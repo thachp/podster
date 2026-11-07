@@ -1187,6 +1187,12 @@ const mcpHandler = {
   },
 };
 
+/** Downloading is what `get_asset_link` is for, so an agent needs that capability's grant to download, as it would to call it. */
+const DOWNLOAD_CAPABILITY = "get_asset_link";
+
+/** The refusal the capability path gives an agent with no grant for a capability, in the plugin's shape. */
+const notGranted = (capability: string) => json({ error: "capability_not_granted", message: `Agent does not have an active grant for capability "${capability}".` }, 403);
+
 /**
  * Who an agent's own credential says it is, read fresh for one download, the same way a capability call does. A credential that ended
  * for any reason, including whoever connected it leaving, stops working on its next use. `null` means it isn't one.
@@ -1197,16 +1203,20 @@ async function agentFromCredential(env: Env, token: string, request: Request): P
       const headers = new Headers({ authorization: `Bearer ${token}` });
       // The real method and URL, so a JWT bound to this request with `htm` and `htu` verifies. A GET has no body to bind.
       const bound = new Request(request.url, { method: request.method, headers });
-      const session = (await createAuth(env).api.getAgentSession({ headers, request: bound, asResponse: false }).catch(() => null)) as { agent?: { id?: string } } | null;
+      const session = (await createAuth(env).api.getAgentSession({ headers, request: bound, asResponse: false }).catch(() => null)) as { agent?: { id?: string; capabilityGrants?: { capability: string }[] } } | null;
       const id = session?.agent?.id;
       const spends = id ? spentToken(id, `Bearer ${token}`) : null;
       if (!id || !spends) return null;
-      return { ...(await resolveAgent(env, "agent_auth", id)), spends } as Identity;
+      const identity = { ...(await resolveAgent(env, "agent_auth", id)), spends } as Identity;
+      // The plugin lists only active, unexpired grants, and only those the JWT's `capabilities` claim names when it has one.
+      return session.agent!.capabilityGrants?.some((grant) => grant.capability === DOWNLOAD_CAPABILITY) ? identity : notGranted(DOWNLOAD_CAPABILITY);
     }
     const held = await env.OAUTH_PROVIDER.unwrapToken<{ externalId?: string }>(token);
     const externalId = held?.grant.props?.externalId;
-    if (!externalId || !held?.scope?.includes("mcp") || !forMcp(held.audience, env.BASE_URL)) return null;
-    return await resolveAgent(env, "mcp_oauth", externalId);
+    if (!externalId || !forMcp(held.audience, env.BASE_URL)) return null;
+    const identity = await resolveAgent(env, "mcp_oauth", externalId);
+    // An MCP tool call is granted by the token's `mcp` scope, which the provider requires at `/mcp` and which covers every tool.
+    return held.scope?.includes("mcp") ? identity : notGranted(DOWNLOAD_CAPABILITY);
   } catch (error) {
     if (error instanceof AgentRefused) return denied(error.message, 403);
     throw error;

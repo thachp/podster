@@ -2743,6 +2743,44 @@ describe("downloading a file through the gateway", () => {
     expect(await reply(await fetchFile(id, agent.token))).toEqual({ status: 401, code: "invalid_credential" });
   });
 
+  it("downloads only with the get_asset_link grant, refused the way the capability path refuses it", async () => {
+    const a = await signUp();
+    const agent = await claimedAgent(a);
+    const id = await roomWith(a, agent.id);
+    const unclaimed = () => signAgentJWT({ agentKeypair: agent.keypair, agentId: agent.pluginId, audience: BASE });
+    // A JWT without a capabilities claim covers every grant the agent holds, and one naming get_asset_link covers that.
+    expect(await reply(await fetchFile(id, await unclaimed()))).toEqual({ status: 404, code: "file_not_found" });
+    expect(await reply(await fetchFile(id, await agentJwt(agent)))).toEqual({ status: 404, code: "file_not_found" });
+    const other = await signAgentJWT({ agentKeypair: agent.keypair, agentId: agent.pluginId, audience: BASE, capabilities: ["get_task"] });
+    const refusedOther = await fetchFile(id, other);
+    expect(refusedOther.status).toBe(403);
+    expect(await refusedOther.json()).toEqual({ error: "capability_not_granted", message: 'Agent does not have an active grant for capability "get_asset_link".' });
+    await e.DB.prepare("DELETE FROM agentCapabilityGrant WHERE agentId = ? AND capability = 'get_asset_link'").bind(agent.pluginId).run();
+    const refused = await fetchFile(id, await unclaimed());
+    const viaCapability = await execute(agent, "get_asset_link", { workspace_id: id, file_id: "obj_unknown" });
+    expect(refused.status).toBe(viaCapability.status);
+    expect(await refused.json()).toEqual(viaCapability.raw);
+    // Other grants are untouched, so it's this one capability that's missing.
+    expect((await execute(agent, "get_identity")).status).toBe(200);
+  });
+
+  it("downloads over MCP only with the scope that grants its tools, get_asset_link among them", async () => {
+    const a = await signUp();
+    const agent = await mcpAgent(a);
+    const id = await roomWith(a, agent.id);
+    expect(await reply(await fetchFile(id, agent.token))).toEqual({ status: 404, code: "file_not_found" });
+    const [userId, grantId] = agent.token.split(":");
+    const { keys } = await e.OAUTH_KV.list({ prefix: `token:${userId}:${grantId}:` });
+    expect(keys.length).toBeGreaterThan(0);
+    for (const { name } of keys) {
+      const held = await e.OAUTH_KV.get<{ grant: Record<string, unknown> }>(name, "json");
+      await e.OAUTH_KV.put(name, JSON.stringify({ ...held, scope: [], grant: { ...held!.grant, scope: [] } }));
+    }
+    const refused = await fetchFile(id, agent.token);
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ error: "capability_not_granted", message: 'Agent does not have an active grant for capability "get_asset_link".' });
+  });
+
   it("takes only an MCP token issued for /mcp, not one for another resource", async () => {
     const a = await signUp();
     const agent = await mcpAgent(a);

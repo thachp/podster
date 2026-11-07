@@ -5,10 +5,12 @@ import { handleUpload } from "../src/uploads";
 const PATH = "/v1/uploads/ws_1/obj_1";
 const ask = async (init: RequestInit, { path = PATH, allowed = true, api = (async () => new Response('{"ok":true}', { status: 200 })) as (r: Request) => Promise<Response> } = {}) => {
   const seen: Request[] = [];
-  const fetcher = { fetch: async (request: Request) => { seen.push(request); return api(request); } } as unknown as Fetcher;
+  const texts: string[] = [];
+  // As the API does, this reads what it's given before it answers.
+  const fetcher = { fetch: async (request: Request) => { seen.push(request); texts.push(await request.text()); return api(request); } } as unknown as Fetcher;
   const request = new Request(`https://gateway.test${path}`, init);
   const response = await handleUpload(request, new URL(request.url), fetcher, async () => allowed);
-  return { response, seen };
+  return { response, seen, texts };
 };
 const TOKEN = `Bearer upl_${"a".repeat(64)}`;
 const chunked = () => new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode("hello")); c.close(); } });
@@ -33,20 +35,20 @@ describe("the upload path", () => {
   });
 
   it("passes the bytes on, with the token and nothing else from the sender", async () => {
-    const { response, seen } = await ask({ method: "PUT", body: "hello", headers: { authorization: TOKEN, cookie: "session=secret", "x-podster-assertion": "forged", "x-podster-caller": "forged" } });
+    const { response, seen, texts } = await ask({ method: "PUT", body: "hello", headers: { authorization: TOKEN, cookie: "session=secret", "x-podster-assertion": "forged", "x-podster-caller": "forged" } });
     expect(response?.status).toBe(200);
     expect(seen).toHaveLength(1);
     expect(seen[0].url).toBe(`https://api.internal${PATH}`);
     expect(seen[0].method).toBe("PUT");
     expect([...seen[0].headers.keys()].filter((name) => name !== "content-type")).toEqual(["authorization"]);
     expect(seen[0].headers.get("authorization")).toBe(TOKEN);
-    expect(await seen[0].text()).toBe("hello");
+    expect(texts).toEqual(["hello"]);
   });
 
   it("doesn't need a declared length, because the API counts what arrives", async () => {
-    const { response, seen } = await ask({ method: "PUT", body: chunked(), duplex: "half", headers: { authorization: TOKEN } } as RequestInit);
+    const { response, texts } = await ask({ method: "PUT", body: chunked(), duplex: "half", headers: { authorization: TOKEN } } as RequestInit);
     expect(response?.status).toBe(200);
-    expect(await seen[0].text()).toBe("hello");
+    expect(texts).toEqual(["hello"]);
   });
 
   it("answers early to a declared length over the limit, without reaching the API", async () => {
@@ -88,6 +90,22 @@ describe("the upload path", () => {
     expect(await send(TOKEN, "198.51.100.7")).toBe(200);
     expect(await send(TOKEN, "203.0.113.9")).toBe(200);
     expect([...counts.keys()].join()).not.toContain("a".repeat(64));
+  });
+
+  it("answers without waiting for a sender who hasn't finished, as when the API refuses early", async () => {
+    let sent = 0;
+    const endless = new ReadableStream({ pull(c) { sent += 1; c.enqueue(new Uint8Array(1024)); } });
+    const fetcher = { fetch: async (forwarded: Request) => {
+      const reader = forwarded.body!.getReader();
+      await reader.read();
+      return new Response('{"error":{"code":"upload_mismatch"}}', { status: 422 });
+    } } as unknown as Fetcher;
+    const request = new Request(`https://gateway.test${PATH}`, { method: "PUT", body: endless, duplex: "half", headers: { authorization: TOKEN } } as RequestInit);
+    const response = await handleUpload(request, new URL(request.url), fetcher, async () => true);
+    expect(response?.status).toBe(422);
+    const soFar = sent;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(sent - soFar).toBeLessThan(5);
   });
 
   it("stops at the rate limit, and says when to come back", async () => {

@@ -12,6 +12,39 @@ const MAX_FILE_BYTES = 100_000_000;
 const answer = (code: string, status: number, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify({ error: { code, message: code } }), { status, headers: { "content-type": "application/json", ...headers } });
 
+/**
+ * The request's body, passed on by hand. The API can answer before the sender has finished, as it does to a file longer than
+ * announced, and sending that answer ends the request. Handing the body straight to the API, or piping it, leaves what's left to
+ * fail where nothing can catch it, on every such refusal. `stop` ends reading first, and the API's side only ever sees an end.
+ */
+function bytesOf(request: Request) {
+  if (!request.body) return { body: null, stop: () => {} };
+  const { readable, writable } = new IdentityTransformStream();
+  const reader = request.body.getReader();
+  const writer = writable.getWriter();
+  let stopped = false;
+  void (async () => {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done || stopped) break;
+        await writer.write(value);
+      }
+      if (!stopped) await writer.close();
+    } catch {
+      // The sender went away, or the API stopped listening. An ordinary end is enough, as the API counts too few bytes and keeps nothing.
+      await writer.close().catch(() => {});
+    }
+  })();
+  return {
+    body: readable,
+    stop: () => {
+      stopped = true;
+      void reader.cancel().catch(() => {});
+    },
+  };
+}
+
 export async function handleUpload(request: Request, url: URL, api: Fetcher, withinLimit: (key: string) => Promise<boolean>): Promise<Response | null> {
   const path = url.pathname.match(UPLOAD_PATH);
   if (!path) return null;
@@ -26,7 +59,9 @@ export async function handleUpload(request: Request, url: URL, api: Fetcher, wit
   const headers = new Headers({ authorization: token });
   try {
     // No timeout, as a large file on a slow connection takes as long as it takes, and it ends if the sender goes away.
-    const response = await api.fetch(new Request(`https://api.internal${url.pathname}`, { method: "PUT", headers, body: request.body }));
+    const { body, stop } = bytesOf(request);
+    const response = await api.fetch(new Request(`https://api.internal${url.pathname}`, { method: "PUT", headers, body }));
+    stop();
     return new Response(response.body, { status: response.status, headers: { "content-type": "application/json" } });
   } catch {
     return answer("upstream_unavailable", 502);

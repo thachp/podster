@@ -60,4 +60,9 @@ for (const secret of existsSync(secrets) ? readFileSync(secrets, "utf8").split("
   }
 }
 if (clean) console.log("ok   no file name or upload token in any log");
+const unhandled = logged.split("\n").filter((line) => /uncaught|unhandled/i.test(line));
+if (unhandled.length) {
+  clean = false;
+  console.log(`FAIL ${unhandled.length} unhandled errors in the Workers' logs:\n${unhandled.slice(0, 5).join("\n").slice(0, 600)}`);
+} else console.log("ok   nothing unhandled in the Workers' logs");
 process.exit(code || (clean ? 0 : 1));

@@ -86,6 +86,21 @@ for (let i = 0; i < 130; i++) {
 console.log(`     130 guesses at one upload: ${limited} answered 429`);
 await check("the real token, after 130 guesses at it", 200, async () => victim, () => ({ body: small }));
 
+// A sender that goes away partway. Nothing should be kept, and nothing in the Workers should be left unhandled.
+const going = await asOwner(small)();
+remember(going.token);
+const leaving = new AbortController();
+const partway = new ReadableStream({
+  async pull(controller) {
+    controller.enqueue(new Uint8Array(small.subarray(0, CHUNK)));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    leaving.abort();
+  },
+});
+await fetch(`${base.replace(/\/$/, "")}${going.upload_path}`, { method: "PUT", headers: { authorization: `Bearer ${going.token}` }, body: partway, duplex: "half", signal: leaving.signal }).catch(() => null);
+await new Promise((resolve) => setTimeout(resolve, 500));
+await check("the same upload after its sender went away", 200, async () => going, () => ({ body: small }));
+
 const agent = await AuthAgent.connect(target, owner, "Uploading agent");
 await owner.addAgent(room, agent);
 const version = (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version;

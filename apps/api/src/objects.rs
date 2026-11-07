@@ -7,16 +7,18 @@
 //!
 //! Logs carry IDs, sizes and timing only. A file's name and the upload token stay out of them.
 use crate::error::ApiError;
-use futures_util::future::{select, Either};
+use futures_util::future::{join, select, Either};
 use futures_util::StreamExt;
 use podster_core::files::{
     complete_upload, Arrival, FileEnds, FileRefusal, FileSample, ObjectState,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
+use worker::wasm_bindgen_futures::JsFuture;
+use worker::web_sys::WritableStreamDefaultWriter;
 use worker::*;
 
 type R<T> = std::result::Result<T, ApiError>;
@@ -107,6 +109,49 @@ fn bearer(req: &Request) -> R<String> {
             })
         })
         .ok_or_else(upload_not_found)
+}
+
+/// Feeds the bytes to R2, through a stream we hold both ends of. `Data::Stream` would do this, but it drops the promise of its pipe,
+/// so every refused upload would leave a rejection nothing handles. A refusal here is normal. Failing tells R2 to keep nothing.
+async fn pump(
+    mut body: impl futures_util::Stream<Item = Result<Vec<u8>>> + Unpin,
+    writer: &WritableStreamDefaultWriter,
+    arrived: &Rc<RefCell<Arrived>>,
+    announced_size: u64,
+) {
+    while let Some(chunk) = body.next().await {
+        let Ok(chunk) = chunk else {
+            abort(writer).await;
+            return;
+        };
+        let too_long = {
+            let mut seen = arrived.borrow_mut();
+            seen.last_chunk_at = Date::now().as_millis();
+            seen.add(&chunk);
+            // The length the room was told is what's enforced. Stop now, not at the end of a longer file.
+            seen.bytes > announced_size
+        };
+        if too_long {
+            abort(writer).await;
+            return;
+        }
+        let data = js_sys::Uint8Array::from(chunk.as_slice());
+        if JsFuture::from(writer.write_with_chunk(&data))
+            .await
+            .is_err()
+        {
+            abort(writer).await;
+            return;
+        }
+    }
+    // Too few bytes fail here, as the stream knows its length.
+    if JsFuture::from(writer.close()).await.is_err() {
+        abort(writer).await;
+    }
+}
+
+async fn abort(writer: &WritableStreamDefaultWriter) {
+    let _ = JsFuture::from(writer.abort()).await;
 }
 
 /// Runs the write to R2 until it ends, or until a deadline passes, when it answers `None`. Going quiet only counts until every byte
@@ -213,38 +258,26 @@ pub async fn stream_upload(mut req: Request, env: Env, room: &str, id: &str) -> 
         last_chunk_at: started,
         ..Arrived::default()
     }));
-    let stopped = Rc::new(Cell::new(false));
     let mut timed_out = false;
     // A request with no body at all has nothing to read, and arrives as an empty stream would.
     let stored = match req.stream() {
-        Ok(stream) => {
-            let counted = arrived.clone();
-            let stop = stopped.clone();
-            let body = stream.map(move |chunk| {
-                let chunk = chunk?;
-                if stop.get() {
-                    return Err(Error::RustError("past its deadline".into()));
-                }
-                let mut seen = counted.borrow_mut();
-                seen.last_chunk_at = Date::now().as_millis();
-                seen.add(&chunk);
-                // The length the room was told is what's enforced. Stop now, not at the end of a longer file.
-                if seen.bytes > announced_size {
-                    return Err(Error::RustError("longer than announced".into()));
-                }
-                Ok(chunk)
-            });
+        Ok(body) => {
+            let channel = worker::worker_sys::FixedLengthStream::new(announced_size as u32)
+                .map_err(|_| ApiError::internal("couldn't make a stream"))?;
+            let writer = channel
+                .writable()
+                .get_writer()
+                .map_err(|_| ApiError::internal("couldn't write to a stream"))?;
             let put = bucket
-                .put(
-                    &key,
-                    Data::Stream(FixedLengthStream::wrap(body, announced_size)),
-                )
+                .put(&key, Data::ReadableStream(channel.readable()))
                 .sha256(unhex(&announced_sha256))
                 .execute();
-            match within_deadlines(put, &arrived, announced_size, started).await {
-                Some(result) => result.map(|_| ()).map_err(|_| ()),
+            let both = join(put, pump(body, &writer, &arrived, announced_size));
+            match within_deadlines(both, &arrived, announced_size, started).await {
+                Some((result, ())) => result.map(|_| ()).map_err(|_| ()),
                 None => {
-                    stopped.set(true);
+                    // Dropping the write above left R2 waiting on this stream, and this ends it with nothing kept.
+                    abort(&writer).await;
                     timed_out = true;
                     Err(())
                 }
@@ -253,7 +286,7 @@ pub async fn stream_upload(mut req: Request, env: Env, room: &str, id: &str) -> 
         Err(_) => Err(()),
     };
 
-    // The stream has ended, so nothing else holds this now.
+    // The bytes have stopped, so nothing else holds this now.
     let seen = arrived.take();
     let received_sha256 = seen.sha256();
     let log = |at: &str, code: &str| {

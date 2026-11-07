@@ -1,0 +1,52 @@
+name: Scanner rebuild
+
+# The scanner's signatures are built into its image (decision 83), and files stop getting verdicts once they're 7 days old
+# (decision 84). So staging's image is rebuilt and deployed each day, which leaves six failed runs to notice before anyone's
+# affected. GitHub emails the owner when a scheduled run fails.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+# One rebuild at a time, and a second one waits rather than replacing a deploy that's under way.
+concurrency:
+  group: scanner-rebuild-staging
+  cancel-in-progress: false
+
+jobs:
+  staging:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: staging
+    steps:
+      # This also deploys the scanner Worker's code, so it takes main's newest commit whose CI passed, not one still being checked.
+      - name: Find main's newest commit that passed CI
+        id: passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch main --event push --status success --limit 1 --json headSha --jq '.[0].headSha // ""')
+          test -n "$sha"
+          echo "Deploying $sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.passed.outputs.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: apps/scanner
+      # A fresh runner has no layer cache, so freshclam fetches current signatures, and the image's own check fails the build
+      # unless they're under 3 days old.
+      - name: Build the image and deploy to staging
+        working-directory: apps/scanner
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BUILDKIT_PROGRESS: plain
+        run: npx wrangler deploy --env staging

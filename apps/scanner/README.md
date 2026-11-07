@@ -38,7 +38,14 @@ Queue message:
 
 They come in the image ([decision 83](../../docs/spec/PRODUCT.md#decisions-needed)). The build runs `freshclam`, then fails unless the database is under 3 days old, then removes `freshclam`. A rebuild has to skip Docker's layer cache, or it keeps the old signatures.
 
-**Proposed:** rebuild and deploy daily. Past 7 days files stop getting verdicts ([decision 84](../../docs/spec/PRODUCT.md#decisions-needed)), so daily leaves six failed runs to notice before anyone's affected. Creating the schedule needs the owner.
+Staging rebuilds and deploys daily at 06:17 UTC, from [`scanner-rebuild.yml`](../../.github/workflows/scanner-rebuild.yml), which the owner approved on 2026-11-07. Past 7 days files stop getting verdicts ([decision 84](../../docs/spec/PRODUCT.md#decisions-needed)), so daily leaves six failed runs to notice before anyone's affected, and GitHub emails the owner about each. It deploys main's newest commit whose CI passed, because the deploy carries the scanner Worker's code too. It can also be run by hand from the Actions tab.
+
+It needs two secrets in the repository's `staging` environment:
+
+- `CLOUDFLARE_ACCOUNT_ID`: the account that holds `podster.dev`.
+- `CLOUDFLARE_API_TOKEN`: an account API token limited to that account. Start from the **Edit Cloudflare Workers** template, and add **Containers: Edit** and **Queues: Edit**, since the scanner is a Container and consumes the scan queues.
+
+Production gets its own schedule and token when it exists.
 
 ## The base image
 

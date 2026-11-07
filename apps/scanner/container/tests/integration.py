@@ -85,7 +85,7 @@ class Box:
         return self.request("POST", "/scan", body=data, headers={"content-length": len(data), "x-expected-sha256": hashlib.sha256(data).hexdigest()})
 
 
-def real_password_zip() -> bytes:
+def locked_by_zip_tool() -> bytes:
     with tempfile.TemporaryDirectory() as folder:
         path = pathlib.Path(folder)
         (path / "plain.txt").write_bytes(b"Inside a locked archive.\n")
@@ -102,7 +102,7 @@ def verdict_cases():
     yield "EICAR", f.EICAR, "malware_found", None
     yield "EICAR in a zip", f.zipped([("note.txt", f.EICAR)]), "malware_found", None
     yield "EICAR in a nested zip", f.nested(f.EICAR, 3), "malware_found", None
-    yield "password-protected zip", real_password_zip(), "unreadable", "password_protected"
+    yield "password-protected zip", locked_by_zip_tool(), "unreadable", "password_protected"
     yield "password-protected zip, flags only", f.flagged_encrypted(f.zipped([("a.txt", b"hidden")])), "unreadable", None
     yield "password-protected OpenDocument", f.odf(f.ENCRYPTED_MANIFEST), "unreadable", "password_protected"
     yield "password-protected OpenDocument in a zip", f.zipped([("report.odt", f.odf(f.ENCRYPTED_MANIFEST))]), "unreadable", "password_protected"

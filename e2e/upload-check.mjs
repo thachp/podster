@@ -117,6 +117,10 @@ if (big) {
   const file = text(100_000_000);
   await check("100 MB, declared length", 200, asOwner(file), () => ({ body: file }));
   await check("100 MB, chunked with no declared length", 200, asOwner(file), () => ({ body: inChunks(file), duplex: "half" }));
+  // Refused early, and the sender still gets to read why.
+  const announced = text(20_000);
+  await check("100 MB against 20 KB announced, declared length", 422, asOwner(announced), () => ({ body: file }));
+  await check("100 MB against 20 KB announced, chunked", 422, asOwner(announced), () => ({ body: inChunks(file), duplex: "half" }));
 }
 console.log(`\n${rows.filter((r) => r.want === r.got).length} of ${rows.length} as wanted. Room ${room}.`);
 console.log("For CPU time, read the API's invocation for each object: wrangler tail podster-api --env staging --format json --search upload.stored");

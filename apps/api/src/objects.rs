@@ -36,6 +36,12 @@ const TOTAL_LIMIT_MS: u64 = if cfg!(feature = "failpoints") {
     30 * 60 * 1000
 };
 const DEADLINE_CHECK_MS: u64 = IDLE_LIMIT_MS / 4;
+/// How long the room gets to answer, since a stuck room shouldn't hold a finished upload open for ever.
+const ROOM_ANSWER_LIMIT_MS: u64 = if cfg!(feature = "failpoints") {
+    3_000
+} else {
+    30_000
+};
 
 pub const BUCKET: &str = "ASSETS";
 
@@ -181,6 +187,16 @@ async fn within_deadlines<T>(
     }
 }
 
+/// Waits for a call for only so long. `None` means nobody knows yet how it went.
+async fn within_room_limit<T>(call: impl std::future::Future<Output = T>) -> Option<T> {
+    let call = Box::pin(call);
+    let limit = Box::pin(Delay::from(Duration::from_millis(ROOM_ANSWER_LIMIT_MS)));
+    match select(call, limit).await {
+        Either::Left((done, _)) => Some(done),
+        Either::Right(_) => None,
+    }
+}
+
 /// Asks the room, which reads the upload's own record. There's no assertion here, so the caller passed is empty, and the
 /// token is what the room checks.
 async fn ask_room(env: &Env, room: &str, path: &str, body: &Value) -> R<Response> {
@@ -236,13 +252,14 @@ pub async fn stream_upload(mut req: Request, env: Env, room: &str, id: &str) -> 
     }
     let token = bearer(&req)?;
     let started = Date::now().as_millis();
-    let mut begun = ask_room(
+    let mut begun = within_room_limit(ask_room(
         &env,
         room,
         crate::INTERNAL_UPLOAD_BEGIN,
         &json!({ "id": id, "token": token }),
-    )
-    .await?;
+    ))
+    .await
+    .ok_or(ApiError::api(504, "room_unavailable"))??;
     if begun.status_code() >= 400 {
         return Ok(begun);
     }
@@ -347,14 +364,20 @@ pub async fn stream_upload(mut req: Request, env: Env, room: &str, id: &str) -> 
         log("upload.refused", "uploader_gone");
         return Err(refused);
     }
-    let mut answer = ask_room(
+    let asked = within_room_limit(ask_room(
         &env,
         room,
         crate::INTERNAL_UPLOAD_COMPLETE,
         &json!({ "id": id, "attempt": attempt, "size": seen.bytes, "sha256": received_sha256,
                  "media_type": completed.kind.media_type() }),
-    )
-    .await?;
+    ))
+    .await;
+    // The room may have accepted the file without saying so, and deleting the bytes then would lose a file it holds. If it didn't,
+    // these bytes stay unreferenced until the sweep in step 8, and the sender's retry starts a new attempt.
+    let Some(Ok(mut answer)) = asked else {
+        log("upload.outcome_unknown", "upload_outcome_unknown");
+        return Err(ApiError::api(504, "upload_outcome_unknown"));
+    };
     if answer.status_code() >= 400 {
         // The room said no, so nothing will ever refer to these bytes.
         bucket.delete(&key).await?;

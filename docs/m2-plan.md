@@ -2,7 +2,7 @@
 
 The order of work for [M2 Assets and artifacts](spec/PRODUCT.md#product-direction-and-delivery-scope). The owner accepted this order and the choices behind it on 2026-11-06, as [decisions 47, 49 and 50 to 60](spec/PRODUCT.md#decisions-needed). Design is in [ADR 0006](adr/0006-uploads-and-scanning.md), and the rules are in the [upload policy](spec/UPLOAD-POLICY.md).
 
-**Status, 2026-11-07 UTC:** M1 is [met by the owner's ruling](spec/PRODUCT.md#decisions-needed), and the owner approved the billed staging resources on 2026-11-06. Two pieces have merged: the record of the exact approved submission ([#97](https://github.com/thachp/podster/pull/97), part of step 6) and the pure upload rules ([#98](https://github.com/thachp/podster/pull/98), with no route or storage). Step 2's storage is built locally, not yet deployed: files stream to R2 and stay in `scanning`, with no download. The rest isn't built.
+**Status, 2026-11-07 UTC:** M1 is [met by the owner's ruling](spec/PRODUCT.md#decisions-needed), and the owner approved the billed staging resources on 2026-11-06. Two pieces have merged: the record of the exact approved submission ([#97](https://github.com/thachp/podster/pull/97), part of step 6) and the pure upload rules ([#98](https://github.com/thachp/podster/pull/98), with no route or storage). Step 2's storage is deployed to staging ([#116](https://github.com/thachp/podster/pull/116), `eaf1b84`): files stream to R2 and stay in `scanning`, with no download. The rest isn't built.
 
 **Steps 0 and 1 are done.** The spike ran on staging, [ADR 0006's results](adr/0006-uploads-and-scanning.md#spike-results) have what it showed, and the owner accepted that ClamAV passed and that building can start ([decisions 81 and 82](spec/PRODUCT.md#decisions-needed)). The spike's code is in [#99](https://github.com/thachp/podster/pull/99), unmerged.
 
@@ -30,7 +30,7 @@ C changes contracts and M adds a migration. Those PRs merge one at a time, and t
 | 5 | Input assets, linked to tasks | Yes | Yes | 4 |
 | 6 | Files on submissions and exact-version review | Yes | Yes | 4 |
 | 7 | Expected outputs: a task may name one, and approval makes it Ready | Yes | Yes | 6 |
-| 8 | Removal and retention: tombstones, abandoned-upload cleanup | Yes | Yes | 4 |
+| 8 | Removal and retention: tombstones, abandoned-upload cleanup, including bytes in R2 that no file refers to | Yes | Yes | 4 |
 | 9a | Screen: asset upload | | | 5 |
 | 9b | Screen: Task Sheet files and review | | | 6 |
 | 9c | Screen: Artifacts tab and output status | | | 7 |
@@ -47,10 +47,11 @@ Put new backend code in new modules, such as `apps/api/src/objects.rs` and `crat
 
 **Step 2:**
 
-- Repeat the 100 MB upload from another network. Runs from the owner's Mac failed before any Worker logged them.
-- Measure the CPU time for hashing 100 MB.
-- Test the request limit on the application's real hostname, and check which plan `podster.dev` is on.
-- Try a chunked upload with a correct hash.
+- **Open:** repeat the 100 MB upload from another network. On 2026-11-07 it passed on staging from the owner's Mac, the same machine whose spike runs failed.
+- **Done:** CPU for a 100 MB upload, measured on staging at `eaf1b84`: 4,600 ms in the API and 1,806 ms in the gateway, against a 30 s limit.
+- **Open:** test the request limit on the application's real hostname, and check which plan `podster.dev` is on.
+- **Done:** a chunked upload with a correct hash got 200 through the real edge, for 200,000 bytes.
+- **Open:** whether the edge overwrites a forged `cf-connecting-ip`, and running `e2e/upload-check.mjs` itself on staging. Those staging results were by hand.
 
 **Step 3:**
 

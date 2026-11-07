@@ -1,3 +1,5 @@
+import { clientKey } from "./index";
+
 /**
  * The bytes of an upload, on their way to the API, which decides everything. The token is what `create_upload` returned, so
  * this needs no session or credential of its own. It only checks the token's shape, so anything else goes no further and
@@ -8,6 +10,7 @@
 const UPLOAD_PATH = /^\/v1\/uploads\/([\w-]+)\/([\w-]+)$/;
 const TOKEN_HEADER = /^Bearer upl_[0-9a-f]{64}$/;
 const MAX_FILE_BYTES = 100_000_000;
+const DISCARD_LIMIT_MS = 5_000;
 
 const answer = (code: string, status: number, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify({ error: { code, message: code } }), { status, headers: { "content-type": "application/json", ...headers } });
@@ -15,31 +18,42 @@ const answer = (code: string, status: number, headers: Record<string, string> = 
 /**
  * The request's body, passed on by hand. The API can answer before the sender has finished, as it does to a file longer than
  * announced, and sending that answer ends the request. Handing the body straight to the API, or piping it, leaves what's left to
- * fail where nothing can catch it, on every such refusal. `stop` ends reading first, and the API's side only ever sees an end.
+ * fail where nothing can catch it, on every such refusal. And a sender still writing when the connection closes never reads the
+ * answer. So `finish` ends reading first, and the API's side only ever sees an end. Told to, it first reads and discards the rest,
+ * for only so long. That's only for answers a real token gets, since anyone can make up a well-formed one and get a fresh limit.
  */
 function bytesOf(request: Request) {
-  if (!request.body) return { body: null, stop: () => {} };
+  if (!request.body) return { body: null, finish: async () => {} };
   const { readable, writable } = new IdentityTransformStream();
   const reader = request.body.getReader();
   const writer = writable.getWriter();
-  let stopped = false;
-  void (async () => {
+  let answered = false;
+  let stopWaiting = () => {};
+  const stopped = new Promise<void>((resolve) => (stopWaiting = resolve));
+  const read = (async () => {
     try {
-      for (;;) {
+      for (let discarded = 0; discarded <= MAX_FILE_BYTES; ) {
         const { done, value } = await reader.read();
-        if (done || stopped) break;
-        await writer.write(value);
+        if (done) break;
+        if (answered) discarded += value.byteLength;
+        // Once the API has answered, nothing is reading this any more, so a write might never finish.
+        else await Promise.race([writer.write(value).catch(() => {}), stopped]);
       }
-      if (!stopped) await writer.close();
     } catch {
-      // The sender went away, or the API stopped listening. An ordinary end is enough, as the API counts too few bytes and keeps nothing.
-      await writer.close().catch(() => {});
+      // The sender went away. An ordinary end is enough, as the API counts too few bytes and keeps nothing.
     }
+    void writer.close().catch(() => {});
   })();
   return {
     body: readable,
-    stop: () => {
-      stopped = true;
+    finish: async (discard: boolean) => {
+      answered = true;
+      stopWaiting();
+      if (discard) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([read, new Promise((resolve) => (timer = setTimeout(resolve, DISCARD_LIMIT_MS)))]);
+        clearTimeout(timer);
+      }
       void reader.cancel().catch(() => {});
     },
   };
@@ -55,13 +69,13 @@ export async function handleUpload(request: Request, url: URL, api: Fetcher, wit
   // By who's sending and with what, so that someone guessing at an upload can't use up the limit of the person it belongs to.
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
   const hashed = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-  if (!(await withinLimit(`upload:${request.headers.get("cf-connecting-ip") ?? "unknown"}:${hashed}`))) return answer("rate_limited", 429, { "retry-after": "60" });
+  if (!(await withinLimit(`upload:${clientKey(request)}:${hashed}`))) return answer("rate_limited", 429, { "retry-after": "60" });
   const headers = new Headers({ authorization: token });
   try {
     // No timeout, as a large file on a slow connection takes as long as it takes, and it ends if the sender goes away.
-    const { body, stop } = bytesOf(request);
+    const { body, finish } = bytesOf(request);
     const response = await api.fetch(new Request(`https://api.internal${url.pathname}`, { method: "PUT", headers, body }));
-    stop();
+    await finish(response.status === 413 || response.status === 422);
     return new Response(response.body, { status: response.status, headers: { "content-type": "application/json" } });
   } catch {
     return answer("upstream_unavailable", 502);

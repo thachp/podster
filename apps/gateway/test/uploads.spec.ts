@@ -92,20 +92,63 @@ describe("the upload path", () => {
     expect([...counts.keys()].join()).not.toContain("a".repeat(64));
   });
 
-  it("answers without waiting for a sender who hasn't finished, as when the API refuses early", async () => {
-    let sent = 0;
-    const endless = new ReadableStream({ pull(c) { sent += 1; c.enqueue(new Uint8Array(1024)); } });
-    const fetcher = { fetch: async (forwarded: Request) => {
-      const reader = forwarded.body!.getReader();
-      await reader.read();
+  const refusesEarly = {
+    fetch: async (forwarded: Request) => {
+      await forwarded.body!.getReader().read();
       return new Response('{"error":{"code":"upload_mismatch"}}', { status: 422 });
+    },
+  } as unknown as Fetcher;
+  const MEGABYTE = 1024 * 1024;
+
+  it("reads the rest of a body the API refused early, so the sender gets to read the answer", async () => {
+    let sent = 0;
+    const longer = new ReadableStream({ pull(c) { sent += 1; if (sent > 20) c.close(); else c.enqueue(new Uint8Array(MEGABYTE)); } });
+    const request = new Request(`https://gateway.test${PATH}`, { method: "PUT", body: longer, duplex: "half", headers: { authorization: TOKEN } } as RequestInit);
+    const response = await handleUpload(request, new URL(request.url), refusesEarly, async () => true);
+    expect(response?.status).toBe(422);
+    expect(sent).toBe(21);
+  });
+
+  it.each([[404, "upload_not_found"], [403, "access_revoked"], [409, "invalid_transition"]])("doesn't read on for a %s, which a made-up token can get, so it costs nothing to refuse", async (status, code) => {
+    let sent = 0;
+    const endless = new ReadableStream({ pull(c) { sent += 1; c.enqueue(new Uint8Array(MEGABYTE)); } });
+    const answers = { fetch: async (forwarded: Request) => {
+      await forwarded.body!.getReader().read();
+      return new Response(JSON.stringify({ error: { code } }), { status });
     } } as unknown as Fetcher;
     const request = new Request(`https://gateway.test${PATH}`, { method: "PUT", body: endless, duplex: "half", headers: { authorization: TOKEN } } as RequestInit);
-    const response = await handleUpload(request, new URL(request.url), fetcher, async () => true);
+    const response = await handleUpload(request, new URL(request.url), answers, async () => true);
+    expect(response?.status).toBe(status);
+    expect(sent).toBeLessThan(10);
+  });
+
+  it("stops reading at the file limit, however much a sender keeps sending", async () => {
+    let sent = 0;
+    const endless = new ReadableStream({ pull(c) { sent += 1; c.enqueue(new Uint8Array(MEGABYTE)); } });
+    const request = new Request(`https://gateway.test${PATH}`, { method: "PUT", body: endless, duplex: "half", headers: { authorization: TOKEN } } as RequestInit);
+    const response = await handleUpload(request, new URL(request.url), refusesEarly, async () => true);
     expect(response?.status).toBe(422);
     const soFar = sent;
+    expect(soFar).toBeLessThan(120);
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(sent - soFar).toBeLessThan(5);
+  }, 15_000);
+
+  it("answers after a few seconds if a sender stalls once refused", async () => {
+    const stalled = new ReadableStream({ start(c) { c.enqueue(new Uint8Array(10)); } });
+    const request = new Request(`https://gateway.test${PATH}`, { method: "PUT", body: stalled, duplex: "half", headers: { authorization: TOKEN } } as RequestInit);
+    const response = await handleUpload(request, new URL(request.url), refusesEarly, async () => true);
+    expect(response?.status).toBe(422);
+  }, 15_000);
+
+  it("counts a whole IPv6 /64 as one sender, so rotating addresses in it doesn't escape the limit", async () => {
+    const keys: string[] = [];
+    const fetcher = { fetch: async () => new Response("{}") } as unknown as Fetcher;
+    for (const ip of ["2001:db8:1:2::1", "2001:db8:1:2:aaaa::9"]) {
+      const request = new Request(`https://gateway.test${PATH}`, { method: "PUT", body: "x", headers: { authorization: TOKEN, "cf-connecting-ip": ip } });
+      await handleUpload(request, new URL(request.url), fetcher, async (key) => (keys.push(key), true));
+    }
+    expect(keys[0]).toBe(keys[1]);
   });
 
   it("stops at the rate limit, and says when to come back", async () => {

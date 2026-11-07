@@ -243,6 +243,18 @@ class ZipsThatDoNotSayTheyAreZips(unittest.TestCase):
     def test_a_zip_hidden_in_front_of_a_small_one(self):
         self.assertEqual(problem(f.zeros_zip(160, f.EICAR) + f.zipped([("a.txt", b"note")])), archive.UNREADABLE)
 
+    def test_a_version_byte_no_tool_writes_does_not_hide_a_zip(self):
+        small = f.zipped([("ok.txt", b"note")])
+        for version in (0x40, 0x7f, 0xff):
+            self.assertEqual(problem(f.with_version_byte(f.zeros_zip(160, f.EICAR), version) + small), archive.UNREADABLE, version)
+            self.assertEqual(problem(b"#!/bin/sh\n" + f.with_version_byte(f.wide_bomb(), version) + bytes(70_000)), archive.UNREADABLE, version)
+            self.assertEqual(problem(f.zipped([("inner.bin", b"#!/bin/sh\n" + f.without_directory(f.with_version_byte(self.locked, version)))])), archive.UNREADABLE, version)
+
+    def test_a_method_that_does_not_exist_is_still_not_a_header(self):
+        self.assertIsNone(problem(b"text PK\x03\x04\x14\x00\x00\x00\xff\xff more text\n"))
+        self.assertIsNone(problem(b"text PK\x03\x04\x14\x00\x00\x00\x64\x00 more text\n"))
+        self.assertEqual(problem(b"text PK\x03\x04\x14\x00\x00\x00\x63\x00 more text\n"), archive.UNREADABLE)
+
     def test_ordinary_files_that_mention_pk_pass(self):
         self.assertIsNone(problem(b"PK is on page 3.\n" * 100))
         self.assertIsNone(problem(b"PK"))
@@ -260,6 +272,27 @@ class LocalFlags(unittest.TestCase):
 
     def test_inside_another_zip(self):
         self.assertEqual(problem(f.zipped([("inner.zip", f.local_flag_only(f.zipped([("a.txt", b"hidden")])))])), archive.PASSWORD_PROTECTED)
+
+
+class OtherFlags(unittest.TestCase):
+    data = f.zipped([("a.txt", b"hidden")])
+
+    def test_strong_encryption_and_an_encrypted_directory_are_password_protected(self):
+        for flag in (0x40, 0x2000):
+            for local, central in ((True, True), (True, False), (False, True)):
+                self.assertEqual(problem(f.with_flag(self.data, flag, local, central)), archive.PASSWORD_PROTECTED, (flag, local, central))
+
+    def test_patched_data_was_not_read(self):
+        for local, central in ((True, True), (True, False), (False, True)):
+            self.assertEqual(problem(f.with_flag(self.data, 0x20, local, central)), archive.UNREADABLE, (local, central))
+
+    def test_inside_another_zip(self):
+        self.assertEqual(problem(f.zipped([("inner.zip", f.with_flag(self.data, 0x40))])), archive.PASSWORD_PROTECTED)
+        self.assertEqual(problem(f.zipped([("inner.zip", f.with_flag(self.data, 0x20))])), archive.UNREADABLE)
+
+    def test_flags_real_zips_set_still_pass(self):
+        self.assertIsNone(problem(f.with_flag(self.data, 0x800)))
+        self.assertIsNone(problem(f.with_flag(self.data, 0x2)))
 
 
 class ManifestEncodings(unittest.TestCase):

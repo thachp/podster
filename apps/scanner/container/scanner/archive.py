@@ -46,11 +46,14 @@ _READABLE_ENCODINGS = (b"utf-8", b"utf8", b"utf-16", b"utf16")
 _LOCAL_HEADER = struct.Struct("<4sHHHHHLLLHH")
 _LOCAL_SIGNATURE = b"PK\x03\x04"
 _ZIP_STARTS = (_LOCAL_SIGNATURE, b"PK\x01\x02", b"PK\x05\x06", b"PK\x07\x08", b"PK\x06\x06")
-# A local header's signature, a version a zip tool would write, and a method number that exists. Just the signature turns up by
-# chance in about one 100 MB compressed file in 40, and this makes that vanishingly rare.
-_LOOKS_LOCAL = re.compile(rb"PK\x03\x04[\x00-\x3f].{3}[\x00-\x63]\x00", re.DOTALL)
+# A local header's signature, and a method number that exists. The version isn't checked, because other tools extract an entry
+# whatever it says. The signature alone turns up by chance in about one 100 MB compressed file in 40, and this makes that rare. A
+# text file quoting these bytes gets blocked, which is the safe way to be wrong.
+_LOOKS_LOCAL = re.compile(rb"PK\x03\x04.{4}[\x00-\x63]\x00", re.DOTALL)
 _OVERLAP = 12
-_ENCRYPTED = 0x1
+# Plain encryption, strong encryption and an encrypted directory. Any of them, in either header, means it can't be read.
+_ENCRYPTED = 0x1 | 0x40 | 0x2000
+_PATCHED = 0x20
 _DESCRIPTOR = 0x8
 _UTF8_NAME = 0x800
 _ZIP64_SIZE = 0xFFFFFFFF
@@ -107,6 +110,13 @@ def _looks_like_a_zip(source: BinaryIO) -> bool:
     if source.read(4).startswith(_ZIP_STARTS):
         return True
     return next(_local_headers(source), None) is not None
+
+
+def _check_flags(flags: int) -> None:
+    if flags & _ENCRYPTED:
+        raise _Stop(PASSWORD_PROTECTED)
+    if flags & _PATCHED:
+        raise _Stop(UNREADABLE)
 
 
 class _Entry:
@@ -167,8 +177,7 @@ class _Walk:
                 raise _Stop(UNREADABLE)
 
     def entry(self, source: BinaryIO, entry: zipfile.ZipInfo, depth: int) -> tuple[int, int]:
-        if entry.flag_bits & _ENCRYPTED:
-            raise _Stop(PASSWORD_PROTECTED)
+        _check_flags(entry.flag_bits)
         if entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
             raise _Stop(METHOD_NOT_SUPPORTED)
         data_start = self.check_local_header(source, entry)
@@ -192,8 +201,7 @@ class _Walk:
         signature, _, flags, method, _, _, crc, compressed, size, name_length, extra_length = _LOCAL_HEADER.unpack(head)
         if signature != _LOCAL_SIGNATURE:
             raise _Stop(UNREADABLE)
-        if flags & _ENCRYPTED:
-            raise _Stop(PASSWORD_PROTECTED)
+        _check_flags(flags)
         if method != entry.compress_type:
             raise _Stop(UNREADABLE)
         name = source.read(name_length)

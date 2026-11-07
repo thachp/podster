@@ -150,3 +150,23 @@ def with_descriptors(entries: list[tuple[str, bytes]]) -> bytes:
         for name, data in entries:
             archive.writestr(name, data)
     return sink.getvalue()
+
+
+def with_version_byte(data: bytes, version: int = 0x40) -> bytes:
+    """Sets the version in every local header to one no zip tool writes, which other tools still extract."""
+    out = bytearray(data)
+    at = out.find(b"PK\x03\x04")
+    while at != -1:
+        out[at + 4] = version
+        at = out.find(b"PK\x03\x04", at + 4)
+    return bytes(out)
+
+
+def with_flag(data: bytes, flag: int, local: bool = True, central: bool = True) -> bytes:
+    """Sets a general-purpose flag on the first entry, in the headers named."""
+    out = bytearray(data)
+    for wanted, signature, offset in ((local, b"PK\x03\x04", 6), (central, b"PK\x01\x02", 8)):
+        if wanted:
+            at = out.find(signature)
+            struct.pack_into("<H", out, at + offset, struct.unpack_from("<H", out, at + offset)[0] | flag)
+    return bytes(out)

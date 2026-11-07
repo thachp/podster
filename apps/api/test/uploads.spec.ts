@@ -74,6 +74,9 @@ async function create(uploads: string, data: Uint8Array = TEXT, over: object = {
   expect(r.status, JSON.stringify(r.body)).toBe(200);
   return r.body;
 }
+const coordinator = async (who: Who, id: string) => {
+  expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${who.id}/access`, { preset: "coordinator", policy_version: await version(id) })).status).toBe(200);
+};
 const put = (upload: { upload_path: string; token: string }, body?: BodyInit | null, token: string | null = upload.token) =>
   SELF.fetch(`https://api.internal${upload.upload_path}`, { method: "PUT", headers: token ? { authorization: `Bearer ${token}` } : {}, body: body as any });
 const answer = async (res: Response) => ({ status: res.status, body: (await res.json()) as any });
@@ -285,7 +288,9 @@ describe("the bytes of an upload", () => {
     const expired = await create(uploads);
     await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET upload_expires_at = 1 WHERE id = ?", expired.id));
     const answers = [
+      await put(upload, TEXT, `upl_${"0".repeat(64)}`),
       await put(upload, TEXT, "upl_wrong"),
+      await put(upload, TEXT, `${upload.token}0`),
       await put(upload, TEXT, null),
       await put({ ...upload, upload_path: `/v1/uploads/${id}/obj_none` }, TEXT),
       await put({ ...upload, upload_path: `/v1/uploads/ws_none/${upload.id}` }, TEXT),
@@ -440,12 +445,89 @@ describe("the bytes of an upload", () => {
     expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${MEMBER.id}`, { policy_version: await version(id) })).status).toBe(200);
     release();
     const finished = await going;
-    expect(finished.status).toBe(403);
-    expect(await code(finished)).toBe("access_revoked");
+    expect(finished.status).toBe(404);
+    expect(await code(finished)).toBe("upload_not_found");
     expect(await stored(id)).toEqual([]);
     const started = await put(upload, TEXT);
-    expect(started.status).toBe(403);
-    expect((await row(id, during.id)).state).toBe("uploading");
+    expect(started.status).toBe(404);
+    expect(await row(id, during.id)).toBeUndefined();
+    expect(await row(id, upload.id)).toBeUndefined();
+  });
+
+  it("ends a removed member's token for good, even if they come back with more access", async () => {
+    const { id, uploads } = await room();
+    await coordinator(MEMBER, id);
+    const upload = await create(uploads, TEXT, {}, MEMBER);
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${MEMBER.id}`, { policy_version: await version(id) })).status).toBe(200);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members/${MEMBER.id}/clear-removal`, { policy_version: await version(id) })).status).toBeLessThan(500);
+    await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: MEMBER.id, kind: "agent", org_id: MEMBER.org, role: "member", policy_version: await version(id) });
+    await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${MEMBER.id}/access`, { preset: "coordinator", policy_version: await version(id) });
+    const res = await put(upload, TEXT);
+    expect(res.status).toBe(404);
+    expect(await code(res)).toBe("upload_not_found");
+    expect(await stored(id)).toEqual([]);
+  });
+
+  it("gives back a removed member's reservation at once, with the record that it went", async () => {
+    const { id, uploads } = await room();
+    await coordinator(MEMBER, id);
+    await inRoom(id, (sql) => sql.exec("INSERT INTO stored_object (id, name, size, sha256, state, token_hash, uploaded_by, created_at, upload_expires_at) VALUES ('most', 'x', 4900000000, 'x', 'scanning', '', 'o', 0, 0)"));
+    const reserving = await create(uploads, TEXT, { size: 100_000_000 }, MEMBER);
+    const hash = await sha256(TEXT);
+    expect((await api(OWNER, "POST", uploads, { name: "n.txt", size: 1, sha256: hash })).code).toBe("room_quota_exceeded");
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${MEMBER.id}`, { policy_version: await version(id) })).status).toBe(200);
+    expect((await api(OWNER, "POST", uploads, { name: "n.txt", size: 1, sha256: hash })).status).toBe(200);
+    const log = (await api(OWNER, "GET", `/v1/workspaces/${id}/audit`)).body.audit;
+    expect(log.some((entry: any) => entry.action === "object.upload_dropped" && entry.target_id === reserving.id)).toBe(true);
+  });
+
+  it("drops an owner's unfinished uploads when the room hears they left the organization", async () => {
+    const { id, uploads } = await room();
+    const upload = await create(uploads);
+    const answer = await BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)).fetch("https://do/internal/org-departure", { method: "POST", body: JSON.stringify({ person: OWNER.id, org: OWNER.org, left_at: Date.now() + 1000, actor: OWNER.id }) });
+    expect(answer.status).toBe(200);
+    expect(await row(id, upload.id)).toBeUndefined();
+  });
+
+  it("keeps a file that had already arrived when its uploader goes", async () => {
+    const { id, uploads } = await room();
+    await coordinator(MEMBER, id);
+    const upload = await create(uploads, TEXT, {}, MEMBER);
+    expect((await put(upload, TEXT)).status).toBe(200);
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${MEMBER.id}`, { policy_version: await version(id) })).status).toBe(200);
+    expect((await row(id, upload.id)).state).toBe("scanning");
+  });
+
+  describe("deadlines", () => {
+    it("gives up on a sender that goes quiet, keeping nothing, and the upload can be tried again", async () => {
+      const { id, uploads } = await room();
+      const upload = await create(uploads);
+      const res = await put(upload, heldBody().body);
+      expect(res.status).toBe(408);
+      expect(await code(res)).toBe("upload_timed_out");
+      expect(await stored(id)).toEqual([]);
+      expect((await row(id, upload.id)).state).toBe("uploading");
+      expect((await put(upload, TEXT)).status).toBe(200);
+    }, 15_000);
+
+    it("gives up on a sender that keeps trickling past the total limit", async () => {
+      const { id, uploads } = await room();
+      const upload = await create(uploads);
+      let stop = false;
+      const trickle = new ReadableStream({
+        async start(controller) {
+          for (let at = 0; at < TEXT.length && !stop; at++) {
+            controller.enqueue(TEXT.slice(at, at + 1));
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+        },
+      });
+      const res = await put(upload, trickle);
+      stop = true;
+      expect(res.status).toBe(408);
+      expect(await code(res)).toBe("upload_timed_out");
+      expect(await stored(id)).toEqual([]);
+    }, 20_000);
   });
 
   it("refuses bytes from someone whose access no longer allows uploads", async () => {
@@ -528,9 +610,6 @@ describe("the bytes of an upload", () => {
     const holdFanOut = async (who: Who) => {
       const res = await SELF.fetch(`https://api.internal/v1/agents/${who.id}/disconnect`, { method: "POST", headers: { "x-podster-assertion": await assertion(orgAdmin(who.org)), "x-test-hold-fan-out": "1" }, body: "{}" });
       expect(res.status).toBe(200);
-    };
-    const coordinator = async (who: Who, id: string) => {
-      expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${who.id}/access`, { preset: "coordinator", policy_version: await version(id) })).status).toBe(200);
     };
     const depart = async (person: string, org: string, left_at: number) => {
       const res = await SELF.fetch("https://api.internal/v1/org-departures", { method: "POST", headers: { "x-podster-assertion": await assertion(orgAdmin(org), { departure: { person, org, left_at } }) }, body: "{}" });

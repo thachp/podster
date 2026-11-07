@@ -46,7 +46,7 @@ async function check(title, want, make, send) {
   let status;
   let body;
   try {
-    const res = await fetch(`${base.replace(/\/$/, "")}${upload.upload_path}`, { method: "PUT", headers: { authorization: `Bearer ${upload.token}` }, ...send(), signal: AbortSignal.timeout(600_000) });
+    const res = await fetch(`${base.replace(/\/$/, "")}${upload.upload_path}`, { method: "PUT", headers: { authorization: `Bearer ${upload.sendToken ?? upload.token}` }, ...send(), signal: AbortSignal.timeout(600_000) });
     status = res.status;
     body = await res.json().catch(() => null);
   } catch (error) {
@@ -67,13 +67,35 @@ await check("chunked, wrong hash", 422, asOwner(small, { sha256: wrong }), () =>
 await check("declared length, wrong hash", 422, asOwner(small, { sha256: wrong }), () => ({ body: small }));
 await check("chunked, longer than announced", 422, asOwner(small), () => ({ body: inChunks(Buffer.concat([small, Buffer.from("x")])), duplex: "half" }));
 await check("chunked, shorter than announced", 422, asOwner(small), () => ({ body: inChunks(small.subarray(0, 1000)), duplex: "half" }));
-await check("wrong token", 404, async () => ({ ...(await asOwner(small)()), token: "upl_wrong" }), () => ({ body: small }));
+await check("wrong token", 404, async () => ({ ...(await asOwner(small)()), sendToken: `upl_${"0".repeat(64)}` }), () => ({ body: small }));
+await check("a real token with one non-ASCII byte added", 404, async () => {
+  const upload = await asOwner(small)();
+  return { ...upload, sendToken: `${upload.token}\xff` };
+}, () => ({ body: small }));
+
+// Someone guessing can't use up the limit of the person whose upload it is. 120 a minute is the limit.
+const victim = await asOwner(small)();
+remember(victim.token);
+const guess = `upl_${randomBytes(32).toString("hex")}`;
+let limited = 0;
+for (let i = 0; i < 130; i++) {
+  const res = await fetch(`${base.replace(/\/$/, "")}${victim.upload_path}`, { method: "PUT", headers: { authorization: `Bearer ${guess}` }, body: "x" });
+  limited += res.status === 429 ? 1 : 0;
+  await res.body?.cancel();
+}
+console.log(`     130 guesses at one upload: ${limited} answered 429`);
+await check("the real token, after 130 guesses at it", 200, async () => victim, () => ({ body: small }));
 
 const agent = await AuthAgent.connect(target, owner, "Uploading agent");
 await owner.addAgent(room, agent);
 const version = (await owner.must("GET", `/v1/workspaces/${room}`)).policy_version;
 await owner.must("PUT", `/v1/workspaces/${room}/members/${agent.id}/access`, { preset: "coordinator", policy_version: version });
 await check("an agent, through its tool", 200, () => agent.must("create_upload", { workspace_id: room, name: SECRET_NAME, size: small.length, sha256: sha256(small) }), () => ({ body: small }));
+
+const refused = await agent.execute("create_upload", { workspace_id: room, name: "setup.exe", size: small.length, sha256: sha256(small), idempotency_key: key() }, await agent.token("create_upload"));
+const reasonable = refused.status === 415;
+failed ||= !reasonable;
+console.log(`${reasonable ? "ok  " : "FAIL"} an agent's refused type answers ${refused.status}, wanted 415, with ${refused.code}`);
 
 if (big) {
   // Text, because random bytes aren't a type anyone may upload.

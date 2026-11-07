@@ -248,8 +248,8 @@ export function sensitiveRoute(method: string, path: string) {
 /** Dashboard commands that create something, or that invite others, and previews, because a preview checks a token. */
 const sensitiveCommand = (method: string, path: string) => method === "POST" && /^\/v1\/(workspaces|workspaces\/[^/]+\/invitations|invitations\/accept|invitations\/preview)$/.test(path);
 
-const ERROR_NAMES: Record<number, "BAD_REQUEST" | "UNAUTHORIZED" | "FORBIDDEN" | "NOT_FOUND" | "CONFLICT" | "UNPROCESSABLE_ENTITY" | "INTERNAL_SERVER_ERROR" | "NOT_IMPLEMENTED" | "GATEWAY_TIMEOUT"> = {
-  400: "BAD_REQUEST", 401: "UNAUTHORIZED", 403: "FORBIDDEN", 404: "NOT_FOUND", 409: "CONFLICT", 422: "UNPROCESSABLE_ENTITY", 500: "INTERNAL_SERVER_ERROR", 501: "NOT_IMPLEMENTED", 504: "GATEWAY_TIMEOUT",
+const ERROR_NAMES: Record<number, "BAD_REQUEST" | "UNAUTHORIZED" | "FORBIDDEN" | "NOT_FOUND" | "CONFLICT" | "UNPROCESSABLE_ENTITY" | "PAYLOAD_TOO_LARGE" | "UNSUPPORTED_MEDIA_TYPE" | "INTERNAL_SERVER_ERROR" | "NOT_IMPLEMENTED" | "GATEWAY_TIMEOUT"> = {
+  400: "BAD_REQUEST", 401: "UNAUTHORIZED", 403: "FORBIDDEN", 404: "NOT_FOUND", 409: "CONFLICT", 413: "PAYLOAD_TOO_LARGE", 415: "UNSUPPORTED_MEDIA_TYPE", 422: "UNPROCESSABLE_ENTITY", 500: "INTERNAL_SERVER_ERROR", 501: "NOT_IMPLEMENTED", 504: "GATEWAY_TIMEOUT",
 };
 
 class AgentRefused extends Error {}

@@ -1539,6 +1539,7 @@ fn remove_member(
     roles::withdraw_role_invites(sql, principal)?;
     exec(sql, "UPDATE member SET revoked_at = ?, revocation_reason = ?, owner_consented_at = NULL WHERE principal_id = ?", vec![now.into(), reason.into(), principal.into()])?;
     apply_departure_rules(sql, actor, principal, now)?;
+    objects::drop_uploads_of(sql, &actor.id, actor_kind, principal, now)?;
     end_invitations_of(sql, &actor.id, actor_kind, principal, reason, now)?;
     audit_as(
         sql,
@@ -3345,6 +3346,7 @@ impl Workspace {
                         vec![left_at.into()],
                     )?;
                     apply_departure_rules(&sql, &actor, &person, now)?;
+                    objects::drop_uploads_of(&sql, &actor.id, "person", &person, now)?;
                     queue_index(&sql, &person, &org, Some("owner"), now)?;
                     audit(
                         &sql,

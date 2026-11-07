@@ -37,7 +37,8 @@ fn room_id(sql: &SqlStorage) -> R<String> {
 }
 
 /// Reserves the space and records the upload, in one transaction, so two uploads can't both take the last of a room's quota.
-/// The token is returned once, and `store_answer` keeps it out of what a retry gets.
+/// The token is returned once, and `store_answer` keeps it out of what a retry gets. It works for any number of attempts until the
+/// file arrives, the upload expires or the uploader goes.
 pub(super) fn handle_create(
     sql: &SqlStorage,
     caller: &Caller,
@@ -100,6 +101,40 @@ pub(super) fn handle_create(
         "id": id, "name": accepted.name.as_str(), "size": accepted.size, "state": ObjectState::Uploading.name(),
         "expires_at": expires_at, "upload_path": format!("/v1/uploads/{room}/{id}"), "token": token,
     }))
+}
+
+/// Drops what someone was still uploading when they went, in the transaction that ends their place here, so their token dies with
+/// it, coming back doesn't revive it, and the space is free at once. Bytes on their way get refused when they finish.
+pub(super) fn drop_uploads_of(
+    sql: &SqlStorage,
+    actor: &str,
+    actor_kind: &str,
+    principal: &str,
+    now: i64,
+) -> R<()> {
+    let found = rows(
+        sql,
+        "SELECT id FROM stored_object WHERE uploaded_by = ? AND state = 'uploading'",
+        vec![principal.into()],
+    )?;
+    for row in &found {
+        let id = text(&row["id"]).unwrap_or_default();
+        audit_as(
+            sql,
+            actor,
+            actor_kind,
+            "object.upload_dropped",
+            &id,
+            None,
+            None,
+            now,
+        )?;
+    }
+    exec(
+        sql,
+        "DELETE FROM stored_object WHERE uploaded_by = ? AND state = 'uploading'",
+        vec![principal.into()],
+    )
 }
 
 /// The uploader as they were when they asked, for what only the room can check again: whether they're still here and may

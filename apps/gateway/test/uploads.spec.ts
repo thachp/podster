@@ -10,6 +10,7 @@ const ask = async (init: RequestInit, { path = PATH, allowed = true, api = (asyn
   const response = await handleUpload(request, new URL(request.url), fetcher, async () => allowed);
   return { response, seen };
 };
+const TOKEN = `Bearer upl_${"a".repeat(64)}`;
 const chunked = () => new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode("hello")); c.close(); } });
 
 describe("the upload path", () => {
@@ -32,18 +33,18 @@ describe("the upload path", () => {
   });
 
   it("passes the bytes on, with the token and nothing else from the sender", async () => {
-    const { response, seen } = await ask({ method: "PUT", body: "hello", headers: { authorization: "Bearer upl_x", cookie: "session=secret", "x-podster-assertion": "forged", "x-podster-caller": "forged" } });
+    const { response, seen } = await ask({ method: "PUT", body: "hello", headers: { authorization: TOKEN, cookie: "session=secret", "x-podster-assertion": "forged", "x-podster-caller": "forged" } });
     expect(response?.status).toBe(200);
     expect(seen).toHaveLength(1);
     expect(seen[0].url).toBe(`https://api.internal${PATH}`);
     expect(seen[0].method).toBe("PUT");
     expect([...seen[0].headers.keys()].filter((name) => name !== "content-type")).toEqual(["authorization"]);
-    expect(seen[0].headers.get("authorization")).toBe("Bearer upl_x");
+    expect(seen[0].headers.get("authorization")).toBe(TOKEN);
     expect(await seen[0].text()).toBe("hello");
   });
 
   it("doesn't need a declared length, because the API counts what arrives", async () => {
-    const { response, seen } = await ask({ method: "PUT", body: chunked(), duplex: "half" } as RequestInit);
+    const { response, seen } = await ask({ method: "PUT", body: chunked(), duplex: "half", headers: { authorization: TOKEN } } as RequestInit);
     expect(response?.status).toBe(200);
     expect(await seen[0].text()).toBe("hello");
   });
@@ -55,17 +56,51 @@ describe("the upload path", () => {
     expect(seen).toEqual([]);
   });
 
+  it.each([
+    ["no token", undefined],
+    ["another scheme", `Basic upl_${"a".repeat(64)}`],
+    ["a short token", "Bearer upl_abc"],
+    ["upper-case hex", `Bearer upl_${"A".repeat(64)}`],
+    ["a byte too many", `${TOKEN}0`],
+    ["a non-ASCII byte", `${TOKEN}\xff`],
+  ])("goes no further with %s", async (_name, authorization) => {
+    const { response, seen } = await ask({ method: "PUT", body: "x", headers: authorization ? { authorization } : {} });
+    expect(response?.status).toBe(404);
+    expect(((await response?.json()) as any).error.code).toBe("upload_not_found");
+    expect(seen).toEqual([]);
+  });
+
+  it("can't have someone guessing use up the limit of the person whose upload it is", async () => {
+    const counts = new Map<string, number>();
+    const limited = async (key: string) => {
+      const count = (counts.get(key) ?? 0) + 1;
+      counts.set(key, count);
+      return count <= 120;
+    };
+    const fetcher = { fetch: async () => new Response("{}") } as unknown as Fetcher;
+    const send = async (authorization: string, ip: string) => {
+      const request = new Request(`https://gateway.test${PATH}`, { method: "PUT", body: "x", headers: { authorization, "cf-connecting-ip": ip } });
+      return (await handleUpload(request, new URL(request.url), fetcher, limited))?.status;
+    };
+    const guess = `Bearer upl_${"b".repeat(64)}`;
+    for (let i = 0; i < 130; i++) await send(guess, "203.0.113.9");
+    expect(await send(guess, "203.0.113.9")).toBe(429);
+    expect(await send(TOKEN, "198.51.100.7")).toBe(200);
+    expect(await send(TOKEN, "203.0.113.9")).toBe(200);
+    expect([...counts.keys()].join()).not.toContain("a".repeat(64));
+  });
+
   it("stops at the rate limit, and says when to come back", async () => {
-    const { response, seen } = await ask({ method: "PUT", body: "x" }, { allowed: false });
+    const { response, seen } = await ask({ method: "PUT", body: "x", headers: { authorization: TOKEN } }, { allowed: false });
     expect(response?.status).toBe(429);
     expect(response?.headers.get("retry-after")).toBe("60");
     expect(seen).toEqual([]);
   });
 
   it("passes on the API's answer, and gives a clear one if it's unreachable", async () => {
-    const refused = await ask({ method: "PUT", body: "x" }, { api: async () => new Response('{"error":{"code":"upload_mismatch"}}', { status: 422 }) });
+    const refused = await ask({ method: "PUT", body: "x", headers: { authorization: TOKEN } }, { api: async () => new Response('{"error":{"code":"upload_mismatch"}}', { status: 422 }) });
     expect(refused.response?.status).toBe(422);
-    const down = await ask({ method: "PUT", body: "x" }, { api: async () => { throw new Error("gone"); } });
+    const down = await ask({ method: "PUT", body: "x", headers: { authorization: TOKEN } }, { api: async () => { throw new Error("gone"); } });
     expect(down.response?.status).toBe(502);
   });
 });

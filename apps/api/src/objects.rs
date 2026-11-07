@@ -7,17 +7,33 @@
 //!
 //! Logs carry IDs, sizes and timing only. A file's name and the upload token stay out of them.
 use crate::error::ApiError;
+use futures_util::future::{select, Either};
 use futures_util::StreamExt;
 use podster_core::files::{
     complete_upload, Arrival, FileEnds, FileRefusal, FileSample, ObjectState,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 use worker::*;
 
 type R<T> = std::result::Result<T, ApiError>;
+
+/// How long an attempt may go with no bytes arriving, and how long it may take at all. 100 MB in 30 minutes is about 55 KB/s. These
+/// are what stop a stalled sender holding an attempt open, and a test build shortens them so they can be run.
+const IDLE_LIMIT_MS: u64 = if cfg!(feature = "failpoints") {
+    3_000
+} else {
+    60_000
+};
+const TOTAL_LIMIT_MS: u64 = if cfg!(feature = "failpoints") {
+    8_000
+} else {
+    30 * 60 * 1000
+};
+const DEADLINE_CHECK_MS: u64 = IDLE_LIMIT_MS / 4;
 
 pub const BUCKET: &str = "ASSETS";
 
@@ -46,6 +62,7 @@ pub fn upload_not_found() -> ApiError {
 /// What has passed so far. It holds the file's ends and its hash, never the file.
 #[derive(Default)]
 struct Arrived {
+    last_chunk_at: u64,
     bytes: u64,
     chunks: u64,
     hash: Sha256,
@@ -76,12 +93,47 @@ fn unhex(text: &str) -> Vec<u8> {
         .collect()
 }
 
+/// Only what `create_upload` can have issued. The gateway refuses anything else first, and this doesn't rely on it.
 fn bearer(req: &Request) -> R<String> {
     req.headers()
         .get("authorization")?
         .and_then(|value| value.strip_prefix("Bearer ").map(str::to_string))
-        .filter(|token| !token.is_empty())
+        .filter(|token| {
+            token.strip_prefix("upl_").is_some_and(|secret| {
+                secret.len() == 64
+                    && secret
+                        .bytes()
+                        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            })
+        })
         .ok_or_else(upload_not_found)
+}
+
+/// Runs the write to R2 until it ends, or until a deadline passes, when it answers `None`. Going quiet only counts until every byte
+/// has arrived, because after that the wait is for storage and not the sender.
+async fn within_deadlines<T>(
+    put: impl std::future::Future<Output = T>,
+    arrived: &Rc<RefCell<Arrived>>,
+    announced_size: u64,
+    started: u64,
+) -> Option<T> {
+    let mut put = Box::pin(put);
+    loop {
+        let tick = Box::pin(Delay::from(Duration::from_millis(DEADLINE_CHECK_MS)));
+        match select(put, tick).await {
+            Either::Left((done, _)) => return Some(done),
+            Either::Right((_, still_going)) => put = still_going,
+        }
+        let now = Date::now().as_millis();
+        let (bytes, last) = {
+            let seen = arrived.borrow();
+            (seen.bytes, seen.last_chunk_at)
+        };
+        let idle = bytes < announced_size && now.saturating_sub(last) > IDLE_LIMIT_MS;
+        if idle || now.saturating_sub(started) > TOTAL_LIMIT_MS {
+            return None;
+        }
+    }
 }
 
 /// Asks the room, which reads the upload's own record. There's no assertion here, so the caller passed is empty, and the
@@ -157,14 +209,24 @@ pub async fn stream_upload(mut req: Request, env: Env, room: &str, id: &str) -> 
     let announced_size = begun["size"].as_u64().unwrap_or(0);
 
     let bucket = env.bucket(BUCKET)?;
-    let arrived = Rc::new(RefCell::new(Arrived::default()));
+    let arrived = Rc::new(RefCell::new(Arrived {
+        last_chunk_at: started,
+        ..Arrived::default()
+    }));
+    let stopped = Rc::new(Cell::new(false));
+    let mut timed_out = false;
     // A request with no body at all has nothing to read, and arrives as an empty stream would.
     let stored = match req.stream() {
         Ok(stream) => {
             let counted = arrived.clone();
+            let stop = stopped.clone();
             let body = stream.map(move |chunk| {
                 let chunk = chunk?;
+                if stop.get() {
+                    return Err(Error::RustError("past its deadline".into()));
+                }
                 let mut seen = counted.borrow_mut();
+                seen.last_chunk_at = Date::now().as_millis();
                 seen.add(&chunk);
                 // The length the room was told is what's enforced. Stop now, not at the end of a longer file.
                 if seen.bytes > announced_size {
@@ -172,16 +234,21 @@ pub async fn stream_upload(mut req: Request, env: Env, room: &str, id: &str) -> 
                 }
                 Ok(chunk)
             });
-            bucket
+            let put = bucket
                 .put(
                     &key,
                     Data::Stream(FixedLengthStream::wrap(body, announced_size)),
                 )
                 .sha256(unhex(&announced_sha256))
-                .execute()
-                .await
-                .map(|_| ())
-                .map_err(|_| ())
+                .execute();
+            match within_deadlines(put, &arrived, announced_size, started).await {
+                Some(result) => result.map(|_| ()).map_err(|_| ()),
+                None => {
+                    stopped.set(true);
+                    timed_out = true;
+                    Err(())
+                }
+            }
         }
         Err(_) => Err(()),
     };
@@ -203,6 +270,10 @@ pub async fn stream_upload(mut req: Request, env: Env, room: &str, id: &str) -> 
                 "{}",
                 json!({ "at": "upload.cleanup_failed", "room": room, "object": id, "kind": problem.to_string().len() })
             );
+        }
+        if timed_out {
+            log("upload.refused", "upload_timed_out");
+            return Err(ApiError::api(408, "upload_timed_out"));
         }
         // All of the right bytes arrived, so it's storage that failed, and the sender can try again.
         if seen.bytes == announced_size && received_sha256 == announced_sha256 {

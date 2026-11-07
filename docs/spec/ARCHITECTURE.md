@@ -316,7 +316,7 @@ The consumer in `apps/api` rechecks everything before sending: the connection is
 GET    /v1/me                                       inbox_unread, wake
 GET    /v1/workspaces                               from membership_index
 GET    /v1/workspaces/{ws}/plan?scope=              tasks, durations, edges, plan_revision and complete, narrowed per viewer (decisions 64 to 66); scope=unfinished for unfinished tasks only (decision 77); start and the baseline forecast (decisions 67 to 73), which only someone who sees the whole plan and isn't a guest gets
-POST   /v1/workspaces/{ws}/uploads                  create_upload: reserves space and returns a one-time token (ADR 0006)
+POST   /v1/workspaces/{ws}/uploads                  create_upload: reserves space and returns a token, once (ADR 0006)
 PUT    /v1/uploads/{ws}/{object}                    the file's bytes, with that token and no assertion; the room decides
 PUT    /v1/workspaces/{ws}/plan/start               set_plan_start, for the owner or a human admin: the room's start date and timezone, checked against plan_revision (decision 70)
 PUT    /v1/workspaces/{ws}/tasks/{t}/plan           set_task_plan: a task's whole duration and predecessor list, checked against plan_revision

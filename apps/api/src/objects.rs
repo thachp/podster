@@ -260,18 +260,22 @@ async fn uploader_still_here(env: &Env, begun: &Value) -> R<()> {
 /// A scanner's verdict. Only the secret lets anything through, and everything without it gets the same answer as a route that doesn't
 /// exist, including when no secret is set, so a forged clean report has nowhere to go. The verdict's own words decide nothing here.
 pub async fn scan_result(mut req: Request, env: Env) -> R<Response> {
+    // A header can't carry a value with whitespace at either end, so such a secret could never match. It counts as unset.
     let expected = env
         .secret("SCANNER_SECRET")
-        .map_err(|_| ApiError::not_found())?
-        .to_string();
+        .map(|secret| secret.to_string())
+        .ok()
+        .filter(|secret| podster_core::files::scanner_secret_usable(secret));
+    let Some(expected) = expected else {
+        console_error!("{}", json!({ "at": "scan.secret_unset" }));
+        return Err(ApiError::not_found());
+    };
     let given = req
         .headers()
         .get("x-podster-scanner")?
         .ok_or_else(ApiError::not_found)?;
     // Compared as hashes, so a comparison that stops early says nothing about the secret.
-    if expected.is_empty()
-        || Sha256::digest(given.as_bytes()) != Sha256::digest(expected.as_bytes())
-    {
+    if Sha256::digest(given.as_bytes()) != Sha256::digest(expected.as_bytes()) {
         return Err(ApiError::not_found());
     }
     let body: Value =

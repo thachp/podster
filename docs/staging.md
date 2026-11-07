@@ -207,7 +207,7 @@ Run the journey in the [kernel success criteria](spec/PRODUCT.md#coordination-ke
 
 ## The scanner's secret
 
-The API and `apps/scanner` share `SCANNER_SECRET`. It's a random value, such as the output of `openssl rand -hex 32`, set to the same value on both Workers. Until both have it, nothing can record a verdict, so every file ends as `failed` after an hour, which is the safe way round.
+The API and `apps/scanner` share `SCANNER_SECRET`. It's a random value, such as the output of `openssl rand -hex 32`, set to the same value on both Workers. Until both have it, nothing can record a verdict, so every file ends as `failed` after an hour, which is the safe way round. A value with whitespace at either end counts as unset, and the API logs `scan.secret_unset`. Deploy the scanner with the API: the API refuses a clean report that doesn't name the file's key, and an older scanner doesn't send one, so its files would end as `failed`.
 
 ```bash
 cd apps/api && npx wrangler secret put SCANNER_SECRET --env staging

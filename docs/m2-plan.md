@@ -73,3 +73,7 @@ Put new backend code in new modules, such as `apps/api/src/objects.rs` and `crat
 - **Archived rooms:** reads and downloads continue, new uploads are refused, and a scan already running still records its result.
 - **Departure:** access ends on the next download, submitted files stay, and unfinished uploads are dropped. Copies already downloaded can't be recalled.
 - **Counts:** cards must not reveal hidden work to someone limited to their own tasks.
+
+## Known limits before production
+
+- **Scan fairness:** the scan queue feeds one Container in arrival order, with no share per room. A few rooms filling their quota can push other rooms' scans past the hour, and those files end as `failed`. That fails closed, but the person has to upload again. It needs a fix before production, such as a share per room or more Containers, and step 11's load run should measure it.

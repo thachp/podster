@@ -6,8 +6,8 @@
 use super::*;
 use crate::objects::{refusal, upload_not_found};
 use podster_core::files::{
-    check_upload, expire_scan, fits_room_quota, is_sha256, record_scan, FileRefusal, ObjectState,
-    ScanOutcome, UploadRequest, SCAN_DEADLINE_MS,
+    check_upload, expire_scan, fits_room_quota, is_sha256, record_scan, scan_database_fits,
+    FileRefusal, ObjectState, ScanOutcome, UploadRequest, SCAN_DEADLINE_MS,
 };
 use podster_policy::files::authorize_input_upload;
 
@@ -85,9 +85,10 @@ pub(super) fn handle_create(
             identity_json.into(), now.into(), expires_at.into(),
         ],
     )?;
-    audit(
+    audit_file(
         sql,
-        caller,
+        &caller.id,
+        kind_name(caller),
         "object.upload_created",
         &id,
         None,
@@ -146,7 +147,7 @@ pub(super) fn drop_uploads_of(
     )?;
     for row in &found {
         let id = text(&row["id"]).unwrap_or_default();
-        audit_as(
+        audit_file(
             sql,
             actor,
             actor_kind,
@@ -250,9 +251,10 @@ fn complete(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         "UPDATE stored_object SET state = ?, media_type = ?, stored_at = ?, scanning_since = ?, uploader_json = NULL, token_hash = '' WHERE id = ?",
         vec![state.into(), media_type.into(), now.into(), now.into(), id.into()],
     )?;
-    audit(
+    audit_file(
         sql,
-        &who.caller,
+        &who.caller.id,
+        kind_name(&who.caller),
         "object.stored",
         id,
         None,
@@ -273,16 +275,17 @@ fn complete(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     )
 }
 
-/// The scan database, as decision 84 needs it stored, or nothing if the scanner didn't give all of it.
-fn scan_database(body: &Value) -> Option<String> {
+/// The scan database, as decision 84 needs it stored, or nothing if the scanner didn't give all of it, or gave signatures
+/// past their week.
+fn scan_database(body: &Value, now: i64) -> Option<String> {
     let database = &body["database"];
-    ["engine", "version", "built_at"]
-        .iter()
-        .all(|name| database[name].is_string())
-        .then(|| {
-            json!({ "engine": database["engine"], "version": database["version"], "built_at": database["built_at"] })
-                .to_string()
-        })
+    let engine = database["engine"].as_str()?;
+    let version = database["version"].as_str()?;
+    let built_at = database["built_at"].as_str()?;
+    let parsed = js_sys::Date::parse(built_at);
+    let built_at_ms = parsed.is_finite().then_some(parsed as i64);
+    scan_database_fits(engine, version, built_at, built_at_ms, now)
+        .then(|| json!({ "engine": engine, "version": version, "built_at": built_at }).to_string())
 }
 
 fn cut_reason(reason: &str) -> &str {
@@ -308,12 +311,13 @@ fn record_verdict(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     let outcome = ScanOutcome::from_report(body["report"].as_str().unwrap_or_default());
     // A clean report about other bytes says nothing about this file, so the hour limit ends it. A blocking one still blocks: the
     // scanner reports a stored size that differs from the upload's this way, and a block can only tighten.
-    let mismatch =
-        body["sha256"] != row["sha256"] || body["bytes"].as_i64() != Some(int(&row["size"]));
+    let mismatch = body["sha256"] != row["sha256"]
+        || body["bytes"].as_i64() != Some(int(&row["size"]))
+        || body["key"] != row["object_key"];
     if mismatch && outcome == ScanOutcome::NoKnownMalware {
         return Err(ApiError::api(409, "scan_mismatch"));
     }
-    let database = scan_database(body);
+    let database = scan_database(body, now);
     // Nothing is made available without knowing which signatures said so. A finding blocks regardless.
     if outcome == ScanOutcome::NoKnownMalware && database.is_none() {
         return Err(ApiError::invalid_argument());
@@ -333,7 +337,7 @@ fn record_verdict(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         ],
     )?;
     let new = json!({ "state": next.name() }).to_string();
-    audit_as(
+    audit_file(
         sql,
         "scanner",
         "system",
@@ -359,7 +363,7 @@ fn record_verdict(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
 fn expire_overdue_scans(sql: &SqlStorage, now: i64) -> R<()> {
     let overdue = rows(
         sql,
-        "SELECT id, scanning_since FROM stored_object WHERE state = 'scanning' AND scanning_since <= ? ORDER BY scanning_since LIMIT ?",
+        "SELECT id, scanning_since FROM stored_object INDEXED BY stored_object_scanning WHERE state = 'scanning' AND scanning_since <= ? ORDER BY scanning_since LIMIT ?",
         vec![(now - SCAN_DEADLINE_MS).into(), EXPIRED_SCANS_PER_ALARM.into()],
     )?;
     for row in &overdue {
@@ -371,7 +375,7 @@ fn expire_overdue_scans(sql: &SqlStorage, now: i64) -> R<()> {
             vec![next.name().into(), id.as_str().into()],
         )?;
         let new = json!({ "state": next.name() }).to_string();
-        audit_as(
+        audit_file(
             sql,
             "scanner",
             "system",
@@ -398,7 +402,7 @@ fn expire_overdue_scans(sql: &SqlStorage, now: i64) -> R<()> {
 pub(super) fn next_scan_expiry(sql: &SqlStorage, now: i64) -> R<Option<i64>> {
     let found = rows(
         sql,
-        "SELECT MIN(scanning_since) AS first FROM stored_object WHERE state = 'scanning'",
+        "SELECT MIN(scanning_since) AS first FROM stored_object INDEXED BY stored_object_scanning WHERE state = 'scanning'",
         vec![],
     )?;
     Ok(found

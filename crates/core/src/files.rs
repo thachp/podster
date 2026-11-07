@@ -32,6 +32,16 @@ pub const MAX_FILE_BYTES: u64 = 100_000_000;
 pub const ROOM_QUOTA_BYTES: u64 = 5_000_000_000;
 /// No result within an hour fails the scan.
 pub const SCAN_DEADLINE_MS: i64 = 60 * 60 * 1000;
+/// Decision 84: signatures older than this can't make a file available.
+pub const MAX_SIGNATURE_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+/// How far ahead of the room's clock a signature database's build time may be, for clocks that disagree.
+pub const MAX_SIGNATURES_AHEAD_MS: i64 = 24 * 60 * 60 * 1000;
+/// The longest scan engine name kept, the scanner's own limit.
+pub const MAX_SCAN_ENGINE_BYTES: usize = 40;
+/// The longest signature database version kept. It's all digits.
+pub const MAX_SCAN_VERSION_BYTES: usize = 20;
+/// The longest build time kept, which is an ISO 8601 time with room to spare.
+pub const MAX_SCAN_BUILT_AT_BYTES: usize = 40;
 /// How much of a file's start `FileSample::head` holds.
 pub const SAMPLE_HEAD_BYTES: usize = 64 * 1024;
 /// How much of a file's end `FileSample::tail` holds. A zip's directory must fit, which is about 15,000 entries.
@@ -1073,6 +1083,33 @@ pub fn record_scan(
             ScanOutcome::NoKnownMalware,
         ) => Ok(state),
     }
+}
+
+/// Whether the scanner's shared secret can ever match a header. A header can't carry whitespace at either end, so a secret with
+/// any there, or nothing but whitespace, would refuse every report, and counts as unset.
+pub fn scanner_secret_usable(secret: &str) -> bool {
+    !secret.is_empty() && secret.trim() == secret
+}
+
+/// Whether a scanner's signature database can stand behind a clean report: a named engine, a version of digits and a build time
+/// within decision 84's week, each within its length. `built_at_ms` is the build time already read, or `None` if it isn't a time.
+pub fn scan_database_fits(
+    engine: &str,
+    version: &str,
+    built_at: &str,
+    built_at_ms: Option<i64>,
+    now: i64,
+) -> bool {
+    let named = !engine.is_empty() && engine.len() <= MAX_SCAN_ENGINE_BYTES;
+    let numbered = !version.is_empty()
+        && version.len() <= MAX_SCAN_VERSION_BYTES
+        && version.bytes().all(|b| b.is_ascii_digit());
+    let fresh = built_at.len() <= MAX_SCAN_BUILT_AT_BYTES
+        && built_at_ms.is_some_and(|at| {
+            let age = now.saturating_sub(at);
+            (-MAX_SIGNATURES_AHEAD_MS..=MAX_SIGNATURE_AGE_MS).contains(&age)
+        });
+    named && numbered && fresh
 }
 
 /// What a state becomes when the room's alarm looks at it: a scan with no result after an hour fails.

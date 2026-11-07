@@ -646,8 +646,44 @@ fn audit_as(
         "UPDATE workspace SET policy_version = policy_version + 1",
         vec![],
     )?;
-    exec(sql, "INSERT INTO audit_event (id, actor_id, actor_kind, action, target_id, outcome, prior_json, new_json, policy_version, created_at)
-      VALUES (?, ?, ?, ?, ?, 'allowed', ?, ?, (SELECT policy_version FROM workspace), ?)", vec![
+    audit_row(sql, actor, actor_kind, action, target, prior, new, now)
+}
+
+/// Records a change to a file, which changes nobody's access, so it leaves the policy version alone. That version guards an
+/// admin's open form, and an upload or a scan mustn't make one fail.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn audit_file(
+    sql: &SqlStorage,
+    actor: &str,
+    actor_kind: &str,
+    action: &str,
+    target: &str,
+    prior: Option<String>,
+    new: Option<String>,
+    now: i64,
+) -> R<()> {
+    audit_row(sql, actor, actor_kind, action, target, prior, new, now)
+}
+
+/// The audit entry itself, with its place in the audit list. The entry keeps the policy version it was written under.
+#[allow(clippy::too_many_arguments)]
+fn audit_row(
+    sql: &SqlStorage,
+    actor: &str,
+    actor_kind: &str,
+    action: &str,
+    target: &str,
+    prior: Option<String>,
+    new: Option<String>,
+    now: i64,
+) -> R<()> {
+    exec(
+        sql,
+        "UPDATE workspace SET audit_seq = audit_seq + 1",
+        vec![],
+    )?;
+    exec(sql, "INSERT INTO audit_event (id, actor_id, actor_kind, action, target_id, outcome, prior_json, new_json, policy_version, seq, created_at)
+      VALUES (?, ?, ?, ?, ?, 'allowed', ?, ?, (SELECT policy_version FROM workspace), (SELECT audit_seq FROM workspace), ?)", vec![
         format!("aud_{}", uuid::Uuid::new_v4().simple()).into(), actor.into(), actor_kind.into(), action.into(), target.into(), opt(&prior), opt(&new), now.into(),
     ])
 }
@@ -2404,14 +2440,18 @@ mod queries {
     pub fn list_audit(sql: &SqlStorage, caller: &Caller, url: &Url) -> R<Value> {
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ReadAuditLog))?;
         let after = query_int(url, "after")?.unwrap_or(0);
-        let mut audit = rows(sql, "SELECT id, actor_id, actor_kind, action, target_id, outcome, reason_code, prior_json, new_json, policy_version, created_at
-            FROM audit_event WHERE policy_version > ? ORDER BY policy_version LIMIT ?", vec![after.into(), (PAGE_SIZE + 1).into()])?;
+        let mut audit = rows(sql, "SELECT id, actor_id, actor_kind, action, target_id, outcome, reason_code, prior_json, new_json, policy_version, seq, created_at
+            FROM audit_event WHERE seq > ? ORDER BY seq LIMIT ?", vec![after.into(), (PAGE_SIZE + 1).into()])?;
         // One row past the page, which only says whether there is more, so a full last page doesn't lead to an empty one.
         let more = audit.len() as i64 > PAGE_SIZE;
         audit.truncate(PAGE_SIZE as usize);
-        let next = more
-            .then(|| audit.last().map(|r| int(&r["policy_version"])))
-            .flatten();
+        let next = more.then(|| audit.last().map(|r| int(&r["seq"]))).flatten();
+        // The cursor is the entry's place in the list. It isn't part of the entry.
+        for entry in &mut audit {
+            if let Some(fields) = entry.as_object_mut() {
+                fields.remove("seq");
+            }
+        }
         Ok(json!({ "audit": audit, "next_cursor": next }))
     }
 }

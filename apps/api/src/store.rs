@@ -119,7 +119,12 @@ ALTER TABLE stored_object ADD COLUMN scan_reason TEXT;
 ALTER TABLE stored_object ADD COLUMN scan_sha256 TEXT;
 ALTER TABLE stored_object ADD COLUMN scan_database_json TEXT;
 ALTER TABLE stored_object ADD COLUMN scanned_at INTEGER;
-CREATE INDEX stored_object_scanning ON stored_object (scanning_since) WHERE state = 'scanning';
+CREATE INDEX stored_object_scanning ON stored_object (state, scanning_since);
+ALTER TABLE workspace ADD COLUMN audit_seq INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE audit_event ADD COLUMN seq INTEGER;
+UPDATE audit_event SET seq = policy_version;
+UPDATE workspace SET audit_seq = COALESCE((SELECT MAX(seq) FROM audit_event), 0);
+CREATE INDEX audit_event_seq ON audit_event (seq);
 "];
 
 pub fn int(value: &Value) -> i64 {

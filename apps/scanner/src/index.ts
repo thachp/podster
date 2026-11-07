@@ -46,8 +46,13 @@ export default {
       }
       const started = Date.now();
       const ending = await scanOne(message.body, scanningWith(env)).catch(() => ({ ack: false as const, why: "no_answer" as const }));
-      const status = ending.ack && ending.outcome === "not_recorded" ? { status: ending.status } : {};
-      console.log(JSON.stringify({ ...logged(message.body), outcome: ending.ack ? ending.outcome : ending.why, ...status, attempts: message.attempts, ms: Date.now() - started }));
+      const refused = ending.ack && ending.outcome === "not_recorded" ? ending.status : null;
+      // A 404 is a wrong or missing secret as often as an unknown file, and a wrong secret fails every file, so it has its own word to
+      // alert on.
+      const outcome = refused === 404 ? "room_said_not_found" : ending.ack ? ending.outcome : ending.why;
+      const line = JSON.stringify({ ...logged(message.body), outcome, ...(refused === null ? {} : { status: refused }), attempts: message.attempts, ms: Date.now() - started });
+      if (refused === 404) console.error(line);
+      else console.log(line);
       if (ending.ack) message.ack();
       else message.retry();
     }

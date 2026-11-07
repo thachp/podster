@@ -43,10 +43,12 @@ async function stored(id: string, name = "notes.txt") {
   const upload = (await api("POST", `/v1/workspaces/${id}/uploads`, { name, size: DATA.length, sha256: hash })).body;
   const res = await SELF.fetch(`https://api.internal${upload.upload_path}`, { method: "PUT", headers: { authorization: `Bearer ${upload.token}` }, body: DATA });
   expect(res.status).toBe(200);
-  return { id: upload.id as string, hash };
+  const key = (await row(id, upload.id)).object_key as string;
+  return { id: upload.id as string, hash, key };
 }
-const DATABASE = { engine: "1.5.4", version: "28176", built_at: "2026-11-06T07:26:08Z" };
-const verdict = (id: string, file: { id: string; hash: string }, over: object = {}) => ({ v: 1, workspace_id: id, object_id: file.id, report: "no_known_malware", reason: "none", sha256: file.hash, bytes: DATA.length, database: DATABASE, scanned_at: 1, ...over });
+const DAY = 24 * HOUR;
+const DATABASE = { engine: "1.5.4", version: "28176", built_at: new Date(Date.now() - DAY).toISOString() };
+const verdict = (id: string, file: { id: string; hash: string; key: string }, over: object = {}) => ({ v: 1, workspace_id: id, object_id: file.id, key: file.key, report: "no_known_malware", reason: "none", sha256: file.hash, bytes: DATA.length, database: DATABASE, scanned_at: 1, ...over });
 const send = (body: unknown, secret: string | null = SECRET) => SELF.fetch("https://api.internal/internal/scan-result", { method: "POST", headers: secret === null ? {} : { "x-podster-scanner": secret }, body: JSON.stringify(body) });
 const answer = async (res: Response) => ({ status: res.status, body: (await res.json()) as any });
 
@@ -116,7 +118,7 @@ describe("a scanner's verdict", () => {
   it("refuses a clean report about other bytes, and records nothing", async () => {
     const id = await room();
     const file = await stored(id);
-    for (const over of [{ sha256: "0".repeat(64) }, { bytes: DATA.length + 1 }]) {
+    for (const over of [{ sha256: "0".repeat(64) }, { bytes: DATA.length + 1 }, { key: `${file.key}x` }, { key: undefined }]) {
       const res = await answer(await send(verdict(id, file, over)));
       expect(res.status).toBe(409);
       expect(res.body.error.code).toBe("scan_mismatch");
@@ -127,7 +129,7 @@ describe("a scanner's verdict", () => {
   });
 
   it("blocks on a finding about other bytes, as the scanner reports a stored size that differs from the upload's", async () => {
-    for (const over of [{ report: "unreadable", reason: "size_mismatch", bytes: DATA.length + 1 }, { report: "malware_found", sha256: "0".repeat(64) }]) {
+    for (const over of [{ report: "unreadable", reason: "size_mismatch", bytes: DATA.length + 1 }, { report: "malware_found", sha256: "0".repeat(64) }, { report: "malware_found", key: undefined }]) {
       const id = await room();
       const file = await stored(id);
       const res = await answer(await send(verdict(id, file, over)));
@@ -143,7 +145,13 @@ describe("a scanner's verdict", () => {
   it("won't take a clean report without knowing which signatures said so, though a finding still blocks", async () => {
     const id = await room();
     const file = await stored(id);
-    for (const database of [null, {}, { engine: "1.5.4" }, { ...DATABASE, version: 28176 }]) {
+    const builtAt = (ms: number) => ({ ...DATABASE, built_at: new Date(ms).toISOString() });
+    for (const database of [
+      null, {}, { engine: "1.5.4" }, { ...DATABASE, version: 28176 },
+      builtAt(Date.now() - 7 * DAY - HOUR), builtAt(Date.now() + 2 * DAY), { ...DATABASE, built_at: "last tuesday" },
+      { ...DATABASE, engine: "" }, { ...DATABASE, engine: "e".repeat(41) }, { ...DATABASE, version: "28176a" }, { ...DATABASE, version: "1".repeat(21) },
+      { ...DATABASE, built_at: `${DATABASE.built_at}${" ".repeat(40)}` },
+    ]) {
       expect((await send(verdict(id, file, { database }))).status).toBe(400);
     }
     expect((await row(id, file.id)).state).toBe("scanning");
@@ -159,9 +167,12 @@ describe("a scanner's verdict", () => {
     expect((await send(verdict("../bad", file))).status).toBe(404);
     const hash = await sha256(DATA);
     const arriving = (await api("POST", `/v1/workspaces/${id}/uploads`, { name: "n.txt", size: DATA.length, sha256: hash })).body;
-    const res = await answer(await send(verdict(id, { id: arriving.id, hash })));
-    expect(res.status).toBe(409);
-    expect(res.body.error.code).toBe("invalid_transition");
+    // It has no key yet, so a report naming none is about it, and a finding about it still can't skip its arrival.
+    for (const report of ["no_known_malware", "malware_found"]) {
+      const res = await answer(await send(verdict(id, { id: arriving.id, hash, key: undefined as unknown as string }, { report })));
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe("invalid_transition");
+    }
   });
 
   it("only ever tightens: a finding blocks a ready file, and nothing makes a blocked one ready", async () => {
@@ -245,6 +256,24 @@ describe("a scan with no verdict", () => {
     expect(audit).toBe(1);
   });
 
+  it("leaves an admin's open form valid through an upload, a verdict and the sweep, and still lists them in the audit", async () => {
+    const id = await room();
+    const version = (await api("GET", `/v1/workspaces/${id}`)).body.policy_version;
+    const scanned = await stored(id);
+    expect((await answer(await send(verdict(id, scanned)))).body.state).toBe("ready");
+    const late = await stored(id, "other.txt");
+    await overdue(id, late.id);
+    await runDurableObjectAlarm(stub(id));
+    await vi.waitFor(async () => {
+      if ((await row(id, late.id)).state !== "failed") await runInDurableObject(stub(id), (instance: any) => instance.alarm());
+      expect((await row(id, late.id)).state).toBe("failed");
+    });
+    expect((await api("GET", `/v1/workspaces/${id}`)).body.policy_version).toBe(version);
+    const actions = (await api("GET", `/v1/workspaces/${id}/audit`)).body.audit.map((e: any) => e.action);
+    for (const action of ["object.upload_created", "object.stored", "object.scan_recorded", "object.scan_expired"]) expect(actions).toContain(action);
+    expect((await api("POST", `/v1/workspaces/${id}/archive`, { policy_version: version })).status).toBe(200);
+  });
+
   it("can't be brought back by a late clean report, though a late finding still blocks it", async () => {
     const id = await room();
     const file = await stored(id);
@@ -300,15 +329,61 @@ describe("a file ready or not", () => {
   });
 });
 
+describe("the sweep's queries", () => {
+  it("read scanning files through their own index, not every file's", async () => {
+    const id = await room();
+    await stored(id);
+    const plans = await inRoom(id, (sql) =>
+      [
+        "SELECT id, scanning_since FROM stored_object INDEXED BY stored_object_scanning WHERE state = 'scanning' AND scanning_since <= 1 ORDER BY scanning_since LIMIT 500",
+        "SELECT MIN(scanning_since) AS first FROM stored_object INDEXED BY stored_object_scanning WHERE state = 'scanning'",
+        "SELECT id, scanning_since FROM stored_object WHERE state = 'scanning' AND scanning_since <= 1 ORDER BY scanning_since LIMIT 500",
+      ].map((query) => sql.exec(`EXPLAIN QUERY PLAN ${query}`).toArray().map((step: any) => step.detail).join(" | ")),
+    );
+    for (const plan of plans.slice(0, 2)) {
+      expect(plan).toContain("stored_object_scanning");
+      expect(plan).not.toContain("TEMP B-TREE");
+    }
+    // Even unnamed, it's the index SQLite picks now.
+    expect(plans[2]).toContain("stored_object_scanning");
+  });
+});
+
 describe("a room from before this", () => {
+  /** Puts a room back to before this migration. Its audit entries each had their own policy version then, which was the cursor. */
+  const undo = (id: string) =>
+    inRoom(id, (sql) => {
+      sql.exec("DROP INDEX stored_object_scanning");
+      for (const column of ["scan_reason", "scan_sha256", "scan_database_json", "scanned_at"]) sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
+      sql.exec("DROP INDEX audit_event_seq");
+      sql.exec("ALTER TABLE audit_event DROP COLUMN seq");
+      sql.exec("ALTER TABLE workspace DROP COLUMN audit_seq");
+      sql.exec("UPDATE schema_version SET version = version - 1");
+    });
+
   it("gets the columns, and keeps its files waiting", async () => {
     const id = await room();
     const file = await stored(id);
-    await inRoom(id, (sql) => {
-      sql.exec("DROP INDEX stored_object_scanning");
-      for (const column of ["scan_reason", "scan_sha256", "scan_database_json", "scanned_at"]) sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
-      sql.exec("UPDATE schema_version SET version = version - 1");
-    });
+    await undo(id);
     expect((await answer(await send(verdict(id, file)))).body.state).toBe("ready");
+  });
+
+  it("keeps an audit cursor from before meaning the same place, and carries on after it", async () => {
+    const id = await room();
+    await stored(id);
+    await undo(id);
+    // Before this, every entry moved the policy version, so each had its own.
+    await inRoom(id, (sql) => {
+      sql.exec("UPDATE audit_event SET policy_version = 100 + rowid");
+      sql.exec("UPDATE workspace SET policy_version = (SELECT MAX(policy_version) FROM audit_event)");
+    });
+    const before = await inRoom(id, (sql) => sql.exec("SELECT id, policy_version FROM audit_event ORDER BY policy_version").toArray());
+    expect(before.length).toBeGreaterThan(2);
+    const cursor = before[0].policy_version;
+    const listed = (await api("GET", `/v1/workspaces/${id}/audit?after=${cursor}`)).body.audit.map((e: any) => e.id);
+    expect(listed).toEqual(before.slice(1).map((e: any) => e.id));
+    await stored(id, "later.txt");
+    const after = (await api("GET", `/v1/workspaces/${id}/audit?after=${before[before.length - 1].policy_version}`)).body.audit.map((e: any) => e.action);
+    expect(after).toEqual(["object.upload_created", "object.stored"]);
   });
 });

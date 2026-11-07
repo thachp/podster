@@ -1056,7 +1056,7 @@ const appHandler = {
     const onApplicationHost = env !== publicEnv;
     const upload = await handleUpload(request, url, publicEnv.API, (key) => withinLimit(publicEnv.RL_ACCOUNT, key));
     if (upload) return upload;
-    const download = await handleAgentDownload(request, url, publicEnv, (token) => agentFromCredential(publicEnv, token), (key) => withinLimit(publicEnv.RL_ACCOUNT, key));
+    const download = await handleAgentDownload(request, url, publicEnv, (token) => agentFromCredential(publicEnv, token, request), (key) => withinLimit(publicEnv.RL_ACCOUNT, key));
     if (download) return download;
     if (publicEnv.APP_URL && !onApplicationHost) {
       const moved = await movedToApplicationHost(request, publicEnv, publicEnv.APP_URL);
@@ -1191,11 +1191,13 @@ const mcpHandler = {
  * Who an agent's own credential says it is, read fresh for one download, the same way a capability call does. A credential that ended
  * for any reason, including whoever connected it leaving, stops working on its next use. `null` means it isn't one.
  */
-async function agentFromCredential(env: Env, token: string): Promise<Identity | Response | null> {
+async function agentFromCredential(env: Env, token: string, request: Request): Promise<Identity | Response | null> {
   try {
     if (token.split(".").length === 3) {
       const headers = new Headers({ authorization: `Bearer ${token}` });
-      const session = (await createAuth(env).api.getAgentSession({ headers }).catch(() => null)) as { agent?: { id?: string } } | null;
+      // The real method and URL, so a JWT bound to this request with `htm` and `htu` verifies. A GET has no body to bind.
+      const bound = new Request(request.url, { method: request.method, headers });
+      const session = (await createAuth(env).api.getAgentSession({ headers, request: bound, asResponse: false }).catch(() => null)) as { agent?: { id?: string } } | null;
       const id = session?.agent?.id;
       const spends = id ? spentToken(id, `Bearer ${token}`) : null;
       if (!id || !spends) return null;
@@ -1203,12 +1205,29 @@ async function agentFromCredential(env: Env, token: string): Promise<Identity | 
     }
     const held = await env.OAUTH_PROVIDER.unwrapToken<{ externalId?: string }>(token);
     const externalId = held?.grant.props?.externalId;
-    if (!externalId || !held?.scope?.includes("mcp")) return null;
+    if (!externalId || !held?.scope?.includes("mcp") || !forMcp(held.audience, env.BASE_URL)) return null;
     return await resolveAgent(env, "mcp_oauth", externalId);
   } catch (error) {
     if (error instanceof AgentRefused) return denied(error.message, 403);
     throw error;
   }
+}
+
+/**
+ * Whether a token was issued for `/mcp`, as the provider checks there, so a token for any other resource doesn't work at `/v1/files`.
+ * `/mcp` is the only resource declared, and a token stored with no audience is the provider's legacy grant for that one resource.
+ */
+export function forMcp(audience: string | string[] | undefined, base: string) {
+  const resource = new URL(`${base}/mcp`).href;
+  const same = (value: unknown) => {
+    try {
+      return typeof value === "string" && new URL(value).href === resource;
+    } catch {
+      return false;
+    }
+  };
+  if (audience === undefined) return true;
+  return Array.isArray(audience) ? audience.some(same) : same(audience);
 }
 
 let provider: { base: string; instance: OAuthProvider<Env> } | undefined;

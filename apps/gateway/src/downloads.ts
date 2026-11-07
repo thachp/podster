@@ -4,6 +4,7 @@
  * download. Only the API's own file headers pass, and the body is never read here.
  */
 import { mintAssertion, type Identity } from "./assertion";
+import { clientKey } from "./index";
 
 const FILE_PATH = /^\/v1\/files\/[\w-]+\/[\w-]+$/;
 const BEARER = /^Bearer ([^\s,]{1,8192})$/;
@@ -52,10 +53,9 @@ export async function handleAgentDownload(request: Request, url: URL, env: FileE
   if (request.method !== "GET") return answer("not_found", 405, { allow: "GET" });
   const token = request.headers.get("authorization")?.match(BEARER)?.[1];
   if (!token) return answer("invalid_credential", 401);
-  // Reading a credential costs a lookup, so guessing is counted by who's sending and with what, before any of that.
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
-  const hashed = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-  if (!(await withinLimit(`download:${request.headers.get("cf-connecting-ip") ?? "unknown"}:${hashed}`))) return limited();
+  // Reading a credential costs a lookup, so guessing is counted by client before any of that, whatever token it sends, so fresh junk
+  // tokens don't each get a fresh allowance. A bucket per token as well would add nothing, as the client's runs out first.
+  if (!(await withinLimit(`download:${clientKey(request)}`))) return limited();
   const identity = await identify(token);
   if (!identity) return answer("invalid_credential", 401);
   if (identity instanceof Response) return identity;

@@ -63,6 +63,17 @@ describe("the agents' download path", () => {
     expect(seen).toEqual([]);
   });
 
+  it("counts guessing by client whatever token is sent, with an IPv6 client's /64 as one", async () => {
+    const { env } = envWith(() => new Response("x"));
+    const keys: string[] = [];
+    const record = async (key: string) => { keys.push(key); return true; };
+    for (const [ip, token] of [["2001:db8:1:2::a", "a.b.c"], ["2001:db8:1:2:ffff::b", "x:y:z"]]) {
+      const request = ask({ headers: { authorization: `Bearer ${token}`, "cf-connecting-ip": ip } });
+      await handleAgentDownload(request, new URL(request.url), env, async () => null, record);
+    }
+    expect(keys).toEqual(["download:2001:db8:1:2", "download:2001:db8:1:2"]);
+  });
+
   it("sends only a fresh assertion, nothing from the caller", async () => {
     const { env, seen } = envWith(() => new Response("hello", { headers: ATTACHED }));
     const request = ask({ headers: { authorization: "Bearer a.b.c", cookie: "session=secret", "x-podster-assertion": "forged", range: "bytes=0-1" } });

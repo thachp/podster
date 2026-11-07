@@ -9,7 +9,7 @@ import { parse } from "yaml";
 import { CAPABILITIES, toApiCall } from "../src/capabilities";
 import { decodeJwt, importJWK, SignJWT } from "jose";
 import { mintAssertion } from "../src/assertion";
-import worker, { resolveAgent, cleanUp, clientKey, sensitiveRoute, type RateLimit, safeNext, allowedPassthrough, spentToken, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
+import worker, { resolveAgent, cleanUp, clientKey, sensitiveRoute, type RateLimit, safeNext, allowedPassthrough, spentToken, forMcp, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
 
 const BASE = "https://gateway.test";
 const e = env as unknown as Env & { API_DB: D1Database; TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string; TEST_CAPABILITIES: string; TEST_WRANGLER: string };
@@ -2722,6 +2722,17 @@ describe("downloading a file through the gateway", () => {
     expect(await reply(await fetchFile(id, await agentJwt(agent)))).toEqual({ status: 401, code: "invalid_credential" });
   });
 
+  it("verifies a JWT bound to this very request, and refuses one bound to another", async () => {
+    const a = await signUp();
+    const agent = await claimedAgent(a);
+    const id = await roomWith(a, agent.id);
+    const bound = (htm: string, htu: string) => signAgentJWT({ agentKeypair: agent.keypair, agentId: agent.pluginId, audience: BASE, capabilities: ["get_asset_link"], htm, htu });
+    const here = `${BASE}/v1/files/${id}/obj_unknown`;
+    expect(await reply(await fetchFile(id, await bound("GET", here)))).toEqual({ status: 404, code: "file_not_found" });
+    expect(await reply(await fetchFile(id, await bound("GET", `${BASE}/v1/files/${id}/obj_other`)))).toEqual({ status: 401, code: "invalid_credential" });
+    expect(await reply(await fetchFile(id, await bound("POST", here)))).toEqual({ status: 401, code: "invalid_credential" });
+  });
+
   it("takes an MCP access token on each use, and stops when it ends", async () => {
     const a = await signUp();
     const agent = await mcpAgent(a);
@@ -2730,6 +2741,27 @@ describe("downloading a file through the gateway", () => {
     expect(await agent.tool("get_asset_link", { workspace_id: id, file_id: "obj_unknown" })).toMatchObject({ code: "file_not_found" });
     await dash(a, "POST", `/agents/${agent.id}/disconnect`);
     expect(await reply(await fetchFile(id, agent.token))).toEqual({ status: 401, code: "invalid_credential" });
+  });
+
+  it("takes only an MCP token issued for /mcp, not one for another resource", async () => {
+    const a = await signUp();
+    const agent = await mcpAgent(a);
+    const id = await roomWith(a, agent.id);
+    const [userId, grantId] = agent.token.split(":");
+    const { keys } = await e.OAUTH_KV.list({ prefix: `token:${userId}:${grantId}:` });
+    expect(keys.length).toBeGreaterThan(0);
+    for (const { name } of keys) {
+      const held = await e.OAUTH_KV.get<Record<string, unknown>>(name, "json");
+      await e.OAUTH_KV.put(name, JSON.stringify({ ...held, audience: "https://elsewhere.test/api" }));
+    }
+    expect(await reply(await fetchFile(id, agent.token))).toEqual({ status: 401, code: "invalid_credential" });
+  });
+
+  it("matches /mcp the way the provider does, and a token with no audience is its one resource's", () => {
+    expect(forMcp(`${BASE}/mcp`, BASE)).toBe(true);
+    expect(forMcp(["https://elsewhere.test/mcp", `${BASE.toUpperCase()}/mcp`], BASE)).toBe(true);
+    expect(forMcp(undefined, BASE)).toBe(true);
+    for (const other of [`${BASE}/mcp/x`, `${BASE}/`, `${BASE}/v1/files`, "https://elsewhere.test/mcp", "not a url", []]) expect(forMcp(other as never, BASE), String(other)).toBe(false);
   });
 
   it("ends a credential's downloads as soon as whoever connected it leaves, with nothing issued earlier still working", async () => {

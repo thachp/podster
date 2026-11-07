@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { forwardedHeaders, forwardToGateway, isForwardable } from "./forward";
+import { boundedBody, forwardedHeaders, forwardToGateway, isForwardable, MAX_FORWARDED_BODY_BYTES } from "./forward";
 
 const APP = "https://app.test";
 
@@ -34,6 +34,10 @@ describe("isForwardable", () => {
     "/api/orgs/org_1/members/per_1/x",
     "/api/org-invitations",
     "/api/org-invitations/other",
+    "/api/v1/uploads",
+    "/api/v1/uploads/ws_1",
+    "/api/v1/uploads/ws_1/obj_1",
+    "/api/v1/uploads/ws_1/obj_1/more",
   ])("refuses %s", (path) => expect(isForwardable(path)).toBe(false));
 });
 
@@ -90,7 +94,7 @@ describe("forwardToGateway", () => {
     await forwardToGateway(new Request(`${APP}/api/v1/workspaces`, { method: "POST", body: '{"name":"x"}' }), { fetch }, APP);
     const init = calls.mock.calls[0][1];
     expect(init.method).toBe("POST");
-    expect(new TextDecoder().decode(init.body as ArrayBuffer)).toBe('{"name":"x"}');
+    expect(new TextDecoder().decode(init.body as Uint8Array)).toBe('{"name":"x"}');
   });
 
   it("keeps every cookie and a redirect's location, and stops caching", async () => {
@@ -104,5 +108,86 @@ describe("forwardToGateway", () => {
     expect(response.headers.get("location")).toBe("https://github.test/authorize");
     expect(response.headers.getSetCookie()).toEqual(["a=1; HttpOnly", "b=2; HttpOnly"]);
     expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+});
+
+/**
+ * A body with no length sending 64 KiB chunks, 4 MiB in all, counting what was asked of it. It ends so that a missing
+ * limit fails an assertion instead of exhausting the test's memory.
+ */
+function endless() {
+  let pulled = 0;
+  let cancelled = false;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      pulled += 1;
+      if (pulled > 64) controller.close();
+      else controller.enqueue(new Uint8Array(64 * 1024));
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  return { stream, pulled: () => pulled, cancelled: () => cancelled };
+}
+
+const put = (body: BodyInit, headers: Record<string, string> = {}) => new Request(`${APP}/api/v1/workspaces`, { method: "POST", body, headers, duplex: "half" } as RequestInit);
+
+describe("a body's size", () => {
+  it("refuses a declared length over the limit before reading any of it", async () => {
+    const { fetch, calls } = gateway();
+    const body = endless();
+    const response = await forwardToGateway(put(body.stream, { "content-length": String(MAX_FORWARDED_BODY_BYTES + 1) }), { fetch }, APP);
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: { code: "body_too_large", message: "body_too_large" } });
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(calls).not.toHaveBeenCalled();
+    expect(body.cancelled()).toBe(true);
+    // A stream asks for its first chunk as it starts, before anyone reads it. Nothing past that is read.
+    expect(body.pulled()).toBeLessThanOrEqual(1);
+  });
+
+  it("refuses a length that isn't a number", async () => {
+    expect(await boundedBody(put("{}", { "content-length": "lots" }), MAX_FORWARDED_BODY_BYTES)).toBeNull();
+  });
+
+  it("stops reading a streamed body with no length once it passes the limit", async () => {
+    const { fetch, calls } = gateway();
+    const body = endless();
+    const response = await forwardToGateway(put(body.stream), { fetch }, APP);
+    expect(response.status).toBe(413);
+    expect(calls).not.toHaveBeenCalled();
+    expect(body.cancelled()).toBe(true);
+    // 16 chunks reach the limit exactly and the 17th passes it. A couple more may be queued ahead of the reader.
+    expect(body.pulled()).toBeGreaterThanOrEqual(17);
+    expect(body.pulled()).toBeLessThanOrEqual(20);
+  });
+
+  it("takes a streamed body up to the limit itself, byte for byte", async () => {
+    const { fetch, calls } = gateway();
+    const bytes = new Uint8Array(MAX_FORWARDED_BODY_BYTES).map((_, i) => i % 251);
+    const chunks = [bytes.subarray(0, 1000), bytes.subarray(1000)];
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const next = chunks.shift();
+        if (next) controller.enqueue(next);
+        else controller.close();
+      },
+    });
+    const response = await forwardToGateway(put(stream), { fetch }, APP);
+    expect(response.status).toBe(200);
+    expect(new Uint8Array(calls.mock.calls[0][1].body as Uint8Array)).toEqual(bytes);
+  });
+
+  it("refuses a body one byte over the limit when its length is declared truthfully", async () => {
+    expect(await boundedBody(put(new Uint8Array(MAX_FORWARDED_BODY_BYTES + 1), { "content-length": String(MAX_FORWARDED_BODY_BYTES + 1) }), MAX_FORWARDED_BODY_BYTES)).toBeNull();
+  });
+
+  it("doesn't trust a declared length that understates the body", async () => {
+    expect(await boundedBody(put(new Uint8Array(MAX_FORWARDED_BODY_BYTES + 1), { "content-length": "10" }), MAX_FORWARDED_BODY_BYTES)).toBeNull();
+  });
+
+  it("reads a request with no body as empty", async () => {
+    expect(await boundedBody(new Request(`${APP}/api/v1/workspaces`, { method: "POST" }), MAX_FORWARDED_BODY_BYTES)).toEqual(new Uint8Array(0));
   });
 });

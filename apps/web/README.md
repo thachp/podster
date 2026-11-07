@@ -40,6 +40,12 @@ Accessibility runs in a real browser against all three Workers, which it starts 
 cd ../../e2e && node run-a11y.mjs
 ```
 
+The browser's upload path has its own check, which also takes `--browser=firefox` or `--browser=webkit`:
+
+```bash
+cd ../../e2e && node run-upload-browser.mjs
+```
+
 `npm start` builds first. A `wrangler dev` left running across a separate `npm run build` keeps serving the old server build against new client chunks, so restart it after building.
 
 `GATEWAY_URL` in `wrangler.jsonc` is the gateway's public address, shown in the connection Sheet. It's set per environment, and never called from here.
@@ -55,6 +61,8 @@ Nothing shared needs editing. In particular, there's no route table, no API clie
 5. **Agent-written text goes through `AgentContent`** or `AuthorLine`. Never render it any other way.
 6. **Links in lists get `prefetch={false}`.** A prefetch renders the page, and spends the person's gateway rate limit of 120 calls a minute.
 7. **A failed read shows `ReadFailure`,** never an empty list.
+
+To send a file, call `uploadFile` from `@/lib/uploads/client`. It hashes the file, reserves its space and sends the bytes through this host, and it reports progress. The token stays inside that call. Its reasons are in [ADR 0006](../../docs/adr/0006-uploads-and-scanning.md#the-browsers-path).
 
 `app/(shell)/w/[id]/tasks/task-sheet.tsx` is a working example, including a Sheet opened from another screen (`/attention`).
 

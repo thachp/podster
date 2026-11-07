@@ -159,6 +159,43 @@ fn links_and_files_share_one_limit() {
 fn the_first_bad_file_decides_and_nothing_is_pinned() {
     let found = [file("obj_a", Ready), file("obj_b", Scanning)];
     assert_eq!(pin(&["obj_a", "obj_b"], 0, &found), Err(S::NotReady));
+    // Two bad files: the one named first decides, whichever way round.
+    let found = [file("obj_scanning", Scanning)];
+    assert_eq!(
+        pin(&["obj_scanning", "obj_missing"], 0, &found),
+        Err(S::NotReady)
+    );
+    assert_eq!(
+        pin(&["obj_missing", "obj_scanning"], 0, &found),
+        Err(S::NotFound)
+    );
+}
+
+#[test]
+fn someone_elses_removed_file_answers_as_if_it_didnt_exist() {
+    let theirs = RoomFile {
+        uploaded_by: "other",
+        removed: true,
+        ..file("obj_a", Ready)
+    };
+    assert_eq!(pin(&["obj_a"], 0, &[theirs]), Err(S::NotFound));
+}
+
+#[test]
+fn a_duplicate_is_refused_even_when_not_next_to_its_twin() {
+    let found = [file("a", Ready), file("b", Ready)];
+    assert_eq!(pin(&["a", "b", "a"], 0, &found), Err(S::Duplicate));
+}
+
+#[test]
+fn a_removed_file_says_removed_whatever_its_scan_state() {
+    for state in [Uploading, Scanning, Blocked, Failed] {
+        let removed = RoomFile {
+            removed: true,
+            ..file("obj_a", state)
+        };
+        assert_eq!(pin(&["obj_a"], 0, &[removed]), Err(S::Removed), "{state:?}");
+    }
 }
 
 #[test]
@@ -256,6 +293,21 @@ fn anything_but_the_pinned_bytes_fails_closed() {
         check_approval(&[pinned("obj_a")], &[other_size]),
         Err(A::Changed)
     );
+}
+
+#[test]
+fn changed_bytes_say_changed_even_when_also_not_ready() {
+    for state in [Uploading, Scanning, Blocked, Failed] {
+        let both = RoomFile {
+            sha256: OTHER_HASH,
+            ..file("obj_a", state)
+        };
+        assert_eq!(
+            check_approval(&[pinned("obj_a")], &[both]),
+            Err(A::Changed),
+            "{state:?}"
+        );
+    }
 }
 
 #[test]

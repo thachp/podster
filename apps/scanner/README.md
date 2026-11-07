@@ -45,6 +45,12 @@ It needs two secrets in the repository's `staging` environment:
 - `CLOUDFLARE_ACCOUNT_ID`: the account that holds `podster.dev`.
 - `CLOUDFLARE_API_TOKEN`: an account API token limited to that account. Start from the **Edit Cloudflare Workers** template, and add **Containers: Edit** and **Queues: Edit**, since the scanner is a Container and consumes the scan queues.
 
+The environment's deployment branches are limited to `main`, with no required reviewers, so the scheduled run doesn't wait. Without that limit, any branch with write access could run its own copy of the workflow with the token.
+
+The image is built and checked once before `wrangler deploy`, because the deploy makes the Worker live before it builds the image. A build that fails at that point leaves staging as it was. The deploy then builds the image again, and a failure in that second build, which is rare, can still leave the new Worker beside the old image.
+
+The run deploys main's newest passed commit, not whatever staging runs now. So a scanner deploy by hand should also come from main after its CI passes, or the next run puts main back. If a merged PR changes the scanner and the API together, deploy the API (and its migrations) by hand first, the same day, because this run deploys only the scanner.
+
 Production gets its own schedule and token when it exists.
 
 ## The base image

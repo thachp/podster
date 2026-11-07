@@ -19,6 +19,8 @@ concurrency:
 
 jobs:
   staging:
+    # The `staging` environment is limited to main as well, which is what keeps another branch's copy of this file from the token.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: staging
@@ -41,9 +43,13 @@ jobs:
           node-version: 22
       - run: npm ci
         working-directory: apps/scanner
-      # A fresh runner has no layer cache, so freshclam fetches current signatures, and the image's own check fails the build
-      # unless they're under 3 days old.
-      - name: Build the image and deploy to staging
+      # `wrangler deploy` makes the Worker live before it builds the image, so a failed build would leave new Worker code beside
+      # yesterday's image. Building first means a freshclam failure or stale signatures stop the run before anything changes. A
+      # fresh runner has no layer cache, so freshclam fetches current signatures, and the image's own check fails the build unless
+      # they're under 3 days old.
+      - name: Build the image first, so a failed build changes nothing
+        run: docker build --no-cache --platform linux/amd64 apps/scanner/container
+      - name: Deploy to staging
         working-directory: apps/scanner
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

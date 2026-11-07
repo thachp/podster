@@ -122,7 +122,7 @@ These follow from the evidence and are for review, not owner rulings. None is bu
 
 - **Keep streaming through our Workers.** A declared length and `FixedLengthStream` to an R2 binding held 100 MB in a chunk at a time.
 - **The API is the size control.** It counts bytes and checks the hash, and refuses by those whatever a client or the edge declared. The gateway's 411 and 413 are only an early answer. A chunked upload with a correct hash gets a test in step 2.
-- **Use `standard-1`.** `basic` was OOM-killed locally on 100 MB, and ready memory on staging, 1.05 GB, was close to the local 1.02 GB.
+- **Use `standard-1`.** `basic` was OOM-killed locally on 100 MB, and ready memory on staging, 1.05 GB, was close to the local 1.02 GB. Its headroom during a reload is [unmeasured on staging](#whats-still-unproven), and locally the peak was 2.0 GB of its 4 GiB. With [signatures in the image](#what-the-owner-ruled), the scanner shouldn't reload.
 - **Treat "OK" from clamd as a partial answer.** Four of the seven blocked files on staging were blocked only by the archive walk. A verdict is clamd plus a walk of every zip, and anything the walk can't read is `blocked`. The walk is written fresh in step 3, because spike code isn't built on.
 - **Run the upload type check before scanning.** The walk only covers files starting with `PK`, and locally a zip with one line in front of it came back clean. The [upload rules](../../crates/core/src/files.rs) say they catch a zip ending the file, but the two haven't been run together.
 - **Keep the hour before `failed`.** The slowest verdict was 18.6 s, so an hour leaves room for retries.

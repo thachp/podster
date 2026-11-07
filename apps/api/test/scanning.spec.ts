@@ -113,7 +113,7 @@ describe("a scanner's verdict", () => {
     expect((await row(id, file.id)).state).toBe("scanning");
   });
 
-  it("refuses a report about other bytes, and records nothing", async () => {
+  it("refuses a clean report about other bytes, and records nothing", async () => {
     const id = await room();
     const file = await stored(id);
     for (const over of [{ sha256: "0".repeat(64) }, { bytes: DATA.length + 1 }]) {
@@ -124,6 +124,20 @@ describe("a scanner's verdict", () => {
     const saved = await row(id, file.id);
     expect(saved.state).toBe("scanning");
     expect(saved.scanned_at).toBeNull();
+  });
+
+  it("blocks on a finding about other bytes, as the scanner reports a stored size that differs from the upload's", async () => {
+    for (const over of [{ report: "unreadable", reason: "size_mismatch", bytes: DATA.length + 1 }, { report: "malware_found", sha256: "0".repeat(64) }]) {
+      const id = await room();
+      const file = await stored(id);
+      const res = await answer(await send(verdict(id, file, over)));
+      expect(res.status).toBe(200);
+      expect(res.body.state).toBe("blocked");
+      const saved = await row(id, file.id);
+      expect(saved.state).toBe("blocked");
+      expect(saved.scan_sha256).toBe(file.hash);
+      expect(saved.scanned_at).not.toBeNull();
+    }
   });
 
   it("won't take a clean report without knowing which signatures said so, though a finding still blocks", async () => {

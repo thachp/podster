@@ -250,9 +250,9 @@ describe("telling the room", () => {
     expect(await seen[0].json()).toEqual(result);
   });
 
-  it.each([404, 409, 422])("a %i is an answer: nothing was recorded, retrying won't help, and the log can tell", async (status) => {
+  it.each([400, 404, 409, 422])("a %i is an answer: nothing was recorded, retrying won't help, and the log can tell", async (status) => {
     const { scanning } = setup({ send: async () => json({}, status) });
-    expect(await scanOne(job, scanning)).toEqual({ ack: true, outcome: "not_recorded" });
+    expect(await scanOne(job, scanning)).toEqual({ ack: true, outcome: "not_recorded", status });
   });
 
   it.each([500, 503, 429, 401, 403])("a %i retries, and ends in the dead-letter queue if it keeps on", async (status) => {

@@ -33,11 +33,15 @@ export type Scanning = {
   send: (result: ScanResult, signal: AbortSignal) => Promise<Response>;
 };
 
-export type Ending = { ack: true; outcome: Report | "bad_message" | "not_recorded" } | { ack: false; why: NoVerdict };
+export type Ending = { ack: true; outcome: Report | "bad_message" } | { ack: true; outcome: "not_recorded"; status: number } | { ack: false; why: NoVerdict };
 export type NoVerdict = "not_ready" | "signatures_stale" | "no_answer" | "bad_answer" | "report_refused";
 
-/** 404: a wrong secret or an unknown object. 409: `scan_mismatch` or `invalid_transition`. 422: a report the room refuses. */
-const ANSWERED_NOT_RECORDED: readonly number[] = [404, 409, 422];
+/**
+ * The room answered and recorded nothing. 400: `invalid_argument`, such as a bad `v` or a clean report without its signatures.
+ * 404: a wrong secret or an unknown object. 409: `scan_mismatch` on a clean report, or `invalid_transition`. 422: a report the
+ * room refuses. Each would be refused again, and each retry is a full rescan on the one Container.
+ */
+const ANSWERED_NOT_RECORDED: readonly number[] = [400, 404, 409, 422];
 const REPORTS: readonly string[] = ["no_known_malware", "malware_found", "unreadable"];
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -122,7 +126,7 @@ async function tell(job: ScanJob, found: Omit<ScanResult, "v" | "workspace_id" |
   if (answer?.ok) return { ack: true, outcome: result.report };
   // The room answered and won't record this, so trying again won't help. The hour limit ends the file as failed. A wrong secret
   // looks the same as an unknown object here, which is why this has its own word in the log.
-  if (answer && ANSWERED_NOT_RECORDED.includes(answer.status)) return { ack: true, outcome: "not_recorded" };
+  if (answer && ANSWERED_NOT_RECORDED.includes(answer.status)) return { ack: true, outcome: "not_recorded", status: answer.status };
   return { ack: false, why: "report_refused" };
 }
 

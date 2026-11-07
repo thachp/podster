@@ -301,15 +301,17 @@ fn record_verdict(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     }
     let id = body["object_id"].as_str().ok_or_else(upload_not_found)?;
     let row = upload_row(sql, id)?;
-    // A report about other bytes says nothing about this file, so the hour limit ends it.
-    if body["sha256"] != row["sha256"] || body["bytes"].as_i64() != Some(int(&row["size"])) {
-        return Err(ApiError::api(409, "scan_mismatch"));
-    }
     let state = row["state"]
         .as_str()
         .and_then(ObjectState::from_name)
         .ok_or_else(|| ApiError::internal("unknown object state"))?;
     let outcome = ScanOutcome::from_report(body["report"].as_str().unwrap_or_default());
+    // A clean report about other bytes says nothing about this file, so the hour limit ends it. A blocking one still blocks: the
+    // scanner reports a stored size that differs from the upload's this way, and a block can only tighten.
+    let mismatch = body["sha256"] != row["sha256"] || body["bytes"].as_i64() != Some(int(&row["size"]));
+    if mismatch && outcome == ScanOutcome::NoKnownMalware {
+        return Err(ApiError::api(409, "scan_mismatch"));
+    }
     let database = scan_database(body);
     // Nothing is made available without knowing which signatures said so. A finding blocks regardless.
     if outcome == ScanOutcome::NoKnownMalware && database.is_none() {

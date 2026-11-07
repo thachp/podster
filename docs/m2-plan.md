@@ -4,7 +4,7 @@ The order of work for [M2 Assets and artifacts](spec/PRODUCT.md#product-directio
 
 **Status, 2026-11-07 UTC:** M1 is [met by the owner's ruling](spec/PRODUCT.md#decisions-needed), and the owner approved the billed staging resources on 2026-11-06. Two pieces have merged: the record of the exact approved submission ([#97](https://github.com/thachp/podster/pull/97), part of step 6) and the pure upload rules ([#98](https://github.com/thachp/podster/pull/98), with no route or storage). The rest isn't built.
 
-**Step 0 is partly deployed and blocked.** The scan queues and the bucket exist, but the scanner's Worker and Container don't. Its deploy needs the owner to run `wrangler login` at the Mac. The spike's code is in [#99](https://github.com/thachp/podster/pull/99), unmerged, and it has no result, so step 1 hasn't started. Separately, `docker-credential-desktop` hangs on that Mac and stalls image pulls with no error. A temporary `DOCKER_CONFIG` gets past it.
+**Step 0 ran on staging, and step 1 is written.** [ADR 0006's results](adr/0006-uploads-and-scanning.md#spike-results) have what it showed, what's unproven and what the owner has to rule on. Whether ClamAV passed is the owner's call, and step 3 waits on it. The spike's code is in [#99](https://github.com/thachp/podster/pull/99), unmerged.
 
 ## What M2 includes
 
@@ -22,8 +22,8 @@ C changes contracts and M adds a migration. Those PRs merge one at a time, and t
 
 | Step | Work | C | M | After |
 | --- | --- | --- | --- | --- |
-| 0 | Spike on staging: stream 100 MB through web, gateway and API to R2, and run ClamAV in a Container | | | Partly deployed, waiting on the owner's login |
-| 1 | The storage and scanning details the spike settles, as an update to ADR 0006 | | | 0 |
+| 0 | Spike on staging: stream 100 MB through web, gateway and API to R2, and run ClamAV in a Container | | | Ran on staging. One 100 MB pass, not yet repeatable |
+| 1 | The storage and scanning details the spike settles, as an update to ADR 0006 | | | 0. Written, and the owner's rulings are open |
 | 2 | Storage: `stored_object`, `create_upload`, streamed upload, quota, R2 binding | Yes | Yes | 1 |
 | 3 | Scanning: queue, Container, clean or blocked, fail closed | | If the ADR adds a state | 2 |
 | 4 | Download: authority rechecked on each use, attachment only | Yes | | 2. Can run beside 3 |

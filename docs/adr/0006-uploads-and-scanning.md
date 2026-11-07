@@ -1,6 +1,6 @@
 # ADR 0006: Uploads and scanning
 
-**Status:** On 2026-11-06 the owner accepted the choices below, now [decisions 50 to 59](../spec/PRODUCT.md#decisions-needed). The scanner is conditional on a spike. The owner approved the billed staging resources and the spike, which [hasn't finished](../m2-plan.md). The design that follows from the choices is **proposed** and isn't built. The rules people see are in the [upload policy](../spec/UPLOAD-POLICY.md), and the order of work is in the [M2 plan](../m2-plan.md).
+**Status:** On 2026-11-06 the owner accepted the choices below, now [decisions 50 to 59](../spec/PRODUCT.md#decisions-needed). The scanner is conditional on a spike. The owner approved the billed staging resources and the spike. The spike ran on staging on 2026-11-07, and [its results are below](#spike-results). Whether ClamAV passed is the owner's to accept, and [that's still open](#for-the-owner-to-rule-on). The design that follows from the choices is **proposed** and isn't built. The rules people see are in the [upload policy](../spec/UPLOAD-POLICY.md), and the order of work is in the [M2 plan](../m2-plan.md).
 
 ## The owner's choices
 
@@ -40,7 +40,7 @@ Uploads:
 2. The file streams to R2 under an immutable key scoped by room. A Worker has 128 MB of memory, so nothing buffers the whole file, including hashing.
 3. Completion checks the size and hash, moves the object to scanning and queues the scan.
 
-Abandoned uploads give their space back through a sweep in the room's alarm, and an R2 lifecycle rule clears incomplete data.
+Abandoned uploads give their space back through a sweep in the room's alarm.
 
 Downloads ask the room's Durable Object first. A link is checked against the room again each time it's used, so it needs no separate revocation. Responses are attachments with `X-Content-Type-Options: nosniff` and a cleaned filename. Filenames are agent content, so they stay out of logs and events.
 
@@ -50,13 +50,7 @@ A queue consumer hands the object to a ClamAV Container and reports the result t
 
 The Container runs hostile input, so it holds no secrets and has no access to rooms, and its only outbound traffic is for signature updates. Anything it can't read is `blocked`. An object with no result after an hour becomes `failed`.
 
-The spike has to show, on staging, that:
-
-- A 100 MB file streams through web, gateway and API to R2.
-- ClamAV fits a Container instance, including its signature memory, cold start and zip bombs.
-- Signatures can be kept up to date.
-
-If it fails, the fallback in decision 51 applies, and the owner hears before anything else is built.
+The spike had to show, on staging, that a 100 MB file streams through web, gateway and API to R2, that ClamAV fits a Container instance, including its signature memory, cold start and zip bombs, and that signatures can be kept up to date. [Its results](#spike-results) are below. If the owner doesn't accept them, the fallback in decision 51 applies.
 
 ### Exact-version review
 
@@ -77,6 +71,76 @@ A task may name an expected output. Approving it makes the output Ready and link
 
 Removing a file deletes its bytes and sets a tombstone on `stored_object`, keeping its hash and who removed it. An approved submission keeps its approval and shows the file was removed.
 
+## Spike results
+
+The spike ran on 2026-11-07 UTC, from [#99](https://github.com/thachp/podster/pull/99) at `30eae82`, on a `workers.dev` address and with test files only. The chain was web, gateway and API to R2, then queue, scanner and Container. Verdicts and memory are from the first run's results file. The refused uploads and the logs are from the lead's report of the run's output, because that file doesn't hold them.
+
+### What it showed
+
+**Streaming:**
+
+- 100,000,000 bytes stored in 55.9 s on the owner's connection, 42.5 s of that in the API. Wasm memory stayed at 1.3 MB, across 24,417 chunks of at most 4,096 bytes. That's linear memory only, so the isolate's own memory wasn't read. The upload did finish under the 128 MB limit.
+- 100,000,001 bytes got 413, after 13.3 s. A wrong hash got 422. Over-limit, wrong-hash and cut-off uploads left no object.
+
+**The scanner, ClamAV 1.5.4 on `standard-1`:**
+
+- Cold start was 10.4 s. clamd's memory stayed at 1.05 to 1.10 GB.
+- A clean verdict arrived 12.6 s after storing on the cold start, and 16.7 s after storing for 100 MB, whose scan took 13.3 s.
+
+| File | Verdict | Said by | After storing |
+| --- | --- | --- | --- |
+| Small text, 100 MB of random bytes | Clean | clamd | 12.6 s, 16.7 s |
+| EICAR, and EICAR in a nested zip | Blocked | clamd | 1.2 s each |
+| Password-protected zip | Blocked | clamd | 2.4 s |
+| EICAR past the limit inside a zip entry | Blocked | Archive walk, clamd said OK | 2.4 s |
+| Zip expanding to 2 GB | Blocked | Archive walk, clamd said OK | 18.6 s |
+| Nested zip expanding to 655 GB | Blocked | Archive walk, clamd said OK | 7.8 s |
+| Truncated zip | Blocked | Archive walk, clamd said OK | 1.3 s |
+
+**Signatures:** `freshclam` went from database 28172 to 28176 and exited 0 in 20.1 s, 18.6 s of it the reload. The image's signatures were five days old at the time.
+
+**Logs:** the lead read runs 2 and 3, and they held IDs, status, bytes and timing only, with no exceptions.
+
+### One check failed
+
+A chunked upload with no declared length got 422, not the expected 411. The test sends a deliberately bad hash, and both the gateway and the API answer 411 to a missing length, so that request probably arrived with a length and failed on its hash. The lead's guess is that the edge adds a length to a small chunked body, which isn't confirmed. The run didn't keep the answer's body. So no length rule refused it, and a chunked upload with a correct hash hasn't been tried.
+
+### What's still unproven
+
+- **Repeatability.** Runs 2 and 3 and a `curl` check failed on 100 MB uploads from the owner's Mac (EPIPE, then `bad record mac`), before any Worker logged them. That looks like corruption on the path, but it isn't proven. One pass isn't repeatability.
+- **The real hostname.** `app.podster.dev`'s request limit is untested, because this ran on `workers.dev`, and which plan `podster.dev` is on still hasn't been checked. Cloudflare's documented limit is 100 MB on Free and Pro.
+- **CPU time for hashing 100 MB.** The tail saw only small requests, at most 9 ms. The upload finished, so it was within the limit, but there's no number.
+- **Memory during a reload on `standard-1`.** The cgroup readings came back null, and clamd's own memory was read before and after the reload, not during it. Locally it peaked at 2.0 GB.
+- **The Container's outbound limit.** `example.com` got 520 and `database.clamav.net` got 403 to `/`, and `freshclam` worked. That suggests a limit, but one blocked host doesn't prove an allowlist.
+- **Failure on a deployment.** A scanner that never answers, a stalled upload and clamd dying were tested locally only, so failing closed hasn't run on staging. Neither have the other seven local verdict files, such as the 20,000-file zip.
+- **Load.** Each scan ran alone, on one instance.
+
+### What this settles, proposed
+
+These follow from the evidence, and none is built:
+
+- **Keep streaming through our Workers.** A declared length and `FixedLengthStream` to an R2 binding held 100 MB in a chunk at a time.
+- **The API is the size control.** It counts bytes and checks the hash, and refuses by those whatever a client or the edge declared. The gateway's 411 and 413 are only an early answer. A chunked upload with a correct hash gets a test in step 2.
+- **Use `standard-1`.** `basic` was OOM-killed locally on 100 MB, and ready memory on staging, 1.05 GB, was close to the local 1.02 GB.
+- **Treat "OK" from clamd as a partial answer.** Four of the seven blocked files on staging were blocked only by the archive walk. A verdict is clamd plus a walk of every zip, and anything the walk can't read is `blocked`. The walk is written fresh in step 3, because spike code isn't built on.
+- **Run the upload type check before scanning.** The walk only covers files starting with `PK`, and locally a zip with one line in front of it came back clean. The [upload rules](../../crates/core/src/files.rs) say they catch a zip ending the file, but the two haven't been run together.
+- **Keep the hour before `failed`.** The slowest verdict was 18.6 s, so an hour leaves room for retries.
+- **Drop the lifecycle rule for incomplete data.** A cut-off single upload left no object, so there's nothing for it to clear until multipart exists. The sweep that gives space back stays.
+
+### For the owner to rule on
+
+1. **Did ClamAV pass?** The recommendation is yes, with the open items above staying on the plan. If not, decision 51's fallback applies.
+2. **Is one 100 MB pass enough to start building?** The recommendation is yes, because a hosted scanner would use the same upload path. Repeat the upload from another network in step 2, before calling it repeatable.
+3. **How do signatures stay current?** Updates are lost on sleep, because a Container's disk is [fresh from the image each time](https://developers.cloudflare.com/containers/faq/#is-disk-persistent-what-happens-to-my-disk-when-my-container-sleeps). The recommendation is the first row:
+
+   | Option | For | Against |
+   | --- | --- | --- |
+   | Rebuild the image on a schedule, with signatures in it | The Container needs no outbound traffic at all, and never reloads, so the unmeasured reload peak stops mattering | Needs a scheduled staging deploy, which needs the owner's yes. Signatures are as old as the last build. Putting them in at build time hasn't been tested |
+   | Run `freshclam` at each start | Current signatures, shown working | Adds about 20 s to a 10 s cold start, keeps outbound traffic and the unmeasured reload, and needs an answer for when the update fails |
+   | Container snapshots | No rebuild | In public beta, and untested here |
+
+4. **How old may signatures get before scanning stops?** A result should carry its database version whichever option is chosen. Past the limit, a file would stay in Scanning and end as Scan failed rather than get a verdict. The recommendation is 7 days, which is a judgment, not a measurement.
+
 ## Consequences
 
 - No content domain, Public Suffix List entry or S3 credentials are needed for M2.
@@ -85,14 +149,13 @@ Removing a file deletes its bytes and sets a tombstone on `stored_object`, keepi
 - Scanning only catches known malware, which is why the policy says "No known malware found".
 - The most storage one organization can use is about 100 GB, from 20 rooms at 5 GB each.
 
-## Cloud resources this needs (not approved)
+## Cloud resources this needs
 
-The owner approves these, and none exist:
+The owner approved the billed staging resources on 2026-11-06.
 
-- A private R2 bucket for staging.
-- A scan queue and a dead-letter queue.
-- Cloudflare Containers and a small scanner Worker, billed above the Workers Paid allowance.
-- The same again before production.
+- **On staging, created:** a private R2 bucket, a scan queue and a dead-letter queue.
+- **On staging, for step 3:** Cloudflare Containers and a small scanner Worker, billed above the Workers Paid allowance. The spike's own are temporary, and [#99](https://github.com/thachp/podster/pull/99)'s README has their teardown.
+- **Before production, not approved:** the same again.
 
 ## Proposed details to settle in review
 

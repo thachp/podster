@@ -1,11 +1,13 @@
 //! Who may upload and see files in a workroom (decisions 53 and 58). Denies by default.
 //!
-//! Removing a file, attaching one to a submission and an operator's takedown come with the steps that build them.
+//! Attaching a file to a submission and an operator's takedown come with the steps that build them.
 
 use podster_core::files::ObjectState;
 use podster_core::Task;
 
-use crate::{authorize_task, is_party, Caller, Role, TaskAction, TaskView, Verdict};
+use crate::{
+    authorize_task, is_human_admin, is_party, Caller, Role, TaskAction, TaskView, Verdict,
+};
 
 /// How much of a file someone may have. A route answers `Hidden` as if the file didn't exist, as it does for a hidden task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,5 +85,23 @@ pub fn may_download(view: FileView, state: ObjectState) -> bool {
     match view {
         FileView::Full => state.is_available(),
         FileView::NameAndStatus | FileView::Hidden => false,
+    }
+}
+
+/// Who may remove a file's bytes from inside the room: its owner or a human admin (decision 57). An agent stored as an admin
+/// counts as a guest, as everywhere else, and the uploader has no say over their own file. Someone who can't see the file is
+/// answered as if it didn't exist. `view` is the caller's current view of this file, from the same state.
+///
+/// A Podster operator, also named in decision 57, isn't a room participant, so their takedown needs its own route.
+pub fn authorize_file_removal(caller: &Caller, view: FileView) -> Verdict {
+    if caller.role == Role::None {
+        return Verdict::NotParticipant;
+    }
+    if is_human_admin(caller) {
+        return Verdict::Allow;
+    }
+    match view {
+        FileView::Hidden => Verdict::Hidden,
+        FileView::NameAndStatus | FileView::Full => Verdict::Forbidden,
     }
 }

@@ -325,3 +325,67 @@ fn an_uploader_cannot_fetch_their_own_blocked_file() {
     assert!(!may_download(view, ObjectState::Failed));
     assert!(!may_download(view, ObjectState::Scanning));
 }
+
+#[test]
+fn only_an_owner_or_human_admin_removes_a_file() {
+    for view in [FileView::Hidden, FileView::NameAndStatus, FileView::Full] {
+        for role in [Role::Owner, Role::Admin] {
+            let person = someone(Person, role, Scopes::PUBLIC_PARTICIPANT);
+            assert_eq!(
+                authorize_file_removal(&person, view),
+                Verdict::Allow,
+                "{role:?} {view:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn nobody_else_removes_one_however_wide_their_grant() {
+    for (who, caller) in [
+        ("member", someone(Person, Role::Member, Scopes::MEMBER)),
+        (
+            "coordinator",
+            someone(Agent, Role::Member, Preset::Coordinator.scopes()),
+        ),
+        (
+            "guest widened to coordinate",
+            someone(Agent, Role::Guest, Scopes::COORDINATOR),
+        ),
+        (
+            "agent stored as owner",
+            someone(Agent, Role::Owner, Scopes::COORDINATOR),
+        ),
+        (
+            "agent stored as admin",
+            someone(Agent, Role::Admin, Scopes::COORDINATOR),
+        ),
+    ] {
+        for view in [FileView::NameAndStatus, FileView::Full] {
+            assert_eq!(
+                authorize_file_removal(&caller, view),
+                Verdict::Forbidden,
+                "{who} {view:?}"
+            );
+        }
+        assert_eq!(
+            authorize_file_removal(&caller, FileView::Hidden),
+            Verdict::Hidden,
+            "{who}"
+        );
+    }
+    let outsider = someone(Person, Role::None, Scopes::COORDINATOR);
+    for view in [FileView::Hidden, FileView::Full] {
+        assert_eq!(
+            authorize_file_removal(&outsider, view),
+            Verdict::NotParticipant
+        );
+    }
+}
+
+#[test]
+fn a_removed_file_downloads_for_nobody() {
+    for view in [FileView::Hidden, FileView::NameAndStatus, FileView::Full] {
+        assert!(!may_download(view, ObjectState::Removed), "{view:?}");
+    }
+}

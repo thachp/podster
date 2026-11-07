@@ -363,6 +363,103 @@ fn a_name_that_runs_is_refused_whatever_the_content() {
 }
 
 #[test]
+fn the_extensions_added_by_decision_91_are_refused() {
+    for ext in [
+        "cmd",
+        "vbs",
+        "msc",
+        "inf",
+        "url",
+        "jnlp",
+        "application",
+        "bat",
+        "ps1",
+        "sh",
+        "js",
+    ] {
+        for name in [
+            format!("run.{ext}"),
+            format!("RUN.{}", ext.to_uppercase()),
+            format!("report.pdf.{ext}"),
+        ] {
+            let asked = UploadRequest {
+                name: &name,
+                ..request(10, 0)
+            };
+            assert_eq!(check_upload(asked).unwrap_err(), R::Executable, "{name:?}");
+        }
+    }
+}
+
+#[test]
+fn a_name_that_runs_is_refused_however_its_dot_or_letters_are_written() {
+    for name in [
+        "setup\u{FF0E}exe",               // full-width dot
+        "setup.\u{FF45}\u{FF58}\u{FF45}", // full-width letters
+        "\u{FF33}\u{FF25}\u{FF34}\u{FF35}\u{FF30}\u{FF0E}\u{FF25}\u{FF38}\u{FF25}", // all of it, in capitals
+        "setup\u{FF0E}exe\u{FF0E}", // and a trailing one, which Windows drops
+        "setup\u{3002}exe",         // ideographic full stop
+        "setup\u{FF61}exe",         // half-width ideographic full stop
+        "setup\u{FE52}exe",         // small full stop
+        "setup\u{2024}exe",         // one dot leader
+        "run\u{FF0E}sh",
+        "run\u{FF0E}js",
+    ] {
+        let asked = UploadRequest {
+            name,
+            ..request(10, 0)
+        };
+        assert_eq!(check_upload(asked).unwrap_err(), R::Executable, "{name:?}");
+    }
+}
+
+#[test]
+fn shortening_cannot_uncover_a_name_with_a_full_width_dot() {
+    let name = format!(
+        "{}\u{FF0E}exe\u{FF0E}{}",
+        "a".repeat(MAX_FILE_NAME_BYTES - 6),
+        "y".repeat(30)
+    );
+    let asked = UploadRequest {
+        name: &name,
+        ..request(10, 0)
+    };
+    assert_eq!(check_upload(asked).unwrap_err(), R::Executable);
+}
+
+#[test]
+fn full_width_characters_stay_in_a_name_that_doesnt_run() {
+    let name = "\u{5831}\u{544A}\u{FF0E}\u{FF50}\u{FF44}\u{FF46}";
+    let asked = UploadRequest {
+        name,
+        ..request(10, 0)
+    };
+    assert_eq!(check_upload(asked).unwrap().name.as_str(), name);
+}
+
+#[test]
+fn names_near_the_refused_extensions_are_allowed() {
+    for name in [
+        "scripts.py",
+        "notes.json",
+        "view.jsx",
+        "page.shtml",
+        "links.urls",
+        "app.applications",
+        "bat",
+        "js",
+        "sh.txt",
+        "run.js.txt",
+    ] {
+        let asked = UploadRequest {
+            name,
+            ..request(1, 0)
+        };
+        assert!(check_upload(asked).is_ok(), "{name:?}");
+    }
+}
+
+#[test]
 fn shortening_cannot_uncover_a_name_that_runs() {
     let extension_too_long_to_keep = "y".repeat(30);
     let name = format!(
@@ -385,7 +482,7 @@ fn a_name_only_refuses_and_a_harmless_name_lets_nothing_in() {
         "the name is fine"
     );
     assert!(check_upload(UploadRequest {
-        name: "scripts.sh",
+        name: "scripts.py",
         ..request(1, 0)
     })
     .is_ok());

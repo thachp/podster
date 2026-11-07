@@ -247,13 +247,22 @@ pub fn clean_file_name(raw: &str) -> Result<CleanFileName, FileRefusal> {
     Ok(CleanFileName(name.to_string()))
 }
 
+/// What a character reads as when it stands in for plain text: full-width forms, and the marks that stand in for a dot. A
+/// name isn't stored this way, because these are ordinary characters in a real name. It's only how the name is read below.
+fn plain_form(c: char) -> char {
+    match c {
+        '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+        '\u{2024}' | '\u{3002}' | '\u{FE52}' | '\u{FF61}' => '.',
+        other => other,
+    }
+}
+
 /// Whether a name would run when someone opens the download, whatever its content. This is the one place a name matters:
-/// it can get a file refused, because what the browser saves is what the name says.
-///
-/// **Proposed.** It covers formats nobody uploads as code. Whether to add `.bat`, `.cmd`, `.ps1`, `.sh`, `.js`, `.vbs`, `.msc`,
-/// `.inf`, `.url`, `.jnlp` or `.application` is open, as code is on the allowed list and some of these run when opened.
+/// it can get a file refused, because what the browser saves is what the name says. The list is decision 91 in
+/// `docs/spec/PRODUCT.md`, and a name is read through `plain_form`, so one with a full-width dot is refused too.
 fn has_refused_extension(name: &CleanFileName) -> bool {
-    let Some((_, ext)) = name.as_str().rsplit_once('.') else {
+    let plain: String = name.as_str().chars().map(plain_form).collect();
+    let Some((_, ext)) = plain.trim_end_matches(['.', ' ']).rsplit_once('.') else {
         return false;
     };
     matches!(
@@ -291,6 +300,17 @@ fn has_refused_extension(name: &CleanFileName) -> bool {
             | "xpi"
             | "bin"
             | "elf"
+            | "cmd"
+            | "vbs"
+            | "msc"
+            | "inf"
+            | "url"
+            | "jnlp"
+            | "application"
+            | "bat"
+            | "ps1"
+            | "sh"
+            | "js"
     )
 }
 

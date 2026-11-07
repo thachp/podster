@@ -1,7 +1,8 @@
 #![allow(clippy::indexing_slicing)]
 //! What an upload keeps as a file streams past.
 use podster_core::files::{
-    classify, ContentKind, FileEnds, FileSample, SAMPLE_HEAD_BYTES, SAMPLE_TAIL_BYTES,
+    classify, fits_room_quota, ContentKind, FileEnds, FileSample, ROOM_QUOTA_BYTES,
+    SAMPLE_HEAD_BYTES, SAMPLE_TAIL_BYTES,
 };
 
 #[test]
@@ -47,4 +48,11 @@ fn its_debug_shows_no_bytes() {
     let mut ends = FileEnds::default();
     ends.add(b"secret");
     assert!(!format!("{ends:?}").contains("secret"));
+}
+
+#[test]
+fn a_file_fits_up_to_the_quota_and_no_further() {
+    assert!(fits_room_quota(ROOM_QUOTA_BYTES - 1, 1));
+    assert!(!fits_room_quota(ROOM_QUOTA_BYTES, 1));
+    assert!(!fits_room_quota(u64::MAX, 1));
 }

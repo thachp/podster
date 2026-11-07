@@ -12,10 +12,10 @@ const GUEST: Who = { id: "agt_guest", org: "org_a" };
 const OUTSIDER: Who = { id: "agt_out", org: "org_x" };
 const orgAdmin = (org: string): Who => ({ id: `per_admin_${org}`, kind: "person", org, adminOrgs: [org] });
 
-async function assertion(who: Who) {
+async function assertion(who: Who, claims: object = {}) {
   const now = Math.floor(Date.now() / 1000);
   const isAgent = (who.kind ?? "agent") === "agent";
-  return new SignJWT({ kind: who.kind ?? "agent", org: who.org, ...(isAgent ? { gen: who.gen ?? 1 } : { orgs: [], admin_orgs: who.adminOrgs ?? [] }) })
+  return new SignJWT({ kind: who.kind ?? "agent", org: who.org, ...(isAgent ? { gen: who.gen ?? 1 } : { orgs: [], admin_orgs: who.adminOrgs ?? [] }), ...claims })
     .setProtectedHeader({ alg: "EdDSA", kid: "test" }).setIssuer("podster-gateway").setSubject(who.id).setAudience("podster-api")
     .setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID()).sign(key);
 }
@@ -88,6 +88,22 @@ const chunked = (data: Uint8Array, size = 1024) => new ReadableStream({
     controller.close();
   },
 });
+
+/** A body that sends its first bytes, then waits to be told to finish. */
+const heldBody = (data: Uint8Array = TEXT) => {
+  let release = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  const body = new ReadableStream({
+    async start(controller) {
+      controller.enqueue(data.slice(0, 10));
+      await held;
+      controller.enqueue(data.slice(10));
+      controller.close();
+    },
+  });
+  return { body, release };
+};
+const underWay = () => new Promise((resolve) => setTimeout(resolve, 100));
 
 describe("create_upload", () => {
   it("reserves the space, cleans the name and answers with a way to send the bytes", async () => {
@@ -283,6 +299,26 @@ describe("the bytes of an upload", () => {
     expect((await row(id, upload.id)).state).toBe("uploading");
   });
 
+  it("doesn't take a real token for another upload, or for the same upload in another room", async () => {
+    const { id, uploads } = await room();
+    const other = await room();
+    const upload = await create(uploads);
+    const second = await create(uploads);
+    const elsewhere = await create(other.uploads);
+    const refused = [
+      await put(upload, TEXT, second.token),
+      await put(upload, TEXT, elsewhere.token),
+      await put({ ...upload, upload_path: `/v1/uploads/${other.id}/${upload.id}` }, TEXT),
+      await put({ ...elsewhere, upload_path: `/v1/uploads/${id}/${elsewhere.id}` }, TEXT),
+    ];
+    for (const res of refused) {
+      expect(res.status).toBe(404);
+      expect(await code(res)).toBe("upload_not_found");
+    }
+    expect(await stored(id)).toEqual([]);
+    expect(await stored(other.id)).toEqual([]);
+  });
+
   it("can't use an assertion in place of the token", async () => {
     const { uploads } = await room();
     const upload = await create(uploads);
@@ -447,6 +483,138 @@ describe("the bytes of an upload", () => {
     const late = await put(before, TEXT);
     expect(late.status).toBe(409);
     expect(await code(late)).toBe("workspace_archived");
+  });
+
+  describe("a reservation that lapses during an upload", () => {
+    const reservationEnds = (id: string, object: string) => inRoom(id, (sql) => sql.exec("UPDATE stored_object SET upload_expires_at = 1 WHERE id = ?", object));
+
+    it("still finishes if the file fits", async () => {
+      const { id, uploads } = await room();
+      const upload = await create(uploads);
+      const held = heldBody();
+      const going = put(upload, held.body);
+      await underWay();
+      await reservationEnds(id, upload.id);
+      held.release();
+      expect((await going).status).toBe(200);
+    });
+
+    it("can't take the room past its quota, and keeps none of the bytes", async () => {
+      const { id, uploads } = await room();
+      const upload = await create(uploads);
+      const held = heldBody();
+      const going = put(upload, held.body);
+      await underWay();
+      await reservationEnds(id, upload.id);
+      // Its space came back, and someone else takes all of it.
+      await inRoom(id, (sql) => sql.exec("INSERT INTO stored_object (id, name, size, sha256, state, token_hash, uploaded_by, created_at, upload_expires_at) VALUES ('full', 'x', 5000000000, 'x', 'scanning', '', 'o', 0, 0)"));
+      held.release();
+      const finished = await going;
+      expect(finished.status).toBe(409);
+      expect(await code(finished)).toBe("room_quota_exceeded");
+      expect(await stored(id)).toEqual([]);
+      expect((await row(id, upload.id)).state).toBe("uploading");
+    });
+
+    it("doesn't count itself when it checks, so a full room's own last file still lands", async () => {
+      const { id, uploads } = await room();
+      await inRoom(id, (sql) => sql.exec("INSERT INTO stored_object (id, name, size, sha256, state, token_hash, uploaded_by, created_at, upload_expires_at) VALUES ('most', 'x', ?, 'x', 'scanning', '', 'o', 0, 0)", 5_000_000_000 - TEXT.length));
+      const upload = await create(uploads);
+      expect((await put(upload, TEXT)).status).toBe(200);
+    });
+  });
+
+  describe("an uploader who goes while their room hasn't heard", () => {
+    const holdFanOut = async (who: Who) => {
+      const res = await SELF.fetch(`https://api.internal/v1/agents/${who.id}/disconnect`, { method: "POST", headers: { "x-podster-assertion": await assertion(orgAdmin(who.org)), "x-test-hold-fan-out": "1" }, body: "{}" });
+      expect(res.status).toBe(200);
+    };
+    const coordinator = async (who: Who, id: string) => {
+      expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${who.id}/access`, { preset: "coordinator", policy_version: await version(id) })).status).toBe(200);
+    };
+    const depart = async (person: string, org: string, left_at: number) => {
+      const res = await SELF.fetch("https://api.internal/v1/org-departures", { method: "POST", headers: { "x-podster-assertion": await assertion(orgAdmin(org), { departure: { person, org, left_at } }) }, body: "{}" });
+      expect(res.status).toBe(200);
+    };
+    const freshAgent = async (id: string) => {
+      const who: Who = { id: `agt_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_a" };
+      const res = await SELF.fetch(`https://api.internal/v1/agents/${who.id}`, { method: "PUT", headers: { "x-podster-assertion": await assertion(orgAdmin(who.org)) }, body: JSON.stringify({ org_id: who.org, name: who.id }) });
+      expect(res.status).toBe(200);
+      expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: "agent", org_id: who.org, role: "member", policy_version: await version(id) })).status).toBe(200);
+      await coordinator(who, id);
+      return who;
+    };
+    const freshAdmin = async (id: string) => {
+      const who: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a" };
+      await addPerson(id, who, "admin");
+      return who;
+    };
+
+    /** Answers without the body ever finishing, which only a check before the bytes can do. */
+    const refusedBeforeTheBytes = async (upload: any) => {
+      const held = heldBody();
+      const res = await Promise.race([put(upload, held.body), new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000))]);
+      held.release();
+      expect(res, "it waited for the bytes").not.toBeNull();
+      return res as Response;
+    };
+
+    it("refuses an agent disconnected before the bytes start, without reading them", async () => {
+      const { id, uploads } = await room();
+      const agent = await freshAgent(id);
+      const upload = await create(uploads, TEXT, {}, agent);
+      await holdFanOut(agent);
+      const res = await refusedBeforeTheBytes(upload);
+      expect(res.status).toBe(403);
+      expect(await code(res)).toBe("agent_disconnected");
+      expect(await stored(id)).toEqual([]);
+    });
+
+    it("refuses an agent disconnected while the bytes arrive, and keeps none", async () => {
+      const { id, uploads } = await room();
+      const agent = await freshAgent(id);
+      const upload = await create(uploads, TEXT, {}, agent);
+      const held = heldBody();
+      const going = put(upload, held.body);
+      await underWay();
+      await holdFanOut(agent);
+      held.release();
+      const finished = await going;
+      expect(finished.status).toBe(403);
+      expect(await code(finished)).toBe("agent_disconnected");
+      expect(await stored(id)).toEqual([]);
+      expect((await row(id, upload.id)).state).toBe("uploading");
+    });
+
+    it("refuses a person who left the organization before the bytes start, or while they arrive", async () => {
+      const { id, uploads } = await room();
+      const first = await freshAdmin(id);
+      const before = await create(uploads, TEXT, {}, first);
+      await depart(first.id, first.org, Date.now());
+      const res = await refusedBeforeTheBytes(before);
+      expect(res.status).toBe(403);
+      expect(await code(res)).toBe("access_revoked");
+      const second = await freshAdmin(id);
+      const during = await create(uploads, TEXT, {}, second);
+      const held = heldBody();
+      const going = put(during, held.body);
+      await underWay();
+      await depart(second.id, second.org, Date.now());
+      held.release();
+      const finished = await going;
+      expect(finished.status).toBe(403);
+      expect(await code(finished)).toBe("access_revoked");
+      expect(await stored(id)).toEqual([]);
+    });
+
+    it("doesn't hold an old departure against someone who came back before they asked", async () => {
+      const { id, uploads } = await room();
+      const person = await freshAdmin(id);
+      const upload = await create(uploads, TEXT, {}, person);
+      await depart(person.id, person.org, 1);
+      await depart(person.id, "org_elsewhere", Date.now());
+      expect((await put(upload, TEXT)).status).toBe(200);
+    });
   });
 
   it("is refused for a disconnected agent", async () => {

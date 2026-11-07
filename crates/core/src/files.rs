@@ -322,6 +322,14 @@ pub struct AcceptedUpload {
     pub size: u64,
 }
 
+/// Whether a file fits beside what the room already holds. Asked when an upload starts, and again when one finishes after its
+/// reservation has lapsed, because the room may have filled up since.
+pub fn fits_room_quota(room_used: u64, size: u64) -> bool {
+    room_used
+        .checked_add(size)
+        .is_some_and(|total| total <= ROOM_QUOTA_BYTES)
+}
+
 /// Checks a request before any byte arrives. Who may ask is `podster-policy`'s question, and it runs first.
 pub fn check_upload(request: UploadRequest<'_>) -> Result<AcceptedUpload, FileRefusal> {
     if request.room_archived {
@@ -333,11 +341,7 @@ pub fn check_upload(request: UploadRequest<'_>) -> Result<AcceptedUpload, FileRe
     if request.size > MAX_FILE_BYTES {
         return Err(FileRefusal::TooLarge);
     }
-    let within_quota = request
-        .room_used
-        .checked_add(request.size)
-        .is_some_and(|total| total <= ROOM_QUOTA_BYTES);
-    if !within_quota {
+    if !fits_room_quota(request.room_used, request.size) {
         return Err(FileRefusal::QuotaExceeded);
     }
     let name = clean_file_name(request.name)?;

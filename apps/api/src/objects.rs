@@ -115,6 +115,23 @@ async fn ask_room(env: &Env, room: &str, path: &str, body: &Value) -> R<Response
     .await
 }
 
+/// What only the uploader's Principal knows, read fresh. An agent's connection may have ended, and a person may have left the
+/// organization they uploaded through, since the token was issued. Rooms hear of both later.
+async fn uploader_still_here(env: &Env, begun: &Value) -> R<()> {
+    let uploader = begun["uploader"].as_str().unwrap_or_default();
+    if begun["agent"].as_bool() == Some(true) {
+        crate::principal::check_active(env, uploader, begun["gen"].as_u64(), None).await
+    } else {
+        crate::principal::check_not_departed(
+            env,
+            uploader,
+            begun["org"].as_str().unwrap_or_default(),
+            begun["asked_at"].as_i64().unwrap_or(0),
+        )
+        .await
+    }
+}
+
 /// Takes the bytes of one upload. Only the room's answer decides whether they stay.
 pub async fn stream_upload(mut req: Request, env: Env, room: &str, id: &str) -> R<Response> {
     if !crate::valid_id(room) || !crate::valid_id(id) {
@@ -133,10 +150,7 @@ pub async fn stream_upload(mut req: Request, env: Env, room: &str, id: &str) -> 
         return Ok(begun);
     }
     let begun: Value = begun.json().await?;
-    if begun["agent"].as_bool() == Some(true) {
-        let agent = begun["uploader"].as_str().unwrap_or_default();
-        crate::principal::check_active(&env, agent, begun["gen"].as_u64(), None).await?;
-    }
+    uploader_still_here(&env, &begun).await?;
     let key = begun["key"].as_str().unwrap_or_default().to_string();
     let attempt = begun["attempt"].as_str().unwrap_or_default().to_string();
     let announced_sha256 = begun["sha256"].as_str().unwrap_or_default().to_string();
@@ -222,6 +236,13 @@ pub async fn stream_upload(mut req: Request, env: Env, room: &str, id: &str) -> 
             return Err(refusal(refused));
         }
     };
+    // The room checks what it knows when it answers below. Failing to ask counts as a no, because nothing here may keep a file
+    // on a guess.
+    if let Err(refused) = uploader_still_here(&env, &begun).await {
+        bucket.delete(&key).await?;
+        log("upload.refused", "uploader_gone");
+        return Err(refused);
+    }
     let mut answer = ask_room(
         &env,
         room,

@@ -5,22 +5,26 @@
 //! download route. A file's name is agent content, so it's never in an event, an audit entry or a log.
 use super::*;
 use crate::objects::{refusal, upload_not_found};
-use podster_core::files::{check_upload, is_sha256, FileRefusal, ObjectState, UploadRequest};
+use podster_core::files::{
+    check_upload, fits_room_quota, is_sha256, FileRefusal, ObjectState, UploadRequest,
+};
 use podster_policy::files::authorize_input_upload;
 
-/// How long an upload may be started after it's created. An attempt already under way finishes. Space comes back when it ends.
+/// How long an upload may be started after it's created. Its reservation ends then too, whatever is under way. An attempt already
+/// running can still finish, but only if the file still fits the room when it does.
 const UPLOAD_GRANT_MS: i64 = 60 * 60 * 1000;
 
 fn token_hash(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
 }
 
-/// Every file kept, and every upload still able to arrive. One that expired reserves nothing, even before it's cleared away.
-fn room_used(sql: &SqlStorage, now: i64) -> R<u64> {
+/// Every file kept, and every upload whose reservation hasn't ended, leaving out `except`. One that expired reserves nothing, even
+/// before it's cleared away.
+fn room_used(sql: &SqlStorage, now: i64, except: &str) -> R<u64> {
     let found = rows(
         sql,
-        "SELECT COALESCE(SUM(size), 0) AS used FROM stored_object WHERE state <> 'uploading' OR upload_expires_at > ?",
-        vec![now.into()],
+        "SELECT COALESCE(SUM(size), 0) AS used FROM stored_object WHERE (state <> 'uploading' OR upload_expires_at > ?) AND id <> ?",
+        vec![now.into(), except.into()],
     )?;
     Ok(found.first().map_or(0, |row| int(&row["used"])).max(0) as u64)
 }
@@ -53,7 +57,7 @@ pub(super) fn handle_create(
     let accepted = check_upload(UploadRequest {
         name: &name,
         size,
-        room_used: room_used(sql, now)?,
+        room_used: room_used(sql, now, "")?,
         room_archived: room_archived(sql)?,
     })
     .map_err(refusal)?;
@@ -136,6 +140,7 @@ fn begin(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         return Err(refusal(FileRefusal::RoomArchived));
     }
     let (identity, who) = uploader(sql, &row)?;
+    // The room can't read a person's organizations, and an agent's connection is its Principal's, so the Worker asks those.
     // Each attempt has its own key, and only the latest can complete, so two at once can't leave a file the room didn't check.
     let attempt = uuid::Uuid::new_v4().simple().to_string();
     let room = room_id(sql)?;
@@ -148,6 +153,7 @@ fn begin(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     Ok(json!({
         "key": key, "attempt": attempt, "size": row["size"], "sha256": row["sha256"],
         "agent": who.caller.kind == PrincipalKind::Agent, "uploader": identity.id, "gen": identity.gen,
+        "org": who.org, "asked_at": row["created_at"],
     }))
 }
 
@@ -168,6 +174,11 @@ fn complete(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         return Err(refusal(FileRefusal::RoomArchived));
     }
     let (_, who) = uploader(sql, &row)?;
+    // A reservation can lapse while the bytes arrive, and the room can fill up meanwhile. This counts the room as it is now, so a
+    // finished upload can never take it past its quota, however long it took.
+    if !fits_room_quota(room_used(sql, now, id)?, int(&row["size"]).max(0) as u64) {
+        return Err(refusal(FileRefusal::QuotaExceeded));
+    }
     let media_type = body["media_type"]
         .as_str()
         .ok_or_else(ApiError::invalid_argument)?;

@@ -141,6 +141,20 @@ pub async fn check_active(
     }
 }
 
+/// Refuses a person who has left this organization since `since`, in milliseconds. A departure reaches their Principal as soon as
+/// the gateway delivers it, which is before any room hears, and it's kept for longer than an upload can last. Someone who left
+/// before `since` had rejoined by then, or wouldn't have been let in.
+pub async fn check_not_departed(env: &Env, person: &str, org: &str, since: i64) -> R<()> {
+    let body = json!({ "org": org, "since": since });
+    let mut response = internal(env, person, "/internal/departed", &body).await?;
+    let answer: Value = response.json().await?;
+    if answer["departed"].as_bool() == Some(false) {
+        Ok(())
+    } else {
+        Err(ApiError::access_revoked())
+    }
+}
+
 /// Asks the agent's Principal what to send.
 pub async fn claim_wake_for(env: &Env, agent: &str) -> R<Value> {
     let mut response = internal(env, agent, "/internal/wake-claim", &json!({})).await?;
@@ -1082,6 +1096,19 @@ impl Principal {
                 // The alarm does the rooms, so answering the gateway doesn't depend on how many there are.
                 self.arm_next_sweep().await?;
                 return Ok(json!({ "recorded": true }));
+            }
+            "/internal/departed" => {
+                let body: Value = req.json().await?;
+                exec(&sql, DEPARTURE_SCHEMA, vec![])?;
+                let found = rows(
+                    &sql,
+                    "SELECT 1 FROM org_departure WHERE org_id = ? AND left_at >= ? LIMIT 1",
+                    vec![
+                        body["org"].as_str().unwrap_or_default().into(),
+                        body["since"].as_i64().unwrap_or(0).into(),
+                    ],
+                )?;
+                return Ok(json!({ "departed": !found.is_empty() }));
             }
             "/internal/check" => {
                 let body: Value = req.json().await?;

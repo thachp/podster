@@ -308,7 +308,8 @@ fn record_verdict(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     let outcome = ScanOutcome::from_report(body["report"].as_str().unwrap_or_default());
     // A clean report about other bytes says nothing about this file, so the hour limit ends it. A blocking one still blocks: the
     // scanner reports a stored size that differs from the upload's this way, and a block can only tighten.
-    let mismatch = body["sha256"] != row["sha256"] || body["bytes"].as_i64() != Some(int(&row["size"]));
+    let mismatch =
+        body["sha256"] != row["sha256"] || body["bytes"].as_i64() != Some(int(&row["size"]));
     if mismatch && outcome == ScanOutcome::NoKnownMalware {
         return Err(ApiError::api(409, "scan_mismatch"));
     }

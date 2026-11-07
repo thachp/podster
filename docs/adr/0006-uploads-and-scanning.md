@@ -165,7 +165,7 @@ Reading a body whole, as the catch-all at `/api/[...path]` does, grew the same p
 
 The measurements are RSS of the local `workerd` process, not a deployed isolate's memory against its 128 MB. [The spike](#spike-results) sent 100 MB through a plain web Worker on staging, but not through vinext, so that hop hasn't run on a deployment. The helper hashes with the browser's own SHA-256, which can't take a file in parts, so the browser holds the whole file for that moment.
 
-In Chromium, Firefox and WebKit locally, a refusal that comes before the browser has finished sending, such as 100 MB against a 1-byte reservation, appeared as a lost connection and not as the refusal's code. The helper reports that as `network_error` with a retry. Whether this also happens through Cloudflare's edge is unchecked, and it would apply to CORS too.
+In Chromium, Firefox and WebKit locally, a refusal that comes before the browser has finished sending, such as 100 MB against a 1-byte reservation, often appeared as a lost connection and not as the refusal's code. Each browser did this in some runs, and Chromium and WebKit also saw the 422 in others. The helper reports that as `network_error` with a retry. Whether this also happens through Cloudflare's edge is unchecked, and it would apply to CORS too.
 
 ## Consequences
 

@@ -555,6 +555,58 @@ describe("the bytes of an upload", () => {
     expect((await api(OWNER, "POST", uploads, { name: "n.txt", size: 1, sha256: hash })).status).toBe(200);
   });
 
+  it("drops an upload when a change of role stops its uploader finishing", async () => {
+    const { id, uploads } = await room();
+    await coordinator(MEMBER, id);
+    const upload = await create(uploads, TEXT, {}, MEMBER);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members/${MEMBER.id}/role`, { role: "guest", policy_version: await version(id) })).status).toBe(200);
+    expect(await row(id, upload.id)).toBeUndefined();
+    expect((await put(upload, TEXT)).status).toBe(404);
+  });
+
+  it("drops an upload when ending a claim takes away what let its uploader upload", async () => {
+    const { id, uploads } = await room();
+    const opening = await api(OWNER, "POST", `/v1/workspaces/${id}/roles`, { title: "Engineer", responsibilities: "Builds it", capacity: 1, preset: "member", policy_version: await version(id) });
+    expect(opening.status).toBe(200);
+    const roles = `/v1/workspaces/${id}/roles/${opening.body.id}`;
+    expect((await api(OWNER, "POST", `${roles}/invites`, { principal_id: GUEST.id, policy_version: await version(id) })).status).toBe(200);
+    expect((await api(GUEST, "POST", `${roles}/claim`, {})).status).toBe(200);
+    const upload = await create(uploads, TEXT, {}, GUEST);
+    expect((await api(GUEST, "POST", `${roles}/release`, {})).status).toBe(200);
+    expect(await row(id, upload.id)).toBeUndefined();
+    expect((await put(upload, TEXT)).status).toBe(404);
+  });
+
+  it("doesn't bring an upload back when an agent returns through an invitation", async () => {
+    const { id, uploads } = await room();
+    const created = await api(OWNER, "POST", `/v1/workspaces/${id}/invitations`, { role: "member", invited_org_id: OUTSIDER.org, policy_version: await version(id) });
+    expect(created.status).toBe(200);
+    expect((await api(orgAdmin(OUTSIDER.org), "POST", "/v1/invitations/accept", { token: created.body.token, org_id: OUTSIDER.org, agents: [OUTSIDER.id] })).status).toBe(200);
+    await coordinator(OUTSIDER, id);
+    const upload = await create(uploads, TEXT, {}, OUTSIDER);
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${OUTSIDER.id}`, { policy_version: await version(id) })).status).toBe(200);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members/${OUTSIDER.id}/clear-removal`, { policy_version: await version(id) })).status).toBeLessThan(500);
+    const again = await api(OWNER, "POST", `/v1/workspaces/${id}/invitations`, { role: "member", invited_org_id: OUTSIDER.org, policy_version: await version(id) });
+    expect((await api(orgAdmin(OUTSIDER.org), "POST", "/v1/invitations/accept", { token: again.body.token, org_id: OUTSIDER.org, agents: [OUTSIDER.id] })).status).toBe(200);
+    expect(await row(id, upload.id)).toBeUndefined();
+    expect((await put(upload, TEXT)).status).toBe(404);
+  });
+
+  it("answers when the room is stuck at the start, reading no bytes", async () => {
+    const { id, uploads } = await room();
+    const upload = await create(uploads);
+    let unblock = () => {};
+    const blocked = new Promise<void>((resolve) => (unblock = resolve));
+    const holding = runInDurableObject(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)), (_: any, state: any) => state.blockConcurrencyWhile(() => blocked));
+    await underWay();
+    const res = await put(upload, TEXT);
+    expect(res.status).toBe(504);
+    expect(await code(res)).toBe("room_unavailable");
+    unblock();
+    await holding;
+    expect(await stored(id)).toEqual([]);
+  }, 15_000);
+
   it("keeps an upload through a change that still lets its uploader finish", async () => {
     const { id, uploads } = await room();
     await coordinator(MEMBER, id);

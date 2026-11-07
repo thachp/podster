@@ -109,6 +109,19 @@ describe("the upload path", () => {
     expect(sent).toBe(21);
   });
 
+  it.each([[404, "upload_not_found"], [403, "access_revoked"], [409, "invalid_transition"]])("doesn't read on for a %s, which a made-up token can get, so it costs nothing to refuse", async (status, code) => {
+    let sent = 0;
+    const endless = new ReadableStream({ pull(c) { sent += 1; c.enqueue(new Uint8Array(MEGABYTE)); } });
+    const answers = { fetch: async (forwarded: Request) => {
+      await forwarded.body!.getReader().read();
+      return new Response(JSON.stringify({ error: { code } }), { status });
+    } } as unknown as Fetcher;
+    const request = new Request(`https://gateway.test${PATH}`, { method: "PUT", body: endless, duplex: "half", headers: { authorization: TOKEN } } as RequestInit);
+    const response = await handleUpload(request, new URL(request.url), answers, async () => true);
+    expect(response?.status).toBe(status);
+    expect(sent).toBeLessThan(10);
+  });
+
   it("stops reading at the file limit, however much a sender keeps sending", async () => {
     let sent = 0;
     const endless = new ReadableStream({ pull(c) { sent += 1; c.enqueue(new Uint8Array(MEGABYTE)); } });

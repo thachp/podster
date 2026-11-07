@@ -30,7 +30,7 @@ C changes contracts and M adds a migration. Those PRs merge one at a time, and t
 | 5 | Input assets, linked to tasks | Yes | Yes | 4 |
 | 6 | Files on submissions and exact-version review | Yes | Yes | 4 |
 | 7 | Expected outputs: a task may name one, and approval makes it Ready | Yes | Yes | 6 |
-| 8 | Removal and retention: tombstones, abandoned-upload cleanup | Yes | Yes | 4 |
+| 8 | Removal and retention: tombstones, abandoned-upload cleanup, including bytes in R2 that no file refers to | Yes | Yes | 4 |
 | 9a | Screen: asset upload | | | 5 |
 | 9b | Screen: Task Sheet files and review | | | 6 |
 | 9c | Screen: Artifacts tab and output status | | | 7 |

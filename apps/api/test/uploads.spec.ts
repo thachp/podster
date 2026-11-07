@@ -420,9 +420,9 @@ describe("the bytes of an upload", () => {
     expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${MEMBER.id}/access`, { preset: "guest", policy_version: await version(id) })).status).toBe(200);
     release();
     const finished = await going;
-    expect(finished.status).toBe(403);
+    expect(finished.status).toBe(404);
     expect(await stored(id)).toEqual([]);
-    expect((await row(id, upload.id)).state).toBe("uploading");
+    expect(await row(id, upload.id)).toBeUndefined();
   });
 
   it("refuses bytes from someone who has left, at the start and when they finish", async () => {
@@ -536,9 +536,51 @@ describe("the bytes of an upload", () => {
     const upload = await create(uploads, TEXT, {}, MEMBER);
     expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${MEMBER.id}/access`, { preset: "guest", policy_version: await version(id) })).status).toBe(200);
     const res = await put(upload, TEXT);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(404);
+    expect(await code(res)).toBe("upload_not_found");
     expect(await stored(id)).toEqual([]);
+    // Widening doesn't bring the token back.
+    await coordinator(MEMBER, id);
+    expect((await put(upload, TEXT)).status).toBe(404);
   });
+
+  it("gives back a narrowed uploader's reservation at once", async () => {
+    const { id, uploads } = await room();
+    await coordinator(MEMBER, id);
+    await inRoom(id, (sql) => sql.exec("INSERT INTO stored_object (id, name, size, sha256, state, token_hash, uploaded_by, created_at, upload_expires_at) VALUES ('most', 'x', 4900000000, 'x', 'scanning', '', 'o', 0, 0)"));
+    await create(uploads, TEXT, { size: 100_000_000 }, MEMBER);
+    const hash = await sha256(TEXT);
+    expect((await api(OWNER, "POST", uploads, { name: "n.txt", size: 1, sha256: hash })).code).toBe("room_quota_exceeded");
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${MEMBER.id}/access`, { preset: "guest", policy_version: await version(id) })).status).toBe(200);
+    expect((await api(OWNER, "POST", uploads, { name: "n.txt", size: 1, sha256: hash })).status).toBe(200);
+  });
+
+  it("keeps an upload through a change that still lets its uploader finish", async () => {
+    const { id, uploads } = await room();
+    await coordinator(MEMBER, id);
+    const upload = await create(uploads, TEXT, {}, MEMBER);
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${MEMBER.id}/access`, { scopes: { conversations: "own" }, policy_version: await version(id) })).status).toBe(200);
+    expect((await put(upload, TEXT)).status).toBe(200);
+  });
+
+  it("answers when the room is stuck, without deleting bytes it may yet accept", async () => {
+    const { id, uploads } = await room();
+    const upload = await create(uploads);
+    const held = heldBody();
+    const going = put(upload, held.body);
+    await underWay();
+    let unblock = () => {};
+    const blocked = new Promise<void>((resolve) => (unblock = resolve));
+    const holding = runInDurableObject(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)), (_: any, state: any) => state.blockConcurrencyWhile(() => blocked));
+    await underWay();
+    held.release();
+    const res = await going;
+    expect(res.status).toBe(504);
+    expect(await code(res)).toBe("upload_outcome_unknown");
+    expect((await stored(id)).length).toBe(1);
+    unblock();
+    await holding;
+  }, 15_000);
 
   it("refuses bytes in a room archived before or during the upload, and keeps none", async () => {
     const { id, uploads } = await room();

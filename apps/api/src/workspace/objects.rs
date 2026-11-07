@@ -103,6 +103,26 @@ pub(super) fn handle_create(
     }))
 }
 
+/// Drops what someone may no longer finish after their access or role changed, as if they'd gone: narrowing them shouldn't leave
+/// space held that nobody can release, and widening them again shouldn't bring an old token back.
+pub(super) fn drop_uploads_no_longer_allowed(
+    sql: &SqlStorage,
+    actor: &str,
+    actor_kind: &str,
+    principal: &str,
+    now: i64,
+) -> R<()> {
+    let found = rows(
+        sql,
+        "SELECT * FROM stored_object WHERE uploaded_by = ? AND state = 'uploading'",
+        vec![principal.into()],
+    )?;
+    if found.iter().any(|row| uploader(sql, row).is_err()) {
+        drop_uploads_of(sql, actor, actor_kind, principal, now)?;
+    }
+    Ok(())
+}
+
 /// Drops what someone was still uploading when they went, in the transaction that ends their place here, so their token dies with
 /// it, coming back doesn't revive it, and the space is free at once. Bytes on their way get refused when they finish.
 pub(super) fn drop_uploads_of(

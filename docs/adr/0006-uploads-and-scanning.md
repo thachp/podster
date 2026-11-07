@@ -42,9 +42,9 @@ Uploads:
 
 Abandoned uploads give their space back through a sweep in the room's alarm.
 
-**Built in step 2, locally:** `create_upload` returns a token, once, because agents reach the API only through capabilities and had no way to send bytes. The bytes go to `PUT /v1/uploads/{ws}/{object}` with that token and no assertion, and the room decides. The token works for any number of attempts until the file arrives, an hour passes or the uploader leaves the room. Leaving drops the upload and gives back its space at once. Each attempt has its own key, and gives up after a minute with no bytes or 30 minutes in all.
+**Built in step 2, locally:** `create_upload` returns a token, once, because agents reach the API only through capabilities and had no way to send bytes. The bytes go to `PUT /v1/uploads/{ws}/{object}` with that token and no assertion, and the room decides. The token works for any number of attempts until the file arrives, an hour passes or the uploader leaves the room or may no longer upload. Either drops the upload and gives back its space at once. Each attempt has its own key, and gives up after a minute with no bytes or 30 minutes in all.
 
-Each attempt checks the uploader at its start and its end, and the end also rechecks the quota, since a reservation can lapse during a slow upload. Removal, narrowed access and archiving are read from the room. A disconnect and a person leaving their organization are read from the Principal, which hears before rooms do. That departure can lag only if the gateway couldn't deliver it, and its cron retries.
+Each attempt checks the uploader at its start and its end, and the end also rechecks the quota, since a reservation can lapse during a slow upload. Removal, narrowed access and archiving are read from the room. A disconnect and a person leaving their organization are read from the Principal, which hears before rooms do. If the gateway can't deliver a departure, for instance because the API is down, a token from before it still commits until the gateway's hourly cron retry succeeds.
 
 **The one gap:** an agent's credential ends when the person who connected it leaves the organization, and only the gateway's directory knows that. A token isn't a credential the gateway checks, so that agent's existing upload can still finish, for up to an hour after `create_upload` plus however long the attempt runs. It can't start a new one, because `create_upload` goes through the gateway.
 
@@ -112,6 +112,22 @@ The spike ran on 2026-11-07 UTC, from [#99](https://github.com/thachp/podster/pu
 ### One check failed
 
 A chunked upload with no declared length got 422, not the expected 411. The test sends a deliberately bad hash, and both the gateway and the API answer 411 to a missing length, so that request probably arrived with a length and failed on its hash. The lead's guess is that the edge adds a length to a small chunked body, which isn't confirmed. The run didn't keep the answer's body. So no length rule refused it, and a chunked upload with a correct hash hasn't been tried.
+
+### Step 2 on staging
+
+The lead ran these on 2026-11-07, at `eaf1b84`, as the owner through the browser on the same Mac as the spike, with real R2:
+
+| Upload | Result |
+| --- | --- |
+| 30 bytes | 200, `scanning`. Reusing the token got 404, and no token got 404 |
+| 200,000 bytes, chunked with no declared length, correct hash | 200, `scanning` |
+| 100,000,000 bytes | 200 in 33 s, 24,417 chunks, 13.4 s of API wall time |
+| 100,000,001 bytes | 413 `file_too_large` |
+| `run.bat` | 415 `executable_refused` |
+
+**That answers the chunked question:** a chunked upload with a correct hash works through the real edge. It also gives the CPU number: 4,600 ms in the API and 1,806 ms in the gateway for 100 MB, against a 30 s limit. The tail held outcomes of ok or canceled, no exceptions and no uncaught-promise lines, with only IDs, bytes, chunks and wall time, and no token or file name.
+
+**Not done yet:** a second network, a forged `cf-connecting-ip` at the edge, `app.podster.dev`'s request limit, and `e2e/upload-check.mjs` itself. These ran before the later fixes to uploads, so they don't cover those.
 
 ### What's still unproven
 

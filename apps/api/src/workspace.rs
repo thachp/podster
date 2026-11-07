@@ -1093,6 +1093,7 @@ fn handle_change_role(
             principal.into(),
         ],
     )?;
+    objects::drop_uploads_no_longer_allowed(sql, &caller.id, "person", principal, now)?;
     let org = rows(
         sql,
         "SELECT org_id FROM member WHERE principal_id = ?",
@@ -1259,6 +1260,7 @@ fn handle_change_access(
             principal.into(),
         ],
     )?;
+    objects::drop_uploads_no_longer_allowed(sql, &caller.id, "person", principal, now)?;
     if role != prior_role {
         queue_index(sql, principal, &org, Some(&role), now)?;
     }
@@ -2893,6 +2895,7 @@ impl Workspace {
                             agent.as_str().into(),
                         ],
                     )?;
+                    objects::drop_uploads_no_longer_allowed(&sql, &person, "person", agent, now)?;
                 }
                 let access = access_json(PrincipalKind::Agent, parsed_role, scopes);
                 audit(

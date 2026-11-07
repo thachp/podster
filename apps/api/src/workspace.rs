@@ -3078,6 +3078,7 @@ impl Workspace {
         if !store::is_initialized(&sql)? {
             return Ok(());
         }
+        self.migrate_if_needed()?;
         let now = Date::now().as_millis() as i64;
         let mut due: Option<i64> = None;
         if !rows(&sql, "SELECT seq FROM index_outbox LIMIT 1", vec![])?.is_empty() {
@@ -3096,6 +3097,9 @@ impl Workspace {
                 let next = (next as i64).max(soonest);
                 due = Some(due.map_or(next, |d| d.min(next)));
             }
+        }
+        if let Some(next) = objects::next_scan_expiry(&sql, now)? {
+            due = Some(due.map_or(next, |d| d.min(next)));
         }
         let Some(due) = due else {
             return Ok(());
@@ -3425,6 +3429,11 @@ impl Workspace {
             let body: Value = serde_json::from_str(&req.text().await?)
                 .map_err(|_| ApiError::invalid_argument())?;
             return self.upload_step(&path, body);
+        }
+        if path == crate::INTERNAL_SCAN_RESULT {
+            let body: Value = serde_json::from_str(&req.text().await?)
+                .map_err(|_| ApiError::invalid_argument())?;
+            return self.scan_verdict(body);
         }
         let path_parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
         if cfg!(feature = "failpoints") {
@@ -3921,6 +3930,10 @@ impl DurableObject for Workspace {
         let index = self.drain_index().await;
         if let Err(error) = &index {
             console_error!("index projection failed: {:?}", error);
+        }
+        // A stuck scan fails closed here, and this failing holds up nothing else.
+        if let Err(error) = self.expire_scans() {
+            console_error!("couldn't end overdue scans: {:?}", error.code());
         }
         // One failing doesn't hold up the other.
         let outbox = self.drain_outbox().await;

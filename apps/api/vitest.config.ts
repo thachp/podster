@@ -25,7 +25,7 @@ export default defineConfig({
       wrangler: { configPath: "./wrangler.jsonc" },
       miniflare: {
         outboundService: fakeHook,
-        queueProducers: { WAKE: { queueName: "podster-wake-test" } },
+        queueProducers: { WAKE: { queueName: "podster-wake-test" }, SCAN: { queueName: "podster-scan-test" } },
         // The test pool can't run the real consumer. This one records what actually crosses the queue.
         workers: [
           {
@@ -34,11 +34,12 @@ export default defineConfig({
             script: `export default { async queue(batch) { for (const message of batch.messages) { await fetch("https://hook-record.example.com/__queue", { method: "POST", body: JSON.stringify(message.body) }); message.ack(); } } };`,
             compatibilityDate: "2026-08-01",
             outboundService: fakeHook,
-            queueConsumers: { "podster-wake-test": { maxBatchTimeout: 0.05 } },
+            queueConsumers: { "podster-wake-test": { maxBatchTimeout: 0.05 }, "podster-scan-test": { maxBatchTimeout: 0.05 } },
           },
         ],
         bindings: {
           ASSERTION_KEYS: JSON.stringify({ test: pub.x }),
+          SCANNER_SECRET: "test-scanner-secret",
           TEST_WRANGLER: readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8"),
           TEST_D1_SCHEMA: ["0001_membership_index.sql", "0002_room_status.sql", "0003_membership_by_org.sql", "0004_ownerless_rooms.sql"].map((name) => readFileSync(new URL(`./migrations/${name}`, import.meta.url), "utf8")).join("\n").replace(/--.*$/gm, ""),
           TEST_SIGNING_JWK: JSON.stringify(privateKey.export({ format: "jwk" })),

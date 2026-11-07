@@ -6,13 +6,20 @@
 use super::*;
 use crate::objects::{refusal, upload_not_found};
 use podster_core::files::{
-    check_upload, fits_room_quota, is_sha256, FileRefusal, ObjectState, UploadRequest,
+    check_upload, expire_scan, fits_room_quota, is_sha256, record_scan, FileRefusal, ObjectState,
+    ScanOutcome, UploadRequest, SCAN_DEADLINE_MS,
 };
 use podster_policy::files::authorize_input_upload;
 
 /// How long an upload may be started after it's created. Its reservation ends then too, whatever is under way. An attempt already
 /// running can still finish, but only if the file still fits the room when it does.
 const UPLOAD_GRANT_MS: i64 = 60 * 60 * 1000;
+/// What the room stores of a scanner's words. A signature name comes from what's in the file, so it's never logged or put in an event.
+const MAX_SCAN_REASON_BYTES: usize = 200;
+/// Scans failed in one alarm. More go in the next, soon after.
+const EXPIRED_SCANS_PER_ALARM: i64 = 500;
+/// The soonest an overdue scan wakes the room again, so one that can't be cleared can't spin the alarm.
+const EXPIRY_REARM_MS: i64 = 1_000;
 
 fn token_hash(token: &str) -> String {
     format!("{:x}", Sha256::digest(token.as_bytes()))
@@ -266,7 +273,156 @@ fn complete(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     )
 }
 
+/// The scan database, as decision 84 needs it stored, or nothing if the scanner didn't give all of it.
+fn scan_database(body: &Value) -> Option<String> {
+    let database = &body["database"];
+    ["engine", "version", "built_at"]
+        .iter()
+        .all(|name| database[name].is_string())
+        .then(|| {
+            json!({ "engine": database["engine"], "version": database["version"], "built_at": database["built_at"] })
+                .to_string()
+        })
+}
+
+fn cut_reason(reason: &str) -> &str {
+    let mut end = reason.len().min(MAX_SCAN_REASON_BYTES);
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    reason.get(..end).unwrap_or_default()
+}
+
+/// Records a scanner's report on a file. It runs every time, because a report can only tighten: a later finding must still block a
+/// file. It works in an archived room, since a scan already running still records its result.
+fn record_verdict(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
+    if body["v"].as_i64() != Some(1) {
+        return Err(ApiError::invalid_argument());
+    }
+    let id = body["object_id"].as_str().ok_or_else(upload_not_found)?;
+    let row = upload_row(sql, id)?;
+    // A report about other bytes says nothing about this file, so the hour limit ends it.
+    if body["sha256"] != row["sha256"] || body["bytes"].as_i64() != Some(int(&row["size"])) {
+        return Err(ApiError::api(409, "scan_mismatch"));
+    }
+    let state = row["state"]
+        .as_str()
+        .and_then(ObjectState::from_name)
+        .ok_or_else(|| ApiError::internal("unknown object state"))?;
+    let outcome = ScanOutcome::from_report(body["report"].as_str().unwrap_or_default());
+    let database = scan_database(body);
+    // Nothing is made available without knowing which signatures said so. A finding blocks regardless.
+    if outcome == ScanOutcome::NoKnownMalware && database.is_none() {
+        return Err(ApiError::invalid_argument());
+    }
+    let next = record_scan(state, outcome, int(&row["scanning_since"]), now).map_err(refusal)?;
+    // A repeat of what's settled changes nothing, and keeps the report that settled it.
+    if next == state && state != ObjectState::Scanning {
+        return Ok(json!({ "state": state.name() }));
+    }
+    let reason = cut_reason(body["reason"].as_str().unwrap_or_default());
+    exec(
+        sql,
+        "UPDATE stored_object SET state = ?, scan_reason = ?, scan_sha256 = ?, scan_database_json = ?, scanned_at = ? WHERE id = ?",
+        vec![
+            next.name().into(), reason.into(), row["sha256"].as_str().unwrap_or_default().into(),
+            database.map_or(V::Null, |d| d.as_str().into()), now.into(), id.into(),
+        ],
+    )?;
+    let new = json!({ "state": next.name() }).to_string();
+    audit_as(
+        sql,
+        "scanner",
+        "system",
+        "object.scan_recorded",
+        id,
+        None,
+        Some(new),
+        now,
+    )?;
+    record_event(
+        sql,
+        "object.scan_recorded",
+        "scanner",
+        None,
+        &Transition::NONE,
+        Vec::<String>::new(),
+        now,
+    )?;
+    Ok(json!({ "state": next.name() }))
+}
+
+/// Ends scans with no verdict after the hour. No verdict sends nothing, so this is what makes a stuck scan fail closed.
+fn expire_overdue_scans(sql: &SqlStorage, now: i64) -> R<()> {
+    let overdue = rows(
+        sql,
+        "SELECT id, scanning_since FROM stored_object WHERE state = 'scanning' AND scanning_since <= ? ORDER BY scanning_since LIMIT ?",
+        vec![(now - SCAN_DEADLINE_MS).into(), EXPIRED_SCANS_PER_ALARM.into()],
+    )?;
+    for row in &overdue {
+        let id = text(&row["id"]).unwrap_or_default();
+        let next = expire_scan(ObjectState::Scanning, int(&row["scanning_since"]), now);
+        exec(
+            sql,
+            "UPDATE stored_object SET state = ? WHERE id = ?",
+            vec![next.name().into(), id.as_str().into()],
+        )?;
+        let new = json!({ "state": next.name() }).to_string();
+        audit_as(
+            sql,
+            "scanner",
+            "system",
+            "object.scan_expired",
+            &id,
+            None,
+            Some(new),
+            now,
+        )?;
+        record_event(
+            sql,
+            "object.scan_expired",
+            "scanner",
+            None,
+            &Transition::NONE,
+            Vec::<String>::new(),
+            now,
+        )?;
+    }
+    Ok(())
+}
+
+/// When the room next has a scan to end, if any.
+pub(super) fn next_scan_expiry(sql: &SqlStorage, now: i64) -> R<Option<i64>> {
+    let found = rows(
+        sql,
+        "SELECT MIN(scanning_since) AS first FROM stored_object WHERE state = 'scanning'",
+        vec![],
+    )?;
+    Ok(found
+        .first()
+        .filter(|row| row["first"].is_number())
+        .map(|row| (int(&row["first"]) + SCAN_DEADLINE_MS).max(now + EXPIRY_REARM_MS)))
+}
+
 impl Workspace {
+    pub(super) fn expire_scans(&self) -> R<()> {
+        self.migrate_if_needed()?;
+        let sql = self.state.storage().sql();
+        transaction_sync(&self.state, move || expire_overdue_scans(&sql, now_ms()))
+    }
+
+    pub(super) fn scan_verdict(&self, body: Value) -> R<Value> {
+        let sql = self.state.storage().sql();
+        let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+        let slot = out.clone();
+        transaction_sync(&self.state, move || {
+            *slot.borrow_mut() = Some(record_verdict(&sql, &body, now_ms())?);
+            Ok(())
+        })?;
+        let value = out.borrow_mut().take();
+        value.ok_or_else(|| ApiError::internal("verdict produced no result"))
+    }
+
     /// The room's two steps around the bytes, each in a transaction of its own.
     pub(super) fn upload_step(&self, path: &str, body: Value) -> R<Value> {
         let sql = self.state.storage().sql();

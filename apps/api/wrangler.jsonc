@@ -16,11 +16,12 @@
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Workspace", "Principal"] }],
   // The real database ID is set when staging is created. Only the listing read model lives here.
   "d1_databases": [{ "binding": "DB", "database_name": "podster-api", "database_id": "local-only", "migrations_dir": "migrations" }]
-  // ASSERTION_KEYS is a secret: a JSON object of kid to base64url Ed25519 public key.
+  // ASSERTION_KEYS is a secret: a JSON object of kid to base64url Ed25519 public key. SCANNER_SECRET is the same value as the scanner
+  // Worker's, and without it no verdict is accepted.
   // Private, with no public access or S3 keys. Every byte goes through the API.
   ,"r2_buckets": [{ "binding": "ASSETS", "bucket_name": "podster-assets" }]
   ,"queues": {
-    "producers": [{ "binding": "WAKE", "queue": "podster-wake" }],
+    "producers": [{ "binding": "WAKE", "queue": "podster-wake" }, { "binding": "SCAN", "queue": "podster-scan" }],
     "consumers": [{ "queue": "podster-wake", "max_batch_size": 6, "max_batch_timeout": 5, "max_retries": 5 }]
   },
   "env": {
@@ -29,7 +30,7 @@
       "preview_urls": false,
       "r2_buckets": [{ "binding": "ASSETS", "bucket_name": "podster-assets-staging" }],
       "queues": {
-        "producers": [{ "binding": "WAKE", "queue": "podster-wake-staging" }],
+        "producers": [{ "binding": "WAKE", "queue": "podster-wake-staging" }, { "binding": "SCAN", "queue": "podster-scan-staging" }],
         "consumers": [{ "queue": "podster-wake-staging", "max_batch_size": 6, "max_batch_timeout": 5, "max_retries": 5 }]
       },
       "durable_objects": { "bindings": [

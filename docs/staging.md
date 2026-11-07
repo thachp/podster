@@ -205,6 +205,18 @@ npx wrangler d1 execute podster-gateway-staging --remote --env staging --command
 
 Run the journey in the [kernel success criteria](spec/PRODUCT.md#coordination-kernel-success-criteria) against the real hostname, and probe that the API has no public route.
 
+## The scanner's secret
+
+The API and `apps/scanner` share `SCANNER_SECRET`. Set the same value on both. Until both have it, nothing can record a verdict, so every file ends as `failed` after an hour, which is the safe way round.
+
+```bash
+cd apps/api && npx wrangler secret put SCANNER_SECRET --env staging
+```
+
+```bash
+cd apps/scanner && npx wrangler secret put SCANNER_SECRET --env staging
+```
+
 ## Checking uploads on staging
 
 `e2e/upload-check.mjs` sends real uploads down the deployed path, so it shows what the edge does with a chunked upload, which local runs can't. It needs a person's session cookie, and it leaves a room named "Upload check" behind.

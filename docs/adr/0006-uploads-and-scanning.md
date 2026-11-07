@@ -54,6 +54,8 @@ Downloads ask the room's Durable Object first. A link is checked against the roo
 
 ### Scanner
 
+**The API's side is built, locally:** after the room accepts a file, the API Worker queues `{ v, workspace_id, object_id, key, size, sha256 }`, with no name. The scanner answers `POST /internal/scan-result` over its service binding, with header `x-podster-scanner`. Only the secret `SCANNER_SECRET` lets a verdict in: anything else, including no secret being set, gets the same 404 as a route that isn't there. The room refuses a report whose hash or size isn't the file's, and won't take a clean report without its signature database. `record_scan` runs on every report, with no idempotency key, so a report can only tighten. The room's alarm ends a scan with no verdict after an hour, so a stuck scan, a lost queue message or a scanner that never answers all end as `failed`. `reason` can be a signature name, so it's stored and stays out of logs, events and audit entries.
+
 A queue consumer hands the object to a ClamAV Container and reports the result to the room, which records it after rechecking that the object exists. A result is recorded even if the room was archived in between.
 
 The Container runs hostile input, so it holds no secrets and has no access to rooms, and it has no outbound traffic, because signatures arrive with a scheduled image rebuild ([decision 83](../spec/PRODUCT.md#decisions-needed)). Anything it can't read is `blocked`. An object with no result after an hour becomes `failed`.

@@ -114,6 +114,12 @@ ALTER TABLE workspace ADD COLUMN plan_timezone TEXT;
 ", "
 CREATE TABLE stored_object (id TEXT PRIMARY KEY, name TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL, state TEXT NOT NULL, media_type TEXT, object_key TEXT, attempt_id TEXT, token_hash TEXT NOT NULL, uploaded_by TEXT NOT NULL, uploader_json TEXT, created_at INTEGER NOT NULL, upload_expires_at INTEGER NOT NULL, stored_at INTEGER, scanning_since INTEGER);
 CREATE INDEX stored_object_space ON stored_object (state, upload_expires_at, size);
+", "
+ALTER TABLE stored_object ADD COLUMN scan_reason TEXT;
+ALTER TABLE stored_object ADD COLUMN scan_sha256 TEXT;
+ALTER TABLE stored_object ADD COLUMN scan_database_json TEXT;
+ALTER TABLE stored_object ADD COLUMN scanned_at INTEGER;
+CREATE INDEX stored_object_scanning ON stored_object (scanning_since) WHERE state = 'scanning';
 "];
 
 pub fn int(value: &Value) -> i64 {

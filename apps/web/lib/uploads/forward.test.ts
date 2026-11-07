@@ -51,6 +51,20 @@ describe("forwardUpload", () => {
     expect(fake.calls).not.toHaveBeenCalled();
   });
 
+  it("answers something to try again when the gateway can't be reached", async () => {
+    const fake = gateway();
+    fake.calls.mockRejectedValue(new Error("Network connection lost"));
+    const response = await forwardUpload(upload(), fake, APP);
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ error: { code: "upstream_unavailable", message: "upstream_unavailable" } });
+  });
+
+  it("keeps how long a limit asks to wait", async () => {
+    const response = await forwardUpload(upload(), gateway(new Response('{"error":{"code":"rate_limited"}}', { status: 429, headers: { "retry-after": "60" } })), APP);
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("60");
+  });
+
   it("passes on the gateway's status and body, with none of its other headers, and isn't cached", async () => {
     const response = await forwardUpload(upload(), gateway(new Response('{"error":{"code":"upload_mismatch"}}', { status: 422, headers: { "set-cookie": "a=b" } })), APP);
     expect(response.status).toBe(422);

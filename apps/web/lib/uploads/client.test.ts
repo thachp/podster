@@ -14,6 +14,7 @@ class FakeRequest {
   body: unknown;
   status = 0;
   responseText = "";
+  responseHeaders: Record<string, string> = {};
   onerror?: () => void;
   onabort?: () => void;
   onload?: () => void;
@@ -26,6 +27,9 @@ class FakeRequest {
   send(body: unknown) {
     this.body = body;
     FakeRequest.sent.push(this);
+  }
+  getResponseHeader(name: string) {
+    return this.responseHeaders[name] ?? null;
   }
   abort() {
     this.onabort?.();
@@ -137,6 +141,7 @@ describe("uploadFile", () => {
 
   it.each([
     [502, "storage_unavailable"],
+    [502, "upstream_unavailable"],
     [408, "upload_timed_out"],
     [429, "rate_limited"],
   ])("offers a retry with the same reservation after %i %s", async (status, code) => {
@@ -151,6 +156,53 @@ describe("uploadFile", () => {
     second.answer(200, { id: "obj_1" });
     expect((await again).ok).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  describe("when the server asks to wait", () => {
+    beforeEach(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] }));
+    afterEach(() => vi.useRealTimers());
+
+    const limited = async (seconds: string, options = {}) => {
+      const done = uploadFile("ws_1", file(), options);
+      const request = await sent();
+      request.responseHeaders["retry-after"] = seconds;
+      request.answer(429, { error: { code: "rate_limited" } });
+      const failed = await done;
+      if (failed.ok || !failed.retry) throw new Error("expected a retry");
+      return failed;
+    };
+
+    it("waits that long before sending again", async () => {
+      const failed = await limited("60");
+      expect(failed.retryAfter).toBe(60);
+      void failed.retry!();
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(FakeRequest.sent).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(FakeRequest.sent).toHaveLength(2);
+    });
+
+    it("stops waiting when canceled, and sends nothing", async () => {
+      const stop = new AbortController();
+      const failed = await limited("60", { signal: stop.signal });
+      const again = failed.retry!();
+      stop.abort();
+      expect(await again).toEqual({ ok: false, status: 0, code: "upload_canceled" });
+      expect(FakeRequest.sent).toHaveLength(1);
+    });
+
+    it("has a ceiling, and ignores what isn't a number of seconds", async () => {
+      expect((await limited("86400")).retryAfter).toBe(300);
+      FakeRequest.sent = [];
+      expect((await limited("soon")).retryAfter).toBeUndefined();
+    });
+  });
+
+  it("reports a connection lost while reserving, rather than throwing", async () => {
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+    const result = await uploadFile("ws_1", file());
+    expect(result).toEqual({ ok: false, status: 0, code: "network_error" });
+    expect(FakeRequest.sent).toEqual([]);
   });
 
   it("offers a retry after a lost connection", async () => {

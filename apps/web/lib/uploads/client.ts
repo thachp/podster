@@ -1,6 +1,7 @@
 "use client";
 
 import { clientCommand } from "@/lib/gateway/client";
+import type { GatewayResult } from "@/lib/gateway/result";
 
 /** Only so a file that can't fit isn't read into memory to be hashed. The API decides, by what really arrives. */
 export const MAX_UPLOAD_BYTES = 100_000_000;
@@ -11,8 +12,11 @@ export type UploadedFile = { id: string; state: string; size: number; sha256: st
 
 export type UploadResult =
   | { ok: true; data: UploadedFile }
-  /** `retry` is there only when the same token can try again. It sends the bytes once more, and the token stays inside it. */
-  | { ok: false; status: number; code: string; retry?: () => Promise<UploadResult> };
+  /**
+   * `retry` is there only when the same token can try again. It sends the bytes once more, and the token stays inside it.
+   * `retryAfter` is how many seconds the server asked for, which `retry` waits out by itself.
+   */
+  | { ok: false; status: number; code: string; retry?: () => Promise<UploadResult>; retryAfter?: number };
 
 type Options = { signal?: AbortSignal; onProgress?: (progress: UploadProgress) => void };
 type Reservation = { upload_path: string; token: string };
@@ -21,6 +25,7 @@ type Reservation = { upload_path: string; token: string };
 // with only the answer lost, and then a retry answers `invalid_transition`.
 const CAN_RETRY = new Set(["network_error", "storage_unavailable", "upload_timed_out", "upstream_unavailable", "rate_limited"]);
 const CANCELED: UploadResult = { ok: false, status: 0, code: "upload_canceled" };
+const MAX_WAIT_SECONDS = 300;
 
 /**
  * Sends a file to a room: hashes it, reserves its space, then sends the bytes through this host's `/api`.
@@ -46,7 +51,13 @@ export async function uploadFile(workspaceId: string, file: File, options: Optio
   }
   if (signal?.aborted) return CANCELED;
   onProgress?.({ phase: "reserving" });
-  const reserved = await clientCommand<Reservation>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/uploads`, { name: file.name, size: file.size, sha256 });
+  let reserved: GatewayResult<Reservation>;
+  try {
+    reserved = await clientCommand<Reservation>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/uploads`, { name: file.name, size: file.size, sha256 });
+  } catch {
+    // No retry: without an answer there's no token, and whether space was reserved isn't known.
+    return { ok: false, status: 0, code: "network_error" };
+  }
   if (!reserved.ok) return reserved;
   const { upload_path: path, token } = reserved.data;
   return sendBytes(path, token, file, options);
@@ -56,7 +67,6 @@ const hex = (digest: ArrayBuffer) => [...new Uint8Array(digest)].map((byte) => b
 
 function sendBytes(path: string, token: string, file: File, options: Options): Promise<UploadResult> {
   const { signal, onProgress } = options;
-  const again = () => sendBytes(path, token, file, options);
   return new Promise((done) => {
     if (signal?.aborted) return done(CANCELED);
     const request = new XMLHttpRequest();
@@ -65,7 +75,15 @@ function sendBytes(path: string, token: string, file: File, options: Options): P
       signal?.removeEventListener("abort", abort);
       done(result);
     };
-    const failed = (status: number, code: string): UploadResult => (CAN_RETRY.has(code) ? { ok: false, status, code, retry: again } : { ok: false, status, code });
+    const failed = (status: number, code: string): UploadResult => {
+      if (!CAN_RETRY.has(code)) return { ok: false, status, code };
+      const retryAfter = secondsToWait(request.getResponseHeader("retry-after"));
+      const retry = async () => {
+        await pause(retryAfter, signal);
+        return sendBytes(path, token, file, options);
+      };
+      return retryAfter ? { ok: false, status, code, retry, retryAfter } : { ok: false, status, code, retry };
+    };
 
     signal?.addEventListener("abort", abort);
     request.open("PUT", `/api${path}`);
@@ -80,6 +98,24 @@ function sendBytes(path: string, token: string, file: File, options: Options): P
       finish(failed(request.status, (body as { error?: { code?: string } } | null)?.error?.code ?? "error"));
     };
     request.send(file);
+  });
+}
+
+/** Whole seconds only, which is all the gateway sends. Anything else is treated as no wait, and a long one has a ceiling. */
+function secondsToWait(header: string | null) {
+  return header && /^\d+$/.test(header) ? Math.min(Number(header), MAX_WAIT_SECONDS) : 0;
+}
+
+function pause(seconds: number, signal?: AbortSignal) {
+  return new Promise<void>((done) => {
+    if (!seconds || signal?.aborted) return done();
+    const finish = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      done();
+    };
+    const timer = setTimeout(finish, seconds * 1000);
+    signal?.addEventListener("abort", finish);
   });
 }
 

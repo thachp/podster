@@ -59,8 +59,8 @@ function AvailablePanel({ forecast, form }: { forecast: GanttForecast; form: Rea
       </dl>
       {shift ? <p className="rounded-lg bg-status-amber-surface p-2 text-status-amber">{shift}</p> : null}
       <ul className="list-disc space-y-0.5 pl-5 text-muted-foreground">
-        {forecast.assumptions.map((assumption) => (
-          <li key={assumption}>{assumption}</li>
+        {forecast.assumptions.map((assumption, index) => (
+          <li key={index}>{assumption}</li>
         ))}
       </ul>
       {forecast.leftOut.length > 0 ? <LeftOut names={forecast.leftOut} /> : null}

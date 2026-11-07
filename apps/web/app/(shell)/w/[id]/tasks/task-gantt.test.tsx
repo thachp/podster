@@ -362,10 +362,13 @@ describe("the timeline", () => {
   it("marks weekends in text as well as shading, and draws only the links it has both ends of", async () => {
     await planned({}, { edges: [{ predecessor: "a", successor: "b" }, { predecessor: "b", successor: "c" }, { predecessor: "hidden", successor: "a" }] });
     const region = screen.getByRole("region", { name: "Timeline" });
-    expect(within(region).getAllByText("S")).toHaveLength(2);
+    expect(within(region).getAllByText("Sa")).toHaveLength(1);
+    expect(within(region).getAllByText("Su")).toHaveLength(1);
+    expect(within(region).getAllByText("Tu")).toHaveLength(2);
+    expect(within(region).getAllByText("Th")).toHaveLength(2);
     expect(region.querySelectorAll("rect")).toHaveLength(2);
     expect(region.querySelectorAll('path[marker-end]')).toHaveLength(2);
-    expect(screen.getByText(/columns marked S are weekends/)).toBeInTheDocument();
+    expect(screen.getByText(/columns marked Sa and Su are weekends/)).toBeInTheDocument();
   });
 
   it("draws no line for a link to a task that isn't a row here", async () => {
@@ -389,6 +392,47 @@ describe("the timeline", () => {
       expect(screen.getByRole("region", { name: "Timeline" }).querySelectorAll('line[stroke-dasharray]')).toHaveLength(0);
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["on its timer", () => vi.advanceTimersByTime(60_000)],
+    ["when the tab shows again", () => document.dispatchEvent(new Event("visibilitychange"))],
+  ])("moves Today past the room's midnight in a tab left open, %s", async (_, wake) => {
+    // 11:30 PM on Nov 4 in New York, which is already Nov 5 in UTC.
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"], now: Date.UTC(2026, 10, 5, 4, 30) });
+    try {
+      await planned();
+      expect(screen.getByText(/Today is Nov 4, 2026 in America/)).toBeInTheDocument();
+      vi.setSystemTime(Date.UTC(2026, 10, 5, 5, 30));
+      act(() => wake());
+      expect(screen.getByText(/Today is Nov 5, 2026 in America/)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops its clock when it's gone", async () => {
+    planReply = () => json(withForecast());
+    const shown = render(<TasksScreen {...props(threeTasks)} />);
+    await screen.findByRole("region", { name: "Timeline" });
+    const stopped = vi.spyOn(globalThis, "clearInterval");
+    const removed = vi.spyOn(document, "removeEventListener");
+    shown.unmount();
+    expect(stopped).toHaveBeenCalled();
+    expect(removed).toHaveBeenCalledWith("visibilitychange", expect.any(Function));
+    stopped.mockRestore();
+    removed.mockRestore();
+  });
+
+  it("keeps two identical assumptions without a clash", async () => {
+    const complaints = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await planned({ assumptions: ["The same words.", "The same words."] });
+      expect(screen.getAllByText("The same words.")).toHaveLength(2);
+      expect(complaints.mock.calls.flat().join(" ")).not.toMatch(/same key/);
+    } finally {
+      complaints.mockRestore();
     }
   });
 

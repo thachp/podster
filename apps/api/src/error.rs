@@ -10,7 +10,7 @@ pub enum ApiError {
 }
 
 impl ApiError {
-    const fn api(status: u16, code: &'static str) -> ApiError {
+    pub const fn api(status: u16, code: &'static str) -> ApiError {
         ApiError::Api { status, code }
     }
     pub fn invalid_assertion() -> ApiError {

@@ -73,6 +73,7 @@ const INVITATION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 type Identity = Verified;
 
 mod collaboration;
+mod objects;
 mod plan;
 mod planned;
 mod roles;
@@ -3375,13 +3376,11 @@ impl Workspace {
                     .ok_or_else(ApiError::invalid_argument)?,
             );
         }
-        let identity: Identity = req
+        let raw_identity = req
             .headers()
             .get(CALLER_HEADER)?
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()?
             .ok_or_else(|| ApiError::internal("missing caller"))?;
+        let identity: Identity = serde_json::from_str(&raw_identity)?;
         let sql = self.state.storage().sql();
         let method = req.method();
         let path = req.path();
@@ -3416,6 +3415,11 @@ impl Workspace {
         if store::needs_migration(&sql)? {
             let migrating = sql.clone();
             transaction_sync(&self.state, move || store::migrate(&migrating))?;
+        }
+        if path == crate::INTERNAL_UPLOAD_BEGIN || path == crate::INTERNAL_UPLOAD_COMPLETE {
+            let body: Value = serde_json::from_str(&req.text().await?)
+                .map_err(|_| ApiError::invalid_argument())?;
+            return self.upload_step(&path, body);
         }
         let path_parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
         if cfg!(feature = "failpoints") {
@@ -3632,6 +3636,17 @@ impl Workspace {
                     move |sql, who, now| {
                         handle_change_role(sql, &who.caller, &target, &body, target_member, now)
                     },
+                )
+            }
+            (Method::Post, ["uploads"]) => {
+                let raw = raw_identity.clone();
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| objects::handle_create(sql, &who.caller, &raw, &body, now),
                 )
             }
             (Method::Put, ["plan", "start"]) => self.command(

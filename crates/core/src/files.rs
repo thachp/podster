@@ -419,6 +419,45 @@ pub struct FileSample<'a> {
     pub total_size: u64,
 }
 
+/// Collects a file's ends as it streams past, for `FileSample`. It holds at most twice the tail's sample, plus one chunk, however
+/// large the file is.
+#[derive(Clone, Default)]
+pub struct FileEnds {
+    head: Vec<u8>,
+    tail: Vec<u8>,
+}
+
+impl FileEnds {
+    pub fn add(&mut self, chunk: &[u8]) {
+        let room = SAMPLE_HEAD_BYTES.saturating_sub(self.head.len());
+        self.head.extend(chunk.iter().take(room));
+        self.tail.extend_from_slice(chunk);
+        // Only past twice the sample, so most chunks move nothing.
+        if self.tail.len() > SAMPLE_TAIL_BYTES * 2 {
+            let extra = self.tail.len() - SAMPLE_TAIL_BYTES;
+            self.tail.drain(..extra);
+        }
+    }
+
+    pub fn head(&self) -> &[u8] {
+        &self.head
+    }
+
+    pub fn tail(&self) -> &[u8] {
+        let extra = self.tail.len().saturating_sub(SAMPLE_TAIL_BYTES);
+        self.tail.get(extra..).unwrap_or_default()
+    }
+}
+
+impl fmt::Debug for FileEnds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileEnds")
+            .field("head_bytes", &self.head.len())
+            .field("tail_bytes", &self.tail.len())
+            .finish()
+    }
+}
+
 impl fmt::Debug for FileSample<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FileSample")
@@ -924,7 +963,8 @@ impl fmt::Debug for Arrival<'_> {
     }
 }
 
-fn is_sha256(hash: &str) -> bool {
+/// Lower-case hex, the only form one is compared in.
+pub fn is_sha256(hash: &str) -> bool {
     hash.len() == 64 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 

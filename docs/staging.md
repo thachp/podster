@@ -204,3 +204,20 @@ npx wrangler d1 execute podster-gateway-staging --remote --env staging --command
 ## After a deploy
 
 Run the journey in the [kernel success criteria](spec/PRODUCT.md#coordination-kernel-success-criteria) against the real hostname, and probe that the API has no public route.
+
+## Checking uploads on staging
+
+`e2e/upload-check.mjs` sends real uploads down the deployed path, so it shows what the edge does with a chunked upload, which local runs can't. It needs a person's session cookie, and it leaves a room named "Upload check" behind.
+
+```bash
+cd e2e && PODSTER_E2E_COOKIE_A='<cookie>' node upload-check.mjs --base-url https://gateway-staging.podster.dev --big
+```
+
+**CPU time:** a Worker can't read its own, because its clock doesn't move while it computes. Read it from the platform, with this running while the check does:
+
+```bash
+cd apps/api && npx wrangler tail podster-api --env staging --format json --search upload.stored
+```
+
+Each stored file logs one `upload.stored` line, with the object ID, bytes, chunks and wall time. Compare the invocation's CPU time with the limit, which is 30 seconds unless `limits.cpu_ms` raises it. An outcome of `exceededCpu` means it went over.
+

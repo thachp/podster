@@ -388,6 +388,23 @@ paths:
   /v1/workspaces/{ws}/plan:
     parameters: [{ $ref: "#/components/parameters/ws" }]
     get: { operationId: getPlan, tags: [queries], parameters: [{ name: scope, in: query, required: false, schema: { type: string, enum: [unfinished] }, description: "`unfinished` lists only unfinished tasks. `complete` is then always false, because finished tasks are left out, so don't work out a finish from it. Someone who sees the whole room still gets every unfinished task, each one's whole predecessor list and `plan_revision`, so it's enough to edit from, and a predecessor that's finished shows only as an ID in `edges`. Someone limited to their own tasks gets those of their tasks that are unfinished, and only edges with both ends among them. It shows them only tasks they're named on, and it has no per-column cut, so someone named on over 3,001 tasks can see an older one of their own here that the default read leaves out. Any other value gets `invalid_argument`" }], summary: "One read with `forecast`, a `PlanForecast` that every viewer gets, and `start`, `{ date, timezone }` or null, only for someone who can have a forecast. One read of the room's plan: `tasks` with `id`, `title`, `status`, `assignee`, `reviewer` and `duration_days`, where null means not estimated, plus `edges` of `predecessor` and `successor`, and `complete`. Someone who sees the whole room also gets `plan_revision` and `plan_changed_at`. Someone limited to their own tasks gets only those and the edges between them, with `complete` false and no revision or time. `complete` is also false over 3,000 tasks, or with more than 5,000 finished tasks' edges. A read holds unfinished tasks first, then the newest finished ones, so someone who sees the whole room always gets every task whose plan can change, and each one's whole predecessor list, even if a predecessor is too old to be listed. Don't work out a finish from an incomplete plan", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/workspaces/{ws}/uploads:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    post:
+      operationId: createUpload
+      tags: [commands]
+      summary: "Start an upload, reserving its space: at most 100 MB a file and 5 GB a room, counting every file kept and every upload that hasn't expired. Only someone who may upload an input asset can. The answer has `id`, the cleaned `name`, `size`, `state` of `uploading`, `expires_at` an hour on, `upload_path` and `token`. `token` is returned once, and a retry with the same idempotency key answers without it, so that caller starts a new upload. Refusals: `file_too_large` (413), `room_quota_exceeded` and `workspace_archived` (409), `invalid_file_name` (422), `executable_refused` (415)"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/CreateUpload" } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/uploads/{ws}/{object}:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: object, in: path, required: true, schema: { type: string } }]
+    put:
+      operationId: putUploadBytes
+      tags: [commands]
+      summary: "The file's bytes, with `Authorization: Bearer <token>` from `createUpload`, and no session. A declared length isn't needed: a chunked upload works, and what's enforced is the size and SHA-256 given to `createUpload`. It can be tried again until `expires_at`. The room checks each time that whoever asked for the upload is still there and may still upload. On success the answer has `id`, `state` of `scanning`, `size`, `sha256` and `media_type`, which comes from the file's content. A file in `scanning` can't be downloaded. Refusals: `upload_not_found` (404) for an unknown or expired upload or a wrong token, `upload_mismatch` (422) when what arrived isn't what was announced, `file_too_large` (413) as an early answer to a declared length, 415 for a type that isn't allowed, `invalid_transition` (409) if it already arrived, or if a newer attempt replaced this one, and `storage_unavailable` (502), which can be tried again"
+      requestBody: { required: true, content: { application/octet-stream: { schema: { type: string, format: binary } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/plan/start:
     parameters: [{ $ref: "#/components/parameters/ws" }]
     put:
@@ -601,6 +618,14 @@ components:
         reviewer: { type: string }
         due_at: { type: integer }
         follow_up_of: { type: string }
+    CreateUpload:
+      type: object
+      required: [name, size, sha256]
+      additionalProperties: false
+      properties:
+        name: { type: string, description: "The file's name, which is cleaned. It's agent content, and never reaches a log or an event." }
+        size: { type: integer, minimum: 1, maximum: 100000000, description: "The exact size in bytes." }
+        sha256: { type: string, pattern: "^[0-9a-f]{64}$", description: "The file's SHA-256, in lower-case hex." }
     SetPlanStart:
       type: object
       required: [start_date, timezone, plan_revision]

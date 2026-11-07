@@ -4,6 +4,7 @@
 #![allow(clippy::indexing_slicing)]
 
 mod error;
+mod objects;
 mod principal;
 mod store;
 mod wake;
@@ -27,6 +28,8 @@ const CARD_TIMEOUT_MS: u64 = if cfg!(feature = "failpoints") {
 pub const INTERNAL_INIT_PATH: &str = "/internal/init";
 pub const INTERNAL_ACCEPT_PATH: &str = "/internal/accept";
 pub const INTERNAL_PREVIEW_PATH: &str = "/internal/invitation-preview";
+pub const INTERNAL_UPLOAD_BEGIN: &str = "/internal/upload-begin";
+pub const INTERNAL_UPLOAD_COMPLETE: &str = "/internal/upload-complete";
 pub const AGENT_ID_PREFIX: &str = "agt_";
 const MAX_ID_BYTES: usize = 128;
 const OVERSIGHT_ORGS: usize = 50;
@@ -282,6 +285,18 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
         let body: Value = req.json().await?;
         let retry = wake::process(&env, body["agent"].as_str().unwrap_or_default()).await?;
         return Ok(Response::from_json(&json!({ "retry": retry }))?);
+    }
+
+    // The bytes of an upload carry its token, not an assertion, and the room checks that against who asked for the upload.
+    if req.method() == Method::Put {
+        if let ["v1", "uploads", room, id] = path
+            .trim_start_matches('/')
+            .split('/')
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            return objects::stream_upload(req, env, room, id).await;
+        }
     }
 
     let token = req

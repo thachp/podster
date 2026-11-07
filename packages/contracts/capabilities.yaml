@@ -10,6 +10,7 @@ capabilities:
   claim_role: { kind: command, operation: claimRole }
   release_role: { kind: command, operation: releaseRole }
   create_task: { kind: command, operation: createTask }
+  create_upload: { kind: command, operation: createUpload }
   list_tasks: { kind: query, operation: listTasks }
   get_task: { kind: query, operation: getTask }
   get_plan: { kind: query, operation: getPlan }
@@ -86,3 +87,6 @@ person_only:
   - registerAgent
   - disconnectAgent
   - reconnectAgent
+# Not a call an agent makes through a tool: raw bytes, sent to the path `create_upload` returned, with its token.
+transfer_only:
+  - putUploadBytes

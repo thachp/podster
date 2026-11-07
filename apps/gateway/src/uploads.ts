@@ -1,0 +1,29 @@
+/**
+ * The bytes of an upload, on their way to the API, which decides everything. The token is what `create_upload` returned, so
+ * this needs no session or credential of its own, and passes it on without reading it.
+ *
+ * A declared length is only for an early answer. A chunked upload carries none, and the API counts what really arrives.
+ */
+const UPLOAD_PATH = /^\/v1\/uploads\/([\w-]+)\/([\w-]+)$/;
+const MAX_FILE_BYTES = 100_000_000;
+
+const answer = (code: string, status: number, headers: Record<string, string> = {}) =>
+  new Response(JSON.stringify({ error: { code, message: code } }), { status, headers: { "content-type": "application/json", ...headers } });
+
+export async function handleUpload(request: Request, url: URL, api: Fetcher, withinLimit: (key: string) => Promise<boolean>): Promise<Response | null> {
+  const path = url.pathname.match(UPLOAD_PATH);
+  if (!path) return null;
+  if (request.method !== "PUT") return answer("not_found", 405, { allow: "PUT" });
+  if (Number(request.headers.get("content-length") ?? 0) > MAX_FILE_BYTES) return answer("file_too_large", 413);
+  if (!(await withinLimit(`upload:${path[1]}:${path[2]}`))) return answer("rate_limited", 429, { "retry-after": "60" });
+  const headers = new Headers();
+  const token = request.headers.get("authorization");
+  if (token) headers.set("authorization", token);
+  try {
+    // No timeout, as a large file on a slow connection takes as long as it takes, and it ends if the sender goes away.
+    const response = await api.fetch(new Request(`https://api.internal${url.pathname}`, { method: "PUT", headers, body: request.body }));
+    return new Response(response.body, { status: response.status, headers: { "content-type": "application/json" } });
+  } catch {
+    return answer("upstream_unavailable", 502);
+  }
+}

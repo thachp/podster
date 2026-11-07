@@ -12,6 +12,7 @@ import { mintAssertion, type Identity } from "./assertion";
 import { CAPABILITIES, InvalidArguments, jsonSchema, toApiCall, zodShape, type ApiCall, type Capability } from "./capabilities";
 import { EMAIL_LINK_ROUTE, EMAIL_LINK_SECONDS, EMAIL_VERIFY_ROUTE, emailSignInEnabled, handleEmailLink, handleEmailVerify, linkMustNotReach, linkTokenHash, sendSignInLink, type EmailBinding } from "./email-sign-in";
 import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TEST_SIGNUP_ROUTE } from "./test-people";
+import { handleUpload } from "./uploads";
 
 export interface Env {
   DB: D1Database;
@@ -457,7 +458,8 @@ export const sameOrigin = (request: Request, env: Env) => request.headers.get("o
 export function allowedPassthrough(path: string) {
   // Something between here and the API may collapse a double slash, which would slip past the prefix checks below.
   if (!path.startsWith("/v1/") || path.includes("//")) return false;
-  return !path.startsWith("/v1/agents") && !path.startsWith("/v1/inbox") && !path.startsWith("/v1/org-departures");
+  // An upload's bytes have their own path, and this one would read them all into memory.
+  return !path.startsWith("/v1/agents") && !path.startsWith("/v1/inbox") && !path.startsWith("/v1/org-departures") && !path.startsWith("/v1/uploads");
 }
 
 /**
@@ -1051,6 +1053,8 @@ const appHandler = {
     const env = forPublicHost(request, publicEnv);
     const url = new URL(request.url);
     const onApplicationHost = env !== publicEnv;
+    const upload = await handleUpload(request, url, publicEnv.API, (key) => withinLimit(publicEnv.RL_ACCOUNT, key));
+    if (upload) return upload;
     if (publicEnv.APP_URL && !onApplicationHost) {
       const moved = await movedToApplicationHost(request, publicEnv, publicEnv.APP_URL);
       if (moved) return moved;

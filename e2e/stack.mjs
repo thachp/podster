@@ -81,9 +81,9 @@ export function prepareStack({ skipBuild = false } = {}) {
 }
 
 /** Starts a Worker's `wrangler dev` in its own process group, so it can be stopped with all its children. */
-export function startWrangler({ cwd, command = wrangler, args, env = {} }) {
+export function startWrangler({ cwd, command = wrangler, args, env = {}, logLevel = "warn" }) {
   const log = [];
-  const stack = spawn(command, ["dev", ...args, "--ip", "127.0.0.1", "--show-interactive-dev-session=false", "--log-level", "warn"], { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...process.env, ...quiet, ...env } });
+  const stack = spawn(command, ["dev", ...args, "--ip", "127.0.0.1", "--show-interactive-dev-session=false", "--log-level", logLevel], { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...process.env, ...quiet, ...env } });
   for (const stream of [stack.stdout, stack.stderr]) stream.on("data", (chunk) => log.push(chunk.toString()));
   let stopped = false;
   const stop = () => {
@@ -100,7 +100,7 @@ export function startWrangler({ cwd, command = wrangler, args, env = {} }) {
   return { stack, log, stop };
 }
 
-export function startGateway({ gateway: cwd, apiConfig, persist, vars, port, inspectorPort, gatewayConfig = join(cwd, "wrangler.jsonc"), extraArgs = [], env = {} }) {
+export function startGateway({ gateway: cwd, apiConfig, persist, vars, port, inspectorPort, gatewayConfig = join(cwd, "wrangler.jsonc"), extraArgs = [], env = {}, logLevel }) {
   const args = ["-c", gatewayConfig, "-c", apiConfig, ...Object.entries(vars).flatMap(([name, value]) => ["--var", `${name}:${value}`]), ...extraArgs, "--port", String(port), "--inspector-port", String(inspectorPort), "--persist-to", persist];
-  return startWrangler({ cwd, args, env });
+  return startWrangler({ cwd, args, env, logLevel });
 }

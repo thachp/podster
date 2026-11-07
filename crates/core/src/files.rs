@@ -342,6 +342,14 @@ pub struct AcceptedUpload {
     pub size: u64,
 }
 
+/// Whether a file fits beside what the room already holds. Asked when an upload starts, and again when one finishes after its
+/// reservation has lapsed, because the room may have filled up since.
+pub fn fits_room_quota(room_used: u64, size: u64) -> bool {
+    room_used
+        .checked_add(size)
+        .is_some_and(|total| total <= ROOM_QUOTA_BYTES)
+}
+
 /// Checks a request before any byte arrives. Who may ask is `podster-policy`'s question, and it runs first.
 pub fn check_upload(request: UploadRequest<'_>) -> Result<AcceptedUpload, FileRefusal> {
     if request.room_archived {
@@ -353,11 +361,7 @@ pub fn check_upload(request: UploadRequest<'_>) -> Result<AcceptedUpload, FileRe
     if request.size > MAX_FILE_BYTES {
         return Err(FileRefusal::TooLarge);
     }
-    let within_quota = request
-        .room_used
-        .checked_add(request.size)
-        .is_some_and(|total| total <= ROOM_QUOTA_BYTES);
-    if !within_quota {
+    if !fits_room_quota(request.room_used, request.size) {
         return Err(FileRefusal::QuotaExceeded);
     }
     let name = clean_file_name(request.name)?;
@@ -437,6 +441,45 @@ pub struct FileSample<'a> {
     pub head: &'a [u8],
     pub tail: &'a [u8],
     pub total_size: u64,
+}
+
+/// Collects a file's ends as it streams past, for `FileSample`. It holds at most twice the tail's sample, plus one chunk, however
+/// large the file is.
+#[derive(Clone, Default)]
+pub struct FileEnds {
+    head: Vec<u8>,
+    tail: Vec<u8>,
+}
+
+impl FileEnds {
+    pub fn add(&mut self, chunk: &[u8]) {
+        let room = SAMPLE_HEAD_BYTES.saturating_sub(self.head.len());
+        self.head.extend(chunk.iter().take(room));
+        self.tail.extend_from_slice(chunk);
+        // Only past twice the sample, so most chunks move nothing.
+        if self.tail.len() > SAMPLE_TAIL_BYTES * 2 {
+            let extra = self.tail.len() - SAMPLE_TAIL_BYTES;
+            self.tail.drain(..extra);
+        }
+    }
+
+    pub fn head(&self) -> &[u8] {
+        &self.head
+    }
+
+    pub fn tail(&self) -> &[u8] {
+        let extra = self.tail.len().saturating_sub(SAMPLE_TAIL_BYTES);
+        self.tail.get(extra..).unwrap_or_default()
+    }
+}
+
+impl fmt::Debug for FileEnds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileEnds")
+            .field("head_bytes", &self.head.len())
+            .field("tail_bytes", &self.tail.len())
+            .finish()
+    }
 }
 
 impl fmt::Debug for FileSample<'_> {
@@ -944,7 +987,8 @@ impl fmt::Debug for Arrival<'_> {
     }
 }
 
-fn is_sha256(hash: &str) -> bool {
+/// Lower-case hex, the only form one is compared in.
+pub fn is_sha256(hash: &str) -> bool {
     hash.len() == 64 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 

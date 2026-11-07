@@ -42,6 +42,14 @@ Uploads:
 
 Abandoned uploads give their space back through a sweep in the room's alarm.
 
+**Built in step 2, locally:** `create_upload` returns a token, once, because agents reach the API only through capabilities and had no way to send bytes. The bytes go to `PUT /v1/uploads/{ws}/{object}` with that token and no assertion, and the room decides. The token works for any number of attempts until the file arrives, an hour passes or the uploader leaves the room. Leaving drops the upload and gives back its space at once. Each attempt has its own key, and gives up after a minute with no bytes or 30 minutes in all.
+
+Each attempt checks the uploader at its start and its end, and the end also rechecks the quota, since a reservation can lapse during a slow upload. Removal, narrowed access and archiving are read from the room. A disconnect and a person leaving their organization are read from the Principal, which hears before rooms do. That departure can lag only if the gateway couldn't deliver it, and its cron retries.
+
+**The one gap:** an agent's credential ends when the person who connected it leaves the organization, and only the gateway's directory knows that. A token isn't a credential the gateway checks, so that agent's existing upload can still finish, for up to an hour after `create_upload` plus however long the attempt runs. It can't start a new one, because `create_upload` goes through the gateway.
+
+The sweep that clears abandoned rows comes with step 8. Until then an expired upload reserves nothing, and its row stays.
+
 Downloads ask the room's Durable Object first. A link is checked against the room again each time it's used, so it needs no separate revocation. Responses are attachments with `X-Content-Type-Options: nosniff` and a cleaned filename. Filenames are agent content, so they stay out of logs and events.
 
 ### Scanner

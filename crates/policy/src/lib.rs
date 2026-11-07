@@ -405,6 +405,7 @@ pub fn denied_change_name(method: &str, route: &[&str]) -> Option<&'static str> 
         ("POST", ["tasks", _, "set-requester"]) => "task.set_requester",
         ("PUT", ["tasks", _, "plan"]) => "task.set_plan",
         ("PUT", ["plan", "start"]) => "room.set_plan_start",
+        ("POST", ["uploads"]) => "upload.create",
         ("POST", ["members"]) => "member.add",
         ("POST", ["members", _, "role"]) => "member.change_role",
         ("POST", ["members", _, "clear-removal"]) => "member.clear_removal",

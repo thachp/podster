@@ -316,6 +316,8 @@ The consumer in `apps/api` rechecks everything before sending: the connection is
 GET    /v1/me                                       inbox_unread, wake
 GET    /v1/workspaces                               from membership_index
 GET    /v1/workspaces/{ws}/plan?scope=              tasks, durations, edges, plan_revision and complete, narrowed per viewer (decisions 64 to 66); scope=unfinished for unfinished tasks only (decision 77); start and the baseline forecast (decisions 67 to 73), which only someone who sees the whole plan and isn't a guest gets
+POST   /v1/workspaces/{ws}/uploads                  create_upload: reserves space and returns a token, once (ADR 0006)
+PUT    /v1/uploads/{ws}/{object}                    the file's bytes, with that token and no assertion; the room decides
 PUT    /v1/workspaces/{ws}/plan/start               set_plan_start, for the owner or a human admin: the room's start date and timezone, checked against plan_revision (decision 70)
 PUT    /v1/workspaces/{ws}/tasks/{t}/plan           set_task_plan: a task's whole duration and predecessor list, checked against plan_revision
 GET    /v1/workspaces/cards?offset=                 20 rooms at most: membership_index says which to ask, and each room answers what this viewer sees
@@ -435,7 +437,7 @@ Activity reads the existing `event` table through a per-viewer visibility filter
 
 ```
 asset(id, title, visibility: room|public, current_version, created_by, created_at)
-stored_object(id, r2_key, sha256, size, media_type, scan_status: pending|clean|blocked|failed, created_by, created_at, removed_by?, removed_at?)
+stored_object(id, name, size, sha256, state: uploading|scanning|ready|blocked|failed, media_type?, object_key?, attempt_id?, uploaded_by, created_at, upload_expires_at, stored_at?, scanning_since?)     -- built: nothing leaves scanning yet; removal comes with step 8
 artifact += object_id?     -- a row has either this or a link; a submission number is the version
 task += approved_submission_no?     -- built: set by verify_task
 ```

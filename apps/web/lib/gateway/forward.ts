@@ -34,6 +34,43 @@ export function forwardedHeaders(incoming: Headers) {
   return headers;
 }
 
+/**
+ * The largest body a dashboard route takes is one command, whose fields together stay under 200 KB, so this leaves room
+ * for JSON escaping and still keeps an anonymous caller from making this Worker hold an unbounded body.
+ */
+export const MAX_FORWARDED_BODY_BYTES = 1024 * 1024;
+
+/** Reads the stream as well as trusting the header, because a chunked body has no length. Null once it passes the limit. */
+export async function boundedBody(request: Request, limit: number): Promise<Uint8Array<ArrayBuffer> | null> {
+  const declared = request.headers.get("content-length");
+  if (declared !== null && !(Number(declared) <= limit)) {
+    await request.body?.cancel().catch(() => undefined);
+    return null;
+  }
+  const reader = request.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (reader) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  const body = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
+
+const tooLarge = () => Response.json({ error: { code: "body_too_large", message: "body_too_large" } }, { status: 413, headers: { "cache-control": "no-store" } });
+
 /** The only way browser code reaches anything behind this Worker. The gateway authenticates, and Rust decides. */
 export async function forwardToGateway(request: Request, gateway: Pick<Fetcher, "fetch">, appUrl: string): Promise<Response> {
   const url = new URL(request.url);
@@ -43,10 +80,12 @@ export async function forwardToGateway(request: Request, gateway: Pick<Fetcher, 
   // Only here, where the gateway checks a sign-in link came from its landing page. A referrer can hold anything otherwise.
   const referer = request.headers.get("referer");
   if (url.pathname === "/api/auth/magic-link/verify" && referer) sent.set("referer", referer);
+  const body = hasBody ? await boundedBody(request, MAX_FORWARDED_BODY_BYTES) : undefined;
+  if (body === null) return tooLarge();
   const response = await gateway.fetch(new URL(url.pathname + url.search, appUrl).toString(), {
     method: request.method,
     headers: sent,
-    body: hasBody ? await request.arrayBuffer() : undefined,
+    body,
     redirect: "manual",
   });
   // Set-Cookie and Location pass through, so a session and a provider's redirect land on this host.

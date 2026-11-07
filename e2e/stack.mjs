@@ -21,15 +21,27 @@ export function run(command, args, cwd, env = {}) {
   if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed in ${cwd}`);
 }
 
-export const freePort = () =>
-  new Promise((done, fail) => {
+// Below the range the system hands out for port 0: 32768 and up on Linux, 49152 and up on macOS. The port is only checked here and bound
+// later, and the Workers bind many port 0 sockets while starting, so a port from that range can be taken in between.
+const PORTS = { first: 20_000, last: 32_767 };
+const handedOut = new Set();
+
+const isFree = (port) =>
+  new Promise((done) => {
     const server = createServer();
-    server.on("error", fail);
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address();
-      server.close(() => done(port));
-    });
+    server.on("error", () => done(false));
+    server.listen(port, "127.0.0.1", () => server.close(() => done(true)));
   });
+
+export async function freePort() {
+  for (let tries = 0; tries < 200; tries++) {
+    const port = PORTS.first + Math.floor(Math.random() * (PORTS.last - PORTS.first + 1));
+    if (handedOut.has(port) || !(await isFree(port))) continue;
+    handedOut.add(port);
+    return port;
+  }
+  throw new Error(`no free port between ${PORTS.first} and ${PORTS.last}`);
+}
 
 /** Builds the API, makes throwaway keys, writes its local config and applies both apps' migrations. */
 export function prepareStack({ skipBuild = false } = {}) {

@@ -38,7 +38,7 @@ A failure never lets a file through.
 
 A scanner only recognizes known malware. Podster says **No known malware found**, and never says a file is **safe**, **clean** or **virus-free** on a screen.
 
-The scanner is [ClamAV in Cloudflare Containers](../adr/0006-uploads-and-scanning.md#scanner), on condition that a spike on staging passes. The spike [ran on staging](../adr/0006-uploads-and-scanning.md#spike-results), and the owner hasn't yet ruled on whether it passed.
+The scanner is [ClamAV in Cloudflare Containers](../adr/0006-uploads-and-scanning.md#scanner), which [passed a spike on staging](../adr/0006-uploads-and-scanning.md#spike-results). Scanning stops when its signatures pass 7 days old, and a file waiting then ends as Scan failed ([decision 84](PRODUCT.md#decisions-needed)).
 
 ## Downloads
 

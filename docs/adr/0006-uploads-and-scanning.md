@@ -1,13 +1,13 @@
 # ADR 0006: Uploads and scanning
 
-**Status:** On 2026-11-06 the owner accepted the choices below, now [decisions 50 to 59](../spec/PRODUCT.md#decisions-needed). The scanner is conditional on a spike. The owner approved the billed staging resources and the spike. The spike ran on staging on 2026-11-07, and [its results are below](#spike-results). Whether ClamAV passed is the owner's to accept, and [that's still open](#for-the-owner-to-rule-on). The design that follows from the choices is **proposed** and isn't built. The rules people see are in the [upload policy](../spec/UPLOAD-POLICY.md), and the order of work is in the [M2 plan](../m2-plan.md).
+**Status:** On 2026-11-06 the owner accepted the choices below, now [decisions 50 to 59](../spec/PRODUCT.md#decisions-needed). The scanner is conditional on a spike. The spike ran on staging on 2026-11-07, [its results are below](#spike-results), and the owner accepted that ClamAV passed, as [decision 81](../spec/PRODUCT.md#decisions-needed). The design that follows from the choices is **proposed** and isn't built. The rules people see are in the [upload policy](../spec/UPLOAD-POLICY.md), and the order of work is in the [M2 plan](../m2-plan.md).
 
 ## The owner's choices
 
 | # | Choice | Accepted | Why |
 | --- | --- | --- | --- |
 | 50 | Limits and types | 100 MB per file, 5 GB per room. Documents, images, text, code, presentations, video and zip. No executables or password-protected files | 100 MB is the request limit on Cloudflare's Free and Pro plans |
-| 51 | Scanner | ClamAV in Cloudflare Containers, if the spike passes. Otherwise a hosted API with a no-retention contract, and never one that shares samples | Files stay in the account. Cloudflare's own upload scanning needs an Enterprise plan with a paid add-on |
+| 51 | Scanner | ClamAV in Cloudflare Containers, because the spike passed ([decision 81](../spec/PRODUCT.md#decisions-needed)). If it has to be replaced, a hosted API with a no-retention contract, and never one that shares samples | Files stay in the account. Cloudflare's own upload scanning needs an Enterprise plan with a paid add-on |
 | 52 | Previews | Download only in M2 | No content domain is needed, and no agent-written HTML runs near the app |
 | 53 | Input assets | Owner, admin, member and Coordinator upload. Whole-room viewers see all, and guests see only assets linked to their tasks | Guests get what their work needs |
 | 54 | Expected outputs | Owner and admins define them, requesters link tasks, and the lead comes later. All participants see titles and status | Outputs are the room's goal |
@@ -48,9 +48,9 @@ Downloads ask the room's Durable Object first. A link is checked against the roo
 
 A queue consumer hands the object to a ClamAV Container and reports the result to the room, which records it after rechecking that the object exists. A result is recorded even if the room was archived in between.
 
-The Container runs hostile input, so it holds no secrets and has no access to rooms, and its only outbound traffic is for signature updates. Anything it can't read is `blocked`. An object with no result after an hour becomes `failed`.
+The Container runs hostile input, so it holds no secrets and has no access to rooms, and it has no outbound traffic, because signatures arrive with a scheduled image rebuild ([decision 83](../spec/PRODUCT.md#decisions-needed)). Anything it can't read is `blocked`. An object with no result after an hour becomes `failed`.
 
-The spike had to show, on staging, that a 100 MB file streams through web, gateway and API to R2, that ClamAV fits a Container instance, including its signature memory, cold start and zip bombs, and that signatures can be kept up to date. [Its results](#spike-results) are below. If the owner doesn't accept them, the fallback in decision 51 applies.
+The spike had to show, on staging, that a 100 MB file streams through web, gateway and API to R2, that ClamAV fits a Container instance, including its signature memory, cold start and zip bombs, and that signatures can be kept up to date. [Its results](#spike-results) are below, and the owner accepted them.
 
 ### Exact-version review
 
@@ -109,15 +109,16 @@ A chunked upload with no declared length got 422, not the expected 411. The test
 
 - **Repeatability.** Runs 2 and 3 and a `curl` check failed on 100 MB uploads from the owner's Mac (EPIPE, then `bad record mac`), before any Worker logged them. That looks like corruption on the path, but it isn't proven. One pass isn't repeatability.
 - **The real hostname.** `app.podster.dev`'s request limit is untested, because this ran on `workers.dev`, and which plan `podster.dev` is on still hasn't been checked. Cloudflare's documented limit is 100 MB on Free and Pro.
-- **CPU time for hashing 100 MB.** The tail saw only small requests, at most 9 ms. The upload finished, so it was within the limit, but there's no number.
-- **Memory during a reload on `standard-1`.** The cgroup readings came back null, and clamd's own memory was read before and after the reload, not during it. Locally it peaked at 2.0 GB.
-- **The Container's outbound limit.** `example.com` got 520 and `database.clamav.net` got 403 to `/`, and `freshclam` worked. That suggests a limit, but one blocked host doesn't prove an allowlist.
+- **CPU time for hashing 100 MB.** The tail saw only small requests, at most 9 ms. The upload finished, so it was within the limit, but there's no number. It's a step 2 check.
+- **Memory during a reload on `standard-1`.** The cgroup readings came back null, and clamd's own memory was read before and after the reload, not during it. Locally it peaked at 2.0 GB. With signatures in the image, the scanner doesn't reload.
+- **The Container's outbound limit.** `example.com` got 520 and `database.clamav.net` got 403 to `/`, and `freshclam` worked. That suggests a limit, but one blocked host doesn't prove an allowlist. The product's Container should have no outbound traffic, so step 3 checks that instead.
 - **Failure on a deployment.** A scanner that never answers, a stalled upload and clamd dying were tested locally only, so failing closed hasn't run on staging. Neither have the other seven local verdict files, such as the 20,000-file zip.
 - **Load.** Each scan ran alone, on one instance.
+- **Signatures in the image.** The spike's image used the base image's signatures, and nothing has yet added current ones at build time.
 
 ### What this settles, proposed
 
-These follow from the evidence, and none is built:
+These follow from the evidence and are for review, not owner rulings. None is built:
 
 - **Keep streaming through our Workers.** A declared length and `FixedLengthStream` to an R2 binding held 100 MB in a chunk at a time.
 - **The API is the size control.** It counts bytes and checks the hash, and refuses by those whatever a client or the edge declared. The gateway's 411 and 413 are only an early answer. A chunked upload with a correct hash gets a test in step 2.
@@ -127,19 +128,14 @@ These follow from the evidence, and none is built:
 - **Keep the hour before `failed`.** The slowest verdict was 18.6 s, so an hour leaves room for retries.
 - **Drop the lifecycle rule for incomplete data.** A cut-off single upload left no object, so there's nothing for it to clear until multipart exists. The sweep that gives space back stays.
 
-### For the owner to rule on
+### What the owner ruled
 
-1. **Did ClamAV pass?** The recommendation is yes, with the open items above staying on the plan. If not, decision 51's fallback applies.
-2. **Is one 100 MB pass enough to start building?** The recommendation is yes, because a hosted scanner would use the same upload path. Repeat the upload from another network in step 2, before calling it repeatable.
-3. **How do signatures stay current?** Updates are lost on sleep, because a Container's disk is [fresh from the image each time](https://developers.cloudflare.com/containers/faq/#is-disk-persistent-what-happens-to-my-disk-when-my-container-sleeps). The recommendation is the first row:
+The owner said "accept all" on 2026-11-07, so these are [decisions 81 to 84](../spec/PRODUCT.md#decisions-needed):
 
-   | Option | For | Against |
-   | --- | --- | --- |
-   | Rebuild the image on a schedule, with signatures in it | The Container needs no outbound traffic at all, and never reloads, so the unmeasured reload peak stops mattering | Needs a scheduled staging deploy, which needs the owner's yes. Signatures are as old as the last build. Putting them in at build time hasn't been tested |
-   | Run `freshclam` at each start | Current signatures, shown working | Adds about 20 s to a 10 s cold start, keeps outbound traffic and the unmeasured reload, and needs an answer for when the update fails |
-   | Container snapshots | No rebuild | In public beta, and untested here |
-
-4. **How old may signatures get before scanning stops?** A result should carry its database version whichever option is chosen. Past the limit, a file would stay in Scanning and end as Scan failed rather than get a verdict. The recommendation is 7 days, which is a judgment, not a measurement.
+1. **ClamAV passed,** with the items above staying on the [M2 plan](../m2-plan.md#checks-the-spike-left-open).
+2. **One 100 MB pass is enough to start building.** It's repeated from another network in step 2.
+3. **Signatures stay current through a scheduled image rebuild,** with signatures in the image. A Container's disk is [fresh from the image each time it starts](https://developers.cloudflare.com/containers/faq/#is-disk-persistent-what-happens-to-my-disk-when-my-container-sleeps), so an update made while running is lost on sleep. Running `freshclam` at each start would add about 20 s to a 10 s cold start and keep outbound traffic. Container snapshots are in public beta and untested here. This is a yes in principle to a scheduled staging deploy, and creating it still needs the owner in that session.
+4. **Scanning stops when signatures pass 7 days old.** A result carries its database version. Past the limit, a file stays in Scanning and ends as Scan failed, and never gets a verdict. So a rebuild that keeps failing stops files becoming Ready, and the rebuild has to run well inside the 7 days. How often isn't ruled, and step 3 proposes it.
 
 ## Consequences
 
@@ -154,7 +150,7 @@ These follow from the evidence, and none is built:
 The owner approved the billed staging resources on 2026-11-06.
 
 - **On staging, created:** a private R2 bucket, a scan queue and a dead-letter queue.
-- **On staging, for step 3:** Cloudflare Containers and a small scanner Worker, billed above the Workers Paid allowance. The spike's own are temporary, and [#99](https://github.com/thachp/podster/pull/99)'s README has their teardown.
+- **On staging, for step 3:** Cloudflare Containers, a small scanner Worker, billed above the Workers Paid allowance, and the scheduled rebuild, which still needs the owner in that session. The spike's own are temporary, and [#99](https://github.com/thachp/podster/pull/99)'s README has their teardown.
 - **Before production, not approved:** the same again.
 
 ## Proposed details to settle in review

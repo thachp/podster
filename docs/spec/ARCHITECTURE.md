@@ -446,7 +446,7 @@ task += approved_submission_no?     -- built: set by verify_task
 - **Upload.** A checked command creates a `pending` record, reserves quota and returns an upload grant that is short-lived and limited by size and type. The file streams through the gateway and the API to R2, with no presigned URL, because one can't enforce a size or be revoked. Completion verifies size and hash and starts scanning. Nothing is downloadable before `clean`.
 - **Download.** Every download calls the DO to check current authority, and any link is checked again each time it's used. M2 serves everything as an attachment ([decision 52](PRODUCT.md#decisions-needed)).
 - **Review binding.** `verify_task` names `submission_no` and writes `approved_submission_no` in the same transaction, which is built. It'll also be refused until every file is clean, once files exist. A later submission starts unreviewed, so an approved badge cannot move onto replaced content.
-- **Scanner.** ClamAV in Cloudflare Containers, on condition that a spike passes ([decision 51](PRODUCT.md#decisions-needed)). The spike [ran on staging](../adr/0006-uploads-and-scanning.md#spike-results), and the owner hasn't yet ruled on whether it passed.
+- **Scanner.** ClamAV in Cloudflare Containers ([decision 51](PRODUCT.md#decisions-needed)), which [passed a spike on staging](../adr/0006-uploads-and-scanning.md#spike-results). It has no outbound traffic, and gets signatures from a scheduled image rebuild ([decision 83](PRODUCT.md#decisions-needed)).
 - **Deferred:** export and legal terms, until before public rooms ([decision 59](PRODUCT.md#decisions-needed)).
 
 ### Content and deployment origins

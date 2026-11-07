@@ -67,7 +67,9 @@ async function waitForStack() {
     if (res?.status === 200 && up?.status === 200) return;
     await new Promise((done) => setTimeout(done, 500));
   }
-  console.error(backend.log.join("").slice(-3000), dashboard.log.join("").slice(-3000));
+  // Which one stopped, because their logs look alike.
+  console.error(`--- the gateway and API (${backend.stack.exitCode === null ? "still running" : `exited ${backend.stack.exitCode}`}) ---\n${backend.log.join("").slice(-3000)}`);
+  console.error(`--- the dashboard (${dashboard.stack.exitCode === null ? "still running" : `exited ${dashboard.stack.exitCode}`}) ---\n${dashboard.log.join("").slice(-3000)}`);
   throw new Error("the local stack didn't come up");
 }
 

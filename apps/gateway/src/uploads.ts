@@ -19,7 +19,8 @@ const answer = (code: string, status: number, headers: Record<string, string> = 
  * The request's body, passed on by hand. The API can answer before the sender has finished, as it does to a file longer than
  * announced, and sending that answer ends the request. Handing the body straight to the API, or piping it, leaves what's left to
  * fail where nothing can catch it, on every such refusal. And a sender still writing when the connection closes never reads the
- * answer. So `finish` reads and discards the rest first, for only so long, and the API's side only ever sees an end.
+ * answer. So `finish` ends reading first, and the API's side only ever sees an end. Told to, it first reads and discards the rest,
+ * for only so long. That's only for answers a real token gets, since anyone can make up a well-formed one and get a fresh limit.
  */
 function bytesOf(request: Request) {
   if (!request.body) return { body: null, finish: async () => {} };
@@ -45,12 +46,14 @@ function bytesOf(request: Request) {
   })();
   return {
     body: readable,
-    finish: async () => {
+    finish: async (discard: boolean) => {
       answered = true;
       stopWaiting();
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      await Promise.race([read, new Promise((resolve) => (timer = setTimeout(resolve, DISCARD_LIMIT_MS)))]);
-      clearTimeout(timer);
+      if (discard) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([read, new Promise((resolve) => (timer = setTimeout(resolve, DISCARD_LIMIT_MS)))]);
+        clearTimeout(timer);
+      }
       void reader.cancel().catch(() => {});
     },
   };
@@ -72,7 +75,7 @@ export async function handleUpload(request: Request, url: URL, api: Fetcher, wit
     // No timeout, as a large file on a slow connection takes as long as it takes, and it ends if the sender goes away.
     const { body, finish } = bytesOf(request);
     const response = await api.fetch(new Request(`https://api.internal${url.pathname}`, { method: "PUT", headers, body }));
-    await finish();
+    await finish(response.status === 413 || response.status === 422);
     return new Response(response.body, { status: response.status, headers: { "content-type": "application/json" } });
   } catch {
     return answer("upstream_unavailable", 502);

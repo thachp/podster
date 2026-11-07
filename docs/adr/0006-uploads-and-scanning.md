@@ -50,6 +50,8 @@ Each attempt checks the uploader at its start and its end, and the end also rech
 
 The sweep that clears abandoned rows comes with step 8. Until then an expired upload reserves nothing, and its row stays.
 
+**Step 8 also has bytes to clear.** If the room doesn't answer when an upload finishes, or the call to it fails, the API answers `upload_outcome_unknown` and keeps the bytes, since the room may have accepted them. If it hadn't, nothing refers to them, and they aren't counted in the quota. The same goes for a Worker that dies between storing a file and the room's answer. Those objects stay in R2, under `rooms/{room}/objects/{object}/`, until a sweep exists.
+
 Downloads ask the room's Durable Object first. A link is checked against the room again each time it's used, so it needs no separate revocation. Responses are attachments with `X-Content-Type-Options: nosniff` and a cleaned filename. Filenames are agent content, so they stay out of logs and events.
 
 ### Scanner

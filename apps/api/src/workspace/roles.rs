@@ -550,7 +550,13 @@ fn set_access(
     if role != prior_role {
         queue_index(sql, principal, org, Some(role), now)?;
     }
-    Ok(())
+    // Ending a claim can take away what let someone upload.
+    let by_kind = if by.starts_with(AGENT_ID_PREFIX) {
+        "agent"
+    } else {
+        "person"
+    };
+    super::objects::drop_uploads_no_longer_allowed(sql, by, by_kind, principal, now)
 }
 
 /// Ends someone's active claim, if they have one, and works out what they keep. If nobody touched their grant while they

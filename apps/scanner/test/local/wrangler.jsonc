@@ -1,0 +1,17 @@
+// Only for run-local.mjs. Nothing here is deployed.
+{
+  "name": "podster-scanner-local",
+  "main": "harness.ts",
+  "compatibility_date": "2026-08-01",
+  "r2_buckets": [{ "binding": "ASSETS", "bucket_name": "podster-assets-local" }],
+  "kv_namespaces": [{ "binding": "RESULTS", "id": "local-only" }],
+  "services": [{ "binding": "API", "service": "podster-scanner-local" }],
+  "vars": { "SCANNER_SECRET": "fake-local-secret" },
+  "queues": {
+    "producers": [{ "binding": "SCAN", "queue": "podster-scan-local" }],
+    "consumers": [{ "queue": "podster-scan-local", "max_batch_size": 1, "max_batch_timeout": 1, "max_concurrency": 1, "max_retries": 1, "retry_delay": 1 }]
+  },
+  "containers": [{ "class_name": "ClamAV", "image": "../../container/Dockerfile", "image_build_context": "../../container", "instance_type": "standard-1", "max_instances": 1 }],
+  "durable_objects": { "bindings": [{ "name": "CLAMAV", "class_name": "ClamAV" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ClamAV"] }]
+}

@@ -54,6 +54,12 @@ The sweep that clears abandoned rows comes with step 8. Until then an expired up
 
 Downloads ask the room's Durable Object first. A link is checked against the room again each time it's used, so it needs no separate revocation. Responses are attachments with `X-Content-Type-Options: nosniff` and a cleaned filename. Filenames are agent content, so they stay out of logs and events.
 
+**Built in step 4, locally:** there's no download token or signed URL, so nothing can outlive a check. `GET /v1/files/{ws}/{file}` takes an agent's own credential, an Agent Auth JWT, which is spent, or an MCP access token, and people use their session at the same path under `/api`. So the gateway reads the credential's current state on each download, including whether whoever connected it has left, which closes for downloads the gap uploads have. `get_asset_link` returns only that path, which grants nothing. The room then checks the caller's current place and the file's state, and only the Worker learns the key. It also refuses bytes whose size or SHA-256 differ from the record.
+
+Each check runs when a download starts. A download already under way isn't cut off by a later removal, and it lasts as long as the sender takes. Ranges aren't supported. Downloads aren't audited, because they're reads, and whether they should be is open.
+
+Oversight reaches only the agent's own tasks, and files can't be linked to tasks until step 5, so until then someone limited to their own tasks, and any admin overseeing, sees no file at all. `getOverseenFile` answers name and state only, and has no path to the bytes.
+
 ### Scanner
 
 A queue consumer hands the object to a ClamAV Container and reports the result to the room, which records it after rechecking that the object exists. A result is recorded even if the room was archived in between.
@@ -182,6 +188,6 @@ The owner approved the billed staging resources on 2026-11-06.
 ## Proposed details to settle in review
 
 - The exact file formats behind each allowed category, including whether macro-enabled Office formats count as executables.
-- The lifetime of an upload grant and of a download link.
+- The lifetime of an upload grant. A download has no link to expire.
 - How oversight's "name and status" appears in `getOverseenTask`.
 - The operator's takedown route, which has to be a recorded command and not a change to the database by hand.

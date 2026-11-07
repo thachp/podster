@@ -1553,3 +1553,70 @@ fn refusals_have_stable_codes_and_carry_nothing_from_the_file() {
         assert_eq!(refusal.code(), code);
     }
 }
+
+#[test]
+fn a_served_file_is_always_an_attachment_with_a_harmless_header() {
+    assert_eq!(
+        attachment_header("notes.txt"),
+        "attachment; filename=\"notes.txt\"; filename*=UTF-8''notes.txt"
+    );
+    for name in [
+        "a\"; filename=evil.html",
+        "a\r\nSet-Cookie: x=1.txt",
+        "..\\..\\etc/passwd",
+        "résumé.pdf",
+        "%0d%0a.txt",
+        "name;x=y.txt",
+    ] {
+        let header = attachment_header(name);
+        let (plain, encoded) = header
+            .strip_prefix("attachment; filename=\"")
+            .and_then(|rest| rest.split_once("\"; filename*=UTF-8''"))
+            .expect(name);
+        assert!(
+            plain
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ')),
+            "{name}"
+        );
+        assert!(
+            encoded
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '%')),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        attachment_header("\u{e9}\u{e9}"),
+        "attachment; filename=\"__\"; filename*=UTF-8''%C3%A9%C3%A9"
+    );
+    assert_eq!(
+        attachment_header("..."),
+        "attachment; filename=\"download\"; filename*=UTF-8''..."
+    );
+}
+
+#[test]
+fn only_a_type_the_upload_rules_chose_is_served() {
+    assert_eq!(
+        served_media_type(Some("application/pdf")),
+        "application/pdf"
+    );
+    assert_eq!(
+        served_media_type(Some("text/plain; charset=utf-8")),
+        "text/plain; charset=utf-8"
+    );
+    for stored in [
+        Some("text/html"),
+        Some("image/svg+xml"),
+        Some("TEXT/PLAIN"),
+        Some(""),
+        None,
+    ] {
+        assert_eq!(
+            served_media_type(stored),
+            "application/octet-stream",
+            "{stored:?}"
+        );
+    }
+}

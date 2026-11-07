@@ -2695,3 +2695,73 @@ describe("staging's test sign-up", () => {
     expect(sensitiveRoute("POST", "/api/auth/sign-up/e2e")).toBe("auth");
   });
 });
+
+describe("downloading a file through the gateway", () => {
+  /** A room with this agent in it. The room's own answer about an unknown file shows a request got all the way there. */
+  async function roomWith(who: Person, agent: string) {
+    const made = await dash(who, "POST", "/v1/workspaces", { name: "Files" });
+    const id = made.body.id as string;
+    const version = (await dash(who, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    const added = await dash(who, "POST", `/v1/workspaces/${id}/members`, { principal_id: agent, kind: "agent", org_id: who.org, role: "member", policy_version: version });
+    expect(added.status, JSON.stringify(added.body)).toBe(200);
+    return id;
+  }
+  const fetchFile = (id: string, token?: string) => call(`/v1/files/${id}/obj_unknown`, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+  const reply = async (res: Response) => ({ status: res.status, code: (await res.json<any>()).error?.code as string });
+  const agentJwt = (agent: AgentAuthAgent) => signAgentJWT({ agentKeypair: agent.keypair, agentId: agent.pluginId, audience: BASE, capabilities: ["get_asset_link"] });
+
+  it("takes an Agent Auth credential on each use, spends it, and stops when it ends", async () => {
+    const a = await signUp();
+    const agent = await claimedAgent(a);
+    const id = await roomWith(a, agent.id);
+    const jwt = await agentJwt(agent);
+    expect(await reply(await fetchFile(id, jwt))).toEqual({ status: 404, code: "file_not_found" });
+    expect((await reply(await fetchFile(id, jwt))).code).not.toBe("file_not_found");
+    await dash(a, "POST", `/agents/${agent.id}/disconnect`);
+    // Disconnecting revokes the credential itself, so it's no longer one at all.
+    expect(await reply(await fetchFile(id, await agentJwt(agent)))).toEqual({ status: 401, code: "invalid_credential" });
+  });
+
+  it("takes an MCP access token on each use, and stops when it ends", async () => {
+    const a = await signUp();
+    const agent = await mcpAgent(a);
+    const id = await roomWith(a, agent.id);
+    expect(await reply(await fetchFile(id, agent.token))).toEqual({ status: 404, code: "file_not_found" });
+    expect(await agent.tool("get_asset_link", { workspace_id: id, file_id: "obj_unknown" })).toMatchObject({ code: "file_not_found" });
+    await dash(a, "POST", `/agents/${agent.id}/disconnect`);
+    expect(await reply(await fetchFile(id, agent.token))).toEqual({ status: 401, code: "invalid_credential" });
+  });
+
+  it("ends a credential's downloads as soon as whoever connected it leaves, with nothing issued earlier still working", async () => {
+    const a = await signUp();
+    const viaKey = await claimedAgent(a);
+    const viaOauth = await mcpAgent(a);
+    const id = await roomWith(a, viaKey.id);
+    await e.DB.prepare("DELETE FROM org_member WHERE org_id = ?").bind(a.org).run();
+    expect(await reply(await fetchFile(id, await agentJwt(viaKey)))).toEqual({ status: 403, code: "credential_owner_left" });
+    expect(await reply(await fetchFile(id, viaOauth.token))).toEqual({ status: 403, code: "credential_owner_left" });
+  });
+
+  it("refuses anything that isn't a credential, before it reaches the API", async () => {
+    expect(await reply(await fetchFile("ws_x"))).toEqual({ status: 401, code: "invalid_credential" });
+    for (const token of ["a.b.c", "x:y:z", `upl_${"a".repeat(64)}`]) expect(await reply(await fetchFile("ws_x", token)), token).toEqual({ status: 401, code: "invalid_credential" });
+    expect((await call("/v1/files/ws_x/obj_1", { method: "DELETE" })).status).toBe(405);
+  });
+
+  it("takes a person's session on the dashboard's path, which never answers with a client's headers", async () => {
+    const a = await signUp();
+    const made = await dash(a, "POST", "/v1/workspaces", { name: "Files" });
+    const res = await dashboard(a, "GET", `/v1/files/${made.body.id}/obj_unknown`);
+    expect(res.headers.get("content-disposition")).toBeNull();
+    expect(await reply(res)).toEqual({ status: 404, code: "file_not_found" });
+    expect((await dashboard(a, "POST", `/v1/files/${made.body.id}/obj_unknown`, {})).status).toBe(405);
+    expect((await call(`/api/v1/files/${made.body.id}/obj_unknown`)).status).toBe(401);
+  });
+
+  it("gives another organization's person the room's one answer", async () => {
+    const a = await signUp();
+    const b = await signUp();
+    const made = await dash(a, "POST", "/v1/workspaces", { name: "Files" });
+    expect(await reply(await dashboard(b, "GET", `/v1/files/${made.body.id}/obj_unknown`))).toEqual({ status: 404, code: "workspace_not_found" });
+  });
+});

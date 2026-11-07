@@ -12,6 +12,7 @@ import { mintAssertion, type Identity } from "./assertion";
 import { CAPABILITIES, InvalidArguments, jsonSchema, toApiCall, zodShape, type ApiCall, type Capability } from "./capabilities";
 import { EMAIL_LINK_ROUTE, EMAIL_LINK_SECONDS, EMAIL_VERIFY_ROUTE, emailSignInEnabled, handleEmailLink, handleEmailVerify, linkMustNotReach, linkTokenHash, sendSignInLink, type EmailBinding } from "./email-sign-in";
 import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TEST_SIGNUP_ROUTE } from "./test-people";
+import { handleAgentDownload, isFilePath, serveFile } from "./downloads";
 import { handleUpload } from "./uploads";
 
 export interface Env {
@@ -459,7 +460,7 @@ export function allowedPassthrough(path: string) {
   // Something between here and the API may collapse a double slash, which would slip past the prefix checks below.
   if (!path.startsWith("/v1/") || path.includes("//")) return false;
   // An upload's bytes have their own path, and this one would read them all into memory.
-  return !path.startsWith("/v1/agents") && !path.startsWith("/v1/inbox") && !path.startsWith("/v1/org-departures") && !path.startsWith("/v1/uploads");
+  return !path.startsWith("/v1/agents") && !path.startsWith("/v1/inbox") && !path.startsWith("/v1/org-departures") && !path.startsWith("/v1/uploads") && !path.startsWith("/v1/files");
 }
 
 /**
@@ -1055,6 +1056,8 @@ const appHandler = {
     const onApplicationHost = env !== publicEnv;
     const upload = await handleUpload(request, url, publicEnv.API, (key) => withinLimit(publicEnv.RL_ACCOUNT, key));
     if (upload) return upload;
+    const download = await handleAgentDownload(request, url, publicEnv, (token) => agentFromCredential(publicEnv, token), (key) => withinLimit(publicEnv.RL_ACCOUNT, key));
+    if (download) return download;
     if (publicEnv.APP_URL && !onApplicationHost) {
       const moved = await movedToApplicationHost(request, publicEnv, publicEnv.APP_URL);
       if (moved) return moved;
@@ -1135,6 +1138,7 @@ const appHandler = {
 
     // Everything else in the dashboard goes straight to the API, which decides.
     const path = url.pathname.slice("/api".length);
+    if (isFilePath(path)) return request.method === "GET" ? serveFile(env, identity, path) : denied("not_found", 405);
     if (!allowedPassthrough(path) && !allowedInbox(request.method, path, url.searchParams)) return denied("not_found", 404);
     if (sensitiveCommand(request.method, path) && !(await withinLimit(env.RL_SENSITIVE, `invite-or-create:${session.user.id}`))) return rateLimited();
     const hasBody = !["GET", "HEAD"].includes(request.method);
@@ -1182,6 +1186,30 @@ const mcpHandler = {
     return transport.handleRequest(new Request(request, { body }));
   },
 };
+
+/**
+ * Who an agent's own credential says it is, read fresh for one download, the same way a capability call does. A credential that ended
+ * for any reason, including whoever connected it leaving, stops working on its next use. `null` means it isn't one.
+ */
+async function agentFromCredential(env: Env, token: string): Promise<Identity | Response | null> {
+  try {
+    if (token.split(".").length === 3) {
+      const headers = new Headers({ authorization: `Bearer ${token}` });
+      const session = (await createAuth(env).api.getAgentSession({ headers }).catch(() => null)) as { agent?: { id?: string } } | null;
+      const id = session?.agent?.id;
+      const spends = id ? spentToken(id, `Bearer ${token}`) : null;
+      if (!id || !spends) return null;
+      return { ...(await resolveAgent(env, "agent_auth", id)), spends } as Identity;
+    }
+    const held = await env.OAUTH_PROVIDER.unwrapToken<{ externalId?: string }>(token);
+    const externalId = held?.grant.props?.externalId;
+    if (!externalId || !held?.scope?.includes("mcp")) return null;
+    return await resolveAgent(env, "mcp_oauth", externalId);
+  } catch (error) {
+    if (error instanceof AgentRefused) return denied(error.message, 403);
+    throw error;
+  }
+}
 
 let provider: { base: string; instance: OAuthProvider<Env> } | undefined;
 

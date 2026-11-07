@@ -29,7 +29,7 @@ fn room_used(sql: &SqlStorage, now: i64, except: &str) -> R<u64> {
     Ok(found.first().map_or(0, |row| int(&row["used"])).max(0) as u64)
 }
 
-fn room_id(sql: &SqlStorage) -> R<String> {
+pub(super) fn room_id(sql: &SqlStorage) -> R<String> {
     rows(sql, "SELECT id FROM workspace", vec![])?
         .first()
         .and_then(|row| text(&row["id"]))

@@ -1,0 +1,21 @@
+{
+  "name": "@podster/scanner",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:container": "cd container && PYTHONPATH=.:tests python3 -m unittest discover -s tests -p 'test_*.py'",
+    "test:local": "node test/local/run-local.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "0.3.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261104.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.12",
+    "wrangler": "^4.157.0",
+    "@types/node": "^22.0.0"
+  }
+}

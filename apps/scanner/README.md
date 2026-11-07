@@ -40,6 +40,16 @@ They come in the image ([decision 83](../../docs/spec/PRODUCT.md#decisions-neede
 
 **Proposed:** rebuild and deploy daily. Past 7 days files stop getting verdicts ([decision 84](../../docs/spec/PRODUCT.md#decisions-needed)), so daily leaves six failed runs to notice before anyone's affected. Creating the schedule needs the owner.
 
+## The base image
+
+The Dockerfile pins `clamav/clamav` by digest, so the image stays what was tested. That also freezes clamd and its parsers, the code that reads hostile files, and a daily rebuild only refreshes signatures. Nothing automates a bump, so someone has to do it:
+
+- **When:** within a few days of a ClamAV security release, and otherwise once a month.
+- **How:** read the new digest with `docker buildx imagetools inspect clamav/clamav:1.5-debian`, put it in the Dockerfile, and build with `--no-cache`. A new minor version also means changing the tag.
+- **Before merging:** run `container/tests/integration.py` on the new image, because a change in what clamd reports or in the base image's Python can change verdicts.
+
+Python's `zipfile` reads the directory, so bumps to it matter too. The base image's Debian `python3` comes in at each rebuild, so it isn't pinned by the digest.
+
 ## Tests
 
 ```bash

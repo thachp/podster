@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import uuid
+import zipfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import fixtures as f  # noqa: E402
@@ -114,6 +115,16 @@ def verdict_cases():
     yield "truncated zip", f.truncated(), "unreadable", None
     yield "fake zip", b"PK\x03\x04" + os.urandom(4096), "unreadable", None
     yield "zip damaged inside its LZMA data", f.corrupt_lzma(), "unreadable", None
+    yield "a small declared size over EICAR past the limit", f.lying_size(b"\0" * (160 * f.MB) + f.EICAR), "unreadable", "archive_entry_too_large"
+    yield "bzip2 entry", f.zipped([("zeros.bin", b"\0" * (20 * f.MB))], zipfile.ZIP_BZIP2), "unreadable", "archive_method_not_supported"
+    yield "damaged locked zip inside another", f.zipped([("inner.zip", f.without_directory(f.flagged_encrypted(f.zipped([("a.txt", b"hidden")]))))]), "unreadable", "unreadable_archive"
+    yield "a bomb with a line in front and a long trailer", b"#!/bin/sh\n" + f.wide_bomb() + bytes(70_000), "unreadable", "unreadable_archive"
+    yield "a zip hidden in front of a small one", f.zeros_zip(160, f.EICAR) + f.zipped([("a.txt", b"note")]), "unreadable", "unreadable_archive"
+    yield "encrypted bit only in the local header", f.local_flag_only(f.zipped([("a.txt", b"hidden")])), "unreadable", "password_protected"
+    yield "locked OpenDocument, manifest in UTF-32", f.odf(f.ENCRYPTED_MANIFEST.encode("utf-32")), "unreadable", "unreadable_archive"
+    yield "locked OpenDocument, ./ in its path", f.odf(f.ENCRYPTED_MANIFEST, "./META-INF/manifest.xml"), "unreadable", "password_protected"
+    yield "a text file that starts with PK", b"PK is on page 3.\n" * 100, "no_known_malware", "none"
+    yield "zip with data descriptors", f.with_descriptors([("a.txt", b"note\n" * 1000)]), "no_known_malware", "none"
 
 
 def main(image: str) -> int:

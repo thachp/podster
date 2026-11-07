@@ -89,6 +89,35 @@ describe("fails closed: no verdict sends nothing and retries", () => {
     }
   });
 
+  // A compromised Container could answer at once and then stall, which would hold the one-at-a-time queue.
+  const stalledBody = () => new Response(new ReadableStream({ start: (controller) => controller.enqueue(new TextEncoder().encode('{"report":')) }));
+
+  it("an answer whose body never ends", async () => {
+    vi.useFakeTimers();
+    try {
+      const { sent, scanning } = setup({ scan: stalledBody });
+      const pending = scanOne(job, scanning);
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(await pending).toEqual({ ack: false, why: "no_answer" });
+      expect(sent).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a readiness answer whose body never ends", async () => {
+    vi.useFakeTimers();
+    try {
+      const { scanned, scanning } = setup({ ready: stalledBody });
+      const pending = scanOne(job, scanning);
+      await vi.advanceTimersByTimeAsync(150_000);
+      expect(await pending).toEqual({ ack: false, why: "not_ready" });
+      expect(scanned).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("a stalled upload or dead clamd, which the Container answers with a 503", () => noVerdict({ scan: () => json({ error: "scan_interrupted" }, 503) }, "no_answer"));
   it("a connection that drops", () => noVerdict({ scan: () => Promise.reject(new Error("network connection lost")) }, "no_answer"));
   it("a 500", () => noVerdict({ scan: () => new Response("oops", { status: 500 }) }, "no_answer"));

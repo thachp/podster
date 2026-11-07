@@ -90,7 +90,8 @@ export function sendResult(api: Pick<Fetcher, "fetch">, secret: string | undefin
   return api.fetch(`https://api${SCAN_RESULT_PATH}`, { method: "POST", signal, headers: { "content-type": "application/json", [SCANNER_HEADER]: secret }, body: JSON.stringify(result) });
 }
 
-export const withTimeout = async (start: (signal: AbortSignal) => Promise<Response>, ms: number): Promise<Response | null> => {
+/** Holds for all of `start`, including reading a body, because a Container can stall after its headers just as well as before. */
+export const withTimeout = async <T>(start: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T | null> => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
   try {
@@ -110,6 +111,11 @@ const jsonOf = async (response: Response): Promise<unknown> => {
   }
 };
 
+const answerOf = async (response: Promise<Response>) => {
+  const answered = await response;
+  return { status: answered.status, body: await jsonOf(answered) };
+};
+
 async function tell(job: ScanJob, found: Omit<ScanResult, "v" | "workspace_id" | "object_id" | "scanned_at">, scanning: Scanning): Promise<Ending> {
   const result: ScanResult = { v: 1, workspace_id: job.workspace_id, object_id: job.object_id, scanned_at: scanning.now(), ...found };
   const answer = await withTimeout((signal) => scanning.send(result, signal), REPORT_TIMEOUT_MS);
@@ -126,11 +132,10 @@ export async function scanOne(body: unknown, scanning: Scanning): Promise<Ending
   if (!job) return { ack: true, outcome: "bad_message" };
 
   // Before reading a byte of the file, because old signatures shouldn't even wake a read.
-  const ready = await withTimeout((signal) => scanning.container(new Request("http://scanner/ready", { signal })), READY_TIMEOUT_MS);
+  const ready = await withTimeout((signal) => answerOf(scanning.container(new Request("http://scanner/ready", { signal }))), READY_TIMEOUT_MS);
   if (!ready) return { ack: false, why: "not_ready" };
-  const readiness = await jsonOf(ready);
-  if (!ready.ok) return { ack: false, why: (readiness as { error?: unknown } | null)?.error === "signatures_stale" ? "signatures_stale" : "not_ready" };
-  const database = readDatabase((readiness as { database?: unknown } | null)?.database);
+  if (ready.status !== 200) return { ack: false, why: (ready.body as { error?: unknown } | null)?.error === "signatures_stale" ? "signatures_stale" : "not_ready" };
+  const database = readDatabase((ready.body as { database?: unknown } | null)?.database);
   if (!database) return { ack: false, why: "bad_answer" };
   if (!signaturesAreFresh(database, scanning.now())) return { ack: false, why: "signatures_stale" };
 
@@ -141,8 +146,8 @@ export async function scanOne(body: unknown, scanning: Scanning): Promise<Ending
   if (file.size > MAX_FILE_BYTES) return blocked("too_large_to_scan", file.size);
 
   const headers = { "content-length": String(file.size), "x-expected-sha256": job.sha256 };
-  const answer = await withTimeout((signal) => scanning.container(new Request("http://scanner/scan", { method: "POST", headers, body: file.body, signal })), SCAN_TIMEOUT_MS);
+  const answer = await withTimeout((signal) => answerOf(scanning.container(new Request("http://scanner/scan", { method: "POST", headers, body: file.body, signal }))), SCAN_TIMEOUT_MS);
   if (!answer) return { ack: false, why: "no_answer" };
-  const verdict = readVerdict(answer.status, await jsonOf(answer), job, scanning.now());
+  const verdict = readVerdict(answer.status, answer.body, job, scanning.now());
   return typeof verdict === "string" ? { ack: false, why: verdict } : tell(job, verdict, scanning);
 }

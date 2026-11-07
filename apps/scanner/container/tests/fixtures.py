@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import struct
 import zipfile
+import zlib
 
 # Split so this file itself doesn't trip a scanner.
 EICAR = b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$" + b"EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
@@ -98,3 +99,54 @@ def odf(manifest: bytes | str = PLAIN_MANIFEST, manifest_name: str = "META-INF/m
     """The shape of an OpenDocument file: its zip flags stay 0 even when its content is encrypted."""
     data = manifest.encode() if isinstance(manifest, str) else manifest
     return zipped([("mimetype", b"application/vnd.oasis.opendocument.text"), ("content.xml", b"<office:document-content/>"), (manifest_name, data)])
+
+
+def _patch_entry(data: bytes, crc: int, compressed: int | None, size: int) -> bytes:
+    """Rewrites an entry's sizes and checksum in both of its headers, leaving its real data alone."""
+    out = bytearray(data)
+    for signature, at in ((b"PK\x03\x04", 14), (b"PK\x01\x02", 16)):
+        start = out.find(signature)
+        struct.pack_into("<L", out, start + at, crc)
+        if compressed is not None:
+            struct.pack_into("<L", out, start + at + 4, compressed)
+        struct.pack_into("<L", out, start + at + 8, size)
+    return bytes(out)
+
+
+def lying_size(content: bytes, claimed: int = 10) -> bytes:
+    """Declares a few bytes, with the checksum of those few, over a much larger deflate stream."""
+    return _patch_entry(zipped([("big.bin", content)]), zlib.crc32(content[:claimed]), None, claimed)
+
+
+def local_flag_only(data: bytes) -> bytes:
+    """Sets the encrypted bit in the local header and leaves the central directory saying otherwise."""
+    out = bytearray(data)
+    at = out.find(b"PK\x03\x04")
+    struct.pack_into("<H", out, at + 6, struct.unpack_from("<H", out, at + 6)[0] | 1)
+    return bytes(out)
+
+
+def without_directory(data: bytes) -> bytes:
+    """A zip cut off before its end-of-directory record, so nothing that looks for that record finds one."""
+    return data[: data.rfind(b"PK\x01\x02")]
+
+
+class _NoSeek(io.RawIOBase):
+    """Makes zipfile write sizes after the data, in a descriptor, as a streaming zip writer does."""
+
+    def __init__(self, sink: io.BytesIO) -> None:
+        self.sink = sink
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, data) -> int:
+        return self.sink.write(data)
+
+
+def with_descriptors(entries: list[tuple[str, bytes]]) -> bytes:
+    sink = io.BytesIO()
+    with zipfile.ZipFile(_NoSeek(sink), "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in entries:
+            archive.writestr(name, data)
+    return sink.getvalue()

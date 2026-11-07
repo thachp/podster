@@ -27,9 +27,13 @@ pub async fn stream_download(
     room: &str,
     id: &str,
 ) -> R<Response> {
-    if !crate::valid_id(room) || !crate::valid_id(id) {
-        return Err(ApiError::api(404, "file_not_found"));
+    // Answered as the room answers anyone who isn't in it, since no room has such an ID, so a bad ID doesn't tell an outsider apart.
+    if !crate::valid_id(room) {
+        return Err(ApiError::workspace_not_found());
     }
+    // The room checks the caller first, so an outsider gets its usual answer and a member learns there's no such file. A malformed
+    // ID goes as one that can't match, so it never reaches the room's SQL as it came.
+    let id = if crate::valid_id(id) { id } else { "" };
     caller.workspace_id = room.to_string();
     let stub = env
         .durable_object("WORKSPACE")?

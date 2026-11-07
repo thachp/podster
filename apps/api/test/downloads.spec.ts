@@ -132,15 +132,25 @@ describe("downloading a file", () => {
     expect(await refusal(await download(orgAdmin("org_dl_other"), id, object))).toEqual({ status: 404, code: "workspace_not_found" });
   });
 
+  it("answers a malformed ID the room's usual way, checking the caller first", async () => {
+    const id = await room();
+    for (const bad of ["x".repeat(200), "obj!1"]) {
+      expect(await refusal(await download(STRANGER, id, bad)), bad).toEqual({ status: 404, code: "workspace_not_found" });
+      expect(await refusal(await download(MEMBER, id, bad)), bad).toEqual({ status: 404, code: "file_not_found" });
+    }
+    for (const who of [STRANGER, MEMBER]) expect(await refusal(await download(who, "x".repeat(200), "obj_1"))).toEqual({ status: 404, code: "workspace_not_found" });
+  });
+
   it("checks on every use, so removal from the room ends the next download", async () => {
     const id = await room();
     const object = await file(id);
     expect((await download(MEMBER, id, object)).status).toBe(200);
     expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${MEMBER.id}`, { policy_version: await version(id) })).status).toBe(200);
     const after = await download(MEMBER, id, object);
-    expect(after.status).toBeGreaterThanOrEqual(400);
     expect(after.headers.get("content-disposition")).toBeNull();
-    expect(((await after.json()) as any).error.code).not.toBe("file_not_available");
+    expect(await refusal(after)).toEqual({ status: 403, code: "access_revoked" });
+    const read = await api(MEMBER, "GET", `/v1/workspaces/${id}/files/${object}`);
+    expect({ status: read.status, code: read.body.error?.code }).toEqual({ status: 403, code: "access_revoked" });
   });
 
   it("stops at a file's state on the very next use", async () => {

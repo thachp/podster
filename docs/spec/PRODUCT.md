@@ -555,7 +555,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 48 | A default reviewer in the create flow | **Decided:** none for M1. A task's reviewer is set on the task, under the `create_task` rule | M1 |
 | 49 | What directory cards show | **Decided:** goal and roles now, and artifact progress in M2 | M1 |
 | 50 | Upload limits and types | **Decided:** 100 MB per file and 5 GB per room. Documents, images, text, code, presentations, video and zip. No executables or password-protected files. See the [upload policy](UPLOAD-POLICY.md) | M2 |
-| 51 | Scanner | **Decided, on condition:** ClamAV in Cloudflare Containers, if a spike on staging passes. Otherwise a hosted API with a no-retention contract, and never one that shares samples. The spike's billed resources aren't approved yet. Screens say "No known malware found", never "safe" | M2 |
+| 51 | Scanner | **Decided:** ClamAV in Cloudflare Containers, because the spike passed ([decision 81](#decisions-needed)). If it ever has to be replaced, the fallback is a hosted API with a no-retention contract, and never one that shares samples. Screens say "No known malware found", never "safe" | M2 |
 | 52 | Previews of uploaded files | **Decided:** download only in M2, so no content domain is needed yet | M2 |
 | 53 | Who uploads and sees input assets | **Decided:** owner, admin, member and Coordinator upload. Whoever sees the whole room sees all of them, and someone limited to their own tasks sees only assets linked to those tasks | M2 |
 | 54 | Who manages expected outputs | **Decided:** the owner and admins define them, requesters link tasks, and the lead comes later, as in decision 45. All participants see titles and status | M2 |
@@ -585,13 +585,28 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 78 | Notices about an agent in its own Activity | **Decided:** a limited agent's Activity shows `member.added`, `role.invited` and `role.claim_ended` when they're about that agent. The inbox keeps sending them | M1 |
 | 79 | Whether test people count for M1 | **Decided:** test people count for M1's criteria. Real people stay owed before production | M1 |
 | 80 | Whether M1 is met | **Decided:** the by-hand check counts for M1's screens. The smaller gaps are accepted for M1 and stay listed as open. The owner calls M1 met | M1 |
+| 81 | Whether ClamAV passed the spike | **Decided:** yes, with the open items staying on the [M2 plan](../m2-plan.md#checks-the-spike-left-open) | M2 |
+| 82 | Whether one 100 MB pass is enough to start building | **Decided:** yes. Repeat it from another network in step 2 | M2 |
+| 83 | How signatures stay current | **Decided:** a scheduled image rebuild, so the Container needs no outbound traffic. This is a yes in principle to a scheduled staging deploy, and creating it still needs the owner in that session | M2 |
+| 84 | How old signatures may get | **Decided:** scanning stops when signatures pass 7 days old | M2 |
+| 85 | Finished tasks with no estimate in the forecast | **Decided:** they're left out of the forecast and named on screen | Planning |
+| 86 | A forecast that moves with task status | **Decided:** the forecast can change with task status without moving `plan_changed_at`, and says so. No revision bump | Planning |
+| 87 | The forecast in an agent's plan read | **Decided:** agents' default `get_plan` includes the forecast | Planning |
+| 88 | A first Load more click lost before hydration on a slow device | **Decided:** it stays as it is, and is revisited if real users hit it | M1 |
+
+## Spike, Gantt and Load more decisions, November 7, 2026
+
+- The owner accepted the recommendations on the spike, the Gantt and Load more, now decisions 81 to 88, saying "accept all".
+- Decision 51's condition is met by decision 81, so the hosted fallback isn't in use. [ADR 0006](../adr/0006-uploads-and-scanning.md#spike-results) has the results.
+- Decision 83 doesn't create the scheduled deploy. That still needs the owner in that session.
+
 ## M2 and planning decisions, November 6, 2026
 
 - The owner accepted the open plan questions, now decisions 74 to 77, saying "accept all".
 
 - The owner accepted the M2 and task-planning recommendations, now decisions 50 to 60 and 62 to 73, saying "i agreed", along with automatic loading and a visible **Load more** button for long lists, now decision 61.
 - None of it was built then. The design behind decisions 50 to 59 is proposed in [ADR 0006](../adr/0006-uploads-and-scanning.md), and the order of work is in the [M2 plan](../m2-plan.md).
-- The billed staging resources for the upload spike were approved separately, later that day. Decision 51's scanner stays conditional until the spike passes.
+- The billed staging resources for the upload spike were approved separately, later that day. Decision 51's scanner stayed conditional until the spike passed, which is decision 81.
 - Decision 62 words the planning rule by who sees the whole room, because access now follows scopes.
 
 ## M1 decisions, November 6, 2026

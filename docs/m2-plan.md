@@ -4,7 +4,7 @@ The order of work for [M2 Assets and artifacts](spec/PRODUCT.md#product-directio
 
 **Status, 2026-11-07 UTC:** M1 is [met by the owner's ruling](spec/PRODUCT.md#decisions-needed), and the owner approved the billed staging resources on 2026-11-06. Two pieces have merged: the record of the exact approved submission ([#97](https://github.com/thachp/podster/pull/97), part of step 6) and the pure upload rules ([#98](https://github.com/thachp/podster/pull/98), with no route or storage). The rest isn't built.
 
-**Step 0 is partly deployed and blocked.** The scan queues and the bucket exist, but the scanner's Worker and Container don't. Its deploy needs the owner to run `wrangler login` at the Mac. The spike's code is in [#99](https://github.com/thachp/podster/pull/99), unmerged, and it has no result, so step 1 hasn't started. Separately, `docker-credential-desktop` hangs on that Mac and stalls image pulls with no error. A temporary `DOCKER_CONFIG` gets past it.
+**Steps 0 and 1 are done.** The spike ran on staging, [ADR 0006's results](adr/0006-uploads-and-scanning.md#spike-results) have what it showed, and the owner accepted that ClamAV passed and that building can start ([decisions 81 and 82](spec/PRODUCT.md#decisions-needed)). The spike's code is in [#99](https://github.com/thachp/podster/pull/99), unmerged.
 
 ## What M2 includes
 
@@ -22,10 +22,10 @@ C changes contracts and M adds a migration. Those PRs merge one at a time, and t
 
 | Step | Work | C | M | After |
 | --- | --- | --- | --- | --- |
-| 0 | Spike on staging: stream 100 MB through web, gateway and API to R2, and run ClamAV in a Container | | | Partly deployed, waiting on the owner's login |
-| 1 | The storage and scanning details the spike settles, as an update to ADR 0006 | | | 0 |
+| 0 | Spike on staging: stream 100 MB through web, gateway and API to R2, and run ClamAV in a Container | | | Done. One 100 MB pass, accepted as enough to start |
+| 1 | The storage and scanning details the spike settles, as an update to ADR 0006 | | | 0. Done |
 | 2 | Storage: `stored_object`, `create_upload`, streamed upload, quota, R2 binding | Yes | Yes | 1 |
-| 3 | Scanning: queue, Container, clean or blocked, fail closed | | If the ADR adds a state | 2 |
+| 3 | Scanning: queue, Container, clean or blocked, fail closed, signatures in the image, no verdict past 7 days | | If the ADR adds a state | 2 |
 | 4 | Download: authority rechecked on each use, attachment only | Yes | | 2. Can run beside 3 |
 | 5 | Input assets, linked to tasks | Yes | Yes | 4 |
 | 6 | Files on submissions and exact-version review | Yes | Yes | 4 |
@@ -41,9 +41,30 @@ Steps 9a, 9b and 9c are in different folders, so they can run in parallel. Agent
 
 Put new backend code in new modules, such as `apps/api/src/objects.rs` and `crates/core/src/files.rs`, to stay out of the conflict-prone files. Room schema changes are entries in `apps/api/src/store.rs`, and D1 migrations are in `apps/api/migrations`.
 
+## Checks the spike left open
+
+[Decision 81](spec/PRODUCT.md#decisions-needed) keeps these on the plan. Each runs on staging.
+
+**Step 2:**
+
+- Repeat the 100 MB upload from another network. Runs from the owner's Mac failed before any Worker logged them.
+- Measure the CPU time for hashing 100 MB.
+- Test the request limit on the application's real hostname, and check which plan `podster.dev` is on.
+- Try a chunked upload with a correct hash.
+
+**Step 3:**
+
+- Fail closed on a deployment: a scanner that never answers, a stalled upload and clamd dying.
+- Scan the seven test files that only ran locally.
+- Build current signatures into the image, and check the Container has no outbound traffic.
+- Check that signatures past 7 days old stop scanning.
+- Propose how often the image rebuilds. Creating the schedule needs the owner in that session ([decision 83](spec/PRODUCT.md#decisions-needed)).
+
+**Step 11:** scanning under load, since each scan in the spike ran alone.
+
 ## Risks to test
 
-- **Scanning:** only known malware is caught, signatures must stay current, and a stuck scan must fail closed.
+- **Scanning:** only known malware is caught, signatures must stay current, a failing rebuild stops files becoming Ready after 7 days, and a stuck scan must fail closed.
 - **The scanner itself:** hostile files can attack it, so it holds no secrets or room access.
 - **Streaming:** a Worker has 128 MB of memory, and the gateway's body limit needs an exception for uploads.
 - **Spoofed files:** types come from content, names get cleaned and stay out of logs and events.

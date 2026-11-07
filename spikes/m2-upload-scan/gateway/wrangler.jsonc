@@ -1,0 +1,9 @@
+{
+  "name": "podster-spike-gateway",
+  "main": "index.js",
+  "compatibility_date": "2026-08-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "services": [{ "binding": "API", "service": "podster-spike-api" }],
+  "observability": { "enabled": true }
+}

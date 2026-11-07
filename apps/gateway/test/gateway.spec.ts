@@ -2718,8 +2718,13 @@ describe("downloading a file through the gateway", () => {
     expect(await reply(await fetchFile(id, jwt))).toEqual({ status: 404, code: "file_not_found" });
     expect((await reply(await fetchFile(id, jwt))).code).not.toBe("file_not_found");
     await dash(a, "POST", `/agents/${agent.id}/disconnect`);
-    // Disconnecting revokes the credential itself, so it's no longer one at all.
-    expect(await reply(await fetchFile(id, await agentJwt(agent)))).toEqual({ status: 401, code: "invalid_credential" });
+    // Disconnecting revokes the agent in the plugin, which refuses it as the capability path does.
+    const after = await fetchFile(id, await agentJwt(agent));
+    const viaCapability = await execute(agent, "get_asset_link", { workspace_id: id, file_id: "obj_unknown" });
+    expect(after.status).toBe(403);
+    expect(viaCapability.status).toBe(403);
+    expect(await after.json()).toEqual(viaCapability.raw);
+    expect(viaCapability.raw.error).toBe("agent_revoked");
   });
 
   it("verifies a JWT bound to this very request, and refuses one bound to another", async () => {
@@ -2761,6 +2766,34 @@ describe("downloading a file through the gateway", () => {
     expect(refused.status).toBe(viaCapability.status);
     expect(await refused.json()).toEqual(viaCapability.raw);
     // Other grants are untouched, so it's this one capability that's missing.
+    expect((await execute(agent, "get_identity")).status).toBe(200);
+  });
+
+  it("holds a download to its grant's constraints, as the capability path does", async () => {
+    const a = await signUp();
+    const agent = await claimedAgent(a);
+    const allowed = await roomWith(a, agent.id);
+    const other = await roomWith(a, agent.id);
+    await e.DB.prepare("UPDATE agentCapabilityGrant SET constraints = ? WHERE agentId = ? AND capability = 'get_asset_link'").bind(JSON.stringify({ workspace_id: allowed }), agent.pluginId).run();
+    expect(await reply(await fetchFile(allowed, await agentJwt(agent)))).toEqual({ status: 404, code: "file_not_found" });
+    const refused = await fetchFile(other, await agentJwt(agent));
+    const viaCapability = await execute(agent, "get_asset_link", { workspace_id: other, file_id: "obj_unknown" });
+    expect(refused.status).toBe(403);
+    expect(viaCapability.status).toBe(403);
+    expect(await refused.json()).toEqual(viaCapability.raw);
+    expect(viaCapability.raw.error).toBe("constraint_violated");
+  });
+
+  it("answers a revoked get_asset_link grant as the capability path does", async () => {
+    const a = await signUp();
+    const agent = await claimedAgent(a);
+    const id = await roomWith(a, agent.id);
+    await e.DB.prepare("UPDATE agentCapabilityGrant SET status = 'revoked' WHERE agentId = ? AND capability = 'get_asset_link'").bind(agent.pluginId).run();
+    const refused = await fetchFile(id, await agentJwt(agent));
+    const viaCapability = await execute(agent, "get_asset_link", { workspace_id: id, file_id: "obj_unknown" });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual(viaCapability.raw);
+    expect(viaCapability.raw.error).toBe("grant_revoked");
     expect((await execute(agent, "get_identity")).status).toBe(200);
   });
 

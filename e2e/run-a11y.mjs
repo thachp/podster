@@ -9,6 +9,13 @@ import { freePort, local, prepareStack, repo, run, startGateway, startWrangler }
 
 const here = dirname(fileURLToPath(import.meta.url));
 const skipBuild = process.argv.includes("--skip-build");
+// Checked before anything builds, and `--browser firefox` is refused rather than quietly running Chromium.
+const browserArgs = process.argv.slice(2).filter((arg) => arg.startsWith("--browser"));
+const browserName = browserArgs[0]?.slice("--browser=".length);
+if (browserArgs.length > 1 || (browserArgs.length === 1 && !["chromium", "firefox", "webkit"].includes(browserName))) {
+  console.error(`Choose one browser, as --browser=chromium, --browser=firefox or --browser=webkit, not: ${browserArgs.join(" ")}`);
+  process.exit(2);
+}
 const web = join(repo, "apps/web");
 
 const { gateway, apiConfig, persist, privateKey, kid } = prepareStack({ skipBuild });
@@ -16,7 +23,8 @@ if (!skipBuild && !process.argv.includes("--skip-web-build")) run("npm", ["run",
 
 const [gatewayPort, webPort] = [await freePort(), await freePort()];
 const gatewayBase = `http://localhost:${gatewayPort}`;
-const app = `http://app.localhost:${webPort}`;
+// WebKit on macOS can't resolve a name under localhost, and the app's own port keeps it apart from the gateway.
+const app = `http://${browserName === "webkit" ? "" : "app."}localhost:${webPort}`;
 // One person walks every screen in seconds, well past a real person's limit of 120 reads a minute, so only this run's
 // config raises the limits. Everything else about the gateway is its own.
 const gatewayConfig = join(local, "gateway.wrangler.jsonc");
@@ -68,7 +76,7 @@ try {
   await waitForStack();
   console.log(`dashboard is up at ${app}\n`);
   code = await new Promise((done) => {
-    const proc = spawn(process.execPath, [join(here, "a11y.mjs")], { cwd: here, stdio: "inherit", env: { ...process.env, PODSTER_A11Y_APP: app, PODSTER_A11Y_GATEWAY: gatewayBase } });
+    const proc = spawn(process.execPath, [join(here, "a11y.mjs")], { cwd: here, stdio: "inherit", env: { ...process.env, ...(browserName ? { PODSTER_A11Y_BROWSER: browserName } : {}), PODSTER_A11Y_APP: app, PODSTER_A11Y_GATEWAY: gatewayBase } });
     proc.on("exit", (status) => done(status ?? 1));
   });
   if (code !== 0) console.error(`\n--- end of the Workers' logs ---\n${backend.log.join("").slice(-2000)}\n${dashboard.log.join("").slice(-2000)}`);

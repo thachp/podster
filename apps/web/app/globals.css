@@ -147,3 +147,10 @@
     outline-offset: 2px;
   }
 }
+
+/* Outside any layer, to beat the field's own ring utilities. WebKit doesn't paint a box-shadow on a native select, so its ring is an outline, the same width and color as an input's, in every browser. */
+select:focus-visible {
+  outline: 3px solid color-mix(in oklab, var(--ring) 50%, transparent);
+  outline-offset: 0;
+  box-shadow: none;
+}

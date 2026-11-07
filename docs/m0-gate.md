@@ -124,7 +124,7 @@ The call rests on:
 - A second real person, and the two-person kernel journey.
 - The probes at the end of [ADR 0001](adr/0001-application-host-and-session-cookie.md#what-staging-needs). The owner's sign-in reached the application host, but no probe measured GitHub's callback or the cookie crossing the web Worker.
 - Decision 23 and gap 8, which need an OAuth sign-up to create a personal organization. The owner's sign-in wasn't a check of that.
-- Safari, Firefox and a real screen reader. Browser checks so far ran in Chromium only.
+- Safari, Firefox and a real screen reader. CI's browser checks run in Chromium. `run-a11y.mjs --browser=firefox` and `--browser=webkit` have run locally only, in Playwright's own builds, which aren't a released Firefox or Safari, and none of this is a screen-reader pass. On those runs Firefox had no failures. WebKit had one, a tab taking about 10 seconds to show 50 messages of alternating text direction, and its arrow keys don't scroll anything, so scrolling a table or the map by key is unseen there.
 
 **UI-10 isn't an M1 criterion.** It asks for a keyboard and screen-reader pass on creating a room, reviewing a task and revoking access, and creating a room is one of M1's screens. But [M1's gate](spec/PRODUCT.md#product-direction-and-delivery-scope) names only expanded criteria 1, 3, 4 and 5, and [DESIGN.md](spec/DESIGN.md#12-design-acceptance-criteria) sets UI-10 as a design criterion, with the screen-reader pass due before launch. So it's listed under production, and it's still open.
 

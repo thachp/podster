@@ -2,7 +2,9 @@
 // creating a room, reviewing a task and revoking access. It uses the real Workers in a real browser, because jsdom can't
 // compute contrast. A screen reader isn't run, so UI-10's announcements are checked only as live regions in the page.
 //
-//   node run-a11y.mjs [--skip-build]
+//   node run-a11y.mjs [--skip-build] [--browser=firefox|webkit]
+//
+// CI runs Chromium. Playwright's Firefox and WebKit are engines it builds itself, so a pass there isn't a pass in Safari or a released Firefox.
 //
 // A violation fails the run unless a11y-known.json lists it, with the file to fix. A listed one that's gone fails too, so
 // the list can't go stale. Results go to results/a11y-<time>.json.
@@ -10,7 +12,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium } from "playwright";
+import * as playwright from "playwright";
 import { AuthAgent, key, ok, Person, Target } from "./lib.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -241,7 +243,7 @@ async function seed() {
     planRevision = (await owner.must("PUT", `/v1/workspaces/${plannedRoom}/tasks/${step.id}/plan`, { plan_revision: planRevision, duration_days, predecessors })).plan_revision;
   }
   await owner.must("PUT", `/v1/workspaces/${plannedRoom}/plan/start`, { start_date: "2026-11-07", timezone: "America/New_York", plan_revision: planRevision });
-  return { plannedRoom, viewer, narrowed, otherWorker, limitedRoom, secretTask, viewerTask, SECRET, teamOrgId: teamOrg, longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  return { done, plannedRoom, viewer, narrowed, otherWorker, limitedRoom, secretTask, viewerTask, SECRET, teamOrgId: teamOrg, longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -299,7 +301,19 @@ const failures = [];
 
 /** Lets opening animations finish, because a half-faded element fails contrast by accident. */
 async function settle(page) {
-  await page.evaluate(() => Promise.all(document.getAnimations().map((a) => a.finished.catch(() => null))));
+  // Ended rather than waited on: Firefox and WebKit don't finish a transition on something scrolled out of view, and axe needs the final
+  // colors. In rounds, because ending one can start another on what inherits from it.
+  await page.evaluate(() => {
+    for (let round = 0; round < 20 && document.getAnimations().length > 0; round++) {
+      for (const animation of document.getAnimations()) {
+        try {
+          animation.finish();
+        } catch {
+          // An endless one can't finish, and nothing here depends on it.
+        }
+      }
+    }
+  });
 }
 
 /** Waits until React has taken over the page, so keys and clicks reach it. */
@@ -355,7 +369,13 @@ async function audit(page, screen) {
   await page.evaluate(() => document.documentElement.classList.remove("dark"));
 }
 
-const browser = await chromium.launch();
+const browserName = process.env.PODSTER_A11Y_BROWSER ?? "chromium";
+ok(["chromium", "firefox", "webkit"].includes(browserName), `There's no browser called ${browserName}.`);
+// Safari's Tab skips links and buttons unless someone turns on full keyboard access, and Option-Tab reaches them either way.
+const TAB = browserName === "webkit" ? "Alt+Tab" : "Tab";
+const SHIFT_TAB = browserName === "webkit" ? "Alt+Shift+Tab" : "Shift+Tab";
+const browser = await playwright[browserName].launch();
+console.log(`browser: ${browserName} ${browser.version()}`);
 const newContext = () => browser.newContext({ reducedMotion: "reduce", viewport: { width: 1280, height: 900 } });
 const signedOut = await newContext();
 const contexts = new Map();
@@ -382,9 +402,20 @@ function fail(path, message) {
 
 /** Tabs until `locator` has focus, and fails if the page never gets there. Only the keyboard moves focus here. */
 async function tabTo(page, locator, label, limit = 80) {
+  let backwards = false;
   for (let i = 0; i < limit; i++) {
-    await page.keyboard.press("Tab");
-    if (await locator.evaluate((el) => el === document.activeElement || el.contains(document.activeElement)).catch(() => false)) {
+    // Firefox and WebKit may not come back round to what has focus already, so there it's counted without a key. Chromium always comes
+    // round, and has to press Tab to show the keyboard reaches it.
+    const there = browserName !== "chromium" && (await locator.evaluate((el) => el === document.activeElement || el.contains(document.activeElement)).catch(() => false));
+    if (!there) await page.keyboard.press(backwards ? SHIFT_TAB : TAB);
+    // Firefox here doesn't come round from the end of a page, and Option-Tab doesn't come round in a dialog, so from there it goes back.
+    // Several presses on one control aren't stuck, because Tab moves between a date's parts with the same element active.
+    if (browserName !== "chromium" && !there) backwards ||= await page.evaluate(() => {
+      window.__tabRepeats = document.activeElement === window.__lastTabStop ? (window.__tabRepeats ?? 0) + 1 : 0;
+      window.__lastTabStop = document.activeElement;
+      return document.activeElement === document.body || window.__tabRepeats >= 5;
+    });
+    if (there || (await locator.evaluate((el) => el === document.activeElement || el.contains(document.activeElement)).catch(() => false))) {
       const visible = await page.evaluate(() => {
         const style = getComputedStyle(document.activeElement);
         return style.outlineStyle !== "none" && parseFloat(style.outlineWidth) > 0 ? true : style.boxShadow !== "none";
@@ -398,6 +429,19 @@ async function tabTo(page, locator, label, limit = 80) {
 
 const activeText = (page) => page.evaluate(() => `${document.activeElement?.tagName} ${document.activeElement?.getAttribute("role") ?? ""} ${(document.activeElement?.textContent ?? "").trim().slice(0, 60)}`);
 const insideDialog = (page) => page.evaluate(() => Boolean(document.activeElement?.closest('[role="dialog"], [role="alertdialog"]')));
+
+/** A check Playwright's WebKit can't answer, recorded as skipped with what it did, so the path's pass can't be read as covering it. */
+const unseenInWebKit = (name, happened) => {
+  console.log(`skip keyboard: ${name}: unseen in WebKit, which ${happened ? "did" : "didn't"} scroll here`);
+  results.push({ keyboard: name, status: "skipped", detail: `Playwright's WebKit ${happened ? "scrolled" : "didn't scroll"}. Needs Safari.` });
+};
+
+/** A path that needs Chromium's debugging protocol is named as skipped elsewhere, so a pass can't be read as covering it. */
+const chromiumOnly = (name, fn) => {
+  if (browserName === "chromium") return keyboardPath(name, fn);
+  console.log(`skip keyboard: ${name}: needs Chromium`);
+  results.push({ keyboard: name, status: "skipped", detail: `needs Chromium, not ${browserName}` });
+};
 
 async function keyboardPath(name, fn) {
   try {
@@ -435,6 +479,19 @@ async function controls() {
 
 async function keyboardPaths(s) {
   const page = await contextFor(s.owner).newPage();
+  // In Firefox, the router finishing a request from the step before updates history, and that cancels a load just started. Load states
+  // don't help, because a page that has been idle once stays idle to them.
+  if (browserName === "firefox") {
+    let open = 0;
+    page.on("request", () => open++);
+    for (const ended of ["requestfinished", "requestfailed"]) page.on(ended, () => open--);
+    const goto = page.goto.bind(page);
+    page.goto = async (...args) => {
+      for (const deadline = Date.now() + 5_000; open > 0 && Date.now() < deadline; ) await new Promise((done) => setTimeout(done, 25));
+      await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))).catch(() => {});
+      return goto(...args);
+    };
+  }
 
   await keyboardPath("create a room", async () => {
     await page.goto(`${app}/workrooms/new`);
@@ -449,7 +506,7 @@ async function keyboardPaths(s) {
     await page.getByText("Keyboard room").first().waitFor({ timeout: 15_000 });
     await page.waitForFunction(() => document.activeElement?.id === "main-content", null, { timeout: 5_000 }).catch(() => {});
     ok(await page.evaluate(() => document.activeElement?.id === "main-content"), `after creating, focus is on ${await activeText(page)}, not on the new screen's main region`);
-    await page.keyboard.press("Tab");
+    await page.keyboard.press(TAB);
     ok(await page.evaluate(() => document.getElementById("main-content").contains(document.activeElement)), `Tab from the new screen's main region went to ${await activeText(page)}, not into that screen`);
   });
 
@@ -504,6 +561,16 @@ async function keyboardPaths(s) {
       [`/claim?agent_id=${s.pending.pluginId}&code=${s.pending.userCode}`],
       [`/oauth/consent?${s.consent}`],
       [`/invitations/${s.roomInvite.token}`, s.partner],
+      // Forms that don't need the early-input hook, which would need it if they ever held their state in React before load.
+      ["/sign-in", null],
+      ["/agents"],
+      ["/agents/connect"],
+      ["/attention"],
+      ["/settings/profile"],
+      ["/settings/notifications"],
+      ["/workrooms/explore"],
+      [`/w/${s.room}/tasks?task=${s.review.id}`],
+      [`/w/${s.room}/artifacts`],
     ];
     for (const [path, person = s.owner, org] of screensToFill) {
       const { own, lost } = await fillEarly(path, person, org);
@@ -526,6 +593,69 @@ async function keyboardPaths(s) {
     console.log(`     coming back, the browser ${goal ? "restored" : "didn't restore"} the goal`);
     ok(!goal || (await save.isEnabled()), "a restored goal left Save disabled");
     await own.close();
+  });
+
+  await keyboardPath("a filter ticked before the page is ready is applied, once", async () => {
+    const own = await contextFor(s.owner).newPage();
+    let release;
+    const ready = new Promise((done) => (release = done));
+    await own.route(/_next\/static\/.*\.js/, async (route) => {
+      await ready;
+      await route.continue();
+    });
+    try {
+      await own.goto(`${app}/w/${s.room}/tasks`, { waitUntil: "commit" });
+      const filter = own.getByRole("checkbox", { name: "Needs my review" });
+      await filter.waitFor();
+      const entries = await own.evaluate(() => history.length);
+      await filter.evaluate((el) => (el.checked = true));
+      release();
+      await own.waitForURL(/[?&]/, { timeout: 15_000 });
+      await hydrated(own);
+      await own.waitForTimeout(500);
+      const after = await own.evaluate(() => history.length);
+      ok(after === entries + 1, `a filter ticked early moved history by ${after - entries}`);
+      ok(await filter.isChecked(), "the filter ticked early came back unticked");
+    } finally {
+      await own.close();
+    }
+  });
+
+  await keyboardPath("settings changed before the page is ready send what they show, only when asked", async () => {
+    const own = await contextFor(s.owner).newPage();
+    const sent = [];
+    await own.route(/\/api\/v1\/workspaces\/[^/]+\/(brief|review-policy)$/, (route) => {
+      if (route.request().method() !== "PUT") return route.fallback();
+      sent.push([new URL(route.request().url()).pathname.split("/").at(-1), route.request().postDataJSON()]);
+      return route.fulfill({ status: 403, json: { error: { code: "not_allowed" } } });
+    });
+    let release;
+    const ready = new Promise((done) => (release = done));
+    await own.route(/_next\/static\/.*\.js/, async (route) => {
+      await ready;
+      await route.continue();
+    });
+    try {
+      await own.goto(`${app}/w/${s.room}/settings`, { waitUntil: "commit" });
+      const goal = own.locator("form textarea").first();
+      await goal.waitFor();
+      await goal.focus();
+      await own.keyboard.type("Typed before load");
+      await own.getByRole("checkbox", { name: /Require a person to review/ }).evaluate((el) => (el.checked = true));
+      release();
+      await hydrated(own);
+      await own.waitForTimeout(500);
+      ok(sent.length === 0, `something early was sent without being asked: ${JSON.stringify(sent)}`);
+      const answered = (what) => own.waitForResponse((response) => response.url().endsWith(`/${what}`) && response.request().method() === "PUT", { timeout: 15_000 });
+      await Promise.all([answered("brief"), own.getByRole("button", { name: "Save goal and context" }).click()]);
+      const brief = sent.filter(([what]) => what === "brief");
+      ok(brief.length === 1 && brief[0][1].goal?.includes("Typed before load"), `the goal sent wasn't what it showed: ${JSON.stringify(sent)}`);
+      await Promise.all([answered("review-policy"), own.getByRole("button", { name: "Save review setting" }).click()]);
+      const policy = sent.filter(([what]) => what === "review-policy");
+      ok(policy.length === 1 && policy[0][1].require_person === true, `the review setting sent wasn't what it showed: ${JSON.stringify(sent)}`);
+    } finally {
+      await own.close();
+    }
   });
 
   await keyboardPath("a filter ticked after the page is ready isn't sent again on load or coming back", async () => {
@@ -733,7 +863,11 @@ async function keyboardPaths(s) {
     const box = small.getByRole("region", { name: /scrolls sideways/ });
     await box.focus();
     await small.keyboard.press("ArrowRight");
-    await small.waitForFunction(() => document.activeElement?.scrollLeft > 0, null, { timeout: 15_000 });
+    // See the table's arrow keys: in Playwright's WebKit, a key doesn't move even a plain box with focus.
+    if (browserName === "webkit") {
+      await small.waitForTimeout(1_000);
+      unseenInWebKit("arrow keys scrolling the map", await box.evaluate((el) => el.scrollLeft > 0));
+    } else await small.waitForFunction(() => document.activeElement?.scrollLeft > 0, null, { timeout: 15_000 });
     await phone.close();
   });
 
@@ -747,15 +881,15 @@ async function keyboardPaths(s) {
     await tabTo(page, from, "the From role select", 120);
     await page.keyboard.type("Delivery");
     await page.waitForFunction((id) => document.activeElement?.value === id, s.plannedTo, { timeout: 15_000 });
-    await page.keyboard.press("Tab");
+    await page.keyboard.press(TAB);
     await to.evaluate((el) => new Promise((done) => (document.activeElement === el ? done() : el.addEventListener("focus", done, { once: true }))));
     await page.keyboard.type("Lead");
     await page.waitForFunction((id) => document.activeElement?.value === id, s.opening, { timeout: 15_000 });
     ok((await from.inputValue()) === s.plannedTo && (await to.inputValue()) === s.opening, "the keyboard didn't choose both roles");
-    await page.keyboard.press("Tab");
+    await page.keyboard.press(TAB);
     await page.waitForFunction(() => document.activeElement?.tagName === "INPUT", null, { timeout: 15_000 });
     await page.keyboard.type("Asks questions of");
-    await page.keyboard.press("Tab");
+    await page.keyboard.press(TAB);
     await page.waitForFunction(() => document.activeElement?.textContent === "Add planned line", null, { timeout: 15_000 });
     await page.keyboard.press("Enter");
     const dashed = page.locator('svg a[href^="#planned-"]', { hasText: "Asks questions of" });
@@ -770,7 +904,7 @@ async function keyboardPaths(s) {
     await page.waitForFunction(() => document.activeElement?.tagName === "LI" && document.activeElement.id.startsWith("planned-"), null, { timeout: 15_000 });
     const row = page.locator(`li#${await page.evaluate(() => document.activeElement.id)}`);
     ok((await row.textContent()).includes("Planned, not recorded"), "the list's row doesn't say it's planned");
-    await page.keyboard.press("Tab");
+    await page.keyboard.press(TAB);
     await page.waitForFunction(() => document.activeElement?.textContent === "Remove", null, { timeout: 15_000 });
     await page.keyboard.press("Enter");
     const confirm = page.getByRole("alertdialog");
@@ -1065,7 +1199,7 @@ async function keyboardPaths(s) {
       await waitForRows(own, 50);
       const late = own.getByRole("link", { name: "Long task 250", exact: true });
       // Backward from the button, which is how far a keyboard user has got.
-      for (let i = 0; i < 120 && !(await late.evaluate((el) => el === document.activeElement)); i++) await own.keyboard.press("Shift+Tab");
+      for (let i = 0; i < 120 && !(await late.evaluate((el) => el === document.activeElement)); i++) await own.keyboard.press(SHIFT_TAB);
       ok(await late.evaluate((el) => el === document.activeElement), "couldn't reach a row from the second page");
       await own.keyboard.press("Enter");
       await own.getByRole("dialog").waitFor({ timeout: 15_000 });
@@ -1142,7 +1276,7 @@ async function keyboardPaths(s) {
     }
   });
 
-  await keyboardPath("several thousand rows stay usable", async () => {
+  await chromiumOnly("several thousand rows stay usable", async () => {
     const TARGET = 5000;
     const own = await buttonOnly();
     // Pages the server would have to hold thousands of tasks to answer, with instructions at their limit, which rows don't keep.
@@ -1379,9 +1513,14 @@ async function keyboardPaths(s) {
     ok(share <= 0.55, `the column that stays put takes ${Math.round(share * 100)}% of the table's width at 375px`);
     await region.focus();
     await small.keyboard.press("ArrowRight");
-    await small.waitForFunction(() => document.querySelector('[role="region"][aria-label="Task plan table"]').scrollLeft > 0, undefined, { timeout: 5000 }).catch(() => {
-      throw new Error("the arrow keys don't scroll the table");
-    });
+    if (browserName === "webkit") {
+      await small.waitForTimeout(1_000);
+      unseenInWebKit("arrow keys scrolling the Gantt table", await region.evaluate((el) => el.scrollLeft > 0));
+    } else {
+      await small.waitForFunction(() => document.querySelector('[role="region"][aria-label="Task plan table"]').scrollLeft > 0, undefined, { timeout: 5000 }).catch(() => {
+        throw new Error("the arrow keys don't scroll the table");
+      });
+    }
     await audit(small, "Tasks, Gantt, phone");
     await phone.close();
   });
@@ -1623,7 +1762,9 @@ async function keyboardPaths(s) {
     await tabTo(small, scroller, "the table");
     await small.keyboard.press("ArrowRight");
     await small.waitForFunction((el) => el.scrollLeft > 0, await scroller.elementHandle(), { timeout: 5_000 }).catch(() => {});
-    ok(await scroller.evaluate((el) => el.scrollLeft > 0), "the arrow keys don't scroll the table");
+    // Whether Safari does this needs Safari. In Playwright's WebKit the table has focus and can scroll, and a key doesn't move even a plain box.
+    if (browserName === "webkit") unseenInWebKit("arrow keys scrolling a table", await scroller.evaluate((el) => el.scrollLeft > 0));
+    else ok(await scroller.evaluate((el) => el.scrollLeft > 0), "the arrow keys don't scroll the table");
     const box = small.getByRole("checkbox", { name: "Author's mark, not verified by Podster" }).first();
     ok(await box.isDisabled(), "a checklist mark isn't disabled");
     const before = await box.isChecked();
@@ -1998,7 +2139,28 @@ async function keyboardPaths(s) {
     ok(refused.status === 400, `narrowing a person answered ${refused.status} ${refused.code}`);
   });
 
-  await keyboardPath("long messages are in the accessibility tree, off-screen too", async () => {
+  await keyboardPath("a completed task's Sheet shows the Approved mark on the approved submission, in view", async () => {
+    const own = await contextFor(s.owner).newPage();
+    try {
+      await own.goto(`${app}/w/${s.room}/tasks?task=${s.done.id}`);
+      const sheet = own.getByRole("dialog");
+      await sheet.waitFor({ timeout: 15_000 });
+      await hydrated(own);
+      const mark = sheet.getByText("Approved", { exact: true }).filter({ visible: true });
+      await mark.waitFor({ timeout: 15_000 });
+      ok((await mark.count()) === 1, `the Sheet shows ${await mark.count()} Approved marks for one approved submission`);
+      await mark.scrollIntoViewIfNeeded();
+      const box = await mark.boundingBox();
+      ok(box && box.y >= 0 && box.y + box.height <= own.viewportSize().height, "the Approved mark isn't in view after scrolling to it");
+      // It says so in words, because a color and an icon alone wouldn't reach everyone.
+      ok((await mark.locator("svg").getAttribute("aria-hidden")) === "true", "the Approved mark's icon isn't hidden from the accessibility tree");
+      await audit(own, "Task Sheet, Approved mark in view");
+    } finally {
+      await own.close();
+    }
+  });
+
+  await chromiumOnly("long messages are in the accessibility tree, off-screen too", async () => {
     const own = await contextFor(s.owner).newPage();
     await own.goto(`${app}/w/${s.room}/tasks?task=${s.linkThread.id}`);
     const sheet = own.getByRole("dialog");
@@ -2049,7 +2211,7 @@ async function keyboardPaths(s) {
     await sheet.getByRole("tab", { name: /^Discussion/ }).focus();
     const reached = new Set();
     for (let i = 0; i < 40; i++) {
-      await own.keyboard.press("Tab");
+      await own.keyboard.press(TAB);
       const href = await own.evaluate(() => (document.activeElement?.closest("article") ? document.activeElement.getAttribute("href") : null));
       if (href) reached.add(href);
     }
@@ -2098,7 +2260,7 @@ async function keyboardPaths(s) {
           await own.waitForTimeout(300);
           let stops = 0;
           for (let i = 0; i < 400; i++) {
-            await own.keyboard.press("Tab");
+            await own.keyboard.press(TAB);
             const inside = await article.evaluate((el) => el.contains(document.activeElement));
             if (inside) stops += 1;
             else if (stops > 0) break;
@@ -2206,7 +2368,7 @@ const unexpected = failures.filter((f) => !knownKeyboard.has(f));
 for (const entry of knownKeyboard) if (!failures.includes(entry)) unexpected.push(`a11y-known.json lists a keyboard failure that's gone, so remove it: ${entry}`);
 
 mkdirSync(join(here, "results"), { recursive: true });
-const file = join(here, "results", `a11y-${new Date().toISOString().replaceAll(":", "-").slice(0, 19)}.json`);
+const file = join(here, "results", `a11y-${browserName === "chromium" ? "" : `${browserName}-`}${new Date().toISOString().replaceAll(":", "-").slice(0, 19)}.json`);
 writeFileSync(file, `${JSON.stringify({ commit: process.env.GITHUB_SHA ?? null, results, failures }, null, 2)}\n`);
 console.log(`\n${results.filter((r) => r.screen).length} axe runs, ${uniqueFound.size} distinct violations, ${unexpected.length} unexpected. Results: ${file}`);
 for (const failure of unexpected) console.log(`  ${failure}`);

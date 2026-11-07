@@ -1,0 +1,20 @@
+// A queue consumer and a ClamAV Container. No route and no workers.dev address.
+{
+  "name": "podster-spike-scanner",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "r2_buckets": [{ "binding": "ASSETS", "bucket_name": "podster-assets-staging" }],
+  "services": [{ "binding": "API", "service": "podster-spike-api" }],
+  "queues": {
+    "consumers": [
+      { "queue": "podster-scan-staging", "max_batch_size": 1, "max_batch_timeout": 1, "max_concurrency": 1, "max_retries": 2, "retry_delay": 30, "dead_letter_queue": "podster-scan-dlq-staging" },
+      { "queue": "podster-scan-dlq-staging", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 2 }
+    ]
+  },
+  "containers": [{ "class_name": "ClamAV", "image": "./container/Dockerfile", "image_build_context": "./container", "instance_type": "standard-1", "max_instances": 1 }],
+  "durable_objects": { "bindings": [{ "name": "CLAMAV", "class_name": "ClamAV" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ClamAV"] }],
+  "observability": { "enabled": true }
+}

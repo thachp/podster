@@ -1,0 +1,12 @@
+// Run wrangler from the spike folder, so `cwd` finds this crate. The Rust API's shape. No route and no workers.dev address: only the spike's Workers can reach it, by service binding.
+{
+  "name": "podster-spike-api",
+  "main": "build/index.js",
+  "build": { "command": "worker-build --release", "cwd": "api" },
+  "compatibility_date": "2026-08-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "r2_buckets": [{ "binding": "ASSETS", "bucket_name": "podster-assets-staging" }],
+  "queues": { "producers": [{ "binding": "SCAN", "queue": "podster-scan-staging" }] },
+  "observability": { "enabled": true }
+}

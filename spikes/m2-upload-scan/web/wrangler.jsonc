@@ -1,0 +1,10 @@
+// The only Worker in this spike with a public address, and it refuses anything without the spike's token.
+{
+  "name": "podster-spike-web",
+  "main": "index.js",
+  "compatibility_date": "2026-08-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "services": [{ "binding": "GATEWAY", "service": "podster-spike-gateway" }],
+  "observability": { "enabled": true }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "@podster/spike-m2-upload-scan",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "fixtures": "python3 local/fixtures.py",
+    "measure:container": "python3 local/measure_container.py",
+    "measure:path": "node local/run_path.mjs"
+  },
+  "dependencies": { "@cloudflare/containers": "^0.3.0" },
+  "devDependencies": { "wrangler": "^4.157.0" }
+}

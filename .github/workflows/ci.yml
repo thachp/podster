@@ -92,6 +92,9 @@ jobs:
         working-directory: e2e
       - run: node run-a11y.mjs --skip-web-build
         working-directory: e2e
+      # The browser's path for a file's bytes, with the API that run built.
+      - run: node run-upload-browser.mjs --skip-build
+        working-directory: e2e
 
   # The real image needs current signatures from the mirror, so test/local and container/tests/integration.py run by hand.
   scanner:

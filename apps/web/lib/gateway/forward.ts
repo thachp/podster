@@ -5,6 +5,8 @@ const DASHBOARD = [/^\/api\/v1\//, /^\/api\/orgs$/, /^\/api\/orgs\/org_[\w-]+\/(
 export function isForwardable(path: string) {
   // A collapsed slash or dot segment could reach something the gateway's prefix checks didn't look at.
   if (path.includes("//") || path.includes("/./") || path.includes("/../") || /%2f|%5c|%2e/i.test(path)) return false;
+  // A file's bytes have their own route, because this path reads a body whole. Near misses get no further than a refusal.
+  if (path.startsWith("/api/v1/uploads")) return false;
   return PERSON_AUTH.some((route) => route.test(path)) || DASHBOARD.some((route) => route.test(path));
 }
 

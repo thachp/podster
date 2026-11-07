@@ -145,6 +145,28 @@ The owner said "accept all" on 2026-11-07, so these are [decisions 81 to 84](../
 3. **Signatures stay current through a scheduled image rebuild,** with signatures in the image. A Container's disk is [fresh from the image each time it starts](https://developers.cloudflare.com/containers/faq/#is-disk-persistent-what-happens-to-my-disk-when-my-container-sleeps), so an update made while running is lost on sleep. Running `freshclam` at each start would add about 20 s to a 10 s cold start and keep outbound traffic. Container snapshots are in public beta and untested here. This is a yes in principle to a scheduled staging deploy, and creating it still needs the owner in that session.
 4. **Scanning stops when signatures pass 7 days old.** A result carries its database version. Past the limit, a file stays in Scanning and ends as Scan failed, and never gets a verdict. So a rebuild that keeps failing stops files becoming Ready, and the rebuild has to run well inside the 7 days. How often isn't ruled, and step 3 proposes it.
 
+## The browser's path
+
+**Proposed**, and built: a page sends a file's bytes to its own host, and the web Worker streams them to the gateway over its service binding. The alternative was CORS on the gateway for that one route. Neither needs a contract change, because `PUT /v1/uploads/{ws}/{object}` stays as it is and `/api/v1/uploads/...` is only the web Worker's own route to it.
+
+| | Web Worker's own route (chosen) | CORS on the gateway |
+| --- | --- | --- |
+| CSP | `connect-src 'self'` stays, and a check shows it still blocks other hosts | Has to add the gateway, which differs by environment, and lets page code reach all of that host, including its agent routes |
+| The project's rule | "Browser code only ever talks to this host" stays true | An exception to it |
+| Memory for 100 MB, local | The web Worker's process grew by 2 to 24 MB over 12 runs | No web Worker involved |
+| CPU for 100 MB, local | 0.3 to 0.5 s more, against a 30 s limit | None more |
+| Progress | XMLHttpRequest, the same | XMLHttpRequest, the same, as request streams with `fetch` give no progress and aren't in every browser |
+| Cookie | Sent to this host by the browser, and dropped here by an allowlist of two headers | Never sent |
+| Token | In a header and a variable, the same | The same, with a preflight on every attempt |
+| New code | One small route | `OPTIONS` and CORS headers on every answer of the route, and a per-environment CSP |
+| Failure | One more hop that can fail | One fewer |
+
+Reading a body whole, as the catch-all at `/api/[...path]` does, grew the same process by 286 MB, so this route is separate from it and the catch-all refuses `/api/v1/uploads`. vinext tees every request with a body for its middleware and cancels the unused side when the matcher skips the path, which `/api/` does. The numbers above were taken with that in place. A vinext upgrade that stops cancelling it would hold the file, and only a memory measurement would notice.
+
+The measurements are RSS of the local `workerd` process, not a deployed isolate's memory against its 128 MB. [The spike](#spike-results) sent 100 MB through a plain web Worker on staging, but not through vinext, so that hop hasn't run on a deployment. The helper hashes with the browser's own SHA-256, which can't take a file in parts, so the browser holds the whole file for that moment.
+
+In Chromium, Firefox and WebKit locally, a refusal that comes before the browser has finished sending, such as 100 MB against a 1-byte reservation, appeared as a lost connection and not as the refusal's code. The helper reports that as `network_error` with a retry. Whether this also happens through Cloudflare's edge is unchecked, and it would apply to CORS too.
+
 ## Consequences
 
 - No content domain, Public Suffix List entry or S3 credentials are needed for M2.

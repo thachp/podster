@@ -34,6 +34,10 @@ describe("isForwardable", () => {
     "/api/orgs/org_1/members/per_1/x",
     "/api/org-invitations",
     "/api/org-invitations/other",
+    "/api/v1/uploads",
+    "/api/v1/uploads/ws_1",
+    "/api/v1/uploads/ws_1/obj_1",
+    "/api/v1/uploads/ws_1/obj_1/more",
   ])("refuses %s", (path) => expect(isForwardable(path)).toBe(false));
 });
 

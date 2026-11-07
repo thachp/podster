@@ -61,7 +61,7 @@ The existing two-agent task lifecycle, authorization checks and durable inbox ar
 | **M0 Kernel** | Two-agent task lifecycle, inbox and wake; workroom owner and admins; revocation fence; basic dashboard | [Kernel success criteria](#coordination-kernel-success-criteria) plus AC-01 to AC-07, AC-09, AC-12 to AC-17, AC-19 to AC-22, AC-25, AC-26, AC-29 and AC-30, for the features M0 includes |
 | **M1 Private workrooms** | Goal and context, work roles and invited claims, lead, scoped access, activity, collaboration list and map | Expanded criteria 1 (without input assets and expected outputs, which M2 adds), 3, 4 and 5 for private rooms. **Met by the owner's ruling on 2026-11-06, at `5ae3dad`** ([decision 80](#decisions-needed), [what it rests on](../m0-gate.md#what-the-call-on-m1-rests-on)) |
 | **M2 Assets and artifacts** ([plan](../m2-plan.md)) | Upload, scanning, expected and versioned outputs, exact-version review | The input assets and expected outputs in expanded criterion 1; expanded criterion 6; upload policy |
-| **M3 A2A** | Published profile, adapter, interoperability and authorization tests | Protocol gates below |
+| **M3 A2A** ([proposed plan](../m3-plan.md)) | Published profile, adapter, interoperability and authorization tests | Protocol gates below |
 | **M4 Public workrooms** | Explore, public read surface, public claims, abuse controls | Expanded criterion 2; abuse review |
 | **M5 Managed repositories** | GitHub App, repository link, review and merge | Expanded criterion 7 for repositories |
 | **M6 Release** | Workroom-level deployment, separate content domain, custom domains | Expanded criteria 7 and 8 |
@@ -593,6 +593,14 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 86 | A forecast that moves with task status | **Decided:** the forecast can change with task status without moving `plan_changed_at`, and says so. No revision bump | Planning |
 | 87 | The forecast in an agent's plan read | **Decided:** agents' default `get_plan` includes the forecast | Planning |
 | 88 | A first Load more click lost before hydration on a slow device | **Decided:** it stays as it is, and is revisited if real users hit it | M1 |
+| 89 | PDFs with only an owner password | **Decided:** they stay refused | M2 |
+| 90 | Password-protected OpenDocument files | **Decided:** refused if they can be detected without refusing all OpenDocument files. The whole format isn't refused | M2 |
+| 91 | Blocked file extensions | **Decided:** `.cmd`, `.vbs`, `.msc`, `.inf`, `.url`, `.jnlp`, `.application`, `.bat`, `.ps1`, `.sh` and `.js`, plus those already in the rules | M2 |
+
+## File type decisions, November 7, 2026
+
+- The owner accepted the file type recommendations, now decisions 89 to 91, saying "go with ur recommendation".
+- Only decision 89 is in the code so far. Decisions 90 and 91 still need `crates/core/src/files.rs` changed.
 
 ## Spike, Gantt and Load more decisions, November 7, 2026
 

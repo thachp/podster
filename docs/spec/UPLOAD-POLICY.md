@@ -18,9 +18,10 @@ Documents, images, text, code, presentations, video and zip archives.
 Refused:
 
 - Executables and installers.
-- Password-protected files, including password-protected archives, because they can't be scanned.
+- Password-protected files, including password-protected archives, because they can't be scanned. A PDF with only an owner password is refused too ([decision 89](PRODUCT.md#decisions-needed)). A password-protected OpenDocument file is refused if it can be detected without refusing all OpenDocument files ([decision 90](PRODUCT.md#decisions-needed)).
+- Files with a name that would run when opened ([decision 91](PRODUCT.md#decisions-needed)): `.cmd`, `.vbs`, `.msc`, `.inf`, `.url`, `.jnlp`, `.application`, `.bat`, `.ps1`, `.sh`, `.js`, and those already in the rules: `.exe`, `.dll`, `.sys`, `.msi`, `.msp`, `.msix`, `.msixbundle`, `.appx`, `.appxbundle`, `.com`, `.scr`, `.pif`, `.cpl`, `.lnk`, `.hta`, `.jse`, `.vbe`, `.wsf`, `.wsh`, `.reg`, `.jar`, `.apk`, `.aab`, `.ipa`, `.dmg`, `.pkg`, `.deb`, `.rpm`, `.appimage`, `.crx`, `.xpi`, `.bin` and `.elf`. Code is otherwise allowed, so a JavaScript or shell file has to go inside a zip.
 
-Podster decides a file's type from its content, not from its name or what the sender claims. A file that doesn't match the list is refused.
+Podster decides a file's type from its content, not from its name or what the sender claims. A name can only get a file refused, never accepted. A file that doesn't match the list is refused.
 
 ## Scanning
 

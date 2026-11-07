@@ -582,6 +582,19 @@ describe("setting the room's start", () => {
     expect(planReads).toBe(readsBefore + 1);
   });
 
+  it("keeps focus and the saved message on the button when a first start makes the forecast appear", async () => {
+    const user = userEvent.setup();
+    await asOwner();
+    await user.click(screen.getByRole("button", { name: "Set start date" }));
+    await user.clear(screen.getByLabelText("Start date"));
+    await user.type(screen.getByLabelText("Start date"), "2026-11-09");
+    planReply = () => json(withForecast());
+    await user.click(screen.getByRole("button", { name: "Save start" }));
+    await screen.findByRole("heading", { name: "Baseline plan" });
+    expect(screen.getByRole("button", { name: "Change start date" })).toHaveFocus();
+    expect(screen.getByText(/Start saved\./)).toBeInTheDocument();
+  });
+
   it("starts from the room's own start, and Cancel sends nothing", async () => {
     const user = userEvent.setup();
     await asOwner(withForecast());

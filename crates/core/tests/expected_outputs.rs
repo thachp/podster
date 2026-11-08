@@ -130,6 +130,33 @@ fn a_description_is_optional_but_not_blank_or_too_long() {
         decide_edit(false, "Report", Some(&long)),
         Err(R::InvalidArgument("description"))
     );
+    let at_limit = "x".repeat(MAX_OUTPUT_DESCRIPTION_BYTES);
+    assert_eq!(MAX_OUTPUT_DESCRIPTION_BYTES, 4096);
+    assert_eq!(decide_define(false, 0, "Report", Some(&at_limit)), Ok(()));
+    assert_eq!(decide_edit(false, "Report", Some(&at_limit)), Ok(()));
+}
+
+#[test]
+fn limits_count_bytes_not_characters() {
+    // 101 characters, 202 bytes: under the title limit in characters, over it in bytes.
+    let accented = "é".repeat(101);
+    assert_eq!(accented.chars().count(), 101);
+    assert_eq!(accented.len(), 202);
+    assert_eq!(
+        decide_define(false, 0, &accented, None),
+        Err(R::InvalidArgument("title"))
+    );
+    assert_eq!(
+        decide_edit(false, &accented, None),
+        Err(R::InvalidArgument("title"))
+    );
+    // 100 of them is exactly 200 bytes, which fits.
+    assert_eq!(decide_define(false, 0, &"é".repeat(100), None), Ok(()));
+    let accented_description = "é".repeat(MAX_OUTPUT_DESCRIPTION_BYTES / 2 + 1);
+    assert_eq!(
+        decide_define(false, 0, "Report", Some(&accented_description)),
+        Err(R::InvalidArgument("description"))
+    );
 }
 
 #[test]
@@ -161,6 +188,14 @@ fn renaming_is_allowed_and_checked() {
     assert_eq!(decide_edit(false, "Board report", None), Ok(()));
     assert_eq!(
         decide_edit(false, "", None),
+        Err(R::InvalidArgument("title"))
+    );
+    assert_eq!(
+        decide_edit(false, &"x".repeat(MAX_OUTPUT_TITLE_BYTES), None),
+        Ok(())
+    );
+    assert_eq!(
+        decide_edit(false, &"x".repeat(MAX_OUTPUT_TITLE_BYTES + 1), None),
         Err(R::InvalidArgument("title"))
     );
 }

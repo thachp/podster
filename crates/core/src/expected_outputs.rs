@@ -234,6 +234,9 @@ pub fn output_status(has_version: bool, naming: &[TaskStatus]) -> OutputStatus {
 /// Whether every stored file of an output's current version can still be downloaded. `files` is what the room reads now for
 /// the files that submission names. False if any was removed or blocked after approval, or a row is missing. A version with no
 /// stored files, only links, is available.
+///
+/// The answer says something about a submission, so a read shows it only to someone who may read that submission, never to
+/// every participant who sees the output.
 pub fn current_files_available(pinned: &[&str], files: &[RoomFile<'_>]) -> bool {
     pinned.iter().all(|id| {
         files

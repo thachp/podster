@@ -72,6 +72,7 @@ const INVITATION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 type Identity = Verified;
 
+mod asset_links;
 mod collaboration;
 mod downloads;
 mod objects;
@@ -3601,6 +3602,7 @@ impl Workspace {
                 ["outputs"] => outputs::read(&sql, &who),
                 ["outputs", output, "versions"] => outputs::read_versions(&sql, &who, output),
                 ["card"] => roles::read_card(&sql, &who),
+                ["files"] => asset_links::list(&sql, &who, &url),
                 ["files", id] => downloads::read_file(&sql, &who, id),
                 ["collaboration"] => collaboration::read_map(&sql, &who),
                 ["collaboration", "handoffs"] => collaboration::read_edge(&sql, &who, &url),
@@ -3747,6 +3749,32 @@ impl Workspace {
                     stops_when_archived,
                     test_fail,
                     move |sql, who, now| objects::handle_create(sql, &who.caller, &raw, &body, now),
+                )
+            }
+            (Method::Post, ["files", file, "links"]) => {
+                let file = (*file).to_string();
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| {
+                        asset_links::handle_link(sql, &who.caller, &file, &body, now)
+                    },
+                )
+            }
+            (Method::Delete, ["files", file, "links", task]) => {
+                let (file, task) = ((*file).to_string(), (*task).to_string());
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| {
+                        asset_links::handle_unlink(sql, &who.caller, &file, &task, now)
+                    },
                 )
             }
             (Method::Put, ["plan", "start"]) => self.command(

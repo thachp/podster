@@ -18,7 +18,12 @@ export type UploadResult =
    */
   | { ok: false; status: number; code: string; retry?: () => Promise<UploadResult>; retryAfter?: number };
 
-type Options = { signal?: AbortSignal; onProgress?: (progress: UploadProgress) => void };
+type Options = {
+  signal?: AbortSignal;
+  onProgress?: (progress: UploadProgress) => void;
+  /** The task whose submission this file is for, which only its assignee may upload. Left out, it's an input asset. */
+  taskId?: string;
+};
 type Reservation = { upload_path: string; token: string };
 
 // Answers that say this attempt failed and the upload is still open. A lost connection is one, though the file may have arrived
@@ -38,7 +43,7 @@ const MAX_WAIT_SECONDS = 300;
  * A failed upload keeps its reserved space until it expires, so prefer `retry` where it's offered to starting again.
  */
 export async function uploadFile(workspaceId: string, file: File, options: Options = {}): Promise<UploadResult> {
-  const { signal, onProgress } = options;
+  const { signal, onProgress, taskId } = options;
   if (file.size > MAX_UPLOAD_BYTES) return { ok: false, status: 413, code: "file_too_large" };
   if (signal?.aborted) return CANCELED;
   onProgress?.({ phase: "hashing" });
@@ -53,7 +58,7 @@ export async function uploadFile(workspaceId: string, file: File, options: Optio
   onProgress?.({ phase: "reserving" });
   let reserved: GatewayResult<Reservation>;
   try {
-    reserved = await clientCommand<Reservation>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/uploads`, { name: file.name, size: file.size, sha256 });
+    reserved = await clientCommand<Reservation>(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/uploads`, { name: file.name, size: file.size, sha256, ...(taskId === undefined ? {} : { task_id: taskId }) });
   } catch {
     // No retry: without an answer there's no token, and whether space was reserved isn't known.
     return { ok: false, status: 0, code: "network_error" };

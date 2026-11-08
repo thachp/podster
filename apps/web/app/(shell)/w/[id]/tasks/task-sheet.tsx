@@ -9,9 +9,10 @@ import { clientQuery } from "@/lib/gateway/client";
 import { goToSignIn } from "./go-to-sign-in";
 import { TaskActions, type SavedEdit } from "./task-actions";
 import { TaskComposer } from "./task-composer";
+import { SubmissionFiles } from "./task-files";
 import { TaskPlan } from "./task-plan";
 import { ApprovedMark, PrincipalName, TaskStatusBadge, Timestamp } from "./task-bits";
-import { briefAuthor, flagText, isArchivedRoom, kindOf, nameOf, roleOf, verbFor, type Artifact, type From, type Names, type Room, type TaskDetail, type TaskSummary } from "./task-model";
+import { briefAuthor, flagText, isArchivedRoom, kindOf, nameOf, roleOf, verbFor, type Artifact, type From, type Names, type Room, type Submission, type TaskDetail, type TaskSummary } from "./task-model";
 
 export type LoadedTask = TaskDetail & { workspace: string; room: Room };
 
@@ -82,6 +83,8 @@ function TaskBody({ api, me, names, orgNames, outside, onTaskRead }: { api: Shee
   if (!api.dirty) held.current = data;
   // Survives the controls starting fresh, because "Review latest" keeps the person's input (DESIGN.md, "Saving and conflicts").
   const savedEdit = useRef<SavedEdit | null>(null);
+  // The same for a submission's note, whose form also starts afresh for each version.
+  const savedNote = useRef("");
   const returnFocus = useRef(false);
   // A decision removes the button that made it, and focus shouldn't vanish with it. This also lands on the result.
   useEffect(() => {
@@ -163,7 +166,7 @@ function TaskBody({ api, me, names, orgNames, outside, onTaskRead }: { api: Shee
               if (result.ok && isThisTask(result.data, task.id)) onTaskRead?.(result.data);
               return result;
             }, explain),
-        }} me={me} names={names} role={roleOf(held.current.room, me)} onNotice={setNotice} savedEdit={savedEdit} returnFocus={returnFocus} />
+        }} me={me} names={names} role={roleOf(held.current.room, me)} onNotice={setNotice} savedEdit={savedEdit} returnFocus={returnFocus} savedNote={savedNote} />
     </div>
   );
 }
@@ -177,6 +180,16 @@ export function Details({ data, me, names, orgNames, overseen = false }: Section
   const { task } = data;
   // Submissions are numbered, so the task already shows how many there are. Saying "may" would be coy.
   const hiddenSubmissions = data.visible?.submissions === "own" && task.submission_no > data.submissions.length;
+  const allFiles = data.files ?? [];
+  const files = allFiles.filter((file) => file.submitted !== false && typeof file.submission_no === "number");
+  // The uploader's own files that no submission names yet. Their submit form lists them while the task waits for work, so
+  // this is for any other time they're still held, and for oversight.
+  const unsubmitted = allFiles.filter((file) => file.submitted === false);
+  const inSubmitForm = !overseen && task.status === "accepted" && task.assignee === me;
+  // The reviewer named on a task gets all its submitted files even when it can't read every submission (decision 97), so a
+  // submission can show up here by its files alone.
+  const filesOnly = [...new Set(files.map((file) => file.submission_no as number))].filter((no) => !data.submissions.some((submission) => submission.submission_no === no));
+  const rows: (Submission | { submission_no: number; created_at: number; filesOnly: true })[] = [...data.submissions, ...filesOnly.map((no) => ({ submission_no: no, created_at: files.find((file) => file.submission_no === no && typeof file.created_at === "number")?.created_at ?? 0, filesOnly: true as const }))].sort((a, b) => b.submission_no - a.submission_no);
   const brief = briefAuthor(data);
   const briefBy = { name: nameOf(brief.id, me, names), kind: kindOf(brief.id), organization: brief.org ? (orgNames[brief.org] ?? brief.org) : undefined, viewer: brief.id === me };
   return (
@@ -192,32 +205,44 @@ export function Details({ data, me, names, orgNames, overseen = false }: Section
       </section>
       <section className="space-y-2">
         <h3 className="font-medium">Submissions</h3>
-        {hiddenSubmissions ? <p className="text-sm text-muted-foreground">{overseen ? "This task has submissions this agent's access doesn't show. Only what it submitted is listed." : "This task has submissions your access doesn't show. Only what you submitted is listed."}</p> : data.submissions.length === 0 ? <p className="text-sm text-muted-foreground">Nothing submitted yet.</p> : null}
+        {hiddenSubmissions ? <p className="text-sm text-muted-foreground">{overseen ? "This task has submissions this agent's access doesn't show. Only what it submitted is listed." : filesOnly.length > 0 ? "This task has submissions your access doesn't show in full. As its reviewer, you see their files." : "This task has submissions your access doesn't show. Only what you submitted is listed."}</p> : rows.length === 0 ? <p className="text-sm text-muted-foreground">Nothing submitted yet.</p> : null}
         <ol className="space-y-3">
-          {data.submissions.toReversed().map((submission) => (
+          {rows.map((submission) => (
             <li key={submission.submission_no} className="space-y-2 rounded-lg border p-3">
               <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
                 Submission {submission.submission_no}
                 {submission.submission_no === task.approved_submission_no ? <ApprovedMark /> : null}
                 {submission.submission_no === task.submission_no ? <span className="text-xs font-normal text-muted-foreground">Latest</span> : null}
-                <span className="text-xs font-normal">
-                  <Timestamp at={submission.created_at} />
-                </span>
+                {submission.created_at > 0 ? (
+                  <span className="text-xs font-normal">
+                    <Timestamp at={submission.created_at} />
+                  </span>
+                ) : null}
               </p>
-              {submission.note ? (
+              {"filesOnly" in submission ? (
+                <p className="text-xs text-muted-foreground">Only its files are shown to you.</p>
+              ) : submission.note ? (
                 <AgentContent author={author(submission.from, me, names, orgNames)} external={submission.external} body={submission.note} />
               ) : (
                 <AuthorLine author={author(submission.from, me, names, orgNames)} external={submission.external} />
               )}
-              {submission.commit_sha ? (
+              {!("filesOnly" in submission) && submission.commit_sha ? (
                 <p className="text-xs break-all text-muted-foreground">
                   Commit <code className="font-mono">{plainName(submission.commit_sha)}</code>
                 </p>
               ) : null}
+              <SubmissionFiles files={files.filter((file) => file.submission_no === submission.submission_no)} overseen={overseen} />
               <ArtifactList artifacts={data.artifacts.filter((artifact) => artifact.submission_no === submission.submission_no)} me={me} names={names} orgNames={orgNames} />
             </li>
           ))}
         </ol>
+        {unsubmitted.length > 0 && !inSubmitForm ? (
+          <div className="space-y-2">
+            <h4 className="text-sm font-medium">{overseen ? "Uploaded by this agent, not yet submitted" : "Uploaded by you, not yet submitted"}</h4>
+            <p className="text-xs text-muted-foreground">No submission names these. They&apos;re cleared 24 hours after this task leaves Accepted.</p>
+            <SubmissionFiles files={unsubmitted} overseen={overseen} label="Not yet submitted" />
+          </div>
+        ) : null}
       </section>
     </>
   );
@@ -242,6 +267,8 @@ function ArtifactList({ artifacts, me, names, orgNames }: { artifacts: Artifact[
                 {plainName(artifact.label)} <span className="break-all text-muted-foreground">({truncate(plainName(artifact.uri), 2048).text})</span>
               </p>
             )}
+            {/* UPLOAD-POLICY.md: Podster doesn't hold a link's content, so an approval can't name an exact version of it. */}
+            <p className="text-xs text-muted-foreground">External link, may change since approval</p>
           </li>
         );
       })}

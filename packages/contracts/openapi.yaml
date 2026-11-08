@@ -425,12 +425,37 @@ paths:
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/CreateUpload" } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/files:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    get:
+      operationId: listFiles
+      tags: [queries]
+      summary: "The room's input assets the caller can see, oldest first, 50 a page, with `next_cursor` for the next page or null. Each has what `getFile` returns. Whoever sees the whole room sees every one, and someone limited to their own tasks only those linked to one of their tasks. A file still uploading isn't listed. Whoever sees the whole room also gets `quota`, with `used`, the bytes of every file kept and every open reservation, and `limit`, the room's 5 GB. It's left out for anyone limited to their own tasks, because the total counts files they can't see. `task_id` narrows it to that task's assets, and a task the caller can't see answers `task_not_found` (404). An outsider gets `workspace_not_found` (404)"
+      parameters: [{ name: task_id, in: query, schema: { type: string } }, { name: cursor, in: query, schema: { type: integer } }]
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/files/{file}/links:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: file, in: path, required: true, schema: { type: string } }]
+    post:
+      operationId: linkFile
+      tags: [commands]
+      summary: "Link an input asset to a task (decision 53), so the task's parties can read it even if they see only their own tasks. For an owner, admin, member or Coordinator, as for uploading an input asset, on a task they can see. The answer is `file_id`, `task_id` and `linked` of true. Linking what's already linked answers the same and records nothing. The task's assignee gets an `asset.linked` event naming the task, never the file, and it wakes nobody (decision 104). It doesn't move `policy_version`. Refusals: `not_allowed` (403), `task_not_found` and `file_not_found` (404), `file_not_available` (409) for a file uploading, blocked or failed, `task_closed` (409) for a completed or canceled task, `limit_exceeded` (409) past 50 assets on a task, `workspace_archived` (409) and `workspace_not_found` (404)"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/LinkFile" } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/files/{file}/links/{task}:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: file, in: path, required: true, schema: { type: string } }, { name: task, in: path, required: true, schema: { type: string } }]
+    delete:
+      operationId: unlinkFile
+      tags: [commands]
+      summary: "Unlink an input asset from a task, for whoever may link it, whatever the file's or task's state. Someone who saw it only through that task loses sight of it on their next read. A download already under way isn't cut off. The answer is `file_id`, `task_id` and `linked` of false, and unlinking what isn't linked answers the same and records nothing. The task's assignee gets an `asset.unlinked` event, which wakes nobody. Refusals: `not_allowed` (403), `task_not_found` and `file_not_found` (404), `workspace_archived` (409) and `workspace_not_found` (404). Neither the file's state, the task's nor the limit can refuse it"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/files/{file}:
     parameters: [{ $ref: "#/components/parameters/ws" }, { name: file, in: path, required: true, schema: { type: string } }]
     get:
       operationId: getFile
       tags: [queries]
-      summary: "A file's `id`, `name`, `size`, `sha256`, `media_type` and `state`, and `download_path`, which is null unless the caller may download it now. The path carries no authority. Who sees a file depends on what it was uploaded for. An input asset is seen by whoever sees the whole room, and by someone limited to their own tasks only when it's linked to one of those, so until files can be linked they see none. A file uploaded for a task's submission is seen only by its uploader until a submission names it, and after that as that task's submitted work: by an artifact scope of `all`, by its submitter, and by the reviewer named on the task. A file the caller can't see answers `file_not_found` (404), as an unknown one does. Other refusals: `access_revoked` (403) for someone removed from the room and `workspace_not_found` (404) for an outsider"
+      summary: "A file's `id`, `name`, `size`, `sha256`, `media_type` and `state`, and `download_path`, which is null unless the caller may download it now, and `linked_tasks`, the IDs of the tasks an input asset is linked to that the caller can see, which is empty for a submission file. The path carries no authority. Who sees a file depends on what it was uploaded for. An input asset is seen by whoever sees the whole room, and by someone limited to their own tasks only while it's linked to one of those, by `linkFile`. A file uploaded for a task's submission is seen only by its uploader until a submission names it, and after that as that task's submitted work: by an artifact scope of `all`, by its submitter, and by the reviewer named on the task. A file the caller can't see answers `file_not_found` (404), as an unknown one does. Other refusals: `access_revoked` (403) for someone removed from the room and `workspace_not_found` (404) for an outsider"
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/agents/{agent}/files/{file}:
     parameters: [{ $ref: "#/components/parameters/ws" }, { name: agent, in: path, required: true, schema: { type: string } }, { name: file, in: path, required: true, schema: { type: string } }]
@@ -688,6 +713,12 @@ components:
       properties:
         title: { type: string, minLength: 1, description: "At most 200 bytes." }
         description: { type: [string, "null"], minLength: 1, description: "At most 4096 bytes." }
+    LinkFile:
+      type: object
+      required: [task_id]
+      additionalProperties: false
+      properties:
+        task_id: { type: string, description: "The task to link the input asset to." }
     CreateUpload:
       type: object
       required: [name, size, sha256]

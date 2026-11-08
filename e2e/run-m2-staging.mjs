@@ -57,6 +57,8 @@ writeFileSync(
     name: "podster-scanner",
     main: standIn,
     compatibility_date: "2026-08-01",
+    // Local only. Never a public URL, even if this config were deployed by mistake.
+    workers_dev: false,
     vars: { SCANNER_SECRET: scannerSecret },
     r2_buckets: [{ binding: "ASSETS", bucket_name: "podster-assets" }],
     services: [{ binding: "API", service: "podster-api" }],
@@ -81,9 +83,10 @@ for (;;) {
   await new Promise((done) => setTimeout(done, 500));
 }
 
+// The script adds the names and tokens it uses. Each line is a kind and a value, so a leak is reported by its kind alone.
 const secrets = join(local, "m2-secrets.txt");
 rmSync(secrets, { force: true });
-writeFileSync(secrets, `${scannerSecret}\n${FINDING}\n`);
+writeFileSync(secrets, `scanner secret\t${scannerSecret}\nfinding\t${FINDING}\n`);
 const code = await new Promise((done) => {
   const proc = spawn(process.execPath, [join(here, "m2-staging.mjs"), "--base-url", base, ...(big ? ["--big"] : [])], { cwd: here, stdio: "inherit", env: { ...process.env, PODSTER_UPLOAD_SECRETS_FILE: secrets } });
   proc.on("exit", (status) => done(status ?? 1));
@@ -99,8 +102,15 @@ const report = (passed, title, detail = "") => {
 };
 const verdicts = logged.split("\n").filter((line) => line.includes('"at":"stand-in-scanner"'));
 report(verdicts.length > 0 && verdicts.every((line) => line.includes('"status":200')), "the stand-in's reports were each recorded", verdicts.slice(0, 4).join("\n"));
-const leaked = (existsSync(secrets) ? readFileSync(secrets, "utf8").split("\n").filter(Boolean) : []).filter((secret) => logged.includes(secret));
-report(leaked.length === 0, "no file name, upload token, scanner secret or finding in any log", leaked.map((secret) => `${secret.slice(0, 8)}...`).join("\n"));
+const remembered = existsSync(secrets) ? readFileSync(secrets, "utf8").split("\n").filter(Boolean).map((line) => line.split("\t")) : [];
+rmSync(secrets, { force: true });
+const leaks = new Map();
+for (const [kind, value] of remembered) if (value && logged.includes(value)) leaks.set(kind, (leaks.get(kind) ?? 0) + 1);
+// Under the secret and the finding, the script added nothing, so there was nothing to look for.
+const kinds = new Set(remembered.map(([kind]) => kind));
+report(kinds.has("file name") && kinds.has("upload token") && leaks.size === 0, "no file name, upload token, scanner secret or finding in any log", leaks.size ? [...leaks].map(([kind, n]) => `${n} ${kind}${n === 1 ? "" : "s"}`).join(", ") : `${remembered.length} values looked for`);
+// Only that one happened and its error's name, since a raw line could carry anything the Worker held.
 const unhandled = logged.split("\n").filter((line) => /uncaught|unhandled/i.test(line));
-report(unhandled.length === 0, "nothing unhandled in the Workers' logs", unhandled.slice(0, 5).join("\n").slice(0, 600));
+const names = [...new Set(unhandled.map((line) => line.match(/\b([A-Z][A-Za-z]*Error)\b/)?.[1] ?? "an error with no name"))];
+report(unhandled.length === 0, "nothing unhandled in the Workers' logs", unhandled.length ? `${unhandled.length} unhandled: ${names.join(", ")}` : "");
 process.exit(code || (clean ? 0 : 1));

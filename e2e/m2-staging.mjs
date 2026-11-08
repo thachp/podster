@@ -9,8 +9,8 @@
 // PODSTER_E2E_COOKIE_B, each from a different person's sign-in. `--big` adds a 100 MB file through the scanner. It writes rooms
 // and files to the target, and staging has no delete route, so rooms are named "M2 staging <time>".
 //
-// PODSTER_UPLOAD_SECRETS_FILE, if set, gets the file names, upload tokens and scanner words used, so a caller can check that none
-// reached a log. Nothing here reads a database or a log itself.
+// PODSTER_UPLOAD_SECRETS_FILE, if set, gets the file names and upload tokens used, each with its kind, so a caller can check that
+// none reached a log. Nothing here reads a database or a log itself.
 import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { AuthAgent, key, Person, sleep, Target } from "./lib.mjs";
@@ -44,9 +44,15 @@ if (signupSecret && new URL(base).origin !== STAGING) {
   process.exit(2);
 }
 // A verdict on staging waits for the Container, which may be starting cold. Locally the stand-in answers in a moment.
-const verdictWaitMs = Number(option("--verdict-wait-s") ?? (isLocal ? 30 : 300)) * 1000;
+const waitSeconds = Number(option("--verdict-wait-s") ?? (isLocal ? 30 : 300));
+if (!Number.isFinite(waitSeconds) || waitSeconds <= 0) {
+  console.error("--verdict-wait-s takes a number of seconds above 0.");
+  process.exit(2);
+}
+const verdictWaitMs = waitSeconds * 1000;
 
-const remember = (text) => process.env.PODSTER_UPLOAD_SECRETS_FILE && appendFileSync(process.env.PODSTER_UPLOAD_SECRETS_FILE, `${text}\n`);
+/** One kind and one value a line, so a caller checking the logs can say what leaked without printing it. */
+const remember = (kind, value) => process.env.PODSTER_UPLOAD_SECRETS_FILE && appendFileSync(process.env.PODSTER_UPLOAD_SECRETS_FILE, `${kind}\t${value}\n`);
 const target = new Target(base, { pollMs: isLocal ? 150 : 1000 });
 const sha256 = (data) => createHash("sha256").update(data).digest("hex");
 const text = (size, line = "some notes\n") => Buffer.alloc(size, line);
@@ -76,6 +82,8 @@ async function step(title, run) {
 // ---- people ----
 
 const ownCookies = [];
+let room;
+const objects = [];
 async function people() {
   if (signupSecret) {
     const made = [];
@@ -96,6 +104,8 @@ async function people() {
 }
 
 async function signOut() {
+  if (signOut.done) return;
+  signOut.done = true;
   let ended = true;
   for (const cookie of ownCookies) {
     await target.http("/api/auth/sign-out", { method: "POST", headers: { cookie, origin: target.base, "content-type": "application/json" }, body: "{}" }).catch(() => null);
@@ -109,10 +119,10 @@ async function signOut() {
 
 /** Creates an upload as this person and sends its bytes. Answers the upload's ID with what the PUT answered. */
 async function upload(person, room, name, data, { declaredHash = sha256(data) } = {}) {
-  remember(name);
+  remember("file name", name);
   const created = await person.dash("POST", `/v1/workspaces/${room}/uploads`, { name, size: data.length, sha256: declaredHash });
   if (!created.ok) return { created };
-  remember(created.body.token);
+  remember("upload token", created.body.token);
   const res = await target.http(created.body.upload_path, { method: "PUT", headers: { authorization: `Bearer ${created.body.token}` }, body: data, signal: AbortSignal.timeout(600_000) });
   const body = await res.json().catch(() => null);
   return { created, id: created.body.id, status: res.status, body };
@@ -155,116 +165,136 @@ async function checkRefused(res, status, code, title) {
 
 // ---- the run ----
 
-const [owner, outsider] = await people();
-const room = await owner.createRoom(`M2 staging ${new Date().toISOString().slice(0, 19)} ${key().slice(-6)}`);
-console.log(`Room ${room} on ${base}. Verdicts wait up to ${verdictWaitMs / 1000} s.`);
-const objects = [];
+// A run stopped partway still signs its test people out.
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => signOut().finally(() => process.exit(130)));
+}
 
-const clean = text(20_000);
-const CLEAN_NAME = `m2-clean-${key()}.txt`;
-let cleanId;
-section("Scanning");
-await step("a clean text file", async () => {
-  const started = Date.now();
-  const sent = await upload(owner, room, CLEAN_NAME, clean);
-  check(sent.status === 200 && sent.body?.state === "scanning", "a clean text file uploads and waits in scanning", `${sent.status ?? sent.created.status} ${sent.body?.state ?? sent.created.code ?? ""}`);
-  if (sent.status !== 200) return;
-  cleanId = sent.id;
-  objects.push(sent.id);
-  // The verdict may already be in, so a 200 here isn't a failure. Only a file still scanning is asked about.
-  const early = await personDownload(owner, room, sent.id);
-  const earlyCode = await errorCode(early.clone());
-  if (early.status === 409) check(earlyCode === "file_not_available", "a file still scanning doesn't download", `409 ${earlyCode}`);
-  else record("note", "a file still scanning doesn't download: not asked, as the verdict came first", String(early.status));
-  await early.body?.cancel().catch(() => null);
-  const settled = await verdict(owner, room, sent.id, started);
-  check(settled.state === "ready", "and the scanner makes it ready", `${settled.state} after ${settled.seconds} s`);
-});
+let failedOutside = false;
+try {
+  await run();
+} catch (error) {
+  failedOutside = true;
+  console.error(`FAIL the run stopped: ${error?.message ?? error}`);
+} finally {
+  await signOut();
+}
+const count = (status) => results.filter((r) => r.status === status).length;
+console.log(`\n${count("ok")} passed, ${count("fail")} failed, ${count("skip")} skipped.${room ? ` Room ${room}.` : ""} Files: ${objects.join(", ") || "none"}.`);
+if (!isLocal) console.log("For the scanner's side, read its log during a run: cd apps/scanner && npx wrangler tail --env staging --format json");
+process.exit(count("fail") || failedOutside ? 1 : 0);
 
-let blockedId;
-await step("the EICAR test string", async () => {
-  const started = Date.now();
-  const name = `m2-eicar-${key()}.txt`;
-  const sent = await upload(owner, room, name, EICAR);
-  check(sent.status === 200, "the EICAR test string uploads", `${sent.status ?? sent.created.status} ${sent.created.code ?? ""}`);
-  if (sent.status !== 200) return;
-  blockedId = sent.id;
-  objects.push(sent.id);
-  const settled = await verdict(owner, room, sent.id, started);
-  check(settled.state === "blocked", "and the scanner blocks it", `${settled.state} after ${settled.seconds} s`);
-});
+async function run() {
+  const [owner, outsider] = await people();
+  room = await owner.createRoom(`M2 staging ${new Date().toISOString().slice(0, 19)} ${key().slice(-6)}`);
+  console.log(`Room ${room} on ${base}. Verdicts wait up to ${verdictWaitMs / 1000} s.`);
 
-if (big) {
-  await step("100 MB of text", async () => {
-    const data = text(100_000_000);
+  const clean = text(20_000);
+  const CLEAN_NAME = `m2-clean-${key()}.txt`;
+  let cleanId;
+  section("Scanning");
+  await step("a clean text file", async () => {
     const started = Date.now();
-    const sent = await upload(owner, room, `m2-big-${key()}.txt`, data);
-    check(sent.status === 200, "100 MB uploads", `${sent.status ?? sent.created.status} in ${((Date.now() - started) / 1000).toFixed(1)} s`);
+    const sent = await upload(owner, room, CLEAN_NAME, clean);
+    check(sent.status === 200 && sent.body?.state === "scanning", "a clean text file uploads and waits in scanning", `${sent.status ?? sent.created.status} ${sent.body?.state ?? sent.created.code ?? ""}`);
     if (sent.status !== 200) return;
+    cleanId = sent.id;
+    objects.push(sent.id);
+    // The verdict may already be in, so a 200 here isn't a failure. Only a file still scanning is asked about.
+    const early = await personDownload(owner, room, sent.id);
+    const earlyCode = await errorCode(early.clone());
+    if (early.status === 409) check(earlyCode === "file_not_available", "a file still scanning doesn't download", `409 ${earlyCode}`);
+    else record("note", "a file still scanning doesn't download: not asked, as the verdict came first", String(early.status));
+    await early.body?.cancel().catch(() => null);
+    const settled = await verdict(owner, room, sent.id, started);
+    check(settled.state === "ready", "and the scanner makes it ready", `${settled.state} after ${settled.seconds} s`);
+  });
+
+  let blockedId;
+  await step("the EICAR test string", async () => {
+    const started = Date.now();
+    const name = `m2-eicar-${key()}.txt`;
+    const sent = await upload(owner, room, name, EICAR);
+    check(sent.status === 200, "the EICAR test string uploads", `${sent.status ?? sent.created.status} ${sent.created.code ?? ""}`);
+    if (sent.status !== 200) return;
+    blockedId = sent.id;
     objects.push(sent.id);
     const settled = await verdict(owner, room, sent.id, started);
-    check(settled.state === "ready", "and the scanner makes it ready", `${settled.state} after ${settled.seconds} s from the start of its upload`);
-    if (settled.state === "ready") await checkServed(await personDownload(owner, room, sent.id), data, "100 MB");
+    check(settled.state === "blocked", "and the scanner blocks it", `${settled.state} after ${settled.seconds} s`);
   });
-} else skip("100 MB through the scanner", "pass --big");
 
-section("Downloads");
-await step("the owner's download", async () => {
-  if (!cleanId) return skip("the owner downloads a ready file", "the clean file didn't upload");
-  await checkServed(await personDownload(owner, room, cleanId), clean, "the owner");
-});
+  if (big) {
+    await step("100 MB of text", async () => {
+      const data = text(100_000_000);
+      const started = Date.now();
+      const sent = await upload(owner, room, `m2-big-${key()}.txt`, data);
+      check(sent.status === 200, "100 MB uploads", `${sent.status ?? sent.created.status} in ${((Date.now() - started) / 1000).toFixed(1)} s`);
+      if (sent.status !== 200) return;
+      objects.push(sent.id);
+      const settled = await verdict(owner, room, sent.id, started);
+      check(settled.state === "ready", "and the scanner makes it ready", `${settled.state} after ${settled.seconds} s from the start of its upload`);
+      if (settled.state === "ready") await checkServed(await personDownload(owner, room, sent.id), data, "100 MB");
+    });
+  } else skip("100 MB through the scanner", "pass --big");
 
-await step("an agent's download", async () => {
-  if (!cleanId) return skip("an agent downloads a ready file", "the clean file didn't upload");
-  const agent = await AuthAgent.connect(target, owner, "M2 staging agent");
-  await owner.addAgent(room, agent);
-  const link = await agent.execute("get_asset_link", { workspace_id: room, file_id: cleanId });
-  check(link.ok && link.data?.download_path === `/v1/files/${room}/${cleanId}`, "an agent's get_asset_link gives the download path", link.ok ? String(link.data?.download_path) : `${link.status} ${link.code}`);
-  const res = await target.http(`/v1/files/${room}/${cleanId}`, { headers: { authorization: `Bearer ${await agent.token("get_asset_link")}` } });
-  await checkServed(res, clean, "an agent, with its own credential");
-});
+  section("Downloads");
+  await step("the owner's download", async () => {
+    if (!cleanId) return skip("the owner downloads a ready file", "the clean file didn't upload");
+    await checkServed(await personDownload(owner, room, cleanId), clean, "the owner");
+  });
 
-section("Refusals");
-await step("a blocked file", async () => {
-  if (!blockedId) return skip("a blocked file doesn't download", "the EICAR file didn't upload");
-  await checkRefused(await personDownload(owner, room, blockedId), 409, "file_not_available", "a blocked file doesn't download");
-});
-await step("an unknown file", async () => {
-  await checkRefused(await personDownload(owner, room, `obj_${randomBytes(16).toString("hex")}`), 404, "file_not_found", "an unknown file answers as one");
-});
-await step("someone outside the room", async () => {
-  if (!cleanId) return skip("someone outside the room can't download", "the clean file didn't upload");
-  await checkRefused(await personDownload(outsider, room, cleanId), 404, "workspace_not_found", "someone outside the room can't download, or learn the file exists");
-});
-await step("no credential", async () => {
-  if (!cleanId) return skip("a download with no credential is refused", "the clean file didn't upload");
-  await checkRefused(await target.http(`/v1/files/${room}/${cleanId}`), 401, "invalid_credential", "a download with no credential is refused");
-});
-await step("an executable", async () => {
-  const data = text(1_000);
-  const created = await owner.dash("POST", `/v1/workspaces/${room}/uploads`, { name: "setup.exe", size: data.length, sha256: sha256(data) });
-  check(created.status === 415 && created.code === "executable_refused", "an executable's name is refused before any bytes", `${created.status} ${created.code ?? ""}`);
-});
-await step("too large", async () => {
-  const created = await owner.dash("POST", `/v1/workspaces/${room}/uploads`, { name: "huge.txt", size: 100_000_001, sha256: sha256(Buffer.from("x")) });
-  check(created.status === 413 && created.code === "file_too_large", "a file over 100 MB is refused before any bytes", `${created.status} ${created.code ?? ""}`);
-});
-await step("a wrong hash", async () => {
-  const sent = await upload(owner, room, `m2-wrong-${key()}.txt`, text(2_000), { declaredHash: sha256(randomBytes(32)) });
-  check(sent.status === 422, "bytes that don't match the declared hash are refused, and nothing is kept", `${sent.status ?? sent.created.status} ${sent.body?.error?.code ?? ""}`);
-});
+  await step("an agent's download", async () => {
+    if (!cleanId) return skip("an agent downloads a ready file", "the clean file didn't upload");
+    const agent = await AuthAgent.connect(target, owner, "M2 staging agent");
+    await owner.addAgent(room, agent);
+    const link = await agent.execute("get_asset_link", { workspace_id: room, file_id: cleanId });
+    check(link.ok && link.data?.download_path === `/v1/files/${room}/${cleanId}`, "an agent's get_asset_link gives the download path", link.ok ? String(link.data?.download_path) : `${link.status} ${link.code}`);
+    const res = await target.http(`/v1/files/${room}/${cleanId}`, { headers: { authorization: `Bearer ${await agent.token("get_asset_link")}` } });
+    await checkServed(res, clean, "an agent, with its own credential");
+  });
 
-// Each later M2 step fills in its own cases here as it lands. They're listed so a run says what it doesn't cover yet.
-section("Later steps");
-skip("input assets: link a ready file to a task, and an agent limited to its own tasks sees only linked files", "step 5");
-skip("submission files: submit with files, and the reviewer gets the exact versions submitted", "step 6");
-skip("expected outputs: a task names one, and approval makes it ready", "step 7");
-skip("removal: a removed file stops downloading, and abandoned uploads and unreferenced bytes are cleared", "step 8");
-skip("the hour sweep: a file left scanning ends failed", "can't be seen in one run. Check a file from an earlier run, or the room's alarm, by hand");
-skip("scanning under load: many files at once, and how long the last waits", "step 11, once the cases above are in");
+  section("Refusals");
+  await step("a blocked file", async () => {
+    if (!blockedId) return skip("a blocked file doesn't download", "the EICAR file didn't upload");
+    await checkRefused(await personDownload(owner, room, blockedId), 409, "file_not_available", "a blocked file doesn't download");
+  });
+  await step("an unknown file", async () => {
+    await checkRefused(await personDownload(owner, room, `obj_${randomBytes(16).toString("hex")}`), 404, "file_not_found", "an unknown file answers as one");
+  });
+  await step("someone outside the room", async () => {
+    if (!cleanId) return skip("someone outside the room can't download", "the clean file didn't upload");
+    await checkRefused(await personDownload(outsider, room, cleanId), 404, "workspace_not_found", "someone outside the room can't download, or learn the file exists");
+  });
+  await step("no credential", async () => {
+    if (!cleanId) return skip("a download with no credential is refused", "the clean file didn't upload");
+    await checkRefused(await target.http(`/v1/files/${room}/${cleanId}`), 401, "invalid_credential", "a download with no credential is refused");
+  });
+  await step("an executable", async () => {
+    const data = text(1_000);
+    const created = await owner.dash("POST", `/v1/workspaces/${room}/uploads`, { name: "setup.exe", size: data.length, sha256: sha256(data) });
+    check(created.status === 415 && created.code === "executable_refused", "an executable's name is refused before any bytes", `${created.status} ${created.code ?? ""}`);
+  });
+  await step("too large", async () => {
+    const created = await owner.dash("POST", `/v1/workspaces/${room}/uploads`, { name: "huge.txt", size: 100_000_001, sha256: sha256(Buffer.from("x")) });
+    check(created.status === 413 && created.code === "file_too_large", "a file over 100 MB is refused before any bytes", `${created.status} ${created.code ?? ""}`);
+  });
+  await step("a wrong hash", async () => {
+    const sent = await upload(owner, room, `m2-wrong-${key()}.txt`, text(2_000), { declaredHash: sha256(randomBytes(32)) });
+    check(sent.status === 422 && sent.body?.error?.code === "upload_mismatch", "bytes that don't match the declared hash are refused", `${sent.status ?? sent.created.status} ${sent.body?.error?.code ?? ""}`);
+    if (!sent.id) return;
+    // Nothing is kept: the file never leaves uploading, so it can be tried again, and it has nothing to download.
+    const file = await owner.dash("GET", `/v1/workspaces/${room}/files/${sent.id}`);
+    const download = await personDownload(owner, room, sent.id);
+    const downloadCode = await errorCode(download);
+    check(file.ok && file.body.state === "uploading" && file.body.download_path === null && download.status === 409 && downloadCode === "file_not_available", "and nothing is kept: it's still uploading, with nothing to download", `${file.body?.state ?? file.status}, download ${download.status} ${downloadCode ?? ""}`);
+  });
 
-await signOut();
-const count = (status) => results.filter((r) => r.status === status).length;
-console.log(`\n${count("ok")} passed, ${count("fail")} failed, ${count("skip")} skipped. Room ${room}. Files: ${objects.join(", ") || "none"}.`);
-if (!isLocal) console.log("For the scanner's side, read its log during a run: cd apps/scanner && npx wrangler tail --env staging --format json");
-process.exit(count("fail") ? 1 : 0);
+  // Each later M2 step fills in its own cases here as it lands. They're listed so a run says what it doesn't cover yet.
+  section("Later steps");
+  skip("input assets: link a ready file to a task, and an agent limited to its own tasks sees only linked files", "step 5");
+  skip("submission files: submit with files, and the reviewer gets the exact versions submitted", "step 6");
+  skip("expected outputs: a task names one, and approval makes it ready", "step 7");
+  skip("removal: a removed file stops downloading, and abandoned uploads and unreferenced bytes are cleared", "step 8");
+  skip("the hour sweep: a file left scanning ends failed", "can't be seen in one run. Check a file from an earlier run, or the room's alarm, by hand");
+  skip("scanning under load: many files at once, and how long the last waits", "step 11, once the cases above are in");
+}

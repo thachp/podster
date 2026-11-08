@@ -27,7 +27,7 @@ export const isLifecycleMethod = (method: unknown): method is LifecycleMethod =>
 /** Which extensions a request named in `A2A-Extensions`. */
 export const activated = (header: string | null) => (header ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 
-/** A `requestId` becomes the API's idempotency key, `a2a:<requestId>`, which holds at most 255 bytes. */
+/** A `requestId` becomes the API's idempotency key, `a2a-lc:<requestId>`, which holds at most 255 bytes, apart from messages' keys. */
 const REQUEST_ID = /^[\x21-\x7e]{1,200}$/;
 const MAX_REASON_BYTES = 4 * 1024;
 const MAX_NOTE_BYTES = 16 * 1024;
@@ -49,7 +49,12 @@ type Parsed = { workspaceId: string; taskId: string; a2aId: string; requestId: s
 function parse(method: LifecycleMethod, params: unknown): Parsed {
   if (!params || typeof params !== "object" || Array.isArray(params)) throw malformed("params must be an object.");
   const p = params as Record<string, unknown>;
-  for (const key of Object.keys(p)) if (!ALLOWED[method].includes(key)) throw malformed(`${method} takes no ${key}.`);
+  for (const key of Object.keys(p)) {
+    // A2A's own `tenant` may come along empty. A non-empty one is refused like any other parameter, by name: Podster
+    // never reads a client's tenant for anything.
+    if (key === "tenant" && (p.tenant === undefined || p.tenant === "")) continue;
+    if (!ALLOWED[method].includes(key)) throw malformed(`${method} takes no ${key}.`);
+  }
   const target = parseA2aTaskId(p.id);
   if (!target) throw new TaskNotFoundError("Task not found.");
   if (!Number.isSafeInteger(p.version) || (p.version as number) < 1) throw malformed("version is the task's podster.dev/version, a positive integer.");
@@ -100,7 +105,7 @@ function refusal(status: number, body: any): Error {
 export async function runLifecycle(api: ApiReads, callerId: string, method: LifecycleMethod, params: unknown, extensions: string[]): Promise<Task> {
   if (!extensions.includes(LIFECYCLE_URI)) throw new ExtensionSupportRequiredError(`Name ${LIFECYCLE_URI} in A2A-Extensions to call ${method}.`);
   const parsed = parse(method, params);
-  const { status, body } = await api.command(LIFECYCLE_METHODS[method], { workspace_id: parsed.workspaceId, task_id: parsed.taskId, ...parsed.args }, `a2a:${parsed.requestId}`);
+  const { status, body } = await api.command(LIFECYCLE_METHODS[method], { workspace_id: parsed.workspaceId, task_id: parsed.taskId, ...parsed.args }, `a2a-lc:${parsed.requestId}`);
   if (status !== 200) throw refusal(status, body);
   try {
     return await readTask(api, callerId, parsed.a2aId);

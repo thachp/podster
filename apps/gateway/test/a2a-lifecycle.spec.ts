@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { a2a, agentOnBoth, dash, mcpTool, setUpSchemas, signUp, type Person } from "./oauth-helpers";
+import { a2a, agentOnBoth, call as http, dash, mcpTool, setUpSchemas, signUp, type Person } from "./oauth-helpers";
 
 /**
  * M3 step 10: the lifecycle extension (decision 113, ADR 0007). Accept, decline, release and submit are the existing
@@ -134,5 +134,38 @@ describe("what decides, and what's refused", () => {
     const res = await call("AcceptTask", { id: id(room, task), version: await versionOf(task) }, ON, lead.a2a);
     expect(res.body.error).toBeDefined();
     expect((await read(task)).metadata["podster.dev/status"]).toBe("offered");
+  });
+});
+
+describe("the review's fixes", () => {
+  const raw = (body: unknown) =>
+    http("/a2a", { method: "POST", headers: { authorization: `Bearer ${guest.a2a}`, "content-type": "application/json", "A2A-Version": "1.0", ...ON }, body: JSON.stringify(body) });
+
+  it("runs nothing for a notification, or a request that isn't JSON-RPC 2.0", async () => {
+    const task = await make(guest.id);
+    const params = { id: id(room, task), version: await versionOf(task), requestId: crypto.randomUUID() };
+    for (const envelope of [{ jsonrpc: "2.0", method: M("AcceptTask"), params }, { id: 1, method: M("AcceptTask"), params }, { jsonrpc: "2.0", id: { x: 1 }, method: M("AcceptTask"), params }]) {
+      const body = await (await raw(envelope)).json<any>();
+      expect(body.error.code, JSON.stringify(envelope).slice(0, 60)).toBe(-32600);
+    }
+    expect((await read(task)).metadata["podster.dev/status"]).toBe("offered");
+  });
+
+  it("takes an empty tenant, and refuses a non-empty one by name", async () => {
+    const task = await make(guest.id);
+    const v = await versionOf(task);
+    const refused = await call("AcceptTask", { id: id(room, task), version: v, tenant: "ws_other" });
+    expect(refused.body.error.message).toMatch(/tenant/);
+    expect((await read(task)).metadata["podster.dev/status"]).toBe("offered");
+    expect((await call("AcceptTask", { id: id(room, task), version: v, tenant: "" })).body.result.metadata["podster.dev/status"]).toBe("accepted");
+  });
+
+  it("keeps lifecycle keys apart from message keys, so one ID used for both doesn't collide", async () => {
+    const task = await make(guest.id);
+    const shared = crypto.randomUUID();
+    const sent = await a2a("SendMessage", { message: { messageId: shared, role: "ROLE_USER", taskId: id(room, task), parts: [{ text: "Taking a look." }] } }, guest.a2a);
+    expect(sent.body.result).toBeDefined();
+    const accepted = await call("AcceptTask", { id: id(room, task), version: await versionOf(task), requestId: shared });
+    expect(accepted.body.result.metadata["podster.dev/status"]).toBe("accepted");
   });
 });

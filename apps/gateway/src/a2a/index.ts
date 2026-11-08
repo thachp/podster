@@ -101,8 +101,14 @@ export async function answerA2a(text: string, agentId: string, baseUrl: string, 
   // Step 10: the lifecycle extension's own methods, which the SDK's transport doesn't know.
   if (isLifecycleMethod(method)) {
     const extensions = activated(extensionsHeader);
+    // A command runs only for a request that expects an answer: JSON-RPC 2.0, with an id. A notification, which has none,
+    // runs nothing.
+    const request = JSON.parse(text) as { jsonrpc?: unknown; id?: unknown; params?: unknown };
+    if (request.jsonrpc !== "2.0" || !(typeof request.id === "string" || (typeof request.id === "number" && Number.isFinite(request.id)))) {
+      return json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request: a lifecycle method needs jsonrpc \"2.0\" and an id." } });
+    }
     try {
-      const params = (JSON.parse(text) as { params?: unknown }).params;
+      const params = request.params;
       const task = await guarded(method, agentId, () => runLifecycle(api, agentId, method, params, extensions));
       return json({ jsonrpc: "2.0", id: safeId(id), result: Task.toJSON(task) }, 200, { [A2A_EXTENSIONS_HEADER]: LIFECYCLE_URI });
     } catch (error) {

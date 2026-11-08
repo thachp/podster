@@ -75,6 +75,7 @@ type Identity = Verified;
 mod asset_links;
 mod collaboration;
 mod downloads;
+mod held;
 mod objects;
 mod outputs;
 mod plan;
@@ -2499,6 +2500,8 @@ pub struct Workspace {
     denial_alarm_set: std::cell::Cell<bool>,
     /// File sweeps that failed in a row, which backs off how soon the alarm comes back for them. A restart forgets it.
     sweep_failures: std::cell::Cell<u32>,
+    /// Whether nothing is held from a failed migration, so a request needn't look. A restart looks again.
+    held_clear: std::cell::Cell<bool>,
 }
 
 type HeldDenials = std::collections::HashMap<DenialKey, HeldDenial>;
@@ -2697,42 +2700,12 @@ impl Workspace {
         if !store::is_initialized(&sql)? {
             return Ok(json!({ "acked": true }));
         }
-        self.migrate_if_needed()?;
+        if self.migrate_if_needed().is_err() {
+            let body = json!({ "principal": principal, "floor": floor });
+            return self.hold(held::HELD_FENCE, body, json!({ "acked": true }));
+        }
         transaction_sync(&self.state, move || {
-            let now = now_ms();
-            let prior = rows(
-                &sql,
-                "SELECT min_generation FROM principal_fence WHERE principal_id = ?",
-                vec![principal.as_str().into()],
-            )?;
-            let raises = prior.first().map_or(0, |f| int(&f["min_generation"])) < floor;
-            exec(&sql, "INSERT INTO principal_fence (principal_id, min_generation) VALUES (?, ?)
-              ON CONFLICT (principal_id) DO UPDATE SET min_generation = max(min_generation, excluded.min_generation)", vec![principal.as_str().into(), floor.into()])?;
-            // A new disconnect cancels earlier consent to return. A delayed retry of an old one doesn't.
-            if raises {
-                exec(&sql, "UPDATE member SET owner_consented_at = NULL WHERE principal_id = ? AND revoked_at IS NOT NULL", vec![principal.as_str().into()])?;
-            }
-            let found = rows(&sql, "SELECT join_generation FROM member WHERE principal_id = ? AND revoked_at IS NULL AND kind = 'agent'", vec![principal.as_str().into()])?;
-            if found
-                .first()
-                .is_some_and(|m| int(&m["join_generation"]) < floor)
-            {
-                let system = Caller {
-                    id: "system".to_string(),
-                    kind: PrincipalKind::Agent,
-                    role: Role::None,
-                    scopes: Scopes::PUBLIC_PARTICIPANT,
-                };
-                remove_member(
-                    &sql,
-                    &system,
-                    "system",
-                    &principal,
-                    "global_disconnect",
-                    now,
-                )?;
-            }
-            Ok(())
+            fence_effect(&sql, &principal, floor, now_ms())
         })?;
         Ok(json!({ "acked": true }))
     }
@@ -2844,10 +2817,7 @@ impl Workspace {
         if !store::is_initialized(&sql)? {
             return Err(ApiError::invitation_not_found());
         }
-        if store::needs_migration(&sql)? {
-            let migrating = sql.clone();
-            transaction_sync(&self.state, move || store::migrate(&migrating))?;
-        }
+        self.migrate_if_needed()?;
         let token = required(body, "token")?;
         let (id, secret) = parse_token(&token).ok_or_else(ApiError::invitation_not_found)?;
         let now = now_ms();
@@ -3273,14 +3243,10 @@ impl Workspace {
         Ok(json!({ "id": identity.workspace_id, "owner": identity.id }))
     }
 
-    /// Internal routes come in ahead of the migration in `dispatch`, and the departure rules read every column.
+    /// Internal routes come in ahead of the migration in `dispatch`, and the departure rules read every column. Every
+    /// migration after a room's creation comes through here, so what a failed one held is applied first (`held`).
     fn migrate_if_needed(&self) -> R<()> {
-        let sql = self.state.storage().sql();
-        if store::needs_migration(&sql)? {
-            let migrating = sql.clone();
-            transaction_sync(&self.state, move || store::migrate(&migrating))?;
-        }
-        Ok(())
+        self.migrate_and_replay()
     }
 
     /// What to record if this request is refused: who tried, and a name for the change from a fixed list. Nothing here is
@@ -3392,87 +3358,17 @@ impl Workspace {
         if !store::is_initialized(&sql)? {
             return Ok(json!({ "applied": false }));
         }
-        self.migrate_if_needed()?;
-        let person = required(body, "person")?;
-        let org = required(body, "org")?;
-        let actor_id = required(body, "actor")?;
-        let left_at = body["left_at"]
-            .as_i64()
-            .ok_or_else(ApiError::invalid_argument)?;
-        transaction_sync(&self.state, move || {
-            let now = now_ms();
-            let actor = Caller {
-                id: actor_id.clone(),
-                kind: PrincipalKind::Person,
-                role: Role::None,
-                scopes: Scopes::PUBLIC_PARTICIPANT,
-            };
-            let found = rows(&sql, "SELECT org_id, added_at FROM member WHERE principal_id = ? AND kind = 'person' AND revoked_at IS NULL", vec![person.as_str().into()])?;
-            if let Some(member) = found.first() {
-                let held = text(&member["org_id"]).unwrap_or_default();
-                if org_departure_ends(&held, &org, int(&member["added_at"]), left_at) {
-                    remove_member(&sql, &actor, "person", &person, "org_departure", now)?;
-                }
-            }
-            let room_org = room_owner_org(&sql)?;
-            let invitations = rows(
-                &sql,
-                "SELECT id, created_at FROM invitation WHERE created_by = ? AND status = 'pending'",
-                vec![person.as_str().into()],
-            )?;
-            for invitation in &invitations {
-                if org_departure_ends(&room_org, &org, int(&invitation["created_at"]), left_at) {
-                    let id = text(&invitation["id"]).unwrap_or_default();
-                    exec(
-                        &sql,
-                        "UPDATE invitation SET status = 'withdrawn' WHERE id = ?",
-                        vec![id.as_str().into()],
-                    )?;
-                    let reason = json!({ "reason": "org_departure" }).to_string();
-                    audit(
-                        &sql,
-                        &actor,
-                        "invitation.withdrawn",
-                        &id,
-                        None,
-                        Some(reason),
-                        now,
-                    )?;
-                }
-            }
-            // The room keeps its owner until recovery names another. They stop being a participant, so their tasks follow the
-            // departure table and nothing more reaches their inbox. Each departure applies once, and one from before they
-            // became owner under their current membership doesn't count.
-            if is_owner(&sql, &person)? && room_org == org {
-                let since = rows(&sql, "SELECT owner_since FROM workspace", vec![])?;
-                let rejoined = since
-                    .first()
-                    .and_then(|room| room["owner_since"].as_i64())
-                    .is_some_and(|since| since > left_at);
-                let note = json!({ "org_id": org, "left_at": left_at }).to_string();
-                let noted = rows(&sql, "SELECT id FROM audit_event WHERE action = 'owner.left_organization' AND new_json = ?", vec![note.as_str().into()])?;
-                if !rejoined && noted.is_empty() {
-                    exec(
-                        &sql,
-                        "UPDATE workspace SET owner_left_at = MAX(COALESCE(owner_left_at, 0), ?)",
-                        vec![left_at.into()],
-                    )?;
-                    apply_departure_rules(&sql, &actor, &person, now)?;
-                    objects::drop_uploads_of(&sql, &actor.id, "person", &person, now)?;
-                    queue_index(&sql, &person, &org, Some("owner"), now)?;
-                    audit(
-                        &sql,
-                        &actor,
-                        "owner.left_organization",
-                        &person,
-                        None,
-                        Some(note),
-                        now,
-                    )?;
-                }
-            }
-            Ok(())
-        })?;
+        // Checked before anything is held, so a held departure always replays.
+        departure_fields(body)?;
+        if self.migrate_if_needed().is_err() {
+            return self.hold(
+                held::HELD_DEPARTURE,
+                body.clone(),
+                json!({ "applied": true }),
+            );
+        }
+        let body = body.clone();
+        transaction_sync(&self.state, move || departure_effect(&sql, &body, now_ms()))?;
         Ok(json!({ "applied": true }))
     }
 
@@ -3526,10 +3422,7 @@ impl Workspace {
         if !store::is_initialized(&sql)? {
             return Err(ApiError::workspace_not_found());
         }
-        if store::needs_migration(&sql)? {
-            let migrating = sql.clone();
-            transaction_sync(&self.state, move || store::migrate(&migrating))?;
-        }
+        self.migrate_if_needed()?;
         if path == crate::INTERNAL_UPLOAD_BEGIN || path == crate::INTERNAL_UPLOAD_COMPLETE {
             let body: Value = serde_json::from_str(&req.text().await?)
                 .map_err(|_| ApiError::invalid_argument())?;
@@ -4091,6 +3984,7 @@ impl DurableObject for Workspace {
             denials_held: RefCell::new(HeldDenials::new()),
             denial_alarm_set: std::cell::Cell::new(false),
             sweep_failures: std::cell::Cell::new(0),
+            held_clear: std::cell::Cell::new(false),
         }
     }
 
@@ -4164,4 +4058,128 @@ impl DurableObject for Workspace {
         }
         Response::ok("ok")
     }
+}
+
+/// A disconnect's effect in one room: raise the floor, and remove the agent if it joined below it. The caller holds the
+/// transaction, so a held fence replays through the same code.
+fn fence_effect(sql: &SqlStorage, principal: &str, floor: i64, now: i64) -> R<()> {
+    let prior = rows(
+        sql,
+        "SELECT min_generation FROM principal_fence WHERE principal_id = ?",
+        vec![principal.into()],
+    )?;
+    let raises = prior.first().map_or(0, |f| int(&f["min_generation"])) < floor;
+    exec(sql, "INSERT INTO principal_fence (principal_id, min_generation) VALUES (?, ?)
+      ON CONFLICT (principal_id) DO UPDATE SET min_generation = max(min_generation, excluded.min_generation)", vec![principal.into(), floor.into()])?;
+    // A new disconnect cancels earlier consent to return. A delayed retry of an old one doesn't.
+    if raises {
+        exec(sql, "UPDATE member SET owner_consented_at = NULL WHERE principal_id = ? AND revoked_at IS NOT NULL", vec![principal.into()])?;
+    }
+    let found = rows(sql, "SELECT join_generation FROM member WHERE principal_id = ? AND revoked_at IS NULL AND kind = 'agent'", vec![principal.into()])?;
+    if found
+        .first()
+        .is_some_and(|m| int(&m["join_generation"]) < floor)
+    {
+        let system = Caller {
+            id: "system".to_string(),
+            kind: PrincipalKind::Agent,
+            role: Role::None,
+            scopes: Scopes::PUBLIC_PARTICIPANT,
+        };
+        remove_member(sql, &system, "system", principal, "global_disconnect", now)?;
+    }
+    Ok(())
+}
+
+fn departure_fields(body: &Value) -> R<(String, String, String, i64)> {
+    let left_at = body["left_at"]
+        .as_i64()
+        .ok_or_else(ApiError::invalid_argument)?;
+    Ok((
+        required(body, "person")?,
+        required(body, "org")?,
+        required(body, "actor")?,
+        left_at,
+    ))
+}
+
+/// An organization departure's effect in one room. The caller holds the transaction, so a held departure replays through the
+/// same code.
+fn departure_effect(sql: &SqlStorage, body: &Value, now: i64) -> R<()> {
+    let (person, org, actor_id, left_at) = departure_fields(body)?;
+    let actor = Caller {
+        id: actor_id.clone(),
+        kind: PrincipalKind::Person,
+        role: Role::None,
+        scopes: Scopes::PUBLIC_PARTICIPANT,
+    };
+    let found = rows(sql, "SELECT org_id, added_at FROM member WHERE principal_id = ? AND kind = 'person' AND revoked_at IS NULL", vec![person.as_str().into()])?;
+    if let Some(member) = found.first() {
+        let held = text(&member["org_id"]).unwrap_or_default();
+        if org_departure_ends(&held, &org, int(&member["added_at"]), left_at) {
+            remove_member(sql, &actor, "person", &person, "org_departure", now)?;
+        }
+    }
+    let room_org = room_owner_org(sql)?;
+    let invitations = rows(
+        sql,
+        "SELECT id, created_at FROM invitation WHERE created_by = ? AND status = 'pending'",
+        vec![person.as_str().into()],
+    )?;
+    for invitation in &invitations {
+        if org_departure_ends(&room_org, &org, int(&invitation["created_at"]), left_at) {
+            let id = text(&invitation["id"]).unwrap_or_default();
+            exec(
+                sql,
+                "UPDATE invitation SET status = 'withdrawn' WHERE id = ?",
+                vec![id.as_str().into()],
+            )?;
+            let reason = json!({ "reason": "org_departure" }).to_string();
+            audit(
+                sql,
+                &actor,
+                "invitation.withdrawn",
+                &id,
+                None,
+                Some(reason),
+                now,
+            )?;
+        }
+    }
+    // The room keeps its owner until recovery names another. They stop being a participant, so their tasks follow the
+    // departure table and nothing more reaches their inbox. Each departure applies once, and one from before they
+    // became owner under their current membership doesn't count.
+    if is_owner(sql, &person)? && room_org == org {
+        let since = rows(sql, "SELECT owner_since FROM workspace", vec![])?;
+        let rejoined = since
+            .first()
+            .and_then(|room| room["owner_since"].as_i64())
+            .is_some_and(|since| since > left_at);
+        let note = json!({ "org_id": org, "left_at": left_at }).to_string();
+        let noted = rows(
+            sql,
+            "SELECT id FROM audit_event WHERE action = 'owner.left_organization' AND new_json = ?",
+            vec![note.as_str().into()],
+        )?;
+        if !rejoined && noted.is_empty() {
+            exec(
+                sql,
+                "UPDATE workspace SET owner_left_at = MAX(COALESCE(owner_left_at, 0), ?)",
+                vec![left_at.into()],
+            )?;
+            apply_departure_rules(sql, &actor, &person, now)?;
+            objects::drop_uploads_of(sql, &actor.id, "person", &person, now)?;
+            queue_index(sql, &person, &org, Some("owner"), now)?;
+            audit(
+                sql,
+                &actor,
+                "owner.left_organization",
+                &person,
+                None,
+                Some(note),
+                now,
+            )?;
+        }
+    }
+    Ok(())
 }

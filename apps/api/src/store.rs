@@ -223,6 +223,17 @@ pub fn migrate(sql: &SqlStorage) -> R<()> {
     )?;
     let found = rows(sql, "SELECT version FROM schema_version", vec![])?;
     let current = found.first().map_or(0, |r| int(&r["version"])) as usize;
+    // Test builds only: a room holding this table can't migrate, which is how a test shows what a failed migration does.
+    #[cfg(feature = "failpoints")]
+    if !rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'fail_migration'",
+        vec![],
+    )?
+    .is_empty()
+    {
+        return Err(crate::error::ApiError::internal("forced migration failure"));
+    }
     for migration in MIGRATIONS.iter().skip(current) {
         exec(sql, migration, vec![])?;
     }

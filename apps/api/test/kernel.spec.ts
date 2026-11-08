@@ -955,6 +955,30 @@ describe("review findings", () => {
     expect(names).not.toContain("workspace");
     expect(names).toContain("workspace_old");
   });
+
+  it("runs a real pending migration and then the fence it held, in the same request, before answering", async () => {
+    const { id } = await room();
+    const version = await runInDurableObject(stub(id), (_: any, state: any) => {
+      // The newest migration is really pending again, and the test failpoint refuses it, as a broken release would.
+      undoSubmittedFlagMigration(state);
+      state.storage.sql.exec("CREATE TABLE fail_migration (x INTEGER)");
+      return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
+    });
+    const fenced = await stub(id).fetch("https://workspace/internal/revoke", { method: "POST", body: JSON.stringify({ principal: BOB.id, floor: 99 }) });
+    expect(fenced.status).toBe(200);
+    const bob = () => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT revoked_at, revocation_reason FROM member WHERE principal_id = ?", BOB.id).one());
+    expect((await bob()).revoked_at).toBeNull();
+    // The fixed release: the migration itself now runs, then the held fence, all inside this one read.
+    await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("DROP TABLE fail_migration"));
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
+    const after = await runInDurableObject(stub(id), (_: any, state: any) => ({
+      version: state.storage.sql.exec("SELECT version FROM schema_version").one().version as number,
+      column: state.storage.sql.exec("SELECT name FROM pragma_table_info('stored_object') WHERE name = 'submitted_at'").toArray().length,
+      held: state.storage.sql.exec("SELECT count(*) AS n FROM held_access").one().n as number,
+    }));
+    expect(after).toEqual({ version: version + 1, column: 1, held: 0 });
+    expect(await bob()).toMatchObject({ revoked_at: expect.any(Number), revocation_reason: "global_disconnect" });
+  });
 });
 
 describe("agent identity and connection", () => {

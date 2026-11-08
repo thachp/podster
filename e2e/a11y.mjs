@@ -304,6 +304,7 @@ const screens = (s) => {
     ["Room invitation", `/invitations/${s.roomInvite.token}`, "Workroom invitation", "partner"],
     ["Organization invitation", `/join#${s.orgInvite.token}`, "Ada team", "partner"],
     ["Not found", `/w/ws_${"0".repeat(32)}/overview`, "find that page"],
+    ["Too many requests", "/too-many-requests?after=30&next=/attention", "Too many requests just now", null],
   ];
 };
 

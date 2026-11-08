@@ -3,7 +3,10 @@ import { NotFoundSignal, RedirectSignal } from "@/test/next-navigation";
 import type { GatewayResult } from "./gateway/result";
 
 const gatewayQuery = vi.fn<(path: string) => Promise<GatewayResult<unknown>>>();
-vi.mock("./gateway/server", () => ({ gatewayQuery: (path: string) => gatewayQuery(path), signInPath: (next: string) => `/sign-in?next=${next}` }));
+vi.mock("./gateway/server", async () => {
+  const { redirect } = await import("@/test/next-navigation");
+  return { gatewayQuery: (path: string) => gatewayQuery(path), signInPath: (next: string) => `/sign-in?next=${next}`, rateLimited: async (after?: number) => redirect(`/too-many-requests?after=${after}`) };
+});
 // A new call each time here. React only dedupes within a server render.
 vi.mock("react", async (original) => ({ ...(await original<object>()), cache: <T,>(fn: T) => fn }));
 
@@ -43,9 +46,15 @@ describe("loadWorkroom", () => {
     await expect(loadWorkroom("ws_1")).rejects.toBeInstanceOf(RedirectSignal);
   });
 
-  it.each([500, 503, 429])("an outage (%i) isn't reported as not found", async (status) => {
+  it.each([500, 503])("an outage (%i) isn't reported as not found", async (status) => {
     gatewayQuery.mockResolvedValue(refusal(status, "internal_error"));
     await expect(loadWorkroom("ws_1")).rejects.toThrow("gateway_unavailable");
+  });
+
+  it("sends a read refused for the rate limit to its own page with the wait, not the error page or not-found", async () => {
+    gatewayQuery.mockResolvedValue({ ok: false, status: 429, code: "rate_limited", retryAfter: 20 } as GatewayResult<unknown>);
+    await expect(loadWorkroom("ws_1")).rejects.toThrow("/too-many-requests?after=20");
+    await expect(loadWorkroom("ws_1")).rejects.toBeInstanceOf(RedirectSignal);
   });
 });
 

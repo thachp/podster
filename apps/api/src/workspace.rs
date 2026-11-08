@@ -2346,10 +2346,10 @@ mod queries {
     }
 
     pub fn list_tasks(sql: &SqlStorage, caller: &Caller, url: &Url) -> R<Value> {
-        let cursor = match super::cursor::resume(sql, url, "cursor", "task", "seq", None)? {
-            super::cursor::Resume::Start => 0,
-            super::cursor::Resume::After(seq) => seq,
-        };
+        // Only a task the caller can see resumes a list. Any other answers as if it didn't exist.
+        let cursor = super::cursor::resume(sql, url, "cursor", "task", "seq", None, |id| {
+            Ok(load_task(sql, id)?.is_some_and(|task| can_see_task(caller, &task)))
+        })?;
         let mine = query_str(url, "mine").as_deref() == Some("true");
         let status = query_str(url, "status");
         if let Some(s) = &status {
@@ -2357,36 +2357,45 @@ mod queries {
                 return Err(ApiError::invalid_argument());
             }
         }
-        // Oldest first unless asked. A cursor is the last row returned either way, and no row sits at 0, so 0 is the start.
+        // Oldest first unless asked. Either way the list goes on past the cursor's task, or from before the first one.
         let order = query_str(url, "order");
-        let (position, direction) = match order.as_deref() {
-            None | Some("oldest") => ("seq > ?", "ASC"),
-            // A position nothing could hold would read as the end of the list, and an agent's bad cursor shouldn't.
-            Some("newest") if cursor < 0 => return Err(ApiError::invalid_argument()),
-            Some("newest") if cursor == 0 => ("? = 0", "DESC"),
-            Some("newest") => ("seq < ?", "DESC"),
+        let (comparison, direction, start) = match order.as_deref() {
+            None | Some("oldest") => (">", "ASC", 0),
+            Some("newest") => ("<", "DESC", i64::MAX),
             Some(_) => return Err(ApiError::invalid_argument()),
+        };
+        let from = match cursor {
+            super::cursor::Resume::Start => start,
+            super::cursor::Resume::After(seq) => seq,
         };
         // Someone limited to their own tasks only ever receives those, so the query itself is narrowed before policy re-checks each row.
         let narrow = mine || !sees_whole_room(caller);
-        let found = rows(sql, &format!("SELECT * FROM task WHERE {position} AND (? IS NULL OR status = ?)
-            AND (? = 0 OR requester_id = ? OR assignee_id = ? OR reviewer_id = ?) ORDER BY seq {direction} LIMIT ?"), vec![
-            cursor.into(), opt(&status), opt(&status), i64::from(narrow).into(), caller.id.as_str().into(), caller.id.as_str().into(), caller.id.as_str().into(), (PAGE_SIZE + 1).into(),
-        ])?;
-        // One row past the page, which only says whether there is more, so a full last page doesn't promise another.
-        let more = found.len() as i64 > PAGE_SIZE;
-        let page = || found.iter().take(PAGE_SIZE as usize);
-        let mut tasks = Vec::new();
-        for row in page() {
-            let task = store::task_from_row(row)?;
-            if can_see_task(caller, &task) {
-                tasks.push(task_json(&task));
-            }
-        }
-        // The last row's ID. The query is already narrowed to what the caller may see, so it's a task they were just given.
-        let next = more
-            .then(|| page().next_back().and_then(|r| text(&r["id"])))
-            .flatten();
+        let query = format!("SELECT *, seq AS position FROM task WHERE seq {comparison} ? AND (? IS NULL OR status = ?)
+            AND (? = 0 OR requester_id = ? OR assignee_id = ? OR reviewer_id = ?) ORDER BY seq {direction} LIMIT ?");
+        let (tasks, next) = super::cursor::page(
+            sql,
+            from,
+            |position| {
+                rows(
+                    sql,
+                    &query,
+                    vec![
+                        position.into(),
+                        opt(&status),
+                        opt(&status),
+                        i64::from(narrow).into(),
+                        caller.id.as_str().into(),
+                        caller.id.as_str().into(),
+                        caller.id.as_str().into(),
+                        (PAGE_SIZE + 1).into(),
+                    ],
+                )
+            },
+            |row| {
+                let task = store::task_from_row(row)?;
+                Ok(can_see_task(caller, &task).then(|| task_json(&task)))
+            },
+        )?;
         Ok(json!({ "tasks": tasks, "next_cursor": next }))
     }
 
@@ -2473,6 +2482,8 @@ mod queries {
             "message",
             "seq",
             Some(("task_id", id)),
+            // The thread is all-or-nothing for whoever reads it, so any message on it may resume it.
+            |_| Ok(true),
         )? {
             super::cursor::Resume::Start => 0,
             super::cursor::Resume::After(seq) => seq,

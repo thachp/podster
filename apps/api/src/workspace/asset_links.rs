@@ -202,7 +202,27 @@ pub(super) fn list(sql: &SqlStorage, who: &Participant, url: &Url) -> R<Value> {
     if caller.role == Role::None {
         return Err(ApiError::workspace_not_found());
     }
-    let cursor = match super::cursor::resume(sql, url, "cursor", "stored_object", "rowid", None)? {
+    // Only a file this list could show the caller resumes it: an input asset that has arrived and that they may see. Any other
+    // answers as if it didn't exist, so a cursor can't confirm a hidden file, a submission file or an upload under way.
+    let cursor = match super::cursor::resume(
+        sql,
+        url,
+        "cursor",
+        "stored_object",
+        "rowid",
+        None,
+        |id| {
+            let found = rows(
+            sql,
+            "SELECT id, name, size, sha256, media_type, state, uploaded_by, for_task FROM stored_object WHERE id = ? AND state <> 'uploading' AND for_task IS NULL",
+            vec![id.into()],
+        )?;
+            match found.first() {
+                Some(row) => Ok(downloads::file_json(sql, caller, row)?.is_some()),
+                None => Ok(false),
+            }
+        },
+    )? {
         super::cursor::Resume::Start => 0,
         super::cursor::Resume::After(position) => position,
     };
@@ -214,30 +234,33 @@ pub(super) fn list(sql: &SqlStorage, who: &Participant, url: &Url) -> R<Value> {
             .ok_or_else(ApiError::task_not_found)?;
     }
     let narrow = !sees_whole_room(caller);
-    let found = rows(
-        sql,
-        "SELECT o.rowid AS seq, o.id, o.name, o.size, o.sha256, o.media_type, o.state, o.uploaded_by, o.for_task FROM stored_object o
+    let query = "SELECT o.rowid AS position, o.id, o.name, o.size, o.sha256, o.media_type, o.state, o.uploaded_by, o.for_task FROM stored_object o
         WHERE o.rowid > ? AND o.state <> 'uploading' AND o.for_task IS NULL
         AND (? IS NULL OR EXISTS (SELECT 1 FROM asset_link l WHERE l.object_id = o.id AND l.task_id = ?))
         AND (? = 0 OR EXISTS (SELECT 1 FROM asset_link l JOIN task t ON t.id = l.task_id WHERE l.object_id = o.id
             AND (t.requester_id = ? OR t.assignee_id = ? OR t.reviewer_id = ?)))
-        ORDER BY o.rowid LIMIT ?",
-        vec![
-            cursor.into(), opt(&task_id), opt(&task_id), i64::from(narrow).into(), caller.id.as_str().into(),
-            caller.id.as_str().into(), caller.id.as_str().into(), (PAGE_SIZE + 1).into(),
-        ],
+        ORDER BY o.rowid LIMIT ?";
+    let (files, next) = super::cursor::page(
+        sql,
+        cursor,
+        |position| {
+            rows(
+                sql,
+                query,
+                vec![
+                    position.into(),
+                    opt(&task_id),
+                    opt(&task_id),
+                    i64::from(narrow).into(),
+                    caller.id.as_str().into(),
+                    caller.id.as_str().into(),
+                    caller.id.as_str().into(),
+                    (PAGE_SIZE + 1).into(),
+                ],
+            )
+        },
+        |row| downloads::file_json(sql, caller, row),
     )?;
-    let more = found.len() as i64 > PAGE_SIZE;
-    let page = || found.iter().take(PAGE_SIZE as usize);
-    let mut files = Vec::new();
-    for row in page() {
-        if let Some(file) = downloads::file_json(sql, caller, row)? {
-            files.push(file);
-        }
-    }
-    let next = more
-        .then(|| page().next_back().and_then(|row| text(&row["id"])))
-        .flatten();
     let mut answer = json!({ "files": files, "next_cursor": next });
     // The room's total counts files someone limited to their own tasks can't see, so only whoever sees the whole room gets it.
     if !narrow {

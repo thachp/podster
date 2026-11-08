@@ -126,6 +126,59 @@ describe("the task list's cursor", () => {
     }
   });
 
+  it("answers a hidden task's ID exactly as it answers one that names nothing, so a cursor can't confirm it exists", async () => {
+    const id = await room();
+    await seedTasks(id, 3);
+    const unknown = await api(GUEST, "GET", `/v1/workspaces/${id}/tasks?cursor=tsk_nothing`);
+    expect([unknown.status, unknown.code]).toEqual([400, "invalid_argument"]);
+    for (const order of ["", "&order=newest"]) {
+      const hidden = await api(GUEST, "GET", `/v1/workspaces/${id}/tasks?cursor=tsk_cuh001${order}`);
+      expect([hidden.status, hidden.body], order).toEqual([unknown.status, unknown.body]);
+    }
+    // Whoever can see it pages from it as from any other.
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/tasks?cursor=tsk_cuh001`)).body.tasks.map((t: any) => t.id)).toEqual(["tsk_cug002", "tsk_cuh002"]);
+  });
+
+  it("reads on past rows it drops, ending neither early nor never, and never names a dropped row", async () => {
+    // No real row is dropped after the narrowed query, so a test-only table drops these, more than two batches in a row.
+    const id = await room();
+    await seedTasks(id, 130);
+    const dropped = Array.from({ length: 120 }, (_, i) => `tsk_cug${String(i + 5).padStart(3, "0")}`);
+    await inRoom(id, (sql) => {
+      sql.exec("CREATE TABLE test_hide_from_lists (id TEXT PRIMARY KEY)");
+      for (const task of dropped) sql.exec("INSERT INTO test_hide_from_lists (id) VALUES (?)", task);
+    });
+    const { seen, cursors } = await pages(GUEST, `/v1/workspaces/${id}/tasks`, "tasks");
+    const kept = Array.from({ length: 130 }, (_, i) => `tsk_cug${String(i).padStart(3, "0")}`).filter((task) => !dropped.includes(task));
+    expect(seen.map((t) => t.id)).toEqual(kept);
+    expect(cursors).toEqual([]);
+    // A page that would end on dropped rows reads on to a row it can return.
+    await inRoom(id, (sql) => sql.exec("DELETE FROM test_hide_from_lists WHERE id IN ('tsk_cug100', 'tsk_cug101')"));
+    const again = await pages(GUEST, `/v1/workspaces/${id}/tasks`, "tasks");
+    expect(again.seen.length).toBe(12);
+    expect(again.seen.map((t) => t.id)).toContain("tsk_cug100");
+    for (const cursor of again.cursors) expect(dropped.filter((t) => t !== "tsk_cug100" && t !== "tsk_cug101")).not.toContain(cursor);
+    // Everything dropped ends the list at once, with no cursor.
+    await inRoom(id, (sql) => sql.exec("INSERT INTO test_hide_from_lists (id) SELECT id FROM task WHERE id NOT IN (SELECT id FROM test_hide_from_lists)"));
+    expect((await api(GUEST, "GET", `/v1/workspaces/${id}/tasks`)).body).toEqual({ tasks: [], next_cursor: null });
+  });
+
+  it("puts the cursor on the last row returned when a page fills before rows it drops", async () => {
+    const id = await room();
+    await seedTasks(id, 60);
+    // The page fills at tsk_cug049, and the next row it would scan is dropped, so the cursor stays on the last one returned.
+    await inRoom(id, (sql) => {
+      sql.exec("CREATE TABLE test_hide_from_lists (id TEXT PRIMARY KEY)");
+      for (let i = 50; i < 55; i++) sql.exec("INSERT INTO test_hide_from_lists (id) VALUES (?)", `tsk_cug0${i}`);
+    });
+    const first = await api(GUEST, "GET", `/v1/workspaces/${id}/tasks`);
+    expect(first.body.tasks.length).toBe(50);
+    expect(first.body.next_cursor).toBe("tsk_cug049");
+    const next = await api(GUEST, "GET", `/v1/workspaces/${id}/tasks?cursor=tsk_cug049`);
+    expect(next.body.tasks.map((t: any) => t.id)).toEqual(["tsk_cug055", "tsk_cug056", "tsk_cug057", "tsk_cug058", "tsk_cug059"]);
+    expect(next.body.next_cursor).toBeNull();
+  });
+
   it("gives an organization's admin overseeing its agent the same kind of cursor", async () => {
     const id = await room();
     await seedTasks(id, 0);
@@ -164,6 +217,32 @@ describe("the file list's cursor", () => {
     // A position, the old kind of cursor, names no file, and neither does an ID that isn't one here.
     const rowid = await inRoom(id, (sql) => sql.exec("SELECT rowid AS r FROM stored_object WHERE id = 'obj_cug058'").one().r as number);
     for (const cursor of [String(rowid), "obj_nothing"]) expect((await api(GUEST, "GET", `/v1/workspaces/${id}/files?cursor=${cursor}`)).code, cursor).toBe("invalid_argument");
+  });
+});
+
+describe("the file list's cursor, for a file the caller isn't shown", () => {
+  it("answers a hidden file's, a submission file's or an unfinished upload's ID exactly as one that names nothing", async () => {
+    const id = await room();
+    const t = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Read", instructions: "x", assignee: GUEST.id });
+    await inRoom(id, (sql) => {
+      const add = (object: string, state: string, forTask: string | null) =>
+        sql.exec("INSERT INTO stored_object (id, name, size, sha256, state, token_hash, uploaded_by, created_at, upload_expires_at, for_task) VALUES (?, 'n.txt', 1, ?, ?, 'x', ?, 0, 0, ?)", object, "a".repeat(64), state, OWNER.id, forTask);
+      add("obj_cushown", "ready", null);
+      add("obj_cuhidden", "ready", null);
+      add("obj_cusubmission", "ready", t.body.id);
+      add("obj_cuuploading", "uploading", null);
+      sql.exec("INSERT INTO asset_link (task_id, object_id, linked_by, linked_at) VALUES (?, 'obj_cushown', ?, 0)", t.body.id, OWNER.id);
+    });
+    const unknown = await api(GUEST, "GET", `/v1/workspaces/${id}/files?cursor=obj_nothing`);
+    expect([unknown.status, unknown.code]).toEqual([400, "invalid_argument"]);
+    for (const object of ["obj_cuhidden", "obj_cusubmission", "obj_cuuploading"]) {
+      const answer = await api(GUEST, "GET", `/v1/workspaces/${id}/files?cursor=${object}`);
+      expect([answer.status, answer.body], object).toEqual([unknown.status, unknown.body]);
+    }
+    // A submission file and an unfinished upload aren't in the list for anyone, so they resume it for nobody.
+    for (const object of ["obj_cusubmission", "obj_cuuploading"]) expect((await api(OWNER, "GET", `/v1/workspaces/${id}/files?cursor=${object}`)).code, object).toBe("invalid_argument");
+    expect((await api(GUEST, "GET", `/v1/workspaces/${id}/files?cursor=obj_cushown`)).status).toBe(200);
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/files?cursor=obj_cuhidden`)).status).toBe(200);
   });
 });
 

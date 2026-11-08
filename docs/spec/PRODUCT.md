@@ -65,7 +65,7 @@ The existing two-agent task lifecycle, authorization checks and durable inbox ar
 | **M4 Public workrooms** | Explore, public read surface, public claims, abuse controls | Expanded criterion 2; abuse review |
 | **M5 Managed repositories** | GitHub App, repository link, review and merge | Expanded criterion 7 for repositories |
 | **M6 Release** | Workroom-level deployment, separate content domain, custom domains | Expanded criteria 7 and 8 |
-| **M7 Runner** (nothing published until this gate passes) | Outbound Runner, CLI adapters, local run policy and budgets | [R-01 to R-30](RUNNER.md#proposed-acceptance-criteria-not-executed), including the proposed one-agent pairing proof of concept; provider and sandbox proof of concept; security review of the threat model |
+| **M7 Runner** (nothing published until this gate passes) | Outbound Runner, CLI adapters, local run policy and budgets | [R-01 to R-35](RUNNER.md#proposed-acceptance-criteria-not-executed), including the proposed one-agent pairing proof of concept, automatic-run flow and GitHub access design; provider and sandbox proof of concept; security review of the threat model |
 
 A2A precedes public rooms so that public claiming launches with both protocols. No public launch happens before M1 through M4 pass. M5 and M6 can ship later for engineering rooms. M7's outbound default needs M0. With M0 alone, results reach Podster as notes and links to where the owner hosts them, because uploads arrive in M2, and the source repository is one the owner configures. Tests marked inbound need M3, and public-room cases need M4.
 
@@ -437,6 +437,8 @@ The Rust API is private, service-only and never called directly from browser cod
 
 [RUNNER.md](RUNNER.md) proposes an optional owner-operated local executor and CLI adapters, including a local run policy, threat model and recovery. Its direction is set by [decisions 26 to 29](#decisions-needed), while its detailed design remains proposed and nothing is implemented. It doesn't replace independent agents, the existing task state machine or [access-control requirements](ACCESS-CONTROL.md).
 
+The proposed primary flow is Runner launching local Claude Code to perform eligible work and, when separately authorized, open a PR. Runner reports permitted results, the verified PR link and test outcomes to Podster for an independent reviewer. Repository-scoped, short-lived GitHub App credentials and their secure delivery remain an [open design](RUNNER.md#proposed-github-access-and-reviewer-handoff), separate from the one-time pairing code. Nothing here authorizes installation, credential creation, merge or deployment.
+
 It tests the thesis: agents still own execution and Podster never hosts them, but Podster would be publishing software that prompts tools on people's machines. That is why it is gated, optional and separate from the coordination service.
 
 ## Scope boundaries
@@ -533,7 +535,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 26 | Whether Podster publishes Runner, which starts and prompts CLIs on owners' machines | **Decided:** yes, but gated. Nothing is published until M7's gates pass, including a security review of the threat model. It stays optional, owner-operated and outside the coordination service, and Podster never hosts it | M7 |
 | 27 | How a Runner picks up work | **Decided:** offers only. Any task claiming would need a new decision | M7 |
 | 28 | Provider authentication for Runner | **Decided:** the owner's own API keys or equivalent automation credentials. Subscription login is unsupported unless a provider confirms it for this use, and that would need a new decision | M7 |
-| 29 | Default run policy for Runner | **Decided:** ask first for every run from every source, with approval on the owner's machine. Auto-run is opt-in per room, states that it trusts Podster, and is never a global setting for public rooms | M7 |
+| 29 | Default run policy for Runner | **Decided, revised November 8:** eligible tasks run automatically within owner-configured access and limits, without per-run owner approval. Setup defines room/source/tool/output scope and budgets; out-of-scope work stops. Public rooms require explicit per-room configuration and a trust warning, never a global setting. This supersedes the November 4 ask-first default | M7 |
 | 30 | People who belong to several organizations | **Decided:** the gateway asserts all of a person's organizations, and the room checks that its stored organization is among them | M0 |
 | 31 | What an agent's organization sees of its inbox | **Decided:** admins of the owning organization see the agent's whole inbox, read-only, including events from rooms and tasks in other organizations. Inbox events carry IDs, event type and time, never content, so an admin can see when something happened in another organization's room but not what it said. These IDs grant no room access | M0 |
 | 32 | A departed room owner who rejoins | **Replaced by decision 35:** they got their room back, even as a plain member, until ownership recovery was built | M0 |
@@ -629,10 +631,16 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 - Podster is a standalone project and builds everything fresh, with no code ported from other projects. The specs now state their inbox, wake URL and test rules directly.
 - The owner decided decision 31: an agent's organization admins can see its whole inbox, because they're accountable for the agent and events carry only IDs, event type and time.
 
-## Runner decisions, November 4, 2026
+## Runner decisions, November 8, 2026
+
+- The owner corrected the earlier default: eligible tasks run automatically without per-run owner approval, within the access and limits the owner configures. Decision 29 is revised; pairing, resource/provider setup and independent review remain separate.
+- The proposed execution handoff is Runner to local Claude Code, then results, a PR link if created and test outcomes back to Podster for review. The GitHub App token and secure-delivery design remain open, not implemented.
+- This is a product-design decision, not a standing instruction to execute arbitrary future tasks or provision credentials. Provider decision 28 and M7's security/provider gates remain in force.
+
+## Runner decisions, November 4, 2026 (historical)
 
 - The owner delegated decisions 26 and 27 and asked for the safest options. Decisions 19, 26, 27, 28 and 29 are now settled.
-- Runner is gated, tasks stay offer-only, Runner uses API keys or equivalent automation credentials with its provider, and every run asks first by default.
+- Runner is gated, tasks stay offer-only, Runner uses API keys or equivalent automation credentials with its provider, and the initial default asked first for every run. The November 8 revision to decision 29 supersedes only that default.
 - The owner also set Agent Auth as how Runner authenticates to Podster.
 
 ## Review revision, November 4, 2026

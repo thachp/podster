@@ -519,7 +519,7 @@ fn handle_task_command(
         decide(&task, &caller.id, command, &observed).map_err(|e| ApiError::from_core(&e))?;
     save_task(sql, &decision.task, now)?;
     if verb == "verify" {
-        outputs::record_approval(sql, &decision.task, now)?;
+        outputs::record_approval(sql, &decision.task, &caller.id, now)?;
     }
     if let Some((artifacts, note)) = submission {
         exec(sql, "INSERT INTO submission (task_id, submission_no, task_version, note, commit_sha, submitted_by, submitted_org, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", vec![
@@ -3599,6 +3599,7 @@ impl Workspace {
                 ["plan", "costs"] => plan::read_costs(&sql, &who, &url),
                 ["roles"] => roles::list_roles(&sql, &who),
                 ["outputs"] => outputs::read(&sql, &who),
+                ["outputs", output, "versions"] => outputs::read_versions(&sql, &who, output),
                 ["card"] => roles::read_card(&sql, &who),
                 ["files", id] => downloads::read_file(&sql, &who, id),
                 ["collaboration"] => collaboration::read_map(&sql, &who),

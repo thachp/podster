@@ -14,6 +14,8 @@ const MEMBER: Who = { id: "agt_op_member", org: "org_op" };
 const GUEST: Who = { id: "agt_op_guest", org: "org_op_guest" };
 /** A guest who isn't on the task, so it can't see it. */
 const OTHER_GUEST: Who = { id: "agt_op_other", org: "org_op" };
+/** A guest on no task here. */
+const LIMITED: Who = { id: "agt_op_limited", org: "org_op" };
 /** An agent stored as an admin, which counts as a guest. */
 const AGENT_ADMIN: Who = { id: "agt_op_agent_admin", org: "org_op" };
 const orgAdmin = (org: string): Who => ({ id: `per_op_orgadmin_${org}`, kind: "person", org, adminOrgs: [org] });
@@ -39,7 +41,7 @@ async function api(who: Who, method: string, path: string, body?: unknown, opts:
 beforeAll(async () => {
   key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
   for (const statement of BINDINGS.TEST_D1_SCHEMA.split(";").map((x: string) => x.trim()).filter(Boolean)) await BINDINGS.DB.prepare(statement).run();
-  for (const who of [MEMBER, GUEST, OTHER_GUEST, AGENT_ADMIN]) {
+  for (const who of [MEMBER, GUEST, OTHER_GUEST, AGENT_ADMIN, LIMITED]) {
     const res = await SELF.fetch(`https://api.internal/v1/agents/${who.id}`, { method: "PUT", headers: { "x-podster-assertion": await assertion(orgAdmin(who.org)) }, body: JSON.stringify({ org_id: who.org, name: who.id }) });
     if (res.status !== 200) throw new Error(`register ${who.id}: ${res.status}`);
   }
@@ -55,7 +57,7 @@ const LINK = [{ uri: "https://example.com/report", label: "Report" }];
 /** A room with an admin, a member, an agent stored as admin, and two guests, GUEST from another organization. */
 async function room() {
   const id: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Outputs" })).body.id;
-  for (const [who, role] of [[ADMIN, "admin"], [MEMBER, "member"], [OTHER_GUEST, "guest"], [AGENT_ADMIN, "member"]] as const) {
+  for (const [who, role] of [[ADMIN, "admin"], [MEMBER, "member"], [OTHER_GUEST, "guest"], [LIMITED, "guest"], [AGENT_ADMIN, "member"]] as const) {
     const claims = who.kind === "person" ? { target_member: { person: who.id, orgs: { [who.org]: 1 } } } : {};
     const r = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: who.kind ?? "agent", org_id: who.org, role, policy_version: await version(id) }, { claims });
     expect(r.status, `add ${who.id}: ${JSON.stringify(r.body)}`).toBe(200);
@@ -380,5 +382,82 @@ describe("removing an output", () => {
     expect((await submit(done.taskPath, { artifacts: LINK })).status).toBe(200);
     expect((await approve(done.taskPath)).status).toBe(200);
     expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/outputs/${ready}`)).code).toBe("output_in_use");
+  });
+});
+
+describe("an output's version history", () => {
+  const versions = async (who: Who, id: string, output: string) => {
+    const r = await api(who, "GET", `/v1/workspaces/${id}/outputs/${output}/versions`);
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body.complete).toBe(true);
+    return r.body.versions as any[];
+  };
+  const ALLOWED = ["approved_at", "approved_by", "submission_no", "task_id"];
+
+  /** Two approvals of one output: the first by the owner, the second by OTHER_GUEST, a guest named as that task's reviewer. */
+  async function history() {
+    const id = await room();
+    const output = await define(id);
+    const first = await acceptedTask(id, output);
+    expect((await submit(first.taskPath, { artifacts: LINK })).status).toBe(200);
+    expect((await approve(first.taskPath)).status).toBe(200);
+    const made = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Follow up", instructions: "Again.", assignee: GUEST.id, reviewer: OTHER_GUEST.id, expected_output_id: output });
+    expect(made.status, JSON.stringify(made.body)).toBe(200);
+    const secondPath = `/v1/workspaces/${id}/tasks/${made.body.id}`;
+    expect((await api(GUEST, "POST", `${secondPath}/accept`, { version: made.body.version })).status).toBe(200);
+    const file = await upload(id, made.body.id);
+    expect((await submit(secondPath, { files: [{ id: file }] })).status).toBe(200);
+    const approved = await api(OTHER_GUEST, "POST", `${secondPath}/verify`, { submission_no: 1 });
+    expect(approved.status, JSON.stringify(approved.body)).toBe(200);
+    return { id, output, first: first.task, second: made.body.id as string };
+  }
+
+  it("lists every approval newest first, with the source task and approver for someone who sees both tasks", async () => {
+    const { id, output, first, second } = await history();
+    const seen = await versions(OWNER, id, output);
+    expect(seen).toEqual([
+      { submission_no: 1, approved_at: expect.any(Number), task_id: second, approved_by: OTHER_GUEST.id },
+      { submission_no: 1, approved_at: expect.any(Number), task_id: first, approved_by: OWNER.id },
+    ]);
+    expect(seen[0].approved_at).toBeGreaterThanOrEqual(seen[1].approved_at);
+  });
+
+  it("gives a limited guest on neither task only each version's number and time", async () => {
+    const { id, output } = await history();
+    const seen = await versions(LIMITED, id, output);
+    expect(seen).toHaveLength(2);
+    for (const version of seen) expect(Object.keys(version).sort()).toEqual(["approved_at", "submission_no"]);
+  });
+
+  it("gives the named reviewer, otherwise limited, the task it reviewed and nothing more of the other", async () => {
+    const { id, output, second } = await history();
+    const [reviewed, other] = await versions(OTHER_GUEST, id, output);
+    expect(reviewed).toEqual({ submission_no: 1, approved_at: expect.any(Number), task_id: second, approved_by: OTHER_GUEST.id });
+    expect(Object.keys(other).sort()).toEqual(["approved_at", "submission_no"]);
+  });
+
+  it("gives a member narrowed to its own artifacts the tasks it sees, and nothing about files", async () => {
+    const { id, output, first, second } = await history();
+    const narrowed = await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${MEMBER.id}/access`, { scopes: { artifacts: "own" }, policy_version: await version(id) });
+    expect(narrowed.status, JSON.stringify(narrowed.body)).toBe(200);
+    const seen = await versions(MEMBER, id, output);
+    expect(seen.map((v) => v.task_id)).toEqual([second, first]);
+    for (const v of seen) expect(Object.keys(v).every((key) => ALLOWED.includes(key)), JSON.stringify(v)).toBe(true);
+    // get_task still keeps that submission's file from it, which is where a version's files are read.
+    const task = await api(MEMBER, "GET", `/v1/workspaces/${id}/tasks/${second}`);
+    expect(task.body.files).toEqual([]);
+  });
+
+  it("answers output_not_found for an unknown or removed output, and nothing to an outsider", async () => {
+    const id = await room();
+    const output = await define(id);
+    const unknown = await api(OWNER, "GET", `/v1/workspaces/${id}/outputs/out_unknown/versions`);
+    expect([unknown.status, unknown.code]).toEqual([404, "output_not_found"]);
+    expect((await versions(GUEST, id, output))).toEqual([]);
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/outputs/${output}`)).status).toBe(200);
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/outputs/${output}/versions`)).code).toBe("output_not_found");
+    const outsider = await api({ id: "agt_op_outsider", org: "org_x" }, "GET", `/v1/workspaces/${id}/outputs/${output}/versions`);
+    expect(outsider.status).not.toBe(200);
+    expect(outsider.body.versions).toBeUndefined();
   });
 });

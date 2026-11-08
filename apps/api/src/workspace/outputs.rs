@@ -310,7 +310,8 @@ fn task_with_output(sql: &SqlStorage, task: &Task) -> R<Value> {
 
 /// Records the version an approval makes, in the approval's transaction. Runs only after `decide` approved, which is after
 /// step 6's file check, and an idempotent replay returns its stored answer without reaching here, so nothing records twice.
-pub(super) fn record_approval(sql: &SqlStorage, task: &Task, now: i64) -> R<()> {
+/// `approver` is the reviewer who approved, kept with the version, since the task's reviewer can change later.
+pub(super) fn record_approval(sql: &SqlStorage, task: &Task, approver: &str, now: i64) -> R<()> {
     let Some(output) = named_by(sql, &task.id)? else {
         return Ok(());
     };
@@ -333,8 +334,9 @@ pub(super) fn record_approval(sql: &SqlStorage, task: &Task, now: i64) -> R<()> 
     exec(sql, "UPDATE expected_output SET current_task_id = ?, current_submission_no = ?, current_approved_at = ? WHERE id = ?", vec![
         version.task_id.as_str().into(), i64::from(version.submission_no).into(), version.approved_at.into(), version.output_id.as_str().into(),
     ])?;
-    exec(sql, "INSERT OR IGNORE INTO expected_output_version (output_id, task_id, submission_no, approved_at) VALUES (?, ?, ?, ?)", vec![
+    exec(sql, "INSERT OR IGNORE INTO expected_output_version (output_id, task_id, submission_no, approved_at, approved_by) VALUES (?, ?, ?, ?, ?)", vec![
         version.output_id.as_str().into(), version.task_id.as_str().into(), i64::from(version.submission_no).into(), version.approved_at.into(),
+        approver.into(),
     ])
 }
 
@@ -435,4 +437,42 @@ pub(super) fn read(sql: &SqlStorage, who: &Participant) -> R<Value> {
     }
     let (ready, total) = ready_count(&ready);
     Ok(json!({ "outputs": listed, "ready": ready, "total": total }))
+}
+
+/// The most versions one read returns, newest first. `complete` says whether there were more.
+const VERSIONS_LISTED: i64 = 200;
+
+/// `GET /outputs/:id/versions`: every approval that made this output Ready, newest first, for every participant. Each is gated
+/// like `current`: the source task and the reviewer who approved only for someone who can see that task, and otherwise only its
+/// submission number and time, as the output's status already tells everyone it was approved. Nothing here is about files:
+/// the submission's links and files are read through `get_task`, under `task_view` and the file views.
+pub(super) fn read_versions(sql: &SqlStorage, who: &Participant, id: &str) -> R<Value> {
+    let caller = &who.caller;
+    if !sees_outputs(caller) {
+        return Err(ApiError::workspace_not_found());
+    }
+    live_output(sql, id)?.ok_or_else(output_not_found)?;
+    let found = rows(
+        sql,
+        "SELECT task_id, submission_no, approved_at, approved_by FROM expected_output_version INDEXED BY expected_output_history
+            WHERE output_id = ? ORDER BY approved_at DESC, task_id DESC, submission_no DESC LIMIT ?",
+        vec![id.into(), (VERSIONS_LISTED + 1).into()],
+    )?;
+    let complete = found.len() as i64 <= VERSIONS_LISTED;
+    let mut versions = Vec::with_capacity(found.len());
+    for row in found.iter().take(VERSIONS_LISTED as usize) {
+        let mut version =
+            json!({ "submission_no": row["submission_no"], "approved_at": row["approved_at"] });
+        let task = row["task_id"]
+            .as_str()
+            .map(|task| load_task(sql, task))
+            .transpose()?
+            .flatten();
+        if task.is_some_and(|task| sees_output_task(caller, &task)) {
+            version["task_id"] = row["task_id"].clone();
+            version["approved_by"] = row["approved_by"].clone();
+        }
+        versions.push(version);
+    }
+    Ok(json!({ "output_id": id, "versions": versions, "complete": complete }))
 }

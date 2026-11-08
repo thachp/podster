@@ -14,6 +14,10 @@ describe("expected outputs, as capabilities", () => {
     expect(toApiCall(capability("list_outputs"), { workspace_id: "w", extra: "x" })).toEqual({ method: "GET", path: "/v1/workspaces/w/outputs" });
   });
 
+  it("list_output_versions reads one output's history", () => {
+    expect(toApiCall(capability("list_output_versions"), { workspace_id: "w", output_id: "out_1", extra: "x" })).toEqual({ method: "GET", path: "/v1/workspaces/w/outputs/out_1/versions" });
+  });
+
   it("set_task_output requires output_id, which may be null to clear it", () => {
     const schema = jsonSchema(capability("set_task_output")) as any;
     expect(schema.required).toEqual(expect.arrayContaining(["workspace_id", "task_id", "version", "output_id", "idempotency_key"]));

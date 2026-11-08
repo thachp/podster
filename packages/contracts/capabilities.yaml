@@ -15,6 +15,7 @@ capabilities:
   list_tasks: { kind: query, operation: listTasks }
   get_task: { kind: query, operation: getTask }
   list_outputs: { kind: query, operation: listOutputs }
+  list_output_versions: { kind: query, operation: listOutputVersions }
   set_task_output: { kind: command, operation: setTaskOutput }
   get_plan: { kind: query, operation: getPlan }
   set_task_plan: { kind: command, operation: setTaskPlan }

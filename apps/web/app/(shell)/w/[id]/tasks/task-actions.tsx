@@ -9,6 +9,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { clientCommand } from "@/lib/gateway/client";
 import { FIELD_CLASS } from "./task-bits";
+import { RespondToOffer } from "./task-acceptance";
+import { SubmitWork } from "./task-files";
+import { approvalBlocker, definiteRefusal, verifyProblem } from "./task-files-model";
 import { asConflict, changedSince, changeProblem, draftOf, flagged, isArchivedRoom, LIMITS, newRequesterChoices, newReviewerChoices, ownWords, rebaseDraft, reoffers, taskPatch, textNameOf, tooLong, viewerActions, type Names, type Task, type TaskDraft } from "./task-model";
 import type { LoadedTask } from "./task-sheet";
 
@@ -20,7 +23,7 @@ export type SavedEdit = { readAt: Task; draft: TaskDraft };
 const PRIMARY = "min-h-11 sm:min-h-9";
 
 /** Only what this viewer may do now. It's rebuilt for each task version, so nothing here can outlive what it was read against. */
-export function TaskActions({ api, me, names, role, onNotice, savedEdit, returnFocus }: Props & { savedEdit: RefObject<SavedEdit | null>; returnFocus: RefObject<boolean> }) {
+export function TaskActions({ api, me, names, role, onNotice, savedEdit, returnFocus, savedNote }: Props & { savedEdit: RefObject<SavedEdit | null>; returnFocus: RefObject<boolean>; savedNote?: RefObject<string> }) {
   const { task, room } = api.data;
   const archived = isArchivedRoom(room);
   const can = viewerActions(task, me, role, archived);
@@ -57,7 +60,7 @@ export function TaskActions({ api, me, names, role, onNotice, savedEdit, returnF
       </section>
     );
   }
-  if (!can.review && !can.cancel && !can.assign && !can.edit && !can.setReviewer && !can.setRequester) {
+  if (!can.review && !can.submit && !can.respond && !can.cancel && !can.assign && !can.edit && !can.setReviewer && !can.setRequester) {
     return (
       <>
         {savedEdit.current ? <UnsavableEdit savedEdit={savedEdit} /> : null}
@@ -68,7 +71,7 @@ export function TaskActions({ api, me, names, role, onNotice, savedEdit, returnF
   return (
     <section aria-label="Actions" className="space-y-3 border-t pt-4">
       {savedEdit.current && !can.edit ? <UnsavableEdit savedEdit={savedEdit} /> : null}
-      {can.review ? <ReviewActions api={api} onNotice={onNotice} /> : <Waiting api={api} me={me} names={names} />}
+      {can.respond ? <RespondToOffer api={api} onNotice={onNotice} taskPath={taskPath} /> : can.submit ? <SubmitWork api={api} onNotice={onNotice} taskPath={taskPath} savedNote={savedNote} /> : can.review ? <ReviewActions api={api} onNotice={onNotice} /> : <Waiting api={api} me={me} names={names} />}
       {can.assign ? <OfferTask api={api} me={me} names={names} role={role} onNotice={onNotice} /> : null}
       {can.edit ? (
         <Button
@@ -322,6 +325,9 @@ function ReviewActions({ api, onNotice }: Pick<Props, "api" | "onNotice">) {
   const approveKey = useIntentKey(`verify:${submission}`);
   const changesKey = useIntentKey(`changes:${submission}:${reason}`);
   const trimmed = reason.trim();
+  // The reviewer named on a task reads all its submitted files (decision 97), so this is the whole of them.
+  const files = (data.files ?? []).filter((file) => file.submission_no === submission);
+  const blocker = approvalBlocker(files);
 
   useEffect(() => {
     if (asking) fieldRef.current?.focus();
@@ -336,7 +342,7 @@ function ReviewActions({ api, onNotice }: Pick<Props, "api" | "onNotice">) {
 
   const approve = async () => {
     onNotice(null);
-    const result = await run(async () => asConflict(await clientCommand(taskPath(data, "verify"), { submission_no: submission }, { idempotencyKey: approveKey })));
+    const result = await run(async () => definiteRefusal(asConflict(await clientCommand(taskPath(data, "verify"), { submission_no: submission }, { idempotencyKey: approveKey }))), verifyProblem);
     if (result?.ok) onNotice(`Approved submission ${submission}. This task is completed.`);
   };
 
@@ -349,7 +355,15 @@ function ReviewActions({ api, onNotice }: Pick<Props, "api" | "onNotice">) {
 
   return (
     <div className="space-y-3">
-      <p className="text-sm text-muted-foreground">You're the reviewer. Your decision applies to submission {submission} only.</p>
+      <p className="text-sm text-muted-foreground">
+        You're the reviewer. Your decision applies to submission {submission} only
+        {files.length > 0 ? `, and approving it records the exact ${files.length === 1 ? "file" : `${files.length} files`} it was submitted with, by SHA-256. Check ${files.length === 1 ? "it" : "them"} in Details.` : "."}
+      </p>
+      {blocker ? (
+        <p id="approve-blocked" className="rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">
+          {blocker}
+        </p>
+      ) : null}
       {asking ? (
         <div className="space-y-2">
           <Label htmlFor="changes-reason">What needs to change in submission {submission}?</Label>
@@ -383,7 +397,16 @@ function ReviewActions({ api, onNotice }: Pick<Props, "api" | "onNotice">) {
         </div>
       ) : (
         <div className="flex flex-wrap gap-2">
-          <Button className={PRIMARY} disabled={saving} onClick={approve}>
+          {/* Not disabled for a file that isn't ready: a refresh can find one while focus is here, and focus mustn't drop. */}
+          <Button
+            className={`${PRIMARY} aria-disabled:cursor-not-allowed aria-disabled:opacity-50`}
+            disabled={saving}
+            aria-disabled={blocker !== null || undefined}
+            aria-describedby={blocker ? "approve-blocked" : undefined}
+            onClick={() => {
+              if (blocker === null) void approve();
+            }}
+          >
             {saving ? "Approving…" : `Approve submission ${submission}`}
           </Button>
           <Button variant="outline" className={PRIMARY} disabled={saving} onClick={() => setAsking(true)}>

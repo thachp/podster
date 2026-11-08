@@ -233,3 +233,21 @@ cd apps/api && npx wrangler tail podster-api --env staging --format json --searc
 
 Each stored file logs one `upload.stored` line, with the object ID, bytes, chunks and wall time. Compare the invocation's CPU time with the limit, which is 30 seconds unless `limits.cpu_ms` raises it. An outcome of `exceededCpu` means it went over.
 
+## Checking M2 on staging
+
+`e2e/m2-staging.mjs` is the start of M2 step 11's staging run. It uploads through the gateway and waits for the scanner's verdicts: a clean text file has to become `ready`, and the EICAR test string `blocked`. Then it downloads the clean file as a person and as an agent, checking the bytes and the file headers, and checks the refusals: a blocked file, an unknown file, someone outside the room, no credential, an executable, a file over 100 MB and a wrong hash. Cases for steps 5 to 8 are listed as skipped until each lands. `--big` adds a 100 MB file through the scanner. It leaves a room named "M2 staging" and its files behind.
+
+With staging's test sign-up, as for the journey:
+
+```bash
+cd e2e && PODSTER_E2E_SIGNUP_SECRET='<secret>' node m2-staging.mjs --base-url https://gateway-staging.podster.dev
+```
+
+A verdict waits up to 300 s by default, for a Container that may be starting cold. `--verdict-wait-s` changes that. Read the scanner's side while it runs:
+
+```bash
+cd apps/scanner && npx wrangler tail --env staging --format json
+```
+
+Locally, `node run-m2-staging.mjs` runs it against the local stack with a stand-in for the scanner. The stand-in reports the EICAR string as a finding and anything else as clean, so a local run checks the queue message, the verdict route and downloads, but not ClamAV or the Container. It also checks that no file name, token, scanner secret or finding reached the Workers' logs.
+

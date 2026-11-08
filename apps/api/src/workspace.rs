@@ -73,6 +73,7 @@ const INVITATION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 type Identity = Verified;
 
 mod a2a_out;
+mod a2a_read;
 mod asset_links;
 mod collaboration;
 mod cursor;
@@ -3195,13 +3196,9 @@ impl Workspace {
         else {
             return Ok(());
         };
-        a2a_out::drain(
-            &self.env,
-            &sql,
-            &workspace_id,
-            Date::now().as_millis() as i64,
-        )
-        .await
+        let now = Date::now().as_millis() as i64;
+        a2a_out::drain(&self.env, &sql, &workspace_id, now).await?;
+        a2a_read::drain(&self.env, &sql, &workspace_id, now).await
     }
 
     /// Schedules the alarm for whatever is due next, moving it earlier if needed. Never later: a pending alarm that
@@ -3242,6 +3239,14 @@ impl Workspace {
         // Like every other due time here, it can only bring the alarm earlier.
         if let Some(next) = (migrated && !outbox_held(&sql)?)
             .then(|| a2a_out::next_due(&sql))
+            .transpose()?
+            .flatten()
+        {
+            let next = next.max(now + 10);
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
+        if let Some(next) = migrated
+            .then(|| a2a_read::next_due(&sql, now))
             .transpose()?
             .flatten()
         {
@@ -3502,6 +3507,20 @@ impl Workspace {
             let body: Value = serde_json::from_str(&req.text().await?)
                 .map_err(|_| ApiError::invalid_argument())?;
             return self.upload_step(&path, body);
+        }
+        if [
+            crate::INTERNAL_A2A_READ_BEGIN,
+            crate::INTERNAL_A2A_READ_END,
+            crate::INTERNAL_A2A_READ_FAILED,
+            crate::INTERNAL_A2A_READ_APPLY,
+            crate::INTERNAL_A2A_CANCEL_BEGIN,
+            crate::INTERNAL_A2A_CANCEL_FINISH,
+        ]
+        .contains(&path.as_str())
+        {
+            let body: Value = serde_json::from_str(&req.text().await?)
+                .map_err(|_| ApiError::invalid_argument())?;
+            return a2a_read::step(&self.state, &path, &identity, body);
         }
         if path == crate::INTERNAL_A2A_BEGIN || path == crate::INTERNAL_A2A_FINISH {
             let body: Value = serde_json::from_str(&req.text().await?)

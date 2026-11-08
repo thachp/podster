@@ -228,7 +228,26 @@ describe("the room's sweep", () => {
   it("plans one sweep an hour after migrating a room that holds files, and none for a room that doesn't", async () => {
     const undoRemoval = (id: string) => runInDurableObject(stub(id), (_: any, state: any) => {
       // The migrations after this one come off first: submitted files' flag, then expected outputs.
-      // Step 12's A2A attempts, the newest migration, first.
+      // Step 13's read-back, the newest migration, then step 12's A2A attempts.
+      state.storage.sql.exec("DROP INDEX a2a_attempt_reads");
+      state.storage.sql.exec("DROP INDEX a2a_attempt_cancels");
+      state.storage.sql.exec("DROP TABLE a2a_held");
+      state.storage.sql.exec("ALTER TABLE event DROP COLUMN origin");
+      state.storage.sql.exec("ALTER TABLE event DROP COLUMN origin_ref");
+      state.storage.sql.exec("ALTER TABLE audit_event DROP COLUMN origin");
+      state.storage.sql.exec("ALTER TABLE audit_event DROP COLUMN origin_ref");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN reading_ended");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_until");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN next_read_at");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_no");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_queued");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_queued_at");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN last_read_no");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN last_state");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN working_seen");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_ended_reason");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN cancel_state");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP TABLE a2a_attempt");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP INDEX stored_object_unsubmitted");
@@ -334,7 +353,26 @@ describe("the room's sweep", () => {
     const object = await file(id);
     await runInDurableObject(stub(id), (_: any, state: any) => {
       // The migrations after this one come off first: submitted files' flag, then expected outputs.
-      // Step 12's A2A attempts, the newest migration, first.
+      // Step 13's read-back, the newest migration, then step 12's A2A attempts.
+      state.storage.sql.exec("DROP INDEX a2a_attempt_reads");
+      state.storage.sql.exec("DROP INDEX a2a_attempt_cancels");
+      state.storage.sql.exec("DROP TABLE a2a_held");
+      state.storage.sql.exec("ALTER TABLE event DROP COLUMN origin");
+      state.storage.sql.exec("ALTER TABLE event DROP COLUMN origin_ref");
+      state.storage.sql.exec("ALTER TABLE audit_event DROP COLUMN origin");
+      state.storage.sql.exec("ALTER TABLE audit_event DROP COLUMN origin_ref");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN reading_ended");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_until");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN next_read_at");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_no");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_queued");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_queued_at");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN last_read_no");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN last_state");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN working_seen");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_ended_reason");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN cancel_state");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP TABLE a2a_attempt");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP INDEX stored_object_unsubmitted");
@@ -583,7 +621,26 @@ describe("removal by the rules, review fixes", () => {
     await runInDurableObject(stub(id), (_: any, state: any) => {
       const sql = state.storage.sql;
       sql.exec("INSERT INTO submission_file (task_id, submission_no, object_id, sha256, size, label, submitted_by, submitted_org, created_at) VALUES (?, 1, ?, ?, 1, 'x', ?, ?, 456)", t.body.id, named, "0".repeat(64), MEMBER.id, MEMBER.org);
-      // Step 12's A2A attempts, the newest migration, first.
+      // Step 13's read-back, the newest migration, then step 12's A2A attempts.
+      state.storage.sql.exec("DROP INDEX a2a_attempt_reads");
+      state.storage.sql.exec("DROP INDEX a2a_attempt_cancels");
+      state.storage.sql.exec("DROP TABLE a2a_held");
+      state.storage.sql.exec("ALTER TABLE event DROP COLUMN origin");
+      state.storage.sql.exec("ALTER TABLE event DROP COLUMN origin_ref");
+      state.storage.sql.exec("ALTER TABLE audit_event DROP COLUMN origin");
+      state.storage.sql.exec("ALTER TABLE audit_event DROP COLUMN origin_ref");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN reading_ended");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_until");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN next_read_at");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_no");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_queued");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_queued_at");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN last_read_no");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN last_state");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN working_seen");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_ended_reason");
+      state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN cancel_state");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE a2a_attempt");
       sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP INDEX stored_object_unsubmitted");

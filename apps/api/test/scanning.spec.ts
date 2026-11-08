@@ -378,7 +378,26 @@ describe("a room from before this", () => {
     inRoom(id, (sql) => {
       // The newer migrations come off first, newest first: submitted files' flag, expected outputs, removal, input assets linked
       // to tasks, then files on submissions.
-      // Step 12's A2A attempts, the newest migration, first.
+      // Step 13's read-back, the newest migration, then step 12's A2A attempts.
+      sql.exec("DROP INDEX a2a_attempt_reads");
+      sql.exec("DROP INDEX a2a_attempt_cancels");
+      sql.exec("DROP TABLE a2a_held");
+      sql.exec("ALTER TABLE event DROP COLUMN origin");
+      sql.exec("ALTER TABLE event DROP COLUMN origin_ref");
+      sql.exec("ALTER TABLE audit_event DROP COLUMN origin");
+      sql.exec("ALTER TABLE audit_event DROP COLUMN origin_ref");
+      sql.exec("ALTER TABLE a2a_attempt DROP COLUMN reading_ended");
+      sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_until");
+      sql.exec("ALTER TABLE a2a_attempt DROP COLUMN next_read_at");
+      sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_no");
+      sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_queued");
+      sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_queued_at");
+      sql.exec("ALTER TABLE a2a_attempt DROP COLUMN last_read_no");
+      sql.exec("ALTER TABLE a2a_attempt DROP COLUMN last_state");
+      sql.exec("ALTER TABLE a2a_attempt DROP COLUMN working_seen");
+      sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_ended_reason");
+      sql.exec("ALTER TABLE a2a_attempt DROP COLUMN cancel_state");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE a2a_attempt");
       sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP INDEX stored_object_unsubmitted");

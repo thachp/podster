@@ -233,6 +233,10 @@ pub(super) fn finish(sql: &SqlStorage, identity: &Identity, body: &Value, now: i
             exec(sql, "UPDATE a2a_attempt SET state = 'sent', remote_task_id = ?, lease_until = NULL, updated_at = ? WHERE id = ? AND state = 'queued'", vec![
                 remote.map_or(V::Null, V::from), now.into(), id.into(),
             ])?;
+            // A remote task is read back from a minute on (step 13). A message with no task has nothing to read.
+            if remote.is_some() && attempt["state"].as_str() == Some("queued") {
+                super::a2a_read::start_reading(sql, id, now)?;
+            }
         }
         Some("retry") => {
             pin(sql)?;

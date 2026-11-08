@@ -161,3 +161,22 @@ fn the_offer_text_is_cut_to_the_limit_on_a_character_boundary_and_keeps_the_link
     let bare = offer_text("T", &long, None, None);
     assert!(bare.len() <= MAX_OFFER_TEXT_BYTES && bare.len() > MAX_OFFER_TEXT_BYTES - 4);
 }
+
+#[test]
+fn reads_back_off_from_a_minute_to_an_hour_and_stay_there() {
+    let minutes: Vec<i64> = (1..=9).map(|n| read_delay_ms(n) / 60_000).collect();
+    assert_eq!(minutes, vec![1, 2, 4, 8, 16, 32, 60, 60, 60]);
+    assert_eq!(read_delay_ms(0), 60_000);
+    assert_eq!(read_delay_ms(u32::MAX), 3_600_000);
+}
+
+#[test]
+fn reading_ends_after_seven_days_or_once_ended() {
+    let sent = 1_000;
+    let until = sent + READ_FOR_MS;
+    assert!(reading_open(sent, until, false));
+    assert!(reading_open(until - 1, until, false));
+    assert!(!reading_open(until, until, false));
+    assert!(!reading_open(sent, until, true));
+    assert_eq!(READ_FOR_MS, 604_800_000);
+}

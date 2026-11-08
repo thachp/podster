@@ -413,12 +413,34 @@ fn delete_wake(sql: &SqlStorage, now: i64) -> R<Value> {
     Ok(json!({ "deleted": true }))
 }
 
-/// Whether a wake should be queued for a new event, and with what delay. A wake inside the debounce window is delayed to
-/// its end instead of dropped, so the last event in a burst still gets a nudge.
 /// Notices that ask nothing of an agent, so they reach its inbox without a wake: an input asset linked to or unlinked from its
-/// task (decision 104). The next wake for anything else still finds them there.
+/// task (decision 104). They never queue a wake, and no check of whether to send or resend one counts them, though they still
+/// count as unread. The next wake for anything else still finds them there.
 const QUIET_EVENTS: &[&str] = &["asset.linked", "asset.unlinked"];
 
+/// Unread events that call for a wake: those within retention, leaving out quiet notices.
+fn waking_unread(sql: &SqlStorage, acked: i64, now: i64) -> R<i64> {
+    waking_after(sql, acked, now - UNREAD_KEPT_MS)
+}
+
+/// How many events after `seq`, created at or after `since`, call for a wake.
+fn waking_after(sql: &SqlStorage, seq: i64, since: i64) -> R<i64> {
+    if !inbox_exists(sql)? {
+        return Ok(0);
+    }
+    let quiet = vec!["?"; QUIET_EVENTS.len()].join(", ");
+    let mut values: Vec<worker::SqlStorageValue> = vec![seq.into(), since.into()];
+    values.extend(QUIET_EVENTS.iter().map(|kind| (*kind).into()));
+    let found = rows(
+        sql,
+        &format!("SELECT count(*) AS n FROM inbox_event WHERE seq > ? AND created_at >= ? AND type NOT IN ({quiet})"),
+        values,
+    )?;
+    Ok(found.first().map_or(0, |row| int(&row["n"])))
+}
+
+/// Whether a wake should be queued for a new event, and with what delay. A wake inside the debounce window is delayed to
+/// its end instead of dropped, so the last event in a burst still gets a nudge.
 fn wake_to_queue(sql: &SqlStorage, now: i64) -> R<Option<i64>> {
     let Some(wake) = wake_row(sql)? else {
         return Ok(None);
@@ -470,11 +492,12 @@ fn claim_wake(sql: &SqlStorage, now: i64) -> R<Value> {
         return Ok(skip("url_refused"));
     }
     let (acked, last_seq, _) = inbox_state(sql)?;
-    let unread = unread_count(sql, acked, now)?;
-    if unread == 0 {
+    // Quiet notices alone are nothing to wake for, but a wake that is sent says how many are unread in all.
+    if waking_unread(sql, acked, now)? == 0 {
         clear()?;
         return Ok(skip("nothing_unread"));
     }
+    let unread = unread_count(sql, acked, now)?;
     let due = wake["last_sent_at"]
         .as_i64()
         .map_or(now, |sent| sent + int(&wake["debounce_s"]) * 1000);
@@ -516,7 +539,7 @@ fn report_wake(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
             vec![now.into()],
         )?;
         let (acked, _, _) = inbox_state(sql)?;
-        return Ok(json!({ "retry": false, "requeue": unread_count(sql, acked, now)? > 0 }));
+        return Ok(json!({ "retry": false, "requeue": waking_unread(sql, acked, now)? > 0 }));
     }
     if body["ok"].as_bool().unwrap_or(false) {
         exec(
@@ -524,11 +547,11 @@ fn report_wake(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
             "UPDATE wake SET last_sent_at = ?, consecutive_failures = 0, queued_until = NULL, sending_until = NULL",
             vec![now.into()],
         )?;
-        // An event during the send was held back by the queued flag, and this wake's count didn't include it.
+        // An event during the send was held back by the queued flag, and this wake's count didn't include it. A quiet notice
+        // isn't one to wake for, so only another kind requeues.
         let (_, last_seq, _) = inbox_state(sql)?;
-        return Ok(
-            json!({ "retry": false, "requeue": last_seq > body["last_seq"].as_i64().unwrap_or(last_seq) }),
-        );
+        let sent_at = body["last_seq"].as_i64().unwrap_or(last_seq);
+        return Ok(json!({ "retry": false, "requeue": waking_after(sql, sent_at, i64::MIN)? > 0 }));
     }
     let failures = int(&wake["consecutive_failures"]) + 1;
     if failures >= WAKE_MAX_FAILURES {

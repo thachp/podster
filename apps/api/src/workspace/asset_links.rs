@@ -98,13 +98,20 @@ fn is_linked(sql: &SqlStorage, file_id: &str, task_id: &str) -> R<bool> {
     .is_empty())
 }
 
-/// Who hears about a link: the task's assignee, who is the one it's for. Nobody else's work changes.
-fn recipients(caller: &Caller, task: &Task) -> Vec<String> {
-    task.assignee
+/// Who hears about a link: the task's assignee, who is the one it's for, while they're still in the room. Nobody else's work
+/// changes, and someone who has left hears nothing more about the room, as with any notice.
+fn recipients(sql: &SqlStorage, caller: &Caller, task: &Task) -> R<Vec<String>> {
+    let mut found = Vec::new();
+    for assignee in task
+        .assignee
         .iter()
         .filter(|assignee| **assignee != caller.id)
-        .cloned()
-        .collect()
+    {
+        if store::participant(sql, assignee)?.is_some() {
+            found.push(assignee.clone());
+        }
+    }
+    Ok(found)
 }
 
 fn link_json(file_id: &str, task_id: &str, linked: bool) -> Value {
@@ -150,7 +157,7 @@ pub(super) fn handle_link(
         &caller.id,
         Some(&task.id),
         &Transition::NONE,
-        recipients(caller, &task),
+        recipients(sql, caller, &task)?,
         now,
     )?;
     Ok(link_json(file_id, &task.id, true))
@@ -179,7 +186,7 @@ pub(super) fn handle_unlink(
         &caller.id,
         Some(&task.id),
         &Transition::NONE,
-        recipients(caller, &task),
+        recipients(sql, caller, &task)?,
         now,
     )?;
     Ok(link_json(file_id, &task.id, false))

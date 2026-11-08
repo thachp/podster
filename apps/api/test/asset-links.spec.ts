@@ -238,6 +238,57 @@ describe("linking an input asset to a task", () => {
     await vi.waitFor(async () => expect(await wake()).toBeGreaterThan(Date.now()), { timeout: 5000, interval: 25 });
   });
 
+  it("never wakes for a link, even one made while a wake is being sent", async () => {
+    const id = await room();
+    const object = await file(id);
+    const agent: Who = { id: `agt_al_${crypto.randomUUID().replaceAll("-", "")}`, org: "org_al" };
+    const registered = await SELF.fetch(`https://api.internal/v1/agents/${agent.id}`, { method: "PUT", headers: { "x-podster-assertion": await assertion(orgAdmin(agent.org)) }, body: JSON.stringify({ org_id: agent.org, name: agent.id }) });
+    expect(registered.status).toBe(200);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: agent.id, kind: "agent", org_id: agent.org, role: "guest", policy_version: await version(id) })).status).toBe(200);
+    expect((await api(agent, "PUT", "/v1/inbox/wake", { url: "https://hooks.example.com/in-flight" })).status).toBe(200);
+    const principal = BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(agent.id));
+    const internal = (path: string, body: object = {}) => principal.fetch(`https://principal/internal/${path}`, { method: "POST", body: JSON.stringify(body) }).then((r: Response) => r.json() as any);
+    const t = await task(id, agent.id);
+    await vi.waitFor(async () => expect(await inboxTypes(agent, t)).toContain("task.offered"), { timeout: 5000, interval: 25 });
+    // A wake for the offer is sent, and while it's on its way the agent reads the offer and an asset is linked.
+    const claim = await internal("wake-claim");
+    expect(claim.send).toBe(true);
+    const seen = (await api(agent, "GET", "/v1/inbox")).body.events as any[];
+    expect((await api(agent, "POST", "/v1/inbox/ack", { up_to: seen.at(-1).seq })).status).toBe(200);
+    expect((await link(OWNER, id, object, t)).status).toBe(200);
+    await vi.waitFor(async () => expect(await inboxTypes(agent, t)).toContain("asset.linked"), { timeout: 5000, interval: 25 });
+    expect((await internal("wake-report", { ok: true, secret: claim.secret, last_seq: claim.last_seq })).requeue).toBe(false);
+    expect((await internal("wake-report", { ok: true, secret: "not this one", last_seq: claim.last_seq })).requeue).toBe(false);
+    // Unread, but nothing to wake for.
+    expect((await api(agent, "GET", "/v1/inbox")).body.unread).toBe(1);
+    expect(await internal("wake-claim")).toMatchObject({ send: false, reason: "nothing_unread" });
+  });
+
+  it("tells an assignee who's no longer in the room nothing", async () => {
+    // An owner who left their organization stays named on their tasks, but isn't in the room any more.
+    const owner: Who = { id: `per_al_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_al", adminOrgs: ["org_al"] };
+    const id: string = (await api(owner, "POST", "/v1/workspaces", { name: "Left" })).body.id;
+    const added = await api(owner, "POST", `/v1/workspaces/${id}/members`, { principal_id: MEMBER.id, kind: "agent", org_id: MEMBER.org, role: "member", policy_version: (await api(owner, "GET", `/v1/workspaces/${id}`)).body.policy_version });
+    expect(added.status, JSON.stringify(added.body)).toBe(200);
+    const made = await api(owner, "POST", tasks(id), { title: "Mine", instructions: "x", assignee: owner.id, reviewer: MEMBER.id });
+    expect(made.status, JSON.stringify(made.body)).toBe(200);
+    const t = made.body.id as string;
+    const uploaded = await api(MEMBER, "POST", `/v1/workspaces/${id}/uploads`, { name: "brief.txt", size: TEXT.length, sha256: await sha256(TEXT) });
+    expect(uploaded.status).toBe(200);
+    await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET state = 'ready' WHERE id = ?", uploaded.body.id));
+    await vi.waitFor(async () => expect(await inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM outbox").one().n)).toBe(0), { timeout: 5000, interval: 25 });
+    await inRoom(id, (sql) => sql.exec("UPDATE workspace SET owner_left_at = 1"));
+    expect(await inRoom(id, (sql) => sql.exec("SELECT assignee_id FROM task WHERE id = ?", t).one().assignee_id)).toBe(owner.id);
+    expect((await link(MEMBER, id, uploaded.body.id, t)).status).toBe(200);
+    expect((await unlink(MEMBER, id, uploaded.body.id, t)).status).toBe(200);
+    expect(await events(id, "asset.linked")).toEqual([{ task_id: t }]);
+    expect(await events(id, "asset.unlinked")).toEqual([{ task_id: t }]);
+    // Recorded with nobody to deliver to, so nothing is waiting and nothing was ever sent.
+    expect(await inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM outbox").one().n)).toBe(0);
+    const inbox = ((await api(owner, "GET", "/v1/inbox")).body.events ?? []) as any[];
+    expect(inbox.filter((e) => String(e.type).startsWith("asset."))).toEqual([]);
+  });
+
   it("names only the linked tasks the reader can see", async () => {
     const id = await room();
     const object = await file(id);

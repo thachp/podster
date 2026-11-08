@@ -79,6 +79,16 @@ describe("a task's attached files", () => {
     expect(sent.filter((request) => request.url.includes("/files?")).map((request) => request.url.split("cursor=")[1])).toEqual(["0", "1"]);
   });
 
+  it("stops at a page with no cursor, rather than reading on", async () => {
+    vi.stubGlobal("fetch", async (url: string) => {
+      sent.push({ method: "GET", url });
+      return json({ files });
+    });
+    show();
+    await screen.findByRole("list", { name: "Attached files" });
+    expect(sent.filter((request) => request.url.includes("/files?"))).toHaveLength(1);
+  });
+
   it("says a file that went while it was being downloaded has gone, in the notice", async () => {
     show();
     await screen.findByRole("list", { name: "Attached files" });

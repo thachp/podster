@@ -23,8 +23,9 @@ export function useFileList(workspace: string, initial: FilePage | null, taskId?
     async (from: number) => {
       const result = await clientQuery<FilePage>(`${base(workspace)}/files?${query}cursor=${from}`).catch(() => null);
       if (result && !result.ok && result.status === 401) goToSignIn();
-      // Anything that isn't a page of files is a failed read, never an empty list.
-      return result?.ok && Array.isArray(result.data?.files) ? result.data : null;
+      // Anything that isn't a page of files is a failed read, never an empty list. A cursor that isn't a number ends the list.
+      if (!result?.ok || !Array.isArray(result.data?.files)) return null;
+      return { ...result.data, next_cursor: Number.isInteger(result.data.next_cursor) ? result.data.next_cursor : null };
     },
     [workspace, query],
   );

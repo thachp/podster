@@ -2,7 +2,7 @@
 
 What Podster's A2A surface supports. The design is [ADR 0007](../adr/0007-a2a.md), which the owner accepted on 2026-11-08. The choices behind it are [decisions 107 to 143](PRODUCT.md#decisions-needed), and the order of work is in the [M3 plan](../m3-plan.md).
 
-**Status: preview, not available.** As of M3 step 6, the card is published and every operation answers a named error. **Podster doesn't claim A2A support or conformance** until M3's gate passes and the owner calls it ([decision 132](PRODUCT.md#decisions-needed)). Each later step turns operations on, and updates this page and `apps/gateway/src/a2a/profile.ts` in the same PR. A gateway test holds the two together.
+**Status: preview, not available.** As of M3 step 7, the card is published, every request must authenticate, and every operation answers a named error. **Podster doesn't claim A2A support or conformance** until M3's gate passes and the owner calls it ([decision 132](PRODUCT.md#decisions-needed)). Each later step turns operations on, and updates this page and `apps/gateway/src/a2a/profile.ts` in the same PR. A gateway test holds the two together.
 
 ## Protocol
 
@@ -12,7 +12,8 @@ What Podster's A2A surface supports. The design is [ADR 0007](../adr/0007-a2a.md
 | Binding | JSON-RPC only ([decision 108](PRODUCT.md#decisions-needed)), at `POST /a2a` on the gateway |
 | Agent Card | `GET /.well-known/agent-card.json`. It describes Podster only, and never lists a room, task or agent ([decision 110](PRODUCT.md#decisions-needed)) |
 | Streaming, push notifications, extended card | All off ([decision 110](PRODUCT.md#decisions-needed)) |
-| Authentication | Not yet. Step 7 adds an OAuth 2 bearer token whose audience is `/a2a` and whose scope is `a2a`, for the same agent identity as MCP ([decision 111](PRODUCT.md#decisions-needed)). Until then the card declares no security scheme, because every operation refuses |
+| Authentication | An OAuth 2 bearer token whose audience is `/a2a` and whose scope is `a2a`, for the same agent identity as MCP ([decision 111](PRODUCT.md#decisions-needed)). It comes through Podster's own consent, as MCP's does, with the authorization-code flow and PKCE the card's `oauth2SecurityScheme` names. An `/mcp` token is refused at `/a2a`, and an `/a2a` one at `/mcp` and at downloads. A request without a valid token gets 401, with a challenge naming `/.well-known/oauth-protected-resource/a2a` |
+| Rate limit | The agent's own limit is shared with MCP, so the two protocols together get one agent's allowance ([decision 123](PRODUCT.md#decisions-needed)) |
 | Request body | `application/json` or `application/a2a+json`, at most 64 KB |
 
 ## Operations
@@ -33,7 +34,9 @@ The test reads this table. Each row's status is `not_yet` (answers `UnsupportedO
 | `DeleteTaskPushNotificationConfig` | off | `PushNotificationNotSupportedError` | Off, decision 110 |
 | `GetExtendedAgentCard` | off | `ExtendedAgentCardNotConfiguredError` | Off, decision 110 |
 
-A malformed request gets the JSON-RPC error the SDK's transport gives, and an unknown method gets "method not found".
+The checks run in this order: method, content type, body size, `A2A-Version`, then the token. So a request on the wrong version is refused before it needs a token. Once a request with `A2A-Version: 1.0` and a valid token gets that far, a malformed body gets the JSON-RPC error the SDK's transport gives, and a method this table doesn't name gets `-32601` "Method not found". Every answer carries `A2A-Version: 1.0`, and a request's `id` is echoed only when it's a string, a number or null.
+
+A request's `tenant` is never used for authority. Who is calling comes only from the token, and step 8's reads must keep it that way.
 
 ## What's planned, from ADR 0007
 

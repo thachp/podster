@@ -580,14 +580,15 @@ const registrationRefused = (status: number) => (status === 403 || status === 40
  * `kind`, only its grants for that resource, so consenting to `/a2a` doesn't end the same client's `/mcp` grant. A grant
  * with no stored resource is the legacy `/mcp` one.
  */
-async function grantIds(env: Env, person: string, externalId: string, kind?: "mcp" | "a2a") {
+async function grantIds(env: Env, person: string, externalId: string, only?: { kind: "mcp" | "a2a"; gatewayUrl: string }) {
   const ids: string[] = [];
   let cursor: string | undefined;
   do {
     const page = await env.OAUTH_PROVIDER.listUserGrants(person, { cursor });
     for (const grant of page.items) {
       if ((grant.metadata as { externalId?: string } | undefined)?.externalId !== externalId) continue;
-      if (kind && resourceKind(env.BASE_URL, grant.resource) !== kind) continue;
+      // Resources are always the gateway's own URLs, even when the person is on the application host.
+      if (only && resourceKind(only.gatewayUrl, grant.resource) !== only.kind) continue;
       ids.push(grant.id);
     }
     cursor = page.cursor;
@@ -751,7 +752,8 @@ async function parseOAuth(env: Env, request: Request) {
     if (namesOurHost(env, parsed.redirectUri, request.url)) return null;
     // Each resource grants only its own scope. MCP clients often send no scope, and refresh tokens are issued anyway, so
     // both of those mean plain access to the resource asked for. A request naming no resource is for `/mcp`.
-    const kind = resourceKind(env.BASE_URL, parsed.resource);
+    // The resource is the gateway's, whichever host the person is on, and `request` is always for the gateway's host.
+    const kind = resourceKind(new URL(request.url).origin, parsed.resource);
     if (!kind) return null;
     if (parsed.scope.some((scope) => scope !== kind && scope !== "offline_access")) return null;
     return parsed;
@@ -773,7 +775,7 @@ async function consentChoices(env: Env, gatewayUrl: string, person: string, quer
   const client = await env.OAUTH_PROVIDER.lookupClient(parsed.clientId);
   if (!client) return denied("invalid_client", 400);
   if (adminOrgs.length === 0) return denied("not_allowed", 403);
-  const protocol = resourceKind(env.BASE_URL, parsed.resource) ?? "mcp";
+  const protocol = resourceKind(gatewayUrl, parsed.resource) ?? "mcp";
   return { clientName: client.clientName ?? parsed.clientId, redirectHosts: [new URL(parsed.redirectUri).host], query, protocol, ...(await approverChoices(env, adminOrgs)) };
 }
 
@@ -811,8 +813,8 @@ async function approveConsent(request: Request, env: Env, gatewayUrl: string, us
   await renewLink(env, externalId, person, org);
   // The provider's own cleanup covers every grant for this person and client, which would end this client's agents in
   // other organizations. Only the grant being replaced goes.
-  const kind = resourceKind(env.BASE_URL, parsed.resource) ?? "mcp";
-  const replaced = await grantIds(env, person, externalId, kind);
+  const kind = resourceKind(gatewayUrl, parsed.resource) ?? "mcp";
+  const replaced = await grantIds(env, person, externalId, { kind, gatewayUrl });
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({ request: parsed, userId: person, metadata: { org, externalId }, scope: [kind], props: { externalId }, revokeExistingGrants: false });
   for (const id of replaced) await env.OAUTH_PROVIDER.revokeGrant(id, person);
   return { redirectTo };

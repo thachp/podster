@@ -698,6 +698,14 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 - Decisions 122 and 129 still need the owner's yes in that session before the secret is set or the queues are created.
 - None is in the code yet. The spikes start under decision 107, and ADR 0007 and the build steps carry the rest.
 
+## M4 decisions, November 8, 2026
+
+- The architect accepted all 26 questions in the [M4 plan](../m4-plan.md#questions-for-the-architect) as proposed, now decisions 146 to 171, and none of the alternatives.
+- Every looser alternative in that table still needs the owner's yes. By decision 170, the owner calls M4's gate.
+- Switching `PUBLIC_ROOMS` on in staging, the legal text (decision 167), naming operators, and each deeper security pass (decision 166) need the owner's yes in that session.
+- None of it is in the code yet.
+- For M3, decisions 122 and 129 are now met: on 2026-11-08 the owner set `A2A_TOKEN_KEY` on staging and created `podster-a2a-staging` and `podster-a2a-dlq-staging`.
+
 ## Input asset decisions, November 8, 2026
 
 - The owner accepted decision 99 and step 5's recommendations, now decisions 100 to 106, saying "per ur recommendation.. i agreement".

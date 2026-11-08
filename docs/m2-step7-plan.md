@@ -2,7 +2,17 @@
 
 Step 7 of the [M2 plan](m2-plan.md). A task may name one expected output, and approving the submission that delivers it makes the output Ready. Decisions: [47 and 54](spec/PRODUCT.md#decisions-needed). Design: [ADR 0006](adr/0006-uploads-and-scanning.md#expected-outputs).
 
-**Status, 2026-11-07:** everything here is **proposed**. Part 1, the pure rules, is written and tested. Part 2, the API, gateway and contracts, waits for step 6 ([#131](https://github.com/thachp/podster/pull/131)) and goes after steps 5 and 8 in the contract and migration order.
+**Status, 2026-11-07:** part 1, the pure rules, merged in [#136](https://github.com/thachp/podster/pull/136). Part 2, the API, gateway and contracts, is built locally on top of step 6 ([#131](https://github.com/thachp/podster/pull/131)) and undeployed. It goes after steps 5 and 8 in the contract and migration order. The rules follow [decisions 135 to 140](#rulings).
+
+**Where part 2 differs from what's below:**
+
+- `GET /outputs` doesn't list each output's naming tasks or the current version's artifacts. Step 9c reads those through `get_task`, which already applies `task_view` and the file views, including oversight's.
+- There's no oversight route for outputs.
+- Each listed output also has `in_review`, true while any task naming it is submitted, so a Ready output can show a newer version waiting. It names no task.
+- `PUT /tasks/:id/expected-output` runs on `command_checked`, so a replay re-checks `authorize_output_link` against current state.
+- Through oversight, `get_task`'s `expected_output` has its ID and `removed`, never its title.
+- `GET /outputs/:id/versions` (`list_output_versions`) reads `expected_output_version`, newest first, for step 9c's version history. Each version has its submission number and time, and its source task and approver (`approved_by`, recorded at approval) only for someone who can see that task. Nothing about files: those come through `get_task`.
+- `PUT /outputs/:id` replaces the title and description. Leaving the description out clears it, and the same text again records nothing. Define and rename refuse unknown keys.
 
 ## Part 1: pure rules
 
@@ -60,7 +70,8 @@ CREATE INDEX task_expected_output ON task (expected_output_id) WHERE expected_ou
 
 - **Define, rename, remove:** new room routes, each `authorize_manage_outputs`, then `decide_*`. The count passed to `decide_define` is rows with `removed_at IS NULL`, so a removed output frees its place. Each commits the row, an event and the idempotency record in one transaction. Events: `output.defined`, `output.updated`, `output.removed`, carrying the output ID only, with no title. Recipients: none, since it's room-level. Whether these reach inboxes is a question below.
 - **Naming an output on a task:** a new `PUT /tasks/:id/expected-output` with `{ output_id | null }`. It runs `authorize_output_link`, then `decide_link` with the output's existence read from rows where `removed_at IS NULL`. Event `task.output_changed`, with the task as subject and the requester, assignee and reviewer as recipients, minus the actor.
-  - **It bumps `task.version`** when it changes anything (`Unchanged` doesn't). So an assignee who submits against a version from before the change gets `version_conflict`, rereads, and sees which output it's working toward.
+  - **It takes the task `version` the caller last read**, refused with `version_conflict` when stale, as `update_task` is.
+  - **It bumps `task.version`** when it changes anything (`Unchanged` doesn't). Core decides this, in `LinkChange::next_version`. So an assignee who submits against a version from before the change gets `version_conflict`, rereads, and sees which output it's working toward.
   - It's refused once the task is submitted, so a race with review can't move what a reviewer approves.
 - **`create_task`:** an optional `expected_output_id`, checked with `decide_link(.., Open, None, ..)` after `decide_create`, and written in the same transaction. About 3 lines in `workspace.rs`.
 - **Verify hook:** about 4 lines in `handle_task_command`. They call `outputs::record_approval(sql, &decision.task, artifacts, now)`, which reads the task's `expected_output_id` and calls `version_from_approval`. If that returns a version, it updates the output row and appends the version row in the same transaction. `artifacts` is links plus `submission_files` for that submission. No new event: `task.completed` already says it, and a listing derives Ready.
@@ -112,11 +123,13 @@ CREATE INDEX task_expected_output ON task (expected_output_id) WHERE expected_ou
 4. **The Verify hook** must run in the same transaction as the approval, after `decide` and step 6's file check. It must never run on a refused approval.
 5. **Agent content.** Titles and descriptions are text people and screens show. They never become instructions or permissions, and events and logs carry IDs only.
 
-## Gaps for the lead, each with a recommendation
+## Rulings
 
-1. **Does a note-only approval make an output Ready?** The glossary says Ready needs "an approved artifact version". *Recommend:* no. It needs at least one link or file. Built that way, and easy to flip.
-2. **Removing an output.** Decision 54 says owners and admins "define" outputs, and doesn't say whether they can remove them. *Recommend:* a soft removal that keeps the row, refused once Ready or while a live task names it. Built that way.
-3. **Changing a task's output after submission.** *Recommend:* refused once submitted, and on finished tasks. Built that way.
-4. **A Ready output whose file was later blocked or removed.** *Recommend:* stays Ready, with `files_available: false` shown beside it, and the screen says "file unavailable" clearly (the lead's condition), matching ADR 0006's "keeps its approval". The alternative is falling back to an earlier row of `expected_output_version`, which would quietly change what the room calls its output.
-5. **Inbox events for output changes.** *Recommend:* `task.output_changed` goes to the task's parties. Define, rename and remove go to nobody's inbox and appear in activity only. Outputs are the room's goal, but inbox noise for every rename isn't worth it.
-6. **Limits:** 50 per room, 200-byte titles and 4 KB descriptions. These are choices, not rulings.
+The owner accepted all six recommendations on 2026-11-07, as [decisions 135 to 140](spec/PRODUCT.md#decisions-needed), and the code follows them:
+
+- **[135](spec/PRODUCT.md#decisions-needed):** a note-only approval doesn't make an output Ready.
+- **[136](spec/PRODUCT.md#decisions-needed):** removal keeps the row, and is refused once the output was Ready or while a live task names it.
+- **[137](spec/PRODUCT.md#decisions-needed):** a task's output can change only while the task is open, offered or accepted, so not while it's submitted or once it's finished, and again after changes are requested.
+- **[138](spec/PRODUCT.md#decisions-needed):** a Ready output whose file is later blocked or removed stays Ready with `files_available` false, and step 9c's screen must say clearly that the file is unavailable.
+- **[139](spec/PRODUCT.md#decisions-needed):** `task.output_changed` goes to the task's parties. Defining, renaming and removing go to activity only.
+- **[140](spec/PRODUCT.md#decisions-needed):** 50 outputs per room, 200-byte titles and 4 KB descriptions.

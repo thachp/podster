@@ -147,6 +147,15 @@ CREATE INDEX stored_object_abandoned ON stored_object (upload_expires_at) WHERE 
 CREATE INDEX stored_object_purge ON stored_object (purge_due_at) WHERE purge_due_at IS NOT NULL;
 CREATE TABLE storage_sweep (id INTEGER PRIMARY KEY CHECK (id = 1), due_at INTEGER, cursor TEXT, cycle_due_at INTEGER, settles_at INTEGER);
 INSERT INTO storage_sweep (id, due_at, settles_at) SELECT 1, CASE WHEN EXISTS (SELECT 1 FROM stored_object WHERE object_key IS NOT NULL) THEN CAST(strftime('%s', 'now') AS INTEGER) * 1000 + 3600000 END, CAST(strftime('%s', 'now') AS INTEGER) * 1000 + 3600000;
+", "
+CREATE TABLE expected_output (id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL, removed_at INTEGER, removed_by TEXT, current_task_id TEXT, current_submission_no INTEGER, current_approved_at INTEGER);
+CREATE INDEX expected_output_shown ON expected_output (created_at, id) WHERE removed_at IS NULL;
+CREATE TABLE expected_output_version (seq INTEGER PRIMARY KEY AUTOINCREMENT, output_id TEXT NOT NULL, task_id TEXT NOT NULL, submission_no INTEGER NOT NULL,
+  approved_at INTEGER NOT NULL, approved_by TEXT NOT NULL, UNIQUE (output_id, task_id, submission_no));
+CREATE INDEX expected_output_history ON expected_output_version (output_id, seq);
+ALTER TABLE task ADD COLUMN expected_output_id TEXT;
+CREATE INDEX task_expected_output ON task (expected_output_id) WHERE expected_output_id IS NOT NULL;
 "];
 
 pub fn int(value: &Value) -> i64 {

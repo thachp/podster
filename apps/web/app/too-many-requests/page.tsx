@@ -2,6 +2,8 @@ import { RATE_LIMITED_PATH, secondsToWait } from "@/lib/gateway/server";
 import { safeNext } from "@/lib/safe-next";
 import { WaitThenRetry } from "./wait-then-retry";
 
+export const metadata = { title: "Too many requests · Podster" };
+
 const one = (value: string | string[] | undefined) => (typeof value === "string" ? value : undefined);
 
 /**

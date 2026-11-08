@@ -10,6 +10,11 @@ const nextConfig: NextConfig = {
         source: "/((?!api/).*)",
         headers: SECURITY_HEADERS.map(([key, value]) => ({ key, value })),
       },
+      {
+        // Says how long one person should wait, and where they were, so nothing should keep it.
+        source: "/too-many-requests",
+        headers: [{ key: "Cache-Control", value: "no-store" }],
+      },
     ];
   },
 };

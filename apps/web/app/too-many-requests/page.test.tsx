@@ -2,13 +2,17 @@ import { act, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/gateway/env", () => ({ webEnv: () => ({ GATEWAY: { fetch: vi.fn() }, APP_URL: "https://app.test" }) }));
-const { default: TooManyRequests } = await import("./page");
+const { default: TooManyRequests, metadata } = await import("./page");
 
 const show = async (query: Record<string, string>) => render(await TooManyRequests({ searchParams: Promise.resolve(query) }));
 
 afterEach(() => vi.useRealTimers());
 
 describe("the rate-limit page", () => {
+  it("names itself in the tab (WCAG 2.4.2)", () => {
+    expect(metadata.title).toBe("Too many requests · Podster");
+  });
+
   it("says how long to wait, and links back to where the person was", async () => {
     await show({ after: "30", next: "/w/ws_1/tasks?view=board" });
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Too many requests just now");

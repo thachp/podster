@@ -104,11 +104,16 @@ async function sentOffer(path?: string) {
   expect(sent.state).toBe("sent");
   return { room, ...t, task: created, attempt: sent, remote: sent.remote_task_id as string };
 }
+/** Runs the room's alarm now. A test that edits rows directly hasn't scheduled one, and only a scheduled alarm runs. */
+async function fireAlarm(room: string) {
+  await runInDurableObject(roomStub(room), (_: any, state: any) => state.storage.setAlarm(Date.now() + 60_000));
+  return runDurableObjectAlarm(roomStub(room));
+}
 const row = async (room: string, id: string) => (await roomSql(room, "SELECT * FROM a2a_attempt WHERE id = ?", id))[0] as any;
 /** Makes the next read due, runs the room's alarm so it queues it, then runs that read job. */
 async function readOnce(room: string, attemptId: string) {
   await roomSql(room, "UPDATE a2a_attempt SET next_read_at = 0 WHERE id = ? AND read_queued = 0", attemptId);
-  await runDurableObjectAlarm(roomStub(room));
+  await fireAlarm(room);
   const queued = await row(room, attemptId);
   expect(queued.read_queued, "the read was queued").toBe(1);
   const res = await SELF.fetch("https://api.internal/test/consume-a2a", { method: "POST", body: JSON.stringify({ ws: room, attempt: attemptId, agent: queued.agent_id, kind: "read", read: queued.read_no }) });
@@ -134,7 +139,7 @@ describe("reading starts", () => {
     const { room, attempt, agent, url, remote, secret } = await sentOffer();
     await script(remote, [task(remote, "TASK_STATE_SUBMITTED")]);
     // Not due yet: the alarm queues nothing.
-    await runDurableObjectAlarm(roomStub(room));
+    await fireAlarm(room);
     expect((await row(room, attempt.id)).read_queued).toBe(0);
     const delays: number[] = [];
     for (let i = 1; i <= 8; i++) {
@@ -280,7 +285,7 @@ describe("what a read refuses", () => {
     // Three failures in a row switched the endpoint off, and the next read ends reading.
     expect((await must(agent, "GET", "/v1/inbox/a2a-endpoint")).enabled).toBe(false);
     await roomSql(room, "UPDATE a2a_attempt SET next_read_at = 0 WHERE id = ?", attempt.id);
-    await runDurableObjectAlarm(roomStub(room));
+    await fireAlarm(room);
     const queued = await row(room, attempt.id);
     await SELF.fetch("https://api.internal/test/consume-a2a", { method: "POST", body: JSON.stringify({ ws: room, attempt: attempt.id, agent: agent.id, kind: "read", read: queued.read_no }) });
     expect((await row(room, attempt.id))).toMatchObject({ reading_ended: 1, read_ended_reason: "switched_off" });
@@ -319,7 +324,7 @@ describe("what a read refuses", () => {
   it("reading ends after seven days", async () => {
     const { room, attempt, url } = await sentOffer();
     await roomSql(room, "UPDATE a2a_attempt SET read_until = ?, next_read_at = 0 WHERE id = ?", Date.now() - 1, attempt.id);
-    await runDurableObjectAlarm(roomStub(room));
+    await fireAlarm(room);
     expect((await row(room, attempt.id))).toMatchObject({ reading_ended: 1, read_ended_reason: "expired", read_queued: 0 });
     expect(await getTasks(url)).toEqual([]);
   });
@@ -338,7 +343,7 @@ describe("what a read refuses", () => {
 
 describe("cancel out", () => {
   const cancelJob = async (room: string, attempt: any) => {
-    await runDurableObjectAlarm(roomStub(room));
+    await fireAlarm(room);
     expect((await row(room, attempt.id)).cancel_state).toBe("queued");
     const res = await SELF.fetch("https://api.internal/test/consume-a2a", { method: "POST", body: JSON.stringify({ ws: room, attempt: attempt.id, agent: attempt.agent_id, kind: "cancel" }) });
     return ((await res.json()) as any).outcome;
@@ -347,12 +352,15 @@ describe("cancel out", () => {
   it("a canceled task's remote task gets CancelTask once, and reading ends", async () => {
     const { room, attempt, task: t, url, remote } = await sentOffer();
     await must(LEAD, "POST", `/v1/workspaces/${room}/tasks/${t.id}/cancel`, { version: t.version, reason: "Not needed." });
-    expect((await row(room, attempt.id))).toMatchObject({ cancel_state: "due", reading_ended: 1, read_ended_reason: "task_canceled" });
+    const marked = await row(room, attempt.id);
+    expect(marked).toMatchObject({ reading_ended: 1, read_ended_reason: "task_canceled" });
+    // The cancel command arms the room's alarm, which may already have queued it.
+    expect(["due", "queued"]).toContain(marked.cancel_state);
     expect(await cancelJob(room, attempt)).toBe("ack");
     const cancels = (await sentTo(url)).map((r) => JSON.parse(r.body)).filter((b) => b.method === "CancelTask");
     expect(cancels).toEqual([{ jsonrpc: "2.0", id: `${attempt.id}:cancel`, method: "CancelTask", params: { id: remote } }]);
     expect((await row(room, attempt.id)).cancel_state).toBe("sent");
-    await runDurableObjectAlarm(roomStub(room));
+    await fireAlarm(room);
     expect((await sentTo(url)).filter((r) => JSON.parse(r.body).method === "CancelTask")).toHaveLength(1);
   });
 
@@ -374,7 +382,7 @@ describe("cancel out", () => {
     await must(LEAD, "POST", `/v1/workspaces/${room}/tasks/${t.id}/cancel`, { version: t.version, reason: "Done." });
     const principal = BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(agent.id));
     await runInDurableObject(principal, (_: any, state: any) => state.storage.sql.exec("CREATE TABLE test_fail_report (x)"));
-    await runDurableObjectAlarm(roomStub(room));
+    await fireAlarm(room);
     const job = { ws: room, attempt: attempt.id, agent: agent.id, kind: "cancel" };
     expect((await SELF.fetch("https://api.internal/test/consume-a2a", { method: "POST", body: JSON.stringify(job) })).status).toBe(500);
     expect((await row(room, attempt.id)).cancel_state).toBe("sent");
@@ -385,12 +393,12 @@ describe("cancel out", () => {
   it("ends a dead-lettered cancel, and leaves a dead-lettered read to the room", async () => {
     const { room, attempt, agent, task: t } = await sentOffer();
     await roomSql(room, "UPDATE a2a_attempt SET next_read_at = 0 WHERE id = ?", attempt.id);
-    await runDurableObjectAlarm(roomStub(room));
+    await fireAlarm(room);
     const dead = (body: object) => SELF.fetch("https://api.internal/test/dead-letter-a2a", { method: "POST", body: JSON.stringify(body) });
     expect((await dead({ ws: room, attempt: attempt.id, agent: agent.id, kind: "read", read: 1 })).status).toBe(200);
     expect((await row(room, attempt.id))).toMatchObject({ state: "sent", reading_ended: 0, read_queued: 1 });
     await must(LEAD, "POST", `/v1/workspaces/${room}/tasks/${t.id}/cancel`, { version: t.version, reason: "Done." });
-    await runDurableObjectAlarm(roomStub(room));
+    await fireAlarm(room);
     expect((await row(room, attempt.id)).cancel_state).toBe("queued");
     expect((await dead({ ws: room, attempt: attempt.id, agent: agent.id, kind: "cancel" })).status).toBe(200);
     expect((await row(room, attempt.id)).cancel_state).toBe("dead_lettered");

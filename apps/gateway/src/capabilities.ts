@@ -87,14 +87,15 @@ export type ApiCall = { method: string; path: string; body?: string; idempotency
 
 /**
  * Turns validated arguments into one API call. Path values are encoded, and fields not defined for this capability
- * are dropped, so a caller can't reach another route or smuggle in identity.
+ * are dropped, so a caller can't reach another route or smuggle in identity. Encoding leaves "." and ".." as they are,
+ * and a URL treats those as a step in place or up, so they're refused. A "%" is encoded, so "%2e" stays text.
  */
 export function toApiCall(capability: Capability, args: Record<string, unknown>): ApiCall {
   const used = new Set<string>();
   const path = capability.path.replace(/\{(\w+)\}/g, (_, name: string) => {
     used.add(name);
     const value = args[name];
-    if (typeof value !== "string" || value.length === 0) throw new InvalidArguments(name);
+    if (typeof value !== "string" || value.length === 0 || value === "." || value === "..") throw new InvalidArguments(name);
     return encodeURIComponent(value);
   });
   const rest: Record<string, unknown> = {};

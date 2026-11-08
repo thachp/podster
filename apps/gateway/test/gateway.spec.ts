@@ -6,7 +6,7 @@ import { getMigrations } from "better-auth/db/migration";
 import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
-import { CAPABILITIES, toApiCall } from "../src/capabilities";
+import { CAPABILITIES, InvalidArguments, toApiCall } from "../src/capabilities";
 import { decodeJwt, importJWK, SignJWT } from "jose";
 import { mintAssertion } from "../src/assertion";
 import worker, { resolveAgent, cleanUp, clientKey, sensitiveRoute, type RateLimit, safeNext, allowedPassthrough, spentToken, forMcp, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
@@ -2220,6 +2220,23 @@ describe("capability mapping", () => {
     expect(query.path).toBe("/v1/workspaces/w/tasks?status=open");
     expect(toApiCall(CAPABILITIES.find((c) => c.name === "list_tasks")!, { workspace_id: "w", order: "newest", cursor: 7 }).path).toBe("/v1/workspaces/w/tasks?cursor=7&order=newest");
   });
+
+  it("refuses a path value a URL would read as a step in place or up, in every capability's every placeholder", () => {
+    const withPath = CAPABILITIES.filter((c) => c.path.includes("{"));
+    expect(withPath.length).toBeGreaterThan(10);
+    for (const capability of withPath) {
+      const names = [...capability.path.matchAll(/\{(\w+)\}/g)].map((m) => m[1]);
+      const args = (value: string, at: string) => ({ ...Object.fromEntries(names.map((n) => [n, n === at ? value : "x"])), version: 1, plan_revision: 1, predecessors: [], idempotency_key: "k" });
+      for (const name of names) {
+        for (const value of [".", "..", ""]) expect(() => toApiCall(capability, args(value, name)), `${capability.name} ${name}=${JSON.stringify(value)}`).toThrow(InvalidArguments);
+        // Encoded or longer forms stay text: the "%" is encoded too, so the API sees the same number of segments.
+        for (const value of ["%2e%2e", ".%2e", "%2E", "...", "..x"]) {
+          const { path } = toApiCall(capability, args(value, name));
+          expect(new URL(`https://api.internal${path}`).pathname, `${capability.name} ${name}=${value}`).toBe(path.split("?")[0]);
+        }
+      }
+    }
+  });
 });
 
 describe("kernel journey across two organizations", () => {
@@ -2420,6 +2437,14 @@ describe("kernel journey across two organizations", () => {
     expect(second.data.id).toBe(first.data.id);
     expect((await lead.tool("list_tasks", { workspace_id: room })).data.tasks).toHaveLength(1);
     expect((await lead.tool("create_task", { ...args, title: "Different" })).code).toBe("idempotency_mismatch");
+  });
+
+  it("refuses a role ID that would step up to another route, over both connection methods", async () => {
+    const { lead, architect, room } = await setup();
+    // Without the refusal this became POST /v1/workspaces/{room}/claim.
+    expect((await lead.tool("claim_role", { workspace_id: room, role_id: "..", idempotency_key: unique("k") })).code).toBe("invalid_argument");
+    expect((await execute(architect, "claim_role", { workspace_id: room, role_id: "..", idempotency_key: unique("k") })).code).toBe("invalid_argument");
+    expect((await execute(architect, "get_task", { workspace_id: room, task_id: "." })).code).toBe("invalid_argument");
   });
 
   it("lets an agent ask for tasks newest first", async () => {

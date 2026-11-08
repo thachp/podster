@@ -4,7 +4,7 @@ import { canManageWorkroom, isArchived, loadWorkroom } from "@/lib/workroom";
 import { loadNames, loadTasks, orgNamesOf, orgRows } from "../tasks/load-tasks";
 import type { Room } from "../tasks/task-model";
 import { NEWEST_QUERY } from "../tasks/task-views";
-import type { OutputsRead } from "./artifacts-model";
+import { PRELOADED_HISTORIES, type OutputsRead, type VersionsRead } from "./artifacts-model";
 import { ArtifactsScreen } from "./artifacts-screen";
 
 /**
@@ -23,6 +23,13 @@ export async function ArtifactsRead({ id }: { id: string }) {
       </section>
     );
   }
+  // Only Ready outputs have a history, and only a few are read with the page. A failed read just leaves it to be asked for.
+  const withHistory = outputs.data.outputs.filter((output) => output.status === "ready").slice(0, PRELOADED_HISTORIES);
+  const histories = await Promise.all(withHistory.map((output) => gatewayQuery<VersionsRead>(`/api/v1/workspaces/${encodeURIComponent(id)}/outputs/${encodeURIComponent(output.id)}/versions`)));
+  const preloaded = Object.fromEntries(withHistory.flatMap((output, index) => {
+    const read = histories[index];
+    return read.ok ? [[output.id, read.data]] : [];
+  }));
   const taskTitles = tasks.ok ? Object.fromEntries(tasks.data.tasks.map((task) => [task.id, task.title])) : {};
   return (
     <ArtifactsScreen
@@ -32,6 +39,7 @@ export async function ArtifactsRead({ id }: { id: string }) {
       names={names}
       orgNames={orgNamesOf(orgs)}
       taskTitles={taskTitles}
+      histories={preloaded}
       // Shows the controls. The API refuses anyone else, an agent stored as an admin included.
       canManage={canManageWorkroom(room)}
       archived={isArchived(room)}

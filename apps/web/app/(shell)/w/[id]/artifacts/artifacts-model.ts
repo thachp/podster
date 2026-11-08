@@ -17,6 +17,22 @@ export type Output = {
 
 export type OutputsRead = { outputs: Output[]; ready: number; total: number };
 
+/**
+ * One approval that made an output Ready, newest first. `task_id` and `approved_by` are there only for someone who can see the
+ * source task. Nothing here is about files: those are read through the task.
+ */
+export type OutputVersion = { submission_no: number; approved_at: number; task_id?: string; approved_by?: string };
+export type VersionsRead = { versions: OutputVersion[]; complete: boolean };
+
+/** How many Ready outputs get their history read with the page. Each read spends the person's rate limit, so past this it's read when asked. */
+export const PRELOADED_HISTORIES = 10;
+
+/** The version that's current, when the history's newest entry is the one the listing names. */
+export const currentVersion = (output: Output, history: VersionsRead | undefined) => {
+  const newest = history?.versions[0];
+  return newest && output.current && newest.task_id === output.current.task_id && newest.submission_no === output.current.submission_no ? newest : undefined;
+};
+
 /** DESIGN.md's three states, each with an icon beside it so color is never the only signal. */
 export const OUTPUT_STATUS: Record<OutputStatus, { label: string; tone: Tone }> = {
   not_started: { label: "Not started", tone: "neutral" },

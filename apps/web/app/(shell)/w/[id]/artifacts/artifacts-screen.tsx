@@ -8,13 +8,14 @@ import { SheetLink } from "@/components/sheet/target-sheet";
 import { Button } from "@/components/ui/button";
 import { useEarlyInput } from "@/hooks/use-early-input";
 import { Input } from "@/components/ui/input";
-import { Timestamp } from "../tasks/task-bits";
-import type { Names, Room } from "../tasks/task-model";
+import { clientQuery } from "@/lib/gateway/client";
+import { PrincipalName, Timestamp } from "../tasks/task-bits";
+import { nameOf, type Names, type Room } from "../tasks/task-model";
 import { TaskSheet } from "../tasks/task-sheet";
 import { CommandNotice, useCommands, type Send } from "../team/commands";
 import { ConfirmAction } from "../team/confirm-action";
 import { MOBILE_TARGET } from "../team/field";
-import { currentFilesText, OUTPUT_LIMITS, outputProblem, outputStatus, outputTextProblem, readyText, type Output, type OutputsRead } from "./artifacts-model";
+import { currentFilesText, currentVersion, OUTPUT_LIMITS, outputProblem, outputStatus, outputTextProblem, readyText, type Output, type OutputsRead, type VersionsRead } from "./artifacts-model";
 
 const ICONS: Record<string, LucideIcon> = { not_started: Circle, in_review: Eye, ready: CheckCircle2 };
 
@@ -38,13 +39,13 @@ export function OutputStatusBadge({ status }: { status: string }) {
   );
 }
 
-type Props = { room: Room; read: OutputsRead; me: string; names: Names; orgNames: Names; taskTitles: Record<string, string>; canManage: boolean; archived: boolean };
+type Props = { room: Room; read: OutputsRead; me: string; names: Names; orgNames: Names; taskTitles: Record<string, string>; histories?: Record<string, VersionsRead>; canManage: boolean; archived: boolean };
 
 /**
  * The room's expected outputs, for every participant (decision 54): title, description and status. The version that made one
  * Ready shows only as far as the read allows, and its files open from its task, whose read applies the file rules again.
  */
-export function ArtifactsScreen({ room, read, me, names, orgNames, taskTitles, canManage, archived }: Props) {
+export function ArtifactsScreen({ room, read, me, names, orgNames, taskTitles, histories = {}, canManage, archived }: Props) {
   const commands = useCommands(null);
   const base = `/api/v1/workspaces/${encodeURIComponent(room.id)}`;
   const manage = canManage && !archived;
@@ -59,7 +60,7 @@ export function ArtifactsScreen({ room, read, me, names, orgNames, taskTitles, c
       {read.outputs.length > 0 ? (
         <ul aria-label="Expected outputs" className="space-y-3">
           {read.outputs.map((output) => (
-            <OutputRow key={output.id} output={output} base={base} taskTitles={taskTitles} manage={manage} send={commands.send} noticeRef={commands.noticeRef} />
+            <OutputRow key={output.id} output={output} base={base} taskTitles={taskTitles} history={histories[output.id]} me={me} names={names} manage={manage} send={commands.send} noticeRef={commands.noticeRef} />
           ))}
         </ul>
       ) : (
@@ -72,13 +73,25 @@ export function ArtifactsScreen({ room, read, me, names, orgNames, taskTitles, c
   );
 }
 
-function OutputRow({ output, base, taskTitles, manage, send, noticeRef }: { output: Output; base: string; taskTitles: Record<string, string>; manage: boolean; send: Send; noticeRef: React.RefObject<HTMLDivElement | null> }) {
+/** A task named by its title when this page has it, and otherwise by its ID: the read already decided the viewer may know it. */
+function TaskLink({ id, taskTitles }: { id: string; taskTitles: Record<string, string> }) {
+  return (
+    <SheetLink param="task" target={id} className="text-primary underline">
+      {taskTitles[id] ? plainName(taskTitles[id]) : `task ${id}`}
+    </SheetLink>
+  );
+}
+
+type RowProps = { output: Output; base: string; taskTitles: Record<string, string>; history?: VersionsRead; me: string; names: Names; manage: boolean; send: Send; noticeRef: React.RefObject<HTMLDivElement | null> };
+
+function OutputRow({ output, base, taskTitles, history, me, names, manage, send, noticeRef }: RowProps) {
   const [editing, setEditing] = useState(false);
   const editButton = useRef<HTMLButtonElement>(null);
   const returnFocus = useRef(false);
   const titleId = `output-${output.id}`;
   const filesText = currentFilesText(output.current);
   const path = `${base}/outputs/${encodeURIComponent(output.id)}`;
+  const approved = currentVersion(output, history);
 
   useEffect(() => {
     if (!editing && returnFocus.current) editButton.current?.focus();
@@ -103,9 +116,13 @@ function OutputRow({ output, base, taskTitles, manage, send, noticeRef }: { outp
       {output.current ? (
         <p className="text-sm break-words">
           <span className="text-muted-foreground">Approved version:</span> submission {output.current.submission_no} of{" "}
-          <SheetLink param="task" target={output.current.task_id} className="text-primary underline">
-            {taskTitles[output.current.task_id] ? plainName(taskTitles[output.current.task_id]) : `task ${output.current.task_id}`}
-          </SheetLink>
+          <TaskLink id={output.current.task_id} taskTitles={taskTitles} />
+          {approved?.approved_by ? (
+            <>
+              {", approved by "}
+              <PrincipalName id={approved.approved_by} label={nameOf(approved.approved_by, me, names)} me={me} />
+            </>
+          ) : null}
           {typeof output.current.approved_at === "number" ? (
             <span className="text-xs text-muted-foreground">
               {" "}
@@ -116,6 +133,7 @@ function OutputRow({ output, base, taskTitles, manage, send, noticeRef }: { outp
       ) : output.status === "ready" ? (
         <p className="text-sm text-muted-foreground">Its approved version is from a task your access doesn&apos;t show.</p>
       ) : null}
+      {output.status === "ready" ? <VersionHistory path={path} initial={history} taskTitles={taskTitles} me={me} names={names} /> : null}
       {filesText ? <p className={cn("text-sm", output.current?.files_available === false ? "rounded-lg bg-status-amber-surface p-3 text-status-amber" : "text-muted-foreground")}>{filesText}</p> : null}
       {manage && editing ? <EditOutput output={output} path={path} send={send} onDone={done} /> : null}
       {manage && !editing ? (
@@ -136,6 +154,82 @@ function OutputRow({ output, base, taskTitles, manage, send, noticeRef }: { outp
         </div>
       ) : null}
     </li>
+  );
+}
+
+type HistoryState = { phase: "idle" } | { phase: "loading" } | { phase: "failed" } | { phase: "ready"; read: VersionsRead };
+
+/**
+ * Every approval that made this output Ready, newest first. Read with the page for the first few Ready outputs, and otherwise
+ * when opened. A version from a task the viewer can't see shows only its number and time, as the read gives.
+ */
+function VersionHistory({ path, initial, taskTitles, me, names }: { path: string; initial?: VersionsRead; taskTitles: Record<string, string>; me: string; names: Names }) {
+  const [state, setState] = useState<HistoryState>(initial ? { phase: "ready", read: initial } : { phase: "idle" });
+  const loading = useRef(false);
+
+  const load = async () => {
+    if (loading.current) return;
+    loading.current = true;
+    setState({ phase: "loading" });
+    const read = await clientQuery<VersionsRead>(`${path}/versions`).catch(() => null);
+    loading.current = false;
+    setState(read?.ok ? { phase: "ready", read: read.data } : { phase: "failed" });
+  };
+
+  const count = state.phase === "ready" ? state.read.versions.length : null;
+  return (
+    <details
+      className="rounded-md bg-muted/50 p-2 text-sm"
+      onToggle={(event) => {
+        if (event.currentTarget.open && state.phase === "idle") void load();
+      }}
+    >
+      <summary className="min-h-6 cursor-pointer font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        Version history{count !== null ? ` (${count}${state.phase === "ready" && !state.read.complete ? "+" : ""})` : ""}
+      </summary>
+      <div className="mt-2 space-y-2">
+        {state.phase === "loading" || state.phase === "idle" ? <p role="status" className="text-muted-foreground">Loading version history</p> : null}
+        {state.phase === "failed" ? (
+          <p role="alert" className="text-status-danger">
+            Couldn&apos;t load the version history.{" "}
+            <Button variant="link" className="h-auto p-0 text-status-danger underline" onClick={() => void load()}>
+              Try again
+            </Button>
+          </p>
+        ) : null}
+        {state.phase === "ready" ? (
+          <>
+            <ol aria-label="Approved versions, newest first" className="space-y-2">
+              {state.read.versions.map((version, index) => (
+                <li key={`${version.task_id ?? "hidden"}:${version.submission_no}:${version.approved_at}`} className="space-y-0.5 border-b pb-2 last:border-b-0 last:pb-0">
+                  <p className="flex flex-wrap items-center gap-x-2">
+                    <span className="font-medium">Submission {version.submission_no}</span>
+                    {index === 0 ? <span className="text-xs text-muted-foreground">Current</span> : null}
+                    <span className="text-xs">
+                      <Timestamp at={version.approved_at} />
+                    </span>
+                  </p>
+                  {version.task_id ? (
+                    <p className="break-words">
+                      <span className="text-muted-foreground">Source task:</span> <TaskLink id={version.task_id} taskTitles={taskTitles} />
+                      {version.approved_by ? (
+                        <>
+                          {" "}
+                          <span className="text-muted-foreground">· Reviewer:</span> <PrincipalName id={version.approved_by} label={nameOf(version.approved_by, me, names)} me={me} />
+                        </>
+                      ) : null}
+                    </p>
+                  ) : (
+                    <p className="text-muted-foreground">From a task your access doesn&apos;t show.</p>
+                  )}
+                </li>
+              ))}
+            </ol>
+            {!state.read.complete ? <p className="text-xs text-muted-foreground">Showing the latest {state.read.versions.length} versions.</p> : null}
+          </>
+        ) : null}
+      </div>
+    </details>
   );
 }
 

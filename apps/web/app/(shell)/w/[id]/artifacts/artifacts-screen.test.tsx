@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { routerCalls, setUrl } from "@/test/next-navigation";
 import type { Room } from "../tasks/task-model";
-import { currentFilesText, outputProblem, outputStatus, outputTextProblem, readyText, type Output, type OutputsRead } from "./artifacts-model";
+import { currentFilesText, currentVersion, outputProblem, outputStatus, outputTextProblem, readyText, type Output, type OutputsRead, type VersionsRead } from "./artifacts-model";
 import { ArtifactsScreen } from "./artifacts-screen";
 
 vi.mock("../tasks/go-to-sign-in", () => ({ goToSignIn: vi.fn() }));
@@ -17,14 +17,19 @@ const read = (outputs: Output[], ready = outputs.filter((o) => o.status === "rea
 type Sent = { method: string; url: string; body: unknown; key: string | null };
 let sent: Sent[];
 let refuse: { status: number; code: string } | null;
+let reads: (url: string) => Response;
 
 beforeEach(() => {
   setUrl("/w/ws_1/artifacts");
   sent = [];
   refuse = null;
+  reads = () => new Response(JSON.stringify({ error: { code: "not_found" } }), { status: 404 });
   vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
     const method = init.method ?? "GET";
-    if (method === "GET") return new Response(JSON.stringify({ error: { code: "not_found" } }), { status: 404 });
+    if (method === "GET") {
+      sent.push({ method, url, body: undefined, key: null });
+      return reads(url);
+    }
     sent.push({ method, url, body: init.body ? JSON.parse(String(init.body)) : undefined, key: new Headers(init.headers).get("idempotency-key") });
     if (refuse) return new Response(JSON.stringify({ error: { code: refuse.code } }), { status: refuse.status });
     return new Response("{}", { status: 200 });
@@ -32,8 +37,9 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-const show = (data: OutputsRead, over: { canManage?: boolean; archived?: boolean; taskTitles?: Record<string, string> } = {}) =>
-  render(<ArtifactsScreen room={ROOM} read={data} me="per_me" names={{}} orgNames={{}} taskTitles={over.taskTitles ?? {}} canManage={over.canManage ?? false} archived={over.archived ?? false} />);
+const show = (data: OutputsRead, over: { canManage?: boolean; archived?: boolean; taskTitles?: Record<string, string>; histories?: Record<string, VersionsRead> } = {}) =>
+  render(<ArtifactsScreen room={ROOM} read={data} me="per_me" names={{ per_rev: "Rae Reviewer" }} orgNames={{}} taskTitles={over.taskTitles ?? {}} histories={over.histories} canManage={over.canManage ?? false} archived={over.archived ?? false} />);
+const commandsSent = () => sent.filter((call) => call.method !== "GET");
 
 const rowOf = (title: string) => screen.getByRole("heading", { name: title, level: 2 }).closest("li") as HTMLElement;
 
@@ -47,6 +53,13 @@ describe("the output model", () => {
     expect(readyText(1, 3)).toBe("1 of 3 outputs ready");
     expect(readyText(0, 1)).toBe("0 of 1 output ready");
     expect(readyText(0, 0)).toBe("No expected outputs yet.");
+  });
+
+  it("takes the history's newest entry as current only when it's the version the listing names", () => {
+    const ready = output({ status: "ready", current: { task_id: "tsk_9", submission_no: 2 } });
+    expect(currentVersion(ready, { versions: [{ submission_no: 2, approved_at: 5, task_id: "tsk_9", approved_by: "per_rev" }], complete: true })?.approved_by).toBe("per_rev");
+    expect(currentVersion(ready, { versions: [{ submission_no: 1, approved_at: 5, task_id: "tsk_9", approved_by: "per_rev" }], complete: true })).toBeUndefined();
+    expect(currentVersion(ready, undefined)).toBeUndefined();
   });
 
   it("says nothing about files the read doesn't speak for", () => {
@@ -111,6 +124,49 @@ describe("Artifacts", () => {
     expect(within(rowOf("Hidden")).queryByRole("link")).toBeNull();
   });
 
+  const HISTORY: VersionsRead = {
+    versions: [
+      { submission_no: 2, approved_at: 1_700_000_200_000, task_id: "tsk_9", approved_by: "per_rev" },
+      { submission_no: 1, approved_at: 1_700_000_100_000 },
+    ],
+    complete: true,
+  };
+
+  it("names the reviewer of the approved version, and lists every version newest first, with source task and reviewer where given", async () => {
+    const user = userEvent.setup();
+    show(read([output({ status: "ready", current: { task_id: "tsk_9", submission_no: 2 } })]), { taskTitles: { tsk_9: "Write the design" }, histories: { out_1: HISTORY } });
+    const row = rowOf("Design doc");
+    expect(within(row).getByText(/submission 2 of/).parentElement ?? row).toHaveTextContent(/approved by Rae Reviewer/);
+    await user.click(within(row).getByText("Version history (2)"));
+    const versions = within(row).getAllByRole("listitem");
+    expect(versions[0]).toHaveTextContent(/Submission 2\s*Current/);
+    expect(within(versions[0]).getByRole("link", { name: "Write the design" })).toHaveAttribute("href", "/w/ws_1/artifacts?task=tsk_9");
+    expect(versions[0]).toHaveTextContent(/Reviewer:\s*Rae Reviewer/);
+    expect(versions[1]).toHaveTextContent("From a task your access doesn't show.");
+    expect(within(versions[1]).queryByRole("link")).toBeNull();
+    expect(sent.some((call) => call.url.endsWith("/versions"))).toBe(false);
+  });
+
+  it("reads a history that wasn't loaded with the page only when it's opened", async () => {
+    const user = userEvent.setup();
+    reads = (url) => (url.endsWith("/outputs/out_1/versions") ? new Response(JSON.stringify({ ...HISTORY, complete: false }), { status: 200 }) : new Response("{}", { status: 404 }));
+    show(read([output({ status: "ready", current: { task_id: "tsk_9", submission_no: 2 } })]));
+    expect(sent).toHaveLength(0);
+    await user.click(screen.getByText("Version history"));
+    expect(await screen.findByText("Showing the latest 2 versions.")).toBeInTheDocument();
+    expect(screen.getByText("Version history (2+)")).toBeInTheDocument();
+    expect(sent.filter((call) => call.url === "/api/v1/workspaces/ws_1/outputs/out_1/versions")).toHaveLength(1);
+  });
+
+  it("offers a retry when the history doesn't load, and has none for an output that was never Ready", async () => {
+    const user = userEvent.setup();
+    reads = () => new Response(JSON.stringify({ error: { code: "upstream_unavailable" } }), { status: 503 });
+    show(read([output({ status: "ready", current: null }), output({ id: "out_2", title: "Launch plan", status: "in_review" })]));
+    expect(within(rowOf("Launch plan")).queryByText(/Version history/)).toBeNull();
+    await user.click(within(rowOf("Design doc")).getByText("Version history"));
+    expect(await screen.findByText(/Couldn't load the version history/)).toHaveAttribute("role", "alert");
+  });
+
   it("offers no controls to someone who doesn't manage the room, or in an archived room", () => {
     const { unmount } = show(read([output()]));
     expect(screen.queryByRole("button", { name: "Rename" })).toBeNull();
@@ -128,9 +184,9 @@ describe("Artifacts", () => {
     const form = screen.getByRole("form", { name: "Define an expected output" });
     await user.type(within(form).getByLabelText("Title"), "  Launch plan  ");
     await user.click(within(form).getByRole("button", { name: "Define output" }));
-    await waitFor(() => expect(sent).toHaveLength(1));
-    expect(sent[0]).toMatchObject({ method: "POST", url: "/api/v1/workspaces/ws_1/outputs", body: { title: "Launch plan" } });
-    expect(sent[0].key).toBeTruthy();
+    await waitFor(() => expect(commandsSent()).toHaveLength(1));
+    expect(commandsSent()[0]).toMatchObject({ method: "POST", url: "/api/v1/workspaces/ws_1/outputs", body: { title: "Launch plan" } });
+    expect(commandsSent()[0].key).toBeTruthy();
     expect(await screen.findByText(/Defined “Launch plan”/)).toBeInTheDocument();
     expect(routerCalls.refresh).toBeGreaterThan(0);
     expect(within(form).getByLabelText("Title")).toHaveValue("");
@@ -153,8 +209,8 @@ describe("Artifacts", () => {
     await user.type(title, "Design");
     await user.clear(within(form).getByLabelText("Description (optional)"));
     await user.click(within(form).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(sent).toHaveLength(1));
-    expect(sent[0]).toMatchObject({ method: "PUT", url: "/api/v1/workspaces/ws_1/outputs/out_1", body: { title: "Design", description: null } });
+    await waitFor(() => expect(commandsSent()).toHaveLength(1));
+    expect(commandsSent()[0]).toMatchObject({ method: "PUT", url: "/api/v1/workspaces/ws_1/outputs/out_1", body: { title: "Design", description: null } });
     await waitFor(() => expect(within(rowOf("Design doc")).getByRole("button", { name: "Rename" })).toHaveFocus());
   });
 
@@ -163,10 +219,10 @@ describe("Artifacts", () => {
     refuse = { status: 409, code: "output_in_use" };
     show(read([output()]), { canManage: true });
     await user.click(within(rowOf("Design doc")).getByRole("button", { name: "Remove" }));
-    expect(sent).toHaveLength(0);
+    expect(commandsSent()).toHaveLength(0);
     await user.click(screen.getByRole("button", { name: "Remove output" }));
-    await waitFor(() => expect(sent).toHaveLength(1));
-    expect(sent[0]).toMatchObject({ method: "DELETE", url: "/api/v1/workspaces/ws_1/outputs/out_1" });
+    await waitFor(() => expect(commandsSent()).toHaveLength(1));
+    expect(commandsSent()[0]).toMatchObject({ method: "DELETE", url: "/api/v1/workspaces/ws_1/outputs/out_1" });
     expect(await screen.findByRole("alert")).toHaveTextContent(/can't be removed: it was Ready once/);
   });
 
@@ -180,7 +236,7 @@ describe("Artifacts", () => {
     expect(await screen.findByText(/We can't tell whether this saved/)).toBeInTheDocument();
     refuse = null;
     await user.click(screen.getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(sent).toHaveLength(2));
-    expect(sent[1].key).toBe(sent[0].key);
+    await waitFor(() => expect(commandsSent()).toHaveLength(2));
+    expect(commandsSent()[1].key).toBe(commandsSent()[0].key);
   });
 });

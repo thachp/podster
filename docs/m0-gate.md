@@ -86,7 +86,7 @@ On 2026-11-06, at `5ae3dad`, the lead drove the screens in a browser pane as the
 - The form fixes for typing before load.
 - Narrowed or guest views in a browser on a deployment, including Collaboration's. They now have [local paths only](#what-the-call-on-m1-rests-on).
 - An agent in the browser.
-- Safari, Firefox and a real screen reader.
+- Firefox. Safari with VoiceOver is [done](#safari-with-voiceover).
 - A second real person.
 
 **Left behind:** `M1 Screens Check` is a leftover test room in the owner's personal organization.
@@ -94,6 +94,10 @@ On 2026-11-06, at `5ae3dad`, the lead drove the screens in a browser pane as the
 **The Approved mark on the Task Sheet ([#101](https://github.com/thachp/podster/pull/101)):** on 2026-11-07 UTC, at `404dab7`, the lead saw it on staging in the Smoke room, on a task whose approved submission is also its latest. This is a check by hand, recorded from the lead's report. An approved earlier submission, which a task can't reach today, and a limited viewer have component tests only, and no browser test looks for the mark.
 
 The seen list covers [the checklist](#the-checklist)'s steps 1 to 3. Its agent steps weren't run this way, and the journey covers those through the API.
+
+### Safari with VoiceOver
+
+On 2026-11-07, at `6e75834`, the owner checked staging by hand in real Safari with VoiceOver: sign-in, creating a room, the Tasks List, Board and Gantt (including saving a start date), the Task Sheet, Activity's Load more, and members and invitations. All of it was fine. It's recorded from the lead's report. Firefox hasn't been checked this way.
 
 ### What the call on M1 rests on
 
@@ -124,7 +128,7 @@ The call rests on:
 - A second real person, and the two-person kernel journey.
 - The probes at the end of [ADR 0001](adr/0001-application-host-and-session-cookie.md#what-staging-needs). The owner's sign-in reached the application host, but no probe measured GitHub's callback or the cookie crossing the web Worker.
 - Decision 23 and gap 8, which need an OAuth sign-up to create a personal organization. The owner's sign-in wasn't a check of that.
-- Safari, Firefox and a real screen reader. CI's browser checks run in Chromium. `run-a11y.mjs --browser=firefox` and `--browser=webkit` have run locally only, in Playwright's own builds, which aren't a released Firefox or Safari, and none of this is a screen-reader pass. On those runs Firefox had no failures. WebKit had one, a tab taking about 10 seconds to show 50 messages of alternating text direction, and its arrow keys don't scroll anything, so scrolling a table or the map by key is unseen there.
+- Firefox. Safari with VoiceOver is [done](#safari-with-voiceover). CI's browser checks run in Chromium. `run-a11y.mjs --browser=firefox` and `--browser=webkit` have run locally only, in Playwright's own builds, which aren't a released Firefox or Safari, and none of this is a screen-reader pass. On those runs Firefox had no failures. WebKit had one, a tab taking about 10 seconds to show 50 messages of alternating text direction, and its arrow keys don't scroll anything, so scrolling a table or the map by key is unseen there.
 
 **UI-10 isn't an M1 criterion.** It asks for a keyboard and screen-reader pass on creating a room, reviewing a task and revoking access, and creating a room is one of M1's screens. But [M1's gate](spec/PRODUCT.md#product-direction-and-delivery-scope) names only expanded criteria 1, 3, 4 and 5, and [DESIGN.md](spec/DESIGN.md#12-design-acceptance-criteria) sets UI-10 as a design criterion, with the screen-reader pass due before launch. So it's listed under production, and it's still open.
 
@@ -158,7 +162,7 @@ Earlier on 2026-11-06, with the owner's approval, `e2e/journey.mjs` ran against 
 - The two-person kernel journey, with two real people and their own sign-ins.
 - The probes at the end of [ADR 0001](adr/0001-application-host-and-session-cookie.md#what-staging-needs). [The owner's sign-in](#screens-seen-on-staging) reached the application host, but no probe measured GitHub's callback or the cookie crossing the web Worker.
 - Everything else listed under [With test people](#with-test-people), which stays open.
-- Safari, Firefox and a real screen reader.
+- Firefox. Safari with VoiceOver is [done](#safari-with-voiceover).
 
 These runs drive APIs and agents, not screens. [The screens seen by hand](#screens-seen-on-staging) are recorded separately.
 

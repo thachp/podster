@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod baseline;
+pub mod expected_outputs;
 pub mod files;
 pub mod removal;
 pub mod submission_files;

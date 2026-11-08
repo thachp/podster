@@ -94,10 +94,13 @@ describe("removing a file", () => {
     const id = await room();
     const object = await file(id);
     const before = await row(id, object);
+    const policy = await version(id);
     const removed = await remove(OWNER, id, object);
     expect(removed.status, JSON.stringify(removed.body)).toBe(200);
     expect(removed.body).toMatchObject({ id: object, state: "removed", size: TEXT.length, sha256: before.sha256, removed_by: OWNER.id });
     expect(typeof removed.body.removed_at).toBe("number");
+    // A file's removal changes nobody's access, so an admin's open form still holds.
+    expect(await version(id)).toBe(policy);
     const after = await row(id, object);
     expect(after).toMatchObject({ state: "removed", removed_by_kind: "person", removed_from: "ready", name: before.name, sha256: before.sha256, uploaded_by: before.uploaded_by });
     expect(await refusal(await download(OWNER, id, object))).toEqual({ status: 410, code: "file_removed" });
@@ -235,8 +238,10 @@ describe("the room's sweep", () => {
     await runDurableObjectAlarm(stub(id));
     expect(await row(id, made.body.id)).toBeDefined();
     await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET upload_expires_at = ? WHERE id = ?", now - 60 * 60 * 1000 - 1, made.body.id));
+    const policy = await version(id);
     await runDurableObjectAlarm(stub(id));
     expect(await row(id, made.body.id)).toBeUndefined();
+    expect(await version(id)).toBe(policy);
     const [audit] = await audits(id, "object.upload_abandoned");
     expect(audit).toMatchObject({ actor_id: "podster", actor_kind: "system", target_id: made.body.id });
   });

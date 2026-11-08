@@ -648,8 +648,44 @@ fn audit_as(
         "UPDATE workspace SET policy_version = policy_version + 1",
         vec![],
     )?;
-    exec(sql, "INSERT INTO audit_event (id, actor_id, actor_kind, action, target_id, outcome, prior_json, new_json, policy_version, created_at)
-      VALUES (?, ?, ?, ?, ?, 'allowed', ?, ?, (SELECT policy_version FROM workspace), ?)", vec![
+    audit_row(sql, actor, actor_kind, action, target, prior, new, now)
+}
+
+/// Records a change to a file, which changes nobody's access, so it leaves the policy version alone. That version guards an
+/// admin's open form, and an upload or a scan mustn't make one fail.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn audit_file(
+    sql: &SqlStorage,
+    actor: &str,
+    actor_kind: &str,
+    action: &str,
+    target: &str,
+    prior: Option<String>,
+    new: Option<String>,
+    now: i64,
+) -> R<()> {
+    audit_row(sql, actor, actor_kind, action, target, prior, new, now)
+}
+
+/// The audit entry itself, with its place in the audit list. The entry keeps the policy version it was written under.
+#[allow(clippy::too_many_arguments)]
+fn audit_row(
+    sql: &SqlStorage,
+    actor: &str,
+    actor_kind: &str,
+    action: &str,
+    target: &str,
+    prior: Option<String>,
+    new: Option<String>,
+    now: i64,
+) -> R<()> {
+    exec(
+        sql,
+        "UPDATE workspace SET audit_seq = audit_seq + 1",
+        vec![],
+    )?;
+    exec(sql, "INSERT INTO audit_event (id, actor_id, actor_kind, action, target_id, outcome, prior_json, new_json, policy_version, seq, created_at)
+      VALUES (?, ?, ?, ?, ?, 'allowed', ?, ?, (SELECT policy_version FROM workspace), (SELECT audit_seq FROM workspace), ?)", vec![
         format!("aud_{}", uuid::Uuid::new_v4().simple()).into(), actor.into(), actor_kind.into(), action.into(), target.into(), opt(&prior), opt(&new), now.into(),
     ])
 }
@@ -2406,14 +2442,18 @@ mod queries {
     pub fn list_audit(sql: &SqlStorage, caller: &Caller, url: &Url) -> R<Value> {
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ReadAuditLog))?;
         let after = query_int(url, "after")?.unwrap_or(0);
-        let mut audit = rows(sql, "SELECT id, actor_id, actor_kind, action, target_id, outcome, reason_code, prior_json, new_json, policy_version, created_at
-            FROM audit_event WHERE policy_version > ? ORDER BY policy_version LIMIT ?", vec![after.into(), (PAGE_SIZE + 1).into()])?;
+        let mut audit = rows(sql, "SELECT id, actor_id, actor_kind, action, target_id, outcome, reason_code, prior_json, new_json, policy_version, seq, created_at
+            FROM audit_event WHERE seq > ? ORDER BY seq LIMIT ?", vec![after.into(), (PAGE_SIZE + 1).into()])?;
         // One row past the page, which only says whether there is more, so a full last page doesn't lead to an empty one.
         let more = audit.len() as i64 > PAGE_SIZE;
         audit.truncate(PAGE_SIZE as usize);
-        let next = more
-            .then(|| audit.last().map(|r| int(&r["policy_version"])))
-            .flatten();
+        let next = more.then(|| audit.last().map(|r| int(&r["seq"]))).flatten();
+        // The cursor is the entry's place in the list. It isn't part of the entry.
+        for entry in &mut audit {
+            if let Some(fields) = entry.as_object_mut() {
+                fields.remove("seq");
+            }
+        }
         Ok(json!({ "audit": audit, "next_cursor": next }))
     }
 }
@@ -3080,6 +3120,8 @@ impl Workspace {
         if !store::is_initialized(&sql)? {
             return Ok(());
         }
+        // Scheduling doesn't migrate a room. A request does, and then arms, so an unmigrated room has no scans to end until then.
+        let migrated = !store::needs_migration(&sql)?;
         let now = Date::now().as_millis() as i64;
         let mut due: Option<i64> = None;
         if !rows(&sql, "SELECT seq FROM index_outbox LIMIT 1", vec![])?.is_empty() {
@@ -3098,6 +3140,13 @@ impl Workspace {
                 let next = (next as i64).max(soonest);
                 due = Some(due.map_or(next, |d| d.min(next)));
             }
+        }
+        if let Some(next) = migrated
+            .then(|| objects::next_scan_expiry(&sql, now))
+            .transpose()?
+            .flatten()
+        {
+            due = Some(due.map_or(next, |d| d.min(next)));
         }
         if let Some(next) = removal::next_due(&sql)? {
             due = Some(due.map_or(next, |d| d.min(next)));
@@ -3430,6 +3479,11 @@ impl Workspace {
             let body: Value = serde_json::from_str(&req.text().await?)
                 .map_err(|_| ApiError::invalid_argument())?;
             return self.upload_step(&path, body);
+        }
+        if path == crate::INTERNAL_SCAN_RESULT {
+            let body: Value = serde_json::from_str(&req.text().await?)
+                .map_err(|_| ApiError::invalid_argument())?;
+            return self.scan_verdict(body);
         }
         if path == crate::INTERNAL_DOWNLOAD {
             let body: Value = serde_json::from_str(&req.text().await?)
@@ -3906,6 +3960,13 @@ impl DurableObject for Workspace {
 
     async fn fetch(&self, req: Request) -> Result<Response> {
         let is_write = req.method() != Method::Get;
+        // A request that migrates the room arms it afterwards, a read included, so scans left over from before the migration still
+        // end on time.
+        let migrates = {
+            let sql = self.state.storage().sql();
+            store::is_initialized(&sql).unwrap_or(false)
+                && store::needs_migration(&sql).unwrap_or(false)
+        };
         let denial = if is_write {
             Self::denial_context(&req)
         } else {
@@ -3922,7 +3983,7 @@ impl DurableObject for Workspace {
                 error.into_response()
             }
         };
-        if is_write {
+        if is_write || migrates {
             // The command has already committed, so a scheduling problem can't change its answer. The next write retries.
             if let Err(error) = self.arm(false, false).await {
                 console_error!("couldn't schedule delivery: {:?}", error);
@@ -3947,6 +4008,10 @@ impl DurableObject for Workspace {
         let index = self.drain_index().await;
         if let Err(error) = &index {
             console_error!("index projection failed: {:?}", error);
+        }
+        // A stuck scan fails closed here, and this failing holds up nothing else.
+        if let Err(error) = self.expire_scans() {
+            console_error!("couldn't end overdue scans: {:?}", error.code());
         }
         self.sweep_files().await;
         // One failing doesn't hold up the other.

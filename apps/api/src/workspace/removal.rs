@@ -65,7 +65,7 @@ pub(super) fn remove(sql: &SqlStorage, remover: &Remover<'_>, id: &str, now: i64
             id.into(),
         ],
     )?;
-    audit_as(
+    audit_file(
         sql,
         remover.id,
         remover.kind,
@@ -161,7 +161,7 @@ fn drop_abandoned(sql: &SqlStorage, now: i64) -> R<()> {
             "DELETE FROM stored_object WHERE id = ? AND state = 'uploading'",
             vec![id.as_str().into()],
         )?;
-        audit_as(
+        audit_file(
             sql,
             "podster",
             "system",

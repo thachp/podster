@@ -596,6 +596,33 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 89 | PDFs with only an owner password | **Decided:** they stay refused | M2 |
 | 90 | Password-protected OpenDocument files | **Decided:** refused if they can be detected without refusing all OpenDocument files. The whole format isn't refused | M2 |
 | 91 | Blocked file extensions | **Decided:** `.cmd`, `.vbs`, `.msc`, `.inf`, `.url`, `.jnlp`, `.application`, `.bat`, `.ps1`, `.sh` and `.js`, plus those already in the rules | M2 |
+| 92 | Takedown by a Podster operator | **Decided:** amends decision 57 for M2: not built yet. Owners and admins can remove files now. The operator route gets its own change before any public room, with operators named as person IDs in the API's configuration and checked in Rust | M2 |
+| 93 | Removing a file in an archived room | **Decided:** allowed. Archiving keeps files, but it doesn't shield harmful content from a takedown | M2 |
+| 94 | Bytes of blocked and failed files | **Decided:** removed automatically 7 days after the verdict, leaving the same record and hash as any removal, marked as done by the system, and freeing their space. The 7 days leave time to look into a reported false positive. This narrows decision 56 for files that can never be downloaded | M2 |
+| 95 | Cancelling your own unfinished upload | **Decided:** not in M2. An abandoned upload frees its space when its grant expires | M2 |
+| 96 | Guest uploads and the room's quota | **Decided:** files a guest uploads for their own submission, external agents included, count toward the room's 5 GB during private pilots. Revisited before public rooms. Input assets stay as decision 53 says, so guests still don't upload those | M2 |
+| 97 | A reviewer reading the files they review | **Decided:** the reviewer named on a task may read that task's submitted files, even when their access is otherwise limited to their own tasks. It widens access by only that much: no other task's files, and nothing unsubmitted | M2 |
+| 98 | Files uploaded for a task but never submitted | **Decided:** cleared 24 hours after the task leaves the Accepted state, whether it was submitted, handed back or canceled, by the same sweep that clears abandoned uploads | M2 |
+| 99 | Unsubmitted files on one task | **Decided:** at most 10 files per uploader per task that are uploading or uploaded but not yet submitted, the same number as the limit of 10 artifacts per submission. More are refused, so an assignee can't hold the room's space with files nobody will see | M2 |
+| 100 | Who attaches an input asset to a task | **Decided:** an owner, admin, member or Coordinator, onto any task they can see, and only a file they can see as well. A hidden file or task answers as if it doesn't exist. Removing an attachment follows the same rule | M2 |
+| 101 | Which files can be attached | **Decided:** files that are scanning or ready. Files still uploading, blocked or failed are refused. Only ready files download, as before | M2 |
+| 102 | Attaching to a finished task | **Decided:** refused for a completed or canceled task. Removing an attachment always works, except in an archived room | M2 |
+| 103 | What an attachment shows the assignee | **Decided:** the task's assignee can read an attached file only while it's attached. Removing it ends that on their next read, and oversight follows the same rule | M2 |
+| 104 | Notice of an attachment | **Decided:** the assignee's inbox gets an attach or remove notice with IDs only. It wakes nobody and doesn't change the task | M2 |
+| 105 | Files attached to one task | **Decided:** at most 50 | M2 |
+| 106 | Listing input assets | **Decided:** people and agents can list the input assets they can see, each with the tasks it's attached to, limited to tasks they can see | M2 |
+
+## Input asset decisions, November 8, 2026
+
+- The owner accepted decision 99 and step 5's recommendations, now decisions 100 to 106, saying "per ur recommendation.. i agreement".
+- In decision 100, needing to see the file as well as the task is the lead's change to the step 5 proposal.
+- None is in the code yet. Steps 5 and 6 build them, and update [UPLOAD-POLICY.md](UPLOAD-POLICY.md) and [ADR 0006](../adr/0006-uploads-and-scanning.md) to match.
+
+## Removal and submission file decisions, November 7, 2026
+
+- The owner accepted seven recommendations for M2 steps 6 and 8, now decisions 92 to 98, saying "as recommended".
+- Decision 97 is the lead's change to the step 6 proposal, which would have refused the approval instead.
+- None is in the code yet. Steps 6 and 8 build them, and update [UPLOAD-POLICY.md](UPLOAD-POLICY.md) and [ADR 0006](../adr/0006-uploads-and-scanning.md) to match, including the operator wording that decision 92 defers.
 
 ## File type decisions, November 7, 2026
 

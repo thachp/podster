@@ -27,6 +27,15 @@ describe("the upload path", () => {
     expect(allowedPassthrough("/v1/workspaces/ws_1/uploads")).toBe(true);
   });
 
+  it("has no way to the scanner's route", async () => {
+    expect(allowedPassthrough("/internal/scan-result")).toBe(false);
+    // A dashboard path can't climb out of /v1, because a URL has already resolved these by the time anything reads it.
+    expect(new URL("https://gateway.test/api/v1/%2e%2e/%2e%2e/internal/scan-result").pathname).toBe("/internal/scan-result");
+    const { response, seen } = await ask({ method: "POST", body: "{}" }, { path: "/internal/scan-result" });
+    expect(response).toBeNull();
+    expect(seen).toEqual([]);
+  });
+
   it("only takes PUT", async () => {
     const { response, seen } = await ask({ method: "GET" });
     expect(response?.status).toBe(405);

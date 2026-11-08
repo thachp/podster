@@ -400,14 +400,25 @@ describe("the timeline", () => {
     ["when the tab shows again", () => document.dispatchEvent(new Event("visibilitychange"))],
   ])("moves Today past the room's midnight in a tab left open, %s", async (_, wake) => {
     // 11:30 PM on Nov 4 in New York, which is already Nov 5 in UTC.
+    // A fixed clock, and only the clock's own timers faked, so Testing Library's timeout and React's scheduler stay real.
     vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"], now: Date.UTC(2026, 10, 5, 4, 30) });
+    const started = vi.spyOn(globalThis, "setInterval");
+    const listening = vi.spyOn(document, "addEventListener");
     try {
       await planned();
+      // The clock starts in an effect, which can run after the screen has painted when the machine is busy. Waking it any
+      // earlier would leave Today where it was, so wait until it's really running.
+      await vi.waitFor(() => {
+        expect(started).toHaveBeenCalledWith(expect.any(Function), 60_000);
+        expect(listening).toHaveBeenCalledWith("visibilitychange", expect.any(Function));
+      });
       expect(screen.getByText(/Today is Nov 4, 2026 in America/)).toBeInTheDocument();
       vi.setSystemTime(Date.UTC(2026, 10, 5, 5, 30));
       act(() => wake());
       expect(screen.getByText(/Today is Nov 5, 2026 in America/)).toBeInTheDocument();
     } finally {
+      started.mockRestore();
+      listening.mockRestore();
       vi.useRealTimers();
     }
   });

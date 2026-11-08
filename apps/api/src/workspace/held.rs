@@ -34,7 +34,43 @@ fn held_table_exists(sql: &SqlStorage) -> R<bool> {
     .is_empty())
 }
 
+/// Whether two held changes are the same one, so the later can take the earlier's place: a fence for the same agent, or a
+/// departure of the same person from the same organization. Both effects are monotonic, so keeping one is the same as
+/// applying both in order.
+fn same_change(kind: &str, held: &Value, body: &Value) -> bool {
+    match kind {
+        HELD_FENCE => held["principal"] == body["principal"],
+        HELD_DEPARTURE => held["person"] == body["person"] && held["org"] == body["org"],
+        _ => false,
+    }
+}
+
+/// The later of two of the same held change: the higher fence floor, or the later departure.
+fn merged(kind: &str, held: &Value, body: &Value) -> Value {
+    let field = if kind == HELD_FENCE {
+        "floor"
+    } else {
+        "left_at"
+    };
+    if body[field].as_i64() > held[field].as_i64() {
+        body.clone()
+    } else {
+        held.clone()
+    }
+}
+
 impl Workspace {
+    /// Whether the room can't yet be trusted to say who's in it: a migration is due, or changes to access are held.
+    pub(super) fn access_changes_pending(&self, sql: &SqlStorage) -> R<bool> {
+        if store::needs_migration(sql)? {
+            return Ok(true);
+        }
+        if self.held_clear.get() || !held_table_exists(sql)? {
+            return Ok(false);
+        }
+        Ok(!rows(sql, "SELECT seq FROM held_access LIMIT 1", vec![])?.is_empty())
+    }
+
     /// The one way a room migrates after it's created: migrate if it needs to, then apply what was held while it couldn't.
     pub(super) fn migrate_and_replay(&self) -> R<()> {
         let sql = self.state.storage().sql();
@@ -97,6 +133,27 @@ impl Workspace {
         let sql = self.state.storage().sql();
         transaction_sync(&self.state, move || {
             exec(&sql, HELD_SCHEMA, vec![])?;
+            // One entry for each agent's fence and each person's departure from an organization, so repeated disconnects
+            // can't fill the cap and push someone else's departure out. It keeps its place in the order.
+            let same = rows(
+                &sql,
+                "SELECT seq, body_json FROM held_access WHERE kind = ?",
+                vec![kind.into()],
+            )?;
+            for entry in &same {
+                let held: Value =
+                    serde_json::from_str(entry["body_json"].as_str().unwrap_or_default())?;
+                if same_change(kind, &held, &body) {
+                    return exec(
+                        &sql,
+                        "UPDATE held_access SET body_json = ? WHERE seq = ?",
+                        vec![
+                            merged(kind, &held, &body).to_string().into(),
+                            int(&entry["seq"]).into(),
+                        ],
+                    );
+                }
+            }
             let count = rows(&sql, "SELECT count(*) AS n FROM held_access", vec![])?;
             if count.first().map_or(0, |row| int(&row["n"])) >= MAX_HELD {
                 // Refused, never dropped: the sender sees no acknowledgment and keeps retrying, and the room stays closed.

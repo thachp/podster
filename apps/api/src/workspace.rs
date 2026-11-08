@@ -3090,6 +3090,11 @@ impl Workspace {
         if !store::is_initialized(&sql)? || outbox_held(&sql)? {
             return Ok(());
         }
+        // A recipient may be someone whose removal is held, which applying it would delete from the outbox. So nothing goes
+        // until the room migrates and replays, and the alarm comes back on the outbox's failure delay.
+        if self.access_changes_pending(&sql)? {
+            return Err(ApiError::api(503, "room_migration_pending"));
+        }
         let room = rows(&sql, "SELECT id FROM workspace", vec![])?;
         let Some(workspace_id) = room.first().and_then(|r| text(&r["id"])) else {
             return Ok(());

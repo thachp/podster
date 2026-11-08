@@ -132,8 +132,11 @@ describe("a room whose migration fails", () => {
     await inRoom(id, (sql) => {
       for (let i = 1; i < 1_000; i++) sql.exec("INSERT INTO held_access (kind, body_json, held_at) VALUES ('fence', ?, 0)", JSON.stringify({ principal: `agt_fill_${i}`, floor: 1 }));
     });
-    // At the cap a revocation and a departure are refused, not acknowledged, so their senders keep retrying.
-    expect((await revoke(id, 99)).status).toBe(500);
+    // A later fence for an agent already held only raises its floor, so the cap doesn't refuse it.
+    expect((await revoke(id, 99)).status).toBe(200);
+    // At the cap a new revocation and a departure are refused, not acknowledged, so their senders keep retrying.
+    const other = () => stub(id).fetch("https://workspace/internal/revoke", { method: "POST", body: JSON.stringify({ principal: "agt_not_held", floor: 5 }) });
+    expect((await other()).status).toBe(500);
     expect((await depart(id)).status).toBe(500);
     expect((await held(id)).length).toBe(1_000);
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(500);
@@ -141,11 +144,61 @@ describe("a room whose migration fails", () => {
     await fixMigration(id);
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
     expect(await held(id)).toEqual([]);
-    expect((await revoke(id, 99)).status).toBe(200);
+    expect((await other()).status).toBe(200);
     expect((await depart(id)).status).toBe(200);
     expect(await member(id, AGENT)).toMatchObject({ revocation_reason: "global_disconnect" });
     expect(await member(id, LEAVER)).toMatchObject({ revocation_reason: "org_departure" });
   }, 60_000);
+
+  it("sends nothing from the outbox while a removal is held, so the removal can still take back what was queued", async () => {
+    const id = await room();
+    await inRoom(id, (sql) => sql.exec("CREATE TABLE test_hold_outbox (x)"));
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "For the agent", instructions: "x", assignee: AGENT.id })).status).toBe(200);
+    const queued = () => inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM outbox WHERE recipient_principal_id = ?", AGENT.id).one().n as number);
+    expect(await queued()).toBeGreaterThan(0);
+    await breakMigration(id);
+    expect((await revoke(id, 99)).status).toBe(200);
+    // The outbox is free to send again, but the alarm sends nothing while the fence is held, and comes back later.
+    await inRoom(id, (sql) => sql.exec("DROP TABLE test_hold_outbox"));
+    await runInDurableObject(stub(id), (instance: any) => instance.alarm());
+    expect(await queued()).toBeGreaterThan(0);
+    expect(await inRoom(id, (_sql, state) => state.storage.getAlarm())).not.toBeNull();
+    const before = await inRoom(id, (sql) => sql.exec("SELECT e.type FROM outbox o JOIN event e ON e.id = o.event_id WHERE o.recipient_principal_id = ?", AGENT.id).toArray().map((r: any) => r.type));
+    expect(before).not.toContain("member.revoked");
+    // Once the room migrates, the fence applies and takes back what was waiting for the agent.
+    await fixMigration(id);
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
+    const left = await inRoom(id, (sql) => sql.exec("SELECT e.type FROM outbox o JOIN event e ON e.id = o.event_id WHERE o.recipient_principal_id = ?", AGENT.id).toArray().map((r: any) => r.type));
+    // Only the notice of its own removal is left for it, as a live revocation leaves.
+    expect(left).toEqual(["member.revoked"]);
+  });
+
+  it.each([
+    ["the fenced agent", AGENT, "agent_disconnected"],
+    ["the departed person", LEAVER, "access_revoked"],
+  ])("refuses %s's own first request after the fix, because the held removal applies before it", async (_name, who, code) => {
+    const id = await room();
+    await breakMigration(id);
+    expect((await revoke(id, 99)).status).toBe(200);
+    expect((await depart(id)).status).toBe(200);
+    await fixMigration(id);
+    const first = await api(who, "GET", `/v1/workspaces/${id}`);
+    expect([first.status, first.code]).toEqual([403, code]);
+    expect(await held(id)).toEqual([]);
+  });
+
+  it("keeps one held fence per agent and one held departure per person and organization, the latest of each", async () => {
+    const id = await room();
+    await breakMigration(id);
+    for (const floor of [5, 9, 7]) expect((await revoke(id, floor)).status).toBe(200);
+    const leave = (left_at: number) => stub(id).fetch("https://workspace/internal/org-departure", { method: "POST", body: JSON.stringify({ person: LEAVER.id, org: LEAVER.org, actor: orgAdmin(LEAVER.org).id, left_at }) });
+    for (const left_at of [200, 300, 100]) expect((await leave(left_at)).status).toBe(200);
+    const entries = await inRoom(id, (sql) => sql.exec("SELECT kind, body_json FROM held_access ORDER BY seq").toArray().map((r: any) => ({ kind: r.kind, ...JSON.parse(r.body_json) })));
+    expect(entries).toEqual([
+      { kind: "fence", principal: AGENT.id, floor: 9 },
+      { kind: "org_departure", person: LEAVER.id, org: LEAVER.org, actor: orgAdmin(LEAVER.org).id, left_at: 300 },
+    ]);
+  });
 
   it("applies a disconnect and a departure at once in a room that migrates fine, holding nothing", async () => {
     const id = await room();

@@ -1,8 +1,8 @@
 # M3 plan
 
-**Proposed.** This is a draft for the owner, and no choice in it is accepted. It covers [M3 A2A](spec/PRODUCT.md#product-direction-and-delivery-scope) and starts from the [proposed A2A adapter](spec/ARCHITECTURE.md#a2a-adapter). No A2A code exists.
+The owner accepted all 28 questions below on 2026-11-08, as [decisions 107 to 134](spec/PRODUCT.md#decisions-needed). The build order and the engineering details in it are still **Proposed**. It covers [M3 A2A](spec/PRODUCT.md#product-direction-and-delivery-scope) and starts from the [proposed A2A adapter](spec/ARCHITECTURE.md#a2a-adapter). No A2A code exists.
 
-**Status, 2026-11-08 UTC:** on 2026-11-07 the owner said "we need to finish m2", meaning M2 before any M3 code. That's the owner's statement of that date, not yet a numbered decision. So M3 is planning only, and what "finished" means for M3's first code is question 27. When M2 is done, M3 starts with the [rulings](#questions-for-the-owner) and the [spikes](#spikes), then the [build order](#build-order).
+**Status, 2026-11-08 UTC:** on 2026-11-07 the owner said "we need to finish m2", meaning M2 before any M3 code. [Decision 133](spec/PRODUCT.md#decisions-needed) says what finished means for M3's product code, and [decision 107](spec/PRODUCT.md#decisions-needed) lets the spikes and ADR 0007 start now. The [spikes](#spikes) come first, then the [build order](#build-order).
 
 ## What M3 includes
 
@@ -42,7 +42,7 @@ Text messages, reads and the lifecycle need M2 only to have finished its contrac
 
 ## Spikes
 
-Each runs in `spikes/`, is thrown away afterwards, and ends with its results written into ADR 0007, as M2's spike did for [ADR 0006](adr/0006-uploads-and-scanning.md#spike-results). Question 1 asks whether they can run before M2 is done.
+Each runs in `spikes/`, is thrown away afterwards, and ends with its results written into ADR 0007, as M2's spike did for [ADR 0006](adr/0006-uploads-and-scanning.md#spike-results). [Decision 107](spec/PRODUCT.md#decisions-needed) lets them run before M2 is finished.
 
 | Spike | What it must prove | Pass bar | Where | Needs |
 | --- | --- | --- | --- | --- |
@@ -54,7 +54,7 @@ The wake policy checks the name, not what it resolves to, and relies on `global_
 
 ## Build order
 
-C changes `packages/contracts` and M adds a migration or room schema. All of it is proposed. Product code, steps 5 onward, waits until M2 is finished as question 27 defines it. C and M PRs merge one at a time, after M2's last one, and take turns with planning's as [decision 60](spec/PRODUCT.md#decisions-needed) does for M2.
+C changes `packages/contracts` and M adds a migration or room schema. The order is **Proposed**. Product code, steps 5 onward, waits until M2 is finished as [decision 133](spec/PRODUCT.md#decisions-needed) defines it. C and M PRs merge one at a time, after M2's last one, and take turns with planning's as [decision 60](spec/PRODUCT.md#decisions-needed) does for M2.
 
 | Step | Work | C | M | After | Runs beside |
 | --- | --- | --- | --- | --- | --- |
@@ -78,13 +78,12 @@ C changes `packages/contracts` and M adds a migration or room schema. All of it 
 
 **What runs in parallel:** the three spikes and the ADR draft. Steps 5 and 6. Step 11 is built beside 8 to 10, because it's in the `Principal` and they're in the `Workspace` path. Steps 9 to 11 change contracts and 11 adds a migration, so they're built side by side and still merge one at a time. Steps 14 and 15, which are in different folders.
 
-**Steps that unruled defaults block:**
+**Steps that still need the owner's yes in that session:**
 
-- **Questions 6 and 7:** with both defaults, no A2A path can accept a task. Step 10 builds nothing, and AC-24's after-acceptance case can't run over A2A, so step 16 can't pass the gate.
-- **Question 18:** with its default, step 16 can run but support can't be claimed.
-- **Question 23:** with its default there's no queue, so steps 12 to 16 are blocked.
-
-Steps 5 to 9 and 11 don't depend on any of these.
+- **Spike C on staging,** by [decision 126](spec/PRODUCT.md#decisions-needed). Until then it runs locally only.
+- **Step 11's encryption secret** for stored endpoint tokens, by [decision 122](spec/PRODUCT.md#decisions-needed). The owner sets it.
+- **Step 12's queue and dead-letter queue,** by [decision 129](spec/PRODUCT.md#decisions-needed). Steps 12 to 16 wait on them.
+- **The second implementation** for step 16, which the owner picks from spike A's candidates by [decision 124](spec/PRODUCT.md#decisions-needed).
 
 Step 8 waits only on step 7, because reads translate today's task view. Step 5's mapping is first used by step 12.
 
@@ -92,38 +91,38 @@ The gateway only translates. Rust decides every command, including what a remote
 
 ## Questions for the owner
 
-Each has a recommendation and the narrowest default, which is what the plan does if the question isn't ruled. None is decided.
+The owner accepted every recommendation on 2026-11-08 ("sure"). Each row links to its decision, which is the record. The defaults are kept to show what was ruled out.
 
-| # | Question | Recommendation | Default if unruled |
-| --- | --- | --- | --- |
-| 1 | Do the spikes and ADR count as the M3 code that the owner's 2026-11-07 statement holds until M2 is finished? | Spikes in `spikes/` and the ADR may start now, since they don't touch product code, contracts or staging. Product code, including step 5's pure code, waits as question 27 says | Nothing but docs until M2 is finished |
-| 2 | Which binding? | JSON-RPC only at first. One binding is allowed, it's the simplest on a Worker, and HTTP+JSON's error format disagrees within the spec | Same |
-| 3 | Which version? | 1.0 only, with no 0.3. Two versions double the tests | Same |
-| 4 | What does Podster's server offer beyond the basics? | Streaming, push notifications and the extended card all off. One public card that describes Podster and lists no rooms | Same |
-| 5 | How does an A2A client authenticate? | An OAuth 2 bearer token for the same agent identity, with an audience just for A2A, through the same consent. Agent Auth JWTs aren't accepted on A2A at first | Same |
-| 6 | Does a remote agent reporting `WORKING` accept an offer? | Yes, from the registered endpoint only, and the profile says so plainly. `COMPLETED` with no `WORKING` is held. Generic agents can then take part without an extension | No. Only the extension accepts, and anything before that is held |
-| 7 | How does an inbound client accept, decline, release or submit? | A small versioned Podster extension. Reading and messages don't need it. A message's text never becomes a command | No inbound lifecycle in the first profile, only reads and messages |
-| 8 | How does `request_changes` reach a completed remote task? | A new A2A task with `referenceTaskIds` and the same `contextId`, because a terminal task takes no messages | Same |
-| 9 | Can a task be created over A2A? | No. A task needs a room, role, reviewer and policy that plain A2A doesn't carry | Same |
-| 10 | What are `contextId` and the task ID? | Both come from the Podster task, with no room-wide context, so a shared `contextId` can't reach across a room | Same |
-| 11 | How does Podster learn a remote task's state? | Polling `GetTask` from the queue, backing off from 1 minute to 1 hour, ending at a terminal state or after 7 days. Push later, since servers needn't support it and it adds a public webhook | Same |
-| 12 | What does an outbound offer carry? | The title, instructions and acceptance criteria as text parts, read fresh at send time after access is rechecked, and a Podster link. The queue holds IDs only | IDs and a link only, which most generic agents can't act on |
-| 13 | Who registers an endpoint? | The agent, or its organization's admin, as with wake. One per agent, beside wake rather than replacing it. It grants nothing in any room | The agent only |
-| 14 | Does Podster fetch a remote Agent Card? | Not at first. The registrant gives the URL, and the first delivery shows it works. A fetched card would be untrusted input with SSRF risk | Same |
-| 15 | What happens to file references? | Podster never fetches one. A URL is kept as an [external link](spec/PRODUCT.md#decisions-needed), bytes come through `create_upload`, and inline bytes are refused | Same |
-| 16 | What credential does Podster hold for a remote endpoint? | A signed request like wake's, plus one optional bearer token per endpoint, encrypted. It's Podster's first stored outbound credential, so it gets question 21's pass and a new secret the owner sets | Signed requests only, and no stored token |
-| 17 | Which limits apply? | MCP's: 16 KB per message, 10 artifacts per submission, the same request rates. At most 8 parts per message. One send per offer attempt | Same |
-| 18 | What counts as two independent implementations? | One project SDK, and one agent framework from outside the project, so they can't share a misreading. Spike A names candidates for the owner to pick | No support claimed until the owner names them |
-| 19 | What must the kit show? | Every MUST check passes, or each exception is in the profile with its reason | Same |
-| 20 | Where do the spikes run? | Locally. Spike C runs once on staging only if the owner says yes in that session | Local only, with the real egress checks left to step 12 on staging |
-| 21 | Which steps get a deeper security pass? | Steps 7, 11, 12 and 13, beyond the quick diff review. They add a public protocol surface, outbound calls and a stored credential | Same, since each is asked before it runs |
-| 22 | The project's JavaScript SDK in the gateway, or a small fresh JSON-RPC layer? | Whichever spike A shows runs cleanly on Workers. A fresh layer if the SDK needs Node-only server code | A fresh layer |
-| 23 | Which cloud resources? | A new queue and dead-letter queue for A2A, kept apart from wake, which is ID-only and debounced | Nothing is created. Without a queue, step 12 can't start |
-| 24 | Is Runner's inbound nudge part of M3? | No, it stays in M7. M3 only gives it a profile to follow | Same |
-| 25 | Do test people count for M3's gate, as for M1 under [decision 79](spec/PRODUCT.md#decisions-needed)? | Yes. A pass with a real second person stays owed before production | Same |
-| 26 | Who calls the gate, and when may support be claimed? | The owner, after step 16's staging run. Until then the card and docs say "preview" and never "conformant" | Same |
-| 27 | When is M2 "finished" for M3's product code? | When M2's last contract or migration PR has merged, through step 8 and step 10's D1 migration if it has one. M2's screens and staging run can finish beside M3's first steps, and M3's gate still waits for M2's | When M2's gate, step 11, has passed |
-| 28 | Does A2A egress need more than wake's policy? | No new resolved-address check at first. Keep wake's rules and `global_fetch_strictly_public`, and don't follow redirects. Revisit before public rooms, when anyone could register an endpoint | Same |
+| # | Question | Accepted recommendation | Default it replaced | Decision |
+| --- | --- | --- | --- | --- |
+| 1 | Do the spikes and ADR count as the M3 code that the owner's 2026-11-07 statement holds until M2 is finished? | Spikes in `spikes/` and the ADR may start now, since they don't touch product code, contracts or staging. Product code, including step 5's pure code, waits as question 27 says | Nothing but docs until M2 is finished | [107](spec/PRODUCT.md#decisions-needed) |
+| 2 | Which binding? | JSON-RPC only at first. One binding is allowed, it's the simplest on a Worker, and HTTP+JSON's error format disagrees within the spec | Same | [108](spec/PRODUCT.md#decisions-needed) |
+| 3 | Which version? | 1.0 only, with no 0.3. Two versions double the tests | Same | [109](spec/PRODUCT.md#decisions-needed) |
+| 4 | What does Podster's server offer beyond the basics? | Streaming, push notifications and the extended card all off. One public card that describes Podster and lists no rooms | Same | [110](spec/PRODUCT.md#decisions-needed) |
+| 5 | How does an A2A client authenticate? | An OAuth 2 bearer token for the same agent identity, with an audience just for A2A, through the same consent. Agent Auth JWTs aren't accepted on A2A at first | Same | [111](spec/PRODUCT.md#decisions-needed) |
+| 6 | Does a remote agent reporting `WORKING` accept an offer? | Yes, from the registered endpoint only, and the profile says so plainly. `COMPLETED` with no `WORKING` is held. Generic agents can then take part without an extension | No. Only the extension accepts, and anything before that is held | [112](spec/PRODUCT.md#decisions-needed) |
+| 7 | How does an inbound client accept, decline, release or submit? | A small versioned Podster extension. Reading and messages don't need it. A message's text never becomes a command | No inbound lifecycle in the first profile, only reads and messages | [113](spec/PRODUCT.md#decisions-needed) |
+| 8 | How does `request_changes` reach a completed remote task? | A new A2A task with `referenceTaskIds` and the same `contextId`, because a terminal task takes no messages | Same | [114](spec/PRODUCT.md#decisions-needed) |
+| 9 | Can a task be created over A2A? | No. A task needs a room, role, reviewer and policy that plain A2A doesn't carry | Same | [115](spec/PRODUCT.md#decisions-needed) |
+| 10 | What are `contextId` and the task ID? | Both come from the Podster task, with no room-wide context, so a shared `contextId` can't reach across a room | Same | [116](spec/PRODUCT.md#decisions-needed) |
+| 11 | How does Podster learn a remote task's state? | Polling `GetTask` from the queue, backing off from 1 minute to 1 hour, ending at a terminal state or after 7 days. Push later, since servers needn't support it and it adds a public webhook | Same | [117](spec/PRODUCT.md#decisions-needed) |
+| 12 | What does an outbound offer carry? | The title, instructions and acceptance criteria as text parts, read fresh at send time after access is rechecked, and a Podster link. The queue holds IDs only | IDs and a link only, which most generic agents can't act on | [118](spec/PRODUCT.md#decisions-needed) |
+| 13 | Who registers an endpoint? | The agent, or its organization's admin, as with wake. One per agent, beside wake rather than replacing it. It grants nothing in any room | The agent only | [119](spec/PRODUCT.md#decisions-needed) |
+| 14 | Does Podster fetch a remote Agent Card? | Not at first. The registrant gives the URL, and the first delivery shows it works. A fetched card would be untrusted input with SSRF risk | Same | [120](spec/PRODUCT.md#decisions-needed) |
+| 15 | What happens to file references? | Podster never fetches one. A URL is kept as an [external link](spec/PRODUCT.md#decisions-needed), bytes come through `create_upload`, and inline bytes are refused | Same | [121](spec/PRODUCT.md#decisions-needed) |
+| 16 | What credential does Podster hold for a remote endpoint? | A signed request like wake's, plus one optional bearer token per endpoint, encrypted. It's Podster's first stored outbound credential, so it gets question 21's pass and a new secret the owner sets. Setting the secret still needs the owner's yes at step 11 | Signed requests only, and no stored token | [122](spec/PRODUCT.md#decisions-needed) |
+| 17 | Which limits apply? | MCP's: 16 KB per message, 10 artifacts per submission, the same request rates. At most 8 parts per message. One send per offer attempt | Same | [123](spec/PRODUCT.md#decisions-needed) |
+| 18 | What counts as two independent implementations? | One project SDK, and one agent framework from outside the project, so they can't share a misreading. Spike A names candidates for the owner to pick | No support claimed until the owner names them | [124](spec/PRODUCT.md#decisions-needed) |
+| 19 | What must the kit show? | Every MUST check passes, or each exception is in the profile with its reason | Same | [125](spec/PRODUCT.md#decisions-needed) |
+| 20 | Where do the spikes run? | Locally. Spike C runs once on staging only if the owner says yes in that session | Local only, with the real egress checks left to step 12 on staging | [126](spec/PRODUCT.md#decisions-needed) |
+| 21 | Which steps get a deeper security pass? | Steps 7, 11, 12 and 13, beyond the quick diff review. They add a public protocol surface, outbound calls and a stored credential | Same, since each is asked before it runs | [127](spec/PRODUCT.md#decisions-needed) |
+| 22 | The project's JavaScript SDK in the gateway, or a small fresh JSON-RPC layer? | Whichever spike A shows runs cleanly on Workers. A fresh layer if the SDK needs Node-only server code | A fresh layer | [128](spec/PRODUCT.md#decisions-needed) |
+| 23 | Which cloud resources? | A new queue and dead-letter queue for A2A, kept apart from wake, which is ID-only and debounced. Creating them still needs the owner's yes at step 12 | Nothing is created. Without a queue, step 12 can't start | [129](spec/PRODUCT.md#decisions-needed) |
+| 24 | Is Runner's inbound nudge part of M3? | No, it stays in M7. M3 only gives it a profile to follow | Same | [130](spec/PRODUCT.md#decisions-needed) |
+| 25 | Do test people count for M3's gate, as for M1 under [decision 79](spec/PRODUCT.md#decisions-needed)? | Yes. A pass with a real second person stays owed before production | Same | [131](spec/PRODUCT.md#decisions-needed) |
+| 26 | Who calls the gate, and when may support be claimed? | The owner, after step 16's staging run. Until then the card and docs say "preview" and never "conformant" | Same | [132](spec/PRODUCT.md#decisions-needed) |
+| 27 | When is M2 "finished" for M3's product code? | When M2's last contract or migration PR has merged, through step 8 and step 10's D1 migration if it has one. M2's screens and staging run can finish beside M3's first steps, and M3's gate still waits for M2's | When M2's gate, step 11, has passed | [133](spec/PRODUCT.md#decisions-needed) |
+| 28 | Does A2A egress need more than wake's policy? | No new resolved-address check at first. Keep wake's rules and `global_fetch_strictly_public`, and don't follow redirects. Revisit before public rooms, when anyone could register an endpoint | Same | [134](spec/PRODUCT.md#decisions-needed) |
 
 ## Owed before production that M3 touches
 

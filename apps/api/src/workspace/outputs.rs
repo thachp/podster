@@ -403,7 +403,8 @@ pub(super) fn read(sql: &SqlStorage, who: &Participant) -> R<Value> {
     for row in &outputs {
         let id = row["id"].as_str().unwrap_or_default();
         let current_task = row["current_task_id"].as_str();
-        let naming = if in_review.iter().any(|o| o == id) {
+        let reviewing = in_review.iter().any(|o| o == id);
+        let naming = if reviewing {
             vec![TaskStatus::Submitted]
         } else {
             vec![]
@@ -412,6 +413,9 @@ pub(super) fn read(sql: &SqlStorage, who: &Participant) -> R<Value> {
         ready.push(current_task.is_some());
         let mut out = output_json(row);
         out["status"] = json!(status.name());
+        // A Ready output can have a newer submission waiting for review. Like the status, it comes from every task naming the
+        // output, which decision 54 lets every participant see, and it names none of them.
+        out["in_review"] = json!(reviewing);
         out["current"] = Value::Null;
         if let Some(task) = current_task
             .map(|t| load_task(sql, t))

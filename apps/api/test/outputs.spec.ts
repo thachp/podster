@@ -123,7 +123,7 @@ describe("defining expected outputs", () => {
       const body = await list(who, id);
       expect(body.total, who.id).toBe(2);
       expect(body.ready, who.id).toBe(0);
-      expect(body.outputs[0], who.id).toMatchObject({ id: output, title: "Final report", description: "A PDF for the board", status: "not_started", current: null });
+      expect(body.outputs[0], who.id).toMatchObject({ id: output, title: "Final report", description: "A PDF for the board", status: "not_started", in_review: false, current: null });
     }
     // Someone outside the room learns nothing.
     const refused = await api(OUTSIDER, "GET", `/v1/workspaces/${id}/outputs`);
@@ -324,8 +324,12 @@ describe("approval and status", () => {
     expect((await approve(first.taskPath)).status).toBe(200);
     const followUp = await acceptedTask(id, output);
     expect((await submit(followUp.taskPath, { artifacts: LINK })).status).toBe(200);
-    // A follow-up in review doesn't take Ready away.
-    expect((await listed(OWNER, id, output)).status).toBe("ready");
+    // A follow-up in review doesn't take Ready away, and `in_review` says a newer version waits, to everyone, naming no task.
+    for (const who of [OWNER, LIMITED]) {
+      const seen = await listed(who, id, output);
+      expect([seen.status, seen.in_review], who.id).toEqual(["ready", true]);
+      expect(JSON.stringify(seen), who.id).not.toContain(followUp.task);
+    }
     expect((await approve(followUp.taskPath)).status).toBe(200);
     expect((await listed(OWNER, id, output)).current.task_id).toBe(followUp.task);
     const versions = await inRoom(id, (sql) => sql.exec("SELECT task_id FROM expected_output_version WHERE output_id = ? ORDER BY approved_at, task_id", output).toArray());

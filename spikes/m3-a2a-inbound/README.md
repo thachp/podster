@@ -24,8 +24,8 @@ All against `@a2a-js/sdk` 1.3.0 and `a2a-sdk` 1.3.0 for Python, which both speak
 | Check | Result |
 | --- | --- |
 | Tests in workerd (`npm test`) | **14 passed** |
-| The project's JavaScript client, in Node, unpatched | **8 passed**: card, `GetTask`, `SendMessage` to a task, scoped `ListTasks`, a hidden task refused, no `taskId` refused, streaming off, and the outsider |
-| The project's Python client, unpatched | **6 passed**: card, `GetTask`, `SendMessage`, scoped `ListTasks`, a hidden task refused, no `taskId` refused, and the outsider |
+| The project's JavaScript client, in Node, unpatched | **8 passed**: `GetTask`, `SendMessage` to a task, scoped `ListTasks`, a hidden task refused, no `taskId` refused, streaming off, the outsider, and a left-out `status` refused |
+| The project's Python client, unpatched | **6 passed**: `GetTask`, `SendMessage`, scoped `ListTasks`, a hidden task refused, no `taskId` refused, and the outsider. Both clients fetch the card first, which isn't counted as a check |
 | A request with no version | Refused with `VersionNotSupportedError`, as 0.3 (spec 3.6.2). Both SDK clients send `A2A-Version: 1.0` by themselves |
 | The compatibility kit | **Not run.** See [below](#the-compatibility-kit) |
 | Time per request, locally | p50 about 2.5 to 2.8 ms and p95 about 5.5 to 7.5 ms over 200 calls each to `GetTask`, `ListTasks` and `SendMessage` against `wrangler dev`. That's wall time on one Mac with an in-memory room, not CPU on a deployment |

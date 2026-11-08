@@ -8,8 +8,8 @@ import { summaryOf, type Task, type TaskSummary } from "./task-model";
 export type TaskPages = {
   /** The tasks these pages added. */
   tasks: TaskSummary[];
-  /** Where the next page starts, or null at the end. */
-  cursor: number | null;
+  /** Where the next page starts, or null at the end: the last task a page returned, never a position. */
+  cursor: string | null;
   status: "idle" | "loading" | "failed";
   /** A later page was refused, so access may be gone and nothing already loaded should stay on screen. */
   lost: boolean;
@@ -24,7 +24,7 @@ export type TaskPages = {
 };
 
 /** A read that doesn't reach the screen is at most this far from the reader's place. */
-type Held = { generation: number; tasks: TaskSummary[]; firstPageRows: number; laterFrom: number | null; cursor: number | null | undefined; pages: number; announce: { count: number } | null; lost: boolean };
+type Held = { generation: number; tasks: TaskSummary[]; firstPageRows: number; laterFrom: string | null; cursor: string | null | undefined; pages: number; announce: { count: number } | null; lost: boolean };
 const nothingHeld = (generation: number): Held => ({ generation, tasks: [], firstPageRows: 0, laterFrom: null, cursor: undefined, pages: 0, announce: null, lost: false });
 
 /**
@@ -52,7 +52,7 @@ export function rememberPlace() {
  * by. It never decides what the reader may see, because the server filters every row. A new `generation` means what's held
  * can't be trusted, so it's dropped. A new `firstRead` is the page reading again, which is the way back from a refusal.
  */
-export function useTaskPages(workspace: string, filter: string, start: number | null, generation: number, firstRead: unknown): TaskPages {
+export function useTaskPages(workspace: string, filter: string, start: string | null, generation: number, firstRead: unknown): TaskPages {
   const [stored, setStored] = useState(() => nothingHeld(generation));
   const held = stored.generation === generation ? stored : nothingHeld(generation);
   const [status, setStatus] = useState<TaskPages["status"]>("idle");
@@ -79,13 +79,13 @@ export function useTaskPages(workspace: string, filter: string, start: number | 
   }, [stored]);
 
   const read = useCallback(
-    (from: number, replace: boolean) => {
+    (from: string, replace: boolean) => {
       const controller = new AbortController();
       inFlight.current = controller;
       setStatus("loading");
       void (async () => {
         try {
-          const result = await clientQuery<{ tasks: Task[]; next_cursor: number | null }>(`/api/v1/workspaces/${encodeURIComponent(workspace)}/tasks?cursor=${from}${filter}`, { signal: controller.signal });
+          const result = await clientQuery<{ tasks: Task[]; next_cursor: string | null }>(`/api/v1/workspaces/${encodeURIComponent(workspace)}/tasks?cursor=${encodeURIComponent(from)}${filter}`, { signal: controller.signal });
           if (controller.signal.aborted) return;
           inFlight.current = null;
           if (result.ok) {
@@ -95,10 +95,13 @@ export function useTaskPages(workspace: string, filter: string, start: number | 
             setStored((before) => {
               const now = before.generation === generation ? before : nothingHeld(generation);
               if (!replace) return { ...now, tasks: [...now.tasks, ...rows], firstPageRows: now.pages === 0 ? rows.length : now.firstPageRows, laterFrom: now.pages === 1 ? from : now.laterFrom, cursor: next, pages: now.pages + 1, announce: { count: rows.length }, lost: false };
-              // Later pages stay, as the reader's place, only if the new first page reaches where they start. Rows run newest first,
-              // so a task joining the list ends the first page earlier, at a higher position, and a row between the two would then
-              // be on neither and nothing would fetch it. Rows past that point overlap at most, and `mergeTasks` removes those.
-              const keepLater = next !== null && now.laterFrom !== null && next <= now.laterFrom;
+              // Later pages stay, as the reader's place, only if the new first page reaches where they start: it holds the task
+              // the old first page ended on, where the later pages pick up, or one of theirs. A task joining the list pushes that
+              // task off the end, and a row between the two would then be on neither and nothing would fetch it. Rows past that
+              // point overlap at most, and `mergeTasks` removes those. A cursor is a task's ID, not a position, so rows tell, or
+              // a first page that ends where it did.
+              const later = new Set(now.tasks.slice(now.firstPageRows).map((task) => task.id));
+              const keepLater = next !== null && now.laterFrom !== null && (next === now.laterFrom || rows.some((row) => row.id === now.laterFrom || later.has(row.id)));
               return { ...now, tasks: keepLater ? [...rows, ...now.tasks.slice(now.firstPageRows)] : rows, firstPageRows: rows.length, laterFrom: keepLater ? now.laterFrom : null, cursor: keepLater ? now.cursor : next, pages: keepLater ? now.pages : 1, announce: null, lost: false };
             });
             setStatus("idle");
@@ -125,7 +128,7 @@ export function useTaskPages(workspace: string, filter: string, start: number | 
   }, [cursor, read]);
   const restart = useCallback(() => {
     abort();
-    read(start ?? 0, true);
+    read(start ?? "", true);
   }, [abort, read, start]);
 
   return { tasks: held.tasks, cursor, status, lost: held.lost, pages: held.pages, announce: held.announce, load, restart };

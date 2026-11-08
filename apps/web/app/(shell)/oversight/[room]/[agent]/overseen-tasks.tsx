@@ -36,7 +36,7 @@ async function read<T>(path: string, signal: AbortSignal) {
 /** Anything but an outage says something about this viewer's access, and needs the same answer a Sheet's read gets. */
 const isRefusal = (result: { status: number }) => result.status < 500 && result.status !== 429;
 
-export function OverseenTasks({ workspace, agent, workspaceLabel, initial, initialCursor, me, names, orgNames }: Scope & { workspaceLabel: string; initial: Task[]; initialCursor: number | null }) {
+export function OverseenTasks({ workspace, agent, workspaceLabel, initial, initialCursor, me, names, orgNames }: Scope & { workspaceLabel: string; initial: Task[]; initialCursor: string | null }) {
   const scope = { workspace, agent, me, names, orgNames };
   const [more, setMore] = useState<Task[]>([]);
   const [cursor, setCursor] = useState(initialCursor);
@@ -48,7 +48,7 @@ export function OverseenTasks({ workspace, agent, workspaceLabel, initial, initi
   async function loadMore() {
     setLoading(true);
     setFailed(false);
-    const result = await clientQuery<{ tasks: Task[]; next_cursor: number | null }>(`${tasksPath(scope)}?cursor=${cursor}`).catch(() => null);
+    const result = await clientQuery<{ tasks: Task[]; next_cursor: string | null }>(`${tasksPath(scope)}?cursor=${encodeURIComponent(cursor ?? "")}`).catch(() => null);
     setLoading(false);
     if (result !== null && !result.ok && isRefusal(result)) {
       // The same as anywhere else here: a lapsed session signs in, and lost access is the page's one not-found.
@@ -179,7 +179,7 @@ function Thread({ api, scope }: { api: SheetApi<Overseen>; scope: Scope }) {
     busy.current = true;
     setLoading(true);
     setFailed(false);
-    const result = await clientQuery<{ messages: Message[] }>(`${tasksPath(scope)}/${encodeURIComponent(data.task.id)}/messages?after=${messages.at(-1)?.seq ?? 0}`).catch(() => null);
+    const result = await clientQuery<{ messages: Message[] }>(`${tasksPath(scope)}/${encodeURIComponent(data.task.id)}/messages?after=${encodeURIComponent(messages.at(-1)?.id ?? "")}`).catch(() => null);
     busy.current = false;
     setLoading(false);
     if (result !== null && !result.ok && isRefusal(result)) {

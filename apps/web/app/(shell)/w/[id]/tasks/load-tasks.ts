@@ -8,11 +8,11 @@ type Query = <T>(path: string) => Promise<GatewayResult<T>>;
  * The tasks the viewer may see, as far as `maxPages` of 50. The Tasks page reads one and loads the rest as the person
  * reaches them, from `cursor`. A failure on any page fails the read, rather than looking like a shorter list.
  */
-export async function loadTasks(query: Query, workspace: string, filter = "", maxPages = 1): Promise<GatewayResult<{ tasks: Task[]; more: boolean; cursor: number | null }>> {
+export async function loadTasks(query: Query, workspace: string, filter = "", maxPages = 1): Promise<GatewayResult<{ tasks: Task[]; more: boolean; cursor: string | null }>> {
   const tasks: Task[] = [];
-  let cursor: number | null = 0;
+  let cursor: string | null = "";
   for (let page = 0; page < maxPages && cursor !== null; page += 1) {
-    const result: GatewayResult<{ tasks: Task[]; next_cursor: number | null }> = await query(`/api/v1/workspaces/${encodeURIComponent(workspace)}/tasks?cursor=${cursor}${filter}`);
+    const result: GatewayResult<{ tasks: Task[]; next_cursor: string | null }> = await query(`/api/v1/workspaces/${encodeURIComponent(workspace)}/tasks?cursor=${encodeURIComponent(cursor)}${filter}`);
     if (!result.ok) return result;
     tasks.push(...result.data.tasks);
     cursor = result.data.next_cursor;

@@ -64,7 +64,7 @@ describe("the list", () => {
   });
 
   it("says it stopped, rather than looking complete", () => {
-    render(<TasksScreen room={room("member")} tasks={[task("a", "open")]} cursor={50} me="per_me" names={{}} />);
+    render(<TasksScreen room={room("member")} tasks={[task("a", "open")]} cursor="tsk_c50" me="per_me" names={{}} />);
     expect(screen.getByText(/There are more/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Load more" })).toBeInTheDocument();
   });

@@ -24,9 +24,11 @@ beforeEach(() => {
     sent.push({ method: init.method ?? "GET", url });
     if (url.includes("/files?")) {
       if (listStatus !== 200) return json({ error: { code: "upstream_unavailable" } }, listStatus);
-      const from = Number(new URL(url, "http://local").searchParams.get("cursor"));
+      // As the API pages: the cursor is the last file returned, by its ID.
+      const after = new URL(url, "http://local").searchParams.get("cursor");
+      const from = after ? files.findIndex((file) => file.id === after) + 1 : 0;
       const page = files.slice(from, from + pageSize);
-      return json({ files: page, next_cursor: from + pageSize < files.length ? from + pageSize : null, ...(narrowed ? {} : { quota: { used: 0, limit: 5_000_000_000 } }) });
+      return json({ files: page, next_cursor: from + pageSize < files.length ? page.at(-1)!.id : null, ...(narrowed ? {} : { quota: { used: 0, limit: 5_000_000_000 } }) });
     }
     const one = files.find((known) => url.endsWith(`/files/${known.id}`));
     if (one) return json(one);
@@ -42,7 +44,7 @@ describe("a task's attached files", () => {
   it("reads only this task's files and shows each one's state, with a download only when ready", async () => {
     show();
     const list = await screen.findByRole("list", { name: "Attached files" });
-    expect(sent[0]?.url).toBe("/api/v1/workspaces/ws_1/files?task_id=tsk_1&cursor=0");
+    expect(sent[0]?.url).toBe("/api/v1/workspaces/ws_1/files?task_id=tsk_1&cursor=");
     expect(within(list).getByText("Ready")).toBeInTheDocument();
     expect(within(list).getByText("Scanning")).toBeInTheDocument();
     expect(within(list).getAllByRole("button", { name: /^Download/ })).toHaveLength(1);
@@ -87,7 +89,7 @@ describe("a task's attached files", () => {
     const list = await screen.findByRole("list", { name: "Attached files" });
     await vi.waitFor(() => expect(within(list).getAllByRole("listitem")).toHaveLength(2));
     expect(screen.queryByRole("button", { name: "Load more files" })).not.toBeInTheDocument();
-    expect(sent.filter((request) => request.url.includes("/files?")).map((request) => request.url.split("cursor=")[1])).toEqual(["0", "1"]);
+    expect(sent.filter((request) => request.url.includes("/files?")).map((request) => request.url.split("cursor=")[1])).toEqual(["", files[0].id]);
   });
 
   it("stops at a page with no cursor, rather than reading on", async () => {

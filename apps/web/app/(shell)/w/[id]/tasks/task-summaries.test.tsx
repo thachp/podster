@@ -40,9 +40,9 @@ describe("what a list holds", () => {
   it("reads newest first, in the page's own read and later ones", async () => {
     const paths: string[] = [];
     vi.stubGlobal("fetch", async (path: string) => (paths.push(path), new Response(JSON.stringify({ tasks: [], next_cursor: null }), { status: 200 })));
-    const { result } = renderHook(() => useTaskPages("ws_1", NEWEST_QUERY, 50, 0, null));
+    const { result } = renderHook(() => useTaskPages("ws_1", NEWEST_QUERY, "tsk_c50", 0, null));
     act(() => result.current.load());
-    await waitFor(() => expect(paths).toEqual(["/api/v1/workspaces/ws_1/tasks?cursor=50&order=newest"]));
+    await waitFor(() => expect(paths).toEqual(["/api/v1/workspaces/ws_1/tasks?cursor=tsk_c50&order=newest"]));
     expect(NEWEST_QUERY).toBe("&order=newest");
     expect(REVIEW_QUERY).toContain(NEWEST_QUERY);
   });
@@ -54,7 +54,7 @@ describe("what a list holds", () => {
 
   it("a later page", async () => {
     vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ tasks: [full("b")], next_cursor: null }), { status: 200 }));
-    const { result } = renderHook(() => useTaskPages("ws_1", "", 50, 0, null));
+    const { result } = renderHook(() => useTaskPages("ws_1", "", "tsk_c50", 0, null));
     act(() => result.current.load());
     await waitFor(() => expect(result.current.tasks).toHaveLength(1));
     expectSummaries(result.current.tasks);

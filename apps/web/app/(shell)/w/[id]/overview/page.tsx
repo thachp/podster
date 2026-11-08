@@ -46,7 +46,7 @@ export default async function Overview({ params }: { params: Promise<{ id: strin
   const showCount = identity.ok && !isGuest;
   const canManageAssets = identity.ok && mayManageAssets(roleOf(room as Room, me));
   const [files, taskRead] = await Promise.all([
-    gatewayQuery<FilePage>(`/api/v1/workspaces/${encodeURIComponent(id)}/files?cursor=0`),
+    gatewayQuery<FilePage>(`/api/v1/workspaces/${encodeURIComponent(id)}/files`),
     // Only those who attach files need a list to choose from. Anyone else reads tasks only to name what's attached.
     canManageAssets ? loadTasks(gatewayQuery, id, "", TASK_PAGES) : null,
   ]);

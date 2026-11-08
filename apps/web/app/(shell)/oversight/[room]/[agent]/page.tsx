@@ -17,7 +17,7 @@ const VALID_ID = /^[\w-]{1,128}$/;
 export default async function Oversight({ params }: { params: Promise<{ room: string; agent: string }> }) {
   const { room, agent } = await params;
   if (!VALID_ID.test(room) || !VALID_ID.test(agent)) notFound();
-  const tasks = await gatewayQuery<{ tasks: Task[]; next_cursor: number | null }>(`/api/v1/workspaces/${room}/agents/${agent}/tasks`);
+  const tasks = await gatewayQuery<{ tasks: Task[]; next_cursor: string | null }>(`/api/v1/workspaces/${room}/agents/${agent}/tasks`);
   if (!tasks.ok) {
     if (tasks.status === 401) redirect(signInPath(`/oversight/${room}/${agent}`));
     if (tasks.status < 500 && tasks.status !== 429) notFound();

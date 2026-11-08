@@ -9,8 +9,8 @@ const ws = (n: number) => `ws_${hex(n)}`;
 const tsk = (n: number) => `tsk_${hex(n)}`;
 
 type Page = { status: number; body: any };
-function stub(rooms: string[], page: (room: string, query: { cursor?: number; status?: string }, call: number) => Page) {
-  const asked: { room: string; cursor?: number; status?: string }[] = [];
+function stub(rooms: string[], page: (room: string, query: { cursor?: string; status?: string }, call: number) => Page) {
+  const asked: { room: string; cursor?: string; status?: string }[] = [];
   let listed = 0;
   const api: ApiReads = {
     listWorkspaces: async () => (listed++, { status: 200, body: { workspaces: rooms.map((id) => ({ workspace_id: id })) } }),
@@ -70,12 +70,13 @@ describe("what one request costs", () => {
   });
 
   it("stops after MAX_LIST_CALLS API reads, with a token to go on from", async () => {
-    const s = stub([ws(1)], (_room, q) => ({ status: 200, body: { tasks: [], next_cursor: (q.cursor ?? 10_000) - 1 } }));
+    // Each read's cursor is the last task of the read before, by its ID, as the API's are.
+    const s = stub([ws(1)], (_room, q) => ({ status: 200, body: { tasks: [], next_cursor: tsk((q.cursor ? parseInt(q.cursor.slice(4), 16) : 10_000) - 1) } }));
     const page = await list(s.api, {});
     expect(s.asked).toHaveLength(MAX_LIST_CALLS);
     expect(page.nextPageToken).not.toBe("");
     await list(s.api, { pageToken: page.nextPageToken });
-    expect(s.asked[MAX_LIST_CALLS].cursor).toBe(s.asked[MAX_LIST_CALLS - 1].cursor! - 1);
+    expect(s.asked[MAX_LIST_CALLS].cursor).toBe(tsk(parseInt(s.asked[MAX_LIST_CALLS - 1].cursor!.slice(4), 16) - 1));
   });
 });
 
@@ -122,7 +123,10 @@ describe("paging", () => {
   it("refuses a token with a cursor no room could have, or the wrong shape", async () => {
     const s = stub([ws(1)], twoOnAPage);
     const make = (c: object) => btoa(JSON.stringify(c)).replace(/=+$/, "");
-    for (const bad of [{ v: 2, ws: ws(1), s: 0, c: 2 ** 53, after: "", f: "*" }, { v: 2, ws: ws(1), s: 5, c: 0, after: "", f: "*" }, { v: 2, ws: ws(1), s: 0, c: 0, after: "nope", f: "*" }, { v: 1, ws: ws(1), c: 0, skip: 0, f: "*" }]) {
+    const good = { v: 3, ws: ws(1), s: 0, c: tsk(1), after: "", f: "*" };
+    await expect(list(s.api, { pageToken: make(good) })).resolves.toBeTruthy();
+    // A cursor that's a position, the version 2 kind, isn't one the API gives any more, and neither is anything but a task's ID.
+    for (const bad of [{ ...good, c: 7 }, { ...good, c: "7" }, { ...good, c: "nope" }, { ...good, s: 5 }, { ...good, after: "nope" }, { v: 2, ws: ws(1), s: 0, c: 0, after: "", f: "*" }, { v: 1, ws: ws(1), c: 0, skip: 0, f: "*" }]) {
       await expect(list(s.api, { pageToken: make(bad) })).rejects.toThrow(/pageToken/);
     }
   });

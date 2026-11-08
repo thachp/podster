@@ -9,7 +9,7 @@ import { loadNames, orgNamesOf } from "../../../w/[id]/tasks/load-tasks";
 import type { Names, Task } from "../../../w/[id]/tasks/task-model";
 import { OverseenTasks } from "./overseen-tasks";
 
-type Result = { tasks: Task[]; next_cursor: number | null };
+type Result = { tasks: Task[]; next_cursor: string | null };
 type Org = { id: string; name: string; personal: number };
 
 /**

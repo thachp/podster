@@ -57,7 +57,7 @@ describe("loadAttention", () => {
       ["One", "a"],
     ]);
     expect(result.failedRooms).toBe(0);
-    expect(asked).toContain("/api/v1/workspaces/ws_1/tasks?cursor=0&status=submitted&mine=true");
+    expect(asked).toContain("/api/v1/workspaces/ws_1/tasks?cursor=&status=submitted&mine=true");
   });
 
   it("a room that fails is counted, so an empty answer can't look complete", async () => {
@@ -108,7 +108,7 @@ describe("loadAttention", () => {
   it("reads one page of submissions per room, and says when there's more", async () => {
     const { query, asked } = stub({
       "/api/v1/inbox": ok(emptyInbox),
-      "/api/v1/workspaces/ws_1/tasks": ok({ tasks: [task("a")], next_cursor: 9 }),
+      "/api/v1/workspaces/ws_1/tasks": ok({ tasks: [task("a")], next_cursor: "tsk_a" }),
       "/api/v1/workspaces": ok({ workspaces: [{ workspace_id: "ws_1", workspace_name: "One", role: "member" }] }),
     });
     const result = await loadAttention(query, "per_me");

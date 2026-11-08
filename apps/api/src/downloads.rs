@@ -21,6 +21,23 @@ fn log_problem(room: &str, id: &str, code: &str) {
     );
 }
 
+/// The room's answer to whether this caller may have this file now, with its key when they may.
+async fn ask_room(env: &Env, caller: &crate::Caller, room: &str, id: &str) -> R<Response> {
+    let stub = env
+        .durable_object("WORKSPACE")?
+        .id_from_name(room)?
+        .get_stub()?;
+    crate::forward(
+        stub,
+        crate::INTERNAL_DOWNLOAD,
+        "",
+        crate::caller_header(caller)?,
+        Method::Post,
+        Some(json!({ "id": id }).to_string()),
+    )
+    .await
+}
+
 pub async fn stream_download(
     env: &Env,
     mut caller: crate::Caller,
@@ -35,19 +52,7 @@ pub async fn stream_download(
     // ID goes as one that can't match, so it never reaches the room's SQL as it came.
     let id = if crate::valid_id(id) { id } else { "" };
     caller.workspace_id = room.to_string();
-    let stub = env
-        .durable_object("WORKSPACE")?
-        .id_from_name(room)?
-        .get_stub()?;
-    let mut allowed = crate::forward(
-        stub,
-        crate::INTERNAL_DOWNLOAD,
-        "",
-        crate::caller_header(&caller)?,
-        Method::Post,
-        Some(json!({ "id": id }).to_string()),
-    )
-    .await?;
+    let mut allowed = ask_room(env, &caller, room, id).await?;
     if allowed.status_code() != 200 {
         return Ok(allowed);
     }
@@ -59,7 +64,12 @@ pub async fn stream_download(
         ApiError::api(502, "storage_unavailable")
     })?;
     let Some(object) = found else {
-        // The room says it's here and storage says it isn't, as when a file is removed just now.
+        // The room said it's here and storage says it isn't, as when a file is removed just now. Asking again gives the room's
+        // answer for that, `file_removed`.
+        let again = ask_room(env, &caller, room, id).await?;
+        if again.status_code() != 200 {
+            return Ok(again);
+        }
         log_problem(room, id, "file_not_available");
         return Err(ApiError::api(409, "file_not_available"));
     };

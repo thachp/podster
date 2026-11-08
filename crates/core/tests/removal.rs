@@ -260,3 +260,14 @@ fn an_unsubmitted_file_goes_a_day_after_its_task_leaves_accepted() {
     }
     assert_eq!(unsubmitted_file_due(Removed, false, Some(NOW)), None);
 }
+
+#[test]
+fn a_row_whose_state_cant_be_read_keeps_its_bytes() {
+    assert!(!delete_stored_bytes(
+        ROOM,
+        "rooms/ws_1/objects/obj_1/abc",
+        KeyHolder::Unreadable,
+        i64::MIN,
+        NOW
+    ));
+}

@@ -86,7 +86,8 @@ const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromNam
 const undoRemovalMigration = (state: any) => {
   state.storage.sql.exec("DROP TABLE storage_sweep");
   state.storage.sql.exec("DROP INDEX stored_object_abandoned");
-  for (const column of ["removed_at", "removed_by", "removed_by_kind", "removed_from"]) state.storage.sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
+  state.storage.sql.exec("DROP INDEX stored_object_purge");
+  for (const column of ["removed_at", "removed_by", "removed_by_kind", "removed_from", "attempt_started_at", "purge_due_at"]) state.storage.sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
   state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
 };
 /** Puts a room back to before files had scan results. */

@@ -96,6 +96,8 @@ pub enum KeyHolder {
     Nobody,
     /// The file whose current key this is.
     File(ObjectState),
+    /// A row holds this key, but its state can't be read. Its bytes stay, failing closed.
+    Unreadable,
 }
 
 /// Whether to delete bytes found in storage under this room. Bytes a file refers to stay, including an upload still
@@ -120,7 +122,8 @@ pub fn delete_stored_bytes(
             | ObjectState::Ready
             | ObjectState::Blocked
             | ObjectState::Failed,
-        ) => false,
+        )
+        | KeyHolder::Unreadable => false,
         KeyHolder::Nobody => now.saturating_sub(stored_at) >= UNREFERENCED_BYTES_GRACE_MS,
     }
 }

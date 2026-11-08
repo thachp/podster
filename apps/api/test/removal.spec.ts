@@ -195,7 +195,8 @@ describe("the room's sweep", () => {
     const undoRemoval = (id: string) => runInDurableObject(stub(id), (_: any, state: any) => {
       state.storage.sql.exec("DROP TABLE storage_sweep");
       state.storage.sql.exec("DROP INDEX stored_object_abandoned");
-      for (const column of ["removed_at", "removed_by", "removed_by_kind", "removed_from"]) state.storage.sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
+      state.storage.sql.exec("DROP INDEX stored_object_purge");
+      for (const column of ["removed_at", "removed_by", "removed_by_kind", "removed_from", "attempt_started_at", "purge_due_at"]) state.storage.sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
     });
     const due = async (id: string) => ((await inRoom(id, (sql) => sql.exec("SELECT due_at FROM storage_sweep").toArray()[0])) as any).due_at;
@@ -212,13 +213,62 @@ describe("the room's sweep", () => {
     expect(await due(empty)).toBeNull();
   });
 
+  it("purges a removed file's own prefix at once, even when the room-wide sweep is pages past its key", async () => {
+    const id = await room();
+    const object = await file(id);
+    const key = (await row(id, object)).object_key;
+    // An older attempt of the same file, left behind, is under the same prefix and goes too.
+    const older = `rooms/${id}/objects/${object}/older-attempt`;
+    await BINDINGS.ASSETS.put(older, new Uint8Array([1]));
+    // More than three pages of fresh strays that sort after the file, so the file's key is on page 1.
+    const strays = Array.from({ length: 3100 }, (_, i) => `rooms/${id}/objects/z${String(i).padStart(5, "0")}/a`);
+    for (let i = 0; i < strays.length; i += 100) await Promise.all(strays.slice(i, i + 100).map((k) => BINDINGS.ASSETS.put(k, new Uint8Array([1]))));
+    // A pass lists the file's key on page 1 and moves its cursor on, before the file is removed.
+    await sweep(id);
+    expect((await remove(OWNER, id, object)).status).toBe(200);
+    await runDurableObjectAlarm(stub(id));
+    expect(await BINDINGS.ASSETS.head(key)).toBeNull();
+    expect(await BINDINGS.ASSETS.head(older)).toBeNull();
+    expect(await BINDINGS.ASSETS.head(strays[0])).not.toBeNull();
+    const after: any = await row(id, object);
+    // Its attempt began just now, so a purge is due again once that attempt can't still be writing.
+    expect(after.purge_due_at).toBe(after.attempt_started_at + 60 * 60 * 1000);
+    for (let i = 0; i < strays.length; i += 500) await BINDINGS.ASSETS.delete(strays.slice(i, i + 500));
+  }, 60_000);
+
+  it("keeps a forced pass from putting the sweep off past the newest attempt, as a replaced one may still be writing", async () => {
+    const id = await room();
+    const object = await file(id);
+    const started = (await row(id, object)).attempt_started_at;
+    expect(typeof started).toBe("number");
+    // A replaced attempt's bytes land after any pass that ran before it finished. A pass forced now finds nothing to keep.
+    await sweep(id);
+    const { due_at }: any = await inRoom(id, (sql) => sql.exec("SELECT due_at FROM storage_sweep").toArray()[0]);
+    expect(due_at).toBe(started + 60 * 60 * 1000);
+  });
+
+  it("looks again an hour after someone's uploads are dropped as they leave", async () => {
+    const id = await room();
+    const made = await api(ADMIN, "POST", `/v1/workspaces/${id}/uploads`, { name: "mid.txt", size: TEXT.length, sha256: await sha256(TEXT) });
+    expect(made.status, JSON.stringify(made.body)).toBe(200);
+    await inRoom(id, (sql) => sql.exec("UPDATE storage_sweep SET due_at = NULL"));
+    const before = Date.now();
+    const gone = await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${ADMIN.id}`, { policy_version: await version(id) });
+    expect(gone.status, JSON.stringify(gone.body)).toBe(200);
+    expect(await row(id, made.body.id)).toBeUndefined();
+    const { due_at }: any = await inRoom(id, (sql) => sql.exec("SELECT due_at FROM storage_sweep").toArray()[0]);
+    expect(due_at).toBeGreaterThanOrEqual(before + 60 * 60 * 1000);
+    expect(due_at).toBeLessThanOrEqual(Date.now() + 60 * 60 * 1000);
+  });
+
   it("leaves a room that hasn't migrated yet to its next request, and its alarm still runs", async () => {
     const id = await room();
     const object = await file(id);
     await runInDurableObject(stub(id), (_: any, state: any) => {
       state.storage.sql.exec("DROP TABLE storage_sweep");
       state.storage.sql.exec("DROP INDEX stored_object_abandoned");
-      for (const column of ["removed_at", "removed_by", "removed_by_kind", "removed_from"]) state.storage.sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
+      state.storage.sql.exec("DROP INDEX stored_object_purge");
+      for (const column of ["removed_at", "removed_by", "removed_by_kind", "removed_from", "attempt_started_at", "purge_due_at"]) state.storage.sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
     });
     await runDurableObjectAlarm(stub(id));
@@ -236,7 +286,9 @@ describe("the room's sweep", () => {
     expect(await BINDINGS.ASSETS.head(kept)).not.toBeNull();
     expect(await BINDINGS.ASSETS.head(stray)).not.toBeNull();
     const due: any = await inRoom(id, (sql) => sql.exec("SELECT due_at, cursor FROM storage_sweep").toArray()[0]);
-    expect(due).toEqual({ due_at: strayAt + 60 * 60 * 1000, cursor: null });
+    // The next pass comes when the stray is old enough, or when the file's own attempt has settled, whichever is sooner.
+    const started = (await row(id, object)).attempt_started_at;
+    expect(due).toEqual({ due_at: Math.min(strayAt, started) + 60 * 60 * 1000, cursor: null });
     expect((await download(OWNER, id, object)).status).toBe(200);
   });
 

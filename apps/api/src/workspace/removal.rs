@@ -1,8 +1,9 @@
 //! Removing a file, and the room's sweep of what nobody needs: uploads that never finished, and bytes in storage that no file
 //! refers to. The rules are `podster_core::removal`, and who may remove is `podster_policy::files`.
 //!
-//! Removing commits the record first and leaves deleting the bytes to the sweep, which the same transaction makes due at once.
-//! That keeps every delete from storage in one place, where a failure is simply tried again.
+//! Removing commits the record first and marks the file's bytes for a purge, which the alarm runs right after: it lists only that
+//! file's own prefix, so a room's size can't delay it, and a failure is tried again a minute later. The room-wide sweep is the
+//! backstop, for bytes nothing refers to.
 //!
 //! A file's name is agent content, and a key names the room and the file, so neither goes into a log, an audit entry or an event.
 use super::*;
@@ -22,6 +23,10 @@ const SWEEP_PAGES_PER_PASS: usize = 3;
 const SWEEP_RETRY_MS: i64 = 60 * 1000;
 /// At most this many abandoned rows go in one alarm, so a room with many can't hold the alarm up.
 const ABANDONED_PER_PASS: i64 = 200;
+/// At most this many removed files are purged in one alarm.
+const PURGES_PER_PASS: i64 = 20;
+/// The soonest anything overdue here wakes the room again, so work that keeps failing can't spin the alarm.
+const REARM_MS: i64 = 1_000;
 
 /// Who removes. An operator or the system would be another kind, recorded the same way, so a ruling that adds either only adds a
 /// caller of `remove`.
@@ -55,13 +60,14 @@ pub(super) fn remove(sql: &SqlStorage, remover: &Remover<'_>, id: &str, now: i64
     // The token goes too, though no upload step accepts a removed file anyway.
     exec(
         sql,
-        "UPDATE stored_object SET state = ?, removed_at = ?, removed_by = ?, removed_by_kind = ?, removed_from = ?, uploader_json = NULL, token_hash = '' WHERE id = ?",
+        "UPDATE stored_object SET state = ?, removed_at = ?, removed_by = ?, removed_by_kind = ?, removed_from = ?, uploader_json = NULL, token_hash = '', purge_due_at = ? WHERE id = ?",
         vec![
             ObjectState::Removed.name().into(),
             now.into(),
             remover.id.into(),
             remover.kind.into(),
             was.name().into(),
+            now.into(),
             id.into(),
         ],
     )?;
@@ -84,7 +90,6 @@ pub(super) fn remove(sql: &SqlStorage, remover: &Remover<'_>, id: &str, now: i64
         Vec::<String>::new(),
         now,
     )?;
-    sweep_after(sql, now)?;
     answer(sql, id)
 }
 
@@ -118,28 +123,46 @@ pub(super) fn sweep_after(sql: &SqlStorage, at: i64) -> R<()> {
     )
 }
 
-/// When the room next has something to clear: the storage sweep, or the first unfinished upload to be abandoned. A room still
-/// waiting to migrate has nothing here yet: its next request migrates it, and the alarm mustn't fail on its older tables.
-pub(super) fn next_due(sql: &SqlStorage) -> R<Option<i64>> {
+/// When the room next has something to clear: the storage sweep, a removed file's purge, or the first unfinished upload to be
+/// abandoned. Nothing overdue wakes it sooner than `REARM_MS` from now, so a step that keeps failing can't spin the alarm. A room
+/// still waiting to migrate has nothing here yet: its next request migrates it, and the alarm mustn't fail on its older tables.
+pub(super) fn next_due(sql: &SqlStorage, now: i64) -> R<Option<i64>> {
     if store::needs_migration(sql)? {
         return Ok(None);
     }
-    let sweep = rows(sql, "SELECT due_at FROM storage_sweep", vec![])?
-        .first()
-        .and_then(|r| r["due_at"].as_f64())
-        .map(|d| d as i64);
-    let abandoned = rows(
-        sql,
+    let first = |query: &str| -> R<Option<i64>> {
+        Ok(rows(sql, query, vec![])?
+            .first()
+            .and_then(|r| r["first"].as_f64())
+            .map(|d| d as i64))
+    };
+    let sweep = first("SELECT due_at AS first FROM storage_sweep")?;
+    let purge = first(
+        "SELECT MIN(purge_due_at) AS first FROM stored_object WHERE purge_due_at IS NOT NULL",
+    )?;
+    let abandoned = first(
         "SELECT MIN(upload_expires_at) AS first FROM stored_object WHERE state = 'uploading'",
+    )?
+    .map(|first| first.saturating_add(ABANDONED_UPLOAD_GRACE_MS));
+    Ok([sweep, purge, abandoned]
+        .into_iter()
+        .flatten()
+        .min()
+        .map(|due| due.max(now.saturating_add(REARM_MS))))
+}
+
+/// The latest time an upload attempt that's begun could still leave bytes nothing refers to: the newest attempt's start plus the
+/// grace. Removed files and finished uploads keep their start, so this covers an attempt replaced by a newer one, or one still
+/// writing when its file was removed.
+fn last_attempt_settles(sql: &SqlStorage) -> R<Option<i64>> {
+    Ok(rows(
+        sql,
+        "SELECT MAX(attempt_started_at) AS last FROM stored_object",
         vec![],
     )?
     .first()
-    .and_then(|r| r["first"].as_f64())
-    .map(|first| (first as i64).saturating_add(ABANDONED_UPLOAD_GRACE_MS));
-    Ok(match (sweep, abandoned) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    })
+    .and_then(|r| r["last"].as_f64())
+    .map(|last| (last as i64).saturating_add(UNREFERENCED_BYTES_GRACE_MS)))
 }
 
 /// Deletes rows of uploads that never finished, well after their grant ended. Each is audited by ID. Bytes an attempt left go with
@@ -200,6 +223,7 @@ impl Workspace {
         }) {
             console_error!("couldn't clear abandoned uploads: {:?}", error.code());
         }
+        self.purge_removed().await;
         if let Err(error) = self.sweep_storage().await {
             console_error!("couldn't sweep storage: {:?}", error.code());
             let retry = Date::now().as_millis() as i64 + SWEEP_RETRY_MS;
@@ -207,6 +231,94 @@ impl Workspace {
                 console_error!("couldn't schedule the sweep again: {:?}", error.code());
             }
         }
+    }
+
+    /// Deletes removed files' bytes, listing only each file's own prefix, which holds every attempt it had. An attempt may still be
+    /// writing when its file is removed, so a file whose last attempt could still land is purged again once it can't.
+    async fn purge_removed(&self) {
+        let sql = self.state.storage().sql();
+        let now = Date::now().as_millis() as i64;
+        let due = match rows(
+            &sql,
+            "SELECT id, attempt_started_at FROM stored_object WHERE state = 'removed' AND purge_due_at <= ? ORDER BY purge_due_at LIMIT ?",
+            vec![now.into(), PURGES_PER_PASS.into()],
+        ) {
+            Ok(due) => due,
+            Err(error) => {
+                console_error!("couldn't read files to purge: {:?}", error.code());
+                return;
+            }
+        };
+        if due.is_empty() {
+            return;
+        }
+        let room = match objects::room_id(&sql) {
+            Ok(room) => room,
+            Err(error) => {
+                console_error!("couldn't read the room to purge: {:?}", error.code());
+                return;
+            }
+        };
+        for row in &due {
+            let id = text(&row["id"]).unwrap_or_default();
+            let next = match self.purge_one(&room, &id).await {
+                Ok(()) => {
+                    let settles = row["attempt_started_at"]
+                        .as_f64()
+                        .map(|at| (at as i64).saturating_add(UNREFERENCED_BYTES_GRACE_MS))
+                        .filter(|at| *at > now);
+                    settles.map_or(V::Null, V::from)
+                }
+                Err(error) => {
+                    console_error!(
+                        "{}",
+                        json!({ "at": "storage.purge_failed", "room": room, "object": id, "kind": error.code() })
+                    );
+                    V::from(now.saturating_add(SWEEP_RETRY_MS))
+                }
+            };
+            if let Err(error) = exec(
+                &sql,
+                "UPDATE stored_object SET purge_due_at = ? WHERE id = ? AND state = 'removed'",
+                vec![next, id.as_str().into()],
+            ) {
+                console_error!("couldn't record a purge: {:?}", error.code());
+            }
+        }
+    }
+
+    async fn purge_one(&self, room: &str, id: &str) -> R<()> {
+        if !crate::valid_id(id) {
+            return Ok(());
+        }
+        let bucket = self.env.bucket(crate::objects::BUCKET)?;
+        let prefix = format!("{}{id}/", room_prefix(room));
+        let mut cursor: Option<String> = None;
+        let mut deleted = 0usize;
+        loop {
+            let mut listing = bucket.list().prefix(prefix.clone()).limit(SWEEP_PAGE_KEYS);
+            if let Some(after) = &cursor {
+                listing = listing.cursor(after.clone());
+            }
+            let page = listing.execute().await?;
+            for object in page.objects() {
+                let key = object.key();
+                // The prefix holds only this file, so everything here is its bytes, and the rule agrees.
+                if delete_stored_bytes(room, &key, KeyHolder::File(ObjectState::Removed), 0, 0) {
+                    bucket.delete(&key).await?;
+                    deleted += 1;
+                }
+            }
+            cursor = page.cursor().filter(|_| page.truncated());
+            if cursor.is_none() {
+                break;
+            }
+        }
+        console_log!(
+            "{}",
+            json!({ "at": "storage.purged", "room": room, "object": id, "deleted": deleted })
+        );
+        Ok(())
     }
 
     /// Lists the room's keys in storage and deletes what `delete_stored_bytes` says to.
@@ -217,10 +329,13 @@ impl Workspace {
     async fn sweep_storage(&self) -> R<()> {
         let sql = self.state.storage().sql();
         let now = Date::now().as_millis() as i64;
-        let Some(sweep) = rows(&sql, "SELECT due_at, cursor FROM storage_sweep", vec![])?
-            .into_iter()
-            .next()
-        else {
+        let Some(sweep) = rows(
+            &sql,
+            "SELECT due_at, cursor, cycle_due_at FROM storage_sweep",
+            vec![],
+        )?
+        .into_iter()
+        .next() else {
             return Ok(());
         };
         if sweep["due_at"].as_f64().is_none_or(|due| due as i64 > now) {
@@ -252,26 +367,26 @@ impl Workspace {
             }
         }
         // Read after the listing, in one go, from current state.
-        let holders: HashMap<String, ObjectState> = rows(
+        let holders: HashMap<String, KeyHolder> = rows(
             &sql,
             "SELECT object_key, state FROM stored_object WHERE object_key IS NOT NULL",
             vec![],
         )?
         .iter()
         .filter_map(|row| {
-            Some((
-                text(&row["object_key"])?,
-                row["state"].as_str().and_then(ObjectState::from_name)?,
-            ))
+            // A state that doesn't read still holds its key, so its bytes stay.
+            let holder = row["state"]
+                .as_str()
+                .and_then(ObjectState::from_name)
+                .map_or(KeyHolder::Unreadable, KeyHolder::File);
+            Some((text(&row["object_key"])?, holder))
         })
         .collect();
         let now = Date::now().as_millis() as i64;
         let mut deleted = 0usize;
         let mut kept_until: Option<i64> = None;
         for (key, stored_at) in &found {
-            let holder = holders
-                .get(key)
-                .map_or(KeyHolder::Nobody, |state| KeyHolder::File(*state));
+            let holder = holders.get(key).copied().unwrap_or(KeyHolder::Nobody);
             if delete_stored_bytes(&room, key, holder, *stored_at, now) {
                 bucket.delete(key).await?;
                 deleted += 1;
@@ -280,17 +395,34 @@ impl Workspace {
                 kept_until = Some(kept_until.map_or(ready, |k| k.min(ready)));
             }
         }
-        // More pages wait for the next alarm, soon. Otherwise the sweep is due again only when something kept becomes old enough.
-        let due = if more { Some(now) } else { kept_until };
-        let saved_cursor = if more { cursor } else { None };
-        let cursor_value = saved_cursor.as_deref().map_or(V::Null, V::from);
-        exec(
-            &sql,
-            "UPDATE storage_sweep SET cursor = ?",
-            vec![cursor_value],
-        )?;
-        if let Some(due) = due {
-            sweep_after(&sql, due)?;
+        // What this pass kept is carried through the cycle, so a key on an early page still gets its turn after the last page.
+        let carried = sweep["cycle_due_at"].as_f64().map(|d| d as i64);
+        let cycle_due = [carried, kept_until].into_iter().flatten().min();
+        if more {
+            // More pages wait for the next alarm, soon.
+            exec(
+                &sql,
+                "UPDATE storage_sweep SET cursor = ?, cycle_due_at = ?",
+                vec![
+                    cursor.as_deref().map_or(V::Null, V::from),
+                    cycle_due.map_or(V::Null, V::from),
+                ],
+            )?;
+            sweep_after(&sql, now)?;
+        } else {
+            exec(
+                &sql,
+                "UPDATE storage_sweep SET cursor = NULL, cycle_due_at = NULL",
+                vec![],
+            )?;
+            if let Some(due) = cycle_due {
+                sweep_after(&sql, due)?;
+            }
+        }
+        // An attempt that's begun may still leave bytes after this pass looked, so the sweep is never put off past when the newest
+        // attempt has settled. A pass made early, by a removal, can't lose that.
+        if let Some(settles) = last_attempt_settles(&sql)?.filter(|at| *at > now) {
+            sweep_after(&sql, settles)?;
         }
         console_log!(
             "{}",

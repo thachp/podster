@@ -375,7 +375,8 @@ describe("a room from before this", () => {
       // Removal's migration came after this one, so it's undone first.
       sql.exec("DROP TABLE storage_sweep");
       sql.exec("DROP INDEX stored_object_abandoned");
-      for (const column of ["removed_at", "removed_by", "removed_by_kind", "removed_from"]) sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
+      sql.exec("DROP INDEX stored_object_purge");
+      for (const column of ["removed_at", "removed_by", "removed_by_kind", "removed_from", "attempt_started_at", "purge_due_at"]) sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
       sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP INDEX stored_object_scanning");
       for (const column of ["scan_reason", "scan_sha256", "scan_database_json", "scanned_at"]) sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);

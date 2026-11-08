@@ -9,6 +9,7 @@ use podster_core::files::{
     check_upload, expire_scan, fits_room_quota, is_sha256, record_scan, scan_database_fits,
     FileRefusal, ObjectState, ScanOutcome, UploadRequest, SCAN_DEADLINE_MS,
 };
+use podster_core::removal::UNREFERENCED_BYTES_GRACE_MS;
 use podster_policy::files::authorize_input_upload;
 
 /// How long an upload may be started after it's created. Its reservation ends then too, whatever is under way. An attempt already
@@ -162,7 +163,12 @@ pub(super) fn drop_uploads_of(
         sql,
         "DELETE FROM stored_object WHERE uploaded_by = ? AND state = 'uploading'",
         vec![principal.into()],
-    )
+    )?;
+    // An attempt of theirs may still be writing, and its row is gone now, so the sweep looks again once that attempt has ended.
+    if !found.is_empty() {
+        removal::sweep_after(sql, now.saturating_add(UNREFERENCED_BYTES_GRACE_MS))?;
+    }
+    Ok(())
 }
 
 /// The uploader as they were when they asked, for what only the room can check again: whether they're still here and may
@@ -210,14 +216,11 @@ fn begin(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     let key = format!("rooms/{room}/objects/{id}/{attempt}");
     exec(
         sql,
-        "UPDATE stored_object SET attempt_id = ?, object_key = ? WHERE id = ?",
-        vec![attempt.as_str().into(), key.as_str().into(), id.into()],
+        "UPDATE stored_object SET attempt_id = ?, object_key = ?, attempt_started_at = ? WHERE id = ?",
+        vec![attempt.as_str().into(), key.as_str().into(), now.into(), id.into()],
     )?;
     // Every way bytes can be left with nothing referring to them starts with an attempt, so this is when to look again.
-    removal::sweep_after(
-        sql,
-        now.saturating_add(podster_core::removal::UNREFERENCED_BYTES_GRACE_MS),
-    )?;
+    removal::sweep_after(sql, now.saturating_add(UNREFERENCED_BYTES_GRACE_MS))?;
     Ok(json!({
         "key": key, "attempt": attempt, "size": row["size"], "sha256": row["sha256"],
         "agent": who.caller.kind == PrincipalKind::Agent, "uploader": identity.id, "gen": identity.gen,

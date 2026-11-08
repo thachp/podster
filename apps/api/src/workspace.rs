@@ -3148,7 +3148,7 @@ impl Workspace {
         {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
-        if let Some(next) = removal::next_due(&sql)? {
+        if let Some(next) = removal::next_due(&sql, now)? {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
         let Some(due) = due else {

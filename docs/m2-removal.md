@@ -38,7 +38,12 @@
 3. Set `state = 'removed'`, `removed_at`, `removed_by`, `removed_by_kind` and `removed_from` on `stored_object`. The name, size, hash, uploader and timestamps stay.
 4. Audit `object.removed`, record the event `object.removed` with IDs only, and store the idempotency record.
 
-The same transaction makes the storage sweep due at once, and the sweep deletes the bytes. Every delete from storage happens there, where a failure is simply tried again a minute later. The answer is the file's record with `state: removed`.
+The same transaction marks the file for a purge, and the alarm right after it lists only `rooms/{room}/objects/{file}/` and deletes everything there, every attempt included.
+- **Room size can't delay it:** it doesn't wait on the room-wide sweep, so even a room with thousands of keys gets its takedown at once.
+- **A failure is tried again a minute later.**
+- **A late attempt:** an attempt may still be writing when its file is removed, so the purge runs once more when the file's last attempt has settled, an hour after it began.
+
+The answer is the file's record with `state: removed`.
 
 **Related behavior:**
 - **Downloads** answer `file_removed` (410) from current state, using #123's check.
@@ -65,7 +70,11 @@ The same transaction makes the storage sweep due at once, and the sweep deletes 
 - after abandoned rows are cleared;
 - once, an hour after the schema migration runs, in a room that already holds files. This covers what staging already holds, and a new room starts with nothing due.
 
-If it keeps bytes that are too young, it runs again when the youngest one is an hour old. A room with nothing new never lists storage.
+If it keeps bytes that are too young, it runs again when the youngest one is an hour old. That's carried across the pages of a cycle, so a key on an early page isn't forgotten.
+
+After every pass, the next is due no later than an hour after the newest upload attempt began. A replaced attempt may still be writing, and a pass forced early can't lose that. A room with nothing new never lists storage.
+
+A row whose state can't be read keeps its key's bytes. Nothing overdue wakes the room sooner than a second from now, so a step that keeps failing can't spin the alarm.
 
 **Where unreferenced bytes come from:**
 - `upload_outcome_unknown`;

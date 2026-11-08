@@ -66,17 +66,20 @@ pub enum TokenChange {
 }
 
 /// Decides the version, secret and token after a set. `current` is the registered URL and the highest version ever used,
-/// with `None` as the URL after a delete or when none was ever set. `url` is the new, already checked URL.
+/// with `None` as the URL after a delete or when none was ever set. `url` is the new, already checked URL. `rotate_secret`
+/// asks for a new signing secret for the same URL, so a lost one needs no delete. It doesn't move the version, since the
+/// endpoint is the same one: attempts pinned to it carry on, signed with the new secret from then on.
 pub fn decide_set(
     current_url: Option<&str>,
     highest_version: u64,
     url: &str,
     token: TokenChange,
+    rotate_secret: bool,
 ) -> SetOutcome {
     if current_url == Some(url) {
         return SetOutcome {
             version: highest_version,
-            new_secret: false,
+            new_secret: rotate_secret,
             keep_token: token == TokenChange::Unchanged,
         };
     }
@@ -253,6 +256,7 @@ mod tests {
                 4,
                 "https://b.acme.dev/x",
                 token,
+                false,
             );
             assert_eq!(
                 set,
@@ -268,11 +272,24 @@ mod tests {
     #[test]
     fn setting_after_a_delete_or_for_the_first_time_moves_the_version() {
         assert_eq!(
-            decide_set(None, 0, "https://a.acme.dev/x", TokenChange::Unchanged).version,
+            decide_set(
+                None,
+                0,
+                "https://a.acme.dev/x",
+                TokenChange::Unchanged,
+                false
+            )
+            .version,
             1
         );
         // Deleted at version 4: the same URL again is a new registration, so version 4's attempts stay ended.
-        let again = decide_set(None, 4, "https://a.acme.dev/x", TokenChange::Unchanged);
+        let again = decide_set(
+            None,
+            4,
+            "https://a.acme.dev/x",
+            TokenChange::Unchanged,
+            false,
+        );
         assert_eq!(
             again,
             SetOutcome {
@@ -287,15 +304,39 @@ mod tests {
     fn the_same_url_keeps_the_version_and_secret_and_keeps_the_token_unless_told() {
         let url = "https://a.acme.dev/x";
         assert_eq!(
-            decide_set(Some(url), 4, url, TokenChange::Unchanged),
+            decide_set(Some(url), 4, url, TokenChange::Unchanged, false),
             SetOutcome {
                 version: 4,
                 new_secret: false,
                 keep_token: true
             }
         );
-        assert!(!decide_set(Some(url), 4, url, TokenChange::Clear).keep_token);
-        assert!(!decide_set(Some(url), 4, url, TokenChange::Replace).keep_token);
+        assert!(!decide_set(Some(url), 4, url, TokenChange::Clear, false).keep_token);
+        assert!(!decide_set(Some(url), 4, url, TokenChange::Replace, false).keep_token);
+    }
+
+    #[test]
+    fn rotating_the_secret_for_the_same_url_keeps_the_version_and_the_token() {
+        let url = "https://a.acme.dev/x";
+        assert_eq!(
+            decide_set(Some(url), 4, url, TokenChange::Unchanged, true),
+            SetOutcome {
+                version: 4,
+                new_secret: true,
+                keep_token: true
+            }
+        );
+        // With a new URL the secret is new anyway.
+        assert!(
+            decide_set(
+                Some(url),
+                4,
+                "https://b.acme.dev/x",
+                TokenChange::Unchanged,
+                true
+            )
+            .new_secret
+        );
     }
 
     #[test]

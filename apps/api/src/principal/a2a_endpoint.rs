@@ -9,7 +9,6 @@ use podster_egress::endpoint::{
     check_endpoint_url, decide_report, decide_set, open, parse_key, seal, valid_bearer_token,
     ReportOutcome, TokenChange, NONCE_BYTES,
 };
-use sha2::{Digest, Sha256};
 
 /// One endpoint per agent. A delete blanks the row rather than removing it, so `version` only ever goes up and an attempt
 /// pinned to an old registration never matches a new one.
@@ -62,17 +61,20 @@ pub(super) fn status_json(sql: &SqlStorage) -> R<Value> {
     })
 }
 
-/// A fresh 96-bit nonce from two random UUIDs, hashed, since the Worker's random source reaches Rust through `uuid` here.
-fn fresh_nonce() -> [u8; NONCE_BYTES] {
-    let mut hasher = Sha256::new();
-    hasher.update(uuid::Uuid::new_v4().as_bytes());
-    hasher.update(uuid::Uuid::new_v4().as_bytes());
-    let digest = hasher.finalize();
+/// A fresh 96-bit nonce from the Worker's own `crypto.getRandomValues`. If that isn't there, nothing is sealed.
+fn fresh_nonce() -> R<[u8; NONCE_BYTES]> {
+    use wasm_bindgen::JsCast;
+    let unavailable = |_| no_token_storage();
+    let crypto = js_sys::Reflect::get(&js_sys::global(), &"crypto".into()).map_err(unavailable)?;
+    let fill: js_sys::Function = js_sys::Reflect::get(&crypto, &"getRandomValues".into())
+        .map_err(unavailable)?
+        .dyn_into()
+        .map_err(unavailable)?;
+    let array = js_sys::Uint8Array::new_with_length(NONCE_BYTES as u32);
+    fill.call1(&crypto, &array).map_err(unavailable)?;
     let mut nonce = [0u8; NONCE_BYTES];
-    for (slot, byte) in nonce.iter_mut().zip(digest.iter()) {
-        *slot = *byte;
-    }
-    nonce
+    array.copy_to(&mut nonce);
+    Ok(nonce)
 }
 
 fn new_secret() -> String {
@@ -83,7 +85,8 @@ fn new_secret() -> String {
     )
 }
 
-/// `PUT`: `{ "url": "https://…", "token"?: "…" | null }`. A new URL, or one set after a delete, makes a new registration
+/// `PUT`: `{ "url": "https://…", "token"?: "…" | null, "rotate_secret"?: true }`. `rotate_secret` makes a new signing secret for
+/// the same URL, returned once, so a lost secret needs no delete. A new URL, or one set after a delete, makes a new registration
 /// version and signing secret, returned here once, and clears any token not given in the same request. The same URL keeps
 /// its version and secret, keeps the token unless it's replaced or cleared, and turns a switched-off endpoint back on.
 /// `key` is the sealing key, if the owner has set it: without it a token can't be stored, and the endpoint can still be set.
@@ -95,9 +98,17 @@ pub(super) fn set(
     now: i64,
 ) -> R<Value> {
     let object = body.as_object().ok_or_else(ApiError::invalid_argument)?;
-    if object.keys().any(|k| k != "url" && k != "token") {
+    if object
+        .keys()
+        .any(|k| !matches!(k.as_str(), "url" | "token" | "rotate_secret"))
+    {
         return Err(ApiError::invalid_argument());
     }
+    let rotate_secret = match body.get("rotate_secret") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(rotate)) => *rotate,
+        Some(_) => return Err(ApiError::invalid_argument()),
+    };
     let url = body["url"]
         .as_str()
         .ok_or_else(ApiError::invalid_argument)?;
@@ -120,7 +131,7 @@ pub(super) fn set(
         .and_then(|r| r["url"].as_str())
         .filter(|u| !u.is_empty());
     let highest = row.as_ref().map_or(0, |r| int(&r["version"]).max(0) as u64);
-    let outcome = decide_set(current_url, highest, &url, change);
+    let outcome = decide_set(current_url, highest, &url, change, rotate_secret);
     let secret = if outcome.new_secret {
         new_secret()
     } else {
@@ -130,7 +141,7 @@ pub(super) fn set(
     };
     let sealed = match (token, key) {
         (Some(token), Some(key)) => Some(
-            seal(key, &fresh_nonce(), agent, outcome.version, token)
+            seal(key, &fresh_nonce()?, agent, outcome.version, token)
                 .map_err(|_| no_token_storage())?,
         ),
         _ if outcome.keep_token => row.as_ref().and_then(|r| text(&r["token_sealed"])),
@@ -255,9 +266,13 @@ pub(super) fn report(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     Ok(json!({ "outcome": name }))
 }
 
-/// The sealing key from the Worker's environment, if the owner has set a valid one.
+/// The sealing key from the Worker's environment, if the owner has set a valid one. A value that's set but isn't 64 hex
+/// characters fails closed, as if unset, and logs one code with nothing of the value in it.
 pub(super) fn key(env: &Env) -> Option<Vec<u8>> {
-    env.secret(KEY_SECRET)
-        .ok()
-        .and_then(|secret| parse_key(&secret.to_string()))
+    let secret = env.secret(KEY_SECRET).ok()?.to_string();
+    let key = parse_key(&secret);
+    if key.is_none() {
+        console_error!("a2a.token_key_invalid");
+    }
+    key
 }

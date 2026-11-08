@@ -99,6 +99,18 @@ describe("setting an endpoint", () => {
     expect((await storedRow(agent)).signing_secret).toBe(first.body.signing_secret);
   });
 
+  it("makes a new secret for the same URL on rotate_secret, keeping the version and token", async () => {
+    const agent = await newAgent();
+    const first = await set(agent, { url: URL_A, token: TOKEN });
+    const rotated = await set(agent, { url: URL_A, rotate_secret: true });
+    expect(rotated.body).toMatchObject({ version: 1, has_token: true });
+    expect(rotated.body.signing_secret).toMatch(/^a2asec_/);
+    expect(rotated.body.signing_secret).not.toBe(first.body.signing_secret);
+    expect(await claim(agent)).toMatchObject({ version: 1, signing_secret: rotated.body.signing_secret, token: TOKEN });
+    expect((await set(agent, { url: URL_A, rotate_secret: false })).body).not.toHaveProperty("signing_secret");
+    expect((await set(agent, { url: URL_A, rotate_secret: "yes" })).code).toBe("invalid_argument");
+  });
+
   it("moves the version and makes a new secret for a new URL, or the same one after a delete", async () => {
     const agent = await newAgent();
     const first = await set(agent, { url: URL_A });

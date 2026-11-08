@@ -794,14 +794,17 @@ pub(super) fn read_card(sql: &SqlStorage, who: &Participant) -> R<Value> {
     // Every participant sees outputs' status (decision 54), and the counts name no task. Anyone who isn't a participant, if a
     // card ever reaches one, gets no counts.
     if podster_policy::outputs::sees_outputs(&who.caller) {
-        let counted = rows(
+        // The same rule as the outputs read, so the card and that list can't disagree. A room holds at most 50 outputs.
+        let has_version: Vec<bool> = rows(
             sql,
-            "SELECT count(*) AS total, COALESCE(SUM(CASE WHEN current_task_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS ready
-               FROM expected_output WHERE removed_at IS NULL",
+            "SELECT current_task_id IS NOT NULL AS has_version FROM expected_output WHERE removed_at IS NULL",
             vec![],
-        )?;
-        let count = |name: &str| counted.first().map_or(0, |row| int(&row[name]));
-        card["outputs"] = json!({ "ready": count("ready"), "total": count("total") });
+        )?
+        .iter()
+        .map(|row| int(&row["has_version"]) == 1)
+        .collect();
+        let (ready, total) = podster_core::expected_outputs::ready_count(&has_version);
+        card["outputs"] = json!({ "ready": ready, "total": total });
     }
     Ok(card)
 }

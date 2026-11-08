@@ -1,6 +1,6 @@
 # ADR 0006: Uploads and scanning
 
-**Status:** On 2026-11-06 the owner accepted the choices below, now [decisions 50 to 59](../spec/PRODUCT.md#decisions-needed). The scanner is conditional on a spike. The spike ran on staging on 2026-11-07, [its results are below](#spike-results), and the owner accepted that ClamAV passed, as [decision 81](../spec/PRODUCT.md#decisions-needed). The design that follows from the choices is **proposed** and isn't built. The rules people see are in the [upload policy](../spec/UPLOAD-POLICY.md), and the order of work is in the [M2 plan](../m2-plan.md).
+**Status:** On 2026-11-06 the owner accepted the choices below, now [decisions 50 to 59](../spec/PRODUCT.md#decisions-needed). The scanner is conditional on a spike. The spike ran on staging on 2026-11-07, [its results are below](#spike-results), and the owner accepted that ClamAV passed, as [decision 81](../spec/PRODUCT.md#decisions-needed). The design that follows from the choices is built and deployed to staging, and M2, which it serves, is met on staging with test people, as [decision 145](../spec/PRODUCT.md#decisions-needed), the lead's call for the owner to review. The rules people see are in the [upload policy](../spec/UPLOAD-POLICY.md), and the order of work is in the [M2 plan](../m2-plan.md).
 
 ## The owner's choices
 

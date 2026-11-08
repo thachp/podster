@@ -27,6 +27,9 @@ use crate::{require_text, Task, TaskStatus};
 
 /// The most expected outputs one room may define. A room's goal is a handful of results, and a card shows "n of m ready".
 pub const MAX_EXPECTED_OUTPUTS: usize = 50;
+/// The most outputs one room may ever define, removed ones included. A removed output keeps its row (decision 136), so
+/// without this, define and remove could grow the table without end. Not an owner ruling: a bound the lead asked for.
+pub const MAX_OUTPUTS_EVER_DEFINED: usize = 500;
 /// An output's title, the same as a work role's.
 pub const MAX_OUTPUT_TITLE_BYTES: usize = 200;
 /// An output's optional description, the same as a work role's responsibilities.
@@ -40,7 +43,7 @@ pub enum OutputRefusal {
     RoomArchived,
     /// A title or description is empty where it can't be, or too long. Carries the field's name.
     InvalidArgument(&'static str),
-    /// The room already has [`MAX_EXPECTED_OUTPUTS`].
+    /// The room already has [`MAX_EXPECTED_OUTPUTS`], or has ever defined [`MAX_OUTPUTS_EVER_DEFINED`].
     TooMany,
     /// No such output in this room, or it was removed.
     NotFound,
@@ -86,16 +89,18 @@ fn check_text(title: &str, description: Option<&str>) -> Result<(), OutputRefusa
     Ok(())
 }
 
-/// Whether a new output may be defined. `existing` is how many outputs the room has now.
+/// Whether a new output may be defined. `existing` is how many outputs the room has now, and `ever_defined` how many it has
+/// ever defined, removed ones included.
 pub fn decide_define(
     room_archived: bool,
     existing: usize,
+    ever_defined: usize,
     title: &str,
     description: Option<&str>,
 ) -> Result<(), OutputRefusal> {
     require_open_room(room_archived)?;
     check_text(title, description)?;
-    if existing >= MAX_EXPECTED_OUTPUTS {
+    if existing >= MAX_EXPECTED_OUTPUTS || ever_defined >= MAX_OUTPUTS_EVER_DEFINED {
         return Err(OutputRefusal::TooMany);
     }
     Ok(())

@@ -126,7 +126,7 @@ The owner accepted all six recommendations on 2026-11-07, as [decisions 135 to 1
 
 - **[135](spec/PRODUCT.md#decisions-needed):** a note-only approval doesn't make an output Ready.
 - **[136](spec/PRODUCT.md#decisions-needed):** removal keeps the row, and is refused once the output was Ready or while a live task names it.
-- **[137](spec/PRODUCT.md#decisions-needed):** a task's output can't change once it's submitted.
+- **[137](spec/PRODUCT.md#decisions-needed):** a task's output can change only while the task is open, offered or accepted, so not while it's submitted or once it's finished, and again after changes are requested.
 - **[138](spec/PRODUCT.md#decisions-needed):** a Ready output whose file is later blocked or removed stays Ready with `files_available` false, and step 9c's screen must say clearly that the file is unavailable.
 - **[139](spec/PRODUCT.md#decisions-needed):** `task.output_changed` goes to the task's parties. Defining, renaming and removing go to activity only.
 - **[140](spec/PRODUCT.md#decisions-needed):** 50 outputs per room, 200-byte titles and 4 KB descriptions.

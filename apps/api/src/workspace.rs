@@ -572,7 +572,7 @@ fn handle_create_task(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64)
     outputs::name_on_create(sql, &decision.task, body)?;
     record_decision(sql, &decision, decision.task.status, &caller.id, now)?;
     let mut created = task_json(&decision.task);
-    created["expected_output"] = outputs::of_task(sql, &decision.task.id)?;
+    created["expected_output"] = outputs::of_task(sql, &decision.task.id, false)?;
     Ok(created)
 }
 
@@ -2435,7 +2435,7 @@ mod queries {
             .collect();
         let files = super::submission_files::for_task(sql, who, &task, oversight)?;
         Ok(json!({
-            "task": task_json(&task), "expected_output": super::outputs::of_task(sql, &task.id)?, "submissions": submissions, "artifacts": artifacts, "files": files, "messages": messages, "history": history,
+            "task": task_json(&task), "expected_output": super::outputs::of_task(sql, &task.id, oversight)?, "submissions": submissions, "artifacts": artifacts, "files": files, "messages": messages, "history": history,
             // Says what's limited, so empty lists and null reasons aren't read as "none exist".
             "visible": { "submissions": if view.artifacts == ArtifactView::All { "all" } else { "own" }, "conversation": view.conversation },
         }))

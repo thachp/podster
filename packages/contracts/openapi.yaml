@@ -68,7 +68,7 @@ paths:
     post:
       operationId: defineOutput
       tags: [commands]
-      summary: "Define an expected output. Human owner or admin. At most 50 in a room, not counting removed ones, or 409 `too_many_outputs`. Recorded as `output.defined`, which goes to activity only, with the output's ID"
+      summary: "Define an expected output. Human owner or admin. At most 50 in a room, not counting removed ones, and at most 500 ever, counting them, or 409 `too_many_outputs`. Recorded as `output.defined`, which goes to activity only, with the output's ID"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/OutputText" } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }

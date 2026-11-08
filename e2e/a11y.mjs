@@ -9,10 +9,12 @@
 // A violation fails the run unless a11y-known.json lists it, with the file to fix. A listed one that's gone fails too, so
 // the list can't go stale. Results go to results/a11y-<time>.json.
 import AxeBuilder from "@axe-core/playwright";
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as playwright from "playwright";
+import { seedInputAssets } from "./asset-fixture.mjs";
 import { AuthAgent, key, ok, Person, Target } from "./lib.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -26,6 +28,33 @@ const TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"];
 const target = new Target(gatewayBase, { pollMs: 150 });
 
 const CANT_FORMAT = "This text can't be formatted";
+
+
+/**
+ * Screen 9c's second block: an output whose task's submission carries a file. Before the Workers restart, the agent uploads
+ * the file for its task, and it ends in `scanning`. After the runner marks it Ready, `approveThenRemove` submits it, approves
+ * it, which makes the output Ready, and removes the file, which leaves the output Ready with `files_available` false.
+ */
+async function uploadOutputFile({ gatewayBase, owner, agent, room }) {
+  const base = `/v1/workspaces/${room}`;
+  const output = await owner.must("POST", `${base}/outputs`, { title: "Signed contract", description: "Its approved file was removed after approval." });
+  const task = await owner.must("POST", `${base}/tasks`, { title: "Send the signed contract", instructions: "Ordinary", assignee: agent.id, expected_output_id: output.id });
+  const at = { workspace_id: room, task_id: task.id };
+  const taken = await agent.must("accept_task", { ...at, version: task.version });
+  const bytes = Buffer.from("Removed output file fixture\nPlain text for the accessibility run.\n");
+  const upload = await agent.must("create_upload", { ...at, name: "Signed contract.txt", size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") });
+  const sent = await fetch(`${gatewayBase}${upload.upload_path}`, { method: "PUT", headers: { authorization: `Bearer ${upload.token}` }, body: bytes });
+  const answer = await sent.json().catch(() => null);
+  ok(sent.ok && answer?.state === "scanning", `uploading the output's file answered ${sent.status} ${answer?.error?.code ?? answer?.state ?? ""}`);
+  return {
+    fileId: upload.id,
+    approveThenRemove: async () => {
+      const submitted = await agent.must("submit_task", { ...at, version: taken.version, note: "Signed", files: [{ id: upload.id }] });
+      await owner.must("POST", `${base}/tasks/${task.id}/verify`, { submission_no: submitted.submission_no });
+      await owner.must("POST", `${base}/files/${upload.id}/remove`);
+    },
+  };
+}
 
 /** Screen 9c's block: outputs Not started, In review and Ready, with a description that has markup in it, kept as text. */
 async function seedOutputs(owner, agent) {
@@ -267,6 +296,21 @@ async function seed() {
     planRevision = (await owner.must("PUT", `/v1/workspaces/${plannedRoom}/tasks/${step.id}/plan`, { plan_revision: planRevision, duration_days, predecessors })).plan_revision;
   }
   await owner.must("PUT", `/v1/workspaces/${plannedRoom}/plan/start`, { start_date: "2026-11-07", timezone: "America/New_York", plan_revision: planRevision });
+
+  // INPUT ASSET FIXTURE (screen 9a). Test-only, and last, because setting its scan states restarts the Workers. Why, in asset-fixture.mjs.
+  // Checked before uploading, so a run that can't set the states fails before it leaves files behind.
+  ok(canAskRunner(), RUN_THROUGH_RUNNER);
+  const inputAssets = await seedInputAssets({ gatewayBase, owner, room, task: reviewScreen.id });
+  await askRunner({ type: "set-file-states", changes: inputAssets.changes });
+  // END INPUT ASSET FIXTURE
+
+  // REMOVED OUTPUT FILE FIXTURE (screen 9c). After 9a's block, and through the same runner, for decision 138's note: a Ready
+  // output whose approved file was later removed. Only the scan verdict is written by hand, as 9a's are. The submission, the
+  // approval and the removal go through the real routes.
+  const removedFile = await uploadOutputFile({ gatewayBase, owner, agent: lead, room: outputs.room });
+  await askRunner({ type: "set-file-states", changes: [{ id: removedFile.fileId, state: "ready" }] });
+  await removedFile.approveThenRemove();
+  // END REMOVED OUTPUT FILE FIXTURE
   return { outputs, done, plannedRoom, viewer, narrowed, otherWorker, limitedRoom, secretTask, viewerTask, SECRET, teamOrgId: teamOrg, longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
@@ -289,6 +333,9 @@ const screens = (s) => {
     ["Organization, team", "/settings/organization", "Ada team", "owner", false, s.teamOrg],
     ["Organization, a workroom to recover", "/settings/organization", "Room to recover", "owner", false, s.teamOrg],
     ["Overview", `${w}/overview`, "Billing v2"],
+    // From the input asset fixture: a row in each scan state, and the attach picker.
+    ["Overview, input assets", `${w}/overview`, "Scan failed"],
+    ["Task Sheet, attached files", `${w}/tasks?task=${s.reviewScreen.id}`, "No known malware found.", "owner", true],
     ["Tasks", `${w}/tasks`, "An open task"],
     ["Tasks, empty", `/w/${s.emptyRoom}/tasks`, "Tasks"],
     ["Task Sheet, review", `${w}/tasks?task=${s.reviewScreen.id}`, "Approve submission", "owner", true],
@@ -312,7 +359,7 @@ const screens = (s) => {
     ["Collaboration", `${w}/collaboration`, "Who has worked with whom"],
     ["Collaboration, map", `${w}/collaboration?view=map`, "Each number counts"],
     ["Artifacts", `${w}/artifacts`, "Artifacts"],
-    ["Artifacts, outputs in each state", `/w/${s.outputs.room}/artifacts`, "1 of 3 outputs ready"],
+    ["Artifacts, outputs in each state", `/w/${s.outputs.room}/artifacts`, "has since been blocked or removed"],
     ["Task Sheet over Artifacts", `/w/${s.outputs.room}/artifacts?task=${s.outputs.readyTask}`, "Expected output", "owner", true],
     ["Claim", `/claim?agent_id=${s.pending.pluginId}&code=${s.pending.userCode}`, "Confirm ownership"],
     ["MCP consent", `/oauth/consent?${s.consent}`, "Connect an agent to Podster"],
@@ -405,6 +452,24 @@ console.log(`browser: ${browserName} ${browser.version()}`);
 const newContext = () => browser.newContext({ reducedMotion: "reduce", viewport: { width: 1280, height: 900 } });
 const signedOut = await newContext();
 const contexts = new Map();
+
+const RUN_THROUGH_RUNNER = "Run this through run-a11y.mjs, which can restart the Workers.";
+const canAskRunner = () => typeof process.send === "function";
+
+/** Asks run-a11y.mjs to do what only it can, with the Workers stopped, and waits for it to say it's done. */
+function askRunner(request) {
+  ok(canAskRunner(), RUN_THROUGH_RUNNER);
+  return new Promise((done, fail) => {
+    const answer = (message) => {
+      if (message?.type !== `${request.type}:done`) return;
+      process.off("message", answer);
+      if (message.error) fail(new Error(message.error));
+      else done();
+    };
+    process.on("message", answer);
+    process.send(request);
+  });
+}
 
 /** Sign-up belongs to the application host once `APP_URL` is set, so it runs in the browser there. The session works on both hosts. */
 async function signUp(label) {

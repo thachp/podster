@@ -8,6 +8,9 @@ Step 7 of the [M2 plan](m2-plan.md). A task may name one expected output, and ap
 
 - `GET /outputs` doesn't list each output's naming tasks or the current version's artifacts. Step 9c reads those through `get_task`, which already applies `task_view` and the file views, including oversight's.
 - There's no oversight route for outputs.
+- Each listed output also has `in_review`, true while any task naming it is submitted, so a Ready output can show a newer version waiting. It names no task.
+- `PUT /tasks/:id/expected-output` runs on `command_checked`, so a replay re-checks `authorize_output_link` against current state.
+- Through oversight, `get_task`'s `expected_output` has its ID and `removed`, never its title.
 - `GET /outputs/:id/versions` (`list_output_versions`) reads `expected_output_version`, newest first, for step 9c's version history. Each version has its submission number and time, and its source task and approver (`approved_by`, recorded at approval) only for someone who can see that task. Nothing about files: those come through `get_task`.
 - `PUT /outputs/:id` replaces the title and description. Leaving the description out clears it, and the same text again records nothing. Define and rename refuse unknown keys.
 

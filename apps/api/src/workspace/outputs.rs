@@ -221,6 +221,14 @@ pub(super) fn name_on_create(sql: &SqlStorage, task: &Task, body: &Value) -> R<(
     }
 }
 
+/// Who may change which output a task names, against current state. `command_checked` also runs it before replaying a stored
+/// answer, so a retry from someone who has since lost the task gets `task_not_found`, not the task as it was.
+pub(super) fn authorize_link(sql: &SqlStorage, caller: &Caller, task_id: &str) -> R<Task> {
+    let task = load_task(sql, task_id)?.ok_or_else(ApiError::task_not_found)?;
+    ApiError::from_verdict(authorize_output_link(caller, &task))?;
+    Ok(task)
+}
+
 /// `PUT /tasks/:id/expected-output` with `{ "version": n, "output_id": "out_…" | null }`. `version` is the task version the
 /// caller last read, as `update_task` takes it. Whether the version moves is core's `LinkChange::next_version`: a real change
 /// does, so an assignee acting on what they read before it gets `version_conflict` and rereads which output they're working
@@ -233,9 +241,8 @@ pub(super) fn handle_set_task_output(
     now: i64,
 ) -> R<Value> {
     let caller = &who.caller;
-    let task = load_task(sql, task_id)?.ok_or_else(ApiError::task_not_found)?;
     // Authority first, so a malformed body can't tell someone a hidden task exists.
-    ApiError::from_verdict(authorize_output_link(caller, &task))?;
+    let task = authorize_link(sql, caller, task_id)?;
     only_keys(body, &["version", "output_id"])?;
     if body.get("output_id").is_none() {
         return Err(ApiError::invalid_argument());
@@ -403,7 +410,8 @@ pub(super) fn read(sql: &SqlStorage, who: &Participant) -> R<Value> {
     for row in &outputs {
         let id = row["id"].as_str().unwrap_or_default();
         let current_task = row["current_task_id"].as_str();
-        let naming = if in_review.iter().any(|o| o == id) {
+        let reviewing = in_review.iter().any(|o| o == id);
+        let naming = if reviewing {
             vec![TaskStatus::Submitted]
         } else {
             vec![]
@@ -412,6 +420,9 @@ pub(super) fn read(sql: &SqlStorage, who: &Participant) -> R<Value> {
         ready.push(current_task.is_some());
         let mut out = output_json(row);
         out["status"] = json!(status.name());
+        // A Ready output can have a newer submission waiting for review. Like the status, it comes from every task naming the
+        // output, which decision 54 lets every participant see, and it names none of them.
+        out["in_review"] = json!(reviewing);
         out["current"] = Value::Null;
         if let Some(task) = current_task
             .map(|t| load_task(sql, t))
@@ -446,7 +457,8 @@ pub(super) fn read(sql: &SqlStorage, who: &Participant) -> R<Value> {
 /// The most versions one read returns, newest first. `complete` says whether there were more.
 const VERSIONS_LISTED: i64 = 200;
 
-/// `GET /outputs/:id/versions`: every approval that made this output Ready, newest first, for every participant. Each is gated
+/// `GET /outputs/:id/versions`: every approval that made this output Ready, newest first by the order they were recorded, so
+/// two in the same millisecond still come out in order, for every participant. Each is gated
 /// like `current`: the source task and the reviewer who approved only for someone who can see that task, and otherwise only its
 /// submission number and time, as the output's status already tells everyone it was approved. Nothing here is about files:
 /// the submission's links and files are read through `get_task`, under `task_view` and the file views.
@@ -459,7 +471,7 @@ pub(super) fn read_versions(sql: &SqlStorage, who: &Participant, id: &str) -> R<
     let found = rows(
         sql,
         "SELECT task_id, submission_no, approved_at, approved_by FROM expected_output_version INDEXED BY expected_output_history
-            WHERE output_id = ? ORDER BY approved_at DESC, task_id DESC, submission_no DESC LIMIT ?",
+            WHERE output_id = ? ORDER BY seq DESC LIMIT ?",
         vec![id.into(), (VERSIONS_LISTED + 1).into()],
     )?;
     let complete = found.len() as i64 <= VERSIONS_LISTED;

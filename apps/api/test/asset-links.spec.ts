@@ -120,6 +120,21 @@ describe("linking an input asset to a task", () => {
     expect(await listed(GUEST, id)).toEqual([]);
   });
 
+  it("stops downloading for its assignee with file_removed once removed, keeping the link as a record", async () => {
+    const id = await room();
+    const object = await file(id);
+    const t = await task(id);
+    expect((await link(OWNER, id, object, t)).status).toBe(200);
+    expect((await download(GUEST, id, object)).status).toBe(200);
+    const removed = await api(OWNER, "POST", `/v1/workspaces/${id}/files/${object}/remove`);
+    expect(removed.status, JSON.stringify(removed.body)).toBe(200);
+    expect(await refusal(await download(GUEST, id, object))).toEqual({ status: 410, code: "file_removed" });
+    expect((await read(GUEST, id, object)).body).toMatchObject({ state: "removed", download_path: null, linked_tasks: [t] });
+    // Linking it anywhere again is refused as removed.
+    const other = await task(id);
+    expect((await link(OWNER, id, object, other)).code).toBe("file_removed");
+  });
+
   it("is for whoever may upload input assets, and refuses everyone else as uploading does", async () => {
     const id = await room();
     const object = await file(id);

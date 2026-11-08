@@ -14,6 +14,8 @@ const MEMBER: Who = { id: "agt_op_member", org: "org_op" };
 const GUEST: Who = { id: "agt_op_guest", org: "org_op_guest" };
 /** A guest who isn't on the task, so it can't see it. */
 const OTHER_GUEST: Who = { id: "agt_op_other", org: "org_op" };
+/** A registered agent that isn't in the room. */
+const OUTSIDER: Who = { id: "agt_op_outsider", org: "org_op_x" };
 /** A guest on no task here. */
 const LIMITED: Who = { id: "agt_op_limited", org: "org_op" };
 /** An agent stored as an admin, which counts as a guest. */
@@ -41,7 +43,7 @@ async function api(who: Who, method: string, path: string, body?: unknown, opts:
 beforeAll(async () => {
   key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
   for (const statement of BINDINGS.TEST_D1_SCHEMA.split(";").map((x: string) => x.trim()).filter(Boolean)) await BINDINGS.DB.prepare(statement).run();
-  for (const who of [MEMBER, GUEST, OTHER_GUEST, AGENT_ADMIN, LIMITED]) {
+  for (const who of [MEMBER, GUEST, OTHER_GUEST, AGENT_ADMIN, LIMITED, OUTSIDER]) {
     const res = await SELF.fetch(`https://api.internal/v1/agents/${who.id}`, { method: "PUT", headers: { "x-podster-assertion": await assertion(orgAdmin(who.org)) }, body: JSON.stringify({ org_id: who.org, name: who.id }) });
     if (res.status !== 200) throw new Error(`register ${who.id}: ${res.status}`);
   }
@@ -121,14 +123,12 @@ describe("defining expected outputs", () => {
       const body = await list(who, id);
       expect(body.total, who.id).toBe(2);
       expect(body.ready, who.id).toBe(0);
-      expect(body.outputs[0], who.id).toMatchObject({ id: output, title: "Final report", description: "A PDF for the board", status: "not_started", current: null });
+      expect(body.outputs[0], who.id).toMatchObject({ id: output, title: "Final report", description: "A PDF for the board", status: "not_started", in_review: false, current: null });
     }
     // Someone outside the room learns nothing.
-    const outsider: Who = { id: "agt_op_outsider", org: "org_x" };
-    const refused = await api(outsider, "GET", `/v1/workspaces/${id}/outputs`);
-    expect(refused.status).not.toBe(200);
+    const refused = await api(OUTSIDER, "GET", `/v1/workspaces/${id}/outputs`);
+    expect(refused.code).toBe("workspace_not_found");
     expect(refused.body.outputs).toBeUndefined();
-    expect(refused.code).toBe((await api(outsider, "GET", `/v1/workspaces/${id}/roles`)).code);
   });
 
   it("checks titles and descriptions in bytes, and replaces them on rename", async () => {
@@ -324,8 +324,12 @@ describe("approval and status", () => {
     expect((await approve(first.taskPath)).status).toBe(200);
     const followUp = await acceptedTask(id, output);
     expect((await submit(followUp.taskPath, { artifacts: LINK })).status).toBe(200);
-    // A follow-up in review doesn't take Ready away.
-    expect((await listed(OWNER, id, output)).status).toBe("ready");
+    // A follow-up in review doesn't take Ready away, and `in_review` says a newer version waits, to everyone, naming no task.
+    for (const who of [OWNER, LIMITED]) {
+      const seen = await listed(who, id, output);
+      expect([seen.status, seen.in_review], who.id).toEqual(["ready", true]);
+      expect(JSON.stringify(seen), who.id).not.toContain(followUp.task);
+    }
     expect((await approve(followUp.taskPath)).status).toBe(200);
     expect((await listed(OWNER, id, output)).current.task_id).toBe(followUp.task);
     const versions = await inRoom(id, (sql) => sql.exec("SELECT task_id FROM expected_output_version WHERE output_id = ? ORDER BY approved_at, task_id", output).toArray());
@@ -373,6 +377,57 @@ describe("approval and status", () => {
     const seen = await listed(MEMBER, id, output);
     expect(seen.current).toMatchObject({ task_id: task, submission_no: 1 });
     expect(seen.current).not.toHaveProperty("files_available");
+  });
+});
+
+describe("removing a file through the room's removal route", () => {
+  const removeFile = (who: Who, id: string, object: string) => api(who, "POST", `/v1/workspaces/${id}/files/${object}/remove`);
+
+  it("leaves an approved output Ready, with files_available false", async () => {
+    const id = await room();
+    const output = await define(id);
+    const { task, taskPath } = await acceptedTask(id, output);
+    const file = await upload(id, task);
+    expect((await submit(taskPath, { files: [{ id: file }] })).status).toBe(200);
+    expect((await approve(taskPath)).status).toBe(200);
+    expect((await listed(OWNER, id, output)).current.files_available).toBe(true);
+    const removed = await removeFile(OWNER, id, file);
+    expect(removed.status, JSON.stringify(removed.body)).toBe(200);
+    expect(await listed(OWNER, id, output)).toMatchObject({ status: "ready", current: { task_id: task, submission_no: 1, files_available: false } });
+    expect((await list(OWNER, id)).ready).toBe(1);
+  });
+
+  it("refuses an approval after a file was removed, with file_removed, and records no version", async () => {
+    const id = await room();
+    const output = await define(id);
+    const { task, taskPath } = await acceptedTask(id, output);
+    const file = await upload(id, task);
+    expect((await submit(taskPath, { files: [{ id: file }] })).status).toBe(200);
+    expect((await removeFile(OWNER, id, file)).status).toBe(200);
+    const refused = await approve(taskPath);
+    expect([refused.status, refused.code]).toEqual([409, "file_removed"]);
+    expect(await listed(OWNER, id, output)).toMatchObject({ status: "in_review", in_review: true, current: null });
+    expect(await inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM expected_output_version").toArray()[0].n)).toBe(0);
+  });
+});
+
+describe("replaying a change to a task's output", () => {
+  it("re-checks authority, so someone who lost the task gets no stored answer", async () => {
+    const id = await room();
+    const output = await define(id);
+    const own = await api(MEMBER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Mine", instructions: "Do it." });
+    const path = `/v1/workspaces/${id}/tasks/${own.body.id}`;
+    const body = { version: own.body.version, output_id: output };
+    expect((await api(MEMBER, "PUT", `${path}/expected-output`, body, { key: "op-replay-link" })).status).toBe(200);
+    // An admin takes the task over, so MEMBER is no longer its requester.
+    const moved = await api(ADMIN, "POST", `${path}/set-requester`, { version: await taskVersion(path), requester: ADMIN.id });
+    expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+    const replayed = await api(MEMBER, "PUT", `${path}/expected-output`, body, { key: "op-replay-link" });
+    expect([replayed.status, replayed.code]).toEqual([403, "not_allowed"]);
+    // The requester's own retry still gets its stored answer.
+    const again = await api(ADMIN, "PUT", `${path}/expected-output`, { version: await taskVersion(path), output_id: null }, { key: "op-admin-clear" });
+    expect(again.status).toBe(200);
+    expect((await api(ADMIN, "PUT", `${path}/expected-output`, { version: again.body.version - 1, output_id: null }, { key: "op-admin-clear" })).status).toBe(200);
   });
 });
 
@@ -468,8 +523,45 @@ describe("an output's version history", () => {
     expect((await versions(GUEST, id, output))).toEqual([]);
     expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/outputs/${output}`)).status).toBe(200);
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}/outputs/${output}/versions`)).code).toBe("output_not_found");
-    const outsider = await api({ id: "agt_op_outsider", org: "org_x" }, "GET", `/v1/workspaces/${id}/outputs/${output}/versions`);
-    expect(outsider.status).not.toBe(200);
-    expect(outsider.body.versions).toBeUndefined();
+  });
+
+  it("tells an outsider and a stored participant with no role that the room doesn't exist", async () => {
+    const id = await room();
+    const output = await define(id);
+    const outsider = await api(OUTSIDER, "GET", `/v1/workspaces/${id}/outputs/${output}/versions`);
+    expect([outsider.code, outsider.body.versions]).toEqual(["workspace_not_found", undefined]);
+    // A member row whose role isn't one the room knows reads as Role::None, which sees no outputs.
+    await inRoom(id, (sql) => sql.exec("UPDATE member SET role = 'none' WHERE principal_id = ?", LIMITED.id));
+    for (const path of [`/v1/workspaces/${id}/outputs`, `/v1/workspaces/${id}/outputs/${output}/versions`]) {
+      const refused = await api(LIMITED, "GET", path);
+      expect([refused.code, refused.body.outputs, refused.body.versions], path).toEqual(["workspace_not_found", undefined, undefined]);
+    }
+  });
+
+  it("orders versions by when they were recorded, even within one millisecond", async () => {
+    const id = await room();
+    const output = await define(id);
+    // Recorded second, with a lower submission number and the same time, so only the record order puts it first.
+    await inRoom(id, (sql) => {
+      sql.exec("INSERT INTO expected_output_version (output_id, task_id, submission_no, approved_at, approved_by) VALUES (?, 'tsk_gone', 2, 1000, ?)", output, OWNER.id);
+      sql.exec("INSERT INTO expected_output_version (output_id, task_id, submission_no, approved_at, approved_by) VALUES (?, 'tsk_gone', 1, 1000, ?)", output, OWNER.id);
+    });
+    expect((await versions(OWNER, id, output)).map((v) => v.submission_no)).toEqual([1, 2]);
+  });
+
+  it("returns at most 200, newest first, and says when there were more", async () => {
+    const id = await room();
+    const output = await define(id);
+    await inRoom(id, (sql) => {
+      for (let n = 1; n <= 201; n++) sql.exec("INSERT INTO expected_output_version (output_id, task_id, submission_no, approved_at, approved_by) VALUES (?, 'tsk_gone', ?, ?, ?)", output, n, 1000 + n, OWNER.id);
+    });
+    const r = await api(OWNER, "GET", `/v1/workspaces/${id}/outputs/${output}/versions`);
+    expect(r.status).toBe(200);
+    expect(r.body.complete).toBe(false);
+    expect(r.body.versions).toHaveLength(200);
+    expect(r.body.versions[0].submission_no).toBe(201);
+    expect(r.body.versions[199].submission_no).toBe(2);
+    // A version whose task no longer exists names nothing.
+    expect(Object.keys(r.body.versions[0]).sort()).toEqual(["approved_at", "submission_no"]);
   });
 });

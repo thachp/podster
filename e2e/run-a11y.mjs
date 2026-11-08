@@ -5,6 +5,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseJsonc } from "./jsonc.mjs";
+import { writeFileStates } from "./asset-fixture.mjs";
 import { freePort, local, prepareStack, repo, run, startGateway, startWrangler } from "./stack.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -40,16 +41,10 @@ writeFileSync(
 );
 // Workers in separate processes find each other through a registry, and another run's must not answer for these.
 const registry = { WRANGLER_REGISTRY_PATH: join(local, "registry") };
-const backend = startGateway({
-  gateway,
-  apiConfig,
-  persist,
-  gatewayConfig,
-  port: gatewayPort,
-  inspectorPort: await freePort(),
-  env: registry,
-  vars: { AUTH_SECRET: randomBytes(32).toString("base64"), ASSERTION_SIGNING_JWK: JSON.stringify({ ...privateKey.export({ format: "jwk" }), kid }), BASE_URL: gatewayBase, APP_URL: app, ENABLE_PASSWORD_SIGNIN: "true", STRICT_PER_MINUTE: "100000" },
-});
+// Made once, so the Workers come back with the same secrets, and everyone stays signed in, when the input asset fixture restarts them.
+const backendVars = { AUTH_SECRET: randomBytes(32).toString("base64"), ASSERTION_SIGNING_JWK: JSON.stringify({ ...privateKey.export({ format: "jwk" }), kid }), BASE_URL: gatewayBase, APP_URL: app, ENABLE_PASSWORD_SIGNIN: "true", STRICT_PER_MINUTE: "100000" };
+const startBackend = async () => startGateway({ gateway, apiConfig, persist, gatewayConfig, port: gatewayPort, inspectorPort: await freePort(), env: registry, vars: backendVars });
+let backend = await startBackend();
 const dashboard = startWrangler({
   cwd: web,
   command: join(web, "node_modules/.bin/wrangler"),
@@ -78,8 +73,29 @@ try {
   await waitForStack();
   console.log(`dashboard is up at ${app}\n`);
   code = await new Promise((done) => {
-    const proc = spawn(process.execPath, [join(here, "a11y.mjs")], { cwd: here, stdio: "inherit", env: { ...process.env, ...(browserName ? { PODSTER_A11Y_BROWSER: browserName } : {}), PODSTER_A11Y_APP: app, PODSTER_A11Y_GATEWAY: gatewayBase } });
+    const proc = spawn(process.execPath, [join(here, "a11y.mjs")], { cwd: here, stdio: ["inherit", "inherit", "inherit", "ipc"], env: { ...process.env, ...(browserName ? { PODSTER_A11Y_BROWSER: browserName } : {}), PODSTER_A11Y_APP: app, PODSTER_A11Y_GATEWAY: gatewayBase } });
     proc.on("exit", (status) => done(status ?? 1));
+    // INPUT ASSET FIXTURE (screen 9a). Test-only: scan states can't arrive through a scanner here, so they're written with the
+    // Workers stopped, then the Workers start again. Why, in asset-fixture.mjs.
+    proc.on("message", async (message) => {
+      if (message?.type !== "set-file-states") return;
+      try {
+        const stopped = new Promise((ended) => (backend.stack.exitCode !== null ? ended() : backend.stack.once("exit", ended)));
+        backend.stop();
+        await stopped;
+        // The runtime under wrangler goes a moment later, and it holds the files and the port until it does.
+        const answers = () => fetch(gatewayBase, { signal: AbortSignal.timeout(1_000) }).then(() => true, () => false);
+        for (let tries = 0; tries < 100 && (await answers()); tries++) await new Promise((wait) => setTimeout(wait, 200));
+        // Writing under a live runtime could corrupt the room or be overwritten, so a gateway that still answers stops the run.
+        if (await answers()) throw new Error("the Workers still answer after being stopped, so the file states weren't written");
+        await writeFileStates(persist, message.changes);
+        backend = await startBackend();
+        await waitForStack();
+        proc.send({ type: "set-file-states:done" });
+      } catch (error) {
+        proc.send({ type: "set-file-states:done", error: String(error?.message ?? error) });
+      }
+    });
   });
   if (code !== 0) console.error(`\n--- end of the Workers' logs ---\n${backend.log.join("").slice(-2000)}\n${dashboard.log.join("").slice(-2000)}`);
 } catch (error) {

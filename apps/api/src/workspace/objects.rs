@@ -25,11 +25,11 @@ fn token_hash(token: &str) -> String {
 }
 
 /// Every file kept, and every upload whose reservation hasn't ended, leaving out `except`. One that expired reserves nothing, even
-/// before it's cleared away.
+/// before it's cleared away, and a removed file holds nothing. This is `podster_core::removal::holds_space` in SQL.
 pub(super) fn room_used(sql: &SqlStorage, now: i64, except: &str) -> R<u64> {
     let found = rows(
         sql,
-        "SELECT COALESCE(SUM(size), 0) AS used FROM stored_object WHERE (state <> 'uploading' OR upload_expires_at > ?) AND id <> ?",
+        "SELECT COALESCE(SUM(size), 0) AS used FROM stored_object WHERE ((state <> 'uploading' AND state <> 'removed') OR (state = 'uploading' AND upload_expires_at > ?)) AND id <> ?",
         vec![now.into(), except.into()],
     )?;
     Ok(found.first().map_or(0, |row| int(&row["used"])).max(0) as u64)
@@ -185,7 +185,9 @@ fn drop_upload(sql: &SqlStorage, actor: &str, actor_kind: &str, id: &str, now: i
         sql,
         "DELETE FROM stored_object WHERE id = ? AND state = 'uploading'",
         vec![id.into()],
-    )
+    )?;
+    // An attempt may still be writing, and its row is gone, so the sweep looks again once that attempt can't be.
+    removal::row_dropped(sql, now)
 }
 
 /// Drops what someone was still uploading when they went, in the transaction that ends their place here, so their token dies with
@@ -219,7 +221,12 @@ pub(super) fn drop_uploads_of(
         sql,
         "DELETE FROM stored_object WHERE uploaded_by = ? AND state = 'uploading'",
         vec![principal.into()],
-    )
+    )?;
+    // An attempt of theirs may still be writing, and its row is gone now, so the sweep looks again once that attempt has ended.
+    if !found.is_empty() {
+        removal::row_dropped(sql, now)?;
+    }
+    Ok(())
 }
 
 /// The uploader as they were when they asked, for what only the room can check again: whether they're still here and may
@@ -267,9 +274,11 @@ fn begin(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     let key = format!("rooms/{room}/objects/{id}/{attempt}");
     exec(
         sql,
-        "UPDATE stored_object SET attempt_id = ?, object_key = ? WHERE id = ?",
-        vec![attempt.as_str().into(), key.as_str().into(), id.into()],
+        "UPDATE stored_object SET attempt_id = ?, object_key = ?, attempt_started_at = ? WHERE id = ?",
+        vec![attempt.as_str().into(), key.as_str().into(), now.into(), id.into()],
     )?;
+    // Every way bytes can be left with nothing referring to them starts with an attempt, so this is when to look again.
+    removal::attempt_began(sql, now)?;
     Ok(json!({
         "key": key, "attempt": attempt, "size": row["size"], "sha256": row["sha256"],
         "agent": who.caller.kind == PrincipalKind::Agent, "uploader": identity.id, "gen": identity.gen,

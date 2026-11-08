@@ -12,6 +12,7 @@ use futures_util::StreamExt;
 use podster_core::files::{
     complete_upload, Arrival, FileEnds, FileRefusal, FileSample, ObjectState,
 };
+use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
@@ -228,6 +229,17 @@ async fn ask_room(env: &Env, room: &str, path: &str, body: &Value) -> R<Response
     .await
 }
 
+/// What the scanner is asked to look at, with no name or claimed type. A struct, because a `serde_json::Value` reaches the queue as `{}`.
+#[derive(Serialize)]
+struct ScanJob<'a> {
+    v: u8,
+    workspace_id: &'a str,
+    object_id: &'a str,
+    key: &'a str,
+    size: u64,
+    sha256: &'a str,
+}
+
 /// What only the uploader's Principal knows, read fresh. An agent's connection may have ended, and a person may have left the
 /// organization they uploaded through, since the token was issued. Rooms hear of both later.
 async fn uploader_still_here(env: &Env, begun: &Value) -> R<()> {
@@ -243,6 +255,38 @@ async fn uploader_still_here(env: &Env, begun: &Value) -> R<()> {
         )
         .await
     }
+}
+
+/// A scanner's verdict. Only the secret lets anything through, and everything without it gets the same answer as a route that doesn't
+/// exist, including when no secret is set, so a forged clean report has nowhere to go. The verdict's own words decide nothing here.
+pub async fn scan_result(mut req: Request, env: Env) -> R<Response> {
+    // A header can't carry a value with whitespace at either end, so such a secret could never match. It counts as unset.
+    let expected = env
+        .secret("SCANNER_SECRET")
+        .map(|secret| secret.to_string())
+        .ok()
+        .filter(|secret| podster_core::files::scanner_secret_usable(secret));
+    let Some(expected) = expected else {
+        console_error!("{}", json!({ "at": "scan.secret_unset" }));
+        return Err(ApiError::not_found());
+    };
+    let given = req
+        .headers()
+        .get("x-podster-scanner")?
+        .ok_or_else(ApiError::not_found)?;
+    // Compared as hashes, so a comparison that stops early says nothing about the secret.
+    if Sha256::digest(given.as_bytes()) != Sha256::digest(expected.as_bytes()) {
+        return Err(ApiError::not_found());
+    }
+    let body: Value =
+        serde_json::from_str(&req.text().await?).map_err(|_| ApiError::invalid_argument())?;
+    let room = body["workspace_id"]
+        .as_str()
+        .filter(|room| crate::valid_id(room))
+        .ok_or_else(ApiError::not_found)?;
+    within_room_limit(ask_room(&env, room, crate::INTERNAL_SCAN_RESULT, &body))
+        .await
+        .ok_or(ApiError::api(504, "room_unavailable"))?
 }
 
 /// Takes the bytes of one upload. Only the room's answer decides whether they stay.
@@ -385,6 +429,28 @@ pub async fn stream_upload(mut req: Request, env: Env, room: &str, id: &str) -> 
         return Ok(answer);
     }
     log("upload.stored", "ok");
+    // A file that never gets here ends as `failed` when the room's hour runs out, so a failed send can't let anything through, and
+    // the file has arrived either way.
+    let job = ScanJob {
+        v: 1,
+        workspace_id: room,
+        object_id: id,
+        key: &key,
+        size: seen.bytes,
+        sha256: &received_sha256,
+    };
+    let queued = match env.queue("SCAN") {
+        Ok(queue) => within_room_limit(queue.send(&job))
+            .await
+            .map(|sent| sent.is_ok()),
+        Err(_) => Some(false),
+    };
+    if queued != Some(true) {
+        console_error!(
+            "{}",
+            json!({ "at": "upload.scan_not_queued", "room": room, "object": id })
+        );
+    }
     let body: Value = answer.json().await?;
     Ok(Response::from_json(&body)?)
 }

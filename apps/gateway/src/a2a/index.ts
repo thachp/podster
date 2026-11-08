@@ -2,7 +2,9 @@ import { A2A_VERSION_HEADER } from "@a2a-js/sdk";
 import { defaultServerCallContextBuilder, JsonRpcTransportHandler, validateVersion, type User } from "@a2a-js/sdk/server";
 import { toJsonRpcError, UnsupportedOperationError, VersionNotSupportedError } from "@a2a-js/sdk/errors";
 import { agentCard } from "./card";
-import { PodsterA2AHandler } from "./handler";
+import { Task } from "@a2a-js/sdk";
+import { guarded, PodsterA2AHandler } from "./handler";
+import { activated, isLifecycleMethod, LIFECYCLE_URI, runLifecycle } from "./lifecycle";
 import { INCOMPLETE_HEADER, type ApiReads, type ReadNotes } from "./reads";
 import { A2A_BINDING, A2A_METHODS, A2A_PATH, A2A_VERSION, CARD_PATH, MAX_A2A_BODY_BYTES } from "./profile";
 
@@ -18,6 +20,7 @@ import { A2A_BINDING, A2A_METHODS, A2A_PATH, A2A_VERSION, CARD_PATH, MAX_A2A_BOD
  * 5. `answerA2a`: parsing, streaming refused, and the handler.
  */
 
+const A2A_EXTENSIONS_HEADER = "A2A-Extensions";
 const STREAMING = new Set(["SendStreamingMessage", "SubscribeToTask"]);
 const VERSION_HEADERS = { [A2A_VERSION_HEADER]: A2A_VERSION };
 
@@ -93,8 +96,25 @@ export async function checkA2aRequest(request: Request, baseUrl: string): Promis
  * After authentication: one JSON-RPC request from one agent. `agentId` is what the gateway resolved from the token, never
  * anything the client sent. A request's `tenant` reaches the SDK's context, and Podster never reads it for authority.
  */
-export async function answerA2a(text: string, agentId: string, baseUrl: string, api: ApiReads): Promise<Response> {
+export async function answerA2a(text: string, agentId: string, baseUrl: string, api: ApiReads, extensionsHeader: string | null = null): Promise<Response> {
   const { id, method } = envelope(text);
+  // Step 10: the lifecycle extension's own methods, which the SDK's transport doesn't know.
+  if (isLifecycleMethod(method)) {
+    const extensions = activated(extensionsHeader);
+    // A command runs only for a request that expects an answer: JSON-RPC 2.0, with an id. A notification, which has none,
+    // runs nothing.
+    const request = JSON.parse(text) as { jsonrpc?: unknown; id?: unknown; params?: unknown };
+    if (request.jsonrpc !== "2.0" || !(typeof request.id === "string" || (typeof request.id === "number" && Number.isFinite(request.id)))) {
+      return json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request: a lifecycle method needs jsonrpc \"2.0\" and an id." } });
+    }
+    try {
+      const params = request.params;
+      const task = await guarded(method, agentId, () => runLifecycle(api, agentId, method, params, extensions));
+      return json({ jsonrpc: "2.0", id: safeId(id), result: Task.toJSON(task) }, 200, { [A2A_EXTENSIONS_HEADER]: LIFECYCLE_URI });
+    } catch (error) {
+      return rpcError(id, error);
+    }
+  }
   // Decision 110: no streaming, refused here so nothing ever holds a response open.
   if (typeof method === "string" && STREAMING.has(method)) return rpcError(id, new UnsupportedOperationError("Streaming isn't supported."));
   // Only the profile's operations reach the handler. Anything else is "method not found", exactly.

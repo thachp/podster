@@ -38,7 +38,11 @@ describe("the Agent Card", () => {
     expect(res.headers.get("cache-control")).toContain("public");
     const card = await res.json<any>();
     expect(card.supportedInterfaces).toEqual([{ url: `${BASE}/a2a`, protocolBinding: "JSONRPC", protocolVersion: "1.0" }]);
-    expect(card.capabilities).toEqual({ streaming: false, pushNotifications: false, extendedAgentCard: false, extensions: [] });
+    expect(card.capabilities).toMatchObject({ streaming: false, pushNotifications: false, extendedAgentCard: false });
+    // Step 10: the lifecycle extension, declared and not required.
+    expect(card.capabilities.extensions).toEqual([
+      { uri: "https://podster.dev/a2a/lifecycle/v1", description: expect.any(String), required: false, params: { methods: ["podster.lifecycle.v1.AcceptTask", "podster.lifecycle.v1.DeclineTask", "podster.lifecycle.v1.ReleaseTask", "podster.lifecycle.v1.SubmitTask"] } },
+    ]);
     expect(card.skills).toEqual([]);
     // Step 7: the same consent as MCP, for scope `a2a`, with PKCE.
     const scheme = card.securitySchemes.podster.oauth2SecurityScheme;

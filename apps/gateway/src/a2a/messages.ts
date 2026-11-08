@@ -10,9 +10,12 @@ import { parseA2aTaskId, readTask, UpstreamError, type ApiReads } from "./reads"
 /** Decision 123: MCP's 16 KB per message, and at most 8 parts. */
 export const MAX_MESSAGE_BYTES = 16 * 1024;
 export const MAX_PARTS = 8;
-/** A `messageId` becomes part of the API's idempotency key, which holds at most 255 bytes with Podster's `a2a:` prefix. */
+/**
+ * A `messageId` becomes the API's idempotency key, `a2a-msg:<messageId>`, which holds at most 255 bytes. Its own prefix keeps
+ * it apart from the lifecycle's `a2a-lc:` keys and from MCP's, so one ID a client reuses across them can't collide.
+ */
 const MESSAGE_ID = /^[\x21-\x7e]{1,200}$/;
-export const idempotencyKey = (messageId: string) => `a2a:${messageId}`;
+export const idempotencyKey = (messageId: string) => `a2a-msg:${messageId}`;
 
 /** The thread text a message carries. Every other field of the message is dropped, never read for meaning. */
 function textOf(params: SendMessageRequest): { messageId: string; taskId: string; text: string } {

@@ -1234,6 +1234,10 @@ function a2aReads(env: Env, identity: Identity): ApiReads {
     getTask: (workspaceId, taskId) => run("get_task", { workspace_id: workspaceId, task_id: taskId }),
     listTasks: (workspaceId, query) => run("list_tasks", { workspace_id: workspaceId, order: query.order, ...(query.cursor ? { cursor: query.cursor } : {}), ...(query.status ? { status: query.status } : {}) }),
     listWorkspaces: () => run("list_workspaces", {}),
+    command: async (name, args, idempotencyKey) => {
+      const response = await callApi(env, identity, toApiCall(CAPABILITIES.find((c) => c.name === name)!, { ...args, idempotency_key: idempotencyKey }));
+      return { status: response.status, body: await response.json().catch(() => null) };
+    },
     // `send_message`'s own call, with `via` added, which no capability field can set: it tells the room the message
     // came over A2A, so a finished task refuses it (ADR 0007). It can only refuse more.
     sendMessage: async (workspaceId, taskId, body, idempotencyKey) => {
@@ -1255,7 +1259,7 @@ const a2aHandler = {
     if (!(await withinLimit(env.RL_ACCOUNT, `mcp:${externalId}`))) return rateLimited();
     try {
       const identity = await resolveAgent(env, "mcp_oauth", externalId);
-      return await answerA2a(await request.text(), identity.id, env.BASE_URL, a2aReads(env, identity));
+      return await answerA2a(await request.text(), identity.id, env.BASE_URL, a2aReads(env, identity), request.headers.get("A2A-Extensions"));
     } catch (error) {
       if (error instanceof AgentRefused) return denied(error.message, 403);
       throw error;

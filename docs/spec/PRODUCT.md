@@ -1,6 +1,6 @@
 # Podster — Product Spec
 
-Status: **draft for review** · Owner: Patrick Thach · Last updated: 2026-11-04 · [Architecture](ARCHITECTURE.md) · [Design](DESIGN.md) · [Access control](ACCESS-CONTROL.md)
+Status: **draft for review** · Owner: Patrick Thach · Last updated: 2026-11-08 · [Architecture](ARCHITECTURE.md) · [Design](DESIGN.md) · [Access control](ACCESS-CONTROL.md)
 
 The project name is **Podster** and the planned domain is `podster.dev`; brand clearance is still pending. The coordination kernel's agent-facing half is built and running on a staging deployment, with wake built and deploying next, and there's no production deployment yet. The November 4 workroom direction below supersedes the earlier link-only, invitation-only product scope. Detailed API names remain the existing kernel contract until the extension contracts are designed. [Concept mockups](../mockups/README.md) illustrate the direction; they are not implemented screens.
 
@@ -60,7 +60,7 @@ The existing two-agent task lifecycle, authorization checks and durable inbox ar
 | --- | --- | --- |
 | **M0 Kernel** | Two-agent task lifecycle, inbox and wake; workroom owner and admins; revocation fence; basic dashboard | [Kernel success criteria](#coordination-kernel-success-criteria) plus AC-01 to AC-07, AC-09, AC-12 to AC-17, AC-19 to AC-22, AC-25, AC-26, AC-29 and AC-30, for the features M0 includes |
 | **M1 Private workrooms** | Goal and context, work roles and invited claims, lead, scoped access, activity, collaboration list and map | Expanded criteria 1 (without input assets and expected outputs, which M2 adds), 3, 4 and 5 for private rooms. **Met by the owner's ruling on 2026-11-06, at `5ae3dad`** ([decision 80](#decisions-needed), [what it rests on](../m0-gate.md#what-the-call-on-m1-rests-on)) |
-| **M2 Assets and artifacts** ([plan](../m2-plan.md)) | Upload, scanning, expected and versioned outputs, exact-version review | The input assets and expected outputs in expanded criterion 1; expanded criterion 6; upload policy |
+| **M2 Assets and artifacts** ([plan](../m2-plan.md)) | Upload, scanning, expected and versioned outputs, exact-version review | The input assets and expected outputs in expanded criterion 1; expanded criterion 6; upload policy. **Met on staging with test people, by the lead's call on 2026-11-08, at `137cfd6`, for the owner to review** ([decision 145](#decisions-needed), [the run it rests on](../m2-plan.md#checks-the-spike-left-open)) |
 | **M3 A2A** ([proposed plan](../m3-plan.md)) | Published profile, adapter, interoperability and authorization tests | Protocol gates below |
 | **M4 Public workrooms** | Explore, public read surface, public claims, abuse controls | Expanded criterion 2; abuse review |
 | **M5 Managed repositories** | GitHub App, repository link, review and merge | Expanded criterion 7 for repositories |
@@ -651,6 +651,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 142 | Running the compatibility kit | **Decided:** the owner won't run it by hand, and the session permission check refuses running it, so it hasn't run. The plan and profile say so, and no support is claimed until it has run some other way. It's owed before M3's gate | M3 |
 | 143 | Which second implementation counts | **Decided:** independence is judged by direction, as decision 124 allows. Outbound runs against LangGraph's A2A 1.0 server, with fasta2a's server as backup. Inbound uses the A2A project's own JavaScript and Python clients and the compatibility kit's own `httpx` client, and the profile says plainly that inbound was tested only against the A2A project's own code. Revisited before public rooms | M3 |
 | 144 | Removing a file hidden from the caller | **Decided:** a file the caller can't see answers `file_not_found`, even to a human owner or admin trying to remove it. Hidden equals missing for removal too, and the caller's view is checked before the admin check. Unsubmitted task files are still cleared under decision 98 | M2 |
+| 145 | Whether M2 is met | **Decided, for the owner to review:** M2 is met on staging with test people, by the lead's call on 2026-11-08 under the owner's delegation, as M1 was called on test people (decision 79). Real people and the other items listed on that date stay owed before production | M2 |
 
 ## ADR 0007 accepted, November 8, 2026
 
@@ -666,6 +667,18 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 - The proposed token policy keeps the normal one-hour installation-token lifetime separate from the approved task duration. Longer authorized tasks obtain fresh scoped tokens on demand after current task/duration/agent/repository checks, with no per-renewal owner approval. Completion, cancellation, expiry or lost authority stops renewal; revocation results must be verified. Public/fork ownership remains undecided.
 - This is a product-design proposal, not a standing instruction to execute arbitrary future tasks or provision credentials. Provider decision 28 and M7's security/provider gates remain in force.
 - On 2026-11-08 the owner left it to the lead whether these were rulings, and the lead recorded them as proposals, since they're M7 work and automatic runs loosen the safest-options stance of decision 26.
+
+## M2 gate, November 8, 2026
+
+- The lead called M2 met on staging with test people, now decision 145. The lead acted under the owner's delegation, which the lead reports as "i'm make u the architect.. and that you are free to decide on my behalf". It's recorded for the owner to review, as M1's call was (decisions 79 and 80).
+- **What it rests on:** the full M2 staging run of `e2e/m2-staging.mjs`, by the lead with `--big` against main `137cfd6`, with the API, gateway, web and scanner all deployed, in room `ws_9af0c5de042947639615f3e795be6c35`. It got 56 passed, 0 failed, 3 skipped. It covered scanning, downloads, the upload policy's refusals, a 100 MB file, input assets, submission files and exact-version approval, expected outputs and removal. [The M2 plan](../m2-plan.md#checks-the-spike-left-open) has this run and the earlier ones.
+- **Owed before production:**
+  - The two-person journey with real people and their own sign-ins.
+  - An upload from another network. This run's 100 MB upload passed from the lead's Mac, but earlier runs failed there at the network layer.
+  - A Firefox and screen-reader pass on the M2 screens: asset upload, the Task Sheet's files and review, and the Artifacts tab.
+  - The hour sweep on a deployment, and scanning under load. One run can't show the sweep, and every scan so far ran alone.
+  - Per-room fairness in the scan queue. One Container takes scans in arrival order, so a few busy rooms can push other rooms' scans past the hour, and those files fail closed.
+  - A room whose migration fails. The migration rolls back and runs again on the room's next request, so every request to that room errors until a fixed release ships. That includes revocations and organization departures, since the fence and the departure route migrate the room first. So removing someone's access can't reach that room until then.
 
 ## File removal ruling and a wording fix, November 8, 2026
 

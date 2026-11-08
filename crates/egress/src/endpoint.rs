@@ -147,7 +147,8 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn unhex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
+    // `from_str_radix` would take a leading `+`, so every character must be a hex digit.
+    if !text.len().is_multiple_of(2) || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     (0..text.len())
@@ -410,6 +411,15 @@ mod tests {
         let one = seal(&KEY, &NONCE, "agt_1", 4, "t").unwrap();
         let two = seal(&KEY, &[2; 12], "agt_1", 4, "t").unwrap();
         assert_ne!(one, two);
+    }
+
+    #[test]
+    fn hex_with_a_sign_or_other_characters_isnt_hex() {
+        assert!(parse_key(&format!("+a{}", "0a".repeat(31))).is_none());
+        assert!(parse_key(&format!("-a{}", "0a".repeat(31))).is_none());
+        let sealed = seal(&KEY, &NONCE, "agt_1", 4, "t").unwrap();
+        let signed = format!("v1:+{}", &sealed[4..]);
+        assert_eq!(open(&KEY, "agt_1", 4, &signed), Err(SealError::NotOpenable));
     }
 
     #[test]

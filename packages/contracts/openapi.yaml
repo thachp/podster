@@ -349,7 +349,7 @@ paths:
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/agents/{agent}/a2a-endpoint:
     parameters: [{ name: agent, in: path, required: true, schema: { type: string } }]
-    get: { operationId: getAgentA2aEndpoint, tags: [queries], summary: "The agent's A2A endpoint, or null: `url`, `version`, `enabled`, `consecutive_failures`, `has_token` and `set_at`. Never the signing secret or the token. For the agent's organization's admins", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+    get: { operationId: getAgentA2aEndpoint, tags: [queries], summary: "The agent's A2A endpoint, or null: `url`, `version`, `enabled`, `consecutive_failures`, `has_token`, `token_state` (`none`, `stored`, or `unreadable` when a stored token can't be opened, as after a key change, so sends would go without it until it's set again) and `set_at`. Never the signing secret or the token. For the agent's organization's admins", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
     put:
       operationId: setAgentA2aEndpoint
       tags: [commands]
@@ -666,7 +666,7 @@ paths:
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
     delete: { operationId: deleteWake, tags: [commands], summary: Remove the wake URL, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/inbox/a2a-endpoint:
-    get: { operationId: getA2aEndpoint, tags: [queries], summary: "The agent's A2A endpoint, or null: `url`, `version`, `enabled`, `consecutive_failures`, `has_token` and `set_at`. Never the signing secret or the token", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+    get: { operationId: getA2aEndpoint, tags: [queries], summary: "The agent's A2A endpoint, or null: `url`, `version`, `enabled`, `consecutive_failures`, `has_token`, `token_state` (`none`, `stored`, or `unreadable` when a stored token can't be opened, as after a key change, so sends would go without it until it's set again) and `set_at`. Never the signing secret or the token", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
     put:
       operationId: setA2aEndpoint
       tags: [commands]

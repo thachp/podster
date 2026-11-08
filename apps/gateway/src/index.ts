@@ -1157,8 +1157,13 @@ const appHandler = {
     // token or, outside a set, the signing secret.
     const endpoint = url.pathname.match(/^\/api\/agents\/([\w-]+)\/a2a-endpoint$/);
     if (endpoint && ["GET", "PUT", "DELETE"].includes(request.method)) {
-      const body = request.method === "PUT" ? await request.text() : undefined;
-      if (body !== undefined && body.length > 8192) return denied("invalid_argument", 400);
+      let body: string | undefined;
+      if (request.method === "PUT") {
+        // Counted in bytes as they arrive, so an oversized body is refused before it's all read.
+        const bytes = await boundedBody(request, 8192);
+        if (!bytes) return denied("invalid_argument", 400);
+        body = new TextDecoder().decode(bytes);
+      }
       const response = await callApi(env, identity, { method: request.method, path: `/v1/agents/${endpoint[1]}/a2a-endpoint`, body });
       return json(await response.json(), response.status);
     }

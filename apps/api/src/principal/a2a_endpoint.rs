@@ -49,14 +49,33 @@ fn current(sql: &SqlStorage) -> R<Option<Value>> {
     Ok(stored(sql)?.filter(|row| row["url"].as_str().is_some_and(|url| !url.is_empty())))
 }
 
-/// What a read shows: never the signing secret or the token, only whether a token is stored.
-pub(super) fn status_json(sql: &SqlStorage) -> R<Value> {
+/// Whether the stored token can be used now: `none`, `stored`, or `unreadable` when it can't be opened, because the key was
+/// changed or isn't set. Never the token itself.
+fn token_state(row: &Value, key: Option<&[u8]>, agent: &str) -> &'static str {
+    let Some(sealed) = row["token_sealed"].as_str() else {
+        return "none";
+    };
+    let version = int(&row["version"]).max(0) as u64;
+    match key.map(|key| open(key, agent, version, sealed)) {
+        Some(Ok(_)) => "stored",
+        _ => "unreadable",
+    }
+}
+
+/// What a read shows: never the signing secret or the token, only whether a token is stored and can be used.
+pub(super) fn status_json(sql: &SqlStorage, key: Option<&[u8]>) -> R<Value> {
+    let agent = connection(sql)?
+        .and_then(|c| text(&c["id"]))
+        .unwrap_or_default();
     Ok(match current(sql)? {
-        Some(row) => json!({
-            "url": row["url"], "version": row["version"], "enabled": int(&row["enabled"]) == 1,
-            "consecutive_failures": row["consecutive_failures"], "has_token": !row["token_sealed"].is_null(),
-            "set_at": row["set_at"],
-        }),
+        Some(row) => {
+            let token_state = token_state(&row, key, &agent);
+            json!({
+                "url": row["url"], "version": row["version"], "enabled": int(&row["enabled"]) == 1,
+                "consecutive_failures": row["consecutive_failures"], "has_token": token_state != "none",
+                "token_state": token_state, "set_at": row["set_at"],
+            })
+        }
         None => Value::Null,
     })
 }
@@ -160,7 +179,7 @@ pub(super) fn set(
             now.into(),
         ],
     )?;
-    let mut out = status_json(sql)?;
+    let mut out = status_json(sql, key)?;
     if outcome.new_secret {
         out["signing_secret"] = json!(secret);
     }

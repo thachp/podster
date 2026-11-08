@@ -777,14 +777,15 @@ impl Principal {
         let sql = self.state.storage().sql();
         match method {
             Method::Put => {
-                // A disconnect ends wake along with the agent's credentials, so nothing can be set to survive a reconnect.
+                // The body is read first, because a disconnect can land while it arrives. Checking and setting then run with no
+                // wait between them, so nothing can be set after a disconnect and survive a reconnect.
+                let body: Value = serde_json::from_str(&req.text().await?)
+                    .map_err(|_| ApiError::invalid_argument())?;
                 let active =
                     connection(&sql)?.is_some_and(|c| c["status"].as_str() == Some(ACTIVE));
                 if !active {
                     return Err(ApiError::agent_disconnected());
                 }
-                let body: Value = serde_json::from_str(&req.text().await?)
-                    .map_err(|_| ApiError::invalid_argument())?;
                 set_wake(&sql, &body, now_ms())
             }
             Method::Delete => delete_wake(&sql, now_ms()),
@@ -797,17 +798,18 @@ impl Principal {
     async fn endpoint_command(&self, method: Method, req: &mut Request) -> R<Value> {
         let sql = self.state.storage().sql();
         match method {
-            Method::Get => a2a_endpoint::status_json(&sql),
+            Method::Get => a2a_endpoint::status_json(&sql, a2a_endpoint::key(&self.env).as_deref()),
             Method::Put => {
-                let conn = connection(&sql)?
-                    .filter(|c| c["status"].as_str() == Some(ACTIVE))
-                    .ok_or_else(ApiError::agent_disconnected)?;
-                let agent = text(&conn["id"]).unwrap_or_default();
+                // A disconnect can land while the body arrives, so the connection is checked inside the transaction that sets.
                 let body: Value = serde_json::from_str(&req.text().await?)
                     .map_err(|_| ApiError::invalid_argument())?;
                 let key = a2a_endpoint::key(&self.env);
                 let (store, now) = (sql.clone(), now_ms());
                 self.in_transaction(move || {
+                    let conn = connection(&store)?
+                        .filter(|c| c["status"].as_str() == Some(ACTIVE))
+                        .ok_or_else(ApiError::agent_disconnected)?;
+                    let agent = text(&conn["id"]).unwrap_or_default();
                     a2a_endpoint::set(&store, key.as_deref(), &agent, &body, now)
                 })
             }
@@ -1367,7 +1369,8 @@ impl Principal {
                 let mut identity = connection_json(&conn);
                 identity["inbox_unread"] = json!(unread_count(&sql, acked, now_ms())?);
                 identity["wake"] = wake_json(&sql)?;
-                identity["a2a_endpoint"] = a2a_endpoint::status_json(&sql)?;
+                identity["a2a_endpoint"] =
+                    a2a_endpoint::status_json(&sql, a2a_endpoint::key(&self.env).as_deref())?;
                 Ok(identity)
             }
             (method @ (Method::Put | Method::Delete), Some("wake")) => {

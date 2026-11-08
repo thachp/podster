@@ -44,8 +44,9 @@ capabilities:
   set_a2a_endpoint: { kind: command, operation: setA2aEndpoint, idempotent_by_design: true }
   delete_a2a_endpoint: { kind: command, operation: deleteA2aEndpoint, idempotent_by_design: true }
 
-# Operations that aren't agent capabilities: dashboard actions for people, plus getAgent, listAgentRooms and readAgentInbox, which are
-# also open to the agent itself. These are safe to retry without a key: acceptInvitation, withdrawAgent, consentToAgentReturn,
+# Operations that aren't agent capabilities: dashboard actions for people, plus getAgent, listAgentRooms, readAgentInbox,
+# getAgentA2aEndpoint, setAgentA2aEndpoint and deleteAgentA2aEndpoint, which are also open to the agent itself. The agent's
+# own A2A endpoint capabilities use /v1/inbox/a2a-endpoint instead. These are safe to retry without a key: acceptInvitation, withdrawAgent, consentToAgentReturn,
 # registerAgent, disconnectAgent and reconnectAgent.
 person_only:
   - getAgentA2aEndpoint

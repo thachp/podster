@@ -132,7 +132,7 @@ describe("the bearer token", () => {
   it("is sealed, never returned, and opened only for a send", async () => {
     const agent = await newAgent();
     const made = await set(agent, { url: URL_A, token: TOKEN });
-    expect(made.body.has_token).toBe(true);
+    expect(made.body).toMatchObject({ has_token: true, token_state: "stored" });
     expect(made.text).not.toContain(TOKEN);
     const row = await storedRow(agent);
     expect(row.token_sealed).toMatch(/^v1:[0-9a-f]+$/);
@@ -172,6 +172,9 @@ describe("the bearer token", () => {
     await set(other, { url: URL_A });
     await runInDurableObject(stub(other), (_: any, state: any) => state.storage.sql.exec("UPDATE a2a_endpoint SET token_sealed = ?", sealed));
     expect(await claim(other)).toEqual({ send: false, reason: "token_unavailable" });
+    // The read says so too, so nobody takes a stored token for a working one.
+    expect(await status(other)).toMatchObject({ has_token: true, token_state: "unreadable" });
+    expect(await status(agent)).toMatchObject({ has_token: true, token_state: "stored" });
     await runInDurableObject(stub(agent), (_: any, state: any) => state.storage.sql.exec("UPDATE a2a_endpoint SET version = version + 1"));
     expect(await claim(agent)).toEqual({ send: false, reason: "token_unavailable" });
   });
@@ -242,5 +245,50 @@ describe("reports and claims", () => {
     const bad = await stub(agent).fetch("https://principal.internal/internal/a2a-endpoint-report", { method: "POST", body: JSON.stringify({ version: "1", ok: false }) });
     expect(bad.status).toBe(400);
     await bad.text();
+  });
+});
+
+describe("a disconnect while a set's body is still arriving", () => {
+  /** Sends a PUT straight to the agent's Principal with a body held open, then disconnects it, then finishes the body. */
+  async function setDuringDisconnect(agent: Who, path: string, body: unknown) {
+    let finish: (() => void) | undefined;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        finish = () => {
+          controller.enqueue(new TextEncoder().encode(JSON.stringify(body)));
+          controller.close();
+        };
+      },
+    });
+    const pending = stub(agent).fetch(`https://principal.internal${path}`, {
+      method: "PUT",
+      headers: { "x-podster-caller": JSON.stringify({ id: agent.id, kind: "agent", org: ORG, gen: 1 }) },
+      body: stream,
+      duplex: "half",
+    } as RequestInit);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const off = await api(ADMIN, "POST", `/v1/agents/${agent.id}/disconnect`);
+    expect(off.status, off.text).toBe(200);
+    finish?.();
+    const res = await pending;
+    return { status: res.status, body: (await res.json()) as any };
+  }
+
+  it("refuses the endpoint, so nothing survives a reconnect", async () => {
+    const agent = await newAgent();
+    const res = await setDuringDisconnect(agent, "/v1/inbox/a2a-endpoint", { url: URL_A, token: TOKEN });
+    expect(res.body.error?.code).toBe("agent_disconnected");
+    expect(await api(ADMIN, "POST", `/v1/agents/${agent.id}/reconnect`)).toMatchObject({ status: 200 });
+    // The agent's old credentials ended with the disconnect, so its admin reads.
+    expect((await api(ADMIN, "GET", `/v1/agents/${agent.id}/a2a-endpoint`)).body).toBeNull();
+    expect(await claim(agent)).toEqual({ send: false, reason: "no_endpoint" });
+  });
+
+  it("refuses wake the same way", async () => {
+    const agent = await newAgent();
+    const res = await setDuringDisconnect(agent, "/v1/inbox/wake", { url: "https://hooks.acme.dev/wake" });
+    expect(res.body.error?.code).toBe("agent_disconnected");
+    expect(await api(ADMIN, "POST", `/v1/agents/${agent.id}/reconnect`)).toMatchObject({ status: 200 });
+    expect((await api(ADMIN, "GET", `/v1/agents/${agent.id}`)).body.wake).toBeNull();
   });
 });

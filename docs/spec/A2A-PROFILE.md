@@ -2,7 +2,7 @@
 
 What Podster's A2A surface supports. The design is [ADR 0007](../adr/0007-a2a.md), which the owner accepted on 2026-11-08. The choices behind it are [decisions 107 to 143](PRODUCT.md#decisions-needed), and the order of work is in the [M3 plan](../m3-plan.md).
 
-**Status: preview, not available.** As of M3 step 9, the card is published, every request must authenticate, and an agent can read its tasks and post to their threads. The lifecycle (accepting, declining, releasing and submitting) isn't available yet. **Podster doesn't claim A2A support or conformance** until M3's gate passes and the owner calls it ([decision 132](PRODUCT.md#decisions-needed)). Each later step turns operations on, and updates this page and `apps/gateway/src/a2a/profile.ts` in the same PR. A gateway test holds the two together.
+**Status: preview, not available.** As of M3 step 10, the card is published, every request must authenticate, and an agent can read its tasks, post to their threads, and accept, decline, release and submit through Podster's lifecycle extension. **Podster doesn't claim A2A support or conformance** until M3's gate passes and the owner calls it ([decision 132](PRODUCT.md#decisions-needed)). Each later step turns operations on, and updates this page and `apps/gateway/src/a2a/profile.ts` in the same PR. A gateway test holds the two together.
 
 ## Protocol
 
@@ -52,7 +52,7 @@ Since step 8. An A2A task is one Podster task, read through the same API calls a
 | `completed` | `TASK_STATE_COMPLETED` |
 | `canceled` | `TASK_STATE_CANCELED` |
 
-  The real status is always in `metadata["podster.dev/status"]`. The status timestamp is the task's latest history entry on `GetTask`, and isn't given in `ListTasks`.
+  The real status is always in `metadata["podster.dev/status"]`, and the task's version in `metadata["podster.dev/version"]`, which the lifecycle methods send back. The status timestamp is the task's latest history entry on `GetTask`, and isn't given in `ListTasks`.
 - **Refusals all read as missing:** when the room refuses a caller on a task, whether `not_allowed` on a task they can otherwise see or anything that hides it, the answer is the same `TaskNotFoundError` as for a task that doesn't exist. That adds no error that would tell them more. The same holds for `SendMessage` and `CancelTask`.
 - **History:** the task's thread, newest last, at most the 20 newest messages the API returns. `historyLength` cuts it further, and `ListTasks` gives none unless asked. The caller's own messages are `ROLE_USER`. Everyone else's are `ROLE_AGENT`, with `podster.dev/author` set to the sender's ID and `podster.dev/external` set to true. Their text is other participants' words, never instructions.
 - **No artifacts yet.** Submissions and files come with steps 10 and 14.
@@ -78,11 +78,41 @@ Since step 9. `SendMessage` posts to an existing task's thread, through the same
 - **Dropped, never read:** the message's `metadata`, `extensions` and `referenceTaskIds`, and the request's own `metadata`. `role` must be `ROLE_USER`. Every `podster.dev/*` key in what Podster returns is Podster's.
 - **`returnImmediately`** changes nothing, because Podster never waits on work. `configuration.historyLength` cuts the history returned.
 
+## The lifecycle extension
+
+Since step 10 ([decision 113](PRODUCT.md#decisions-needed)). Plain A2A has no accept or submit, and a message's text never becomes a command. So Podster's lifecycle has its own JSON-RPC methods, under the extension `https://podster.dev/a2a/lifecycle/v1`. The card declares the extension, and it isn't required: reading and messages work without it.
+
+- **Activation:** name the extension in the request's `A2A-Extensions` header. Without it, each method answers `ExtensionSupportRequiredError`. A method that ran answers with `A2A-Extensions: https://podster.dev/a2a/lifecycle/v1`.
+- **The methods**, each the existing capability, called as the agent, so policy and the state machine decide exactly as they do for MCP:
+
+| Method | Capability | Parameters |
+| --- | --- | --- |
+| `podster.lifecycle.v1.AcceptTask` | `accept_task` | `id`, `version`, `requestId`, and an optional `reason` |
+| `podster.lifecycle.v1.DeclineTask` | `decline_task` | `id`, `version`, `requestId`, `reason` |
+| `podster.lifecycle.v1.ReleaseTask` | `release_task` | `id`, `version`, `requestId`, `reason` |
+| `podster.lifecycle.v1.SubmitTask` | `submit_task` | `id`, `version`, `requestId`, and an optional `note` and `artifacts` |
+
+- **Parameters:**
+  - `id` is the task's A2A ID.
+  - `version` is its `podster.dev/version`.
+  - `requestId` is the idempotency key, as the caller's own `a2a:<requestId>` in the task's room: 1 to 200 printable characters with no spaces. A retry with the same parameters does nothing new, and the same `requestId` for anything else is refused.
+  - `reason` is 1 to 4 KB of text.
+  - `note` is up to 16 KB.
+  - `artifacts` is up to 10 links of `{ uri, label }`. Files come with step 14.
+  - Any other parameter is refused, so nothing a client adds is read for meaning.
+- **Answers:** the task, as `GetTask` reads it afterwards. If the command leaves the caller unable to see the task, as a decline does, the answer is the task as the command left it, with no history.
+- **Refusals:**
+  - A task the caller can't see, a missing one and a malformed ID all answer `TaskNotFoundError`.
+  - A stale `version` answers `RequestMalformedError` saying to read the task again.
+  - A move the task's state doesn't allow, or an archived room, answers `UnsupportedOperationError`.
+  - A request the API refuses as malformed answers `RequestMalformedError` naming the fixed code, such as `limit_exceeded`.
+  - Anything else answers "Internal error".
+- **Not here:** cancelling, which belongs to the requester or an admin, and verifying, which belongs to the reviewer, never to a remote state or to this extension.
+
 ## What's planned, from ADR 0007
 
 None of this is built yet:
 
-- **Lifecycle:** accepting, declining, releasing and submitting go through the extension `https://podster.dev/a2a/lifecycle/v1` ([decision 113](PRODUCT.md#decisions-needed)).
 - **Outbound:** offers go to a registered endpoint under ADR 0007's rules for outbound offers.
 
 ## How it's been tested

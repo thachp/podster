@@ -18,7 +18,7 @@ export type A2ACaller = { agentId: string; api: ApiReads; notes?: ReadNotes };
  * Only the SDK's named errors reach a client as themselves. Anything else, an API that couldn't answer or a fault here,
  * reaches it as a fixed "Internal error", and the log gets IDs and a status, never a message or a body.
  */
-async function guarded<T>(operation: string, agentId: string, run: () => Promise<T>): Promise<T> {
+export async function guarded<T>(operation: string, agentId: string, run: () => Promise<T>): Promise<T> {
   try {
     return await run();
   } catch (error) {

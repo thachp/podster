@@ -17,6 +17,7 @@ function stub(rooms: string[], page: (room: string, query: { cursor?: number; st
     listTasks: async (room, query) => (asked.push({ room, cursor: query.cursor, status: query.status }), page(room, query, asked.length)),
     getTask: async () => ({ status: 404, body: { error: { code: "task_not_found" } } }),
     sendMessage: async () => ({ status: 500, body: null }),
+    command: async () => ({ status: 500, body: null }),
   };
   return { api, asked, listed: () => listed };
 }

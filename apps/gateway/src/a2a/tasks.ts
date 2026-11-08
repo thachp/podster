@@ -7,6 +7,8 @@ import { RequestMalformedError } from "@a2a-js/sdk/errors";
  */
 
 export const STATUS_KEY = "podster.dev/status";
+/** The task's version, which the lifecycle extension's methods send back so a change in between is caught. */
+export const VERSION_KEY = "podster.dev/version";
 export const AUTHOR_KEY = "podster.dev/author";
 export const EXTERNAL_KEY = "podster.dev/external";
 
@@ -34,7 +36,7 @@ export function statusesFor(state: TaskState | undefined): string[] | null {
 }
 
 type ApiMessage = { id: string; from?: { id?: string }; body?: string; created_at?: number };
-type ApiTask = { id: string; status: string };
+type ApiTask = { id: string; status: string; version?: number };
 type ApiHistory = { created_at?: number }[];
 
 /** Message roles are about who's asking: the caller's own words are `ROLE_USER`, everyone else's `ROLE_AGENT`, marked external. */
@@ -68,6 +70,6 @@ export function toA2aTask(a2aId: string, task: ApiTask, callerId: string, opts: 
     status: { state: stateOf(task.status), message: undefined, timestamp: iso(lastChange) },
     artifacts: [],
     history: keep > 0 ? messages.slice(-keep).map((m) => toMessage(m, a2aId, callerId)) : [],
-    metadata: { [STATUS_KEY]: task.status },
+    metadata: { [STATUS_KEY]: task.status, ...(typeof task.version === "number" ? { [VERSION_KEY]: task.version } : {}) },
   };
 }

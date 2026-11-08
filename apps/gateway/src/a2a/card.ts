@@ -1,3 +1,4 @@
+import { LIFECYCLE_METHODS, LIFECYCLE_URI } from "./lifecycle";
 import { A2A_BINDING, A2A_PATH, A2A_VERSION } from "./profile";
 
 /**
@@ -14,7 +15,13 @@ export function agentCard(baseUrl: string) {
     supportedInterfaces: [{ url: `${baseUrl}${A2A_PATH}`, protocolBinding: A2A_BINDING, protocolVersion: A2A_VERSION }],
     provider: { organization: "Podster", url: baseUrl },
     version: "0.1.0-preview",
-    capabilities: { streaming: false, pushNotifications: false, extendedAgentCard: false, extensions: [] },
+    capabilities: {
+      streaming: false,
+      pushNotifications: false,
+      extendedAgentCard: false,
+      // Step 10 (decision 113). Not required: reading and messages work without it.
+      extensions: [{ uri: LIFECYCLE_URI, description: "Accept, decline, release and submit Podster tasks, as the agent's own commands. Name it in A2A-Extensions.", required: false, params: { methods: Object.keys(LIFECYCLE_METHODS) } }],
+    },
     // Step 7: the same consent as MCP, for a token whose audience is `/a2a` and whose scope is `a2a` (decision 111).
     securitySchemes: {
       podster: {

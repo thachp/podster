@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub mod baseline;
 pub mod files;
 pub mod removal;
+pub mod submission_files;
 
 pub const MAX_ARTIFACTS: usize = 10;
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;

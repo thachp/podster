@@ -15,6 +15,7 @@ import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TE
 import { handleAgentDownload, isFilePath, serveFile } from "./downloads";
 import { handleUpload } from "./uploads";
 import { answerA2a, checkA2aRequest, handleA2aCard, isA2aPath } from "./a2a";
+import type { ApiReads } from "./a2a/reads";
 import { buildOAuth, resourceKind, routeOAuth } from "./oauth";
 
 export interface Env {
@@ -1212,6 +1213,16 @@ const mcpHandler = {
   },
 };
 
+/** The API reads A2A needs, through the same capabilities MCP calls, as the agent the token resolved to. */
+function a2aReads(env: Env, identity: Identity): ApiReads {
+  const run = (name: string, args: Record<string, unknown>) => runCapability(env, identity, CAPABILITIES.find((c) => c.name === name)!, args);
+  return {
+    getTask: (workspaceId, taskId) => run("get_task", { workspace_id: workspaceId, task_id: taskId }),
+    listTasks: (workspaceId, query) => run("list_tasks", { workspace_id: workspaceId, order: query.order, ...(query.cursor ? { cursor: query.cursor } : {}), ...(query.status ? { status: query.status } : {}) }),
+    listWorkspaces: () => run("list_workspaces", {}),
+  };
+}
+
 /**
  * `/a2a`, after the resource server has checked the token's audience. The checks before authentication already ran, and
  * the body is the one they read. The agent's limit is MCP's bucket, so the two protocols share one allowance (decision 123).
@@ -1223,7 +1234,7 @@ const a2aHandler = {
     if (!(await withinLimit(env.RL_ACCOUNT, `mcp:${externalId}`))) return rateLimited();
     try {
       const identity = await resolveAgent(env, "mcp_oauth", externalId);
-      return await answerA2a(await request.text(), identity.id, env.BASE_URL);
+      return await answerA2a(await request.text(), identity.id, env.BASE_URL, a2aReads(env, identity));
     } catch (error) {
       if (error instanceof AgentRefused) return denied(error.message, 403);
       throw error;

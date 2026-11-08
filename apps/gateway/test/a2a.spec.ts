@@ -70,12 +70,13 @@ describe("the card and the profile agree", () => {
   });
 });
 
-describe("every operation refuses, by name", () => {
-  const expected: Record<string, RegExp> = {
+describe("each operation answers as the profile says", () => {
+  // The reads are step 8's, and their own spec covers them. Here, a task that exists nowhere.
+  const expected: Record<string, RegExp | "result"> = {
     SendMessage: /UNSUPPORTED_OPERATION/,
-    GetTask: /UNSUPPORTED_OPERATION/,
-    ListTasks: /UNSUPPORTED_OPERATION/,
-    CancelTask: /UNSUPPORTED_OPERATION/,
+    GetTask: /TASK_NOT_FOUND/,
+    ListTasks: "result",
+    CancelTask: /TASK_NOT_FOUND/,
     SendStreamingMessage: /UNSUPPORTED_OPERATION/,
     SubscribeToTask: /UNSUPPORTED_OPERATION/,
     CreateTaskPushNotificationConfig: /PUSH_NOTIFICATION_NOT_SUPPORTED/,
@@ -101,9 +102,10 @@ describe("every operation refuses, by name", () => {
   });
 
   for (const [method, error] of Object.entries(expected)) {
-    it(`${method} answers its named error`, async () => {
+    it(`${method} answers as expected`, async () => {
       const { status, body } = await rpc(method, params[method] ?? {});
       expect(status).toBe(200);
+      if (error === "result") return expect(body.result).toBeDefined();
       expect(body.result).toBeUndefined();
       expect(reason(body)).toMatch(error);
     });
@@ -198,6 +200,7 @@ describe("the A2A project's own client", () => {
     const client = await new ClientFactory({ ...ClientFactoryOptions.default, transports: [new JsonRpcTransportFactory({ fetchImpl })] }).createFromAgentCard(
       AgentCard.fromJSON(await (await SELF.fetch(`${BASE}/.well-known/agent-card.json`)).json()),
     );
-    await expect(client.getTask({ id: "tsk_x" } as never)).rejects.toThrow(/available yet/);
+    await expect(client.getTask({ id: "tsk_x" } as never)).rejects.toThrow(/not found/i);
+    await expect(client.sendMessage({ message: { messageId: "m", role: 1, parts: [{ content: { $case: "text", value: "hi" } }] } } as never)).rejects.toThrow(/available yet/);
   });
 });

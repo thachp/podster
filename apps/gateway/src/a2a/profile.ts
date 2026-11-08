@@ -2,11 +2,13 @@
  * What Podster's A2A surface offers, operation by operation. `docs/spec/A2A-PROFILE.md` lists the same table, and a
  * test holds the two together, so the card and the profile can't drift apart.
  *
- * Step 6 of the M3 plan: nothing is available yet. Every operation answers its named error, and steps 7 to 10 turn
- * them on one at a time, each updating this table and the profile in the same PR.
+ * Steps 6 to 10 of the M3 plan turn operations on one at a time, each updating this table and the profile in the same
+ * PR. Step 8 turned on the reads, and cancel's fixed answer.
  */
 
 export type MethodStatus =
+  /** Available, as the profile describes. */
+  | "available"
   /** Not available yet. Answers `UnsupportedOperationError`. */
   | "not_yet"
   /** Off by decision 110. Answers the operation's own named error. */
@@ -14,9 +16,9 @@ export type MethodStatus =
 
 export const A2A_METHODS = {
   SendMessage: "not_yet",
-  GetTask: "not_yet",
-  ListTasks: "not_yet",
-  CancelTask: "not_yet",
+  GetTask: "available",
+  ListTasks: "available",
+  CancelTask: "available",
   SendStreamingMessage: "off",
   SubscribeToTask: "off",
   CreateTaskPushNotificationConfig: "off",

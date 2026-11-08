@@ -1,6 +1,7 @@
-// M2 step 11's staging run, as far as M2 is built: files go up through the gateway, wait for the scanner's verdict, and come back
-// down with their bytes and headers checked. It also checks the EICAR test string is blocked and that refusals answer as the
-// upload policy says. Cases for later steps are stubs, listed as skipped, to fill in as each step lands.
+// M2 step 11's staging run: files go up through the gateway, wait for the scanner's verdict, and come back down with their bytes
+// and headers checked. It checks the EICAR test string is blocked and that refusals answer as the upload policy says. Then steps 5
+// to 8: an input asset linked to a guest's task, a submission with files and its approval, an expected output, and removal. The
+// hour sweep and load are listed as skipped, since one run can't show them.
 //
 //   node m2-staging.mjs --base-url <gateway> [--big] [--verdict-wait-s <seconds>] [--allow-host <host>]
 //
@@ -70,12 +71,21 @@ const record = (status, title, detail = "") => {
 const check = (passed, title, detail) => record(passed ? "ok" : "fail", title, detail);
 const skip = (title, why) => record("skip", title, why);
 const section = (name) => console.log(`\n## ${name}`);
+/** What a failed request says underneath "fetch failed": the network's own code and message, such as ECONNRESET or a TLS alert. */
+const cause = (error) => {
+  const parts = [];
+  for (let at = error, depth = 0; at && depth < 4; at = at.cause, depth++) {
+    const said = [at.code, at.message].filter(Boolean).join(" ");
+    if (said && !parts.includes(said)) parts.push(said);
+  }
+  return parts.join(": ") || String(error);
+};
 /** Runs one case, so a failure in it is reported and the rest still run. */
 async function step(title, run) {
   try {
     await run();
   } catch (error) {
-    record("fail", title, error?.message ?? String(error));
+    record("fail", title, cause(error));
   }
 }
 
@@ -117,16 +127,33 @@ async function signOut() {
 
 // ---- files ----
 
-/** Creates an upload as this person and sends its bytes. Answers the upload's ID with what the PUT answered. */
-async function upload(person, room, name, data, { declaredHash = sha256(data) } = {}) {
-  remember("file name", name);
-  const created = await person.dash("POST", `/v1/workspaces/${room}/uploads`, { name, size: data.length, sha256: declaredHash });
-  if (!created.ok) return { created };
-  remember("upload token", created.body.token);
-  const res = await target.http(created.body.upload_path, { method: "PUT", headers: { authorization: `Bearer ${created.body.token}` }, body: data, signal: AbortSignal.timeout(600_000) });
-  const body = await res.json().catch(() => null);
-  return { created, id: created.body.id, status: res.status, body };
+/** Sends an upload's bytes. A network failure answers its cause instead of throwing, so a caller can say what happened. */
+async function put(created, data) {
+  remember("upload token", created.token);
+  try {
+    const res = await target.http(created.upload_path, { method: "PUT", headers: { authorization: `Bearer ${created.token}` }, body: data, signal: AbortSignal.timeout(600_000) });
+    return { id: created.id, status: res.status, body: await res.json().catch(() => null) };
+  } catch (error) {
+    return { id: created.id, status: null, failure: cause(error) };
+  }
 }
+
+/**
+ * Creates an upload as this person and sends its bytes. Answers the upload's ID with what the PUT answered. `retry` tries once more
+ * with a fresh upload, and so a fresh token, if the network failed, since a large upload from some networks fails on the way.
+ */
+async function upload(person, room, name, data, { declaredHash = sha256(data), retry = false } = {}) {
+  remember("file name", name);
+  for (let attempt = 1; ; attempt++) {
+    const created = await person.dash("POST", `/v1/workspaces/${room}/uploads`, { name, size: data.length, sha256: declaredHash });
+    if (!created.ok) return { created };
+    const sent = { created, ...(await put(created.body, data)) };
+    if (sent.status !== null || !retry || attempt > 1) return { ...sent, attempts: attempt };
+    record("note", `an upload failed on the network, so it's tried once more with a fresh token`, sent.failure);
+  }
+}
+/** What an upload ended as, for a check's detail: a status and code, or the network's cause. */
+const outcome = (sent) => (sent.status === null ? `network failure: ${sent.failure}` : `${sent.status ?? sent.created?.status} ${sent.body?.error?.code ?? sent.body?.state ?? sent.created?.code ?? ""}`);
 
 /** Waits for the scanner. Answers the state it settled in and how long that took, or `scanning` if it didn't settle in time. */
 async function verdict(person, room, id, started) {
@@ -175,7 +202,7 @@ try {
   await run();
 } catch (error) {
   failedOutside = true;
-  console.error(`FAIL the run stopped: ${error?.message ?? error}`);
+  console.error(`FAIL the run stopped: ${cause(error)}`);
 } finally {
   await signOut();
 }
@@ -196,7 +223,7 @@ async function run() {
   await step("a clean text file", async () => {
     const started = Date.now();
     const sent = await upload(owner, room, CLEAN_NAME, clean);
-    check(sent.status === 200 && sent.body?.state === "scanning", "a clean text file uploads and waits in scanning", `${sent.status ?? sent.created.status} ${sent.body?.state ?? sent.created.code ?? ""}`);
+    check(sent.status === 200 && sent.body?.state === "scanning", "a clean text file uploads and waits in scanning", outcome(sent));
     if (sent.status !== 200) return;
     cleanId = sent.id;
     objects.push(sent.id);
@@ -215,7 +242,7 @@ async function run() {
     const started = Date.now();
     const name = `m2-eicar-${key()}.txt`;
     const sent = await upload(owner, room, name, EICAR);
-    check(sent.status === 200, "the EICAR test string uploads", `${sent.status ?? sent.created.status} ${sent.created.code ?? ""}`);
+    check(sent.status === 200, "the EICAR test string uploads", outcome(sent));
     if (sent.status !== 200) return;
     blockedId = sent.id;
     objects.push(sent.id);
@@ -227,8 +254,8 @@ async function run() {
     await step("100 MB of text", async () => {
       const data = text(100_000_000);
       const started = Date.now();
-      const sent = await upload(owner, room, `m2-big-${key()}.txt`, data);
-      check(sent.status === 200, "100 MB uploads", `${sent.status ?? sent.created.status} in ${((Date.now() - started) / 1000).toFixed(1)} s`);
+      const sent = await upload(owner, room, `m2-big-${key()}.txt`, data, { retry: true });
+      check(sent.status === 200, "100 MB uploads", `${outcome(sent)} in ${((Date.now() - started) / 1000).toFixed(1)} s, attempts ${sent.attempts ?? 1}`);
       if (sent.status !== 200) return;
       objects.push(sent.id);
       const settled = await verdict(owner, room, sent.id, started);
@@ -289,12 +316,146 @@ async function run() {
     check(file.ok && file.body.state === "uploading" && file.body.download_path === null && download.status === 409 && downloadCode === "file_not_available", "and nothing is kept: it's still uploading, with nothing to download", `${file.body?.state ?? file.status}, download ${download.status} ${downloadCode ?? ""}`);
   });
 
-  // Each later M2 step fills in its own cases here as it lands. They're listed so a run says what it doesn't cover yet.
-  section("Later steps");
-  skip("input assets: link a ready file to a task, and an agent limited to its own tasks sees only linked files", "step 5");
-  skip("submission files: submit with files, and the reviewer gets the exact versions submitted", "step 6");
-  skip("expected outputs: a task names one, and approval makes it ready", "step 7");
-  skip("removal: a removed file stops downloading, and abandoned uploads and unreferenced bytes are cleared", "step 8");
-  skip("the hour sweep: a file left scanning ends failed", "can't be seen in one run. Check a file from an earlier run, or the room's alarm, by hand");
+  await laterSteps(owner, room);
+
+  section("Not covered by one run");
+  skip("the hour sweep: a file left scanning ends failed", "takes an hour, so one run can't show it");
   skip("scanning under load: many files at once, and how long the last waits", "step 11, once the cases above are in");
+}
+
+// ---- steps 5 to 8 ----
+
+/** An agent's view of a file, through `get_asset_link`. */
+function agentFile(agent, room, id) {
+  return agent.execute("get_asset_link", { workspace_id: room, file_id: id });
+}
+async function agentDownload(agent, room, id) {
+  return target.http(`/v1/files/${room}/${id}`, { headers: { authorization: `Bearer ${await agent.token("get_asset_link")}` } });
+}
+
+/** Uploads a file for a task's submission as its assignee, through `create_upload`, and waits for its scan as that agent sees it. */
+async function agentUpload(agent, room, task, name, data) {
+  remember("file name", name);
+  const created = await agent.execute("create_upload", { workspace_id: room, task_id: task, name, size: data.length, sha256: sha256(data), idempotency_key: key() });
+  if (!created.ok) return { refused: `${created.status} ${created.code}` };
+  const sent = await put(created.data, data);
+  if (sent.status !== 200) return { refused: outcome(sent) };
+  const deadline = Date.now() + verdictWaitMs;
+  for (;;) {
+    const file = await agentFile(agent, room, sent.id);
+    const state = file.data?.state;
+    if ((file.ok && state !== "scanning") || Date.now() > deadline) return { id: sent.id, state: file.ok ? state : `${file.status} ${file.code}` };
+    await sleep(isLocal ? 200 : 2000);
+  }
+}
+
+function taskPath(room, task) {
+  return `/v1/workspaces/${room}/tasks/${task}`;
+}
+/** A task for the agent, from the owner, who is then its requester and reviewer. */
+async function offer(owner, room, agent, title) {
+  return owner.must("POST", `/v1/workspaces/${room}/tasks`, { title, instructions: "Part of the M2 staging run.", assignee: agent.id });
+}
+
+async function laterSteps(owner, room) {
+  // One agent limited to its own tasks: a guest sees only the tasks it's part of, and only files linked to those.
+  const guest = await AuthAgent.connect(target, owner, "M2 staging guest");
+  await owner.addAgent(room, guest, "guest");
+  const asset = text(3_000, "an input asset\n");
+  const unlinked = text(3_000, "another input asset\n");
+  let assetId;
+  let otherId;
+  let task;
+  let output;
+  let submittedId;
+
+  section("Step 5: input assets");
+  await step("input assets", async () => {
+    const sent = await upload(owner, room, `m2-asset-${key()}.txt`, asset);
+    const other = await upload(owner, room, `m2-asset-${key()}.txt`, unlinked);
+    if (sent.status !== 200 || other.status !== 200) return check(false, "two input assets upload", `${outcome(sent)}; ${outcome(other)}`);
+    [assetId, otherId] = [sent.id, other.id];
+    objects.push(assetId, otherId);
+    const states = [(await verdict(owner, room, assetId, Date.now())).state, (await verdict(owner, room, otherId, Date.now())).state];
+    check(states.every((state) => state === "ready"), "two input assets upload and become ready", states.join(", "));
+    output = (await owner.must("POST", `/v1/workspaces/${room}/outputs`, { title: "M2 staging output" })).id;
+    task = (await offer(owner, room, guest, "M2 staging task")).id;
+    const before = await agentFile(guest, room, assetId);
+    check(!before.ok && before.status === 404, "a guest can't see an input asset before it's linked to its task", `${before.status} ${before.code ?? ""}`);
+    const linked = await owner.dash("POST", `/v1/workspaces/${room}/files/${assetId}/links`, { task_id: task });
+    check(linked.ok && linked.body.linked === true, "the owner links it to the guest's task", `${linked.status} ${linked.code ?? ""}`);
+    const after = await agentFile(guest, room, assetId);
+    check(after.ok && after.data.download_path === `/v1/files/${room}/${assetId}` && after.data.linked_tasks?.includes(task), "then the guest sees it, linked to its task, with a download path", after.ok ? `${after.data.download_path}` : `${after.status} ${after.code}`);
+    await checkServed(await agentDownload(guest, room, assetId), asset, "the guest, a linked input asset");
+    const listed = await guest.execute("list_assets", { workspace_id: room });
+    const ids = (listed.data?.files ?? []).map((f) => f.id);
+    check(listed.ok && ids.length === 1 && ids[0] === assetId, "the guest's asset list holds only the linked asset", listed.ok ? `${ids.length} listed` : `${listed.status} ${listed.code}`);
+    const hidden = await agentFile(guest, room, otherId);
+    check(!hidden.ok && hidden.status === 404, "an input asset not linked to its task stays hidden from it", `${hidden.status} ${hidden.code ?? ""}`);
+    await checkRefused(await agentDownload(guest, room, otherId), 404, "file_not_found", "and doesn't download, as if it didn't exist");
+  });
+
+  section("Step 6: submission files");
+  await step("submission files", async () => {
+    if (!task) return skip("a submission with files", "the task wasn't made");
+    const named = await owner.dash("PUT", `${taskPath(room, task)}/expected-output`, { version: 1, output_id: output });
+    check(named.ok, "the owner names the expected output on the task", `${named.status} ${named.code ?? ""}`);
+    const accepted = await guest.execute("accept_task", { workspace_id: room, task_id: task, version: named.body?.version ?? 2, idempotency_key: key() });
+    check(accepted.ok, "the guest accepts the task", `${accepted.status} ${accepted.code ?? ""}`);
+    const work = text(4_000, "the guest's work\n");
+    const file = await agentUpload(guest, room, task, `m2-work-${key()}.txt`, work);
+    check(file.state === "ready", "the guest uploads a file for its submission, and it's scanned ready", file.refused ?? file.state);
+    if (file.state !== "ready") return;
+    submittedId = file.id;
+    objects.push(file.id);
+    const hiddenFromOwner = await owner.dash("GET", `/v1/workspaces/${room}/files/${file.id}`);
+    check(hiddenFromOwner.status === 404, "until it's submitted, only its uploader sees it", `${hiddenFromOwner.status} ${hiddenFromOwner.code ?? ""}`);
+    const submitted = await guest.execute("submit_task", { workspace_id: room, task_id: task, version: accepted.data?.version ?? 3, files: [{ id: file.id, label: "The work" }], idempotency_key: key() });
+    check(submitted.ok && submitted.data.status === "submitted", "the guest submits with the file", `${submitted.status} ${submitted.data?.status ?? submitted.code ?? ""}`);
+    const read = await owner.must("GET", taskPath(room, task));
+    const pinned = (read.files ?? []).find((f) => f.id === file.id);
+    check(pinned?.submitted === true && pinned.submission_no === 1 && pinned.sha256 === sha256(work) && pinned.size === work.length, "the reviewer sees the exact version submitted, by hash and size", pinned ? `submission ${pinned.submission_no}, ${pinned.size} bytes` : "not listed");
+    if (pinned?.download_path) await checkServed(await personDownload(owner, room, file.id), work, "the reviewer, the submitted file");
+    else check(false, "the reviewer can download the submitted file", "no download path");
+    const approved = await owner.dash("POST", `${taskPath(room, task)}/verify`, { submission_no: 1 });
+    check(approved.ok && approved.body.status === "completed", "the reviewer approves that submission", `${approved.status} ${approved.body?.status ?? approved.code ?? ""}`);
+
+    // A second task, whose file is removed after it's submitted: approval is refused, and changes can still be requested.
+    const second = (await offer(owner, room, guest, "M2 staging removed before approval")).id;
+    const took = await guest.execute("accept_task", { workspace_id: room, task_id: second, version: 1, idempotency_key: key() });
+    const gone = await agentUpload(guest, room, second, `m2-gone-${key()}.txt`, text(1_500, "removed before approval\n"));
+    if (!took.ok || gone.state !== "ready") return check(false, "a second submission with a file", `${took.status} ${took.code ?? ""}; ${gone.refused ?? gone.state}`);
+    objects.push(gone.id);
+    const sent = await guest.execute("submit_task", { workspace_id: room, task_id: second, version: took.data.version, files: [{ id: gone.id }], idempotency_key: key() });
+    const removed = await owner.dash("POST", `/v1/workspaces/${room}/files/${gone.id}/remove`, {});
+    check(sent.ok && removed.ok, "a second submission's file is removed after it's submitted", `${sent.status}, remove ${removed.status} ${removed.code ?? ""}`);
+    const refusedApproval = await owner.dash("POST", `${taskPath(room, second)}/verify`, { submission_no: 1 });
+    check(refusedApproval.status === 409 && refusedApproval.code === "file_removed", "and approving it is refused", `${refusedApproval.status} ${refusedApproval.code ?? ""}`);
+    skip("approval refused after a submitted file is blocked", "only a later scan can block a ready file, and a run can't cause one");
+  });
+
+  section("Step 7: expected outputs");
+  await step("expected outputs", async () => {
+    if (!output || !submittedId) return skip("an approval makes an output ready", "the submission didn't happen");
+    const ready = (await owner.must("GET", `/v1/workspaces/${room}/outputs`)).outputs?.find((o) => o.id === output);
+    check(ready?.status === "ready" && ready.current?.task_id === task && ready.current.files_available === true, "approving the task makes its expected output ready, with its files available", ready ? `${ready.status}, files_available ${ready.current?.files_available}` : "not listed");
+    const removed = await owner.dash("POST", `/v1/workspaces/${room}/files/${submittedId}/remove`, {});
+    check(removed.ok && removed.body.state === "removed", "the owner removes the approved file", `${removed.status} ${removed.body?.state ?? removed.code ?? ""}`);
+    const after = (await owner.must("GET", `/v1/workspaces/${room}/outputs`)).outputs?.find((o) => o.id === output);
+    check(after?.status === "ready" && after.current?.files_available === false, "the output stays ready, and says its files aren't available", after ? `${after.status}, files_available ${after.current?.files_available}` : "not listed");
+  });
+
+  section("Step 8: removal");
+  await step("removal", async () => {
+    if (!assetId) return skip("a removed file stops downloading", "the input asset didn't upload");
+    const before = await owner.dash("GET", `/v1/workspaces/${room}/files/${assetId}`);
+    check(before.ok && before.body.state === "ready", "an input asset is ready before removal", `${before.body?.state ?? before.status}`);
+    const removed = await owner.dash("POST", `/v1/workspaces/${room}/files/${assetId}/remove`, {});
+    check(removed.ok && removed.body.state === "removed" && removed.body.sha256 === sha256(asset) && Boolean(removed.body.removed_at), "the owner removes it, and its record and hash are kept", `${removed.status} ${removed.body?.state ?? removed.code ?? ""}`);
+    await checkRefused(await personDownload(owner, room, assetId), 410, "file_removed", "it no longer downloads for the owner");
+    await checkRefused(await agentDownload(guest, room, assetId), 410, "file_removed", "or for the guest it was linked for");
+    const again = await owner.dash("POST", `/v1/workspaces/${room}/files/${assetId}/remove`, {});
+    check(again.ok && again.body.state === "removed", "removing it again changes nothing", `${again.status} ${again.body?.state ?? again.code ?? ""}`);
+    if (submittedId) await checkRefused(await personDownload(owner, room, submittedId), 410, "file_removed", "an approved submission's removed file no longer downloads either");
+  });
 }

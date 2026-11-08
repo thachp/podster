@@ -217,6 +217,14 @@ cd apps/api && npx wrangler secret put SCANNER_SECRET --env staging
 cd apps/scanner && npx wrangler secret put SCANNER_SECRET --env staging
 ```
 
+## The A2A token key
+
+`A2A_TOKEN_KEY` is the key the API seals agents' A2A endpoint bearer tokens with ([decision 122](spec/PRODUCT.md#decisions-needed), ADR 0007). It's 64 hex characters, such as the output of `openssl rand -hex 32`. **The owner sets it**, in that session, and nobody else does. Until it's set, or if it isn't 64 hex characters, an agent can still register an endpoint, and setting a token answers 503 `token_storage_unavailable`. Changing the key makes every stored token unopenable: those endpoints send nothing until their token is set again.
+
+```bash
+cd apps/api && npx wrangler secret put A2A_TOKEN_KEY --env staging
+```
+
 ## Checking uploads on staging
 
 `e2e/upload-check.mjs` sends real uploads down the deployed path, so it shows what the edge does with a chunked upload, which local runs can't. It needs a person's session cookie, and it leaves a room named "Upload check" behind.

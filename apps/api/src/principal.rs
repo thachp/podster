@@ -13,6 +13,8 @@ use worker::*;
 
 type R<T> = std::result::Result<T, ApiError>;
 
+mod a2a_endpoint;
+
 const SCHEMA: &str = "
 CREATE TABLE connection (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, name TEXT NOT NULL, generation INTEGER NOT NULL,
   status TEXT NOT NULL, created_at INTEGER NOT NULL);
@@ -790,6 +792,30 @@ impl Principal {
         }
     }
 
+    /// The agent's A2A endpoint: read, set or delete, for the agent or its organization's admin (decision 119). Setting needs an
+    /// active connection, as wake does, so nothing can be set to survive a disconnect.
+    async fn endpoint_command(&self, method: Method, req: &mut Request) -> R<Value> {
+        let sql = self.state.storage().sql();
+        match method {
+            Method::Get => a2a_endpoint::status_json(&sql),
+            Method::Put => {
+                let conn = connection(&sql)?
+                    .filter(|c| c["status"].as_str() == Some(ACTIVE))
+                    .ok_or_else(ApiError::agent_disconnected)?;
+                let agent = text(&conn["id"]).unwrap_or_default();
+                let body: Value = serde_json::from_str(&req.text().await?)
+                    .map_err(|_| ApiError::invalid_argument())?;
+                let key = a2a_endpoint::key(&self.env);
+                let (store, now) = (sql.clone(), now_ms());
+                self.in_transaction(move || {
+                    a2a_endpoint::set(&store, key.as_deref(), &agent, &body, now)
+                })
+            }
+            Method::Delete => a2a_endpoint::delete(&sql),
+            _ => Err(ApiError::not_found()),
+        }
+    }
+
     async fn queue_wake(&self, now: i64) -> R<()> {
         let sql = self.state.storage().sql();
         let Some(delay) = wake_to_queue(&sql, now)? else {
@@ -1221,6 +1247,14 @@ impl Principal {
                 }
                 return Ok(outcome);
             }
+            "/internal/a2a-endpoint-claim" => {
+                return a2a_endpoint::claim(&sql, a2a_endpoint::key(&self.env).as_deref());
+            }
+            "/internal/a2a-endpoint-report" => {
+                let body: Value = req.json().await?;
+                let (store, now) = (sql.clone(), now_ms());
+                return self.in_transaction(move || a2a_endpoint::report(&store, &body, now));
+            }
             "/internal/unread" => {
                 let (acked, _, _) = inbox_state(&sql)?;
                 return Ok(json!({ "unread": unread_count(&sql, acked, now_ms())? }));
@@ -1265,6 +1299,9 @@ impl Principal {
             }
             (["v1", "inbox", "wake"], method) if caller.kind == "agent" => {
                 return self.wake_command(method, &mut req).await;
+            }
+            (["v1", "inbox", "a2a-endpoint"], method) if caller.kind == "agent" => {
+                return self.endpoint_command(method, &mut req).await;
             }
             (["v1", "inbox", ..], _) => return Err(ApiError::not_found()),
             _ => {}
@@ -1330,11 +1367,13 @@ impl Principal {
                 let mut identity = connection_json(&conn);
                 identity["inbox_unread"] = json!(unread_count(&sql, acked, now_ms())?);
                 identity["wake"] = wake_json(&sql)?;
+                identity["a2a_endpoint"] = a2a_endpoint::status_json(&sql)?;
                 Ok(identity)
             }
             (method @ (Method::Put | Method::Delete), Some("wake")) => {
                 self.wake_command(method, &mut req).await
             }
+            (method, Some("a2a-endpoint")) => self.endpoint_command(method, &mut req).await,
             // Oversight: the agent or an authorized person can look, and looking never moves the cursor.
             // Rooms this agent is in or has left, from the listing read model. This shows them and decides nothing.
             (Method::Get, Some("rooms")) => {
@@ -1384,6 +1423,8 @@ impl Principal {
                     )?;
                     // A reconnect starts over, like its credentials: a leaked URL and secret shouldn't come back.
                     delete_wake(&sql, now_ms())?;
+                    // So does the A2A endpoint, with its signing secret and token (ADR 0007).
+                    a2a_endpoint::delete(&sql)?;
                 }
                 self.fan_out().await?;
                 Ok(connection_json(

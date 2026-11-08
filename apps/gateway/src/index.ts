@@ -1136,6 +1136,15 @@ const appHandler = {
     const connection = url.pathname.match(/^\/api\/agents\/([\w-]+)\/(disconnect|reconnect)$/);
     if (connection && request.method === "POST") return handleConnection(env, identity, connection[1], connection[2] as "disconnect" | "reconnect");
     if (url.pathname === "/api/agents" && request.method === "GET") return listAgents(env, (await memberships(env, person)).orgs);
+    // An agent's A2A endpoint, for its organization's admins (decision 119). The API checks who may, and never returns the
+    // token or, outside a set, the signing secret.
+    const endpoint = url.pathname.match(/^\/api\/agents\/([\w-]+)\/a2a-endpoint$/);
+    if (endpoint && ["GET", "PUT", "DELETE"].includes(request.method)) {
+      const body = request.method === "PUT" ? await request.text() : undefined;
+      if (body !== undefined && body.length > 8192) return denied("invalid_argument", 400);
+      const response = await callApi(env, identity, { method: request.method, path: `/v1/agents/${endpoint[1]}/a2a-endpoint`, body });
+      return json(await response.json(), response.status);
+    }
     const agent = url.pathname.match(/^\/api\/agents\/([\w-]+)$/);
     if (agent && request.method === "GET") {
       const response = await callApi(env, identity, { method: "GET", path: `/v1/agents/${agent[1]}` });

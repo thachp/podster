@@ -374,6 +374,28 @@ describe("gateway refusals that don't rely on the API", () => {
     expect(await (await call(`/authorize${query}`, { headers: { cookie: a.cookie } })).text()).not.toContain(old.id);
   });
 
+  it("lets an agent and its organization's admin set its A2A endpoint, and nobody else", async () => {
+    const [a, b] = [await signUp(), await signUp()];
+    const agent = await mcpAgent(a);
+    const set = await agent.tool("set_a2a_endpoint", { url: "https://agent.acme.dev/a2a" });
+    expect(set.code).toBeUndefined();
+    expect(set.data).toMatchObject({ url: "https://agent.acme.dev/a2a", version: 1, enabled: true, has_token: false });
+    expect(set.data.signing_secret).toMatch(/^a2asec_/);
+    expect((await agent.tool("get_a2a_endpoint")).data).not.toHaveProperty("signing_secret");
+    // With no sealing key set, as on a deployment before the owner sets it, a token can't be stored, and the endpoint stays.
+    expect((await agent.tool("set_a2a_endpoint", { url: "https://agent.acme.dev/a2a", token: "tok_x" })).code).toBe("token_storage_unavailable");
+    const path = `/agents/${agent.id}/a2a-endpoint`;
+    expect((await dash(a, "GET", path)).body).toMatchObject({ url: "https://agent.acme.dev/a2a", version: 1 });
+    const moved = await dash(a, "PUT", path, { url: "https://other.acme.dev/a2a" });
+    expect(moved.status).toBe(200);
+    expect(moved.body).toMatchObject({ version: 2 });
+    expect((await dash(b, "GET", path)).status).toBe(404);
+    expect((await dash(b, "PUT", path, { url: "https://evil.acme.dev/a2a" })).status).toBe(404);
+    expect((await dash(a, "DELETE", path)).body).toEqual({ deleted: true });
+    expect((await agent.tool("get_a2a_endpoint")).data).toBeNull();
+    expect((await agent.tool("delete_a2a_endpoint")).data).toEqual({ deleted: true });
+  });
+
   it("can't link a claim to another organization's agent", async () => {
     const [a, b] = [await signUp(), await signUp()];
     const other = await claimedAgent(a);

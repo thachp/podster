@@ -40,11 +40,17 @@ capabilities:
   ack_inbox: { kind: command, operation: ackInbox, idempotent_by_design: true }
   set_wake: { kind: command, operation: setWake, idempotent_by_design: true }
   delete_wake: { kind: command, operation: deleteWake, idempotent_by_design: true }
+  get_a2a_endpoint: { kind: query, operation: getA2aEndpoint }
+  set_a2a_endpoint: { kind: command, operation: setA2aEndpoint, idempotent_by_design: true }
+  delete_a2a_endpoint: { kind: command, operation: deleteA2aEndpoint, idempotent_by_design: true }
 
 # Operations that aren't agent capabilities: dashboard actions for people, plus getAgent, listAgentRooms and readAgentInbox, which are
 # also open to the agent itself. These are safe to retry without a key: acceptInvitation, withdrawAgent, consentToAgentReturn,
 # registerAgent, disconnectAgent and reconnectAgent.
 person_only:
+  - getAgentA2aEndpoint
+  - setAgentA2aEndpoint
+  - deleteAgentA2aEndpoint
   - removeFile
   - listWorkspaceCards
   - getWorkspaceCard

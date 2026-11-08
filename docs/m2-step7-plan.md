@@ -8,7 +8,7 @@ Step 7 of the [M2 plan](m2-plan.md). A task may name one expected output, and ap
 
 - `GET /outputs` doesn't list each output's naming tasks or the current version's artifacts. Step 9c reads those through `get_task`, which already applies `task_view` and the file views, including oversight's.
 - There's no oversight route for outputs.
-- `PUT /outputs/:id` replaces the title and description. Leaving the description out clears it.
+- `PUT /outputs/:id` replaces the title and description. Leaving the description out clears it, and the same text again records nothing. Define and rename refuse unknown keys.
 
 ## Part 1: pure rules
 
@@ -66,7 +66,8 @@ CREATE INDEX task_expected_output ON task (expected_output_id) WHERE expected_ou
 
 - **Define, rename, remove:** new room routes, each `authorize_manage_outputs`, then `decide_*`. The count passed to `decide_define` is rows with `removed_at IS NULL`, so a removed output frees its place. Each commits the row, an event and the idempotency record in one transaction. Events: `output.defined`, `output.updated`, `output.removed`, carrying the output ID only, with no title. Recipients: none, since it's room-level. Whether these reach inboxes is a question below.
 - **Naming an output on a task:** a new `PUT /tasks/:id/expected-output` with `{ output_id | null }`. It runs `authorize_output_link`, then `decide_link` with the output's existence read from rows where `removed_at IS NULL`. Event `task.output_changed`, with the task as subject and the requester, assignee and reviewer as recipients, minus the actor.
-  - **It bumps `task.version`** when it changes anything (`Unchanged` doesn't). So an assignee who submits against a version from before the change gets `version_conflict`, rereads, and sees which output it's working toward.
+  - **It takes the task `version` the caller last read**, refused with `version_conflict` when stale, as `update_task` is.
+  - **It bumps `task.version`** when it changes anything (`Unchanged` doesn't). Core decides this, in `LinkChange::next_version`. So an assignee who submits against a version from before the change gets `version_conflict`, rereads, and sees which output it's working toward.
   - It's refused once the task is submitted, so a race with review can't move what a reviewer approves.
 - **`create_task`:** an optional `expected_output_id`, checked with `decide_link(.., Open, None, ..)` after `decide_create`, and written in the same transaction. About 3 lines in `workspace.rs`.
 - **Verify hook:** about 4 lines in `handle_task_command`. They call `outputs::record_approval(sql, &decision.task, artifacts, now)`, which reads the task's `expected_output_id` and calls `version_from_approval`. If that returns a version, it updates the output row and appends the version row in the same transaction. `artifacts` is links plus `submission_files` for that submission. No new event: `task.completed` already says it, and a listing derives Ready.

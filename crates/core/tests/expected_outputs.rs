@@ -177,7 +177,15 @@ fn an_archived_room_refuses_every_change() {
     assert_eq!(decide_edit(true, "Report", None), Err(R::RoomArchived));
     assert_eq!(decide_remove(true, 0, false), Err(R::RoomArchived));
     assert_eq!(
-        decide_link(true, TaskStatus::Open, None, Some("out_1"), true),
+        decide_link(
+            true,
+            TaskStatus::Open,
+            5,
+            Some(5),
+            None,
+            Some("out_1"),
+            true
+        ),
         Err(R::RoomArchived)
     );
     assert_eq!(R::RoomArchived.code(), "workspace_archived");
@@ -214,17 +222,25 @@ fn only_an_output_no_live_task_names_and_never_ready_can_be_removed() {
 fn a_task_can_name_an_output_before_it_is_submitted() {
     for status in [TaskStatus::Open, TaskStatus::Offered, TaskStatus::Accepted] {
         assert_eq!(
-            decide_link(false, status, None, Some("out_1"), true),
+            decide_link(false, status, 5, Some(5), None, Some("out_1"), true),
             Ok(LinkChange::Set("out_1".into())),
             "{status:?}"
         );
         assert_eq!(
-            decide_link(false, status, Some("out_1"), Some("out_2"), true),
+            decide_link(
+                false,
+                status,
+                5,
+                Some(5),
+                Some("out_1"),
+                Some("out_2"),
+                true
+            ),
             Ok(LinkChange::Set("out_2".into())),
             "{status:?}"
         );
         assert_eq!(
-            decide_link(false, status, Some("out_1"), None, false),
+            decide_link(false, status, 5, Some(5), Some("out_1"), None, false),
             Ok(LinkChange::Cleared),
             "{status:?}"
         );
@@ -239,17 +255,25 @@ fn a_submitted_or_finished_task_keeps_its_output() {
         TaskStatus::Canceled,
     ] {
         assert_eq!(
-            decide_link(false, status, Some("out_1"), Some("out_2"), true),
+            decide_link(
+                false,
+                status,
+                5,
+                Some(5),
+                Some("out_1"),
+                Some("out_2"),
+                true
+            ),
             Err(R::InvalidTransition),
             "{status:?}"
         );
         assert_eq!(
-            decide_link(false, status, Some("out_1"), None, false),
+            decide_link(false, status, 5, Some(5), Some("out_1"), None, false),
             Err(R::InvalidTransition),
             "{status:?}"
         );
         assert_eq!(
-            decide_link(false, status, None, Some("out_1"), true),
+            decide_link(false, status, 5, Some(5), None, Some("out_1"), true),
             Err(R::InvalidTransition),
             "{status:?}"
         );
@@ -260,11 +284,19 @@ fn a_submitted_or_finished_task_keeps_its_output() {
 fn asking_for_what_it_already_names_changes_nothing_in_any_status() {
     for status in TaskStatus::ALL {
         assert_eq!(
-            decide_link(false, status, Some("out_1"), Some("out_1"), true),
+            decide_link(
+                false,
+                status,
+                5,
+                Some(5),
+                Some("out_1"),
+                Some("out_1"),
+                true
+            ),
             Ok(LinkChange::Unchanged)
         );
         assert_eq!(
-            decide_link(false, status, None, None, false),
+            decide_link(false, status, 5, Some(5), None, None, false),
             Ok(LinkChange::Unchanged)
         );
     }
@@ -273,7 +305,15 @@ fn asking_for_what_it_already_names_changes_nothing_in_any_status() {
 #[test]
 fn naming_an_output_the_room_lacks_is_not_found() {
     assert_eq!(
-        decide_link(false, TaskStatus::Open, None, Some("out_x"), false),
+        decide_link(
+            false,
+            TaskStatus::Open,
+            5,
+            Some(5),
+            None,
+            Some("out_x"),
+            false
+        ),
         Err(R::NotFound)
     );
     assert_eq!(R::NotFound.code(), "output_not_found");
@@ -453,4 +493,71 @@ fn refusal_codes_are_stable() {
     assert_eq!(R::InvalidArgument("title").code(), "invalid_argument");
     assert_eq!(R::TooMany.code(), "too_many_outputs");
     assert_eq!(R::InvalidTransition.code(), "invalid_transition");
+}
+
+#[test]
+fn a_stale_version_is_refused_before_anything_else() {
+    for status in TaskStatus::ALL {
+        assert_eq!(
+            decide_link(false, status, 5, Some(4), None, Some("out_1"), true),
+            Err(R::VersionConflict),
+            "{status:?}"
+        );
+        // Even asking for what it already names.
+        assert_eq!(
+            decide_link(
+                false,
+                status,
+                5,
+                Some(6),
+                Some("out_1"),
+                Some("out_1"),
+                true
+            ),
+            Err(R::VersionConflict),
+            "{status:?}"
+        );
+    }
+    assert_eq!(R::VersionConflict.code(), "version_conflict");
+    // Naming one as the task is created has no older version to check.
+    assert_eq!(
+        decide_link(false, TaskStatus::Open, 1, None, None, Some("out_1"), true),
+        Ok(LinkChange::Set("out_1".into()))
+    );
+}
+
+#[test]
+fn a_real_change_moves_the_version_and_unchanged_does_not() {
+    let set = LinkChange::Set("out_1".into());
+    assert!(set.moves_version());
+    assert_eq!(set.next_version(5), 6);
+    assert!(LinkChange::Cleared.moves_version());
+    assert_eq!(LinkChange::Cleared.next_version(5), 6);
+    assert!(!LinkChange::Unchanged.moves_version());
+    assert_eq!(LinkChange::Unchanged.next_version(5), 5);
+}
+
+#[test]
+fn after_changes_are_requested_the_output_can_change_again() {
+    let task = submitted();
+    let returned = step(
+        &task,
+        "rev",
+        Command::RequestChanges {
+            submission_no: task.submission_no,
+            reason: "Wrong output".into(),
+        },
+    );
+    assert_eq!(
+        decide_link(
+            false,
+            returned.status,
+            returned.version,
+            Some(returned.version),
+            Some("out_1"),
+            Some("out_2"),
+            true
+        ),
+        Ok(LinkChange::Set("out_2".into()))
+    );
 }

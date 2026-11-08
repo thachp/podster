@@ -28,9 +28,10 @@ fn refusal(refused: OutputRefusal) -> ApiError {
         OutputRefusal::RoomArchived => ApiError::workspace_archived(),
         OutputRefusal::InvalidArgument(_) => ApiError::invalid_argument(),
         OutputRefusal::NotFound => ApiError::api(404, refused.code()),
-        OutputRefusal::TooMany | OutputRefusal::InUse | OutputRefusal::InvalidTransition => {
-            ApiError::api(409, refused.code())
-        }
+        OutputRefusal::TooMany
+        | OutputRefusal::InUse
+        | OutputRefusal::VersionConflict
+        | OutputRefusal::InvalidTransition => ApiError::api(409, refused.code()),
     }
 }
 
@@ -38,8 +39,20 @@ fn output_not_found() -> ApiError {
     refusal(OutputRefusal::NotFound)
 }
 
-/// A title and an optional description from a body. A description that's present and not a string is refused.
+/// Refuses a body with any key not named here, as the contract's `additionalProperties: false` says.
+fn only_keys(body: &Value, allowed: &[&str]) -> R<()> {
+    let object = body.as_object().ok_or_else(ApiError::invalid_argument)?;
+    if object.keys().all(|key| allowed.contains(&key.as_str())) {
+        Ok(())
+    } else {
+        Err(ApiError::invalid_argument())
+    }
+}
+
+/// A title and an optional description from a body, and nothing else. A description that's present and not a string is
+/// refused.
 fn text_fields(body: &Value) -> R<(String, Option<String>)> {
+    only_keys(body, &["title", "description"])?;
     Ok((required(body, "title")?, field(body, "description")?))
 }
 
@@ -127,8 +140,14 @@ pub(super) fn handle_update(
 ) -> R<Value> {
     ApiError::from_verdict(authorize_manage_outputs(caller))?;
     let (title, description) = text_fields(body)?;
-    live_output(sql, id)?.ok_or_else(output_not_found)?;
+    let row = live_output(sql, id)?.ok_or_else(output_not_found)?;
     decide_edit(room_archived(sql)?, &title, description.as_deref()).map_err(refusal)?;
+    // The same text again records nothing, so activity shows only real changes.
+    if row["title"].as_str() == Some(title.as_str())
+        && row["description"].as_str() == description.as_deref()
+    {
+        return Ok(output_json(&row));
+    }
     exec(
         sql,
         "UPDATE expected_output SET title = ?, description = ?, updated_at = ? WHERE id = ?",
@@ -186,6 +205,8 @@ pub(super) fn name_on_create(sql: &SqlStorage, task: &Task, body: &Value) -> R<(
     match decide_link(
         room_archived(sql)?,
         task.status,
+        task.version,
+        None,
         None,
         Some(&requested),
         exists,
@@ -201,8 +222,10 @@ pub(super) fn name_on_create(sql: &SqlStorage, task: &Task, body: &Value) -> R<(
     }
 }
 
-/// `PUT /tasks/:id/expected-output` with `{ "output_id": "out_…" | null }`. A real change moves the task's version, so an
-/// assignee acting on what they read before it gets `version_conflict` and rereads which output they're working toward.
+/// `PUT /tasks/:id/expected-output` with `{ "version": n, "output_id": "out_…" | null }`. `version` is the task version the
+/// caller last read, as `update_task` takes it. Whether the version moves is core's `LinkChange::next_version`: a real change
+/// does, so an assignee acting on what they read before it gets `version_conflict` and rereads which output they're working
+/// toward.
 pub(super) fn handle_set_task_output(
     sql: &SqlStorage,
     who: &Participant,
@@ -214,13 +237,11 @@ pub(super) fn handle_set_task_output(
     let task = load_task(sql, task_id)?.ok_or_else(ApiError::task_not_found)?;
     // Authority first, so a malformed body can't tell someone a hidden task exists.
     ApiError::from_verdict(authorize_output_link(caller, &task))?;
-    let keys: Vec<&String> = body
-        .as_object()
-        .map(|o| o.keys().collect())
-        .unwrap_or_default();
-    if keys.len() != 1 || keys[0] != "output_id" {
+    only_keys(body, &["version", "output_id"])?;
+    if body.get("output_id").is_none() {
         return Err(ApiError::invalid_argument());
     }
+    let expected = version(body)?;
     let requested = requested_output(body, "output_id")?;
     let current = named_by(sql, task_id)?;
     let exists = match &requested {
@@ -230,6 +251,8 @@ pub(super) fn handle_set_task_output(
     let change = decide_link(
         room_archived(sql)?,
         task.status,
+        task.version,
+        Some(expected),
         current.as_deref(),
         requested.as_deref(),
         exists,
@@ -240,10 +263,16 @@ pub(super) fn handle_set_task_output(
         LinkChange::Set(id) => Some(id.clone()),
         LinkChange::Cleared => None,
     };
+    let next = change.next_version(task.version);
     exec(
         sql,
-        "UPDATE task SET expected_output_id = ?, version = version + 1, updated_at = ? WHERE id = ?",
-        vec![opt(&subject), now.into(), task_id.into()],
+        "UPDATE task SET expected_output_id = ?, version = ?, updated_at = ? WHERE id = ?",
+        vec![
+            opt(&subject),
+            (next as i64).into(),
+            now.into(),
+            task_id.into(),
+        ],
     )?;
     let task = load_task(sql, task_id)?.ok_or_else(ApiError::task_not_found)?;
     let mut parties = vec![task.requester.clone(), task.reviewer.clone()];

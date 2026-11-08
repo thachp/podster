@@ -85,7 +85,7 @@ async function acceptedTask(id: string, output?: string) {
 }
 
 const taskVersion = async (taskPath: string) => (await api(OWNER, "GET", taskPath)).body.task.version as number;
-const setOutput = (who: Who, taskPath: string, output: string | null, body?: unknown) => api(who, "PUT", `${taskPath}/expected-output`, body ?? { output_id: output });
+const setOutput = async (who: Who, taskPath: string, output: string | null, body?: unknown) => api(who, "PUT", `${taskPath}/expected-output`, body ?? { version: await taskVersion(taskPath), output_id: output });
 const submit = async (taskPath: string, body: Record<string, unknown>) => api(GUEST, "POST", `${taskPath}/submit`, { version: await taskVersion(taskPath), ...body });
 const approve = (taskPath: string, submission_no = 1, opts: { key?: string } = {}) => api(OWNER, "POST", `${taskPath}/verify`, { submission_no }, opts);
 const list = async (who: Who, id: string) => {
@@ -137,10 +137,12 @@ describe("defining expected outputs", () => {
     expect((await api(OWNER, "POST", path, { title: "é".repeat(101) })).code).toBe("invalid_argument");
     expect((await api(OWNER, "POST", path, { title: "Report", description: "x".repeat(4097) })).code).toBe("invalid_argument");
     expect((await api(OWNER, "POST", path, { title: "Report", description: 7 })).code).toBe("invalid_argument");
+    expect((await api(OWNER, "POST", path, { title: "Report", status: "ready" })).code).toBe("invalid_argument");
     const output = await define(id, "é".repeat(100), "x".repeat(4096));
     const renamed = await api(OWNER, "PUT", `${path}/${output}`, { title: "Board report" });
     expect(renamed.status, JSON.stringify(renamed.body)).toBe(200);
     expect(renamed.body).toMatchObject({ id: output, title: "Board report", description: null });
+    expect((await api(OWNER, "PUT", `${path}/${output}`, { title: "Board report", current_task_id: "tsk_x" })).code).toBe("invalid_argument");
     expect((await api(OWNER, "PUT", `${path}/out_unknown`, { title: "X" })).status).toBe(404);
     expect((await api(OWNER, "PUT", `${path}/out_unknown`, { title: "X" })).code).toBe("output_not_found");
   });
@@ -161,6 +163,8 @@ describe("defining expected outputs", () => {
     const id = await room();
     const output = await define(id, "Secret plan title");
     await api(OWNER, "PUT", `/v1/workspaces/${id}/outputs/${output}`, { title: "Renamed title" });
+    // The same text again records nothing.
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/outputs/${output}`, { title: "Renamed title" })).status).toBe(200);
     await api(OWNER, "DELETE", `/v1/workspaces/${id}/outputs/${output}`);
     const events = await inRoom(id, (sql) => sql.exec("SELECT e.id, e.type, e.subject_id, e.reason, (SELECT count(*) FROM outbox o WHERE o.event_id = e.id) AS sent FROM event e WHERE e.type LIKE 'output.%' ORDER BY e.seq").toArray());
     expect(events.map((e: any) => [e.type, e.subject_id, e.reason, e.sent])).toEqual([
@@ -206,7 +210,8 @@ describe("naming an output on a task", () => {
     const id = await room();
     const output = await define(id);
     const { taskPath } = await acceptedTask(id);
-    for (const body of [{}, { output_id: 7 }, { output_id: output, extra: 1 }]) {
+    const v = await taskVersion(taskPath);
+    for (const body of [{}, { version: v }, { output_id: output }, { version: v, output_id: 7 }, { version: v, output_id: output, extra: 1 }, { version: "1", output_id: output }]) {
       expect((await setOutput(OWNER, taskPath, null, body)).code, JSON.stringify(body)).toBe("invalid_argument");
     }
     const unknown = await setOutput(OWNER, taskPath, "out_unknown");
@@ -227,6 +232,9 @@ describe("naming an output on a task", () => {
     expect((await setOutput(OWNER, taskPath, output)).body.version).toBe(before + 1);
     const stale = await api(GUEST, "POST", `${taskPath}/submit`, { version: before, artifacts: LINK });
     expect(stale.code).toBe("version_conflict");
+    // Changing the output from a stale read is refused too, as update_task is.
+    const staleSet = await setOutput(OWNER, taskPath, null, { version: before, output_id: null });
+    expect([staleSet.status, staleSet.code]).toEqual([409, "version_conflict"]);
     const cleared = await setOutput(OWNER, taskPath, null);
     expect(cleared.body).toMatchObject({ version: before + 2, expected_output: null });
     const events = await inRoom(id, (sql) => sql.exec("SELECT e.subject_id, e.task_version, (SELECT group_concat(recipient_principal_id) FROM outbox o WHERE o.event_id = e.id) AS sent FROM event e WHERE e.type = 'task.output_changed' ORDER BY e.seq").toArray());
@@ -273,6 +281,10 @@ describe("approval and status", () => {
     expect((await listed(OWNER, id, output)).status).toBe("in_review");
     expect((await api(OWNER, "POST", `${taskPath}/request-changes`, { submission_no: 1, reason: "Add a summary." })).status).toBe(200);
     expect(await listed(OWNER, id, output)).toMatchObject({ status: "not_started", current: null });
+    // Back in accepted, the task's output can change again (decision 137), and here it's set back.
+    const other = await define(id, "Other");
+    expect((await setOutput(OWNER, taskPath, other)).status).toBe(200);
+    expect((await setOutput(OWNER, taskPath, output)).status).toBe(200);
     expect((await submit(taskPath, { artifacts: LINK })).status).toBe(200);
     expect((await approve(taskPath, 2)).status).toBe(200);
     const body = await list(OWNER, id);

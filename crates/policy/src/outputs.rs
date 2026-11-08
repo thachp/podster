@@ -32,8 +32,9 @@ pub fn sees_outputs(caller: &Caller) -> bool {
     caller.role != Role::None
 }
 
-/// Whether the caller learns which task delivered an output's current version, or which tasks name it. Only for a task they
-/// can see, so an output's status never names a task hidden from someone limited to their own.
+/// Whether the caller learns which task delivered an output's current version, or which tasks name it: only for a task they
+/// can see, so an output never names a task hidden from someone limited to their own. The status itself isn't gated: "In
+/// review" comes from every task naming the output, visible or not, which decision 54 allows, since all participants see status.
 pub fn sees_output_task(caller: &Caller, task: &Task) -> bool {
     can_see_task(caller, task)
 }

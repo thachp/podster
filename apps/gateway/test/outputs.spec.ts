@@ -16,15 +16,15 @@ describe("expected outputs, as capabilities", () => {
 
   it("set_task_output requires output_id, which may be null to clear it", () => {
     const schema = jsonSchema(capability("set_task_output")) as any;
-    expect(schema.required).toEqual(expect.arrayContaining(["workspace_id", "task_id", "output_id", "idempotency_key"]));
+    expect(schema.required).toEqual(expect.arrayContaining(["workspace_id", "task_id", "version", "output_id", "idempotency_key"]));
     const allowed = JSON.stringify(schema.properties.output_id);
     expect(allowed).toContain('"string"');
     expect(allowed).toContain('"null"');
     const set = toApiCall(capability("set_task_output"), { workspace_id: "w", task_id: "t", output_id: "out_1", version: 3, idempotency_key: "k" });
     expect(set).toMatchObject({ method: "PUT", path: "/v1/workspaces/w/tasks/t/expected-output", idempotencyKey: "k" });
-    expect(JSON.parse(set.body!)).toEqual({ output_id: "out_1" });
-    const cleared = toApiCall(capability("set_task_output"), { workspace_id: "w", task_id: "t", output_id: null, idempotency_key: "k" });
-    expect(JSON.parse(cleared.body!)).toEqual({ output_id: null });
+    expect(JSON.parse(set.body!)).toEqual({ version: 3, output_id: "out_1" });
+    const cleared = toApiCall(capability("set_task_output"), { workspace_id: "w", task_id: "t", version: 4, output_id: null, idempotency_key: "k" });
+    expect(JSON.parse(cleared.body!)).toEqual({ version: 4, output_id: null });
   });
 
   it("create_task passes expected_output_id on", () => {

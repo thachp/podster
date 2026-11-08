@@ -16,7 +16,7 @@ The Container reads hostile files, so it holds no secrets, has no outbound traff
 | The room answers 404, 409 or 422 | | Ack, logged as `not_recorded` |
 | The room answers anything else | | Retry |
 
-Retries run out at about 25 minutes, in the dead-letter queue, which records nothing. The room's own sweep ends the file as Scan failed after an hour. So the scanner never reports `failed`, and nothing here can turn a failure into a pass.
+A job that can't be scanned is retried 5 minutes later, up to 5 failed tries in all, counted across the messages that carry it (see below). Past that it's dropped as `gave_up`, as the dead-letter queue does with a message whose own retries run out. Neither records anything. The room's own sweep ends the file as Scan failed an hour after upload, whichever comes first. So the scanner never reports `failed`, and nothing here can turn a failure into a pass.
 
 A job more than an hour past its `queued_at` is acked as `too_late` without a scan, since its room has already failed it.
 
@@ -24,14 +24,28 @@ A job more than an hour past its `queued_at` is acked as `too_late` without a sc
 
 There's one Container, scanning one file at a time, so the order is all there is to share. A busy room shouldn't push other rooms' files past their hour.
 
-The consumer takes up to 100 jobs at a time (`src/fair.ts`):
-- **Turns:** it scans them one room at a time, one job per room per round.
-- **Limits:** at most 4 jobs from any room per batch, and no more than 2 minutes of scanning.
-- **The rest:** jobs it didn't reach go to the back of the same queue. They're sent again, not retried, so waiting doesn't use up a job's retries. If sending them back fails, they're retried instead.
+The consumer takes up to 100 jobs at a time (`src/fair.ts`). Before scanning any, it does three things:
+1. **Settles what needs no scan:** jobs past their hour (`too_late`) and jobs out of tries (`gave_up`). Neither counts toward a room's turns.
+2. **Sends each room's surplus away:** past the first 4 jobs, a room's jobs go back to the same queue with a 2-minute delay. They leave the front, and the jobs behind them come forward.
+3. **Scans the rest in turns:** one room's job per round, for no more than 2 minutes. Jobs it didn't reach go back with no delay.
 
-So a busy room's backlog moves behind other rooms' jobs rather than staying ahead of them. Simulated with 17 s per scan, a single file behind 1,000 of one room's files is scanned after about 12 minutes, where in arrival order it would take about 4.7 hours. With 2 s scans, a file behind 5,000 small files waits about 7 minutes.
+**Sending back** is a new message, not a retry, so waiting a turn doesn't use up a try. A job's failed tries so far go with it in the body as `tries`. A job from an API that didn't stamp `queued_at` is stamped when it's first sent back, so the hour bounds it too. If sending back fails, those jobs are retried instead, and `requeue_failed` is logged as an error to alert on.
 
-This doesn't change how many files are scanned an hour, so a room that sends more than that can still have its own files fail closed. Nothing here gives a verdict, so the hour and the room's sweep are unchanged.
+**Simulated,** with batches taken from the earliest-available messages:
+
+| Ahead of the waiting file | Per scan | Arrival order | With this |
+| --- | --- | --- | --- |
+| 1,000 files from one room | 17 s | about 4.7 hours | about 12 minutes |
+| 3 rooms × 1,500 small files, one room after another | 2 s | about 2.5 hours | about 6 minutes |
+| 3 rooms × 1,500 small files, interleaved | 2 s | about 2.5 hours | about 18 minutes |
+| 10 rooms × 1,500 small files | 2 s | about 8.3 hours | about 20 minutes |
+
+**What's left:**
+- **Total speed doesn't change.** A room that sends more than an hour's worth of scans still has its own files fail closed, as before.
+- **Waits still grow with depth.** A file waits roughly (jobs ahead ÷ 100) × (rooms in each batch × 4) × the scan time. With 3 rooms of 1,500 large, 17 s files ahead, that's about 51 minutes. A room's 5 GB quota allows only about 50 files of 100 MB, so a backlog that deep is of small files, which scan in seconds.
+- **The model assumes Queues delivers roughly in order of availability.** Queues doesn't promise an order, so this is unverified, and nothing here has run against a deployment.
+
+**Deploy order:** the API first, so new jobs carry `queued_at`, then the scanner. Jobs already queued without it are stamped when first sent back.
 
 ## Shapes
 

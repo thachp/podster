@@ -66,10 +66,17 @@ export default {
     const done = await consumeFairly(batch.messages, {
       now: () => Date.now(),
       handle: (message) => handle(message, env),
-      requeue: async (bodies) => {
-        await env.SCAN.sendBatch(bodies.map((body) => ({ body })));
+      // Its room's sweep ends the file as failed after the hour, so neither says anything to the room.
+      settle: (message, why) => {
+        console.log(JSON.stringify({ ...logged(message.body), outcome: why, attempts: message.attempts }));
+        message.ack();
       },
+      requeue: async (messages) => {
+        await env.SCAN.sendBatch(messages);
+      },
+      // Its own word to alert on: sending back is how turns are shared, and when it fails every deferred job spends a try.
+      requeueFailed: (count) => console.error(JSON.stringify({ at: "scanner", outcome: "requeue_failed", count })),
     });
-    if (done.requeued > 0 || done.retried > 0) console.log(JSON.stringify({ at: "scanner", outcome: "batch_deferred", ...done }));
+    if (done.delayed + done.requeued + done.retried + done.settled > 0) console.log(JSON.stringify({ at: "scanner", outcome: "batch_shared", ...done }));
   },
 } satisfies ExportedHandler<Env, unknown>;

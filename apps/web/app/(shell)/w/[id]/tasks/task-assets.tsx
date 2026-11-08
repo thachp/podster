@@ -26,7 +26,8 @@ export function TaskAssets({ workspace, taskId, canManage, archived }: Props) {
   const [announcement, setAnnouncement] = useState("");
   useScanWatch(workspace, list.files, list.replace, (file) => setAnnouncement(`${fileName(file)}: ${fileState(file.state).label}.`));
   const links = useLinkCommands(workspace, list.reload);
-  const manage = canManage && !archived;
+  // Detaching follows attaching's rule (decision 100), so a member narrowed to some tasks, who gets no `quota`, can't remove.
+  const manage = canManage && !archived && list.wholeRoom;
   return (
     <section className="space-y-2">
       <h3 className="font-medium">Attached files</h3>

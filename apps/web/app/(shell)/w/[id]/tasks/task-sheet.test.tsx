@@ -1120,6 +1120,8 @@ describe("attached files", () => {
       { id: "obj_s", name: "notes.txt", size: 10, sha256: "b".repeat(64), media_type: "text/plain", state: "scanning", download_path: null, linked_tasks: ["tsk_1"] },
     ],
     next_cursor: null,
+    // Sent only to whoever sees the whole room.
+    quota: { used: 1210, limit: 5_000_000_000 },
   };
   beforeEach(() => {
     answer = (url) => (url.includes("/files?") ? json(200, attached) : json(200, detail()));

@@ -9,6 +9,7 @@ let sent: Sent[] = [];
 let files: RoomFile[] = [];
 let listStatus = 200;
 let pageSize = 50;
+let narrowed = false;
 
 const file = (over: Partial<RoomFile> = {}): RoomFile => ({ id: "obj_1", name: "spec.pdf", size: 1200, sha256: "a".repeat(64), media_type: "application/pdf", state: "ready", download_path: "/v1/files/ws_1/obj_1", linked_tasks: ["tsk_1"], ...over });
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
@@ -18,13 +19,14 @@ beforeEach(() => {
   files = [file(), file({ id: "obj_2", name: "notes.txt", state: "scanning", download_path: null })];
   listStatus = 200;
   pageSize = 50;
+  narrowed = false;
   vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
     sent.push({ method: init.method ?? "GET", url });
     if (url.includes("/files?")) {
       if (listStatus !== 200) return json({ error: { code: "upstream_unavailable" } }, listStatus);
       const from = Number(new URL(url, "http://local").searchParams.get("cursor"));
       const page = files.slice(from, from + pageSize);
-      return json({ files: page, next_cursor: from + pageSize < files.length ? from + pageSize : null });
+      return json({ files: page, next_cursor: from + pageSize < files.length ? from + pageSize : null, ...(narrowed ? {} : { quota: { used: 0, limit: 5_000_000_000 } }) });
     }
     const one = files.find((known) => url.endsWith(`/files/${known.id}`));
     if (one) return json(one);
@@ -61,6 +63,15 @@ describe("a task's attached files", () => {
     expect(await screen.findByText(/Removed spec\.pdf from this task/)).toBeInTheDocument();
     expect(sent.find((request) => request.method === "DELETE")?.url).toBe("/api/v1/workspaces/ws_1/files/obj_1/links/tsk_1");
     await vi.waitFor(() => expect(screen.queryByText("spec.pdf")).not.toBeInTheDocument());
+  });
+
+  it("offers a member narrowed to some tasks no removal, only the download", async () => {
+    // Detaching follows attaching's rule, and only someone who sees the whole room gets `quota`.
+    narrowed = true;
+    show(true);
+    await screen.findByRole("list", { name: "Attached files" });
+    expect(screen.queryByRole("button", { name: /Remove from task/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Download spec.pdf" })).toBeInTheDocument();
   });
 
   it("offers no removal in an archived room", async () => {

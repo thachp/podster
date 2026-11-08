@@ -38,7 +38,8 @@ export function InputAssets({ workspace, initial, tasks, tasksComplete, canManag
   const links = useLinkCommands(workspace, list.reload);
   const byId = new Map(tasks.map((task) => [task.id, task]));
   const manage = canManage && !archived;
-  // Adding needs the whole room: a member whose access is narrowed to some tasks gets no `quota`, and no Upload or Attach.
+  // Changing what's attached needs the whole room (decision 100): a member narrowed to some tasks gets no `quota`, and no Upload,
+  // Attach or Remove. Download stays, as the API decides each one.
   const add = manage && list.wholeRoom;
   return (
     <section aria-labelledby="input-assets-heading" className="space-y-3">
@@ -68,7 +69,7 @@ export function InputAssets({ workspace, initial, tasks, tasksComplete, canManag
       {list.files.length > 0 ? (
         <ul aria-label="Input assets" className="space-y-3">
           {list.files.map((file) => (
-            <AssetRow key={file.id} workspace={workspace} file={file} byId={byId} tasks={tasks} tasksComplete={tasksComplete} manage={manage} add={add} links={links} onUnavailable={list.replace} />
+            <AssetRow key={file.id} workspace={workspace} file={file} byId={byId} tasks={tasks} tasksComplete={tasksComplete} add={add} links={links} onUnavailable={list.replace} />
           ))}
         </ul>
       ) : null}
@@ -96,7 +97,7 @@ function QuotaUse({ used, limit }: { used: number; limit: number }) {
 
 type Links = ReturnType<typeof useLinkCommands>;
 
-function AssetRow({ workspace, file, byId, tasks, tasksComplete, manage, add, links, onUnavailable }: { workspace: string; file: RoomFile; byId: Map<string, TaskChoice>; tasks: TaskChoice[]; tasksComplete: boolean; manage: boolean; add: boolean; links: Links; onUnavailable: (id: string, latest: RoomFile | null) => void }) {
+function AssetRow({ workspace, file, byId, tasks, tasksComplete, add, links, onUnavailable }: { workspace: string; file: RoomFile; byId: Map<string, TaskChoice>; tasks: TaskChoice[]; tasksComplete: boolean; add: boolean; links: Links; onUnavailable: (id: string, latest: RoomFile | null) => void }) {
   const name = fileName(file);
   const state = fileState(file.state);
   const headingId = useId();
@@ -137,7 +138,7 @@ function AssetRow({ workspace, file, byId, tasks, tasksComplete, manage, add, li
                   <Link href={`/w/${encodeURIComponent(workspace)}/tasks?task=${encodeURIComponent(taskId)}`} prefetch={false} className="min-w-0 break-words text-primary underline">
                     {title}
                   </Link>
-                  {manage ? (
+                  {add ? (
                     <Button type="button" variant="ghost" size="sm" className="max-md:h-11" disabled={links.busy} onClick={() => void links.detach(file.id, taskId, `Removed ${name} from ${title}. Its assignee can no longer read it through that task.`)}>
                       Remove{" "}<span className="sr-only">{name} from {title}</span>
                     </Button>

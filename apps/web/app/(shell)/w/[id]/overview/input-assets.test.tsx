@@ -343,6 +343,7 @@ describe("quota", () => {
     expect(screen.queryByLabelText("Asset upload")).not.toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: /Attach to a task/ })).not.toBeInTheDocument();
     expect(screen.queryByText(/Upload one above/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Remove/ })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Download brief.pdf" })).toBeInTheDocument();
   });
 });

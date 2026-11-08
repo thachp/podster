@@ -106,18 +106,77 @@ describe("uploading a file for a submission", () => {
     expect((await api(GUEST, "POST", `/v1/workspaces/${id}/uploads`, body)).code).toBe("invalid_transition");
   });
 
-  it("stops an upload whose task was released before the bytes arrived, and counts toward the room's quota", async () => {
+  it("drops an unfinished upload, and its reservation, the moment its task stops being accepted", async () => {
+    for (const leave of ["release", "cancel", "submit"] as const) {
+      const { id, task, taskPath } = await accepted();
+      const kept = await upload(GUEST, id, { task });
+      const made = await api(GUEST, "POST", `/v1/workspaces/${id}/uploads`, { name: "late.txt", size: TEXT.length, sha256: await sha256(TEXT), task_id: task });
+      expect(made.status).toBe(200);
+      const reserved = await inRoom(id, (sql) => sql.exec("SELECT size, for_task FROM stored_object WHERE id = ?", made.body.id).toArray()[0]);
+      expect(reserved).toEqual({ size: TEXT.length, for_task: task });
+      const v = await taskVersion(taskPath);
+      const moved =
+        leave === "release" ? await api(GUEST, "POST", `${taskPath}/release`, { version: v, reason: "Can't do it." })
+        : leave === "cancel" ? await api(OWNER, "POST", `${taskPath}/cancel`, { version: v, reason: "Not needed." })
+        : await submit(taskPath, { files: [{ id: kept }] });
+      expect(moved.status, leave).toBe(200);
+      const left = await inRoom(id, (sql) => sql.exec("SELECT id FROM stored_object WHERE id = ?", made.body.id).toArray());
+      expect(left, leave).toEqual([]);
+      // A stored file is never touched.
+      expect(await inRoom(id, (sql) => sql.exec("SELECT state FROM stored_object WHERE id = ?", kept).toArray()[0].state), leave).toBe("ready");
+      const sent = await SELF.fetch(`https://api.internal${made.body.upload_path}`, { method: "PUT", headers: { authorization: `Bearer ${made.body.token}` }, body: TEXT as any });
+      expect(sent.status, leave).toBe(404);
+      await sent.text();
+    }
+  });
+
+  it("drops an unfinished upload when the task is offered to someone else", async () => {
     const { id, task, taskPath } = await accepted();
     const made = await api(GUEST, "POST", `/v1/workspaces/${id}/uploads`, { name: "late.txt", size: TEXT.length, sha256: await sha256(TEXT), task_id: task });
     expect(made.status).toBe(200);
-    const reserved = await inRoom(id, (sql) => sql.exec("SELECT size, for_task FROM stored_object WHERE id = ?", made.body.id).toArray()[0]);
-    expect(reserved).toEqual({ size: TEXT.length, for_task: task });
-    expect((await api(GUEST, "POST", `${taskPath}/release`, { version: await taskVersion(taskPath), reason: "Can't do it." })).status).toBe(200);
-    const sent = await SELF.fetch(`https://api.internal${made.body.upload_path}`, { method: "PUT", headers: { authorization: `Bearer ${made.body.token}` }, body: TEXT as any });
-    expect(sent.status).not.toBe(200);
-    await sent.text();
-    const after = await inRoom(id, (sql) => sql.exec("SELECT state FROM stored_object WHERE id = ?", made.body.id).toArray()[0]);
-    expect(after.state).toBe("uploading");
+    const reassigned = await api(OWNER, "POST", `${taskPath}/assign`, { version: await taskVersion(taskPath), assignee: MEMBER.id });
+    if (reassigned.status === 200) {
+      expect(await inRoom(id, (sql) => sql.exec("SELECT id FROM stored_object WHERE id = ?", made.body.id).toArray())).toEqual([]);
+    } else {
+      // Reassigning an accepted task is refused, so there's nothing to drop.
+      expect(reassigned.code).toBe("invalid_transition");
+    }
+  });
+
+  it("holds one uploader to ten unsubmitted files for a task, counting uploads still arriving", async () => {
+    const { id, task } = await accepted();
+    const start = async () => api(GUEST, "POST", `/v1/workspaces/${id}/uploads`, { name: "x.txt", size: TEXT.length, sha256: await sha256(TEXT), task_id: task });
+    await upload(GUEST, id, { task });
+    await upload(GUEST, id, { task, state: "blocked" });
+    const arriving = [];
+    for (let i = 0; i < 8; i++) {
+      const made = await start();
+      expect(made.status, `upload ${i}`).toBe(200);
+      arriving.push(made.body.id);
+    }
+    const refused = await start();
+    expect([refused.status, refused.code]).toEqual([409, "limit_exceeded"]);
+    // An upload whose grant ended holds nothing, so it no longer counts.
+    await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET upload_expires_at = 0 WHERE id = ?", arriving[0]));
+    expect((await start()).status).toBe(200);
+    expect((await start()).code).toBe("limit_exceeded");
+    // Input assets, and another uploader's files, are counted apart.
+    expect((await upload(MEMBER, id)).length).toBeGreaterThan(0);
+  });
+
+  it("drops only the uploads someone may no longer finish, when their access narrows", async () => {
+    const { id } = await accepted();
+    const own = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Member's", instructions: "Do it.", assignee: MEMBER.id });
+    await api(MEMBER, "POST", `/v1/workspaces/${id}/tasks/${own.body.id}/accept`, { version: 1 });
+    const body = { name: "x.txt", size: TEXT.length, sha256: await sha256(TEXT) };
+    const input = await api(MEMBER, "POST", `/v1/workspaces/${id}/uploads`, body);
+    const forTask = await api(MEMBER, "POST", `/v1/workspaces/${id}/uploads`, { ...body, task_id: own.body.id });
+    expect([input.status, forTask.status]).toEqual([200, 200]);
+    // As a guest they can't add input assets any more, but they're still the task's assignee.
+    const narrowed = await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${MEMBER.id}/access`, { preset: "guest", policy_version: await version(id) });
+    expect(narrowed.status, JSON.stringify(narrowed.body)).toBe(200);
+    const left = await inRoom(id, (sql) => sql.exec("SELECT id FROM stored_object WHERE state = 'uploading' ORDER BY id").toArray().map((r: any) => r.id));
+    expect(left).toEqual([forTask.body.id]);
   });
 });
 
@@ -163,6 +222,42 @@ describe("who sees a file uploaded for a submission", () => {
     // Nothing about a file's name or label reaches the room's events.
     const events = await inRoom(id, (sql) => sql.exec("SELECT * FROM event").toArray());
     expect(JSON.stringify(events)).not.toMatch(/report\.txt|Final report/);
+  });
+});
+
+describe("the reviewer named on a task (decision 97)", () => {
+  it("lists, reads and downloads that task's submitted files even when limited to their own, and nothing unsubmitted", async () => {
+    const { id, task: otherTask, taskPath: otherPath } = await accepted();
+    const elsewhere = await upload(GUEST, id, { task: otherTask });
+    expect((await submit(otherPath, { files: [{ id: elsewhere }] })).status).toBe(200);
+    const created = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Reviewed", instructions: "Do it.", assignee: GUEST.id, reviewer: MEMBER.id });
+    expect(created.status, JSON.stringify(created.body)).toBe(200);
+    const task = created.body.id;
+    const taskPath = `/v1/workspaces/${id}/tasks/${task}`;
+    await api(GUEST, "POST", `${taskPath}/accept`, { version: 1 });
+    const submitted = await upload(GUEST, id, { task });
+    const unsubmitted = await upload(GUEST, id, { task });
+    expect((await submit(taskPath, { files: [{ id: submitted }] })).status).toBe(200);
+    // The room takes a reviewer who can no longer review off an unfinished task, so they stay named only once it's finished.
+    expect((await api(MEMBER, "POST", `${taskPath}/verify`, { submission_no: 1 })).status).toBe(200);
+    // Narrow the reviewer to a public participant: their own tasks, and only work they submitted themselves.
+    const narrowed = await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${MEMBER.id}/access`, { preset: "public_participant", policy_version: await version(id) });
+    expect(narrowed.status, JSON.stringify(narrowed.body)).toBe(200);
+    const read = await api(MEMBER, "GET", taskPath);
+    expect(read.status).toBe(200);
+    expect(read.body.task.reviewer).toBe(MEMBER.id);
+    expect(read.body.visible.submissions).toBe("own");
+    expect(read.body.submissions).toEqual([]);
+    expect(read.body.files.map((f: any) => [f.id, f.download_path])).toEqual([[submitted, `/v1/files/${id}/${submitted}`]]);
+    expect((await api(MEMBER, "GET", `/v1/workspaces/${id}/files/${submitted}`)).body.state).toBe("ready");
+    const res = await download(MEMBER, id, submitted);
+    expect(res.status).toBe(200);
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(TEXT);
+    expect((await api(MEMBER, "GET", `/v1/workspaces/${id}/files/${unsubmitted}`)).code).toBe("file_not_found");
+    expect((await download(MEMBER, id, unsubmitted)).status).toBe(404);
+    // Another task's submitted file, which they don't review, stays out of reach.
+    expect((await api(MEMBER, "GET", `/v1/workspaces/${id}/files/${elsewhere}`)).code).toBe("file_not_found");
+    expect((await download(MEMBER, id, elsewhere)).status).toBe(404);
   });
 });
 

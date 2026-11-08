@@ -11,7 +11,23 @@
 //! **Proposed** throughout. The choices this makes that the ADR doesn't are listed in the step's plan.
 
 use crate::files::{is_sha256, ObjectState};
-use crate::MAX_ARTIFACTS;
+use crate::{require_label, CoreError, MAX_ARTIFACTS};
+
+/// The most files one uploader may hold for one task that no submission names yet, counting uploads still arriving. It's the
+/// submission limit, since no submission could name more, and it stops an assignee filling the room's quota while the task
+/// stays accepted.
+pub const MAX_UNSUBMITTED_FILES_PER_TASK: usize = MAX_ARTIFACTS;
+
+/// Whether one more upload for a task fits, given how many unsubmitted files and unfinished uploads the uploader already
+/// holds for it.
+pub fn fits_unsubmitted_cap(held: usize) -> bool {
+    held < MAX_UNSUBMITTED_FILES_PER_TASK
+}
+
+/// A file's label on a submission, if one was given: the same rule as a link's label.
+pub fn check_file_label(label: Option<&str>) -> Result<(), CoreError> {
+    label.map_or(Ok(()), require_label)
+}
 
 /// A file in the room, as the room read it from current state. Its `Debug` leaves out nothing secret: an ID, a principal, a
 /// state, a hash the room computed and a size. The name stays out, because a name is agent content.
@@ -140,11 +156,16 @@ pub fn pin_submission_files(
 /// and `decide` refuses `Verify` on a submission with files without it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApprovedFiles {
+    task_id: String,
     submission_no: u32,
     count: usize,
 }
 
 impl ApprovedFiles {
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+
     pub fn submission_no(&self) -> u32 {
         self.submission_no
     }
@@ -154,12 +175,13 @@ impl ApprovedFiles {
     }
 }
 
-/// Whether the files of the submission being approved still allow it. `pinned` is every file submission `submission_no`
-/// names, and `current` is what the room reads for them now. Run it before `decide`'s `Command::Verify`, in the same
+/// Whether the files of the submission being approved still allow it. `pinned` is every file that task's submission
+/// `submission_no` names, and `current` is what the room reads for them now. Run it before `decide`'s `Command::Verify`, in the same
 /// transaction, and pass the proof in `Observed::approved_files`.
 ///
 /// Requesting changes doesn't run this: a reviewer can always send work back, including because a file was blocked.
 pub fn check_approval(
+    task_id: &str,
     submission_no: u32,
     pinned: &[PinnedFile],
     current: &[RoomFile<'_>],
@@ -180,6 +202,7 @@ pub fn check_approval(
         }
     }
     Ok(ApprovedFiles {
+        task_id: task_id.to_string(),
         submission_no,
         count: pinned.len(),
     })

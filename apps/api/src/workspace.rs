@@ -530,6 +530,10 @@ fn handle_task_command(
         }
         submission_files::record(sql, who, task_id, decision.task.submission_no, files, now)?;
     }
+    // Nothing can be uploaded for a task that isn't accepted, so its unfinished uploads end now and give their space back.
+    if task.status == TaskStatus::Accepted && decision.task.status != TaskStatus::Accepted {
+        objects::drop_uploads_for_task(sql, &caller.id, kind_name(caller), task_id, now)?;
+    }
     record_decision(sql, &decision, task.status, &caller.id, now)?;
     Ok(task_json(&decision.task))
 }
@@ -2385,7 +2389,7 @@ mod queries {
             .iter()
             .map(|r| marked(r, "actor_id", "actor_org"))
             .collect();
-        let files = super::submission_files::for_task(sql, who, &task, readable)?;
+        let files = super::submission_files::for_task(sql, who, &task)?;
         Ok(json!({
             "task": task_json(&task), "submissions": submissions, "artifacts": artifacts, "files": files, "messages": messages, "history": history,
             // Says what's limited, so empty lists and null reasons aren't read as "none exist".

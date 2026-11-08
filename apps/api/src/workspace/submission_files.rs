@@ -12,10 +12,10 @@
 use super::*;
 use podster_core::files::ObjectState;
 use podster_core::submission_files::{
-    accepts_submission_uploads, check_approval, pin_submission_files, ApprovalFileRefusal,
-    ApprovedFiles, PinnedFile, RoomFile, SubmissionFileRefusal,
+    accepts_submission_uploads, check_approval, check_file_label, fits_unsubmitted_cap,
+    pin_submission_files, ApprovalFileRefusal, ApprovedFiles, PinnedFile, RoomFile,
+    SubmissionFileRefusal,
 };
-use podster_core::MAX_LABEL_BYTES;
 use podster_policy::files::{
     authorize_input_upload, authorize_submission_upload, input_asset_view, may_download,
     task_file_view, FileView,
@@ -49,6 +49,30 @@ pub(super) fn may_upload(sql: &SqlStorage, caller: &Caller, for_task: Option<&st
         ));
     }
     Ok(())
+}
+
+/// Refuses another upload for a task once the uploader holds as many for it as a submission could name: files no submission
+/// names yet, counting uploads still arriving whose grant hasn't ended. Without it, an assignee could fill the room's quota
+/// while the task stays accepted. A removed file holds no space, so it doesn't count.
+pub(super) fn require_room_for_another(
+    sql: &SqlStorage,
+    uploader: &str,
+    task_id: &str,
+    now: i64,
+) -> R<()> {
+    let held = rows(
+        sql,
+        "SELECT count(*) AS n FROM stored_object o WHERE o.for_task = ? AND o.uploaded_by = ? AND o.state <> 'removed'
+            AND (o.state <> 'uploading' OR o.upload_expires_at > ?)
+            AND NOT EXISTS (SELECT 1 FROM submission_file f WHERE f.object_id = o.id)",
+        vec![task_id.into(), uploader.into(), now.into()],
+    )?;
+    let held = held.first().map_or(0, |row| int(&row["n"])).max(0) as usize;
+    if fits_unsubmitted_cap(held) {
+        Ok(())
+    } else {
+        Err(ApiError::limit_exceeded())
+    }
 }
 
 /// `task_id` from `create_upload`, if the upload is for a submission. Anything but a string is refused, so a malformed body
@@ -117,13 +141,10 @@ pub(super) fn prepare(
         let id = item["id"].as_str().ok_or_else(ApiError::invalid_argument)?;
         let label = match item.get("label") {
             None | Some(Value::Null) => None,
-            Some(Value::String(label))
-                if !label.trim().is_empty() && label.len() <= MAX_LABEL_BYTES =>
-            {
-                Some(label.clone())
-            }
+            Some(Value::String(label)) => Some(label.clone()),
             Some(_) => return Err(ApiError::invalid_argument()),
         };
+        check_file_label(label.as_deref()).map_err(|e| ApiError::from_core(&e))?;
         ids.push(id);
         labels.push(label);
     }
@@ -193,7 +214,7 @@ pub(super) fn approval(
     let ids: Vec<&str> = pinned.iter().map(|file| file.object_id.as_str()).collect();
     let found = object_rows(sql, &ids)?;
     let current: Vec<RoomFile<'_>> = found.iter().map(room_file).collect();
-    check_approval(submission_no, &pinned, &current)
+    check_approval(&task.id, submission_no, &pinned, &current)
         .map(Some)
         .map_err(approval_refusal)
 }
@@ -222,20 +243,16 @@ pub(super) fn file_view(sql: &SqlStorage, caller: &Caller, row: &Value) -> R<Fil
     Ok(task_file_view(caller, &task, uploaded_by, submitted))
 }
 
-/// The files of a task's submissions that the caller may read, for `get_task`. `readable` is the same filter submissions and
-/// links already pass through, so files follow the artifact scope exactly as they do.
-pub(super) fn for_task(
-    sql: &SqlStorage,
-    who: &Participant,
-    task: &Task,
-    readable: impl Fn(&&Value) -> bool,
-) -> R<Vec<Value>> {
+/// The files of a task's submissions that the caller may read, for `get_task`. Each passes the same view a download does, so
+/// files follow the artifact scope as submissions and links do, and the reviewer named on the task also gets them
+/// (decision 97). A submission's note and links stay with the artifact scope.
+pub(super) fn for_task(sql: &SqlStorage, who: &Participant, task: &Task) -> R<Vec<Value>> {
     let found = rows(sql, "SELECT f.task_id, f.submission_no, f.object_id, f.sha256, f.size, f.label, f.submitted_by, f.submitted_org, f.created_at,
         o.name, o.media_type, o.state FROM submission_file f LEFT JOIN stored_object o ON o.id = f.object_id
         WHERE f.task_id = ? ORDER BY f.submission_no, f.created_at, f.object_id", vec![task.id.as_str().into()])?;
     let room = objects::room_id(sql)?;
     let mut out = Vec::new();
-    for row in found.iter().filter(&readable) {
+    for row in &found {
         let id = row["object_id"].as_str().unwrap_or_default();
         let state = row["state"].as_str().and_then(ObjectState::from_name);
         let view = task_file_view(
@@ -244,6 +261,9 @@ pub(super) fn for_task(
             row["submitted_by"].as_str().unwrap_or_default(),
             true,
         );
+        if view == FileView::Hidden {
+            continue;
+        }
         let download_path = state
             .is_some_and(|state| may_download(view, state))
             .then(|| format!("/v1/files/{room}/{id}"));

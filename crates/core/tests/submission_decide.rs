@@ -67,8 +67,8 @@ fn verify(submission_no: u32) -> Command {
     }
 }
 
-/// Proof for `count` ready files, made the only way there is.
-fn proof(submission_no: u32, count: usize) -> Observed {
+/// Proof for `count` ready files of task `task`, made the only way there is.
+fn proof_for(task: &str, submission_no: u32, count: usize) -> Observed {
     let ids: Vec<String> = (0..count).map(|i| format!("obj_{i}")).collect();
     let pinned: Vec<PinnedFile> = ids
         .iter()
@@ -91,9 +91,13 @@ fn proof(submission_no: u32, count: usize) -> Observed {
         })
         .collect();
     Observed {
-        approved_files: Some(check_approval(submission_no, &pinned, &current).unwrap()),
+        approved_files: Some(check_approval(task, submission_no, &pinned, &current).unwrap()),
         ..Observed::default()
     }
+}
+
+fn proof(submission_no: u32, count: usize) -> Observed {
+    proof_for("t", submission_no, count)
 }
 
 fn submitted_with_files(count: u32) -> Task {
@@ -176,6 +180,11 @@ fn proof_for_another_submission_or_another_count_is_refused() {
     );
     assert_eq!(
         decide(&task, "rev", verify(2), &proof(2, 0)).unwrap_err(),
+        CoreError::FilesNotChecked
+    );
+    // Proof for the same submission number of another task.
+    assert_eq!(
+        decide(&task, "rev", verify(2), &proof_for("other", 2, 2)).unwrap_err(),
         CoreError::FilesNotChecked
     );
 }

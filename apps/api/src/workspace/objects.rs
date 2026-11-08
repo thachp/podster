@@ -47,6 +47,9 @@ pub(super) fn handle_create(
 ) -> R<Value> {
     let for_task = super::submission_files::upload_target(body)?;
     super::submission_files::may_upload(sql, caller, for_task.as_deref())?;
+    if let Some(task_id) = &for_task {
+        super::submission_files::require_room_for_another(sql, &caller.id, task_id, now)?;
+    }
     let name = required(body, "name")?;
     let size = body["size"]
         .as_u64()
@@ -117,10 +120,63 @@ pub(super) fn drop_uploads_no_longer_allowed(
         "SELECT * FROM stored_object WHERE uploaded_by = ? AND state = 'uploading'",
         vec![principal.into()],
     )?;
-    if found.iter().any(|row| uploader(sql, row).is_err()) {
-        drop_uploads_of(sql, actor, actor_kind, principal, now)?;
+    // Each upload is judged alone: losing the right to add input assets doesn't end an upload for their own task, or the reverse.
+    for row in &found {
+        if uploader(sql, row).is_err() {
+            drop_upload(
+                sql,
+                actor,
+                actor_kind,
+                row["id"].as_str().unwrap_or_default(),
+                now,
+            )?;
+        }
     }
     Ok(())
+}
+
+/// Drops every unfinished upload for a task, when it stops being accepted, so its space comes back at once and its token dies.
+pub(super) fn drop_uploads_for_task(
+    sql: &SqlStorage,
+    actor: &str,
+    actor_kind: &str,
+    task_id: &str,
+    now: i64,
+) -> R<()> {
+    let found = rows(
+        sql,
+        "SELECT id FROM stored_object WHERE for_task = ? AND state = 'uploading'",
+        vec![task_id.into()],
+    )?;
+    for row in &found {
+        drop_upload(
+            sql,
+            actor,
+            actor_kind,
+            row["id"].as_str().unwrap_or_default(),
+            now,
+        )?;
+    }
+    Ok(())
+}
+
+/// Drops one unfinished upload, recording who ended it. Only an upload still arriving goes, so a stored file is never touched.
+fn drop_upload(sql: &SqlStorage, actor: &str, actor_kind: &str, id: &str, now: i64) -> R<()> {
+    audit_as(
+        sql,
+        actor,
+        actor_kind,
+        "object.upload_dropped",
+        id,
+        None,
+        None,
+        now,
+    )?;
+    exec(
+        sql,
+        "DELETE FROM stored_object WHERE id = ? AND state = 'uploading'",
+        vec![id.into()],
+    )
 }
 
 /// Drops what someone was still uploading when they went, in the transaction that ends their place here, so their token dies with

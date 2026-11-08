@@ -565,7 +565,12 @@ fn require_artifact(artifact: &Artifact) -> Result<(), CoreError> {
     if !valid {
         return Err(CoreError::InvalidArgument("uri"));
     }
-    require_text(&artifact.label, "label", MAX_LABEL_BYTES)
+    require_label(&artifact.label)
+}
+
+/// A label on a link or a file: some text, at most `MAX_LABEL_BYTES`.
+pub fn require_label(label: &str) -> Result<(), CoreError> {
+    require_text(label, "label", MAX_LABEL_BYTES)
 }
 
 /// Decides `create_task`. The reviewer defaults to the requester and can never be the assignee.
@@ -821,7 +826,8 @@ pub fn decide(
             }
             if task.submission_files > 0 {
                 let checked = observed.approved_files.as_ref().is_some_and(|proof| {
-                    proof.submission_no() == submission_no
+                    proof.task_id() == task.id
+                        && proof.submission_no() == submission_no
                         && proof.count() == task.submission_files as usize
                 });
                 if !checked {

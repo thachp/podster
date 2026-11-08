@@ -228,10 +228,12 @@ describe("a scan with no verdict", () => {
     const id = await room();
     const hash = await sha256(DATA);
     const upload = (await api("POST", `/v1/workspaces/${id}/uploads`, { name: "n.txt", size: DATA.length, sha256: hash })).body;
-    // Whatever else the room had to do is done, so the alarm after this can only be the scan's.
+    // Whatever else the room had to do is done, so the alarm after this can only be the scan's. The unfinished upload leaves one
+    // for removal's sweep, which clears it, more than an hour off.
     await vi.waitFor(async () => {
       await runDurableObjectAlarm(stub(id));
-      expect(await inRoom(id, (_sql, state) => state.storage.getAlarm())).toBeNull();
+      const left = await inRoom(id, (_sql, state) => state.storage.getAlarm());
+      expect(left === null || left > Date.now() + HOUR + 30 * 60 * 1000).toBe(true);
     });
     const before = Date.now();
     expect((await SELF.fetch(`https://api.internal${upload.upload_path}`, { method: "PUT", headers: { authorization: `Bearer ${upload.token}` }, body: DATA })).status).toBe(200);
@@ -370,12 +372,17 @@ describe("a room from before this", () => {
   /** Puts a room back to before this migration. Its audit entries each had their own policy version then, which was the cursor. */
   const undo = (id: string) =>
     inRoom(id, (sql) => {
-      // The newer migrations come off first, newest first: expected outputs, input assets linked to tasks, then files on
-      // submissions.
+      // The newer migrations come off first, newest first: expected outputs, removal, input assets linked to tasks, then
+      // files on submissions.
       sql.exec("DROP INDEX task_expected_output");
       sql.exec("ALTER TABLE task DROP COLUMN expected_output_id");
       sql.exec("DROP TABLE expected_output_version");
       sql.exec("DROP TABLE expected_output");
+      sql.exec("UPDATE schema_version SET version = version - 1");
+      sql.exec("DROP TABLE storage_sweep");
+      sql.exec("DROP INDEX stored_object_abandoned");
+      sql.exec("DROP INDEX stored_object_purge");
+      for (const column of ["removed_at", "removed_by", "removed_by_kind", "removed_from", "attempt_started_at", "purge_due_at"]) sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
       sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE asset_link");
       sql.exec("UPDATE schema_version SET version = version - 1");

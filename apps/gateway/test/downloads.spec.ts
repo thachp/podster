@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { allowedPassthrough } from "../src/index";
+import { CAPABILITIES } from "../src/capabilities";
 import { handleAgentDownload, isFilePath, serveFile } from "../src/downloads";
 import type { Identity } from "../src/assertion";
 
@@ -127,5 +128,12 @@ describe("the path's shape", () => {
     for (const path of ["/v1/files/ws_1", "/v1/files/ws_1/obj_1/x", "/v1/files/../x/y", "/v1/files//obj"]) expect(isFilePath(path), path).toBe(false);
     expect(allowedPassthrough(PATH)).toBe(false);
     expect(allowedPassthrough("/v1/workspaces/ws_1/files/obj_1")).toBe(true);
+  });
+});
+
+describe("removing a file", () => {
+  it("is a person's dashboard route, and no agent capability reaches it", () => {
+    expect(allowedPassthrough("/v1/workspaces/ws_1/files/obj_1/remove")).toBe(true);
+    for (const capability of CAPABILITIES) expect(capability.path, capability.name).not.toMatch(/\/remove$/);
   });
 });

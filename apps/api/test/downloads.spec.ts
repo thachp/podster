@@ -92,10 +92,12 @@ describe("downloading a file", () => {
 
   it("only ever serves a ready file, and an unknown state counts as no", async () => {
     const id = await room();
-    for (const state of ["uploading", "scanning", "blocked", "failed", "removed", "READY", ""]) {
+    for (const state of ["uploading", "scanning", "blocked", "failed", "READY", ""]) {
       const object = await file(id, state);
       expect(await refusal(await download(OWNER, id, object)), state).toEqual({ status: 409, code: "file_not_available" });
     }
+    // A removed file says so, since that's what it will stay.
+    expect(await refusal(await download(OWNER, id, await file(id, "removed")))).toEqual({ status: 410, code: "file_removed" });
   });
 
   it("shows a file a room member can't have yet, with no path to it", async () => {

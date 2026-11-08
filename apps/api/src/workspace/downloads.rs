@@ -5,14 +5,14 @@ use super::*;
 use podster_core::files::ObjectState;
 use podster_policy::files::{may_download, FileView};
 
-fn file_not_found() -> ApiError {
+pub(super) fn file_not_found() -> ApiError {
     ApiError::api(404, "file_not_found")
 }
 
-fn file_row(sql: &SqlStorage, id: &str) -> R<Value> {
+pub(super) fn file_row(sql: &SqlStorage, id: &str) -> R<Value> {
     rows(
         sql,
-        "SELECT id, name, size, sha256, media_type, state, object_key, uploaded_by, for_task FROM stored_object WHERE id = ?",
+        "SELECT id, name, size, sha256, media_type, state, object_key, uploaded_by, for_task, removed_at, removed_by FROM stored_object WHERE id = ?",
         vec![id.into()],
     )?
     .into_iter()
@@ -22,7 +22,7 @@ fn file_row(sql: &SqlStorage, id: &str) -> R<Value> {
 
 /// How much of a file the caller gets, from current state: `submission_files::file_view` decides by what the file was uploaded
 /// for.
-fn view_of(sql: &SqlStorage, caller: &Caller, row: &Value) -> R<FileView> {
+pub(super) fn view_of(sql: &SqlStorage, caller: &Caller, row: &Value) -> R<FileView> {
     super::submission_files::file_view(sql, caller, row)
 }
 
@@ -67,6 +67,7 @@ pub(super) fn file_json(sql: &SqlStorage, caller: &Caller, row: &Value) -> R<Opt
     Ok(Some(json!({
         "id": row["id"], "name": row["name"], "size": row["size"], "sha256": row["sha256"], "media_type": row["media_type"],
         "state": row["state"], "download_path": download_path.transpose()?, "linked_tasks": linked,
+        "removed_at": row["removed_at"], "removed_by": row["removed_by"],
     })))
 }
 
@@ -103,6 +104,9 @@ pub(super) fn begin(sql: &SqlStorage, who: &Participant, body: &Value) -> R<Valu
     let view = view_of(sql, &who.caller, &row)?;
     if view == FileView::Hidden {
         return Err(file_not_found());
+    }
+    if row["state"].as_str() == Some(ObjectState::Removed.name()) {
+        return Err(ApiError::api(410, "file_removed"));
     }
     let key = row["object_key"].as_str().filter(|key| !key.is_empty());
     if !can_download(view, &row) || key.is_none() {

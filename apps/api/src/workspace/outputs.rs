@@ -221,6 +221,14 @@ pub(super) fn name_on_create(sql: &SqlStorage, task: &Task, body: &Value) -> R<(
     }
 }
 
+/// Who may change which output a task names, against current state. `command_checked` also runs it before replaying a stored
+/// answer, so a retry from someone who has since lost the task gets `task_not_found`, not the task as it was.
+pub(super) fn authorize_link(sql: &SqlStorage, caller: &Caller, task_id: &str) -> R<Task> {
+    let task = load_task(sql, task_id)?.ok_or_else(ApiError::task_not_found)?;
+    ApiError::from_verdict(authorize_output_link(caller, &task))?;
+    Ok(task)
+}
+
 /// `PUT /tasks/:id/expected-output` with `{ "version": n, "output_id": "out_…" | null }`. `version` is the task version the
 /// caller last read, as `update_task` takes it. Whether the version moves is core's `LinkChange::next_version`: a real change
 /// does, so an assignee acting on what they read before it gets `version_conflict` and rereads which output they're working
@@ -233,9 +241,8 @@ pub(super) fn handle_set_task_output(
     now: i64,
 ) -> R<Value> {
     let caller = &who.caller;
-    let task = load_task(sql, task_id)?.ok_or_else(ApiError::task_not_found)?;
     // Authority first, so a malformed body can't tell someone a hidden task exists.
-    ApiError::from_verdict(authorize_output_link(caller, &task))?;
+    let task = authorize_link(sql, caller, task_id)?;
     only_keys(body, &["version", "output_id"])?;
     if body.get("output_id").is_none() {
         return Err(ApiError::invalid_argument());

@@ -380,6 +380,57 @@ describe("approval and status", () => {
   });
 });
 
+describe("removing a file through the room's removal route", () => {
+  const removeFile = (who: Who, id: string, object: string) => api(who, "POST", `/v1/workspaces/${id}/files/${object}/remove`);
+
+  it("leaves an approved output Ready, with files_available false", async () => {
+    const id = await room();
+    const output = await define(id);
+    const { task, taskPath } = await acceptedTask(id, output);
+    const file = await upload(id, task);
+    expect((await submit(taskPath, { files: [{ id: file }] })).status).toBe(200);
+    expect((await approve(taskPath)).status).toBe(200);
+    expect((await listed(OWNER, id, output)).current.files_available).toBe(true);
+    const removed = await removeFile(OWNER, id, file);
+    expect(removed.status, JSON.stringify(removed.body)).toBe(200);
+    expect(await listed(OWNER, id, output)).toMatchObject({ status: "ready", current: { task_id: task, submission_no: 1, files_available: false } });
+    expect((await list(OWNER, id)).ready).toBe(1);
+  });
+
+  it("refuses an approval after a file was removed, with file_removed, and records no version", async () => {
+    const id = await room();
+    const output = await define(id);
+    const { task, taskPath } = await acceptedTask(id, output);
+    const file = await upload(id, task);
+    expect((await submit(taskPath, { files: [{ id: file }] })).status).toBe(200);
+    expect((await removeFile(OWNER, id, file)).status).toBe(200);
+    const refused = await approve(taskPath);
+    expect([refused.status, refused.code]).toEqual([409, "file_removed"]);
+    expect(await listed(OWNER, id, output)).toMatchObject({ status: "in_review", in_review: true, current: null });
+    expect(await inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM expected_output_version").toArray()[0].n)).toBe(0);
+  });
+});
+
+describe("replaying a change to a task's output", () => {
+  it("re-checks authority, so someone who lost the task gets no stored answer", async () => {
+    const id = await room();
+    const output = await define(id);
+    const own = await api(MEMBER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Mine", instructions: "Do it." });
+    const path = `/v1/workspaces/${id}/tasks/${own.body.id}`;
+    const body = { version: own.body.version, output_id: output };
+    expect((await api(MEMBER, "PUT", `${path}/expected-output`, body, { key: "op-replay-link" })).status).toBe(200);
+    // An admin takes the task over, so MEMBER is no longer its requester.
+    const moved = await api(ADMIN, "POST", `${path}/set-requester`, { version: await taskVersion(path), requester: ADMIN.id });
+    expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+    const replayed = await api(MEMBER, "PUT", `${path}/expected-output`, body, { key: "op-replay-link" });
+    expect([replayed.status, replayed.code]).toEqual([403, "not_allowed"]);
+    // The requester's own retry still gets its stored answer.
+    const again = await api(ADMIN, "PUT", `${path}/expected-output`, { version: await taskVersion(path), output_id: null }, { key: "op-admin-clear" });
+    expect(again.status).toBe(200);
+    expect((await api(ADMIN, "PUT", `${path}/expected-output`, { version: again.body.version - 1, output_id: null }, { key: "op-admin-clear" })).status).toBe(200);
+  });
+});
+
 describe("removing an output", () => {
   it("is refused while a live task names it or once it was Ready, and allowed after a cancel", async () => {
     const id = await room();

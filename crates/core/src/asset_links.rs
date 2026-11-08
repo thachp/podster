@@ -44,7 +44,10 @@ impl LinkRefusal {
 pub fn linkable_state(state: ObjectState) -> bool {
     match state {
         ObjectState::Scanning | ObjectState::Ready => true,
-        ObjectState::Uploading | ObjectState::Blocked | ObjectState::Failed => false,
+        ObjectState::Uploading
+        | ObjectState::Blocked
+        | ObjectState::Failed
+        | ObjectState::Removed => false,
     }
 }
 

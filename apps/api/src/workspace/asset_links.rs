@@ -48,15 +48,16 @@ pub(super) fn visible_links(caller: &Caller, tasks: &[Task]) -> Vec<String> {
         .collect()
 }
 
-/// The file as the link rules see it: an input asset has no `for_task`, and a submission file names its task. Removal comes with
-/// step 8, and until then no file has been removed.
+/// The file as the link rules see it: an input asset has no `for_task`, and a submission file names its task. A removed file is
+/// the `removed` state, so linking one is refused as `file_removed`. Its links stay as a record, and a download through one
+/// answers `file_removed` too.
 fn room_file(row: &Value) -> Option<RoomFile<'_>> {
     Some(RoomFile {
         id: row["id"].as_str()?,
         uploaded_by: row["uploaded_by"].as_str()?,
         for_task: row["for_task"].as_str(),
         state: ObjectState::from_name(row["state"].as_str()?)?,
-        removed: false,
+        removed: row["state"].as_str() == Some(ObjectState::Removed.name()),
         sha256: row["sha256"].as_str().unwrap_or_default(),
         size: row["size"].as_u64().unwrap_or_default(),
     })

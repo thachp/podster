@@ -12,6 +12,7 @@ import { mintAssertion, type Identity } from "./assertion";
 import { CAPABILITIES, InvalidArguments, jsonSchema, toApiCall, zodShape, type ApiCall, type Capability } from "./capabilities";
 import { EMAIL_LINK_ROUTE, EMAIL_LINK_SECONDS, EMAIL_VERIFY_ROUTE, emailSignInEnabled, handleEmailLink, handleEmailVerify, linkMustNotReach, linkTokenHash, sendSignInLink, type EmailBinding } from "./email-sign-in";
 import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TEST_SIGNUP_ROUTE } from "./test-people";
+import { handleAgentDownload, isFilePath, serveFile } from "./downloads";
 import { handleUpload } from "./uploads";
 
 export interface Env {
@@ -365,6 +366,12 @@ export function createAuth(env: Env, { testPeople = false } = {}) {
         onExecute: async ({ ctx, capability, arguments: args, agentSession }) => {
           const definition = CAPABILITIES.find((c) => c.name === capability);
           if (!definition) throw new APIError("BAD_REQUEST", { message: "unknown_capability" });
+          // A download reaches here only once the plugin has checked the agent's get_asset_link grant, as for any call of it.
+          const download = ctx.request ? DOWNLOADS.get(ctx.request) : undefined;
+          if (download && capability === DOWNLOAD_CAPABILITY) {
+            download.response = await download.serve(agentSession.agent.id, ctx.headers?.get("authorization"));
+            return {};
+          }
           // Before the token is spent, so an agent that was limited can retry with the same one.
           if (!(await withinLimit(env.RL_ACCOUNT, `agent:${agentSession.agent.id}`))) throw new APIError("TOO_MANY_REQUESTS", { error: "rate_limited", message: "rate_limited" }, { "retry-after": RETRY_AFTER_SECONDS });
           const spends = spentToken(agentSession.agent.id, ctx.headers?.get("authorization"));
@@ -459,7 +466,7 @@ export function allowedPassthrough(path: string) {
   // Something between here and the API may collapse a double slash, which would slip past the prefix checks below.
   if (!path.startsWith("/v1/") || path.includes("//")) return false;
   // An upload's bytes have their own path, and this one would read them all into memory.
-  return !path.startsWith("/v1/agents") && !path.startsWith("/v1/inbox") && !path.startsWith("/v1/org-departures") && !path.startsWith("/v1/uploads");
+  return !path.startsWith("/v1/agents") && !path.startsWith("/v1/inbox") && !path.startsWith("/v1/org-departures") && !path.startsWith("/v1/uploads") && !path.startsWith("/v1/files");
 }
 
 /**
@@ -1055,6 +1062,8 @@ const appHandler = {
     const onApplicationHost = env !== publicEnv;
     const upload = await handleUpload(request, url, publicEnv.API, (key) => withinLimit(publicEnv.RL_ACCOUNT, key));
     if (upload) return upload;
+    const download = await handleAgentDownload(request, url, publicEnv, (token) => agentFromCredential(publicEnv, token, request), (key) => withinLimit(publicEnv.RL_ACCOUNT, key));
+    if (download) return download;
     if (publicEnv.APP_URL && !onApplicationHost) {
       const moved = await movedToApplicationHost(request, publicEnv, publicEnv.APP_URL);
       if (moved) return moved;
@@ -1135,6 +1144,7 @@ const appHandler = {
 
     // Everything else in the dashboard goes straight to the API, which decides.
     const path = url.pathname.slice("/api".length);
+    if (isFilePath(path)) return request.method === "GET" ? serveFile(env, identity, path) : denied("not_found", 405);
     if (!allowedPassthrough(path) && !allowedInbox(request.method, path, url.searchParams)) return denied("not_found", 404);
     if (sensitiveCommand(request.method, path) && !(await withinLimit(env.RL_SENSITIVE, `invite-or-create:${session.user.id}`))) return rateLimited();
     const hasBody = !["GET", "HEAD"].includes(request.method);
@@ -1182,6 +1192,98 @@ const mcpHandler = {
     return transport.handleRequest(new Request(request, { body }));
   },
 };
+
+/** Downloading is what `get_asset_link` is for, so an agent needs that capability's grant to download, as it would to call it. */
+const DOWNLOAD_CAPABILITY = "get_asset_link";
+
+/** The refusal the capability path gives an agent with no grant for a capability, in the plugin's shape. */
+const notGranted = (capability: string) => json({ error: "capability_not_granted", message: `Agent does not have an active grant for capability "${capability}".` }, 403);
+
+/** A download under way through the plugin's own call of `get_asset_link`, found again by the request it was given. */
+type Download = { serve: (pluginAgent: string, authorization: string | null | undefined) => Promise<Response>; response?: Response };
+const DOWNLOADS = new WeakMap<Request, Download>();
+
+/**
+ * Who an agent's own credential says it is, read fresh for one download, the same way a capability call does. A credential that ended
+ * for any reason, including whoever connected it leaving, stops working on its next use. `null` means it isn't one.
+ *
+ * An Agent Auth JWT goes through the plugin's own call of `get_asset_link`, with this file's room and ID as its arguments, so the grant
+ * check is the capability path's, not a copy of it: the JWT's `capabilities` claim, a grant's constraints, a revoked grant and the host's
+ * budget all count as they do there, and so do its refusals. The plugin then hands the download back here, which serves the file. The
+ * request it's given is the real method and URL, so a JWT bound to this request with `htm` and `htu` verifies.
+ *
+ * An MCP token's tools are all granted by its `mcp` scope, which the provider requires at `/mcp`, and there's no grant for each tool, so
+ * that scope is what lets it download. Every MCP token is issued with it, so for now this refuses only a token whose record lost it.
+ */
+async function agentFromCredential(env: Env, token: string, request: Request): Promise<Identity | Response | null> {
+  try {
+    if (token.split(".").length === 3) {
+      const [, , workspace_id, file_id] = new URL(request.url).pathname.split("/").slice(1);
+      const headers = new Headers({ authorization: `Bearer ${token}` });
+      const bound = new Request(request.url, { method: request.method, headers });
+      const download: Download = {
+        serve: async (pluginAgent, authorization) => {
+          // As the capability path counts, before the token is spent, so an agent that was limited can retry with the same one.
+          if (!(await withinLimit(env.RL_ACCOUNT, `agent:${pluginAgent}`))) return rateLimited();
+          const spends = spentToken(pluginAgent, authorization);
+          if (!spends) return denied("invalid_credential", 401);
+          try {
+            const identity = { ...(await resolveAgent(env, "agent_auth", pluginAgent)), spends } as Identity;
+            return await serveFile(env, identity, new URL(request.url).pathname);
+          } catch (error) {
+            if (error instanceof AgentRefused) return denied(error.message, 403);
+            throw error;
+          }
+        },
+      };
+      DOWNLOADS.set(bound, download);
+      // A refusal may come back or be thrown. Either way it's answered as the plugin's route answers it.
+      const answer = (await createAuth(env)
+        .api.executeCapability({ headers, request: bound, body: { capability: DOWNLOAD_CAPABILITY, arguments: { workspace_id, file_id } }, asResponse: true })
+        .catch((error: unknown) => {
+          if (!(error instanceof APIError)) throw error;
+          const sent = new Headers(error.headers as HeadersInit | undefined);
+          sent.set("content-type", "application/json");
+          return new Response(JSON.stringify(error.body), { status: error.statusCode, headers: sent });
+        })) as Response;
+      if (download.response) {
+        await answer.body?.cancel();
+        return download.response;
+      }
+      // A JWT that doesn't verify, or names no agent, isn't a credential. Any other refusal is the capability path's own.
+      if (answer.status === 401) {
+        await answer.body?.cancel();
+        return null;
+      }
+      return answer;
+    }
+    const held = await env.OAUTH_PROVIDER.unwrapToken<{ externalId?: string }>(token);
+    const externalId = held?.grant.props?.externalId;
+    if (!externalId || !forMcp(held.audience, env.BASE_URL)) return null;
+    const identity = await resolveAgent(env, "mcp_oauth", externalId);
+    return held.scope?.includes("mcp") ? identity : notGranted(DOWNLOAD_CAPABILITY);
+  } catch (error) {
+    if (error instanceof AgentRefused) return denied(error.message, 403);
+    throw error;
+  }
+}
+
+/**
+ * Whether a token was issued for `/mcp`, as the provider checks there, so a token for any other resource doesn't work at `/v1/files`.
+ * `/mcp` is the only resource declared, and a token stored with no audience is the provider's legacy grant for that one resource.
+ */
+export function forMcp(audience: string | string[] | undefined, base: string) {
+  const resource = new URL(`${base}/mcp`).href;
+  const same = (value: unknown) => {
+    try {
+      return typeof value === "string" && new URL(value).href === resource;
+    } catch {
+      return false;
+    }
+  };
+  if (audience === undefined) return true;
+  return Array.isArray(audience) ? audience.some(same) : same(audience);
+}
 
 let provider: { base: string; instance: OAuthProvider<Env> } | undefined;
 

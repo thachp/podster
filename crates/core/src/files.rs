@@ -434,6 +434,66 @@ impl ContentKind {
     }
 }
 
+/// Every type `ContentKind::media_type` can give. A stored value that isn't one of these is served as plain bytes.
+const SERVED_MEDIA_TYPES: [ContentKind; 19] = [
+    ContentKind::Pdf,
+    ContentKind::Rtf,
+    ContentKind::Word,
+    ContentKind::Spreadsheet,
+    ContentKind::Presentation,
+    ContentKind::Png,
+    ContentKind::Jpeg,
+    ContentKind::Gif,
+    ContentKind::Webp,
+    ContentKind::Tiff,
+    ContentKind::Bmp,
+    ContentKind::Heif,
+    ContentKind::Mp4,
+    ContentKind::QuickTime,
+    ContentKind::Matroska,
+    ContentKind::Avi,
+    ContentKind::Mpeg,
+    ContentKind::Zip,
+    ContentKind::Text,
+];
+
+/// The `Content-Type` to serve a stored file with. It's only ever a type the upload rules chose from the file's content, so a
+/// bad or missing row can't name something a browser would render.
+pub fn served_media_type(stored: Option<&str>) -> &'static str {
+    SERVED_MEDIA_TYPES
+        .iter()
+        .map(|kind| kind.media_type())
+        .find(|media_type| Some(*media_type) == stored)
+        .unwrap_or("application/octet-stream")
+}
+
+/// The `Content-Disposition` to serve a file with, always an attachment. A name is agent content, so only characters that can't
+/// end the value or start another header get through, whatever the stored name holds. `filename*` carries the real name for
+/// clients that read it (RFC 6266), and `filename` is a plain stand-in for those that don't.
+pub fn attachment_header(name: &str) -> String {
+    let plain: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let plain = plain.trim_matches([' ', '.']);
+    let plain = if plain.is_empty() { "download" } else { plain };
+    let mut encoded = String::with_capacity(name.len());
+    for byte in name.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    format!("attachment; filename=\"{plain}\"; filename*=UTF-8''{encoded}")
+}
+
 /// The ends of a file. `head` is its first `SAMPLE_HEAD_BYTES` and `tail` its last `SAMPLE_TAIL_BYTES`, or all of it when
 /// it's shorter, and the two can overlap. A sample of any other length is refused. Its `Debug` prints lengths, never bytes.
 #[derive(Clone, Copy)]

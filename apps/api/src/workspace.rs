@@ -78,6 +78,7 @@ mod objects;
 mod plan;
 mod planned;
 mod roles;
+mod submission_files;
 
 /// The caller as this room knows them. `org` comes from stored state, not the request.
 struct Participant {
@@ -501,8 +502,20 @@ fn handle_task_command(
         } => Some((artifacts.clone(), note.clone())),
         _ => None,
     };
-    let decision = decide(&task, &caller.id, command, &Observed::default())
-        .map_err(|e| ApiError::from_core(&e))?;
+    // Files are checked against the room before `decide`, which counts them, and refuses to approve any without the check's proof.
+    let mut observed = Observed::default();
+    let files = match &command {
+        Command::Submit { artifacts, .. } => {
+            submission_files::prepare(sql, caller, &task, body, artifacts.len())?
+        }
+        _ => vec![],
+    };
+    observed.submission_files = files.len();
+    if let Command::Verify { submission_no, .. } = &command {
+        observed.approved_files = submission_files::approval(sql, &task, *submission_no)?;
+    }
+    let decision =
+        decide(&task, &caller.id, command, &observed).map_err(|e| ApiError::from_core(&e))?;
     save_task(sql, &decision.task, now)?;
     if let Some((artifacts, note)) = submission {
         exec(sql, "INSERT INTO submission (task_id, submission_no, task_version, note, commit_sha, submitted_by, submitted_org, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", vec![
@@ -515,6 +528,11 @@ fn handle_task_command(
                 artifact.uri.into(), artifact.label.into(), caller.id.as_str().into(), who.org.as_str().into(), now.into(),
             ])?;
         }
+        submission_files::record(sql, who, task_id, decision.task.submission_no, files, now)?;
+    }
+    // Nothing can be uploaded for a task that isn't accepted, so its unfinished uploads end now and give their space back.
+    if task.status == TaskStatus::Accepted && decision.task.status != TaskStatus::Accepted {
+        objects::drop_uploads_for_task(sql, &caller.id, kind_name(caller), task_id, now)?;
     }
     record_decision(sql, &decision, task.status, &caller.id, now)?;
     Ok(task_json(&decision.task))
@@ -2356,7 +2374,8 @@ mod queries {
         })
     }
 
-    pub fn get_task(sql: &SqlStorage, who: &Participant, id: &str) -> R<Value> {
+    /// `oversight` narrows what it shows of files to name and status, for an organization's admin reading as their agent.
+    pub fn get_task(sql: &SqlStorage, who: &Participant, id: &str, oversight: bool) -> R<Value> {
         let task = load_task(sql, id)?.ok_or_else(ApiError::task_not_found)?;
         ApiError::from_verdict(authorize_task(&who.caller, &task, TaskAction::Read))?;
         let view = task_view(&who.caller, &task);
@@ -2407,8 +2426,9 @@ mod queries {
             .iter()
             .map(|r| marked(r, "actor_id", "actor_org"))
             .collect();
+        let files = super::submission_files::for_task(sql, who, &task, oversight)?;
         Ok(json!({
-            "task": task_json(&task), "submissions": submissions, "artifacts": artifacts, "messages": messages, "history": history,
+            "task": task_json(&task), "submissions": submissions, "artifacts": artifacts, "files": files, "messages": messages, "history": history,
             // Says what's limited, so empty lists and null reasons aren't read as "none exist".
             "visible": { "submissions": if view.artifacts == ArtifactView::All { "all" } else { "own" }, "conversation": view.conversation },
         }))
@@ -3528,7 +3548,7 @@ impl Workspace {
                 };
                 return match rest {
                     [] => queries::list_tasks(&sql, &view.caller, &url),
-                    [task] => queries::get_task(&sql, &view, task),
+                    [task] => queries::get_task(&sql, &view, task, true),
                     [task, "messages"] => queries::list_messages(&sql, &view, task, &url),
                     _ => Err(ApiError::not_found()),
                 };
@@ -3580,7 +3600,7 @@ impl Workspace {
                 ["brief"] => queries::get_brief(&sql, &who),
                 ["activity"] => queries::list_activity(&sql, &who, &url),
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
-                ["tasks", id] => queries::get_task(&sql, &who, id),
+                ["tasks", id] => queries::get_task(&sql, &who, id, false),
                 ["tasks", id, "messages"] => queries::list_messages(&sql, &who, id, &url),
                 ["events"] => queries::list_events(&sql, &who.caller, &url),
                 ["audit"] => queries::list_audit(&sql, &who.caller, &url),

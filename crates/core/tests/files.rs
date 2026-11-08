@@ -1664,10 +1664,14 @@ fn each_field_has_a_length_and_a_shape() {
 fn a_scanner_secret_a_header_cant_carry_counts_as_unset() {
     assert!(scanner_secret_usable("3f9a0c"));
     assert!(scanner_secret_usable("a b"));
-    for secret in [
+    // A failure names the case by its place in the list, never by the value.
+    for (case, candidate) in [
         "", " ", "\t\n", " 3f9a0c", "3f9a0c ", "3f9a0c\n", "\t3f9a0c",
-    ] {
-        assert!(!scanner_secret_usable(secret), "{secret:?}");
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert!(!scanner_secret_usable(candidate), "case {case}");
     }
 }
 

@@ -34,7 +34,7 @@ C changes contracts and M adds a migration. Those PRs merge one at a time, and t
 | 9a | Screen: asset upload | | | 5 |
 | 9b | Screen: Task Sheet files and review | | | 6 |
 | 9c | Screen: Artifacts tab and output status | | | 7 |
-| 10 | Card progress | | D1, if cards read the index | 7, and [decision 49](spec/PRODUCT.md#decisions-needed)'s card work |
+| 10 | Card progress | Yes | None: each room's card counts its own outputs, so no index is needed | 7, and [decision 49](spec/PRODUCT.md#decisions-needed)'s card work |
 | 11 | Staging run of expanded criterion 6 and the upload policy | | | All |
 
 Steps 9a, 9b and 9c are in different folders, so they can run in parallel. Agent tools ship with each backend PR, because a new capability updates contracts in the same PR.

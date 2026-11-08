@@ -652,6 +652,12 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 143 | Which second implementation counts | **Decided:** independence is judged by direction, as decision 124 allows. Outbound runs against LangGraph's A2A 1.0 server, with fasta2a's server as backup. Inbound uses the A2A project's own JavaScript and Python clients and the compatibility kit's own `httpx` client, and the profile says plainly that inbound was tested only against the A2A project's own code. Revisited before public rooms | M3 |
 | 144 | Removing a file hidden from the caller | **Decided:** a file the caller can't see answers `file_not_found`, even to a human owner or admin trying to remove it. Hidden equals missing for removal too, and the caller's view is checked before the admin check. Unsubmitted task files are still cleared under decision 98 | M2 |
 
+## ADR 0007 accepted, November 8, 2026
+
+- The owner accepted [ADR 0007](../adr/0007-a2a.md), saying "yes i agreed.. go ahead and accept adr 0007". It builds on decisions 107 to 143, so it needs no new decision number.
+- Its details to settle in review stay open. M3's build order in the [plan](../m3-plan.md) stays proposed.
+- None of it is in the code yet.
+
 ## Runner proposals, November 8, 2026
 
 - The owner proposed changing the earlier default so eligible tasks run automatically without per-run owner approval, within the access and limits the owner configures. It's recorded as a **proposed revision** to decision 29, not a decision, and waits for M7's security review; pairing, resource/provider setup and independent review remain separate.
@@ -659,7 +665,6 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 - The proposed execution handoff is Runner to local Claude Code, then results, a PR link if created and test outcomes back to Podster for review. The GitHub App token and secure-delivery design remain open, not implemented.
 - The proposed token policy keeps the normal one-hour installation-token lifetime separate from the approved task duration. Longer authorized tasks obtain fresh scoped tokens on demand after current task/duration/agent/repository checks, with no per-renewal owner approval. Completion, cancellation, expiry or lost authority stops renewal; revocation results must be verified. Public/fork ownership remains undecided.
 - This is a product-design proposal, not a standing instruction to execute arbitrary future tasks or provision credentials. Provider decision 28 and M7's security/provider gates remain in force.
-
 - On 2026-11-08 the owner left it to the lead whether these were rulings, and the lead recorded them as proposals, since they're M7 work and automatic runs loosen the safest-options stance of decision 26.
 
 ## File removal ruling and a wording fix, November 8, 2026

@@ -1,6 +1,6 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 // Expected outputs (M2 step 7): defining them, naming one on a task, and approval making it Ready (decisions 54, 135 to 140).
 
@@ -563,5 +563,61 @@ describe("an output's version history", () => {
     expect(r.body.versions[199].submission_no).toBe(2);
     // A version whose task no longer exists names nothing.
     expect(Object.keys(r.body.versions[0]).sort()).toEqual(["approved_at", "submission_no"]);
+  });
+});
+
+describe("the directory card's output count", () => {
+  const card = async (who: Who, id: string) => api(who, "GET", `/v1/workspaces/${id}/card`);
+
+  it("counts Ready outputs out of those not removed, for every participant, as the outputs read does", async () => {
+    const id = await room();
+    expect((await card(OWNER, id)).body.outputs).toEqual({ ready: 0, total: 0 });
+    const output = await define(id);
+    await define(id, "Second");
+    const gone = await define(id, "Gone");
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/outputs/${gone}`)).status).toBe(200);
+    const { taskPath } = await acceptedTask(id, output);
+    expect((await submit(taskPath, { artifacts: LINK })).status).toBe(200);
+    // In review isn't Ready.
+    expect((await card(OWNER, id)).body.outputs).toEqual({ ready: 0, total: 2 });
+    expect((await approve(taskPath)).status).toBe(200);
+    const read = await list(OWNER, id);
+    for (const who of [OWNER, ADMIN, MEMBER, GUEST, LIMITED, AGENT_ADMIN]) {
+      const seen = await card(who, id);
+      expect(seen.status, who.id).toBe(200);
+      expect(seen.body.outputs, who.id).toEqual({ ready: read.ready, total: read.outputs.length });
+    }
+    expect((await card(LIMITED, id)).body.outputs).toEqual({ ready: 1, total: 2 });
+  });
+
+  it("gives an outsider and an organization's admin overseeing its agent no card, and so no count", async () => {
+    const id = await room();
+    await define(id);
+    for (const who of [OUTSIDER, orgAdmin(GUEST.org), orgAdmin("org_op_x")]) {
+      const seen = await card(who, id);
+      expect([seen.status, seen.code], who.id).toEqual([404, "workspace_not_found"]);
+      expect(seen.body, who.id).not.toHaveProperty("outputs");
+    }
+    // The directory lists only rooms someone is in, so it never shows an outsider this room.
+    const listed = await api(OUTSIDER, "GET", "/v1/workspaces/cards");
+    expect(listed.status).toBe(200);
+    expect((listed.body.workspaces as any[]).some((row) => row.workspace_id === id)).toBe(false);
+  });
+
+  it("reaches the directory listing, card by card", async () => {
+    const id = await room();
+    await define(id);
+    // The directory pages 20 rooms at a time from the listing read model, which hears of a new member shortly after.
+    const find = async () => {
+      for (let offset: number | undefined = 0; offset !== undefined; ) {
+        const page = await api(GUEST, "GET", `/v1/workspaces/cards?offset=${offset}`);
+        expect(page.status).toBe(200);
+        const row = (page.body.workspaces as any[]).find((w) => w.workspace_id === id);
+        if (row) return row;
+        offset = page.body.next_offset ?? undefined;
+      }
+      return undefined;
+    };
+    await vi.waitFor(async () => expect((await find())?.card?.outputs).toEqual({ ready: 0, total: 1 }), { timeout: 5000, interval: 50 });
   });
 });

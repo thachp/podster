@@ -47,7 +47,9 @@ export type Submission = { submission_no: number; task_version: number; note: st
 export type HistoryEvent = { seq: number; id: string; type: string; from: From; external: boolean; reason: string | null; prior_status: string | null; new_status: string | null; task_version: number | null; created_at: number };
 /** What the viewer's access leaves out of this read. Without it, empty lists can't be told from a task with nothing in them. */
 export type TaskVisibility = { submissions: "all" | "own"; conversation: boolean };
-export type TaskDetail = { task: Task; submissions: Submission[]; artifacts: Artifact[]; files?: TaskFile[]; messages: Message[]; history: HistoryEvent[]; visible?: TaskVisibility };
+/** The expected output a task works toward. `removed` means it was removed since the task named it. */
+export type TaskOutput = { id: string; title: string; removed: boolean };
+export type TaskDetail = { task: Task; expected_output?: TaskOutput | null; submissions: Submission[]; artifacts: Artifact[]; files?: TaskFile[]; messages: Message[]; history: HistoryEvent[]; visible?: TaskVisibility };
 
 export type Member = { principal_id: string; kind: string; org_id: string; role: string; access?: { review: string; artifacts: string } };
 export type Room = { id: string; name: string; owner: string; status?: string; require_person_review?: boolean; owner_left_at?: number | null; members?: Member[] };
@@ -113,6 +115,7 @@ const VERBS: Record<string, string> = {
   "task.assignee_departed": "recorded that the assignee left",
   "task.needs_attention": "recorded that someone left, so the task needs a new reviewer or requester",
   "task.message": "posted a message",
+  "task.output_changed": "changed the expected output",
 };
 
 /** An edit to the instructions or criteria of an accepted task (decision 4). It's recorded as an offer, and no actual offer starts from `accepted`. */
@@ -137,7 +140,7 @@ const isAdmin = (role: string | undefined) => role === "owner" || role === "admi
  * the server decides each request again.
  */
 export function viewerActions(task: Task, me: string, role: string | undefined, archived = false) {
-  if (archived) return { review: false, respond: false, submit: false, cancel: false, assign: false, edit: false, setReviewer: false, setRequester: false };
+  if (archived) return { review: false, respond: false, submit: false, setOutput: false, cancel: false, assign: false, edit: false, setReviewer: false, setRequester: false };
   const admin = isAdmin(role);
   const manages = task.requester === me || admin;
   const live = !isTerminal(task.status);
@@ -147,6 +150,8 @@ export function viewerActions(task: Task, me: string, role: string | undefined, 
     submit: task.status === "accepted" && task.assignee === me,
     // Accept or decline an offer, which only the one it's offered to can do.
     respond: task.status === "offered" && task.assignee === me,
+    // Decision 137: not once work is submitted, since a reviewer approves for the output named when it was.
+    setOutput: manages && (task.status === "open" || task.status === "offered" || task.status === "accepted"),
     cancel: manages && live,
     assign: manages && (task.status === "open" || task.status === "offered"),
     edit: manages && live && task.status !== "submitted",

@@ -1,6 +1,6 @@
 # M3 plan
 
-The owner accepted all 28 questions below on 2026-11-08, as [decisions 107 to 134](spec/PRODUCT.md#decisions-needed). The build order and the engineering details in it are still **Proposed**. It covers [M3 A2A](spec/PRODUCT.md#product-direction-and-delivery-scope) and starts from the [proposed A2A adapter](spec/ARCHITECTURE.md#a2a-adapter). No A2A code exists.
+The owner accepted all 28 questions below on 2026-11-08, as [decisions 107 to 134](spec/PRODUCT.md#decisions-needed). The owner accepted [ADR 0007](adr/0007-a2a.md) on 2026-11-08, which covers the engineering details in the build order. The order of the steps is still **Proposed**, and so are ADR 0007's [details to settle in review](adr/0007-a2a.md#proposed-details-to-settle-in-review). It covers [M3 A2A](spec/PRODUCT.md#product-direction-and-delivery-scope) and starts from the [proposed A2A adapter](spec/ARCHITECTURE.md#a2a-adapter). No A2A code exists.
 
 **Status, 2026-11-08 UTC:** on 2026-11-07 the owner said "we need to finish m2", meaning M2 before any M3 code. [Decision 133](spec/PRODUCT.md#decisions-needed) says what finished means for M3's product code, and [decision 107](spec/PRODUCT.md#decisions-needed) lets the spikes and ADR 0007 start now. The [spikes](#spikes) come first, then the [build order](#build-order).
 
@@ -69,15 +69,15 @@ All three ran locally. Each folder's README has the details.
 
 ## Build order
 
-C changes `packages/contracts` and M adds a migration or room schema. The order is **Proposed**. Product code, steps 5 onward, waits until M2 is finished as [decision 133](spec/PRODUCT.md#decisions-needed) defines it. C and M PRs merge one at a time, after M2's last one, and take turns with planning's as [decision 60](spec/PRODUCT.md#decisions-needed) does for M2.
+C changes `packages/contracts` and M adds a migration or room schema. The order is **Proposed**. What each step does follows the accepted ADR 0007. Product code, steps 5 onward, waits until M2 is finished as [decision 133](spec/PRODUCT.md#decisions-needed) defines it. C and M PRs merge one at a time, after M2's last one, and take turns with planning's as [decision 60](spec/PRODUCT.md#decisions-needed) does for M2.
 
 | Step | Work | C | M | After | Runs beside |
 | --- | --- | --- | --- | --- | --- |
-| 0 | ADR 0007 draft: the profile, from the owner's rulings | | | Rulings | 1, 2, 3 |
-| 1 | Spike A | | | Questions 1, 2, 3, 18 and 22 | 0, 2, 3 |
-| 2 | Spike B | | | Questions 1 and 5 | 0, 1, 3 |
-| 3 | Spike C | | | Questions 1, 16 and 20 | 0, 1, 2 |
-| 4 | ADR 0007 with spike results, accepted by the owner | | | 0 to 3 | |
+| 0 | ADR 0007 draft: the profile, from the owner's rulings | | | Rulings. **Done** ([#145](https://github.com/thachp/podster/pull/145)) | 1, 2, 3 |
+| 1 | Spike A | | | Questions 1, 2, 3, 18 and 22. **Done**, without the kit ([#138](https://github.com/thachp/podster/pull/138)) | 0, 2, 3 |
+| 2 | Spike B | | | Questions 1 and 5. **Done** ([#139](https://github.com/thachp/podster/pull/139)) | 0, 1, 3 |
+| 3 | Spike C | | | Questions 1, 16 and 20. **Local half done** ([#140](https://github.com/thachp/podster/pull/140)). The staging half waits for the owner's yes | 0, 1, 2 |
+| 4 | ADR 0007 with spike results, accepted by the owner | | | 0 to 3. **Done:** accepted on 2026-11-08 | |
 | 5 | Pure mapping in `crates/core/src/a2a.rs`, with one line in `lib.rs`: a remote state plus the current Podster state gives one command, a hold or nothing. Tests include late and out-of-order updates | | | 4, M2 finished | 6 |
 | 6 | Gateway module `apps/gateway/src/a2a/`: Agent Card, JSON-RPC envelope, version check, and every operation answering its named "not supported" error. The profile is `docs/spec/A2A-PROFILE.md`, and a gateway test checks the card lists only the operations it names. `check.mjs` covers only `openapi.yaml` and `capabilities.yaml`, so nothing here changes `packages/contracts` | | | 4, M2 finished | 5 |
 | 7 | Authentication, as its own PR with [decision 127](spec/PRODUCT.md#decisions-needed)'s deeper pass:<br>• Move the gateway from the combined `OAuthProvider` to one `OAuthAuthorizationServer` with two `OAuthResourceServer`s, `/mcp` and `/a2a`, still in one Worker. The combined provider has one resource, so it can't give `/a2a` its own audience.<br>• Set `defaultResource` and `legacyGrantResource` to `/mcp`, so clients that send no `resource`, and old grants, stay MCP.<br>• Change the consent code to grant `a2a` for an `/a2a` request. Today it refuses every scope but `mcp` and `offline_access`.<br>• Use `getOAuthApi(env)` where the gateway uses `env.OAUTH_PROVIDER`, and keep `forMcp` MCP-only.<br>• Tokens resolve to the same agent identity. Add AC-12's negatives. | Only if the API's identity call changes | | 6 | |

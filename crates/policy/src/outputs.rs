@@ -5,6 +5,7 @@
 
 use podster_core::Task;
 
+use crate::files::{task_file_view, FileView};
 use crate::{authorize_task, can_see_task, is_human_admin, Caller, Role, TaskAction, Verdict};
 
 /// Who may define, rename or remove the room's expected outputs: a human owner or admin. An agent stored as an admin counts as
@@ -35,4 +36,12 @@ pub fn sees_outputs(caller: &Caller) -> bool {
 /// can see, so an output's status never names a task hidden from someone limited to their own.
 pub fn sees_output_task(caller: &Caller, task: &Task) -> bool {
     can_see_task(caller, task)
+}
+
+/// Whether the caller learns anything computed from the files of a task's submission, such as whether an output's current
+/// version can still be downloaded (decision 138): only someone who may read that submission's files, by the same rule a
+/// download uses, including the reviewer named on the task (decision 97). Seeing the task isn't enough, because someone limited
+/// to their own submissions would learn that a hidden submission's file was blocked or removed.
+pub fn sees_submission_files(caller: &Caller, task: &Task, submitted_by: &str) -> bool {
+    task_file_view(caller, task, submitted_by, true) == FileView::Full
 }

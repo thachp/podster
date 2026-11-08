@@ -133,6 +133,14 @@ CREATE TABLE submission_file (task_id TEXT NOT NULL, submission_no INTEGER NOT N
   label TEXT NOT NULL, submitted_by TEXT NOT NULL, submitted_org TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (task_id, submission_no, object_id)) WITHOUT ROWID;
 CREATE INDEX submission_file_object ON submission_file (object_id);
 ALTER TABLE task ADD COLUMN left_accepted_at INTEGER;
+", "
+CREATE TABLE expected_output (id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL, removed_at INTEGER, removed_by TEXT, current_task_id TEXT, current_submission_no INTEGER, current_approved_at INTEGER);
+CREATE INDEX expected_output_shown ON expected_output (created_at, id) WHERE removed_at IS NULL;
+CREATE TABLE expected_output_version (output_id TEXT NOT NULL, task_id TEXT NOT NULL, submission_no INTEGER NOT NULL, approved_at INTEGER NOT NULL,
+  PRIMARY KEY (output_id, task_id, submission_no)) WITHOUT ROWID;
+ALTER TABLE task ADD COLUMN expected_output_id TEXT;
+CREATE INDEX task_expected_output ON task (expected_output_id) WHERE expected_output_id IS NOT NULL;
 "];
 
 pub fn int(value: &Value) -> i64 {

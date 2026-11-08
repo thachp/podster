@@ -370,7 +370,12 @@ describe("a room from before this", () => {
   /** Puts a room back to before this migration. Its audit entries each had their own policy version then, which was the cursor. */
   const undo = (id: string) =>
     inRoom(id, (sql) => {
-      // The newer migration for files on submissions comes off first.
+      // The newer migrations, for expected outputs and then files on submissions, come off first.
+      sql.exec("DROP INDEX task_expected_output");
+      sql.exec("ALTER TABLE task DROP COLUMN expected_output_id");
+      sql.exec("DROP TABLE expected_output_version");
+      sql.exec("DROP TABLE expected_output");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE submission_file");
       sql.exec("DROP INDEX stored_object_task");
       sql.exec("ALTER TABLE stored_object DROP COLUMN for_task");

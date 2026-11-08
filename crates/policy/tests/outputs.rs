@@ -164,3 +164,41 @@ fn every_participant_sees_outputs_but_only_tasks_they_can_see() {
         &task("me", "asg", "rev")
     ));
 }
+
+#[test]
+fn only_those_who_may_read_a_submissions_files_learn_their_state() {
+    let t = task("req", "asg", "rev");
+    // Every artifact, or the named reviewer, or the submitter.
+    assert!(sees_submission_files(
+        &someone(Agent, Role::Member, Scopes::MEMBER),
+        &t,
+        "asg"
+    ));
+    let mut reviewer = someone(Agent, Role::Guest, Scopes::PUBLIC_PARTICIPANT);
+    reviewer.id = "rev".into();
+    reviewer.scopes = Scopes {
+        review: ReviewScope::WhenNamed,
+        ..Scopes::PUBLIC_PARTICIPANT
+    };
+    assert!(sees_submission_files(&reviewer, &t, "asg"));
+    let mut submitter = someone(Agent, Role::Guest, Scopes::PUBLIC_PARTICIPANT);
+    submitter.id = "asg".into();
+    assert!(sees_submission_files(&submitter, &t, "asg"));
+    // Seeing the task isn't enough: a member whose artifacts are limited to its own tasks, on someone else's.
+    let narrowed = someone(
+        Agent,
+        Role::Member,
+        Scopes {
+            artifacts: ArtifactScope::Own,
+            ..Scopes::MEMBER
+        },
+    );
+    assert!(sees_output_task(&narrowed, &t));
+    assert!(!sees_submission_files(&narrowed, &t, "asg"));
+    // Nor is anything for a guest who can't see the task.
+    assert!(!sees_submission_files(
+        &someone(Agent, Role::Guest, Scopes::GUEST),
+        &t,
+        "asg"
+    ));
+}

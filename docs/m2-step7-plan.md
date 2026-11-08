@@ -2,7 +2,13 @@
 
 Step 7 of the [M2 plan](m2-plan.md). A task may name one expected output, and approving the submission that delivers it makes the output Ready. Decisions: [47 and 54](spec/PRODUCT.md#decisions-needed). Design: [ADR 0006](adr/0006-uploads-and-scanning.md#expected-outputs).
 
-**Status, 2026-11-07:** everything here is **proposed**. Part 1, the pure rules, is written and tested. Part 2, the API, gateway and contracts, waits for step 6 ([#131](https://github.com/thachp/podster/pull/131)) and goes after steps 5 and 8 in the contract and migration order.
+**Status, 2026-11-07:** part 1, the pure rules, merged in [#136](https://github.com/thachp/podster/pull/136). Part 2, the API, gateway and contracts, is built locally on top of step 6 ([#131](https://github.com/thachp/podster/pull/131)) and undeployed. It goes after steps 5 and 8 in the contract and migration order. The rules follow [decisions 135 to 140](#rulings).
+
+**Where part 2 differs from what's below:**
+
+- `GET /outputs` doesn't list each output's naming tasks or the current version's artifacts. Step 9c reads those through `get_task`, which already applies `task_view` and the file views, including oversight's.
+- There's no oversight route for outputs.
+- `PUT /outputs/:id` replaces the title and description. Leaving the description out clears it.
 
 ## Part 1: pure rules
 
@@ -112,11 +118,13 @@ CREATE INDEX task_expected_output ON task (expected_output_id) WHERE expected_ou
 4. **The Verify hook** must run in the same transaction as the approval, after `decide` and step 6's file check. It must never run on a refused approval.
 5. **Agent content.** Titles and descriptions are text people and screens show. They never become instructions or permissions, and events and logs carry IDs only.
 
-## Gaps for the lead, each with a recommendation
+## Rulings
 
-1. **Does a note-only approval make an output Ready?** The glossary says Ready needs "an approved artifact version". *Recommend:* no. It needs at least one link or file. Built that way, and easy to flip.
-2. **Removing an output.** Decision 54 says owners and admins "define" outputs, and doesn't say whether they can remove them. *Recommend:* a soft removal that keeps the row, refused once Ready or while a live task names it. Built that way.
-3. **Changing a task's output after submission.** *Recommend:* refused once submitted, and on finished tasks. Built that way.
-4. **A Ready output whose file was later blocked or removed.** *Recommend:* stays Ready, with `files_available: false` shown beside it, and the screen says "file unavailable" clearly (the lead's condition), matching ADR 0006's "keeps its approval". The alternative is falling back to an earlier row of `expected_output_version`, which would quietly change what the room calls its output.
-5. **Inbox events for output changes.** *Recommend:* `task.output_changed` goes to the task's parties. Define, rename and remove go to nobody's inbox and appear in activity only. Outputs are the room's goal, but inbox noise for every rename isn't worth it.
-6. **Limits:** 50 per room, 200-byte titles and 4 KB descriptions. These are choices, not rulings.
+The owner accepted all six recommendations on 2026-11-07, as [decisions 135 to 140](spec/PRODUCT.md#decisions-needed), and the code follows them:
+
+- **[135](spec/PRODUCT.md#decisions-needed):** a note-only approval doesn't make an output Ready.
+- **[136](spec/PRODUCT.md#decisions-needed):** removal keeps the row, and is refused once the output was Ready or while a live task names it.
+- **[137](spec/PRODUCT.md#decisions-needed):** a task's output can't change once it's submitted.
+- **[138](spec/PRODUCT.md#decisions-needed):** a Ready output whose file is later blocked or removed stays Ready with `files_available` false, and step 9c's screen must say clearly that the file is unavailable.
+- **[139](spec/PRODUCT.md#decisions-needed):** `task.output_changed` goes to the task's parties. Defining, renaming and removing go to activity only.
+- **[140](spec/PRODUCT.md#decisions-needed):** 50 outputs per room, 200-byte titles and 4 KB descriptions.

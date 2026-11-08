@@ -82,8 +82,17 @@ const offer = async (tasks: string, extra: object = {}) => {
   return r.body;
 };
 const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
-/** Puts a room back to before submissions named files: the newest migration. */
+/** Puts a room back to before expected outputs: the newest migration. */
+const undoOutputMigration = (state: any) => {
+  state.storage.sql.exec("DROP INDEX task_expected_output");
+  state.storage.sql.exec("ALTER TABLE task DROP COLUMN expected_output_id");
+  state.storage.sql.exec("DROP TABLE expected_output_version");
+  state.storage.sql.exec("DROP TABLE expected_output");
+  state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+};
+/** Puts a room back to before submissions named files. */
 const undoSubmissionFileMigration = (state: any) => {
+  undoOutputMigration(state);
   state.storage.sql.exec("DROP TABLE submission_file");
   state.storage.sql.exec("DROP INDEX stored_object_task");
   state.storage.sql.exec("ALTER TABLE stored_object DROP COLUMN for_task");
@@ -4570,7 +4579,7 @@ describe("rooms from before access grants", () => {
     });
     const read = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body;
     expect([read.goal, read.context]).toEqual([null, null]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(version + 12);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(version + 13);
     const accessOf = (who: Who) => read.members.find((m: any) => m.principal_id === who.id).access;
     expect(accessOf(LEAD).preset).toBe("member");
     expect(accessOf(BOB).preset).toBe("guest");
@@ -4760,7 +4769,7 @@ describe("work roles and claims", () => {
     expect(read.status).toBe(200);
     expect(read.body.members.find((m: any) => m.principal_id === BOB.id).access.preset).toBe("public_participant");
     expect(await count(id, "access_grant")).toBe(before);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 11);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 12);
     const role = await opening(id);
     expect((await invite(id, role, BOB)).status).toBe(200);
     expect((await claim(id, role, BOB)).body.access.preset).toBe("member");
@@ -5248,7 +5257,7 @@ describe("requiring a person to review (decision 5)", () => {
       return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
     });
     expect((await api(LEAD, "GET", `/v1/workspaces/${id}`)).body.require_person_review).toBe(false);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 10);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 11);
     expect((await api(OWNER, "POST", `/v1/workspaces/${id}/archive`, { policy_version: await version(id) })).status).toBe(200);
     expect((await setting(id, true)).code).toBe("workspace_archived");
   });
@@ -5745,7 +5754,7 @@ describe("planned relationships", () => {
       return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
     });
     expect((await read(OWNER, id)).planned).toEqual([]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 8);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 9);
     expect((await managed(OWNER, "POST", planned(id), id, line(a, b))).status).toBe(200);
   });
 
@@ -7232,6 +7241,6 @@ describe("the collaboration list and map", () => {
       return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
     });
     expect((await read(OWNER, id)).edges).toEqual([]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 9);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 10);
   });
 });

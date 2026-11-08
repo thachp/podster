@@ -36,6 +36,13 @@ describe("viewerActions", () => {
     expect(viewerActions(task({ status: "completed" }), "per_r", "owner").cancel).toBe(false);
     expect(viewerActions(task({ status: "canceled" }), "per_r", "owner").cancel).toBe(false);
   });
+  it("offers submitting only to the assignee of an accepted task", () => {
+    expect(viewerActions(task({ status: "accepted", assignee: "per_a" }), "per_a", "guest").submit).toBe(true);
+    expect(viewerActions(task({ status: "accepted", assignee: "per_a" }), "per_r", "owner").submit).toBe(false);
+    expect(viewerActions(task({ status: "offered", assignee: "per_a" }), "per_a", "member").submit).toBe(false);
+    expect(viewerActions(task({ status: "submitted", assignee: "per_a" }), "per_a", "member").submit).toBe(false);
+    expect(viewerActions(task({ status: "accepted", assignee: "per_a" }), "per_a", "member", true).submit).toBe(false);
+  });
   it("offers assignment only while the task is open or offered", () => {
     expect(viewerActions(task({ status: "open" }), "per_r", "member").assign).toBe(true);
     expect(viewerActions(task({ status: "offered" }), "per_r", "member").assign).toBe(true);
@@ -222,7 +229,8 @@ describe("changeProblem", () => {
 describe("an archived room", () => {
   it("offers nothing to anyone, whatever their role", () => {
     for (const [viewer, role] of [["per_v", "member"], ["per_r", "member"], ["per_x", "owner"], ["per_x", "admin"]]) {
-      expect(Object.values(viewerActions(task(), viewer, role, true))).toEqual([false, false, false, false, false, false]);
+      expect(Object.values(viewerActions(task(), viewer, role, true)).every((allowed) => allowed === false)).toBe(true);
+      expect(viewerActions(task({ status: "accepted", assignee: viewer }), viewer, role, true).submit).toBe(false);
     }
     expect(isArchivedRoom({ status: "archived" })).toBe(true);
     expect(isArchivedRoom({ status: "active" })).toBe(false);

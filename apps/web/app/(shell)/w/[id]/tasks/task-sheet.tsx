@@ -9,9 +9,10 @@ import { clientQuery } from "@/lib/gateway/client";
 import { goToSignIn } from "./go-to-sign-in";
 import { TaskActions, type SavedEdit } from "./task-actions";
 import { TaskComposer } from "./task-composer";
+import { SubmissionFiles } from "./task-files";
 import { TaskPlan } from "./task-plan";
 import { ApprovedMark, PrincipalName, TaskStatusBadge, Timestamp } from "./task-bits";
-import { briefAuthor, flagText, isArchivedRoom, kindOf, nameOf, roleOf, verbFor, type Artifact, type From, type Names, type Room, type TaskDetail, type TaskSummary } from "./task-model";
+import { briefAuthor, flagText, isArchivedRoom, kindOf, nameOf, roleOf, verbFor, type Artifact, type From, type Names, type Room, type Submission, type TaskDetail, type TaskSummary } from "./task-model";
 
 export type LoadedTask = TaskDetail & { workspace: string; room: Room };
 
@@ -177,6 +178,11 @@ export function Details({ data, me, names, orgNames, overseen = false }: Section
   const { task } = data;
   // Submissions are numbered, so the task already shows how many there are. Saying "may" would be coy.
   const hiddenSubmissions = data.visible?.submissions === "own" && task.submission_no > data.submissions.length;
+  const files = data.files ?? [];
+  // The reviewer named on a task gets all its submitted files even when it can't read every submission (decision 97), so a
+  // submission can show up here by its files alone.
+  const filesOnly = [...new Set(files.map((file) => file.submission_no))].filter((no) => !data.submissions.some((submission) => submission.submission_no === no));
+  const rows: (Submission | { submission_no: number; created_at: number; filesOnly: true })[] = [...data.submissions, ...filesOnly.map((no) => ({ submission_no: no, created_at: files.find((file) => file.submission_no === no)?.created_at ?? 0, filesOnly: true as const }))].sort((a, b) => b.submission_no - a.submission_no);
   const brief = briefAuthor(data);
   const briefBy = { name: nameOf(brief.id, me, names), kind: kindOf(brief.id), organization: brief.org ? (orgNames[brief.org] ?? brief.org) : undefined, viewer: brief.id === me };
   return (
@@ -192,9 +198,9 @@ export function Details({ data, me, names, orgNames, overseen = false }: Section
       </section>
       <section className="space-y-2">
         <h3 className="font-medium">Submissions</h3>
-        {hiddenSubmissions ? <p className="text-sm text-muted-foreground">{overseen ? "This task has submissions this agent's access doesn't show. Only what it submitted is listed." : "This task has submissions your access doesn't show. Only what you submitted is listed."}</p> : data.submissions.length === 0 ? <p className="text-sm text-muted-foreground">Nothing submitted yet.</p> : null}
+        {hiddenSubmissions ? <p className="text-sm text-muted-foreground">{overseen ? "This task has submissions this agent's access doesn't show. Only what it submitted is listed." : filesOnly.length > 0 ? "This task has submissions your access doesn't show in full. As its reviewer, you see their files." : "This task has submissions your access doesn't show. Only what you submitted is listed."}</p> : rows.length === 0 ? <p className="text-sm text-muted-foreground">Nothing submitted yet.</p> : null}
         <ol className="space-y-3">
-          {data.submissions.toReversed().map((submission) => (
+          {rows.map((submission) => (
             <li key={submission.submission_no} className="space-y-2 rounded-lg border p-3">
               <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
                 Submission {submission.submission_no}
@@ -204,16 +210,19 @@ export function Details({ data, me, names, orgNames, overseen = false }: Section
                   <Timestamp at={submission.created_at} />
                 </span>
               </p>
-              {submission.note ? (
+              {"filesOnly" in submission ? (
+                <p className="text-xs text-muted-foreground">Only its files are shown to you.</p>
+              ) : submission.note ? (
                 <AgentContent author={author(submission.from, me, names, orgNames)} external={submission.external} body={submission.note} />
               ) : (
                 <AuthorLine author={author(submission.from, me, names, orgNames)} external={submission.external} />
               )}
-              {submission.commit_sha ? (
+              {!("filesOnly" in submission) && submission.commit_sha ? (
                 <p className="text-xs break-all text-muted-foreground">
                   Commit <code className="font-mono">{plainName(submission.commit_sha)}</code>
                 </p>
               ) : null}
+              <SubmissionFiles files={files.filter((file) => file.submission_no === submission.submission_no)} overseen={overseen} />
               <ArtifactList artifacts={data.artifacts.filter((artifact) => artifact.submission_no === submission.submission_no)} me={me} names={names} orgNames={orgNames} />
             </li>
           ))}
@@ -242,6 +251,8 @@ function ArtifactList({ artifacts, me, names, orgNames }: { artifacts: Artifact[
                 {plainName(artifact.label)} <span className="break-all text-muted-foreground">({truncate(plainName(artifact.uri), 2048).text})</span>
               </p>
             )}
+            {/* UPLOAD-POLICY.md: Podster doesn't hold a link's content, so an approval can't name an exact version of it. */}
+            <p className="text-xs text-muted-foreground">External link, may change since approval</p>
           </li>
         );
       })}

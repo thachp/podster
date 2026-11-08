@@ -446,7 +446,8 @@ pub(super) fn read(sql: &SqlStorage, who: &Participant) -> R<Value> {
 /// The most versions one read returns, newest first. `complete` says whether there were more.
 const VERSIONS_LISTED: i64 = 200;
 
-/// `GET /outputs/:id/versions`: every approval that made this output Ready, newest first, for every participant. Each is gated
+/// `GET /outputs/:id/versions`: every approval that made this output Ready, newest first by the order they were recorded, so
+/// two in the same millisecond still come out in order, for every participant. Each is gated
 /// like `current`: the source task and the reviewer who approved only for someone who can see that task, and otherwise only its
 /// submission number and time, as the output's status already tells everyone it was approved. Nothing here is about files:
 /// the submission's links and files are read through `get_task`, under `task_view` and the file views.
@@ -459,7 +460,7 @@ pub(super) fn read_versions(sql: &SqlStorage, who: &Participant, id: &str) -> R<
     let found = rows(
         sql,
         "SELECT task_id, submission_no, approved_at, approved_by FROM expected_output_version INDEXED BY expected_output_history
-            WHERE output_id = ? ORDER BY approved_at DESC, task_id DESC, submission_no DESC LIMIT ?",
+            WHERE output_id = ? ORDER BY seq DESC LIMIT ?",
         vec![id.into(), (VERSIONS_LISTED + 1).into()],
     )?;
     let complete = found.len() as i64 <= VERSIONS_LISTED;

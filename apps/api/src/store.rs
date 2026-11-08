@@ -114,6 +114,9 @@ ALTER TABLE workspace ADD COLUMN plan_timezone TEXT;
 ", "
 CREATE TABLE stored_object (id TEXT PRIMARY KEY, name TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL, state TEXT NOT NULL, media_type TEXT, object_key TEXT, attempt_id TEXT, token_hash TEXT NOT NULL, uploaded_by TEXT NOT NULL, uploader_json TEXT, created_at INTEGER NOT NULL, upload_expires_at INTEGER NOT NULL, stored_at INTEGER, scanning_since INTEGER);
 CREATE INDEX stored_object_space ON stored_object (state, upload_expires_at, size);
+", "
+CREATE TABLE asset_link (task_id TEXT NOT NULL, object_id TEXT NOT NULL, linked_by TEXT NOT NULL, linked_at INTEGER NOT NULL, PRIMARY KEY (task_id, object_id)) WITHOUT ROWID;
+CREATE INDEX asset_link_object ON asset_link (object_id, task_id);
 "];
 
 pub fn int(value: &Value) -> i64 {

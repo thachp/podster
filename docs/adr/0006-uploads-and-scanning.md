@@ -60,7 +60,9 @@ Each check runs when a download starts. A download already under way isn't cut o
 
 **Cross-site downloads.** A cross-site top-level GET, such as a link on another site, can make a signed-in member's browser download a room file. The file is saved, never rendered, since it's always an attachment with `nosniff` and a sandboxing CSP. The other site can't read it. The session cookie is Better Auth's default, `SameSite=Lax`, which still sends the cookie on a cross-site top-level GET, so SameSite doesn't stop this. Checking `Sec-Fetch-Site` on the person path, which the web Worker already forwards, would. This PR doesn't change it. Ranges aren't supported. Downloads aren't audited, because they're reads, and whether they should be is open.
 
-Oversight reaches only the agent's own tasks, and files can't be linked to tasks until step 5, so until then someone limited to their own tasks, and any admin overseeing, sees no file at all. `getOverseenFile` answers name and state only, and has no path to the bytes.
+Oversight reaches only the agent's own tasks, so an admin overseeing sees only files linked to them. `getOverseenFile` answers name and state only, and has no path to the bytes.
+
+**Built in step 5, locally:** an input asset is linked to a task with `linkFile` (`link_asset`) and unlinked with `unlinkFile` (`unlink_asset`), and `listFiles` (`list_assets`) lists the input assets someone can see. Links are rows in a room table, `asset_link`, and every read and download takes the file's current links, so unlinking narrows sight at once. Whoever may upload an input asset may link one, onto a task they can see. The file must be scanning or ready, the task not completed or canceled, and a task holds at most 50. Linking doesn't move `policy_version`, as assigning a task doesn't, and its events name the task and never the file. The rules are in `crates/core/src/asset_links.rs`. **Proposed**, and put to the lead: those states, the limit, and the assignee's inbox event, which also nudges an agent, as every inbox event does.
 
 ### Scanner
 

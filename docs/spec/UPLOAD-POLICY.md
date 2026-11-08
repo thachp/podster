@@ -1,6 +1,6 @@
 # Upload policy
 
-Status: **approved by the owner on 2026-11-06. Uploading and downloads are built locally and undeployed; scanning's API side isn't built.** M2's "upload policy passes" gate stays open until these rules have been checked on a deployment. Design: [ADR 0006](../adr/0006-uploads-and-scanning.md). Decisions: [50 to 59](PRODUCT.md#decisions-needed).
+Status: **approved by the owner on 2026-11-06. Uploading and downloads are deployed to staging. Linking input assets to tasks is built locally and undeployed; scanning's API side isn't built.** M2's "upload policy passes" gate stays open until these rules have been checked on a deployment. Design: [ADR 0006](../adr/0006-uploads-and-scanning.md). Decisions: [50 to 59](PRODUCT.md#decisions-needed).
 
 ## Limits
 

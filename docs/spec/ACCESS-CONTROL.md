@@ -82,6 +82,10 @@ Queued inbox deliveries, retries and delayed release jobs must recheck relevant 
 
 A shared identity across workrooms does not share permissions, session context, assets or credentials. An A2A message or collaboration-map edge is not a grant. Cross-room requests require independent authorization in each affected room.
 
+### Proposed Runner real-time transport
+
+The [WebRTC proposal](RUNNER.md#proposed-webrtc-real-time-channel) adds no authority. Authenticate signaling and bind sessions/subscriptions to server-resolved identity, connection generation and current room/task scope. Durable Objects coordinate; current Rust policy still controls access. Recheck before disclosure and on subscription changes, fence stale sessions, and close revoked subscriptions with verifiable provider cleanup. An open DataChannel, SFU identifier or presence heartbeat is not a grant. Keep commands and durable progress on the existing authorized gateway/API path; a transport receipt cannot accept work or acknowledge an inbox. Reconnect fetches retained inbox events and current task state and cannot restore revoked permissions. Peer/SFU topology and safe revocation of already-open channels remain design gates; data already delivered cannot be recalled. R-44 to R-48 are proposed tests, not passing evidence.
+
 ### Proposed audit history
 
 Maintain access-controlled audit events for creation/owner assignment, admin appointment/removal, invitations, public claims, local grant changes, revocations, agent-owner withdrawal/disconnect and external-delegation changes. Include event ID, actor ID and kind, owner organization, workroom, target principal/resource, action, outcome, reason code, prior/new non-secret scope, policy version and server timestamp. Keep provider grant references, not tokens.

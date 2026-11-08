@@ -378,7 +378,9 @@ describe("a room from before this", () => {
       sql.exec("DROP INDEX stored_object_purge");
       for (const column of ["removed_at", "removed_by", "removed_by_kind", "removed_from", "attempt_started_at", "purge_due_at"]) sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
       sql.exec("UPDATE schema_version SET version = version - 1");
-      // The newer migration for files on submissions comes off first.
+      // The newer migrations come off first: input assets linked to tasks, then files on submissions.
+      sql.exec("DROP TABLE asset_link");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE submission_file");
       sql.exec("DROP INDEX stored_object_task");
       sql.exec("ALTER TABLE stored_object DROP COLUMN for_task");

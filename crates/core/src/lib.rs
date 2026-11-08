@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod asset_links;
 pub mod baseline;
 pub mod expected_outputs;
 pub mod files;

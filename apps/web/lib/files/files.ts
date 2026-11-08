@@ -28,8 +28,19 @@ export const fileState = (state: string | null) => (state && Object.hasOwn(FILE_
 export function fileSize(bytes: number) {
   if (!Number.isFinite(bytes) || bytes < 0) return "Unknown size";
   if (bytes < 1000) return `${bytes} ${bytes === 1 ? "byte" : "bytes"}`;
-  const [value, unit] = bytes < 1e6 ? [bytes / 1e3, "KB"] : bytes < 1e9 ? [bytes / 1e6, "MB"] : [bytes / 1e9, "GB"];
-  return `${value.toLocaleString("en-US", { maximumFractionDigits: value < 10 ? 1 : 0 })} ${unit}`;
+  const units: [number, string][] = [
+    [1e3, "KB"],
+    [1e6, "MB"],
+    [1e9, "GB"],
+  ];
+  // Rounding can reach the next unit, as 999,950 bytes would show as 1,000 KB, so the unit is chosen after rounding.
+  for (const [index, [scale, unit]] of units.entries()) {
+    const value = bytes / scale;
+    const digits = value < 10 ? 1 : 0;
+    const rounded = Number(value.toFixed(digits));
+    if (rounded < 1000 || index === units.length - 1) return `${rounded.toLocaleString("en-US", { maximumFractionDigits: digits })} ${unit}`;
+  }
+  return "Unknown size";
 }
 
 /** The API's own download path, and nothing else: no host, query, dot segment or encoded character. */

@@ -9,6 +9,10 @@ describe("shared file display", () => {
     expect(fileSize(999)).toBe("999 bytes");
     expect(fileSize(2_400_000)).toBe("2.4 MB");
     expect(fileSize(100_000_000)).toBe("100 MB");
+    // Rounding up to the next unit picks that unit.
+    expect(fileSize(999_950)).toBe("1 MB");
+    expect(fileSize(9_960)).toBe("10 KB");
+    expect(fileSize(1_500)).toBe("1.5 KB");
   });
 
   it("never calls an unknown or missing state Ready, and never says safe", () => {

@@ -87,10 +87,29 @@ describe("answering an offer", () => {
   it("treats an edit since reading as a conflict, not an acceptance", async () => {
     const user = userEvent.setup();
     await open();
-    answer = (url, method) => (method === "POST" ? refused(409, "version_conflict") : json(200, detail()));
+    answer = (url, method) => (method === "POST" ? refused(409, "version_conflict") : json(200, detail({ instructions: "Write it twice", version: 4 })));
     await user.click(screen.getByRole("button", { name: "Accept task" }));
     await waitFor(() => expect(commands()).toHaveLength(1));
     expect(screen.queryByText(/Accepted\./)).toBeNull();
+    expect(screen.getByRole("alert")).toHaveTextContent(/This task changed while you were editing/);
+    await user.click(screen.getByRole("button", { name: "Review latest" }));
+    expect(await screen.findByText("Write it twice")).toBeInTheDocument();
+    answer = (url, method) => (method === "POST" ? json(200, task({ status: "accepted", version: 5 })) : json(200, detail({ status: "accepted", version: 5 })));
+    await user.click(screen.getByRole("button", { name: "Accept task" }));
+    await waitFor(() => expect(commands()).toHaveLength(2));
+    expect(commands()[1].body).toEqual({ version: 4 });
+    expect(commands()[1].key).not.toBe(commands()[0].key);
+  });
+
+  it.each([
+    ["accept", "unknown", 0, /can't tell whether this task was accepted/],
+    ["decline", "unknown", 503, /can't tell whether this task was declined/],
+    ["accept", "workspace_archived", 409, /archived/],
+    ["accept", "rate_limited", 429, /Too many requests/],
+    ["decline", "invalid_argument", 400, /Declining needs a reason/],
+  ] as const)("words a %s failure (%s) plainly", async (change, code, status, words) => {
+    const { respondProblem } = await import("./task-acceptance");
+    expect(respondProblem(change, code, status)).toMatch(words);
   });
 
   it("says a refusal changed nothing", async () => {

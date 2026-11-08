@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { cn } from "cn";
 import { plainName } from "@/components/agent-content/text";
 import type { SheetApi } from "@/components/sheet/target-sheet";
@@ -69,7 +69,7 @@ type Phase = UploadProgress["phase"] | "scanning" | "ready" | "blocked" | "faile
  * already uploaded for it (`held`). `leftOut` keeps a stored file out of this submission. There's no deleting one (decision
  * 95), so it stays listed with what it still counts for.
  */
-type Chosen = { key: string; name: string; size: number; phase: Phase; held?: boolean; leftOut?: boolean; sent?: number; id?: string; problem?: string; retry?: () => Promise<UploadResult> };
+type Chosen = { key: string; name: string; size: number; phase: Phase; held?: boolean; leftOut?: boolean; reserved?: boolean; sent?: number; id?: string; problem?: string; retry?: () => Promise<UploadResult>; since?: number };
 
 const STORED_PHASES: Partial<Record<string, Phase>> = { ready: "ready", blocked: "blocked", failed: "failed", scanning: "scanning", uploading: "sending" };
 
@@ -80,7 +80,7 @@ function heldFiles(files: TaskFile[] | undefined): Chosen[] {
     .map((file) => {
       const phase = (file.state && STORED_PHASES[file.state]) || "failed";
       // Only a Ready file goes in by itself. One still arriving is likely from another tab, and one refused can't go at all.
-      return { key: `held:${file.id}`, id: file.id, name: typeof file.name === "string" ? file.name : "", size: typeof file.size === "number" ? file.size : 0, phase, held: true, leftOut: phase !== "ready" && phase !== "scanning" };
+      return { key: `held:${file.id}`, id: file.id, name: typeof file.name === "string" ? file.name : "", size: typeof file.size === "number" ? file.size : 0, phase, held: true, reserved: true, leftOut: phase !== "ready" && phase !== "scanning", since: typeof file.created_at === "number" ? file.created_at : undefined };
     });
 }
 
@@ -91,8 +91,32 @@ function phaseText(chosen: Chosen) {
   return PHASE_TEXT[chosen.phase] ?? fileState(chosen.phase === "sending" ? "uploading" : chosen.phase).label;
 }
 
-/** Rows the API counts toward one uploader's 10 unsubmitted files for a task: not a refusal, and not blocked or failed. */
-const counted = (chosen: Chosen) => chosen.phase !== "refused" && chosen.phase !== "blocked" && chosen.phase !== "failed" && chosen.phase !== "removed";
+/**
+ * Rows the API counts toward one uploader's 10 unsubmitted files for a task: anything whose space was reserved and that isn't
+ * blocked, failed or removed. That includes an upload that failed partway, whose reservation stays open until it expires.
+ */
+const counted = (chosen: Chosen) => (chosen.phase === "refused" ? chosen.reserved === true : chosen.phase !== "blocked" && chosen.phase !== "failed" && chosen.phase !== "removed");
+
+/** How long an upload's grant lasts, plus the longest a last attempt may run, after which the API stops counting it. */
+const UPLOAD_LIFETIME_MS = 60 * 60_000 + 30 * 60_000;
+
+/** Said whenever stored files fill the cap. They can't be deleted, so the only ways out are submitting and the sweep. */
+const CAP_TEXT = `You already have ${MAX_SUBMISSION_ITEMS} files for this task that no submission names. They count until they're submitted, or cleared 24 hours after this task leaves Accepted. An upload stopped or failed partway counts for up to an hour and a half.`;
+
+/**
+ * A live region that's in the page before its words are, so a screen reader announces them however soon after the row
+ * appears they're set (DESIGN.md: failures are alerts).
+ */
+function LateAlert({ text, className }: { text: string | null | undefined; className: string }) {
+  const [shown, setShown] = useState<string | null>(null);
+  useEffect(() => setShown(text ?? null), [text]);
+  return (
+    // Never display: none while empty, which some screen readers take as gone and then don't announce.
+    <p role="alert" className={className}>
+      {shown}
+    </p>
+  );
+}
 const settled = (phase: Phase) => phase === "ready" || phase === "blocked" || phase === "failed" || phase === "removed" || phase === "refused";
 
 /** How long to wait before reading a scanning file again. A scan takes about 20 seconds, and a slow one is read less often. */
@@ -102,13 +126,20 @@ const pollDelay = (attempt: number) => Math.min(3000 * 1.25 ** attempt, 30_000);
  * The assignee's submission: a note and files, each uploaded for this task and scanned before it can go. Only Ready files
  * can be submitted, which is the API's rule too. The submission pins each one's SHA-256, so what's reviewed is what was sent.
  */
-export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTask>; onNotice: (notice: string | null) => void; taskPath: (data: LoadedTask, action: string) => string }) {
+export function SubmitWork({ api, onNotice, taskPath, savedNote }: { api: SheetApi<LoadedTask>; onNotice: (notice: string | null) => void; taskPath: (data: LoadedTask, action: string) => string; savedNote?: RefObject<string> }) {
   const { data, run, saving, setDirty } = api;
   const { task, workspace } = data;
-  const [note, setNote] = useState("");
+  // Kept outside this form, which starts afresh for each version, so "Review latest" keeps what the person wrote.
+  const [note, setNoteState] = useState(() => savedNote?.current ?? "");
+  const setNote = (next: string) => {
+    if (savedNote) savedNote.current = next;
+    setNoteState(next);
+  };
   // Read once: a later read can't tell this form's own uploads in flight from the same files on the server.
   const [chosen, setChosen] = useState<Chosen[]>(() => heldFiles(data.files));
   const [problem, setProblem] = useState<string | null>(null);
+  // Uploads removed here after their space was reserved, which the API counts until each grant ends.
+  const [dropped, setDropped] = useState<number[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const controllers = useRef(new Map<string, AbortController>());
   const alive = useRef(true);
@@ -122,6 +153,8 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
   const hasContent = trimmed !== "" || chosen.some((file) => !file.held);
   const canSubmit = !saving && !unsettled && !stuck && !noteTooLong && (trimmed !== "" || ready.length > 0);
   const ids = ready.map((file) => file.id).join(",");
+  const now = Date.now();
+  const used = chosen.filter(counted).length + dropped.filter((at) => now - at < UPLOAD_LIFETIME_MS).length;
   const key = useIntentKey(`submit:${task.version}:${trimmed}:${ids}`);
 
   useEffect(() => {
@@ -138,7 +171,7 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
       if (!file.held || !file.id || (file.phase !== "scanning" && file.phase !== "sending")) continue;
       const controller = new AbortController();
       running.set(file.key, controller);
-      void watchScan(file.key, file.id, controller.signal);
+      void watchScan(file.key, file.id, controller.signal, file.phase === "sending" && file.since !== undefined ? file.since + UPLOAD_LIFETIME_MS : undefined);
     }
     return () => {
       alive.current = false;
@@ -151,8 +184,10 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
     if (alive.current) setChosen((all) => all.map((file) => (file.key === key ? { ...file, ...change } : file)));
   };
 
-  async function watchScan(key: string, id: string, signal: AbortSignal) {
+  /** `until` ends the reads for an upload that's still arriving: past it the grant has ended, and the API has dropped it. */
+  async function watchScan(key: string, id: string, signal: AbortSignal, until?: number) {
     for (let attempt = 0; !signal.aborted; attempt++) {
+      if (until !== undefined && Date.now() >= until) return update(key, { phase: "refused", reserved: false, problem: "This upload never finished, and its time has run out. It no longer counts toward your files." });
       await new Promise((done) => setTimeout(done, pollDelay(attempt)));
       if (signal.aborted) return;
       const read = await clientQuery<{ state: string }>(`/api/v1/workspaces/${encodeURIComponent(workspace)}/files/${encodeURIComponent(id)}`, { signal }).catch(() => null);
@@ -161,6 +196,7 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
       if (!read || (!read.ok && (read.status >= 500 || read.status === 429))) continue;
       if (!read.ok) return update(key, { phase: "refused", problem: read.status === 401 ? uploadProblem("", 401) : "It can't be found any more. Remove it and add it again." });
       const state = read.data.state;
+      if (state === "scanning") until = undefined;
       if (state === "scanning" || state === "uploading") continue;
       const phase = (["ready", "blocked", "failed", "removed"].includes(state) ? state : "failed") as Phase;
       // A stored file that can't go is kept out at once, since it can't be deleted and mustn't hold the submission back.
@@ -173,6 +209,7 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
     if (!controller) return;
     const result = await attempt();
     if (controller.signal.aborted) return;
+    // A refusal after the bytes started to go is from an attempt, so its reservation stays open until it expires.
     if (!result.ok) return update(key, { phase: "refused", problem: uploadProblem(result.code, result.status), retry: result.retry });
     const state = result.data.state;
     const phase = (state === "ready" || state === "blocked" || state === "failed" || state === "removed" ? state : "scanning") as Phase;
@@ -184,11 +221,9 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
     if (!files || files.length === 0 || saving) return;
     setProblem(null);
     onNotice(null);
-    const room = MAX_SUBMISSION_ITEMS - chosen.filter(counted).length;
+    const room = MAX_SUBMISSION_ITEMS - used;
     const picked = [...files];
-    if (picked.length > room) {
-      setProblem(room <= 0 ? `A submission can hold at most ${MAX_SUBMISSION_ITEMS} files. Remove one to add another.` : `A submission can hold at most ${MAX_SUBMISSION_ITEMS} files, so only the first ${room} were added.`);
-    }
+    if (picked.length > room) setProblem(room <= 0 ? CAP_TEXT : `You can hold at most ${MAX_SUBMISSION_ITEMS} files for this task that no submission names, so only the first ${room} were added.`);
     const added: Chosen[] = [];
     for (const file of picked.slice(0, Math.max(0, room))) {
       const key = crypto.randomUUID();
@@ -196,12 +231,13 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
       controllers.current.set(key, controller);
       const tooBig = file.size > MAX_UPLOAD_BYTES;
       added.push({ key, name: file.name, size: file.size, phase: tooBig ? "refused" : "hashing", problem: tooBig ? uploadProblem("file_too_large", 413) : undefined });
-      if (!tooBig) void follow(key, () => uploadFile(workspace, file, { taskId: task.id, signal: controller.signal, onProgress: (progress) => update(key, progress.phase === "sending" ? { phase: "sending", sent: progress.sent } : { phase: progress.phase }) }));
+      if (!tooBig) void follow(key, () => uploadFile(workspace, file, { taskId: task.id, signal: controller.signal, onProgress: (progress) => update(key, progress.phase === "sending" ? { phase: "sending", sent: progress.sent, reserved: true } : progress.phase === "storing" ? { phase: "storing", reserved: true } : { phase: progress.phase }) }));
     }
     setChosen((all) => [...all, ...added]);
   }
 
   function remove(key: string) {
+    if (chosen.some((file) => file.key === key && counted(file))) setDropped((all) => [...all, Date.now()]);
     controllers.current.get(key)?.abort();
     controllers.current.delete(key);
     setChosen((all) => all.filter((file) => file.key !== key));
@@ -230,6 +266,7 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
     const files = ready.map((file) => ({ id: file.id as string }));
     const result = await run(async (binding) => asConflict(await clientCommand<Task>(taskPath(data, "submit"), { version: binding.version, ...(trimmed ? { note: trimmed } : {}), ...(files.length ? { files } : {}) }, { idempotencyKey: key })), submitProblem);
     if (!result?.ok) return;
+    if (savedNote) savedNote.current = "";
     const number = result.data.submission_no;
     onNotice(`Submitted${number ? ` submission ${number}` : ""}${files.length ? ` with ${files.length} ${files.length === 1 ? "file" : "files"}` : ""}. It's waiting for review.`);
   };
@@ -248,11 +285,17 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
           readOnly={saving}
           className={FIELD_CLASS}
           value={note}
+          aria-invalid={noteTooLong || undefined}
+          aria-describedby={noteTooLong ? "submit-note-error" : undefined}
           onChange={(event) => {
             if (!saving) setNote(event.target.value);
           }}
         />
-        {noteTooLong ? <p className="text-sm text-status-danger">That&apos;s too long. A note can be at most 16 KB.</p> : null}
+        {noteTooLong ? (
+          <p id="submit-note-error" className="text-sm text-status-danger">
+            That&apos;s too long. A note can be at most 16 KB.
+          </p>
+        ) : null}
       </div>
       <div className="space-y-1">
         <Label htmlFor="submit-files">Files (optional)</Label>
@@ -271,8 +314,11 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
         <p id="submit-files-hint" className="text-xs text-muted-foreground">
           Up to {MAX_SUBMISSION_ITEMS} files, each at most 100 MB. Each is scanned before it can be submitted. Until you submit, only you can see them.
         </p>
+        <p className="text-xs text-muted-foreground">
+          {used} of {MAX_SUBMISSION_ITEMS} used for this task. Files no submission names count until they&apos;re submitted or cleared, and an upload stopped or failed partway counts for up to an hour and a half.
+        </p>
       </div>
-      {problem ? <p className="text-sm text-status-danger">{problem}</p> : null}
+      <LateAlert text={problem} className="text-sm text-status-danger" />
       {chosen.length > 0 ? (
         <ul aria-label="Your files for this task" className="space-y-2">
           {chosen.map((file) => {
@@ -290,7 +336,7 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
                   <span role="status" className="sr-only">
                     {settled(file.phase) ? `${name}: ${file.phase === "refused" ? "didn't upload" : fileState(file.phase).label}` : ""}
                   </span>
-                  {file.problem ? <p className="text-xs text-status-danger">{file.problem}</p> : null}
+                  <LateAlert text={file.problem} className="text-xs text-status-danger" />
                   {file.id && (file.phase === "blocked" || file.phase === "failed") ? (
                     <p className="text-xs text-muted-foreground">It can&apos;t be submitted, and it doesn&apos;t count toward your {MAX_SUBMISSION_ITEMS} files for this task.</p>
                   ) : file.leftOut ? (
@@ -303,7 +349,8 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
                       Try again
                     </Button>
                   ) : null}
-                  {!file.id ? (
+                  {/* A file that never arrived, or that the API no longer has, has nothing left to keep out: it can only go. */}
+                  {!file.id || file.phase === "refused" ? (
                     <Button type="button" variant="outline" className="min-h-11 sm:min-h-8" disabled={saving} aria-label={`Remove ${name}`} onClick={() => remove(file.key)}>
                       Remove
                     </Button>

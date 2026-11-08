@@ -10,14 +10,14 @@ import { Details, TaskSheet } from "./task-sheet";
 
 vi.mock("./go-to-sign-in", () => ({ goToSignIn: vi.fn() }));
 
-type Upload = { workspace: string; file: File; taskId?: string; finish: (result: UploadResult) => void };
+type Upload = { workspace: string; file: File; taskId?: string; finish: (result: UploadResult) => void; progress: (progress: unknown) => void };
 let uploads: Upload[];
 vi.mock("@/lib/uploads/client", () => ({
   MAX_UPLOAD_BYTES: 100_000_000,
   uploadFile: (workspace: string, file: File, options: { taskId?: string; onProgress?: (progress: unknown) => void } = {}) =>
     new Promise<UploadResult>((finish) => {
       options.onProgress?.({ phase: "hashing" });
-      uploads.push({ workspace, file, taskId: options.taskId, finish });
+      uploads.push({ workspace, file, taskId: options.taskId, finish, progress: (progress) => options.onProgress?.(progress) });
     }),
 }));
 
@@ -183,7 +183,14 @@ describe("reviewing files", () => {
     answer = () => json(200, detail({}, { files: [file(), file({ id: "obj_2", state: "blocked", download_path: null })] }));
     await open();
     expect(screen.getByText(/blocked or couldn't be scanned, so it can't be approved/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Approve submission 1" })).toBeDisabled();
+    const approve = screen.getByRole("button", { name: "Approve submission 1" });
+    // Not disabled, so focus can't drop when a refresh finds the file, but it says why and does nothing.
+    expect(approve).toHaveAttribute("aria-disabled", "true");
+    expect(approve).toHaveAccessibleDescription(/blocked or couldn't be scanned/);
+    approve.focus();
+    await userEvent.setup().click(approve);
+    expect(approve).toHaveFocus();
+    expect(commands()).toHaveLength(0);
     expect(screen.getByRole("button", { name: "Request changes" })).toBeEnabled();
   });
 
@@ -281,13 +288,24 @@ describe("submitting files", () => {
     expect(commands()[0].body).toMatchObject({ files: [{ id: "obj_h" }] });
   });
 
+  it("stops reading a held upload once its grant has run out, and stops counting it", async () => {
+    answer = assignedWith([held({ id: "obj_u", name: "stale.pdf", state: "uploading", download_path: null, created_at: Date.now() - 2 * 60 * 60_000 })]);
+    await open();
+    expect(await screen.findByText(/its time has run out/)).toHaveAttribute("role", "alert");
+    expect(screen.getByText(/of 10 used for this task/)).toHaveTextContent(/^0 of 10/);
+    expect(calls.some((call) => call.url.includes("/files/obj_u"))).toBe(false);
+    expect(screen.queryByRole("button", { name: "Include stale.pdf" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Remove stale.pdf" })).toBeInTheDocument();
+  });
+
   it("counts files already held toward the 10", async () => {
     const user = userEvent.setup();
     answer = assignedWith(Array.from({ length: 9 }, (_, index) => held({ id: `obj_${index}`, name: `f${index}.pdf` })));
     await open();
     await user.upload(screen.getByLabelText("Files (optional)"), [pick("a.pdf"), pick("b.pdf")]);
     await waitFor(() => expect(uploads).toHaveLength(1));
-    expect(screen.getByText(/only the first 1 were added/)).toBeInTheDocument();
+    expect(await screen.findByText(/only the first 1 were added/)).toBeInTheDocument();
+    expect(screen.getByText("10 of 10 used for this task.", { exact: false })).toBeInTheDocument();
   });
 
   it("shows the uploader's unsubmitted files apart from submissions once the task has moved on", async () => {
@@ -361,7 +379,91 @@ describe("submitting files", () => {
     await open();
     await user.upload(screen.getByLabelText("Files (optional)"), Array.from({ length: 11 }, (_, index) => pick(`f${index}.pdf`)));
     await waitFor(() => expect(uploads).toHaveLength(10));
-    expect(screen.getByText(/at most 10 files, so only the first 10 were added/)).toBeInTheDocument();
+    expect(await screen.findByText(/at most 10 files for this task that no submission names, so only the first 10 were added/)).toBeInTheDocument();
+    expect(screen.getByText(/only the first 10 were added/)).toHaveAttribute("role", "alert");
+  });
+
+  it("says when stored files fill the cap, as an alert, without offering a Remove they don't have", async () => {
+    const user = userEvent.setup();
+    answer = assignedWith(Array.from({ length: 10 }, (_, index) => held({ id: `obj_${index}`, name: `f${index}.pdf` })));
+    await open();
+    await user.upload(screen.getByLabelText("Files (optional)"), pick("one-more.pdf"));
+    const alert = await screen.findByText(/You already have 10 files for this task that no submission names/);
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(alert).not.toHaveTextContent(/Remove/);
+    expect(uploads).toHaveLength(0);
+  });
+
+  it("counts an upload removed after its space was reserved, as the API does until its grant ends", async () => {
+    const user = userEvent.setup();
+    answer = assignedWith(Array.from({ length: 9 }, (_, index) => held({ id: `obj_${index}`, name: `f${index}.pdf` })));
+    await open();
+    await user.upload(screen.getByLabelText("Files (optional)"), pick("going.pdf"));
+    await waitFor(() => expect(uploads).toHaveLength(1));
+    // Its space is reserved once the bytes start to go.
+    await act(async () => uploads[0].progress({ phase: "sending", sent: 1, total: 3 }));
+    expect(screen.getByText(/of 10 used for this task/)).toHaveTextContent(/^10 of 10/);
+    await act(async () => uploads[0].finish({ ok: false, status: 0, code: "network_error", retry: async () => ({ ok: false, status: 0, code: "network_error" }) }));
+    await user.click(await screen.findByRole("button", { name: "Remove going.pdf" }));
+    expect(screen.queryByText("going.pdf", { selector: "p" })).toBeNull();
+    expect(screen.getByText(/of 10 used for this task/)).toHaveTextContent(/^10 of 10/);
+    await user.upload(screen.getByLabelText("Files (optional)"), pick("again.pdf"));
+    expect(await screen.findByText(/You already have 10 files for this task/)).toBeInTheDocument();
+    expect(uploads).toHaveLength(1);
+  });
+
+  it("announces a file over 100 MB as an alert, set after its row is there", async () => {
+    const user = userEvent.setup();
+    answer = assigned;
+    await open();
+    const big = pick("huge.mov");
+    Object.defineProperty(big, "size", { value: 100_000_001 });
+    await user.upload(screen.getByLabelText("Files (optional)"), big);
+    const alert = await screen.findByText(/over 100 MB/);
+    expect(alert).toHaveAttribute("role", "alert");
+    expect(uploads).toHaveLength(0);
+  });
+
+  it("links a note that's too long to its message", async () => {
+    answer = assigned;
+    await open();
+    const field = screen.getByLabelText("Note (optional)");
+    // fireEvent, since typing 16 KB key by key is slow.
+    const { fireEvent } = await import("@testing-library/react");
+    fireEvent.change(field, { target: { value: "x".repeat(16 * 1024 + 1) } });
+    expect(field).toHaveAttribute("aria-invalid", "true");
+    expect(field).toHaveAccessibleDescription(/A note can be at most 16 KB/);
+    expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled();
+  });
+
+  it("keeps the note through a conflict, and resubmits the new version with a new key", async () => {
+    const user = userEvent.setup();
+    answer = (url, method) => (method === "POST" ? refused(409, "version_conflict") : assigned());
+    await open();
+    await user.type(screen.getByLabelText("Note (optional)"), "Done");
+    await user.click(screen.getByRole("button", { name: "Submit" }));
+    await waitFor(() => expect(commands()).toHaveLength(1));
+    expect(commands()[0].body).toMatchObject({ version: 5, note: "Done" });
+    answer = (url, method) => (method === "POST" ? json(200, task({ status: "submitted", assignee: "per_me", reviewer: "per_r", submission_no: 1, version: 7 })) : json(200, detail({ status: "accepted", assignee: "per_me", reviewer: "per_r", submission_no: 0, version: 6 }, { submissions: [], files: [] })));
+    await user.click(await screen.findByRole("button", { name: "Review latest" }));
+    await waitFor(() => expect(screen.getByLabelText("Note (optional)")).toHaveValue("Done"));
+    await user.click(screen.getByRole("button", { name: "Submit" }));
+    await waitFor(() => expect(commands()).toHaveLength(2));
+    expect(commands()[1].body).toMatchObject({ version: 6, note: "Done" });
+    expect(commands()[1].key).not.toBe(commands()[0].key);
+  });
+
+  it("resends a lost submission with the same key, so it can't submit twice", async () => {
+    const user = userEvent.setup();
+    answer = (url, method) => (method === "POST" ? Promise.reject(new TypeError("lost")) : assigned());
+    await open();
+    await user.type(screen.getByLabelText("Note (optional)"), "Done");
+    await user.click(screen.getByRole("button", { name: "Submit" }));
+    expect(await screen.findByText(/We can't tell whether your work was submitted/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Submit" }));
+    await waitFor(() => expect(commands()).toHaveLength(2));
+    expect(commands()[1].key).toBe(commands()[0].key);
+    expect(commands()[1].body).toEqual(commands()[0].body);
   });
 
   it.each([

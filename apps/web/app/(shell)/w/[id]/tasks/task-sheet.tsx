@@ -83,6 +83,8 @@ function TaskBody({ api, me, names, orgNames, outside, onTaskRead }: { api: Shee
   if (!api.dirty) held.current = data;
   // Survives the controls starting fresh, because "Review latest" keeps the person's input (DESIGN.md, "Saving and conflicts").
   const savedEdit = useRef<SavedEdit | null>(null);
+  // The same for a submission's note, whose form also starts afresh for each version.
+  const savedNote = useRef("");
   const returnFocus = useRef(false);
   // A decision removes the button that made it, and focus shouldn't vanish with it. This also lands on the result.
   useEffect(() => {
@@ -164,7 +166,7 @@ function TaskBody({ api, me, names, orgNames, outside, onTaskRead }: { api: Shee
               if (result.ok && isThisTask(result.data, task.id)) onTaskRead?.(result.data);
               return result;
             }, explain),
-        }} me={me} names={names} role={roleOf(held.current.room, me)} onNotice={setNotice} savedEdit={savedEdit} returnFocus={returnFocus} />
+        }} me={me} names={names} role={roleOf(held.current.room, me)} onNotice={setNotice} savedEdit={savedEdit} returnFocus={returnFocus} savedNote={savedNote} />
     </div>
   );
 }

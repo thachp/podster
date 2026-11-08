@@ -23,7 +23,7 @@ export type SavedEdit = { readAt: Task; draft: TaskDraft };
 const PRIMARY = "min-h-11 sm:min-h-9";
 
 /** Only what this viewer may do now. It's rebuilt for each task version, so nothing here can outlive what it was read against. */
-export function TaskActions({ api, me, names, role, onNotice, savedEdit, returnFocus }: Props & { savedEdit: RefObject<SavedEdit | null>; returnFocus: RefObject<boolean> }) {
+export function TaskActions({ api, me, names, role, onNotice, savedEdit, returnFocus, savedNote }: Props & { savedEdit: RefObject<SavedEdit | null>; returnFocus: RefObject<boolean>; savedNote?: RefObject<string> }) {
   const { task, room } = api.data;
   const archived = isArchivedRoom(room);
   const can = viewerActions(task, me, role, archived);
@@ -71,7 +71,7 @@ export function TaskActions({ api, me, names, role, onNotice, savedEdit, returnF
   return (
     <section aria-label="Actions" className="space-y-3 border-t pt-4">
       {savedEdit.current && !can.edit ? <UnsavableEdit savedEdit={savedEdit} /> : null}
-      {can.respond ? <RespondToOffer api={api} onNotice={onNotice} taskPath={taskPath} /> : can.submit ? <SubmitWork api={api} onNotice={onNotice} taskPath={taskPath} /> : can.review ? <ReviewActions api={api} onNotice={onNotice} /> : <Waiting api={api} me={me} names={names} />}
+      {can.respond ? <RespondToOffer api={api} onNotice={onNotice} taskPath={taskPath} /> : can.submit ? <SubmitWork api={api} onNotice={onNotice} taskPath={taskPath} savedNote={savedNote} /> : can.review ? <ReviewActions api={api} onNotice={onNotice} /> : <Waiting api={api} me={me} names={names} />}
       {can.assign ? <OfferTask api={api} me={me} names={names} role={role} onNotice={onNotice} /> : null}
       {can.edit ? (
         <Button
@@ -359,7 +359,11 @@ function ReviewActions({ api, onNotice }: Pick<Props, "api" | "onNotice">) {
         You're the reviewer. Your decision applies to submission {submission} only
         {files.length > 0 ? `, and approving it records the exact ${files.length === 1 ? "file" : `${files.length} files`} it was submitted with, by SHA-256. Check ${files.length === 1 ? "it" : "them"} in Details.` : "."}
       </p>
-      {blocker ? <p className="rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">{blocker}</p> : null}
+      {blocker ? (
+        <p id="approve-blocked" className="rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">
+          {blocker}
+        </p>
+      ) : null}
       {asking ? (
         <div className="space-y-2">
           <Label htmlFor="changes-reason">What needs to change in submission {submission}?</Label>
@@ -393,7 +397,16 @@ function ReviewActions({ api, onNotice }: Pick<Props, "api" | "onNotice">) {
         </div>
       ) : (
         <div className="flex flex-wrap gap-2">
-          <Button className={PRIMARY} disabled={saving || blocker !== null} onClick={approve}>
+          {/* Not disabled for a file that isn't ready: a refresh can find one while focus is here, and focus mustn't drop. */}
+          <Button
+            className={`${PRIMARY} aria-disabled:cursor-not-allowed aria-disabled:opacity-50`}
+            disabled={saving}
+            aria-disabled={blocker !== null || undefined}
+            aria-describedby={blocker ? "approve-blocked" : undefined}
+            onClick={() => {
+              if (blocker === null) void approve();
+            }}
+          >
             {saving ? "Approving…" : `Approve submission ${submission}`}
           </Button>
           <Button variant="outline" className={PRIMARY} disabled={saving} onClick={() => setAsking(true)}>

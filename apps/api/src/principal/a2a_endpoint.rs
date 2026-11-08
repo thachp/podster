@@ -91,9 +91,8 @@ fn fresh_nonce() -> R<[u8; NONCE_BYTES]> {
         .map_err(unavailable)?;
     let array = js_sys::Uint8Array::new_with_length(NONCE_BYTES as u32);
     fill.call1(&crypto, &array).map_err(unavailable)?;
-    let mut nonce = [0u8; NONCE_BYTES];
-    array.copy_to(&mut nonce);
-    Ok(nonce)
+    // Built from the filled array, so no buffer of fixed bytes ever stands in for the nonce.
+    array.to_vec().try_into().map_err(|_| no_token_storage())
 }
 
 fn new_secret() -> String {

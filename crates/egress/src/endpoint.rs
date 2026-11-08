@@ -217,8 +217,30 @@ pub fn parse_key(secret: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    const KEY: [u8; 32] = [7; 32];
-    const NONCE: [u8; 12] = [1; 12];
+    use sha2::{Digest, Sha256};
+
+    /// Test bytes derived at run time from a label, so no key or nonce is written into the tests as a literal.
+    fn test_bytes(label: &str, len: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(len);
+        let mut round: u32 = 0;
+        while out.len() < len {
+            let mut hasher = Sha256::new();
+            hasher.update(label.as_bytes());
+            hasher.update(round.to_be_bytes());
+            out.extend(hasher.finalize());
+            round += 1;
+        }
+        out.truncate(len);
+        out
+    }
+
+    fn key() -> Vec<u8> {
+        test_bytes("key", KEY_BYTES)
+    }
+
+    fn nonce(label: &str) -> [u8; NONCE_BYTES] {
+        test_bytes(label, NONCE_BYTES).try_into().unwrap()
+    }
 
     #[test]
     fn the_url_rule_is_wakes() {
@@ -378,28 +400,34 @@ mod tests {
 
     #[test]
     fn a_sealed_token_opens_only_for_its_agent_version_and_key() {
-        let sealed = seal(&KEY, &NONCE, "agt_1", 4, "secret-token").unwrap();
+        let sealed = seal(&key(), &nonce("first"), "agt_1", 4, "secret-token").unwrap();
         assert!(sealed.starts_with("v1:"));
         assert!(!sealed.contains("secret-token"));
-        assert_eq!(open(&KEY, "agt_1", 4, &sealed).unwrap(), "secret-token");
-        assert_eq!(open(&KEY, "agt_2", 4, &sealed), Err(SealError::NotOpenable));
-        assert_eq!(open(&KEY, "agt_1", 5, &sealed), Err(SealError::NotOpenable));
+        assert_eq!(open(&key(), "agt_1", 4, &sealed).unwrap(), "secret-token");
         assert_eq!(
-            open(&[8; 32], "agt_1", 4, &sealed),
+            open(&key(), "agt_2", 4, &sealed),
+            Err(SealError::NotOpenable)
+        );
+        assert_eq!(
+            open(&key(), "agt_1", 5, &sealed),
+            Err(SealError::NotOpenable)
+        );
+        assert_eq!(
+            open(&test_bytes("other key", KEY_BYTES), "agt_1", 4, &sealed),
             Err(SealError::NotOpenable)
         );
     }
 
     #[test]
     fn a_tampered_or_malformed_value_doesnt_open() {
-        let sealed = seal(&KEY, &NONCE, "agt_1", 4, "secret-token").unwrap();
+        let sealed = seal(&key(), &nonce("first"), "agt_1", 4, "secret-token").unwrap();
         let mut flipped = sealed.clone().into_bytes();
         let last = flipped.len() - 1;
         flipped[last] = if flipped[last] == b'0' { b'1' } else { b'0' };
         let flipped = String::from_utf8(flipped).unwrap();
         for bad in [flipped.as_str(), "v1:", "v1:zz", "v2:00", "", &sealed[3..]] {
             assert_eq!(
-                open(&KEY, "agt_1", 4, bad),
+                open(&key(), "agt_1", 4, bad),
                 Err(SealError::NotOpenable),
                 "{bad:?}"
             );
@@ -408,8 +436,8 @@ mod tests {
 
     #[test]
     fn a_fresh_nonce_gives_a_different_sealed_value() {
-        let one = seal(&KEY, &NONCE, "agt_1", 4, "t").unwrap();
-        let two = seal(&KEY, &[2; 12], "agt_1", 4, "t").unwrap();
+        let one = seal(&key(), &nonce("first"), "agt_1", 4, "t").unwrap();
+        let two = seal(&key(), &nonce("second"), "agt_1", 4, "t").unwrap();
         assert_ne!(one, two);
     }
 
@@ -417,9 +445,12 @@ mod tests {
     fn hex_with_a_sign_or_other_characters_isnt_hex() {
         assert!(parse_key(&format!("+a{}", "0a".repeat(31))).is_none());
         assert!(parse_key(&format!("-a{}", "0a".repeat(31))).is_none());
-        let sealed = seal(&KEY, &NONCE, "agt_1", 4, "t").unwrap();
+        let sealed = seal(&key(), &nonce("first"), "agt_1", 4, "t").unwrap();
         let signed = format!("v1:+{}", &sealed[4..]);
-        assert_eq!(open(&KEY, "agt_1", 4, &signed), Err(SealError::NotOpenable));
+        assert_eq!(
+            open(&key(), "agt_1", 4, &signed),
+            Err(SealError::NotOpenable)
+        );
     }
 
     #[test]
@@ -427,6 +458,9 @@ mod tests {
         assert_eq!(parse_key(&"0a".repeat(32)).unwrap().len(), 32);
         assert!(parse_key(&"0a".repeat(31)).is_none());
         assert!(parse_key("not hex").is_none());
-        assert_eq!(seal(&[0; 16], &NONCE, "a", 1, "t"), Err(SealError::BadKey));
+        assert_eq!(
+            seal(&test_bytes("short key", 16), &nonce("first"), "a", 1, "t"),
+            Err(SealError::BadKey)
+        );
     }
 }

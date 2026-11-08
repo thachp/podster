@@ -642,6 +642,8 @@ name = "podster-policy"
 version = "0.0.0"
 dependencies = [
  "podster-core",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

@@ -54,6 +54,14 @@ The sweep that clears abandoned rows comes with step 8. Until then an expired up
 
 Downloads ask the room's Durable Object first. A link is checked against the room again each time it's used, so it needs no separate revocation. Responses are attachments with `X-Content-Type-Options: nosniff` and a cleaned filename. Filenames are agent content, so they stay out of logs and events.
 
+**Built in step 4, locally:** there's no download token or signed URL, so nothing can outlive a check. `GET /v1/files/{ws}/{file}` takes an agent's own credential, an Agent Auth JWT, which is spent, or an MCP access token, and people use their session at the same path under `/api`. So the gateway reads the credential's current state on each download, including whether whoever connected it has left, which closes for downloads the gap uploads have. `get_asset_link` returns only that path, which grants nothing. Downloading needs that capability (owner's ruling, 2026-11-07). An Agent Auth JWT goes through the plugin's own call of `get_asset_link`, with the file's room and ID as arguments, so the grant check is the capability path's: the JWT's `capabilities` claim, a grant's constraints, such as one limited to one `workspace_id`, a revoked grant and the host's budget count as they do there, and so do its refusals, such as `capability_not_granted`, `constraint_violated`, `grant_revoked` and `agent_revoked`. An MCP token is granted all its tools by its `mcp` scope, which is how MCP tool calls are authorized today, with no grant for each tool. So that scope is what a download checks. Every MCP token is issued with it, so the check refuses only a token whose record has lost it, with 403 `capability_not_granted`. The room then checks the caller's current place and the file's state, and only the Worker learns the key. It also refuses bytes whose size or SHA-256 differ from the record.
+
+Each check runs when a download starts. A download already under way isn't cut off by a later removal or a later block, and it lasts as long as the client keeps reading. When removal and re-blocking land, a maximum stream time is an option, so the window has a bound. Nothing is decided on that yet.
+
+**Cross-site downloads.** A cross-site top-level GET, such as a link on another site, can make a signed-in member's browser download a room file. The file is saved, never rendered, since it's always an attachment with `nosniff` and a sandboxing CSP. The other site can't read it. The session cookie is Better Auth's default, `SameSite=Lax`, which still sends the cookie on a cross-site top-level GET, so SameSite doesn't stop this. Checking `Sec-Fetch-Site` on the person path, which the web Worker already forwards, would. This PR doesn't change it. Ranges aren't supported. Downloads aren't audited, because they're reads, and whether they should be is open.
+
+Oversight reaches only the agent's own tasks, and files can't be linked to tasks until step 5, so until then someone limited to their own tasks, and any admin overseeing, sees no file at all. `getOverseenFile` answers name and state only, and has no path to the bytes.
+
 ### Scanner
 
 A queue consumer hands the object to a ClamAV Container and reports the result to the room, which records it after rechecking that the object exists. A result is recorded even if the room was archived in between.
@@ -204,6 +212,6 @@ The owner approved the billed staging resources on 2026-11-06.
 ## Proposed details to settle in review
 
 - The exact file formats behind each allowed category, including whether macro-enabled Office formats count as executables.
-- The lifetime of an upload grant and of a download link.
+- The lifetime of an upload grant. A download has no link to expire.
 - How oversight's "name and status" appears in `getOverseenTask`.
 - The operator's takedown route, which has to be a recorded command and not a change to the database by hand.

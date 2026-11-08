@@ -11,6 +11,7 @@ capabilities:
   release_role: { kind: command, operation: releaseRole }
   create_task: { kind: command, operation: createTask }
   create_upload: { kind: command, operation: createUpload }
+  get_asset_link: { kind: query, operation: getFile }
   list_tasks: { kind: query, operation: listTasks }
   get_task: { kind: query, operation: getTask }
   get_plan: { kind: query, operation: getPlan }
@@ -87,6 +88,9 @@ person_only:
   - registerAgent
   - disconnectAgent
   - reconnectAgent
-# Not a call an agent makes through a tool: raw bytes, sent to the path `create_upload` returned, with its token.
+  - getOverseenFile
+# Not a call an agent makes through a tool: raw bytes. An upload goes to the path `create_upload` returned, with its token. A download goes to
+# the path `get_asset_link` returned, with the caller's own credential or session.
 transfer_only:
   - putUploadBytes
+  - downloadFile

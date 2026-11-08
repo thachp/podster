@@ -9,7 +9,7 @@ import { parse } from "yaml";
 import { CAPABILITIES, InvalidArguments, toApiCall } from "../src/capabilities";
 import { decodeJwt, importJWK, SignJWT } from "jose";
 import { mintAssertion } from "../src/assertion";
-import worker, { resolveAgent, cleanUp, clientKey, sensitiveRoute, type RateLimit, safeNext, allowedPassthrough, spentToken, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
+import worker, { resolveAgent, cleanUp, clientKey, sensitiveRoute, type RateLimit, safeNext, allowedPassthrough, spentToken, forMcp, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
 
 const BASE = "https://gateway.test";
 const e = env as unknown as Env & { API_DB: D1Database; TEST_DIRECTORY_SCHEMA: string; TEST_AUTH_SCHEMA: string; TEST_API_SCHEMA: string; TEST_CAPABILITIES: string; TEST_WRANGLER: string };
@@ -2718,5 +2718,178 @@ describe("staging's test sign-up", () => {
 
   it("wrong guesses count under the route's limit per client, like other sign-up routes", () => {
     expect(sensitiveRoute("POST", "/api/auth/sign-up/e2e")).toBe("auth");
+  });
+});
+
+describe("downloading a file through the gateway", () => {
+  /** A room with this agent in it. The room's own answer about an unknown file shows a request got all the way there. */
+  async function roomWith(who: Person, agent: string) {
+    const made = await dash(who, "POST", "/v1/workspaces", { name: "Files" });
+    const id = made.body.id as string;
+    const version = (await dash(who, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+    const added = await dash(who, "POST", `/v1/workspaces/${id}/members`, { principal_id: agent, kind: "agent", org_id: who.org, role: "member", policy_version: version });
+    expect(added.status, JSON.stringify(added.body)).toBe(200);
+    return id;
+  }
+  const fetchFile = (id: string, token?: string) => call(`/v1/files/${id}/obj_unknown`, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+  const reply = async (res: Response) => ({ status: res.status, code: (await res.json<any>()).error?.code as string });
+  const agentJwt = (agent: AgentAuthAgent) => signAgentJWT({ agentKeypair: agent.keypair, agentId: agent.pluginId, audience: BASE, capabilities: ["get_asset_link"] });
+
+  it("takes an Agent Auth credential on each use, spends it, and stops when it ends", async () => {
+    const a = await signUp();
+    const agent = await claimedAgent(a);
+    const id = await roomWith(a, agent.id);
+    const jwt = await agentJwt(agent);
+    expect(await reply(await fetchFile(id, jwt))).toEqual({ status: 404, code: "file_not_found" });
+    expect((await reply(await fetchFile(id, jwt))).code).not.toBe("file_not_found");
+    await dash(a, "POST", `/agents/${agent.id}/disconnect`);
+    // Disconnecting revokes the agent in the plugin, which refuses it as the capability path does.
+    const after = await fetchFile(id, await agentJwt(agent));
+    const viaCapability = await execute(agent, "get_asset_link", { workspace_id: id, file_id: "obj_unknown" });
+    expect(after.status).toBe(403);
+    expect(viaCapability.status).toBe(403);
+    expect(await after.json()).toEqual(viaCapability.raw);
+    expect(viaCapability.raw.error).toBe("agent_revoked");
+  });
+
+  it("verifies a JWT bound to this very request, and refuses one bound to another", async () => {
+    const a = await signUp();
+    const agent = await claimedAgent(a);
+    const id = await roomWith(a, agent.id);
+    const bound = (htm: string, htu: string) => signAgentJWT({ agentKeypair: agent.keypair, agentId: agent.pluginId, audience: BASE, capabilities: ["get_asset_link"], htm, htu });
+    const here = `${BASE}/v1/files/${id}/obj_unknown`;
+    expect(await reply(await fetchFile(id, await bound("GET", here)))).toEqual({ status: 404, code: "file_not_found" });
+    expect(await reply(await fetchFile(id, await bound("GET", `${BASE}/v1/files/${id}/obj_other`)))).toEqual({ status: 401, code: "invalid_credential" });
+    expect(await reply(await fetchFile(id, await bound("POST", here)))).toEqual({ status: 401, code: "invalid_credential" });
+  });
+
+  it("takes an MCP access token on each use, and stops when it ends", async () => {
+    const a = await signUp();
+    const agent = await mcpAgent(a);
+    const id = await roomWith(a, agent.id);
+    expect(await reply(await fetchFile(id, agent.token))).toEqual({ status: 404, code: "file_not_found" });
+    expect(await agent.tool("get_asset_link", { workspace_id: id, file_id: "obj_unknown" })).toMatchObject({ code: "file_not_found" });
+    await dash(a, "POST", `/agents/${agent.id}/disconnect`);
+    expect(await reply(await fetchFile(id, agent.token))).toEqual({ status: 401, code: "invalid_credential" });
+  });
+
+  it("downloads only with the get_asset_link grant, refused the way the capability path refuses it", async () => {
+    const a = await signUp();
+    const agent = await claimedAgent(a);
+    const id = await roomWith(a, agent.id);
+    const unclaimed = () => signAgentJWT({ agentKeypair: agent.keypair, agentId: agent.pluginId, audience: BASE });
+    // A JWT without a capabilities claim covers every grant the agent holds, and one naming get_asset_link covers that.
+    expect(await reply(await fetchFile(id, await unclaimed()))).toEqual({ status: 404, code: "file_not_found" });
+    expect(await reply(await fetchFile(id, await agentJwt(agent)))).toEqual({ status: 404, code: "file_not_found" });
+    const other = await signAgentJWT({ agentKeypair: agent.keypair, agentId: agent.pluginId, audience: BASE, capabilities: ["get_task"] });
+    const refusedOther = await fetchFile(id, other);
+    expect(refusedOther.status).toBe(403);
+    expect(await refusedOther.json()).toEqual({ error: "capability_not_granted", message: 'Agent does not have an active grant for capability "get_asset_link".' });
+    await e.DB.prepare("DELETE FROM agentCapabilityGrant WHERE agentId = ? AND capability = 'get_asset_link'").bind(agent.pluginId).run();
+    const refused = await fetchFile(id, await unclaimed());
+    const viaCapability = await execute(agent, "get_asset_link", { workspace_id: id, file_id: "obj_unknown" });
+    expect(refused.status).toBe(viaCapability.status);
+    expect(await refused.json()).toEqual(viaCapability.raw);
+    // Other grants are untouched, so it's this one capability that's missing.
+    expect((await execute(agent, "get_identity")).status).toBe(200);
+  });
+
+  it("holds a download to its grant's constraints, as the capability path does", async () => {
+    const a = await signUp();
+    const agent = await claimedAgent(a);
+    const allowed = await roomWith(a, agent.id);
+    const other = await roomWith(a, agent.id);
+    await e.DB.prepare("UPDATE agentCapabilityGrant SET constraints = ? WHERE agentId = ? AND capability = 'get_asset_link'").bind(JSON.stringify({ workspace_id: allowed }), agent.pluginId).run();
+    expect(await reply(await fetchFile(allowed, await agentJwt(agent)))).toEqual({ status: 404, code: "file_not_found" });
+    const refused = await fetchFile(other, await agentJwt(agent));
+    const viaCapability = await execute(agent, "get_asset_link", { workspace_id: other, file_id: "obj_unknown" });
+    expect(refused.status).toBe(403);
+    expect(viaCapability.status).toBe(403);
+    expect(await refused.json()).toEqual(viaCapability.raw);
+    expect(viaCapability.raw.error).toBe("constraint_violated");
+  });
+
+  it("answers a revoked get_asset_link grant as the capability path does", async () => {
+    const a = await signUp();
+    const agent = await claimedAgent(a);
+    const id = await roomWith(a, agent.id);
+    await e.DB.prepare("UPDATE agentCapabilityGrant SET status = 'revoked' WHERE agentId = ? AND capability = 'get_asset_link'").bind(agent.pluginId).run();
+    const refused = await fetchFile(id, await agentJwt(agent));
+    const viaCapability = await execute(agent, "get_asset_link", { workspace_id: id, file_id: "obj_unknown" });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual(viaCapability.raw);
+    expect(viaCapability.raw.error).toBe("grant_revoked");
+    expect((await execute(agent, "get_identity")).status).toBe(200);
+  });
+
+  it("downloads over MCP only with the scope that grants its tools, get_asset_link among them", async () => {
+    const a = await signUp();
+    const agent = await mcpAgent(a);
+    const id = await roomWith(a, agent.id);
+    expect(await reply(await fetchFile(id, agent.token))).toEqual({ status: 404, code: "file_not_found" });
+    const [userId, grantId] = agent.token.split(":");
+    const { keys } = await e.OAUTH_KV.list({ prefix: `token:${userId}:${grantId}:` });
+    expect(keys.length).toBeGreaterThan(0);
+    for (const { name } of keys) {
+      const held = await e.OAUTH_KV.get<{ grant: Record<string, unknown> }>(name, "json");
+      await e.OAUTH_KV.put(name, JSON.stringify({ ...held, scope: [], grant: { ...held!.grant, scope: [] } }));
+    }
+    const refused = await fetchFile(id, agent.token);
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ error: "capability_not_granted", message: 'Agent does not have an active grant for capability "get_asset_link".' });
+  });
+
+  it("takes only an MCP token issued for /mcp, not one for another resource", async () => {
+    const a = await signUp();
+    const agent = await mcpAgent(a);
+    const id = await roomWith(a, agent.id);
+    const [userId, grantId] = agent.token.split(":");
+    const { keys } = await e.OAUTH_KV.list({ prefix: `token:${userId}:${grantId}:` });
+    expect(keys.length).toBeGreaterThan(0);
+    for (const { name } of keys) {
+      const held = await e.OAUTH_KV.get<Record<string, unknown>>(name, "json");
+      await e.OAUTH_KV.put(name, JSON.stringify({ ...held, audience: "https://elsewhere.test/api" }));
+    }
+    expect(await reply(await fetchFile(id, agent.token))).toEqual({ status: 401, code: "invalid_credential" });
+  });
+
+  it("matches /mcp the way the provider does, and a token with no audience is its one resource's", () => {
+    expect(forMcp(`${BASE}/mcp`, BASE)).toBe(true);
+    expect(forMcp(["https://elsewhere.test/mcp", `${BASE.toUpperCase()}/mcp`], BASE)).toBe(true);
+    expect(forMcp(undefined, BASE)).toBe(true);
+    for (const other of [`${BASE}/mcp/x`, `${BASE}/`, `${BASE}/v1/files`, "https://elsewhere.test/mcp", "not a url", []]) expect(forMcp(other as never, BASE), String(other)).toBe(false);
+  });
+
+  it("ends a credential's downloads as soon as whoever connected it leaves, with nothing issued earlier still working", async () => {
+    const a = await signUp();
+    const viaKey = await claimedAgent(a);
+    const viaOauth = await mcpAgent(a);
+    const id = await roomWith(a, viaKey.id);
+    await e.DB.prepare("DELETE FROM org_member WHERE org_id = ?").bind(a.org).run();
+    expect(await reply(await fetchFile(id, await agentJwt(viaKey)))).toEqual({ status: 403, code: "credential_owner_left" });
+    expect(await reply(await fetchFile(id, viaOauth.token))).toEqual({ status: 403, code: "credential_owner_left" });
+  });
+
+  it("refuses anything that isn't a credential, before it reaches the API", async () => {
+    expect(await reply(await fetchFile("ws_x"))).toEqual({ status: 401, code: "invalid_credential" });
+    for (const token of ["a.b.c", "x:y:z", `upl_${"a".repeat(64)}`]) expect(await reply(await fetchFile("ws_x", token)), token).toEqual({ status: 401, code: "invalid_credential" });
+    expect((await call("/v1/files/ws_x/obj_1", { method: "DELETE" })).status).toBe(405);
+  });
+
+  it("takes a person's session on the dashboard's path, which never answers with a client's headers", async () => {
+    const a = await signUp();
+    const made = await dash(a, "POST", "/v1/workspaces", { name: "Files" });
+    const res = await dashboard(a, "GET", `/v1/files/${made.body.id}/obj_unknown`);
+    expect(res.headers.get("content-disposition")).toBeNull();
+    expect(await reply(res)).toEqual({ status: 404, code: "file_not_found" });
+    expect((await dashboard(a, "POST", `/v1/files/${made.body.id}/obj_unknown`, {})).status).toBe(405);
+    expect((await call(`/api/v1/files/${made.body.id}/obj_unknown`)).status).toBe(401);
+  });
+
+  it("gives another organization's person the room's one answer", async () => {
+    const a = await signUp();
+    const b = await signUp();
+    const made = await dash(a, "POST", "/v1/workspaces", { name: "Files" });
+    expect(await reply(await dashboard(b, "GET", `/v1/files/${made.body.id}/obj_unknown`))).toEqual({ status: 404, code: "workspace_not_found" });
   });
 });

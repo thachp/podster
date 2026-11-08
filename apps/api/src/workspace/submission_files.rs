@@ -194,6 +194,12 @@ pub(super) fn record(
             task_id.into(), i64::from(submission_no).into(), object_id.as_str().into(), sha256.as_str().into(), (size as i64).into(),
             opt(&file.label), object_id.as_str().into(), who.caller.id.as_str().into(), who.org.as_str().into(), now.into(),
         ])?;
+        // Named by a submission now, which it stays, so removal's rule for unsubmitted files can leave it out cheaply.
+        exec(
+            sql,
+            "UPDATE stored_object SET submitted_at = COALESCE(submitted_at, ?) WHERE id = ?",
+            vec![now.into(), object_id.as_str().into()],
+        )?;
     }
     Ok(())
 }

@@ -14,7 +14,7 @@ import { statusesFor, toA2aTask } from "./tasks";
 export type ApiReads = {
   sendMessage(workspaceId: string, taskId: string, body: string, idempotencyKey: string): Promise<{ status: number; body: any }>;
   getTask(workspaceId: string, taskId: string): Promise<{ status: number; body: any }>;
-  listTasks(workspaceId: string, query: { cursor?: number; order: "newest"; status?: string }): Promise<{ status: number; body: any }>;
+  listTasks(workspaceId: string, query: { cursor?: string; order: "newest"; status?: string }): Promise<{ status: number; body: any }>;
   listWorkspaces(): Promise<{ status: number; body: any }>;
 };
 
@@ -70,17 +70,17 @@ export const INCOMPLETE_HEADER = "Podster-List-Incomplete";
 /** The most API reads one `ListTasks` makes. Reaching it ends the page early, with a token to go on from. */
 export const MAX_LIST_CALLS = 60;
 const MAX_PAGE = 50;
-/** An API cursor is a task's position in its room. Anything past this isn't one Podster gave. */
-const MAX_API_CURSOR = 2 ** 40;
 
 /** What a read learned that the A2A answer can't carry, for the route to add as a header. */
 export type ReadNotes = { incompleteRooms?: boolean };
 
 /**
  * Where a list goes on from: a room, which of the filter's API statuses it was reading (or every status), the API cursor
- * of the page it was in, and the last task it sent from that page, so the next page starts after it.
+ * of the page it was in, and the last task it sent from that page, so the next page starts after it. The API cursor is the
+ * last task of the page before, by its ID, or empty for the room's first page, so it says nothing about tasks between. A
+ * version 2 token held a position instead, and is refused like any token Podster didn't give.
  */
-type Cursor = { v: 2; ws: string; s: number; c: number; after: string; f: string };
+type Cursor = { v: 3; ws: string; s: number; c: string; after: string; f: string };
 
 const encode = (c: Cursor) => btoa(JSON.stringify(c)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
@@ -88,10 +88,10 @@ function decode(token: string, filter: string, passCount: number): Cursor {
   try {
     const c = JSON.parse(atob(token.replace(/-/g, "+").replace(/_/g, "/"))) as Cursor;
     const ok =
-      c?.v === 2 &&
+      c?.v === 3 &&
       ROOM.test(c.ws) &&
       Number.isSafeInteger(c.s) && c.s >= 0 && c.s < passCount &&
-      Number.isSafeInteger(c.c) && c.c >= 0 && c.c < MAX_API_CURSOR &&
+      (c.c === "" || TASK.test(c.c)) &&
       (c.after === "" || TASK.test(c.after)) &&
       c.f === filter;
     if (ok) return c;
@@ -133,13 +133,13 @@ export async function listTasks(api: ApiReads, callerId: string, params: ListTas
   if (all.length > MAX_LIST_ROOMS) notes.incompleteRooms = true;
   const ids = all.slice(0, MAX_LIST_ROOMS);
 
-  let at: Cursor = params.pageToken ? decode(params.pageToken, filter, passes.length) : { v: 2, ws: ids[0] ?? "", s: 0, c: 0, after: "", f: filter };
+  let at: Cursor = params.pageToken ? decode(params.pageToken, filter, passes.length) : { v: 3, ws: ids[0] ?? "", s: 0, c: "", after: "", f: filter };
   let index = ids.indexOf(at.ws);
   const out: Task[] = [];
   let calls = 0;
   const nextRoom = () => {
     index += 1;
-    at = { v: 2, ws: ids[index] ?? "", s: 0, c: 0, after: "", f: filter };
+    at = { v: 3, ws: ids[index] ?? "", s: 0, c: "", after: "", f: filter };
   };
   // A room the caller has left since the cursor was made ends the list rather than guessing where to go on.
   while (index >= 0 && index < ids.length && out.length < pageSize) {
@@ -166,8 +166,8 @@ export async function listTasks(api: ApiReads, callerId: string, params: ListTas
       return { tasks: out, nextPageToken: encode(at), pageSize, totalSize: out.length };
     }
     const next = body?.next_cursor;
-    if (typeof next === "number" && next > 0 && next < MAX_API_CURSOR) at = { ...at, c: next, after: "" };
-    else if (at.s + 1 < passes.length) at = { ...at, s: at.s + 1, c: 0, after: "" };
+    if (typeof next === "string" && TASK.test(next)) at = { ...at, c: next, after: "" };
+    else if (at.s + 1 < passes.length) at = { ...at, s: at.s + 1, c: "", after: "" };
     else nextRoom();
   }
   const more = index >= 0 && index < ids.length;

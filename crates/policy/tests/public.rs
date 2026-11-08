@@ -256,11 +256,12 @@ fn no_private_value_reaches_the_view() {
     // What should be there is.
     let c = &view.content;
     assert_eq!(c.openings.len(), 4);
-    assert_eq!(c.openings[0].id.as_deref(), Some("role_pub"));
-    assert_eq!(c.openings[0].filled, 2);
-    assert!(c.openings[1..].iter().all(|o| o.id.is_none()));
-    assert!(c.openings[1..].iter().all(|o| !o.publicly_claimable));
-    assert!(c.openings[2].lead);
+    let (claimable, rest): (Vec<_>, Vec<_>) = c.openings.iter().partition(|o| o.id.is_some());
+    assert_eq!(claimable.len(), 1);
+    assert_eq!(claimable[0].id.as_deref(), Some("role_pub"));
+    assert_eq!(claimable[0].filled, 2);
+    assert!(rest.iter().all(|o| !o.publicly_claimable));
+    assert_eq!(rest.iter().filter(|o| o.lead).count(), 1);
     assert_eq!(c.outputs.len(), 1);
     assert_eq!(c.participant_count, 2);
 }
@@ -626,4 +627,67 @@ fn a_public_claim_needs_a_public_room_and_a_willing_agent() {
 fn refusal_codes_hide_what_strangers_cant_see() {
     assert_eq!(PublicClaimRefusal::RoomHidden.code(), "workspace_not_found");
     assert_eq!(PublicClaimRefusal::OpeningHidden.code(), "role_not_found");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Review fixes
+
+#[test]
+fn explore_leaves_out_archived_rooms_that_still_have_a_page() {
+    let reader = SignedInReader {
+        id: "per_x".into(),
+        kind: PrincipalKind::Person,
+    };
+    let mut archived = public_room();
+    archived.room.archived = true;
+    assert!(page(&archived).unwrap().content.archived);
+    assert!(explore_entry(&reader, true, &archived, HANDLE).is_none());
+}
+
+#[test]
+fn a_public_room_needs_person_review() {
+    let mut state = private_room();
+    state.room.require_person_review = false;
+    let hash = content_hash(&public_content(&state));
+    assert_eq!(
+        decide_publish(true, &state, &hash),
+        Err(PublishRefusal::PersonReviewOff)
+    );
+    let mut public = public_room();
+    public.room.require_person_review = false;
+    assert_eq!(
+        claim(&public, "role_pub", agent()),
+        Err(PublicClaimRefusal::PersonReviewOff)
+    );
+}
+
+#[test]
+fn row_order_doesnt_change_the_view_or_its_hash() {
+    let mut state = public_room();
+    let mut later = opening("role_b", Preset::Guest, true);
+    later.created_at = 2;
+    let mut same_time = opening("role_a", Preset::Guest, false);
+    same_time.created_at = 2;
+    state.openings.extend([later, same_time]);
+    state.outputs.push(OutputRow {
+        id: "out_0".into(),
+        title: "Plan".into(),
+        ..state.outputs[0].clone()
+    });
+    let mut shuffled = state.clone();
+    shuffled.openings.reverse();
+    shuffled.outputs.reverse();
+
+    let a = public_content(&state);
+    let b = public_content(&shuffled);
+    assert_eq!(a, b);
+    assert_eq!(content_hash(&a), content_hash(&b));
+    let ids: Vec<_> = a.openings.iter().map(|o| o.title.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["public_participant title", "guest title", "guest title"]
+    );
+    assert_eq!(a.openings[1].id, None, "role_a sorts before role_b");
+    assert_eq!(a.openings[2].id.as_deref(), Some("role_b"));
+    assert_eq!(a.outputs[0].title, "Plan");
 }

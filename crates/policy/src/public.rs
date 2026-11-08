@@ -265,18 +265,24 @@ fn count(n: usize) -> u32 {
 
 /// The public content of a room, field by field, as if it were public. The preview and the served page both come from
 /// here, so they can't drift. Closed openings and removed outputs are left out.
+///
+/// Openings are ordered by when they were made, then by ID, and outputs by ID, whatever order the rows came in. So the
+/// room's query order can't change the hash, and a preview and a publish of the same rows always agree.
 pub fn public_content(state: &RoomState) -> PublicContent {
     let room = &state.room;
     let takes_claims = !room.archived;
+    let mut openings: Vec<&OpeningRow> = state.openings.iter().collect();
+    openings.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+    let mut outputs: Vec<&OutputRow> = state.outputs.iter().collect();
+    outputs.sort_by(|a, b| a.id.cmp(&b.id));
     PublicContent {
         name: room.name.clone(),
         goal: room.goal.clone(),
         context: room.context.clone(),
         topic: room.topic,
         workflow: room.workflow,
-        openings: state
-            .openings
-            .iter()
+        openings: openings
+            .into_iter()
             .filter(|o| o.closed_at.is_none())
             .map(|o| {
                 let claimable = opening_publicly_claimable(o);
@@ -292,9 +298,8 @@ pub fn public_content(state: &RoomState) -> PublicContent {
                 }
             })
             .collect(),
-        outputs: state
-            .outputs
-            .iter()
+        outputs: outputs
+            .into_iter()
             .filter(|o| o.removed_at.is_none())
             .map(|o| PublicOutput {
                 title: o.title.clone(),
@@ -342,13 +347,17 @@ pub fn room_page(
 }
 
 /// One Explore result, confirmed with its room. The index only offers candidates: anything this doesn't confirm is
-/// dropped, and every field comes from the room now.
+/// dropped, and every field comes from the room now. An archived room still has its page, labeled Archived, but is gone
+/// from Explore (decision 152).
 pub fn explore_entry(
     _reader: &SignedInReader,
     public_rooms_enabled: bool,
     state: &RoomState,
     handle: &str,
 ) -> Option<PublicWorkroomView> {
+    if state.room.archived {
+        return None;
+    }
     let reader = RoomPageReader::Public(PublicCaller::from_public_assertion());
     room_page(&reader, public_rooms_enabled, state, handle)
 }
@@ -536,6 +545,8 @@ pub enum PublishRefusal {
     Suspended,
     /// What the owner previewed isn't what would be shown now.
     StalePreview,
+    /// Person review is off. A public room always has it on (decision 159), so the owner turns it on first.
+    PersonReviewOff,
 }
 
 impl PublishRefusal {
@@ -545,6 +556,7 @@ impl PublishRefusal {
             PublishRefusal::Archived => "workspace_archived",
             PublishRefusal::Suspended => "room_suspended",
             PublishRefusal::StalePreview => "version_conflict",
+            PublishRefusal::PersonReviewOff => "person_review_required",
         }
     }
 }
@@ -574,6 +586,9 @@ pub fn decide_publish(
     }
     if room.suspended {
         return Err(PublishRefusal::Suspended);
+    }
+    if !room.require_person_review {
+        return Err(PublishRefusal::PersonReviewOff);
     }
     if content_hash(&public_content(state)) != previewed_hash {
         return Err(PublishRefusal::StalePreview);
@@ -638,6 +653,8 @@ pub enum PublicClaimRefusal {
     OpeningHidden,
     Archived,
     Paused,
+    /// Person review is off. It's locked on while a room is public (decision 159), so this fails closed if it isn't.
+    PersonReviewOff,
     /// Only agents claim openings.
     NotAnAgent,
     /// The agent's owner hasn't allowed public claims.
@@ -656,6 +673,7 @@ impl PublicClaimRefusal {
             PublicClaimRefusal::OpeningHidden => "role_not_found",
             PublicClaimRefusal::Archived => "workspace_archived",
             PublicClaimRefusal::Paused => "public_claims_paused",
+            PublicClaimRefusal::PersonReviewOff => "person_review_required",
             PublicClaimRefusal::NotAnAgent => "not_allowed",
             PublicClaimRefusal::PolicyRefuses => "public_claims_not_allowed",
             PublicClaimRefusal::OperatorSuspended => "public_claims_suspended",
@@ -691,6 +709,9 @@ pub fn decide_public_claim(
         .ok_or(PublicClaimRefusal::OpeningHidden)?;
     if room.archived {
         return Err(PublicClaimRefusal::Archived);
+    }
+    if !room.require_person_review {
+        return Err(PublicClaimRefusal::PersonReviewOff);
     }
     if room.public_claims_paused {
         return Err(PublicClaimRefusal::Paused);

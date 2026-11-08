@@ -3118,7 +3118,8 @@ impl Workspace {
         if !store::is_initialized(&sql)? {
             return Ok(());
         }
-        self.migrate_if_needed()?;
+        // The alarm path never migrates a room: its next request does. Until then it has no scans to end.
+        let migrated = !store::needs_migration(&sql)?;
         let now = Date::now().as_millis() as i64;
         let mut due: Option<i64> = None;
         if !rows(&sql, "SELECT seq FROM index_outbox LIMIT 1", vec![])?.is_empty() {
@@ -3138,7 +3139,11 @@ impl Workspace {
                 due = Some(due.map_or(next, |d| d.min(next)));
             }
         }
-        if let Some(next) = objects::next_scan_expiry(&sql, now)? {
+        if let Some(next) = migrated
+            .then(|| objects::next_scan_expiry(&sql, now))
+            .transpose()?
+            .flatten()
+        {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
         let Some(due) = due else {

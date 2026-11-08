@@ -229,8 +229,9 @@ async function run() {
     check(res.status === 200 && iface?.protocolBinding === "JSONRPC" && iface?.protocolVersion === "1.0" && iface?.url === `${base}/a2a`, "the card names one JSON-RPC 1.0 interface at /a2a", iface ? `${iface.protocolBinding} ${iface.protocolVersion} ${iface.url}` : `HTTP ${res.status}`);
     const scheme = card.securitySchemes?.podster?.scheme;
     check(scheme?.$case === "oauth2SecurityScheme", "the card declares an OAuth scheme", scheme?.$case ?? "none");
-    const extensions = (card.capabilities?.extensions ?? []).map((e) => e.uri);
-    if (extensions.includes(LIFECYCLE)) check(true, "the card declares the lifecycle extension, not required");
+    // Compared whole, so a URI that only contains the extension's doesn't count.
+    const declared = (card.capabilities?.extensions ?? []).find((e) => e.uri === LIFECYCLE);
+    if (declared) check(declared.required === false, "the card declares the lifecycle extension, not required", `required ${declared.required}`);
     else skip("the card declares the lifecycle extension", "not deployed yet (#168)");
   });
 

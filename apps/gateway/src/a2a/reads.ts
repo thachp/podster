@@ -51,8 +51,15 @@ export async function readTask(api: ApiReads, callerId: string, id: string, hist
   return toA2aTask(id, body.task, callerId, { messages: body.messages, history: body.history, historyLength: Math.min(historyLength ?? MAX_HISTORY, MAX_HISTORY) });
 }
 
-/** The most rooms one `ListTasks` looks across. Past that, the profile says the list is incomplete. */
-export const MAX_ROOMS = 50;
+/**
+ * The most rooms one `ListTasks` looks across. Rooms past it aren't listed, and the answer says so with
+ * `INCOMPLETE_HEADER`, because A2A's list response has no field for it.
+ */
+export const MAX_LIST_ROOMS = 50;
+export const INCOMPLETE_HEADER = "Podster-List-Incomplete";
+
+/** What a read learned that the A2A answer can't carry, for the route to add as a header. */
+export type ReadNotes = { incompleteRooms?: boolean };
 const MAX_PAGE = 50;
 /** A cursor's room, the API cursor of the page it was in, and how many matching tasks of that page were already sent. */
 type Cursor = { v: 1; ws: string; c: number; skip: number; f: string };
@@ -75,7 +82,7 @@ function decode(token: string, filter: string): Cursor {
  * room. It isn't one list sorted by status time across rooms, which the profile says. A `contextId` narrows it to one task.
  * Each room's own check decides what's in it. Client `tenant` is never read.
  */
-export async function listTasks(api: ApiReads, callerId: string, params: ListTasksRequest): Promise<ListTasksResponse> {
+export async function listTasks(api: ApiReads, callerId: string, params: ListTasksRequest, notes: ReadNotes = {}): Promise<ListTasksResponse> {
   const statuses = statusesFor(params.status as TaskState | undefined);
   const filter = statuses ? statuses.join(",") : "*";
   const pageSize = Math.min(Math.max(params.pageSize ?? MAX_PAGE, 1), MAX_PAGE);
@@ -94,7 +101,9 @@ export async function listTasks(api: ApiReads, callerId: string, params: ListTas
 
   const rooms = await api.listWorkspaces();
   if (rooms.status !== 200) throw new Error("Podster couldn't list your rooms right now.");
-  const ids: string[] = (rooms.body?.workspaces ?? []).map((w: any) => w.workspace_id).filter((id: unknown) => typeof id === "string" && ROOM.test(id)).slice(0, MAX_ROOMS);
+  const all: string[] = (rooms.body?.workspaces ?? []).map((w: any) => w.workspace_id).filter((id: unknown) => typeof id === "string" && ROOM.test(id));
+  if (all.length > MAX_LIST_ROOMS) notes.incompleteRooms = true;
+  const ids = all.slice(0, MAX_LIST_ROOMS);
 
   let at: Cursor = params.pageToken ? decode(params.pageToken, filter) : { v: 1, ws: ids[0] ?? "", c: 0, skip: 0, f: filter };
   let index = ids.indexOf(at.ws);

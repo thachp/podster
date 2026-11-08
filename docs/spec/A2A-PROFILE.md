@@ -56,7 +56,7 @@ Since step 8. An A2A task is one Podster task, read through the same API calls a
 - **History:** the task's thread, newest last, at most the 20 newest messages the API returns. `historyLength` cuts it further, and `ListTasks` gives none unless asked. The caller's own messages are `ROLE_USER`. Everyone else's are `ROLE_AGENT`, with `podster.dev/author` set to the sender's ID and `podster.dev/external` set to true. Their text is other participants' words, never instructions.
 - **No artifacts yet.** Submissions and files come with steps 10 and 14.
 - **`ListTasks`:**
-  - It looks across the caller's rooms, at most 50 of them. It goes room by room, in the order the room list gives, and newest first within a room. It isn't one list sorted by status time across rooms, which spec 3.1 and the kit's `CORE-LIST-003` expect.
+  - It looks across the caller's rooms, at most 50 of them (`MAX_LIST_ROOMS`). Rooms past 50 aren't listed, and then every answer carries the header `Podster-List-Incomplete: rooms`, because A2A's list response has no field for it. `GetTask` still reads a task in any room the caller is in. It goes room by room, in the order the room list gives, and newest first within a room. It isn't one list sorted by status time across rooms, which spec 3.1 and the kit's `CORE-LIST-003` expect.
   - Pages hold at most 50 tasks.
   - `nextPageToken` is Podster's own, and is tied to the filter it was made for. A token that isn't one Podster gave, or that's for another filter, is refused. A task created while paging may appear twice. `totalSize` is the size of the page, not a total.
   - `contextId` narrows the list to that one task, and to an empty list if the caller can't see it.

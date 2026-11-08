@@ -3,7 +3,7 @@ import type { A2ARequestHandler } from "@a2a-js/sdk/server";
 import type { CancelTaskRequest, GetTaskRequest, ListTasksRequest } from "@a2a-js/sdk";
 import { ExtendedAgentCardNotConfiguredError, PushNotificationNotSupportedError, TaskNotCancelableError, UnsupportedOperationError } from "@a2a-js/sdk/errors";
 import { agentCard } from "./card";
-import { listTasks, readTask, type ApiReads } from "./reads";
+import { listTasks, readTask, type ApiReads, type ReadNotes } from "./reads";
 
 /**
  * Podster's own `A2ARequestHandler`, as ADR 0007 decides: the SDK's transport, not its `DefaultRequestHandler`, which
@@ -11,7 +11,7 @@ import { listTasks, readTask, type ApiReads } from "./reads";
  * the calling agent, so Rust decides. Step 8 turned on the reads and cancel's answer. Messages and the lifecycle follow
  * in steps 9 and 10, and until then those answer their named error without reading a parameter.
  */
-export type A2ACaller = { agentId: string; api: ApiReads };
+export type A2ACaller = { agentId: string; api: ApiReads; notes?: ReadNotes };
 
 const notYet = (operation: string) => new UnsupportedOperationError(`${operation} isn't available yet. Podster's A2A support is in preview.`);
 const noPush = () => new PushNotificationNotSupportedError("Push notifications aren't supported.");
@@ -47,8 +47,8 @@ export class PodsterA2AHandler implements A2ARequestHandler {
   }
 
   async listTasks(params: ListTasksRequest) {
-    const { agentId, api } = this.who();
-    return listTasks(api, agentId, params);
+    const { agentId, api, notes } = this.who();
+    return listTasks(api, agentId, params, notes);
   }
 
   /**

@@ -596,19 +596,19 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 89 | PDFs with only an owner password | **Decided:** they stay refused | M2 |
 | 90 | Password-protected OpenDocument files | **Decided:** refused if they can be detected without refusing all OpenDocument files. The whole format isn't refused | M2 |
 | 91 | Blocked file extensions | **Decided:** `.cmd`, `.vbs`, `.msc`, `.inf`, `.url`, `.jnlp`, `.application`, `.bat`, `.ps1`, `.sh` and `.js`, plus those already in the rules | M2 |
-| 92 | Takedown by a Podster operator (decision 57) | **Decided:** not built in M2. Owners and admins can remove files now. The operator route gets its own change before any public room, with operators named as person IDs in the API's configuration and checked in Rust | M2 |
+| 92 | Takedown by a Podster operator | **Decided:** amends decision 57 for M2: not built yet. Owners and admins can remove files now. The operator route gets its own change before any public room, with operators named as person IDs in the API's configuration and checked in Rust | M2 |
 | 93 | Removing a file in an archived room | **Decided:** allowed. Archiving keeps files, but it doesn't shield harmful content from a takedown | M2 |
 | 94 | Bytes of blocked and failed files | **Decided:** removed automatically 7 days after the verdict, leaving the same record and hash as any removal, marked as done by the system, and freeing their space. The 7 days leave time to look into a reported false positive. This narrows decision 56 for files that can never be downloaded | M2 |
-| 95 | Cancelling your own unfinished upload | **Decided:** not in M2. An abandoned upload frees its space when its grant expires, within the hour | M2 |
-| 96 | Guest uploads and the room's quota | **Decided:** guests, external agents included, upload into the room's 5 GB during private pilots. Revisited before public rooms | M2 |
-| 97 | A reviewer reading the files they review | **Decided:** the reviewer named on a task may read that task's submitted files, even when their access is otherwise limited to shared tasks. It widens access by only that much: no other task's files, and nothing unsubmitted | M2 |
-| 98 | Files uploaded for a task but never submitted | **Decided:** cleared 24 hours after the task leaves Accepted, by the same sweep that clears abandoned uploads | M2 |
+| 95 | Cancelling your own unfinished upload | **Decided:** not in M2. An abandoned upload frees its space when its grant expires | M2 |
+| 96 | Guest uploads and the room's quota | **Decided:** files a guest uploads for their own submission, external agents included, count toward the room's 5 GB during private pilots. Revisited before public rooms. Input assets stay as decision 53 says, so guests still don't upload those | M2 |
+| 97 | A reviewer reading the files they review | **Decided:** the reviewer named on a task may read that task's submitted files, even when their access is otherwise limited to their own tasks. It widens access by only that much: no other task's files, and nothing unsubmitted | M2 |
+| 98 | Files uploaded for a task but never submitted | **Decided:** cleared 24 hours after the task leaves the Accepted state, whether it was submitted, handed back or canceled, by the same sweep that clears abandoned uploads | M2 |
 
 ## Removal and submission file decisions, November 7, 2026
 
 - The owner accepted seven recommendations for M2 steps 6 and 8, now decisions 92 to 98, saying "as recommended".
 - Decision 97 is the lead's change to the step 6 proposal, which would have refused the approval instead.
-- None is in the code yet. Steps 6 and 8 build them.
+- None is in the code yet. Steps 6 and 8 build them, and update [UPLOAD-POLICY.md](UPLOAD-POLICY.md) and [ADR 0006](../adr/0006-uploads-and-scanning.md) to match, including the operator wording that decision 92 defers.
 
 ## File type decisions, November 7, 2026
 

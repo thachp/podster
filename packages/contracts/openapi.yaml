@@ -400,8 +400,8 @@ paths:
       parameters:
         - { name: status, in: query, schema: { $ref: "#/components/schemas/TaskStatus" } }
         - { name: mine, in: query, schema: { type: boolean } }
-        - { name: cursor, in: query, description: "The next_cursor of the page before, in the same order. 0 or absent is the start.", schema: { type: integer } }
-        - { name: order, in: query, description: "Oldest first unless asked. Any other value, or a negative cursor with newest, answers 400 invalid_argument.", schema: { type: string, enum: [oldest, newest] } }
+        - { name: cursor, in: query, description: "Opaque: the next_cursor of the page before, in the same order, which is the last task that page returned. Absent or empty is the start. Anything else, a number included, answers 400 invalid_argument.", schema: { type: string } }
+        - { name: order, in: query, description: "Oldest first unless asked. Any other value answers 400 invalid_argument.", schema: { type: string, enum: [oldest, newest] } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
     post:
       operationId: createTask
@@ -431,7 +431,7 @@ paths:
       operationId: listFiles
       tags: [queries]
       summary: "The room's input assets the caller can see, oldest first, 50 a page, with `next_cursor` for the next page or null. Each has what `getFile` returns. Whoever sees the whole room sees every one, and someone limited to their own tasks only those linked to one of their tasks. A file still uploading isn't listed. Whoever sees the whole room also gets `quota`, with `used`, the bytes of every file kept and every open reservation, and `limit`, the room's 5 GB. It's left out for anyone limited to their own tasks, because the total counts files they can't see. `task_id` narrows it to that task's assets, and a task the caller can't see answers `task_not_found` (404). An outsider gets `workspace_not_found` (404)"
-      parameters: [{ name: task_id, in: query, schema: { type: string } }, { name: cursor, in: query, schema: { type: integer } }]
+      parameters: [{ name: task_id, in: query, schema: { type: string } }, { name: cursor, in: query, description: "Opaque: the next_cursor of the page before, which is the last file that page returned. Absent or empty is the start. Anything else, a number included, answers 400 invalid_argument.", schema: { type: string } }]
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/files/{file}/links:
     parameters: [{ $ref: "#/components/parameters/ws" }, { name: file, in: path, required: true, schema: { type: string } }]
@@ -620,8 +620,8 @@ paths:
     get:
       operationId: listMessages
       tags: [queries]
-      summary: Messages on a task thread
-      parameters: [{ name: after, in: query, schema: { type: integer } }]
+      summary: "Messages on a task thread, oldest first, 50 at a time, each with `id`, `from`, `external`, `body` and `created_at`"
+      parameters: [{ name: after, in: query, description: "Opaque: the id of the last message the page before returned. Absent or empty is the start. One that isn't a message on this task answers 400 invalid_argument.", schema: { type: string } }]
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
     post:
       operationId: sendMessage

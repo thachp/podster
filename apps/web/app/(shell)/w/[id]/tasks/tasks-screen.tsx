@@ -77,7 +77,7 @@ function useSteadyNames(names: Names) {
   return steady.current;
 }
 
-export type TasksRead = { room: Room; tasks: TaskSummary[]; cursor: number | null; me: string; names: Names; orgNames?: Names; /** Null if that read failed. */ plan?: PlanSummary | null };
+export type TasksRead = { room: Room; tasks: TaskSummary[]; cursor: string | null; me: string; names: Names; orgNames?: Names; /** Null if that read failed. */ plan?: PlanSummary | null };
 
 /** What a refresh that fell over keeps showing. Access being lost never reaches here, because the page renders no tasks at all then. */
 export function KeptTasksScreen({ read }: { read: TasksRead | null }) {
@@ -106,7 +106,7 @@ export function TasksScreen({ room, tasks: firstPage, cursor, me, names: readNam
   // filter asks the server, each time it's turned on and each time the page reads again.
   const paged = cursor !== null;
   const askServer = state.reviewMine && paged;
-  const reviewPages = useTaskPages(room.id, REVIEW_QUERY, 0, generation, firstPage);
+  const reviewPages = useTaskPages(room.id, REVIEW_QUERY, "", generation, firstPage);
   const pages = askServer ? reviewPages : roomPages;
   const more = pages.cursor !== null;
   const restartReviews = reviewPages.restart;

@@ -259,7 +259,7 @@ describe("what comes back after an edit that can't be saved", () => {
 });
 
 describe("briefAuthor after an edit", () => {
-  const event = (over: Partial<HistoryEvent>): HistoryEvent => ({ seq: 1, id: "e", type: "task.created", from: { id: "per_r", org: "o" }, external: false, reason: null, prior_status: null, new_status: "open", task_version: 1, created_at: 1, ...over });
+  const event = (over: Partial<HistoryEvent>): HistoryEvent => ({ id: "e", type: "task.created", from: { id: "per_r", org: "o" }, external: false, reason: null, prior_status: null, new_status: "open", task_version: 1, created_at: 1, ...over });
   it("credits whoever edited accepted work, though it's recorded as an offer", () => {
     const history = [event({}), event({ type: "task.offered", prior_status: "accepted", from: { id: "per_e", org: "o" } })];
     expect(briefAuthor({ task: task(), history }).id).toBe("per_e");

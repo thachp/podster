@@ -16,7 +16,7 @@ export type RoomFile = {
 
 /** `quota` comes only to someone who sees the whole room, and only when the API sends it. */
 export type Quota = { used: number; limit: number };
-export type FilePage = { files: RoomFile[]; next_cursor: number | null; quota?: Quota };
+export type FilePage = { files: RoomFile[]; next_cursor: string | null; quota?: Quota };
 
 /** The upload policy's limits, as the API applies them. Shown to explain a refusal, never to decide one. */
 export const MAX_FILE_BYTES = 100_000_000;

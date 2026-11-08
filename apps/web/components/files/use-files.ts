@@ -10,7 +10,7 @@ const base = (workspace: string) => `/api/v1/workspaces/${encodeURIComponent(wor
 /** Every page of the room's input assets the viewer can see, or only one task's. A failure leaves what's on screen, and says so. */
 export function useFileList(workspace: string, initial: FilePage | null, taskId?: string) {
   const [files, setFiles] = useState<RoomFile[]>(initial?.files ?? []);
-  const [cursor, setCursor] = useState<number | null>(initial ? initial.next_cursor : null);
+  const [cursor, setCursor] = useState<string | null>(initial ? initial.next_cursor : null);
   const [loaded, setLoaded] = useState(initial !== null);
   const [failed, setFailed] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -20,12 +20,14 @@ export function useFileList(workspace: string, initial: FilePage | null, taskId?
   const query = taskId ? `task_id=${encodeURIComponent(taskId)}&` : "";
 
   const readPage = useCallback(
-    async (from: number) => {
-      const result = await clientQuery<FilePage>(`${base(workspace)}/files?${query}cursor=${from}`).catch(() => null);
+    async (from: string) => {
+      const result = await clientQuery<FilePage>(`${base(workspace)}/files?${query}cursor=${encodeURIComponent(from)}`).catch(() => null);
       if (result && !result.ok && result.status === 401) goToSignIn();
-      // Anything that isn't a page of files is a failed read, never an empty list. A cursor that isn't a number ends the list.
+      // Anything that isn't a page of files is a failed read, never an empty list. A cursor is the last file's ID, and one that
+      // isn't a string, or is empty, ends the list.
       if (!result?.ok || !Array.isArray(result.data?.files)) return null;
-      return { ...result.data, next_cursor: Number.isInteger(result.data.next_cursor) ? result.data.next_cursor : null };
+      const next = result.data.next_cursor;
+      return { ...result.data, next_cursor: typeof next === "string" && next !== "" ? next : null };
     },
     [workspace, query],
   );
@@ -37,7 +39,7 @@ export function useFileList(workspace: string, initial: FilePage | null, taskId?
   const reload = useCallback(async () => {
     setLoading(true);
     const next: RoomFile[] = [];
-    let from: number | null = 0;
+    let from: string | null = "";
     for (let page = 0; page < MAX_RELOAD_PAGES && from !== null; page += 1) {
       const read: FilePage | null = await readPage(from);
       if (!read) {

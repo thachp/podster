@@ -182,7 +182,7 @@ async function kernel() {
     const [fromA, fromB] = [await lead.must("get_task", at, false), await architect.must("get_task", at, false)];
     eq(fromA.task.status, "completed", "state");
     eq(fromA.task, fromB.task, "the task as each side reads it");
-    eq(fromA.history.map((h) => [h.seq, h.type, h.new_status]), fromB.history.map((h) => [h.seq, h.type, h.new_status]), "the history as each side reads it");
+    eq(fromA.history.map((h) => [h.id, h.type, h.new_status]), fromB.history.map((h) => [h.id, h.type, h.new_status]), "the history as each side reads it");
     eq(fromA.submissions.length, 2, "submissions kept");
     eq(fromA.artifacts.length, 2, "artifacts kept");
     eq(fromA.messages[0].external, true, "A sees B's message marked external");
@@ -1072,7 +1072,7 @@ async function criteria() {
     refused(await lead.call("verify_task", { ...at, submission_no: second.submission_no, idempotency_key: key() }), "not_allowed", "the former reviewer approving");
     eq((await partner.twice("verify_task", { ...at, submission_no: second.submission_no })).status, "completed", "after the Agent Auth lead approves");
     const reads = [await lead.must("get_task", at, false), await writer.must("get_task", at, false), await partner.must("get_task", at, false), await personA.must("GET", `/v1/workspaces/${room}/tasks/${task.id}`)];
-    const history = (read) => read.history.map((h) => [h.seq, h.type, h.new_status]);
+    const history = (read) => read.history.map((h) => [h.id, h.type, h.new_status]);
     for (const read of reads.slice(1)) {
       eq(history(read), history(reads[0]), "the history as each side reads it");
       eq(read.task, reads[0].task, "the task as each side reads it");

@@ -190,13 +190,13 @@ describe("the board", () => {
 
   it("on a partial read, finding nothing to review only speaks for what loaded", () => {
     setUrl("/w/ws_1/tasks?view=board&review=mine");
-    show([task("b", "accepted")], { cursor: 50 });
+    show([task("b", "accepted")], { cursor: "tsk_c50" });
     expect(screen.getByText(/None of the loaded tasks are waiting for your review. There may be more/)).toBeInTheDocument();
     expect(screen.queryByText("No submissions are waiting for your review in this workroom.")).toBeNull();
   });
 
   it("labels partial counts on a partial read", () => {
-    show([task("a", "open")], { cursor: 50 });
+    show([task("a", "open")], { cursor: "tsk_c50" });
     expect(screen.getByRole("heading", { name: "Open (1 loaded)" })).toBeInTheDocument();
     expect(within(column(/^Accepted/)).getByText("None loaded")).toBeInTheDocument();
   });
@@ -245,7 +245,7 @@ describe("the task Sheet from either view", () => {
 
   it("says nothing about a task it can't place, past the pages it loaded", async () => {
     setUrl("/w/ws_1/tasks?task=elsewhere");
-    show([task("a", "open")], { cursor: 50 });
+    show([task("a", "open")], { cursor: "tsk_c50" });
     await screen.findByText("Requester");
     expect(screen.queryByText(/outside the current filter/)).toBeNull();
   });
@@ -275,7 +275,7 @@ describe("progress on the page", () => {
   });
 
   it("a partial read gives loaded counts, and no percentage or bar", () => {
-    show(fixture, { cursor: 50 });
+    show(fixture, { cursor: "tsk_c50" });
     expect(screen.getByText(/Loaded tasks only · partial · 3 of 8 loaded tasks completed/)).toBeInTheDocument();
     expect(screen.queryByRole("progressbar")).toBeNull();
     expect(screen.queryByText(/38%/)).toBeNull();

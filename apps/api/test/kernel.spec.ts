@@ -730,13 +730,14 @@ describe("review findings", () => {
 
     const first = (await api(LEAD, "GET", `${tasks}?order=newest`)).body;
     expect(ids(first)).toEqual(made.toReversed().slice(0, 50));
-    expect(first.next_cursor).toEqual(expect.any(Number));
+    // The last task returned, by its ID, never its place in the room.
+    expect(first.next_cursor).toBe(ids(first).at(-1));
     const second = (await api(LEAD, "GET", `${tasks}?order=newest&cursor=${first.next_cursor}`)).body;
     expect(ids(second)).toEqual(made.toReversed().slice(50));
     expect(second.next_cursor).toBeNull();
 
-    // 0 is the start in either order, so a caller holding no cursor can say so.
-    expect(ids((await api(LEAD, "GET", `${tasks}?order=newest&cursor=0`)).body)).toEqual(ids(first));
+    // An empty cursor is the start in either order, so a caller holding none can say so.
+    expect(ids((await api(LEAD, "GET", `${tasks}?order=newest&cursor=`)).body)).toEqual(ids(first));
     // Filters apply to the same rows. BOB is every task's assignee.
     expect(ids((await api(BOB, "GET", `${tasks}?order=newest&mine=true&status=offered`)).body)).toEqual(ids(first));
     expect((await api(LEAD, "GET", `${tasks}?order=newest&status=submitted`)).body.tasks).toEqual([]);
@@ -744,9 +745,11 @@ describe("review findings", () => {
     expect(ids((await api(LEAD, "GET", tasks)).body)).toEqual(made.slice(0, 50));
     expect(ids((await api(LEAD, "GET", `${tasks}?order=oldest`)).body)).toEqual(made.slice(0, 50));
     expect((await api(LEAD, "GET", `${tasks}?order=sideways`)).code).toBe("invalid_argument");
-    // A bad cursor is refused rather than looking like the end of the list. Oldest first keeps treating it as the start.
-    expect((await api(LEAD, "GET", `${tasks}?order=newest&cursor=-1`)).code).toBe("invalid_argument");
-    expect(ids((await api(LEAD, "GET", `${tasks}?cursor=-1`)).body)).toEqual(made.slice(0, 50));
+    // A bad cursor is refused rather than looking like the end of the list or its start, in either order. A number is a bad
+    // cursor: a task's place in the room would count the tasks between.
+    for (const order of ["order=newest&", ""]) {
+      for (const cursor of ["-1", "0", "1", "tsk_nothing"]) expect((await api(LEAD, "GET", `${tasks}?${order}cursor=${cursor}`)).code, `${order}${cursor}`).toBe("invalid_argument");
+    }
   });
 
   it("refuses malformed fields instead of ignoring them", async () => {
@@ -5868,7 +5871,7 @@ describe("where a long list ends", () => {
   });
 
   describe.each([["newest", "order=newest&"], ["oldest", ""]])("Tasks, %s first", (_name, order) => {
-    const page = async (who: Who, tasks: string, cursor = 0) => (await api(who, "GET", `${tasks}?${order}cursor=${cursor}`)).body;
+    const page = async (who: Who, tasks: string, cursor: string | null = null) => (await api(who, "GET", `${tasks}?${order}${cursor ? `cursor=${cursor}` : ""}`)).body;
 
     it("says there's nothing more on a full last page, at exactly one page", async () => {
       const { id, tasks } = await room();
@@ -5883,7 +5886,7 @@ describe("where a long list ends", () => {
       await tasksFor(id, PAGE * 2);
       const first = await page(OWNER, tasks);
       expect(first.tasks).toHaveLength(PAGE);
-      expect(first.next_cursor).toEqual(expect.any(Number));
+      expect(first.next_cursor).toBe(first.tasks.at(-1).id);
       const second = await page(OWNER, tasks, first.next_cursor);
       expect(second.tasks).toHaveLength(PAGE);
       expect(second.next_cursor).toBeNull();
@@ -5895,7 +5898,7 @@ describe("where a long list ends", () => {
       await tasksFor(id, PAGE + 1);
       const first = await page(OWNER, tasks);
       expect(first.tasks).toHaveLength(PAGE);
-      expect(first.next_cursor).toEqual(expect.any(Number));
+      expect(first.next_cursor).toBe(first.tasks.at(-1).id);
       const second = await page(OWNER, tasks, first.next_cursor);
       expect(second.tasks).toHaveLength(1);
       expect(second.next_cursor).toBeNull();

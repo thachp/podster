@@ -74,6 +74,7 @@ type Identity = Verified;
 
 mod asset_links;
 mod collaboration;
+mod cursor;
 mod downloads;
 mod objects;
 mod outputs;
@@ -2336,7 +2337,10 @@ mod queries {
     }
 
     pub fn list_tasks(sql: &SqlStorage, caller: &Caller, url: &Url) -> R<Value> {
-        let cursor = query_int(url, "cursor")?.unwrap_or(0);
+        let cursor = match super::cursor::resume(sql, url, "cursor", "task", "seq", None)? {
+            super::cursor::Resume::Start => 0,
+            super::cursor::Resume::After(seq) => seq,
+        };
         let mine = query_str(url, "mine").as_deref() == Some("true");
         let status = query_str(url, "status");
         if let Some(s) = &status {
@@ -2344,7 +2348,7 @@ mod queries {
                 return Err(ApiError::invalid_argument());
             }
         }
-        // Oldest first unless asked. A cursor is the last row's position either way, and no row sits at 0, so 0 is the start.
+        // Oldest first unless asked. A cursor is the last row returned either way, and no row sits at 0, so 0 is the start.
         let order = query_str(url, "order");
         let (position, direction) = match order.as_deref() {
             None | Some("oldest") => ("seq > ?", "ASC"),
@@ -2370,15 +2374,16 @@ mod queries {
                 tasks.push(task_json(&task));
             }
         }
+        // The last row's ID. The query is already narrowed to what the caller may see, so it's a task they were just given.
         let next = more
-            .then(|| page().next_back().map(|r| int(&r["seq"])))
+            .then(|| page().next_back().and_then(|r| text(&r["id"])))
             .flatten();
         Ok(json!({ "tasks": tasks, "next_cursor": next }))
     }
 
     fn message_json(row: &Value, reader_org: &str) -> Value {
         json!({
-            "id": row["id"], "seq": row["seq"], "from": { "id": row["sender_id"], "org": row["sender_org"] },
+            "id": row["id"], "from": { "id": row["sender_id"], "org": row["sender_org"] },
             "external": row["sender_org"].as_str() != Some(reader_org), "body": row["body"], "created_at": row["created_at"],
         })
     }
@@ -2410,7 +2415,8 @@ mod queries {
             messages.clear();
         }
         let messages: Vec<Value> = messages.iter().map(|m| message_json(m, &who.org)).collect();
-        let history = rows(sql, "SELECT seq, id, type, actor_id, actor_org, reason, prior_status, new_status, task_version, created_at FROM event WHERE task_id = ?1 AND (type <> ?2 OR ?3) ORDER BY seq", vec![id.into(), podster_policy::TASK_PLAN_CHANGED.into(), flag(sees_whole_room(&who.caller))])?;
+        // In order, without saying where each entry sits among the room's events, which would count the ones not shown.
+        let history = rows(sql, "SELECT id, type, actor_id, actor_org, reason, prior_status, new_status, task_version, created_at FROM event WHERE task_id = ?1 AND (type <> ?2 OR ?3) ORDER BY seq", vec![id.into(), podster_policy::TASK_PLAN_CHANGED.into(), flag(sees_whole_room(&who.caller))])?;
         let marked = |row: &Value, id: &str, org: &str| -> Value {
             let mut out = row.clone();
             if let Some(map) = out.as_object_mut() {
@@ -2449,7 +2455,19 @@ mod queries {
         if !task_view(&who.caller, &task).conversation {
             return Err(ApiError::not_allowed());
         }
-        let after = query_int(url, "after")?.unwrap_or(0);
+        // The last message the page before returned, by its ID and on this task. A message's place in the room would count the
+        // messages on tasks the reader can't see.
+        let after = match super::cursor::resume(
+            sql,
+            url,
+            "after",
+            "message",
+            "seq",
+            Some(("task_id", id)),
+        )? {
+            super::cursor::Resume::Start => 0,
+            super::cursor::Resume::After(seq) => seq,
+        };
         let found = rows(
             sql,
             "SELECT * FROM message WHERE task_id = ? AND seq > ? ORDER BY seq LIMIT ?",

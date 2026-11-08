@@ -34,7 +34,7 @@ export function summaryOf(task: TaskSummary): TaskSummary {
 }
 
 export type From = { id: string; org: string };
-export type Message = { id: string; seq: number; from: From; external: boolean; body: string; created_at: number };
+export type Message = { id: string; from: From; external: boolean; body: string; created_at: number };
 export type Artifact = { id: string; submission_no: number; uri: string; label: string; from: From; external: boolean; created_at: number };
 /**
  * A stored file on a submission, as the task read lists it. `sha256` and `size` are what the submission pinned, and `state` is
@@ -44,7 +44,7 @@ export type Artifact = { id: string; submission_no: number; uri: string; label: 
  */
 export type TaskFile = { id: string; submitted?: boolean; submission_no: number | null; label?: string | null; name: string | null; size?: number; sha256?: string; media_type?: string | null; state: string | null; download_path: string | null; from?: From; external?: boolean; created_at?: number };
 export type Submission = { submission_no: number; task_version: number; note: string | null; commit_sha: string | null; from: From; external: boolean; created_at: number };
-export type HistoryEvent = { seq: number; id: string; type: string; from: From; external: boolean; reason: string | null; prior_status: string | null; new_status: string | null; task_version: number | null; created_at: number };
+export type HistoryEvent = { id: string; type: string; from: From; external: boolean; reason: string | null; prior_status: string | null; new_status: string | null; task_version: number | null; created_at: number };
 /** What the viewer's access leaves out of this read. Without it, empty lists can't be told from a task with nothing in them. */
 export type TaskVisibility = { submissions: "all" | "own"; conversation: boolean };
 /** The expected output a task works toward. `removed` means it was removed since the task named it. */

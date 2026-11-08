@@ -1374,11 +1374,12 @@ async function keyboardPaths(s) {
     // Pages the server would have to hold thousands of tasks to answer, with instructions at their limit, which rows don't keep.
     const instructions = "x".repeat(64 * 1024);
     let served = 0;
-    await own.route(/\/tasks\?cursor=\d+&order=newest$/, (route) => {
+    await own.route(/\/tasks\?cursor=[\w-]+&order=newest$/, (route) => {
       const start = 1000 + served;
       served += 50;
       const tasks = Array.from({ length: 50 }, (_, i) => ({ id: `tsk_many_${start + i}`, title: `Many ${start + i}`, instructions, acceptance_criteria: null, requester: s.owner.id, assignee: null, reviewer: s.owner.id, status: i % 2 ? "open" : "completed", version: 1, due_at: null, follow_up_of: null, submission_no: 0, needs_attention: false }));
-      return route.fulfill({ json: { tasks, next_cursor: 1 } });
+      // A cursor is the last task returned, as the API's are.
+      return route.fulfill({ json: { tasks, next_cursor: tasks.at(-1).id } });
     });
     const cdp = await own.context().newCDPSession(own);
     await cdp.send("HeapProfiler.enable");

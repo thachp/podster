@@ -202,7 +202,10 @@ pub(super) fn list(sql: &SqlStorage, who: &Participant, url: &Url) -> R<Value> {
     if caller.role == Role::None {
         return Err(ApiError::workspace_not_found());
     }
-    let cursor = query_int(url, "cursor")?.unwrap_or(0);
+    let cursor = match super::cursor::resume(sql, url, "cursor", "stored_object", "rowid", None)? {
+        super::cursor::Resume::Start => 0,
+        super::cursor::Resume::After(position) => position,
+    };
     let task_id = query_str(url, "task_id");
     if let Some(task_id) = &task_id {
         require_id(task_id)?;
@@ -233,7 +236,7 @@ pub(super) fn list(sql: &SqlStorage, who: &Participant, url: &Url) -> R<Value> {
         }
     }
     let next = more
-        .then(|| page().next_back().map(|row| int(&row["seq"])))
+        .then(|| page().next_back().and_then(|row| text(&row["id"])))
         .flatten();
     let mut answer = json!({ "files": files, "next_cursor": next });
     // The room's total counts files someone limited to their own tasks can't see, so only whoever sees the whole room gets it.

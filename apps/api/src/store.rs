@@ -136,6 +136,17 @@ ALTER TABLE task ADD COLUMN left_accepted_at INTEGER;
 ", "
 CREATE TABLE asset_link (task_id TEXT NOT NULL, object_id TEXT NOT NULL, linked_by TEXT NOT NULL, linked_at INTEGER NOT NULL, PRIMARY KEY (task_id, object_id)) WITHOUT ROWID;
 CREATE INDEX asset_link_object ON asset_link (object_id, task_id);
+", "
+ALTER TABLE stored_object ADD COLUMN removed_at INTEGER;
+ALTER TABLE stored_object ADD COLUMN removed_by TEXT;
+ALTER TABLE stored_object ADD COLUMN removed_by_kind TEXT;
+ALTER TABLE stored_object ADD COLUMN removed_from TEXT;
+ALTER TABLE stored_object ADD COLUMN attempt_started_at INTEGER;
+ALTER TABLE stored_object ADD COLUMN purge_due_at INTEGER;
+CREATE INDEX stored_object_abandoned ON stored_object (upload_expires_at) WHERE state = 'uploading';
+CREATE INDEX stored_object_purge ON stored_object (purge_due_at) WHERE purge_due_at IS NOT NULL;
+CREATE TABLE storage_sweep (id INTEGER PRIMARY KEY CHECK (id = 1), due_at INTEGER, cursor TEXT, cycle_due_at INTEGER, settles_at INTEGER);
+INSERT INTO storage_sweep (id, due_at, settles_at) SELECT 1, CASE WHEN EXISTS (SELECT 1 FROM stored_object WHERE object_key IS NOT NULL) THEN CAST(strftime('%s', 'now') AS INTEGER) * 1000 + 3600000 END, CAST(strftime('%s', 'now') AS INTEGER) * 1000 + 3600000;
 "];
 
 pub fn int(value: &Value) -> i64 {

@@ -13,7 +13,7 @@
 | 54 | Expected outputs | Owner and admins define them, requesters link tasks, and the lead comes later. All participants see titles and status | Outputs are the room's goal |
 | 55 | External links | Kept, labeled "External link, may change since approval" | M0 and repository work depend on them, but they can't be exact-version |
 | 56 | Retention | Files and messages last the room's life during the preview, and archiving keeps them | Rooms can't be deleted yet, so the quota caps cost |
-| 57 | Takedown | Owner, admin or a Podster operator can remove a file's bytes, keeping its record and hash | It's the one exception to "submitted artifacts are always kept" |
+| 57 | Takedown | Owner or admin can remove a file's bytes, keeping its record and hash. [Decision 92](../spec/PRODUCT.md#decisions-needed) amends this: a Podster operator's takedown waits for its own change | It's the one exception to "submitted artifacts are always kept" |
 | 58 | Oversight | Org admins see file names and status, not bytes, at first | Decision 7 covers tasks and inboxes, not files |
 | 59 | Export and legal terms | Deferred until before public rooms | Only private pilots run until M4 |
 
@@ -48,9 +48,9 @@ Each attempt checks the uploader at its start and its end, and the end also rech
 
 **The one gap:** an agent's credential ends when the person who connected it leaves the organization, and only the gateway's directory knows that. A token isn't a credential the gateway checks, so that agent's existing upload can still finish, for up to an hour after `create_upload` plus however long the attempt runs. It can't start a new one, because `create_upload` goes through the gateway.
 
-The sweep that clears abandoned rows comes with step 8. Until then an expired upload reserves nothing, and its row stays.
+An expired upload reserves nothing at once. Step 8's sweep deletes its row an hour after its grant ends, since an attempt that began just before then may still finish ([step 8's notes](../m2-removal.md)).
 
-**Step 8 also has bytes to clear.** If the room doesn't answer when an upload finishes, or the call to it fails, the API answers `upload_outcome_unknown` and keeps the bytes, since the room may have accepted them. If it hadn't, nothing refers to them, and they aren't counted in the quota. The same goes for a Worker that dies between storing a file and the room's answer. Those objects stay in R2, under `rooms/{room}/objects/{object}/`, until a sweep exists. When the room did accept the file, it's in `scanning` but no scan job was sent, because the API sends the job only after the room's answer. Nothing rescans it, so it ends as `failed` after the hour, and the person uploads again.
+**Step 8 also has bytes to clear.** If the room doesn't answer when an upload finishes, or the call to it fails, the API answers `upload_outcome_unknown` and keeps the bytes, since the room may have accepted them. If it hadn't, nothing refers to them, and they aren't counted in the quota. The same goes for a Worker that dies between storing a file and the room's answer. Those objects are under `rooms/{room}/objects/{object}/`. Step 8's sweep deletes bytes no file refers to once they're an hour old. When the room did accept the file, it's in `scanning` but no scan job was sent, because the API sends the job only after the room's answer. Nothing rescans it, so it ends as `failed` after the hour, and the person uploads again.
 
 Downloads ask the room's Durable Object first. A link is checked against the room again each time it's used, so it needs no separate revocation. Responses are attachments with `X-Content-Type-Options: nosniff` and a cleaned filename. Filenames are agent content, so they stay out of logs and events.
 
@@ -92,6 +92,14 @@ A task may name an expected output. Approving it makes the output Ready and link
 ### Removal
 
 Removing a file deletes its bytes and sets a tombstone on `stored_object`, keeping its hash and who removed it. An approved submission keeps its approval and shows the file was removed.
+
+The rules for the owner's rulings are [decisions 92 to 95 and 98](../spec/PRODUCT.md#decisions-needed):
+- **Archived rooms:** removal works in an archived room (93).
+- **Blocked and failed files:** they lose their bytes 7 days after the verdict, as a removal by the system (94).
+- **Unsubmitted files:** files uploaded for a task but never submitted are cleared 24 hours after the task leaves Accepted (98).
+- **Self-cancel:** no one can cancel their own unfinished upload in M2 (95).
+
+How it's built is in [step 8's notes](../m2-removal.md).
 
 ## Spike results
 
@@ -233,4 +241,4 @@ The owner approved the billed staging resources on 2026-11-06.
 - The exact file formats behind each allowed category, including whether macro-enabled Office formats count as executables.
 - The lifetime of an upload grant. A download has no link to expire.
 - How oversight's "name and status" appears in `getOverseenTask`.
-- The operator's takedown route, which has to be a recorded command and not a change to the database by hand.
+- The operator's takedown route ([decision 92](../spec/PRODUCT.md#decisions-needed)): its own change before any public room, with operators named as person IDs in the API's configuration and checked in Rust. It has to be a recorded command and not a change to the database by hand.

@@ -78,6 +78,7 @@ mod downloads;
 mod objects;
 mod plan;
 mod planned;
+mod removal;
 mod roles;
 mod submission_files;
 
@@ -2558,6 +2559,30 @@ impl Workspace {
         test_fail: bool,
         handler: impl FnOnce(&SqlStorage, &Participant, i64) -> R<Value> + 'static,
     ) -> R<Value> {
+        self.command_checked(
+            identity,
+            key,
+            hash,
+            stops_when_archived,
+            test_fail,
+            |_, _| Ok(()),
+            handler,
+        )
+    }
+
+    /// The same, with `recheck` run before a stored answer is replayed, for a command whose own authority goes past being in the
+    /// room. A stored answer then can't reach someone who has since lost it. Only removal uses it so far.
+    #[allow(clippy::too_many_arguments)]
+    fn command_checked(
+        &self,
+        identity: &Identity,
+        key: Option<String>,
+        hash: String,
+        stops_when_archived: bool,
+        test_fail: bool,
+        recheck: impl FnOnce(&SqlStorage, &Participant) -> R<()> + 'static,
+        handler: impl FnOnce(&SqlStorage, &Participant, i64) -> R<Value> + 'static,
+    ) -> R<Value> {
         let key = key
             .filter(|k| !k.is_empty() && k.len() <= MAX_KEY_BYTES)
             .ok_or_else(ApiError::idempotency_required)?;
@@ -2568,6 +2593,7 @@ impl Workspace {
         transaction_sync(&self.state, move || {
             // Authority first, so a revoked caller can't replay a stored response.
             let who = resolve_caller(&sql, &identity)?;
+            recheck(&sql, &who)?;
             let now = now_ms();
             if let Some(answer) = stored_answer(&sql, &identity.id, &key, &hash, now)? {
                 *slot.borrow_mut() = Some(answer);
@@ -3168,6 +3194,9 @@ impl Workspace {
         {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
+        if let Some(next) = removal::next_due(&sql, now)? {
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
         let Some(due) = due else {
             return Ok(());
         };
@@ -3577,6 +3606,8 @@ impl Workspace {
         let stops_when_archived = !matches!(
             (&method, tail),
             (Method::Post, ["unarchive"])
+                // Decision 93: archiving doesn't shield harmful content from a takedown.
+                | (Method::Post, ["files", _, "remove"])
                 | (
                     Method::Delete,
                     ["members" | "organizations" | "invitations", _]
@@ -3740,6 +3771,18 @@ impl Workspace {
                     stops_when_archived,
                     test_fail,
                     move |sql, who, now| objects::handle_create(sql, &who.caller, &raw, &body, now),
+                )
+            }
+            (Method::Post, ["files", _, "remove"]) => {
+                let checked = target.clone();
+                self.command_checked(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who| removal::authorize_removal(sql, &who.caller, &checked),
+                    move |sql, who, now| removal::handle_remove(sql, &who.caller, &target, now),
                 )
             }
             (Method::Post, ["files", file, "links"]) => {
@@ -4047,6 +4090,7 @@ impl DurableObject for Workspace {
         if let Err(error) = self.expire_scans() {
             console_error!("couldn't end overdue scans: {:?}", error.code());
         }
+        self.sweep_files().await;
         // One failing doesn't hold up the other.
         let outbox = self.drain_outbox().await;
         if let Err(error) = &outbox {

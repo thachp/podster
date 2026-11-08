@@ -998,15 +998,19 @@ pub enum ObjectState {
     Blocked,
     /// No result within an hour. Upload the file again.
     Failed,
+    /// Taken down by an owner or admin: the bytes are gone, and the record and hash stay. Nothing leaves it, see
+    /// [`crate::removal`].
+    Removed,
 }
 
 impl ObjectState {
-    pub const ALL: [ObjectState; 5] = [
+    pub const ALL: [ObjectState; 6] = [
         ObjectState::Uploading,
         ObjectState::Scanning,
         ObjectState::Ready,
         ObjectState::Blocked,
         ObjectState::Failed,
+        ObjectState::Removed,
     ];
 
     pub fn name(self) -> &'static str {
@@ -1016,6 +1020,7 @@ impl ObjectState {
             ObjectState::Ready => "ready",
             ObjectState::Blocked => "blocked",
             ObjectState::Failed => "failed",
+            ObjectState::Removed => "removed",
         }
     }
 
@@ -1031,7 +1036,8 @@ impl ObjectState {
             ObjectState::Uploading
             | ObjectState::Scanning
             | ObjectState::Blocked
-            | ObjectState::Failed => false,
+            | ObjectState::Failed
+            | ObjectState::Removed => false,
         }
     }
 }
@@ -1076,9 +1082,11 @@ pub fn complete_upload(
 ) -> Result<CompletedUpload, FileRefusal> {
     match state {
         ObjectState::Uploading => {}
-        ObjectState::Scanning | ObjectState::Ready | ObjectState::Blocked | ObjectState::Failed => {
-            return Err(FileRefusal::InvalidTransition)
-        }
+        ObjectState::Scanning
+        | ObjectState::Ready
+        | ObjectState::Blocked
+        | ObjectState::Failed
+        | ObjectState::Removed => return Err(FileRefusal::InvalidTransition),
     }
     if arrival.received_size != arrival.announced_size
         || arrival.sample.total_size != arrival.received_size
@@ -1122,6 +1130,7 @@ fn scan_is_late(scanning_since: i64, now: i64) -> bool {
 
 /// Records a scanner's report. Reports can arrive twice or late, so a report can only ever tighten: nothing leaves
 /// blocked or failed for ready, a finding blocks whatever the state was, and a clean report after the deadline is too late.
+/// A removed file stays removed, whatever arrives.
 pub fn record_scan(
     state: ObjectState,
     outcome: ScanOutcome,
@@ -1130,6 +1139,7 @@ pub fn record_scan(
 ) -> Result<ObjectState, FileRefusal> {
     match (state, outcome) {
         (ObjectState::Uploading, _) => Err(FileRefusal::InvalidTransition),
+        (ObjectState::Removed, _) => Ok(ObjectState::Removed),
         (_, ScanOutcome::MalwareFound | ScanOutcome::Unreadable) => Ok(ObjectState::Blocked),
         (ObjectState::Scanning, ScanOutcome::NoKnownMalware) => {
             if scan_is_late(scanning_since, now) {
@@ -1180,6 +1190,7 @@ pub fn expire_scan(state: ObjectState, scanning_since: i64, now: i64) -> ObjectS
         | ObjectState::Scanning
         | ObjectState::Ready
         | ObjectState::Blocked
-        | ObjectState::Failed => state,
+        | ObjectState::Failed
+        | ObjectState::Removed => state,
     }
 }

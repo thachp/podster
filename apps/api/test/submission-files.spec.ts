@@ -455,6 +455,17 @@ describe("approving the exact files submitted", () => {
     expect((await api(OWNER, "POST", `${taskPath}/request-changes`, { submission_no: 1, reason: "A file was blocked." })).status).toBe(200);
   });
 
+  it("refuses approval once a submitted file is removed, keeping the task waiting", async () => {
+    const { id, task, taskPath } = await accepted();
+    const object = await upload(GUEST, id, { task });
+    await submit(taskPath, { files: [{ id: object }] });
+    const removed = await api(OWNER, "POST", `/v1/workspaces/${id}/files/${object}/remove`);
+    expect(removed.status, JSON.stringify(removed.body)).toBe(200);
+    const refused = await api(OWNER, "POST", `${taskPath}/verify`, { submission_no: 1 });
+    expect([refused.status, refused.code]).toEqual([409, "file_removed"]);
+    expect((await api(OWNER, "GET", taskPath)).body.task).toMatchObject({ status: "submitted", approved_submission_no: null });
+  });
+
   it("refuses approval if a file's row no longer matches what was pinned", async () => {
     const { id, task, taskPath } = await accepted();
     const object = await upload(GUEST, id, { task });

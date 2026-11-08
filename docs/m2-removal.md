@@ -97,7 +97,12 @@ The owner ruled "as recommended", recorded as [decisions 92 to 98](spec/PRODUCT.
 - **Removal works in an archived room (93).** This is built.
 - **Blocked and failed files (94).** Their bytes are removed by the system 7 days after the verdict. The rule is `unusable_file_due` in core. Its alarm step needs #125's `scanned_at`, so it lands after #125.
 - **No self-cancel (95).**
-- **Unsubmitted files (98).** Files uploaded for a task and never submitted are removed by the system 24 hours after the task leaves Accepted. The rule is `unsubmitted_file_due` in core. The alarm step needs step 6's `for_task`, the files each submission names, and a time the task left Accepted, and that hook is being agreed with step 6.
+- **Unsubmitted files (98).** Files uploaded for a task and never submitted are removed by the system 24 hours after the task leaves Accepted. The rule is `unsubmitted_file_due` in core. The hook is agreed with step 6 part 2, whose migration adds what this reads:
+  - `stored_object.for_task`;
+  - a `submission_file` table, where "named by a submission" means one of its rows has the file's `object_id`;
+  - `task.left_accepted_at`, which `store::save_task` sets on leaving Accepted and clears on coming back.
+
+  The alarm step lands after both migrations.
 
 ## What the deeper pass should cover
 

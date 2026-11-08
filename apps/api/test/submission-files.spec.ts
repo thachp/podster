@@ -284,6 +284,41 @@ describe("the reviewer named on a task (decision 97)", () => {
   });
 });
 
+describe("an uploader's own unsubmitted files on the task", () => {
+  it("lists them for the uploader after a reload, with state and size, and for nobody else", async () => {
+    const { id, task, taskPath } = await accepted();
+    const ready = await upload(GUEST, id, { task });
+    const blocked = await upload(GUEST, id, { task, state: "blocked" });
+    const arriving = await api(GUEST, "POST", `/v1/workspaces/${id}/uploads`, { name: "big.txt", size: 5, sha256: "a".repeat(64), task_id: task });
+    const expired = await api(GUEST, "POST", `/v1/workspaces/${id}/uploads`, { name: "old.txt", size: 5, sha256: "b".repeat(64), task_id: task });
+    await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET upload_expires_at = 0 WHERE id = ?", expired.body.id));
+    const mine = (await api(GUEST, "GET", taskPath)).body.files;
+    expect(mine.map((f: any) => [f.id, f.submitted, f.state])).toEqual([[ready, false, "ready"], [blocked, false, "blocked"], [arriving.body.id, false, "uploading"]]);
+    expect(mine[0]).toMatchObject({ submission_no: null, label: null, name: "report.txt", size: TEXT.length, download_path: `/v1/files/${id}/${ready}` });
+    expect(mine[1].download_path).toBeNull();
+    expect(mine[2]).toMatchObject({ name: "big.txt", size: 5, download_path: null });
+    for (const who of [OWNER, MEMBER, OTHER_GUEST]) {
+      const read = await api(who, "GET", taskPath);
+      expect(read.body?.files ?? [], who.id).toEqual([]);
+    }
+    // Oversight of the uploader gets names and states only.
+    const overseen = (await api(orgAdmin(GUEST.org), "GET", `/v1/workspaces/${id}/agents/${GUEST.id}/tasks/${task}`)).body.files;
+    expect(overseen[0]).toEqual({ id: ready, submitted: false, submission_no: null, name: "report.txt", state: "ready", download_path: null });
+  });
+
+  it("puts submitted files first, and drops a file from the unsubmitted ones once a submission names it", async () => {
+    const { id, task, taskPath } = await accepted();
+    const first = await upload(GUEST, id, { task });
+    const second = await upload(GUEST, id, { task });
+    expect((await submit(taskPath, { files: [{ id: first }] })).status).toBe(200);
+    await api(OWNER, "POST", `${taskPath}/request-changes`, { submission_no: 1, reason: "Again." });
+    const files = (await api(GUEST, "GET", taskPath)).body.files;
+    expect(files.map((f: any) => [f.id, f.submitted, f.submission_no])).toEqual([[first, true, 1], [second, false, null]]);
+    // The reviewer sees the submitted one only.
+    expect((await api(OWNER, "GET", taskPath)).body.files.map((f: any) => f.id)).toEqual([first]);
+  });
+});
+
 describe("oversight of a task's files", () => {
   it("shows an organization's admin only the name and state of their agent's submitted files, with no path", async () => {
     const { id, task, taskPath } = await accepted();
@@ -291,7 +326,7 @@ describe("oversight of a task's files", () => {
     expect((await submit(taskPath, { files: [{ id: object, label: "Final report" }] })).status).toBe(200);
     const read = await api(orgAdmin(GUEST.org), "GET", `/v1/workspaces/${id}/agents/${GUEST.id}/tasks/${task}`);
     expect(read.status, JSON.stringify(read.body)).toBe(200);
-    expect(read.body.files).toEqual([{ id: object, submission_no: 1, name: "report.txt", state: "ready", download_path: null }]);
+    expect(read.body.files).toEqual([{ id: object, submitted: true, submission_no: 1, name: "report.txt", state: "ready", download_path: null }]);
     // The agent itself, reading the same task, gets everything.
     const own = await api(GUEST, "GET", taskPath);
     expect(own.body.files[0]).toMatchObject({ id: object, label: "Final report", sha256: await sha256(TEXT), download_path: `/v1/files/${id}/${object}` });

@@ -288,7 +288,8 @@ pub(super) fn for_task(
             FileView::Hidden => continue,
             FileView::NameAndStatus => {
                 out.push(json!({
-                    "id": id, "submission_no": row["submission_no"], "name": row["name"], "state": row["state"], "download_path": null,
+                    "id": id, "submitted": true, "submission_no": row["submission_no"], "name": row["name"], "state": row["state"],
+                    "download_path": null,
                 }));
                 continue;
             }
@@ -298,11 +299,74 @@ pub(super) fn for_task(
             .is_some_and(|state| may_download(view, state))
             .then(|| format!("/v1/files/{room}/{id}"));
         out.push(json!({
-            "id": id, "submission_no": row["submission_no"], "label": row["label"], "name": row["name"], "size": row["size"],
+            "id": id, "submitted": true, "submission_no": row["submission_no"], "label": row["label"], "name": row["name"], "size": row["size"],
             "sha256": row["sha256"], "media_type": row["media_type"], "state": row["state"], "download_path": download_path,
             "from": { "id": row["submitted_by"], "org": row["submitted_org"] },
             "external": row["submitted_org"].as_str() != Some(who.org.as_str()), "created_at": row["created_at"],
         }));
+    }
+    out.extend(unsubmitted(sql, who, task, oversight, &room)?);
+    Ok(out)
+}
+
+/// The caller's own files for this task that no submission names yet, after the submitted ones: what counts toward their cap
+/// (decision 99), plus blocked and failed files so they can see why, so a reload doesn't hide them. Only their uploader sees
+/// one, by the same rule as a download, and oversight of that uploader gets its name and state. An upload that can no longer
+/// arrive is left out, as the cap leaves it out.
+fn unsubmitted(
+    sql: &SqlStorage,
+    who: &Participant,
+    task: &Task,
+    oversight: bool,
+    room: &str,
+) -> R<Vec<Value>> {
+    let found = rows(
+        sql,
+        "SELECT o.id, o.name, o.size, o.sha256, o.media_type, o.state, o.uploaded_by, o.created_at FROM stored_object o
+            WHERE o.for_task = ? AND o.uploaded_by = ? AND o.state <> 'removed'
+            AND (o.state <> 'uploading' OR o.upload_expires_at > ? OR (o.attempt_id IS NOT NULL AND o.upload_expires_at + ? > ?))
+            AND NOT EXISTS (SELECT 1 FROM submission_file f WHERE f.object_id = o.id)
+            ORDER BY o.created_at, o.id",
+        vec![
+            task.id.as_str().into(),
+            who.caller.id.as_str().into(),
+            now_ms().into(),
+            (crate::objects::TOTAL_LIMIT_MS as i64).into(),
+            now_ms().into(),
+        ],
+    )?;
+    let mut out = Vec::new();
+    for row in &found {
+        let id = row["id"].as_str().unwrap_or_default();
+        let view = task_file_view(
+            &who.caller,
+            task,
+            row["uploaded_by"].as_str().unwrap_or_default(),
+            false,
+        );
+        let view = if oversight {
+            view.for_oversight()
+        } else {
+            view
+        };
+        match view {
+            FileView::Hidden => {}
+            FileView::NameAndStatus => out.push(json!({
+                "id": id, "submitted": false, "submission_no": null, "name": row["name"], "state": row["state"], "download_path": null,
+            })),
+            FileView::Full => {
+                let download_path = row["state"]
+                    .as_str()
+                    .and_then(ObjectState::from_name)
+                    .is_some_and(|state| may_download(view, state))
+                    .then(|| format!("/v1/files/{room}/{id}"));
+                out.push(json!({
+                    "id": id, "submitted": false, "submission_no": null, "label": null, "name": row["name"], "size": row["size"],
+                    "sha256": row["sha256"], "media_type": row["media_type"], "state": row["state"], "download_path": download_path,
+                    "created_at": row["created_at"],
+                }));
+            }
+        }
     }
     Ok(out)
 }

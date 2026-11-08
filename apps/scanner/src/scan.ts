@@ -18,7 +18,7 @@ const MAX_FILE_BYTES = 100_000_000;
 export type ScanJob = { v: 1; workspace_id: string; object_id: string; key: string; size: number; sha256: string };
 export type Report = "no_known_malware" | "malware_found" | "unreadable";
 export type Database = { engine: string; version: string; built_at: string };
-export type ScanResult = { v: 1; workspace_id: string; object_id: string; report: Report; reason: string; sha256: string; bytes: number; database: Database | null; scanned_at: number };
+export type ScanResult = { v: 1; workspace_id: string; object_id: string; key: string; report: Report; reason: string; sha256: string; bytes: number; database: Database | null; scanned_at: number };
 
 /** The R2 object, or what the test gives instead. */
 export type StoredFile = { size: number; body: BodyInit };
@@ -33,11 +33,15 @@ export type Scanning = {
   send: (result: ScanResult, signal: AbortSignal) => Promise<Response>;
 };
 
-export type Ending = { ack: true; outcome: Report | "bad_message" | "not_recorded" } | { ack: false; why: NoVerdict };
+export type Ending = { ack: true; outcome: Report | "bad_message" } | { ack: true; outcome: "not_recorded"; status: number } | { ack: false; why: NoVerdict };
 export type NoVerdict = "not_ready" | "signatures_stale" | "no_answer" | "bad_answer" | "report_refused";
 
-/** 404: a wrong secret or an unknown object. 409: `scan_mismatch` or `invalid_transition`. 422: a report the room refuses. */
-const ANSWERED_NOT_RECORDED: readonly number[] = [404, 409, 422];
+/**
+ * The room answered and recorded nothing. 400: `invalid_argument`, such as a bad `v` or a clean report without its signatures.
+ * 404: a wrong secret or an unknown object. 409: `scan_mismatch` on a clean report, or `invalid_transition`. 422: a report the
+ * room refuses. Each would be refused again, and each retry is a full rescan on the one Container.
+ */
+const ANSWERED_NOT_RECORDED: readonly number[] = [400, 404, 409, 422];
 const REPORTS: readonly string[] = ["no_known_malware", "malware_found", "unreadable"];
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -45,14 +49,21 @@ const SHA256 = /^[0-9a-f]{64}$/;
 export function readJob(body: unknown): ScanJob | null {
   if (typeof body !== "object" || body === null) return null;
   const job = body as Partial<ScanJob>;
-  const fits = job.v === 1 && typeof job.workspace_id === "string" && ID.test(job.workspace_id) && typeof job.object_id === "string" && ID.test(job.object_id) && typeof job.key === "string" && job.key.length > 0 && job.key.length <= 1024 && typeof job.sha256 === "string" && SHA256.test(job.sha256) && Number.isSafeInteger(job.size) && job.size! >= 0;
-  return fits ? (job as ScanJob) : null;
+  const fits = job.v === 1 && typeof job.workspace_id === "string" && ID.test(job.workspace_id) && typeof job.object_id === "string" && ID.test(job.object_id) && typeof job.key === "string" && job.key.length <= 1024 && typeof job.sha256 === "string" && SHA256.test(job.sha256) && Number.isSafeInteger(job.size) && job.size! >= 0;
+  if (!fits) return null;
+  // The key is the room's own place for this file, one attempt under it, so a message naming another room's or another file's
+  // bytes isn't a job.
+  const place = `rooms/${job.workspace_id}/objects/${job.object_id}/`;
+  return job.key!.startsWith(place) && ID.test(job.key!.slice(place.length)) ? (job as ScanJob) : null;
 }
 
 export function readDatabase(value: unknown): Database | null {
   if (typeof value !== "object" || value === null) return null;
   const { engine, version, built_at } = value as Partial<Database>;
-  if (typeof engine !== "string" || typeof version !== "string" || typeof built_at !== "string" || !/^\d+$/.test(version) || engine.length === 0 || engine.length > 40) return null;
+  // The room's own limits, so a database it would refuse is caught here rather than as a refused report.
+  if (typeof engine !== "string" || typeof version !== "string" || typeof built_at !== "string" || !/^\d{1,20}$/.test(version)) return null;
+  const engineBytes = new TextEncoder().encode(engine).length;
+  if (engineBytes === 0 || engineBytes > 40 || new TextEncoder().encode(built_at).length > 40) return null;
   return Number.isNaN(Date.parse(built_at)) ? null : { engine, version, built_at };
 }
 
@@ -116,13 +127,13 @@ const answerOf = async (response: Promise<Response>) => {
   return { status: answered.status, body: await jsonOf(answered) };
 };
 
-async function tell(job: ScanJob, found: Omit<ScanResult, "v" | "workspace_id" | "object_id" | "scanned_at">, scanning: Scanning): Promise<Ending> {
-  const result: ScanResult = { v: 1, workspace_id: job.workspace_id, object_id: job.object_id, scanned_at: scanning.now(), ...found };
+async function tell(job: ScanJob, found: Omit<ScanResult, "v" | "workspace_id" | "object_id" | "key" | "scanned_at">, scanning: Scanning): Promise<Ending> {
+  const result: ScanResult = { v: 1, workspace_id: job.workspace_id, object_id: job.object_id, key: job.key, scanned_at: scanning.now(), ...found };
   const answer = await withTimeout((signal) => scanning.send(result, signal), REPORT_TIMEOUT_MS);
   if (answer?.ok) return { ack: true, outcome: result.report };
   // The room answered and won't record this, so trying again won't help. The hour limit ends the file as failed. A wrong secret
   // looks the same as an unknown object here, which is why this has its own word in the log.
-  if (answer && ANSWERED_NOT_RECORDED.includes(answer.status)) return { ack: true, outcome: "not_recorded" };
+  if (answer && ANSWERED_NOT_RECORDED.includes(answer.status)) return { ack: true, outcome: "not_recorded", status: answer.status };
   return { ack: false, why: "report_refused" };
 }
 

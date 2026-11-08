@@ -31,6 +31,7 @@ pub const INTERNAL_ACCEPT_PATH: &str = "/internal/accept";
 pub const INTERNAL_PREVIEW_PATH: &str = "/internal/invitation-preview";
 pub const INTERNAL_UPLOAD_BEGIN: &str = "/internal/upload-begin";
 pub const INTERNAL_UPLOAD_COMPLETE: &str = "/internal/upload-complete";
+pub const INTERNAL_SCAN_RESULT: &str = "/internal/scan-result";
 pub const INTERNAL_DOWNLOAD: &str = "/internal/download";
 pub const AGENT_ID_PREFIX: &str = "agt_";
 const MAX_ID_BYTES: usize = 128;
@@ -289,6 +290,10 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
         return Ok(Response::from_json(&json!({ "retry": retry }))?);
     }
 
+    // The scanner has no identity in any room, and only its secret lets it say anything.
+    if path == INTERNAL_SCAN_RESULT && req.method() == Method::Post {
+        return objects::scan_result(req, env).await;
+    }
     // The bytes of an upload carry its token, not an assertion, and the room checks that against who asked for the upload.
     if req.method() == Method::Put {
         if let ["v1", "uploads", room, id] = path

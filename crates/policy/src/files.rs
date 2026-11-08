@@ -1,6 +1,6 @@
 //! Who may upload and see files in a workroom (decisions 53 and 58). Denies by default.
 //!
-//! Removing a file, attaching one to a submission and an operator's takedown come with the steps that build them.
+//! Removing a file and an operator's takedown come with the steps that build them.
 
 use podster_core::files::ObjectState;
 use podster_core::Task;
@@ -74,6 +74,42 @@ pub fn submitted_file_view(caller: &Caller, task: &Task, submitted_by: &str) -> 
         crate::ArtifactView::All => FileView::Full,
         crate::ArtifactView::OwnSubmissions if submitted_by == caller.id => FileView::Full,
         crate::ArtifactView::OwnSubmissions => FileView::Hidden,
+    }
+}
+
+/// Who may start an upload for a task's submission: whoever may submit it, which is its assignee, a guest included. The
+/// file counts toward the room's quota like any other. Whether the task is waiting for a submission is
+/// `podster_core::submission_files::accepts_submission_uploads`.
+pub fn authorize_submission_upload(caller: &Caller, task: &Task) -> Verdict {
+    authorize_task(caller, task, TaskAction::Submit)
+}
+
+/// How much of a file uploaded for a task's submission the caller gets. Until a submission names it, only its uploader, while
+/// they can still read the task, so nobody else in the room learns it exists. Once one does, as for submitted work, through
+/// [`submitted_file_view`]. A file is only ever submitted by its uploader, so the uploader is its submitter.
+///
+/// The reviewer named on the task reads its submitted files whatever their artifact scope (decision 97). That widens access by
+/// exactly that much: only that task's files, only once submitted, and only while they can read the task.
+pub fn task_file_view(
+    caller: &Caller,
+    task: &Task,
+    uploaded_by: &str,
+    submitted: bool,
+) -> FileView {
+    if submitted {
+        let named_reviewer = caller.id == task.reviewer
+            && authorize_task(caller, task, TaskAction::Read) == Verdict::Allow;
+        return if named_reviewer {
+            FileView::Full
+        } else {
+            submitted_file_view(caller, task, uploaded_by)
+        };
+    }
+    if caller.id == uploaded_by && authorize_task(caller, task, TaskAction::Read) == Verdict::Allow
+    {
+        FileView::Full
+    } else {
+        FileView::Hidden
     }
 }
 

@@ -339,6 +339,40 @@ describe("linking an input asset to a task", () => {
     expect((await api(MEMBER, "GET", files(id))).body).not.toHaveProperty("quota");
   });
 
+  it("never lists a file uploaded for a submission, submitted or not, or lets it be linked", async () => {
+    const id = await room();
+    const input = await file(id);
+    const t = await task(id);
+    const path = `${tasks(id)}/${t}`;
+    expect((await api(GUEST, "POST", `${path}/accept`, { version: 1 })).status).toBe(200);
+    const forTask = async () => {
+      const made = await api(GUEST, "POST", `/v1/workspaces/${id}/uploads`, { name: "work.txt", size: TEXT.length, sha256: await sha256(TEXT), task_id: t });
+      expect(made.status, JSON.stringify(made.body)).toBe(200);
+      const sent = await SELF.fetch(`https://api.internal${made.body.upload_path}`, { method: "PUT", headers: { authorization: `Bearer ${made.body.token}` }, body: TEXT as any });
+      expect(sent.status).toBe(200);
+      await sent.text();
+      await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET state = 'ready' WHERE id = ?", made.body.id));
+      return made.body.id as string;
+    };
+    const submitted = await forTask();
+    const unsubmitted = await forTask();
+    const version = (await api(OWNER, "GET", path)).body.task.version;
+    expect((await api(GUEST, "POST", `${path}/submit`, { version, files: [{ id: submitted }] })).status).toBe(200);
+    // The guest is the submitter and the assignee, and the input asset isn't linked to their task.
+    for (const [who, all] of [[OWNER, [input]], [MEMBER, [input]], [GUEST, []]] as const) {
+      expect(await listed(who, id), who.id).toEqual(all);
+      expect(await listed(who, id, `?task_id=${t}`), who.id).toEqual([]);
+    }
+    // Still read through its task, as step 6 decides, and never with links.
+    const read = await api(OWNER, "GET", `${files(id)}/${submitted}`);
+    expect([read.status, read.body.linked_tasks]).toEqual([200, []]);
+    for (const object of [submitted, unsubmitted]) {
+      const other = await task(id);
+      expect((await link(OWNER, id, object, other)).code, object).toBe("file_not_found");
+    }
+    expect(await inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM asset_link").one().n)).toBe(0);
+  });
+
   it("refuses a link in an archived room, and the file stays readable", async () => {
     const id = await room();
     const object = await file(id);

@@ -1,0 +1,19 @@
+{
+  // Local only. Never deployed: decision 126 keeps M3's spikes local, and decision 129's queue isn't created.
+  "name": "podster-spike-m3-a2a-outbound",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "kv_namespaces": [{ "binding": "STATE", "id": "local-only" }],
+  "queues": {
+    "producers": [{ "binding": "A2A_OUTBOUND", "queue": "podster-a2a-spike" }],
+    "consumers": [{ "queue": "podster-a2a-spike", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 1 }]
+  },
+  "vars": {
+    "BASE_URL": "https://app.podster.dev",
+    "SEND_TIMEOUT_MS": "500",
+    // Decision 117 backs off from 1 minute to 1 hour. Seconds here so a test finishes.
+    "POLL_DELAYS_S": "0,0,0,1,1,1",
+    "MAX_POLLS": "20"
+  }
+}

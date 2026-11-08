@@ -76,6 +76,7 @@ mod asset_links;
 mod collaboration;
 mod downloads;
 mod objects;
+mod outputs;
 mod plan;
 mod planned;
 mod removal;
@@ -519,6 +520,9 @@ fn handle_task_command(
     let decision =
         decide(&task, &caller.id, command, &observed).map_err(|e| ApiError::from_core(&e))?;
     save_task(sql, &decision.task, now)?;
+    if verb == "verify" {
+        outputs::record_approval(sql, &decision.task, &caller.id, now)?;
+    }
     if let Some((artifacts, note)) = submission {
         exec(sql, "INSERT INTO submission (task_id, submission_no, task_version, note, commit_sha, submitted_by, submitted_org, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", vec![
             task_id.into(), i64::from(decision.task.submission_no).into(), (decision.task.version as i64).into(), opt(&note),
@@ -567,8 +571,11 @@ fn handle_create_task(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64)
     require_eligible_reviewer(sql, new.reviewer.as_deref().unwrap_or(&caller.id))?;
     let decision = decide_create(&caller.id, new).map_err(|e| ApiError::from_core(&e))?;
     store::insert_task(sql, &decision.task, now)?;
+    outputs::name_on_create(sql, &decision.task, body)?;
     record_decision(sql, &decision, decision.task.status, &caller.id, now)?;
-    Ok(task_json(&decision.task))
+    let mut created = task_json(&decision.task);
+    created["expected_output"] = outputs::of_task(sql, &decision.task.id, false)?;
+    Ok(created)
 }
 
 fn handle_send_message(
@@ -2430,7 +2437,7 @@ mod queries {
             .collect();
         let files = super::submission_files::for_task(sql, who, &task, oversight)?;
         Ok(json!({
-            "task": task_json(&task), "submissions": submissions, "artifacts": artifacts, "files": files, "messages": messages, "history": history,
+            "task": task_json(&task), "expected_output": super::outputs::of_task(sql, &task.id, oversight)?, "submissions": submissions, "artifacts": artifacts, "files": files, "messages": messages, "history": history,
             // Says what's limited, so empty lists and null reasons aren't read as "none exist".
             "visible": { "submissions": if view.artifacts == ArtifactView::All { "all" } else { "own" }, "conversation": view.conversation },
         }))
@@ -2571,7 +2578,7 @@ impl Workspace {
     }
 
     /// The same, with `recheck` run before a stored answer is replayed, for a command whose own authority goes past being in the
-    /// room. A stored answer then can't reach someone who has since lost it. Only removal uses it so far.
+    /// room. A stored answer then can't reach someone who has since lost it. Removal and setting a task's output use it.
     #[allow(clippy::too_many_arguments)]
     fn command_checked(
         &self,
@@ -3623,6 +3630,8 @@ impl Workspace {
                 #[cfg(feature = "failpoints")]
                 ["plan", "costs"] => plan::read_costs(&sql, &who, &url),
                 ["roles"] => roles::list_roles(&sql, &who),
+                ["outputs"] => outputs::read(&sql, &who),
+                ["outputs", output, "versions"] => outputs::read_versions(&sql, &who, output),
                 ["card"] => roles::read_card(&sql, &who),
                 ["files"] => asset_links::list(&sql, &who, &url),
                 ["files", id] => downloads::read_file(&sql, &who, id),
@@ -3828,6 +3837,53 @@ impl Workspace {
                     stops_when_archived,
                     test_fail,
                     move |sql, who, now| plan::handle_set(sql, &who.caller, &task, &body, now),
+                )
+            }
+            (Method::Put, ["tasks", task, "expected-output"]) => {
+                let task = (*task).to_string();
+                let checked = task.clone();
+                self.command_checked(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who| outputs::authorize_link(sql, &who.caller, &checked).map(|_| ()),
+                    move |sql, who, now| {
+                        outputs::handle_set_task_output(sql, who, &task, &body, now)
+                    },
+                )
+            }
+            (Method::Post, ["outputs"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| outputs::handle_define(sql, &who.caller, &body, now),
+            ),
+            (Method::Put, ["outputs", output]) => {
+                let output = (*output).to_string();
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| {
+                        outputs::handle_update(sql, &who.caller, &output, &body, now)
+                    },
+                )
+            }
+            (Method::Delete, ["outputs", output]) => {
+                let output = (*output).to_string();
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| outputs::handle_remove(sql, &who.caller, &output, now),
                 )
             }
             (Method::Post, ["collaboration", "planned"]) => self.command(

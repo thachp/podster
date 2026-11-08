@@ -97,7 +97,7 @@ pub(super) fn upload_target(body: &Value) -> R<Option<String>> {
 }
 
 /// The room's rows for these files, kept as read so `RoomFile` can borrow from them.
-fn object_rows(sql: &SqlStorage, ids: &[&str]) -> R<Vec<Value>> {
+pub(super) fn object_rows(sql: &SqlStorage, ids: &[&str]) -> R<Vec<Value>> {
     let mut found = Vec::with_capacity(ids.len());
     for id in ids {
         found.extend(rows(
@@ -111,7 +111,7 @@ fn object_rows(sql: &SqlStorage, ids: &[&str]) -> R<Vec<Value>> {
 
 /// A row as the rules read it. An unknown state reads as `Failed`, which nothing accepts. Step 8 records removal as the state
 /// `removed`, so a removed file reads as removed whether or not `ObjectState` knows that name yet.
-fn room_file(row: &Value) -> RoomFile<'_> {
+pub(super) fn room_file(row: &Value) -> RoomFile<'_> {
     let state = row["state"].as_str();
     RoomFile {
         id: row["id"].as_str().unwrap_or_default(),

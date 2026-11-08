@@ -95,22 +95,22 @@ fn file(id: &'static str, state: ObjectState, removed: bool) -> RoomFile<'static
 
 #[test]
 fn an_output_needs_a_title_within_limits() {
-    assert_eq!(decide_define(false, 0, "Final report", None), Ok(()));
+    assert_eq!(decide_define(false, 0, 0, "Final report", None), Ok(()));
     assert_eq!(
-        decide_define(false, 0, "Final report", Some("A PDF for the board")),
+        decide_define(false, 0, 0, "Final report", Some("A PDF for the board")),
         Ok(())
     );
     assert_eq!(
-        decide_define(false, 0, "   ", None),
+        decide_define(false, 0, 0, "   ", None),
         Err(R::InvalidArgument("title"))
     );
     let long_title = "x".repeat(MAX_OUTPUT_TITLE_BYTES + 1);
     assert_eq!(
-        decide_define(false, 0, &long_title, None),
+        decide_define(false, 0, 0, &long_title, None),
         Err(R::InvalidArgument("title"))
     );
     assert_eq!(
-        decide_define(false, 0, &"x".repeat(MAX_OUTPUT_TITLE_BYTES), None),
+        decide_define(false, 0, 0, &"x".repeat(MAX_OUTPUT_TITLE_BYTES), None),
         Ok(())
     );
 }
@@ -118,12 +118,12 @@ fn an_output_needs_a_title_within_limits() {
 #[test]
 fn a_description_is_optional_but_not_blank_or_too_long() {
     assert_eq!(
-        decide_define(false, 0, "Report", Some("")),
+        decide_define(false, 0, 0, "Report", Some("")),
         Err(R::InvalidArgument("description"))
     );
     let long = "x".repeat(MAX_OUTPUT_DESCRIPTION_BYTES + 1);
     assert_eq!(
-        decide_define(false, 0, "Report", Some(&long)),
+        decide_define(false, 0, 0, "Report", Some(&long)),
         Err(R::InvalidArgument("description"))
     );
     assert_eq!(
@@ -132,7 +132,10 @@ fn a_description_is_optional_but_not_blank_or_too_long() {
     );
     let at_limit = "x".repeat(MAX_OUTPUT_DESCRIPTION_BYTES);
     assert_eq!(MAX_OUTPUT_DESCRIPTION_BYTES, 4096);
-    assert_eq!(decide_define(false, 0, "Report", Some(&at_limit)), Ok(()));
+    assert_eq!(
+        decide_define(false, 0, 0, "Report", Some(&at_limit)),
+        Ok(())
+    );
     assert_eq!(decide_edit(false, "Report", Some(&at_limit)), Ok(()));
 }
 
@@ -143,7 +146,7 @@ fn limits_count_bytes_not_characters() {
     assert_eq!(accented.chars().count(), 101);
     assert_eq!(accented.len(), 202);
     assert_eq!(
-        decide_define(false, 0, &accented, None),
+        decide_define(false, 0, 0, &accented, None),
         Err(R::InvalidArgument("title"))
     );
     assert_eq!(
@@ -151,10 +154,10 @@ fn limits_count_bytes_not_characters() {
         Err(R::InvalidArgument("title"))
     );
     // 100 of them is exactly 200 bytes, which fits.
-    assert_eq!(decide_define(false, 0, &"é".repeat(100), None), Ok(()));
+    assert_eq!(decide_define(false, 0, 0, &"é".repeat(100), None), Ok(()));
     let accented_description = "é".repeat(MAX_OUTPUT_DESCRIPTION_BYTES / 2 + 1);
     assert_eq!(
-        decide_define(false, 0, "Report", Some(&accented_description)),
+        decide_define(false, 0, 0, "Report", Some(&accented_description)),
         Err(R::InvalidArgument("description"))
     );
 }
@@ -162,22 +165,45 @@ fn limits_count_bytes_not_characters() {
 #[test]
 fn a_room_holds_at_most_the_limit() {
     assert_eq!(
-        decide_define(false, MAX_EXPECTED_OUTPUTS - 1, "One more", None),
+        decide_define(
+            false,
+            MAX_EXPECTED_OUTPUTS - 1,
+            MAX_EXPECTED_OUTPUTS - 1,
+            "One more",
+            None
+        ),
         Ok(())
     );
     assert_eq!(
-        decide_define(false, MAX_EXPECTED_OUTPUTS, "Too many", None),
+        decide_define(
+            false,
+            MAX_EXPECTED_OUTPUTS,
+            MAX_EXPECTED_OUTPUTS,
+            "Too many",
+            None
+        ),
         Err(R::TooMany)
     );
 }
 
 #[test]
 fn an_archived_room_refuses_every_change() {
-    assert_eq!(decide_define(true, 0, "Report", None), Err(R::RoomArchived));
+    assert_eq!(
+        decide_define(true, 0, 0, "Report", None),
+        Err(R::RoomArchived)
+    );
     assert_eq!(decide_edit(true, "Report", None), Err(R::RoomArchived));
     assert_eq!(decide_remove(true, 0, false), Err(R::RoomArchived));
     assert_eq!(
-        decide_link(true, TaskStatus::Open, None, Some("out_1"), true),
+        decide_link(
+            true,
+            TaskStatus::Open,
+            5,
+            Some(5),
+            None,
+            Some("out_1"),
+            true
+        ),
         Err(R::RoomArchived)
     );
     assert_eq!(R::RoomArchived.code(), "workspace_archived");
@@ -214,17 +240,25 @@ fn only_an_output_no_live_task_names_and_never_ready_can_be_removed() {
 fn a_task_can_name_an_output_before_it_is_submitted() {
     for status in [TaskStatus::Open, TaskStatus::Offered, TaskStatus::Accepted] {
         assert_eq!(
-            decide_link(false, status, None, Some("out_1"), true),
+            decide_link(false, status, 5, Some(5), None, Some("out_1"), true),
             Ok(LinkChange::Set("out_1".into())),
             "{status:?}"
         );
         assert_eq!(
-            decide_link(false, status, Some("out_1"), Some("out_2"), true),
+            decide_link(
+                false,
+                status,
+                5,
+                Some(5),
+                Some("out_1"),
+                Some("out_2"),
+                true
+            ),
             Ok(LinkChange::Set("out_2".into())),
             "{status:?}"
         );
         assert_eq!(
-            decide_link(false, status, Some("out_1"), None, false),
+            decide_link(false, status, 5, Some(5), Some("out_1"), None, false),
             Ok(LinkChange::Cleared),
             "{status:?}"
         );
@@ -239,17 +273,25 @@ fn a_submitted_or_finished_task_keeps_its_output() {
         TaskStatus::Canceled,
     ] {
         assert_eq!(
-            decide_link(false, status, Some("out_1"), Some("out_2"), true),
+            decide_link(
+                false,
+                status,
+                5,
+                Some(5),
+                Some("out_1"),
+                Some("out_2"),
+                true
+            ),
             Err(R::InvalidTransition),
             "{status:?}"
         );
         assert_eq!(
-            decide_link(false, status, Some("out_1"), None, false),
+            decide_link(false, status, 5, Some(5), Some("out_1"), None, false),
             Err(R::InvalidTransition),
             "{status:?}"
         );
         assert_eq!(
-            decide_link(false, status, None, Some("out_1"), true),
+            decide_link(false, status, 5, Some(5), None, Some("out_1"), true),
             Err(R::InvalidTransition),
             "{status:?}"
         );
@@ -260,11 +302,19 @@ fn a_submitted_or_finished_task_keeps_its_output() {
 fn asking_for_what_it_already_names_changes_nothing_in_any_status() {
     for status in TaskStatus::ALL {
         assert_eq!(
-            decide_link(false, status, Some("out_1"), Some("out_1"), true),
+            decide_link(
+                false,
+                status,
+                5,
+                Some(5),
+                Some("out_1"),
+                Some("out_1"),
+                true
+            ),
             Ok(LinkChange::Unchanged)
         );
         assert_eq!(
-            decide_link(false, status, None, None, false),
+            decide_link(false, status, 5, Some(5), None, None, false),
             Ok(LinkChange::Unchanged)
         );
     }
@@ -273,7 +323,15 @@ fn asking_for_what_it_already_names_changes_nothing_in_any_status() {
 #[test]
 fn naming_an_output_the_room_lacks_is_not_found() {
     assert_eq!(
-        decide_link(false, TaskStatus::Open, None, Some("out_x"), false),
+        decide_link(
+            false,
+            TaskStatus::Open,
+            5,
+            Some(5),
+            None,
+            Some("out_x"),
+            false
+        ),
         Err(R::NotFound)
     );
     assert_eq!(R::NotFound.code(), "output_not_found");
@@ -453,4 +511,81 @@ fn refusal_codes_are_stable() {
     assert_eq!(R::InvalidArgument("title").code(), "invalid_argument");
     assert_eq!(R::TooMany.code(), "too_many_outputs");
     assert_eq!(R::InvalidTransition.code(), "invalid_transition");
+}
+
+#[test]
+fn a_stale_version_is_refused_before_anything_else() {
+    for status in TaskStatus::ALL {
+        assert_eq!(
+            decide_link(false, status, 5, Some(4), None, Some("out_1"), true),
+            Err(R::VersionConflict),
+            "{status:?}"
+        );
+        // Even asking for what it already names.
+        assert_eq!(
+            decide_link(
+                false,
+                status,
+                5,
+                Some(6),
+                Some("out_1"),
+                Some("out_1"),
+                true
+            ),
+            Err(R::VersionConflict),
+            "{status:?}"
+        );
+    }
+    assert_eq!(R::VersionConflict.code(), "version_conflict");
+    // Naming one as the task is created has no older version to check.
+    assert_eq!(
+        decide_link(false, TaskStatus::Open, 1, None, None, Some("out_1"), true),
+        Ok(LinkChange::Set("out_1".into()))
+    );
+}
+
+#[test]
+fn a_real_change_moves_the_version_and_unchanged_does_not() {
+    let set = LinkChange::Set("out_1".into());
+    assert!(set.moves_version());
+    assert_eq!(set.next_version(5), 6);
+    assert!(LinkChange::Cleared.moves_version());
+    assert_eq!(LinkChange::Cleared.next_version(5), 6);
+    assert!(!LinkChange::Unchanged.moves_version());
+    assert_eq!(LinkChange::Unchanged.next_version(5), 5);
+}
+
+#[test]
+fn after_changes_are_requested_the_output_can_change_again() {
+    let task = submitted();
+    let returned = step(
+        &task,
+        "rev",
+        Command::RequestChanges {
+            submission_no: task.submission_no,
+            reason: "Wrong output".into(),
+        },
+    );
+    assert_eq!(
+        decide_link(
+            false,
+            returned.status,
+            returned.version,
+            Some(returned.version),
+            Some("out_1"),
+            Some("out_2"),
+            true
+        ),
+        Ok(LinkChange::Set("out_2".into()))
+    );
+}
+
+#[test]
+fn a_room_can_define_at_most_500_ever_counting_removed_ones() {
+    assert_eq!(MAX_OUTPUTS_EVER_DEFINED, 500);
+    assert_eq!(decide_define(false, 0, 499, "One more", None), Ok(()));
+    assert_eq!(
+        decide_define(false, 0, 500, "Too many", None),
+        Err(R::TooMany)
+    );
 }

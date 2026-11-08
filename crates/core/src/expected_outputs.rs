@@ -27,6 +27,9 @@ use crate::{require_text, Task, TaskStatus};
 
 /// The most expected outputs one room may define. A room's goal is a handful of results, and a card shows "n of m ready".
 pub const MAX_EXPECTED_OUTPUTS: usize = 50;
+/// The most outputs one room may ever define, removed ones included. A removed output keeps its row (decision 136), so
+/// without this, define and remove could grow the table without end. Not an owner ruling: a bound the lead asked for.
+pub const MAX_OUTPUTS_EVER_DEFINED: usize = 500;
 /// An output's title, the same as a work role's.
 pub const MAX_OUTPUT_TITLE_BYTES: usize = 200;
 /// An output's optional description, the same as a work role's responsibilities.
@@ -40,13 +43,16 @@ pub enum OutputRefusal {
     RoomArchived,
     /// A title or description is empty where it can't be, or too long. Carries the field's name.
     InvalidArgument(&'static str),
-    /// The room already has [`MAX_EXPECTED_OUTPUTS`].
+    /// The room already has [`MAX_EXPECTED_OUTPUTS`], or has ever defined [`MAX_OUTPUTS_EVER_DEFINED`].
     TooMany,
     /// No such output in this room, or it was removed.
     NotFound,
     /// An output a live task names, or one that was ever Ready, can't be removed.
     InUse,
-    /// The task's output can change only before it's submitted. A reviewer looking at a submission approves it for the output
+    /// The task changed since the caller read it: `expected_version` isn't its current version.
+    VersionConflict,
+    /// The task's output can change only while it's open, offered or accepted, so not while submitted or once finished. Changes
+    /// requested puts it back in accepted, where it can change again (decision 137). A reviewer looking at a submission approves it for the output
     /// it named when submitted, and a finished task's approval has already counted or never will.
     InvalidTransition,
 }
@@ -59,6 +65,7 @@ impl OutputRefusal {
             OutputRefusal::TooMany => "too_many_outputs",
             OutputRefusal::NotFound => "output_not_found",
             OutputRefusal::InUse => "output_in_use",
+            OutputRefusal::VersionConflict => "version_conflict",
             OutputRefusal::InvalidTransition => "invalid_transition",
         }
     }
@@ -82,16 +89,18 @@ fn check_text(title: &str, description: Option<&str>) -> Result<(), OutputRefusa
     Ok(())
 }
 
-/// Whether a new output may be defined. `existing` is how many outputs the room has now.
+/// Whether a new output may be defined. `existing` is how many outputs the room has now, and `ever_defined` how many it has
+/// ever defined, removed ones included.
 pub fn decide_define(
     room_archived: bool,
     existing: usize,
+    ever_defined: usize,
     title: &str,
     description: Option<&str>,
 ) -> Result<(), OutputRefusal> {
     require_open_room(room_archived)?;
     check_text(title, description)?;
-    if existing >= MAX_EXPECTED_OUTPUTS {
+    if existing >= MAX_EXPECTED_OUTPUTS || ever_defined >= MAX_OUTPUTS_EVER_DEFINED {
         return Err(OutputRefusal::TooMany);
     }
     Ok(())
@@ -135,20 +144,46 @@ pub enum LinkChange {
     Cleared,
 }
 
+impl LinkChange {
+    /// Whether this moves the task's version. A real change does, so anyone acting on what they read before it, such as an
+    /// assignee about to submit, gets `version_conflict` and rereads which output the task works toward. `Unchanged` records
+    /// nothing, so it doesn't.
+    pub fn moves_version(&self) -> bool {
+        !matches!(self, LinkChange::Unchanged)
+    }
+
+    /// The task's version after this.
+    pub fn next_version(&self, task_version: u64) -> u64 {
+        if self.moves_version() {
+            task_version.saturating_add(1)
+        } else {
+            task_version
+        }
+    }
+}
+
 /// Whether a task may name `requested`, or none for `None`, given that it names `current` now. Also used when a task is
 /// created naming an output, with `Open` and no current one. `requested_exists` is whether the room has the output asked for,
 /// and is ignored for `None`.
 ///
-/// A task can change its output only while open, offered or accepted. Asking for what it already names is accepted whatever
-/// its status, so a retried request gets the same answer.
+/// `expected_version` is the task version the caller last read, as `update_task` takes it, and must be `task_version`. It's
+/// `None` only when the task is being created in the same command, so there's nothing older to have read.
+///
+/// A task can change its output only while open, offered or accepted, so again after changes are requested (decision 137).
+/// Asking for what it already names is accepted whatever its status, and moves nothing.
 pub fn decide_link(
     room_archived: bool,
     status: TaskStatus,
+    task_version: u64,
+    expected_version: Option<u64>,
     current: Option<&str>,
     requested: Option<&str>,
     requested_exists: bool,
 ) -> Result<LinkChange, OutputRefusal> {
     require_open_room(room_archived)?;
+    if expected_version.is_some_and(|expected| expected != task_version) {
+        return Err(OutputRefusal::VersionConflict);
+    }
     if current == requested {
         return Ok(LinkChange::Unchanged);
     }

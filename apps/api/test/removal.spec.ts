@@ -227,6 +227,12 @@ describe("removing a file", () => {
 describe("the room's sweep", () => {
   it("plans one sweep an hour after migrating a room that holds files, and none for a room that doesn't", async () => {
     const undoRemoval = (id: string) => runInDurableObject(stub(id), (_: any, state: any) => {
+      // Expected outputs' migration came after this one, so it comes off first.
+      state.storage.sql.exec("DROP INDEX task_expected_output");
+      state.storage.sql.exec("ALTER TABLE task DROP COLUMN expected_output_id");
+      state.storage.sql.exec("DROP TABLE expected_output_version");
+      state.storage.sql.exec("DROP TABLE expected_output");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP TABLE storage_sweep");
       state.storage.sql.exec("DROP INDEX stored_object_abandoned");
       state.storage.sql.exec("DROP INDEX stored_object_purge");
@@ -321,6 +327,12 @@ describe("the room's sweep", () => {
     const id = await room();
     const object = await file(id);
     await runInDurableObject(stub(id), (_: any, state: any) => {
+      // Expected outputs' migration came after this one, so it comes off first.
+      state.storage.sql.exec("DROP INDEX task_expected_output");
+      state.storage.sql.exec("ALTER TABLE task DROP COLUMN expected_output_id");
+      state.storage.sql.exec("DROP TABLE expected_output_version");
+      state.storage.sql.exec("DROP TABLE expected_output");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP TABLE storage_sweep");
       state.storage.sql.exec("DROP INDEX stored_object_abandoned");
       state.storage.sql.exec("DROP INDEX stored_object_purge");

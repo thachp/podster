@@ -27,6 +27,7 @@ fn task() -> Task {
         submission_no: 0,
         submission_commit: None,
         approved_submission_no: None,
+        submission_files: 0,
         assignee_departed: false,
         needs_reviewer: false,
         needs_requester: false,

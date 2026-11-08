@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { allowedPassthrough } from "../src/index";
 import { handleUpload } from "../src/uploads";
+import { CAPABILITIES, jsonSchema, toApiCall } from "../src/capabilities";
 
 const PATH = "/v1/uploads/ws_1/obj_1";
 const ask = async (init: RequestInit, { path = PATH, allowed = true, api = (async () => new Response('{"ok":true}', { status: 200 })) as (r: Request) => Promise<Response> } = {}) => {
@@ -25,6 +26,15 @@ describe("the upload path", () => {
   it("isn't reachable through the dashboard's path, which would read the whole file into memory", () => {
     expect(allowedPassthrough("/v1/uploads/ws_1/obj_1")).toBe(false);
     expect(allowedPassthrough("/v1/workspaces/ws_1/uploads")).toBe(true);
+  });
+
+  it("has no way to the scanner's route", async () => {
+    expect(allowedPassthrough("/internal/scan-result")).toBe(false);
+    // A dashboard path can't climb out of /v1, because a URL has already resolved these by the time anything reads it.
+    expect(new URL("https://gateway.test/api/v1/%2e%2e/%2e%2e/internal/scan-result").pathname).toBe("/internal/scan-result");
+    const { response, seen } = await ask({ method: "POST", body: "{}" }, { path: "/internal/scan-result" });
+    expect(response).toBeNull();
+    expect(seen).toEqual([]);
   });
 
   it("only takes PUT", async () => {
@@ -163,5 +173,22 @@ describe("the upload path", () => {
     expect(refused.response?.status).toBe(422);
     const down = await ask({ method: "PUT", body: "x", headers: { authorization: TOKEN } }, { api: async () => { throw new Error("gone"); } });
     expect(down.response?.status).toBe(502);
+  });
+});
+
+describe("files on a submission, as capabilities", () => {
+  const capability = (name: string) => CAPABILITIES.find((c) => c.name === name)!;
+
+  it("create_upload passes task_id on, and only the fields it defines", () => {
+    const call = toApiCall(capability("create_upload"), { workspace_id: "w", name: "a.txt", size: 3, sha256: "0".repeat(64), task_id: "tsk_1", uploaded_by: "evil", idempotency_key: "k" });
+    expect(JSON.parse(call.body!)).toEqual({ name: "a.txt", size: 3, sha256: "0".repeat(64), task_id: "tsk_1" });
+  });
+
+  it("submit_task takes files as { id, label? } and passes them on", () => {
+    const schema = jsonSchema(capability("submit_task")) as any;
+    expect(schema.properties.files.items.properties).toEqual({ id: { type: "string" }, label: { type: "string" } });
+    expect(schema.properties.files.items.required).toEqual(["id"]);
+    const call = toApiCall(capability("submit_task"), { workspace_id: "w", task_id: "t", version: 2, files: [{ id: "obj_1" }, { id: "obj_2", label: "Report" }], idempotency_key: "k" });
+    expect(JSON.parse(call.body!)).toEqual({ version: 2, files: [{ id: "obj_1" }, { id: "obj_2", label: "Report" }] });
   });
 });

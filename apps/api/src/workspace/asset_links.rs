@@ -6,7 +6,7 @@
 //! events carry the task's ID and nothing about the file, whose name is agent content.
 use super::*;
 use podster_core::asset_links::{check_link, LinkRefusal};
-use podster_core::files::ObjectState;
+use podster_core::files::{ObjectState, ROOM_QUOTA_BYTES};
 use podster_core::submission_files::RoomFile;
 use podster_policy::files::authorize_input_upload;
 
@@ -48,13 +48,13 @@ pub(super) fn visible_links(caller: &Caller, tasks: &[Task]) -> Vec<String> {
         .collect()
 }
 
-/// The file as the link rules see it. Step 6 tells input assets from submission files, and step 8 adds removal. Until they
-/// land, every file is an input asset that hasn't been removed.
+/// The file as the link rules see it: an input asset has no `for_task`, and a submission file names its task. Removal comes with
+/// step 8, and until then no file has been removed.
 fn room_file(row: &Value) -> Option<RoomFile<'_>> {
     Some(RoomFile {
         id: row["id"].as_str()?,
         uploaded_by: row["uploaded_by"].as_str()?,
-        for_task: None,
+        for_task: row["for_task"].as_str(),
         state: ObjectState::from_name(row["state"].as_str()?)?,
         removed: false,
         sha256: row["sha256"].as_str().unwrap_or_default(),
@@ -76,7 +76,7 @@ fn target(sql: &SqlStorage, caller: &Caller, file_id: &str, task_id: &str) -> R<
         .ok_or_else(ApiError::task_not_found)?;
     let file = rows(
         sql,
-        "SELECT id, uploaded_by, state, sha256, size FROM stored_object WHERE id = ?",
+        "SELECT id, uploaded_by, for_task, state, sha256, size FROM stored_object WHERE id = ?",
         vec![file_id.into()],
     )?
     .into_iter()
@@ -98,13 +98,20 @@ fn is_linked(sql: &SqlStorage, file_id: &str, task_id: &str) -> R<bool> {
     .is_empty())
 }
 
-/// Who hears about a link: the task's assignee, who is the one it's for. Nobody else's work changes.
-fn recipients(caller: &Caller, task: &Task) -> Vec<String> {
-    task.assignee
+/// Who hears about a link: the task's assignee, who is the one it's for, while they're still in the room. Nobody else's work
+/// changes, and someone who has left hears nothing more about the room, as with any notice.
+fn recipients(sql: &SqlStorage, caller: &Caller, task: &Task) -> R<Vec<String>> {
+    let mut found = Vec::new();
+    for assignee in task
+        .assignee
         .iter()
         .filter(|assignee| **assignee != caller.id)
-        .cloned()
-        .collect()
+    {
+        if store::participant(sql, assignee)?.is_some() {
+            found.push(assignee.clone());
+        }
+    }
+    Ok(found)
 }
 
 fn link_json(file_id: &str, task_id: &str, linked: bool) -> Value {
@@ -150,7 +157,7 @@ pub(super) fn handle_link(
         &caller.id,
         Some(&task.id),
         &Transition::NONE,
-        recipients(caller, &task),
+        recipients(sql, caller, &task)?,
         now,
     )?;
     Ok(link_json(file_id, &task.id, true))
@@ -179,7 +186,7 @@ pub(super) fn handle_unlink(
         &caller.id,
         Some(&task.id),
         &Transition::NONE,
-        recipients(caller, &task),
+        recipients(sql, caller, &task)?,
         now,
     )?;
     Ok(link_json(file_id, &task.id, false))
@@ -187,7 +194,8 @@ pub(super) fn handle_unlink(
 
 /// The input assets the caller can see, oldest first, a page at a time, or only those linked to `task_id`. Someone limited to their
 /// own tasks only ever receives assets linked to one of them, so the query is narrowed before each row is checked again.
-/// A file that hasn't finished arriving is a reservation, not a file, so it isn't listed.
+/// A file that hasn't finished arriving is a reservation, not a file, so it isn't listed. Nor is a file uploaded for a task's
+/// submission, which isn't an input asset and is read through its task, by the task's own rules.
 pub(super) fn list(sql: &SqlStorage, who: &Participant, url: &Url) -> R<Value> {
     let caller = &who.caller;
     if caller.role == Role::None {
@@ -204,8 +212,8 @@ pub(super) fn list(sql: &SqlStorage, who: &Participant, url: &Url) -> R<Value> {
     let narrow = !sees_whole_room(caller);
     let found = rows(
         sql,
-        "SELECT o.rowid AS seq, o.id, o.name, o.size, o.sha256, o.media_type, o.state FROM stored_object o
-        WHERE o.rowid > ? AND o.state <> 'uploading'
+        "SELECT o.rowid AS seq, o.id, o.name, o.size, o.sha256, o.media_type, o.state, o.uploaded_by, o.for_task FROM stored_object o
+        WHERE o.rowid > ? AND o.state <> 'uploading' AND o.for_task IS NULL
         AND (? IS NULL OR EXISTS (SELECT 1 FROM asset_link l WHERE l.object_id = o.id AND l.task_id = ?))
         AND (? = 0 OR EXISTS (SELECT 1 FROM asset_link l JOIN task t ON t.id = l.task_id WHERE l.object_id = o.id
             AND (t.requester_id = ? OR t.assignee_id = ? OR t.reviewer_id = ?)))
@@ -226,5 +234,11 @@ pub(super) fn list(sql: &SqlStorage, who: &Participant, url: &Url) -> R<Value> {
     let next = more
         .then(|| page().next_back().map(|row| int(&row["seq"])))
         .flatten();
-    Ok(json!({ "files": files, "next_cursor": next }))
+    let mut answer = json!({ "files": files, "next_cursor": next });
+    // The room's total counts files someone limited to their own tasks can't see, so only whoever sees the whole room gets it.
+    if !narrow {
+        answer["quota"] =
+            json!({ "used": objects::room_used(sql, now_ms(), "")?, "limit": ROOM_QUOTA_BYTES });
+    }
+    Ok(answer)
 }

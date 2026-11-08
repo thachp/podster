@@ -384,7 +384,7 @@ paths:
       responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/tasks/{t}:
     parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
-    get: { operationId: getTask, tags: [queries], summary: "One task with submissions, artifacts, recent messages and history. `visible` says what the caller's access leaves out: when `submissions` is `own`, `submissions` and `artifacts` hold only what the caller submitted, and when `conversation` is false, `messages` is empty and each history `reason` is null. Those values then don't mean none exist", responses: { "200": { $ref: "#/components/responses/TaskDetail" }, default: { $ref: "#/components/responses/Error" } } }
+    get: { operationId: getTask, tags: [queries], summary: "One task with submissions, artifacts, recent messages and history. `files` lists each submission's stored files, with `submission_no`, `id`, `label`, `name`, `size`, `sha256`, `media_type`, `state`, `download_path`, which is null unless the caller may download it now, `from` (`id` and `org` of whoever submitted it), `external`, true when that organization isn't the caller's, and `created_at`. Each has `submitted` true. After them come the caller's own files for this task that no submission names yet, with `submitted` false, a null `submission_no` and `label`, and no `from` or `external`: uploads still arriving, scanning, ready, blocked and failed, so a reload still shows what counts toward the cap. An upload whose grant ended with no attempt under way can't arrive, so it isn't listed. Nobody else sees those. Through oversight, each file has only `id`, `submitted`, `submission_no`, `name`, `state` and a null `download_path`. `visible` says what the caller's access leaves out: when `submissions` is `own`, `submissions` and `artifacts` hold only what the caller submitted, and so does `files`, except that the reviewer named on the task gets all of its submitted files, and when `conversation` is false, `messages` is empty and each history `reason` is null. Those values then don't mean none exist", responses: { "200": { $ref: "#/components/responses/TaskDetail" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/workspaces/{ws}/plan:
     parameters: [{ $ref: "#/components/parameters/ws" }]
     get: { operationId: getPlan, tags: [queries], parameters: [{ name: scope, in: query, required: false, schema: { type: string, enum: [unfinished] }, description: "`unfinished` lists only unfinished tasks. `complete` is then always false, because finished tasks are left out, so don't work out a finish from it. Someone who sees the whole room still gets every unfinished task, each one's whole predecessor list and `plan_revision`, so it's enough to edit from, and a predecessor that's finished shows only as an ID in `edges`. Someone limited to their own tasks gets those of their tasks that are unfinished, and only edges with both ends among them. It shows them only tasks they're named on, and it has no per-column cut, so someone named on over 3,001 tasks can see an older one of their own here that the default read leaves out. Any other value gets `invalid_argument`" }], summary: "One read with `forecast`, a `PlanForecast` that every viewer gets, and `start`, `{ date, timezone }` or null, only for someone who can have a forecast. One read of the room's plan: `tasks` with `id`, `title`, `status`, `assignee`, `reviewer` and `duration_days`, where null means not estimated, plus `edges` of `predecessor` and `successor`, and `complete`. Someone who sees the whole room also gets `plan_revision` and `plan_changed_at`. Someone limited to their own tasks gets only those and the edges between them, with `complete` false and no revision or time. `complete` is also false over 3,000 tasks, or with more than 5,000 finished tasks' edges. A read holds unfinished tasks first, then the newest finished ones, so someone who sees the whole room always gets every task whose plan can change, and each one's whole predecessor list, even if a predecessor is too old to be listed. Don't work out a finish from an incomplete plan", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
@@ -393,7 +393,7 @@ paths:
     post:
       operationId: createUpload
       tags: [commands]
-      summary: "Start an upload, reserving its space: at most 100 MB a file and 5 GB a room, counting every file kept and every upload that hasn't expired. Only someone who may upload an input asset can. The answer has `id`, the cleaned `name`, `size`, `state` of `uploading`, `expires_at` an hour on, `upload_path` and `token`. `token` is returned once, and a retry with the same idempotency key answers without it, so that caller starts a new upload. Refusals: `file_too_large` (413), `room_quota_exceeded` and `workspace_archived` (409), `invalid_file_name` (422), `executable_refused` (415)"
+      summary: "Start an upload, reserving its space: at most 100 MB a file and 5 GB a room, counting every file kept and every upload that hasn't expired. Without `task_id`, it's an input asset, which only someone who may upload one can start. With `task_id`, it's for that task's submission: only its assignee can start it, a guest included, and only while the task is accepted, or `invalid_transition` (409). Until a submission names it, only its uploader can see it. One uploader holds at most 10 files for a task that no submission names, counting uploads that can still arrive but not blocked or failed files, or `limit_exceeded` (409), as decision 99 says. With `task_id`, an unknown or hidden task gets `task_not_found` (404), a task the caller isn't assigned gets `not_allowed` (403), and a `task_id` that isn't a string gets `invalid_argument` (400). Each attempt to send the bytes checks the same again, and a task that stops being accepted ends its unfinished uploads at once and frees their space. The answer has `id`, the cleaned `name`, `size`, `state` of `uploading`, `expires_at` an hour on, `upload_path` and `token`. `token` is returned once, and a retry with the same idempotency key answers without it, so that caller starts a new upload. Refusals: `file_too_large` (413), `room_quota_exceeded` and `workspace_archived` (409), `invalid_file_name` (422), `executable_refused` (415)"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/CreateUpload" } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
@@ -402,7 +402,7 @@ paths:
     get:
       operationId: listFiles
       tags: [queries]
-      summary: "The room's input assets the caller can see, oldest first, 50 a page, with `next_cursor` for the next page or null. Each has what `getFile` returns. Whoever sees the whole room sees every one, and someone limited to their own tasks only those linked to one of their tasks. A file still uploading isn't listed. `task_id` narrows it to that task's assets, and a task the caller can't see answers `task_not_found` (404). An outsider gets `workspace_not_found` (404)"
+      summary: "The room's input assets the caller can see, oldest first, 50 a page, with `next_cursor` for the next page or null. Each has what `getFile` returns. Whoever sees the whole room sees every one, and someone limited to their own tasks only those linked to one of their tasks. A file still uploading isn't listed. Whoever sees the whole room also gets `quota`, with `used`, the bytes of every file kept and every open reservation, and `limit`, the room's 5 GB. It's left out for anyone limited to their own tasks, because the total counts files they can't see. `task_id` narrows it to that task's assets, and a task the caller can't see answers `task_not_found` (404). An outsider gets `workspace_not_found` (404)"
       parameters: [{ name: task_id, in: query, schema: { type: string } }, { name: cursor, in: query, schema: { type: integer } }]
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/files/{file}/links:
@@ -410,7 +410,7 @@ paths:
     post:
       operationId: linkFile
       tags: [commands]
-      summary: "Link an input asset to a task (decision 53), so the task's parties can read it even if they see only their own tasks. For an owner, admin, member or Coordinator, as for uploading an input asset, on a task they can see. The answer is `file_id`, `task_id` and `linked` of true. Linking what's already linked answers the same and records nothing. The task's assignee gets an `asset.linked` event naming the task, never the file. It doesn't move `policy_version`. Refusals: `not_allowed` (403), `task_not_found` and `file_not_found` (404), `file_not_available` (409) for a file uploading, blocked or failed, `task_closed` (409) for a completed or canceled task, `limit_exceeded` (409) past 50 assets on a task, `workspace_archived` (409) and `workspace_not_found` (404)"
+      summary: "Link an input asset to a task (decision 53), so the task's parties can read it even if they see only their own tasks. For an owner, admin, member or Coordinator, as for uploading an input asset, on a task they can see. The answer is `file_id`, `task_id` and `linked` of true. Linking what's already linked answers the same and records nothing. The task's assignee gets an `asset.linked` event naming the task, never the file, and it wakes nobody (decision 104). It doesn't move `policy_version`. Refusals: `not_allowed` (403), `task_not_found` and `file_not_found` (404), `file_not_available` (409) for a file uploading, blocked or failed, `task_closed` (409) for a completed or canceled task, `limit_exceeded` (409) past 50 assets on a task, `workspace_archived` (409) and `workspace_not_found` (404)"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/LinkFile" } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
@@ -419,7 +419,7 @@ paths:
     delete:
       operationId: unlinkFile
       tags: [commands]
-      summary: "Unlink an input asset from a task, for whoever may link it, whatever the file's or task's state. Someone who saw it only through that task loses sight of it on their next read. A download already under way isn't cut off. The answer is `file_id`, `task_id` and `linked` of false, and unlinking what isn't linked answers the same and records nothing. The task's assignee gets an `asset.unlinked` event. Refusals: as `linkFile`, apart from the file's state and the task's"
+      summary: "Unlink an input asset from a task, for whoever may link it, whatever the file's or task's state. Someone who saw it only through that task loses sight of it on their next read. A download already under way isn't cut off. The answer is `file_id`, `task_id` and `linked` of false, and unlinking what isn't linked answers the same and records nothing. The task's assignee gets an `asset.unlinked` event, which wakes nobody. Refusals: `not_allowed` (403), `task_not_found` and `file_not_found` (404), `workspace_archived` (409) and `workspace_not_found` (404). Neither the file's state, the task's nor the limit can refuse it"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/files/{file}:
@@ -427,7 +427,7 @@ paths:
     get:
       operationId: getFile
       tags: [queries]
-      summary: "A file's `id`, `name`, `size`, `sha256`, `media_type` and `state`, and `download_path`, which is null unless the caller may download it now, and `linked_tasks`, the IDs of the tasks it's linked to that the caller can see. The path carries no authority. Whoever sees the whole room sees every file, and someone limited to their own tasks sees only files linked to those tasks, by `linkFile`. A file the caller can't see answers `file_not_found` (404), as an unknown one does. Other refusals: `access_revoked` (403) for someone removed from the room and `workspace_not_found` (404) for an outsider"
+      summary: "A file's `id`, `name`, `size`, `sha256`, `media_type` and `state`, and `download_path`, which is null unless the caller may download it now, and `linked_tasks`, the IDs of the tasks an input asset is linked to that the caller can see, which is empty for a submission file. The path carries no authority. Who sees a file depends on what it was uploaded for. An input asset is seen by whoever sees the whole room, and by someone limited to their own tasks only while it's linked to one of those, by `linkFile`. A file uploaded for a task's submission is seen only by its uploader until a submission names it, and after that as that task's submitted work: by an artifact scope of `all`, by its submitter, and by the reviewer named on the task. A file the caller can't see answers `file_not_found` (404), as an unknown one does. Other refusals: `access_revoked` (403) for someone removed from the room and `workspace_not_found` (404) for an outsider"
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/agents/{agent}/files/{file}:
     parameters: [{ $ref: "#/components/parameters/ws" }, { name: agent, in: path, required: true, schema: { type: string } }, { name: file, in: path, required: true, schema: { type: string } }]
@@ -630,6 +630,7 @@ components:
               task: { $ref: "#/components/schemas/Task" }
               submissions: { type: array, items: { type: object } }
               artifacts: { type: array, items: { type: object } }
+              files: { type: array, items: { type: object } }
               messages: { type: array, items: { type: object } }
               history: { type: array, items: { type: object } }
               visible: { type: object, required: [submissions, conversation], properties: { submissions: { type: string, enum: [all, own] }, conversation: { type: boolean } } }
@@ -680,6 +681,7 @@ components:
         name: { type: string, description: "The file's name, which is cleaned. It's agent content, and never reaches a log or an event." }
         size: { type: integer, minimum: 1, maximum: 100000000, description: "The exact size in bytes." }
         sha256: { type: string, pattern: "^[0-9a-f]{64}$", description: "The file's SHA-256, in lower-case hex." }
+        task_id: { type: string, description: "The task whose submission this file is for. Left out, it's an input asset." }
     SetPlanStart:
       type: object
       required: [start_date, timezone, plan_revision]
@@ -748,16 +750,19 @@ components:
     VersionedReason: { type: object, required: [version], properties: { version: { type: integer }, reason: { type: string } } }
     RequiredReason: { type: object, required: [version, reason], properties: { version: { type: integer }, reason: { type: string, minLength: 1 } } }
     Artifact: { type: object, required: [uri, label], properties: { uri: { type: string, description: "HTTPS only, at most 2 KiB." }, label: { type: string, minLength: 1, description: "At most 256 bytes." } } }
+    SubmissionFile: { type: object, required: [id], additionalProperties: false, properties: { id: { type: string, description: "A file you uploaded for this task with create_upload's task_id, which has finished scanning as ready." }, label: { type: string, minLength: 1, description: "At most 256 bytes. Left out, it's the file's name." } } }
     SubmitTask:
       type: object
       required: [version]
+      description: "Needs at least one link, file or note. Links and files together are at most 10, or `too_many_artifacts` (400). Naming a file twice gets `duplicate_file` (400). A file that isn't one you uploaded for this task answers `file_not_found` (404), however it exists. One that hasn't finished scanning as ready gets `file_not_ready` (409), so wait for its scan, and one removed gets `file_removed` (409). Each file is pinned to its SHA-256 and size, and approval names this exact submission."
       properties:
         version: { type: integer }
         artifacts: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/Artifact" } }
+        files: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/SubmissionFile" } }
         note: { type: string }
         commit_sha: { type: string, description: Required when the task has a linked repository. }
     RequestChanges: { type: object, required: [submission_no, reason], properties: { submission_no: { type: integer }, reason: { type: string, minLength: 1 } } }
-    VerifyTask: { type: object, required: [submission_no], properties: { submission_no: { type: integer }, commit_sha: { type: string, description: Required when the task has a linked repository. } } }
+    VerifyTask: { type: object, required: [submission_no], description: "Approves the exact submission named. If it has files, each must still be the one pinned and still ready: a file blocked by a later scan gets `file_not_ready` (409), one removed gets `file_removed` (409), and one that doesn't match gets `file_changed` (409). Requesting changes is always possible.", properties: { submission_no: { type: integer }, commit_sha: { type: string, description: Required when the task has a linked repository. } } }
     Error:
       type: object
       required: [error]
@@ -768,5 +773,5 @@ components:
           properties:
             code:
               type: string
-              enum: [plan_conflict, dependency_cycle, relationship_exists, relationship_not_found, role_not_found, role_full, already_claimed, lead_exists, invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, workspace_archived, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox]
+              enum: [plan_conflict, dependency_cycle, relationship_exists, relationship_not_found, role_not_found, role_full, already_claimed, lead_exists, invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, workspace_archived, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox, too_many_artifacts, duplicate_file, file_not_found, file_not_ready, file_removed, file_changed, files_not_checked]
             message: { type: string }

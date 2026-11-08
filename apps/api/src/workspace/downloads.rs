@@ -3,7 +3,7 @@
 //! access ends. A file's name is agent content, so it goes to whoever may see it and never into a log.
 use super::*;
 use podster_core::files::ObjectState;
-use podster_policy::files::{input_asset_view, may_download, FileView};
+use podster_policy::files::{may_download, FileView};
 
 fn file_not_found() -> ApiError {
     ApiError::api(404, "file_not_found")
@@ -12,7 +12,7 @@ fn file_not_found() -> ApiError {
 fn file_row(sql: &SqlStorage, id: &str) -> R<Value> {
     rows(
         sql,
-        "SELECT id, name, size, sha256, media_type, state, object_key FROM stored_object WHERE id = ?",
+        "SELECT id, name, size, sha256, media_type, state, object_key, uploaded_by, for_task FROM stored_object WHERE id = ?",
         vec![id.into()],
     )?
     .into_iter()
@@ -20,17 +20,24 @@ fn file_row(sql: &SqlStorage, id: &str) -> R<Value> {
     .ok_or_else(file_not_found)
 }
 
-/// How much of a file the caller gets, and the tasks it's linked to now, both read from current state on every use. Someone
-/// limited to their own tasks sees an input asset only while it's linked to one of theirs.
-fn view_of(sql: &SqlStorage, caller: &Caller, id: &str) -> R<(FileView, Vec<Task>)> {
-    let linked = asset_links::linked_tasks(sql, id)?;
-    let refs: Vec<&Task> = linked.iter().collect();
-    Ok((input_asset_view(caller, &refs), linked))
+/// How much of a file the caller gets, from current state: `submission_files::file_view` decides by what the file was uploaded
+/// for.
+fn view_of(sql: &SqlStorage, caller: &Caller, row: &Value) -> R<FileView> {
+    super::submission_files::file_view(sql, caller, row)
 }
 
 /// Whether the caller may know the file exists at all.
 pub(super) fn can_see(sql: &SqlStorage, caller: &Caller, id: &str) -> R<bool> {
-    Ok(view_of(sql, caller, id)?.0 != FileView::Hidden)
+    let Some(row) = rows(
+        sql,
+        "SELECT id, uploaded_by, for_task FROM stored_object WHERE id = ?",
+        vec![id.into()],
+    )?
+    .into_iter()
+    .next() else {
+        return Ok(false);
+    };
+    Ok(view_of(sql, caller, &row)? != FileView::Hidden)
 }
 
 /// An unknown state answers no, so a later state, such as a removed file, can't be downloaded by being new.
@@ -41,19 +48,25 @@ fn can_download(view: FileView, row: &Value) -> bool {
         .is_some_and(|state| may_download(view, state))
 }
 
-/// A file as the caller may see it, with its download path only when they may have it now, and the linked tasks they can see.
-/// `None` when it's hidden from them, which a route answers as if it didn't exist.
+/// A file as the caller may see it, with its download path only when they may have it now, and, for an input asset, the linked
+/// tasks they can see. `None` when it's hidden from them, which a route answers as if it didn't exist. `row` needs what
+/// `file_row` selects.
 pub(super) fn file_json(sql: &SqlStorage, caller: &Caller, row: &Value) -> R<Option<Value>> {
     let id = row["id"].as_str().unwrap_or_default();
-    let (view, linked) = view_of(sql, caller, id)?;
+    let view = view_of(sql, caller, row)?;
     if view == FileView::Hidden {
         return Ok(None);
     }
     let download_path = can_download(view, row)
         .then(|| objects::room_id(sql).map(|room| format!("/v1/files/{room}/{id}")));
+    let linked = if row["for_task"].is_null() {
+        asset_links::visible_links(caller, &asset_links::linked_tasks(sql, id)?)
+    } else {
+        Vec::new()
+    };
     Ok(Some(json!({
         "id": row["id"], "name": row["name"], "size": row["size"], "sha256": row["sha256"], "media_type": row["media_type"],
-        "state": row["state"], "download_path": download_path.transpose()?, "linked_tasks": asset_links::visible_links(caller, &linked),
+        "state": row["state"], "download_path": download_path.transpose()?, "linked_tasks": linked,
     })))
 }
 
@@ -74,7 +87,7 @@ pub(super) fn read_overseen(
         return Err(ApiError::not_allowed());
     };
     let row = file_row(sql, id)?;
-    match view_of(sql, &view.caller, id)?.0.for_oversight() {
+    match view_of(sql, &view.caller, &row)?.for_oversight() {
         FileView::Hidden => Err(file_not_found()),
         FileView::NameAndStatus | FileView::Full => {
             Ok(json!({ "id": row["id"], "name": row["name"], "state": row["state"] }))
@@ -87,7 +100,7 @@ pub(super) fn read_overseen(
 pub(super) fn begin(sql: &SqlStorage, who: &Participant, body: &Value) -> R<Value> {
     let id = body["id"].as_str().ok_or_else(file_not_found)?;
     let row = file_row(sql, id)?;
-    let (view, _) = view_of(sql, &who.caller, id)?;
+    let view = view_of(sql, &who.caller, &row)?;
     if view == FileView::Hidden {
         return Err(file_not_found());
     }

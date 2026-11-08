@@ -2844,7 +2844,7 @@ describe("downloading a file through the gateway", () => {
     const agent = await claimedAgent(a);
     const id = await roomWith(a, agent.id);
     const listed = await execute(agent, "list_assets", { workspace_id: id });
-    expect([listed.status, listed.data]).toEqual([200, { files: [], next_cursor: null }]);
+    expect([listed.status, listed.data]).toEqual([200, { files: [], next_cursor: null, quota: { used: 0, limit: 5_000_000_000 } }]);
     const task = await dash(a, "POST", `/v1/workspaces/${id}/tasks`, { title: "Read the brief", instructions: "x" });
     expect(task.status, JSON.stringify(task.body)).toBe(200);
     expect(await execute(agent, "link_asset", { workspace_id: id, file_id: "obj_unknown", task_id: task.body.id, idempotency_key: "link-1" })).toMatchObject({ status: 404, code: "file_not_found" });

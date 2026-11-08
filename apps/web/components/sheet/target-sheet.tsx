@@ -67,7 +67,8 @@ function hrefWith(pathname: string, search: URLSearchParams, param: string, targ
   return query ? `${pathname}?${query}` : pathname;
 }
 
-const FAILURE_COPY: Record<string, string> = {
+/** The Sheet's own words for a failed command, for a command's `explain` to fall back on. */
+export const FAILURE_COPY: Record<string, string> = {
   unknown: "We can't tell whether this saved. Refresh before trying again.",
   still_unknown: "We still can't tell whether your earlier change saved. Refresh to see where things stand.",
   signed_out: "You've been signed out, so this didn't save. Refresh to sign in again.",

@@ -110,6 +110,8 @@ impl ApiError {
             CoreError::SelfSignOff => 422,
             CoreError::NotAllowed => 403,
             CoreError::InvalidArgument(_) => 400,
+            // The room skipped a check it must run. Nothing a client sent causes it.
+            CoreError::FilesNotChecked => 500,
         };
         ApiError::api(status, error.code())
     }

@@ -50,7 +50,7 @@ Each attempt checks the uploader at its start and its end, and the end also rech
 
 The sweep that clears abandoned rows comes with step 8. Until then an expired upload reserves nothing, and its row stays.
 
-**Step 8 also has bytes to clear.** If the room doesn't answer when an upload finishes, or the call to it fails, the API answers `upload_outcome_unknown` and keeps the bytes, since the room may have accepted them. If it hadn't, nothing refers to them, and they aren't counted in the quota. The same goes for a Worker that dies between storing a file and the room's answer. Those objects stay in R2, under `rooms/{room}/objects/{object}/`, until a sweep exists.
+**Step 8 also has bytes to clear.** If the room doesn't answer when an upload finishes, or the call to it fails, the API answers `upload_outcome_unknown` and keeps the bytes, since the room may have accepted them. If it hadn't, nothing refers to them, and they aren't counted in the quota. The same goes for a Worker that dies between storing a file and the room's answer. Those objects stay in R2, under `rooms/{room}/objects/{object}/`, until a sweep exists. When the room did accept the file, it's in `scanning` but no scan job was sent, because the API sends the job only after the room's answer. Nothing rescans it, so it ends as `failed` after the hour, and the person uploads again.
 
 Downloads ask the room's Durable Object first. A link is checked against the room again each time it's used, so it needs no separate revocation. Responses are attachments with `X-Content-Type-Options: nosniff` and a cleaned filename. Filenames are agent content, so they stay out of logs and events.
 
@@ -62,9 +62,11 @@ Each check runs when a download starts. A download already under way isn't cut o
 
 Oversight reaches only the agent's own tasks, so an admin overseeing sees only files linked to them. `getOverseenFile` answers name and state only, and has no path to the bytes.
 
-**Built in step 5, locally:** an input asset is linked to a task with `linkFile` (`link_asset`) and unlinked with `unlinkFile` (`unlink_asset`), and `listFiles` (`list_assets`) lists the input assets someone can see. Links are rows in a room table, `asset_link`, and every read and download takes the file's current links, so unlinking narrows sight at once. Whoever may upload an input asset may link one, onto a task they can see. The file must be scanning or ready, the task not completed or canceled, and a task holds at most 50. Linking doesn't move `policy_version`, as assigning a task doesn't, and its events name the task and never the file. The rules are in `crates/core/src/asset_links.rs`. **Proposed**, and put to the lead: those states, the limit, and the assignee's inbox event, which also nudges an agent, as every inbox event does.
+**Built in step 5, locally:** an input asset is linked to a task with `linkFile` (`link_asset`) and unlinked with `unlinkFile` (`unlink_asset`), and `listFiles` (`list_assets`) lists the input assets someone can see ([decision 106](../spec/PRODUCT.md#decisions-needed)). Links are rows in a room table, `asset_link`, and every read and download takes the file's current links, so unlinking narrows sight on the next read ([decision 103](../spec/PRODUCT.md#decisions-needed)). Whoever may upload an input asset may link one they can see onto a task they can see, and a hidden file or task answers as if it didn't exist, before any check of whether they may link ([decision 100](../spec/PRODUCT.md#decisions-needed)). The file must be scanning or ready ([decision 101](../spec/PRODUCT.md#decisions-needed)), the task not completed or canceled ([decision 102](../spec/PRODUCT.md#decisions-needed)), and a task holds at most 50 ([decision 105](../spec/PRODUCT.md#decisions-needed)). Linking doesn't move `policy_version`, as assigning a task doesn't. The assignee's inbox gets `asset.linked` or `asset.unlinked`, naming the task and never the file, and it wakes nobody ([decision 104](../spec/PRODUCT.md#decisions-needed)): the Principal delivers those two kinds without queuing a wake. The rules are in `crates/core/src/asset_links.rs`.
 
 ### Scanner
+
+**The API's side is built, locally:** after the room accepts a file, the API Worker queues `{ v, workspace_id, object_id, key, size, sha256 }`, with no name. The scanner answers `POST /internal/scan-result` over its service binding, with header `x-podster-scanner`. Only the secret `SCANNER_SECRET` lets a verdict in: anything else, including no secret being set or one with whitespace at either end, gets the same 404 as a route that isn't there, and an unusable secret logs `scan.secret_unset`. The scanner takes a job only if its key is that room's and that file's, and gives the key back in its report. The room refuses a clean report whose hash, size or key isn't the file's, and won't take a clean report without a signature database it can stand behind: an engine name, a version of digits, and a build time within decision 84's week. Each field has a length limit. A blocking report still blocks on a mismatch, since the scanner reports a stored size that differs from the upload's that way. The scanner treats 400, 404, 409 and 422 as answers and doesn't retry them, since each retry is a full rescan. `record_scan` runs on every report, with no idempotency key, so a report can only tighten. The room's alarm ends a scan with no verdict after an hour, so a stuck scan, a lost queue message or a scanner that never answers all end as `failed`. `reason` can be a signature name, so it's stored and stays out of logs, events and audit entries. A file's audit entries leave the room's policy version alone, since that version guards an admin's open form and a file changes nobody's access. The audit list pages by its own counter, which carries on from the policy versions older entries had. The scanner logs a 404 from the room as `room_said_not_found`, at error level, since a wrong secret fails every file.
 
 A queue consumer hands the object to a ClamAV Container and reports the result to the room, which records it after rechecking that the object exists. A result is recorded even if the room was archived in between.
 
@@ -76,10 +78,10 @@ The spike had to show, on staging, that a 100 MB file streams through web, gatew
 
 Extend `artifact` and `submission` instead of adding the `artifact_version` table the architecture first drew. Submissions are already numbered and immutable, so a submission number is the version.
 
-- `artifact` gains an optional `object_id`, and a row has either that or a link.
+- **Built differently in step 6:** files go in a new `submission_file` table, not an optional `object_id` on `artifact`. `artifact.uri` is `NOT NULL`, and SQLite can't relax that, so a file row would have needed an empty link that every existing reader would serve. Each row pins the file's SHA-256 and size when it's submitted, and links stay as they were.
 - `verify_task` already names `submission_no`. It also records the approved submission on the task, in the same transaction. This part is built, as `approved_submission_no`, and needed no storage. A task completed before it has its latest submission recorded, the only one that could have been approved.
-- `crates/core` gets "all files clean" through its existing `observed` input, and refuses approval without it. Core stays pure.
-- An object can be attached only by the person or agent who uploaded it, on a task in the same room.
+- `crates/core` gets "all files clean" through its existing `observed` input, and refuses approval without it. Core stays pure. **As built:** the task records how many files its latest submission named, and `Verify` on one with files needs proof that only `check_approval` can make, so a room that skips the check is refused. The check wants every pinned file unchanged, not removed and Ready, because a late report can block a Ready file.
+- An object can be attached only by the person or agent who uploaded it, on a task in the same room. **As built, narrower:** only a file uploaded for that task, through `create_upload`'s `task_id`, which only the task's assignee can start, a guest included, while the task is accepted ([decision 96](../spec/PRODUCT.md#decisions-needed)). Until a submission names it, only its uploader sees it, and if none does it's cleared 24 hours after the task leaves Accepted ([decision 98](../spec/PRODUCT.md#decisions-needed)): `task.left_accepted_at` starts that clock for step 8's sweep. A file must be Ready to be submitted. The reviewer named on a task reads its submitted files whatever their scope ([decision 97](../spec/PRODUCT.md#decisions-needed)).
 
 A later submission starts unreviewed, so an approved badge can't move onto different content.
 
@@ -140,6 +142,21 @@ The lead ran these on 2026-11-07, at `eaf1b84`, as the owner through the browser
 **That answers the chunked question:** a chunked upload with a correct hash works through the real edge. It also gives the CPU number: 4,600 ms in the API and 1,806 ms in the gateway for 100 MB, against a 30 s limit. The tail held outcomes of ok or canceled, no exceptions and no uncaught-promise lines, with only IDs, bytes, chunks and wall time, and no token or file name.
 
 **Not done yet:** a second network, a forged `cf-connecting-ip` at the edge, `app.podster.dev`'s request limit, and `e2e/upload-check.mjs` itself. These ran before the later fixes to uploads, so they don't cover those.
+
+### Step 3 on staging
+
+[#125](https://github.com/thachp/podster/pull/125) was deployed on 2026-11-08 UTC at `46da970`, the scanner Worker first (version `fdf3d0a0`) and then the API (`efbf47a9`), the gateway and the web Worker. The lead checked it through the browser, as the owner, in the Smoke test room:
+
+| Check | Result |
+| --- | --- |
+| A clean text file | `ready` within 13 s of upload |
+| The EICAR test string | `blocked` within 13 s of upload |
+| Downloading the clean file through the web Worker | SHA-256 matched. Headers: attachment, `nosniff`, `default-src 'none'; sandbox`, `no-referrer`, CORP `same-origin`, `no-store` |
+| Downloading the blocked file | 409 `file_not_available` |
+
+**What that shows:** the queue reaches the scanner, the scanner's report reaches the room, and `SCANNER_SECRET` matches on both Workers, since a wrong one would have left both files in `scanning`. Only a clean verdict made a file downloadable.
+
+**Not measured:** the Container's cold start, a 100 MB scan, the hour sweep on a deployment, and the logs. Each verdict was one file, scanned alone.
 
 ### What's still unproven
 

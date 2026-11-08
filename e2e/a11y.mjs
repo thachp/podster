@@ -13,6 +13,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as playwright from "playwright";
+import { seedInputAssets } from "./asset-fixture.mjs";
 import { AuthAgent, key, ok, Person, Target } from "./lib.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -243,6 +244,11 @@ async function seed() {
     planRevision = (await owner.must("PUT", `/v1/workspaces/${plannedRoom}/tasks/${step.id}/plan`, { plan_revision: planRevision, duration_days, predecessors })).plan_revision;
   }
   await owner.must("PUT", `/v1/workspaces/${plannedRoom}/plan/start`, { start_date: "2026-11-07", timezone: "America/New_York", plan_revision: planRevision });
+
+  // INPUT ASSET FIXTURE (screen 9a). Test-only, and last, because setting its scan states restarts the Workers. Why, in asset-fixture.mjs.
+  const inputAssets = await seedInputAssets({ gatewayBase, owner, room, task: reviewScreen.id });
+  await askRunner({ type: "set-file-states", changes: inputAssets.changes });
+  // END INPUT ASSET FIXTURE
   return { done, plannedRoom, viewer, narrowed, otherWorker, limitedRoom, secretTask, viewerTask, SECRET, teamOrgId: teamOrg, longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
@@ -265,6 +271,9 @@ const screens = (s) => {
     ["Organization, team", "/settings/organization", "Ada team", "owner", false, s.teamOrg],
     ["Organization, a workroom to recover", "/settings/organization", "Room to recover", "owner", false, s.teamOrg],
     ["Overview", `${w}/overview`, "Billing v2"],
+    // From the input asset fixture: a row in each scan state, and the attach picker.
+    ["Overview, input assets", `${w}/overview`, "Scan failed"],
+    ["Task Sheet, attached files", `${w}/tasks?task=${s.reviewScreen.id}`, "No known malware found.", "owner", true],
     ["Tasks", `${w}/tasks`, "An open task"],
     ["Tasks, empty", `/w/${s.emptyRoom}/tasks`, "Tasks"],
     ["Task Sheet, review", `${w}/tasks?task=${s.reviewScreen.id}`, "Approve submission", "owner", true],
@@ -381,6 +390,21 @@ const signedOut = await newContext();
 const contexts = new Map();
 
 /** Sign-up belongs to the application host once `APP_URL` is set, so it runs in the browser there. The session works on both hosts. */
+/** Asks run-a11y.mjs to do what only it can, with the Workers stopped, and waits for it to say it's done. */
+function askRunner(request) {
+  ok(typeof process.send === "function", "Run this through run-a11y.mjs, which can restart the Workers.");
+  return new Promise((done, fail) => {
+    const answer = (message) => {
+      if (message?.type !== `${request.type}:done`) return;
+      process.off("message", answer);
+      if (message.error) fail(new Error(message.error));
+      else done();
+    };
+    process.on("message", answer);
+    process.send(request);
+  });
+}
+
 async function signUp(label) {
   const context = await newContext();
   const page = await context.newPage();

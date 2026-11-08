@@ -23,9 +23,9 @@ async function assertion(who: Who) {
 }
 
 let counter = 0;
-async function api(who: Who, method: string, path: string, body?: unknown) {
+async function api(who: Who, method: string, path: string, body?: unknown, key?: string) {
   const headers: Record<string, string> = { "x-podster-assertion": await assertion(who), "content-type": "application/json" };
-  if (method !== "GET") headers["idempotency-key"] = `rm-key-${++counter}`;
+  if (method !== "GET") headers["idempotency-key"] = key ?? `rm-key-${++counter}`;
   const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: method === "GET" ? undefined : JSON.stringify(body ?? {}) });
   const text = await res.text();
   const parsed = text ? JSON.parse(text) : null;
@@ -141,6 +141,34 @@ describe("removing a file", () => {
     expect((await row(id, object)).state).toBe("ready");
   });
 
+  it("won't replay a stored answer to a remover who has since lost the right, or can no longer see the file", async () => {
+    const id = await room();
+    const object = await file(id);
+    const key = `rm-replay-${++counter}`;
+    const first = await api(ADMIN, "POST", `/v1/workspaces/${id}/files/${object}/remove`, {}, key);
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+    expect((await api(ADMIN, "POST", `/v1/workspaces/${id}/files/${object}/remove`, {}, key)).body).toEqual(first.body);
+    // Demoted to a member who still sees the whole room: refused.
+    await inRoom(id, (sql) => {
+      sql.exec("UPDATE member SET role = 'member' WHERE principal_id = ?", ADMIN.id);
+      sql.exec("INSERT INTO access_grant (principal_id, tasks, artifacts, conversations, review, granted_by, updated_at) SELECT ?, tasks, artifacts, conversations, review, granted_by, updated_at FROM access_grant WHERE principal_id = ?", ADMIN.id, MEMBER.id);
+    });
+    expect(await api(ADMIN, "POST", `/v1/workspaces/${id}/files/${object}/remove`, {}, key)).toMatchObject({ status: 403, code: "not_allowed" });
+    // Narrowed so the file is out of sight: the same answer as a file that doesn't exist.
+    await inRoom(id, (sql) => sql.exec("DELETE FROM access_grant WHERE principal_id = ?", ADMIN.id));
+    expect(await api(ADMIN, "POST", `/v1/workspaces/${id}/files/${object}/remove`, {}, key)).toMatchObject({ status: 404, code: "file_not_found" });
+  });
+
+  it("answers an owner who can't see a file, such as another person's unsubmitted task file, as if it didn't exist", async () => {
+    const id = await room();
+    const object = await file(id);
+    const task = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Work", instructions: "Do it", assignee: MEMBER.id });
+    expect(task.status, JSON.stringify(task.body)).toBe(200);
+    await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET for_task = ?, uploaded_by = ? WHERE id = ?", task.body.id, MEMBER.id, object));
+    for (const who of [OWNER, ADMIN]) expect(await remove(who, id, object)).toMatchObject({ status: 404, code: "file_not_found" });
+    expect((await row(id, object)).state).toBe("ready");
+  });
+
   it("changes nothing the second time", async () => {
     const id = await room();
     const object = await file(id);
@@ -245,6 +273,28 @@ describe("the room's sweep", () => {
     await sweep(id);
     const { due_at }: any = await inRoom(id, (sql) => sql.exec("SELECT due_at FROM storage_sweep").toArray()[0]);
     expect(due_at).toBe(started + 60 * 60 * 1000);
+  });
+
+  it("keeps a dropped row's schedule through a pass forced before it, so a late attempt's bytes still get swept", async () => {
+    const id = await room();
+    const made = await api(ADMIN, "POST", `/v1/workspaces/${id}/uploads`, { name: "mid.txt", size: TEXT.length, sha256: await sha256(TEXT) });
+    expect(made.status).toBe(200);
+    const before = Date.now();
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${ADMIN.id}`, { policy_version: await version(id) })).status).toBe(200);
+    expect(await row(id, made.body.id)).toBeUndefined();
+    // A pass forced now finds no row with that attempt, and must still leave the sweep due once it can't be writing.
+    await sweep(id);
+    const { due_at, settles_at }: any = await inRoom(id, (sql) => sql.exec("SELECT due_at, settles_at FROM storage_sweep").toArray()[0]);
+    expect(settles_at).toBeGreaterThanOrEqual(before + 60 * 60 * 1000);
+    expect(due_at).toBe(settles_at);
+  });
+
+  it("starts a room's high-water mark at its migration, for attempts begun before it", async () => {
+    const id = await room();
+    const before = Date.now();
+    const { settles_at }: any = await inRoom(id, (sql) => sql.exec("SELECT settles_at FROM storage_sweep").toArray()[0]);
+    expect(settles_at).toBeGreaterThanOrEqual(Math.floor((before - 60_000) / 1000) * 1000 + 60 * 60 * 1000);
+    expect(settles_at).toBeLessThanOrEqual(Date.now() + 60 * 60 * 1000);
   });
 
   it("looks again an hour after someone's uploads are dropped as they leave", async () => {

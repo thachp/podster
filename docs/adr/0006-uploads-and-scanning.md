@@ -76,10 +76,10 @@ The spike had to show, on staging, that a 100 MB file streams through web, gatew
 
 Extend `artifact` and `submission` instead of adding the `artifact_version` table the architecture first drew. Submissions are already numbered and immutable, so a submission number is the version.
 
-- `artifact` gains an optional `object_id`, and a row has either that or a link.
+- **Built differently in step 6:** files go in a new `submission_file` table, not an optional `object_id` on `artifact`. `artifact.uri` is `NOT NULL`, and SQLite can't relax that, so a file row would have needed an empty link that every existing reader would serve. Each row pins the file's SHA-256 and size when it's submitted, and links stay as they were.
 - `verify_task` already names `submission_no`. It also records the approved submission on the task, in the same transaction. This part is built, as `approved_submission_no`, and needed no storage. A task completed before it has its latest submission recorded, the only one that could have been approved.
-- `crates/core` gets "all files clean" through its existing `observed` input, and refuses approval without it. Core stays pure.
-- An object can be attached only by the person or agent who uploaded it, on a task in the same room.
+- `crates/core` gets "all files clean" through its existing `observed` input, and refuses approval without it. Core stays pure. **As built:** the task records how many files its latest submission named, and `Verify` on one with files needs proof that only `check_approval` can make, so a room that skips the check is refused. The check wants every pinned file unchanged, not removed and Ready, because a late report can block a Ready file.
+- An object can be attached only by the person or agent who uploaded it, on a task in the same room. **As built, narrower:** only a file uploaded for that task, through `create_upload`'s `task_id`, which only the task's assignee can start, a guest included, while the task is accepted ([decision 96](../spec/PRODUCT.md#decisions-needed)). Until a submission names it, only its uploader sees it, and if none does it's cleared 24 hours after the task leaves Accepted ([decision 98](../spec/PRODUCT.md#decisions-needed)): `task.left_accepted_at` starts that clock for step 8's sweep. A file must be Ready to be submitted. The reviewer named on a task reads its submitted files whatever their scope ([decision 97](../spec/PRODUCT.md#decisions-needed)).
 
 A later submission starts unreviewed, so an approved badge can't move onto different content.
 
@@ -148,6 +148,21 @@ The lead ran these on 2026-11-07, at `eaf1b84`, as the owner through the browser
 **That answers the chunked question:** a chunked upload with a correct hash works through the real edge. It also gives the CPU number: 4,600 ms in the API and 1,806 ms in the gateway for 100 MB, against a 30 s limit. The tail held outcomes of ok or canceled, no exceptions and no uncaught-promise lines, with only IDs, bytes, chunks and wall time, and no token or file name.
 
 **Not done yet:** a second network, a forged `cf-connecting-ip` at the edge, `app.podster.dev`'s request limit, and `e2e/upload-check.mjs` itself. These ran before the later fixes to uploads, so they don't cover those.
+
+### Step 3 on staging
+
+[#125](https://github.com/thachp/podster/pull/125) was deployed on 2026-11-08 UTC at `46da970`, the scanner Worker first (version `fdf3d0a0`) and then the API (`efbf47a9`), the gateway and the web Worker. The lead checked it through the browser, as the owner, in the Smoke test room:
+
+| Check | Result |
+| --- | --- |
+| A clean text file | `ready` within 13 s of upload |
+| The EICAR test string | `blocked` within 13 s of upload |
+| Downloading the clean file through the web Worker | SHA-256 matched. Headers: attachment, `nosniff`, `default-src 'none'; sandbox`, `no-referrer`, CORP `same-origin`, `no-store` |
+| Downloading the blocked file | 409 `file_not_available` |
+
+**What that shows:** the queue reaches the scanner, the scanner's report reaches the room, and `SCANNER_SECRET` matches on both Workers, since a wrong one would have left both files in `scanning`. Only a clean verdict made a file downloadable.
+
+**Not measured:** the Container's cold start, a 100 MB scan, the hour sweep on a deployment, and the logs. Each verdict was one file, scanned alone.
 
 ### What's still unproven
 

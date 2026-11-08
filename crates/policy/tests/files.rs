@@ -28,6 +28,7 @@ fn task(requester: &str, assignee: &str, reviewer: &str) -> Task {
         submission_no: 0,
         submission_commit: None,
         approved_submission_no: None,
+        submission_files: 0,
         assignee_departed: false,
         needs_reviewer: false,
         needs_requester: false,
@@ -326,9 +327,181 @@ fn an_uploader_cannot_fetch_their_own_blocked_file() {
     assert!(!may_download(view, ObjectState::Scanning));
 }
 
+// ---- files uploaded for a submission ----
+
+#[test]
+fn only_the_assignee_uploads_for_a_submission_a_guest_included() {
+    let theirs = task("a", "me", "c");
+    let others = task("a", "b", "c");
+    let guest = someone(Agent, Role::Guest, Scopes::GUEST);
+    assert_eq!(authorize_submission_upload(&guest, &theirs), Verdict::Allow);
+    let member = someone(Person, Role::Member, Scopes::MEMBER);
+    assert_eq!(
+        authorize_submission_upload(&member, &theirs),
+        Verdict::Allow
+    );
+    assert_eq!(
+        authorize_submission_upload(&member, &others),
+        Verdict::Forbidden
+    );
+    assert_eq!(
+        authorize_submission_upload(&guest, &others),
+        Verdict::Hidden
+    );
+    let gone = someone(Agent, Role::None, Scopes::GUEST);
+    assert_eq!(
+        authorize_submission_upload(&gone, &theirs),
+        Verdict::NotParticipant
+    );
+}
+
+fn named(id: &str, caller: Caller) -> Caller {
+    Caller {
+        id: id.into(),
+        ..caller
+    }
+}
+
+#[test]
+fn an_unsubmitted_file_is_its_uploaders_alone() {
+    let t = task("a", "me", "c");
+    let uploader = someone(Agent, Role::Guest, Scopes::GUEST);
+    assert_eq!(task_file_view(&uploader, &t, "me", false), FileView::Full);
+    for (who, caller) in [
+        (
+            "owner",
+            named(
+                "o",
+                someone(Person, Role::Owner, Scopes::PUBLIC_PARTICIPANT),
+            ),
+        ),
+        (
+            "member",
+            named("m", someone(Person, Role::Member, Scopes::MEMBER)),
+        ),
+        (
+            "requester",
+            named("a", someone(Person, Role::Member, Scopes::MEMBER)),
+        ),
+        (
+            "reviewer",
+            named("c", someone(Person, Role::Member, Scopes::MEMBER)),
+        ),
+    ] {
+        assert_eq!(
+            task_file_view(&caller, &t, "me", false),
+            FileView::Hidden,
+            "{who}"
+        );
+        assert_eq!(
+            task_file_view(&caller, &t, "me", false).for_oversight(),
+            FileView::Hidden,
+            "{who}"
+        );
+    }
+}
+
+#[test]
+fn an_uploader_who_left_or_lost_the_task_sees_nothing_of_an_unsubmitted_file() {
+    let gone = someone(Agent, Role::None, Scopes::GUEST);
+    assert_eq!(
+        task_file_view(&gone, &task("a", "me", "c"), "me", false),
+        FileView::Hidden
+    );
+    let reassigned = someone(Agent, Role::Guest, Scopes::GUEST);
+    assert_eq!(
+        task_file_view(&reassigned, &task("a", "b", "c"), "me", false),
+        FileView::Hidden
+    );
+}
+
+#[test]
+fn a_submitted_file_follows_the_artifact_scope() {
+    let t = task("a", "b", "c");
+    let member = someone(Person, Role::Member, Scopes::MEMBER);
+    assert_eq!(task_file_view(&member, &t, "b", true), FileView::Full);
+    let guest = someone(Agent, Role::Guest, Scopes::GUEST);
+    assert_eq!(task_file_view(&guest, &t, "b", true), FileView::Hidden);
+}
+
+#[test]
+fn the_named_reviewer_reads_the_tasks_submitted_files_even_when_limited_to_their_own() {
+    // A public participant has the `shared` artifact scope, which alone would show them only what they submitted.
+    let reviewer = named("c", someone(Agent, Role::Guest, Scopes::PUBLIC_PARTICIPANT));
+    let theirs = task("a", "b", "c");
+    assert_eq!(
+        submitted_file_view(&reviewer, &theirs, "b"),
+        FileView::Hidden
+    );
+    assert_eq!(
+        task_file_view(&reviewer, &theirs, "b", true),
+        FileView::Full
+    );
+    // Nothing unsubmitted, and no other task's files.
+    assert_eq!(
+        task_file_view(&reviewer, &theirs, "b", false),
+        FileView::Hidden
+    );
+    let other = task("a", "b", "z");
+    assert_eq!(
+        task_file_view(&reviewer, &other, "b", true),
+        FileView::Hidden
+    );
+    // Not once they're out of the room.
+    let gone = named("c", someone(Agent, Role::None, Scopes::PUBLIC_PARTICIPANT));
+    assert_eq!(task_file_view(&gone, &theirs, "b", true), FileView::Hidden);
+    // And the requester, also a party, gets no more than their scope gives.
+    let requester = named("a", someone(Agent, Role::Guest, Scopes::PUBLIC_PARTICIPANT));
+    assert_eq!(
+        task_file_view(&requester, &theirs, "b", true),
+        FileView::Hidden
+    );
+}
+
+#[test]
+fn anyone_allowed_to_approve_can_read_what_they_approve() {
+    // Every combination of scopes, for every role and kind: if `Verify` is allowed, the submitted file reads in full.
+    let mut allowed = 0;
+    for role in [Role::Owner, Role::Admin, Role::Member, Role::Guest] {
+        for kind in [Person, Agent] {
+            for tasks in TaskScope::ALL {
+                for artifacts in ArtifactScope::ALL {
+                    for conversations in ConversationScope::ALL {
+                        for review in ReviewScope::ALL {
+                            let scopes = Scopes {
+                                tasks,
+                                artifacts,
+                                conversations,
+                                review,
+                            };
+                            let reviewer = named("c", someone(kind, role, scopes));
+                            let t = Task {
+                                status: TaskStatus::Submitted,
+                                ..task("a", "b", "c")
+                            };
+                            if authorize_task(&reviewer, &t, TaskAction::Verify) == Verdict::Allow {
+                                allowed += 1;
+                                assert_eq!(
+                                    task_file_view(&reviewer, &t, "b", true),
+                                    FileView::Full,
+                                    "{role:?} {kind:?} {scopes:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        allowed > 0,
+        "no combination may approve, so this proves nothing"
+    );
+}
+
 #[test]
 fn only_an_owner_or_human_admin_removes_a_file() {
-    for view in [FileView::Hidden, FileView::NameAndStatus, FileView::Full] {
+    for view in [FileView::NameAndStatus, FileView::Full] {
         for role in [Role::Owner, Role::Admin] {
             let person = someone(Person, role, Scopes::PUBLIC_PARTICIPANT);
             assert_eq!(
@@ -337,6 +510,18 @@ fn only_an_owner_or_human_admin_removes_a_file() {
                 "{role:?} {view:?}"
             );
         }
+    }
+}
+
+#[test]
+fn a_file_hidden_from_an_owner_or_admin_is_missing_to_them_too() {
+    for role in [Role::Owner, Role::Admin] {
+        let person = someone(Person, role, Scopes::COORDINATOR);
+        assert_eq!(
+            authorize_file_removal(&person, FileView::Hidden),
+            Verdict::Hidden,
+            "{role:?}"
+        );
     }
 }
 

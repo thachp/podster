@@ -9,8 +9,6 @@ use podster_core::files::{
     check_upload, expire_scan, fits_room_quota, is_sha256, record_scan, scan_database_fits,
     FileRefusal, ObjectState, ScanOutcome, UploadRequest, SCAN_DEADLINE_MS,
 };
-use podster_core::removal::UNREFERENCED_BYTES_GRACE_MS;
-use podster_policy::files::authorize_input_upload;
 
 /// How long an upload may be started after it's created. Its reservation ends then too, whatever is under way. An attempt already
 /// running can still finish, but only if the file still fits the room when it does.
@@ -54,7 +52,11 @@ pub(super) fn handle_create(
     body: &Value,
     now: i64,
 ) -> R<Value> {
-    ApiError::from_verdict(authorize_input_upload(caller))?;
+    let for_task = super::submission_files::upload_target(body)?;
+    super::submission_files::may_upload(sql, caller, for_task.as_deref())?;
+    if let Some(task_id) = &for_task {
+        super::submission_files::require_room_for_another(sql, &caller.id, task_id, now)?;
+    }
     let name = required(body, "name")?;
     let size = body["size"]
         .as_u64()
@@ -79,11 +81,11 @@ pub(super) fn handle_create(
     let expires_at = now + UPLOAD_GRANT_MS;
     exec(
         sql,
-        "INSERT INTO stored_object (id, name, size, sha256, state, token_hash, uploaded_by, uploader_json, created_at, upload_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO stored_object (id, name, size, sha256, state, token_hash, uploaded_by, uploader_json, created_at, upload_expires_at, for_task) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         vec![
             id.as_str().into(), accepted.name.as_str().into(), (accepted.size as i64).into(), sha256.as_str().into(),
             ObjectState::Uploading.name().into(), token_hash(&token).as_str().into(), caller.id.as_str().into(),
-            identity_json.into(), now.into(), expires_at.into(),
+            identity_json.into(), now.into(), expires_at.into(), opt(&for_task),
         ],
     )?;
     audit_file(
@@ -126,10 +128,66 @@ pub(super) fn drop_uploads_no_longer_allowed(
         "SELECT * FROM stored_object WHERE uploaded_by = ? AND state = 'uploading'",
         vec![principal.into()],
     )?;
-    if found.iter().any(|row| uploader(sql, row).is_err()) {
-        drop_uploads_of(sql, actor, actor_kind, principal, now)?;
+    // Each upload is judged alone: losing the right to add input assets doesn't end an upload for their own task, or the reverse.
+    for row in &found {
+        if uploader(sql, row).is_err() {
+            drop_upload(
+                sql,
+                actor,
+                actor_kind,
+                row["id"].as_str().unwrap_or_default(),
+                now,
+            )?;
+        }
     }
     Ok(())
+}
+
+/// Drops every unfinished upload for a task, when it stops being accepted, so its space comes back at once and its token dies.
+pub(super) fn drop_uploads_for_task(
+    sql: &SqlStorage,
+    actor: &str,
+    actor_kind: &str,
+    task_id: &str,
+    now: i64,
+) -> R<()> {
+    let found = rows(
+        sql,
+        "SELECT id FROM stored_object WHERE for_task = ? AND state = 'uploading'",
+        vec![task_id.into()],
+    )?;
+    for row in &found {
+        drop_upload(
+            sql,
+            actor,
+            actor_kind,
+            row["id"].as_str().unwrap_or_default(),
+            now,
+        )?;
+    }
+    Ok(())
+}
+
+/// Drops one unfinished upload, recording who ended it. Only an upload still arriving goes, so a stored file is never touched.
+fn drop_upload(sql: &SqlStorage, actor: &str, actor_kind: &str, id: &str, now: i64) -> R<()> {
+    // A file's own audit entry, which doesn't move the room's policy version.
+    audit_file(
+        sql,
+        actor,
+        actor_kind,
+        "object.upload_dropped",
+        id,
+        None,
+        None,
+        now,
+    )?;
+    exec(
+        sql,
+        "DELETE FROM stored_object WHERE id = ? AND state = 'uploading'",
+        vec![id.into()],
+    )?;
+    // An attempt may still be writing, and its row is gone, so the sweep looks again once that attempt can't be.
+    removal::row_dropped(sql, now)
 }
 
 /// Drops what someone was still uploading when they went, in the transaction that ends their place here, so their token dies with
@@ -166,7 +224,7 @@ pub(super) fn drop_uploads_of(
     )?;
     // An attempt of theirs may still be writing, and its row is gone now, so the sweep looks again once that attempt has ended.
     if !found.is_empty() {
-        removal::sweep_after(sql, now.saturating_add(UNREFERENCED_BYTES_GRACE_MS))?;
+        removal::row_dropped(sql, now)?;
     }
     Ok(())
 }
@@ -177,7 +235,7 @@ fn uploader(sql: &SqlStorage, row: &Value) -> R<(Identity, Participant)> {
     let identity: Identity = serde_json::from_str(row["uploader_json"].as_str().unwrap_or(""))
         .map_err(|_| upload_not_found())?;
     let who = resolve_caller(sql, &identity)?;
-    ApiError::from_verdict(authorize_input_upload(&who.caller))?;
+    super::submission_files::may_upload(sql, &who.caller, row["for_task"].as_str())?;
     Ok((identity, who))
 }
 
@@ -220,7 +278,7 @@ fn begin(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         vec![attempt.as_str().into(), key.as_str().into(), now.into(), id.into()],
     )?;
     // Every way bytes can be left with nothing referring to them starts with an attempt, so this is when to look again.
-    removal::sweep_after(sql, now.saturating_add(UNREFERENCED_BYTES_GRACE_MS))?;
+    removal::attempt_began(sql, now)?;
     Ok(json!({
         "key": key, "attempt": attempt, "size": row["size"], "sha256": row["sha256"],
         "agent": who.caller.kind == PrincipalKind::Agent, "uploader": identity.id, "gen": identity.gen,
@@ -237,6 +295,11 @@ fn complete(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     // A newer attempt replaced this one, so these bytes aren't the upload any more.
     if body["attempt"].as_str().is_none() || body["attempt"] != row["attempt_id"] {
         return Err(refusal(FileRefusal::InvalidTransition));
+    }
+    // An attempt can only start before the grant ends, and runs at most `TOTAL_LIMIT_MS`, so nothing can finish later than both.
+    // The Worker checks that limit only now and then, so this is what makes it exact, and keeps the cap's count exact with it.
+    if now > int(&row["upload_expires_at"]).saturating_add(crate::objects::TOTAL_LIMIT_MS as i64) {
+        return Err(upload_not_found());
     }
     if body["size"].as_i64() != Some(int(&row["size"])) || body["sha256"] != row["sha256"] {
         return Err(refusal(FileRefusal::Mismatch));

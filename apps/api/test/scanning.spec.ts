@@ -378,6 +378,13 @@ describe("a room from before this", () => {
       sql.exec("DROP INDEX stored_object_purge");
       for (const column of ["removed_at", "removed_by", "removed_by_kind", "removed_from", "attempt_started_at", "purge_due_at"]) sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
       sql.exec("UPDATE schema_version SET version = version - 1");
+      // The newer migration for files on submissions comes off first.
+      sql.exec("DROP TABLE submission_file");
+      sql.exec("DROP INDEX stored_object_task");
+      sql.exec("ALTER TABLE stored_object DROP COLUMN for_task");
+      sql.exec("ALTER TABLE task DROP COLUMN submission_files");
+      sql.exec("ALTER TABLE task DROP COLUMN left_accepted_at");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP INDEX stored_object_scanning");
       for (const column of ["scan_reason", "scan_sha256", "scan_database_json", "scanned_at"]) sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
       sql.exec("DROP INDEX audit_event_seq");

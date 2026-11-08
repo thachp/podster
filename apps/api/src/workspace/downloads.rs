@@ -3,7 +3,7 @@
 //! access ends. A file's name is agent content, so it goes to whoever may see it and never into a log.
 use super::*;
 use podster_core::files::ObjectState;
-use podster_policy::files::{input_asset_view, may_download, FileView};
+use podster_policy::files::{may_download, FileView};
 
 pub(super) fn file_not_found() -> ApiError {
     ApiError::api(404, "file_not_found")
@@ -12,7 +12,7 @@ pub(super) fn file_not_found() -> ApiError {
 pub(super) fn file_row(sql: &SqlStorage, id: &str) -> R<Value> {
     rows(
         sql,
-        "SELECT id, name, size, sha256, media_type, state, object_key, removed_at, removed_by FROM stored_object WHERE id = ?",
+        "SELECT id, name, size, sha256, media_type, state, object_key, uploaded_by, for_task, removed_at, removed_by FROM stored_object WHERE id = ?",
         vec![id.into()],
     )?
     .into_iter()
@@ -20,10 +20,10 @@ pub(super) fn file_row(sql: &SqlStorage, id: &str) -> R<Value> {
     .ok_or_else(file_not_found)
 }
 
-/// How much of a file the caller gets. A file can't be linked to a task until step 5, so `linked_tasks` is empty, and someone
-/// limited to their own tasks sees nothing. When links arrive they go here, read from current state.
-pub(super) fn view_of(caller: &Caller) -> FileView {
-    input_asset_view(caller, &[])
+/// How much of a file the caller gets, from current state: `submission_files::file_view` decides by what the file was uploaded
+/// for.
+pub(super) fn view_of(sql: &SqlStorage, caller: &Caller, row: &Value) -> R<FileView> {
+    super::submission_files::file_view(sql, caller, row)
 }
 
 /// An unknown state answers no, so a later state, such as a removed file, can't be downloaded by being new.
@@ -36,7 +36,7 @@ fn can_download(view: FileView, row: &Value) -> bool {
 
 pub(super) fn read_file(sql: &SqlStorage, who: &Participant, id: &str) -> R<Value> {
     let row = file_row(sql, id)?;
-    let view = view_of(&who.caller);
+    let view = view_of(sql, &who.caller, &row)?;
     if view == FileView::Hidden {
         return Err(file_not_found());
     }
@@ -62,7 +62,7 @@ pub(super) fn read_overseen(
         return Err(ApiError::not_allowed());
     };
     let row = file_row(sql, id)?;
-    match view_of(&view.caller).for_oversight() {
+    match view_of(sql, &view.caller, &row)?.for_oversight() {
         FileView::Hidden => Err(file_not_found()),
         FileView::NameAndStatus | FileView::Full => {
             Ok(json!({ "id": row["id"], "name": row["name"], "state": row["state"] }))
@@ -75,7 +75,7 @@ pub(super) fn read_overseen(
 pub(super) fn begin(sql: &SqlStorage, who: &Participant, body: &Value) -> R<Value> {
     let id = body["id"].as_str().ok_or_else(file_not_found)?;
     let row = file_row(sql, id)?;
-    let view = view_of(&who.caller);
+    let view = view_of(sql, &who.caller, &row)?;
     if view == FileView::Hidden {
         return Err(file_not_found());
     }

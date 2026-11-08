@@ -27,6 +27,8 @@ const ABANDONED_PER_PASS: i64 = 200;
 const PURGES_PER_PASS: i64 = 20;
 /// The soonest anything overdue here wakes the room again, so work that keeps failing can't spin the alarm.
 const REARM_MS: i64 = 1_000;
+/// How many listings one file's purge makes in one alarm. A file with more keys than that continues on the next.
+const PURGE_PAGES_PER_PASS: usize = 2;
 
 /// Who removes. An operator or the system would be another kind, recorded the same way, so a ruling that adds either only adds a
 /// caller of `remove`.
@@ -93,15 +95,21 @@ pub(super) fn remove(sql: &SqlStorage, remover: &Remover<'_>, id: &str, now: i64
     answer(sql, id)
 }
 
-/// `POST /v1/workspaces/{ws}/files/{file}/remove`: the room's owner or a human admin (decision 57). Someone who can't see the file
-/// is answered as if it didn't exist.
-pub(super) fn handle_remove(sql: &SqlStorage, caller: &Caller, id: &str, now: i64) -> R<Value> {
-    downloads::file_row(sql, id)?;
-    match authorize_file_removal(caller, downloads::view_of(caller)) {
-        Verdict::Allow => {}
-        Verdict::Hidden => return Err(downloads::file_not_found()),
-        other => ApiError::from_verdict(other)?,
+/// Whether this caller may remove this file now: the room's owner or a human admin (decision 57), and only a file they can see.
+/// Someone who can't see the file, an owner or admin included, is answered as if it didn't exist. `command_checked` runs this
+/// before replaying a stored answer too, so an answer can't reach someone who has since lost the right.
+pub(super) fn authorize_removal(sql: &SqlStorage, caller: &Caller, id: &str) -> R<()> {
+    let row = downloads::file_row(sql, id)?;
+    match authorize_file_removal(caller, downloads::view_of(sql, caller, &row)?) {
+        Verdict::Allow => Ok(()),
+        Verdict::Hidden => Err(downloads::file_not_found()),
+        other => ApiError::from_verdict(other),
     }
+}
+
+/// `POST /v1/workspaces/{ws}/files/{file}/remove`.
+pub(super) fn handle_remove(sql: &SqlStorage, caller: &Caller, id: &str, now: i64) -> R<Value> {
+    authorize_removal(sql, caller, id)?;
     let kind = kind_name(caller);
     remove(
         sql,
@@ -151,18 +159,34 @@ pub(super) fn next_due(sql: &SqlStorage, now: i64) -> R<Option<i64>> {
         .map(|due| due.max(now.saturating_add(REARM_MS))))
 }
 
-/// The latest time an upload attempt that's begun could still leave bytes nothing refers to: the newest attempt's start plus the
-/// grace. Removed files and finished uploads keep their start, so this covers an attempt replaced by a newer one, or one still
-/// writing when its file was removed.
-fn last_attempt_settles(sql: &SqlStorage) -> R<Option<i64>> {
-    Ok(rows(
+/// Raises the room's high-water mark: the latest time an upload attempt that's begun could still leave bytes nothing refers to. It
+/// only ever rises, and outlives the rows, so a row dropped while its attempt is writing can't take the sweep's schedule with it.
+fn raise_settles(sql: &SqlStorage, at: i64) -> R<()> {
+    exec(
         sql,
-        "SELECT MAX(attempt_started_at) AS last FROM stored_object",
-        vec![],
-    )?
-    .first()
-    .and_then(|r| r["last"].as_f64())
-    .map(|last| (last as i64).saturating_add(UNREFERENCED_BYTES_GRACE_MS)))
+        "UPDATE storage_sweep SET settles_at = CASE WHEN settles_at IS NULL OR settles_at < ? THEN ? ELSE settles_at END",
+        vec![at.into(), at.into()],
+    )
+}
+
+/// An upload attempt has begun: its bytes may land any time until the grace has passed, so a sweep is due then, and no pass may be
+/// put off past it.
+pub(super) fn attempt_began(sql: &SqlStorage, now: i64) -> R<()> {
+    let settles = now.saturating_add(UNREFERENCED_BYTES_GRACE_MS);
+    raise_settles(sql, settles)?;
+    sweep_after(sql, settles)
+}
+
+/// An unfinished upload's row is gone, but one of its attempts may still be writing. The same as an attempt beginning now.
+pub(super) fn row_dropped(sql: &SqlStorage, now: i64) -> R<()> {
+    attempt_began(sql, now)
+}
+
+fn settles_at(sql: &SqlStorage) -> R<Option<i64>> {
+    Ok(rows(sql, "SELECT settles_at FROM storage_sweep", vec![])?
+        .first()
+        .and_then(|r| r["settles_at"].as_f64())
+        .map(|at| at as i64))
 }
 
 /// Deletes rows of uploads that never finished, well after their grant ended. Each is audited by ID. Bytes an attempt left go with
@@ -261,8 +285,22 @@ impl Workspace {
         };
         for row in &due {
             let id = text(&row["id"]).unwrap_or_default();
+            // Claimed before listing, so if recording the result keeps failing, this file is listed again a minute on, not every
+            // second. A claim that fails lists nothing.
+            if let Err(error) = exec(
+                &sql,
+                "UPDATE stored_object SET purge_due_at = ? WHERE id = ? AND state = 'removed'",
+                vec![
+                    now.saturating_add(SWEEP_RETRY_MS).into(),
+                    id.as_str().into(),
+                ],
+            ) {
+                console_error!("couldn't claim a purge: {:?}", error.code());
+                continue;
+            }
             let next = match self.purge_one(&room, &id).await {
-                Ok(()) => {
+                Ok(false) => V::from(now.saturating_add(REARM_MS)),
+                Ok(true) => {
                     let settles = row["attempt_started_at"]
                         .as_f64()
                         .map(|at| (at as i64).saturating_add(UNREFERENCED_BYTES_GRACE_MS))
@@ -287,38 +325,46 @@ impl Workspace {
         }
     }
 
-    async fn purge_one(&self, room: &str, id: &str) -> R<()> {
+    /// Deletes up to `PURGE_PAGES_PER_PASS` listings of one file's keys, answering whether none are left.
+    async fn purge_one(&self, room: &str, id: &str) -> R<bool> {
         if !crate::valid_id(id) {
-            return Ok(());
+            return Ok(true);
         }
         let bucket = self.env.bucket(crate::objects::BUCKET)?;
         let prefix = format!("{}{id}/", room_prefix(room));
-        let mut cursor: Option<String> = None;
         let mut deleted = 0usize;
-        loop {
-            let mut listing = bucket.list().prefix(prefix.clone()).limit(SWEEP_PAGE_KEYS);
-            if let Some(after) = &cursor {
-                listing = listing.cursor(after.clone());
+        let mut done = false;
+        // Each listing starts from the beginning, since what the last one found is gone.
+        for _ in 0..PURGE_PAGES_PER_PASS {
+            let page = bucket
+                .list()
+                .prefix(prefix.clone())
+                .limit(SWEEP_PAGE_KEYS)
+                .execute()
+                .await?;
+            // The prefix holds only this file, so everything here is its bytes, and the rule agrees.
+            let keys: Vec<String> = page
+                .objects()
+                .iter()
+                .map(|object| object.key())
+                .filter(|key| {
+                    delete_stored_bytes(room, key, KeyHolder::File(ObjectState::Removed), 0, 0)
+                })
+                .collect();
+            if !keys.is_empty() {
+                deleted += keys.len();
+                bucket.delete_multiple(keys).await?;
             }
-            let page = listing.execute().await?;
-            for object in page.objects() {
-                let key = object.key();
-                // The prefix holds only this file, so everything here is its bytes, and the rule agrees.
-                if delete_stored_bytes(room, &key, KeyHolder::File(ObjectState::Removed), 0, 0) {
-                    bucket.delete(&key).await?;
-                    deleted += 1;
-                }
-            }
-            cursor = page.cursor().filter(|_| page.truncated());
-            if cursor.is_none() {
+            if !page.truncated() {
+                done = true;
                 break;
             }
         }
         console_log!(
             "{}",
-            json!({ "at": "storage.purged", "room": room, "object": id, "deleted": deleted })
+            json!({ "at": "storage.purged", "room": room, "object": id, "deleted": deleted, "done": done })
         );
-        Ok(())
+        Ok(done)
     }
 
     /// Lists the room's keys in storage and deletes what `delete_stored_bytes` says to.
@@ -341,8 +387,14 @@ impl Workspace {
         if sweep["due_at"].as_f64().is_none_or(|due| due as i64 > now) {
             return Ok(());
         }
-        // Taken now, so anything that makes the sweep due while this runs, such as a removal, gets a pass of its own.
-        exec(&sql, "UPDATE storage_sweep SET due_at = NULL", vec![])?;
+        // Taken now, a minute on rather than cleared, so a pass that dies midway still has one coming. Anything made due sooner while
+        // this runs stays, and anything later is either in the high-water mark or after this pass's own.
+        let provisional = now.saturating_add(SWEEP_RETRY_MS);
+        exec(
+            &sql,
+            "UPDATE storage_sweep SET due_at = ?",
+            vec![provisional.into()],
+        )?;
         let room = objects::room_id(&sql)?;
         let prefix = room_prefix(&room);
         let bucket = self.env.bucket(crate::objects::BUCKET)?;
@@ -385,16 +437,42 @@ impl Workspace {
         let now = Date::now().as_millis() as i64;
         let mut deleted = 0usize;
         let mut kept_until: Option<i64> = None;
+        let mut keep = |at: i64| kept_until = Some(kept_until.map_or(at, |k: i64| k.min(at)));
+        let mut doomed: Vec<String> = Vec::new();
         for (key, stored_at) in &found {
             let holder = holders.get(key).copied().unwrap_or(KeyHolder::Nobody);
             if delete_stored_bytes(&room, key, holder, *stored_at, now) {
-                bucket.delete(key).await?;
-                deleted += 1;
+                doomed.push(key.clone());
             } else if holder == KeyHolder::Nobody {
-                let ready = stored_at.saturating_add(UNREFERENCED_BYTES_GRACE_MS);
-                kept_until = Some(kept_until.map_or(ready, |k| k.min(ready)));
+                keep(stored_at.saturating_add(UNREFERENCED_BYTES_GRACE_MS));
             }
         }
+        for batch in doomed.chunks(SWEEP_PAGE_KEYS as usize) {
+            if bucket.delete_multiple(batch.to_vec()).await.is_ok() {
+                deleted += batch.len();
+                continue;
+            }
+            // One key that won't delete mustn't stall the rest: each goes alone, and any that fails is tried again later.
+            for key in batch {
+                match bucket.delete(key.clone()).await {
+                    Ok(()) => deleted += 1,
+                    Err(_) => {
+                        let object = key.rsplit('/').nth(1).unwrap_or_default();
+                        console_error!(
+                            "{}",
+                            json!({ "at": "storage.delete_failed", "room": room, "object": object })
+                        );
+                        keep(now.saturating_add(SWEEP_RETRY_MS));
+                    }
+                }
+            }
+        }
+        // This pass's own claim goes, unless something made the sweep due sooner while it ran.
+        exec(
+            &sql,
+            "UPDATE storage_sweep SET due_at = NULL WHERE due_at = ?",
+            vec![provisional.into()],
+        )?;
         // What this pass kept is carried through the cycle, so a key on an early page still gets its turn after the last page.
         let carried = sweep["cycle_due_at"].as_f64().map(|d| d as i64);
         let cycle_due = [carried, kept_until].into_iter().flatten().min();
@@ -421,7 +499,7 @@ impl Workspace {
         }
         // An attempt that's begun may still leave bytes after this pass looked, so the sweep is never put off past when the newest
         // attempt has settled. A pass made early, by a removal, can't lose that.
-        if let Some(settles) = last_attempt_settles(&sql)?.filter(|at| *at > now) {
+        if let Some(settles) = settles_at(&sql)?.filter(|at| *at > now) {
             sweep_after(&sql, settles)?;
         }
         console_log!(

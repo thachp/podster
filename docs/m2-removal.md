@@ -23,7 +23,7 @@
 - **Who may remove,** in `crates/policy/src/files.rs`: `authorize_file_removal` allows the room's owner or a human admin.
   - An agent stored as an admin counts as a guest.
   - The uploader gets no say over their own file.
-  - Someone who can't see the file gets `Hidden`, so a file ID can't be probed.
+  - Someone who can't see the file gets `Hidden`, an owner or admin too, such as with another person's unsubmitted task file. So a file ID can't be probed, and removing can't reveal a hidden file's size or hash.
 
 "Who may remove" is in `crates/policy`, not `crates/core`, because the permission matrix lives there.
 
@@ -42,6 +42,7 @@ The same transaction marks the file for a purge, and the alarm right after it li
 - **Room size can't delay it:** it doesn't wait on the room-wide sweep, so even a room with thousands of keys gets its takedown at once.
 - **A failure is tried again a minute later.**
 - **A late attempt:** an attempt may still be writing when its file is removed, so the purge runs once more when the file's last attempt has settled, an hour after it began.
+- **Bounded work:** a purge is claimed a minute out before it lists, so a failure to record its result can't re-list storage every second. Each alarm lists at most two pages per file and deletes in batches.
 
 The answer is the file's record with `state: removed`.
 
@@ -72,7 +73,9 @@ The answer is the file's record with `state: removed`.
 
 If it keeps bytes that are too young, it runs again when the youngest one is an hour old. That's carried across the pages of a cycle, so a key on an early page isn't forgotten.
 
-After every pass, the next is due no later than an hour after the newest upload attempt began. A replaced attempt may still be writing, and a pass forced early can't lose that. A room with nothing new never lists storage.
+After every pass, the next is due no later than the room's high-water mark, `storage_sweep.settles_at`. It only ever rises, to an hour past each upload attempt's start and each unfinished upload's drop, and it starts an hour after the migration for attempts begun before it. It outlives the rows, so a row dropped while its attempt is still writing, or a pass forced early, can't lose the schedule.
+
+A pass sets its own due time a minute on as it starts, rather than clearing it, so a pass that dies midway still has one coming. A key whose delete fails is skipped and tried again a minute later, so it can't stall the rest. A room with nothing new never lists storage.
 
 A row whose state can't be read keeps its key's bytes. Nothing overdue wakes the room sooner than a second from now, so a step that keeps failing can't spin the alarm.
 
@@ -120,7 +123,7 @@ Removal deletes data, so this needs more than the usual diff review.
 - **Authority:**
   - Members, guests, Coordinators and agents stored as owner or admin are refused.
   - A hidden file answers like a missing one, and oversight never removes anything.
-  - An idempotent replay after the caller lost access is refused, because authority is checked before the stored answer.
+  - An idempotent replay after the caller lost access is refused. `command` checks only that the caller is still in the room before replaying, so removal goes through `command_checked`, which reruns the removal's own authorization, and its view of the file, before a stored answer is returned. Other commands keep the shared path unchanged.
 - **The sweep never deletes bytes a file refers to:**
   - Listing before reading state is the order that makes this hold. Requests can run in the room while it awaits R2, so test a `begin` and a `complete` landing during the listing.
   - No key under another room is ever deleted, including room IDs that are prefixes of each other.

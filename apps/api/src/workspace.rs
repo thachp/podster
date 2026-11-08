@@ -79,6 +79,7 @@ mod plan;
 mod planned;
 mod removal;
 mod roles;
+mod submission_files;
 
 /// The caller as this room knows them. `org` comes from stored state, not the request.
 struct Participant {
@@ -502,8 +503,20 @@ fn handle_task_command(
         } => Some((artifacts.clone(), note.clone())),
         _ => None,
     };
-    let decision = decide(&task, &caller.id, command, &Observed::default())
-        .map_err(|e| ApiError::from_core(&e))?;
+    // Files are checked against the room before `decide`, which counts them, and refuses to approve any without the check's proof.
+    let mut observed = Observed::default();
+    let files = match &command {
+        Command::Submit { artifacts, .. } => {
+            submission_files::prepare(sql, caller, &task, body, artifacts.len())?
+        }
+        _ => vec![],
+    };
+    observed.submission_files = files.len();
+    if let Command::Verify { submission_no, .. } = &command {
+        observed.approved_files = submission_files::approval(sql, &task, *submission_no)?;
+    }
+    let decision =
+        decide(&task, &caller.id, command, &observed).map_err(|e| ApiError::from_core(&e))?;
     save_task(sql, &decision.task, now)?;
     if let Some((artifacts, note)) = submission {
         exec(sql, "INSERT INTO submission (task_id, submission_no, task_version, note, commit_sha, submitted_by, submitted_org, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", vec![
@@ -516,6 +529,11 @@ fn handle_task_command(
                 artifact.uri.into(), artifact.label.into(), caller.id.as_str().into(), who.org.as_str().into(), now.into(),
             ])?;
         }
+        submission_files::record(sql, who, task_id, decision.task.submission_no, files, now)?;
+    }
+    // Nothing can be uploaded for a task that isn't accepted, so its unfinished uploads end now and give their space back.
+    if task.status == TaskStatus::Accepted && decision.task.status != TaskStatus::Accepted {
+        objects::drop_uploads_for_task(sql, &caller.id, kind_name(caller), task_id, now)?;
     }
     record_decision(sql, &decision, task.status, &caller.id, now)?;
     Ok(task_json(&decision.task))
@@ -2357,7 +2375,8 @@ mod queries {
         })
     }
 
-    pub fn get_task(sql: &SqlStorage, who: &Participant, id: &str) -> R<Value> {
+    /// `oversight` narrows what it shows of files to name and status, for an organization's admin reading as their agent.
+    pub fn get_task(sql: &SqlStorage, who: &Participant, id: &str, oversight: bool) -> R<Value> {
         let task = load_task(sql, id)?.ok_or_else(ApiError::task_not_found)?;
         ApiError::from_verdict(authorize_task(&who.caller, &task, TaskAction::Read))?;
         let view = task_view(&who.caller, &task);
@@ -2408,8 +2427,9 @@ mod queries {
             .iter()
             .map(|r| marked(r, "actor_id", "actor_org"))
             .collect();
+        let files = super::submission_files::for_task(sql, who, &task, oversight)?;
         Ok(json!({
-            "task": task_json(&task), "submissions": submissions, "artifacts": artifacts, "messages": messages, "history": history,
+            "task": task_json(&task), "submissions": submissions, "artifacts": artifacts, "files": files, "messages": messages, "history": history,
             // Says what's limited, so empty lists and null reasons aren't read as "none exist".
             "visible": { "submissions": if view.artifacts == ArtifactView::All { "all" } else { "own" }, "conversation": view.conversation },
         }))
@@ -2538,6 +2558,30 @@ impl Workspace {
         test_fail: bool,
         handler: impl FnOnce(&SqlStorage, &Participant, i64) -> R<Value> + 'static,
     ) -> R<Value> {
+        self.command_checked(
+            identity,
+            key,
+            hash,
+            stops_when_archived,
+            test_fail,
+            |_, _| Ok(()),
+            handler,
+        )
+    }
+
+    /// The same, with `recheck` run before a stored answer is replayed, for a command whose own authority goes past being in the
+    /// room. A stored answer then can't reach someone who has since lost it. Only removal uses it so far.
+    #[allow(clippy::too_many_arguments)]
+    fn command_checked(
+        &self,
+        identity: &Identity,
+        key: Option<String>,
+        hash: String,
+        stops_when_archived: bool,
+        test_fail: bool,
+        recheck: impl FnOnce(&SqlStorage, &Participant) -> R<()> + 'static,
+        handler: impl FnOnce(&SqlStorage, &Participant, i64) -> R<Value> + 'static,
+    ) -> R<Value> {
         let key = key
             .filter(|k| !k.is_empty() && k.len() <= MAX_KEY_BYTES)
             .ok_or_else(ApiError::idempotency_required)?;
@@ -2548,6 +2592,7 @@ impl Workspace {
         transaction_sync(&self.state, move || {
             // Authority first, so a revoked caller can't replay a stored response.
             let who = resolve_caller(&sql, &identity)?;
+            recheck(&sql, &who)?;
             let now = now_ms();
             if let Some(answer) = stored_answer(&sql, &identity.id, &key, &hash, now)? {
                 *slot.borrow_mut() = Some(answer);
@@ -3532,7 +3577,7 @@ impl Workspace {
                 };
                 return match rest {
                     [] => queries::list_tasks(&sql, &view.caller, &url),
-                    [task] => queries::get_task(&sql, &view, task),
+                    [task] => queries::get_task(&sql, &view, task, true),
                     [task, "messages"] => queries::list_messages(&sql, &view, task, &url),
                     _ => Err(ApiError::not_found()),
                 };
@@ -3586,7 +3631,7 @@ impl Workspace {
                 ["brief"] => queries::get_brief(&sql, &who),
                 ["activity"] => queries::list_activity(&sql, &who, &url),
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
-                ["tasks", id] => queries::get_task(&sql, &who, id),
+                ["tasks", id] => queries::get_task(&sql, &who, id, false),
                 ["tasks", id, "messages"] => queries::list_messages(&sql, &who, id, &url),
                 ["events"] => queries::list_events(&sql, &who.caller, &url),
                 ["audit"] => queries::list_audit(&sql, &who.caller, &url),
@@ -3726,14 +3771,18 @@ impl Workspace {
                     move |sql, who, now| objects::handle_create(sql, &who.caller, &raw, &body, now),
                 )
             }
-            (Method::Post, ["files", _, "remove"]) => self.command(
-                &identity,
-                key,
-                hash,
-                stops_when_archived,
-                test_fail,
-                move |sql, who, now| removal::handle_remove(sql, &who.caller, &target, now),
-            ),
+            (Method::Post, ["files", _, "remove"]) => {
+                let checked = target.clone();
+                self.command_checked(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who| removal::authorize_removal(sql, &who.caller, &checked),
+                    move |sql, who, now| removal::handle_remove(sql, &who.caller, &target, now),
+                )
+            }
             (Method::Put, ["plan", "start"]) => self.command(
                 &identity,
                 key,

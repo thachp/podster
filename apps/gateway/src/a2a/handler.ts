@@ -1,20 +1,47 @@
 import { AgentCard } from "@a2a-js/sdk";
 import type { A2ARequestHandler } from "@a2a-js/sdk/server";
-import { ExtendedAgentCardNotConfiguredError, PushNotificationNotSupportedError, UnsupportedOperationError } from "@a2a-js/sdk/errors";
+import type { CancelTaskRequest, GetTaskRequest, ListTasksRequest, SendMessageRequest } from "@a2a-js/sdk";
+import { A2AError, ExtendedAgentCardNotConfiguredError, PushNotificationNotSupportedError, TaskNotCancelableError, UnsupportedOperationError } from "@a2a-js/sdk/errors";
 import { agentCard } from "./card";
+import { sendMessage } from "./messages";
+import { listTasks, readTask, UpstreamError, type ApiReads, type ReadNotes } from "./reads";
 
 /**
  * Podster's own `A2ARequestHandler`, as ADR 0007 decides: the SDK's transport, not its `DefaultRequestHandler`, which
- * would run an executor and keep its own task store. Each operation will become one Podster read or command through the
- * API, so Rust decides. Until steps 7 to 10, nothing does: every operation answers its named error, and none reads a
- * parameter, so a refusal can't depend on whether a task exists.
+ * would run an executor and keep its own task store. Each operation is one Podster read or command through the API, as
+ * the calling agent, so Rust decides. Step 8 turned on the reads and cancel's answer, and step 9 messages on a task's
+ * thread. The lifecycle follows in step 10.
  */
-const notYet = (operation: string) => new UnsupportedOperationError(`${operation} isn't available yet. Podster's A2A support is in preview.`);
+export type A2ACaller = { agentId: string; api: ApiReads; notes?: ReadNotes };
+
+/**
+ * Only the SDK's named errors reach a client as themselves. Anything else, an API that couldn't answer or a fault here,
+ * reaches it as a fixed "Internal error", and the log gets IDs and a status, never a message or a body.
+ */
+async function guarded<T>(operation: string, agentId: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (error instanceof A2AError) throw error;
+    console.error(JSON.stringify({ event: "a2a.internal_error", operation, agent: agentId, status: error instanceof UpstreamError ? error.status : null }));
+    throw new Error("Internal error");
+  }
+}
+
 const noPush = () => new PushNotificationNotSupportedError("Push notifications aren't supported.");
 const noStreaming = () => new UnsupportedOperationError("Streaming isn't supported.");
 
 export class PodsterA2AHandler implements A2ARequestHandler {
-  constructor(private readonly baseUrl: string) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly caller?: A2ACaller,
+  ) {}
+
+  /** Every read needs the caller the gateway authenticated. The route never builds a handler for reads without one. */
+  private who(): A2ACaller {
+    if (!this.caller) throw new UnsupportedOperationError("Sign in to use Podster's A2A interface.");
+    return this.caller;
+  }
 
   async getAgentCard() {
     return AgentCard.fromJSON(agentCard(this.baseUrl));
@@ -24,20 +51,30 @@ export class PodsterA2AHandler implements A2ARequestHandler {
     throw new ExtendedAgentCardNotConfiguredError("Podster has no extended card.");
   }
 
-  async sendMessage(): Promise<never> {
-    throw notYet("SendMessage");
+  async sendMessage(params: SendMessageRequest) {
+    const { agentId, api } = this.who();
+    return guarded("SendMessage", agentId, () => sendMessage(api, agentId, params));
   }
 
-  async getTask(): Promise<never> {
-    throw notYet("GetTask");
+  async getTask(params: GetTaskRequest) {
+    const { agentId, api } = this.who();
+    return guarded("GetTask", agentId, () => readTask(api, agentId, params.id, params.historyLength));
   }
 
-  async listTasks(): Promise<never> {
-    throw notYet("ListTasks");
+  async listTasks(params: ListTasksRequest) {
+    const { agentId, api, notes } = this.who();
+    return guarded("ListTasks", agentId, () => listTasks(api, agentId, params, notes));
   }
 
-  async cancelTask(): Promise<never> {
-    throw notYet("CancelTask");
+  /**
+   * Cancelling belongs to the requester or an admin, through Podster's own commands (ADR 0007), so over A2A it never
+   * cancels. A task the caller can see answers `TaskNotCancelableError`, and one it can't the same `TaskNotFoundError` as
+   * a missing one, so the answer tells nothing more than `GetTask` would.
+   */
+  async cancelTask(params: CancelTaskRequest): Promise<never> {
+    const { agentId, api } = this.who();
+    await guarded("CancelTask", agentId, () => readTask(api, agentId, params.id, 0));
+    throw new TaskNotCancelableError("Tasks are canceled by their requester or an admin in Podster, not over A2A.");
   }
 
   // Never reached: the route refuses streaming methods before the handler, so no response is held open. Kept as a second fence.

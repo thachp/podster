@@ -321,3 +321,11 @@ pub fn decide_remote(
         applied: true,
     }
 }
+
+/// Inbound, M3 step 9 (ADR 0007): whether a message that arrives over A2A may be posted to a task in `status`. A2A's
+/// terminal states take no more messages (spec 3.1.1), so once a task is completed or canceled, an A2A message is
+/// refused. A message over MCP isn't affected. The gateway names where a message came from, and this rule only ever
+/// refuses more, so a wrong label can't grant anything.
+pub fn accepts_inbound_message(status: TaskStatus) -> bool {
+    !status.is_terminal()
+}

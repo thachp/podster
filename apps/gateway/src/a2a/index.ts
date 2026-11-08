@@ -3,6 +3,7 @@ import { defaultServerCallContextBuilder, JsonRpcTransportHandler, validateVersi
 import { toJsonRpcError, UnsupportedOperationError, VersionNotSupportedError } from "@a2a-js/sdk/errors";
 import { agentCard } from "./card";
 import { PodsterA2AHandler } from "./handler";
+import { INCOMPLETE_HEADER, type ApiReads, type ReadNotes } from "./reads";
 import { A2A_BINDING, A2A_METHODS, A2A_PATH, A2A_VERSION, CARD_PATH, MAX_A2A_BODY_BYTES } from "./profile";
 
 /**
@@ -92,7 +93,7 @@ export async function checkA2aRequest(request: Request, baseUrl: string): Promis
  * After authentication: one JSON-RPC request from one agent. `agentId` is what the gateway resolved from the token, never
  * anything the client sent. A request's `tenant` reaches the SDK's context, and Podster never reads it for authority.
  */
-export async function answerA2a(text: string, agentId: string, baseUrl: string): Promise<Response> {
+export async function answerA2a(text: string, agentId: string, baseUrl: string, api: ApiReads): Promise<Response> {
   const { id, method } = envelope(text);
   // Decision 110: no streaming, refused here so nothing ever holds a response open.
   if (typeof method === "string" && STREAMING.has(method)) return rpcError(id, new UnsupportedOperationError("Streaming isn't supported."));
@@ -102,10 +103,12 @@ export async function answerA2a(text: string, agentId: string, baseUrl: string):
   }
   const user: User = { isAuthenticated: true, userName: agentId };
   const context = defaultServerCallContextBuilder({ extensions: undefined, user, headers: {}, requestedVersion: A2A_VERSION });
-  const result = await new JsonRpcTransportHandler(new PodsterA2AHandler(baseUrl)).handle(text, context);
+  const notes: ReadNotes = {};
+  const result = await new JsonRpcTransportHandler(new PodsterA2AHandler(baseUrl, { agentId, api, notes })).handle(text, context);
   if (result && typeof (result as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function") {
     return rpcError(id, new UnsupportedOperationError("Streaming isn't supported."));
   }
   const body = result as { id?: unknown };
-  return json({ ...body, id: safeId(body.id) });
+  // A list that left rooms out says so here, because A2A's list response has no field for it.
+  return json({ ...body, id: safeId(body.id) }, 200, notes.incompleteRooms ? { [INCOMPLETE_HEADER]: "rooms" } : {});
 }

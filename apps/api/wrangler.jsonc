@@ -17,7 +17,8 @@
   // The real database ID is set when staging is created. Only the listing read model lives here.
   "d1_databases": [{ "binding": "DB", "database_name": "podster-api", "database_id": "local-only", "migrations_dir": "migrations" }]
   // ASSERTION_KEYS is a secret: a JSON object of kid to base64url Ed25519 public key. SCANNER_SECRET is the same value as the scanner
-  // Worker's, and without it no verdict is accepted.
+  // Worker's, and without it no verdict is accepted. A2A_TOKEN_KEY is 64 hex characters that seal agents' A2A endpoint tokens; the
+  // owner sets it (decision 122, docs/staging.md), and without it endpoints can be set but tokens can't.
   // Private, with no public access or S3 keys. Every byte goes through the API.
   ,"r2_buckets": [{ "binding": "ASSETS", "bucket_name": "podster-assets" }]
   ,"queues": {

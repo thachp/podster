@@ -15,6 +15,7 @@ import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TE
 import { handleAgentDownload, isFilePath, serveFile } from "./downloads";
 import { handleUpload } from "./uploads";
 import { answerA2a, checkA2aRequest, handleA2aCard, isA2aPath } from "./a2a";
+import type { ApiReads } from "./a2a/reads";
 import { buildOAuth, resourceKind, routeOAuth } from "./oauth";
 
 export interface Env {
@@ -1153,6 +1154,20 @@ const appHandler = {
     const connection = url.pathname.match(/^\/api\/agents\/([\w-]+)\/(disconnect|reconnect)$/);
     if (connection && request.method === "POST") return handleConnection(env, identity, connection[1], connection[2] as "disconnect" | "reconnect");
     if (url.pathname === "/api/agents" && request.method === "GET") return listAgents(env, (await memberships(env, person)).orgs);
+    // An agent's A2A endpoint, for its organization's admins (decision 119). The API checks who may, and never returns the
+    // token or, outside a set, the signing secret.
+    const endpoint = url.pathname.match(/^\/api\/agents\/([\w-]+)\/a2a-endpoint$/);
+    if (endpoint && ["GET", "PUT", "DELETE"].includes(request.method)) {
+      let body: string | undefined;
+      if (request.method === "PUT") {
+        // Counted in bytes as they arrive, so an oversized body is refused before it's all read.
+        const bytes = await boundedBody(request, 8192);
+        if (!bytes) return denied("invalid_argument", 400);
+        body = new TextDecoder().decode(bytes);
+      }
+      const response = await callApi(env, identity, { method: request.method, path: `/v1/agents/${endpoint[1]}/a2a-endpoint`, body });
+      return json(await response.json(), response.status);
+    }
     const agent = url.pathname.match(/^\/api\/agents\/([\w-]+)$/);
     if (agent && request.method === "GET") {
       const response = await callApi(env, identity, { method: "GET", path: `/v1/agents/${agent[1]}` });
@@ -1212,6 +1227,23 @@ const mcpHandler = {
   },
 };
 
+/** The API reads A2A needs, through the same capabilities MCP calls, as the agent the token resolved to. */
+function a2aReads(env: Env, identity: Identity): ApiReads {
+  const run = (name: string, args: Record<string, unknown>) => runCapability(env, identity, CAPABILITIES.find((c) => c.name === name)!, args);
+  return {
+    getTask: (workspaceId, taskId) => run("get_task", { workspace_id: workspaceId, task_id: taskId }),
+    listTasks: (workspaceId, query) => run("list_tasks", { workspace_id: workspaceId, order: query.order, ...(query.cursor ? { cursor: query.cursor } : {}), ...(query.status ? { status: query.status } : {}) }),
+    listWorkspaces: () => run("list_workspaces", {}),
+    // `send_message`'s own call, with `via` added, which no capability field can set: it tells the room the message
+    // came over A2A, so a finished task refuses it (ADR 0007). It can only refuse more.
+    sendMessage: async (workspaceId, taskId, body, idempotencyKey) => {
+      const call = toApiCall(CAPABILITIES.find((c) => c.name === "send_message")!, { workspace_id: workspaceId, task_id: taskId, body, idempotency_key: idempotencyKey });
+      const response = await callApi(env, identity, { ...call, body: JSON.stringify({ body, via: "a2a" }) });
+      return { status: response.status, body: await response.json().catch(() => null) };
+    },
+  };
+}
+
 /**
  * `/a2a`, after the resource server has checked the token's audience. The checks before authentication already ran, and
  * the body is the one they read. The agent's limit is MCP's bucket, so the two protocols share one allowance (decision 123).
@@ -1223,7 +1255,7 @@ const a2aHandler = {
     if (!(await withinLimit(env.RL_ACCOUNT, `mcp:${externalId}`))) return rateLimited();
     try {
       const identity = await resolveAgent(env, "mcp_oauth", externalId);
-      return await answerA2a(await request.text(), identity.id, env.BASE_URL);
+      return await answerA2a(await request.text(), identity.id, env.BASE_URL, a2aReads(env, identity));
     } catch (error) {
       if (error instanceof AgentRefused) return denied(error.message, 403);
       throw error;

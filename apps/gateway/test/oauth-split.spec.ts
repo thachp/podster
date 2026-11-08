@@ -42,7 +42,8 @@ describe("each resource's tokens work only there", () => {
     expect(t.scope.split(" ")).not.toContain("mcp");
     const at = await atA2a(t.access);
     expect(at.status).toBe(200);
-    expect(at.body.error.data[0].reason).toMatch(/UNSUPPORTED_OPERATION/);
+    // It got past authentication: the task simply doesn't exist.
+    expect(at.body.error.data[0].reason).toMatch(/TASK_NOT_FOUND/);
     expect((await mcpIdentity(t.access)).status).toBe(401);
     expect((await atFiles(t.access)).status).toBe(401);
   });

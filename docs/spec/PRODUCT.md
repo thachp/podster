@@ -607,7 +607,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 100 | Who attaches an input asset to a task | **Decided:** an owner, admin, member or Coordinator, onto any task they can see, and only a file they can see as well. A hidden file or task answers as if it doesn't exist. Removing an attachment follows the same rule | M2 |
 | 101 | Which files can be attached | **Decided:** files that are scanning or ready. Files still uploading, blocked or failed are refused. Only ready files download, as before | M2 |
 | 102 | Attaching to a finished task | **Decided:** refused for a completed or canceled task. Removing an attachment always works, except in an archived room | M2 |
-| 103 | What an attachment shows the assignee | **Decided:** the task's assignee can read an attached file only while it's attached. Removing it ends that on their next read, and oversight follows the same rule | M2 |
+| 103 | What an attachment shows the assignee | **Decided:** the task's assignee can read an attached file only while it's attached. Removing it ends that on their next read, and oversight follows the same rule Clarified on 2026-11-08: "assignee" here means the task's parties as in decision 53, which are its requester, assignee and named reviewer. Nobody outside the task gains anything | M2 |
 | 104 | Notice of an attachment | **Decided:** the assignee's inbox gets an attach or remove notice with IDs only. It wakes nobody and doesn't change the task | M2 |
 | 105 | Files attached to one task | **Decided:** at most 50 | M2 |
 | 106 | Listing input assets | **Decided:** people and agents can list the input assets they can see, each with the tasks it's attached to, limited to tasks they can see | M2 |
@@ -648,6 +648,12 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 141 | Compatibility kit checks that don't fit | **Decided:** each is listed as an exception in `docs/spec/A2A-PROFILE.md` with its reason, as decision 125 allows. There's no test-only room for the kit | M3 |
 | 142 | Running the compatibility kit | **Decided:** the owner won't run it by hand, and the session permission check refuses running it, so it hasn't run. The plan and profile say so, and no support is claimed until it has run some other way. It's owed before M3's gate | M3 |
 | 143 | Which second implementation counts | **Decided:** independence is judged by direction, as decision 124 allows. Outbound runs against LangGraph's A2A 1.0 server, with fasta2a's server as backup. Inbound uses the A2A project's own JavaScript and Python clients and the compatibility kit's own `httpx` client, and the profile says plainly that inbound was tested only against the A2A project's own code. Revisited before public rooms | M3 |
+| 144 | Removing a file hidden from the caller | **Decided:** a file the caller can't see answers `file_not_found`, even to a human owner or admin trying to remove it. Hidden equals missing for removal too, and the caller's view is checked before the admin check. Unsubmitted task files are still cleared under decision 98 | M2 |
+
+## File removal ruling and a wording fix, November 8, 2026
+
+- On decision 144 the owner said "up to u", and the lead took the recommendation.
+- Decision 103 said "the task's assignee". The code ([#142](https://github.com/thachp/podster/pull/142)) and decision 53 let the task's parties read a linked input asset: its requester, assignee and named reviewer. The row now says so. This only clarifies the wording, and nobody outside the task gains anything.
 
 ## Expected output, compatibility kit and A2A implementation decisions, November 8, 2026
 

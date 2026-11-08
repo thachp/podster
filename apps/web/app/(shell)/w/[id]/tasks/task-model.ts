@@ -136,7 +136,7 @@ const isAdmin = (role: string | undefined) => role === "owner" || role === "admi
  * the server decides each request again.
  */
 export function viewerActions(task: Task, me: string, role: string | undefined, archived = false) {
-  if (archived) return { review: false, submit: false, cancel: false, assign: false, edit: false, setReviewer: false, setRequester: false };
+  if (archived) return { review: false, respond: false, submit: false, cancel: false, assign: false, edit: false, setReviewer: false, setRequester: false };
   const admin = isAdmin(role);
   const manages = task.requester === me || admin;
   const live = !isTerminal(task.status);
@@ -144,6 +144,8 @@ export function viewerActions(task: Task, me: string, role: string | undefined, 
     review: task.status === "submitted" && task.reviewer === me && task.assignee !== me,
     // The assignee hands in work, whoever they are. The server decides again.
     submit: task.status === "accepted" && task.assignee === me,
+    // Accept or decline an offer, which only the one it's offered to can do.
+    respond: task.status === "offered" && task.assignee === me,
     cancel: manages && live,
     assign: manages && (task.status === "open" || task.status === "offered"),
     edit: manages && live && task.status !== "submitted",

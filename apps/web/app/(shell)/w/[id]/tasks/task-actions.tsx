@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { clientCommand } from "@/lib/gateway/client";
 import { FIELD_CLASS } from "./task-bits";
+import { RespondToOffer } from "./task-acceptance";
 import { SubmitWork } from "./task-files";
 import { approvalBlocker, definiteRefusal, verifyProblem } from "./task-files-model";
 import { asConflict, changedSince, changeProblem, draftOf, flagged, isArchivedRoom, LIMITS, newRequesterChoices, newReviewerChoices, ownWords, rebaseDraft, reoffers, taskPatch, textNameOf, tooLong, viewerActions, type Names, type Task, type TaskDraft } from "./task-model";
@@ -59,7 +60,7 @@ export function TaskActions({ api, me, names, role, onNotice, savedEdit, returnF
       </section>
     );
   }
-  if (!can.review && !can.submit && !can.cancel && !can.assign && !can.edit && !can.setReviewer && !can.setRequester) {
+  if (!can.review && !can.submit && !can.respond && !can.cancel && !can.assign && !can.edit && !can.setReviewer && !can.setRequester) {
     return (
       <>
         {savedEdit.current ? <UnsavableEdit savedEdit={savedEdit} /> : null}
@@ -70,7 +71,7 @@ export function TaskActions({ api, me, names, role, onNotice, savedEdit, returnF
   return (
     <section aria-label="Actions" className="space-y-3 border-t pt-4">
       {savedEdit.current && !can.edit ? <UnsavableEdit savedEdit={savedEdit} /> : null}
-      {can.submit ? <SubmitWork api={api} onNotice={onNotice} taskPath={taskPath} /> : can.review ? <ReviewActions api={api} onNotice={onNotice} /> : <Waiting api={api} me={me} names={names} />}
+      {can.respond ? <RespondToOffer api={api} onNotice={onNotice} taskPath={taskPath} /> : can.submit ? <SubmitWork api={api} onNotice={onNotice} taskPath={taskPath} /> : can.review ? <ReviewActions api={api} onNotice={onNotice} /> : <Waiting api={api} me={me} names={names} />}
       {can.assign ? <OfferTask api={api} me={me} names={names} role={role} onNotice={onNotice} /> : null}
       {can.edit ? (
         <Button

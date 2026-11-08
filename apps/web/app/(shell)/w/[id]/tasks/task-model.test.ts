@@ -43,6 +43,12 @@ describe("viewerActions", () => {
     expect(viewerActions(task({ status: "submitted", assignee: "per_a" }), "per_a", "member").submit).toBe(false);
     expect(viewerActions(task({ status: "accepted", assignee: "per_a" }), "per_a", "member", true).submit).toBe(false);
   });
+  it("offers accepting or declining only to the one an offered task names", () => {
+    expect(viewerActions(task({ status: "offered", assignee: "per_a" }), "per_a", "guest").respond).toBe(true);
+    expect(viewerActions(task({ status: "offered", assignee: "per_a" }), "per_r", "owner").respond).toBe(false);
+    expect(viewerActions(task({ status: "accepted", assignee: "per_a" }), "per_a", "member").respond).toBe(false);
+    expect(viewerActions(task({ status: "offered", assignee: "per_a" }), "per_a", "member", true).respond).toBe(false);
+  });
   it("offers assignment only while the task is open or offered", () => {
     expect(viewerActions(task({ status: "open" }), "per_r", "member").assign).toBe(true);
     expect(viewerActions(task({ status: "offered" }), "per_r", "member").assign).toBe(true);

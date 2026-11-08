@@ -437,21 +437,24 @@ describe("removal by the rules (decisions 94 and 98)", () => {
   it("clears a file uploaded for a task but never submitted, a day after the task left Accepted", async () => {
     const id = await room();
     const now = Date.now();
-    const made = async (left: number | null) => {
+    const made = async (left: number | null, named = false) => {
       const t = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Work", instructions: "Do it", assignee: MEMBER.id });
       expect(t.status, JSON.stringify(t.body)).toBe(200);
-      const object = await file(id);
-      await inRoom(id, (sql) => {
-        sql.exec("UPDATE task SET left_accepted_at = ? WHERE id = ?", left, t.body.id);
-        sql.exec("UPDATE stored_object SET for_task = ?, uploaded_by = ? WHERE id = ?", t.body.id, MEMBER.id, object);
-      });
-      return { task: t.body.id as string, object };
+      return { task: t.body.id as string, object: await file(id), left, named };
     };
     const stale = await made(now - DAY_MS - 1000);
     const fresh = await made(now - DAY_MS + 60_000);
     const stillAccepted = await made(null);
-    const submitted = await made(now - 10 * DAY_MS);
-    await inRoom(id, (sql) => sql.exec("INSERT INTO submission_file (task_id, submission_no, object_id, sha256, size, label, submitted_by, submitted_org, created_at) VALUES (?, 1, ?, ?, 1, 'x', ?, ?, 0)", submitted.task, submitted.object, "0".repeat(64), MEMBER.id, MEMBER.org));
+    const submitted = await made(now - 10 * DAY_MS, true);
+    // Every task's clock, every file's task and the submission go in one step, as a submission writes its files with it. A room
+    // alarm can fire between steps, and would rightly clear a file that's overdue and not yet named.
+    await inRoom(id, (sql) => {
+      for (const { task, object, left, named } of [stale, fresh, stillAccepted, submitted]) {
+        sql.exec("UPDATE task SET left_accepted_at = ? WHERE id = ?", left, task);
+        sql.exec("UPDATE stored_object SET for_task = ?, uploaded_by = ? WHERE id = ?", task, MEMBER.id, object);
+        if (named) sql.exec("INSERT INTO submission_file (task_id, submission_no, object_id, sha256, size, label, submitted_by, submitted_org, created_at) VALUES (?, 1, ?, ?, 1, 'x', ?, ?, 0)", task, object, "0".repeat(64), MEMBER.id, MEMBER.org);
+      }
+    });
     await alarm(id);
     expect(await row(id, stale.object)).toMatchObject({ state: "removed", removed_by: "podster", removed_by_kind: "system", removed_from: "ready" });
     for (const kept of [fresh, stillAccepted, submitted]) expect((await row(id, kept.object)).state).toBe("ready");
@@ -544,8 +547,9 @@ describe("removal by the rules, review fixes", () => {
   it("gives a scan noticed late its full 7 days: it fails with the time it was noticed, and isn't removed in the same alarm", async () => {
     const id = await room();
     const late = await file(id, "scanning");
-    await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET scanning_since = ?, scanned_at = NULL WHERE id = ?", Date.now() - 8 * DAY_MS, late));
+    // Taken before the scan is made overdue, since a room alarm already pending may notice it before the one run here.
     const before = Date.now();
+    await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET scanning_since = ?, scanned_at = NULL WHERE id = ?", Date.now() - 8 * DAY_MS, late));
     await alarm(id);
     const after: any = await row(id, late);
     expect(after.state).toBe("failed");

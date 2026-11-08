@@ -124,6 +124,29 @@ describe("a room whose migration fails", () => {
     expect(await member(id, AGENT)).toMatchObject({ revocation_reason: "global_disconnect" });
   });
 
+  it("refuses past its cap rather than drop a revocation, and the sender's retry applies once the room migrates", async () => {
+    const id = await room();
+    await breakMigration(id);
+    expect((await revoke(id, 1)).status).toBe(200);
+    // Fill the rest of the cap with fences for agents who aren't in the room.
+    await inRoom(id, (sql) => {
+      for (let i = 1; i < 1_000; i++) sql.exec("INSERT INTO held_access (kind, body_json, held_at) VALUES ('fence', ?, 0)", JSON.stringify({ principal: `agt_fill_${i}`, floor: 1 }));
+    });
+    // At the cap a revocation and a departure are refused, not acknowledged, so their senders keep retrying.
+    expect((await revoke(id, 99)).status).toBe(500);
+    expect((await depart(id)).status).toBe(500);
+    expect((await held(id)).length).toBe(1_000);
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(500);
+    // Fixed: everything held replays, nothing was dropped, and the retried revocation and departure now apply.
+    await fixMigration(id);
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
+    expect(await held(id)).toEqual([]);
+    expect((await revoke(id, 99)).status).toBe(200);
+    expect((await depart(id)).status).toBe(200);
+    expect(await member(id, AGENT)).toMatchObject({ revocation_reason: "global_disconnect" });
+    expect(await member(id, LEAVER)).toMatchObject({ revocation_reason: "org_departure" });
+  }, 60_000);
+
   it("applies a disconnect and a departure at once in a room that migrates fine, holding nothing", async () => {
     const id = await room();
     expect((await revoke(id, 99)).status).toBe(200);

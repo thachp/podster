@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS held_access (seq INTEGER PRIMARY KEY AUTOINCREMENT, k
 CREATE TABLE IF NOT EXISTS migration_failure (id INTEGER PRIMARY KEY CHECK (id = 1), failures INTEGER NOT NULL, last_failed_at INTEGER NOT NULL);
 ";
 /// More than any real backlog: each fence or departure is held once, because the sender stops once it's answered. Past this the
-/// room answers an error, so the sender keeps retrying and nothing is lost.
+/// room refuses with an error and drops nothing, so the sender keeps retrying, and the room stays failing closed.
 const MAX_HELD: i64 = 1_000;
 
 pub(super) const HELD_FENCE: &str = "fence";
@@ -99,6 +99,11 @@ impl Workspace {
             exec(&sql, HELD_SCHEMA, vec![])?;
             let count = rows(&sql, "SELECT count(*) AS n FROM held_access", vec![])?;
             if count.first().map_or(0, |row| int(&row["n"])) >= MAX_HELD {
+                // Refused, never dropped: the sender sees no acknowledgment and keeps retrying, and the room stays closed.
+                console_error!(
+                    "{}",
+                    json!({ "at": "room.held_access_full", "kind": kind, "held": MAX_HELD })
+                );
                 return Err(ApiError::internal("too many held access changes"));
             }
             exec(

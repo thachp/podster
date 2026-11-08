@@ -228,7 +228,7 @@ describe("submitting files", () => {
     await user.upload(screen.getByLabelText("Files (optional)"), pick());
     await waitFor(() => expect(uploads).toHaveLength(1));
     expect(uploads[0]).toMatchObject({ workspace: "ws_1", taskId: "tsk_1" });
-    const rows = screen.getByRole("list", { name: "Files for this submission" });
+    const rows = screen.getByRole("list", { name: "Your files for this task" });
     expect(within(rows).getByText("report.pdf", { selector: "p" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled();
 
@@ -253,20 +253,77 @@ describe("submitting files", () => {
     expect(await screen.findByText("Submitted submission 1 with 1 file. It's waiting for review.")).toBeInTheDocument();
   });
 
-  it("holds back a submission with a blocked file until it's removed", async () => {
+  const held = (over: Partial<TaskFile> = {}): TaskFile => ({ id: "obj_h", submitted: false, submission_no: null, label: null, name: "earlier.pdf", size: 1200, sha256: "c".repeat(64), media_type: "application/pdf", state: "ready", download_path: "/v1/files/ws_1/obj_h", ...over });
+  const assignedWith = (files: TaskFile[]) => () => json(200, detail({ status: "accepted", assignee: "per_me", reviewer: "per_r", submission_no: 0 }, { submissions: [], files }));
+
+  it("lists files already uploaded for the task after a reload, without making the Sheet a draft", async () => {
+    const user = userEvent.setup();
+    answer = assignedWith([held(), held({ id: "obj_b", name: "bad.zip", state: "blocked", download_path: null })]);
+    await open();
+    const rows = screen.getByRole("list", { name: "Your files for this task" });
+    expect(within(rows).getByText("earlier.pdf", { selector: "p" })).toBeInTheDocument();
+    expect(within(rows).getByText("bad.zip", { selector: "p" })).toBeInTheDocument();
+    expect(within(rows).getByText(/doesn't count toward your 10 files/)).toBeInTheDocument();
+    // Neither is a submission, and only the form shows them while the task waits for work.
+    expect(screen.queryByRole("list", { name: "Not yet submitted" })).toBeNull();
+    expect(screen.queryByText("Unsaved changes")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove earlier.pdf" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Leave out earlier.pdf" }));
+    expect(screen.getByRole("button", { name: "Include earlier.pdf" })).toHaveFocus();
+    expect(within(rows).getByText(/still counts toward your 10 files/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "Include earlier.pdf" }));
+    answer = (url, method) => (method === "POST" ? json(200, task({ status: "submitted", assignee: "per_me", reviewer: "per_r", submission_no: 1, version: 6 })) : assignedWith([])());
+    await user.click(screen.getByRole("button", { name: "Submit with 1 file" }));
+    await waitFor(() => expect(commands()).toHaveLength(1));
+    expect(commands()[0].body).toMatchObject({ files: [{ id: "obj_h" }] });
+  });
+
+  it("counts files already held toward the 10", async () => {
+    const user = userEvent.setup();
+    answer = assignedWith(Array.from({ length: 9 }, (_, index) => held({ id: `obj_${index}`, name: `f${index}.pdf` })));
+    await open();
+    await user.upload(screen.getByLabelText("Files (optional)"), [pick("a.pdf"), pick("b.pdf")]);
+    await waitFor(() => expect(uploads).toHaveLength(1));
+    expect(screen.getByText(/only the first 1 were added/)).toBeInTheDocument();
+  });
+
+  it("shows the uploader's unsubmitted files apart from submissions once the task has moved on", async () => {
+    answer = () => json(200, detail({ status: "submitted", assignee: "per_me", reviewer: "per_r" }, { files: [file(), held()] }));
+    await open();
+    expect(within(screen.getByRole("list", { name: "Files" })).queryByText("earlier.pdf", { selector: "p" })).toBeNull();
+    expect(within(screen.getByRole("list", { name: "Not yet submitted" })).getByText("earlier.pdf", { selector: "p" })).toBeInTheDocument();
+    expect(screen.getAllByText(/^Submission \d/, { selector: "p" })).toHaveLength(1);
+  });
+
+  it("keeps a file its scan blocked out of the submission, so it holds nothing back", async () => {
     const user = userEvent.setup();
     answer = assigned;
     await open();
     await user.type(screen.getByLabelText("Note (optional)"), "Done");
     await user.upload(screen.getByLabelText("Files (optional)"), pick("bad.pdf"));
     await waitFor(() => expect(uploads).toHaveLength(1));
+    expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled();
     await act(async () => uploads[0].finish({ ok: true, data: { id: "obj_9", state: "blocked", size: 3, sha256: "b".repeat(64) } }));
     expect(await screen.findByText("Blocked")).toBeInTheDocument();
-    expect(screen.getByText("Remove each file that isn't Ready before submitting.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: "Remove bad.pdf" }));
-    expect(screen.getByLabelText("Files (optional)")).toHaveFocus();
+    expect(screen.getByText(/It can't be submitted, and it doesn't count toward your 10 files/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /bad\.pdf/ })).toBeNull();
     expect(screen.getByRole("button", { name: "Submit" })).toBeEnabled();
+  });
+
+  it("removes a file that didn't upload, and puts focus back on the picker", async () => {
+    const user = userEvent.setup();
+    answer = assigned;
+    await open();
+    await user.upload(screen.getByLabelText("Files (optional)"), pick("bad.pdf"));
+    await waitFor(() => expect(uploads).toHaveLength(1));
+    await act(async () => uploads[0].finish({ ok: false, status: 415, code: "file_type_refused" }));
+    expect(screen.getByText("Remove or leave out each file that isn't Ready before submitting.")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Remove bad.pdf" }));
+    expect(screen.getByLabelText("Files (optional)")).toHaveFocus();
+    expect(screen.queryByRole("list", { name: "Your files for this task" })).toBeNull();
   });
 
   it.each([

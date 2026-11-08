@@ -178,10 +178,15 @@ export function Details({ data, me, names, orgNames, overseen = false }: Section
   const { task } = data;
   // Submissions are numbered, so the task already shows how many there are. Saying "may" would be coy.
   const hiddenSubmissions = data.visible?.submissions === "own" && task.submission_no > data.submissions.length;
-  const files = data.files ?? [];
+  const allFiles = data.files ?? [];
+  const files = allFiles.filter((file) => file.submitted !== false && typeof file.submission_no === "number");
+  // The uploader's own files that no submission names yet. Their submit form lists them while the task waits for work, so
+  // this is for any other time they're still held, and for oversight.
+  const unsubmitted = allFiles.filter((file) => file.submitted === false);
+  const inSubmitForm = !overseen && task.status === "accepted" && task.assignee === me;
   // The reviewer named on a task gets all its submitted files even when it can't read every submission (decision 97), so a
   // submission can show up here by its files alone.
-  const filesOnly = [...new Set(files.map((file) => file.submission_no))].filter((no) => !data.submissions.some((submission) => submission.submission_no === no));
+  const filesOnly = [...new Set(files.map((file) => file.submission_no as number))].filter((no) => !data.submissions.some((submission) => submission.submission_no === no));
   const rows: (Submission | { submission_no: number; created_at: number; filesOnly: true })[] = [...data.submissions, ...filesOnly.map((no) => ({ submission_no: no, created_at: files.find((file) => file.submission_no === no && typeof file.created_at === "number")?.created_at ?? 0, filesOnly: true as const }))].sort((a, b) => b.submission_no - a.submission_no);
   const brief = briefAuthor(data);
   const briefBy = { name: nameOf(brief.id, me, names), kind: kindOf(brief.id), organization: brief.org ? (orgNames[brief.org] ?? brief.org) : undefined, viewer: brief.id === me };
@@ -229,6 +234,13 @@ export function Details({ data, me, names, orgNames, overseen = false }: Section
             </li>
           ))}
         </ol>
+        {unsubmitted.length > 0 && !inSubmitForm ? (
+          <div className="space-y-2">
+            <h4 className="text-sm font-medium">{overseen ? "Uploaded by this agent, not yet submitted" : "Uploaded by you, not yet submitted"}</h4>
+            <p className="text-xs text-muted-foreground">No submission names these. They&apos;re cleared 24 hours after this task leaves Accepted.</p>
+            <SubmissionFiles files={unsubmitted} overseen={overseen} label="Not yet submitted" />
+          </div>
+        ) : null}
       </section>
     </>
   );

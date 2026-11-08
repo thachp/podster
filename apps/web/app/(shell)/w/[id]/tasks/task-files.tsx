@@ -22,10 +22,10 @@ const UNNAMED = "Unnamed file";
  * A submission's stored files. The label and name are agent content and stay text. The one link is the download, which the
  * API serves only as an attachment. Each row shows the SHA-256 the submission pinned, which is what an approval names.
  */
-export function SubmissionFiles({ files, overseen = false }: { files: TaskFile[]; overseen?: boolean }) {
+export function SubmissionFiles({ files, overseen = false, label: listLabel = "Files" }: { files: TaskFile[]; overseen?: boolean; label?: string }) {
   if (files.length === 0) return null;
   return (
-    <ul aria-label="Files" className="space-y-2">
+    <ul aria-label={listLabel} className="space-y-2">
       {files.map((file) => {
         // Oversight gives a name and no label, so either can be missing.
         const name = typeof file.name === "string" ? plainName(file.name) : null;
@@ -64,8 +64,25 @@ export function SubmissionFiles({ files, overseen = false }: { files: TaskFile[]
 
 type Phase = UploadProgress["phase"] | "scanning" | "ready" | "blocked" | "failed" | "removed" | "refused";
 
-/** A file chosen for this submission, from the moment it's picked. Lives only in this form, like its upload token. */
-type Chosen = { key: string; name: string; size: number; phase: Phase; sent?: number; id?: string; problem?: string; retry?: () => Promise<UploadResult> };
+/**
+ * A file for this submission: one picked in this form, from the moment it's picked, or one the task read says the person
+ * already uploaded for it (`held`). `leftOut` keeps a stored file out of this submission. There's no deleting one (decision
+ * 95), so it stays listed with what it still counts for.
+ */
+type Chosen = { key: string; name: string; size: number; phase: Phase; held?: boolean; leftOut?: boolean; sent?: number; id?: string; problem?: string; retry?: () => Promise<UploadResult> };
+
+const STORED_PHASES: Partial<Record<string, Phase>> = { ready: "ready", blocked: "blocked", failed: "failed", scanning: "scanning", uploading: "sending" };
+
+/** The person's own uploads for this task that no submission names yet, as the task read lists them. */
+function heldFiles(files: TaskFile[] | undefined): Chosen[] {
+  return (files ?? [])
+    .filter((file) => file.submitted === false && typeof file.id === "string")
+    .map((file) => {
+      const phase = (file.state && STORED_PHASES[file.state]) || "failed";
+      // Only a Ready file goes in by itself. One still arriving is likely from another tab, and one refused can't go at all.
+      return { key: `held:${file.id}`, id: file.id, name: typeof file.name === "string" ? file.name : "", size: typeof file.size === "number" ? file.size : 0, phase, held: true, leftOut: phase !== "ready" && phase !== "scanning" };
+    });
+}
 
 const PHASE_TEXT: Partial<Record<Phase, string>> = { hashing: "Preparing", reserving: "Preparing", storing: "Checking what arrived" };
 
@@ -74,8 +91,8 @@ function phaseText(chosen: Chosen) {
   return PHASE_TEXT[chosen.phase] ?? fileState(chosen.phase === "sending" ? "uploading" : chosen.phase).label;
 }
 
-/** Rows that will go out with the submission, or still could. A refusal never reserved space and isn't one. */
-const counted = (chosen: Chosen) => chosen.phase !== "refused";
+/** Rows the API counts toward one uploader's 10 unsubmitted files for a task: not a refusal, and not blocked or failed. */
+const counted = (chosen: Chosen) => chosen.phase !== "refused" && chosen.phase !== "blocked" && chosen.phase !== "failed" && chosen.phase !== "removed";
 const settled = (phase: Phase) => phase === "ready" || phase === "blocked" || phase === "failed" || phase === "removed" || phase === "refused";
 
 /** How long to wait before reading a scanning file again. A scan takes about 20 seconds, and a slow one is read less often. */
@@ -89,17 +106,20 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
   const { data, run, saving, setDirty } = api;
   const { task, workspace } = data;
   const [note, setNote] = useState("");
-  const [chosen, setChosen] = useState<Chosen[]>([]);
+  // Read once: a later read can't tell this form's own uploads in flight from the same files on the server.
+  const [chosen, setChosen] = useState<Chosen[]>(() => heldFiles(data.files));
   const [problem, setProblem] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const controllers = useRef(new Map<string, AbortController>());
   const alive = useRef(true);
-  const ready = chosen.filter((file) => file.phase === "ready" && file.id);
-  const unsettled = chosen.some((file) => !settled(file.phase));
-  const stuck = chosen.some((file) => settled(file.phase) && file.phase !== "ready");
+  const included = chosen.filter((file) => !file.leftOut);
+  const ready = included.filter((file) => file.phase === "ready" && file.id);
+  const unsettled = included.some((file) => !settled(file.phase));
+  const stuck = included.some((file) => settled(file.phase) && file.phase !== "ready");
   const trimmed = note.trim();
   const noteTooLong = tooLong(note, LIMITS.message);
-  const hasContent = trimmed !== "" || chosen.length > 0;
+  // Files already stored aren't a draft: they're there whether or not this form is.
+  const hasContent = trimmed !== "" || chosen.some((file) => !file.held);
   const canSubmit = !saving && !unsettled && !stuck && !noteTooLong && (trimmed !== "" || ready.length > 0);
   const ids = ready.map((file) => file.id).join(",");
   const key = useIntentKey(`submit:${task.version}:${trimmed}:${ids}`);
@@ -114,6 +134,12 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
   useEffect(() => {
     alive.current = true;
     const running = controllers.current;
+    for (const file of chosen) {
+      if (!file.held || !file.id || (file.phase !== "scanning" && file.phase !== "sending")) continue;
+      const controller = new AbortController();
+      running.set(file.key, controller);
+      void watchScan(file.key, file.id, controller.signal);
+    }
     return () => {
       alive.current = false;
       for (const controller of running.values()) controller.abort();
@@ -136,7 +162,9 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
       if (!read.ok) return update(key, { phase: "refused", problem: read.status === 401 ? uploadProblem("", 401) : "It can't be found any more. Remove it and add it again." });
       const state = read.data.state;
       if (state === "scanning" || state === "uploading") continue;
-      return update(key, { phase: (["ready", "blocked", "failed", "removed"].includes(state) ? state : "failed") as Phase });
+      const phase = (["ready", "blocked", "failed", "removed"].includes(state) ? state : "failed") as Phase;
+      // A stored file that can't go is kept out at once, since it can't be deleted and mustn't hold the submission back.
+      return update(key, phase === "ready" ? { phase } : { phase, leftOut: true });
     }
   }
 
@@ -147,7 +175,8 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
     if (controller.signal.aborted) return;
     if (!result.ok) return update(key, { phase: "refused", problem: uploadProblem(result.code, result.status), retry: result.retry });
     const state = result.data.state;
-    update(key, { id: result.data.id, phase: (state === "ready" || state === "blocked" || state === "failed" || state === "removed" ? state : "scanning") as Phase, problem: undefined, retry: undefined });
+    const phase = (state === "ready" || state === "blocked" || state === "failed" || state === "removed" ? state : "scanning") as Phase;
+    update(key, { id: result.data.id, phase, leftOut: phase !== "ready" && phase !== "scanning", problem: undefined, retry: undefined });
     if (state === "scanning" || state === "uploading") void watchScan(key, result.data.id, controller.signal);
   }
 
@@ -180,6 +209,13 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
     inputRef.current?.focus();
   }
 
+  /** A stored file can't be deleted, only kept out of this submission, and put back. */
+  function toggle(file: Chosen) {
+    setProblem(null);
+    if (file.leftOut && included.length >= MAX_SUBMISSION_ITEMS) return setProblem(`A submission can hold at most ${MAX_SUBMISSION_ITEMS} files. Leave one out to add another.`);
+    update(file.key, { leftOut: !file.leftOut });
+  }
+
   function retry(file: Chosen) {
     if (!file.retry) return;
     const again = file.retry;
@@ -198,7 +234,7 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
     onNotice(`Submitted${number ? ` submission ${number}` : ""}${files.length ? ` with ${files.length} ${files.length === 1 ? "file" : "files"}` : ""}. It's waiting for review.`);
   };
 
-  const hint = unsettled ? "Wait for every file to finish uploading and scanning." : stuck ? "Remove each file that isn't Ready before submitting." : !trimmed && ready.length === 0 ? "Add a note or at least one file." : null;
+  const hint = unsettled ? "Wait for every file to finish uploading and scanning." : stuck ? "Remove or leave out each file that isn't Ready before submitting." : !trimmed && ready.length === 0 ? "Add a note or at least one file." : null;
 
   return (
     <form onSubmit={submit} aria-label="Submit work" className="space-y-3">
@@ -238,7 +274,7 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
       </div>
       {problem ? <p className="text-sm text-status-danger">{problem}</p> : null}
       {chosen.length > 0 ? (
-        <ul aria-label="Files for this submission" className="space-y-2">
+        <ul aria-label="Your files for this task" className="space-y-2">
           {chosen.map((file) => {
             const name = plainName(file.name);
             return (
@@ -255,6 +291,11 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
                     {settled(file.phase) ? `${name}: ${file.phase === "refused" ? "didn't upload" : fileState(file.phase).label}` : ""}
                   </span>
                   {file.problem ? <p className="text-xs text-status-danger">{file.problem}</p> : null}
+                  {file.id && (file.phase === "blocked" || file.phase === "failed") ? (
+                    <p className="text-xs text-muted-foreground">It can&apos;t be submitted, and it doesn&apos;t count toward your {MAX_SUBMISSION_ITEMS} files for this task.</p>
+                  ) : file.leftOut ? (
+                    <p className="text-xs text-muted-foreground">Left out of this submission. It still counts toward your {MAX_SUBMISSION_ITEMS} files for this task until it&apos;s cleared, 24 hours after this task leaves Accepted.</p>
+                  ) : null}
                 </div>
                 <div className="flex gap-2">
                   {file.retry ? (
@@ -262,9 +303,15 @@ export function SubmitWork({ api, onNotice, taskPath }: { api: SheetApi<LoadedTa
                       Try again
                     </Button>
                   ) : null}
-                  <Button type="button" variant="outline" className="min-h-11 sm:min-h-8" disabled={saving} aria-label={`Remove ${name}`} onClick={() => remove(file.key)}>
-                    Remove
-                  </Button>
+                  {!file.id ? (
+                    <Button type="button" variant="outline" className="min-h-11 sm:min-h-8" disabled={saving} aria-label={`Remove ${name}`} onClick={() => remove(file.key)}>
+                      Remove
+                    </Button>
+                  ) : file.phase === "blocked" || file.phase === "failed" || file.phase === "removed" ? null : (
+                    <Button type="button" variant="outline" className="min-h-11 sm:min-h-8" disabled={saving} aria-label={`${file.leftOut ? "Include" : "Leave out"} ${name}`} onClick={() => toggle(file)}>
+                      {file.leftOut ? "Include" : "Leave out"}
+                    </Button>
+                  )}
                 </div>
               </li>
             );

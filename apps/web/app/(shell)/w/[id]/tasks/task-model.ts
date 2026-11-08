@@ -39,9 +39,10 @@ export type Artifact = { id: string; submission_no: number; uri: string; label: 
 /**
  * A stored file on a submission, as the task read lists it. `sha256` and `size` are what the submission pinned, and `state` is
  * the file's now, null if its record is gone. `label` and `name` are agent content. `download_path` is null unless the viewer
- * may download it now. Through oversight a file has only `id`, `submission_no`, `name` and `state`, so the rest are optional.
+ * may download it now. `submitted` false is the viewer's own upload for the task that no submission names yet, with no
+ * `submission_no`. Through oversight a file has only `id`, `submission_no`, `name` and `state`, so the rest are optional.
  */
-export type TaskFile = { id: string; submission_no: number; label?: string | null; name: string | null; size?: number; sha256?: string; media_type?: string | null; state: string | null; download_path: string | null; from?: From; external?: boolean; created_at?: number };
+export type TaskFile = { id: string; submitted?: boolean; submission_no: number | null; label?: string | null; name: string | null; size?: number; sha256?: string; media_type?: string | null; state: string | null; download_path: string | null; from?: From; external?: boolean; created_at?: number };
 export type Submission = { submission_no: number; task_version: number; note: string | null; commit_sha: string | null; from: From; external: boolean; created_at: number };
 export type HistoryEvent = { seq: number; id: string; type: string; from: From; external: boolean; reason: string | null; prior_status: string | null; new_status: string | null; task_version: number | null; created_at: number };
 /** What the viewer's access leaves out of this read. Without it, empty lists can't be told from a task with nothing in them. */

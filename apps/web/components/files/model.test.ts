@@ -1,29 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { toResult } from "@/lib/gateway/result";
-import { explainLink, explainUpload, FILE_STATES, formatBytes, mayManageAssets, stateOf } from "./model";
-
-describe("file states", () => {
-  it("names every state the upload policy has, and never calls a file safe", () => {
-    expect(Object.values(FILE_STATES).map((state) => state.label)).toEqual(["Uploading", "Scanning", "Ready", "Blocked", "Scan failed"]);
-    expect(stateOf("ready").detail).toBe("No known malware found.");
-    for (const state of Object.values(FILE_STATES)) expect(`${state.label} ${state.detail}`).not.toMatch(/\b(safe|clean|virus-free)\b/i);
-  });
-
-  it("doesn't read a state it doesn't know as one it does", () => {
-    expect(stateOf("removed").label).toBe("Unknown state");
-  });
-});
-
-describe("sizes", () => {
-  it("uses the decimal units the limits are written in", () => {
-    expect(formatBytes(1)).toBe("1 byte");
-    expect(formatBytes(999)).toBe("999 bytes");
-    expect(formatBytes(1500)).toBe("1.5 KB");
-    expect(formatBytes(100_000_000)).toBe("100 MB");
-    expect(formatBytes(5_000_000_000)).toBe("5 GB");
-    expect(formatBytes(-1)).toBe("Unknown size");
-  });
-});
+import { explainLink, explainUpload, mayManageAssets } from "./model";
 
 describe("refusals", () => {
   it("says what each upload refusal means", () => {

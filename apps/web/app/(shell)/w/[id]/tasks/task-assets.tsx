@@ -1,8 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { DownloadFile, FileStateBadge } from "@/components/files/file-bits";
-import { fileName, formatBytes, stateOf } from "@/components/files/model";
+import { DownloadFile } from "@/components/files/file-bits";
+import { FileStateBadge } from "@/components/files/file-state-badge";
+import { fileName } from "@/components/files/model";
+import { fileSize, fileState } from "@/lib/files/files";
 import { useFileList, useLinkCommands, useScanWatch } from "@/components/files/use-files";
 import { Button } from "@/components/ui/button";
 
@@ -21,7 +23,7 @@ type Props = {
 export function TaskAssets({ workspace, taskId, canManage, archived }: Props) {
   const list = useFileList(workspace, null, taskId);
   const [announcement, setAnnouncement] = useState("");
-  useScanWatch(workspace, list.files, list.replace, (file) => setAnnouncement(`${fileName(file)}: ${stateOf(file.state).label}.`));
+  useScanWatch(workspace, list.files, list.replace, (file) => setAnnouncement(`${fileName(file)}: ${fileState(file.state).label}.`));
   const links = useLinkCommands(workspace, list.reload);
   const manage = canManage && !archived;
   return (
@@ -67,9 +69,9 @@ export function TaskAssets({ workspace, taskId, canManage, archived }: Props) {
                   <p className="flex flex-wrap items-center gap-2">
                     <span className="min-w-0 font-medium break-all">{name}</span>
                     <FileStateBadge state={file.state} />
-                    <span className="text-muted-foreground">{formatBytes(file.size)}</span>
+                    <span className="text-muted-foreground">{fileSize(file.size)}</span>
                   </p>
-                  <p className="text-muted-foreground">{stateOf(file.state).detail}</p>
+                  <p className="text-muted-foreground">{fileState(file.state).detail}</p>
                   <div className="flex flex-wrap items-center gap-2">
                     <DownloadFile workspace={workspace} file={file} onUnavailable={(latest) => list.replace(file.id, latest)} />
                     {manage ? (

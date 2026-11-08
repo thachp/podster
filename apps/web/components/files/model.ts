@@ -22,34 +22,6 @@ export type FilePage = { files: RoomFile[]; next_cursor: number | null; quota?: 
 export const MAX_FILE_BYTES = 100_000_000;
 export const ROOM_QUOTA_BYTES = 5_000_000_000;
 
-type StateInfo = { label: string; tone: "neutral" | "blue" | "green" | "danger" | "amber"; detail: string };
-
-/** UPLOAD-POLICY.md's states. Ready says no known malware was found, and nothing here ever says a file is safe. */
-export const FILE_STATES: Record<string, StateInfo> = {
-  uploading: { label: "Uploading", tone: "neutral", detail: "Not all of the file has arrived." },
-  scanning: { label: "Scanning", tone: "blue", detail: "Waiting for the scan. It can't be downloaded until the scan finishes." },
-  ready: { label: "Ready", tone: "green", detail: "No known malware found." },
-  blocked: { label: "Blocked", tone: "danger", detail: "The scanner found something or couldn't read this file. It can't be downloaded." },
-  failed: { label: "Scan failed", tone: "amber", detail: "No scan result within an hour. Upload the file again." },
-};
-
-/** A state this screen doesn't know is never shown as one it does. */
-export const stateOf = (state: string): StateInfo => FILE_STATES[state] ?? { label: "Unknown state", tone: "neutral", detail: "This file can't be downloaded from here." };
-
-/** Decimal units, as the limits are written: 100 MB is 100,000,000 bytes. */
-export function formatBytes(bytes: number) {
-  if (!Number.isFinite(bytes) || bytes < 0) return "Unknown size";
-  if (bytes < 1000) return `${bytes} ${bytes === 1 ? "byte" : "bytes"}`;
-  const units = ["KB", "MB", "GB"];
-  let value = bytes / 1000;
-  let unit = 0;
-  while (value >= 1000 && unit < units.length - 1) {
-    value /= 1000;
-    unit += 1;
-  }
-  return `${value >= 100 ? Math.round(value) : Number(value.toFixed(1))} ${units[unit]}`;
-}
-
 /** A file's name as text. It's whatever the uploader called it, cleaned by the API, and gets no meaning here. */
 export const fileName = (file: Pick<RoomFile, "name">) => plainName(file.name);
 

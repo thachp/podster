@@ -3,8 +3,10 @@
 import Link from "next/link";
 import { useId, useRef, useState, type FormEvent } from "react";
 import { truncate, plainName } from "@/components/agent-content/text";
-import { DownloadFile, FileStateBadge } from "@/components/files/file-bits";
-import { explainUpload, fileName, formatBytes, MAX_FILE_BYTES, stateOf, type FilePage, type RoomFile } from "@/components/files/model";
+import { DownloadFile } from "@/components/files/file-bits";
+import { FileStateBadge } from "@/components/files/file-state-badge";
+import { fileSize, fileState } from "@/lib/files/files";
+import { explainUpload, fileName, MAX_FILE_BYTES, type FilePage, type RoomFile } from "@/components/files/model";
 import { useFileList, useLinkCommands, useScanWatch, type LinkNotice } from "@/components/files/use-files";
 import { Button } from "@/components/ui/button";
 import { uploadFile, type UploadProgress, type UploadResult } from "@/lib/uploads/client";
@@ -31,7 +33,7 @@ const taskTitle = (task: TaskChoice | undefined, id: string) => (task ? truncate
 export function InputAssets({ workspace, initial, tasks, tasksComplete, canManage, archived }: Props) {
   const list = useFileList(workspace, initial);
   const [announcement, setAnnouncement] = useState("");
-  useScanWatch(workspace, list.files, list.replace, (file) => setAnnouncement(`${fileName(file)}: ${stateOf(file.state).label}. ${stateOf(file.state).detail}`));
+  useScanWatch(workspace, list.files, list.replace, (file) => setAnnouncement(`${fileName(file)}: ${fileState(file.state).label}. ${fileState(file.state).detail}`));
   const links = useLinkCommands(workspace, list.reload);
   const byId = new Map(tasks.map((task) => [task.id, task]));
   const manage = canManage && !archived;
@@ -82,9 +84,9 @@ function QuotaUse({ used, limit }: { used: number; limit: number }) {
   return (
     <div className="space-y-1">
       <p className="text-sm">
-        {formatBytes(used)} of {formatBytes(limit)} used, counting every file kept and every upload under way.
+        {fileSize(used)} of {fileSize(limit)} used, counting every file kept and every upload under way.
       </p>
-      <meter className="h-2 w-full" min={0} max={limit} value={shown} aria-label="Workroom storage used" aria-valuetext={`${formatBytes(used)} of ${formatBytes(limit)}`} />
+      <meter className="h-2 w-full" min={0} max={limit} value={shown} aria-label="Workroom storage used" aria-valuetext={`${fileSize(used)} of ${fileSize(limit)}`} />
     </div>
   );
 }
@@ -93,7 +95,7 @@ type Links = ReturnType<typeof useLinkCommands>;
 
 function AssetRow({ workspace, file, byId, tasks, tasksComplete, manage, links, onUnavailable }: { workspace: string; file: RoomFile; byId: Map<string, TaskChoice>; tasks: TaskChoice[]; tasksComplete: boolean; manage: boolean; links: Links; onUnavailable: (id: string, latest: RoomFile | null) => void }) {
   const name = fileName(file);
-  const state = stateOf(file.state);
+  const state = fileState(file.state);
   const headingId = useId();
   const attachable = file.state === "scanning" || file.state === "ready";
   const choices = tasks.filter((task) => !CLOSED.has(task.status) && !file.linked_tasks.includes(task.id));
@@ -106,7 +108,7 @@ function AssetRow({ workspace, file, byId, tasks, tasksComplete, manage, links, 
         <FileStateBadge state={file.state} />
       </div>
       <p className="text-sm text-muted-foreground">
-        {formatBytes(file.size)}
+        {fileSize(file.size)}
         {file.media_type ? ` · ${plainName(file.media_type)}` : ""}
       </p>
       <p className="text-sm">{state.detail}</p>
@@ -308,7 +310,7 @@ function Uploader({ workspace, onUploaded }: { workspace: string; onUploaded: ()
       />
       {chosen ? (
         <p className="text-sm break-all">
-          {plainName(chosen.name)}, {formatBytes(chosen.size)}
+          {plainName(chosen.name)}, {fileSize(chosen.size)}
         </p>
       ) : null}
       {tooLarge ? <p className="text-sm text-status-danger">{explainUpload("file_too_large", 413)}</p> : null}
@@ -336,7 +338,7 @@ function Uploader({ workspace, onUploaded }: { workspace: string; onUploaded: ()
             <>
               <progress className="h-2 w-full accent-primary" max={progress.total || 1} value={progress.sent} aria-label="Upload progress" />
               <p className="text-xs text-muted-foreground" aria-hidden>
-                {formatBytes(progress.sent)} of {formatBytes(progress.total)}
+                {fileSize(progress.sent)} of {fileSize(progress.total)}
               </p>
             </>
           ) : null}

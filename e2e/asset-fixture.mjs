@@ -4,7 +4,7 @@
 // Files are really uploaded and really attached to a task through the gateway. Only the scan verdicts are written by hand:
 // locally there's no scanner, and the API takes a verdict only from it, on an internal route with its secret that the local
 // stack doesn't expose. So after seeding, run-a11y.mjs stops the Workers, sets those files' state in the room's stored
-// SQLite, as apps/api's own tests do, and starts them again. Every state written is checked against the names
+// SQLite, as apps/api's own tests do, the way the API's own scan paths leave each row, and starts them again. Every state written is checked against the names
 // `ObjectState::name` gives in crates/core/src/files.rs, so this can't produce a state the API never does.
 //
 // Screen 9b adds submission files after this block. Keep the two apart.
@@ -53,7 +53,11 @@ export async function seedInputAssets({ gatewayBase, owner, room, task }) {
   return { files: made, changes: made.filter((file) => file.state !== "scanning").map(({ id, state }) => ({ id, state })) };
 }
 
-/** Writes the states into the stopped room's SQLite. Only `state` changes, as in apps/api's tests. */
+/**
+ * Writes each verdict into the stopped room's SQLite as the API's own paths leave the row (apps/api/src/workspace/objects.rs):
+ * a scanner's report (ready, blocked) sets the state with its reason, the SHA-256 it scanned, the signature database and the time;
+ * an hour with no report (failed) sets only the state. Nothing reads the scan columns yet, so they don't change what's shown.
+ */
 export async function writeFileStates(persist, changes) {
   const states = apiFileStates();
   for (const change of changes) ok(states.has(change.state) && change.state !== "uploading", `refusing to write file state ${change.state}`);
@@ -68,7 +72,12 @@ export async function writeFileStates(persist, changes) {
       const hasTable = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'stored_object'").get();
       if (!hasTable) continue;
       for (const [id, state] of [...left]) {
-        const changed = db.prepare("UPDATE stored_object SET state = ? WHERE id = ? AND state = 'scanning'").run(state, id);
+        const changed =
+          state === "failed"
+            ? db.prepare("UPDATE stored_object SET state = ? WHERE id = ? AND state = 'scanning'").run(state, id)
+            : db
+                .prepare("UPDATE stored_object SET state = ?, scan_reason = ?, scan_sha256 = sha256, scan_database_json = ?, scanned_at = ? WHERE id = ? AND state = 'scanning'")
+                .run(state, state === "blocked" ? "Fixture finding" : "", FIXTURE_SCAN_DATABASE, Date.now(), id);
         if (changed.changes === 1) left.delete(id);
       }
     } finally {

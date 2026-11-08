@@ -588,6 +588,15 @@ fn handle_send_message(
     let caller = &who.caller;
     let task = load_task(sql, task_id)?.ok_or_else(ApiError::task_not_found)?;
     ApiError::from_verdict(authorize_task(caller, &task, TaskAction::PostMessage))?;
+    // Where the message came from, as the gateway says. Only A2A is named, and it can only refuse more (ADR 0007).
+    match field(body, "via")?.as_deref() {
+        None => {}
+        Some("a2a") if !podster_core::a2a::accepts_inbound_message(task.status) => {
+            return Err(ApiError::api(409, "task_closed"))
+        }
+        Some("a2a") => {}
+        Some(_) => return Err(ApiError::invalid_argument()),
+    }
     let text_body = required(body, "body")?;
     if text_body.trim().is_empty() || text_body.len() > MAX_MESSAGE_BYTES {
         return Err(ApiError::invalid_argument());

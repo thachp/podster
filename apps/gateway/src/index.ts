@@ -1234,6 +1234,13 @@ function a2aReads(env: Env, identity: Identity): ApiReads {
     getTask: (workspaceId, taskId) => run("get_task", { workspace_id: workspaceId, task_id: taskId }),
     listTasks: (workspaceId, query) => run("list_tasks", { workspace_id: workspaceId, order: query.order, ...(query.cursor ? { cursor: query.cursor } : {}), ...(query.status ? { status: query.status } : {}) }),
     listWorkspaces: () => run("list_workspaces", {}),
+    // `send_message`'s own call, with `via` added, which no capability field can set: it tells the room the message
+    // came over A2A, so a finished task refuses it (ADR 0007). It can only refuse more.
+    sendMessage: async (workspaceId, taskId, body, idempotencyKey) => {
+      const call = toApiCall(CAPABILITIES.find((c) => c.name === "send_message")!, { workspace_id: workspaceId, task_id: taskId, body, idempotency_key: idempotencyKey });
+      const response = await callApi(env, identity, { ...call, body: JSON.stringify({ body, via: "a2a" }) });
+      return { status: response.status, body: await response.json().catch(() => null) };
+    },
   };
 }
 

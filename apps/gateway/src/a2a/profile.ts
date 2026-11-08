@@ -3,7 +3,7 @@
  * test holds the two together, so the card and the profile can't drift apart.
  *
  * Steps 6 to 10 of the M3 plan turn operations on one at a time, each updating this table and the profile in the same
- * PR. Step 8 turned on the reads, and cancel's fixed answer.
+ * PR. Step 8 turned on the reads, and cancel's fixed answer. Step 9 turned on messages to an existing task.
  */
 
 export type MethodStatus =
@@ -15,7 +15,7 @@ export type MethodStatus =
   | "off";
 
 export const A2A_METHODS = {
-  SendMessage: "not_yet",
+  SendMessage: "available",
   GetTask: "available",
   ListTasks: "available",
   CancelTask: "available",

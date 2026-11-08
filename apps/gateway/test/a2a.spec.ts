@@ -73,7 +73,7 @@ describe("the card and the profile agree", () => {
 describe("each operation answers as the profile says", () => {
   // The reads are step 8's, and their own spec covers them. Here, a task that exists nowhere.
   const expected: Record<string, RegExp | "result"> = {
-    SendMessage: /UNSUPPORTED_OPERATION/,
+    SendMessage: /TASK_NOT_FOUND/,
     GetTask: /TASK_NOT_FOUND/,
     ListTasks: "result",
     CancelTask: /TASK_NOT_FOUND/,
@@ -201,6 +201,6 @@ describe("the A2A project's own client", () => {
       AgentCard.fromJSON(await (await SELF.fetch(`${BASE}/.well-known/agent-card.json`)).json()),
     );
     await expect(client.getTask({ id: "tsk_x" } as never)).rejects.toThrow(/not found/i);
-    await expect(client.sendMessage({ message: { messageId: "m", role: 1, parts: [{ content: { $case: "text", value: "hi" } }] } } as never)).rejects.toThrow(/available yet/);
+    await expect(client.sendMessage({ message: { messageId: "m", role: 1, parts: [{ content: { $case: "text", value: "hi" } }] } } as never)).rejects.toThrow(/create tasks/);
   });
 });

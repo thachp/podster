@@ -412,8 +412,8 @@ pub(super) fn next_scan_expiry(sql: &SqlStorage, now: i64) -> R<Option<i64>> {
 }
 
 impl Workspace {
-    /// Leaves a room that hasn't migrated alone, since the alarm path never migrates one. Its next request does, and the alarm it
-    /// arms then ends what's overdue.
+    /// Leaves a room that hasn't migrated alone. Ending scans doesn't migrate one, though writing held refusals in the same alarm
+    /// may. A request migrates it otherwise, and the alarm it arms then ends what's overdue.
     pub(super) fn expire_scans(&self) -> R<()> {
         let sql = self.state.storage().sql();
         if !store::is_initialized(&sql)? || store::needs_migration(&sql)? {

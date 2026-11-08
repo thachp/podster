@@ -381,6 +381,20 @@ describe("a room from before this", () => {
       sql.exec("UPDATE workspace SET policy_version = (SELECT MAX(policy_version) FROM audit_event)");
     });
 
+  it("arms the alarm when a read migrates it, so a scan stuck from before still ends", async () => {
+    const id = await room();
+    const stuck = await stored(id);
+    await undo(id);
+    await runInDurableObject(stub(id), async (_: any, state: any) => {
+      state.storage.sql.exec("UPDATE stored_object SET scanning_since = ? WHERE id = ?", Date.now() - HOUR - 1000, stuck.id);
+      await state.storage.deleteAlarm();
+    });
+    expect((await api("GET", `/v1/workspaces/${id}`)).status).toBe(200);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm())).not.toBeNull();
+    await runDurableObjectAlarm(stub(id));
+    expect((await row(id, stuck.id)).state).toBe("failed");
+  });
+
   it("gets the columns, and keeps its files waiting", async () => {
     const id = await room();
     const file = await stored(id);

@@ -3119,7 +3119,7 @@ impl Workspace {
         if !store::is_initialized(&sql)? {
             return Ok(());
         }
-        // The alarm path never migrates a room: its next request does. Until then it has no scans to end.
+        // Scheduling doesn't migrate a room. A request does, and then arms, so an unmigrated room has no scans to end until then.
         let migrated = !store::needs_migration(&sql)?;
         let now = Date::now().as_millis() as i64;
         let mut due: Option<i64> = None;
@@ -3946,6 +3946,13 @@ impl DurableObject for Workspace {
 
     async fn fetch(&self, req: Request) -> Result<Response> {
         let is_write = req.method() != Method::Get;
+        // A request that migrates the room arms it afterwards, a read included, so scans left over from before the migration still
+        // end on time.
+        let migrates = {
+            let sql = self.state.storage().sql();
+            store::is_initialized(&sql).unwrap_or(false)
+                && store::needs_migration(&sql).unwrap_or(false)
+        };
         let denial = if is_write {
             Self::denial_context(&req)
         } else {
@@ -3962,7 +3969,7 @@ impl DurableObject for Workspace {
                 error.into_response()
             }
         };
-        if is_write {
+        if is_write || migrates {
             // The command has already committed, so a scheduling problem can't change its answer. The next write retries.
             if let Err(error) = self.arm(false, false).await {
                 console_error!("couldn't schedule delivery: {:?}", error);

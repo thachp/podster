@@ -4553,8 +4553,11 @@ describe("rooms from before access grants", () => {
     expect((await add(gone, "member")).status).toBe(200);
     expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${gone.id}`, {})).status).toBe(200);
     const t = await offer(tasks);
-    await runInDurableObject(stub(id), (_: any, state: any) => undoBriefMigration(state));
-    const version = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number);
+    // Read in the same call as the undo, so an alarm that migrates the room before the next request can't come in between.
+    const version = await runInDurableObject(stub(id), (_: any, state: any) => {
+      undoBriefMigration(state);
+      return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
+    });
     const read = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body;
     expect([read.goal, read.context]).toEqual([null, null]);
     expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(version + 11);

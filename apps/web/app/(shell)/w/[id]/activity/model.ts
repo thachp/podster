@@ -41,6 +41,10 @@ const EVENT_VERBS: Record<string, string> = {
   "task.assignee_departed": "recorded that a task's assignee left",
   "task.needs_attention": "flagged a task for attention",
   "task.message": "posted on a task",
+  "task.output_changed": "changed a task's expected output",
+  "output.defined": "defined an expected output",
+  "output.updated": "renamed an expected output",
+  "output.removed": "removed an expected output",
 };
 
 /** An unknown type shows as the server named it. Types are the API's own constants, never agent text. */
@@ -80,6 +84,10 @@ const AUDIT_ACTIONS: Record<string, string> = {
   "member.owner_consented": "Consented to the return of",
   "invitation.created": "Created invitation",
   "invitation.withdrawn": "Withdrew invitation",
+  "output.defined": "Defined an expected output:",
+  "output.updated": "Renamed an expected output:",
+  "output.removed": "Removed an expected output:",
+  "task.output_changed": "Changed the expected output of",
 };
 
 export const auditAction = (action: string) => AUDIT_ACTIONS[action] ?? action;

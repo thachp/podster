@@ -10,6 +10,7 @@ import { goToSignIn } from "./go-to-sign-in";
 import { TaskActions, type SavedEdit } from "./task-actions";
 import { TaskComposer } from "./task-composer";
 import { SubmissionFiles } from "./task-files";
+import { ExpectedOutputName } from "./task-output";
 import { TaskPlan } from "./task-plan";
 import { ApprovedMark, PrincipalName, TaskStatusBadge, Timestamp } from "./task-bits";
 import { briefAuthor, flagText, isArchivedRoom, kindOf, nameOf, roleOf, verbFor, type Artifact, type From, type Names, type Room, type Submission, type TaskDetail, type TaskSummary } from "./task-model";
@@ -122,6 +123,14 @@ function TaskBody({ api, me, names, orgNames, outside, onTaskRead }: { api: Shee
         </dd>
         <dt className="text-muted-foreground">Submission</dt>
         <dd>{task.submission_no > 0 ? task.submission_no : "None yet"}</dd>
+        {data.expected_output !== undefined ? (
+          <>
+            <dt className="text-muted-foreground">Expected output</dt>
+            <dd className="min-w-0">
+              <ExpectedOutputName output={data.expected_output} />
+            </dd>
+          </>
+        ) : null}
       </dl>
       {task.needs_attention ? <p className="rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">{flagText(task, data.room, me, roleOf(data.room, me))}</p> : null}
       <p ref={noticeRef} tabIndex={-1} role="status" className="rounded-sm text-sm outline-none empty:hidden focus-visible:ring-2 focus-visible:ring-ring">

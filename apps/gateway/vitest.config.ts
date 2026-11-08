@@ -28,6 +28,7 @@ export default defineConfig({
           TEST_API_SCHEMA: read("../api/migrations/0001_membership_index.sql") + read("../api/migrations/0002_room_status.sql") + read("../api/migrations/0003_membership_by_org.sql") + read("../api/migrations/0004_ownerless_rooms.sql"),
           TEST_WRANGLER: readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8"),
           TEST_CAPABILITIES: readFileSync(new URL("../../packages/contracts/capabilities.yaml", import.meta.url), "utf8"),
+          TEST_A2A_PROFILE: readFileSync(new URL("../../docs/spec/A2A-PROFILE.md", import.meta.url), "utf8"),
         },
         d1Databases: { DB: "gateway-db", API_DB: "api-db" },
         // Suites make many requests from one address, so limit tests pass their own limiters.

@@ -14,6 +14,7 @@ import { EMAIL_LINK_ROUTE, EMAIL_LINK_SECONDS, EMAIL_VERIFY_ROUTE, emailSignInEn
 import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TEST_SIGNUP_ROUTE } from "./test-people";
 import { handleAgentDownload, isFilePath, serveFile } from "./downloads";
 import { handleUpload } from "./uploads";
+import { handleA2a } from "./a2a";
 
 export interface Env {
   DB: D1Database;
@@ -1060,6 +1061,8 @@ const appHandler = {
     const env = forPublicHost(request, publicEnv);
     const url = new URL(request.url);
     const onApplicationHost = env !== publicEnv;
+    const a2a = onApplicationHost ? null : await handleA2a(request, url, publicEnv.BASE_URL);
+    if (a2a) return a2a;
     const upload = await handleUpload(request, url, publicEnv.API, (key) => withinLimit(publicEnv.RL_ACCOUNT, key));
     if (upload) return upload;
     const download = await handleAgentDownload(request, url, publicEnv, (token) => agentFromCredential(publicEnv, token, request), (key) => withinLimit(publicEnv.RL_ACCOUNT, key));

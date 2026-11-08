@@ -650,6 +650,12 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 143 | Which second implementation counts | **Decided:** independence is judged by direction, as decision 124 allows. Outbound runs against LangGraph's A2A 1.0 server, with fasta2a's server as backup. Inbound uses the A2A project's own JavaScript and Python clients and the compatibility kit's own `httpx` client, and the profile says plainly that inbound was tested only against the A2A project's own code. Revisited before public rooms | M3 |
 | 144 | Removing a file hidden from the caller | **Decided:** a file the caller can't see answers `file_not_found`, even to a human owner or admin trying to remove it. Hidden equals missing for removal too, and the caller's view is checked before the admin check. Unsubmitted task files are still cleared under decision 98 | M2 |
 
+## ADR 0007 accepted, November 8, 2026
+
+- The owner accepted [ADR 0007](../adr/0007-a2a.md), saying "yes i agreed.. go ahead and accept adr 0007". It builds on decisions 107 to 143, so it needs no new decision number.
+- Its details to settle in review stay open. M3's build order in the [plan](../m3-plan.md) stays proposed.
+- None of it is in the code yet.
+
 ## File removal ruling and a wording fix, November 8, 2026
 
 - On decision 144 the owner said "up to u", and the lead took the recommendation.

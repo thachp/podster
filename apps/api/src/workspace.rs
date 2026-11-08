@@ -3185,7 +3185,8 @@ impl Workspace {
     /// Puts this room's new A2A offer attempts on the A2A queue. Nothing goes while the room needs migrating.
     async fn drain_a2a(&self) -> R<()> {
         let sql = self.state.storage().sql();
-        if !store::is_initialized(&sql)? || store::needs_migration(&sql)? {
+        // Held with the event outbox, so a test that holds delivery holds this too, and the alarm isn't due for it meanwhile.
+        if !store::is_initialized(&sql)? || store::needs_migration(&sql)? || outbox_held(&sql)? {
             return Ok(());
         }
         let Some(workspace_id) = rows(&sql, "SELECT id FROM workspace", vec![])?
@@ -3238,7 +3239,8 @@ impl Workspace {
         {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
-        if let Some(next) = migrated
+        // Like every other due time here, it can only bring the alarm earlier.
+        if let Some(next) = (migrated && !outbox_held(&sql)?)
             .then(|| a2a_out::next_due(&sql))
             .transpose()?
             .flatten()

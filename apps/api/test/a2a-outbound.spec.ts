@@ -371,3 +371,43 @@ describe("the dead-letter queue", () => {
     expect(res.status).toBe(500);
   });
 });
+
+describe("the room's one alarm", () => {
+  // Sets up a room whose A2A attempt and inbox delivery are both pending, each due when the test says, with the alarm far off.
+  async function pending(attemptIn: number, inboxIn: number) {
+    const room = await newRoom();
+    const { agent } = await target(room);
+    await runInDurableObject(roomStub(room), (_: any, state: any) => void state.storage.sql.exec("CREATE TABLE test_hold_outbox (x)"));
+    const task = await offer(room, agent.id);
+    await runInDurableObject(roomStub(room), async (_: any, state: any) => {
+      state.storage.sql.exec("UPDATE a2a_attempt SET queued = 0, next_queue_at = ? WHERE task_id = ?", Date.now() + attemptIn, task.id);
+      state.storage.sql.exec("UPDATE outbox SET next_attempt_at = ?", Date.now() + inboxIn);
+      state.storage.sql.exec("DROP TABLE test_hold_outbox");
+      await state.storage.setAlarm(Date.now() + 3_600_000);
+    });
+    // Any write schedules the room, even a refused one.
+    expect((await api(OWNER, "POST", `/v1/workspaces/${room}/tasks`, {})).status).toBeGreaterThanOrEqual(400);
+    return runInDurableObject(roomStub(room), (_: any, state: any) => state.storage.getAlarm()) as Promise<number>;
+  }
+
+  it("follows an inbox recipient due before a pending A2A attempt", async () => {
+    expect(await pending(300_000, 2000)).toBeLessThanOrEqual(Date.now() + 2500);
+  });
+
+  it("follows a pending A2A attempt due before an inbox recipient", async () => {
+    expect(await pending(1000, 300_000)).toBeLessThanOrEqual(Date.now() + 1500);
+  });
+
+  it("isn't due for A2A while delivery is held", async () => {
+    const room = await newRoom();
+    const { agent } = await target(room);
+    await runInDurableObject(roomStub(room), (_: any, state: any) => void state.storage.sql.exec("CREATE TABLE test_hold_outbox (x)"));
+    await offer(room, agent.id);
+    await runInDurableObject(roomStub(room), async (_: any, state: any) => {
+      await state.storage.setAlarm(Date.now() + 3_600_000);
+    });
+    expect((await api(OWNER, "POST", `/v1/workspaces/${room}/tasks`, {})).status).toBeGreaterThanOrEqual(400);
+    expect(await runInDurableObject(roomStub(room), (_: any, state: any) => state.storage.getAlarm())).toBeGreaterThan(Date.now() + 3_000_000);
+  });
+});
+

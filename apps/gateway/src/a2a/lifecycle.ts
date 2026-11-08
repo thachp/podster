@@ -24,8 +24,11 @@ export const LIFECYCLE_METHODS = {
 export type LifecycleMethod = keyof typeof LIFECYCLE_METHODS;
 export const isLifecycleMethod = (method: unknown): method is LifecycleMethod => typeof method === "string" && Object.hasOwn(LIFECYCLE_METHODS, method);
 
-/** Which extensions a request named in `A2A-Extensions`. */
+/** Which extensions a request named in `A2A-Extensions`: each comma-separated entry, trimmed. */
 export const activated = (header: string | null) => (header ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+
+/** Whether the lifecycle extension is one of them, compared whole, so a URI that only contains it doesn't count. */
+export const lifecycleActive = (extensions: string[]) => extensions.some((uri) => uri === LIFECYCLE_URI);
 
 /** A `requestId` becomes the API's idempotency key, `a2a-lc:<requestId>`, which holds at most 255 bytes, apart from messages' keys. */
 const REQUEST_ID = /^[\x21-\x7e]{1,200}$/;
@@ -103,7 +106,7 @@ function refusal(status: number, body: any): Error {
  * and parameters does nothing new: the API's idempotency record answers it.
  */
 export async function runLifecycle(api: ApiReads, callerId: string, method: LifecycleMethod, params: unknown, extensions: string[]): Promise<Task> {
-  if (!extensions.includes(LIFECYCLE_URI)) throw new ExtensionSupportRequiredError(`Name ${LIFECYCLE_URI} in A2A-Extensions to call ${method}.`);
+  if (!lifecycleActive(extensions)) throw new ExtensionSupportRequiredError(`Name ${LIFECYCLE_URI} in A2A-Extensions to call ${method}.`);
   const parsed = parse(method, params);
   const { status, body } = await api.command(LIFECYCLE_METHODS[method], { workspace_id: parsed.workspaceId, task_id: parsed.taskId, ...parsed.args }, `a2a-lc:${parsed.requestId}`);
   if (status !== 200) throw refusal(status, body);

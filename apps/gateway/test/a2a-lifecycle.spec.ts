@@ -47,6 +47,17 @@ describe("activation", () => {
     expect((await read(task)).metadata["podster.dev/status"]).toBe("offered");
   });
 
+  it("matches the extension's URI whole: one that only contains it doesn't activate, and it counts among others", async () => {
+    const task = await make(guest.id);
+    for (const header of [`x${URI}y`, `${URI}/v2`, `https://evil.test/?u=${URI}`, `${URI};q=1`]) {
+      const res = await call("AcceptTask", { id: id(room, task), version: await versionOf(task) }, { "A2A-Extensions": header });
+      expect(reason(res.body), header).toMatch(/EXTENSION_SUPPORT_REQUIRED/);
+    }
+    expect((await read(task)).metadata["podster.dev/status"]).toBe("offered");
+    const among = await call("AcceptTask", { id: id(room, task), version: await versionOf(task) }, { "A2A-Extensions": `https://other.test/ext, ${URI}` });
+    expect(among.body.result.metadata["podster.dev/status"]).toBe("accepted");
+  });
+
   it("says it's active in the answer's A2A-Extensions", async () => {
     const task = await make(guest.id);
     const res = await call("AcceptTask", { id: id(room, task), version: await versionOf(task) });

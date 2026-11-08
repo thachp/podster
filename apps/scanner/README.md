@@ -38,7 +38,20 @@ Queue message:
 
 They come in the image ([decision 83](../../docs/spec/PRODUCT.md#decisions-needed)). The build runs `freshclam`, then fails unless the database is under 3 days old, then removes `freshclam`. A rebuild has to skip Docker's layer cache, or it keeps the old signatures.
 
-**Proposed:** rebuild and deploy daily. Past 7 days files stop getting verdicts ([decision 84](../../docs/spec/PRODUCT.md#decisions-needed)), so daily leaves six failed runs to notice before anyone's affected. Creating the schedule needs the owner.
+Staging rebuilds and deploys daily at 06:17 UTC, from [`scanner-rebuild.yml`](../../.github/workflows/scanner-rebuild.yml), which the owner approved on 2026-11-07. Past 7 days files stop getting verdicts ([decision 84](../../docs/spec/PRODUCT.md#decisions-needed)), so daily leaves six failed runs to notice before anyone's affected, and GitHub emails the owner about each. It deploys main's newest commit whose CI passed, because the deploy carries the scanner Worker's code too. It can also be run by hand from the Actions tab.
+
+It needs two secrets in the repository's `staging` environment:
+
+- `CLOUDFLARE_ACCOUNT_ID`: the account that holds `podster.dev`.
+- `CLOUDFLARE_API_TOKEN`: an account API token limited to that account. Start from the **Edit Cloudflare Workers** template, and add **Containers: Edit** and **Queues: Edit**, since the scanner is a Container and consumes the scan queues.
+
+The environment's deployment branches are limited to `main`, with no required reviewers, so the scheduled run doesn't wait. Without that limit, any branch with write access could run its own copy of the workflow with the token.
+
+The image is built and checked once before `wrangler deploy`, because the deploy makes the Worker live before it builds the image. A build that fails at that point leaves staging as it was. The deploy then builds the image again, and a failure in that second build, which is rare, can still leave the new Worker beside the old image.
+
+The run deploys main's newest passed commit, not whatever staging runs now. So a scanner deploy by hand should also come from main after its CI passes, or the next run puts main back. If a merged PR changes the scanner and the API together, deploy the API (and its migrations) by hand first, the same day, because this run deploys only the scanner.
+
+Production gets its own schedule and token when it exists.
 
 ## The base image
 

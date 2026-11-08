@@ -21,6 +21,14 @@ describe("ConsentForm", () => {
     expect(container).toHaveTextContent("workroom access is set separately");
   });
 
+  it("says when the app asks to act over A2A, and keeps the MCP wording otherwise", () => {
+    const { container, unmount } = render(<ConsentForm choices={choices({ protocol: "a2a" })} />);
+    expect(container).toHaveTextContent("It will act as the agent over A2A");
+    unmount();
+    const mcp = render(<ConsentForm choices={choices()} />);
+    expect(mcp.container).toHaveTextContent("It can use the agent's tools");
+  });
+
   it("marks a name that sounds official", () => {
     render(<ConsentForm choices={choices({ client_name: "Podster Admin" })} />);
     expect(screen.getByText("Name chosen by this app")).toBeInTheDocument();

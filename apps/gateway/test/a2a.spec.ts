@@ -1,16 +1,23 @@
 import { env, SELF } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { AgentCard } from "@a2a-js/sdk";
 import { ClientFactory, ClientFactoryOptions, JsonRpcTransportFactory } from "@a2a-js/sdk/client";
 import { A2A_METHODS, MAX_A2A_BODY_BYTES } from "../src/a2a/profile";
+import { A2A, connect, setUpSchemas, signUp } from "./oauth-helpers";
 
 const BASE = "https://gateway.test";
 const PROFILE = (env as unknown as { TEST_A2A_PROFILE: string }).TEST_A2A_PROFILE;
 
+let token = "";
+beforeAll(async () => {
+  await setUpSchemas();
+  token = (await connect(await signUp(), A2A, "a2a")).access;
+});
+
 let seq = 0;
-async function rpc(method: string, params: unknown = {}, headers: Record<string, string> = { "content-type": "application/json", "A2A-Version": "1.0" }) {
-  const res = await SELF.fetch(`${BASE}/a2a`, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: ++seq, method, params }) });
-  return { status: res.status, body: res.headers.get("content-type")?.includes("json") ? await res.json<any>() : null };
+async function rpc(method: string, params: unknown = {}, headers: Record<string, string> = { "content-type": "application/json", "A2A-Version": "1.0" }, id: unknown = ++seq) {
+  const res = await SELF.fetch(`${BASE}/a2a`, { method: "POST", headers: { authorization: `Bearer ${token}`, ...headers }, body: JSON.stringify({ jsonrpc: "2.0", id, method, params }) });
+  return { res, status: res.status, body: res.headers.get("content-type")?.includes("json") ? await res.json<any>() : null };
 }
 const reason = (body: any) => body?.error?.data?.[0]?.reason ?? body?.error?.message;
 
@@ -33,6 +40,11 @@ describe("the Agent Card", () => {
     expect(card.supportedInterfaces).toEqual([{ url: `${BASE}/a2a`, protocolBinding: "JSONRPC", protocolVersion: "1.0" }]);
     expect(card.capabilities).toEqual({ streaming: false, pushNotifications: false, extendedAgentCard: false, extensions: [] });
     expect(card.skills).toEqual([]);
+    // Step 7: the same consent as MCP, for scope `a2a`, with PKCE.
+    const scheme = card.securitySchemes.podster.oauth2SecurityScheme;
+    expect(scheme.oauth2MetadataUrl).toBe(`${BASE}/.well-known/oauth-authorization-server`);
+    expect(scheme.flows.authorizationCode).toMatchObject({ authorizationUrl: `${BASE}/authorize`, tokenUrl: `${BASE}/oauth/token`, scopes: { a2a: expect.any(String) }, pkceRequired: true });
+    expect(card.securityRequirements).toEqual([{ schemes: { podster: { list: ["a2a"] } } }]);
     expect(card.description).toMatch(/preview/i);
     // It describes Podster only: no room, task or agent IDs.
     expect(JSON.stringify(card)).not.toMatch(/\b(ws|tsk|agt|org|per)_/);
@@ -121,11 +133,52 @@ describe("before the handler", () => {
     expect((await SELF.fetch(`${BASE}/a2a`)).status).toBe(405);
   });
 
+  it("counts a chunked body, which declares no length, and refuses one over 64 KB", async () => {
+    const chunk = new TextEncoder().encode("x".repeat(16 * 1024));
+    let sent = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent >= 5) return controller.close();
+        sent += 1;
+        controller.enqueue(chunk);
+      },
+    });
+    const res = await SELF.fetch(`${BASE}/a2a`, { method: "POST", headers: { "content-type": "application/json", "A2A-Version": "1.0" }, body, duplex: "half" } as RequestInit);
+    expect(res.headers.get("content-length")).not.toBe("0");
+    expect(res.status).toBe(413);
+  });
+
+  it("checks the version before authentication, so a wrong version needs no token to hear so", async () => {
+    const res = await SELF.fetch(`${BASE}/a2a`, { method: "POST", headers: { "content-type": "application/json", "A2A-Version": "0.3" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "GetTask", params: { id: "t" } }) });
+    expect(reason(await res.json<any>())).toMatch(/VERSION_NOT_SUPPORTED/);
+  });
+
+  it("refuses a request with no token after those checks, with a challenge naming /a2a's metadata", async () => {
+    const res = await SELF.fetch(`${BASE}/a2a`, { method: "POST", headers: { "content-type": "application/json", "A2A-Version": "1.0" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "GetTask", params: { id: "t" } }) });
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toContain("/.well-known/oauth-protected-resource/a2a");
+  });
+
+  it("puts A2A-Version on every answer, refusals included", async () => {
+    expect((await rpc("GetTask", { id: "t" })).res.headers.get("A2A-Version")).toBe("1.0");
+    expect((await rpc("GetTask", { id: "t" }, { "content-type": "application/json" })).res.headers.get("A2A-Version")).toBe("1.0");
+    expect((await rpc("GetTask", {}, { "content-type": "text/plain", "A2A-Version": "1.0" })).res.headers.get("A2A-Version")).toBe("1.0");
+  });
+
+  it("echoes an id only when it's a string, a number or null", async () => {
+    expect((await rpc("GetTask", { id: "t" }, undefined, "abc")).body.id).toBe("abc");
+    expect((await rpc("GetTask", { id: "t" }, undefined, 7)).body.id).toBe(7);
+    expect((await rpc("GetTask", { id: "t" }, undefined, { evil: true })).body.id).toBeNull();
+    expect((await rpc("GetTask", { id: "t" }, { "content-type": "application/json" }, ["x"])).body.id).toBeNull();
+  });
+
   it("answers malformed JSON and an unknown method as JSON-RPC errors", async () => {
-    const bad = await SELF.fetch(`${BASE}/a2a`, { method: "POST", headers: { "content-type": "application/json", "A2A-Version": "1.0" }, body: "{not json" });
-    expect((await bad.json<any>()).error).toBeDefined();
+    const bad = await SELF.fetch(`${BASE}/a2a`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "A2A-Version": "1.0" }, body: "{not json" });
+    const badText = await bad.text();
+    expect(bad.status, badText).toBe(200);
+    expect(JSON.parse(badText).error).toBeDefined();
     const { body } = await rpc("tasks/get", { id: "tsk_x" });
-    expect(body.error).toBeDefined();
+    expect(body.error.code).toBe(-32601);
     expect(body.result).toBeUndefined();
   });
 
@@ -137,7 +190,11 @@ describe("before the handler", () => {
 
 describe("the A2A project's own client", () => {
   it("reads the card and gets the named errors, unpatched", async () => {
-    const fetchImpl = ((input: string | URL | Request, init?: RequestInit) => SELF.fetch(input instanceof Request ? input : String(input), init)) as typeof fetch;
+    const fetchImpl = ((input: string | URL | Request, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      headers.set("authorization", `Bearer ${token}`);
+      return SELF.fetch(input instanceof Request ? input : String(input), { ...init, headers });
+    }) as typeof fetch;
     const client = await new ClientFactory({ ...ClientFactoryOptions.default, transports: [new JsonRpcTransportFactory({ fetchImpl })] }).createFromAgentCard(
       AgentCard.fromJSON(await (await SELF.fetch(`${BASE}/.well-known/agent-card.json`)).json()),
     );

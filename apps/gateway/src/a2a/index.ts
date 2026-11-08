@@ -1,25 +1,34 @@
 import { A2A_VERSION_HEADER } from "@a2a-js/sdk";
-import { defaultServerCallContextBuilder, JsonRpcTransportHandler, UnauthenticatedUser, validateVersion } from "@a2a-js/sdk/server";
-import { toJsonRpcError, UnsupportedOperationError } from "@a2a-js/sdk/errors";
+import { defaultServerCallContextBuilder, JsonRpcTransportHandler, validateVersion, type User } from "@a2a-js/sdk/server";
+import { toJsonRpcError, UnsupportedOperationError, VersionNotSupportedError } from "@a2a-js/sdk/errors";
 import { agentCard } from "./card";
 import { PodsterA2AHandler } from "./handler";
-import { A2A_BINDING, A2A_PATH, CARD_PATH, MAX_A2A_BODY_BYTES } from "./profile";
+import { A2A_BINDING, A2A_METHODS, A2A_PATH, A2A_VERSION, CARD_PATH, MAX_A2A_BODY_BYTES } from "./profile";
 
 /**
  * The gateway's A2A surface: Podster's Agent Card, and JSON-RPC on `POST /a2a`. The gateway only translates. Rust will
  * decide every command, as it does for MCP. Logs carry nothing from a request.
  *
- * Before the handler, in ADR 0007's order: the gateway's per-client limit has already run for every request, then the
- * content type and size, then `A2A-Version`, then streaming. Authentication and the agent's own limit arrive with step 7,
- * between the per-client limit and the content type.
+ * The order, as the M3 step 7 review set it:
+ * 1. The gateway's per-client limit, which runs for every request before routing.
+ * 2. `checkA2aRequest`: method, content type, a 64 KB body read once, and `A2A-Version`. None of it reveals anything.
+ * 3. Authentication, by the `/a2a` resource server, so only a token whose audience is `/a2a` gets further.
+ * 4. The agent's own limit, in the same bucket as MCP (decision 123), in the gateway's `/a2a` handler.
+ * 5. `answerA2a`: parsing, streaming refused, and the handler.
  */
 
 const STREAMING = new Set(["SendStreamingMessage", "SubscribeToTask"]);
+const VERSION_HEADERS = { [A2A_VERSION_HEADER]: A2A_VERSION };
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
-  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...VERSION_HEADERS, ...headers } });
 
-const rpcError = (id: unknown, error: unknown) => json({ jsonrpc: "2.0", id: id ?? null, error: toJsonRpcError(error) });
+const httpError = (code: string, status: number, headers: Record<string, string> = {}) => json({ error: { code, message: code } }, status, headers);
+
+/** JSON-RPC allows an id that's a string, a number or null. Anything else isn't echoed back. */
+const safeId = (id: unknown) => (typeof id === "string" || (typeof id === "number" && Number.isFinite(id)) ? id : null);
+
+const rpcError = (id: unknown, error: unknown) => json({ jsonrpc: "2.0", id: safeId(id), error: toJsonRpcError(error) });
 
 /** Reads at most `MAX_A2A_BODY_BYTES`, counting what arrives, because a chunked body declares no length. */
 async function boundedText(request: Request): Promise<string | null> {
@@ -51,40 +60,52 @@ function envelope(text: string): { id: unknown; method: unknown } {
   }
 }
 
-/** Answers the card and `/a2a`, and `null` for every other path. */
-export async function handleA2a(request: Request, url: URL, baseUrl: string): Promise<Response | null> {
-  if (url.pathname === CARD_PATH) {
-    if (request.method !== "GET" && request.method !== "HEAD") return json({ error: { code: "method_not_allowed", message: "method_not_allowed" } }, 405, { allow: "GET, HEAD" });
-    return json(agentCard(baseUrl), 200, { "cache-control": "public, max-age=300" });
-  }
-  if (url.pathname !== A2A_PATH) return null;
-  if (request.method !== "POST") return json({ error: { code: "method_not_allowed", message: "method_not_allowed" } }, 405, { allow: "POST" });
+/** Podster's one public card, on the gateway's host. `null` for every other path. */
+export function handleA2aCard(request: Request, url: URL, baseUrl: string): Response | null {
+  if (url.pathname !== CARD_PATH) return null;
+  if (request.method !== "GET" && request.method !== "HEAD") return httpError("method_not_allowed", 405, { allow: "GET, HEAD" });
+  return json(agentCard(baseUrl), 200, { "cache-control": "public, max-age=300" });
+}
 
+export const isA2aPath = (url: URL) => url.pathname === A2A_PATH;
+
+/**
+ * Everything that comes before authentication. It answers a refusal, or the body, read once, for `answerA2a`. The version
+ * check needs no credential and reveals nothing, so a client on the wrong version hears so before it signs in.
+ */
+export async function checkA2aRequest(request: Request, baseUrl: string): Promise<Response | { text: string }> {
+  if (request.method !== "POST") return httpError("method_not_allowed", 405, { allow: "POST" });
   const type = request.headers.get("content-type") ?? "";
-  if (!/^application\/(a2a\+)?json\s*(;|$)/i.test(type)) return json({ error: { code: "unsupported_media_type", message: "unsupported_media_type" } }, 415);
+  if (!/^application\/(a2a\+)?json\s*(;|$)/i.test(type)) return httpError("unsupported_media_type", 415);
   const text = await boundedText(request);
-  if (text === null) return json({ error: { code: "payload_too_large", message: "payload_too_large" } }, 413);
-  const { id, method } = envelope(text);
-
-  const handler = new PodsterA2AHandler(baseUrl);
-  const context = defaultServerCallContextBuilder({
-    extensions: undefined,
-    user: new UnauthenticatedUser(),
-    headers: {},
-    requestedVersion: request.headers.get(A2A_VERSION_HEADER) ?? undefined,
-  } as never);
+  if (text === null) return httpError("payload_too_large", 413);
   try {
     // Decision 109: only 1.0. A missing header is read as 0.3 (spec 3.6.2), so it's refused too.
-    validateVersion(context.requestedVersion, await handler.getAgentCard(), A2A_BINDING);
+    validateVersion(request.headers.get(A2A_VERSION_HEADER) ?? "0.3", await new PodsterA2AHandler(baseUrl).getAgentCard(), A2A_BINDING);
   } catch (error) {
-    return rpcError(id, error);
+    return rpcError(envelope(text).id, error instanceof VersionNotSupportedError ? error : new VersionNotSupportedError("Only A2A 1.0 is supported."));
   }
+  return { text };
+}
+
+/**
+ * After authentication: one JSON-RPC request from one agent. `agentId` is what the gateway resolved from the token, never
+ * anything the client sent. A request's `tenant` reaches the SDK's context, and Podster never reads it for authority.
+ */
+export async function answerA2a(text: string, agentId: string, baseUrl: string): Promise<Response> {
+  const { id, method } = envelope(text);
   // Decision 110: no streaming, refused here so nothing ever holds a response open.
   if (typeof method === "string" && STREAMING.has(method)) return rpcError(id, new UnsupportedOperationError("Streaming isn't supported."));
-
-  const result = await new JsonRpcTransportHandler(handler).handle(text, context);
+  // Only the profile's operations reach the handler. Anything else is "method not found", exactly.
+  if (typeof method === "string" && !Object.hasOwn(A2A_METHODS, method)) {
+    return json({ jsonrpc: "2.0", id: safeId(id), error: { code: -32601, message: "Method not found" } });
+  }
+  const user: User = { isAuthenticated: true, userName: agentId };
+  const context = defaultServerCallContextBuilder({ extensions: undefined, user, headers: {}, requestedVersion: A2A_VERSION });
+  const result = await new JsonRpcTransportHandler(new PodsterA2AHandler(baseUrl)).handle(text, context);
   if (result && typeof (result as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function") {
     return rpcError(id, new UnsupportedOperationError("Streaming isn't supported."));
   }
-  return json(result, 200, { [A2A_VERSION_HEADER]: "1.0" });
+  const body = result as { id?: unknown };
+  return json({ ...body, id: safeId(body.id) });
 }

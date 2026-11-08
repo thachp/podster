@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/button";
 import { clientCommand } from "@/lib/gateway/client";
 import { ApprovalFields, approvalFailure, firstChoice, RequesterName, type ApprovalAgent, type ApprovalOrg } from "../../approval-fields";
 
-export type ConsentChoices = { client_name: string; redirect_hosts: string[]; oauth_query: string; orgs: ApprovalOrg[]; agents: ApprovalAgent[] };
+/** `protocol` says which of the gateway's resources the app asks for. A gateway that doesn't send it is asking for MCP. */
+export type ConsentChoices = { client_name: string; redirect_hosts: string[]; oauth_query: string; protocol?: "mcp" | "a2a"; orgs: ApprovalOrg[]; agents: ApprovalAgent[] };
 
 /**
  * Who is asking, which organization and what will be granted. Nothing here submits on Enter or takes focus, so approving
@@ -37,7 +38,9 @@ export function ConsentForm({ choices, leave = (url: string) => location.assign(
       <p>
         After you approve, it receives access at <strong className="break-all">{choices.redirect_hosts.join(", ")}</strong>. Only continue if you started this and trust that site.
       </p>
-      <p>It can use the agent's tools in any workroom that agent has joined. Connecting doesn't run or wake an agent, and workroom access is set separately.</p>
+      <p>
+        {choices.protocol === "a2a" ? "It will act as the agent over A2A, through Podster's A2A interface," : "It can use the agent's tools"} in any workroom that agent has joined. Connecting doesn't run or wake an agent, and workroom access is set separately.
+      </p>
       <ApprovalFields orgs={choices.orgs} agents={choices.agents} value={choice} onChange={setChoice} disabled={busy} newAgentLabel="A new agent, or its existing one" />
       <p className="text-muted-foreground">If this app is already connected to the organization, it keeps its agent and name.</p>
       {failure ? <p role="alert">{failure}</p> : null}

@@ -1,12 +1,17 @@
 // M3's A2A run against a deployment, through the A2A project's own JavaScript client, `@a2a-js/sdk`, and not the gateway's
-// code. It covers steps 8 to 10:
+// code. It covers steps 8 to 11:
 //
 // - discovery from the Agent Card;
 // - OAuth to the `/a2a` audience;
 // - `GetTask` and `ListTasks`, with paging;
 // - `SendMessage`, with a retry;
 // - the lifecycle extension, with and without `A2A-Extensions`;
-// - the refusals: a hidden task, a stale version, another agent's task.
+// - the refusals: a hidden task, a stale version, another agent's task;
+// - an agent's A2A endpoint with a bearer token (step 11): set, read, rotate, the org admin's read, delete and disconnect.
+//   Nothing is sent to it at step 11, so its host is a made-up name under example.com, which passes egress policy.
+//
+// The token and signing secret must never be shown: not in a read, and not in this script's own output, which it checks at
+// the end. A token is `e2eA2aTok_…` and a secret `a2asec_…`, so the local runner can look for both in the Workers' logs.
 //
 //   node a2a-staging.mjs --base-url <gateway> [--allow-host <host>]
 //
@@ -24,7 +29,7 @@
 import { AgentCard } from "@a2a-js/sdk";
 import { ClientFactory, ClientFactoryOptions, JsonRpcTransportFactory } from "@a2a-js/sdk/client";
 import { auth as sdkAuth } from "@modelcontextprotocol/sdk/client/auth.js";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { key, McpAgent, ok, Person, Target } from "./lib.mjs";
 
 const args = process.argv.slice(2);
@@ -54,6 +59,18 @@ if (signupSecret && new URL(base).origin !== STAGING) {
   console.error(`PODSTER_E2E_SIGNUP_SECRET only works against ${STAGING}. Unset it to run against ${host}.`);
   process.exit(2);
 }
+
+// Everything this script writes, so the end can check no token or secret is in it. Kept in memory only.
+const written = [];
+for (const stream of [process.stdout, process.stderr]) {
+  const write = stream.write.bind(stream);
+  stream.write = (chunk, ...rest) => {
+    written.push(String(chunk));
+    return write(chunk, ...rest);
+  };
+}
+/** Values that must never be printed, gathered as the run makes them. */
+const secrets = new Set();
 
 const target = new Target(base, { pollMs: isLocal ? 150 : 1000 });
 const LIFECYCLE = "https://podster.dev/a2a/lifecycle/v1";
@@ -200,6 +217,11 @@ try {
 } finally {
   await signOut();
 }
+// Last, so it covers everything written before it. It never prints what it found, only that it found something.
+const output = written.join("");
+const leakedValues = [...secrets].filter((value) => output.includes(value)).length;
+const leakedShapes = (output.match(/a2asec_[0-9a-f]{8,}|e2eA2aTok_[0-9a-f]{8,}/g) ?? []).length;
+check(leakedValues === 0 && leakedShapes === 0, "no endpoint token or signing secret anywhere in this script's output", leakedValues || leakedShapes ? `${leakedValues} known values and ${leakedShapes} lookalikes found` : `${secrets.size} values checked`);
 const count = (status) => results.filter((r) => r.status === status).length;
 console.log(`\n${count("ok")} passed, ${count("fail")} failed, ${count("skip")} skipped.${room ? ` Room ${room}.` : ""}`);
 process.exit(count("fail") || failedOutside ? 1 : 0);
@@ -312,5 +334,105 @@ async function run() {
     const v = (await guestClient.getTask({ id: a2aId(declinable) })).metadata?.[VERSION];
     const declined = await lifecycle(guestToken, "DeclineTask", { id: a2aId(declinable), version: v, reason: "Not for me." });
     check(declined.body?.result?.metadata?.[STATUS] === "open", "the guest declines another offer with a reason, and it goes back to open", declined.body?.result?.metadata?.[STATUS] ?? declined.reason);
+  });
+
+  section("Endpoint (step 11)");
+  await endpoint(owner);
+}
+
+/** The text of a value, to look for a token or secret in it. */
+function shown(value) {
+  return JSON.stringify(value ?? null);
+}
+function hides(value, ...values) {
+  return values.every((v) => !shown(value).includes(v));
+}
+
+/**
+ * Step 11: an agent sets its A2A endpoint with a bearer token through its own `set_a2a_endpoint`. Its own agent, because the
+ * disconnect at the end ends it. Nothing is sent to the endpoint until step 12.
+ */
+async function endpoint(owner) {
+  const agent = await McpAgent.connect(target, owner, "A2A staging endpoint");
+  const host = `a2a-e2e-${randomBytes(6).toString("hex")}.example.com`;
+  const url = `https://${host}/a2a`;
+  const token = `e2eA2aTok_${randomBytes(24).toString("hex")}`;
+  secrets.add(token);
+  const adminPath = `/agents/${agent.id}/a2a-endpoint`;
+  let first;
+  let secret;
+
+  await step("set with a token", async () => {
+    const refused = [];
+    for (const bad of ["http://" + host + "/a2a", "https://10.0.0.1/a2a", `https://${host}:8443/a2a`, "https://a2a.internal/a2a"]) {
+      const res = await agent.call("set_a2a_endpoint", { url: bad });
+      if (res.ok || !/invalid_endpoint_url/.test(res.code ?? "")) refused.push(bad.split("/")[2]);
+    }
+    check(refused.length === 0, "a URL egress policy refuses can't be set: plain HTTP, an IP, another port, a private name", refused.length ? `accepted or other code: ${refused.join(", ")}` : "");
+    const set = await agent.call("set_a2a_endpoint", { url, token });
+    if (!set.ok && /token_storage_unavailable/.test(set.code ?? "")) {
+      return check(false, "the agent sets its endpoint with a token", "token_storage_unavailable: A2A_TOKEN_KEY isn't set, or isn't 64 hex characters");
+    }
+    check(set.ok, "the agent sets its endpoint with a token through its own set_a2a_endpoint", set.ok ? "" : set.code);
+    if (!set.ok) return;
+    first = set.data;
+    secret = first.signing_secret;
+    if (typeof secret === "string") secrets.add(secret);
+    check(/^a2asec_[0-9a-f]{64}$/.test(secret ?? ""), "the answer gives a signing secret once");
+    check(first.url === url && first.enabled === true && Number.isInteger(first.version) && first.version >= 1, "the answer has the URL, a version, and the endpoint on", `version ${first.version}, enabled ${first.enabled}`);
+    check(first.has_token === true && first.token_state === "stored", "the token is stored", `has_token ${first.has_token}, token_state ${first.token_state}`);
+    check(!("token" in first) && hides(first, token), "the answer never has the token");
+  });
+  if (!first) return skip("the rest of step 11", "no endpoint");
+
+  await step("reads", async () => {
+    const read = await agent.call("get_a2a_endpoint", {});
+    check(read.ok && read.data?.has_token === true && read.data?.token_state === "stored" && read.data?.version === first.version, "the agent's read shows has_token true and token_state stored", read.ok ? `${read.data?.has_token} ${read.data?.token_state}` : read.code);
+    check(read.ok && !("signing_secret" in (read.data ?? {})) && !("token" in (read.data ?? {})) && hides(read.data, token, secret), "the agent's read has neither the token nor the secret");
+    const identity = await agent.call("get_identity", {});
+    const inIdentity = identity.data?.a2a_endpoint;
+    if (identity.ok && inIdentity !== undefined) {
+      check(inIdentity?.token_state === "stored" && hides(identity.data, token, secret), "get_identity shows the endpoint, with neither the token nor the secret", inIdentity?.token_state);
+    } else {
+      check(identity.ok && hides(identity.data, token, secret), "get_identity has neither the token nor the secret", identity.ok ? "" : identity.code);
+    }
+  });
+
+  let rotated;
+  await step("same URL, then rotate", async () => {
+    const again = await agent.call("set_a2a_endpoint", { url });
+    check(again.ok && again.data?.version === first.version && !("signing_secret" in (again.data ?? {})), "setting the same URL again keeps the version and gives no new secret", again.ok ? `version ${again.data?.version}` : again.code);
+    check(again.ok && again.data?.has_token === true && again.data?.token_state === "stored", "and keeps the token", again.ok ? again.data?.token_state : "");
+    const rotate = await agent.call("set_a2a_endpoint", { url, rotate_secret: true });
+    rotated = rotate.data?.signing_secret;
+    if (typeof rotated === "string") secrets.add(rotated);
+    check(rotate.ok && /^a2asec_[0-9a-f]{64}$/.test(rotated ?? "") && rotated !== secret, "rotate_secret gives a new secret", rotate.ok ? "" : rotate.code);
+    check(rotate.ok && rotate.data?.version === first.version && rotate.data?.token_state === "stored" && hides(rotate.data, token), "rotating keeps the version and the token, and never shows the token", rotate.ok ? `version ${rotate.data?.version}` : "");
+  });
+
+  await step("the org admin's read", async () => {
+    const read = await owner.dash("GET", adminPath);
+    check(read.status === 200 && read.body?.url === url && read.body?.has_token === true && read.body?.token_state === "stored", "an org admin reads it through the person route", `HTTP ${read.status} ${read.body?.token_state ?? read.code ?? ""}`);
+    check(read.status === 200 && !("signing_secret" in (read.body ?? {})) && !("token" in (read.body ?? {})) && hides(read.body, token, secret, rotated ?? secret), "the admin's read has neither the token nor either secret");
+    const identity = await owner.dash("GET", `/agents/${agent.id}`);
+    check(identity.status === 200 && hides(identity.body, token, secret, rotated ?? secret), "nor does the admin's read of the agent", `HTTP ${identity.status}`);
+  });
+
+  await step("delete", async () => {
+    const deleted = await agent.call("delete_a2a_endpoint", {});
+    check(deleted.ok && deleted.data?.deleted === true, "the agent deletes its endpoint", deleted.ok ? "" : deleted.code);
+    const mine = await agent.call("get_a2a_endpoint", {});
+    const theirs = await owner.dash("GET", adminPath);
+    check(mine.ok && mine.data === null && theirs.status === 200 && theirs.body === null, "then neither the agent nor the admin reads one", `${shown(mine.data).slice(0, 20)} / HTTP ${theirs.status} ${shown(theirs.body).slice(0, 20)}`);
+  });
+
+  await step("disconnect", async () => {
+    const again = await agent.call("set_a2a_endpoint", { url, token });
+    if (typeof again.data?.signing_secret === "string") secrets.add(again.data.signing_secret);
+    check(again.ok && again.data?.version > first.version && typeof again.data?.signing_secret === "string" && again.data?.token_state === "stored", "after a delete the same URL makes a new version and secret", again.ok ? `version ${again.data?.version}` : again.code);
+    const gone = await owner.dash("POST", `/agents/${agent.id}/disconnect`);
+    check(gone.status === 200, "the org admin disconnects the agent", `HTTP ${gone.status} ${gone.code ?? ""}`);
+    const theirs = await owner.dash("GET", adminPath);
+    check(theirs.body === null || theirs.status === 404, "the disconnect removes the endpoint, with its token and secret", `HTTP ${theirs.status} ${shown(theirs.body).slice(0, 20)}`);
   });
 }

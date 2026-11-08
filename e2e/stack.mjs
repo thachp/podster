@@ -44,7 +44,8 @@ export async function freePort() {
 }
 
 /** Builds the API, makes throwaway keys, writes its local config and applies both apps' migrations. */
-export function prepareStack({ skipBuild = false } = {}) {
+/** `apiVars` adds to the API's own vars, such as a throwaway A2A_TOKEN_KEY, which a deployment keeps as a secret. */
+export function prepareStack({ skipBuild = false, apiVars = {} } = {}) {
   if (!existsSync(wrangler)) {
     console.error("Run `npm ci` in apps/gateway first: this uses that app's pinned wrangler.");
     process.exit(2);
@@ -69,7 +70,7 @@ export function prepareStack({ skipBuild = false } = {}) {
     JSON.stringify({
       ...apiBase,
       main: join(api, "build/index.js"),
-      vars: { ASSERTION_KEYS: JSON.stringify({ [kid]: publicKey.export({ format: "jwk" }).x }) },
+      vars: { ASSERTION_KEYS: JSON.stringify({ [kid]: publicKey.export({ format: "jwk" }).x }), ...apiVars },
       d1_databases: apiBase.d1_databases.map((db) => ({ ...db, database_id: "e2e-api", migrations_dir: join(api, "migrations") })),
     }),
   );

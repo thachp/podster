@@ -2490,6 +2490,8 @@ pub struct Workspace {
     denials_held: RefCell<HeldDenials>,
     /// Whether an alarm is set for what's held, so a failure to set one is tried again on the next refusal.
     denial_alarm_set: std::cell::Cell<bool>,
+    /// File sweeps that failed in a row, which backs off how soon the alarm comes back for them. A restart forgets it.
+    sweep_failures: std::cell::Cell<u32>,
 }
 
 type HeldDenials = std::collections::HashMap<DenialKey, HeldDenial>;
@@ -3194,7 +3196,7 @@ impl Workspace {
         {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
-        if let Some(next) = removal::next_due(&sql, now)? {
+        if let Some(next) = removal::next_due(&sql, now, self.sweep_failures.get())? {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
         let Some(due) = due else {
@@ -4032,6 +4034,7 @@ impl DurableObject for Workspace {
             test_generation: RefCell::new(None),
             denials_held: RefCell::new(HeldDenials::new()),
             denial_alarm_set: std::cell::Cell::new(false),
+            sweep_failures: std::cell::Cell::new(0),
         }
     }
 

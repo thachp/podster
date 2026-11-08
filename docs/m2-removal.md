@@ -1,6 +1,6 @@
 # M2 step 8: removal and retention
 
-**Proposed, and built locally, undeployed.** The pure rules and the API side are built to the owner's rulings below, except two alarm steps that wait on other work. Rules: [upload policy](spec/UPLOAD-POLICY.md#keeping-and-removing-files). Decisions: [56 and 57](spec/PRODUCT.md#decisions-needed). Design: [ADR 0006](adr/0006-uploads-and-scanning.md#removal). Order: [M2 plan](m2-plan.md#build-order).
+**Proposed, and built locally, undeployed.** The pure rules and the API side are built to the owner's rulings below. Rules: [upload policy](spec/UPLOAD-POLICY.md#keeping-and-removing-files). Decisions: [56 and 57](spec/PRODUCT.md#decisions-needed). Design: [ADR 0006](adr/0006-uploads-and-scanning.md#removal). Order: [M2 plan](m2-plan.md#build-order).
 
 ## What's built: the pure rules
 
@@ -35,7 +35,7 @@
 
 1. Resolve the caller and work out their view of the file, using the same function as downloads.
 2. `authorize_file_removal`, then `remove_file`.
-3. Set `state = 'removed'`, `removed_at`, `removed_by`, `removed_by_kind` and `removed_from` on `stored_object`. The name, size, hash, uploader and timestamps stay.
+3. Set `state = 'removed'`, `removed_at`, `removed_by`, `removed_by_kind` and `removed_from` on `stored_object`. The name, size, hash, who uploaded it (`uploaded_by`) and the timestamps stay. The unfinished upload's grant goes: `uploader_json` and the token's hash.
 4. Audit `object.removed`, record the event `object.removed` with IDs only, and store the idempotency record.
 
 The same transaction marks the file for a purge, and the alarm right after it lists only `rooms/{room}/objects/{file}/` and deletes everything there, every attempt included.
@@ -75,9 +75,9 @@ If it keeps bytes that are too young, it runs again when the youngest one is an 
 
 After every pass, the next is due no later than the room's high-water mark, `storage_sweep.settles_at`. It only ever rises, to an hour past each upload attempt's start and each unfinished upload's drop, and it starts an hour after the migration for attempts begun before it. It outlives the rows, so a row dropped while its attempt is still writing, or a pass forced early, can't lose the schedule.
 
-A pass sets its own due time a minute on as it starts, rather than clearing it, so a pass that dies midway still has one coming. A key whose delete fails is skipped and tried again a minute later, so it can't stall the rest. A room with nothing new never lists storage.
+A pass sets its own due time a minute on as it starts, rather than clearing it, so a pass that dies midway still has one coming. Deletes go in batches. When a batch fails, the keys go one at a time, and a key that still won't delete is skipped, logged by its object's ID and tried again a minute later, in the room-wide sweep and in a file's purge alike. A room with nothing new never lists storage.
 
-A row whose state can't be read keeps its key's bytes. Nothing overdue wakes the room sooner than a second from now, so a step that keeps failing can't spin the alarm.
+A row whose state can't be read keeps its key's bytes. Nothing overdue wakes the room sooner than a second from now, doubled for each sweep in a row that failed, up to five minutes, so a step that keeps failing can't spin the alarm. The count lives in the room's memory, so a restart forgets it.
 
 **Where unreferenced bytes come from:**
 - `upload_outcome_unknown`;
@@ -107,14 +107,14 @@ The owner ruled "as recommended", recorded as [decisions 92 to 98](spec/PRODUCT.
 
 - **No operator route in this change (92).** It gets its own change before any public room, as another `Remover` kind calling `removal::remove`.
 - **Removal works in an archived room (93).** This is built.
-- **Blocked and failed files (94).** Their bytes are removed by the system 7 days after the verdict. The rule is `unusable_file_due` in core. Its alarm step needs #125's `scanned_at`, so it lands after #125.
+- **Blocked and failed files (94).** Their bytes are removed by the system 7 days after the verdict. The rule is `unusable_file_due` in core. The room's alarm removes them as `podster`/`system`, taking the verdict from `scanned_at`, or for a scan that ran out of time, from the end of its hour.
 - **No self-cancel (95).**
 - **Unsubmitted files (98).** Files uploaded for a task and never submitted are removed by the system 24 hours after the task leaves Accepted. The rule is `unsubmitted_file_due` in core. The hook is agreed with step 6 part 2, whose migration adds what this reads:
   - `stored_object.for_task`;
   - a `submission_file` table, where "named by a submission" means one of its rows has the file's `object_id`;
   - `task.left_accepted_at`, which `store::save_task` sets on leaving Accepted and clears on coming back.
 
-  The alarm step lands after both migrations.
+  The room's alarm removes such a file as `podster`/`system` once the task has been out of Accepted for 24 hours. A file any submission names is never touched.
 
 ## What the deeper pass should cover
 

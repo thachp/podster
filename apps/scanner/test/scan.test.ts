@@ -3,7 +3,7 @@ import { MAX_SIGNATURE_AGE_MS, readDatabase, readJob, readVerdict, scanOne, SCAN
 
 const NOW = Date.UTC(2026, 10, 7, 12);
 const hash = "a".repeat(64);
-const job: ScanJob = { v: 1, workspace_id: "ws_1", object_id: "obj_1", key: "rooms/ws_1/obj_1", size: 5, sha256: hash };
+const job: ScanJob = { v: 1, workspace_id: "ws_1", object_id: "obj_1", key: "rooms/ws_1/objects/obj_1/0f1e2d3c", size: 5, sha256: hash };
 const fresh = { engine: "1.5.4", version: "28176", built_at: new Date(NOW - 86_400_000).toISOString() };
 const stale = { ...fresh, built_at: new Date(NOW - MAX_SIGNATURE_AGE_MS - 1).toISOString() };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
@@ -33,7 +33,7 @@ describe("a verdict", () => {
   it("reports nothing found with the database version, in the words core reads", async () => {
     const { sent, scanning, scanned } = setup();
     expect(await scanOne(job, scanning)).toEqual({ ack: true, outcome: "no_known_malware" });
-    expect(sent).toEqual([{ v: 1, workspace_id: "ws_1", object_id: "obj_1", report: "no_known_malware", reason: "none", sha256: hash, bytes: 5, database: fresh, scanned_at: NOW }]);
+    expect(sent).toEqual([{ v: 1, workspace_id: "ws_1", object_id: "obj_1", key: job.key, report: "no_known_malware", reason: "none", sha256: hash, bytes: 5, database: fresh, scanned_at: NOW }]);
     expect(scanned[0].headers.get("x-expected-sha256")).toBe(hash);
     expect(scanned[0].headers.get("content-length")).toBe("5");
   });
@@ -48,11 +48,11 @@ describe("a verdict", () => {
     expect(sent[0]).toMatchObject({ report, reason, database: fresh });
   });
 
-  it("carries no file name, because the message has none", async () => {
+  it("carries no file name, because the message has none, and gives back the key it read, which is only IDs", async () => {
     const { sent, scanning } = setup();
     await scanOne({ ...job, name: "secret.txt" }, scanning);
     expect(JSON.stringify(sent[0])).not.toContain("secret");
-    expect(JSON.stringify(sent[0])).not.toContain(job.key);
+    expect(sent[0].key).toBe(job.key);
   });
 });
 
@@ -221,6 +221,11 @@ describe("a queue message", () => {
     ["a bad workspace", { ...job, workspace_id: "../x" }],
     ["a bad object", { ...job, object_id: "" }],
     ["no key", { ...job, key: "" }],
+    ["another room's key", { ...job, key: "rooms/ws_2/objects/obj_1/0f1e2d3c" }],
+    ["another file's key", { ...job, key: "rooms/ws_1/objects/obj_2/0f1e2d3c" }],
+    ["a key with no attempt", { ...job, key: "rooms/ws_1/objects/obj_1/" }],
+    ["a key that climbs out", { ...job, key: "rooms/ws_1/objects/obj_1/../../obj_2/x" }],
+    ["a key in another shape", { ...job, key: "elsewhere/rooms/ws_1/objects/obj_1/0f1e2d3c" }],
     ["a bad hash", { ...job, sha256: "XYZ" }],
     ["a bad size", { ...job, size: -1 }],
     ["a size that's not a number", { ...job, size: "5" }],
@@ -236,7 +241,7 @@ describe("a queue message", () => {
 });
 
 describe("telling the room", () => {
-  const result: ScanResult = { v: 1, workspace_id: "ws_1", object_id: "obj_1", report: "no_known_malware", reason: "none", sha256: hash, bytes: 5, database: fresh, scanned_at: NOW };
+  const result: ScanResult = { v: 1, workspace_id: "ws_1", object_id: "obj_1", key: job.key, report: "no_known_malware", reason: "none", sha256: hash, bytes: 5, database: fresh, scanned_at: NOW };
   const signal = new AbortController().signal;
 
   it("proves it's the scanner, and sends no idempotency key, so a later finding still counts", async () => {
@@ -250,9 +255,9 @@ describe("telling the room", () => {
     expect(await seen[0].json()).toEqual(result);
   });
 
-  it.each([404, 409, 422])("a %i is an answer: nothing was recorded, retrying won't help, and the log can tell", async (status) => {
+  it.each([400, 404, 409, 422])("a %i is an answer: nothing was recorded, retrying won't help, and the log can tell", async (status) => {
     const { scanning } = setup({ send: async () => json({}, status) });
-    expect(await scanOne(job, scanning)).toEqual({ ack: true, outcome: "not_recorded" });
+    expect(await scanOne(job, scanning)).toEqual({ ack: true, outcome: "not_recorded", status });
   });
 
   it.each([500, 503, 429, 401, 403])("a %i retries, and ends in the dead-letter queue if it keeps on", async (status) => {
@@ -275,6 +280,17 @@ describe("helpers", () => {
     expect(readDatabase({ ...fresh, built_at: "soon" })).toBeNull();
     expect(readDatabase({ ...fresh, engine: "" })).toBeNull();
     expect(readDatabase("28176")).toBeNull();
+  });
+
+  it("readDatabase keeps to the room's limits, counting UTF-8 bytes", () => {
+    expect(readDatabase({ ...fresh, engine: "e".repeat(40) })).not.toBeNull();
+    expect(readDatabase({ ...fresh, engine: "e".repeat(41) })).toBeNull();
+    // 20 UTF-16 units, but 60 bytes.
+    expect(readDatabase({ ...fresh, engine: "€".repeat(20) })).toBeNull();
+    expect(readDatabase({ ...fresh, version: "1".repeat(20) })).not.toBeNull();
+    expect(readDatabase({ ...fresh, version: "1".repeat(21) })).toBeNull();
+    expect(readDatabase({ ...fresh, version: "" })).toBeNull();
+    expect(readDatabase({ ...fresh, built_at: `${fresh.built_at}${" ".repeat(41 - fresh.built_at.length)}` })).toBeNull();
   });
 
   it("withTimeout aborts what it started", async () => {

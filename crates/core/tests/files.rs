@@ -1554,6 +1554,127 @@ fn refusals_have_stable_codes_and_carry_nothing_from_the_file() {
     }
 }
 
+// ---- the scanner's signature database ----
+
+const NOW_MS: i64 = 1_800_000_000_000;
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+const BUILT: &str = "2026-11-06T07:26:08Z";
+
+#[test]
+fn a_named_numbered_database_within_the_week_fits() {
+    assert!(scan_database_fits(
+        "1.5.4",
+        "28176",
+        BUILT,
+        Some(NOW_MS - DAY_MS),
+        NOW_MS
+    ));
+    assert!(scan_database_fits(
+        "1.5.4",
+        "28176",
+        BUILT,
+        Some(NOW_MS - MAX_SIGNATURE_AGE_MS),
+        NOW_MS
+    ));
+    assert!(scan_database_fits(
+        "1.5.4",
+        "28176",
+        BUILT,
+        Some(NOW_MS + MAX_SIGNATURES_AHEAD_MS),
+        NOW_MS
+    ));
+}
+
+#[test]
+fn signatures_past_the_week_or_too_far_ahead_dont_fit() {
+    assert!(!scan_database_fits(
+        "1.5.4",
+        "28176",
+        BUILT,
+        Some(NOW_MS - MAX_SIGNATURE_AGE_MS - 1),
+        NOW_MS
+    ));
+    assert!(!scan_database_fits(
+        "1.5.4",
+        "28176",
+        BUILT,
+        Some(NOW_MS + MAX_SIGNATURES_AHEAD_MS + 1),
+        NOW_MS
+    ));
+    assert!(!scan_database_fits(
+        "1.5.4",
+        "28176",
+        "not a time",
+        None,
+        NOW_MS
+    ));
+    assert!(!scan_database_fits(
+        "1.5.4",
+        "28176",
+        BUILT,
+        Some(i64::MIN),
+        NOW_MS
+    ));
+}
+
+#[test]
+fn each_field_has_a_length_and_a_shape() {
+    let at = Some(NOW_MS);
+    assert!(!scan_database_fits("", "28176", BUILT, at, NOW_MS));
+    assert!(!scan_database_fits(
+        &"e".repeat(MAX_SCAN_ENGINE_BYTES + 1),
+        "28176",
+        BUILT,
+        at,
+        NOW_MS
+    ));
+    assert!(scan_database_fits(
+        &"e".repeat(MAX_SCAN_ENGINE_BYTES),
+        "28176",
+        BUILT,
+        at,
+        NOW_MS
+    ));
+    assert!(!scan_database_fits("1.5.4", "", BUILT, at, NOW_MS));
+    assert!(!scan_database_fits("1.5.4", "28176a", BUILT, at, NOW_MS));
+    assert!(!scan_database_fits(
+        "1.5.4",
+        &"1".repeat(MAX_SCAN_VERSION_BYTES + 1),
+        BUILT,
+        at,
+        NOW_MS
+    ));
+    assert!(scan_database_fits(
+        "1.5.4",
+        &"1".repeat(MAX_SCAN_VERSION_BYTES),
+        BUILT,
+        at,
+        NOW_MS
+    ));
+    assert!(!scan_database_fits(
+        "1.5.4",
+        "28176",
+        &"2".repeat(MAX_SCAN_BUILT_AT_BYTES + 1),
+        at,
+        NOW_MS
+    ));
+}
+
+#[test]
+fn a_scanner_secret_a_header_cant_carry_counts_as_unset() {
+    assert!(scanner_secret_usable("3f9a0c"));
+    assert!(scanner_secret_usable("a b"));
+    // A failure names the case by its place in the list, never by the value.
+    for (case, candidate) in [
+        "", " ", "\t\n", " 3f9a0c", "3f9a0c ", "3f9a0c\n", "\t3f9a0c",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert!(!scanner_secret_usable(candidate), "case {case}");
+    }
+}
+
 #[test]
 fn a_served_file_is_always_an_attachment_with_a_harmless_header() {
     assert_eq!(

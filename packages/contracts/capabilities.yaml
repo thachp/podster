@@ -39,6 +39,7 @@ capabilities:
 # also open to the agent itself. These are safe to retry without a key: acceptInvitation, withdrawAgent, consentToAgentReturn,
 # registerAgent, disconnectAgent and reconnectAgent.
 person_only:
+  - removeFile
   - listWorkspaceCards
   - getWorkspaceCard
   - getCollaboration

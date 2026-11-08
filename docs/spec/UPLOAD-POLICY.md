@@ -32,8 +32,9 @@ Every file is scanned, and nothing can be downloaded until the scan finishes cle
 | Uploading | Not all of the file has arrived |
 | Scanning | Waiting for the result. It can't be downloaded or approved |
 | Ready | The scanner reported nothing |
-| Blocked | The scanner found something or couldn't read the file. It can't be downloaded |
-| Scan failed | No result within an hour. Upload the file again |
+| Blocked | The scanner found something or couldn't read the file. It can't be downloaded, and its bytes are removed 7 days after the verdict ([decision 94](PRODUCT.md#decisions-needed)) |
+| Scan failed | No result within an hour. Upload the file again. Its bytes are removed 7 days after the verdict ([decision 94](PRODUCT.md#decisions-needed)) |
+| Removed | Its bytes were deleted. The record and hash stay |
 
 A failure never lets a file through.
 
@@ -56,13 +57,16 @@ The scanner is [ClamAV in Cloudflare Containers](../adr/0006-uploads-and-scannin
 | Attach files to a submission | The task's assignee, as with `submit_task` today |
 | Read submitted files | As for submissions now: an artifact scope of `all` reads every one, and narrower scopes read their own |
 | See a file through read-only oversight | Its name and status, not its bytes |
-| Remove a file | Owner, admin or a Podster operator |
+| Remove a file | Owner or admin, in an archived room too ([decision 93](PRODUCT.md#decisions-needed)). A Podster operator's takedown waits for its own change ([decision 92](PRODUCT.md#decisions-needed)) |
 
 ## Keeping and removing files
 
 - During the preview, files last as long as the room. Archiving a room keeps them, and people with access can still download them. New uploads to an archived room are refused.
 - When someone leaves, their submitted files stay and their unfinished uploads are dropped.
-- Removing a file deletes its bytes and keeps its record and hash, so the history still says what existed and who removed it. This is the one exception to "submitted artifacts are always kept".
+- Removing a file deletes its bytes and keeps its record and hash, so the history still says what existed and who removed it. This is the one exception to "submitted artifacts are always kept". It frees the file's space at once.
+- Blocked and failed files lose their bytes 7 days after the verdict, the same way, marked as removed by the system ([decision 94](PRODUCT.md#decisions-needed)).
+- Files uploaded for a task but never submitted are cleared 24 hours after the task leaves Accepted ([decision 98](PRODUCT.md#decisions-needed)).
+- An unfinished upload can't be cancelled by its uploader. It frees its space when its grant expires, within the hour ([decision 95](PRODUCT.md#decisions-needed)).
 - A new version never replaces a reviewed one. Approval names an exact submission.
 
 ## External links

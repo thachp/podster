@@ -83,7 +83,15 @@ const offer = async (tasks: string, extra: object = {}) => {
 };
 const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
 /** Puts a room back to what the last deployment left, with only the newest migration undone. */
+const undoRemovalMigration = (state: any) => {
+  state.storage.sql.exec("DROP TABLE storage_sweep");
+  state.storage.sql.exec("DROP INDEX stored_object_abandoned");
+  for (const column of ["removed_at", "removed_by", "removed_by_kind", "removed_from"]) state.storage.sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
+  state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+};
+/** Puts a room back to before it stored files. */
 const undoStoredObjectMigration = (state: any) => {
+  undoRemovalMigration(state);
   state.storage.sql.exec("DROP TABLE stored_object");
   state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
 };

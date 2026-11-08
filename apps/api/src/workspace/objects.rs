@@ -19,11 +19,11 @@ fn token_hash(token: &str) -> String {
 }
 
 /// Every file kept, and every upload whose reservation hasn't ended, leaving out `except`. One that expired reserves nothing, even
-/// before it's cleared away.
-fn room_used(sql: &SqlStorage, now: i64, except: &str) -> R<u64> {
+/// before it's cleared away, and a removed file holds nothing. This is `podster_core::removal::holds_space` in SQL.
+pub(super) fn room_used(sql: &SqlStorage, now: i64, except: &str) -> R<u64> {
     let found = rows(
         sql,
-        "SELECT COALESCE(SUM(size), 0) AS used FROM stored_object WHERE (state <> 'uploading' OR upload_expires_at > ?) AND id <> ?",
+        "SELECT COALESCE(SUM(size), 0) AS used FROM stored_object WHERE ((state <> 'uploading' AND state <> 'removed') OR (state = 'uploading' AND upload_expires_at > ?)) AND id <> ?",
         vec![now.into(), except.into()],
     )?;
     Ok(found.first().map_or(0, |row| int(&row["used"])).max(0) as u64)
@@ -204,6 +204,11 @@ fn begin(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         sql,
         "UPDATE stored_object SET attempt_id = ?, object_key = ? WHERE id = ?",
         vec![attempt.as_str().into(), key.as_str().into(), id.into()],
+    )?;
+    // Every way bytes can be left with nothing referring to them starts with an attempt, so this is when to look again.
+    removal::sweep_after(
+        sql,
+        now.saturating_add(podster_core::removal::UNREFERENCED_BYTES_GRACE_MS),
     )?;
     Ok(json!({
         "key": key, "attempt": attempt, "size": row["size"], "sha256": row["sha256"],

@@ -77,6 +77,7 @@ mod downloads;
 mod objects;
 mod plan;
 mod planned;
+mod removal;
 mod roles;
 
 /// The caller as this room knows them. `org` comes from stored state, not the request.
@@ -3098,6 +3099,9 @@ impl Workspace {
                 due = Some(due.map_or(next, |d| d.min(next)));
             }
         }
+        if let Some(next) = removal::next_due(&sql)? {
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
         let Some(due) = due else {
             return Ok(());
         };
@@ -3502,6 +3506,8 @@ impl Workspace {
         let stops_when_archived = !matches!(
             (&method, tail),
             (Method::Post, ["unarchive"])
+                // Decision 93: archiving doesn't shield harmful content from a takedown.
+                | (Method::Post, ["files", _, "remove"])
                 | (
                     Method::Delete,
                     ["members" | "organizations" | "invitations", _]
@@ -3666,6 +3672,14 @@ impl Workspace {
                     move |sql, who, now| objects::handle_create(sql, &who.caller, &raw, &body, now),
                 )
             }
+            (Method::Post, ["files", _, "remove"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| removal::handle_remove(sql, &who.caller, &target, now),
+            ),
             (Method::Put, ["plan", "start"]) => self.command(
                 &identity,
                 key,
@@ -3934,6 +3948,7 @@ impl DurableObject for Workspace {
         if let Err(error) = &index {
             console_error!("index projection failed: {:?}", error);
         }
+        self.sweep_files().await;
         // One failing doesn't hold up the other.
         let outbox = self.drain_outbox().await;
         if let Err(error) = &outbox {

@@ -124,3 +124,38 @@ pub fn delete_stored_bytes(
         KeyHolder::Nobody => now.saturating_sub(stored_at) >= UNREFERENCED_BYTES_GRACE_MS,
     }
 }
+
+/// How long a blocked or failed file keeps its bytes after the verdict (decision 94). Nobody can download them, and the time is
+/// for looking into a reported false positive.
+pub const UNUSABLE_FILE_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// How long a file uploaded for a task but never submitted lasts after the task leaves Accepted (decision 98).
+pub const UNSUBMITTED_FILE_RETENTION_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// When the system removes a file by itself, if ever: a blocked or failed one 7 days after its verdict (decision 94). Every other
+/// state answers `None`, so a file that became ready, or was already removed, is never touched.
+pub fn unusable_file_due(state: ObjectState, verdict_at: i64) -> Option<i64> {
+    match state {
+        ObjectState::Blocked | ObjectState::Failed => {
+            Some(verdict_at.saturating_add(UNUSABLE_FILE_RETENTION_MS))
+        }
+        ObjectState::Uploading
+        | ObjectState::Scanning
+        | ObjectState::Ready
+        | ObjectState::Removed => None,
+    }
+}
+
+/// When the system removes a file uploaded for a task and never submitted (decision 98): 24 hours after the task left Accepted.
+/// `left_accepted_at` is `None` while the task is in Accepted, so changes requested restarts the wait. A file any submission
+/// names is never touched, and neither is one already removed.
+pub fn unsubmitted_file_due(
+    state: ObjectState,
+    named_by_a_submission: bool,
+    left_accepted_at: Option<i64>,
+) -> Option<i64> {
+    if named_by_a_submission || state == ObjectState::Removed {
+        return None;
+    }
+    left_accepted_at.map(|left| left.saturating_add(UNSUBMITTED_FILE_RETENTION_MS))
+}

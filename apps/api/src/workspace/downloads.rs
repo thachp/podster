@@ -5,14 +5,14 @@ use super::*;
 use podster_core::files::ObjectState;
 use podster_policy::files::{input_asset_view, may_download, FileView};
 
-fn file_not_found() -> ApiError {
+pub(super) fn file_not_found() -> ApiError {
     ApiError::api(404, "file_not_found")
 }
 
-fn file_row(sql: &SqlStorage, id: &str) -> R<Value> {
+pub(super) fn file_row(sql: &SqlStorage, id: &str) -> R<Value> {
     rows(
         sql,
-        "SELECT id, name, size, sha256, media_type, state, object_key FROM stored_object WHERE id = ?",
+        "SELECT id, name, size, sha256, media_type, state, object_key, removed_at, removed_by FROM stored_object WHERE id = ?",
         vec![id.into()],
     )?
     .into_iter()
@@ -22,7 +22,7 @@ fn file_row(sql: &SqlStorage, id: &str) -> R<Value> {
 
 /// How much of a file the caller gets. A file can't be linked to a task until step 5, so `linked_tasks` is empty, and someone
 /// limited to their own tasks sees nothing. When links arrive they go here, read from current state.
-fn view_of(caller: &Caller) -> FileView {
+pub(super) fn view_of(caller: &Caller) -> FileView {
     input_asset_view(caller, &[])
 }
 
@@ -45,6 +45,7 @@ pub(super) fn read_file(sql: &SqlStorage, who: &Participant, id: &str) -> R<Valu
     Ok(json!({
         "id": row["id"], "name": row["name"], "size": row["size"], "sha256": row["sha256"], "media_type": row["media_type"],
         "state": row["state"], "download_path": download_path.transpose()?,
+        "removed_at": row["removed_at"], "removed_by": row["removed_by"],
     }))
 }
 
@@ -77,6 +78,9 @@ pub(super) fn begin(sql: &SqlStorage, who: &Participant, body: &Value) -> R<Valu
     let view = view_of(&who.caller);
     if view == FileView::Hidden {
         return Err(file_not_found());
+    }
+    if row["state"].as_str() == Some(ObjectState::Removed.name()) {
+        return Err(ApiError::api(410, "file_removed"));
     }
     let key = row["object_key"].as_str().filter(|key| !key.is_empty());
     if !can_download(view, &row) || key.is_none() {

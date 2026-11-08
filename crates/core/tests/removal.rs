@@ -219,3 +219,44 @@ fn nothing_outside_the_room_is_ever_deleted() {
         }
     }
 }
+
+#[test]
+fn blocked_and_failed_files_go_seven_days_after_the_verdict_and_nothing_else_does() {
+    const WEEK: i64 = 7 * 24 * HOUR;
+    assert_eq!(UNUSABLE_FILE_RETENTION_MS, WEEK);
+    for state in [Blocked, Failed] {
+        assert_eq!(unusable_file_due(state, NOW), Some(NOW + WEEK), "{state:?}");
+        assert_eq!(
+            unusable_file_due(state, i64::MAX),
+            Some(i64::MAX),
+            "{state:?}"
+        );
+    }
+    for state in [Uploading, Scanning, Ready, Removed] {
+        assert_eq!(unusable_file_due(state, NOW), None, "{state:?}");
+    }
+}
+
+#[test]
+fn an_unsubmitted_file_goes_a_day_after_its_task_leaves_accepted() {
+    const DAY: i64 = 24 * HOUR;
+    assert_eq!(UNSUBMITTED_FILE_RETENTION_MS, DAY);
+    for state in [Uploading, Scanning, Ready, Blocked, Failed] {
+        assert_eq!(
+            unsubmitted_file_due(state, false, Some(NOW)),
+            Some(NOW + DAY),
+            "{state:?}"
+        );
+        assert_eq!(
+            unsubmitted_file_due(state, false, None),
+            None,
+            "{state:?} still accepted"
+        );
+        assert_eq!(
+            unsubmitted_file_due(state, true, Some(NOW)),
+            None,
+            "{state:?} submitted"
+        );
+    }
+    assert_eq!(unsubmitted_file_due(Removed, false, Some(NOW)), None);
+}

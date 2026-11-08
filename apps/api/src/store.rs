@@ -114,6 +114,14 @@ ALTER TABLE workspace ADD COLUMN plan_timezone TEXT;
 ", "
 CREATE TABLE stored_object (id TEXT PRIMARY KEY, name TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL, state TEXT NOT NULL, media_type TEXT, object_key TEXT, attempt_id TEXT, token_hash TEXT NOT NULL, uploaded_by TEXT NOT NULL, uploader_json TEXT, created_at INTEGER NOT NULL, upload_expires_at INTEGER NOT NULL, stored_at INTEGER, scanning_since INTEGER);
 CREATE INDEX stored_object_space ON stored_object (state, upload_expires_at, size);
+", "
+ALTER TABLE stored_object ADD COLUMN removed_at INTEGER;
+ALTER TABLE stored_object ADD COLUMN removed_by TEXT;
+ALTER TABLE stored_object ADD COLUMN removed_by_kind TEXT;
+ALTER TABLE stored_object ADD COLUMN removed_from TEXT;
+CREATE INDEX stored_object_abandoned ON stored_object (upload_expires_at) WHERE state = 'uploading';
+CREATE TABLE storage_sweep (id INTEGER PRIMARY KEY CHECK (id = 1), due_at INTEGER, cursor TEXT);
+INSERT INTO storage_sweep (id, due_at) VALUES (1, 0);
 "];
 
 pub fn int(value: &Value) -> i64 {

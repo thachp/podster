@@ -1,6 +1,6 @@
 # M2 step 8: removal and retention
 
-**Proposed.** The pure rules are built. The API, gateway and contract side below isn't, and waits for downloads ([#123](https://github.com/thachp/podster/pull/123)) and scanning ([#125](https://github.com/thachp/podster/pull/125)) to merge. Rules: [upload policy](spec/UPLOAD-POLICY.md#keeping-and-removing-files). Decisions: [56 and 57](spec/PRODUCT.md#decisions-needed). Design: [ADR 0006](adr/0006-uploads-and-scanning.md#removal). Order: [M2 plan](m2-plan.md#build-order).
+**Proposed, and built locally, undeployed.** The pure rules and the API side are built to the owner's rulings below, except two alarm steps that wait on other work. Rules: [upload policy](spec/UPLOAD-POLICY.md#keeping-and-removing-files). Decisions: [56 and 57](spec/PRODUCT.md#decisions-needed). Design: [ADR 0006](adr/0006-uploads-and-scanning.md#removal). Order: [M2 plan](m2-plan.md#build-order).
 
 ## What's built: the pure rules
 
@@ -27,7 +27,7 @@
 
 "Who may remove" is in `crates/policy`, not `crates/core`, because the permission matrix lives there.
 
-## The API side, proposed
+## The API side, built
 
 ### Removing a file
 
@@ -38,7 +38,7 @@
 3. Set `state = 'removed'`, `removed_at`, `removed_by`, `removed_by_kind` and `removed_from` on `stored_object`. The name, size, hash, uploader and timestamps stay.
 4. Audit `object.removed`, record the event `object.removed` with IDs only, and store the idempotency record.
 
-After the commit, delete `object_key` from R2. A failed delete is only logged, because the sweep deletes a removed file's bytes on its next pass. The answer is the file's record with `state: removed`.
+The same transaction makes the storage sweep due at once, and the sweep deletes the bytes. Every delete from storage happens there, where a failure is simply tried again a minute later. The answer is the file's record with `state: removed`.
 
 **Related behavior:**
 - **Downloads** answer `file_removed` (410) from current state, using #123's check.
@@ -89,23 +89,15 @@ All of these start with an attempt the room recorded. That's why scheduling from
 
 `apps/api/src/workspace/removal.rs` holds the command and the sweep. Edits to `workspace.rs` stay small: the route, one arm in `arm`, and one call in `alarm`. `objects.rs` changes only `room_used`. `store.rs` gets one schema entry and `lib.rs` one route.
 
-## Rulings needed
+## Rulings
 
-Each is the owner's call. A recommendation follows each.
+The owner ruled "as recommended", recorded as [decisions 92 to 98](spec/PRODUCT.md#decisions-needed):
 
-1. **What a "Podster operator" is (decision 57).** Nothing in Podster has that identity today, and the ADR already says a takedown "has to be a recorded command and not a change to the database by hand."
-   - **Recommendation:** build owner and admin removal now, and give the operator's takedown its own PR later.
-   - In that PR, operators would be a list of person IDs in the API's configuration that the owner sets. Rust would check it, and the operator would get a separate route that leaves the same record with `removed_by_kind: operator`.
-   - It's needed before public rooms, not for private pilots.
-2. **Removal in an archived room.** Archiving keeps files, and most commands stop in an archived room.
-   - **Recommendation:** allow removal anyway. A takedown is the one exception to keeping files, and archiving shouldn't shield harmful content.
-3. **Blocked and failed files.** Today they keep their bytes and count toward the 5 GB for the room's life, yet nobody can ever download them.
-   - **Recommendation:** remove their bytes automatically 7 days after the verdict, with the same tombstone and `removed_by_kind: system`, which frees their space. The 7 days leave time to look into a reported false positive.
-   - The other option is to keep them, which is what decision 56 says today.
-4. **Cancelling your own unfinished upload.** The policy names only owners and admins.
-   - **Recommendation:** don't add this in M2. An abandoned upload frees its space when its grant expires, within the hour.
-
-**Defaults if there's no ruling:** no operator route, refused in an archived room, blocked and failed files kept, and no self-cancel. That's the narrowest choice in each case. Each later ruling only adds behavior.
+- **No operator route in this change (92).** It gets its own change before any public room, as another `Remover` kind calling `removal::remove`.
+- **Removal works in an archived room (93).** This is built.
+- **Blocked and failed files (94).** Their bytes are removed by the system 7 days after the verdict. The rule is `unusable_file_due` in core. Its alarm step needs #125's `scanned_at`, so it lands after #125.
+- **No self-cancel (95).**
+- **Unsubmitted files (98).** Files uploaded for a task and never submitted are removed by the system 24 hours after the task leaves Accepted. The rule is `unsubmitted_file_due` in core. The alarm step needs step 6's `for_task`, the files each submission names, and a time the task left Accepted, and that hook is being agreed with step 6.
 
 ## What the deeper pass should cover
 

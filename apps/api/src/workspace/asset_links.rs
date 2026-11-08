@@ -6,7 +6,7 @@
 //! events carry the task's ID and nothing about the file, whose name is agent content.
 use super::*;
 use podster_core::asset_links::{check_link, LinkRefusal};
-use podster_core::files::ObjectState;
+use podster_core::files::{ObjectState, ROOM_QUOTA_BYTES};
 use podster_core::submission_files::RoomFile;
 use podster_policy::files::authorize_input_upload;
 
@@ -226,5 +226,11 @@ pub(super) fn list(sql: &SqlStorage, who: &Participant, url: &Url) -> R<Value> {
     let next = more
         .then(|| page().next_back().map(|row| int(&row["seq"])))
         .flatten();
-    Ok(json!({ "files": files, "next_cursor": next }))
+    let mut answer = json!({ "files": files, "next_cursor": next });
+    // The room's total counts files someone limited to their own tasks can't see, so only whoever sees the whole room gets it.
+    if !narrow {
+        answer["quota"] =
+            json!({ "used": objects::room_used(sql, now_ms(), "")?, "limit": ROOM_QUOTA_BYTES });
+    }
+    Ok(answer)
 }

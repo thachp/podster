@@ -415,6 +415,10 @@ fn delete_wake(sql: &SqlStorage, now: i64) -> R<Value> {
 
 /// Whether a wake should be queued for a new event, and with what delay. A wake inside the debounce window is delayed to
 /// its end instead of dropped, so the last event in a burst still gets a nudge.
+/// Notices that ask nothing of an agent, so they reach its inbox without a wake: an input asset linked to or unlinked from its
+/// task (decision 104). The next wake for anything else still finds them there.
+const QUIET_EVENTS: &[&str] = &["asset.linked", "asset.unlinked"];
+
 fn wake_to_queue(sql: &SqlStorage, now: i64) -> R<Option<i64>> {
     let Some(wake) = wake_row(sql)? else {
         return Ok(None);
@@ -1169,10 +1173,13 @@ impl Principal {
                     Delay::from(Duration::from_secs(30)).await;
                 }
                 let body: Value = req.json().await?;
+                let quiet = body["type"]
+                    .as_str()
+                    .is_some_and(|kind| QUIET_EVENTS.contains(&kind));
                 let (store, now) = (sql.clone(), now_ms());
                 let outcome = self.in_transaction(move || deliver(&store, &body, now))?;
                 // The event is safe already, and a wake is only a nudge, so a problem here can't fail delivery.
-                if outcome["delivered"] == Value::Bool(true) {
+                if outcome["delivered"] == Value::Bool(true) && !quiet {
                     if let Err(error) = self.queue_wake(now).await {
                         console_error!("couldn't queue wake: {:?}", error);
                     }

@@ -52,7 +52,8 @@ The scanner is [ClamAV in Cloudflare Containers](../adr/0006-uploads-and-scannin
 | Action | Who |
 | --- | --- |
 | Upload an input asset | Owner, admin, member and Coordinator |
-| See input assets | Anyone who sees the whole room. Someone limited to their own tasks sees only assets linked to those tasks |
+| See input assets | Anyone who sees the whole room. Someone limited to their own tasks sees only assets linked to those tasks, while they're linked ([decision 103](PRODUCT.md#decisions-needed)) |
+| Link an input asset to a task, or unlink it | Owner, admin, member and Coordinator, for a file and a task they can both see. Only a file that's scanning or ready links, never to a completed or canceled task, and a task holds at most 50 ([decisions 100 to 105](PRODUCT.md#decisions-needed)) |
 | Attach files to a submission | The task's assignee, as with `submit_task` today |
 | Read submitted files | As for submissions now: an artifact scope of `all` reads every one, and narrower scopes read their own |
 | See a file through read-only oversight | Its name and status, not its bytes |

@@ -4,8 +4,7 @@
 //! their tasks. A link is what gives that narrower view, so it's read from current state on every use, and unlinking ends it.
 //! A link grants nothing else: no task access, no upload, no change to the task.
 //!
-//! **Proposed:** the states a file may be linked in, the task states that take a link and the limit per task are recommendations
-//! put to the lead, not owner rulings.
+//! The states a file may be linked in, the task states that take a link and the limit per task are decisions 101, 102 and 105.
 
 use crate::files::ObjectState;
 use crate::submission_files::RoomFile;

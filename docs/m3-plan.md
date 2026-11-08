@@ -89,7 +89,7 @@ C changes `packages/contracts` and M adds a migration or room schema. The order 
 | 13 | Remote updates, as question 11 decides: read back, mapped through step 5 into a submission, a held response, a release or nothing. `cancel_task` sent out | Yes | Yes | 12 | |
 | 14 | Files: inbound submissions with files from `create_upload`, offers that link input files as Podster links, and remote file references kept as external links | Yes | | 10, 13, M2 steps 5 and 6 | 15 |
 | 15 | Screens: endpoint status on the agent's Sheet, and held responses flagged to the requester in the Task Sheet | | | 11, 13, M2 step 9b | 14 |
-| 16 | Staging run: AC-12, AC-18, AC-24, criterion 4 across protocols, and the implementations question C settles. The kit runs only if a way to run it has been found ([decision 142](spec/PRODUCT.md#decisions-needed)). Its non-fitting checks are listed in the profile ([decision 141](spec/PRODUCT.md#decisions-needed)). Then the owner rules, and the profile is published | | | All, M2's gate | |
+| 16 | Staging run: AC-12, AC-18, AC-24, criterion 4 across protocols, and the implementations [decision 143](spec/PRODUCT.md#decisions-needed) names. The kit runs only if a way to run it has been found ([decision 142](spec/PRODUCT.md#decisions-needed)). Its non-fitting checks are listed in the profile ([decision 141](spec/PRODUCT.md#decisions-needed)). Then the owner rules, and the profile is published | | | All, M2's gate | |
 
 **What runs in parallel:** the three spikes and the ADR draft. Steps 5 and 6. Step 11 is built beside 8 to 10, because it's in the `Principal` and they're in the `Workspace` path. Steps 9 to 11 change contracts and 11 adds a migration, so they're built side by side and still merge one at a time. Steps 14 and 15, which are in different folders.
 
@@ -98,7 +98,6 @@ C changes `packages/contracts` and M adds a migration or room schema. The order 
 - **Spike C on staging,** by [decision 126](spec/PRODUCT.md#decisions-needed). Until then it runs locally only.
 - **Step 11's encryption secret** for stored endpoint tokens, by [decision 122](spec/PRODUCT.md#decisions-needed). The owner sets it.
 - **Step 12's queue and dead-letter queue,** by [decision 129](spec/PRODUCT.md#decisions-needed). Steps 12 to 16 wait on them.
-- **The second implementation** for step 16, which is [question C](#open-question-c-the-second-implementation), still with the owner.
 
 Step 8 waits only on step 7, because reads translate today's task view. Step 5's mapping is first used by step 12.
 
@@ -139,25 +138,29 @@ The owner accepted every recommendation on 2026-11-08 ("sure"). Each row links t
 | 27 | When is M2 "finished" for M3's product code? | When M2's last contract or migration PR has merged, through step 8 and step 10's D1 migration if it has one. M2's screens and staging run can finish beside M3's first steps, and M3's gate still waits for M2's | When M2's gate, step 11, has passed | [133](spec/PRODUCT.md#decisions-needed) |
 | 28 | Does A2A egress need more than wake's policy? | No new resolved-address check at first. Keep wake's rules and `global_fetch_strictly_public`, and don't follow redirects. Revisit before public rooms, when anyone could register an endpoint | Same | [134](spec/PRODUCT.md#decisions-needed) |
 
-## Open question C: the second implementation
+## Question C: the second implementation
 
-**Proposed, not yet ruled.** [Decision 124](spec/PRODUCT.md#decisions-needed) asks for one agent framework from outside the A2A project. Neither candidate has a 1.0 client. Checked from package metadata and source on 2026-11-08 UTC, without running either:
+[Decision 143](spec/PRODUCT.md#decisions-needed) settles it: independence is judged by direction. Outbound runs against LangGraph's A2A 1.0 server, with fasta2a's server as backup. Inbound uses the A2A project's own clients and the kit's `httpx` client, and the profile says so. It's revisited before public rooms.
 
-- **Pydantic AI's `fasta2a` 2.1.1** doesn't use `a2a-sdk`. Its server accepts 1.0 method names, but its client sends 0.3 names (`message/send`, `tasks/get`) with no `A2A-Version` header. Podster refuses those under [decision 109](spec/PRODUCT.md#decisions-needed).
-- **LangGraph's `langgraph-api` 0.17.1** doesn't use `a2a-sdk` either. Its source shows a 1.0 server at `/a2a/{assistant_id}`. LangGraph's SDK has no A2A client.
-- **The rest aren't independent:** CrewAI is on 0.3, and Google ADK and Microsoft Agent Framework are built on `a2a-sdk`.
+**What the recommendation rested on,** read on 2026-11-08 UTC from package metadata and source, without running either:
 
-**Recommendation:** judge independence by direction.
-
-- **Outbound,** where Podster is the client (steps 12 and 13), runs against LangGraph's 1.0 server, with fasta2a's server as backup. That meets decision 124.
-- **Inbound,** where Podster is the server, uses the project's JavaScript and Python clients and the kit's own `httpx` client. The profile says plainly that inbound was tested only against the A2A project's own code. Revisit when an outside 1.0 client appears, before public rooms.
-
-**Default if unruled:** decision 124 stands as written, and support isn't claimed until an outside 1.0 client exists for inbound.
+- **fasta2a 2.1.1,** from PyPI, and `pydantic/fasta2a` at `5786276` on GitHub. It doesn't depend on `a2a-sdk`.
+  - In `fasta2a/client.py`, `A2AClient` sends the 0.3 method names `message/send`, `message/stream` and `tasks/get`.
+  - It sets only `Content-Type` on each request, and makes its own `httpx` client with no default headers unless the caller passes one.
+  - `fasta2a/jsonrpc_v1.py` maps 1.0 method names to those, for the server side only.
+- **langgraph-api 0.17.1,** installed from PyPI into a local virtual environment and read, not run:
+  - `langgraph_api/api/a2a.py` sets `A2A_PROTOCOL_VERSION = "1.0"` and serves `/a2a/{assistant_id}`.
+  - Nothing in the package imports `a2a`.
+- **langgraph-sdk 0.4.14:**
+  - Its PyPI description doesn't mention A2A.
+  - A GitHub code search of `langchain-ai/langgraph` for "a2a" under `libs/sdk-py` matched only a docstring in `langgraph_sdk/runtime.py` and `uv.lock`. Under `libs/sdk-js` it matched nothing.
+  - So I found no A2A client there. A search can miss one.
+- **Built on `a2a-sdk`, from their PyPI metadata:** CrewAI 1.15.37 pins `a2a-sdk~=0.3.10`. Google ADK 2.14.0 and `agent-framework-a2a` 1.0.0b261106 depend on `a2a-sdk`.
 
 ## Owed before M3's gate
 
 - **The compatibility kit.** It hasn't run, because the session permission check refuses running its code and the owner won't run it by hand ([decision 142](spec/PRODUCT.md#decisions-needed)). It must run some other way before any support claim.
-- **An independent server, outbound.** LangGraph's server hasn't run, for the same reason. Step 12's interoperability run needs it, or question C's ruling.
+- **The outbound run against LangGraph's server.** [Decision 143](spec/PRODUCT.md#decisions-needed) makes it the outbound independent implementation, with fasta2a's server as backup. It hasn't run, because starting it was refused by the session permission check, so step 12's interoperability run still needs a way to run it.
 - **Spike C on staging,** with the owner's yes in that session ([decision 126](spec/PRODUCT.md#decisions-needed)): real egress, timeouts and queue timing.
 
 ## Owed before production that M3 touches

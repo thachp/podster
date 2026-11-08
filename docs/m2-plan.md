@@ -66,6 +66,7 @@ Put new backend code in new modules, such as `apps/api/src/objects.rs` and `crat
 **Step 11:** scanning under load, since each scan in the spike ran alone.
 
 - **First run of `e2e/m2-staging.mjs`,** by the lead on 2026-11-08 at `059a47c` with `--big`, in room `ws_0a29ea5903194e3aaa9c4861daf10ed7`: 20 passed, 1 failed, 6 skipped. The clean file went `ready` in 12.9 s and the EICAR string `blocked` in 3.3 s. Owner and agent downloads matched their bytes and headers, and every refusal gave its exact code. The one failure was the 100 MB upload, "fetch failed" from the lead's Mac, the network gap above. The skipped cases were steps 5 to 8, which the script didn't cover yet, the hour sweep and load.
+- **Steps 5 to 8 on staging,** by the lead on 2026-11-08 with [#158](https://github.com/thachp/podster/pull/158)'s script at `55a3bf6`, without `--big`, in room `ws_b847b743eaba4fe8aba4c3fe3701f724`, against API `678aeac`, gateway `2295e19` and web `2295e19`: 51 passed, 0 failed, 4 skipped. Input assets linked to a guest's task, a submission with a file approved by its exact version, approval refused after a submitted file's removal, an expected output that stays `ready` with `files_available` false after its file is removed, and removal answering 410 `file_removed` all passed. The skipped cases were the 100 MB file, since `--big` wasn't passed, approval after a blocked file, which a run can't cause, the hour sweep and load.
 
 ## Risks to test
 

@@ -366,6 +366,7 @@ async function laterSteps(owner, room) {
   let assetId;
   let otherId;
   let task;
+  let taskVersion;
   let output;
   let submittedId;
 
@@ -379,9 +380,9 @@ async function laterSteps(owner, room) {
     const states = [(await verdict(owner, room, assetId, Date.now())).state, (await verdict(owner, room, otherId, Date.now())).state];
     check(states.every((state) => state === "ready"), "two input assets upload and become ready", states.join(", "));
     output = (await owner.must("POST", `/v1/workspaces/${room}/outputs`, { title: "M2 staging output" })).id;
-    task = (await offer(owner, room, guest, "M2 staging task")).id;
+    ({ id: task, version: taskVersion } = await offer(owner, room, guest, "M2 staging task"));
     const before = await agentFile(guest, room, assetId);
-    check(!before.ok && before.status === 404, "a guest can't see an input asset before it's linked to its task", `${before.status} ${before.code ?? ""}`);
+    check(!before.ok && before.status === 404 && before.code === "file_not_found", "a guest can't see an input asset before it's linked to its task", `${before.status} ${before.code ?? ""}`);
     const linked = await owner.dash("POST", `/v1/workspaces/${room}/files/${assetId}/links`, { task_id: task });
     check(linked.ok && linked.body.linked === true, "the owner links it to the guest's task", `${linked.status} ${linked.code ?? ""}`);
     const after = await agentFile(guest, room, assetId);
@@ -391,17 +392,20 @@ async function laterSteps(owner, room) {
     const ids = (listed.data?.files ?? []).map((f) => f.id);
     check(listed.ok && ids.length === 1 && ids[0] === assetId, "the guest's asset list holds only the linked asset", listed.ok ? `${ids.length} listed` : `${listed.status} ${listed.code}`);
     const hidden = await agentFile(guest, room, otherId);
-    check(!hidden.ok && hidden.status === 404, "an input asset not linked to its task stays hidden from it", `${hidden.status} ${hidden.code ?? ""}`);
+    check(!hidden.ok && hidden.status === 404 && hidden.code === "file_not_found", "an input asset not linked to its task stays hidden from it", `${hidden.status} ${hidden.code ?? ""}`);
     await checkRefused(await agentDownload(guest, room, otherId), 404, "file_not_found", "and doesn't download, as if it didn't exist");
   });
 
   section("Step 6: submission files");
   await step("submission files", async () => {
     if (!task) return skip("a submission with files", "the task wasn't made");
-    const named = await owner.dash("PUT", `${taskPath(room, task)}/expected-output`, { version: 1, output_id: output });
+    const named = await owner.dash("PUT", `${taskPath(room, task)}/expected-output`, { version: taskVersion, output_id: output });
     check(named.ok, "the owner names the expected output on the task", `${named.status} ${named.code ?? ""}`);
-    const accepted = await guest.execute("accept_task", { workspace_id: room, task_id: task, version: named.body?.version ?? 2, idempotency_key: key() });
+    // Each step reads the version the one before answered. If one failed, there's no version to use, so the rest is skipped.
+    if (!named.ok) return skip("the rest of the submission", "naming the output failed");
+    const accepted = await guest.execute("accept_task", { workspace_id: room, task_id: task, version: named.body.version, idempotency_key: key() });
     check(accepted.ok, "the guest accepts the task", `${accepted.status} ${accepted.code ?? ""}`);
+    if (!accepted.ok) return skip("the rest of the submission", "accepting the task failed");
     const work = text(4_000, "the guest's work\n");
     const file = await agentUpload(guest, room, task, `m2-work-${key()}.txt`, work);
     check(file.state === "ready", "the guest uploads a file for its submission, and it's scanned ready", file.refused ?? file.state);
@@ -409,8 +413,8 @@ async function laterSteps(owner, room) {
     submittedId = file.id;
     objects.push(file.id);
     const hiddenFromOwner = await owner.dash("GET", `/v1/workspaces/${room}/files/${file.id}`);
-    check(hiddenFromOwner.status === 404, "until it's submitted, only its uploader sees it", `${hiddenFromOwner.status} ${hiddenFromOwner.code ?? ""}`);
-    const submitted = await guest.execute("submit_task", { workspace_id: room, task_id: task, version: accepted.data?.version ?? 3, files: [{ id: file.id, label: "The work" }], idempotency_key: key() });
+    check(hiddenFromOwner.status === 404 && hiddenFromOwner.code === "file_not_found", "until it's submitted, only its uploader sees it", `${hiddenFromOwner.status} ${hiddenFromOwner.code ?? ""}`);
+    const submitted = await guest.execute("submit_task", { workspace_id: room, task_id: task, version: accepted.data.version, files: [{ id: file.id, label: "The work" }], idempotency_key: key() });
     check(submitted.ok && submitted.data.status === "submitted", "the guest submits with the file", `${submitted.status} ${submitted.data?.status ?? submitted.code ?? ""}`);
     const read = await owner.must("GET", taskPath(room, task));
     const pinned = (read.files ?? []).find((f) => f.id === file.id);
@@ -421,8 +425,8 @@ async function laterSteps(owner, room) {
     check(approved.ok && approved.body.status === "completed", "the reviewer approves that submission", `${approved.status} ${approved.body?.status ?? approved.code ?? ""}`);
 
     // A second task, whose file is removed after it's submitted: approval is refused, and changes can still be requested.
-    const second = (await offer(owner, room, guest, "M2 staging removed before approval")).id;
-    const took = await guest.execute("accept_task", { workspace_id: room, task_id: second, version: 1, idempotency_key: key() });
+    const { id: second, version: secondVersion } = await offer(owner, room, guest, "M2 staging removed before approval");
+    const took = await guest.execute("accept_task", { workspace_id: room, task_id: second, version: secondVersion, idempotency_key: key() });
     const gone = await agentUpload(guest, room, second, `m2-gone-${key()}.txt`, text(1_500, "removed before approval\n"));
     if (!took.ok || gone.state !== "ready") return check(false, "a second submission with a file", `${took.status} ${took.code ?? ""}; ${gone.refused ?? gone.state}`);
     objects.push(gone.id);

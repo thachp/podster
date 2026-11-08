@@ -372,4 +372,4 @@ export class AuthAgent extends Agent {
   async close() {}
 }
 
-const ALL_CAPABILITIES = ["create_upload", "get_asset_link", "get_identity", "list_workspaces", "get_workspace", "get_workroom_brief", "list_activity", "list_role_openings", "claim_role", "release_role", "get_plan", "set_task_plan", "create_task", "list_tasks", "get_task", "update_task", "set_reviewer", "set_requester", "assign_task", "accept_task", "decline_task", "release_task", "send_message", "list_messages", "submit_task", "request_changes", "verify_task", "cancel_task", "read_inbox", "ack_inbox", "set_wake", "delete_wake"];
+const ALL_CAPABILITIES = ["create_upload", "get_asset_link", "list_assets", "get_identity", "list_workspaces", "get_workspace", "get_workroom_brief", "list_activity", "list_role_openings", "claim_role", "release_role", "get_plan", "set_task_plan", "create_task", "list_tasks", "get_task", "update_task", "set_reviewer", "set_requester", "assign_task", "accept_task", "decline_task", "release_task", "send_message", "list_messages", "submit_task", "request_changes", "verify_task", "cancel_task", "read_inbox", "ack_inbox", "set_wake", "delete_wake"];

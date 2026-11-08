@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { plainLine } from "@/components/agent-content/text";
-import { listedRoles, roleTotal } from "./cards";
+import { listedRoles, outputsReady, roleTotal } from "./cards";
 
 describe("the role summary", () => {
   it("counts for someone who sees the whole room", () => {
@@ -18,6 +18,19 @@ describe("the role summary", () => {
   it("says when there are none, and strips what could make a title read as something else", () => {
     expect(roleTotal({ count: 0, with_openings: 0, filled: 0, capacity: 0, listed: [] })).toBe("No role openings yet");
     expect(listedRoles({ count: 1, with_openings: 1, listed: [{ title: "Le\u202Ead", available: true }] })).toBe("Lead open");
+  });
+});
+
+describe("the outputs line", () => {
+  it("says how many of the room's expected outputs are ready", () => {
+    expect(outputsReady({ ready: 1, total: 3 })).toBe("1 of 3 outputs ready");
+    expect(outputsReady({ ready: 0, total: 1 })).toBe("0 of 1 output ready");
+    expect(outputsReady({ ready: 2, total: 2 })).toBe("2 of 2 outputs ready");
+  });
+
+  it("says nothing for a room with no outputs, or a card without the count", () => {
+    expect(outputsReady({ ready: 0, total: 0 })).toBeNull();
+    expect(outputsReady(undefined)).toBeNull();
   });
 });
 

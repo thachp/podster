@@ -1,6 +1,6 @@
 import { agentAuth } from "@better-auth/agent-auth";
 import { DurableObject } from "cloudflare:workers";
-import { authorizationErrorRedirect, OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
+import { authorizationErrorRedirect, insufficientScope, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { betterAuth } from "better-auth";
@@ -14,6 +14,8 @@ import { EMAIL_LINK_ROUTE, EMAIL_LINK_SECONDS, EMAIL_VERIFY_ROUTE, emailSignInEn
 import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TEST_SIGNUP_ROUTE } from "./test-people";
 import { handleAgentDownload, isFilePath, serveFile } from "./downloads";
 import { handleUpload } from "./uploads";
+import { answerA2a, checkA2aRequest, handleA2aCard, isA2aPath } from "./a2a";
+import { buildOAuth, resourceKind, routeOAuth } from "./oauth";
 
 export interface Env {
   DB: D1Database;
@@ -573,21 +575,28 @@ export const sha256Hex = async (value: string) =>
 /** The API's answer when registering an agent, as this gateway's refusal. It refuses an agent already in another organization. */
 const registrationRefused = (status: number) => (status === 403 || status === 404 || status === 409 ? denied("not_allowed", 403) : denied("upstream_unavailable", 502));
 
-/** A credential's OAuth grants, so one credential can be replaced or ended without touching this person's others. */
-async function grantIds(env: Env, person: string, externalId: string) {
+/**
+ * A credential's OAuth grants, so one credential can be replaced or ended without touching this person's others. With
+ * `kind`, only its grants for that resource, so consenting to `/a2a` doesn't end the same client's `/mcp` grant. A grant
+ * with no stored resource is the legacy `/mcp` one.
+ */
+async function grantIds(env: Env, person: string, externalId: string, only?: { kind: "mcp" | "a2a"; gatewayUrl: string }) {
   const ids: string[] = [];
   let cursor: string | undefined;
   do {
     const page = await env.OAUTH_PROVIDER.listUserGrants(person, { cursor });
     for (const grant of page.items) {
-      if ((grant.metadata as { externalId?: string } | undefined)?.externalId === externalId) ids.push(grant.id);
+      if ((grant.metadata as { externalId?: string } | undefined)?.externalId !== externalId) continue;
+      // Resources are always the gateway's own URLs, even when the person is on the application host.
+      if (only && resourceKind(only.gatewayUrl, grant.resource) !== only.kind) continue;
+      ids.push(grant.id);
     }
     cursor = page.cursor;
   } while (cursor);
   return ids;
 }
 
-type ConsentChoices = { clientName: string; redirectHosts: string[]; query: string; orgs: { id: string; name: string }[]; agents: { id: string; org_id: string; name: string }[] };
+type ConsentChoices = { clientName: string; redirectHosts: string[]; query: string; protocol: "mcp" | "a2a"; orgs: { id: string; name: string }[]; agents: { id: string; org_id: string; name: string }[] };
 
 /** Our pages run no script and load nothing. Every value in `body` must already be escaped. */
 function page(title: string, body: string, status = 200) {
@@ -704,7 +713,7 @@ function consentPage(choices: ConsentChoices) {
   const hosts = choices.redirectHosts.map(escapeHtml).join(", ");
   return page("Connect an agent to Podster", `<p>An app calling itself <strong>${escapeHtml(choices.clientName)}</strong> wants to act as an agent in your organization. Podster hasn't verified this name.</p>
 <p>After you approve, it receives access at <strong>${hosts}</strong>. Only continue if you started this and trust that site.</p>
-<p>It can use the agent's tools in any workroom that agent has joined. Connecting doesn't create, run or wake an agent, and workroom access is set separately.</p>
+<p>${choices.protocol === "a2a" ? "It will act as the agent over A2A, through Podster's A2A interface," : "It can use the agent's tools"} in any workroom that agent has joined. Connecting doesn't create, run or wake an agent, and workroom access is set separately.</p>
 <form method="post" action="/authorize">
 <input type="hidden" name="oauth_query" value="${escapeHtml(choices.query)}">
 <label>Organization <select name="org_id" required>${orgOptions}</select></label>
@@ -741,8 +750,12 @@ async function parseOAuth(env: Env, request: Request) {
     const parsed = await env.OAUTH_PROVIDER.parseAuthRequest(request);
     // `request` is for the gateway's host even when `env` is the application host's, so this covers both.
     if (namesOurHost(env, parsed.redirectUri, request.url)) return null;
-    // MCP clients often send no scope, and refresh tokens are issued anyway, so both of those mean plain `mcp` access.
-    if (parsed.scope.some((scope) => scope !== "mcp" && scope !== "offline_access")) return null;
+    // Each resource grants only its own scope. MCP clients often send no scope, and refresh tokens are issued anyway, so
+    // both of those mean plain access to the resource asked for. A request naming no resource is for `/mcp`.
+    // The resource is the gateway's, whichever host the person is on, and `request` is always for the gateway's host.
+    const kind = resourceKind(new URL(request.url).origin, parsed.resource);
+    if (!kind) return null;
+    if (parsed.scope.some((scope) => scope !== kind && scope !== "offline_access")) return null;
     return parsed;
   } catch {
     return null;
@@ -762,7 +775,8 @@ async function consentChoices(env: Env, gatewayUrl: string, person: string, quer
   const client = await env.OAUTH_PROVIDER.lookupClient(parsed.clientId);
   if (!client) return denied("invalid_client", 400);
   if (adminOrgs.length === 0) return denied("not_allowed", 403);
-  return { clientName: client.clientName ?? parsed.clientId, redirectHosts: [new URL(parsed.redirectUri).host], query, ...(await approverChoices(env, adminOrgs)) };
+  const protocol = resourceKind(gatewayUrl, parsed.resource) ?? "mcp";
+  return { clientName: client.clientName ?? parsed.clientId, redirectHosts: [new URL(parsed.redirectUri).host], query, protocol, ...(await approverChoices(env, adminOrgs)) };
 }
 
 type ConsentFields = { query: string; org: string; linkAgent: string; name: string };
@@ -772,11 +786,12 @@ async function approveConsent(request: Request, env: Env, gatewayUrl: string, us
   const person = personId(userId);
   const { adminOrgs } = await memberships(env, person);
   const { org, linkAgent, query } = fields;
-  const name = fields.name.trim() || "MCP agent";
   if (!adminOrgs.includes(org)) return denied("not_allowed", 403);
-  if (!validName(name)) return denied("invalid_argument", 400);
   const parsed = await parseOAuthQuery(env, gatewayUrl, query);
   if (!parsed) return denied("invalid_request", 400);
+  const kind = resourceKind(gatewayUrl, parsed.resource) ?? "mcp";
+  const name = fields.name.trim() || (kind === "a2a" ? "A2A agent" : "MCP agent");
+  if (!validName(name)) return denied("invalid_argument", 400);
 
   const identity = await personIdentity(env, new Request(request.url, { headers: { "x-podster-org": org } }), userId);
   if (!identity) return denied("not_allowed", 403);
@@ -799,8 +814,8 @@ async function approveConsent(request: Request, env: Env, gatewayUrl: string, us
   await renewLink(env, externalId, person, org);
   // The provider's own cleanup covers every grant for this person and client, which would end this client's agents in
   // other organizations. Only the grant being replaced goes.
-  const replaced = await grantIds(env, person, externalId);
-  const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({ request: parsed, userId: person, metadata: { org, externalId }, scope: ["mcp"], props: { externalId }, revokeExistingGrants: false });
+  const replaced = await grantIds(env, person, externalId, { kind, gatewayUrl });
+  const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({ request: parsed, userId: person, metadata: { org, externalId }, scope: [kind], props: { externalId }, revokeExistingGrants: false });
   for (const id of replaced) await env.OAUTH_PROVIDER.revokeGrant(id, person);
   return { redirectTo };
 }
@@ -828,7 +843,7 @@ async function handleConsentApi(request: Request, env: Env, gatewayUrl: string, 
   if (request.method === "GET") {
     const choices = await consentChoices(env, gatewayUrl, personId(userId), new URL(request.url).search);
     if (choices instanceof Response) return choices;
-    return json({ client_name: choices.clientName, redirect_hosts: choices.redirectHosts, oauth_query: choices.query, orgs: choices.orgs, agents: choices.agents });
+    return json({ client_name: choices.clientName, redirect_hosts: choices.redirectHosts, oauth_query: choices.query, protocol: choices.protocol, orgs: choices.orgs, agents: choices.agents });
   }
   if (request.method !== "POST") return denied("not_found", 404);
   if (!sameOrigin(request, env)) return denied("not_allowed", 403);
@@ -1060,6 +1075,8 @@ const appHandler = {
     const env = forPublicHost(request, publicEnv);
     const url = new URL(request.url);
     const onApplicationHost = env !== publicEnv;
+    const card = onApplicationHost ? null : handleA2aCard(request, url, publicEnv.BASE_URL);
+    if (card) return card;
     const upload = await handleUpload(request, url, publicEnv.API, (key) => withinLimit(publicEnv.RL_ACCOUNT, key));
     if (upload) return upload;
     const download = await handleAgentDownload(request, url, publicEnv, (token) => agentFromCredential(publicEnv, token, request), (key) => withinLimit(publicEnv.RL_ACCOUNT, key));
@@ -1170,9 +1187,11 @@ const appHandler = {
 
 /** Stateless MCP: one server per request, one tool per capability, on the same code path as Agent Auth. */
 const mcpHandler = {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext & { props?: { externalId?: string } }): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext & { props?: { externalId?: string }; auth?: { scope?: string[] } }): Promise<Response> {
     // Stateless: there's no stream to hold open, and every call is a POST.
     if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
+    // The package advertises `requiredScopes` and leaves enforcing them here. Only an `mcp` token reaches the tools.
+    if (!ctx.auth?.scope?.includes("mcp")) return insufficientScope(ctx.auth as never, ["mcp"]);
     const externalId = ctx.props?.externalId ?? "";
     if (!(await withinLimit(env.RL_ACCOUNT, `mcp:${externalId}`))) return rateLimited();
     // Read once, at the size the SDK itself allows, so a huge body can't exhaust the isolate.
@@ -1199,6 +1218,25 @@ const mcpHandler = {
     const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     await server.connect(transport);
     return transport.handleRequest(new Request(request, { body }));
+  },
+};
+
+/**
+ * `/a2a`, after the resource server has checked the token's audience. The checks before authentication already ran, and
+ * the body is the one they read. The agent's limit is MCP's bucket, so the two protocols share one allowance (decision 123).
+ */
+const a2aHandler = {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext & { props?: { externalId?: string }; auth?: { scope?: string[] } }): Promise<Response> {
+    if (!ctx.auth?.scope?.includes("a2a")) return insufficientScope(ctx.auth as never, ["a2a"]);
+    const externalId = ctx.props?.externalId ?? "";
+    if (!(await withinLimit(env.RL_ACCOUNT, `mcp:${externalId}`))) return rateLimited();
+    try {
+      const identity = await resolveAgent(env, "mcp_oauth", externalId);
+      return await answerA2a(await request.text(), identity.id, env.BASE_URL);
+    } catch (error) {
+      if (error instanceof AgentRefused) return denied(error.message, 403);
+      throw error;
+    }
   },
 };
 
@@ -1279,7 +1317,7 @@ async function agentFromCredential(env: Env, token: string, request: Request): P
 
 /**
  * Whether a token was issued for `/mcp`, as the provider checks there, so a token for any other resource doesn't work at `/v1/files`.
- * `/mcp` is the only resource declared, and a token stored with no audience is the provider's legacy grant for that one resource.
+ * A token stored with no audience is a grant from before there were two resources, which `legacyGrantResource` makes `/mcp`.
  */
 export function forMcp(audience: string | string[] | undefined, base: string) {
   const resource = new URL(`${base}/mcp`).href;
@@ -1294,7 +1332,7 @@ export function forMcp(audience: string | string[] | undefined, base: string) {
   return Array.isArray(audience) ? audience.some(same) : same(audience);
 }
 
-let provider: { base: string; instance: OAuthProvider<Env> } | undefined;
+let oauth: ReturnType<typeof buildOAuth<Env>> | undefined;
 
 const ABANDONED_AFTER_MS = 24 * 60 * 60 * 1000;
 const CLEANUP_BATCH = 1000;
@@ -1395,22 +1433,18 @@ export default {
     if (request.method === "POST" && new URL(request.url).pathname === "/oauth/register" && (await registersOurHost(request, env))) {
       return withHsts(json({ error: "invalid_redirect_uri", error_description: "redirect_uri_on_our_host" }, 400), env);
     }
-    if (provider?.base !== env.BASE_URL) {
-      provider = {
-        base: env.BASE_URL,
-        instance: new OAuthProvider<Env>({
-          apiRoute: "/mcp",
-          apiHandler: mcpHandler as never,
-          defaultHandler: appHandler as never,
-          authorizeEndpoint: "/authorize",
-          tokenEndpoint: "/oauth/token",
-          clientRegistrationEndpoint: "/oauth/register",
-          scopesSupported: ["mcp"],
-          requiredScopes: ["mcp"],
-          resourceMetadata: { resource: `${env.BASE_URL}/mcp` },
-        }),
-      };
+    if (oauth?.base !== env.BASE_URL) oauth = buildOAuth<Env>(env.BASE_URL, { mcp: mcpHandler, a2a: a2aHandler });
+    // `/a2a`'s checks come before authentication, and its body is read here, once.
+    if (isA2aPath(new URL(request.url))) {
+      // A2A is the gateway's own, never the application host's.
+      if (forPublicHost(request, env) !== env) return withHsts(denied("not_found", 404), env);
+      // A preflight gets the resource server's own CORS answer. Every other method goes through the checks.
+      if (request.method !== "OPTIONS") {
+        const checked = await checkA2aRequest(request, env.BASE_URL);
+        if (checked instanceof Response) return withHsts(checked, env);
+        request = new Request(request, { body: checked.text });
+      }
     }
-    return withHsts(await provider.instance.fetch(request, env, ctx), env);
+    return withHsts(await routeOAuth(oauth, request, env, ctx, appHandler), env);
   },
 };

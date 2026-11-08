@@ -396,6 +396,17 @@ describe("My workrooms", () => {
     expect(screen.queryByText(/Goal:/)).toBeNull();
   });
 
+  it("shows how many of each room's outputs are ready, and no line for a room with none or no count", async () => {
+    const roles = { count: 0, with_openings: 0, filled: 0, capacity: 0, listed: [] };
+    const row = (id: string, outputs?: { ready: number; total: number }) => ({ workspace_id: id, workspace_name: id, role: "owner", card: { goal: null, goal_cut: false, external: false, roles, ...(outputs ? { outputs } : {}) } });
+    replies.set("/api/v1/workspaces/cards", { ok: true, data: { workspaces: [row("a", { ready: 1, total: 3 }), row("b", { ready: 0, total: 1 }), row("c", { ready: 0, total: 0 }), row("d")] } });
+    render(await MyWorkrooms());
+    const card = (name: string) => screen.getByRole("link", { name }).closest("li")!;
+    expect(within(card("a")).getByText("1 of 3 outputs ready")).toBeInTheDocument();
+    expect(within(card("b")).getByText("0 of 1 output ready")).toBeInTheDocument();
+    for (const name of ["c", "d"]) expect(within(card(name)).queryByText(/outputs? ready/), name).toBeNull();
+  });
+
   it("keeps a multi-line goal's words apart, and shows no goal when nothing readable is left", async () => {
     const roles = { count: 0, with_openings: 0, filled: 0, capacity: 0, listed: [] };
     const row = (workspace_id: string, goal: string) => ({ workspace_id, workspace_name: workspace_id, role: "member", card: { goal, goal_cut: false, external: false, roles } });

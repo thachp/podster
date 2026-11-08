@@ -34,7 +34,7 @@ C changes contracts and M adds a migration. Those PRs merge one at a time, and t
 | 9a | Screen: asset upload | | | 5 |
 | 9b | Screen: Task Sheet files and review | | | 6 |
 | 9c | Screen: Artifacts tab and output status | | | 7 |
-| 10 | Card progress | | D1, if cards read the index | 7, and [decision 49](spec/PRODUCT.md#decisions-needed)'s card work |
+| 10 | Card progress | Yes | None: each room's card counts its own outputs, so no index is needed | 7, and [decision 49](spec/PRODUCT.md#decisions-needed)'s card work |
 | 11 | Staging run of expanded criterion 6 and the upload policy | | | All |
 
 Steps 9a, 9b and 9c are in different folders, so they can run in parallel. Agent tools ship with each backend PR, because a new capability updates contracts in the same PR.
@@ -47,7 +47,7 @@ Put new backend code in new modules, such as `apps/api/src/objects.rs` and `crat
 
 **Step 2:**
 
-- **Open:** repeat the 100 MB upload from another network. On 2026-11-07 it passed on staging from the owner's Mac, the same machine whose spike runs failed.
+- **Open:** repeat the 100 MB upload from another network. On 2026-11-07 it passed on staging from the owner's Mac, the same machine whose spike runs failed. On 2026-11-08 a 100 MB upload from the lead's Mac failed again with "fetch failed" in step 11's run, while a 100 MB upload from the browser pane had worked, so this stays the known network gap, not a finding about the Workers.
 - **Done:** CPU for a 100 MB upload, measured on staging at `eaf1b84`: 4,600 ms in the API and 1,806 ms in the gateway, against a 30 s limit.
 - **Open:** test the request limit on the application's real hostname, and check which plan `podster.dev` is on.
 - **Done:** a chunked upload with a correct hash got 200 through the real edge, for 200,000 bytes.
@@ -64,6 +64,9 @@ Put new backend code in new modules, such as `apps/api/src/objects.rs` and `crat
 - Propose how often the image rebuilds. Creating the schedule needs the owner in that session ([decision 83](spec/PRODUCT.md#decisions-needed)).
 
 **Step 11:** scanning under load, since each scan in the spike ran alone.
+
+- **First run of `e2e/m2-staging.mjs`,** by the lead on 2026-11-08 at `059a47c` with `--big`, in room `ws_0a29ea5903194e3aaa9c4861daf10ed7`: 20 passed, 1 failed, 6 skipped. The clean file went `ready` in 12.9 s and the EICAR string `blocked` in 3.3 s. Owner and agent downloads matched their bytes and headers, and every refusal gave its exact code. The one failure was the 100 MB upload, "fetch failed" from the lead's Mac, the network gap above. The skipped cases were steps 5 to 8, which the script didn't cover yet, the hour sweep and load.
+- **Steps 5 to 8 on staging,** by the lead on 2026-11-08 with [#158](https://github.com/thachp/podster/pull/158)'s script at `55a3bf6`, without `--big`, in room `ws_b847b743eaba4fe8aba4c3fe3701f724`, against API `678aeac`, gateway `2295e19` and web `2295e19`: 51 passed, 0 failed, 4 skipped. Input assets linked to a guest's task, a submission with a file approved by its exact version, approval refused after a submitted file's removal, an expected output that stays `ready` with `files_available` false after its file is removed, and removal answering 410 `file_removed` all passed. The skipped cases were the 100 MB file, since `--big` wasn't passed, approval after a blocked file, which a run can't cause, the hour sweep and load.
 
 ## Risks to test
 

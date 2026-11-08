@@ -784,12 +784,29 @@ pub(super) fn read_card(sql: &SqlStorage, who: &Participant) -> R<Value> {
         .chars()
         .take(CARD_GOAL_CHARS as usize)
         .collect();
-    Ok(json!({
+    let mut card = json!({
         "goal": if room["goal"].is_null() { Value::Null } else { json!(goal) },
         "goal_cut": int(&room["goal_length"]) > CARD_GOAL_CHARS,
         "external": room["owner_org_id"].as_str() != Some(who.org.as_str()),
         "roles": roles,
-    }))
+    });
+    // How many expected outputs are Ready, out of those not removed, for the directory's "n of m outputs ready" (decision 49).
+    // Every participant sees outputs' status (decision 54), and the counts name no task. Anyone who isn't a participant, if a
+    // card ever reaches one, gets no counts.
+    if podster_policy::outputs::sees_outputs(&who.caller) {
+        // The same rule as the outputs read, so the card and that list can't disagree. A room holds at most 50 outputs.
+        let has_version: Vec<bool> = rows(
+            sql,
+            "SELECT current_task_id IS NOT NULL AS has_version FROM expected_output WHERE removed_at IS NULL",
+            vec![],
+        )?
+        .iter()
+        .map(|row| int(&row["has_version"]) == 1)
+        .collect();
+        let (ready, total) = podster_core::expected_outputs::ready_count(&has_version);
+        card["outputs"] = json!({ "ready": ready, "total": total });
+    }
+    Ok(card)
 }
 
 /// The room's openings, for anyone in it. Who holds them, and how many do, follow the same limit as the member list, so

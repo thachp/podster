@@ -12,7 +12,7 @@ Companions: [Product](PRODUCT.md) · [Architecture](ARCHITECTURE.md) · [Design]
 
 Podster remains the coordination layer. Runner is optional software that an agent owner operates on their own machine, executing Podster tasks through supported installed tools. It is not Podster-hosted model execution and does not replace independently hosted agents, MCP/Agent Auth participation, or durable inboxes.
 
-**Decided direction:** the name Podster Runner, local execution, **Agent Auth as Runner's way to authenticate to Podster**, separate from provider authentication, authorized registration, role admission before execution, offer-and-accept pickup, API keys or equivalent automation credentials, and automatic execution of eligible tasks within owner-configured access and limits, without per-run owner approval ([decisions 26 to 29](PRODUCT.md#decisions-needed)).
+**Decided direction:** the name Podster Runner, local execution, **Agent Auth as Runner's way to authenticate to Podster**, separate from provider authentication, authorized registration, role admission before execution, offer-and-accept pickup, API keys or equivalent automation credentials ([decisions 26 to 29](PRODUCT.md#decisions-needed)) Automatic execution without per-run owner approval is a **proposed revision** to decision 29, not decided (see the status above).
 
 Runner picks up work only through the existing offer-and-accept lifecycle. [Task claiming](#rejected-option-task-claiming) was rejected. Detailed APIs, protocol bindings and packaging below are proposals requiring review.
 
@@ -104,7 +104,7 @@ Ordinary reconnect resumes the existing identity; it does not renew revoked perm
 
 Task instructions become the prompt for a tool-using CLI, so another participant's text can drive the owner's machine and credentials. Labeling it as data helps but cannot make it safe. Isolation limits damage. **Run policy decides whether each run starts.** This is the key control for Runner.
 
-**Owner configuration, not a prompt for every run.** The owner configures eligible rooms and requester organizations, the source repository and workspace, allowed tools and network access, provider access, allowed output destinations, and task/day limits. Pairing alone enables none of this. Once configured, a task that passes those checks runs automatically. Missing configuration, an out-of-scope task or a requested escalation stops the run or leaves it waiting for an authorized policy change; Runner does not silently widen access. A manual approval mode can be selected, but is not the default for eligible tasks ([decision 29](PRODUCT.md#decisions-needed)).
+**Owner configuration, not a prompt for every run (proposed revision to decision 29).** Until it's decided, decision 29's ask-first default applies, and everything below describes the proposal. The owner configures eligible rooms and requester organizations, the source repository and workspace, allowed tools and network access, provider access, allowed output destinations, and task/day limits. Pairing alone enables none of this. Once configured, a task that passes those checks runs automatically. Missing configuration, an out-of-scope task or a requested escalation stops the run or leaves it waiting for an authorized policy change; Runner does not silently widen access. A manual approval mode can be selected, but is not the default for eligible tasks ([decision 29](PRODUCT.md#decisions-needed)).
 
 **Prompt inputs.** A run's prompt inputs are exactly the task's title, instructions and acceptance criteria, plus, on a rerun, the reviewer's change request. Thread messages and artifact labels enter a prompt only if a person lists them in an approval; an automatic run uses only the fixed inputs. Additional context must be bounded by the configured repository and task access. Content never changes the policy itself.
 
@@ -113,6 +113,8 @@ Task instructions become the prompt for a tool-using CLI, so another participant
 **The least-trusted author decides.** Evaluate all input authors, not only the requester. If a reviewer or admin outside the configured scope wrote any of it, automatic execution is ineligible. A room or organization label alone does not make task content trustworthy.
 
 **Enforced locally, within limits.** Run policy is stored and evaluated on the owner's machine, and Podster cannot change it. Requester, organization, room and task content come from Podster, and nothing is signed by the requester. **Automatic execution trusts Podster to identify eligible work:** a compromised service could send arbitrary instructions labeled as an allowed room. The setup must disclose this residual risk. Filesystem/tool/network isolation, scoped credentials, budgets and revocation limit damage; an owner prompt is no longer the default defense.
+
+Proposed: this table describes the proposed revision. Until it's decided, every row asks first, as decision 29 says.
 
 | Task source | Within owner-configured scope and limits | Outside that scope |
 | --- | --- | --- |

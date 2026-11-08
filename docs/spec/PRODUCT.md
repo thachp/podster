@@ -750,7 +750,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 ## Runner decisions, November 4, 2026 (historical)
 
 - The owner delegated decisions 26 and 27 and asked for the safest options. Decisions 19, 26, 27, 28 and 29 are now settled.
-- Runner is gated, tasks stay offer-only, Runner uses API keys or equivalent automation credentials with its provider, and the initial default asked first for every run. The November 8 revision to decision 29 supersedes only that default.
+- Runner is gated, tasks stay offer-only, Runner uses API keys or equivalent automation credentials with its provider, and the initial default asked first for every run. A November 8 proposed revision to decision 29 would change only that default, and it waits for M7's security review.
 - The owner also set Agent Auth as how Runner authenticates to Podster.
 
 ## Review revision, November 4, 2026

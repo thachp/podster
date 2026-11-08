@@ -1,6 +1,5 @@
 "use client";
 
-import { CheckCircle2, CircleDashed, Loader2, Ban, Trash2, type LucideIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { cn } from "cn";
 import { plainName } from "@/components/agent-content/text";
@@ -9,24 +8,12 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { clientCommand, clientQuery } from "@/lib/gateway/client";
 import { MAX_UPLOAD_BYTES, uploadFile, type UploadProgress, type UploadResult } from "@/lib/uploads/client";
-import { FIELD_CLASS, TONES } from "./task-bits";
-import { downloadHref, fileSize, fileState, MAX_SUBMISSION_ITEMS, submitProblem, uploadProblem } from "./task-files-model";
+import { FIELD_CLASS } from "./task-bits";
+import { FileStateBadge } from "@/components/files/file-state-badge";
+import { downloadHref, fileSize, fileState } from "@/lib/files/files";
+import { MAX_SUBMISSION_ITEMS, submitProblem, uploadProblem } from "./task-files-model";
 import { asConflict, LIMITS, tooLong, type Task, type TaskFile } from "./task-model";
 import type { LoadedTask } from "./task-sheet";
-
-const ICONS: Record<string, LucideIcon> = { uploading: Loader2, scanning: Loader2, ready: CheckCircle2, blocked: Ban, failed: Ban, removed: Trash2 };
-
-/** A label and an icon, so color is never the only signal. */
-export function FileStateBadge({ state }: { state: string | null }) {
-  const known = fileState(state);
-  const Icon = (state && ICONS[state]) || CircleDashed;
-  return (
-    <span className={cn("inline-flex w-fit shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap", TONES[known.tone])}>
-      <Icon className="size-3" aria-hidden />
-      {known.label}
-    </span>
-  );
-}
 
 const shortHash = (sha256: string) => plainName(sha256).slice(0, 12);
 

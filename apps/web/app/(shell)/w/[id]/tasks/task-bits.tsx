@@ -9,7 +9,7 @@ import { isChosenName, kindOf, TASK_STATUS, type TaskStatus, type Tone } from ".
 
 const ICONS: Record<TaskStatus, LucideIcon> = { open: Circle, offered: Hourglass, accepted: CircleDot, submitted: Eye, completed: CheckCircle2, canceled: XCircle };
 
-export const TONES: Record<Tone, string> = {
+const TONES: Record<Tone, string> = {
   neutral: "bg-status-neutral-surface text-status-neutral",
   amber: "bg-status-amber-surface text-status-amber",
   blue: "bg-status-blue-surface text-status-blue",

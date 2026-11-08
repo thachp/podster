@@ -1,37 +1,8 @@
 import { FAILURE_COPY } from "@/components/sheet/target-sheet";
-import type { Tone, TaskFile } from "./task-model";
+import type { TaskFile } from "./task-model";
 
 /** At most this many links and files together on one submission, as the API counts them. */
 export const MAX_SUBMISSION_ITEMS = 10;
-
-/** DESIGN.md's file labels. A scanner only knows known malware, so nothing here says a file is safe. */
-export const FILE_STATE: Record<string, { label: string; tone: Tone; detail: string }> = {
-  uploading: { label: "Uploading", tone: "blue", detail: "It can't be downloaded until it has arrived and been scanned." },
-  scanning: { label: "Scanning", tone: "amber", detail: "It can be downloaded once its scan finishes." },
-  ready: { label: "Ready", tone: "green", detail: "No known malware found." },
-  blocked: { label: "Blocked", tone: "neutral", detail: "Its scan refused it, so it can't be downloaded or approved." },
-  failed: { label: "Scan failed", tone: "neutral", detail: "It couldn't be scanned, so it can't be downloaded or approved." },
-  removed: { label: "Removed", tone: "neutral", detail: "Its bytes are gone. Its record and SHA-256 stay." },
-};
-
-/** A state this screen doesn't know, or a record that's gone, is never presented as Ready. */
-export const fileState = (state: string | null) => (state && Object.hasOwn(FILE_STATE, state) ? FILE_STATE[state] : { label: "Unavailable", tone: "neutral" as Tone, detail: "It can't be downloaded or approved." });
-
-/** Decimal units, as the upload limits are written: 100 MB is 100,000,000 bytes. */
-export function fileSize(bytes: number) {
-  if (!Number.isFinite(bytes) || bytes < 0) return "Unknown size";
-  if (bytes < 1000) return `${bytes} ${bytes === 1 ? "byte" : "bytes"}`;
-  const [value, unit] = bytes < 1e6 ? [bytes / 1e3, "KB"] : bytes < 1e9 ? [bytes / 1e6, "MB"] : [bytes / 1e9, "GB"];
-  return `${value.toLocaleString("en-US", { maximumFractionDigits: value < 10 ? 1 : 0 })} ${unit}`;
-}
-
-const FILE_PATH = /^\/v1\/files\/[\w-]+\/[\w-]+$/;
-
-/**
- * Where the browser downloads a file: through this host's `/api`, with the person's session. Only a path of the API's own
- * shape becomes a link, so nothing else in a read can point the browser somewhere. The API decides again on each download.
- */
-export const downloadHref = (file: Pick<TaskFile, "download_path" | "state">) => (file.state === "ready" && file.download_path && FILE_PATH.test(file.download_path) ? `/api${file.download_path}` : null);
 
 /** Why a submission's files stop it being approved, as far as this read shows. The API checks each one again. */
 export function approvalBlocker(files: Pick<TaskFile, "state">[]) {

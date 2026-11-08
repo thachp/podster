@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SheetLink } from "@/components/sheet/target-sheet";
 import { setUrl } from "@/test/next-navigation";
 import type { UploadResult } from "@/lib/uploads/client";
-import { approvalBlocker, downloadHref, fileSize, fileState, verifyProblem } from "./task-files-model";
+import { approvalBlocker, verifyProblem } from "./task-files-model";
 import type { Room, Task, TaskDetail, TaskFile } from "./task-model";
 import { TaskSheet } from "./task-sheet";
 
@@ -81,27 +81,7 @@ const open = async (me = "per_me") => {
   await screen.findByRole("heading", { name: "Design the API" });
 };
 
-describe("the file model", () => {
-  it("writes sizes in the decimal units the limits use", () => {
-    expect(fileSize(1)).toBe("1 byte");
-    expect(fileSize(999)).toBe("999 bytes");
-    expect(fileSize(2_400_000)).toBe("2.4 MB");
-    expect(fileSize(100_000_000)).toBe("100 MB");
-  });
-
-  it("never calls an unknown or missing state Ready, and never says safe", () => {
-    expect(fileState("quarantined").label).toBe("Unavailable");
-    expect(fileState(null).label).toBe("Unavailable");
-    expect(fileState("failed").label).toBe("Scan failed");
-    expect(JSON.stringify(["uploading", "scanning", "ready", "blocked", "failed", "removed"].map(fileState))).not.toMatch(/safe|clean|virus-free/i);
-  });
-
-  it("links only the API's own path for a ready file, through this host", () => {
-    expect(downloadHref(file())).toBe("/api/v1/files/ws_1/obj_1");
-    expect(downloadHref(file({ state: "scanning" }))).toBeNull();
-    for (const path of ["https://evil.example/x", "/v1/files/ws_1/../admin", "/v1/files/ws_1/obj_1?x=1", "//evil.example/v1/files/a/b", "javascript:alert(1)"]) expect(downloadHref(file({ download_path: path }))).toBeNull();
-  });
-
+describe("the submission file rules", () => {
   it("names what stops an approval", () => {
     expect(approvalBlocker([file()])).toBeNull();
     expect(approvalBlocker([])).toBeNull();

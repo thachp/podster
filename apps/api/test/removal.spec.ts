@@ -83,9 +83,15 @@ const refusal = async (res: Response) => ({ status: res.status, code: ((await re
 const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
 const row = (id: string, object: string): Promise<any> => inRoom(id, (sql) => sql.exec("SELECT * FROM stored_object WHERE id = ?", object).toArray()[0]) as Promise<any>;
 const remove = (who: Who, id: string, object: string) => api(who, "POST", `/v1/workspaces/${id}/files/${object}/remove`);
+/** Runs the room's alarm now. Running it does nothing when none is set, so one is set first, far enough off that this runs it. */
+const alarm = async (id: string) => {
+  await runInDurableObject(stub(id), (_: any, state: any) => state.storage.setAlarm(Date.now() + 60_000));
+  expect(await runDurableObjectAlarm(stub(id))).toBe(true);
+};
+/** Forces a sweep pass. */
 const sweep = async (id: string) => {
   await inRoom(id, (sql) => sql.exec("UPDATE storage_sweep SET due_at = 0"));
-  await runDurableObjectAlarm(stub(id));
+  await alarm(id);
 };
 const audits = (id: string, action: string): Promise<any[]> => inRoom(id, (sql) => sql.exec("SELECT * FROM audit_event WHERE action = ?", action).toArray()) as Promise<any[]>;
 
@@ -107,7 +113,7 @@ describe("removing a file", () => {
     const read = await api(MEMBER, "GET", `/v1/workspaces/${id}/files/${object}`);
     expect(read.body).toMatchObject({ state: "removed", download_path: null, removed_by: OWNER.id });
     // The removal made the sweep due at once, so the room's own alarm may already have run it.
-    await runDurableObjectAlarm(stub(id));
+    await alarm(id);
     expect(await BINDINGS.ASSETS.head(before.object_key)).toBeNull();
     const [audit] = await audits(id, "object.removed");
     expect(audit).toMatchObject({ actor_id: OWNER.id, target_id: object });
@@ -254,7 +260,7 @@ describe("the room's sweep", () => {
     // A pass lists the file's key on page 1 and moves its cursor on, before the file is removed.
     await sweep(id);
     expect((await remove(OWNER, id, object)).status).toBe(200);
-    await runDurableObjectAlarm(stub(id));
+    await alarm(id);
     expect(await BINDINGS.ASSETS.head(key)).toBeNull();
     expect(await BINDINGS.ASSETS.head(older)).toBeNull();
     expect(await BINDINGS.ASSETS.head(strays[0])).not.toBeNull();
@@ -321,7 +327,7 @@ describe("the room's sweep", () => {
       for (const column of ["removed_at", "removed_by", "removed_by_kind", "removed_from", "attempt_started_at", "purge_due_at"]) state.storage.sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
     });
-    await runDurableObjectAlarm(stub(id));
+    await alarm(id);
     expect((await remove(OWNER, id, object)).body.state).toBe("removed");
   });
 
@@ -358,11 +364,11 @@ describe("the room's sweep", () => {
     const made = await api(OWNER, "POST", `/v1/workspaces/${id}/uploads`, { name: "never.txt", size: 3, sha256: await sha256(new Uint8Array([1, 2, 3])) });
     const now = Date.now();
     await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET upload_expires_at = ? WHERE id = ?", now - 60 * 60 * 1000 + 60_000, made.body.id));
-    await runDurableObjectAlarm(stub(id));
+    await alarm(id);
     expect(await row(id, made.body.id)).toBeDefined();
     await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET upload_expires_at = ? WHERE id = ?", now - 60 * 60 * 1000 - 1, made.body.id));
     const policy = await version(id);
-    await runDurableObjectAlarm(stub(id));
+    await alarm(id);
     expect(await row(id, made.body.id)).toBeUndefined();
     expect(await version(id)).toBe(policy);
     const [audit] = await audits(id, "object.upload_abandoned");

@@ -40,6 +40,8 @@ export default defineConfig({
         bindings: {
           ASSERTION_KEYS: JSON.stringify({ test: pub.x }),
           SCANNER_SECRET: "test-scanner-secret",
+          // A test value only. The real key is the owner's to set (decision 122).
+          A2A_TOKEN_KEY: "0f".repeat(32),
           TEST_WRANGLER: readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8"),
           TEST_D1_SCHEMA: ["0001_membership_index.sql", "0002_room_status.sql", "0003_membership_by_org.sql", "0004_ownerless_rooms.sql"].map((name) => readFileSync(new URL(`./migrations/${name}`, import.meta.url), "utf8")).join("\n").replace(/--.*$/gm, ""),
           TEST_SIGNING_JWK: JSON.stringify(privateKey.export({ format: "jwk" })),

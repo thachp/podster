@@ -224,52 +224,98 @@ pub(super) fn next_due(sql: &SqlStorage, now: i64, failures: u32) -> R<Option<i6
         .map(|due| due.max(now.saturating_add(floor))))
 }
 
-/// A blocked or failed file's verdict: when the scanner reported, or, for a scan that ran out of time, when its hour ended.
+/// A blocked or failed file's verdict: when the scanner reported or the scan ran out of time. A row from before scans recorded
+/// that has none, so the end of its scan's hour stands in.
 const VERDICT_AT: &str = "COALESCE(scanned_at, scanning_since + ?)";
 const UNUSABLE_FIRST: &str = "SELECT MIN(COALESCE(scanned_at, scanning_since + ?)) AS first FROM stored_object WHERE state IN ('blocked', 'failed')";
-/// Files uploaded for a task that no submission names, on a task that has left Accepted. A removed one is already done.
-const UNSUBMITTED: &str = "FROM stored_object o JOIN task t ON t.id = o.for_task WHERE o.for_task IS NOT NULL AND o.state <> 'removed' AND t.left_accepted_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM submission_file s WHERE s.object_id = o.id)";
-const UNSUBMITTED_FIRST: &str = "SELECT MIN(t.left_accepted_at) AS first FROM stored_object o JOIN task t ON t.id = o.for_task WHERE o.for_task IS NOT NULL AND o.state <> 'removed' AND t.left_accepted_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM submission_file s WHERE s.object_id = o.id)";
+/// Files uploaded for a task that no submission has named, on a task that has left Accepted, through the partial index that holds
+/// only unsubmitted task files still here, so it doesn't grow with every file ever submitted.
+const UNSUBMITTED: &str = "FROM stored_object o INDEXED BY stored_object_unsubmitted JOIN task t ON t.id = o.for_task WHERE o.for_task IS NOT NULL AND o.submitted_at IS NULL AND o.state <> 'removed' AND t.left_accepted_at IS NOT NULL";
+const UNSUBMITTED_FIRST: &str = "SELECT MIN(t.left_accepted_at) AS first FROM stored_object o INDEXED BY stored_object_unsubmitted JOIN task t ON t.id = o.for_task WHERE o.for_task IS NOT NULL AND o.submitted_at IS NULL AND o.state <> 'removed' AND t.left_accepted_at IS NOT NULL";
 
-/// Removes what the rules say goes, as the system, the same way a person's removal does: blocked and failed files 7 days after
-/// their verdict (decision 94), and files uploaded for a task but never submitted, 24 hours after the task left Accepted (decision
-/// 98). Each rule is asked again for every row, so the queries only narrow what it looks at.
-fn remove_by_rule(sql: &SqlStorage, now: i64) -> R<()> {
+/// Which rule a file is up for removal under.
+#[derive(Clone, Copy)]
+enum Rule {
+    Unusable,
+    Unsubmitted,
+}
+
+/// The files due for removal by the rules now, at most `SYSTEM_REMOVALS_PER_PASS` for each. Each is checked again, alone, before
+/// it's removed.
+fn due_by_rule(sql: &SqlStorage, now: i64) -> R<Vec<(String, Rule)>> {
     let unusable = rows(
         sql,
-        &format!("SELECT id, state, {VERDICT_AT} AS verdict_at FROM stored_object WHERE state IN ('blocked', 'failed') AND {VERDICT_AT} <= ? ORDER BY verdict_at LIMIT ?"),
+        &format!("SELECT id FROM stored_object WHERE state IN ('blocked', 'failed') AND {VERDICT_AT} <= ? ORDER BY {VERDICT_AT} LIMIT ?"),
         vec![
             SCAN_DEADLINE_MS.into(),
-            SCAN_DEADLINE_MS.into(),
             now.saturating_sub(UNUSABLE_FILE_RETENTION_MS).into(),
+            SCAN_DEADLINE_MS.into(),
             SYSTEM_REMOVALS_PER_PASS.into(),
         ],
     )?;
-    for row in &unusable {
-        let due = row["state"]
-            .as_str()
-            .and_then(ObjectState::from_name)
-            .and_then(|state| unusable_file_due(state, int(&row["verdict_at"])));
-        if due.is_some_and(|due| due <= now) {
-            remove(sql, &SYSTEM, row["id"].as_str().unwrap_or_default(), now)?;
-        }
-    }
     let unsubmitted = rows(
         sql,
-        &format!("SELECT o.id AS id, o.state AS state, t.left_accepted_at AS left_at {UNSUBMITTED} AND t.left_accepted_at <= ? ORDER BY t.left_accepted_at LIMIT ?"),
+        &format!("SELECT o.id AS id {UNSUBMITTED} AND t.left_accepted_at <= ? ORDER BY t.left_accepted_at LIMIT ?"),
         vec![
             now.saturating_sub(UNSUBMITTED_FILE_RETENTION_MS).into(),
             SYSTEM_REMOVALS_PER_PASS.into(),
         ],
     )?;
-    for row in &unsubmitted {
-        let due = row["state"]
-            .as_str()
-            .and_then(ObjectState::from_name)
-            .and_then(|state| unsubmitted_file_due(state, false, row["left_at"].as_i64()));
-        if due.is_some_and(|due| due <= now) {
-            remove(sql, &SYSTEM, row["id"].as_str().unwrap_or_default(), now)?;
+    Ok(unusable
+        .iter()
+        .map(|row| (text(&row["id"]).unwrap_or_default(), Rule::Unusable))
+        .chain(
+            unsubmitted
+                .iter()
+                .map(|row| (text(&row["id"]).unwrap_or_default(), Rule::Unsubmitted)),
+        )
+        .collect())
+}
+
+/// Removes one file as the system if its rule says so now, reading it afresh: blocked and failed files 7 days after their verdict
+/// (decision 94), and files uploaded for a task but never submitted, 24 hours after the task left Accepted (decision 98).
+///
+/// Whether a submission names the file is read from `submission_file` itself, never from the flag. A file it names that wasn't
+/// flagged gets its flag here instead of being removed, so the cheap query stops finding it.
+fn remove_if_due(sql: &SqlStorage, id: &str, rule: Rule, now: i64) -> R<()> {
+    // A test build fails a file whose ID says so, to show one bad row can't stop the rest.
+    if cfg!(feature = "failpoints") && id.contains("failrule") {
+        return Err(ApiError::internal("injected rule failure"));
+    }
+    let Some(row) = rows(
+        sql,
+        &format!("SELECT o.state AS state, {VERDICT_AT} AS verdict_at, t.left_accepted_at AS left_at, (SELECT MIN(s.created_at) FROM submission_file s WHERE s.object_id = o.id) AS named_at FROM stored_object o LEFT JOIN task t ON t.id = o.for_task WHERE o.id = ?"),
+        vec![SCAN_DEADLINE_MS.into(), id.into()],
+    )?
+    .into_iter()
+    .next() else {
+        return Ok(());
+    };
+    let Some(state) = row["state"].as_str().and_then(ObjectState::from_name) else {
+        return Ok(());
+    };
+    let due = match rule {
+        Rule::Unusable => row["verdict_at"]
+            .as_f64()
+            .and_then(|verdict| unusable_file_due(state, verdict as i64)),
+        Rule::Unsubmitted => {
+            let named_at = row["named_at"].as_f64().map(|at| at as i64);
+            if let Some(named_at) = named_at {
+                exec(
+                    sql,
+                    "UPDATE stored_object SET submitted_at = COALESCE(submitted_at, ?) WHERE id = ?",
+                    vec![named_at.into(), id.into()],
+                )?;
+            }
+            unsubmitted_file_due(
+                state,
+                named_at.is_some(),
+                row["left_at"].as_f64().map(|at| at as i64),
+            )
         }
+    };
+    if due.is_some_and(|due| due <= now) {
+        remove(sql, &SYSTEM, id, now)?;
     }
     Ok(())
 }
@@ -367,12 +413,28 @@ impl Workspace {
             console_error!("couldn't clear abandoned uploads: {:?}", error.code());
             failed = true;
         }
-        let removing = sql.clone();
-        if let Err(error) = transaction_sync(&self.state, move || {
-            remove_by_rule(&removing, Date::now().as_millis() as i64)
-        }) {
-            console_error!("couldn't remove files by rule: {:?}", error.code());
-            failed = true;
+        // Each file is removed in its own transaction, so one that errors can't hold up the rest. It's logged by ID and tried on the
+        // next run.
+        match due_by_rule(&sql, Date::now().as_millis() as i64) {
+            Ok(due) => {
+                for (id, rule) in due {
+                    let removing = sql.clone();
+                    let one = id.clone();
+                    if let Err(error) = transaction_sync(&self.state, move || {
+                        remove_if_due(&removing, &one, rule, Date::now().as_millis() as i64)
+                    }) {
+                        console_error!(
+                            "{}",
+                            json!({ "at": "storage.rule_removal_failed", "object": id, "kind": error.code() })
+                        );
+                        failed = true;
+                    }
+                }
+            }
+            Err(error) => {
+                console_error!("couldn't read files due for removal: {:?}", error.code());
+                failed = true;
+            }
         }
         failed |= !self.purge_removed().await;
         if let Err(error) = self.sweep_storage().await {
@@ -436,11 +498,9 @@ impl Workspace {
             }
             let next = match self.purge_one(&room, &id).await {
                 Ok(Purge::More) => V::from(now.saturating_add(REARM_MS)),
-                // A key that won't delete is tried again a minute on, as the claim already says.
-                Ok(Purge::Stuck) => {
-                    ok = false;
-                    V::from(now.saturating_add(SWEEP_RETRY_MS))
-                }
+                // A key that won't delete is tried again a minute on, as the claim already says. It has its own retry, so it doesn't
+                // count as a failed sweep, which would slow every other removal in the room.
+                Ok(Purge::Stuck) => V::from(now.saturating_add(SWEEP_RETRY_MS)),
                 Ok(Purge::Done) => {
                     let settles = row["attempt_started_at"]
                         .as_f64()

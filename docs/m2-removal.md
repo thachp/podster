@@ -40,7 +40,7 @@
 
 The same transaction marks the file for a purge, and the alarm right after it lists only `rooms/{room}/objects/{file}/` and deletes everything there, every attempt included.
 - **Room size can't delay it:** it doesn't wait on the room-wide sweep, so even a room with thousands of keys gets its takedown at once.
-- **A failure is tried again a minute later.**
+- **A failure is tried again a minute later,** and so is a key that won't delete, while the rest of the file's keys go.
 - **A late attempt:** an attempt may still be writing when its file is removed, so the purge runs once more when the file's last attempt has settled, an hour after it began.
 - **Bounded work:** a purge is claimed a minute out before it lists, so a failure to record its result can't re-list storage every second. Each alarm lists at most two pages per file and deletes in batches.
 
@@ -75,9 +75,9 @@ If it keeps bytes that are too young, it runs again when the youngest one is an 
 
 After every pass, the next is due no later than the room's high-water mark, `storage_sweep.settles_at`. It only ever rises, to an hour past each upload attempt's start and each unfinished upload's drop, and it starts an hour after the migration for attempts begun before it. It outlives the rows, so a row dropped while its attempt is still writing, or a pass forced early, can't lose the schedule.
 
-A pass sets its own due time a minute on as it starts, rather than clearing it, so a pass that dies midway still has one coming. Deletes go in batches. When a batch fails, the keys go one at a time, and a key that still won't delete is skipped, logged by its object's ID and tried again a minute later, in the room-wide sweep and in a file's purge alike. A room with nothing new never lists storage.
+A pass sets its own due time a minute on as it starts, rather than clearing it, so a pass that dies midway still has one coming. Deletes go in batches. When a batch fails, the keys go one at a time, and a key that still won't delete is skipped and logged by its object's ID. In a file's purge it's tried again a minute later. In the room-wide sweep it's tried again no sooner than a minute later: when the sweep is between cycles that's a minute on, and mid-cycle it's carried to the cycle's end, like any other key it keeps. A room with nothing new never lists storage.
 
-A row whose state can't be read keeps its key's bytes. Nothing overdue wakes the room sooner than a second from now, doubled for each sweep in a row that failed, up to five minutes, so a step that keeps failing can't spin the alarm. The count lives in the room's memory, so a restart forgets it.
+A row whose state can't be read keeps its key's bytes. Nothing overdue wakes the room sooner than a second from now, doubled for each sweep in a row that failed, up to five minutes, so a step that keeps failing can't spin the alarm. A key that won't delete doesn't count as a failure, since it has its own retry, so it can't slow every other removal in the room. The count lives in the room's memory, so a restart forgets it.
 
 **Where unreferenced bytes come from:**
 - `upload_outcome_unknown`;
@@ -107,7 +107,7 @@ The owner ruled "as recommended", recorded as [decisions 92 to 98](spec/PRODUCT.
 
 - **No operator route in this change (92).** It gets its own change before any public room, as another `Remover` kind calling `removal::remove`.
 - **Removal works in an archived room (93).** This is built.
-- **Blocked and failed files (94).** Their bytes are removed by the system 7 days after the verdict. The rule is `unusable_file_due` in core. The room's alarm removes them as `podster`/`system`, taking the verdict from `scanned_at`, or for a scan that ran out of time, from the end of its hour.
+- **Blocked and failed files (94).** Their bytes are removed by the system 7 days after the verdict. The rule is `unusable_file_due` in core. The room's alarm removes them as `podster`/`system`, taking the verdict from `scanned_at`. That's when the scanner reported or, for a scan that ran out of time, when the room noticed, so a scan noticed late still gets its full 7 days and isn't failed and removed in the same alarm. A row from before #125 has no `scanned_at`, so the end of its scan's hour stands in. That only matters on staging.
 - **No self-cancel (95).**
 - **Unsubmitted files (98).** Files uploaded for a task and never submitted are removed by the system 24 hours after the task leaves Accepted. The rule is `unsubmitted_file_due` in core. The hook is agreed with step 6 part 2, whose migration adds what this reads:
   - `stored_object.for_task`;
@@ -115,6 +115,10 @@ The owner ruled "as recommended", recorded as [decisions 92 to 98](spec/PRODUCT.
   - `task.left_accepted_at`, which `store::save_task` sets on leaving Accepted and clears on coming back.
 
   The room's alarm removes such a file as `podster`/`system` once the task has been out of Accepted for 24 hours. A file any submission names is never touched.
+
+  To keep this cheap, `stored_object.submitted_at` is set when a submission first names a file, and backfilled by its migration. A partial index, `stored_object_unsubmitted`, holds only unsubmitted task files still here, and that's all the alarm's query reads, so it doesn't grow with every file ever submitted. The removal itself still reads `submission_file`. A file it names that wasn't flagged gets its flag rather than being removed.
+
+  Each file due under either rule is removed in its own transaction. One that errors is logged by ID and tried on the next run, and the rest still go.
 
 ## What the deeper pass should cover
 

@@ -227,7 +227,10 @@ describe("removing a file", () => {
 describe("the room's sweep", () => {
   it("plans one sweep an hour after migrating a room that holds files, and none for a room that doesn't", async () => {
     const undoRemoval = (id: string) => runInDurableObject(stub(id), (_: any, state: any) => {
-      // Expected outputs' migration came after this one, so it comes off first.
+      // The migrations after this one come off first: submitted files' flag, then expected outputs.
+      state.storage.sql.exec("DROP INDEX stored_object_unsubmitted");
+      state.storage.sql.exec("ALTER TABLE stored_object DROP COLUMN submitted_at");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP INDEX task_expected_output");
       state.storage.sql.exec("ALTER TABLE task DROP COLUMN expected_output_id");
       state.storage.sql.exec("DROP TABLE expected_output_version");
@@ -327,7 +330,10 @@ describe("the room's sweep", () => {
     const id = await room();
     const object = await file(id);
     await runInDurableObject(stub(id), (_: any, state: any) => {
-      // Expected outputs' migration came after this one, so it comes off first.
+      // The migrations after this one come off first: submitted files' flag, then expected outputs.
+      state.storage.sql.exec("DROP INDEX stored_object_unsubmitted");
+      state.storage.sql.exec("ALTER TABLE stored_object DROP COLUMN submitted_at");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP INDEX task_expected_output");
       state.storage.sql.exec("ALTER TABLE task DROP COLUMN expected_output_id");
       state.storage.sql.exec("DROP TABLE expected_output_version");
@@ -531,5 +537,63 @@ describe("deletes that fail, and the limits on each alarm", () => {
     expect(state.cycle_due_at).toBeGreaterThanOrEqual(before + 60_000);
     expect(state.cycle_due_at).toBeLessThanOrEqual(Date.now() + 60_000);
     await BINDINGS.ASSETS.delete(stuck);
+  });
+});
+
+describe("removal by the rules, review fixes", () => {
+  it("gives a scan noticed late its full 7 days: it fails with the time it was noticed, and isn't removed in the same alarm", async () => {
+    const id = await room();
+    const late = await file(id, "scanning");
+    await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET scanning_since = ?, scanned_at = NULL WHERE id = ?", Date.now() - 8 * DAY_MS, late));
+    const before = Date.now();
+    await alarm(id);
+    const after: any = await row(id, late);
+    expect(after.state).toBe("failed");
+    expect(after.scanned_at).toBeGreaterThanOrEqual(before);
+  });
+
+  it("flags a submitted file the cheap query found unflagged, and never removes it", async () => {
+    const id = await room();
+    const t = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Work", instructions: "Do it", assignee: MEMBER.id });
+    const object = await file(id);
+    await inRoom(id, (sql) => {
+      sql.exec("UPDATE task SET left_accepted_at = ? WHERE id = ?", Date.now() - 2 * DAY_MS, t.body.id);
+      sql.exec("UPDATE stored_object SET for_task = ?, uploaded_by = ?, submitted_at = NULL WHERE id = ?", t.body.id, MEMBER.id, object);
+      sql.exec("INSERT INTO submission_file (task_id, submission_no, object_id, sha256, size, label, submitted_by, submitted_org, created_at) VALUES (?, 1, ?, ?, 1, 'x', ?, ?, 123)", t.body.id, object, "0".repeat(64), MEMBER.id, MEMBER.org);
+    });
+    await alarm(id);
+    expect(await row(id, object)).toMatchObject({ state: "ready", submitted_at: 123 });
+  });
+
+  it("flags files submissions already name when the migration runs", async () => {
+    const id = await room();
+    const t = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Work", instructions: "Do it", assignee: MEMBER.id });
+    const named = await file(id);
+    const unnamed = await file(id);
+    await runInDurableObject(stub(id), (_: any, state: any) => {
+      const sql = state.storage.sql;
+      sql.exec("INSERT INTO submission_file (task_id, submission_no, object_id, sha256, size, label, submitted_by, submitted_org, created_at) VALUES (?, 1, ?, ?, 1, 'x', ?, ?, 456)", t.body.id, named, "0".repeat(64), MEMBER.id, MEMBER.org);
+      sql.exec("DROP INDEX stored_object_unsubmitted");
+      sql.exec("ALTER TABLE stored_object DROP COLUMN submitted_at");
+      sql.exec("UPDATE schema_version SET version = version - 1");
+    });
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
+    expect((await row(id, named)).submitted_at).toBe(456);
+    expect((await row(id, unnamed)).submitted_at).toBeNull();
+  });
+
+  it("removes each file in its own transaction, so one that errors doesn't stop the rest", async () => {
+    const id = await room();
+    const good = await file(id, "blocked");
+    const bad = await file(id, "blocked");
+    await inRoom(id, (sql) => {
+      sql.exec("UPDATE stored_object SET id = 'obj_failrule' WHERE id = ?", bad);
+      // The bad one is older, so it's tried first.
+      sql.exec("UPDATE stored_object SET scanned_at = ? WHERE id = ?", Date.now() - 9 * DAY_MS, "obj_failrule");
+      sql.exec("UPDATE stored_object SET scanned_at = ? WHERE id = ?", Date.now() - 8 * DAY_MS, good);
+    });
+    await alarm(id);
+    expect((await row(id, good)).state).toBe("removed");
+    expect((await row(id, "obj_failrule")).state).toBe("blocked");
   });
 });

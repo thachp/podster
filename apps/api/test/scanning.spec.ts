@@ -359,6 +359,9 @@ describe("a room from before this", () => {
       sql.exec("ALTER TABLE audit_event DROP COLUMN seq");
       sql.exec("ALTER TABLE workspace DROP COLUMN audit_seq");
       sql.exec("UPDATE schema_version SET version = version - 1");
+      // Before this, every entry moved the policy version, so each had its own.
+      sql.exec("UPDATE audit_event SET policy_version = 100 + rowid");
+      sql.exec("UPDATE workspace SET policy_version = (SELECT MAX(policy_version) FROM audit_event)");
     });
 
   it("gets the columns, and keeps its files waiting", async () => {
@@ -372,11 +375,6 @@ describe("a room from before this", () => {
     const id = await room();
     await stored(id);
     await undo(id);
-    // Before this, every entry moved the policy version, so each had its own.
-    await inRoom(id, (sql) => {
-      sql.exec("UPDATE audit_event SET policy_version = 100 + rowid");
-      sql.exec("UPDATE workspace SET policy_version = (SELECT MAX(policy_version) FROM audit_event)");
-    });
     const before = await inRoom(id, (sql) => sql.exec("SELECT id, policy_version FROM audit_event ORDER BY policy_version").toArray());
     expect(before.length).toBeGreaterThan(2);
     const cursor = before[0].policy_version;

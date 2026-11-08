@@ -109,7 +109,15 @@ function OutputRow({ output, base, taskTitles, history, me, names, manage, send,
         <h2 id={titleId} className="min-w-0 break-words font-medium">
           {plainName(output.title)}
         </h2>
-        <OutputStatusBadge status={output.status} />
+        <div className="flex flex-wrap items-center gap-2">
+          <OutputStatusBadge status={output.status} />
+          {/* Beside the badge, never instead of it: what was approved stays approved until a newer version is (DESIGN.md). */}
+          {output.status === "ready" && output.in_review === true ? (
+            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+              <Eye className="size-3" aria-hidden />A newer submission is in review
+            </span>
+          ) : null}
+        </div>
       </div>
       {/* Someone's text. Plain, so nothing in it becomes a link, an image or markup. */}
       {output.description ? <p className="text-sm break-words whitespace-pre-wrap">{output.description}</p> : null}

@@ -12,6 +12,8 @@ export type Output = {
   title: string;
   description: string | null;
   status: OutputStatus | string;
+  /** A task naming it is submitted. For a Ready output, that's a newer version awaiting review, which never replaces the badge. */
+  in_review?: boolean;
   current: { task_id: string; submission_no: number; approved_at?: number | null; files_available?: boolean } | null;
 };
 
@@ -44,7 +46,7 @@ export const OUTPUT_STATUS: Record<OutputStatus, { label: string; tone: Tone }> 
 export const outputStatus = (status: string) => (Object.hasOwn(OUTPUT_STATUS, status) ? OUTPUT_STATUS[status as OutputStatus] : { label: "Unknown state", tone: "neutral" as Tone });
 
 /** Decision 140. Checked here only to say so early: the API decides. */
-export const OUTPUT_LIMITS = { outputs: 50, title: 200, description: 4096 };
+export const OUTPUT_LIMITS = { outputs: 50, everDefined: 500, title: 200, description: 4096 };
 
 const bytes = (text: string) => new TextEncoder().encode(text).length;
 
@@ -71,7 +73,7 @@ export function outputProblem(code: string, status = 400) {
   if (status >= 500 || code === "unknown") return "We can't tell whether this saved. Try again: if it did, you'll get that answer and it won't happen twice.";
   switch (code) {
     case "too_many_outputs":
-      return `This workroom already has ${OUTPUT_LIMITS.outputs} expected outputs, the most it can have. Remove one that isn't needed first. Nothing changed.`;
+      return `This workroom can't have another expected output. It can have ${OUTPUT_LIMITS.outputs} at once, and ${OUTPUT_LIMITS.everDefined} in all, counting removed ones. Nothing changed.`;
     case "output_in_use":
       return "This output can't be removed: it was Ready once, or a task that isn't finished works toward it. Nothing changed.";
     case "output_not_found":

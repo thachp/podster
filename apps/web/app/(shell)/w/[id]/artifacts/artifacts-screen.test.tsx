@@ -76,7 +76,7 @@ describe("the output model", () => {
   });
 
   it.each([
-    ["too_many_outputs", 409, /already has 50/],
+    ["too_many_outputs", 409, /50 at once, and 500 in all, counting removed ones/],
     ["output_in_use", 409, /was Ready once, or a task that isn't finished works toward it/],
     ["output_not_found", 404, /isn't there any more/],
     ["not_allowed", 403, /owner or an admin/],
@@ -107,6 +107,15 @@ describe("Artifacts", () => {
     expect(within(rowOf("Design doc")).getByText(/submission 2 of/)).toBeInTheDocument();
     expect(within(rowOf("Design doc")).getByText(/Everything in the approved version is still available from its task/)).toBeInTheDocument();
     expect(link).toHaveAttribute("href", "/w/ws_1/artifacts?task=tsk_9");
+  });
+
+  it("says a newer submission is in review beside the Ready badge, without replacing it", () => {
+    show(read([output({ status: "ready", in_review: true, current: { task_id: "tsk_9", submission_no: 1 } }), output({ id: "out_2", title: "Launch plan", status: "in_review", in_review: true })]));
+    const ready = rowOf("Design doc");
+    expect(within(ready).getByText("Ready")).toBeInTheDocument();
+    expect(within(ready).getByText("A newer submission is in review")).toBeInTheDocument();
+    // An output with no approved version is simply In review, and says nothing about a newer one.
+    expect(within(rowOf("Launch plan")).queryByText("A newer submission is in review")).toBeNull();
   });
 
   it("says clearly when a Ready output's file is unavailable (decision 138)", () => {

@@ -142,7 +142,8 @@ describe("a job's tries and age travel with it", () => {
     });
     const r = recorder();
     await consumeFairly(batch.map((m) => m.queued), r.consuming);
-    expect(r.sent).toEqual([{ body: { ...batch[PER_ROOM_PER_BATCH].queued.body as object, queued_at: NOW, tries: 0 }, delaySeconds: SURPLUS_DELAY_SECONDS }]);
+    // One room alone, so no delay.
+    expect(r.sent).toEqual([{ body: { ...batch[PER_ROOM_PER_BATCH].queued.body as object, queued_at: NOW, tries: 0 } }]);
     // An hour later that job is past its hour, and is settled without a scan.
     const later = recorder();
     (later.consuming as { now: () => number }).now = () => NOW + SCAN_WINDOW_MS + 1;
@@ -158,6 +159,18 @@ const backlog = (rooms: number, each: number, interleaved: boolean) => {
   else for (let r = 0; r < rooms; r++) for (let i = 0; i < each; i++) queue.push(job(`ws_busy_${r}`, i));
   return queue;
 };
+
+describe("a room alone on an idle queue", () => {
+  it("is scanned at about the pace of arrival order, with no delay to wait out", async () => {
+    // Without the exception, each batch of 4 would wait 2 minutes for the rest: 100 files of 2 s would take 48 minutes.
+    const solo = Array.from({ length: 100 }, (_, i) => job("ws_solo", i));
+    const ids = solo.map((body) => body.object_id);
+    const { reached } = await simulate(solo, ids, 2_000);
+    expect(reached.size).toBe(100);
+    const last = Math.max(...[...reached.values()].map((r) => r.ms));
+    expect(last).toBeLessThanOrEqual(100 * 2_000 + 60_000);
+  });
+});
 
 describe("one busy room can't starve another", () => {
   it("scans a lone file behind a thousand of one room's large files well inside the hour, where in arrival order it would take hours", async () => {

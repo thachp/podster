@@ -26,7 +26,9 @@ There's one Container, scanning one file at a time, so the order is all there is
 
 The consumer takes up to 100 jobs at a time (`src/fair.ts`). Before scanning any, it does three things:
 1. **Settles what needs no scan:** jobs past their hour (`too_late`) and jobs out of tries (`gave_up`). Neither counts toward a room's turns.
-2. **Sends each room's surplus away:** past the first 4 jobs, a room's jobs go back to the same queue with a 2-minute delay. They leave the front, and the jobs behind them come forward.
+2. **Sends each room's surplus away:** past the first 4 jobs, a room's jobs go back to the same queue. They leave the front, and the jobs behind them come forward.
+   - **When other rooms share the batch,** they go back with a 2-minute delay.
+   - **When it's one room alone,** they go back at once. There's no one in the batch to make way for, and anyone deeper in the queue is already ahead of them. A delay then would only leave the scanner idle: in simulation, 100 files of 2 s took 48 minutes with it, against 200 s without.
 3. **Scans the rest in turns:** one room's job per round, for no more than 2 minutes. Jobs it didn't reach go back with no delay.
 
 **Sending back** is a new message, not a retry, so waiting a turn doesn't use up a try. A job's failed tries so far go with it in the body as `tries`. A job from an API that didn't stamp `queued_at` is stamped when it's first sent back, so the hour bounds it too. If sending back fails, those jobs are retried instead, and `requeue_failed` is logged as an error to alert on.
@@ -42,7 +44,7 @@ The consumer takes up to 100 jobs at a time (`src/fair.ts`). Before scanning any
 
 **What's left:**
 - **Total speed doesn't change.** A room that sends more than an hour's worth of scans still has its own files fail closed, as before.
-- **Waits still grow with depth.** A file waits roughly (jobs ahead ÷ 100) × (rooms in each batch × 4) × the scan time. With 3 rooms of 1,500 large, 17 s files ahead, that's about 51 minutes. A room's 5 GB quota allows only about 50 files of 100 MB, so a backlog that deep is of small files, which scan in seconds.
+- **The bound is the hour, not a depth cap.** Nothing limits how deep the queue gets. A file still waiting an hour after upload is failed closed by its room, and skipped here as `too_late`. Short of that, a file waits roughly (jobs ahead ÷ 100) × (rooms in each batch × 4) × the scan time. With 3 rooms of 1,500 large, 17 s files ahead, that's about 51 minutes. A room's 5 GB quota allows only about 50 files of 100 MB, so a backlog that deep is of small files, which scan in seconds.
 - **The model assumes Queues delivers roughly in order of availability.** Queues doesn't promise an order, so this is unverified, and nothing here has run against a deployment.
 
 **Deploy order:** the API first, so new jobs carry `queued_at`, then the scanner. Jobs already queued without it are stamped when first sent back.

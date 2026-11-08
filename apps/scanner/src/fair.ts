@@ -3,7 +3,8 @@
  *
  * There's one Container and it scans one file at a time, so the order is all there is to share. The consumer takes up to a hundred
  * jobs at once. Before scanning any, it settles what needs no scan, and sends each room's jobs past the first
- * `PER_ROOM_PER_BATCH` back to the queue with a delay, so they leave the front and the jobs behind them come forward. Then it scans
+ * `PER_ROOM_PER_BATCH` back to the queue, so they leave the front and the jobs behind them come forward: with a delay when other
+ * rooms share the batch, and at once when it's one room alone. Then it scans
  * what's left a room at a time, one job per room per round, until two minutes have gone, and sends back whatever it didn't reach.
  * Sending back is a new message, not a retry, so the job's own count of failed tries goes with it in the body.
  *
@@ -18,8 +19,12 @@ export const BATCH_BUDGET_MS = 2 * 60_000;
 export const PER_ROOM_PER_BATCH = 4;
 
 /**
- * How long a room's surplus stays out of the queue. Long enough for the batches behind it to come forward, short enough that a busy
- * room's own files keep moving.
+ * How long a room's surplus stays out of the queue when other rooms share the batch. Long enough for the batches behind it to come
+ * forward, short enough that a busy room's own files keep moving.
+ *
+ * A batch of one room's jobs sends its surplus back with no delay. There's no one in the batch to make way for, and anyone deeper in
+ * the queue is still ahead of what's sent back, which joins the queue behind them. A delay then would only leave the scanner idle:
+ * a hundred 2 s files alone on the queue would take 48 minutes, not 3.
  */
 export const SURPLUS_DELAY_SECONDS = 120;
 
@@ -135,7 +140,9 @@ export async function consumeFairly(messages: readonly Queued[], consuming: Cons
       kept.push(message);
     } else surplus.push(message);
   }
-  if (await sendBack(surplus, SURPLUS_DELAY_SECONDS, consuming, started)) done.delayed += surplus.length;
+  const rooms = new Set(jobs.map((message) => roomOf(message.body))).size;
+  const delay = rooms > 1 ? SURPLUS_DELAY_SECONDS : undefined;
+  if (await sendBack(surplus, delay, consuming, started)) done.delayed += surplus.length;
   else done.retried += surplus.length;
 
   const unreached: Queued[] = [];

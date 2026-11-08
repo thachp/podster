@@ -34,16 +34,25 @@ describe("the queue handler", () => {
     expect(JSON.parse(log.mock.calls[0][0] as string)).toEqual({ at: "scanner", workspace_id: "ws_a", object_id: "obj_ws_a_0", outcome: "gave_up", attempts: 1 });
   });
 
-  it("sends a room's surplus back through the queue binding with its delay, and every message ends once", async () => {
+  it("sends a room's surplus back through the queue binding, with its delay when another room shares the batch, and every message ends once", async () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const bodies = Array.from({ length: PER_ROOM_PER_BATCH + 3 }, (_, i) => job("ws_a", i));
+    const bodies = [...Array.from({ length: PER_ROOM_PER_BATCH + 3 }, (_, i) => job("ws_a", i)), job("ws_b", 0)];
     const { batch: b, seen } = batch("podster-scan", bodies);
     const { env: e, sendBatch } = env();
     await scanner.queue(b, e);
     expect(sendBatch).toHaveBeenCalledTimes(1);
-    expect(sendBatch.mock.calls[0][0]).toEqual(bodies.slice(PER_ROOM_PER_BATCH).map((body) => ({ body: { ...body, tries: 0 }, delaySeconds: SURPLUS_DELAY_SECONDS })));
+    expect(sendBatch.mock.calls[0][0]).toEqual(bodies.slice(PER_ROOM_PER_BATCH, PER_ROOM_PER_BATCH + 3).map((body) => ({ body: { ...body, tries: 0 }, delaySeconds: SURPLUS_DELAY_SECONDS })));
     // The kept ones found the Container not ready, so they're retried. The surplus was sent back, so it's acked.
-    expect(seen).toEqual([...Array(PER_ROOM_PER_BATCH).fill({ acked: 0, retried: 1 }), ...Array(3).fill({ acked: 1, retried: 0 })]);
+    expect(seen).toEqual([...Array(PER_ROOM_PER_BATCH).fill({ acked: 0, retried: 1 }), ...Array(3).fill({ acked: 1, retried: 0 }), { acked: 0, retried: 1 }]);
+  });
+
+  it("sends a lone room's surplus back with no delay, so an idle scanner doesn't wait on it", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const bodies = Array.from({ length: PER_ROOM_PER_BATCH + 2 }, (_, i) => job("ws_a", i));
+    const { batch: b } = batch("podster-scan", bodies);
+    const { env: e, sendBatch } = env();
+    await scanner.queue(b, e);
+    expect(sendBatch.mock.calls[0][0]).toEqual(bodies.slice(PER_ROOM_PER_BATCH).map((body) => ({ body: { ...body, tries: 0 } })));
   });
 
   it("logs its own alert when sending back fails, and retries those instead", async () => {

@@ -100,3 +100,31 @@ export async function a2a(method: string, params: unknown, token: string | null,
   const res = await call("/a2a", { method: "POST", headers: h, body: JSON.stringify({ jsonrpc: "2.0", id: ++seq, method, params }) });
   return { res, status: res.status, body: res.headers.get("content-type")?.includes("json") ? await res.json<any>() : null };
 }
+
+/** One MCP tool call, answering its data or its error code. */
+export async function mcpTool(token: string, name: string, args: unknown = {}) {
+  const res = await call("/mcp", {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+  });
+  const parsed = await res.json<any>();
+  const text = parsed.result?.content?.[0]?.text;
+  return parsed.result?.isError ? { code: text as string, data: undefined as any } : { code: undefined, data: text ? JSON.parse(text) : undefined };
+}
+
+/** An agent connected over both protocols by one client, so one agent identity has an MCP token and an A2A token. */
+export async function agentOnBoth(who: Person) {
+  const clientId = await registerClient();
+  const mcp = await connect(who, MCP, "mcp", { clientId });
+  const a2aToken = await connect(who, A2A, "a2a", { clientId });
+  const id = (await mcpIdentity(mcp.access)).id!;
+  return { id, mcp: mcp.access, a2a: a2aToken.access };
+}
+
+/** A dashboard call as a person. */
+export async function dash(who: Person, method: string, path: string, body?: unknown) {
+  const res = await call(`/api${path}`, { method, headers: { cookie: who.cookie, origin: BASE, "content-type": "application/json", "idempotency-key": crypto.randomUUID() }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const parsed = await res.json<any>().catch(() => null);
+  return { status: res.status, body: parsed, code: parsed?.error?.code };
+}

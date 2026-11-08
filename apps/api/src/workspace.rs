@@ -3245,7 +3245,7 @@ impl Workspace {
             let next = next.max(now + 10);
             due = Some(due.map_or(next, |d| d.min(next)));
         }
-        if let Some(next) = migrated
+        if let Some(next) = (migrated && !outbox_held(&sql)?)
             .then(|| a2a_read::next_due(&sql, now))
             .transpose()?
             .flatten()

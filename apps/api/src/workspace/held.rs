@@ -16,7 +16,7 @@ use super::*;
 /// Kept outside `store::MIGRATIONS`, like `schema_version`, so they exist whatever state the room's schema is in.
 const HELD_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS held_access (seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, body_json TEXT NOT NULL, held_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS migration_failure (id INTEGER PRIMARY KEY CHECK (id = 1), failures INTEGER NOT NULL, last_failed_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS migration_failure (id INTEGER PRIMARY KEY CHECK (id = 1), failures INTEGER NOT NULL, last_failed_at INTEGER NOT NULL, failing INTEGER NOT NULL DEFAULT 1);
 ";
 /// More than any real backlog: each fence or departure is held once, because the sender stops once it's answered. Past this the
 /// room refuses with an error and drops nothing, so the sender keeps retrying, and the room stays failing closed.
@@ -60,15 +60,21 @@ fn merged(kind: &str, held: &Value, body: &Value) -> Value {
 }
 
 impl Workspace {
-    /// Whether the room can't yet be trusted to say who's in it: a migration is due, or changes to access are held.
+    /// Whether the room can't yet be trusted to say who's in it: changes to access are held, or its migration has failed and
+    /// hasn't succeeded since. A migration that's only due isn't either: the room's next request runs it, and until then what
+    /// it holds is as true as before. The alarm never migrates, so waiting on that alone would hold a quiet room's outbox for good.
     pub(super) fn access_changes_pending(&self, sql: &SqlStorage) -> R<bool> {
-        if store::needs_migration(sql)? {
-            return Ok(true);
-        }
         if self.held_clear.get() || !held_table_exists(sql)? {
             return Ok(false);
         }
-        Ok(!rows(sql, "SELECT seq FROM held_access LIMIT 1", vec![])?.is_empty())
+        let held = !rows(sql, "SELECT seq FROM held_access LIMIT 1", vec![])?.is_empty();
+        let failing = !rows(
+            sql,
+            "SELECT id FROM migration_failure WHERE failing = 1",
+            vec![],
+        )?
+        .is_empty();
+        Ok(held || failing)
     }
 
     /// The one way a room migrates after it's created: migrate if it needs to, then apply what was held while it couldn't.
@@ -123,6 +129,12 @@ impl Workspace {
                     json!({ "at": "room.held_access_applied", "kind": kind })
                 );
             }
+            // Migrated and replayed, so the room can be trusted to say who's in it again.
+            exec(
+                sql,
+                "UPDATE migration_failure SET failing = 0 WHERE failing = 1",
+                vec![],
+            )?;
         }
         self.held_clear.set(true);
         Ok(())
@@ -177,11 +189,13 @@ impl Workspace {
     /// A code and a count, never the error's text, which can name a table or quote a statement. Its own write, after the
     /// failed one rolled back. If this fails too, the log line is all there is.
     fn note_migration_failure(&self, sql: &SqlStorage, error: &ApiError) {
+        // The next success has to look again, to clear this and replay anything held meanwhile.
+        self.held_clear.set(false);
         let counting = sql.clone();
         let failures = transaction_sync(&self.state, move || {
             exec(&counting, HELD_SCHEMA, vec![])?;
-            exec(&counting, "INSERT INTO migration_failure (id, failures, last_failed_at) VALUES (1, 1, ?)
-              ON CONFLICT (id) DO UPDATE SET failures = failures + 1, last_failed_at = excluded.last_failed_at", vec![now_ms().into()])
+            exec(&counting, "INSERT INTO migration_failure (id, failures, last_failed_at, failing) VALUES (1, 1, ?, 1)
+              ON CONFLICT (id) DO UPDATE SET failures = failures + 1, last_failed_at = excluded.last_failed_at, failing = 1", vec![now_ms().into()])
         })
         .and_then(|()| rows(sql, "SELECT failures FROM migration_failure", vec![]))
         .ok()

@@ -173,6 +173,38 @@ describe("a room whose migration fails", () => {
     expect(left).toEqual(["member.revoked"]);
   });
 
+  it("still sends its outbox from the alarm when a migration is only due, since the alarm never migrates and nothing failed", async () => {
+    const id = await room();
+    await inRoom(id, (sql) => sql.exec("CREATE TABLE test_hold_outbox (x)"));
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "For the agent", instructions: "x", assignee: AGENT.id })).status).toBe(200);
+    const queued = () => inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM outbox WHERE recipient_principal_id = ?", AGENT.id).one().n as number);
+    expect(await queued()).toBeGreaterThan(0);
+    // A new release brings a migration, and no request has come since: due, but nothing has failed and nothing is held.
+    await inRoom(id, (sql) => {
+      sql.exec("DROP TABLE test_hold_outbox");
+      sql.exec("UPDATE schema_version SET version = version - 1");
+    });
+    await runInDurableObject(stub(id), (instance: any) => instance.alarm());
+    expect(await queued()).toBe(0);
+  });
+
+  it("holds its outbox after a failed migration, even with nothing held, until a migration succeeds", async () => {
+    const id = await room();
+    await inRoom(id, (sql) => sql.exec("CREATE TABLE test_hold_outbox (x)"));
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "For the agent", instructions: "x", assignee: AGENT.id })).status).toBe(200);
+    const queued = () => inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM outbox WHERE recipient_principal_id = ?", AGENT.id).one().n as number);
+    await breakMigration(id);
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(500);
+    await inRoom(id, (sql) => sql.exec("DROP TABLE test_hold_outbox"));
+    await runInDurableObject(stub(id), (instance: any) => instance.alarm());
+    expect(await queued()).toBeGreaterThan(0);
+    await fixMigration(id);
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
+    expect(await inRoom(id, (sql) => sql.exec("SELECT failing FROM migration_failure").one().failing)).toBe(0);
+    await runInDurableObject(stub(id), (instance: any) => instance.alarm());
+    expect(await queued()).toBe(0);
+  });
+
   it.each([
     ["the fenced agent", AGENT, "agent_disconnected"],
     ["the departed person", LEAVER, "access_revoked"],

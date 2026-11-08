@@ -1,4 +1,5 @@
 import { Container, getContainer } from "@cloudflare/containers";
+import { consumeFairly, type Queued } from "./fair";
 import { scanOne, sendResult, type Scanning } from "./scan";
 
 /** Reads hostile files, so it holds no secrets, reaches nothing and is handed one file at a time. Signatures come in the image. */
@@ -16,6 +17,8 @@ export type Env = {
   /** A secret, for this Worker only. The Container is given no environment. */
   SCANNER_SECRET?: string;
   CLAMAV: DurableObjectNamespace<ClamAV>;
+  /** The queue this consumes, so jobs a batch didn't reach can go to its back. */
+  SCAN: Queue<unknown>;
 };
 
 const scanningWith = (env: Env): Scanning => ({
@@ -35,26 +38,38 @@ const logged = (body: unknown) => {
   return { at: "scanner", workspace_id: id(workspace_id), object_id: id(object_id) };
 };
 
+/** Scans one job and acks or retries it, logging only IDs and the outcome. */
+async function handle(message: Queued, env: Env) {
+  const started = Date.now();
+  const ending = await scanOne(message.body, scanningWith(env)).catch(() => ({ ack: false as const, why: "no_answer" as const }));
+  const refused = ending.ack && ending.outcome === "not_recorded" ? ending.status : null;
+  // A 404 is a wrong or missing secret as often as an unknown file, and a wrong secret fails every file, so it has its own word to
+  // alert on.
+  const outcome = refused === 404 ? "room_said_not_found" : ending.ack ? ending.outcome : ending.why;
+  const line = JSON.stringify({ ...logged(message.body), outcome, ...(refused === null ? {} : { status: refused }), attempts: message.attempts, ms: Date.now() - started });
+  if (refused === 404) console.error(line);
+  else console.log(line);
+  if (ending.ack) message.ack();
+  else message.retry();
+}
+
 export default {
   async queue(batch: MessageBatch<unknown>, env: Env) {
-    for (const message of batch.messages) {
-      // Retries ran out with no verdict. The room's hour ends it as failed, so nothing here says otherwise.
-      if (batch.queue.endsWith("-dlq") || batch.queue.includes("-dlq-")) {
+    // Retries ran out with no verdict. The room's hour ends it as failed, so nothing here says otherwise.
+    if (batch.queue.endsWith("-dlq") || batch.queue.includes("-dlq-")) {
+      for (const message of batch.messages) {
         console.log(JSON.stringify({ ...logged(message.body), outcome: "gave_up", attempts: message.attempts }));
         message.ack();
-        continue;
       }
-      const started = Date.now();
-      const ending = await scanOne(message.body, scanningWith(env)).catch(() => ({ ack: false as const, why: "no_answer" as const }));
-      const refused = ending.ack && ending.outcome === "not_recorded" ? ending.status : null;
-      // A 404 is a wrong or missing secret as often as an unknown file, and a wrong secret fails every file, so it has its own word to
-      // alert on.
-      const outcome = refused === 404 ? "room_said_not_found" : ending.ack ? ending.outcome : ending.why;
-      const line = JSON.stringify({ ...logged(message.body), outcome, ...(refused === null ? {} : { status: refused }), attempts: message.attempts, ms: Date.now() - started });
-      if (refused === 404) console.error(line);
-      else console.log(line);
-      if (ending.ack) message.ack();
-      else message.retry();
+      return;
     }
+    const done = await consumeFairly(batch.messages, {
+      now: () => Date.now(),
+      handle: (message) => handle(message, env),
+      requeue: async (bodies) => {
+        await env.SCAN.sendBatch(bodies.map((body) => ({ body })));
+      },
+    });
+    if (done.requeued > 0 || done.retried > 0) console.log(JSON.stringify({ at: "scanner", outcome: "batch_deferred", ...done }));
   },
 } satisfies ExportedHandler<Env, unknown>;

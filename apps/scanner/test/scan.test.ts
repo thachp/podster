@@ -309,3 +309,25 @@ describe("helpers", () => {
     }
   });
 });
+
+describe("a job its room has already failed", () => {
+  it("is skipped once the hour since it was sent is over, without waking the Container", async () => {
+    const { scanned, sent, scanning } = setup();
+    let woke = false;
+    const ending = await scanOne({ ...job, queued_at: NOW - 60 * 60_000 - 1 }, { ...scanning, container: async (r) => ((woke = true), scanning.container(r)) });
+    expect(ending).toEqual({ ack: true, outcome: "too_late" });
+    expect([woke, scanned.length, sent.length]).toEqual([false, 0, 0]);
+  });
+
+  it("is scanned as ever inside the hour, or when it says nothing of when it was sent", async () => {
+    for (const body of [{ ...job, queued_at: NOW - 60 * 60_000 }, job]) {
+      const { sent, scanning } = setup();
+      expect(await scanOne(body, scanning)).toEqual({ ack: true, outcome: "no_known_malware" });
+      expect(sent).toHaveLength(1);
+    }
+  });
+
+  it("isn't a job at all if when it was sent isn't a time", () => {
+    for (const queued_at of [0, -1, 1.5, "1", null]) expect(readJob({ ...job, queued_at }), String(queued_at)).toBeNull();
+  });
+});

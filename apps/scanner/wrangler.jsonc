@@ -9,9 +9,12 @@
   "r2_buckets": [{ "binding": "ASSETS", "bucket_name": "podster-assets" }],
   "services": [{ "binding": "API", "service": "podster-api" }],
   "queues": {
+    // The queue it consumes, so jobs a batch didn't reach can go to its back (src/fair.ts).
+    "producers": [{ "binding": "SCAN", "queue": "podster-scan" }],
     "consumers": [
-      // About 25 minutes of retries, well inside the hour before the room marks a scan as failed.
-      { "queue": "podster-scan", "max_batch_size": 1, "max_batch_timeout": 1, "max_concurrency": 1, "max_retries": 5, "retry_delay": 300, "dead_letter_queue": "podster-scan-dlq" },
+      // About 25 minutes of retries, well inside the hour before the room marks a scan as failed. A batch of up to 100 is scanned
+      // a room at a time, one file at a time, so one busy room can't keep the others waiting.
+      { "queue": "podster-scan", "max_batch_size": 100, "max_batch_timeout": 1, "max_concurrency": 1, "max_retries": 5, "retry_delay": 300, "dead_letter_queue": "podster-scan-dlq" },
       { "queue": "podster-scan-dlq", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 0 }
     ]
   },
@@ -24,8 +27,9 @@
       "r2_buckets": [{ "binding": "ASSETS", "bucket_name": "podster-assets-staging" }],
       "services": [{ "binding": "API", "service": "podster-api-staging" }],
       "queues": {
+        "producers": [{ "binding": "SCAN", "queue": "podster-scan-staging" }],
         "consumers": [
-          { "queue": "podster-scan-staging", "max_batch_size": 1, "max_batch_timeout": 1, "max_concurrency": 1, "max_retries": 5, "retry_delay": 300, "dead_letter_queue": "podster-scan-dlq-staging" },
+          { "queue": "podster-scan-staging", "max_batch_size": 100, "max_batch_timeout": 1, "max_concurrency": 1, "max_retries": 5, "retry_delay": 300, "dead_letter_queue": "podster-scan-dlq-staging" },
           { "queue": "podster-scan-dlq-staging", "max_batch_size": 1, "max_batch_timeout": 1, "max_retries": 0 }
         ]
       },

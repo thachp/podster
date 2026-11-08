@@ -39,7 +39,10 @@ describe("what the scanner can reach", () => {
     for (const scope of [config, config.env.staging]) {
       expect(scope.containers[0].instance_type).toBe("standard-1");
       const [main, dead] = scope.queues.consumers;
-      expect(main).toMatchObject({ max_batch_size: 1, max_concurrency: 1 });
+      // One batch at a time, whose files are scanned one at a time. A batch is how far ahead it looks to share turns between rooms.
+      expect(main).toMatchObject({ max_batch_size: 100, max_concurrency: 1 });
+      // Jobs a batch didn't reach go back on the same queue, and nowhere else.
+      expect(scope.queues.producers).toEqual([{ binding: "SCAN", queue: main.queue }]);
       expect(main.dead_letter_queue).toBe(dead.queue);
       // Retries end inside the hour the room allows.
       expect((main.max_retries * main.retry_delay) / 60).toBeLessThan(60);

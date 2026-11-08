@@ -304,9 +304,13 @@ describe("queueing a scan", () => {
     const id = await room();
     const file = await stored(id, "a-very-secret-name.txt");
     const saved = await row(id, file.id);
+    const after = Date.now();
     await vi.waitFor(async () => {
       const jobs = (await queued()).filter((job) => job.object_id === file.id);
-      expect(jobs).toEqual([{ v: 1, workspace_id: id, object_id: file.id, key: saved.object_key, size: DATA.length, sha256: file.hash }]);
+      // When it was sent, which lets the scanner skip a job its room has already failed after the hour.
+      expect(jobs).toEqual([{ v: 1, workspace_id: id, object_id: file.id, key: saved.object_key, size: DATA.length, sha256: file.hash, queued_at: expect.any(Number) }]);
+      expect(jobs[0].queued_at).toBeGreaterThan(saved.stored_at - 5_000);
+      expect(jobs[0].queued_at).toBeLessThanOrEqual(after + 5_000);
     }, { timeout: 10_000, interval: 100 });
     expect(JSON.stringify(await queued())).not.toContain("secret-name");
   });

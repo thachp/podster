@@ -18,6 +18,21 @@ The Container reads hostile files, so it holds no secrets, has no outbound traff
 
 Retries run out at about 25 minutes, in the dead-letter queue, which records nothing. The room's own sweep ends the file as Scan failed after an hour. So the scanner never reports `failed`, and nothing here can turn a failure into a pass.
 
+A job more than an hour past its `queued_at` is acked as `too_late` without a scan, since its room has already failed it.
+
+## Sharing turns between rooms
+
+There's one Container, scanning one file at a time, so the order is all there is to share. A busy room shouldn't push other rooms' files past their hour.
+
+The consumer takes up to 100 jobs at a time (`src/fair.ts`):
+- **Turns:** it scans them one room at a time, one job per room per round.
+- **Limits:** at most 4 jobs from any room per batch, and no more than 2 minutes of scanning.
+- **The rest:** jobs it didn't reach go to the back of the same queue. They're sent again, not retried, so waiting doesn't use up a job's retries. If sending them back fails, they're retried instead.
+
+So a busy room's backlog moves behind other rooms' jobs rather than staying ahead of them. Simulated with 17 s per scan, a single file behind 1,000 of one room's files is scanned after about 12 minutes, where in arrival order it would take about 4.7 hours. With 2 s scans, a file behind 5,000 small files waits about 7 minutes.
+
+This doesn't change how many files are scanned an hour, so a room that sends more than that can still have its own files fail closed. Nothing here gives a verdict, so the hour and the room's sweep are unchanged.
+
 ## Shapes
 
 Queue message:

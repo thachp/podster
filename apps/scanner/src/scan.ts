@@ -15,7 +15,10 @@ export const SCAN_TIMEOUT_MS = 5 * 60_000;
 export const REPORT_TIMEOUT_MS = 30_000;
 const MAX_FILE_BYTES = 100_000_000;
 
-export type ScanJob = { v: 1; workspace_id: string; object_id: string; key: string; size: number; sha256: string };
+/** `queued_at` is when the API sent it, which a job from before it was added doesn't have. */
+export type ScanJob = { v: 1; workspace_id: string; object_id: string; key: string; size: number; sha256: string; queued_at?: number };
+/** The room ends a scan with no verdict as failed an hour after its upload, so a job older than this is one it has already failed. */
+export const SCAN_WINDOW_MS = 60 * 60_000;
 export type Report = "no_known_malware" | "malware_found" | "unreadable";
 export type Database = { engine: string; version: string; built_at: string };
 export type ScanResult = { v: 1; workspace_id: string; object_id: string; key: string; report: Report; reason: string; sha256: string; bytes: number; database: Database | null; scanned_at: number };
@@ -33,7 +36,7 @@ export type Scanning = {
   send: (result: ScanResult, signal: AbortSignal) => Promise<Response>;
 };
 
-export type Ending = { ack: true; outcome: Report | "bad_message" } | { ack: true; outcome: "not_recorded"; status: number } | { ack: false; why: NoVerdict };
+export type Ending = { ack: true; outcome: Report | "bad_message" | "too_late" } | { ack: true; outcome: "not_recorded"; status: number } | { ack: false; why: NoVerdict };
 export type NoVerdict = "not_ready" | "signatures_stale" | "no_answer" | "bad_answer" | "report_refused";
 
 /**
@@ -51,6 +54,7 @@ export function readJob(body: unknown): ScanJob | null {
   const job = body as Partial<ScanJob>;
   const fits = job.v === 1 && typeof job.workspace_id === "string" && ID.test(job.workspace_id) && typeof job.object_id === "string" && ID.test(job.object_id) && typeof job.key === "string" && job.key.length <= 1024 && typeof job.sha256 === "string" && SHA256.test(job.sha256) && Number.isSafeInteger(job.size) && job.size! >= 0;
   if (!fits) return null;
+  if (job.queued_at !== undefined && !(Number.isSafeInteger(job.queued_at) && job.queued_at > 0)) return null;
   // The key is the room's own place for this file, one attempt under it, so a message naming another room's or another file's
   // bytes isn't a job.
   const place = `rooms/${job.workspace_id}/objects/${job.object_id}/`;
@@ -141,6 +145,8 @@ export async function scanOne(body: unknown, scanning: Scanning): Promise<Ending
   const job = readJob(body);
   // Nothing can be said about a file this doesn't name, and retrying won't help. The room's hour still ends it as failed.
   if (!job) return { ack: true, outcome: "bad_message" };
+  // Its room has already ended it as failed, so a scan now would only be refused, and would take a turn from a file still waiting.
+  if (job.queued_at !== undefined && scanning.now() - job.queued_at > SCAN_WINDOW_MS) return { ack: true, outcome: "too_late" };
 
   // Before reading a byte of the file, because old signatures shouldn't even wake a read.
   const ready = await withTimeout((signal) => answerOf(scanning.container(new Request("http://scanner/ready", { signal }))), READY_TIMEOUT_MS);

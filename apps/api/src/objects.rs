@@ -238,6 +238,9 @@ struct ScanJob<'a> {
     key: &'a str,
     size: u64,
     sha256: &'a str,
+    /// When this was sent. The scanner skips a job its room has already failed after the hour, so the turn goes to a file still
+    /// waiting.
+    queued_at: i64,
 }
 
 /// What only the uploader's Principal knows, read fresh. An agent's connection may have ended, and a person may have left the
@@ -438,6 +441,7 @@ pub async fn stream_upload(mut req: Request, env: Env, room: &str, id: &str) -> 
         key: &key,
         size: seen.bytes,
         sha256: &received_sha256,
+        queued_at: Date::now().as_millis() as i64,
     };
     let queued = match env.queue("SCAN") {
         Ok(queue) => within_room_limit(queue.send(&job))

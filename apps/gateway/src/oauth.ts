@@ -68,6 +68,9 @@ export function buildOAuth<Env>(base: string, handlers: { mcp: Handler<Env>; a2a
   return { base, as, mcp, a2a };
 }
 
+/** Which build each env's helpers came from, so an env reused with another `BASE_URL` gets helpers for the new issuer. */
+const helpersFrom = new WeakMap<object, Roles<any>>();
+
 const under = (path: string, prefix: string) => path === prefix || path.startsWith(`${prefix}/`);
 
 /**
@@ -81,8 +84,12 @@ export async function routeOAuth<Env extends { OAUTH_PROVIDER: OAuthHelpers }>(
   ctx: ExecutionContext,
   app: Handler<Env>,
 ): Promise<Response> {
-  // The helpers, as the combined provider gave them to its handlers.
-  if (!env.OAUTH_PROVIDER) env.OAUTH_PROVIDER = roles.as.getOAuthApi(env);
+  // The helpers, as the combined provider gave them to its handlers. Replaced whenever the build changes, so they never
+  // belong to another issuer.
+  if (helpersFrom.get(env) !== roles) {
+    env.OAUTH_PROVIDER = roles.as.getOAuthApi(env);
+    helpersFrom.set(env, roles);
+  }
   const path = new URL(request.url).pathname;
   if (path === AS_METADATA_PATH || path === TOKEN_PATH || path === REGISTRATION_PATH) return roles.as.fetch(request, env, ctx);
   if (under(path, MCP_PATH) || path === `${PR_METADATA_PREFIX}${MCP_PATH}`) return roles.mcp.fetch(request, env, ctx);

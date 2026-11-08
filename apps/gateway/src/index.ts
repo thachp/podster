@@ -786,11 +786,12 @@ async function approveConsent(request: Request, env: Env, gatewayUrl: string, us
   const person = personId(userId);
   const { adminOrgs } = await memberships(env, person);
   const { org, linkAgent, query } = fields;
-  const name = fields.name.trim() || "MCP agent";
   if (!adminOrgs.includes(org)) return denied("not_allowed", 403);
-  if (!validName(name)) return denied("invalid_argument", 400);
   const parsed = await parseOAuthQuery(env, gatewayUrl, query);
   if (!parsed) return denied("invalid_request", 400);
+  const kind = resourceKind(gatewayUrl, parsed.resource) ?? "mcp";
+  const name = fields.name.trim() || (kind === "a2a" ? "A2A agent" : "MCP agent");
+  if (!validName(name)) return denied("invalid_argument", 400);
 
   const identity = await personIdentity(env, new Request(request.url, { headers: { "x-podster-org": org } }), userId);
   if (!identity) return denied("not_allowed", 403);
@@ -813,7 +814,6 @@ async function approveConsent(request: Request, env: Env, gatewayUrl: string, us
   await renewLink(env, externalId, person, org);
   // The provider's own cleanup covers every grant for this person and client, which would end this client's agents in
   // other organizations. Only the grant being replaced goes.
-  const kind = resourceKind(gatewayUrl, parsed.resource) ?? "mcp";
   const replaced = await grantIds(env, person, externalId, { kind, gatewayUrl });
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({ request: parsed, userId: person, metadata: { org, externalId }, scope: [kind], props: { externalId }, revokeExistingGrants: false });
   for (const id of replaced) await env.OAUTH_PROVIDER.revokeGrant(id, person);
@@ -1429,9 +1429,12 @@ export default {
     if (isA2aPath(new URL(request.url))) {
       // A2A is the gateway's own, never the application host's.
       if (forPublicHost(request, env) !== env) return withHsts(denied("not_found", 404), env);
-      const checked = await checkA2aRequest(request, env.BASE_URL);
-      if (checked instanceof Response) return withHsts(checked, env);
-      request = new Request(request, { body: checked.text });
+      // A preflight gets the resource server's own CORS answer. Every other method goes through the checks.
+      if (request.method !== "OPTIONS") {
+        const checked = await checkA2aRequest(request, env.BASE_URL);
+        if (checked instanceof Response) return withHsts(checked, env);
+        request = new Request(request, { body: checked.text });
+      }
     }
     return withHsts(await routeOAuth(oauth, request, env, ctx, appHandler), env);
   },

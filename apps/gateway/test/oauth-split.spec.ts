@@ -1,5 +1,6 @@
 import { env } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
+import { buildOAuth, routeOAuth } from "../src/oauth";
 import { A2A, BASE, MCP, REDIRECT, VERIFIER, a2a, authorizeQuery, call, connect, consentCode, mcpIdentity, registerClient, setUpSchemas, signUp, tokenRequest, type Person } from "./oauth-helpers";
 
 /**
@@ -195,4 +196,34 @@ describe("discovery", () => {
     expect(as.issuer).toBe(BASE);
   });
 
+});
+
+describe("small things the deeper pass found", () => {
+  it("answers a preflight to /a2a with CORS, and still refuses HEAD", async () => {
+    const pre = await call("/a2a", { method: "OPTIONS", headers: { origin: "https://client.test", "access-control-request-method": "POST", "access-control-request-headers": "authorization, content-type, a2a-version" } });
+    expect(pre.status).toBeLessThan(300);
+    expect(pre.headers.get("access-control-allow-origin")).toBeTruthy();
+    expect((await call("/a2a", { method: "HEAD" })).status).toBe(405);
+  });
+
+  it("names a new agent from an A2A consent for A2A, when the person gives no name", async () => {
+    const t = await connect(who, A2A, "a2a", { fields: { agent_name: "" } });
+    expect(t.access).toBeTruthy();
+    const row = await e.DB.prepare(`SELECT a.name FROM podster_agent a JOIN identity_link l ON l.agent_id = a.id WHERE l.provider = 'mcp_oauth' ORDER BY l.created_at DESC LIMIT 1`).first<{ name: string }>();
+    expect(row!.name).toBe("A2A agent");
+  });
+
+  it("gives an env new helpers when the build changes, so they never belong to another issuer", async () => {
+    const reused = { OAUTH_KV: e.OAUTH_KV } as any;
+    const seen: unknown[] = [];
+    const app = { fetch: async (_r: Request, env: any) => (seen.push(env.OAUTH_PROVIDER), new Response("ok")) };
+    const handlers = { mcp: app, a2a: app };
+    const first = buildOAuth<any>("https://one.test", handlers);
+    const second = buildOAuth<any>("https://two.test", handlers);
+    await routeOAuth(first, new Request("https://one.test/x"), reused, {} as ExecutionContext, app);
+    await routeOAuth(first, new Request("https://one.test/x"), reused, {} as ExecutionContext, app);
+    await routeOAuth(second, new Request("https://two.test/x"), reused, {} as ExecutionContext, app);
+    expect(seen[0]).toBe(seen[1]);
+    expect(seen[2]).not.toBe(seen[0]);
+  });
 });

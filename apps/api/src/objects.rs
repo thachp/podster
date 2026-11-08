@@ -214,6 +214,7 @@ async fn ask_room(env: &Env, room: &str, path: &str, body: &Value) -> R<Response
         org_since: std::collections::HashMap::new(),
         target_member: None,
         gen: None,
+        linker: None,
         workspace_id: room.to_string(),
     };
     let headers = Headers::new();

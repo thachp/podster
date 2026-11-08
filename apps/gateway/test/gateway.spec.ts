@@ -1788,6 +1788,9 @@ describe("sign-in and claim pages", () => {
     const client = await authorizeQuery();
     const first = await mcpAgent(inTeam, {}, client);
     const externalId = (await e.DB.prepare("SELECT external_id FROM identity_link WHERE agent_id = ?").bind(first.id).first<{ external_id: string }>())!.external_id;
+    // The API is told who linked the credential and when, so A2A sends to an endpoint they set stop once they leave.
+    const linked = await e.DB.prepare("SELECT created_at FROM identity_link WHERE external_id = ?").bind(externalId).first<{ created_at: number }>();
+    expect(await resolveAgent(e, "mcp_oauth", externalId)).toMatchObject({ linker: { person: personId, since: linked!.created_at } });
     expect((await dash(stays, "DELETE", `/orgs/${team}/members/${personId}`)).status).toBe(200);
     await new Promise((resolve) => setTimeout(resolve, 2));
     expect((await dash(person, "POST", "/org-invitations/accept", { token: await invite() })).status).toBe(200);
@@ -2219,6 +2222,8 @@ describe("spending agent tokens", () => {
   it("sends the token to the API in the assertion, for agents only", async () => {
     const claims = decodeJwt(await mintAssertion({ kind: "agent", id: "agt_x", org: "o", generation: 1, spends: { key: "plugin:a", expiresAt: 123 } }, e.ASSERTION_SIGNING_JWK));
     expect(claims).toMatchObject({ agent_jti: "plugin:a", agent_jti_exp: 123 });
+    const linked = decodeJwt(await mintAssertion({ kind: "agent", id: "agt_x", org: "o", generation: 1, linker: { person: "per_l", since: 5 } }, e.ASSERTION_SIGNING_JWK));
+    expect(linked.linker).toEqual({ person: "per_l", since: 5 });
     const person = decodeJwt(await mintAssertion({ kind: "person", id: "per_x", org: "o", orgs: ["o"], adminOrgs: [], orgSince: {} }, e.ASSERTION_SIGNING_JWK));
     expect(person).not.toHaveProperty("agent_jti");
   });

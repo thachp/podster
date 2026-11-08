@@ -60,6 +60,16 @@ npx wrangler d1 create podster-api-staging
 npx wrangler queues create podster-wake-staging
 ```
 
+A2A offers have their own queue and dead-letter queue ([decision 129](spec/PRODUCT.md#decisions-needed), M3 step 12). The owner created both on 2026-11-08:
+
+```bash
+npx wrangler queues create podster-a2a-staging
+```
+
+```bash
+npx wrangler queues create podster-a2a-dlq-staging
+```
+
 Staging's IDs are already in the two `wrangler.jsonc` files. If you ever recreate these, put the new IDs under `env.staging` there.
 
 ### 3. Apply migrations
@@ -216,6 +226,23 @@ cd apps/api && npx wrangler secret put SCANNER_SECRET --env staging
 ```bash
 cd apps/scanner && npx wrangler secret put SCANNER_SECRET --env staging
 ```
+
+## The API's resources on staging
+
+What `apps/api/wrangler.jsonc` binds under `env.staging`, and the secrets it reads. Everything here is on the account that holds `podster.dev`.
+
+| Kind | Name | What it's for |
+| --- | --- | --- |
+| D1 | `podster-api-staging` | The listing read model. It never authorizes |
+| R2 | `podster-assets-staging` | Uploaded files, private, reached only through the API |
+| Queue | `podster-wake-staging` | Wake nudges, produced and consumed by the API |
+| Queue | `podster-scan-staging` | Upload scans, produced by the API and consumed by the scanner |
+| Queue | `podster-a2a-staging` | A2A offers, IDs only, produced and consumed by the API. Five retries, then the dead-letter queue |
+| Queue | `podster-a2a-dlq-staging` | A2A offers whose retries ran out. Its consumer logs their IDs and acknowledges them |
+| Secret | `ASSERTION_KEYS` | The gateway's assertion public keys |
+| Secret | `SCANNER_SECRET` | The scanner's shared secret |
+| Secret | `A2A_TOKEN_KEY` | Seals A2A endpoint bearer tokens. The owner set it on 2026-11-08 |
+| Var | `APP_URL` | `https://app-staging.podster.dev`, for the link in an A2A offer |
 
 ## The A2A token key
 

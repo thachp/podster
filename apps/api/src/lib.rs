@@ -3,6 +3,7 @@
 // This crate indexes only `serde_json::Value` by string, which returns null for a missing key and can't panic.
 #![allow(clippy::indexing_slicing)]
 
+mod a2a_out;
 mod downloads;
 mod error;
 mod objects;
@@ -33,6 +34,8 @@ pub const INTERNAL_UPLOAD_BEGIN: &str = "/internal/upload-begin";
 pub const INTERNAL_UPLOAD_COMPLETE: &str = "/internal/upload-complete";
 pub const INTERNAL_SCAN_RESULT: &str = "/internal/scan-result";
 pub const INTERNAL_DOWNLOAD: &str = "/internal/download";
+pub const INTERNAL_A2A_BEGIN: &str = "/internal/a2a-begin";
+pub const INTERNAL_A2A_FINISH: &str = "/internal/a2a-finish";
 pub const AGENT_ID_PREFIX: &str = "agt_";
 const MAX_ID_BYTES: usize = 128;
 const OVERSIGHT_ORGS: usize = 50;
@@ -53,6 +56,9 @@ pub struct Caller {
     #[serde(default)]
     pub target_member: Option<podster_assertion::TargetMember>,
     pub gen: Option<u64>,
+    /// For an agent, who linked the credential this request came with. Recorded when it sets an A2A endpoint.
+    #[serde(default)]
+    pub linker: Option<podster_assertion::Linker>,
     #[serde(default)]
     pub workspace_id: String,
 }
@@ -290,6 +296,16 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
         return Ok(Response::from_json(&json!({ "retry": retry }))?);
     }
 
+    #[cfg(feature = "failpoints")]
+    if path == "/test/consume-a2a" {
+        let body: Value = req.json().await?;
+        let outcome = match a2a_out::process(&env, &body).await? {
+            a2a_out::Outcome::Ack => json!("ack"),
+            a2a_out::Outcome::Retry(delay) => json!({ "retry": delay }),
+        };
+        return Ok(Response::from_json(&json!({ "outcome": outcome }))?);
+    }
+
     // The scanner has no identity in any room, and only its secret lets it say anything.
     if path == INTERNAL_SCAN_RESULT && req.method() == Method::Post {
         return objects::scan_result(req, env).await;
@@ -327,6 +343,8 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
         org_since: identity.org_since,
         target_member: identity.target_member,
         gen: identity.gen,
+        // Only an agent's credential has a linker.
+        linker: identity.linker.filter(|_| is_agent),
         workspace_id: String::new(),
     };
 

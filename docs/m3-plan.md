@@ -87,7 +87,7 @@ C changes `packages/contracts` and M adds a migration or room schema. The order 
 | 9 | Inbound messages: `SendMessage` with a `taskId` becomes `send_message`, with `messageId` as the idempotency key, size limits and `external` marking. No `taskId` is refused | Yes | Only if `messageId` can't use the idempotency record | 8. **Done** ([#167](https://github.com/thachp/podster/pull/167)) | 11 |
 | 10 | Inbound lifecycle through the Podster extension: accept, decline, release, and submit with text and links | Yes | | 9 | 11 |
 | 11 | Endpoint registration on the `Principal`: set, delete and status, checked against the egress policy, with the credential from question 16 | Yes | Yes | 7 | 8, 9, 10 |
-| 12 | Outbound offers: outbox, queue, `SendMessage` with `return_immediately`, the stored mapping of one A2A task per offer attempt, retries with the same `messageId`, and switching off after repeated failures | | Yes | 5, 11 | |
+| 12 | Outbound offers: outbox, queue, `SendMessage` with `return_immediately`, the stored mapping of one A2A task per offer attempt, retries with the same `messageId`, and switching off after repeated failures | | Yes | 5, 11 | Built on `claude/m3-step12-outbound`. The queues exist. Not yet run on staging, and the LangGraph run is still owed |
 | 13 | Remote updates, as question 11 decides: read back, mapped through step 5 into a submission, a held response, a release or nothing. `cancel_task` sent out | Yes | Yes | 12 | |
 | 14 | Files: inbound submissions with files from `create_upload`, offers that link input files as Podster links, and remote file references kept as external links | Yes | | 10, 13, M2 steps 5 and 6 | 15 |
 | 15 | Screens: endpoint status on the agent's Sheet, and held responses flagged to the requester in the Task Sheet | | | 11, 13, M2 step 9b | 14 |
@@ -99,7 +99,7 @@ C changes `packages/contracts` and M adds a migration or room schema. The order 
 
 - **Spike C on staging,** by [decision 126](spec/PRODUCT.md#decisions-needed). Until then it runs locally only.
 - **Step 11's encryption secret** for stored endpoint tokens, by [decision 122](spec/PRODUCT.md#decisions-needed). The owner sets it.
-- **Step 12's queue and dead-letter queue,** by [decision 129](spec/PRODUCT.md#decisions-needed). Steps 12 to 16 wait on them.
+- **Step 12's queue and dead-letter queue,** by [decision 129](spec/PRODUCT.md#decisions-needed). The owner created `podster-a2a-staging` and `podster-a2a-dlq-staging` on 2026-11-08.
 
 Step 8 waits only on step 7, because reads translate today's task view. Step 5's mapping is first used by step 12.
 

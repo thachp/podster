@@ -8,14 +8,29 @@ const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 const pub = publicKey.export({ format: "jwk" });
 
 // Wake's outbound requests land here, so tests can see them and choose how the far end answers.
-const hookRequests: { path: string; signature: string | null; agent: string | null; body: string }[] = [];
+const hookRequests: { host: string; path: string; signature: string | null; agent: string | null; authorization: string | null; a2aVersion: string | null; body: string }[] = [];
+
+// An A2A endpoint's answers to SendMessage, chosen by path (M3 step 12).
+function a2aAnswer(path: string, body: string) {
+  const id = (() => { try { return JSON.parse(body).id ?? null; } catch { return null; } })();
+  const rpc = (result: unknown) => new Response(JSON.stringify({ jsonrpc: "2.0", id, result }), { headers: { "content-type": "application/json" } });
+  if (path.startsWith("/a2a/message")) return rpc({ message: { messageId: "m-1", role: "ROLE_AGENT", parts: [{ text: "Noted." }] } });
+  if (path.startsWith("/a2a/error")) return new Response(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32001, message: "no" } }));
+  if (path.startsWith("/a2a/big")) return rpc({ task: { id: "remote-big", status: { state: "TASK_STATE_SUBMITTED" } }, padding: "x".repeat(70 * 1024) });
+  if (path.startsWith("/a2a/bad-id")) return rpc({ task: { id: "has a space", status: { state: "TASK_STATE_SUBMITTED" } } });
+  if (path.startsWith("/a2a/nothing")) return rpc({});
+  return rpc({ task: { id: `remote-${path.split("/").pop()}`, contextId: "c", status: { state: "TASK_STATE_SUBMITTED" } } });
+}
+
 async function fakeHook(request: Request) {
   const url = new URL(request.url);
   if (url.hostname === "hook-log.example.com") return new Response(JSON.stringify(hookRequests));
-  hookRequests.push({ path: url.pathname, signature: request.headers.get("x-podster-signature"), agent: request.headers.get("user-agent"), body: await request.text() });
+  const body = await request.text();
+  hookRequests.push({ host: url.hostname, path: url.pathname, signature: request.headers.get("x-podster-signature"), agent: request.headers.get("user-agent"), authorization: request.headers.get("authorization"), a2aVersion: request.headers.get("a2a-version"), body });
   if (url.pathname.startsWith("/hang")) await new Promise((resolve) => setTimeout(resolve, 5000));
   if (url.pathname.startsWith("/fail")) return new Response("no", { status: 500 });
   if (url.pathname.startsWith("/redirect")) return new Response(null, { status: 302, headers: { location: "https://elsewhere.example.com/" } });
+  if (url.pathname.startsWith("/a2a")) return a2aAnswer(url.pathname, body);
   return new Response("ok");
 }
 
@@ -25,7 +40,7 @@ export default defineConfig({
       wrangler: { configPath: "./wrangler.jsonc" },
       miniflare: {
         outboundService: fakeHook,
-        queueProducers: { WAKE: { queueName: "podster-wake-test" }, SCAN: { queueName: "podster-scan-test" } },
+        queueProducers: { WAKE: { queueName: "podster-wake-test" }, SCAN: { queueName: "podster-scan-test" }, A2A: { queueName: "podster-a2a-test" } },
         // The test pool can't run the real consumer. This one records what actually crosses the queue.
         workers: [
           {
@@ -34,7 +49,7 @@ export default defineConfig({
             script: `export default { async queue(batch) { for (const message of batch.messages) { await fetch("https://hook-record.example.com/__queue", { method: "POST", body: JSON.stringify(message.body) }); message.ack(); } } };`,
             compatibilityDate: "2026-08-01",
             outboundService: fakeHook,
-            queueConsumers: { "podster-wake-test": { maxBatchTimeout: 0.05 }, "podster-scan-test": { maxBatchTimeout: 0.05 } },
+            queueConsumers: { "podster-wake-test": { maxBatchTimeout: 0.05 }, "podster-scan-test": { maxBatchTimeout: 0.05 }, "podster-a2a-test": { maxBatchTimeout: 0.05 } },
           },
         ],
         bindings: {

@@ -72,6 +72,7 @@ const INVITATION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 type Identity = Verified;
 
+mod a2a_out;
 mod asset_links;
 mod collaboration;
 mod cursor;
@@ -3181,6 +3182,27 @@ impl Workspace {
         Ok(())
     }
 
+    /// Puts this room's new A2A offer attempts on the A2A queue. Nothing goes while the room needs migrating.
+    async fn drain_a2a(&self) -> R<()> {
+        let sql = self.state.storage().sql();
+        if !store::is_initialized(&sql)? || store::needs_migration(&sql)? {
+            return Ok(());
+        }
+        let Some(workspace_id) = rows(&sql, "SELECT id FROM workspace", vec![])?
+            .first()
+            .and_then(|r| text(&r["id"]))
+        else {
+            return Ok(());
+        };
+        a2a_out::drain(
+            &self.env,
+            &sql,
+            &workspace_id,
+            Date::now().as_millis() as i64,
+        )
+        .await
+    }
+
     /// Schedules the alarm for whatever is due next, moving it earlier if needed. Never later: a pending alarm that
     /// finds nothing to do costs nothing, and a missed one would strand events.
     async fn arm(&self, index_failed: bool, outbox_failed: bool) -> R<()> {
@@ -3214,6 +3236,14 @@ impl Workspace {
             .transpose()?
             .flatten()
         {
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
+        if let Some(next) = migrated
+            .then(|| a2a_out::next_due(&sql))
+            .transpose()?
+            .flatten()
+        {
+            let next = next.max(now + 10);
             due = Some(due.map_or(next, |d| d.min(next)));
         }
         if let Some(next) = removal::next_due(&sql, now, self.sweep_failures.get())? {
@@ -3470,6 +3500,11 @@ impl Workspace {
             let body: Value = serde_json::from_str(&req.text().await?)
                 .map_err(|_| ApiError::invalid_argument())?;
             return self.upload_step(&path, body);
+        }
+        if path == crate::INTERNAL_A2A_BEGIN || path == crate::INTERNAL_A2A_FINISH {
+            let body: Value = serde_json::from_str(&req.text().await?)
+                .map_err(|_| ApiError::invalid_argument())?;
+            return self.a2a_step(&path, &identity, body);
         }
         if path == crate::INTERNAL_SCAN_RESULT {
             let body: Value = serde_json::from_str(&req.text().await?)
@@ -4089,6 +4124,10 @@ impl DurableObject for Workspace {
         self.sweep_files().await;
         // One failing doesn't hold up the other.
         let outbox = self.drain_outbox().await;
+        // A2A offers go on their own queue. An attempt that couldn't be queued waits with its own backoff.
+        if let Err(error) = self.drain_a2a().await {
+            console_error!("a2a outbox drain failed: {:?}", error.code());
+        }
         if let Err(error) = &outbox {
             console_error!("outbox drain failed: {:?}", error);
         }

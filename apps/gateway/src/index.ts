@@ -261,14 +261,15 @@ class AgentRefused extends Error {}
 /** Resolves a verified credential to one agent, and refuses unclaimed or disconnected ones before minting anything. */
 export async function resolveAgent(env: Env, provider: "agent_auth" | "mcp_oauth", externalId: string): Promise<Identity> {
   const row = await env.DB.prepare(
-    `SELECT a.id, a.org_id, a.generation, a.revoked_at, EXISTS (SELECT 1 FROM org_member m WHERE m.org_id = a.org_id AND m.person_id = l.person_id AND m.created_at <= l.created_at) AS linker_present FROM identity_link l JOIN podster_agent a ON a.id = l.agent_id WHERE l.provider = ? AND l.external_id = ?`,
-  ).bind(provider, externalId).first<{ id: string; org_id: string; generation: number; revoked_at: number | null; linker_present: number }>();
+    `SELECT a.id, a.org_id, a.generation, a.revoked_at, l.person_id AS linker_id, l.created_at AS linked_at, EXISTS (SELECT 1 FROM org_member m WHERE m.org_id = a.org_id AND m.person_id = l.person_id AND m.created_at <= l.created_at) AS linker_present FROM identity_link l JOIN podster_agent a ON a.id = l.agent_id WHERE l.provider = ? AND l.external_id = ?`,
+  ).bind(provider, externalId).first<{ id: string; org_id: string; generation: number; revoked_at: number | null; linker_id: string; linked_at: number; linker_present: number }>();
   if (!row) throw new AgentRefused("agent_unclaimed");
   if (row.revoked_at) throw new AgentRefused("agent_disconnected");
   // A credential ends when whoever connected it leaves the organization, and rejoining doesn't bring it back, so it must
   // be newer than their current membership. An admin can connect a new one to this agent.
   if (!row.linker_present) throw new AgentRefused("credential_owner_left");
-  return { kind: "agent", id: row.id, org: row.org_id, generation: row.generation };
+  // Who linked this credential, and when, so the API can stop A2A sends to an endpoint they set once they leave (step 12).
+  return { kind: "agent", id: row.id, org: row.org_id, generation: row.generation, linker: { person: row.linker_id, since: row.linked_at } };
 }
 
 export async function callApi(env: Pick<Env, "API" | "ASSERTION_SIGNING_JWK">, identity: Identity, call: ApiCall, timeoutMs = API_TIMEOUT_MS): Promise<Response> {

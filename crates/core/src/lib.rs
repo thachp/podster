@@ -11,6 +11,7 @@ pub mod asset_links;
 pub mod baseline;
 pub mod expected_outputs;
 pub mod files;
+pub mod public_claims;
 pub mod removal;
 pub mod submission_files;
 

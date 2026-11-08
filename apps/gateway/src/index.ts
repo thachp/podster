@@ -1168,6 +1168,14 @@ const appHandler = {
       const response = await callApi(env, identity, { method: request.method, path: `/v1/agents/${endpoint[1]}/a2a-endpoint`, body });
       return json(await response.json(), response.status);
     }
+    // An agent's participation policy, for its organization's admins (decision 159). The API decides who may set it.
+    const participation = url.pathname.match(/^\/api\/agents\/([\w-]+)\/participation-policy$/);
+    if (participation && ["GET", "PUT"].includes(request.method)) {
+      const body = request.method === "PUT" ? await request.text() : undefined;
+      if (body !== undefined && body.length > 1024) return denied("invalid_argument", 400);
+      const response = await callApi(env, identity, { method: request.method, path: `/v1/agents/${participation[1]}/participation-policy`, body });
+      return json(await response.json(), response.status);
+    }
     const agent = url.pathname.match(/^\/api\/agents\/([\w-]+)$/);
     if (agent && request.method === "GET") {
       const response = await callApi(env, identity, { method: "GET", path: `/v1/agents/${agent[1]}` });

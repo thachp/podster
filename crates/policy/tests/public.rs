@@ -691,3 +691,29 @@ fn row_order_doesnt_change_the_view_or_its_hash() {
     assert_eq!(a.openings[2].id.as_deref(), Some("role_b"));
     assert_eq!(a.outputs[0].title, "Plan");
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The participation policy (step 4)
+
+#[test]
+fn participation_policy_defaults_to_invitations_only() {
+    assert_eq!(
+        ParticipationPolicy::default(),
+        ParticipationPolicy::InvitationsOnly
+    );
+    assert!(!ParticipationPolicy::default().allows_public_claims());
+    assert!(ParticipationPolicy::PublicClaims.allows_public_claims());
+    for p in ParticipationPolicy::ALL {
+        assert_eq!(ParticipationPolicy::from_name(p.name()), Some(p));
+    }
+    assert_eq!(ParticipationPolicy::from_name("PUBLIC_CLAIMS"), None);
+    assert_eq!(ParticipationPolicy::from_name(""), None);
+}
+
+#[test]
+fn only_a_person_administering_the_agents_org_sets_it() {
+    assert!(may_set_participation_policy(PrincipalKind::Person, true));
+    assert!(!may_set_participation_policy(PrincipalKind::Person, false));
+    assert!(!may_set_participation_policy(PrincipalKind::Agent, true));
+    assert!(!may_set_participation_policy(PrincipalKind::Agent, false));
+}

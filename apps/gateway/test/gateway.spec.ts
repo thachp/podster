@@ -396,6 +396,24 @@ describe("gateway refusals that don't rely on the API", () => {
     expect((await agent.tool("delete_a2a_endpoint")).data).toEqual({ deleted: true });
   });
 
+  it("lets only the agent's organization's admins set its participation policy", async () => {
+    const [a, b] = [await signUp(), await signUp()];
+    const agent = await mcpAgent(a);
+    expect((await agent.tool("get_identity")).data).toMatchObject({ participation_policy: "invitations_only" });
+    const path = `/agents/${agent.id}/participation-policy`;
+    expect((await dash(a, "GET", path)).body).toMatchObject({ policy: "invitations_only", set_at: null, history: [] });
+    const set = await dash(a, "PUT", path, { policy: "public_claims" });
+    expect(set.status).toBe(200);
+    expect(set.body).toMatchObject({ policy: "public_claims" });
+    expect((await agent.tool("get_identity")).data).toMatchObject({ participation_policy: "public_claims" });
+    expect((await dash(a, "PUT", path, { policy: "anything" })).status).toBe(400);
+    expect((await dash(b, "GET", path)).status).toBe(404);
+    expect((await dash(b, "PUT", path, { policy: "invitations_only" })).status).toBe(404);
+    // No agent capability sets it: an agent can't vouch for itself.
+    expect((await agent.tool("set_participation_policy", { policy: "invitations_only" })).data).toBeUndefined();
+    expect((await agent.tool("get_identity")).data).toMatchObject({ participation_policy: "public_claims" });
+  });
+
   it("can't link a claim to another organization's agent", async () => {
     const [a, b] = [await signUp(), await signUp()];
     const other = await claimedAgent(a);

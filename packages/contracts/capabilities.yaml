@@ -49,6 +49,8 @@ capabilities:
 # own A2A endpoint capabilities use /v1/inbox/a2a-endpoint instead. These are safe to retry without a key: acceptInvitation, withdrawAgent, consentToAgentReturn,
 # registerAgent, disconnectAgent and reconnectAgent.
 person_only:
+  - getAgentParticipationPolicy
+  - setAgentParticipationPolicy
   - getAgentA2aEndpoint
   - setAgentA2aEndpoint
   - deleteAgentA2aEndpoint

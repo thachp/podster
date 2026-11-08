@@ -11,10 +11,19 @@
 //! - Nothing a remote agent wrote becomes a command or a reason. Decline and release carry fixed reasons from here, and a
 //!   status message becomes at most a thread message, which is data.
 //!
-//! A read is ignored, and changes nothing, when it's late or repeated (its number isn't newer than the last applied), when
-//! reading for the attempt has ended, when it's for a remote task Podster didn't record, or when the endpoint it was sent to
-//! has since been re-pointed, deleted or switched off. Reading ends at a terminal remote state, a stale endpoint, or once the
-//! task is no longer offered to or held by the agent.
+//! A read is ignored, and changes nothing, when:
+//!
+//! - it's late or repeated: its number isn't newer than the last applied;
+//! - reading for the attempt has ended;
+//! - it's for a remote task Podster didn't record, or names an invalid one;
+//! - the endpoint it was sent to has since been re-pointed, deleted or switched off;
+//! - the task is no longer on the offer this attempt was sent for. Each offer is its own, so after a decline and a new offer
+//!   to the same agent, or a release and a new acceptance, an old attempt can't act on the new one.
+//!
+//! Reading ends at a terminal remote state, a stale endpoint, or once the task is no longer on the attempt's offer.
+//!
+//! This module has no clock. Decision 117's 7-day cutoff on reading, and the back-off between reads, are the API's
+//! (step 13).
 //!
 //! **Proposed** details, as in the ADR: the 256-byte limit on a remote task ID, and how a held response is shown.
 
@@ -103,6 +112,9 @@ pub const RELEASE_REASON: &str = "The agent's A2A endpoint reported that it stop
 pub struct Attempt<'a> {
     /// The agent the task was offered to.
     pub agent: &'a str,
+    /// The offer this attempt was sent for, as the API recorded it when the task was offered: a task creation or `assign`
+    /// naming the agent. A later offer, even to the same agent, has another.
+    pub offer: &'a str,
     /// The endpoint URL and registration version the offer was sent to, pinned when it was sent.
     pub endpoint_url: &'a str,
     pub endpoint_version: u64,
@@ -112,6 +124,8 @@ pub struct Attempt<'a> {
     pub working_seen: bool,
     /// The number of the last read applied, or 0 if none.
     pub last_read_no: u32,
+    /// The state the last applied read reported, if any, so a repeated `INPUT_REQUIRED` or `AUTH_REQUIRED` posts once.
+    pub last_state: Option<RemoteState>,
     /// Whether reading for this attempt has ended.
     pub ended: bool,
 }
@@ -144,10 +158,15 @@ pub enum Ignored {
     Ended,
     /// The endpoint was re-pointed, deleted or switched off since the offer was sent to it.
     EndpointChanged,
-    /// The response named a remote task Podster didn't record, or an ID that fails [`valid_remote_task_id`].
-    OtherRemoteTask,
-    /// The task is no longer offered to or held by this agent: declined, released, reassigned, canceled or finished.
+    /// The response named a valid remote task other than the one Podster recorded.
+    ForeignRemoteTask,
+    /// The response named an ID that fails [`valid_remote_task_id`]. The API counts it as a failed read toward the endpoint's
+    /// three failures in a row.
+    InvalidRemoteTask,
+    /// The task is no longer on this attempt's offer: declined, released, reassigned, re-offered, canceled or finished.
     NotTheAgents,
+    /// The same `INPUT_REQUIRED` or `AUTH_REQUIRED` as the last read applied, so its message was already posted.
+    Unchanged,
     /// A state that means nothing for the task as it stands, such as `SUBMITTED`, or `WORKING` once accepted.
     NoEffect,
     /// A state this version doesn't know.
@@ -184,6 +203,9 @@ pub enum RemoteEffect {
     },
     /// The remote task was canceled. Recorded, and Podster's own task is unchanged.
     RecordCanceled,
+    /// `REJECTED` or `FAILED` after the agent submitted. A submitted task can't be released, so this is only recorded, for the
+    /// reviewer to see, and the review decides.
+    RecordReportedFailure,
 }
 
 /// What [`decide_remote`] decided for one read.
@@ -194,7 +216,9 @@ pub struct RemoteDecision {
     pub stop_reading: bool,
     /// The attempt's `working_seen` after this read.
     pub working_seen: bool,
-    /// Whether to record this read's number as the last applied. False for an ignored read that wasn't newer.
+    /// Whether to record this read's number and state as the last applied. False whenever the read was ignored before its
+    /// state was considered: stale, ended, a changed endpoint, another or invalid remote task, or not the attempt's offer.
+    /// True otherwise, including `Unchanged`, `NoEffect` and unknown states.
     pub applied: bool,
 }
 
@@ -215,8 +239,8 @@ enum Stage {
     InReview,
 }
 
-fn stage(task: &Task, agent: &str) -> Option<Stage> {
-    if task.assignee.as_deref() != Some(agent) {
+fn stage(task: &Task, attempt: &Attempt<'_>, current_offer: Option<&str>) -> Option<Stage> {
+    if task.assignee.as_deref() != Some(attempt.agent) || current_offer != Some(attempt.offer) {
         return None;
     }
     match task.status {
@@ -227,10 +251,12 @@ fn stage(task: &Task, agent: &str) -> Option<Stage> {
     }
 }
 
-/// Decides what one read of a remote task means. `task` is the Podster task as stored now, `attempt` what was recorded about
-/// the offer, `endpoint` the agent's endpoint as registered now, and `read` what the remote reported.
+/// Decides what one read of a remote task means. `task` is the Podster task as stored now, and `current_offer` the offer it's
+/// on now, as the API recorded it, or `None` if it isn't on one. `attempt` is what was recorded about the offer this read
+/// follows, `endpoint` the agent's endpoint as registered now, and `read` what the remote reported.
 pub fn decide_remote(
     task: &Task,
+    current_offer: Option<&str>,
     attempt: &Attempt<'_>,
     endpoint: Option<&Endpoint<'_>>,
     read: &RemoteRead<'_>,
@@ -247,12 +273,16 @@ pub fn decide_remote(
     if !pinned {
         return ignored(attempt, Ignored::EndpointChanged, true);
     }
-    if !valid_remote_task_id(read.remote_task_id) || read.remote_task_id != attempt.remote_task_id {
-        return ignored(attempt, Ignored::OtherRemoteTask, false);
+    if !valid_remote_task_id(read.remote_task_id) {
+        return ignored(attempt, Ignored::InvalidRemoteTask, false);
     }
-    let Some(stage) = stage(task, attempt.agent) else {
+    if read.remote_task_id != attempt.remote_task_id {
+        return ignored(attempt, Ignored::ForeignRemoteTask, false);
+    }
+    let Some(stage) = stage(task, attempt, current_offer) else {
         return ignored(attempt, Ignored::NotTheAgents, true);
     };
+    let repeated = attempt.last_state == Some(read.state);
     let working_seen = attempt.working_seen || read.state == RemoteState::Working;
     let version = task.version;
     let effect = match (read.state, stage) {
@@ -261,6 +291,9 @@ pub fn decide_remote(
         (RemoteState::Working, Stage::Offered) => RemoteEffect::Accept { version },
         (RemoteState::Working, Stage::Accepted | Stage::InReview) => {
             RemoteEffect::Nothing(Ignored::NoEffect)
+        }
+        (RemoteState::InputRequired | RemoteState::AuthRequired, _) if repeated => {
+            RemoteEffect::Nothing(Ignored::Unchanged)
         }
         (RemoteState::InputRequired | RemoteState::AuthRequired, _) => RemoteEffect::Message,
         (RemoteState::Completed, Stage::Offered) => RemoteEffect::Hold {
@@ -275,9 +308,9 @@ pub fn decide_remote(
         (RemoteState::Rejected | RemoteState::Failed, Stage::Accepted) => {
             RemoteEffect::Release { version }
         }
-        // A submitted task can't be released. Its reviewer decides it.
+        // A submitted task can't be released. Its reviewer decides it, and learns the agent reported failure.
         (RemoteState::Rejected | RemoteState::Failed, Stage::InReview) => {
-            RemoteEffect::Nothing(Ignored::NoEffect)
+            RemoteEffect::RecordReportedFailure
         }
         (RemoteState::Canceled, _) => RemoteEffect::RecordCanceled,
     };

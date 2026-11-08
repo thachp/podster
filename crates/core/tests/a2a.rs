@@ -13,6 +13,7 @@ use RemoteState::*;
 const AGENT: &str = "agt_remote";
 const URL: &str = "https://agent.example.com/a2a";
 const REMOTE: &str = "remote-task-1";
+const OFFER: &str = "off_1";
 
 // Built through `decide_create` and `decide`, so these tests don't list `Task`'s fields.
 fn offered() -> Task {
@@ -68,11 +69,13 @@ fn submitted() -> Task {
 fn attempt() -> Attempt<'static> {
     Attempt {
         agent: AGENT,
+        offer: OFFER,
         endpoint_url: URL,
         endpoint_version: 3,
         remote_task_id: REMOTE,
         working_seen: false,
         last_read_no: 0,
+        last_state: None,
         ended: false,
     }
 }
@@ -94,6 +97,7 @@ fn read(read_no: u32, state: RemoteState) -> RemoteRead<'static> {
 fn effect(task: &Task, attempt: &Attempt<'_>, state: RemoteState) -> RemoteEffect {
     decide_remote(
         task,
+        Some(OFFER),
         attempt,
         Some(&ENDPOINT),
         &read(attempt.last_read_no + 1, state),
@@ -199,6 +203,7 @@ fn it_never_verifies_whatever_the_state_or_stage() {
                         | E::Message
                         | E::Hold { .. }
                         | E::RecordCanceled
+                        | E::RecordReportedFailure
                 ),
                 "{state:?}"
             );
@@ -219,7 +224,13 @@ fn it_never_verifies_whatever_the_state_or_stage() {
 
 #[test]
 fn completed_with_no_working_is_held() {
-    let decision = decide_remote(&offered(), &attempt(), Some(&ENDPOINT), &read(1, Completed));
+    let decision = decide_remote(
+        &offered(),
+        Some(OFFER),
+        &attempt(),
+        Some(&ENDPOINT),
+        &read(1, Completed),
+    );
     assert_eq!(
         decision.effect,
         E::Hold {
@@ -247,7 +258,13 @@ fn completed_after_working_was_seen_but_before_podster_recorded_acceptance_is_st
 #[test]
 fn working_then_completed_accepts_and_then_submits() {
     let task = offered();
-    let first = decide_remote(&task, &attempt(), Some(&ENDPOINT), &read(1, Working));
+    let first = decide_remote(
+        &task,
+        Some(OFFER),
+        &attempt(),
+        Some(&ENDPOINT),
+        &read(1, Working),
+    );
     assert_eq!(
         first.effect,
         E::Accept {
@@ -267,7 +284,13 @@ fn working_then_completed_accepts_and_then_submits() {
         last_read_no: 1,
         ..attempt()
     };
-    let second = decide_remote(&task, &after, Some(&ENDPOINT), &read(2, Completed));
+    let second = decide_remote(
+        &task,
+        Some(OFFER),
+        &after,
+        Some(&ENDPOINT),
+        &read(2, Completed),
+    );
     assert_eq!(
         second.effect,
         E::Submit {
@@ -297,7 +320,13 @@ fn a_repeated_working_before_acceptance_lands_asks_to_accept_again() {
 #[test]
 fn auth_required_grants_nothing() {
     for task in [offered(), accepted()] {
-        let decision = decide_remote(&task, &attempt(), Some(&ENDPOINT), &read(1, AuthRequired));
+        let decision = decide_remote(
+            &task,
+            Some(OFFER),
+            &attempt(),
+            Some(&ENDPOINT),
+            &read(1, AuthRequired),
+        );
         assert_eq!(decision.effect, E::Message);
         assert!(!decision.working_seen);
         assert!(!decision.stop_reading);
@@ -315,7 +344,13 @@ fn unknown_states_are_ignored_and_keep_reading() {
     ] {
         assert_eq!(RemoteState::from_name(name), Unknown, "{name}");
     }
-    let decision = decide_remote(&offered(), &attempt(), Some(&ENDPOINT), &read(1, Unknown));
+    let decision = decide_remote(
+        &offered(),
+        Some(OFFER),
+        &attempt(),
+        Some(&ENDPOINT),
+        &read(1, Unknown),
+    );
     assert_eq!(decision.effect, E::Nothing(Ignored::UnknownState));
     assert!(!decision.stop_reading);
     assert!(decision.applied);
@@ -332,7 +367,13 @@ fn state_names_round_trip_and_terminal_states_end_reading() {
         .collect();
     assert_eq!(terminal, vec![Completed, Rejected, Failed, Canceled]);
     for state in RemoteState::KNOWN {
-        let decision = decide_remote(&accepted(), &attempt(), Some(&ENDPOINT), &read(1, state));
+        let decision = decide_remote(
+            &accepted(),
+            Some(OFFER),
+            &attempt(),
+            Some(&ENDPOINT),
+            &read(1, state),
+        );
         assert_eq!(decision.stop_reading, state.is_terminal(), "{state:?}");
     }
 }
@@ -346,7 +387,13 @@ fn a_duplicate_read_changes_nothing() {
         working_seen: true,
         ..attempt()
     };
-    let decision = decide_remote(&accepted(), &a, Some(&ENDPOINT), &read(4, Completed));
+    let decision = decide_remote(
+        &accepted(),
+        Some(OFFER),
+        &a,
+        Some(&ENDPOINT),
+        &read(4, Completed),
+    );
     assert_eq!(decision.effect, E::Nothing(Ignored::Stale));
     assert!(!decision.applied);
     assert!(!decision.stop_reading);
@@ -360,7 +407,13 @@ fn an_out_of_order_read_older_than_the_last_applied_changes_nothing() {
         last_read_no: 3,
         ..attempt()
     };
-    let decision = decide_remote(&offered(), &a, Some(&ENDPOINT), &read(2, Working));
+    let decision = decide_remote(
+        &offered(),
+        Some(OFFER),
+        &a,
+        Some(&ENDPOINT),
+        &read(2, Working),
+    );
     assert_eq!(decision.effect, E::Nothing(Ignored::Stale));
     assert!(!decision.applied);
     assert!(!decision.working_seen);
@@ -374,7 +427,13 @@ fn nothing_is_read_after_reading_ended() {
         ended: true,
         ..attempt()
     };
-    let decision = decide_remote(&offered(), &a, Some(&ENDPOINT), &read(3, Working));
+    let decision = decide_remote(
+        &offered(),
+        Some(OFFER),
+        &a,
+        Some(&ENDPOINT),
+        &read(3, Working),
+    );
     assert_eq!(decision.effect, E::Nothing(Ignored::Ended));
     assert!(!decision.applied);
 }
@@ -412,7 +471,13 @@ fn a_late_update_after_decline_cancel_or_reassignment_changes_nothing_and_ends_r
         ("reassigned", &reassigned),
     ] {
         for state in [Working, Completed, Rejected, InputRequired] {
-            let decision = decide_remote(task, &attempt(), Some(&ENDPOINT), &read(1, state));
+            let decision = decide_remote(
+                task,
+                Some(OFFER),
+                &attempt(),
+                Some(&ENDPOINT),
+                &read(1, state),
+            );
             assert_eq!(
                 decision.effect,
                 E::Nothing(Ignored::NotTheAgents),
@@ -430,10 +495,12 @@ fn a_late_completion_on_a_submitted_or_finished_task_submits_nothing_more() {
         effect(&task, &attempt(), Completed),
         E::Nothing(Ignored::NoEffect)
     );
+    // A submitted task can't be released, so the agent's reported failure is only recorded for the reviewer.
     assert_eq!(
         effect(&task, &attempt(), Rejected),
-        E::Nothing(Ignored::NoEffect)
+        E::RecordReportedFailure
     );
+    assert_eq!(effect(&task, &attempt(), Failed), E::RecordReportedFailure);
     let done = step(
         &task,
         "rev",
@@ -442,7 +509,13 @@ fn a_late_completion_on_a_submitted_or_finished_task_submits_nothing_more() {
             commit_sha: None,
         },
     );
-    let decision = decide_remote(&done, &attempt(), Some(&ENDPOINT), &read(1, Completed));
+    let decision = decide_remote(
+        &done,
+        Some(OFFER),
+        &attempt(),
+        Some(&ENDPOINT),
+        &read(1, Completed),
+    );
     assert_eq!(decision.effect, E::Nothing(Ignored::NotTheAgents));
     assert!(decision.stop_reading);
 }
@@ -470,7 +543,13 @@ fn a_stale_endpoint_version_ends_reading_with_no_effect() {
         ("deleted", None),
     ] {
         for state in [Working, Completed] {
-            let decision = decide_remote(&offered(), &attempt(), endpoint, &read(1, state));
+            let decision = decide_remote(
+                &offered(),
+                Some(OFFER),
+                &attempt(),
+                endpoint,
+                &read(1, state),
+            );
             assert_eq!(
                 decision.effect,
                 E::Nothing(Ignored::EndpointChanged),
@@ -484,16 +563,29 @@ fn a_stale_endpoint_version_ends_reading_with_no_effect() {
 
 #[test]
 fn a_read_naming_another_remote_task_is_ignored() {
-    for id in ["remote-task-2", "", "has space", "tab\tid", "é"] {
-        let other = RemoteRead {
+    let other = RemoteRead {
+        read_no: 1,
+        remote_task_id: "remote-task-2",
+        state: Working,
+    };
+    let decision = decide_remote(&offered(), Some(OFFER), &attempt(), Some(&ENDPOINT), &other);
+    assert_eq!(decision.effect, E::Nothing(Ignored::ForeignRemoteTask));
+    assert!(!decision.applied && !decision.stop_reading);
+}
+
+#[test]
+fn a_read_naming_an_invalid_remote_task_id_is_its_own_refusal() {
+    // The API counts this one toward the endpoint's three failures in a row.
+    for id in ["", "has space", "tab\tid", "é"] {
+        let bad = RemoteRead {
             read_no: 1,
             remote_task_id: id,
             state: Working,
         };
-        let decision = decide_remote(&offered(), &attempt(), Some(&ENDPOINT), &other);
+        let decision = decide_remote(&offered(), Some(OFFER), &attempt(), Some(&ENDPOINT), &bad);
         assert_eq!(
             decision.effect,
-            E::Nothing(Ignored::OtherRemoteTask),
+            E::Nothing(Ignored::InvalidRemoteTask),
             "{id:?}"
         );
         assert!(!decision.applied && !decision.stop_reading, "{id:?}");
@@ -545,4 +637,189 @@ fn reasons_are_fixed_text_that_quotes_no_remote_agent() {
         assert!(!reason.trim().is_empty());
         assert!(reason.len() <= podster_core::MAX_REASON_BYTES);
     }
+}
+
+// Each offer is its own.
+
+#[test]
+fn an_old_attempt_cant_act_on_a_new_offer_to_the_same_agent() {
+    // The agent declined offer 1, and the requester offered the task to it again as offer 2.
+    let offer = offered();
+    let declined = step(
+        &offer,
+        AGENT,
+        Command::Decline {
+            version: offer.version,
+            reason: "Not now.".into(),
+        },
+    );
+    let reoffered = step(
+        &declined,
+        "req",
+        Command::Assign {
+            version: declined.version,
+            assignee: AGENT.into(),
+        },
+    );
+    assert_eq!(reoffered.status, TaskStatus::Offered);
+    assert_eq!(reoffered.assignee.as_deref(), Some(AGENT));
+    for state in [
+        Working,
+        Completed,
+        Rejected,
+        Failed,
+        InputRequired,
+        AuthRequired,
+    ] {
+        let decision = decide_remote(
+            &reoffered,
+            Some("off_2"),
+            &attempt(),
+            Some(&ENDPOINT),
+            &read(1, state),
+        );
+        assert_eq!(
+            decision.effect,
+            E::Nothing(Ignored::NotTheAgents),
+            "{state:?}"
+        );
+        assert!(decision.stop_reading && !decision.applied, "{state:?}");
+    }
+    // The attempt for offer 2 acts on it.
+    let second = Attempt {
+        offer: "off_2",
+        ..attempt()
+    };
+    assert_eq!(
+        decide_remote(
+            &reoffered,
+            Some("off_2"),
+            &second,
+            Some(&ENDPOINT),
+            &read(1, Working)
+        )
+        .effect,
+        E::Accept {
+            version: reoffered.version
+        }
+    );
+}
+
+#[test]
+fn an_old_attempt_cant_release_a_task_the_agent_accepted_again() {
+    // The agent accepted offer 1, released it, was offered it again as offer 2 and accepted that.
+    let first = accepted();
+    let released = step(
+        &first,
+        AGENT,
+        Command::Release {
+            version: first.version,
+            reason: "Stuck.".into(),
+        },
+    );
+    let reoffered = step(
+        &released,
+        "req",
+        Command::Assign {
+            version: released.version,
+            assignee: AGENT.into(),
+        },
+    );
+    let again = step(
+        &reoffered,
+        AGENT,
+        Command::Accept {
+            version: reoffered.version,
+        },
+    );
+    assert_eq!(again.status, TaskStatus::Accepted);
+    for state in [Rejected, Failed, Completed] {
+        let decision = decide_remote(
+            &again,
+            Some("off_2"),
+            &attempt(),
+            Some(&ENDPOINT),
+            &read(5, state),
+        );
+        assert_eq!(
+            decision.effect,
+            E::Nothing(Ignored::NotTheAgents),
+            "{state:?}"
+        );
+        assert!(decision.stop_reading, "{state:?}");
+    }
+}
+
+#[test]
+fn a_task_on_no_offer_ends_the_attempt() {
+    let decision = decide_remote(
+        &offered(),
+        None,
+        &attempt(),
+        Some(&ENDPOINT),
+        &read(1, Working),
+    );
+    assert_eq!(decision.effect, E::Nothing(Ignored::NotTheAgents));
+    assert!(decision.stop_reading);
+}
+
+// Repeated messages.
+
+#[test]
+fn a_repeated_input_required_or_auth_required_posts_once() {
+    for state in [InputRequired, AuthRequired] {
+        for task in [offered(), accepted(), submitted()] {
+            let first = decide_remote(
+                &task,
+                Some(OFFER),
+                &attempt(),
+                Some(&ENDPOINT),
+                &read(1, state),
+            );
+            assert_eq!(first.effect, E::Message, "{state:?}");
+            assert!(first.applied);
+            let after = Attempt {
+                last_read_no: 1,
+                last_state: Some(state),
+                ..attempt()
+            };
+            let again = decide_remote(&task, Some(OFFER), &after, Some(&ENDPOINT), &read(2, state));
+            assert_eq!(again.effect, E::Nothing(Ignored::Unchanged), "{state:?}");
+            assert!(again.applied && !again.stop_reading, "{state:?}");
+        }
+    }
+}
+
+#[test]
+fn input_required_again_after_another_state_posts_again() {
+    let after = Attempt {
+        last_read_no: 2,
+        last_state: Some(Working),
+        ..attempt()
+    };
+    assert_eq!(effect(&accepted(), &after, InputRequired), E::Message);
+    // And AUTH_REQUIRED after INPUT_REQUIRED is a change too.
+    let asked = Attempt {
+        last_read_no: 2,
+        last_state: Some(InputRequired),
+        ..attempt()
+    };
+    assert_eq!(effect(&accepted(), &asked, AuthRequired), E::Message);
+}
+
+#[test]
+fn a_repeated_working_still_asks_to_accept_while_only_offered() {
+    let after = Attempt {
+        last_read_no: 1,
+        last_state: Some(Working),
+        working_seen: true,
+        ..attempt()
+    };
+    let task = offered();
+    assert_eq!(
+        effect(&task, &after, Working),
+        E::Accept {
+            version: task.version
+        }
+    );
 }

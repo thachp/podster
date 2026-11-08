@@ -52,6 +52,21 @@ Each runs in `spikes/`, is thrown away afterwards, and ends with its results wri
 
 The wake policy checks the name, not what it resolves to, and relies on `global_fetch_strictly_public`. Spike C doesn't test resolved addresses. Whether A2A needs more, since it sends task text where wake sends only IDs, is question 28.
 
+### Spike results, 2026-11-08 UTC
+
+All three ran locally. Each folder's README has the details.
+
+- **A** ([#138](https://github.com/thachp/podster/pull/138), `spikes/m3-a2a-inbound`):
+  - **Passed:** 14 tests in workerd. The project's JavaScript and Python clients passed unpatched. The SDK's JSON-RPC transport runs on Workers, used with Podster's own request handler and not the SDK's `DefaultRequestHandler`.
+  - **Not run:** the kit, because the permission check refused it ([decision 142](spec/PRODUCT.md#decisions-needed)). From its source, it creates its own tasks and sends no token.
+- **B** ([#139](https://github.com/thachp/podster/pull/139), `spikes/m3-a2a-audience`):
+  - **Passed:** 9 tests in workerd, and a standard OAuth client followed by the A2A client, 10 of 10. `/mcp` and `/a2a` tokens are refused at each other's resource, and disconnect revokes both.
+  - **Needs:** the gateway's OAuth set-up has to change, as step 7 says.
+- **C** ([#140](https://github.com/thachp/podster/pull/140), `spikes/m3-a2a-outbound`), the local half only:
+  - **Passed:** 10 tests in workerd through a local queue, against the project's own SDK server.
+  - **Found:** the SDK server makes a second task for a resent `messageId`.
+  - **Not run:** an independent server. Starting LangGraph's was refused by the permission check. The staging half waits for the owner's yes.
+
 ## Build order
 
 C changes `packages/contracts` and M adds a migration or room schema. The order is **Proposed**. Product code, steps 5 onward, waits until M2 is finished as [decision 133](spec/PRODUCT.md#decisions-needed) defines it. C and M PRs merge one at a time, after M2's last one, and take turns with planning's as [decision 60](spec/PRODUCT.md#decisions-needed) does for M2.
@@ -65,7 +80,7 @@ C changes `packages/contracts` and M adds a migration or room schema. The order 
 | 4 | ADR 0007 with spike results, accepted by the owner | | | 0 to 3 | |
 | 5 | Pure mapping in `crates/core/src/a2a.rs`, with one line in `lib.rs`: a remote state plus the current Podster state gives one command, a hold or nothing. Tests include late and out-of-order updates | | | 4, M2 finished | 6 |
 | 6 | Gateway module `apps/gateway/src/a2a/`: Agent Card, JSON-RPC envelope, version check, and every operation answering its named "not supported" error. The profile is `docs/spec/A2A-PROFILE.md`, and a gateway test checks the card lists only the operations it names. `check.mjs` covers only `openapi.yaml` and `capabilities.yaml`, so nothing here changes `packages/contracts` | | | 4, M2 finished | 5 |
-| 7 | Authentication: the `/a2a` audience and scope, resolving to the same agent identity. AC-12's negatives | Only if the API's identity call changes | | 6 | |
+| 7 | Authentication, as its own PR with [decision 127](spec/PRODUCT.md#decisions-needed)'s deeper pass:<br>• Move the gateway from the combined `OAuthProvider` to one `OAuthAuthorizationServer` with two `OAuthResourceServer`s, `/mcp` and `/a2a`, still in one Worker. The combined provider has one resource, so it can't give `/a2a` its own audience.<br>• Set `defaultResource` and `legacyGrantResource` to `/mcp`, so clients that send no `resource`, and old grants, stay MCP.<br>• Change the consent code to grant `a2a` for an `/a2a` request. Today it refuses every scope but `mcp` and `offline_access`.<br>• Use `getOAuthApi(env)` where the gateway uses `env.OAUTH_PROVIDER`, and keep `forMcp` MCP-only.<br>• Tokens resolve to the same agent identity. Add AC-12's negatives. | Only if the API's identity call changes | | 6 | |
 | 8 | Inbound reads: `GetTask` and `ListTasks` through `get_task` and `list_tasks`. A hidden task gets the same `TaskNotFoundError` as a missing one | | | 7 | 11 |
 | 9 | Inbound messages: `SendMessage` with a `taskId` becomes `send_message`, with `messageId` as the idempotency key, size limits and `external` marking. No `taskId` is refused | Yes | Only if `messageId` can't use the idempotency record | 8 | 11 |
 | 10 | Inbound lifecycle through the Podster extension: accept, decline, release, and submit with text and links | Yes | | 9 | 11 |
@@ -74,7 +89,7 @@ C changes `packages/contracts` and M adds a migration or room schema. The order 
 | 13 | Remote updates, as question 11 decides: read back, mapped through step 5 into a submission, a held response, a release or nothing. `cancel_task` sent out | Yes | Yes | 12 | |
 | 14 | Files: inbound submissions with files from `create_upload`, offers that link input files as Podster links, and remote file references kept as external links | Yes | | 10, 13, M2 steps 5 and 6 | 15 |
 | 15 | Screens: endpoint status on the agent's Sheet, and held responses flagged to the requester in the Task Sheet | | | 11, 13, M2 step 9b | 14 |
-| 16 | Staging run: the kit, two implementations, AC-12, AC-18, AC-24 and criterion 4 across protocols. Then the owner rules, and the profile is published | | | All, M2's gate | |
+| 16 | Staging run: AC-12, AC-18, AC-24, criterion 4 across protocols, and the implementations [decision 143](spec/PRODUCT.md#decisions-needed) names. The kit runs only if a way to run it has been found ([decision 142](spec/PRODUCT.md#decisions-needed)). Its non-fitting checks are listed in the profile ([decision 141](spec/PRODUCT.md#decisions-needed)). Then the owner rules, and the profile is published | | | All, M2's gate | |
 
 **What runs in parallel:** the three spikes and the ADR draft. Steps 5 and 6. Step 11 is built beside 8 to 10, because it's in the `Principal` and they're in the `Workspace` path. Steps 9 to 11 change contracts and 11 adds a migration, so they're built side by side and still merge one at a time. Steps 14 and 15, which are in different folders.
 
@@ -83,7 +98,6 @@ C changes `packages/contracts` and M adds a migration or room schema. The order 
 - **Spike C on staging,** by [decision 126](spec/PRODUCT.md#decisions-needed). Until then it runs locally only.
 - **Step 11's encryption secret** for stored endpoint tokens, by [decision 122](spec/PRODUCT.md#decisions-needed). The owner sets it.
 - **Step 12's queue and dead-letter queue,** by [decision 129](spec/PRODUCT.md#decisions-needed). Steps 12 to 16 wait on them.
-- **The second implementation** for step 16, which the owner picks from spike A's candidates by [decision 124](spec/PRODUCT.md#decisions-needed).
 
 Step 8 waits only on step 7, because reads translate today's task view. Step 5's mapping is first used by step 12.
 
@@ -123,6 +137,31 @@ The owner accepted every recommendation on 2026-11-08 ("sure"). Each row links t
 | 26 | Who calls the gate, and when may support be claimed? | The owner, after step 16's staging run. Until then the card and docs say "preview" and never "conformant" | Same | [132](spec/PRODUCT.md#decisions-needed) |
 | 27 | When is M2 "finished" for M3's product code? | When M2's last contract or migration PR has merged, through step 8 and step 10's D1 migration if it has one. M2's screens and staging run can finish beside M3's first steps, and M3's gate still waits for M2's | When M2's gate, step 11, has passed | [133](spec/PRODUCT.md#decisions-needed) |
 | 28 | Does A2A egress need more than wake's policy? | No new resolved-address check at first. Keep wake's rules and `global_fetch_strictly_public`, and don't follow redirects. Revisit before public rooms, when anyone could register an endpoint | Same | [134](spec/PRODUCT.md#decisions-needed) |
+
+## Question C: the second implementation
+
+[Decision 143](spec/PRODUCT.md#decisions-needed) settles it: independence is judged by direction. Outbound runs against LangGraph's A2A 1.0 server, with fasta2a's server as backup. Inbound uses the A2A project's own clients and the kit's `httpx` client, and the profile says so. It's revisited before public rooms.
+
+**What the recommendation rested on,** read on 2026-11-08 UTC from package metadata and source, without running either:
+
+- **fasta2a 2.1.1,** from PyPI, and `pydantic/fasta2a` at `5786276` on GitHub. It doesn't depend on `a2a-sdk`.
+  - In `fasta2a/client.py`, `A2AClient` sends the 0.3 method names `message/send`, `message/stream` and `tasks/get`.
+  - It sets only `Content-Type` on each request, and makes its own `httpx` client with no default headers unless the caller passes one.
+  - `fasta2a/jsonrpc_v1.py` maps 1.0 method names to those, for the server side only.
+- **langgraph-api 0.17.1,** installed from PyPI into a local virtual environment and read, not run:
+  - `langgraph_api/api/a2a.py` sets `A2A_PROTOCOL_VERSION = "1.0"` and serves `/a2a/{assistant_id}`.
+  - Nothing in the package imports `a2a`.
+- **langgraph-sdk 0.4.14:**
+  - Its PyPI description doesn't mention A2A.
+  - A GitHub code search of `langchain-ai/langgraph` for "a2a" under `libs/sdk-py` matched only a docstring in `langgraph_sdk/runtime.py` and `uv.lock`. Under `libs/sdk-js` it matched nothing.
+  - So I found no A2A client there. A search can miss one.
+- **Built on `a2a-sdk`, from their PyPI metadata:** CrewAI 1.15.37 pins `a2a-sdk~=0.3.10`. Google ADK 2.14.0 and `agent-framework-a2a` 1.0.0b261106 depend on `a2a-sdk`.
+
+## Owed before M3's gate
+
+- **The compatibility kit.** It hasn't run, because the session permission check refuses running its code and the owner won't run it by hand ([decision 142](spec/PRODUCT.md#decisions-needed)). It must run some other way before any support claim.
+- **The outbound run against LangGraph's server.** [Decision 143](spec/PRODUCT.md#decisions-needed) makes it the outbound independent implementation, with fasta2a's server as backup. It hasn't run, because starting it was refused by the session permission check, so step 12's interoperability run still needs a way to run it.
+- **Spike C on staging,** with the owner's yes in that session ([decision 126](spec/PRODUCT.md#decisions-needed)): real egress, timeouts and queue timing.
 
 ## Owed before production that M3 touches
 
@@ -176,5 +215,5 @@ There's also a [compatibility kit](https://github.com/a2aproject/a2a-tck) coveri
 
 - **Read directly:** `v1.0.1`'s `docs/specification.md` for the rows above, the task states in `specification/a2a.proto`, and the gateway's MCP and Agent Auth paths, which question 5 and spike B build on.
 - **Not read closely:** the rest of the spec, the kit beyond its README, and the SDKs.
-- **Not run:** nothing. Whether a Worker can serve this, and whether the kit fits, is what the spikes are for.
+- **Run:** only the three local spikes above. The kit and any independent implementation haven't run.
 - **Not checked:** whether the differences between v1.0.0 and v1.0.1 matter, beyond the release notes.

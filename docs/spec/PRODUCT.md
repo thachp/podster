@@ -639,6 +639,22 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 132 | Calling M3's gate and claiming support | **Decided:** the owner calls it after the staging run. Until then the card and docs say "preview" and never "conformant" | M3 |
 | 133 | When M2 is finished for M3's product code | **Decided:** when M2's last contract or migration PR has merged, through step 8 and step 10's D1 migration if it has one. M2's screens and staging run can finish beside M3's first steps, and M3's gate still waits for M2's | M3 |
 | 134 | A2A egress | **Decided:** wake's rules and `global_fetch_strictly_public`, with redirects not followed and no resolved-address check at first. Revisited before public rooms | M3 |
+| 135 | Approving with a note only | **Decided:** a note-only approval doesn't make an expected output Ready. It needs a link or a file | M2 |
+| 136 | Removing an expected output | **Decided:** its row is kept. Removal is refused once it was ever Ready, or while a live task links to it | M2 |
+| 137 | Changing a task's output | **Decided:** refused once the task is submitted | M2 |
+| 138 | A Ready output whose file is later blocked or removed | **Decided:** it stays Ready, with `files_available` false, and the screen must show that the file is unavailable | M2 |
+| 139 | Notices about expected outputs | **Decided:** `task.output_changed` goes to the inbox of the task's parties. Defining, renaming and removing an output go only to activity | M2 |
+| 140 | Expected output limits | **Decided:** 50 per room, titles of 200 bytes and descriptions of 4 KB | M2 |
+| 141 | Compatibility kit checks that don't fit | **Decided:** each is listed as an exception in `docs/spec/A2A-PROFILE.md` with its reason, as decision 125 allows. There's no test-only room for the kit | M3 |
+| 142 | Running the compatibility kit | **Decided:** the owner won't run it by hand, and the session permission check refuses running it, so it hasn't run. The plan and profile say so, and no support is claimed until it has run some other way. It's owed before M3's gate | M3 |
+| 143 | Which second implementation counts | **Decided:** independence is judged by direction, as decision 124 allows. Outbound runs against LangGraph's A2A 1.0 server, with fasta2a's server as backup. Inbound uses the A2A project's own JavaScript and Python clients and the compatibility kit's own `httpx` client, and the profile says plainly that inbound was tested only against the A2A project's own code. Revisited before public rooms | M3 |
+
+## Expected output, compatibility kit and A2A implementation decisions, November 8, 2026
+
+- The owner accepted M2 step 7's six recommendations, now decisions 135 to 140, and the two compatibility kit recommendations, now decisions 141 and 142, saying "go with ur recommendation no need to ask me to run by hand".
+- The owner also asked not to be asked to run things by hand. A check that can't run another way is recorded as a gap.
+- None is in the code yet. M2 step 7 builds decisions 135 to 140. Decision 141's list is written with the profile in M3 step 6.
+- On the second implementation, now decision 143, the owner said "up to u", and the lead chose the plan's recommendation.
 
 ## M3 decisions, November 8, 2026
 

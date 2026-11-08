@@ -60,7 +60,10 @@ export function readJob(body: unknown): ScanJob | null {
 export function readDatabase(value: unknown): Database | null {
   if (typeof value !== "object" || value === null) return null;
   const { engine, version, built_at } = value as Partial<Database>;
-  if (typeof engine !== "string" || typeof version !== "string" || typeof built_at !== "string" || !/^\d+$/.test(version) || engine.length === 0 || engine.length > 40) return null;
+  // The room's own limits, so a database it would refuse is caught here rather than as a refused report.
+  if (typeof engine !== "string" || typeof version !== "string" || typeof built_at !== "string" || !/^\d{1,20}$/.test(version)) return null;
+  const engineBytes = new TextEncoder().encode(engine).length;
+  if (engineBytes === 0 || engineBytes > 40 || new TextEncoder().encode(built_at).length > 40) return null;
   return Number.isNaN(Date.parse(built_at)) ? null : { engine, version, built_at };
 }
 

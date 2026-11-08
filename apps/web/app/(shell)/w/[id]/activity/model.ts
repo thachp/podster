@@ -57,6 +57,7 @@ const AUDIT_ACTIONS: Record<string, string> = {
   "workspace.plan_start_changed": "Changed the planning start of",
   "object.upload_created": "Started uploading a file to",
   "object.stored": "Uploaded a file to",
+  "object.upload_dropped": "Dropped an unfinished upload, as its uploader could no longer upload, in",
   "object.scan_recorded": "Recorded a file's scan result in",
   "object.scan_expired": "Ended a file's scan, with no result in time, in",
   "workspace.review_policy_changed": "Changed whether a person must review in",

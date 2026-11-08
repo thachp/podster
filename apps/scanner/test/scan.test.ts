@@ -282,6 +282,17 @@ describe("helpers", () => {
     expect(readDatabase("28176")).toBeNull();
   });
 
+  it("readDatabase keeps to the room's limits, counting UTF-8 bytes", () => {
+    expect(readDatabase({ ...fresh, engine: "e".repeat(40) })).not.toBeNull();
+    expect(readDatabase({ ...fresh, engine: "e".repeat(41) })).toBeNull();
+    // 20 UTF-16 units, but 60 bytes.
+    expect(readDatabase({ ...fresh, engine: "€".repeat(20) })).toBeNull();
+    expect(readDatabase({ ...fresh, version: "1".repeat(20) })).not.toBeNull();
+    expect(readDatabase({ ...fresh, version: "1".repeat(21) })).toBeNull();
+    expect(readDatabase({ ...fresh, version: "" })).toBeNull();
+    expect(readDatabase({ ...fresh, built_at: `${fresh.built_at}${" ".repeat(41 - fresh.built_at.length)}` })).toBeNull();
+  });
+
   it("withTimeout aborts what it started", async () => {
     vi.useFakeTimers();
     try {

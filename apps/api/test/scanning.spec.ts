@@ -385,5 +385,10 @@ describe("a room from before this", () => {
     await stored(id, "later.txt");
     const after = (await api("GET", `/v1/workspaces/${id}/audit?after=${before[before.length - 1].policy_version}`)).body.audit.map((e: any) => e.action);
     expect(after).toEqual(["object.upload_created", "object.stored"]);
+    const { unique, notNull } = await inRoom(id, (sql) => ({
+      unique: sql.exec("SELECT \"unique\" AS u FROM pragma_index_list('audit_event') WHERE name = 'audit_event_seq'").one().u,
+      notNull: sql.exec("SELECT \"notnull\" AS n FROM pragma_table_info('audit_event') WHERE name = 'seq'").one().n,
+    }));
+    expect([unique, notNull]).toEqual([1, 1]);
   });
 });

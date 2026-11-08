@@ -8,7 +8,6 @@ use crate::objects::{refusal, upload_not_found};
 use podster_core::files::{
     check_upload, fits_room_quota, is_sha256, FileRefusal, ObjectState, UploadRequest,
 };
-use podster_policy::files::authorize_input_upload;
 
 /// How long an upload may be started after it's created. Its reservation ends then too, whatever is under way. An attempt already
 /// running can still finish, but only if the file still fits the room when it does.
@@ -46,7 +45,8 @@ pub(super) fn handle_create(
     body: &Value,
     now: i64,
 ) -> R<Value> {
-    ApiError::from_verdict(authorize_input_upload(caller))?;
+    let for_task = super::submission_files::upload_target(body)?;
+    super::submission_files::may_upload(sql, caller, for_task.as_deref())?;
     let name = required(body, "name")?;
     let size = body["size"]
         .as_u64()
@@ -71,11 +71,11 @@ pub(super) fn handle_create(
     let expires_at = now + UPLOAD_GRANT_MS;
     exec(
         sql,
-        "INSERT INTO stored_object (id, name, size, sha256, state, token_hash, uploaded_by, uploader_json, created_at, upload_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO stored_object (id, name, size, sha256, state, token_hash, uploaded_by, uploader_json, created_at, upload_expires_at, for_task) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         vec![
             id.as_str().into(), accepted.name.as_str().into(), (accepted.size as i64).into(), sha256.as_str().into(),
             ObjectState::Uploading.name().into(), token_hash(&token).as_str().into(), caller.id.as_str().into(),
-            identity_json.into(), now.into(), expires_at.into(),
+            identity_json.into(), now.into(), expires_at.into(), opt(&for_task),
         ],
     )?;
     audit(
@@ -163,7 +163,7 @@ fn uploader(sql: &SqlStorage, row: &Value) -> R<(Identity, Participant)> {
     let identity: Identity = serde_json::from_str(row["uploader_json"].as_str().unwrap_or(""))
         .map_err(|_| upload_not_found())?;
     let who = resolve_caller(sql, &identity)?;
-    ApiError::from_verdict(authorize_input_upload(&who.caller))?;
+    super::submission_files::may_upload(sql, &who.caller, row["for_task"].as_str())?;
     Ok((identity, who))
 }
 

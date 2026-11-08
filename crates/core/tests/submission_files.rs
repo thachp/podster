@@ -234,15 +234,15 @@ fn pinned(id: &str) -> PinnedFile {
 #[test]
 fn approval_passes_when_every_pinned_file_is_unchanged_and_ready() {
     let current = [file("obj_a", Ready), file("obj_b", Ready)];
-    assert_eq!(
-        check_approval(&[pinned("obj_a"), pinned("obj_b")], &current),
-        Ok(())
-    );
+    let proof = check_approval(4, &[pinned("obj_a"), pinned("obj_b")], &current).unwrap();
+    // The proof names the submission and how many files it checked, which `decide` compares with the task.
+    assert_eq!((proof.submission_no(), proof.count()), (4, 2));
 }
 
 #[test]
 fn a_submission_with_no_files_can_be_approved_as_today() {
-    assert_eq!(check_approval(&[], &[]), Ok(()));
+    let proof = check_approval(1, &[], &[]).unwrap();
+    assert_eq!((proof.submission_no(), proof.count()), (1, 0));
 }
 
 #[test]
@@ -250,12 +250,12 @@ fn a_file_blocked_after_submitting_stops_approval() {
     // A late report can block a Ready file, and the files can't be read until then.
     let current = [file("obj_a", Ready), file("obj_b", Blocked)];
     assert_eq!(
-        check_approval(&[pinned("obj_a"), pinned("obj_b")], &current),
+        check_approval(1, &[pinned("obj_a"), pinned("obj_b")], &current),
         Err(A::NotReady)
     );
     for state in [Uploading, Scanning, Failed] {
         assert_eq!(
-            check_approval(&[pinned("obj_a")], &[file("obj_a", state)]),
+            check_approval(1, &[pinned("obj_a")], &[file("obj_a", state)]),
             Err(A::NotReady),
             "{state:?}"
         );
@@ -269,20 +269,20 @@ fn a_removed_file_stops_approval() {
         ..file("obj_a", Ready)
     };
     assert_eq!(
-        check_approval(&[pinned("obj_a")], &[removed]),
+        check_approval(1, &[pinned("obj_a")], &[removed]),
         Err(A::Removed)
     );
 }
 
 #[test]
 fn anything_but_the_pinned_bytes_fails_closed() {
-    assert_eq!(check_approval(&[pinned("obj_a")], &[]), Err(A::Changed));
+    assert_eq!(check_approval(1, &[pinned("obj_a")], &[]), Err(A::Changed));
     let other_hash = RoomFile {
         sha256: OTHER_HASH,
         ..file("obj_a", Ready)
     };
     assert_eq!(
-        check_approval(&[pinned("obj_a")], &[other_hash]),
+        check_approval(1, &[pinned("obj_a")], &[other_hash]),
         Err(A::Changed)
     );
     let other_size = RoomFile {
@@ -290,7 +290,7 @@ fn anything_but_the_pinned_bytes_fails_closed() {
         ..file("obj_a", Ready)
     };
     assert_eq!(
-        check_approval(&[pinned("obj_a")], &[other_size]),
+        check_approval(1, &[pinned("obj_a")], &[other_size]),
         Err(A::Changed)
     );
 }
@@ -303,7 +303,7 @@ fn changed_bytes_say_changed_even_when_also_not_ready() {
             ..file("obj_a", state)
         };
         assert_eq!(
-            check_approval(&[pinned("obj_a")], &[both]),
+            check_approval(1, &[pinned("obj_a")], &[both]),
             Err(A::Changed),
             "{state:?}"
         );
@@ -314,5 +314,5 @@ fn changed_bytes_say_changed_even_when_also_not_ready() {
 fn approval_ignores_files_the_submission_doesnt_name() {
     // A blocked file on an earlier submission, or another task, says nothing about this one.
     let current = [file("obj_a", Ready), file("obj_old", Blocked)];
-    assert_eq!(check_approval(&[pinned("obj_a")], &current), Ok(()));
+    assert!(check_approval(1, &[pinned("obj_a")], &current).is_ok());
 }

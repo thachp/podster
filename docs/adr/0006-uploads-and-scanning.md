@@ -74,10 +74,10 @@ The spike had to show, on staging, that a 100 MB file streams through web, gatew
 
 Extend `artifact` and `submission` instead of adding the `artifact_version` table the architecture first drew. Submissions are already numbered and immutable, so a submission number is the version.
 
-- `artifact` gains an optional `object_id`, and a row has either that or a link.
+- **Built differently in step 6:** files go in a new `submission_file` table, not an optional `object_id` on `artifact`. `artifact.uri` is `NOT NULL`, and SQLite can't relax that, so a file row would have needed an empty link that every existing reader would serve. Each row pins the file's SHA-256 and size when it's submitted, and links stay as they were.
 - `verify_task` already names `submission_no`. It also records the approved submission on the task, in the same transaction. This part is built, as `approved_submission_no`, and needed no storage. A task completed before it has its latest submission recorded, the only one that could have been approved.
-- `crates/core` gets "all files clean" through its existing `observed` input, and refuses approval without it. Core stays pure.
-- An object can be attached only by the person or agent who uploaded it, on a task in the same room.
+- `crates/core` gets "all files clean" through its existing `observed` input, and refuses approval without it. Core stays pure. **As built:** the task records how many files its latest submission named, and `Verify` on one with files needs proof that only `check_approval` can make, so a room that skips the check is refused. The check wants every pinned file unchanged, not removed and Ready, because a late report can block a Ready file.
+- An object can be attached only by the person or agent who uploaded it, on a task in the same room. **As built, narrower:** only a file uploaded for that task, through `create_upload`'s `task_id`, which only the task's assignee can start, a guest included, while the task is accepted ([decision 96](../spec/PRODUCT.md#decisions-needed)). Until a submission names it, only its uploader sees it, and if none does it's cleared 24 hours after the task leaves Accepted ([decision 98](../spec/PRODUCT.md#decisions-needed)): `task.left_accepted_at` starts that clock for step 8's sweep. A file must be Ready to be submitted. The reviewer named on a task reads its submitted files whatever their scope ([decision 97](../spec/PRODUCT.md#decisions-needed)).
 
 A later submission starts unreviewed, so an approved badge can't move onto different content.
 

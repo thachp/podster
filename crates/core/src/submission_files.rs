@@ -136,15 +136,34 @@ pub fn pin_submission_files(
     Ok(pinned)
 }
 
-/// Whether the files of the submission being approved still allow it. `pinned` is every file that submission names, and
-/// `current` is what the room reads for them now. Run it with `decide`'s `Command::Verify`, in the same transaction, for the
-/// same submission number. A submission with no files passes, as it does today.
+/// Proof that [`check_approval`] passed for one submission's files. Its fields are private, so nothing else can make one,
+/// and `decide` refuses `Verify` on a submission with files without it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApprovedFiles {
+    submission_no: u32,
+    count: usize,
+}
+
+impl ApprovedFiles {
+    pub fn submission_no(&self) -> u32 {
+        self.submission_no
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+}
+
+/// Whether the files of the submission being approved still allow it. `pinned` is every file submission `submission_no`
+/// names, and `current` is what the room reads for them now. Run it before `decide`'s `Command::Verify`, in the same
+/// transaction, and pass the proof in `Observed::approved_files`.
 ///
 /// Requesting changes doesn't run this: a reviewer can always send work back, including because a file was blocked.
 pub fn check_approval(
+    submission_no: u32,
     pinned: &[PinnedFile],
     current: &[RoomFile<'_>],
-) -> Result<(), ApprovalFileRefusal> {
+) -> Result<ApprovedFiles, ApprovalFileRefusal> {
     for file in pinned {
         let now = current
             .iter()
@@ -160,5 +179,8 @@ pub fn check_approval(
             return Err(ApprovalFileRefusal::NotReady);
         }
     }
-    Ok(())
+    Ok(ApprovedFiles {
+        submission_no,
+        count: pinned.len(),
+    })
 }

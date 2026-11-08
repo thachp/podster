@@ -78,6 +78,7 @@ mod objects;
 mod plan;
 mod planned;
 mod roles;
+mod submission_files;
 
 /// The caller as this room knows them. `org` comes from stored state, not the request.
 struct Participant {
@@ -501,8 +502,20 @@ fn handle_task_command(
         } => Some((artifacts.clone(), note.clone())),
         _ => None,
     };
-    let decision = decide(&task, &caller.id, command, &Observed::default())
-        .map_err(|e| ApiError::from_core(&e))?;
+    // Files are checked against the room before `decide`, which counts them, and refuses to approve any without the check's proof.
+    let mut observed = Observed::default();
+    let files = match &command {
+        Command::Submit { artifacts, .. } => {
+            submission_files::prepare(sql, caller, &task, body, artifacts.len())?
+        }
+        _ => vec![],
+    };
+    observed.submission_files = files.len();
+    if let Command::Verify { submission_no, .. } = &command {
+        observed.approved_files = submission_files::approval(sql, &task, *submission_no)?;
+    }
+    let decision =
+        decide(&task, &caller.id, command, &observed).map_err(|e| ApiError::from_core(&e))?;
     save_task(sql, &decision.task, now)?;
     if let Some((artifacts, note)) = submission {
         exec(sql, "INSERT INTO submission (task_id, submission_no, task_version, note, commit_sha, submitted_by, submitted_org, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", vec![
@@ -515,6 +528,7 @@ fn handle_task_command(
                 artifact.uri.into(), artifact.label.into(), caller.id.as_str().into(), who.org.as_str().into(), now.into(),
             ])?;
         }
+        submission_files::record(sql, who, task_id, decision.task.submission_no, files, now)?;
     }
     record_decision(sql, &decision, task.status, &caller.id, now)?;
     Ok(task_json(&decision.task))
@@ -2371,8 +2385,9 @@ mod queries {
             .iter()
             .map(|r| marked(r, "actor_id", "actor_org"))
             .collect();
+        let files = super::submission_files::for_task(sql, who, &task, readable)?;
         Ok(json!({
-            "task": task_json(&task), "submissions": submissions, "artifacts": artifacts, "messages": messages, "history": history,
+            "task": task_json(&task), "submissions": submissions, "artifacts": artifacts, "files": files, "messages": messages, "history": history,
             // Says what's limited, so empty lists and null reasons aren't read as "none exist".
             "visible": { "submissions": if view.artifacts == ArtifactView::All { "all" } else { "own" }, "conversation": view.conversation },
         }))

@@ -53,8 +53,9 @@ The scanner is [ClamAV in Cloudflare Containers](../adr/0006-uploads-and-scannin
 | --- | --- |
 | Upload an input asset | Owner, admin, member and Coordinator |
 | See input assets | Anyone who sees the whole room. Someone limited to their own tasks sees only assets linked to those tasks |
-| Attach files to a submission | The task's assignee, as with `submit_task` today |
-| Read submitted files | As for submissions now: an artifact scope of `all` reads every one, and narrower scopes read their own |
+| Attach files to a submission | The task's assignee, as with `submit_task` today, guests and external agents included. They upload for that task while it's accepted, and those files count toward the room's quota during private pilots ([decision 96](PRODUCT.md#decisions-needed)). Guests still can't upload input assets. A file has to finish scanning before it's submitted |
+| See a file uploaded for a submission before it's submitted | Only its uploader, and through oversight its organization's admin, who gets name and status. If it's never submitted, it's cleared 24 hours after the task leaves Accepted ([decision 98](PRODUCT.md#decisions-needed)) |
+| Read submitted files | As for submissions now: an artifact scope of `all` reads every one, and narrower scopes read their own. The reviewer named on a task also reads that task's submitted files, even when limited to their own tasks ([decision 97](PRODUCT.md#decisions-needed)) |
 | See a file through read-only oversight | Its name and status, not its bytes |
 | Remove a file | Owner, admin or a Podster operator |
 

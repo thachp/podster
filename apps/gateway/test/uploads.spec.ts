@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { allowedPassthrough } from "../src/index";
 import { handleUpload } from "../src/uploads";
+import { CAPABILITIES, jsonSchema, toApiCall } from "../src/capabilities";
 
 const PATH = "/v1/uploads/ws_1/obj_1";
 const ask = async (init: RequestInit, { path = PATH, allowed = true, api = (async () => new Response('{"ok":true}', { status: 200 })) as (r: Request) => Promise<Response> } = {}) => {
@@ -163,5 +164,22 @@ describe("the upload path", () => {
     expect(refused.response?.status).toBe(422);
     const down = await ask({ method: "PUT", body: "x", headers: { authorization: TOKEN } }, { api: async () => { throw new Error("gone"); } });
     expect(down.response?.status).toBe(502);
+  });
+});
+
+describe("files on a submission, as capabilities", () => {
+  const capability = (name: string) => CAPABILITIES.find((c) => c.name === name)!;
+
+  it("create_upload passes task_id on, and only the fields it defines", () => {
+    const call = toApiCall(capability("create_upload"), { workspace_id: "w", name: "a.txt", size: 3, sha256: "0".repeat(64), task_id: "tsk_1", uploaded_by: "evil", idempotency_key: "k" });
+    expect(JSON.parse(call.body!)).toEqual({ name: "a.txt", size: 3, sha256: "0".repeat(64), task_id: "tsk_1" });
+  });
+
+  it("submit_task takes files as { id, label? } and passes them on", () => {
+    const schema = jsonSchema(capability("submit_task")) as any;
+    expect(schema.properties.files.items.properties).toEqual({ id: { type: "string" }, label: { type: "string" } });
+    expect(schema.properties.files.items.required).toEqual(["id"]);
+    const call = toApiCall(capability("submit_task"), { workspace_id: "w", task_id: "t", version: 2, files: [{ id: "obj_1" }, { id: "obj_2", label: "Report" }], idempotency_key: "k" });
+    expect(JSON.parse(call.body!)).toEqual({ version: 2, files: [{ id: "obj_1" }, { id: "obj_2", label: "Report" }] });
   });
 });

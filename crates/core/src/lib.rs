@@ -99,6 +99,9 @@ pub struct Task {
     pub submission_commit: Option<String>,
     /// The submission a reviewer approved, set only by `Verify`. A completed task can't be submitted to again, so it can't move.
     pub approved_submission_no: Option<u32>,
+    /// How many stored files the latest submission names. `Verify` refuses a submission with files unless the room proves
+    /// it checked them, so a caller that skips the check fails closed.
+    pub submission_files: u32,
     /// Set when an assignee leaves after submitting, so a change request reopens the task.
     pub assignee_departed: bool,
     /// Set when a departed reviewer has no eligible fallback, until `set_reviewer` runs.
@@ -190,10 +193,16 @@ pub struct Artifact {
     pub label: String,
 }
 
-/// Provider state observed outside the task, such as a pull request's latest head.
+/// State observed outside the task, such as a pull request's latest head, or the room's files.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Observed {
     pub head_sha: Option<String>,
+    /// For `Submit`: how many stored files the submission names, already checked by `submission_files::pin_submission_files`.
+    /// They count toward the same limit as links, and a submission of files alone needs no link or note.
+    pub submission_files: usize,
+    /// For `Verify`: proof that `submission_files::check_approval` passed for this submission's files. Only that function
+    /// makes one, and a submission with files can't be approved without it.
+    pub approved_files: Option<submission_files::ApprovedFiles>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -269,6 +278,9 @@ pub enum CoreError {
     NotAllowed,
     /// `invalid_argument`
     InvalidArgument(&'static str),
+    /// `files_not_checked`: `Verify` on a submission with files, without proof they were checked. A bug in the caller, never
+    /// something a client can cause.
+    FilesNotChecked,
 }
 
 impl CoreError {
@@ -281,6 +293,7 @@ impl CoreError {
             CoreError::SelfSignOff => "self_sign_off",
             CoreError::NotAllowed => "not_allowed",
             CoreError::InvalidArgument(_) => "invalid_argument",
+            CoreError::FilesNotChecked => "files_not_checked",
         }
     }
 }
@@ -586,6 +599,7 @@ pub fn decide_create(actor: &str, new: NewTask) -> Result<Decision, CoreError> {
         submission_no: 0,
         submission_commit: None,
         approved_submission_no: None,
+        submission_files: 0,
         assignee_departed: false,
         needs_reviewer: false,
         needs_requester: false,
@@ -738,7 +752,7 @@ pub fn decide(
         } => {
             require_version(task, version)?;
             require_status(task, &[TaskStatus::Accepted])?;
-            if artifacts.len() > MAX_ARTIFACTS {
+            if artifacts.len().saturating_add(observed.submission_files) > MAX_ARTIFACTS {
                 return Err(CoreError::InvalidArgument("artifacts"));
             }
             for artifact in &artifacts {
@@ -748,7 +762,7 @@ pub fn decide(
                 return Err(CoreError::InvalidArgument("note"));
             }
             let has_note = note.as_deref().is_some_and(|n| !n.trim().is_empty());
-            if artifacts.is_empty() && !has_note {
+            if artifacts.is_empty() && observed.submission_files == 0 && !has_note {
                 return Err(CoreError::InvalidArgument("artifacts"));
             }
             require_reference(&commit_sha, "commit_sha")?;
@@ -763,6 +777,7 @@ pub fn decide(
             next.status = TaskStatus::Submitted;
             next.submission_no = task.submission_no.saturating_add(1);
             next.submission_commit = commit_sha;
+            next.submission_files = observed.submission_files as u32;
             vec![event(EventKind::TaskSubmitted, actor, [&task.reviewer])]
         }
         Command::RequestChanges {
@@ -803,6 +818,15 @@ pub fn decide(
             }
             if submission_no != task.submission_no {
                 return Err(CoreError::SubmissionMismatch);
+            }
+            if task.submission_files > 0 {
+                let checked = observed.approved_files.as_ref().is_some_and(|proof| {
+                    proof.submission_no() == submission_no
+                        && proof.count() == task.submission_files as usize
+                });
+                if !checked {
+                    return Err(CoreError::FilesNotChecked);
+                }
             }
             if task.has_linked_repository {
                 if commit_sha.is_none() {

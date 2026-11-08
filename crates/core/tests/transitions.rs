@@ -26,6 +26,7 @@ fn task(status: TaskStatus) -> Task {
         submission_no: 2,
         submission_commit: None,
         approved_submission_no: None,
+        submission_files: 0,
         assignee_departed: false,
         needs_reviewer: false,
         needs_requester: false,
@@ -409,6 +410,7 @@ fn linked_repositories_pin_the_reviewed_commit() {
     );
     let moved = Observed {
         head_sha: Some("def".into()),
+        ..Observed::default()
     };
     assert_eq!(
         decide(&linked, "asg", submit(Some("abc")), &moved).unwrap_err(),
@@ -440,7 +442,8 @@ fn linked_repositories_pin_the_reviewed_commit() {
             "rev",
             verify(Some("abc")),
             &Observed {
-                head_sha: Some("abc".into())
+                head_sha: Some("abc".into()),
+                ..Observed::default()
             }
         )
         .unwrap()

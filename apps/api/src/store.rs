@@ -156,6 +156,10 @@ CREATE TABLE expected_output_version (seq INTEGER PRIMARY KEY AUTOINCREMENT, out
 CREATE INDEX expected_output_history ON expected_output_version (output_id, seq);
 ALTER TABLE task ADD COLUMN expected_output_id TEXT;
 CREATE INDEX task_expected_output ON task (expected_output_id) WHERE expected_output_id IS NOT NULL;
+", "
+ALTER TABLE stored_object ADD COLUMN submitted_at INTEGER;
+UPDATE stored_object SET submitted_at = (SELECT MIN(s.created_at) FROM submission_file s WHERE s.object_id = stored_object.id) WHERE EXISTS (SELECT 1 FROM submission_file s WHERE s.object_id = stored_object.id);
+CREATE INDEX stored_object_unsubmitted ON stored_object (for_task) WHERE for_task IS NOT NULL AND submitted_at IS NULL AND state <> 'removed';
 "];
 
 pub fn int(value: &Value) -> i64 {

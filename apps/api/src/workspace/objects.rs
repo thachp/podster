@@ -442,8 +442,9 @@ fn expire_overdue_scans(sql: &SqlStorage, now: i64) -> R<()> {
         let next = expire_scan(ObjectState::Scanning, int(&row["scanning_since"]), now);
         exec(
             sql,
-            "UPDATE stored_object SET state = ? WHERE id = ?",
-            vec![next.name().into(), id.as_str().into()],
+            "UPDATE stored_object SET state = ?, scanned_at = ? WHERE id = ?",
+            // When it was found to have run out of time is its verdict, so a scan noticed late still gets its full 7 days.
+            vec![next.name().into(), now.into(), id.as_str().into()],
         )?;
         let new = json!({ "state": next.name() }).to_string();
         audit_file(

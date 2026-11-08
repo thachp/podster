@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { clientCommand } from "@/lib/gateway/client";
 import { FIELD_CLASS } from "./task-bits";
 import { RespondToOffer } from "./task-acceptance";
+import { ChangeOutput } from "./task-output";
 import { SubmitWork } from "./task-files";
 import { approvalBlocker, definiteRefusal, verifyProblem } from "./task-files-model";
 import { asConflict, changedSince, changeProblem, draftOf, flagged, isArchivedRoom, LIMITS, newRequesterChoices, newReviewerChoices, ownWords, rebaseDraft, reoffers, taskPatch, textNameOf, tooLong, viewerActions, type Names, type Task, type TaskDraft } from "./task-model";
@@ -60,7 +61,7 @@ export function TaskActions({ api, me, names, role, onNotice, savedEdit, returnF
       </section>
     );
   }
-  if (!can.review && !can.submit && !can.respond && !can.cancel && !can.assign && !can.edit && !can.setReviewer && !can.setRequester) {
+  if (!can.review && !can.submit && !can.respond && !can.setOutput && !can.cancel && !can.assign && !can.edit && !can.setReviewer && !can.setRequester) {
     return (
       <>
         {savedEdit.current ? <UnsavableEdit savedEdit={savedEdit} /> : null}
@@ -88,6 +89,7 @@ export function TaskActions({ api, me, names, role, onNotice, savedEdit, returnF
         </Button>
       ) : null}
       {/* Saving either one starts these controls afresh, and a draft shouldn't vanish because of it. */}
+      {can.setOutput && !api.dirty ? <ChangeOutput api={api} onNotice={onNotice} taskPath={taskPath} /> : null}
       {(can.setReviewer || can.setRequester) && !api.dirty ? <ChangePeople api={api} me={me} names={names} role={role} onNotice={onNotice} /> : null}
       {task.status === "submitted" && (task.requester === me || role === "owner" || role === "admin") ? <p className="text-sm text-muted-foreground">Submitted work can't be edited. Request changes first.</p> : null}
       {can.cancel ? <CancelTask api={api} onNotice={onNotice} /> : null}

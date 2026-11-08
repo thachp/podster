@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { MAX_TRIES } from "../src/fair";
 
 /** Plain JSON once comments are gone. No value here has `//` in it. */
 const config = JSON.parse(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8").replace(/^\s*\/\/.*$/gm, ""));
@@ -39,10 +40,15 @@ describe("what the scanner can reach", () => {
     for (const scope of [config, config.env.staging]) {
       expect(scope.containers[0].instance_type).toBe("standard-1");
       const [main, dead] = scope.queues.consumers;
-      expect(main).toMatchObject({ max_batch_size: 1, max_concurrency: 1 });
+      // One batch at a time, whose files are scanned one at a time. A batch is how far ahead it looks to share turns between rooms.
+      expect(main).toMatchObject({ max_batch_size: 100, max_concurrency: 1 });
+      // Jobs a batch didn't reach go back on the same queue, and nowhere else.
+      expect(scope.queues.producers).toEqual([{ binding: "SCAN", queue: main.queue }]);
       expect(main.dead_letter_queue).toBe(dead.queue);
-      // Retries end inside the hour the room allows.
+      // One message's retries end inside the hour the room allows. A job sent back to share turns is a new message, so its tries
+      // travel in the body and end at the same count (src/fair.ts).
       expect((main.max_retries * main.retry_delay) / 60).toBeLessThan(60);
+      expect(main.max_retries).toBe(MAX_TRIES);
     }
   });
 });

@@ -9,7 +9,7 @@
   "vars": { "SCANNER_SECRET": "fake-local-secret" },
   "queues": {
     "producers": [{ "binding": "SCAN", "queue": "podster-scan-local" }],
-    "consumers": [{ "queue": "podster-scan-local", "max_batch_size": 1, "max_batch_timeout": 1, "max_concurrency": 1, "max_retries": 1, "retry_delay": 1 }]
+    "consumers": [{ "queue": "podster-scan-local", "max_batch_size": 100, "max_batch_timeout": 1, "max_concurrency": 1, "max_retries": 1, "retry_delay": 1 }]
   },
   "containers": [{ "class_name": "ClamAV", "image": "../../container/Dockerfile", "image_build_context": "../../container", "instance_type": "standard-1", "max_instances": 1 }],
   "durable_objects": { "bindings": [{ "name": "CLAMAV", "class_name": "ClamAV" }] },

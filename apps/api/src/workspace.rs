@@ -2338,7 +2338,8 @@ mod queries {
         })
     }
 
-    pub fn get_task(sql: &SqlStorage, who: &Participant, id: &str) -> R<Value> {
+    /// `oversight` narrows what it shows of files to name and status, for an organization's admin reading as their agent.
+    pub fn get_task(sql: &SqlStorage, who: &Participant, id: &str, oversight: bool) -> R<Value> {
         let task = load_task(sql, id)?.ok_or_else(ApiError::task_not_found)?;
         ApiError::from_verdict(authorize_task(&who.caller, &task, TaskAction::Read))?;
         let view = task_view(&who.caller, &task);
@@ -2389,7 +2390,7 @@ mod queries {
             .iter()
             .map(|r| marked(r, "actor_id", "actor_org"))
             .collect();
-        let files = super::submission_files::for_task(sql, who, &task)?;
+        let files = super::submission_files::for_task(sql, who, &task, oversight)?;
         Ok(json!({
             "task": task_json(&task), "submissions": submissions, "artifacts": artifacts, "files": files, "messages": messages, "history": history,
             // Says what's limited, so empty lists and null reasons aren't read as "none exist".
@@ -3493,7 +3494,7 @@ impl Workspace {
                 };
                 return match rest {
                     [] => queries::list_tasks(&sql, &view.caller, &url),
-                    [task] => queries::get_task(&sql, &view, task),
+                    [task] => queries::get_task(&sql, &view, task, true),
                     [task, "messages"] => queries::list_messages(&sql, &view, task, &url),
                     _ => Err(ApiError::not_found()),
                 };
@@ -3545,7 +3546,7 @@ impl Workspace {
                 ["brief"] => queries::get_brief(&sql, &who),
                 ["activity"] => queries::list_activity(&sql, &who, &url),
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
-                ["tasks", id] => queries::get_task(&sql, &who, id),
+                ["tasks", id] => queries::get_task(&sql, &who, id, false),
                 ["tasks", id, "messages"] => queries::list_messages(&sql, &who, id, &url),
                 ["events"] => queries::list_events(&sql, &who.caller, &url),
                 ["audit"] => queries::list_audit(&sql, &who.caller, &url),

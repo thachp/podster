@@ -30,7 +30,7 @@ const IDLE_LIMIT_MS: u64 = if cfg!(feature = "failpoints") {
 } else {
     60_000
 };
-const TOTAL_LIMIT_MS: u64 = if cfg!(feature = "failpoints") {
+pub(crate) const TOTAL_LIMIT_MS: u64 = if cfg!(feature = "failpoints") {
     8_000
 } else {
     30 * 60 * 1000

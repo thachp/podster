@@ -51,9 +51,13 @@ pub(super) fn may_upload(sql: &SqlStorage, caller: &Caller, for_task: Option<&st
     Ok(())
 }
 
-/// Refuses another upload for a task once the uploader holds as many for it as a submission could name: files no submission
-/// names yet, counting uploads still arriving whose grant hasn't ended. Without it, an assignee could fill the room's quota
-/// while the task stays accepted. A removed file holds no space, so it doesn't count.
+/// Refuses another upload for a task once the uploader holds as many for it as a submission could name (decision 99): files
+/// no submission names yet, and uploads that can still arrive. Without it, an assignee could fill the room's quota while the
+/// task stays accepted.
+///
+/// An upload can still arrive until its grant ends, or, once an attempt has started, until that attempt's own limit after the
+/// grant, since an attempt started near the end keeps going. A blocked or failed file can never be submitted, so it doesn't
+/// count, though it still counts toward the room's quota. Nor does a removed one.
 pub(super) fn require_room_for_another(
     sql: &SqlStorage,
     uploader: &str,
@@ -62,10 +66,17 @@ pub(super) fn require_room_for_another(
 ) -> R<()> {
     let held = rows(
         sql,
-        "SELECT count(*) AS n FROM stored_object o WHERE o.for_task = ? AND o.uploaded_by = ? AND o.state <> 'removed'
-            AND (o.state <> 'uploading' OR o.upload_expires_at > ?)
+        "SELECT count(*) AS n FROM stored_object o WHERE o.for_task = ? AND o.uploaded_by = ?
+            AND o.state NOT IN ('removed', 'blocked', 'failed')
+            AND (o.state <> 'uploading' OR o.upload_expires_at > ? OR (o.attempt_id IS NOT NULL AND o.upload_expires_at + ? > ?))
             AND NOT EXISTS (SELECT 1 FROM submission_file f WHERE f.object_id = o.id)",
-        vec![task_id.into(), uploader.into(), now.into()],
+        vec![
+            task_id.into(),
+            uploader.into(),
+            now.into(),
+            (crate::objects::TOTAL_LIMIT_MS as i64).into(),
+            now.into(),
+        ],
     )?;
     let held = held.first().map_or(0, |row| int(&row["n"])).max(0) as usize;
     if fits_unsubmitted_cap(held) {
@@ -246,7 +257,14 @@ pub(super) fn file_view(sql: &SqlStorage, caller: &Caller, row: &Value) -> R<Fil
 /// The files of a task's submissions that the caller may read, for `get_task`. Each passes the same view a download does, so
 /// files follow the artifact scope as submissions and links do, and the reviewer named on the task also gets them
 /// (decision 97). A submission's note and links stay with the artifact scope.
-pub(super) fn for_task(sql: &SqlStorage, who: &Participant, task: &Task) -> R<Vec<Value>> {
+///
+/// Through oversight, `who` is the agent's view, narrowed to name and status (decision 58): no label, hash, size or path.
+pub(super) fn for_task(
+    sql: &SqlStorage,
+    who: &Participant,
+    task: &Task,
+    oversight: bool,
+) -> R<Vec<Value>> {
     let found = rows(sql, "SELECT f.task_id, f.submission_no, f.object_id, f.sha256, f.size, f.label, f.submitted_by, f.submitted_org, f.created_at,
         o.name, o.media_type, o.state FROM submission_file f LEFT JOIN stored_object o ON o.id = f.object_id
         WHERE f.task_id = ? ORDER BY f.submission_no, f.created_at, f.object_id", vec![task.id.as_str().into()])?;
@@ -261,8 +279,20 @@ pub(super) fn for_task(sql: &SqlStorage, who: &Participant, task: &Task) -> R<Ve
             row["submitted_by"].as_str().unwrap_or_default(),
             true,
         );
-        if view == FileView::Hidden {
-            continue;
+        let view = if oversight {
+            view.for_oversight()
+        } else {
+            view
+        };
+        match view {
+            FileView::Hidden => continue,
+            FileView::NameAndStatus => {
+                out.push(json!({
+                    "id": id, "submission_no": row["submission_no"], "name": row["name"], "state": row["state"], "download_path": null,
+                }));
+                continue;
+            }
+            FileView::Full => {}
         }
         let download_path = state
             .is_some_and(|state| may_download(view, state))

@@ -105,17 +105,16 @@ fn output_json(row: &Value) -> Value {
 pub(super) fn handle_define(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) -> R<Value> {
     ApiError::from_verdict(authorize_manage_outputs(caller))?;
     let (title, description) = text_fields(body)?;
-    let existing = rows(
+    let counts = rows(
         sql,
-        "SELECT count(*) AS n FROM expected_output WHERE removed_at IS NULL",
+        "SELECT count(*) AS ever, COALESCE(SUM(CASE WHEN removed_at IS NULL THEN 1 ELSE 0 END), 0) AS live FROM expected_output",
         vec![],
-    )?
-    .first()
-    .map_or(0, |row| int(&row["n"]))
-    .max(0) as usize;
+    )?;
+    let count = |name: &str| counts.first().map_or(0, |row| int(&row[name])).max(0) as usize;
     decide_define(
         room_archived(sql)?,
-        existing,
+        count("live"),
+        count("ever"),
         &title,
         description.as_deref(),
     )
@@ -304,7 +303,7 @@ pub(super) fn handle_set_task_output(
 
 fn task_with_output(sql: &SqlStorage, task: &Task) -> R<Value> {
     let mut out = task_json(task);
-    out["expected_output"] = of_task(sql, &task.id)?;
+    out["expected_output"] = of_task(sql, &task.id, false)?;
     Ok(out)
 }
 
@@ -341,8 +340,9 @@ pub(super) fn record_approval(sql: &SqlStorage, task: &Task, approver: &str, now
 }
 
 /// What `get_task` shows of the output a task names: its ID and title, and whether it was removed since. Anyone who can read
-/// the task can see every output's title anyway.
-pub(super) fn of_task(sql: &SqlStorage, task_id: &str) -> R<Value> {
+/// the task is in the room and can see every output's title anyway. An organization's admin overseeing its agent isn't in the
+/// room, so through oversight it gets the ID and `removed`, never the title.
+pub(super) fn of_task(sql: &SqlStorage, task_id: &str, oversight: bool) -> R<Value> {
     let Some(id) = named_by(sql, task_id)? else {
         return Ok(Value::Null);
     };
@@ -353,7 +353,11 @@ pub(super) fn of_task(sql: &SqlStorage, task_id: &str) -> R<Value> {
     )?
     .first()
     .map_or(Value::Null, |row| {
-        json!({ "id": row["id"], "title": row["title"], "removed": !row["removed_at"].is_null() })
+        let mut out = json!({ "id": row["id"], "removed": !row["removed_at"].is_null() });
+        if !oversight {
+            out["title"] = row["title"].clone();
+        }
+        out
     }))
 }
 

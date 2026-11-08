@@ -26,6 +26,20 @@ fn view_of(sql: &SqlStorage, caller: &Caller, row: &Value) -> R<FileView> {
     super::submission_files::file_view(sql, caller, row)
 }
 
+/// Whether the caller may know the file exists at all.
+pub(super) fn can_see(sql: &SqlStorage, caller: &Caller, id: &str) -> R<bool> {
+    let Some(row) = rows(
+        sql,
+        "SELECT id, uploaded_by, for_task FROM stored_object WHERE id = ?",
+        vec![id.into()],
+    )?
+    .into_iter()
+    .next() else {
+        return Ok(false);
+    };
+    Ok(view_of(sql, caller, &row)? != FileView::Hidden)
+}
+
 /// An unknown state answers no, so a later state, such as a removed file, can't be downloaded by being new.
 fn can_download(view: FileView, row: &Value) -> bool {
     row["state"]
@@ -34,18 +48,30 @@ fn can_download(view: FileView, row: &Value) -> bool {
         .is_some_and(|state| may_download(view, state))
 }
 
-pub(super) fn read_file(sql: &SqlStorage, who: &Participant, id: &str) -> R<Value> {
-    let row = file_row(sql, id)?;
-    let view = view_of(sql, &who.caller, &row)?;
+/// A file as the caller may see it, with its download path only when they may have it now, and, for an input asset, the linked
+/// tasks they can see. `None` when it's hidden from them, which a route answers as if it didn't exist. `row` needs what
+/// `file_row` selects.
+pub(super) fn file_json(sql: &SqlStorage, caller: &Caller, row: &Value) -> R<Option<Value>> {
+    let id = row["id"].as_str().unwrap_or_default();
+    let view = view_of(sql, caller, row)?;
     if view == FileView::Hidden {
-        return Err(file_not_found());
+        return Ok(None);
     }
-    let download_path = can_download(view, &row)
+    let download_path = can_download(view, row)
         .then(|| objects::room_id(sql).map(|room| format!("/v1/files/{room}/{id}")));
-    Ok(json!({
+    let linked = if row["for_task"].is_null() {
+        asset_links::visible_links(caller, &asset_links::linked_tasks(sql, id)?)
+    } else {
+        Vec::new()
+    };
+    Ok(Some(json!({
         "id": row["id"], "name": row["name"], "size": row["size"], "sha256": row["sha256"], "media_type": row["media_type"],
-        "state": row["state"], "download_path": download_path.transpose()?,
-    }))
+        "state": row["state"], "download_path": download_path.transpose()?, "linked_tasks": linked,
+    })))
+}
+
+pub(super) fn read_file(sql: &SqlStorage, who: &Participant, id: &str) -> R<Value> {
+    file_json(sql, &who.caller, &file_row(sql, id)?)?.ok_or_else(file_not_found)
 }
 
 /// An organization's admin gets the name and status of a file its agent can see, and no way to the bytes (decision 58). Being in the

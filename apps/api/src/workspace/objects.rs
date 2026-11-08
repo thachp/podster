@@ -26,7 +26,7 @@ fn token_hash(token: &str) -> String {
 
 /// Every file kept, and every upload whose reservation hasn't ended, leaving out `except`. One that expired reserves nothing, even
 /// before it's cleared away.
-fn room_used(sql: &SqlStorage, now: i64, except: &str) -> R<u64> {
+pub(super) fn room_used(sql: &SqlStorage, now: i64, except: &str) -> R<u64> {
     let found = rows(
         sql,
         "SELECT COALESCE(SUM(size), 0) AS used FROM stored_object WHERE (state <> 'uploading' OR upload_expires_at > ?) AND id <> ?",

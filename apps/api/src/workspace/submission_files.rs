@@ -234,9 +234,10 @@ pub(super) fn approval(
 /// `None` for a file uploaded for a task that no longer exists, which nothing can see.
 pub(super) fn file_view(sql: &SqlStorage, caller: &Caller, row: &Value) -> R<FileView> {
     let Some(task_id) = row["for_task"].as_str() else {
-        // A file can't be linked to a task until step 5, so `linked_tasks` is empty, and someone limited to their own tasks
-        // sees no input asset. When links arrive they go here, read from current state.
-        return Ok(input_asset_view(caller, &[]));
+        // An input asset is seen through the tasks it's linked to now (decision 103), read from current state on every use.
+        let linked = super::asset_links::linked_tasks(sql, row["id"].as_str().unwrap_or_default())?;
+        let refs: Vec<&Task> = linked.iter().collect();
+        return Ok(input_asset_view(caller, &refs));
     };
     let Some(task) = load_task(sql, task_id)? else {
         return Ok(FileView::Hidden);

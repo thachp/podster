@@ -134,6 +134,9 @@ CREATE TABLE submission_file (task_id TEXT NOT NULL, submission_no INTEGER NOT N
 CREATE INDEX submission_file_object ON submission_file (object_id);
 ALTER TABLE task ADD COLUMN left_accepted_at INTEGER;
 ", "
+CREATE TABLE asset_link (task_id TEXT NOT NULL, object_id TEXT NOT NULL, linked_by TEXT NOT NULL, linked_at INTEGER NOT NULL, PRIMARY KEY (task_id, object_id)) WITHOUT ROWID;
+CREATE INDEX asset_link_object ON asset_link (object_id, task_id);
+", "
 CREATE TABLE expected_output (id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL, removed_at INTEGER, removed_by TEXT, current_task_id TEXT, current_submission_no INTEGER, current_approved_at INTEGER);
 CREATE INDEX expected_output_shown ON expected_output (created_at, id) WHERE removed_at IS NULL;

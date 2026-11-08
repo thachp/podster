@@ -95,22 +95,22 @@ fn file(id: &'static str, state: ObjectState, removed: bool) -> RoomFile<'static
 
 #[test]
 fn an_output_needs_a_title_within_limits() {
-    assert_eq!(decide_define(false, 0, "Final report", None), Ok(()));
+    assert_eq!(decide_define(false, 0, 0, "Final report", None), Ok(()));
     assert_eq!(
-        decide_define(false, 0, "Final report", Some("A PDF for the board")),
+        decide_define(false, 0, 0, "Final report", Some("A PDF for the board")),
         Ok(())
     );
     assert_eq!(
-        decide_define(false, 0, "   ", None),
+        decide_define(false, 0, 0, "   ", None),
         Err(R::InvalidArgument("title"))
     );
     let long_title = "x".repeat(MAX_OUTPUT_TITLE_BYTES + 1);
     assert_eq!(
-        decide_define(false, 0, &long_title, None),
+        decide_define(false, 0, 0, &long_title, None),
         Err(R::InvalidArgument("title"))
     );
     assert_eq!(
-        decide_define(false, 0, &"x".repeat(MAX_OUTPUT_TITLE_BYTES), None),
+        decide_define(false, 0, 0, &"x".repeat(MAX_OUTPUT_TITLE_BYTES), None),
         Ok(())
     );
 }
@@ -118,12 +118,12 @@ fn an_output_needs_a_title_within_limits() {
 #[test]
 fn a_description_is_optional_but_not_blank_or_too_long() {
     assert_eq!(
-        decide_define(false, 0, "Report", Some("")),
+        decide_define(false, 0, 0, "Report", Some("")),
         Err(R::InvalidArgument("description"))
     );
     let long = "x".repeat(MAX_OUTPUT_DESCRIPTION_BYTES + 1);
     assert_eq!(
-        decide_define(false, 0, "Report", Some(&long)),
+        decide_define(false, 0, 0, "Report", Some(&long)),
         Err(R::InvalidArgument("description"))
     );
     assert_eq!(
@@ -132,7 +132,10 @@ fn a_description_is_optional_but_not_blank_or_too_long() {
     );
     let at_limit = "x".repeat(MAX_OUTPUT_DESCRIPTION_BYTES);
     assert_eq!(MAX_OUTPUT_DESCRIPTION_BYTES, 4096);
-    assert_eq!(decide_define(false, 0, "Report", Some(&at_limit)), Ok(()));
+    assert_eq!(
+        decide_define(false, 0, 0, "Report", Some(&at_limit)),
+        Ok(())
+    );
     assert_eq!(decide_edit(false, "Report", Some(&at_limit)), Ok(()));
 }
 
@@ -143,7 +146,7 @@ fn limits_count_bytes_not_characters() {
     assert_eq!(accented.chars().count(), 101);
     assert_eq!(accented.len(), 202);
     assert_eq!(
-        decide_define(false, 0, &accented, None),
+        decide_define(false, 0, 0, &accented, None),
         Err(R::InvalidArgument("title"))
     );
     assert_eq!(
@@ -151,10 +154,10 @@ fn limits_count_bytes_not_characters() {
         Err(R::InvalidArgument("title"))
     );
     // 100 of them is exactly 200 bytes, which fits.
-    assert_eq!(decide_define(false, 0, &"é".repeat(100), None), Ok(()));
+    assert_eq!(decide_define(false, 0, 0, &"é".repeat(100), None), Ok(()));
     let accented_description = "é".repeat(MAX_OUTPUT_DESCRIPTION_BYTES / 2 + 1);
     assert_eq!(
-        decide_define(false, 0, "Report", Some(&accented_description)),
+        decide_define(false, 0, 0, "Report", Some(&accented_description)),
         Err(R::InvalidArgument("description"))
     );
 }
@@ -162,18 +165,33 @@ fn limits_count_bytes_not_characters() {
 #[test]
 fn a_room_holds_at_most_the_limit() {
     assert_eq!(
-        decide_define(false, MAX_EXPECTED_OUTPUTS - 1, "One more", None),
+        decide_define(
+            false,
+            MAX_EXPECTED_OUTPUTS - 1,
+            MAX_EXPECTED_OUTPUTS - 1,
+            "One more",
+            None
+        ),
         Ok(())
     );
     assert_eq!(
-        decide_define(false, MAX_EXPECTED_OUTPUTS, "Too many", None),
+        decide_define(
+            false,
+            MAX_EXPECTED_OUTPUTS,
+            MAX_EXPECTED_OUTPUTS,
+            "Too many",
+            None
+        ),
         Err(R::TooMany)
     );
 }
 
 #[test]
 fn an_archived_room_refuses_every_change() {
-    assert_eq!(decide_define(true, 0, "Report", None), Err(R::RoomArchived));
+    assert_eq!(
+        decide_define(true, 0, 0, "Report", None),
+        Err(R::RoomArchived)
+    );
     assert_eq!(decide_edit(true, "Report", None), Err(R::RoomArchived));
     assert_eq!(decide_remove(true, 0, false), Err(R::RoomArchived));
     assert_eq!(
@@ -559,5 +577,15 @@ fn after_changes_are_requested_the_output_can_change_again() {
             true
         ),
         Ok(LinkChange::Set("out_2".into()))
+    );
+}
+
+#[test]
+fn a_room_can_define_at_most_500_ever_counting_removed_ones() {
+    assert_eq!(MAX_OUTPUTS_EVER_DEFINED, 500);
+    assert_eq!(decide_define(false, 0, 499, "One more", None), Ok(()));
+    assert_eq!(
+        decide_define(false, 0, 500, "Too many", None),
+        Err(R::TooMany)
     );
 }

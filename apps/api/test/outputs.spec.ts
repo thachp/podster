@@ -259,6 +259,18 @@ describe("naming an output on a task", () => {
     expect((await setOutput(OWNER, taskPath, second)).code).toBe("invalid_transition");
   });
 
+  it("gives an organization's admin overseeing its agent the output's ID, never its title", async () => {
+    const id = await room();
+    const output = await define(id, "Confidential plan");
+    const { task } = await acceptedTask(id, output);
+    const overseen = await api(orgAdmin(GUEST.org), "GET", `/v1/workspaces/${id}/agents/${GUEST.id}/tasks/${task}`);
+    expect(overseen.status, JSON.stringify(overseen.body)).toBe(200);
+    expect(overseen.body.expected_output).toEqual({ id: output, removed: false });
+    expect(JSON.stringify(overseen.body)).not.toContain("Confidential plan");
+    // The agent itself, in the room, gets the title.
+    expect((await api(GUEST, "GET", `/v1/workspaces/${id}/tasks/${task}`)).body.expected_output).toEqual({ id: output, title: "Confidential plan", removed: false });
+  });
+
   it("can be named when a task is created", async () => {
     const id = await room();
     const output = await define(id);

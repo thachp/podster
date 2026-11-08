@@ -678,7 +678,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
   - A Firefox and screen-reader pass on the M2 screens: asset upload, the Task Sheet's files and review, and the Artifacts tab.
   - The hour sweep on a deployment, and scanning under load. One run can't show the sweep, and every scan so far ran alone.
   - Per-room fairness in the scan queue. One Container takes scans in arrival order, so a few busy rooms can push other rooms' scans past the hour, and those files fail closed.
-  - A room whose migration fails. The migration rolls back and runs again on the room's next request, so each request to that room errors until a fixed release ships.
+  - A room whose migration fails. The migration rolls back and runs again on the room's next request, so every request to that room errors until a fixed release ships. That includes revocations and organization departures, since the fence and the departure route migrate the room first. So removing someone's access can't reach that room until then.
 
 ## File removal ruling and a wording fix, November 8, 2026
 

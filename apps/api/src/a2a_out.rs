@@ -224,6 +224,8 @@ pub async fn process(env: &Env, job: &Value) -> R<Outcome> {
         console_error!("{}", json!({ "event": "a2a.bad_job" }));
         return Ok(Outcome::Ack);
     }
+    // The claim checks the URL against the endpoint's current registration, one call before the send. The URL and version
+    // the room keeps on the attempt are a record of where it went, not the check. A retry claims again.
     let claim = claim_a2a_for(env, agent).await?;
     if claim["send"] != Value::Bool(true) {
         let reason = claim["reason"].as_str().unwrap_or("not_sent");
@@ -248,6 +250,14 @@ pub async fn process(env: &Env, job: &Value) -> R<Outcome> {
         &json!({ "attempt": attempt }),
     )
     .await?;
+    if begun["sent"] == Value::Bool(true) {
+        // Already recorded as sent by an earlier delivery whose later steps failed: only the report is left.
+        if let Some(version) = begun["version"].as_u64() {
+            report_a2a_for(env, agent, version, true).await?;
+        }
+        log("a2a.send", ws, attempt, agent, "already_sent");
+        return Ok(Outcome::Ack);
+    }
     if begun["send"] != Value::Bool(true) {
         let reason = begun["reason"].as_str().unwrap_or("not_sent");
         log("a2a.send", ws, attempt, agent, reason);
@@ -267,20 +277,22 @@ pub async fn process(env: &Env, job: &Value) -> R<Outcome> {
         &body,
     )
     .await;
-    let ok = matches!(sent, Sent::Answered(_));
-    // Counted first, so three failures switch the endpoint off even if the room can't be reached to record this one.
-    report_a2a_for(env, agent, version, ok).await?;
     let pinned = json!({ "attempt": attempt, "url": url, "version": version });
     match sent {
         Sent::Answered(remote) => {
+            // Recorded before anything else, so a failure after this can't send the offer again: a retry finds it sent and
+            // only reports it.
             let mut finish = pinned;
             finish["outcome"] = json!("sent");
             finish["remote_task_id"] = json!(remote);
             room(env, ws, crate::INTERNAL_A2A_FINISH, agent, &claim, &finish).await?;
+            report_a2a_for(env, agent, version, true).await?;
             log("a2a.send", ws, attempt, agent, "sent");
             Ok(Outcome::Ack)
         }
         Sent::Failed => {
+            // Counted first, so three failures switch the endpoint off even if the room can't be reached to record this one.
+            report_a2a_for(env, agent, version, false).await?;
             let mut finish = pinned;
             finish["outcome"] = json!("retry");
             room(env, ws, crate::INTERNAL_A2A_FINISH, agent, &claim, &finish).await?;
@@ -324,23 +336,51 @@ pub async fn consume(batch: MessageBatch<Value>, env: &Env) -> Result<()> {
     Ok(())
 }
 
-/// The dead-letter queue: jobs whose retries ran out. It logs their IDs and acknowledges them. The attempt stays as the room
-/// last recorded it.
-pub fn consume_dead(batch: MessageBatch<Value>) -> Result<()> {
+/// One dead-lettered job: the room ends its attempt as `dead_lettered`, unless it was already sent or stopped. Errors if the
+/// room can't be reached, so the dead-letter queue retries it.
+pub async fn dead_letter(env: &Env, job: &Value) -> R<()> {
+    let id = |name: &str| {
+        job[name]
+            .as_str()
+            .filter(|v| crate::valid_id(v))
+            .unwrap_or("")
+            .to_string()
+    };
+    let (ws, attempt, agent) = (id("ws"), id("attempt"), id("agent"));
+    console_error!(
+        "{}",
+        json!({ "event": "a2a.dead_letter", "workspace": ws, "attempt": attempt, "agent": agent })
+    );
+    if ws.is_empty() || attempt.is_empty() || agent.is_empty() {
+        return Ok(());
+    }
+    let end = json!({ "attempt": attempt, "outcome": "stopped", "reason": "dead_lettered" });
+    room(
+        env,
+        &ws,
+        crate::INTERNAL_A2A_FINISH,
+        &agent,
+        &json!({}),
+        &end,
+    )
+    .await?;
+    Ok(())
+}
+
+/// The dead-letter queue: jobs whose retries ran out. Each ends its attempt, logs its IDs and is acknowledged. One whose room
+/// can't be reached isn't acknowledged, so it's retried.
+pub async fn consume_dead(batch: MessageBatch<Value>, env: &Env) -> Result<()> {
     for message in batch.messages()? {
-        let body = message.body();
-        let id = |name: &str| {
-            body[name]
-                .as_str()
-                .filter(|v| crate::valid_id(v))
-                .unwrap_or("")
-                .to_string()
-        };
-        console_error!(
-            "{}",
-            json!({ "event": "a2a.dead_letter", "workspace": id("ws"), "attempt": id("attempt"), "agent": id("agent") })
-        );
-        message.ack();
+        match dead_letter(env, message.body()).await {
+            Ok(()) => message.ack(),
+            Err(error) => {
+                console_error!(
+                    "{}",
+                    json!({ "event": "a2a.dead_letter_failed", "code": error.code() })
+                );
+                message.retry();
+            }
+        }
     }
     Ok(())
 }

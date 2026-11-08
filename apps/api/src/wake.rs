@@ -104,7 +104,7 @@ async fn handle(env: &Env, message: Message<Value>) {
 pub async fn consume(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()> {
     let queue = batch.queue();
     if queue.starts_with("podster-a2a-dlq") {
-        return crate::a2a_out::consume_dead(batch);
+        return crate::a2a_out::consume_dead(batch, &env).await;
     }
     if queue.starts_with("podster-a2a") {
         return crate::a2a_out::consume(batch, &env).await;

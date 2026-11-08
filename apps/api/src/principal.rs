@@ -190,6 +190,9 @@ pub async fn claim_a2a_for(env: &Env, agent: &str) -> R<Value> {
 pub async fn report_a2a_for(env: &Env, agent: &str, version: u64, ok: bool) -> R<Value> {
     let body = json!({ "version": version, "ok": ok });
     let mut response = internal(env, agent, "/internal/a2a-endpoint-report", &body).await?;
+    if response.status_code() != 200 {
+        return Err(ApiError::internal("a2a report unavailable"));
+    }
     Ok(response.json().await?)
 }
 
@@ -1360,6 +1363,12 @@ impl Principal {
             }
             "/internal/a2a-endpoint-report" => {
                 let body: Value = req.json().await?;
+                // Tests can't otherwise make a report fail after a send. It fails once, then the table is gone.
+                #[cfg(feature = "failpoints")]
+                if !rows(&sql, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_fail_report'", vec![])?.is_empty() {
+                    exec(&sql, "DROP TABLE test_fail_report", vec![])?;
+                    return Err(ApiError::api(503, "unavailable"));
+                }
                 let (store, now) = (sql.clone(), now_ms());
                 return self.in_transaction(move || a2a_endpoint::report(&store, &body, now));
             }

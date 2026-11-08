@@ -132,12 +132,14 @@ pub(super) fn begin(sql: &SqlStorage, identity: &Identity, body: &Value, now: i6
     let Some(state) = attempt["state"].as_str().and_then(AttemptState::from_name) else {
         return Err(ApiError::internal("unknown attempt state"));
     };
+    // A retry of a job whose send was already recorded skips straight to what's left: reporting it to the Principal.
+    if state == AttemptState::Sent {
+        return Ok(
+            json!({ "send": false, "reason": "already_sent", "sent": true, "version": attempt["endpoint_version"] }),
+        );
+    }
     if state != AttemptState::Queued {
-        return Ok(no_send(if state == AttemptState::Sent {
-            "already_sent"
-        } else {
-            "ended"
-        }));
+        return Ok(no_send("ended"));
     }
     if room_archived(sql)? {
         stop(sql, id, "room_archived", now)?;
@@ -218,6 +220,14 @@ pub(super) fn finish(sql: &SqlStorage, identity: &Identity, body: &Value, now: i
             let remote = body["remote_task_id"].as_str();
             if remote.is_some_and(|r| !valid_remote_task_id(r)) {
                 return Err(ApiError::invalid_argument());
+            }
+            // Recording a send is the first thing done once the endpoint answers, so it's idempotent: the same answer again
+            // changes nothing, and a different remote task for an attempt already sent is refused.
+            if attempt["state"].as_str() == Some("sent") {
+                if attempt["remote_task_id"].as_str() == remote {
+                    return Ok(json!({ "state": "sent" }));
+                }
+                return Err(ApiError::api(409, "already_sent"));
             }
             pin(sql)?;
             exec(sql, "UPDATE a2a_attempt SET state = 'sent', remote_task_id = ?, lease_until = NULL, updated_at = ? WHERE id = ? AND state = 'queued'", vec![

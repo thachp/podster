@@ -306,6 +306,13 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
         return Ok(Response::from_json(&json!({ "outcome": outcome }))?);
     }
 
+    #[cfg(feature = "failpoints")]
+    if path == "/test/dead-letter-a2a" {
+        let body: Value = req.json().await?;
+        a2a_out::dead_letter(&env, &body).await?;
+        return Ok(Response::from_json(&json!({ "outcome": "ack" }))?);
+    }
+
     // The scanner has no identity in any room, and only its secret lets it say anything.
     if path == INTERNAL_SCAN_RESULT && req.method() == Method::Post {
         return objects::scan_result(req, env).await;

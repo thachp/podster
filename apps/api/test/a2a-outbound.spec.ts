@@ -312,4 +312,62 @@ describe("what sends nothing", () => {
     expect(await sentTo(other.url)).toEqual([]);
     expect((await attempts(room, task.id))[0].state).toBe("queued");
   });
+
+  it("records an answered send first, so a failure after it never sends the offer again", async () => {
+    const room = await newRoom();
+    const { agent, url } = await target(room);
+    const task = await offer(room, agent.id);
+    const [attempt] = await attempts(room, task.id);
+    const principal = BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(agent.id));
+    await runInDurableObject(principal, (_: any, state: any) => state.storage.sql.exec("CREATE TABLE test_fail_report (x)"));
+    expect((await consume(room, attempt)).status).toBe(500);
+    expect((await attempts(room, task.id))[0]).toMatchObject({ state: "sent", remote_task_id: `remote-${url.split("/").pop()}` });
+    // The lease has run out by the time the queue retries.
+    await roomSql(room, "UPDATE a2a_attempt SET lease_until = NULL WHERE id = ?", attempt.id);
+    expect((await consume(room, attempt)).body.outcome).toBe("ack");
+    expect(await sentTo(url)).toHaveLength(1);
+    expect((await must(agent, "GET", "/v1/inbox/a2a-endpoint")).consecutive_failures).toBe(0);
+  });
+
+  it("records the same answer again as nothing new, and refuses a different remote task", async () => {
+    const room = await newRoom();
+    const { agent, url } = await target(room);
+    const task = await offer(room, agent.id);
+    const [attempt] = await attempts(room, task.id);
+    await consume(room, attempt);
+    const finish = (remote: string) => roomStub(room).fetch("https://workspace/internal/a2a-finish", {
+      method: "POST",
+      headers: { "x-podster-caller": JSON.stringify({ id: agent.id, kind: "agent", org: ORG, gen: 1, workspace_id: room }) },
+      body: JSON.stringify({ attempt: attempt.id, outcome: "sent", remote_task_id: remote, url, version: 1 }),
+    });
+    expect((await finish(`remote-${url.split("/").pop()}`)).status).toBe(200);
+    expect((await finish("remote-other")).status).toBe(409);
+    expect((await attempts(room, task.id))[0].remote_task_id).toBe(`remote-${url.split("/").pop()}`);
+  });
+});
+
+describe("the dead-letter queue", () => {
+  const dead = async (body: object) => SELF.fetch("https://api.internal/test/dead-letter-a2a", { method: "POST", body: JSON.stringify(body) });
+
+  it("ends a queued attempt as dead_lettered, and leaves a sent one", async () => {
+    const room = await newRoom();
+    const failing = await target(room, `/fail-${++counter}`);
+    const t1 = await offer(room, failing.agent.id);
+    const [a1] = await attempts(room, t1.id);
+    await consume(room, a1);
+    expect((await dead({ ws: room, attempt: a1.id, agent: a1.agent_id })).status).toBe(200);
+    expect((await attempts(room, t1.id))[0]).toMatchObject({ state: "stopped", ended_reason: "dead_lettered" });
+    expect((await dead({ ws: room, attempt: a1.id, agent: a1.agent_id })).status).toBe(200);
+    const ok = await target(room);
+    const t2 = await offer(room, ok.agent.id);
+    const [a2] = await attempts(room, t2.id);
+    await consume(room, a2);
+    await dead({ ws: room, attempt: a2.id, agent: a2.agent_id });
+    expect((await attempts(room, t2.id))[0].state).toBe("sent");
+  });
+
+  it("leaves a job whose room can't answer to be retried", async () => {
+    const res = await dead({ ws: `ws_${"0".repeat(32)}`, attempt: `att_${"0".repeat(32)}`, agent: LEAD.id });
+    expect(res.status).toBe(500);
+  });
 });

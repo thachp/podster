@@ -1,8 +1,8 @@
 //! A room's files. The room owns each file's record: who may upload, how much space is reserved, and whether what arrived is
 //! accepted. The bytes go past it, through `crate::objects`, because a large file would hold up the whole room.
 //!
-//! Nothing here makes a file available. It moves to `scanning` and stays there until the scanner exists, and there's no
-//! download route. A file's name is agent content, so it's never in an event, an audit entry or a log.
+//! A stored file waits in `scanning`. Only the scanner's clean verdict, with the secret, makes it `ready`, which is the one state
+//! `downloads` serves. A file's name is agent content, so it's never in an event, an audit entry or a log.
 use super::*;
 use crate::objects::{refusal, upload_not_found};
 use podster_core::files::{
@@ -36,7 +36,7 @@ fn room_used(sql: &SqlStorage, now: i64, except: &str) -> R<u64> {
     Ok(found.first().map_or(0, |row| int(&row["used"])).max(0) as u64)
 }
 
-fn room_id(sql: &SqlStorage) -> R<String> {
+pub(super) fn room_id(sql: &SqlStorage) -> R<String> {
     rows(sql, "SELECT id FROM workspace", vec![])?
         .first()
         .and_then(|row| text(&row["id"]))

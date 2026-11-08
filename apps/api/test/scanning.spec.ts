@@ -321,11 +321,28 @@ describe("queueing a scan", () => {
 });
 
 describe("a file ready or not", () => {
-  it("has no route that gives its bytes back yet", async () => {
+  it("lets a file be downloaded only once a clean verdict makes it ready", async () => {
     const id = await room();
-    const file = await stored(id);
-    await send(verdict(id, file));
-    expect((await api("GET", `/v1/workspaces/${id}/uploads/${file.id}`)).status).toBe(404);
+    const download = async (object: string) => SELF.fetch(`https://api.internal/v1/files/${id}/${object}`, { headers: { "x-podster-assertion": await assertion() } });
+    const clean = await stored(id);
+    const res = await download(clean.id);
+    expect(res.status).toBe(409);
+    await res.body?.cancel();
+    expect((await answer(await send(verdict(id, clean)))).body.state).toBe("ready");
+    const served = await download(clean.id);
+    expect(served.status).toBe(200);
+    expect(new Uint8Array(await served.arrayBuffer())).toEqual(DATA);
+    const found = await stored(id, "found.txt");
+    expect((await answer(await send(verdict(id, found, { report: "malware_found", database: null })))).body.state).toBe("blocked");
+    const late = await stored(id, "late.txt");
+    await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET scanning_since = ? WHERE id = ?", Date.now() - HOUR - 1000, late.id));
+    await runInDurableObject(stub(id), (instance: any) => instance.alarm());
+    expect((await row(id, late.id)).state).toBe("failed");
+    for (const object of [found.id, late.id]) {
+      const refused = await download(object);
+      expect(refused.status).toBe(409);
+      await refused.body?.cancel();
+    }
   });
 });
 

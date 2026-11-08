@@ -73,6 +73,7 @@ const INVITATION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 type Identity = Verified;
 
 mod collaboration;
+mod downloads;
 mod objects;
 mod plan;
 mod planned;
@@ -3480,6 +3481,11 @@ impl Workspace {
                 .map_err(|_| ApiError::invalid_argument())?;
             return self.scan_verdict(body);
         }
+        if path == crate::INTERNAL_DOWNLOAD {
+            let body: Value = serde_json::from_str(&req.text().await?)
+                .map_err(|_| ApiError::invalid_argument())?;
+            return downloads::begin(&sql, &resolve_caller(&sql, &identity)?, &body);
+        }
         let path_parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
         if cfg!(feature = "failpoints") {
             let forced = req
@@ -3528,6 +3534,11 @@ impl Workspace {
                 };
             }
         }
+        if method == Method::Get {
+            if let Some(["agents", agent, "files", id]) = path_parts.get(3..) {
+                return downloads::read_overseen(&sql, &identity, agent, id);
+            }
+        }
         // Authority comes before anything about the request, so an outsider gets one answer for every request.
         let who = resolve_caller(&sql, &identity)?;
 
@@ -3561,6 +3572,7 @@ impl Workspace {
                 ["plan", "costs"] => plan::read_costs(&sql, &who, &url),
                 ["roles"] => roles::list_roles(&sql, &who),
                 ["card"] => roles::read_card(&sql, &who),
+                ["files", id] => downloads::read_file(&sql, &who, id),
                 ["collaboration"] => collaboration::read_map(&sql, &who),
                 ["collaboration", "handoffs"] => collaboration::read_edge(&sql, &who, &url),
                 #[cfg(feature = "failpoints")]

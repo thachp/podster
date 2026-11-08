@@ -227,7 +227,10 @@ describe("removing a file", () => {
 describe("the room's sweep", () => {
   it("plans one sweep an hour after migrating a room that holds files, and none for a room that doesn't", async () => {
     const undoRemoval = (id: string) => runInDurableObject(stub(id), (_: any, state: any) => {
-      // Expected outputs' migration came after this one, so it comes off first.
+      // The migrations after this one come off first: submitted files' flag, then expected outputs.
+      state.storage.sql.exec("DROP INDEX stored_object_unsubmitted");
+      state.storage.sql.exec("ALTER TABLE stored_object DROP COLUMN submitted_at");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP INDEX task_expected_output");
       state.storage.sql.exec("ALTER TABLE task DROP COLUMN expected_output_id");
       state.storage.sql.exec("DROP TABLE expected_output_version");
@@ -327,7 +330,10 @@ describe("the room's sweep", () => {
     const id = await room();
     const object = await file(id);
     await runInDurableObject(stub(id), (_: any, state: any) => {
-      // Expected outputs' migration came after this one, so it comes off first.
+      // The migrations after this one come off first: submitted files' flag, then expected outputs.
+      state.storage.sql.exec("DROP INDEX stored_object_unsubmitted");
+      state.storage.sql.exec("ALTER TABLE stored_object DROP COLUMN submitted_at");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP INDEX task_expected_output");
       state.storage.sql.exec("ALTER TABLE task DROP COLUMN expected_output_id");
       state.storage.sql.exec("DROP TABLE expected_output_version");
@@ -395,5 +401,199 @@ describe("the room's sweep", () => {
     const { due_at }: any = await inRoom(id, (sql) => sql.exec("SELECT due_at FROM storage_sweep").toArray()[0]);
     expect(due_at).toBeGreaterThanOrEqual(before + 60 * 60 * 1000);
     expect(due_at).toBeLessThanOrEqual(Date.now() + 60 * 60 * 1000);
+  });
+});
+
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+const keysUnder = async (prefix: string) => (await BINDINGS.ASSETS.list({ prefix })).objects.map((o: any) => o.key as string);
+
+describe("removal by the rules (decisions 94 and 98)", () => {
+  it("removes a blocked or failed file's bytes 7 days after its verdict, as the system, and not a moment before", async () => {
+    const id = await room();
+    const now = Date.now();
+    const blocked = await file(id, "blocked");
+    const young = await file(id, "blocked");
+    const timedOut = await file(id, "failed");
+    const ready = await file(id, "ready");
+    await inRoom(id, (sql) => {
+      sql.exec("UPDATE stored_object SET scanned_at = ? WHERE id = ?", now - 7 * DAY_MS - 1000, blocked);
+      sql.exec("UPDATE stored_object SET scanned_at = ? WHERE id = ?", now - 7 * DAY_MS + 60_000, young);
+      // No verdict arrived, so the hour's end is when it failed.
+      sql.exec("UPDATE stored_object SET scanned_at = NULL, scanning_since = ? WHERE id = ?", now - 7 * DAY_MS - HOUR_MS - 1000, timedOut);
+      sql.exec("UPDATE stored_object SET scanned_at = ? WHERE id = ?", now - 30 * DAY_MS, ready);
+    });
+    const key = (await row(id, blocked)).object_key;
+    await alarm(id);
+    expect(await row(id, blocked)).toMatchObject({ state: "removed", removed_by: "podster", removed_by_kind: "system", removed_from: "blocked" });
+    expect(await row(id, timedOut)).toMatchObject({ state: "removed", removed_from: "failed" });
+    expect((await row(id, young)).state).toBe("blocked");
+    expect((await row(id, ready)).state).toBe("ready");
+    expect(await BINDINGS.ASSETS.head(key)).toBeNull();
+    const [audit] = (await audits(id, "object.removed")).filter((a) => a.target_id === blocked);
+    expect(audit).toMatchObject({ actor_id: "podster", actor_kind: "system" });
+  });
+
+  it("clears a file uploaded for a task but never submitted, a day after the task left Accepted", async () => {
+    const id = await room();
+    const now = Date.now();
+    const made = async (left: number | null) => {
+      const t = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Work", instructions: "Do it", assignee: MEMBER.id });
+      expect(t.status, JSON.stringify(t.body)).toBe(200);
+      const object = await file(id);
+      await inRoom(id, (sql) => {
+        sql.exec("UPDATE task SET left_accepted_at = ? WHERE id = ?", left, t.body.id);
+        sql.exec("UPDATE stored_object SET for_task = ?, uploaded_by = ? WHERE id = ?", t.body.id, MEMBER.id, object);
+      });
+      return { task: t.body.id as string, object };
+    };
+    const stale = await made(now - DAY_MS - 1000);
+    const fresh = await made(now - DAY_MS + 60_000);
+    const stillAccepted = await made(null);
+    const submitted = await made(now - 10 * DAY_MS);
+    await inRoom(id, (sql) => sql.exec("INSERT INTO submission_file (task_id, submission_no, object_id, sha256, size, label, submitted_by, submitted_org, created_at) VALUES (?, 1, ?, ?, 1, 'x', ?, ?, 0)", submitted.task, submitted.object, "0".repeat(64), MEMBER.id, MEMBER.org));
+    await alarm(id);
+    expect(await row(id, stale.object)).toMatchObject({ state: "removed", removed_by: "podster", removed_by_kind: "system", removed_from: "ready" });
+    for (const kept of [fresh, stillAccepted, submitted]) expect((await row(id, kept.object)).state).toBe("ready");
+  });
+
+  it("raises the high-water mark when it clears an abandoned upload, as every other drop does", async () => {
+    const id = await room();
+    const made = await api(OWNER, "POST", `/v1/workspaces/${id}/uploads`, { name: "never.txt", size: 3, sha256: await sha256(new Uint8Array([1, 2, 3])) });
+    await inRoom(id, (sql) => {
+      sql.exec("UPDATE stored_object SET upload_expires_at = ? WHERE id = ?", Date.now() - 2 * HOUR_MS, made.body.id);
+      sql.exec("UPDATE storage_sweep SET settles_at = 0");
+    });
+    const before = Date.now();
+    await alarm(id);
+    expect(await row(id, made.body.id)).toBeUndefined();
+    const { settles_at }: any = await inRoom(id, (sql) => sql.exec("SELECT settles_at FROM storage_sweep").toArray()[0]);
+    expect(settles_at).toBeGreaterThanOrEqual(before + HOUR_MS);
+  });
+});
+
+describe("deletes that fail, and the limits on each alarm", () => {
+  /** A removed file with extra keys under its own prefix, named so the test build fails them as asked. */
+  async function removedWith(names: string[]) {
+    const id = await room();
+    const object = await file(id);
+    const prefix = `rooms/${id}/objects/${object}/`;
+    for (const name of names) await BINDINGS.ASSETS.put(prefix + name, new Uint8Array([1]));
+    expect((await remove(OWNER, id, object)).status).toBe(200);
+    return { id, object, prefix };
+  }
+
+  it("falls back to one key at a time when a batch fails, so the purge still finishes", async () => {
+    const { id, object, prefix } = await removedWith(["failbatch-a", "failbatch-b"]);
+    await alarm(id);
+    expect(await keysUnder(prefix)).toEqual([]);
+    const after: any = await row(id, object);
+    expect(after.purge_due_at).toBe(after.attempt_started_at + HOUR_MS);
+  });
+
+  it("skips a key that won't delete, purges the rest, and tries again a minute on", async () => {
+    const { id, object, prefix } = await removedWith(["a-fine", "b-stuck", "c-fine"]);
+    const before = Date.now();
+    await alarm(id);
+    expect(await keysUnder(prefix)).toEqual([prefix + "b-stuck"]);
+    const { purge_due_at }: any = await row(id, object);
+    expect(purge_due_at).toBeGreaterThanOrEqual(before + 60_000);
+    expect(purge_due_at).toBeLessThanOrEqual(Date.now() + 60_000);
+    await BINDINGS.ASSETS.delete(prefix + "b-stuck");
+  });
+
+  it("lists at most two pages of a file per alarm, and comes back soon for the rest", async () => {
+    // A test build lists ten keys a page, so 25 keys and the file's own take three pages.
+    const { id, object, prefix } = await removedWith(Array.from({ length: 25 }, (_, i) => `k${String(i).padStart(2, "0")}`));
+    const before = Date.now();
+    await alarm(id);
+    const left = await keysUnder(prefix);
+    expect(left.length).toBeGreaterThan(0);
+    expect(left.length).toBeLessThanOrEqual(6);
+    const { purge_due_at }: any = await row(id, object);
+    expect(purge_due_at).toBeGreaterThanOrEqual(before);
+    expect(purge_due_at).toBeLessThan(Date.now() + 60_000);
+  });
+
+  it("in the room-wide sweep, falls back per key, skips a stuck one, and lists at most three pages", async () => {
+    const id = await room();
+    const removed = async (key: string) => {
+      const object = await file(id);
+      await BINDINGS.ASSETS.put(key, new Uint8Array([1]));
+      // Its row names this key, and no purge runs, so only the sweep can delete it.
+      await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET object_key = ?, state = 'removed', purge_due_at = NULL WHERE id = ?", key, object));
+      return key;
+    };
+    const batch = await removed(`rooms/${id}/objects/aa-failbatch/x`);
+    const stuck = await removed(`rooms/${id}/objects/ab-stuck/x`);
+    // Fresh strays after them fill more than three pages of ten.
+    for (let i = 0; i < 35; i++) await BINDINGS.ASSETS.put(`rooms/${id}/objects/z${String(i).padStart(2, "0")}/a`, new Uint8Array([1]));
+    const before = Date.now();
+    await sweep(id);
+    expect(await BINDINGS.ASSETS.head(batch)).toBeNull();
+    expect(await BINDINGS.ASSETS.head(stuck)).not.toBeNull();
+    const state: any = await inRoom(id, (sql) => sql.exec("SELECT cursor, cycle_due_at FROM storage_sweep").toArray()[0]);
+    expect(state.cursor).not.toBeNull();
+    expect(state.cycle_due_at).toBeGreaterThanOrEqual(before + 60_000);
+    expect(state.cycle_due_at).toBeLessThanOrEqual(Date.now() + 60_000);
+    await BINDINGS.ASSETS.delete(stuck);
+  });
+});
+
+describe("removal by the rules, review fixes", () => {
+  it("gives a scan noticed late its full 7 days: it fails with the time it was noticed, and isn't removed in the same alarm", async () => {
+    const id = await room();
+    const late = await file(id, "scanning");
+    await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET scanning_since = ?, scanned_at = NULL WHERE id = ?", Date.now() - 8 * DAY_MS, late));
+    const before = Date.now();
+    await alarm(id);
+    const after: any = await row(id, late);
+    expect(after.state).toBe("failed");
+    expect(after.scanned_at).toBeGreaterThanOrEqual(before);
+  });
+
+  it("flags a submitted file the cheap query found unflagged, and never removes it", async () => {
+    const id = await room();
+    const t = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Work", instructions: "Do it", assignee: MEMBER.id });
+    const object = await file(id);
+    await inRoom(id, (sql) => {
+      sql.exec("UPDATE task SET left_accepted_at = ? WHERE id = ?", Date.now() - 2 * DAY_MS, t.body.id);
+      sql.exec("UPDATE stored_object SET for_task = ?, uploaded_by = ?, submitted_at = NULL WHERE id = ?", t.body.id, MEMBER.id, object);
+      sql.exec("INSERT INTO submission_file (task_id, submission_no, object_id, sha256, size, label, submitted_by, submitted_org, created_at) VALUES (?, 1, ?, ?, 1, 'x', ?, ?, 123)", t.body.id, object, "0".repeat(64), MEMBER.id, MEMBER.org);
+    });
+    await alarm(id);
+    expect(await row(id, object)).toMatchObject({ state: "ready", submitted_at: 123 });
+  });
+
+  it("flags files submissions already name when the migration runs", async () => {
+    const id = await room();
+    const t = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Work", instructions: "Do it", assignee: MEMBER.id });
+    const named = await file(id);
+    const unnamed = await file(id);
+    await runInDurableObject(stub(id), (_: any, state: any) => {
+      const sql = state.storage.sql;
+      sql.exec("INSERT INTO submission_file (task_id, submission_no, object_id, sha256, size, label, submitted_by, submitted_org, created_at) VALUES (?, 1, ?, ?, 1, 'x', ?, ?, 456)", t.body.id, named, "0".repeat(64), MEMBER.id, MEMBER.org);
+      sql.exec("DROP INDEX stored_object_unsubmitted");
+      sql.exec("ALTER TABLE stored_object DROP COLUMN submitted_at");
+      sql.exec("UPDATE schema_version SET version = version - 1");
+    });
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
+    expect((await row(id, named)).submitted_at).toBe(456);
+    expect((await row(id, unnamed)).submitted_at).toBeNull();
+  });
+
+  it("removes each file in its own transaction, so one that errors doesn't stop the rest", async () => {
+    const id = await room();
+    const good = await file(id, "blocked");
+    const bad = await file(id, "blocked");
+    await inRoom(id, (sql) => {
+      sql.exec("UPDATE stored_object SET id = 'obj_failrule' WHERE id = ?", bad);
+      // The bad one is older, so it's tried first.
+      sql.exec("UPDATE stored_object SET scanned_at = ? WHERE id = ?", Date.now() - 9 * DAY_MS, "obj_failrule");
+      sql.exec("UPDATE stored_object SET scanned_at = ? WHERE id = ?", Date.now() - 8 * DAY_MS, good);
+    });
+    await alarm(id);
+    expect((await row(id, good)).state).toBe("removed");
+    expect((await row(id, "obj_failrule")).state).toBe("blocked");
   });
 });

@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { gatewayQuery, getIdentity, getOrganizations } from "@/lib/gateway/server";
 import { roleLabel } from "../w/[id]/team/model";
 import { plainLine } from "@/components/agent-content/text";
-import { listedRoles, roleTotal, type WorkroomCard } from "./cards";
+import { listedRoles, outputsReady, roleTotal, type WorkroomCard } from "./cards";
 import { AdminsOnly, createAccess } from "./new/access";
 
 type Listed = { workspace_id: string; workspace_name: string; role: string; status?: string; card: WorkroomCard | null };
@@ -13,6 +13,7 @@ type Listed = { workspace_id: string; workspace_name: string; role: string; stat
 function CardDetails({ card }: { card: WorkroomCard }) {
   const goal = card.goal ? plainLine(card.goal) : "";
   const listed = listedRoles(card.roles);
+  const outputs = outputsReady(card.outputs);
   return (
     <>
       {goal ? (
@@ -29,6 +30,7 @@ function CardDetails({ card }: { card: WorkroomCard }) {
           {listed}
         </p>
       ) : null}
+      {outputs ? <p className="text-sm text-muted-foreground">{outputs}</p> : null}
     </>
   );
 }

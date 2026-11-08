@@ -2,7 +2,7 @@
 
 **Proposed.** This is a draft for the owner, and no choice in it is accepted. It covers [M3 A2A](spec/PRODUCT.md#product-direction-and-delivery-scope) and starts from the [proposed A2A adapter](spec/ARCHITECTURE.md#a2a-adapter). No A2A code exists.
 
-**Status, 2026-11-08 UTC:** the owner said M2 is finished before any M3 code, so M3 is planning only. When M2 is done, M3 starts with the [rulings](#questions-for-the-owner) and the [spikes](#spikes), then the [build order](#build-order).
+**Status, 2026-11-08 UTC:** on 2026-11-07 the owner said "we need to finish m2", meaning M2 before any M3 code. That's the owner's statement of that date, not yet a numbered decision. So M3 is planning only, and what "finished" means for M3's first code is question 27. When M2 is done, M3 starts with the [rulings](#questions-for-the-owner) and the [spikes](#spikes), then the [build order](#build-order).
 
 ## What M3 includes
 
@@ -31,40 +31,42 @@ From the specs. Nothing may say Podster supports A2A until all of these pass:
 
 | M3 needs | From M2 | Status on `main`, 2026-11-08 | Used by M3 step |
 | --- | --- | --- | --- |
-| No more M2 contract or migration PRs in flight | Through step 8 | Steps 2 and 4 merged. Step 3 is [#125](https://github.com/thachp/podster/pull/125) and step 6's second part is [#131](https://github.com/thachp/podster/pull/131), both open. Steps 5, 7 and 8 not started | 6, the first contract PR |
+| No more M2 contract or migration PRs in flight | Through step 8, and step 10's D1 migration if it has one | Steps 2 and 4 merged. Step 3 is [#125](https://github.com/thachp/podster/pull/125) and step 6's second part is [#131](https://github.com/thachp/podster/pull/131), both open. Steps 5, 7, 8 and 10 not started | 5, 6 and every later C or M PR |
 | A stable task and submission shape | Steps 6 and 7 | Step 6's pure rules merged in [#128](https://github.com/thachp/podster/pull/128). The rest is open | 8, 10, 13 |
 | Uploads an agent can start for its own submission | Step 6 (`create_upload` with `task_id`) | In #131 | 14 |
 | Input files an offer can point to | Step 5 | Not started | 14 |
 | Held responses shown beside submissions in the Task Sheet | Step 9b | Not started | 15 |
 | A files path that has run for real | Step 11, M2's gate | Not started | 16 |
 
-Text messages, reads and the lifecycle need M2 only to have finished its contract changes. Files need M2's code.
+Text messages, reads and the lifecycle need M2 only to have finished its contract and migration changes. Files need M2's code. M2 step 10 may add a D1 migration if cards read the index. If it does, that migration is one of M2's and lands before M3's first C or M PR.
 
 ## Spikes
 
 Each runs in `spikes/`, is thrown away afterwards, and ends with its results written into ADR 0007, as M2's spike did for [ADR 0006](adr/0006-uploads-and-scanning.md#spike-results). Question 1 asks whether they can run before M2 is done.
 
-| Spike | What it must prove | Pass bar | Where |
-| --- | --- | --- | --- |
-| **A: inbound on a Worker** | A Worker can serve A2A 1.0 over JSON-RPC to real clients: Agent Card, `SendMessage` to an existing task, `GetTask`, `ListTasks`, and named errors for streaming, push and the extended card. Also whether the project's JavaScript SDK server code runs on Workers (question 22) | Two client implementations (question 18) complete card, send and get with no patches. A request with no version gets `VersionNotSupportedError`. Every kit MUST failure is either fixed or written down with why it doesn't fit a coordinator. CPU per request is measured and recorded | Local, `wrangler dev` |
-| **B: a separate A2A audience** | The gateway's existing OAuth provider can issue tokens for a second resource, `/a2a`, with its own scope, tied to the same agent identity and consent as `/mcp` | An A2A token is refused at `/mcp` and `/v1/files`, and an MCP token at `/a2a`, before any API call. Disconnecting revokes both. At least one A2A client finishes the OAuth flow unpatched, or the ADR records which clients need a token issued by hand | Local |
-| **C: outbound send and read-back** | A queue consumer can send `SendMessage` with `return_immediately` to a remote A2A server, then read its state with `GetTask`, under `crates/egress`'s rules | An offer reaches two different server implementations and their state is read back. An `http` URL, a redirect, a private address and a name that resolves to one are refused before sending. A resend with the same `messageId` is recorded as the server actually treats it. Logs hold IDs only | Local, with a test server. A staging run needs the owner in that session (question 20) |
+| Spike | What it must prove | Pass bar | Where | Needs |
+| --- | --- | --- | --- | --- |
+| **A: inbound on a Worker** | A Worker can serve A2A 1.0 over JSON-RPC to real clients: Agent Card, `SendMessage` to an existing task, `GetTask`, `ListTasks`, and named errors for streaming, push and the extended card. Also whether the project's JavaScript SDK server code runs on Workers (question 22) | Two client implementations (question 18) complete card, send and get with no patches. A request with no version gets `VersionNotSupportedError`. Every kit MUST failure is either fixed or written down with why it doesn't fit a coordinator. CPU per request is measured and recorded | Local, `wrangler dev` | Questions 1, 2, 3, 18 and 22 |
+| **B: a separate A2A audience** | The gateway's existing OAuth provider can issue tokens for a second resource, `/a2a`, with its own scope, tied to the same agent identity and consent as `/mcp` | An A2A token is refused at `/mcp` and `/v1/files`, and an MCP token at `/a2a`, before any API call. Disconnecting revokes both. At least one A2A client finishes the OAuth flow unpatched, or the ADR records which clients need a token issued by hand | Local | Questions 1 and 5 |
+| **C: outbound send and read-back** | A queue consumer can send `SendMessage` with `return_immediately` to a remote A2A server, then read its state with `GetTask`, under `crates/egress`'s rules as they stand | An offer reaches two different server implementations and their state is read back. Everything [the wake policy](spec/ARCHITECTURE.md#wake) refuses is refused before sending: `http`, an IP address in any form, credentials in the URL, a non-default port and `podster.dev`. A redirect isn't followed. A resend with the same `messageId` is recorded as the server actually treats it. Logs hold IDs only | Local, with a test server. A staging run needs the owner in that session | Questions 1, 16 and 20 |
+
+The wake policy checks the name, not what it resolves to, and relies on `global_fetch_strictly_public`. Spike C doesn't test resolved addresses. Whether A2A needs more, since it sends task text where wake sends only IDs, is question 28.
 
 ## Build order
 
-C changes contracts and M adds a migration or room schema. All of it is proposed. C and M PRs merge one at a time, after M2's last one (question 1), and take turns with planning's as [decision 60](spec/PRODUCT.md#decisions-needed) does for M2.
+C changes `packages/contracts` and M adds a migration or room schema. All of it is proposed. Product code, steps 5 onward, waits until M2 is finished as question 27 defines it. C and M PRs merge one at a time, after M2's last one, and take turns with planning's as [decision 60](spec/PRODUCT.md#decisions-needed) does for M2.
 
 | Step | Work | C | M | After | Runs beside |
 | --- | --- | --- | --- | --- | --- |
 | 0 | ADR 0007 draft: the profile, from the owner's rulings | | | Rulings | 1, 2, 3 |
-| 1 | Spike A | | | Question 1 | 0, 2, 3 |
-| 2 | Spike B | | | Question 1 | 0, 1, 3 |
-| 3 | Spike C | | | Question 1 | 0, 1, 2 |
+| 1 | Spike A | | | Questions 1, 2, 3, 18 and 22 | 0, 2, 3 |
+| 2 | Spike B | | | Questions 1 and 5 | 0, 1, 3 |
+| 3 | Spike C | | | Questions 1, 16 and 20 | 0, 1, 2 |
 | 4 | ADR 0007 with spike results, accepted by the owner | | | 0 to 3 | |
-| 5 | Pure mapping in `crates/core/src/a2a.rs`: a remote state plus the current Podster state gives one command, a hold or nothing. Tests include late and out-of-order updates | | | 4 | 6 |
-| 6 | Gateway module `apps/gateway/src/a2a/`: Agent Card, JSON-RPC envelope, version check, and every operation answering its named "not supported" error. The profile goes in `packages/contracts` | Yes | | 4, M2's last C or M PR | 5 |
-| 7 | Authentication: the `/a2a` audience and scope, resolving to the same agent identity. AC-12's negatives | Yes | | 6 | |
-| 8 | Inbound reads: `GetTask` and `ListTasks` through `get_task` and `list_tasks`. A hidden task gets the same `TaskNotFoundError` as a missing one | Yes | | 5, 7 | 11 |
+| 5 | Pure mapping in `crates/core/src/a2a.rs`, with one line in `lib.rs`: a remote state plus the current Podster state gives one command, a hold or nothing. Tests include late and out-of-order updates | | | 4, M2 finished | 6 |
+| 6 | Gateway module `apps/gateway/src/a2a/`: Agent Card, JSON-RPC envelope, version check, and every operation answering its named "not supported" error. The profile is `docs/spec/A2A-PROFILE.md`, and a gateway test checks the card lists only the operations it names. `check.mjs` covers only `openapi.yaml` and `capabilities.yaml`, so nothing here changes `packages/contracts` | | | 4, M2 finished | 5 |
+| 7 | Authentication: the `/a2a` audience and scope, resolving to the same agent identity. AC-12's negatives | Only if the API's identity call changes | | 6 | |
+| 8 | Inbound reads: `GetTask` and `ListTasks` through `get_task` and `list_tasks`. A hidden task gets the same `TaskNotFoundError` as a missing one | | | 7 | 11 |
 | 9 | Inbound messages: `SendMessage` with a `taskId` becomes `send_message`, with `messageId` as the idempotency key, size limits and `external` marking. No `taskId` is refused | Yes | Only if `messageId` can't use the idempotency record | 8 | 11 |
 | 10 | Inbound lifecycle through the Podster extension: accept, decline, release, and submit with text and links | Yes | | 9 | 11 |
 | 11 | Endpoint registration on the `Principal`: set, delete and status, checked against the egress policy, with the credential from question 16 | Yes | Yes | 7 | 8, 9, 10 |
@@ -74,7 +76,17 @@ C changes contracts and M adds a migration or room schema. All of it is proposed
 | 15 | Screens: endpoint status on the agent's Sheet, and held responses flagged to the requester in the Task Sheet | | | 11, 13, M2 step 9b | 14 |
 | 16 | Staging run: the kit, two implementations, AC-12, AC-18, AC-24 and criterion 4 across protocols. Then the owner rules, and the profile is published | | | All, M2's gate | |
 
-**What runs in parallel:** the three spikes and the ADR draft. Steps 5 and 6. Step 11 beside 8 to 10, because it's in the `Principal` and they're in the `Workspace` path, though its contract PR still waits its turn. Steps 14 and 15, which are in different folders.
+**What runs in parallel:** the three spikes and the ADR draft. Steps 5 and 6. Step 11 is built beside 8 to 10, because it's in the `Principal` and they're in the `Workspace` path. Steps 9 to 11 change contracts and 11 adds a migration, so they're built side by side and still merge one at a time. Steps 14 and 15, which are in different folders.
+
+**Steps that unruled defaults block:**
+
+- **Questions 6 and 7:** with both defaults, no A2A path can accept a task. Step 10 builds nothing, and AC-24's after-acceptance case can't run over A2A, so step 16 can't pass the gate.
+- **Question 18:** with its default, step 16 can run but support can't be claimed.
+- **Question 23:** with its default there's no queue, so steps 12 to 16 are blocked.
+
+Steps 5 to 9 and 11 don't depend on any of these.
+
+Step 8 waits only on step 7, because reads translate today's task view. Step 5's mapping is first used by step 12.
 
 The gateway only translates. Rust decides every command, including what a remote state means. New gateway code goes in `apps/gateway/src/a2a/`, new Rust in new modules, and each touches `index.ts`, `lib.rs` and `workspace.rs` by a line or two. Each capability updates contracts in its own PR.
 
@@ -84,7 +96,7 @@ Each has a recommendation and the narrowest default, which is what the plan does
 
 | # | Question | Recommendation | Default if unruled |
 | --- | --- | --- | --- |
-| 1 | Do the spikes and ADR count as the M3 code that waits for M2? | Spikes in `spikes/` and the ADR may start now, since they don't touch product code, contracts or staging. Product code waits for M2 | Nothing but docs until M2 is done |
+| 1 | Do the spikes and ADR count as the M3 code that the owner's 2026-11-07 statement holds until M2 is finished? | Spikes in `spikes/` and the ADR may start now, since they don't touch product code, contracts or staging. Product code, including step 5's pure code, waits as question 27 says | Nothing but docs until M2 is finished |
 | 2 | Which binding? | JSON-RPC only at first. One binding is allowed, it's the simplest on a Worker, and HTTP+JSON's error format disagrees within the spec | Same |
 | 3 | Which version? | 1.0 only, with no 0.3. Two versions double the tests | Same |
 | 4 | What does Podster's server offer beyond the basics? | Streaming, push notifications and the extended card all off. One public card that describes Podster and lists no rooms | Same |
@@ -110,6 +122,8 @@ Each has a recommendation and the narrowest default, which is what the plan does
 | 24 | Is Runner's inbound nudge part of M3? | No, it stays in M7. M3 only gives it a profile to follow | Same |
 | 25 | Do test people count for M3's gate, as for M1 under [decision 79](spec/PRODUCT.md#decisions-needed)? | Yes. A pass with a real second person stays owed before production | Same |
 | 26 | Who calls the gate, and when may support be claimed? | The owner, after step 16's staging run. Until then the card and docs say "preview" and never "conformant" | Same |
+| 27 | When is M2 "finished" for M3's product code? | When M2's last contract or migration PR has merged, through step 8 and step 10's D1 migration if it has one. M2's screens and staging run can finish beside M3's first steps, and M3's gate still waits for M2's | When M2's gate, step 11, has passed |
+| 28 | Does A2A egress need more than wake's policy? | No new resolved-address check at first. Keep wake's rules and `global_fetch_strictly_public`, and don't follow redirects. Revisit before public rooms, when anyone could register an endpoint | Same |
 
 ## Owed before production that M3 touches
 
@@ -121,7 +135,7 @@ Each has a recommendation and the narrowest default, which is what the plan does
 
 ## What the published spec says
 
-Checked on 2026-11-07 against the source at tag `v1.0.1`.
+Read against the source at tag `v1.0.1`. On 2026-11-08 UTC, v1.0.1 was still the latest GitHub release.
 
 **The version.** The latest GitHub release is v1.0.1, from 2026-05-28. The spec page and that tag's text still label the latest version 1.0.0. Version negotiation uses `Major.Minor`, so both are `1.0`.
 

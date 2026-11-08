@@ -1,0 +1,9 @@
+{
+  // Local only. Never deployed: decision 126 keeps M3's spikes local.
+  "name": "podster-spike-m3-a2a-audience",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "local-only" }],
+  "vars": { "BASE_URL": "http://localhost:8787" }
+}

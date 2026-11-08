@@ -228,10 +228,12 @@ describe("a scan with no verdict", () => {
     const id = await room();
     const hash = await sha256(DATA);
     const upload = (await api("POST", `/v1/workspaces/${id}/uploads`, { name: "n.txt", size: DATA.length, sha256: hash })).body;
-    // Whatever else the room had to do is done, so the alarm after this can only be the scan's.
+    // Whatever else the room had to do is done, so the alarm after this can only be the scan's. The unfinished upload leaves one
+    // for removal's sweep, which clears it, more than an hour off.
     await vi.waitFor(async () => {
       await runDurableObjectAlarm(stub(id));
-      expect(await inRoom(id, (_sql, state) => state.storage.getAlarm())).toBeNull();
+      const left = await inRoom(id, (_sql, state) => state.storage.getAlarm());
+      expect(left === null || left > Date.now() + HOUR + 30 * 60 * 1000).toBe(true);
     });
     const before = Date.now();
     expect((await SELF.fetch(`https://api.internal${upload.upload_path}`, { method: "PUT", headers: { authorization: `Bearer ${upload.token}` }, body: DATA })).status).toBe(200);
@@ -370,6 +372,11 @@ describe("a room from before this", () => {
   /** Puts a room back to before this migration. Its audit entries each had their own policy version then, which was the cursor. */
   const undo = (id: string) =>
     inRoom(id, (sql) => {
+      // Removal's migration came after this one, so it's undone first.
+      sql.exec("DROP TABLE storage_sweep");
+      sql.exec("DROP INDEX stored_object_abandoned");
+      for (const column of ["removed_at", "removed_by", "removed_by_kind", "removed_from"]) sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP INDEX stored_object_scanning");
       for (const column of ["scan_reason", "scan_sha256", "scan_database_json", "scanned_at"]) sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
       sql.exec("DROP INDEX audit_event_seq");

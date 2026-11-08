@@ -132,7 +132,7 @@ ALTER TABLE stored_object ADD COLUMN removed_by_kind TEXT;
 ALTER TABLE stored_object ADD COLUMN removed_from TEXT;
 CREATE INDEX stored_object_abandoned ON stored_object (upload_expires_at) WHERE state = 'uploading';
 CREATE TABLE storage_sweep (id INTEGER PRIMARY KEY CHECK (id = 1), due_at INTEGER, cursor TEXT);
-INSERT INTO storage_sweep (id, due_at) VALUES (1, 0);
+INSERT INTO storage_sweep (id, due_at) SELECT 1, CASE WHEN EXISTS (SELECT 1 FROM stored_object WHERE object_key IS NOT NULL) THEN CAST(strftime('%s', 'now') AS INTEGER) * 1000 + 3600000 END;
 "];
 
 pub fn int(value: &Value) -> i64 {

@@ -63,7 +63,7 @@ The same transaction makes the storage sweep due at once, and the sweep deletes 
 - an hour after an upload attempt begins;
 - after a removal whose delete failed;
 - after abandoned rows are cleared;
-- once, when the schema migration runs, which covers what staging already holds.
+- once, an hour after the schema migration runs, in a room that already holds files. This covers what staging already holds, and a new room starts with nothing due.
 
 If it keeps bytes that are too young, it runs again when the youngest one is an hour old. A room with nothing new never lists storage.
 

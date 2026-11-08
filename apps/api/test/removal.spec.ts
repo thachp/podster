@@ -191,6 +191,27 @@ describe("removing a file", () => {
 });
 
 describe("the room's sweep", () => {
+  it("plans one sweep an hour after migrating a room that holds files, and none for a room that doesn't", async () => {
+    const undoRemoval = (id: string) => runInDurableObject(stub(id), (_: any, state: any) => {
+      state.storage.sql.exec("DROP TABLE storage_sweep");
+      state.storage.sql.exec("DROP INDEX stored_object_abandoned");
+      for (const column of ["removed_at", "removed_by", "removed_by_kind", "removed_from"]) state.storage.sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+    });
+    const due = async (id: string) => ((await inRoom(id, (sql) => sql.exec("SELECT due_at FROM storage_sweep").toArray()[0])) as any).due_at;
+    const withFiles = await room();
+    await file(withFiles);
+    const empty = await room();
+    await undoRemoval(withFiles);
+    await undoRemoval(empty);
+    const before = Date.now();
+    expect((await api(OWNER, "GET", `/v1/workspaces/${withFiles}`)).status).toBe(200);
+    expect((await api(OWNER, "GET", `/v1/workspaces/${empty}`)).status).toBe(200);
+    expect(await due(withFiles)).toBeGreaterThanOrEqual(Math.floor(before / 1000) * 1000 + 60 * 60 * 1000);
+    expect(await due(withFiles)).toBeLessThanOrEqual(Date.now() + 60 * 60 * 1000);
+    expect(await due(empty)).toBeNull();
+  });
+
   it("leaves a room that hasn't migrated yet to its next request, and its alarm still runs", async () => {
     const id = await room();
     const object = await file(id);

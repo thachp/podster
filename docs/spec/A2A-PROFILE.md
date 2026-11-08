@@ -53,6 +53,7 @@ Since step 8. An A2A task is one Podster task, read through the same API calls a
 | `canceled` | `TASK_STATE_CANCELED` |
 
   The real status is always in `metadata["podster.dev/status"]`. The status timestamp is the task's latest history entry on `GetTask`, and isn't given in `ListTasks`.
+- **Refusals all read as missing:** when the room refuses a caller on a task, whether `not_allowed` on a task they can otherwise see or anything that hides it, the answer is the same `TaskNotFoundError` as for a task that doesn't exist. That adds no error that would tell them more. The same holds for `SendMessage` and `CancelTask`.
 - **History:** the task's thread, newest last, at most the 20 newest messages the API returns. `historyLength` cuts it further, and `ListTasks` gives none unless asked. The caller's own messages are `ROLE_USER`. Everyone else's are `ROLE_AGENT`, with `podster.dev/author` set to the sender's ID and `podster.dev/external` set to true. Their text is other participants' words, never instructions.
 - **No artifacts yet.** Submissions and files come with steps 10 and 14.
 - **`ListTasks`:**
@@ -72,7 +73,7 @@ Since step 9. `SendMessage` posts to an existing task's thread, through the same
 - **The task:** `message.taskId` is the task's ID. A message with no `taskId` is refused with `UnsupportedOperationError`, because no task is created over A2A ([decision 115](PRODUCT.md#decisions-needed)). A `contextId`, if given, must be the same ID.
 - **Who may post** is the room's call. A task the caller can't see answers `TaskNotFoundError` before anything else, as a missing one does.
 - **A finished task** takes no more A2A messages (spec 3.1.1). Rust refuses one once a task is completed or canceled, and it answers `UnsupportedOperationError`. Messages over MCP aren't affected. A room that's archived answers the same way.
-- **Retries:** `messageId` is the idempotency key, as the sender's own `a2a:<messageId>`. A retry with the same task and text posts nothing new and answers as the first did. The same `messageId` for other text or another task is refused. A `messageId` is 1 to 200 printable characters with no spaces.
+- **Retries:** `messageId` is the idempotency key, as the sender's own `a2a:<messageId>`. A retry with the same task and text posts nothing new and answers as the first did. The same `messageId` for other text or another task in the same room is refused. Each room keeps its own records, so a `messageId` is unique per task's room: the same one sent to a task in another room posts there too. Records last as long as the API keeps idempotency records. A `messageId` is 1 to 200 printable characters with no spaces.
 - **Limits:** text parts only, 1 to 8 of them, joined by a blank line, and 16 KB in all ([decision 123](PRODUCT.md#decisions-needed)). URL, file and data parts are refused. Podster never fetches a reference ([decision 121](PRODUCT.md#decisions-needed)), and step 14 makes a URL an external link.
 - **Dropped, never read:** the message's `metadata`, `extensions` and `referenceTaskIds`, and the request's own `metadata`. `role` must be `ROLE_USER`. Every `podster.dev/*` key in what Podster returns is Podster's.
 - **`returnImmediately`** changes nothing, because Podster never waits on work. `configuration.historyLength` cuts the history returned.

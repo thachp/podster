@@ -92,7 +92,7 @@ describe("Artifacts", () => {
     show(read([output({ status: "ready", current: { task_id: "tsk_9", submission_no: 2, approved_at: 1_700_000_000_000, files_available: true } })]), { taskTitles: { tsk_9: "Write the design" } });
     const link = within(rowOf("Design doc")).getByRole("link", { name: "Write the design" });
     expect(within(rowOf("Design doc")).getByText(/submission 2 of/)).toBeInTheDocument();
-    expect(within(rowOf("Design doc")).getByText(/files can be downloaded from its task/)).toBeInTheDocument();
+    expect(within(rowOf("Design doc")).getByText(/Everything in the approved version is still available from its task/)).toBeInTheDocument();
     expect(link).toHaveAttribute("href", "/w/ws_1/artifacts?task=tsk_9");
   });
 

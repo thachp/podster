@@ -46,7 +46,8 @@ export const readyText = (ready: number, total: number) => (total === 0 ? "No ex
 /** Decision 138: a Ready output keeps its status when a file of it is later blocked or removed, and the screen says so. */
 export function currentFilesText(current: Output["current"]) {
   if (!current || current.files_available === undefined) return null;
-  return current.files_available ? "The approved version's files can be downloaded from its task." : "A file in the approved version has since been blocked or removed, so it can't be downloaded. The output stays Ready, as it was approved.";
+  // True for a version with only links, too, so this doesn't promise a file.
+  return current.files_available ? "Everything in the approved version is still available from its task." : "A file in the approved version has since been blocked or removed, so it can't be downloaded. The output stays Ready, as it was approved.";
 }
 
 /** Why an output command was refused. Nothing changed in any of these. */

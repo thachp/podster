@@ -27,6 +27,27 @@ const target = new Target(gatewayBase, { pollMs: 150 });
 
 const CANT_FORMAT = "This text can't be formatted";
 
+/** Screen 9c's block: outputs Not started, In review and Ready, with a description that has markup in it, kept as text. */
+async function seedOutputs(owner, agent) {
+  const outputsRoom = await owner.createRoom("Outputs room");
+  await owner.addAgent(outputsRoom, agent);
+  const base = `/v1/workspaces/${outputsRoom}`;
+  const define = (title, description) => owner.must("POST", `${base}/outputs`, { title, ...(description ? { description } : {}) });
+  await define("Pricing page", "Not started yet, with <b>markup</b> that stays text.");
+  const inReview = await define("Launch plan");
+  const ready = await define("Design doc", "The API's design, as **one** document.");
+  const work = async (title, output) => {
+    const task = await owner.must("POST", `${base}/tasks`, { title, instructions: "Ordinary", assignee: agent.id, expected_output_id: output.id });
+    const at = { workspace_id: outputsRoom, task_id: task.id };
+    const taken = await agent.must("accept_task", { ...at, version: task.version });
+    return agent.must("submit_task", { ...at, version: taken.version, note: "Ready", artifacts: [{ uri: "https://example.com/design", label: "Design" }] });
+  };
+  await work("Write the launch plan", inReview);
+  const approved = await work("Write the design doc", ready);
+  await owner.must("POST", `${base}/tasks/${approved.id}/verify`, { submission_no: approved.submission_no });
+  return { room: outputsRoom, readyTask: approved.id };
+}
+
 /** What the screens need to show every state: each task status, an agent's text, an external author, and a pending link. */
 async function seed() {
   const [owner, partner] = [await signUp("Ada Owner"), await signUp("Bea Partner")];
@@ -194,6 +215,9 @@ async function seed() {
   };
   const secretTask = await worked(otherWorker, SECRET.title, owner.id, SECRET);
   const viewerTask = await worked(narrowed, "Gia reviews this", viewer.id);
+  // Screen 9c: expected outputs in each state, in a room of their own so other screens' counts don't move. A Ready output
+  // whose file was later blocked needs a scanner, which this stack doesn't run, so its note isn't covered here.
+  const outputs = await seedOutputs(owner, lead);
   const plan = await owner.must("GET", `${inLimited}/plan`, undefined, inTeam);
   await owner.must("PUT", `${inLimited}/tasks/${viewerTask.id}/plan`, { plan_revision: plan.plan_revision, predecessors: [secretTask.id] }, inTeam);
   const client = await (await target.post("/oauth/register", { redirect_uris: ["https://e2e-client.invalid/cb"], client_name: "A11y client", token_endpoint_auth_method: "none" })).json();
@@ -243,7 +267,7 @@ async function seed() {
     planRevision = (await owner.must("PUT", `/v1/workspaces/${plannedRoom}/tasks/${step.id}/plan`, { plan_revision: planRevision, duration_days, predecessors })).plan_revision;
   }
   await owner.must("PUT", `/v1/workspaces/${plannedRoom}/plan/start`, { start_date: "2026-11-07", timezone: "America/New_York", plan_revision: planRevision });
-  return { done, plannedRoom, viewer, narrowed, otherWorker, limitedRoom, secretTask, viewerTask, SECRET, teamOrgId: teamOrg, longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  return { outputs, done, plannedRoom, viewer, narrowed, otherWorker, limitedRoom, secretTask, viewerTask, SECRET, teamOrgId: teamOrg, longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -288,6 +312,8 @@ const screens = (s) => {
     ["Collaboration", `${w}/collaboration`, "Who has worked with whom"],
     ["Collaboration, map", `${w}/collaboration?view=map`, "Each number counts"],
     ["Artifacts", `${w}/artifacts`, "Artifacts"],
+    ["Artifacts, outputs in each state", `/w/${s.outputs.room}/artifacts`, "1 of 3 outputs ready"],
+    ["Task Sheet over Artifacts", `/w/${s.outputs.room}/artifacts?task=${s.outputs.readyTask}`, "Expected output", "owner", true],
     ["Claim", `/claim?agent_id=${s.pending.pluginId}&code=${s.pending.userCode}`, "Confirm ownership"],
     ["MCP consent", `/oauth/consent?${s.consent}`, "Connect an agent to Podster"],
     ["Room invitation", `/invitations/${s.roomInvite.token}`, "Workroom invitation", "partner"],

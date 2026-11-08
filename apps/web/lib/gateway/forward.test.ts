@@ -166,7 +166,9 @@ describe("a body's size", () => {
   it("takes a streamed body up to the limit itself, byte for byte", async () => {
     const { fetch, calls } = gateway();
     const bytes = new Uint8Array(MAX_FORWARDED_BODY_BYTES).map((_, i) => i % 251);
-    const chunks = [bytes.subarray(0, 1000), bytes.subarray(1000)];
+    // 64 KiB chunks after an odd-sized first one, so no chunk boundary lines up with the pattern or the limit.
+    const chunks = [bytes.subarray(0, 1000)];
+    for (let at = 1000; at < bytes.length; at += 64 * 1024) chunks.push(bytes.subarray(at, at + 64 * 1024));
     const stream = new ReadableStream<Uint8Array>({
       pull(controller) {
         const next = chunks.shift();
@@ -176,7 +178,10 @@ describe("a body's size", () => {
     });
     const response = await forwardToGateway(put(stream), { fetch }, APP);
     expect(response.status).toBe(200);
-    expect(new Uint8Array(calls.mock.calls[0][1].body as Uint8Array)).toEqual(bytes);
+    const sent = new Uint8Array(calls.mock.calls[0][1].body as Uint8Array);
+    // A deep equality over a million elements takes over a second, so this compares bytes and names the first that differs.
+    expect(sent.byteLength).toBe(bytes.byteLength);
+    expect(sent.findIndex((byte, i) => byte !== bytes[i])).toBe(-1);
   });
 
   it("refuses a body one byte over the limit when its length is declared truthfully", async () => {

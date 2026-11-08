@@ -7,8 +7,12 @@ import { statusesFor, toA2aTask } from "./tasks";
  * `list_workspaces`. The room's own access check decides every read. The gateway only finds the room and translates.
  */
 
-/** One read of the API as the calling agent. The gateway resolved who that is from the token, and nothing else. */
+/**
+ * The API calls A2A makes, as the calling agent. The gateway resolved who that is from the token, and nothing else.
+ * Step 9 added the one write, posting a message.
+ */
 export type ApiReads = {
+  sendMessage(workspaceId: string, taskId: string, body: string, idempotencyKey: string): Promise<{ status: number; body: any }>;
   getTask(workspaceId: string, taskId: string): Promise<{ status: number; body: any }>;
   listTasks(workspaceId: string, query: { cursor?: number; order: "newest"; status?: string }): Promise<{ status: number; body: any }>;
   listWorkspaces(): Promise<{ status: number; body: any }>;

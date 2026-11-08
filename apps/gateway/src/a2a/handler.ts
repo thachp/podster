@@ -1,15 +1,16 @@
 import { AgentCard } from "@a2a-js/sdk";
 import type { A2ARequestHandler } from "@a2a-js/sdk/server";
-import type { CancelTaskRequest, GetTaskRequest, ListTasksRequest } from "@a2a-js/sdk";
+import type { CancelTaskRequest, GetTaskRequest, ListTasksRequest, SendMessageRequest } from "@a2a-js/sdk";
 import { A2AError, ExtendedAgentCardNotConfiguredError, PushNotificationNotSupportedError, TaskNotCancelableError, UnsupportedOperationError } from "@a2a-js/sdk/errors";
 import { agentCard } from "./card";
+import { sendMessage } from "./messages";
 import { listTasks, readTask, UpstreamError, type ApiReads, type ReadNotes } from "./reads";
 
 /**
  * Podster's own `A2ARequestHandler`, as ADR 0007 decides: the SDK's transport, not its `DefaultRequestHandler`, which
  * would run an executor and keep its own task store. Each operation is one Podster read or command through the API, as
- * the calling agent, so Rust decides. Step 8 turned on the reads and cancel's answer. Messages and the lifecycle follow
- * in steps 9 and 10, and until then those answer their named error without reading a parameter.
+ * the calling agent, so Rust decides. Step 8 turned on the reads and cancel's answer, and step 9 messages on a task's
+ * thread. The lifecycle follows in step 10.
  */
 export type A2ACaller = { agentId: string; api: ApiReads; notes?: ReadNotes };
 
@@ -27,7 +28,6 @@ async function guarded<T>(operation: string, agentId: string, run: () => Promise
   }
 }
 
-const notYet = (operation: string) => new UnsupportedOperationError(`${operation} isn't available yet. Podster's A2A support is in preview.`);
 const noPush = () => new PushNotificationNotSupportedError("Push notifications aren't supported.");
 const noStreaming = () => new UnsupportedOperationError("Streaming isn't supported.");
 
@@ -51,8 +51,9 @@ export class PodsterA2AHandler implements A2ARequestHandler {
     throw new ExtendedAgentCardNotConfiguredError("Podster has no extended card.");
   }
 
-  async sendMessage(): Promise<never> {
-    throw notYet("SendMessage");
+  async sendMessage(params: SendMessageRequest) {
+    const { agentId, api } = this.who();
+    return guarded("SendMessage", agentId, () => sendMessage(api, agentId, params));
   }
 
   async getTask(params: GetTaskRequest) {

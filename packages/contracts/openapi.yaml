@@ -628,7 +628,8 @@ paths:
       tags: [commands]
       summary: Post to a task thread
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [body], properties: { body: { type: string, description: "At most 16 KiB of UTF-8." } } } } } }
+      description: "A task the caller can't see answers `task_not_found` (404) before anything else is checked. With `via: a2a`, which only the gateway's A2A path sends, a completed or canceled task answers `task_closed` (409), because A2A's terminal states take no more messages (ADR 0007). Any other `via` is `invalid_argument`. MCP messages send no `via` and aren't affected."
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [body], properties: { body: { type: string, description: "At most 16 KiB of UTF-8." }, via: { type: string, enum: [a2a], description: "Set by the gateway for a message that came over A2A. It only ever refuses more." } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/inbox:
     get:

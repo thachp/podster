@@ -2,7 +2,7 @@
 
 What Podster's A2A surface supports. The design is [ADR 0007](../adr/0007-a2a.md), which the owner accepted on 2026-11-08. The choices behind it are [decisions 107 to 143](PRODUCT.md#decisions-needed), and the order of work is in the [M3 plan](../m3-plan.md).
 
-**Status: preview, not available.** As of M3 step 8, the card is published, every request must authenticate, and an agent can read its tasks. Messages and the lifecycle aren't available yet. **Podster doesn't claim A2A support or conformance** until M3's gate passes and the owner calls it ([decision 132](PRODUCT.md#decisions-needed)). Each later step turns operations on, and updates this page and `apps/gateway/src/a2a/profile.ts` in the same PR. A gateway test holds the two together.
+**Status: preview, not available.** As of M3 step 9, the card is published, every request must authenticate, and an agent can read its tasks and post to their threads. The lifecycle (accepting, declining, releasing and submitting) isn't available yet. **Podster doesn't claim A2A support or conformance** until M3's gate passes and the owner calls it ([decision 132](PRODUCT.md#decisions-needed)). Each later step turns operations on, and updates this page and `apps/gateway/src/a2a/profile.ts` in the same PR. A gateway test holds the two together.
 
 ## Protocol
 
@@ -22,7 +22,7 @@ The test reads this table. Each row's status is `available` (works as this page 
 
 | Operation | Status | Answers now | Planned |
 | --- | --- | --- | --- |
-| `SendMessage` | not_yet | `UnsupportedOperationError` | Step 9: a message on an existing task's thread. Step 10 adds the lifecycle extension |
+| `SendMessage` | available | A message on an existing task's thread, as [below](#messages), and the task | Step 9. Step 10 adds the lifecycle extension |
 | `GetTask` | available | The task, as [below](#tasks) | Step 8 |
 | `ListTasks` | available | The caller's tasks across their rooms, as [below](#tasks) | Step 8 |
 | `CancelTask` | available | Never cancels: `TaskNotCancelableError` for a task the caller sees, and `TaskNotFoundError` for one it doesn't | Step 8 |
@@ -65,12 +65,22 @@ Since step 8. An A2A task is one Podster task, read through the same API calls a
 - **`tenant`** is never used for authority. Who is asking comes only from the token.
 - **Errors** other than the named A2A ones always read "Internal error". No API body or runtime message reaches the client, and the gateway logs only the operation, the agent's ID and the status.
 
+## Messages
+
+Since step 9. `SendMessage` posts to an existing task's thread, through the same API call as MCP's `send_message`, and answers the task as `GetTask` does. The text is for the thread and nothing else: it never accepts, submits or changes a task, whatever it says.
+
+- **The task:** `message.taskId` is the task's ID. A message with no `taskId` is refused with `UnsupportedOperationError`, because no task is created over A2A ([decision 115](PRODUCT.md#decisions-needed)). A `contextId`, if given, must be the same ID.
+- **Who may post** is the room's call. A task the caller can't see answers `TaskNotFoundError` before anything else, as a missing one does.
+- **A finished task** takes no more A2A messages (spec 3.1.1). Rust refuses one once a task is completed or canceled, and it answers `UnsupportedOperationError`. Messages over MCP aren't affected. A room that's archived answers the same way.
+- **Retries:** `messageId` is the idempotency key, as the sender's own `a2a:<messageId>`. A retry with the same task and text posts nothing new and answers as the first did. The same `messageId` for other text or another task is refused. A `messageId` is 1 to 200 printable characters with no spaces.
+- **Limits:** text parts only, 1 to 8 of them, joined by a blank line, and 16 KB in all ([decision 123](PRODUCT.md#decisions-needed)). URL, file and data parts are refused. Podster never fetches a reference ([decision 121](PRODUCT.md#decisions-needed)), and step 14 makes a URL an external link.
+- **Dropped, never read:** the message's `metadata`, `extensions` and `referenceTaskIds`, and the request's own `metadata`. `role` must be `ROLE_USER`. Every `podster.dev/*` key in what Podster returns is Podster's.
+- **`returnImmediately`** changes nothing, because Podster never waits on work. `configuration.historyLength` cuts the history returned.
+
 ## What's planned, from ADR 0007
 
 None of this is built yet:
 
-- **Limits:** text parts only, at most 8, and 16 KB in all ([decision 123](PRODUCT.md#decisions-needed)).
-- **No new tasks:** a message without a `taskId` is refused, because no task is created over A2A ([decision 115](PRODUCT.md#decisions-needed)).
 - **Lifecycle:** accepting, declining, releasing and submitting go through the extension `https://podster.dev/a2a/lifecycle/v1` ([decision 113](PRODUCT.md#decisions-needed)).
 - **Outbound:** offers go to a registered endpoint under ADR 0007's rules for outbound offers.
 

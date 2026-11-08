@@ -37,8 +37,8 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-const show = (data: OutputsRead, over: { canManage?: boolean; archived?: boolean; taskTitles?: Record<string, string>; histories?: Record<string, VersionsRead> } = {}) =>
-  render(<ArtifactsScreen room={ROOM} read={data} me="per_me" names={{ per_rev: "Rae Reviewer" }} orgNames={{}} taskTitles={over.taskTitles ?? {}} histories={over.histories} canManage={over.canManage ?? false} archived={over.archived ?? false} />);
+const screenFor = (data: OutputsRead, over: { canManage?: boolean; archived?: boolean; taskTitles?: Record<string, string> } = {}) => <ArtifactsScreen room={ROOM} read={data} me="per_me" names={{ per_rev: "Rae Reviewer" }} orgNames={{}} taskTitles={over.taskTitles ?? {}} canManage={over.canManage ?? false} archived={over.archived ?? false} />;
+const show = (data: OutputsRead, over: Parameters<typeof screenFor>[1] = {}) => render(screenFor(data, over));
 const commandsSent = () => sent.filter((call) => call.method !== "GET");
 
 const rowOf = (title: string) => screen.getByRole("heading", { name: title, level: 2 }).closest("li") as HTMLElement;
@@ -141,19 +141,82 @@ describe("Artifacts", () => {
     complete: true,
   };
 
-  it("names the reviewer of the approved version, and lists every version newest first, with source task and reviewer where given", async () => {
+  const historyReads = () => sent.filter((call) => call.url.endsWith("/versions"));
+
+  it("reads no history until it's opened, then names the reviewer on the row and lists every version newest first", async () => {
     const user = userEvent.setup();
-    show(read([output({ status: "ready", current: { task_id: "tsk_9", submission_no: 2 } })]), { taskTitles: { tsk_9: "Write the design" }, histories: { out_1: HISTORY } });
+    reads = (url) => (url.endsWith("/outputs/out_1/versions") ? new Response(JSON.stringify(HISTORY), { status: 200 }) : new Response("{}", { status: 404 }));
+    show(read([output({ status: "ready", current: { task_id: "tsk_9", submission_no: 2 } })]), { taskTitles: { tsk_9: "Write the design" } });
     const row = rowOf("Design doc");
-    expect(within(row).getByText(/submission 2 of/).parentElement ?? row).toHaveTextContent(/approved by Rae Reviewer/);
-    await user.click(within(row).getByText("Version history (2)"));
+    const approvedLine = () => within(row).getByText(/submission 2 of/);
+    expect(approvedLine()).not.toHaveTextContent(/approved by/);
+    expect(historyReads()).toHaveLength(0);
+    await user.click(within(row).getByText("Version history"));
+    await within(row).findByText("Version history (2)");
+    expect(approvedLine()).toHaveTextContent(/approved by Rae Reviewer/);
     const versions = within(row).getAllByRole("listitem");
     expect(versions[0]).toHaveTextContent(/Submission 2\s*Current/);
     expect(within(versions[0]).getByRole("link", { name: "Write the design" })).toHaveAttribute("href", "/w/ws_1/artifacts?task=tsk_9");
     expect(versions[0]).toHaveTextContent(/Reviewer:\s*Rae Reviewer/);
     expect(versions[1]).toHaveTextContent("From a task your access doesn't show.");
     expect(within(versions[1]).queryByRole("link")).toBeNull();
-    expect(sent.some((call) => call.url.endsWith("/versions"))).toBe(false);
+    expect(historyReads()).toHaveLength(1);
+  });
+
+  it("drops a history read for an earlier version once the listing names a newer one", async () => {
+    const user = userEvent.setup();
+    reads = (url) => (url.endsWith("/versions") ? new Response(JSON.stringify(HISTORY), { status: 200 }) : new Response("{}", { status: 404 }));
+    const first = read([output({ status: "ready", current: { task_id: "tsk_9", submission_no: 2 } })]);
+    const { rerender } = show(first);
+    await user.click(screen.getByText("Version history"));
+    await screen.findByText("Version history (2)");
+    // An approval elsewhere on this page refreshes the listing with the new current version.
+    rerender(screenFor(read([output({ status: "ready", current: { task_id: "tsk_9", submission_no: 3 } })])));
+    expect(screen.getByText("Version history")).toBeInTheDocument();
+    expect(screen.queryByText("Version history (2)")).toBeNull();
+    expect(within(rowOf("Design doc")).getByText(/submission 3 of/)).not.toHaveTextContent(/approved by/);
+  });
+
+  it("says a history read was refused for the rate limit", async () => {
+    const user = userEvent.setup();
+    reads = () => new Response(JSON.stringify({ error: { code: "rate_limited" } }), { status: 429 });
+    show(read([output({ status: "ready", current: { task_id: "tsk_9", submission_no: 2 } })]));
+    await user.click(screen.getByText("Version history"));
+    expect(await screen.findByText(/Too many requests just now, so the version history didn't load/)).toHaveAttribute("role", "alert");
+  });
+
+  it("doesn't offer removing a Ready output, which decision 136 always refuses", () => {
+    show(read([output({ status: "ready", current: null }), output({ id: "out_2", title: "Launch plan", status: "in_review" })]), { canManage: true });
+    expect(within(rowOf("Design doc")).queryByRole("button", { name: "Remove" })).toBeNull();
+    expect(within(rowOf("Design doc")).getByRole("button", { name: "Rename" })).toBeInTheDocument();
+    expect(within(rowOf("Launch plan")).getByRole("button", { name: "Remove" })).toBeInTheDocument();
+  });
+
+  it("says why Save is unavailable once the title is cleared", async () => {
+    const user = userEvent.setup();
+    show(read([output()]), { canManage: true });
+    await user.click(within(rowOf("Design doc")).getByRole("button", { name: "Rename" }));
+    const form = screen.getByRole("form", { name: "Rename Design doc" });
+    await user.clear(within(form).getByLabelText("Title"));
+    const save = within(form).getByRole("button", { name: "Save" });
+    expect(save).toBeDisabled();
+    expect(save).toHaveAccessibleDescription("A title is required.");
+  });
+
+  it("closes the rename form once Try again succeeds after a lost answer", async () => {
+    const user = userEvent.setup();
+    refuse = { status: 503, code: "upstream_unavailable" };
+    show(read([output()]), { canManage: true });
+    await user.click(within(rowOf("Design doc")).getByRole("button", { name: "Rename" }));
+    const form = screen.getByRole("form", { name: "Rename Design doc" });
+    await user.type(within(form).getByLabelText("Title"), " v2");
+    await user.click(within(form).getByRole("button", { name: "Save" }));
+    expect(await screen.findByText(/We can't tell whether this saved/)).toBeInTheDocument();
+    expect(screen.getByRole("form", { name: "Rename Design doc" })).toBeInTheDocument();
+    refuse = null;
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.queryByRole("form", { name: "Rename Design doc" })).toBeNull());
+    expect(commandsSent()[1].key).toBe(commandsSent()[0].key);
   });
 
   it("reads a history that wasn't loaded with the page only when it's opened", async () => {

@@ -1,6 +1,7 @@
 "use client";
 
 import { CheckCircle2, Circle, CircleDashed, Eye, type LucideIcon } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { cn } from "cn";
 import { plainName } from "@/components/agent-content/text";
@@ -39,13 +40,27 @@ export function OutputStatusBadge({ status }: { status: string }) {
   );
 }
 
-type Props = { room: Room; read: OutputsRead; me: string; names: Names; orgNames: Names; taskTitles: Record<string, string>; histories?: Record<string, VersionsRead>; canManage: boolean; archived: boolean };
+type Props = { room: Room; read: OutputsRead; me: string; names: Names; orgNames: Names; taskTitles: Record<string, string>; canManage: boolean; archived: boolean };
+
+/** A read refused for the person's rate limit says so, rather than that something broke. */
+export function RateLimited() {
+  const router = useRouter();
+  return (
+    <p role="alert">
+      Too many requests just now, so this didn&apos;t load. Wait a minute, then{" "}
+      <Button variant="link" className="h-auto p-0" onClick={() => router.refresh()}>
+        try again
+      </Button>
+      .
+    </p>
+  );
+}
 
 /**
  * The room's expected outputs, for every participant (decision 54): title, description and status. The version that made one
  * Ready shows only as far as the read allows, and its files open from its task, whose read applies the file rules again.
  */
-export function ArtifactsScreen({ room, read, me, names, orgNames, taskTitles, histories = {}, canManage, archived }: Props) {
+export function ArtifactsScreen({ room, read, me, names, orgNames, taskTitles, canManage, archived }: Props) {
   const commands = useCommands(null);
   const base = `/api/v1/workspaces/${encodeURIComponent(room.id)}`;
   const manage = canManage && !archived;
@@ -60,7 +75,7 @@ export function ArtifactsScreen({ room, read, me, names, orgNames, taskTitles, h
       {read.outputs.length > 0 ? (
         <ul aria-label="Expected outputs" className="space-y-3">
           {read.outputs.map((output) => (
-            <OutputRow key={output.id} output={output} base={base} taskTitles={taskTitles} history={histories[output.id]} me={me} names={names} manage={manage} send={commands.send} noticeRef={commands.noticeRef} />
+            <OutputRow key={output.id} output={output} base={base} taskTitles={taskTitles} me={me} names={names} manage={manage} send={commands.send} noticeRef={commands.noticeRef} />
           ))}
         </ul>
       ) : (
@@ -82,9 +97,15 @@ function TaskLink({ id, taskTitles }: { id: string; taskTitles: Record<string, s
   );
 }
 
-type RowProps = { output: Output; base: string; taskTitles: Record<string, string>; history?: VersionsRead; me: string; names: Names; manage: boolean; send: Send; noticeRef: React.RefObject<HTMLDivElement | null> };
+type RowProps = { output: Output; base: string; taskTitles: Record<string, string>; me: string; names: Names; manage: boolean; send: Send; noticeRef: React.RefObject<HTMLDivElement | null> };
 
-function OutputRow({ output, base, taskTitles, history, me, names, manage, send, noticeRef }: RowProps) {
+/** Which approved version the listing names now. A history read for any other is stale. */
+const versionKey = (output: Output) => (output.current ? `${output.current.task_id}:${output.current.submission_no}` : `none:${output.status}`);
+
+function OutputRow({ output, base, taskTitles, me, names, manage, send, noticeRef }: RowProps) {
+  // The latest history read, and the version it was read for. An approval since makes it stale, so it's dropped, not shown.
+  const [loaded, setLoaded] = useState<{ key: string; read: VersionsRead } | null>(null);
+  const history = loaded?.key === versionKey(output) ? loaded.read : undefined;
   const [editing, setEditing] = useState(false);
   const editButton = useRef<HTMLButtonElement>(null);
   const returnFocus = useRef(false);
@@ -141,7 +162,7 @@ function OutputRow({ output, base, taskTitles, history, me, names, manage, send,
       ) : output.status === "ready" ? (
         <p className="text-sm text-muted-foreground">Its approved version is from a task your access doesn&apos;t show.</p>
       ) : null}
-      {output.status === "ready" ? <VersionHistory path={path} initial={history} taskTitles={taskTitles} me={me} names={names} /> : null}
+      {output.status === "ready" ? <VersionHistory key={versionKey(output)} path={path} taskTitles={taskTitles} me={me} names={names} onLoaded={(read) => setLoaded({ key: versionKey(output), read })} /> : null}
       {filesText ? <p className={cn("text-sm", output.current?.files_available === false ? "rounded-lg bg-status-amber-surface p-3 text-status-amber" : "text-muted-foreground")}>{filesText}</p> : null}
       {manage && editing ? <EditOutput output={output} path={path} send={send} onDone={done} /> : null}
       {manage && !editing ? (
@@ -149,30 +170,33 @@ function OutputRow({ output, base, taskTitles, history, me, names, manage, send,
           <Button ref={editButton} type="button" size="sm" variant="outline" className={MOBILE_TARGET} aria-describedby={titleId} onClick={() => setEditing(true)}>
             Rename
           </Button>
-          <ConfirmAction
-            label="Remove"
-            describedBy={titleId}
-            title={<>Remove “{plainName(output.title)}”?</>}
-            description="It leaves this list and can't be named on a task again. Its record stays, so a finished task that named it still says so. An output that was ever Ready, or that an unfinished task names, can't be removed."
-            confirm="Remove output"
-            destructive
-            focusAfter={noticeRef}
-            action={() => send(path, {}, `Removed “${plainName(output.title)}”.`, { method: "DELETE", explain: outputProblem })}
-          />
+          {/* Decision 136 refuses removing an output that was ever Ready, so it isn't offered. */}
+          {output.status === "ready" ? null : (
+            <ConfirmAction
+              label="Remove"
+              describedBy={titleId}
+              title={<>Remove “{plainName(output.title)}”?</>}
+              description="It leaves this list and can't be named on a task again. Its record stays, so a finished task that named it still says so. An output that was ever Ready, or that an unfinished task names, can't be removed."
+              confirm="Remove output"
+              destructive
+              focusAfter={noticeRef}
+              action={() => send(path, {}, `Removed “${plainName(output.title)}”.`, { method: "DELETE", explain: outputProblem })}
+            />
+          )}
         </div>
       ) : null}
     </li>
   );
 }
 
-type HistoryState = { phase: "idle" } | { phase: "loading" } | { phase: "failed" } | { phase: "ready"; read: VersionsRead };
+type HistoryState = { phase: "idle" } | { phase: "loading" } | { phase: "failed"; limited: boolean } | { phase: "ready"; read: VersionsRead };
 
 /**
- * Every approval that made this output Ready, newest first. Read with the page for the first few Ready outputs, and otherwise
- * when opened. A version from a task the viewer can't see shows only its number and time, as the read gives.
+ * Every approval that made this output Ready, newest first, read when opened and never with the page. Keyed by the version
+ * the listing names, so an approval since starts it afresh. A version from a task the viewer can't see shows only its number and time, as the read gives.
  */
-function VersionHistory({ path, initial, taskTitles, me, names }: { path: string; initial?: VersionsRead; taskTitles: Record<string, string>; me: string; names: Names }) {
-  const [state, setState] = useState<HistoryState>(initial ? { phase: "ready", read: initial } : { phase: "idle" });
+function VersionHistory({ path, taskTitles, me, names, onLoaded }: { path: string; taskTitles: Record<string, string>; me: string; names: Names; onLoaded: (read: VersionsRead) => void }) {
+  const [state, setState] = useState<HistoryState>({ phase: "idle" });
   const loading = useRef(false);
 
   const load = async () => {
@@ -181,7 +205,8 @@ function VersionHistory({ path, initial, taskTitles, me, names }: { path: string
     setState({ phase: "loading" });
     const read = await clientQuery<VersionsRead>(`${path}/versions`).catch(() => null);
     loading.current = false;
-    setState(read?.ok ? { phase: "ready", read: read.data } : { phase: "failed" });
+    if (read?.ok) onLoaded(read.data);
+    setState(read?.ok ? { phase: "ready", read: read.data } : { phase: "failed", limited: read?.ok === false && read.status === 429 });
   };
 
   const count = state.phase === "ready" ? state.read.versions.length : null;
@@ -199,7 +224,7 @@ function VersionHistory({ path, initial, taskTitles, me, names }: { path: string
         {state.phase === "loading" || state.phase === "idle" ? <p role="status" className="text-muted-foreground">Loading version history</p> : null}
         {state.phase === "failed" ? (
           <p role="alert" className="text-status-danger">
-            Couldn&apos;t load the version history.{" "}
+            {state.limited ? "Too many requests just now, so the version history didn't load. Wait a minute, then try again." : "Couldn't load the version history."}{" "}
             <Button variant="link" className="h-auto p-0 text-status-danger underline" onClick={() => void load()}>
               Try again
             </Button>
@@ -271,22 +296,22 @@ function EditOutput({ output, path, send, onDone }: { output: Output; path: stri
     if (problem || pending) return;
     setPending(true);
     const trimmed = description.trim();
-    const outcome = await send(path, { title: title.trim(), description: trimmed === "" ? null : trimmed }, "Saved the output's title and description.", { method: "PUT", focus: true, explain: outputProblem });
+    // onOk also runs when Try again succeeds later, so the form closes then too.
+    await send(path, { title: title.trim(), description: trimmed === "" ? null : trimmed }, "Saved the output's title and description.", { method: "PUT", focus: true, explain: outputProblem, onOk: onDone });
     setPending(false);
-    if (outcome.kind === "ok") onDone();
   };
 
   return (
     <form onSubmit={save} aria-label={`Rename ${plainName(output.title)}`} className="space-y-3 rounded-lg bg-muted/50 p-3">
       <OutputFields idPrefix={`edit-${output.id}`} title={title} description={description} setTitle={setTitle} setDescription={setDescription} titleRef={titleRef} />
       <p className="text-sm text-muted-foreground">Renaming doesn&apos;t change its status: what was approved is the submission, not its wording.</p>
-      {problem && title !== "" ? (
+      {problem ? (
         <p id={problemId} className="text-sm text-status-danger">
           {problem}
         </p>
       ) : null}
       <div className="flex flex-wrap gap-2">
-        <Button type="submit" size="sm" className={MOBILE_TARGET} disabled={pending || problem !== null} aria-describedby={problem && title !== "" ? problemId : undefined}>
+        <Button type="submit" size="sm" className={MOBILE_TARGET} disabled={pending || problem !== null} aria-describedby={problem ? problemId : undefined}>
           {pending ? "Saving…" : "Save"}
         </Button>
         <Button type="button" size="sm" variant="outline" className={MOBILE_TARGET} disabled={pending} onClick={onDone}>

@@ -244,8 +244,8 @@ async function seed() {
   };
   const secretTask = await worked(otherWorker, SECRET.title, owner.id, SECRET);
   const viewerTask = await worked(narrowed, "Gia reviews this", viewer.id);
-  // Screen 9c: expected outputs in each state, in a room of their own so other screens' counts don't move. A Ready output
-  // whose file was later blocked needs a scanner, which this stack doesn't run, so its note isn't covered here.
+  // Screen 9c: expected outputs in each state, in a room of their own so other screens' counts don't move. Decision 138's
+  // note, a Ready output whose file was removed after approval, is added there by the REMOVED OUTPUT FILE FIXTURE below.
   const outputs = await seedOutputs(owner, lead);
   const plan = await owner.must("GET", `${inLimited}/plan`, undefined, inTeam);
   await owner.must("PUT", `${inLimited}/tasks/${viewerTask.id}/plan`, { plan_revision: plan.plan_revision, predecessors: [secretTask.id] }, inTeam);

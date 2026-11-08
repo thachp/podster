@@ -26,8 +26,6 @@ export type OutputsRead = { outputs: Output[]; ready: number; total: number };
 export type OutputVersion = { submission_no: number; approved_at: number; task_id?: string; approved_by?: string };
 export type VersionsRead = { versions: OutputVersion[]; complete: boolean };
 
-/** How many Ready outputs get their history read with the page. Each read spends the person's rate limit, so past this it's read when asked. */
-export const PRELOADED_HISTORIES = 10;
 
 /** The version that's current, when the history's newest entry is the one the listing names. */
 export const currentVersion = (output: Output, history: VersionsRead | undefined) => {

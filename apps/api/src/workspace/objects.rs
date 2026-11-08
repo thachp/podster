@@ -287,6 +287,11 @@ fn complete(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     if body["attempt"].as_str().is_none() || body["attempt"] != row["attempt_id"] {
         return Err(refusal(FileRefusal::InvalidTransition));
     }
+    // An attempt can only start before the grant ends, and runs at most `TOTAL_LIMIT_MS`, so nothing can finish later than both.
+    // The Worker checks that limit only now and then, so this is what makes it exact, and keeps the cap's count exact with it.
+    if now > int(&row["upload_expires_at"]).saturating_add(crate::objects::TOTAL_LIMIT_MS as i64) {
+        return Err(upload_not_found());
+    }
     if body["size"].as_i64() != Some(int(&row["size"])) || body["sha256"] != row["sha256"] {
         return Err(refusal(FileRefusal::Mismatch));
     }

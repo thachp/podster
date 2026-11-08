@@ -1,0 +1,14 @@
+{
+  // Local only. Never deployed: decision 126 keeps M3's spikes local.
+  "name": "podster-spike-m3-a2a-inbound",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "vars": {
+    "BASE_URL": "http://localhost:8787",
+    // Lets tests and client scripts put the stand-in room back to its seed.
+    "SPIKE_RESET": "1",
+    // Spike-only bearer tokens standing in for spike B's OAuth audience. Not secrets.
+    "SPIKE_TOKENS": "{\"tok-worker\":\"agt_worker\",\"tok-lead\":\"agt_lead\",\"tok-outsider\":\"agt_outsider\"}"
+  }
+}

@@ -6,6 +6,7 @@
 use podster_core::{PrincipalId, Task};
 
 pub mod files;
+pub mod outputs;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrincipalKind {

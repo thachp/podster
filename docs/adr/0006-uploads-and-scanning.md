@@ -141,6 +141,21 @@ The lead ran these on 2026-11-07, at `eaf1b84`, as the owner through the browser
 
 **Not done yet:** a second network, a forged `cf-connecting-ip` at the edge, `app.podster.dev`'s request limit, and `e2e/upload-check.mjs` itself. These ran before the later fixes to uploads, so they don't cover those.
 
+### Step 3 on staging
+
+[#125](https://github.com/thachp/podster/pull/125) was deployed on 2026-11-08 UTC at `46da970`, the scanner Worker first (version `fdf3d0a0`) and then the API (`efbf47a9`), the gateway and the web Worker. The lead checked it through the browser, as the owner, in the Smoke test room:
+
+| Check | Result |
+| --- | --- |
+| A clean text file | `ready` within 13 s of upload |
+| The EICAR test string | `blocked` within 13 s of upload |
+| Downloading the clean file through the web Worker | SHA-256 matched. Headers: attachment, `nosniff`, `default-src 'none'; sandbox`, `no-referrer`, CORP `same-origin`, `no-store` |
+| Downloading the blocked file | 409 `file_not_available` |
+
+**What that shows:** the queue reaches the scanner, the scanner's report reaches the room, and `SCANNER_SECRET` matches on both Workers, since a wrong one would have left both files in `scanning`. Only a clean verdict made a file downloadable.
+
+**Not measured:** the Container's cold start, a 100 MB scan, the hour sweep on a deployment, and the logs. Each verdict was one file, scanned alone.
+
 ### What's still unproven
 
 - **Repeatability.** Runs 2 and 3 and a `curl` check failed on 100 MB uploads from the owner's Mac (EPIPE, then `bad record mac`), before any Worker logged them. That looks like corruption on the path, but it isn't proven. One pass isn't repeatability.

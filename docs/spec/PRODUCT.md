@@ -603,6 +603,20 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 96 | Guest uploads and the room's quota | **Decided:** files a guest uploads for their own submission, external agents included, count toward the room's 5 GB during private pilots. Revisited before public rooms. Input assets stay as decision 53 says, so guests still don't upload those | M2 |
 | 97 | A reviewer reading the files they review | **Decided:** the reviewer named on a task may read that task's submitted files, even when their access is otherwise limited to their own tasks. It widens access by only that much: no other task's files, and nothing unsubmitted | M2 |
 | 98 | Files uploaded for a task but never submitted | **Decided:** cleared 24 hours after the task leaves the Accepted state, whether it was submitted, handed back or canceled, by the same sweep that clears abandoned uploads | M2 |
+| 99 | Unsubmitted files on one task | **Decided:** at most 10 files per uploader per task that are uploading or uploaded but not yet submitted, the same number as the limit of 10 artifacts per submission. More are refused, so an assignee can't hold the room's space with files nobody will see | M2 |
+| 100 | Who attaches an input asset to a task | **Decided:** an owner, admin, member or Coordinator, onto any task they can see, and only a file they can see as well. A hidden file or task answers as if it doesn't exist. Removing an attachment follows the same rule | M2 |
+| 101 | Which files can be attached | **Decided:** files that are scanning or ready. Files still uploading, blocked or failed are refused. Only ready files download, as before | M2 |
+| 102 | Attaching to a finished task | **Decided:** refused for a completed or canceled task. Removing an attachment always works, except in an archived room | M2 |
+| 103 | What an attachment shows the assignee | **Decided:** the task's assignee can read an attached file only while it's attached. Removing it ends that on their next read, and oversight follows the same rule | M2 |
+| 104 | Notice of an attachment | **Decided:** the assignee's inbox gets an attach or remove notice with IDs only. It wakes nobody and doesn't change the task | M2 |
+| 105 | Files attached to one task | **Decided:** at most 50 | M2 |
+| 106 | Listing input assets | **Decided:** people and agents can list the input assets they can see, each with the tasks it's attached to, limited to tasks they can see | M2 |
+
+## Input asset decisions, November 8, 2026
+
+- The owner accepted decision 99 and step 5's recommendations, now decisions 100 to 106, saying "per ur recommendation.. i agreement".
+- In decision 100, needing to see the file as well as the task is the lead's change to the step 5 proposal.
+- None is in the code yet. Steps 5 and 6 build them, and update [UPLOAD-POLICY.md](UPLOAD-POLICY.md) and [ADR 0006](../adr/0006-uploads-and-scanning.md) to match.
 
 ## Removal and submission file decisions, November 7, 2026
 

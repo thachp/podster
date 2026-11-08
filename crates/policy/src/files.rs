@@ -1,11 +1,13 @@
 //! Who may upload and see files in a workroom (decisions 53 and 58). Denies by default.
 //!
-//! Removing a file, attaching one to a submission and an operator's takedown come with the steps that build them.
+//! An operator's takedown comes with its own change (decision 92).
 
 use podster_core::files::ObjectState;
 use podster_core::Task;
 
-use crate::{authorize_task, is_party, Caller, Role, TaskAction, TaskView, Verdict};
+use crate::{
+    authorize_task, is_human_admin, is_party, Caller, Role, TaskAction, TaskView, Verdict,
+};
 
 /// How much of a file someone may have. A route answers `Hidden` as if the file didn't exist, as it does for a hidden task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,11 +79,65 @@ pub fn submitted_file_view(caller: &Caller, task: &Task, submitted_by: &str) -> 
     }
 }
 
+/// Who may start an upload for a task's submission: whoever may submit it, which is its assignee, a guest included. The
+/// file counts toward the room's quota like any other. Whether the task is waiting for a submission is
+/// `podster_core::submission_files::accepts_submission_uploads`.
+pub fn authorize_submission_upload(caller: &Caller, task: &Task) -> Verdict {
+    authorize_task(caller, task, TaskAction::Submit)
+}
+
+/// How much of a file uploaded for a task's submission the caller gets. Until a submission names it, only its uploader, while
+/// they can still read the task, so nobody else in the room learns it exists. Once one does, as for submitted work, through
+/// [`submitted_file_view`]. A file is only ever submitted by its uploader, so the uploader is its submitter.
+///
+/// The reviewer named on the task reads its submitted files whatever their artifact scope (decision 97). That widens access by
+/// exactly that much: only that task's files, only once submitted, and only while they can read the task.
+pub fn task_file_view(
+    caller: &Caller,
+    task: &Task,
+    uploaded_by: &str,
+    submitted: bool,
+) -> FileView {
+    if submitted {
+        let named_reviewer = caller.id == task.reviewer
+            && authorize_task(caller, task, TaskAction::Read) == Verdict::Allow;
+        return if named_reviewer {
+            FileView::Full
+        } else {
+            submitted_file_view(caller, task, uploaded_by)
+        };
+    }
+    if caller.id == uploaded_by && authorize_task(caller, task, TaskAction::Read) == Verdict::Allow
+    {
+        FileView::Full
+    } else {
+        FileView::Hidden
+    }
+}
+
 /// Whether someone can have a file's bytes now. Their current view and the scan both have to allow it, so an uploader can't
 /// fetch their own blocked file. Call it on every use, from current state.
 pub fn may_download(view: FileView, state: ObjectState) -> bool {
     match view {
         FileView::Full => state.is_available(),
         FileView::NameAndStatus | FileView::Hidden => false,
+    }
+}
+
+/// Who may remove a file's bytes from inside the room: its owner or a human admin (decision 57). An agent stored as an admin
+/// counts as a guest, as everywhere else, and the uploader has no say over their own file. `view` is the caller's current view of
+/// this file, from the same state.
+///
+/// A file the caller can't see answers as if it didn't exist, for an owner or admin too, such as another person's unsubmitted
+/// task file, so removing can't tell anyone a hidden file's size or hash. A Podster operator isn't a room participant, so their
+/// takedown needs its own route (decision 92).
+pub fn authorize_file_removal(caller: &Caller, view: FileView) -> Verdict {
+    if caller.role == Role::None {
+        return Verdict::NotParticipant;
+    }
+    match view {
+        FileView::Hidden => Verdict::Hidden,
+        FileView::NameAndStatus | FileView::Full if is_human_admin(caller) => Verdict::Allow,
+        FileView::NameAndStatus | FileView::Full => Verdict::Forbidden,
     }
 }

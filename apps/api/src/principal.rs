@@ -141,6 +141,20 @@ pub async fn check_active(
     }
 }
 
+/// Refuses a person who has left this organization since `since`, in milliseconds. A departure reaches their Principal as soon as
+/// the gateway delivers it, which is before any room hears, and it's kept for longer than an upload can last. Someone who left
+/// before `since` had rejoined by then, or wouldn't have been let in.
+pub async fn check_not_departed(env: &Env, person: &str, org: &str, since: i64) -> R<()> {
+    let body = json!({ "org": org, "since": since });
+    let mut response = internal(env, person, "/internal/departed", &body).await?;
+    let answer: Value = response.json().await?;
+    if answer["departed"].as_bool() == Some(false) {
+        Ok(())
+    } else {
+        Err(ApiError::access_revoked())
+    }
+}
+
 /// Asks the agent's Principal what to send.
 pub async fn claim_wake_for(env: &Env, agent: &str) -> R<Value> {
     let mut response = internal(env, agent, "/internal/wake-claim", &json!({})).await?;
@@ -399,6 +413,32 @@ fn delete_wake(sql: &SqlStorage, now: i64) -> R<Value> {
     Ok(json!({ "deleted": true }))
 }
 
+/// Notices that ask nothing of an agent, so they reach its inbox without a wake: an input asset linked to or unlinked from its
+/// task (decision 104). They never queue a wake, and no check of whether to send or resend one counts them, though they still
+/// count as unread. The next wake for anything else still finds them there.
+const QUIET_EVENTS: &[&str] = &["asset.linked", "asset.unlinked"];
+
+/// Unread events that call for a wake: those within retention, leaving out quiet notices.
+fn waking_unread(sql: &SqlStorage, acked: i64, now: i64) -> R<i64> {
+    waking_after(sql, acked, now - UNREAD_KEPT_MS)
+}
+
+/// How many events after `seq`, created at or after `since`, call for a wake.
+fn waking_after(sql: &SqlStorage, seq: i64, since: i64) -> R<i64> {
+    if !inbox_exists(sql)? {
+        return Ok(0);
+    }
+    let quiet = vec!["?"; QUIET_EVENTS.len()].join(", ");
+    let mut values: Vec<worker::SqlStorageValue> = vec![seq.into(), since.into()];
+    values.extend(QUIET_EVENTS.iter().map(|kind| (*kind).into()));
+    let found = rows(
+        sql,
+        &format!("SELECT count(*) AS n FROM inbox_event WHERE seq > ? AND created_at >= ? AND type NOT IN ({quiet})"),
+        values,
+    )?;
+    Ok(found.first().map_or(0, |row| int(&row["n"])))
+}
+
 /// Whether a wake should be queued for a new event, and with what delay. A wake inside the debounce window is delayed to
 /// its end instead of dropped, so the last event in a burst still gets a nudge.
 fn wake_to_queue(sql: &SqlStorage, now: i64) -> R<Option<i64>> {
@@ -452,11 +492,12 @@ fn claim_wake(sql: &SqlStorage, now: i64) -> R<Value> {
         return Ok(skip("url_refused"));
     }
     let (acked, last_seq, _) = inbox_state(sql)?;
-    let unread = unread_count(sql, acked, now)?;
-    if unread == 0 {
+    // Quiet notices alone are nothing to wake for, but a wake that is sent says how many are unread in all.
+    if waking_unread(sql, acked, now)? == 0 {
         clear()?;
         return Ok(skip("nothing_unread"));
     }
+    let unread = unread_count(sql, acked, now)?;
     let due = wake["last_sent_at"]
         .as_i64()
         .map_or(now, |sent| sent + int(&wake["debounce_s"]) * 1000);
@@ -498,7 +539,7 @@ fn report_wake(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
             vec![now.into()],
         )?;
         let (acked, _, _) = inbox_state(sql)?;
-        return Ok(json!({ "retry": false, "requeue": unread_count(sql, acked, now)? > 0 }));
+        return Ok(json!({ "retry": false, "requeue": waking_unread(sql, acked, now)? > 0 }));
     }
     if body["ok"].as_bool().unwrap_or(false) {
         exec(
@@ -506,11 +547,11 @@ fn report_wake(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
             "UPDATE wake SET last_sent_at = ?, consecutive_failures = 0, queued_until = NULL, sending_until = NULL",
             vec![now.into()],
         )?;
-        // An event during the send was held back by the queued flag, and this wake's count didn't include it.
+        // An event during the send was held back by the queued flag, and this wake's count didn't include it. A quiet notice
+        // isn't one to wake for, so only another kind requeues.
         let (_, last_seq, _) = inbox_state(sql)?;
-        return Ok(
-            json!({ "retry": false, "requeue": last_seq > body["last_seq"].as_i64().unwrap_or(last_seq) }),
-        );
+        let sent_at = body["last_seq"].as_i64().unwrap_or(last_seq);
+        return Ok(json!({ "retry": false, "requeue": waking_after(sql, sent_at, i64::MIN)? > 0 }));
     }
     let failures = int(&wake["consecutive_failures"]) + 1;
     if failures >= WAKE_MAX_FAILURES {
@@ -1083,6 +1124,19 @@ impl Principal {
                 self.arm_next_sweep().await?;
                 return Ok(json!({ "recorded": true }));
             }
+            "/internal/departed" => {
+                let body: Value = req.json().await?;
+                exec(&sql, DEPARTURE_SCHEMA, vec![])?;
+                let found = rows(
+                    &sql,
+                    "SELECT 1 FROM org_departure WHERE org_id = ? AND left_at >= ? LIMIT 1",
+                    vec![
+                        body["org"].as_str().unwrap_or_default().into(),
+                        body["since"].as_i64().unwrap_or(0).into(),
+                    ],
+                )?;
+                return Ok(json!({ "departed": !found.is_empty() }));
+            }
             "/internal/check" => {
                 let body: Value = req.json().await?;
                 let conn = connection(&sql)?.ok_or_else(ApiError::agent_disconnected)?;
@@ -1142,10 +1196,13 @@ impl Principal {
                     Delay::from(Duration::from_secs(30)).await;
                 }
                 let body: Value = req.json().await?;
+                let quiet = body["type"]
+                    .as_str()
+                    .is_some_and(|kind| QUIET_EVENTS.contains(&kind));
                 let (store, now) = (sql.clone(), now_ms());
                 let outcome = self.in_transaction(move || deliver(&store, &body, now))?;
                 // The event is safe already, and a wake is only a nudge, so a problem here can't fail delivery.
-                if outcome["delivered"] == Value::Bool(true) {
+                if outcome["delivered"] == Value::Bool(true) && !quiet {
                     if let Err(error) = self.queue_wake(now).await {
                         console_error!("couldn't queue wake: {:?}", error);
                     }

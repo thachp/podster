@@ -32,6 +32,16 @@ pub const MAX_FILE_BYTES: u64 = 100_000_000;
 pub const ROOM_QUOTA_BYTES: u64 = 5_000_000_000;
 /// No result within an hour fails the scan.
 pub const SCAN_DEADLINE_MS: i64 = 60 * 60 * 1000;
+/// Decision 84: signatures older than this can't make a file available.
+pub const MAX_SIGNATURE_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+/// How far ahead of the room's clock a signature database's build time may be, for clocks that disagree.
+pub const MAX_SIGNATURES_AHEAD_MS: i64 = 24 * 60 * 60 * 1000;
+/// The longest scan engine name kept, the scanner's own limit.
+pub const MAX_SCAN_ENGINE_BYTES: usize = 40;
+/// The longest signature database version kept. It's all digits.
+pub const MAX_SCAN_VERSION_BYTES: usize = 20;
+/// The longest build time kept, which is an ISO 8601 time with room to spare.
+pub const MAX_SCAN_BUILT_AT_BYTES: usize = 40;
 /// How much of a file's start `FileSample::head` holds.
 pub const SAMPLE_HEAD_BYTES: usize = 64 * 1024;
 /// How much of a file's end `FileSample::tail` holds. A zip's directory must fit, which is about 15,000 entries.
@@ -247,13 +257,22 @@ pub fn clean_file_name(raw: &str) -> Result<CleanFileName, FileRefusal> {
     Ok(CleanFileName(name.to_string()))
 }
 
+/// What a character reads as when it stands in for plain text: full-width forms, and the marks that stand in for a dot. A
+/// name isn't stored this way, because these are ordinary characters in a real name. It's only how the name is read below.
+fn plain_form(c: char) -> char {
+    match c {
+        '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+        '\u{2024}' | '\u{3002}' | '\u{FE52}' | '\u{FF61}' => '.',
+        other => other,
+    }
+}
+
 /// Whether a name would run when someone opens the download, whatever its content. This is the one place a name matters:
-/// it can get a file refused, because what the browser saves is what the name says.
-///
-/// **Proposed.** It covers formats nobody uploads as code. Whether to add `.bat`, `.cmd`, `.ps1`, `.sh`, `.js`, `.vbs`, `.msc`,
-/// `.inf`, `.url`, `.jnlp` or `.application` is open, as code is on the allowed list and some of these run when opened.
+/// it can get a file refused, because what the browser saves is what the name says. The list is decision 91 in
+/// `docs/spec/PRODUCT.md`, and a name is read through `plain_form`, so one with a full-width dot is refused too.
 fn has_refused_extension(name: &CleanFileName) -> bool {
-    let Some((_, ext)) = name.as_str().rsplit_once('.') else {
+    let plain: String = name.as_str().chars().map(plain_form).collect();
+    let Some((_, ext)) = plain.trim_end_matches(['.', ' ']).rsplit_once('.') else {
         return false;
     };
     matches!(
@@ -291,6 +310,17 @@ fn has_refused_extension(name: &CleanFileName) -> bool {
             | "xpi"
             | "bin"
             | "elf"
+            | "cmd"
+            | "vbs"
+            | "msc"
+            | "inf"
+            | "url"
+            | "jnlp"
+            | "application"
+            | "bat"
+            | "ps1"
+            | "sh"
+            | "js"
     )
 }
 
@@ -322,6 +352,14 @@ pub struct AcceptedUpload {
     pub size: u64,
 }
 
+/// Whether a file fits beside what the room already holds. Asked when an upload starts, and again when one finishes after its
+/// reservation has lapsed, because the room may have filled up since.
+pub fn fits_room_quota(room_used: u64, size: u64) -> bool {
+    room_used
+        .checked_add(size)
+        .is_some_and(|total| total <= ROOM_QUOTA_BYTES)
+}
+
 /// Checks a request before any byte arrives. Who may ask is `podster-policy`'s question, and it runs first.
 pub fn check_upload(request: UploadRequest<'_>) -> Result<AcceptedUpload, FileRefusal> {
     if request.room_archived {
@@ -333,11 +371,7 @@ pub fn check_upload(request: UploadRequest<'_>) -> Result<AcceptedUpload, FileRe
     if request.size > MAX_FILE_BYTES {
         return Err(FileRefusal::TooLarge);
     }
-    let within_quota = request
-        .room_used
-        .checked_add(request.size)
-        .is_some_and(|total| total <= ROOM_QUOTA_BYTES);
-    if !within_quota {
+    if !fits_room_quota(request.room_used, request.size) {
         return Err(FileRefusal::QuotaExceeded);
     }
     let name = clean_file_name(request.name)?;
@@ -410,6 +444,66 @@ impl ContentKind {
     }
 }
 
+/// Every type `ContentKind::media_type` can give. A stored value that isn't one of these is served as plain bytes.
+const SERVED_MEDIA_TYPES: [ContentKind; 19] = [
+    ContentKind::Pdf,
+    ContentKind::Rtf,
+    ContentKind::Word,
+    ContentKind::Spreadsheet,
+    ContentKind::Presentation,
+    ContentKind::Png,
+    ContentKind::Jpeg,
+    ContentKind::Gif,
+    ContentKind::Webp,
+    ContentKind::Tiff,
+    ContentKind::Bmp,
+    ContentKind::Heif,
+    ContentKind::Mp4,
+    ContentKind::QuickTime,
+    ContentKind::Matroska,
+    ContentKind::Avi,
+    ContentKind::Mpeg,
+    ContentKind::Zip,
+    ContentKind::Text,
+];
+
+/// The `Content-Type` to serve a stored file with. It's only ever a type the upload rules chose from the file's content, so a
+/// bad or missing row can't name something a browser would render.
+pub fn served_media_type(stored: Option<&str>) -> &'static str {
+    SERVED_MEDIA_TYPES
+        .iter()
+        .map(|kind| kind.media_type())
+        .find(|media_type| Some(*media_type) == stored)
+        .unwrap_or("application/octet-stream")
+}
+
+/// The `Content-Disposition` to serve a file with, always an attachment. A name is agent content, so only characters that can't
+/// end the value or start another header get through, whatever the stored name holds. `filename*` carries the real name for
+/// clients that read it (RFC 6266), and `filename` is a plain stand-in for those that don't.
+pub fn attachment_header(name: &str) -> String {
+    let plain: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let plain = plain.trim_matches([' ', '.']);
+    let plain = if plain.is_empty() { "download" } else { plain };
+    let mut encoded = String::with_capacity(name.len());
+    for byte in name.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    format!("attachment; filename=\"{plain}\"; filename*=UTF-8''{encoded}")
+}
+
 /// The ends of a file. `head` is its first `SAMPLE_HEAD_BYTES` and `tail` its last `SAMPLE_TAIL_BYTES`, or all of it when
 /// it's shorter, and the two can overlap. A sample of any other length is refused. Its `Debug` prints lengths, never bytes.
 #[derive(Clone, Copy)]
@@ -417,6 +511,45 @@ pub struct FileSample<'a> {
     pub head: &'a [u8],
     pub tail: &'a [u8],
     pub total_size: u64,
+}
+
+/// Collects a file's ends as it streams past, for `FileSample`. It holds at most twice the tail's sample, plus one chunk, however
+/// large the file is.
+#[derive(Clone, Default)]
+pub struct FileEnds {
+    head: Vec<u8>,
+    tail: Vec<u8>,
+}
+
+impl FileEnds {
+    pub fn add(&mut self, chunk: &[u8]) {
+        let room = SAMPLE_HEAD_BYTES.saturating_sub(self.head.len());
+        self.head.extend(chunk.iter().take(room));
+        self.tail.extend_from_slice(chunk);
+        // Only past twice the sample, so most chunks move nothing.
+        if self.tail.len() > SAMPLE_TAIL_BYTES * 2 {
+            let extra = self.tail.len() - SAMPLE_TAIL_BYTES;
+            self.tail.drain(..extra);
+        }
+    }
+
+    pub fn head(&self) -> &[u8] {
+        &self.head
+    }
+
+    pub fn tail(&self) -> &[u8] {
+        let extra = self.tail.len().saturating_sub(SAMPLE_TAIL_BYTES);
+        self.tail.get(extra..).unwrap_or_default()
+    }
+}
+
+impl fmt::Debug for FileEnds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileEnds")
+            .field("head_bytes", &self.head.len())
+            .field("tail_bytes", &self.tail.len())
+            .finish()
+    }
 }
 
 impl fmt::Debug for FileSample<'_> {
@@ -865,15 +998,19 @@ pub enum ObjectState {
     Blocked,
     /// No result within an hour. Upload the file again.
     Failed,
+    /// Taken down by an owner or admin: the bytes are gone, and the record and hash stay. Nothing leaves it, see
+    /// [`crate::removal`].
+    Removed,
 }
 
 impl ObjectState {
-    pub const ALL: [ObjectState; 5] = [
+    pub const ALL: [ObjectState; 6] = [
         ObjectState::Uploading,
         ObjectState::Scanning,
         ObjectState::Ready,
         ObjectState::Blocked,
         ObjectState::Failed,
+        ObjectState::Removed,
     ];
 
     pub fn name(self) -> &'static str {
@@ -883,6 +1020,7 @@ impl ObjectState {
             ObjectState::Ready => "ready",
             ObjectState::Blocked => "blocked",
             ObjectState::Failed => "failed",
+            ObjectState::Removed => "removed",
         }
     }
 
@@ -898,7 +1036,8 @@ impl ObjectState {
             ObjectState::Uploading
             | ObjectState::Scanning
             | ObjectState::Blocked
-            | ObjectState::Failed => false,
+            | ObjectState::Failed
+            | ObjectState::Removed => false,
         }
     }
 }
@@ -924,7 +1063,8 @@ impl fmt::Debug for Arrival<'_> {
     }
 }
 
-fn is_sha256(hash: &str) -> bool {
+/// Lower-case hex, the only form one is compared in.
+pub fn is_sha256(hash: &str) -> bool {
     hash.len() == 64 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
@@ -942,9 +1082,11 @@ pub fn complete_upload(
 ) -> Result<CompletedUpload, FileRefusal> {
     match state {
         ObjectState::Uploading => {}
-        ObjectState::Scanning | ObjectState::Ready | ObjectState::Blocked | ObjectState::Failed => {
-            return Err(FileRefusal::InvalidTransition)
-        }
+        ObjectState::Scanning
+        | ObjectState::Ready
+        | ObjectState::Blocked
+        | ObjectState::Failed
+        | ObjectState::Removed => return Err(FileRefusal::InvalidTransition),
     }
     if arrival.received_size != arrival.announced_size
         || arrival.sample.total_size != arrival.received_size
@@ -988,6 +1130,7 @@ fn scan_is_late(scanning_since: i64, now: i64) -> bool {
 
 /// Records a scanner's report. Reports can arrive twice or late, so a report can only ever tighten: nothing leaves
 /// blocked or failed for ready, a finding blocks whatever the state was, and a clean report after the deadline is too late.
+/// A removed file stays removed, whatever arrives.
 pub fn record_scan(
     state: ObjectState,
     outcome: ScanOutcome,
@@ -996,6 +1139,7 @@ pub fn record_scan(
 ) -> Result<ObjectState, FileRefusal> {
     match (state, outcome) {
         (ObjectState::Uploading, _) => Err(FileRefusal::InvalidTransition),
+        (ObjectState::Removed, _) => Ok(ObjectState::Removed),
         (_, ScanOutcome::MalwareFound | ScanOutcome::Unreadable) => Ok(ObjectState::Blocked),
         (ObjectState::Scanning, ScanOutcome::NoKnownMalware) => {
             if scan_is_late(scanning_since, now) {
@@ -1011,6 +1155,33 @@ pub fn record_scan(
     }
 }
 
+/// Whether the scanner's shared secret can ever match a header. A header can't carry whitespace at either end, so a secret with
+/// any there, or nothing but whitespace, would refuse every report, and counts as unset.
+pub fn scanner_secret_usable(secret: &str) -> bool {
+    !secret.is_empty() && secret.trim() == secret
+}
+
+/// Whether a scanner's signature database can stand behind a clean report: a named engine, a version of digits and a build time
+/// within decision 84's week, each within its length. `built_at_ms` is the build time already read, or `None` if it isn't a time.
+pub fn scan_database_fits(
+    engine: &str,
+    version: &str,
+    built_at: &str,
+    built_at_ms: Option<i64>,
+    now: i64,
+) -> bool {
+    let named = !engine.is_empty() && engine.len() <= MAX_SCAN_ENGINE_BYTES;
+    let numbered = !version.is_empty()
+        && version.len() <= MAX_SCAN_VERSION_BYTES
+        && version.bytes().all(|b| b.is_ascii_digit());
+    let fresh = built_at.len() <= MAX_SCAN_BUILT_AT_BYTES
+        && built_at_ms.is_some_and(|at| {
+            let age = now.saturating_sub(at);
+            (-MAX_SIGNATURES_AHEAD_MS..=MAX_SIGNATURE_AGE_MS).contains(&age)
+        });
+    named && numbered && fresh
+}
+
 /// What a state becomes when the room's alarm looks at it: a scan with no result after an hour fails.
 pub fn expire_scan(state: ObjectState, scanning_since: i64, now: i64) -> ObjectState {
     match state {
@@ -1019,6 +1190,7 @@ pub fn expire_scan(state: ObjectState, scanning_since: i64, now: i64) -> ObjectS
         | ObjectState::Scanning
         | ObjectState::Ready
         | ObjectState::Blocked
-        | ObjectState::Failed => state,
+        | ObjectState::Failed
+        | ObjectState::Removed => state,
     }
 }

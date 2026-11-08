@@ -61,7 +61,7 @@ The existing two-agent task lifecycle, authorization checks and durable inbox ar
 | **M0 Kernel** | Two-agent task lifecycle, inbox and wake; workroom owner and admins; revocation fence; basic dashboard | [Kernel success criteria](#coordination-kernel-success-criteria) plus AC-01 to AC-07, AC-09, AC-12 to AC-17, AC-19 to AC-22, AC-25, AC-26, AC-29 and AC-30, for the features M0 includes |
 | **M1 Private workrooms** | Goal and context, work roles and invited claims, lead, scoped access, activity, collaboration list and map | Expanded criteria 1 (without input assets and expected outputs, which M2 adds), 3, 4 and 5 for private rooms. **Met by the owner's ruling on 2026-11-06, at `5ae3dad`** ([decision 80](#decisions-needed), [what it rests on](../m0-gate.md#what-the-call-on-m1-rests-on)) |
 | **M2 Assets and artifacts** ([plan](../m2-plan.md)) | Upload, scanning, expected and versioned outputs, exact-version review | The input assets and expected outputs in expanded criterion 1; expanded criterion 6; upload policy |
-| **M3 A2A** | Published profile, adapter, interoperability and authorization tests | Protocol gates below |
+| **M3 A2A** ([proposed plan](../m3-plan.md)) | Published profile, adapter, interoperability and authorization tests | Protocol gates below |
 | **M4 Public workrooms** | Explore, public read surface, public claims, abuse controls | Expanded criterion 2; abuse review |
 | **M5 Managed repositories** | GitHub App, repository link, review and merge | Expanded criterion 7 for repositories |
 | **M6 Release** | Workroom-level deployment, separate content domain, custom domains | Expanded criteria 7 and 8 |
@@ -557,7 +557,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 48 | A default reviewer in the create flow | **Decided:** none for M1. A task's reviewer is set on the task, under the `create_task` rule | M1 |
 | 49 | What directory cards show | **Decided:** goal and roles now, and artifact progress in M2 | M1 |
 | 50 | Upload limits and types | **Decided:** 100 MB per file and 5 GB per room. Documents, images, text, code, presentations, video and zip. No executables or password-protected files. See the [upload policy](UPLOAD-POLICY.md) | M2 |
-| 51 | Scanner | **Decided, on condition:** ClamAV in Cloudflare Containers, if a spike on staging passes. Otherwise a hosted API with a no-retention contract, and never one that shares samples. The spike's billed resources aren't approved yet. Screens say "No known malware found", never "safe" | M2 |
+| 51 | Scanner | **Decided:** ClamAV in Cloudflare Containers, because the spike passed ([decision 81](#decisions-needed)). If it ever has to be replaced, the fallback is a hosted API with a no-retention contract, and never one that shares samples. Screens say "No known malware found", never "safe" | M2 |
 | 52 | Previews of uploaded files | **Decided:** download only in M2, so no content domain is needed yet | M2 |
 | 53 | Who uploads and sees input assets | **Decided:** owner, admin, member and Coordinator upload. Whoever sees the whole room sees all of them, and someone limited to their own tasks sees only assets linked to those tasks | M2 |
 | 54 | Who manages expected outputs | **Decided:** the owner and admins define them, requesters link tasks, and the lead comes later, as in decision 45. All participants see titles and status | M2 |
@@ -587,13 +587,119 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 78 | Notices about an agent in its own Activity | **Decided:** a limited agent's Activity shows `member.added`, `role.invited` and `role.claim_ended` when they're about that agent. The inbox keeps sending them | M1 |
 | 79 | Whether test people count for M1 | **Decided:** test people count for M1's criteria. Real people stay owed before production | M1 |
 | 80 | Whether M1 is met | **Decided:** the by-hand check counts for M1's screens. The smaller gaps are accepted for M1 and stay listed as open. The owner calls M1 met | M1 |
+| 81 | Whether ClamAV passed the spike | **Decided:** yes, with the open items staying on the [M2 plan](../m2-plan.md#checks-the-spike-left-open) | M2 |
+| 82 | Whether one 100 MB pass is enough to start building | **Decided:** yes. Repeat it from another network in step 2 | M2 |
+| 83 | How signatures stay current | **Decided:** a scheduled image rebuild, so the Container needs no outbound traffic. This is a yes in principle to a scheduled staging deploy, and creating it still needs the owner in that session | M2 |
+| 84 | How old signatures may get | **Decided:** scanning stops when signatures pass 7 days old | M2 |
+| 85 | Finished tasks with no estimate in the forecast | **Decided:** they're left out of the forecast and named on screen | Planning |
+| 86 | A forecast that moves with task status | **Decided:** the forecast can change with task status without moving `plan_changed_at`, and says so. No revision bump | Planning |
+| 87 | The forecast in an agent's plan read | **Decided:** agents' default `get_plan` includes the forecast | Planning |
+| 88 | A first Load more click lost before hydration on a slow device | **Decided:** it stays as it is, and is revisited if real users hit it | M1 |
+| 89 | PDFs with only an owner password | **Decided:** they stay refused | M2 |
+| 90 | Password-protected OpenDocument files | **Decided:** refused if they can be detected without refusing all OpenDocument files. The whole format isn't refused | M2 |
+| 91 | Blocked file extensions | **Decided:** `.cmd`, `.vbs`, `.msc`, `.inf`, `.url`, `.jnlp`, `.application`, `.bat`, `.ps1`, `.sh` and `.js`, plus those already in the rules | M2 |
+| 92 | Takedown by a Podster operator | **Decided:** amends decision 57 for M2: not built yet. Owners and admins can remove files now. The operator route gets its own change before any public room, with operators named as person IDs in the API's configuration and checked in Rust | M2 |
+| 93 | Removing a file in an archived room | **Decided:** allowed. Archiving keeps files, but it doesn't shield harmful content from a takedown | M2 |
+| 94 | Bytes of blocked and failed files | **Decided:** removed automatically 7 days after the verdict, leaving the same record and hash as any removal, marked as done by the system, and freeing their space. The 7 days leave time to look into a reported false positive. This narrows decision 56 for files that can never be downloaded | M2 |
+| 95 | Cancelling your own unfinished upload | **Decided:** not in M2. An abandoned upload frees its space when its grant expires | M2 |
+| 96 | Guest uploads and the room's quota | **Decided:** files a guest uploads for their own submission, external agents included, count toward the room's 5 GB during private pilots. Revisited before public rooms. Input assets stay as decision 53 says, so guests still don't upload those | M2 |
+| 97 | A reviewer reading the files they review | **Decided:** the reviewer named on a task may read that task's submitted files, even when their access is otherwise limited to their own tasks. It widens access by only that much: no other task's files, and nothing unsubmitted | M2 |
+| 98 | Files uploaded for a task but never submitted | **Decided:** cleared 24 hours after the task leaves the Accepted state, whether it was submitted, handed back or canceled, by the same sweep that clears abandoned uploads | M2 |
+| 99 | Unsubmitted files on one task | **Decided:** at most 10 files per uploader per task that are uploading or uploaded but not yet submitted, the same number as the limit of 10 artifacts per submission. More are refused, so an assignee can't hold the room's space with files nobody will see | M2 |
+| 100 | Who attaches an input asset to a task | **Decided:** an owner, admin, member or Coordinator, onto any task they can see, and only a file they can see as well. A hidden file or task answers as if it doesn't exist. Removing an attachment follows the same rule | M2 |
+| 101 | Which files can be attached | **Decided:** files that are scanning or ready. Files still uploading, blocked or failed are refused. Only ready files download, as before | M2 |
+| 102 | Attaching to a finished task | **Decided:** refused for a completed or canceled task. Removing an attachment always works, except in an archived room | M2 |
+| 103 | What an attachment shows the assignee | **Decided:** the task's assignee can read an attached file only while it's attached. Removing it ends that on their next read, and oversight follows the same rule. Clarified on 2026-11-08: "assignee" here means the task's parties as in decision 53, which are its requester, assignee and named reviewer. Nobody outside the task gains anything | M2 |
+| 104 | Notice of an attachment | **Decided:** the assignee's inbox gets an attach or remove notice with IDs only. It wakes nobody and doesn't change the task | M2 |
+| 105 | Files attached to one task | **Decided:** at most 50 | M2 |
+| 106 | Listing input assets | **Decided:** people and agents can list the input assets they can see, each with the tasks it's attached to, limited to tasks they can see | M2 |
+| 107 | M3 spikes and ADR before M2 is finished | **Decided:** the spikes in `spikes/` and ADR 0007 may start now. Product code, pure code included, waits as decision 133 says | M3 |
+| 108 | A2A binding | **Decided:** JSON-RPC only at first | M3 |
+| 109 | A2A version | **Decided:** 1.0 only, with no 0.3 | M3 |
+| 110 | What Podster's A2A server offers | **Decided:** streaming, push notifications and the extended card are all off. One public Agent Card describes Podster and lists no rooms | M3 |
+| 111 | How an A2A client authenticates | **Decided:** an OAuth 2 bearer token for the same agent identity, with an audience just for A2A, through the same consent. Agent Auth JWTs aren't accepted on A2A at first | M3 |
+| 112 | A remote agent reporting `WORKING` | **Decided:** from the registered endpoint only, it accepts the offer, and the profile says so plainly. `COMPLETED` with no `WORKING` is held as an unaccepted response | M3 |
+| 113 | Inbound accept, decline, release and submit | **Decided:** through a small versioned Podster extension. Reading and messages don't need it. A message's text never becomes a command | M3 |
+| 114 | `request_changes` on a completed remote task | **Decided:** a new A2A task with `referenceTaskIds` and the same `contextId` | M3 |
+| 115 | Creating a task over A2A | **Decided:** not allowed. A task needs a room, role, reviewer and policy that plain A2A doesn't carry | M3 |
+| 116 | A2A `contextId` and task ID | **Decided:** both come from the Podster task, with no room-wide context | M3 |
+| 117 | How Podster learns a remote task's state | **Decided:** polling `GetTask` from the queue, backing off from 1 minute to 1 hour, ending at a terminal state or after 7 days. Push comes later | M3 |
+| 118 | What an outbound offer carries | **Decided:** the title, instructions and acceptance criteria as text parts, read fresh at send time after access is rechecked, and a Podster link. The queue holds IDs only | M3 |
+| 119 | Who registers an A2A endpoint | **Decided:** the agent, or its organization's admin, as with wake. One per agent, beside wake. It grants nothing in any room | M3 |
+| 120 | Fetching a remote Agent Card | **Decided:** not at first. The registrant gives the URL, and the first delivery shows it works | M3 |
+| 121 | File references over A2A | **Decided:** Podster never fetches one. A URL is kept as an external link, bytes come through `create_upload`, and inline bytes are refused | M3 |
+| 122 | Podster's credential for a remote endpoint | **Decided:** a signed request like wake's, plus one optional bearer token per endpoint, encrypted. The encryption secret still needs the owner's yes when step 11 sets it | M3 |
+| 123 | A2A limits | **Decided:** MCP's: 16 KB per message, 10 artifacts per submission and the same request rates. At most 8 parts per message, and one send per offer attempt | M3 |
+| 124 | Two independent implementations | **Decided:** one project SDK and one agent framework from outside the project. Spike A names candidates, and the owner picks | M3 |
+| 125 | What the A2A compatibility kit must show | **Decided:** every MUST check passes, or each exception is in the profile with its reason | M3 |
+| 126 | Where M3's spikes run | **Decided:** locally. Spike C runs once on staging only if the owner says yes in that session | M3 |
+| 127 | Deeper security passes in M3 | **Decided:** on steps 7, 11, 12 and 13, beyond the quick diff review, each asked before it runs | M3 |
+| 128 | The A2A SDK or a fresh JSON-RPC layer | **Decided:** whichever spike A shows runs cleanly on Workers, and a fresh layer if the SDK needs Node-only server code | M3 |
+| 129 | M3's cloud resources | **Decided:** a new queue and dead-letter queue for A2A, apart from wake. Creating them still needs the owner's yes when step 12 needs them | M3 |
+| 130 | Runner's inbound nudge | **Decided:** not part of M3. It stays in M7 | M3 |
+| 131 | Test people for M3's gate | **Decided:** they count, as decision 79 says for M1. A pass with a real second person stays owed before production | M3 |
+| 132 | Calling M3's gate and claiming support | **Decided:** the owner calls it after the staging run. Until then the card and docs say "preview" and never "conformant" | M3 |
+| 133 | When M2 is finished for M3's product code | **Decided:** when M2's last contract or migration PR has merged, through step 8 and step 10's D1 migration if it has one. M2's screens and staging run can finish beside M3's first steps, and M3's gate still waits for M2's | M3 |
+| 134 | A2A egress | **Decided:** wake's rules and `global_fetch_strictly_public`, with redirects not followed and no resolved-address check at first. Revisited before public rooms | M3 |
+| 135 | Approving with a note only | **Decided:** a note-only approval doesn't make an expected output Ready. It needs a link or a file | M2 |
+| 136 | Removing an expected output | **Decided:** its row is kept. Removal is refused once it was ever Ready, or while a live task links to it | M2 |
+| 137 | Changing a task's output | **Decided:** refused once the task is submitted | M2 |
+| 138 | A Ready output whose file is later blocked or removed | **Decided:** it stays Ready, with `files_available` false, and the screen must show that the file is unavailable | M2 |
+| 139 | Notices about expected outputs | **Decided:** `task.output_changed` goes to the inbox of the task's parties. Defining, renaming and removing an output go only to activity | M2 |
+| 140 | Expected output limits | **Decided:** 50 per room, titles of 200 bytes and descriptions of 4 KB | M2 |
+| 141 | Compatibility kit checks that don't fit | **Decided:** each is listed as an exception in `docs/spec/A2A-PROFILE.md` with its reason, as decision 125 allows. There's no test-only room for the kit | M3 |
+| 142 | Running the compatibility kit | **Decided:** the owner won't run it by hand, and the session permission check refuses running it, so it hasn't run. The plan and profile say so, and no support is claimed until it has run some other way. It's owed before M3's gate | M3 |
+| 143 | Which second implementation counts | **Decided:** independence is judged by direction, as decision 124 allows. Outbound runs against LangGraph's A2A 1.0 server, with fasta2a's server as backup. Inbound uses the A2A project's own JavaScript and Python clients and the compatibility kit's own `httpx` client, and the profile says plainly that inbound was tested only against the A2A project's own code. Revisited before public rooms | M3 |
+| 144 | Removing a file hidden from the caller | **Decided:** a file the caller can't see answers `file_not_found`, even to a human owner or admin trying to remove it. Hidden equals missing for removal too, and the caller's view is checked before the admin check. Unsubmitted task files are still cleared under decision 98 | M2 |
+
+## File removal ruling and a wording fix, November 8, 2026
+
+- On decision 144 the owner said "up to u", and the lead took the recommendation.
+- Decision 103 said "the task's assignee". The code ([#142](https://github.com/thachp/podster/pull/142)) and decision 53 let the task's parties read a linked input asset: its requester, assignee and named reviewer. The row now says so. This only clarifies the wording, and nobody outside the task gains anything.
+
+## Expected output, compatibility kit and A2A implementation decisions, November 8, 2026
+
+- The owner accepted M2 step 7's six recommendations, now decisions 135 to 140, and the two compatibility kit recommendations, now decisions 141 and 142, saying "go with ur recommendation no need to ask me to run by hand".
+- The owner also asked not to be asked to run things by hand. A check that can't run another way is recorded as a gap.
+- None is in the code yet. M2 step 7 builds decisions 135 to 140. Decision 141's list is written with the profile in M3 step 6.
+- On the second implementation, now decision 143, the owner said "up to u", and the lead chose the plan's recommendation.
+
+## M3 decisions, November 8, 2026
+
+- The owner accepted all 28 questions in the [M3 plan](../m3-plan.md#questions-for-the-owner) as recommended, now decisions 107 to 134, saying "sure".
+- Decisions 122 and 129 still need the owner's yes in that session before the secret is set or the queues are created.
+- None is in the code yet. The spikes start under decision 107, and ADR 0007 and the build steps carry the rest.
+
+## Input asset decisions, November 8, 2026
+
+- The owner accepted decision 99 and step 5's recommendations, now decisions 100 to 106, saying "per ur recommendation.. i agreement".
+- In decision 100, needing to see the file as well as the task is the lead's change to the step 5 proposal.
+- None is in the code yet. Steps 5 and 6 build them, and update [UPLOAD-POLICY.md](UPLOAD-POLICY.md) and [ADR 0006](../adr/0006-uploads-and-scanning.md) to match.
+
+## Removal and submission file decisions, November 7, 2026
+
+- The owner accepted seven recommendations for M2 steps 6 and 8, now decisions 92 to 98, saying "as recommended".
+- Decision 97 is the lead's change to the step 6 proposal, which would have refused the approval instead.
+- None is in the code yet. Steps 6 and 8 build them, and update [UPLOAD-POLICY.md](UPLOAD-POLICY.md) and [ADR 0006](../adr/0006-uploads-and-scanning.md) to match, including the operator wording that decision 92 defers.
+
+## File type decisions, November 7, 2026
+
+- The owner accepted the file type recommendations, now decisions 89 to 91, saying "go with ur recommendation".
+- Only decision 89 is in the code so far. Decisions 90 and 91 still need `crates/core/src/files.rs` changed.
+
+## Spike, Gantt and Load more decisions, November 7, 2026
+
+- The owner accepted the recommendations on the spike, the Gantt and Load more, now decisions 81 to 88, saying "accept all".
+- Decision 51's condition is met by decision 81, so the hosted fallback isn't in use. [ADR 0006](../adr/0006-uploads-and-scanning.md#spike-results) has the results.
+- Decision 83 doesn't create the scheduled deploy. That still needs the owner in that session.
+
 ## M2 and planning decisions, November 6, 2026
 
 - The owner accepted the open plan questions, now decisions 74 to 77, saying "accept all".
 
 - The owner accepted the M2 and task-planning recommendations, now decisions 50 to 60 and 62 to 73, saying "i agreed", along with automatic loading and a visible **Load more** button for long lists, now decision 61.
 - None of it was built then. The design behind decisions 50 to 59 is proposed in [ADR 0006](../adr/0006-uploads-and-scanning.md), and the order of work is in the [M2 plan](../m2-plan.md).
-- The billed staging resources for the upload spike were approved separately, later that day. Decision 51's scanner stays conditional until the spike passes.
+- The billed staging resources for the upload spike were approved separately, later that day. Decision 51's scanner stayed conditional until the spike passed, which is decision 81.
 - Decision 62 words the planning rule by who sees the whole room, because access now follows scopes.
 
 ## M1 decisions, November 6, 2026

@@ -5,10 +5,18 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseJsonc } from "./jsonc.mjs";
+import { writeFileStates } from "./asset-fixture.mjs";
 import { freePort, local, prepareStack, repo, run, startGateway, startWrangler } from "./stack.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const skipBuild = process.argv.includes("--skip-build");
+// Checked before anything builds, and `--browser firefox` is refused rather than quietly running Chromium.
+const browserArgs = process.argv.slice(2).filter((arg) => arg.startsWith("--browser"));
+const browserName = browserArgs[0]?.slice("--browser=".length);
+if (browserArgs.length > 1 || (browserArgs.length === 1 && !["chromium", "firefox", "webkit"].includes(browserName))) {
+  console.error(`Choose one browser, as --browser=chromium, --browser=firefox or --browser=webkit, not: ${browserArgs.join(" ")}`);
+  process.exit(2);
+}
 const web = join(repo, "apps/web");
 
 const { gateway, apiConfig, persist, privateKey, kid } = prepareStack({ skipBuild });
@@ -16,7 +24,8 @@ if (!skipBuild && !process.argv.includes("--skip-web-build")) run("npm", ["run",
 
 const [gatewayPort, webPort] = [await freePort(), await freePort()];
 const gatewayBase = `http://localhost:${gatewayPort}`;
-const app = `http://app.localhost:${webPort}`;
+// WebKit on macOS can't resolve a name under localhost, and the app's own port keeps it apart from the gateway.
+const app = `http://${browserName === "webkit" ? "" : "app."}localhost:${webPort}`;
 // One person walks every screen in seconds, well past a real person's limit of 120 reads a minute, so only this run's
 // config raises the limits. Everything else about the gateway is its own.
 const gatewayConfig = join(local, "gateway.wrangler.jsonc");
@@ -32,16 +41,10 @@ writeFileSync(
 );
 // Workers in separate processes find each other through a registry, and another run's must not answer for these.
 const registry = { WRANGLER_REGISTRY_PATH: join(local, "registry") };
-const backend = startGateway({
-  gateway,
-  apiConfig,
-  persist,
-  gatewayConfig,
-  port: gatewayPort,
-  inspectorPort: await freePort(),
-  env: registry,
-  vars: { AUTH_SECRET: randomBytes(32).toString("base64"), ASSERTION_SIGNING_JWK: JSON.stringify({ ...privateKey.export({ format: "jwk" }), kid }), BASE_URL: gatewayBase, APP_URL: app, ENABLE_PASSWORD_SIGNIN: "true", STRICT_PER_MINUTE: "100000" },
-});
+// Made once, so the Workers come back with the same secrets, and everyone stays signed in, when the input asset fixture restarts them.
+const backendVars = { AUTH_SECRET: randomBytes(32).toString("base64"), ASSERTION_SIGNING_JWK: JSON.stringify({ ...privateKey.export({ format: "jwk" }), kid }), BASE_URL: gatewayBase, APP_URL: app, ENABLE_PASSWORD_SIGNIN: "true", STRICT_PER_MINUTE: "100000" };
+const startBackend = async () => startGateway({ gateway, apiConfig, persist, gatewayConfig, port: gatewayPort, inspectorPort: await freePort(), env: registry, vars: backendVars });
+let backend = await startBackend();
 const dashboard = startWrangler({
   cwd: web,
   command: join(web, "node_modules/.bin/wrangler"),
@@ -59,7 +62,9 @@ async function waitForStack() {
     if (res?.status === 200 && up?.status === 200) return;
     await new Promise((done) => setTimeout(done, 500));
   }
-  console.error(backend.log.join("").slice(-3000), dashboard.log.join("").slice(-3000));
+  // Which one stopped, because their logs look alike.
+  console.error(`--- the gateway and API (${backend.stack.exitCode === null ? "still running" : `exited ${backend.stack.exitCode}`}) ---\n${backend.log.join("").slice(-3000)}`);
+  console.error(`--- the dashboard (${dashboard.stack.exitCode === null ? "still running" : `exited ${dashboard.stack.exitCode}`}) ---\n${dashboard.log.join("").slice(-3000)}`);
   throw new Error("the local stack didn't come up");
 }
 
@@ -68,8 +73,29 @@ try {
   await waitForStack();
   console.log(`dashboard is up at ${app}\n`);
   code = await new Promise((done) => {
-    const proc = spawn(process.execPath, [join(here, "a11y.mjs")], { cwd: here, stdio: "inherit", env: { ...process.env, PODSTER_A11Y_APP: app, PODSTER_A11Y_GATEWAY: gatewayBase } });
+    const proc = spawn(process.execPath, [join(here, "a11y.mjs")], { cwd: here, stdio: ["inherit", "inherit", "inherit", "ipc"], env: { ...process.env, ...(browserName ? { PODSTER_A11Y_BROWSER: browserName } : {}), PODSTER_A11Y_APP: app, PODSTER_A11Y_GATEWAY: gatewayBase } });
     proc.on("exit", (status) => done(status ?? 1));
+    // INPUT ASSET FIXTURE (screen 9a). Test-only: scan states can't arrive through a scanner here, so they're written with the
+    // Workers stopped, then the Workers start again. Why, in asset-fixture.mjs.
+    proc.on("message", async (message) => {
+      if (message?.type !== "set-file-states") return;
+      try {
+        const stopped = new Promise((ended) => (backend.stack.exitCode !== null ? ended() : backend.stack.once("exit", ended)));
+        backend.stop();
+        await stopped;
+        // The runtime under wrangler goes a moment later, and it holds the files and the port until it does.
+        const answers = () => fetch(gatewayBase, { signal: AbortSignal.timeout(1_000) }).then(() => true, () => false);
+        for (let tries = 0; tries < 100 && (await answers()); tries++) await new Promise((wait) => setTimeout(wait, 200));
+        // Writing under a live runtime could corrupt the room or be overwritten, so a gateway that still answers stops the run.
+        if (await answers()) throw new Error("the Workers still answer after being stopped, so the file states weren't written");
+        await writeFileStates(persist, message.changes);
+        backend = await startBackend();
+        await waitForStack();
+        proc.send({ type: "set-file-states:done" });
+      } catch (error) {
+        proc.send({ type: "set-file-states:done", error: String(error?.message ?? error) });
+      }
+    });
   });
   if (code !== 0) console.error(`\n--- end of the Workers' logs ---\n${backend.log.join("").slice(-2000)}\n${dashboard.log.join("").slice(-2000)}`);
 } catch (error) {

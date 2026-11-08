@@ -18,9 +18,19 @@ const OPEN_LIST_UP_TO = 5;
 export function GanttForecastPanel({ plan, failed, workspace, role, archived, reload }: { plan: GanttPlan | null; failed: boolean; workspace: string; role: string | undefined; archived: boolean; reload: () => void }) {
   if (!plan && !failed) return null;
   const form = plan && offersStart(plan, role, archived) ? <GanttStartForm plan={plan} workspace={workspace} reload={reload} /> : null;
-  if (plan?.forecast) return <AvailablePanel forecast={plan.forecast} form={form} />;
+  // The form stays in one place whichever details show, so a first start that makes the forecast appear doesn't rebuild it, which would
+  // lose the keyboard's place and the saved message.
   return (
-    <section aria-labelledby="gantt-forecast" className="space-y-1 rounded-lg border p-3 text-sm">
+    <section aria-labelledby="gantt-forecast" className={`${plan?.forecast ? "space-y-2" : "space-y-1"} rounded-lg border p-3 text-sm`}>
+      {plan?.forecast ? <AvailableDetails forecast={plan.forecast} /> : <UnavailableDetails plan={plan} />}
+      {form}
+    </section>
+  );
+}
+
+function UnavailableDetails({ plan }: { plan: GanttPlan | null }) {
+  return (
+    <>
       <h2 id="gantt-forecast" className="font-medium">
         Forecast unavailable
       </h2>
@@ -32,15 +42,14 @@ export function GanttForecastPanel({ plan, failed, workspace, role, archived, re
       ) : null}
       <p>No capacity/resource leveling</p>
       <p className="text-muted-foreground">Estimates include acceptance and review.</p>
-      {form}
-    </section>
+    </>
   );
 }
 
-function AvailablePanel({ forecast, form }: { forecast: GanttForecast; form: React.ReactNode }) {
+function AvailableDetails({ forecast }: { forecast: GanttForecast }) {
   const shift = beginShiftText(forecast);
   return (
-    <section aria-labelledby="gantt-forecast" className="space-y-2 rounded-lg border p-3 text-sm">
+    <>
       <h2 id="gantt-forecast" className="font-medium">
         {forecast.label}
       </h2>
@@ -59,14 +68,13 @@ function AvailablePanel({ forecast, form }: { forecast: GanttForecast; form: Rea
       </dl>
       {shift ? <p className="rounded-lg bg-status-amber-surface p-2 text-status-amber">{shift}</p> : null}
       <ul className="list-disc space-y-0.5 pl-5 text-muted-foreground">
-        {forecast.assumptions.map((assumption) => (
-          <li key={assumption}>{assumption}</li>
+        {forecast.assumptions.map((assumption, index) => (
+          <li key={index}>{assumption}</li>
         ))}
       </ul>
       {forecast.leftOut.length > 0 ? <LeftOut names={forecast.leftOut} /> : null}
       {forecast.paths.length > 0 ? <CriticalPaths paths={forecast.paths} cut={forecast.critical_paths_cut} /> : null}
-      {form}
-    </section>
+    </>
   );
 }
 
@@ -112,9 +120,12 @@ function GanttStartForm({ plan, workspace, reload }: { plan: GanttPlan; workspac
   // Keeps its key for a save whose outcome is unknown, so saving the same thing again can't apply twice.
   const unknownKeys = useRef(new Map<string, string>());
 
+  // Waits for its target. This runs for every render, and one still finishing as a save returns can run before the form has closed, when
+  // the button isn't there yet. Clearing then would leave nothing to move focus when it is.
   useEffect(() => {
-    if (focusNext.current === "date") dateField.current?.focus();
-    if (focusNext.current === "opener") opener.current?.focus();
+    const target = focusNext.current === "date" ? dateField.current : focusNext.current === "opener" ? opener.current : null;
+    if (!target) return;
+    target.focus();
     focusNext.current = null;
   });
 

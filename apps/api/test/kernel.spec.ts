@@ -82,8 +82,58 @@ const offer = async (tasks: string, extra: object = {}) => {
   return r.body;
 };
 const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
-/** Puts a room back to what the last deployment left, with only the newest migration undone. */
+/** Puts a room back to before expected outputs: the newest migration. */
+const undoOutputMigration = (state: any) => {
+  state.storage.sql.exec("DROP INDEX task_expected_output");
+  state.storage.sql.exec("ALTER TABLE task DROP COLUMN expected_output_id");
+  state.storage.sql.exec("DROP TABLE expected_output_version");
+  state.storage.sql.exec("DROP TABLE expected_output");
+  state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+};
+/** Puts a room back to before removal and retention. */
+const undoRemovalMigration = (state: any) => {
+  undoOutputMigration(state);
+  state.storage.sql.exec("DROP TABLE storage_sweep");
+  state.storage.sql.exec("DROP INDEX stored_object_abandoned");
+  state.storage.sql.exec("DROP INDEX stored_object_purge");
+  for (const column of ["removed_at", "removed_by", "removed_by_kind", "removed_from", "attempt_started_at", "purge_due_at"]) state.storage.sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
+  state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+};
+/** Puts a room back to before input assets were linked to tasks. */
+const undoAssetLinkMigration = (state: any) => {
+  undoRemovalMigration(state);
+  state.storage.sql.exec("DROP TABLE asset_link");
+  state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+};
+/** Puts a room back to before submissions named files. */
+const undoSubmissionFileMigration = (state: any) => {
+  undoAssetLinkMigration(state);
+  state.storage.sql.exec("DROP TABLE submission_file");
+  state.storage.sql.exec("DROP INDEX stored_object_task");
+  state.storage.sql.exec("ALTER TABLE stored_object DROP COLUMN for_task");
+  state.storage.sql.exec("ALTER TABLE task DROP COLUMN submission_files");
+  state.storage.sql.exec("ALTER TABLE task DROP COLUMN left_accepted_at");
+  state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+};
+/** Puts a room back to before scans recorded their result. */
+const undoScanColumnsMigration = (state: any) => {
+  undoSubmissionFileMigration(state);
+  state.storage.sql.exec("DROP INDEX stored_object_scanning");
+  state.storage.sql.exec("DROP INDEX audit_event_seq");
+  state.storage.sql.exec("ALTER TABLE audit_event DROP COLUMN seq");
+  state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN audit_seq");
+  for (const column of ["scan_reason", "scan_sha256", "scan_database_json", "scanned_at"]) state.storage.sql.exec(`ALTER TABLE stored_object DROP COLUMN ${column}`);
+  state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+};
+/** Puts a room back to before it stored files. */
+const undoStoredObjectMigration = (state: any) => {
+  undoScanColumnsMigration(state);
+  state.storage.sql.exec("DROP TABLE stored_object");
+  state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+};
+/** Puts a room back to before it had a planning start. */
 const undoPlanStartMigration = (state: any) => {
+  undoStoredObjectMigration(state);
   state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN plan_start_date");
   state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN plan_timezone");
   state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
@@ -832,12 +882,15 @@ describe("review findings", () => {
     const auditUpTo = (id: string, total: number) => runInDurableObject(stub(id), (_: any, state: any) => {
       const sql = state.storage.sql;
       const have = sql.exec("SELECT count(*) AS n FROM audit_event").one().n as number;
-      const names = sql.exec("PRAGMA table_info(audit_event)").toArray().map((c: any) => c.name).filter((n: string) => n !== "seq");
-      const chosen = names.map((n: string) => (n === "id" ? "'aud_fill' || g.n" : n === "policy_version" ? "t.policy_version + 1" : `t.${n}`)).join(",");
-      for (let i = have; i < total; i++) sql.exec(`INSERT INTO audit_event (${names.join(",")}) SELECT ${chosen} FROM (SELECT ? AS n) g, (SELECT * FROM audit_event ORDER BY policy_version DESC LIMIT 1) t`, i);
+      const names = sql.exec("PRAGMA table_info(audit_event)").toArray().map((c: any) => c.name);
+      const chosen = names.map((n: string) => (n === "id" ? "'aud_fill' || g.n" : n === "policy_version" || n === "seq" ? `t.${n} + 1` : `t.${n}`)).join(",");
+      for (let i = have; i < total; i++) sql.exec(`INSERT INTO audit_event (${names.join(",")}) SELECT ${chosen} FROM (SELECT ? AS n) g, (SELECT * FROM audit_event ORDER BY seq DESC LIMIT 1) t`, i);
+      sql.exec("UPDATE workspace SET audit_seq = (SELECT MAX(seq) FROM audit_event)");
       expect(sql.exec("SELECT count(*) AS n FROM audit_event").one().n).toBe(total);
     });
     const page = async (id: string, after = 0) => (await api(OWNER, "GET", `/v1/workspaces/${id}/audit?after=${after}`)).body;
+    /** An entry's place in the audit list, which the cursor is, though the entry doesn't carry it. */
+    const placeOf = (id: string, entry: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT seq FROM audit_event WHERE id = ?", entry).one().seq as number);
 
     it("says there's nothing more on a full last page, at exactly one page", async () => {
       const { id } = await room();
@@ -852,7 +905,7 @@ describe("review findings", () => {
       await auditUpTo(id, PAGE * 2);
       const first = await page(id);
       expect(first.audit).toHaveLength(PAGE);
-      expect(first.next_cursor).toBe(first.audit[PAGE - 1].policy_version);
+      expect(first.next_cursor).toBe(await placeOf(id, first.audit[PAGE - 1].id));
       const second = await page(id, first.next_cursor);
       expect(second.audit).toHaveLength(PAGE);
       expect(second.next_cursor).toBeNull();
@@ -864,7 +917,7 @@ describe("review findings", () => {
       await auditUpTo(id, PAGE + 1);
       const first = await page(id);
       expect(first.audit).toHaveLength(PAGE);
-      expect(first.next_cursor).toBe(first.audit[PAGE - 1].policy_version);
+      expect(first.next_cursor).toBe(await placeOf(id, first.audit[PAGE - 1].id));
       const second = await page(id, first.next_cursor);
       expect(second.audit).toHaveLength(1);
       expect(second.next_cursor).toBeNull();
@@ -4534,11 +4587,14 @@ describe("rooms from before access grants", () => {
     expect((await add(gone, "member")).status).toBe(200);
     expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${gone.id}`, {})).status).toBe(200);
     const t = await offer(tasks);
-    await runInDurableObject(stub(id), (_: any, state: any) => undoBriefMigration(state));
-    const version = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number);
+    // Read in the same call as the undo, so an alarm that migrates the room before the next request can't come in between.
+    const version = await runInDurableObject(stub(id), (_: any, state: any) => {
+      undoBriefMigration(state);
+      return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
+    });
     const read = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body;
     expect([read.goal, read.context]).toEqual([null, null]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(version + 9);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(version + 15);
     const accessOf = (who: Who) => read.members.find((m: any) => m.principal_id === who.id).access;
     expect(accessOf(LEAD).preset).toBe("member");
     expect(accessOf(BOB).preset).toBe("guest");
@@ -4728,7 +4784,7 @@ describe("work roles and claims", () => {
     expect(read.status).toBe(200);
     expect(read.body.members.find((m: any) => m.principal_id === BOB.id).access.preset).toBe("public_participant");
     expect(await count(id, "access_grant")).toBe(before);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 8);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 14);
     const role = await opening(id);
     expect((await invite(id, role, BOB)).status).toBe(200);
     expect((await claim(id, role, BOB)).body.access.preset).toBe("member");
@@ -5216,7 +5272,7 @@ describe("requiring a person to review (decision 5)", () => {
       return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
     });
     expect((await api(LEAD, "GET", `/v1/workspaces/${id}`)).body.require_person_review).toBe(false);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 7);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 13);
     expect((await api(OWNER, "POST", `/v1/workspaces/${id}/archive`, { policy_version: await version(id) })).status).toBe(200);
     expect((await setting(id, true)).code).toBe("workspace_archived");
   });
@@ -5713,7 +5769,7 @@ describe("planned relationships", () => {
       return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
     });
     expect((await read(OWNER, id)).planned).toEqual([]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 5);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 11);
     expect((await managed(OWNER, "POST", planned(id), id, line(a, b))).status).toBe(200);
   });
 
@@ -7200,6 +7256,6 @@ describe("the collaboration list and map", () => {
       return state.storage.sql.exec("SELECT version FROM schema_version").one().version as number;
     });
     expect((await read(OWNER, id)).edges).toEqual([]);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 6);
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT version FROM schema_version").one().version as number)).toBe(seen + 12);
   });
 });

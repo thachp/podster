@@ -6,6 +6,7 @@
 use podster_core::{PrincipalId, Task};
 
 pub mod files;
+pub mod outputs;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrincipalKind {
@@ -404,7 +405,12 @@ pub fn denied_change_name(method: &str, route: &[&str]) -> Option<&'static str> 
         ("POST", ["tasks", _, "set-reviewer"]) => "task.set_reviewer",
         ("POST", ["tasks", _, "set-requester"]) => "task.set_requester",
         ("PUT", ["tasks", _, "plan"]) => "task.set_plan",
+        ("PUT", ["tasks", _, "expected-output"]) => "task.set_output",
+        ("POST", ["outputs"]) => "output.define",
+        ("PUT", ["outputs", _]) => "output.update",
+        ("DELETE", ["outputs", _]) => "output.remove",
         ("PUT", ["plan", "start"]) => "room.set_plan_start",
+        ("POST", ["uploads"]) => "upload.create",
         ("POST", ["members"]) => "member.add",
         ("POST", ["members", _, "role"]) => "member.change_role",
         ("POST", ["members", _, "clear-removal"]) => "member.clear_removal",
@@ -689,7 +695,7 @@ pub fn may_decide_review(kind: PrincipalKind, room_requires_person: bool) -> boo
 
 /// Room events anyone in the room can see, whatever their scope: what they can already read in the room's brief and
 /// openings. Everything else about the room, such as who joined or left, follows what they can see of its participants.
-pub const EVENTS_FOR_EVERYONE: [&str; 8] = [
+pub const EVENTS_FOR_EVERYONE: [&str; 11] = [
     "workspace.created",
     "workspace.archived",
     "workspace.unarchived",
@@ -698,6 +704,10 @@ pub const EVENTS_FOR_EVERYONE: [&str; 8] = [
     "role.created",
     "role.updated",
     "role.closed",
+    // Every participant sees expected outputs (decision 54), and these carry only the output's ID.
+    "output.defined",
+    "output.updated",
+    "output.removed",
 ];
 
 /// A task's event only someone who sees the whole room gets. A plan edit can be about a task they can't see, so a party to the

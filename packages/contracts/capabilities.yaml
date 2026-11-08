@@ -10,8 +10,16 @@ capabilities:
   claim_role: { kind: command, operation: claimRole }
   release_role: { kind: command, operation: releaseRole }
   create_task: { kind: command, operation: createTask }
+  create_upload: { kind: command, operation: createUpload }
+  get_asset_link: { kind: query, operation: getFile }
+  list_assets: { kind: query, operation: listFiles }
+  link_asset: { kind: command, operation: linkFile }
+  unlink_asset: { kind: command, operation: unlinkFile }
   list_tasks: { kind: query, operation: listTasks }
   get_task: { kind: query, operation: getTask }
+  list_outputs: { kind: query, operation: listOutputs }
+  list_output_versions: { kind: query, operation: listOutputVersions }
+  set_task_output: { kind: command, operation: setTaskOutput }
   get_plan: { kind: query, operation: getPlan }
   set_task_plan: { kind: command, operation: setTaskPlan }
   update_task: { kind: command, operation: updateTask }
@@ -37,12 +45,16 @@ capabilities:
 # also open to the agent itself. These are safe to retry without a key: acceptInvitation, withdrawAgent, consentToAgentReturn,
 # registerAgent, disconnectAgent and reconnectAgent.
 person_only:
+  - removeFile
   - listWorkspaceCards
   - getWorkspaceCard
   - getCollaboration
   - listHandoffs
   - addPlannedRelationship
   - removePlannedRelationship
+  - defineOutput
+  - updateOutput
+  - removeOutput
   - setReviewPolicy
   - createRole
   - updateRole
@@ -86,3 +98,9 @@ person_only:
   - registerAgent
   - disconnectAgent
   - reconnectAgent
+  - getOverseenFile
+# Not a call an agent makes through a tool: raw bytes. An upload goes to the path `create_upload` returned, with its token. A download goes to
+# the path `get_asset_link` returned, with the caller's own credential or session.
+transfer_only:
+  - putUploadBytes
+  - downloadFile

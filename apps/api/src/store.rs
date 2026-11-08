@@ -111,6 +111,51 @@ UPDATE task SET approved_submission_no = submission_no WHERE status = 'completed
 ", "
 ALTER TABLE workspace ADD COLUMN plan_start_date TEXT;
 ALTER TABLE workspace ADD COLUMN plan_timezone TEXT;
+", "
+CREATE TABLE stored_object (id TEXT PRIMARY KEY, name TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL, state TEXT NOT NULL, media_type TEXT, object_key TEXT, attempt_id TEXT, token_hash TEXT NOT NULL, uploaded_by TEXT NOT NULL, uploader_json TEXT, created_at INTEGER NOT NULL, upload_expires_at INTEGER NOT NULL, stored_at INTEGER, scanning_since INTEGER);
+CREATE INDEX stored_object_space ON stored_object (state, upload_expires_at, size);
+", "
+ALTER TABLE stored_object ADD COLUMN scan_reason TEXT;
+ALTER TABLE stored_object ADD COLUMN scan_sha256 TEXT;
+ALTER TABLE stored_object ADD COLUMN scan_database_json TEXT;
+ALTER TABLE stored_object ADD COLUMN scanned_at INTEGER;
+CREATE INDEX stored_object_scanning ON stored_object (state, scanning_since);
+ALTER TABLE workspace ADD COLUMN audit_seq INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE audit_event ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;
+UPDATE audit_event SET seq = policy_version;
+UPDATE workspace SET audit_seq = COALESCE((SELECT MAX(seq) FROM audit_event), 0);
+CREATE UNIQUE INDEX audit_event_seq ON audit_event (seq);
+", "
+ALTER TABLE task ADD COLUMN submission_files INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE stored_object ADD COLUMN for_task TEXT;
+CREATE INDEX stored_object_task ON stored_object (for_task) WHERE for_task IS NOT NULL;
+CREATE TABLE submission_file (task_id TEXT NOT NULL, submission_no INTEGER NOT NULL, object_id TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL,
+  label TEXT NOT NULL, submitted_by TEXT NOT NULL, submitted_org TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (task_id, submission_no, object_id)) WITHOUT ROWID;
+CREATE INDEX submission_file_object ON submission_file (object_id);
+ALTER TABLE task ADD COLUMN left_accepted_at INTEGER;
+", "
+CREATE TABLE asset_link (task_id TEXT NOT NULL, object_id TEXT NOT NULL, linked_by TEXT NOT NULL, linked_at INTEGER NOT NULL, PRIMARY KEY (task_id, object_id)) WITHOUT ROWID;
+CREATE INDEX asset_link_object ON asset_link (object_id, task_id);
+", "
+ALTER TABLE stored_object ADD COLUMN removed_at INTEGER;
+ALTER TABLE stored_object ADD COLUMN removed_by TEXT;
+ALTER TABLE stored_object ADD COLUMN removed_by_kind TEXT;
+ALTER TABLE stored_object ADD COLUMN removed_from TEXT;
+ALTER TABLE stored_object ADD COLUMN attempt_started_at INTEGER;
+ALTER TABLE stored_object ADD COLUMN purge_due_at INTEGER;
+CREATE INDEX stored_object_abandoned ON stored_object (upload_expires_at) WHERE state = 'uploading';
+CREATE INDEX stored_object_purge ON stored_object (purge_due_at) WHERE purge_due_at IS NOT NULL;
+CREATE TABLE storage_sweep (id INTEGER PRIMARY KEY CHECK (id = 1), due_at INTEGER, cursor TEXT, cycle_due_at INTEGER, settles_at INTEGER);
+INSERT INTO storage_sweep (id, due_at, settles_at) SELECT 1, CASE WHEN EXISTS (SELECT 1 FROM stored_object WHERE object_key IS NOT NULL) THEN CAST(strftime('%s', 'now') AS INTEGER) * 1000 + 3600000 END, CAST(strftime('%s', 'now') AS INTEGER) * 1000 + 3600000;
+", "
+CREATE TABLE expected_output (id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL, removed_at INTEGER, removed_by TEXT, current_task_id TEXT, current_submission_no INTEGER, current_approved_at INTEGER);
+CREATE INDEX expected_output_shown ON expected_output (created_at, id) WHERE removed_at IS NULL;
+CREATE TABLE expected_output_version (seq INTEGER PRIMARY KEY AUTOINCREMENT, output_id TEXT NOT NULL, task_id TEXT NOT NULL, submission_no INTEGER NOT NULL,
+  approved_at INTEGER NOT NULL, approved_by TEXT NOT NULL, UNIQUE (output_id, task_id, submission_no));
+CREATE INDEX expected_output_history ON expected_output_version (output_id, seq);
+ALTER TABLE task ADD COLUMN expected_output_id TEXT;
+CREATE INDEX task_expected_output ON task (expected_output_id) WHERE expected_output_id IS NOT NULL;
 "];
 
 pub fn int(value: &Value) -> i64 {
@@ -335,6 +380,7 @@ pub fn task_from_row(row: &Value) -> R<Task> {
         approved_submission_no: row["approved_submission_no"]
             .is_number()
             .then(|| int(&row["approved_submission_no"]) as u32),
+        submission_files: int(&row["submission_files"]).max(0) as u32,
         assignee_departed: int(&row["assignee_departed"]) != 0,
         needs_reviewer: int(&row["needs_reviewer"]) != 0,
         needs_requester: int(&row["needs_requester"]) != 0,
@@ -357,11 +403,16 @@ pub fn insert_task(sql: &SqlStorage, t: &Task, now: i64) -> R<()> {
     ])
 }
 
+/// Every change to a task's status goes through here. `left_accepted_at` is when it last moved out of `accepted`, and is cleared
+/// when it moves back in, so changes requested restarts the clock. Step 8's sweep reads it to clear files uploaded for the task
+/// that no submission named (decision 98). The `CASE` reads the row as it was before this update.
 pub fn save_task(sql: &SqlStorage, t: &Task, now: i64) -> R<()> {
+    exec(sql, "UPDATE task SET left_accepted_at = CASE WHEN ?1 = 'accepted' THEN NULL WHEN status = 'accepted' THEN ?2 ELSE left_accepted_at END WHERE id = ?3",
+        vec![t.status.name().into(), now.into(), t.id.as_str().into()])?;
     exec(sql, "UPDATE task SET title = ?, instructions = ?, acceptance_criteria = ?, requester_id = ?, assignee_id = ?, reviewer_id = ?, status = ?, version = ?, due_at = ?,
-      submission_no = ?, submission_commit = ?, approved_submission_no = ?, assignee_departed = ?, needs_reviewer = ?, needs_requester = ?, updated_at = ? WHERE id = ?", vec![
+      submission_no = ?, submission_commit = ?, approved_submission_no = ?, submission_files = ?, assignee_departed = ?, needs_reviewer = ?, needs_requester = ?, updated_at = ? WHERE id = ?", vec![
         t.title.as_str().into(), t.instructions.as_str().into(), opt(&t.acceptance_criteria), t.requester.as_str().into(), opt(&t.assignee), t.reviewer.as_str().into(),
-        t.status.name().into(), (t.version as i64).into(), opt_int(t.due_at), i64::from(t.submission_no).into(), opt(&t.submission_commit), t.approved_submission_no.map_or(V::Null, |no| V::from(i64::from(no))), flag(t.assignee_departed),
+        t.status.name().into(), (t.version as i64).into(), opt_int(t.due_at), i64::from(t.submission_no).into(), opt(&t.submission_commit), t.approved_submission_no.map_or(V::Null, |no| V::from(i64::from(no))), i64::from(t.submission_files).into(), flag(t.assignee_departed),
         flag(t.needs_reviewer), flag(t.needs_requester), now.into(), t.id.as_str().into(),
     ])
 }

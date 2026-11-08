@@ -1,7 +1,7 @@
 "use client";
 
 import { Zap } from "lucide-react";
-import { memo, useState, type RefObject } from "react";
+import { memo, useEffect, useState, type RefObject } from "react";
 import { cn } from "cn";
 import { plainName } from "@/components/agent-content/text";
 import { SheetLink } from "@/components/sheet/target-sheet";
@@ -14,10 +14,26 @@ const DAY = 24;
 const ROW = 40;
 const LABEL = 176;
 const HEADER = 44;
-const WEEKDAYS = ["S", "M", "T", "W", "T", "F", "S"];
+const WEEKDAYS = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+/** Often enough that Today moves soon after midnight. A hidden tab's timers slow down, so showing it again checks too. */
+const CLOCK_MS = 60_000;
 /** Day 0 of `dayNumber` was a Thursday. */
 const weekdayOf = (day: number) => (((day + 4) % 7) + 7) % 7;
 const dayText = (day: number) => new Date(day * 86_400_000).toISOString().slice(0, 10);
+
+function useClock() {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const check = () => setNow(Date.now());
+    const timer = setInterval(check, CLOCK_MS);
+    document.addEventListener("visibilitychange", check);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", check);
+    };
+  }, []);
+  return now;
+}
 
 /**
  * The plan drawn, with rows in CSS grid and the calendar and links in SVG. It adds nothing the table doesn't say, and the table
@@ -26,7 +42,7 @@ const dayText = (day: number) => new Date(day * 86_400_000).toISOString().slice(
  */
 export function GanttTimeline({ plan, forecast, rows, tableRef }: { plan: GanttPlan; forecast: GanttForecast; rows: TaskSummary[]; tableRef: RefObject<HTMLDivElement | null> }) {
   const [open, setOpen] = useState(() => window.innerWidth >= 768);
-  const [now] = useState(() => Date.now());
+  const now = useClock();
   const days = timelineDays(forecast);
   const first = dayNumber(forecast.begins_on);
   // Only someone with a start has a Today. A forecast comes with one, and this holds if that ever stops being so.
@@ -41,7 +57,7 @@ export function GanttTimeline({ plan, forecast, rows, tableRef }: { plan: GanttP
       <summary className="w-fit rounded-sm p-3 text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset">Timeline</summary>
       <div className="space-y-2 px-3 pb-3 text-xs text-muted-foreground">
         <p>
-          Bars run from earliest start to earliest finish. A filled bar with a lightning icon is critical. The columns marked S are weekends, which the plan skips. Arrows join a task to the one that follows it, between the rows loaded here.
+          Bars run from earliest start to earliest finish. A filled bar with a lightning icon is critical. The columns marked Sa and Su are weekends, which the plan skips. Arrows join a task to the one that follows it, between the rows loaded here.
           {today ? <> Today is {dateText(today)} in {forecast.timezone}{todayShown ? ", marked with a dashed line" : ", outside this plan's dates"}.</> : null}
         </p>
         <Button type="button" variant="link" className="h-auto p-0" onClick={skip}>

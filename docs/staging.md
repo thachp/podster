@@ -204,3 +204,50 @@ npx wrangler d1 execute podster-gateway-staging --remote --env staging --command
 ## After a deploy
 
 Run the journey in the [kernel success criteria](spec/PRODUCT.md#coordination-kernel-success-criteria) against the real hostname, and probe that the API has no public route.
+
+## The scanner's secret
+
+The API and `apps/scanner` share `SCANNER_SECRET`. It's a random value, such as the output of `openssl rand -hex 32`, set to the same value on both Workers. Until both have it, nothing can record a verdict, so every file ends as `failed` after an hour, which is the safe way round. A value with whitespace at either end counts as unset, and the API logs `scan.secret_unset`. Deploy the scanner with the API: the API refuses a clean report that doesn't name the file's key, and an older scanner doesn't send one, so its files would end as `failed`.
+
+```bash
+cd apps/api && npx wrangler secret put SCANNER_SECRET --env staging
+```
+
+```bash
+cd apps/scanner && npx wrangler secret put SCANNER_SECRET --env staging
+```
+
+## Checking uploads on staging
+
+`e2e/upload-check.mjs` sends real uploads down the deployed path, so it shows what the edge does with a chunked upload, which local runs can't. It needs a person's session cookie, and it leaves a room named "Upload check" behind.
+
+```bash
+cd e2e && PODSTER_E2E_COOKIE_A='<cookie>' node upload-check.mjs --base-url https://gateway-staging.podster.dev --big
+```
+
+**CPU time:** a Worker can't read its own, because its clock doesn't move while it computes. Read it from the platform, with this running while the check does:
+
+```bash
+cd apps/api && npx wrangler tail podster-api --env staging --format json --search upload.stored
+```
+
+Each stored file logs one `upload.stored` line, with the object ID, bytes, chunks and wall time. Compare the invocation's CPU time with the limit, which is 30 seconds unless `limits.cpu_ms` raises it. An outcome of `exceededCpu` means it went over.
+
+## Checking M2 on staging
+
+`e2e/m2-staging.mjs` is the start of M2 step 11's staging run. It uploads through the gateway and waits for the scanner's verdicts: a clean text file has to become `ready`, and the EICAR test string `blocked`. Then it downloads the clean file as a person and as an agent, checking the bytes and the file headers, and checks the refusals: a blocked file, an unknown file, someone outside the room, no credential, an executable, a file over 100 MB and a wrong hash. Cases for steps 5 to 8 are listed as skipped until each lands. `--big` adds a 100 MB file through the scanner. It leaves a room named "M2 staging" and its files behind.
+
+With staging's test sign-up, as for the journey:
+
+```bash
+cd e2e && PODSTER_E2E_SIGNUP_SECRET='<secret>' node m2-staging.mjs --base-url https://gateway-staging.podster.dev
+```
+
+A verdict waits up to 300 s by default, for a Container that may be starting cold. `--verdict-wait-s` changes that. Read the scanner's side while it runs:
+
+```bash
+cd apps/scanner && npx wrangler tail --env staging --format json
+```
+
+Locally, `node run-m2-staging.mjs` runs it against the local stack with a stand-in for the scanner. The stand-in reports the EICAR string as a finding and anything else as clean, so a local run checks the queue message, the verdict route and downloads, but not ClamAV or the Container. It also checks that no file name, token, scanner secret or finding reached the Workers' logs.
+

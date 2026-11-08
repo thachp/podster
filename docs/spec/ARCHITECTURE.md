@@ -316,6 +316,8 @@ The consumer in `apps/api` rechecks everything before sending: the connection is
 GET    /v1/me                                       inbox_unread, wake
 GET    /v1/workspaces                               from membership_index
 GET    /v1/workspaces/{ws}/plan?scope=              tasks, durations, edges, plan_revision and complete, narrowed per viewer (decisions 64 to 66); scope=unfinished for unfinished tasks only (decision 77); start and the baseline forecast (decisions 67 to 73), which only someone who sees the whole plan and isn't a guest gets
+POST   /v1/workspaces/{ws}/uploads                  create_upload: reserves space and returns a token, once (ADR 0006)
+PUT    /v1/uploads/{ws}/{object}                    the file's bytes, with that token and no assertion; the room decides
 PUT    /v1/workspaces/{ws}/plan/start               set_plan_start, for the owner or a human admin: the room's start date and timezone, checked against plan_revision (decision 70)
 PUT    /v1/workspaces/{ws}/tasks/{t}/plan           set_task_plan: a task's whole duration and predecessor list, checked against plan_revision
 GET    /v1/workspaces/cards?offset=                 20 rooms at most: membership_index says which to ask, and each room answers what this viewer sees
@@ -435,7 +437,7 @@ Activity reads the existing `event` table through a per-viewer visibility filter
 
 ```
 asset(id, title, visibility: room|public, current_version, created_by, created_at)
-stored_object(id, r2_key, sha256, size, media_type, scan_status: pending|clean|blocked|failed, created_by, created_at, removed_by?, removed_at?)
+stored_object(id, name, size, sha256, state: uploading|scanning|ready|blocked|failed, media_type?, object_key?, attempt_id?, uploaded_by, created_at, upload_expires_at, stored_at?, scanning_since?, scan_reason?, scan_sha256?, scan_database_json?, scanned_at?)     -- built; removal comes with step 8
 artifact += object_id?     -- a row has either this or a link; a submission number is the version
 task += approved_submission_no?     -- built: set by verify_task
 ```
@@ -446,7 +448,7 @@ task += approved_submission_no?     -- built: set by verify_task
 - **Upload.** A checked command creates a `pending` record, reserves quota and returns an upload grant that is short-lived and limited by size and type. The file streams through the gateway and the API to R2, with no presigned URL, because one can't enforce a size or be revoked. Completion verifies size and hash and starts scanning. Nothing is downloadable before `clean`.
 - **Download.** Every download calls the DO to check current authority, and any link is checked again each time it's used. M2 serves everything as an attachment ([decision 52](PRODUCT.md#decisions-needed)).
 - **Review binding.** `verify_task` names `submission_no` and writes `approved_submission_no` in the same transaction, which is built. It'll also be refused until every file is clean, once files exist. A later submission starts unreviewed, so an approved badge cannot move onto replaced content.
-- **Scanner.** ClamAV in Cloudflare Containers, on condition that a spike passes ([decision 51](PRODUCT.md#decisions-needed)). The spike's billed resources aren't approved.
+- **Scanner.** ClamAV in Cloudflare Containers ([decision 51](PRODUCT.md#decisions-needed)), which [passed a spike on staging](../adr/0006-uploads-and-scanning.md#spike-results). It has no outbound traffic, and gets signatures from a scheduled image rebuild ([decision 83](PRODUCT.md#decisions-needed)).
 - **Deferred:** export and legal terms, until before public rooms ([decision 59](PRODUCT.md#decisions-needed)).
 
 ### Content and deployment origins

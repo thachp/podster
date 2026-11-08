@@ -363,6 +363,103 @@ fn a_name_that_runs_is_refused_whatever_the_content() {
 }
 
 #[test]
+fn the_extensions_added_by_decision_91_are_refused() {
+    for ext in [
+        "cmd",
+        "vbs",
+        "msc",
+        "inf",
+        "url",
+        "jnlp",
+        "application",
+        "bat",
+        "ps1",
+        "sh",
+        "js",
+    ] {
+        for name in [
+            format!("run.{ext}"),
+            format!("RUN.{}", ext.to_uppercase()),
+            format!("report.pdf.{ext}"),
+        ] {
+            let asked = UploadRequest {
+                name: &name,
+                ..request(10, 0)
+            };
+            assert_eq!(check_upload(asked).unwrap_err(), R::Executable, "{name:?}");
+        }
+    }
+}
+
+#[test]
+fn a_name_that_runs_is_refused_however_its_dot_or_letters_are_written() {
+    for name in [
+        "setup\u{FF0E}exe",               // full-width dot
+        "setup.\u{FF45}\u{FF58}\u{FF45}", // full-width letters
+        "\u{FF33}\u{FF25}\u{FF34}\u{FF35}\u{FF30}\u{FF0E}\u{FF25}\u{FF38}\u{FF25}", // all of it, in capitals
+        "setup\u{FF0E}exe\u{FF0E}", // and a trailing one, which Windows drops
+        "setup\u{3002}exe",         // ideographic full stop
+        "setup\u{FF61}exe",         // half-width ideographic full stop
+        "setup\u{FE52}exe",         // small full stop
+        "setup\u{2024}exe",         // one dot leader
+        "run\u{FF0E}sh",
+        "run\u{FF0E}js",
+    ] {
+        let asked = UploadRequest {
+            name,
+            ..request(10, 0)
+        };
+        assert_eq!(check_upload(asked).unwrap_err(), R::Executable, "{name:?}");
+    }
+}
+
+#[test]
+fn shortening_cannot_uncover_a_name_with_a_full_width_dot() {
+    let name = format!(
+        "{}\u{FF0E}exe\u{FF0E}{}",
+        "a".repeat(MAX_FILE_NAME_BYTES - 6),
+        "y".repeat(30)
+    );
+    let asked = UploadRequest {
+        name: &name,
+        ..request(10, 0)
+    };
+    assert_eq!(check_upload(asked).unwrap_err(), R::Executable);
+}
+
+#[test]
+fn full_width_characters_stay_in_a_name_that_doesnt_run() {
+    let name = "\u{5831}\u{544A}\u{FF0E}\u{FF50}\u{FF44}\u{FF46}";
+    let asked = UploadRequest {
+        name,
+        ..request(10, 0)
+    };
+    assert_eq!(check_upload(asked).unwrap().name.as_str(), name);
+}
+
+#[test]
+fn names_near_the_refused_extensions_are_allowed() {
+    for name in [
+        "scripts.py",
+        "notes.json",
+        "view.jsx",
+        "page.shtml",
+        "links.urls",
+        "app.applications",
+        "bat",
+        "js",
+        "sh.txt",
+        "run.js.txt",
+    ] {
+        let asked = UploadRequest {
+            name,
+            ..request(1, 0)
+        };
+        assert!(check_upload(asked).is_ok(), "{name:?}");
+    }
+}
+
+#[test]
 fn shortening_cannot_uncover_a_name_that_runs() {
     let extension_too_long_to_keep = "y".repeat(30);
     let name = format!(
@@ -385,7 +482,7 @@ fn a_name_only_refuses_and_a_harmless_name_lets_nothing_in() {
         "the name is fine"
     );
     assert!(check_upload(UploadRequest {
-        name: "scripts.sh",
+        name: "scripts.py",
         ..request(1, 0)
     })
     .is_ok());
@@ -1454,5 +1551,193 @@ fn refusals_have_stable_codes_and_carry_nothing_from_the_file() {
         (R::InvalidTransition, "invalid_transition"),
     ] {
         assert_eq!(refusal.code(), code);
+    }
+}
+
+// ---- the scanner's signature database ----
+
+const NOW_MS: i64 = 1_800_000_000_000;
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+const BUILT: &str = "2026-11-06T07:26:08Z";
+
+#[test]
+fn a_named_numbered_database_within_the_week_fits() {
+    assert!(scan_database_fits(
+        "1.5.4",
+        "28176",
+        BUILT,
+        Some(NOW_MS - DAY_MS),
+        NOW_MS
+    ));
+    assert!(scan_database_fits(
+        "1.5.4",
+        "28176",
+        BUILT,
+        Some(NOW_MS - MAX_SIGNATURE_AGE_MS),
+        NOW_MS
+    ));
+    assert!(scan_database_fits(
+        "1.5.4",
+        "28176",
+        BUILT,
+        Some(NOW_MS + MAX_SIGNATURES_AHEAD_MS),
+        NOW_MS
+    ));
+}
+
+#[test]
+fn signatures_past_the_week_or_too_far_ahead_dont_fit() {
+    assert!(!scan_database_fits(
+        "1.5.4",
+        "28176",
+        BUILT,
+        Some(NOW_MS - MAX_SIGNATURE_AGE_MS - 1),
+        NOW_MS
+    ));
+    assert!(!scan_database_fits(
+        "1.5.4",
+        "28176",
+        BUILT,
+        Some(NOW_MS + MAX_SIGNATURES_AHEAD_MS + 1),
+        NOW_MS
+    ));
+    assert!(!scan_database_fits(
+        "1.5.4",
+        "28176",
+        "not a time",
+        None,
+        NOW_MS
+    ));
+    assert!(!scan_database_fits(
+        "1.5.4",
+        "28176",
+        BUILT,
+        Some(i64::MIN),
+        NOW_MS
+    ));
+}
+
+#[test]
+fn each_field_has_a_length_and_a_shape() {
+    let at = Some(NOW_MS);
+    assert!(!scan_database_fits("", "28176", BUILT, at, NOW_MS));
+    assert!(!scan_database_fits(
+        &"e".repeat(MAX_SCAN_ENGINE_BYTES + 1),
+        "28176",
+        BUILT,
+        at,
+        NOW_MS
+    ));
+    assert!(scan_database_fits(
+        &"e".repeat(MAX_SCAN_ENGINE_BYTES),
+        "28176",
+        BUILT,
+        at,
+        NOW_MS
+    ));
+    assert!(!scan_database_fits("1.5.4", "", BUILT, at, NOW_MS));
+    assert!(!scan_database_fits("1.5.4", "28176a", BUILT, at, NOW_MS));
+    assert!(!scan_database_fits(
+        "1.5.4",
+        &"1".repeat(MAX_SCAN_VERSION_BYTES + 1),
+        BUILT,
+        at,
+        NOW_MS
+    ));
+    assert!(scan_database_fits(
+        "1.5.4",
+        &"1".repeat(MAX_SCAN_VERSION_BYTES),
+        BUILT,
+        at,
+        NOW_MS
+    ));
+    assert!(!scan_database_fits(
+        "1.5.4",
+        "28176",
+        &"2".repeat(MAX_SCAN_BUILT_AT_BYTES + 1),
+        at,
+        NOW_MS
+    ));
+}
+
+#[test]
+fn a_scanner_secret_a_header_cant_carry_counts_as_unset() {
+    assert!(scanner_secret_usable("3f9a0c"));
+    assert!(scanner_secret_usable("a b"));
+    // A failure names the case by its place in the list, never by the value.
+    for (case, candidate) in [
+        "", " ", "\t\n", " 3f9a0c", "3f9a0c ", "3f9a0c\n", "\t3f9a0c",
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert!(!scanner_secret_usable(candidate), "case {case}");
+    }
+}
+
+#[test]
+fn a_served_file_is_always_an_attachment_with_a_harmless_header() {
+    assert_eq!(
+        attachment_header("notes.txt"),
+        "attachment; filename=\"notes.txt\"; filename*=UTF-8''notes.txt"
+    );
+    for name in [
+        "a\"; filename=evil.html",
+        "a\r\nSet-Cookie: x=1.txt",
+        "..\\..\\etc/passwd",
+        "résumé.pdf",
+        "%0d%0a.txt",
+        "name;x=y.txt",
+    ] {
+        let header = attachment_header(name);
+        let (plain, encoded) = header
+            .strip_prefix("attachment; filename=\"")
+            .and_then(|rest| rest.split_once("\"; filename*=UTF-8''"))
+            .expect(name);
+        assert!(
+            plain
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ')),
+            "{name}"
+        );
+        assert!(
+            encoded
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '%')),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        attachment_header("\u{e9}\u{e9}"),
+        "attachment; filename=\"__\"; filename*=UTF-8''%C3%A9%C3%A9"
+    );
+    assert_eq!(
+        attachment_header("..."),
+        "attachment; filename=\"download\"; filename*=UTF-8''..."
+    );
+}
+
+#[test]
+fn only_a_type_the_upload_rules_chose_is_served() {
+    assert_eq!(
+        served_media_type(Some("application/pdf")),
+        "application/pdf"
+    );
+    assert_eq!(
+        served_media_type(Some("text/plain; charset=utf-8")),
+        "text/plain; charset=utf-8"
+    );
+    for stored in [
+        Some("text/html"),
+        Some("image/svg+xml"),
+        Some("TEXT/PLAIN"),
+        Some(""),
+        None,
+    ] {
+        assert_eq!(
+            served_media_type(stored),
+            "application/octet-stream",
+            "{stored:?}"
+        );
     }
 }

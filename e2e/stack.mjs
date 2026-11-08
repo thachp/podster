@@ -21,15 +21,27 @@ export function run(command, args, cwd, env = {}) {
   if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed in ${cwd}`);
 }
 
-export const freePort = () =>
-  new Promise((done, fail) => {
+// Below the range the system hands out for port 0: 32768 and up on Linux, 49152 and up on macOS. The port is only checked here and bound
+// later, and the Workers bind many port 0 sockets while starting, so a port from that range can be taken in between.
+const PORTS = { first: 20_000, last: 32_767 };
+const handedOut = new Set();
+
+const isFree = (port) =>
+  new Promise((done) => {
     const server = createServer();
-    server.on("error", fail);
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address();
-      server.close(() => done(port));
-    });
+    server.on("error", () => done(false));
+    server.listen(port, "127.0.0.1", () => server.close(() => done(true)));
   });
+
+export async function freePort() {
+  for (let tries = 0; tries < 200; tries++) {
+    const port = PORTS.first + Math.floor(Math.random() * (PORTS.last - PORTS.first + 1));
+    if (handedOut.has(port) || !(await isFree(port))) continue;
+    handedOut.add(port);
+    return port;
+  }
+  throw new Error(`no free port between ${PORTS.first} and ${PORTS.last}`);
+}
 
 /** Builds the API, makes throwaway keys, writes its local config and applies both apps' migrations. */
 export function prepareStack({ skipBuild = false } = {}) {
@@ -69,9 +81,9 @@ export function prepareStack({ skipBuild = false } = {}) {
 }
 
 /** Starts a Worker's `wrangler dev` in its own process group, so it can be stopped with all its children. */
-export function startWrangler({ cwd, command = wrangler, args, env = {} }) {
+export function startWrangler({ cwd, command = wrangler, args, env = {}, logLevel = "warn" }) {
   const log = [];
-  const stack = spawn(command, ["dev", ...args, "--ip", "127.0.0.1", "--show-interactive-dev-session=false", "--log-level", "warn"], { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...process.env, ...quiet, ...env } });
+  const stack = spawn(command, ["dev", ...args, "--ip", "127.0.0.1", "--show-interactive-dev-session=false", "--log-level", logLevel], { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...process.env, ...quiet, ...env } });
   for (const stream of [stack.stdout, stack.stderr]) stream.on("data", (chunk) => log.push(chunk.toString()));
   let stopped = false;
   const stop = () => {
@@ -88,7 +100,7 @@ export function startWrangler({ cwd, command = wrangler, args, env = {} }) {
   return { stack, log, stop };
 }
 
-export function startGateway({ gateway: cwd, apiConfig, persist, vars, port, inspectorPort, gatewayConfig = join(cwd, "wrangler.jsonc"), extraArgs = [], env = {} }) {
+export function startGateway({ gateway: cwd, apiConfig, persist, vars, port, inspectorPort, gatewayConfig = join(cwd, "wrangler.jsonc"), extraArgs = [], env = {}, logLevel }) {
   const args = ["-c", gatewayConfig, "-c", apiConfig, ...Object.entries(vars).flatMap(([name, value]) => ["--var", `${name}:${value}`]), ...extraArgs, "--port", String(port), "--inspector-port", String(inspectorPort), "--persist-to", persist];
-  return startWrangler({ cwd, args, env });
+  return startWrangler({ cwd, args, env, logLevel });
 }

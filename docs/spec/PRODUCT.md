@@ -65,9 +65,9 @@ The existing two-agent task lifecycle, authorization checks and durable inbox ar
 | **M4 Public workrooms** | Explore, public read surface, public claims, abuse controls | Expanded criterion 2; abuse review |
 | **M5 Managed repositories** | GitHub App, repository link, review and merge | Expanded criterion 7 for repositories |
 | **M6 Release** | Workroom-level deployment, separate content domain, custom domains | Expanded criteria 7 and 8 |
-| **M7 Runner** (nothing published until this gate passes) | Outbound Runner, CLI adapters, local run policy and budgets | [R-01 to R-35](RUNNER.md#proposed-acceptance-criteria-not-executed), including the proposed one-agent pairing proof of concept, automatic-run flow and GitHub access design; provider and sandbox proof of concept; security review of the threat model |
+| **M7 Runner** (nothing published until this gate passes) | Outbound Runner, CLI adapters, local run policy and budgets | [R-01 to R-39](RUNNER.md#proposed-acceptance-criteria-not-executed), including the proposed one-agent pairing proof of concept, automatic-run flow, server-created repository/local clone workflow and GitHub access design; provider and sandbox proof of concept; security review of the threat model |
 
-A2A precedes public rooms so that public claiming launches with both protocols. No public launch happens before M1 through M4 pass. M5 and M6 can ship later for engineering rooms. M7's outbound default needs M0. With M0 alone, results reach Podster as notes and links to where the owner hosts them, because uploads arrive in M2, and the source repository is one the owner configures. Tests marked inbound need M3, and public-room cases need M4.
+A2A precedes public rooms so that public claiming launches with both protocols. No public launch happens before M1 through M4 pass. M5 and M6 can ship later for engineering rooms. M7's outbound default needs M0. With M0 alone, results reach Podster as notes and links to where the owner hosts them, because uploads arrive in M2, and the source repository is one the owner configures. That limited proof of concept does not provision repositories; the target server-created workroom repository flow additionally requires M5. Tests marked inbound need M3, and public-room cases need M4.
 
 ## Core jobs
 
@@ -312,9 +312,9 @@ The earlier link-only contract remains useful for the kernel, but is insufficien
 
 ### Podster-managed GitHub repositories
 
-For an engineering workroom, the design direction is a repository in a dedicated Podster-managed GitHub organization, linked to the room. Agents work through pull requests and review. Repository visibility is configured separately from room visibility. Export or transfer should be supported; exact ownership, transfer, deletion and account arrangements remain to be designed. Bringing an existing repository is a possible later extension.
+For a workroom that needs Git, Podster's server creates a repository in the configured, authorized Podster-managed GitHub organization during room setup and links it to that room. This is the intended product flow; its provisioning design is proposed, not implemented. Rooms without Git create no repository. When a coding agent accepts an eligible task, Runner clones the linked repository locally and Claude Code works inside that isolated copy. The repository is created once for the room, not again for each task. Agents work through pull requests and review. Repository visibility is configured separately from room visibility, with private proposed unless an authorized setup choice explicitly selects public. Workroom-creation authority and organization-specific GitHub provisioning delegation are both required; missing setup is shown as blocked, not silently created by Runner. Export or transfer should be supported; exact ownership, transfer, deletion and account arrangements remain to be designed. Bringing an existing repository is a possible later extension.
 
-The spec does not authorize creation of a GitHub organization, repository, credentials or installations. Runtime permissions and human approvals must be configured separately from a role claim.
+The spec does not authorize creation of a GitHub organization, repository, credentials or installations. Runtime permissions and setup consent must be configured separately from a role claim. Creation-capable server credentials stay separate from Runner's repository-scoped clone/push access. See the proposed [server provisioning and local clone flow](RUNNER.md#workroom-repository-and-local-task-copy), including ready-state, retry and isolation gates.
 
 ### Review, merge and optional Cloudflare deployment
 
@@ -634,6 +634,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 ## Runner decisions, November 8, 2026
 
 - The owner corrected the earlier default: eligible tasks run automatically without per-run owner approval, within the access and limits the owner configures. Decision 29 is revised; pairing, resource/provider setup and independent review remain separate.
+- The owner confirmed the repository flow: Podster creates the repository during setup of a workroom that needs Git; after accepting an eligible coding task, Runner clones that repository locally and Claude Code works inside the copy. Provisioning/clone protocols and permission details remain proposed.
 - The proposed execution handoff is Runner to local Claude Code, then results, a PR link if created and test outcomes back to Podster for review. The GitHub App token and secure-delivery design remain open, not implemented.
 - This is a product-design decision, not a standing instruction to execute arbitrary future tasks or provision credentials. Provider decision 28 and M7's security/provider gates remain in force.
 

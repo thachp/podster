@@ -1218,7 +1218,7 @@ function a2aReads(env: Env, identity: Identity): ApiReads {
   const run = (name: string, args: Record<string, unknown>) => runCapability(env, identity, CAPABILITIES.find((c) => c.name === name)!, args);
   return {
     getTask: (workspaceId, taskId) => run("get_task", { workspace_id: workspaceId, task_id: taskId }),
-    listTasks: (workspaceId, query) => run("list_tasks", { workspace_id: workspaceId, order: query.order, ...(query.cursor ? { cursor: query.cursor } : {}) }),
+    listTasks: (workspaceId, query) => run("list_tasks", { workspace_id: workspaceId, order: query.order, ...(query.cursor ? { cursor: query.cursor } : {}), ...(query.status ? { status: query.status } : {}) }),
     listWorkspaces: () => run("list_workspaces", {}),
   };
 }

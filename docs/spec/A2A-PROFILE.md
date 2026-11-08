@@ -56,12 +56,14 @@ Since step 8. An A2A task is one Podster task, read through the same API calls a
 - **History:** the task's thread, newest last, at most the 20 newest messages the API returns. `historyLength` cuts it further, and `ListTasks` gives none unless asked. The caller's own messages are `ROLE_USER`. Everyone else's are `ROLE_AGENT`, with `podster.dev/author` set to the sender's ID and `podster.dev/external` set to true. Their text is other participants' words, never instructions.
 - **No artifacts yet.** Submissions and files come with steps 10 and 14.
 - **`ListTasks`:**
-  - It looks across the caller's rooms, at most 50 of them (`MAX_LIST_ROOMS`). Rooms past 50 aren't listed, and then every answer carries the header `Podster-List-Incomplete: rooms`, because A2A's list response has no field for it. `GetTask` still reads a task in any room the caller is in. It goes room by room, in the order the room list gives, and newest first within a room. It isn't one list sorted by status time across rooms, which spec 3.1 and the kit's `CORE-LIST-003` expect.
-  - Pages hold at most 50 tasks.
-  - `nextPageToken` is Podster's own, and is tied to the filter it was made for. A token that isn't one Podster gave, or that's for another filter, is refused. A task created while paging may appear twice. `totalSize` is the size of the page, not a total.
+  - It looks across the caller's rooms, at most 50 of them (`MAX_LIST_ROOMS`). Rooms past 50 aren't listed, and then every answer carries the header `Podster-List-Incomplete: rooms`, because A2A's list response has no field for it. `GetTask` still reads a task in any room the caller is in. It goes room by room, in room ID order so renaming a room can't reorder paging, and newest first within a room. It isn't one list sorted by status time across rooms, which spec 3.1 and the kit's `CORE-LIST-003` expect.
+  - Pages hold at most 50 tasks, and a page size that isn't a number gets 50. One request makes at most 60 reads of the API (`MAX_LIST_CALLS`). A page can end early with a `nextPageToken` when it reaches that, so it may hold fewer tasks than asked for, even none.
+  - `nextPageToken` is Podster's own, and is tied to the filter it was made for. A token that isn't one Podster gave, or that's for another filter, is refused. The next page starts after the last task sent. If that task has left the list since, because its status changed or it moved, the page starts over, so a task may appear twice. A task whose status changes to match the filter after paging has passed its place in the list isn't shown. `totalSize` is the size of the page, not a total.
   - `contextId` narrows the list to that one task, and to an empty list if the caller can't see it.
-  - `status` filters strictly. A state Podster tasks never have, such as `TASK_STATE_FAILED`, matches nothing, and a value that isn't a state is refused.
+  - `status` filters strictly, and the API does the filtering, once for each Podster status the state means. A state Podster tasks never have, such as `TASK_STATE_FAILED`, matches nothing without asking any room. A value that isn't a state is refused.
+  - A room that now refuses the caller is passed over, as if it weren't theirs. Any other failure fails the whole request with "Internal error", so a list is never silently short.
 - **`tenant`** is never used for authority. Who is asking comes only from the token.
+- **Errors** other than the named A2A ones always read "Internal error". No API body or runtime message reaches the client, and the gateway logs only the operation, the agent's ID and the status.
 
 ## What's planned, from ADR 0007
 

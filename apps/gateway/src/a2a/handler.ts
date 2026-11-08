@@ -1,9 +1,9 @@
 import { AgentCard } from "@a2a-js/sdk";
 import type { A2ARequestHandler } from "@a2a-js/sdk/server";
 import type { CancelTaskRequest, GetTaskRequest, ListTasksRequest } from "@a2a-js/sdk";
-import { ExtendedAgentCardNotConfiguredError, PushNotificationNotSupportedError, TaskNotCancelableError, UnsupportedOperationError } from "@a2a-js/sdk/errors";
+import { A2AError, ExtendedAgentCardNotConfiguredError, PushNotificationNotSupportedError, TaskNotCancelableError, UnsupportedOperationError } from "@a2a-js/sdk/errors";
 import { agentCard } from "./card";
-import { listTasks, readTask, type ApiReads, type ReadNotes } from "./reads";
+import { listTasks, readTask, UpstreamError, type ApiReads, type ReadNotes } from "./reads";
 
 /**
  * Podster's own `A2ARequestHandler`, as ADR 0007 decides: the SDK's transport, not its `DefaultRequestHandler`, which
@@ -12,6 +12,20 @@ import { listTasks, readTask, type ApiReads, type ReadNotes } from "./reads";
  * in steps 9 and 10, and until then those answer their named error without reading a parameter.
  */
 export type A2ACaller = { agentId: string; api: ApiReads; notes?: ReadNotes };
+
+/**
+ * Only the SDK's named errors reach a client as themselves. Anything else, an API that couldn't answer or a fault here,
+ * reaches it as a fixed "Internal error", and the log gets IDs and a status, never a message or a body.
+ */
+async function guarded<T>(operation: string, agentId: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (error instanceof A2AError) throw error;
+    console.error(JSON.stringify({ event: "a2a.internal_error", operation, agent: agentId, status: error instanceof UpstreamError ? error.status : null }));
+    throw new Error("Internal error");
+  }
+}
 
 const notYet = (operation: string) => new UnsupportedOperationError(`${operation} isn't available yet. Podster's A2A support is in preview.`);
 const noPush = () => new PushNotificationNotSupportedError("Push notifications aren't supported.");
@@ -43,12 +57,12 @@ export class PodsterA2AHandler implements A2ARequestHandler {
 
   async getTask(params: GetTaskRequest) {
     const { agentId, api } = this.who();
-    return readTask(api, agentId, params.id, params.historyLength);
+    return guarded("GetTask", agentId, () => readTask(api, agentId, params.id, params.historyLength));
   }
 
   async listTasks(params: ListTasksRequest) {
     const { agentId, api, notes } = this.who();
-    return listTasks(api, agentId, params, notes);
+    return guarded("ListTasks", agentId, () => listTasks(api, agentId, params, notes));
   }
 
   /**
@@ -58,7 +72,7 @@ export class PodsterA2AHandler implements A2ARequestHandler {
    */
   async cancelTask(params: CancelTaskRequest): Promise<never> {
     const { agentId, api } = this.who();
-    await readTask(api, agentId, params.id, 0);
+    await guarded("CancelTask", agentId, () => readTask(api, agentId, params.id, 0));
     throw new TaskNotCancelableError("Tasks are canceled by their requester or an admin in Podster, not over A2A.");
   }
 

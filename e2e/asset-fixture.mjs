@@ -53,6 +53,9 @@ export async function seedInputAssets({ gatewayBase, owner, room, task }) {
   return { files: made, changes: made.filter((file) => file.state !== "scanning").map(({ id, state }) => ({ id, state })) };
 }
 
+/** Marked as the fixture's, so a row written here can't be mistaken for a real scan. */
+const FIXTURE_SCAN_DATABASE = JSON.stringify({ engine: "a11y-fixture", version: "0", built_at: new Date().toISOString() });
+
 /**
  * Writes each verdict into the stopped room's SQLite as the API's own paths leave the row (apps/api/src/workspace/objects.rs):
  * a scanner's report (ready, blocked) sets the state with its reason, the SHA-256 it scanned, the signature database and the time;

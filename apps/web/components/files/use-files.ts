@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { clientCommand, clientQuery } from "@/lib/gateway/client";
 import { goToSignIn } from "@/app/(shell)/w/[id]/tasks/go-to-sign-in";
-import { explainLink, type FilePage, type RoomFile } from "./model";
+import { explainLink, type FilePage, type Quota, type RoomFile } from "./model";
 
 const base = (workspace: string) => `/api/v1/workspaces/${encodeURIComponent(workspace)}`;
 
@@ -14,6 +14,7 @@ export function useFileList(workspace: string, initial: FilePage | null, taskId?
   const [loaded, setLoaded] = useState(initial !== null);
   const [failed, setFailed] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [quota, setQuota] = useState<Quota | null>(validQuota(initial?.quota));
   const query = taskId ? `task_id=${encodeURIComponent(taskId)}&` : "";
 
   const readPage = useCallback(
@@ -40,6 +41,7 @@ export function useFileList(workspace: string, initial: FilePage | null, taskId?
         return;
       }
       next.push(...read.files);
+      if (page === 0) setQuota(validQuota(read.quota));
       from = read.next_cursor;
     }
     setFiles(next);
@@ -70,7 +72,12 @@ export function useFileList(workspace: string, initial: FilePage | null, taskId?
     void reload();
   }, [reload]);
 
-  return { files, more: cursor !== null, loaded, failed, loading, reload, loadMore, replace };
+  return { files, quota, more: cursor !== null, loaded, failed, loading, reload, loadMore, replace };
+}
+
+/** A figure that isn't two sensible numbers isn't shown, rather than shown wrong. */
+function validQuota(quota: Quota | undefined): Quota | null {
+  return quota && Number.isFinite(quota.used) && Number.isFinite(quota.limit) && quota.used >= 0 && quota.limit > 0 ? quota : null;
 }
 
 const POLL_MS = 10_000;

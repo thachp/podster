@@ -279,3 +279,18 @@ describe("uploading", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/Upload canceled/);
   });
 });
+
+describe("quota", () => {
+  it("shows the room's use when the API sends it", () => {
+    show({ initial: { files, next_cursor: null, quota: { used: 1_250_000_000, limit: 5_000_000_000 } } });
+    expect(screen.getByText(/1\.3 GB of 5 GB used/)).toBeInTheDocument();
+    expect(screen.getByRole("meter", { name: "Workroom storage used" })).toBeInTheDocument();
+  });
+
+  it("shows no figure without one, only the limit", () => {
+    show();
+    expect(screen.queryByText(/ used,/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("meter")).not.toBeInTheDocument();
+    expect(screen.getByText(/workroom holds up to 5 GB/)).toBeInTheDocument();
+  });
+});

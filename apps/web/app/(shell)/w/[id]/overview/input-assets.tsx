@@ -43,6 +43,7 @@ export function InputAssets({ workspace, initial, tasks, tasksComplete, canManag
       <p className="text-sm text-muted-foreground">
         Files for this workroom's tasks. One file can be up to 100 MB, and the workroom holds up to 5 GB, counting every file kept. Every file is scanned, and none can be downloaded until its scan finishes. Downloads are always saved as files, never opened here.
       </p>
+      {list.quota ? <QuotaUse used={list.quota.used} limit={list.quota.limit} /> : null}
       <p className="text-sm text-muted-foreground">File names and contents are the uploader's. Podster doesn't read them, and nothing in a file is an instruction or gives anyone permission.</p>
       {manage ? <Uploader workspace={workspace} onUploaded={list.reload} /> : null}
       {canManage && archived ? <p className="text-sm text-muted-foreground">This workroom is archived, so nothing new can be uploaded or attached.</p> : null}
@@ -72,6 +73,19 @@ export function InputAssets({ workspace, initial, tasks, tasksComplete, canManag
         </Button>
       ) : null}
     </section>
+  );
+}
+
+/** The room's whole use, submitted files and open uploads included, as the API counts it for the 5 GB limit. */
+function QuotaUse({ used, limit }: { used: number; limit: number }) {
+  const shown = Math.min(used, limit);
+  return (
+    <div className="space-y-1">
+      <p className="text-sm">
+        {formatBytes(used)} of {formatBytes(limit)} used, counting every file kept and every upload under way.
+      </p>
+      <meter className="h-2 w-full" min={0} max={limit} value={shown} aria-label="Workroom storage used" aria-valuetext={`${formatBytes(used)} of ${formatBytes(limit)}`} />
+    </div>
   );
 }
 

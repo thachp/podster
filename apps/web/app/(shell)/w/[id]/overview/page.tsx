@@ -5,12 +5,18 @@ import { ReadFailure } from "@/components/shell/read-failure";
 import { Badge } from "@/components/ui/badge";
 import { gatewayQuery, getIdentity, getOrganizations } from "@/lib/gateway/server";
 import { canManageWorkroom, loadWorkroom } from "@/lib/workroom";
-import { loadNames, orgRows } from "../tasks/load-tasks";
-import { kindOf, nameOf, textNameOf } from "../tasks/task-model";
+import type { FilePage } from "@/components/files/model";
+import { mayManageAssets } from "@/components/files/model";
+import { loadNames, loadTasks, orgRows } from "../tasks/load-tasks";
+import { kindOf, nameOf, roleOf, textNameOf, type Room } from "../tasks/task-model";
+import { InputAssets, type TaskChoice } from "./input-assets";
 import { membersOf, relationship, type RoleRead } from "../team/model";
 
 /** The API's limit is in bytes, so this is never fewer characters than a context can hold. */
 const MAX_BRIEF_CHARACTERS = 32768;
+
+/** Enough tasks to choose from and to name attachments by. Past this, an attachment shows its task's ID. */
+const TASK_PAGES = 4;
 
 const STATUS_LABELS: Record<string, string> = { active: "Active", archived: "Archived" };
 
@@ -38,6 +44,15 @@ export default async function Overview({ params }: { params: Promise<{ id: strin
   // A guest's read holds only their own row, so a count would be wrong for them, and an unknown viewer might be a guest.
   const isGuest = identity.ok && members.some((member) => member.principal_id === identity.data.id && member.role === "guest");
   const showCount = identity.ok && !isGuest;
+  const canManageAssets = identity.ok && mayManageAssets(roleOf(room as Room, me));
+  const [files, taskRead] = await Promise.all([
+    gatewayQuery<FilePage>(`/api/v1/workspaces/${encodeURIComponent(id)}/files?cursor=0`),
+    // Only those who attach files need a list to choose from. Anyone else reads tasks only to name what's attached.
+    canManageAssets ? loadTasks(gatewayQuery, id, "", TASK_PAGES) : null,
+  ]);
+  const linked = files.ok && files.data.files.some((file) => file.linked_tasks.length > 0);
+  const tasks = taskRead ?? (linked ? await loadTasks(gatewayQuery, id, "", TASK_PAGES) : null);
+  const taskChoices: TaskChoice[] = tasks?.ok ? tasks.data.tasks.map((task) => ({ id: task.id, title: task.title, status: task.status })) : [];
   return (
     <section className="max-w-3xl space-y-4">
       <h1 className="text-2xl font-semibold">Overview</h1>
@@ -85,6 +100,7 @@ export default async function Overview({ params }: { params: Promise<{ id: strin
           </>
         )}
       </dl>
+      <InputAssets workspace={id} initial={files.ok ? files.data : null} tasks={taskChoices} tasksComplete={tasks?.ok === true && !tasks.data.more} canManage={canManageAssets} archived={room.status === "archived"} />
       <div className="flex flex-wrap gap-x-4 gap-y-2">
         <Link href={`/w/${id}/tasks`} prefetch={false} className="text-primary underline">
           See tasks

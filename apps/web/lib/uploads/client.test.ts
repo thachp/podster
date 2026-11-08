@@ -69,6 +69,13 @@ describe("uploadFile", () => {
     expect(JSON.parse(init.body)).toEqual({ name: "notes.txt", size: 3, sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" });
   });
 
+  it("names the task when the file is for a submission, and only then", async () => {
+    const done = uploadFile("ws_1", file("abc"), { taskId: "tsk_1" });
+    (await sent()).answer(200, { id: "obj_1", state: "scanning" });
+    await done;
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ name: "notes.txt", size: 3, sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", task_id: "tsk_1" });
+  });
+
   it("sends the file itself to this host, with the token only in its header", async () => {
     const chosen = file();
     const done = uploadFile("ws_1", chosen);

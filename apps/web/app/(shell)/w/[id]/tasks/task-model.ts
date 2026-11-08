@@ -36,11 +36,18 @@ export function summaryOf(task: TaskSummary): TaskSummary {
 export type From = { id: string; org: string };
 export type Message = { id: string; seq: number; from: From; external: boolean; body: string; created_at: number };
 export type Artifact = { id: string; submission_no: number; uri: string; label: string; from: From; external: boolean; created_at: number };
+/**
+ * A stored file on a submission, as the task read lists it. `sha256` and `size` are what the submission pinned, and `state` is
+ * the file's now, null if its record is gone. `label` and `name` are agent content. `download_path` is null unless the viewer
+ * may download it now. `submitted` false is the viewer's own upload for the task that no submission names yet, with no
+ * `submission_no`. Through oversight a file has only `id`, `submission_no`, `name` and `state`, so the rest are optional.
+ */
+export type TaskFile = { id: string; submitted?: boolean; submission_no: number | null; label?: string | null; name: string | null; size?: number; sha256?: string; media_type?: string | null; state: string | null; download_path: string | null; from?: From; external?: boolean; created_at?: number };
 export type Submission = { submission_no: number; task_version: number; note: string | null; commit_sha: string | null; from: From; external: boolean; created_at: number };
 export type HistoryEvent = { seq: number; id: string; type: string; from: From; external: boolean; reason: string | null; prior_status: string | null; new_status: string | null; task_version: number | null; created_at: number };
 /** What the viewer's access leaves out of this read. Without it, empty lists can't be told from a task with nothing in them. */
 export type TaskVisibility = { submissions: "all" | "own"; conversation: boolean };
-export type TaskDetail = { task: Task; submissions: Submission[]; artifacts: Artifact[]; messages: Message[]; history: HistoryEvent[]; visible?: TaskVisibility };
+export type TaskDetail = { task: Task; submissions: Submission[]; artifacts: Artifact[]; files?: TaskFile[]; messages: Message[]; history: HistoryEvent[]; visible?: TaskVisibility };
 
 export type Member = { principal_id: string; kind: string; org_id: string; role: string; access?: { review: string; artifacts: string } };
 export type Room = { id: string; name: string; owner: string; status?: string; require_person_review?: boolean; owner_left_at?: number | null; members?: Member[] };
@@ -130,12 +137,16 @@ const isAdmin = (role: string | undefined) => role === "owner" || role === "admi
  * the server decides each request again.
  */
 export function viewerActions(task: Task, me: string, role: string | undefined, archived = false) {
-  if (archived) return { review: false, cancel: false, assign: false, edit: false, setReviewer: false, setRequester: false };
+  if (archived) return { review: false, respond: false, submit: false, cancel: false, assign: false, edit: false, setReviewer: false, setRequester: false };
   const admin = isAdmin(role);
   const manages = task.requester === me || admin;
   const live = !isTerminal(task.status);
   return {
     review: task.status === "submitted" && task.reviewer === me && task.assignee !== me,
+    // The assignee hands in work, whoever they are. The server decides again.
+    submit: task.status === "accepted" && task.assignee === me,
+    // Accept or decline an offer, which only the one it's offered to can do.
+    respond: task.status === "offered" && task.assignee === me,
     cancel: manages && live,
     assign: manages && (task.status === "open" || task.status === "offered"),
     edit: manages && live && task.status !== "submitted",

@@ -182,7 +182,7 @@ export function Details({ data, me, names, orgNames, overseen = false }: Section
   // The reviewer named on a task gets all its submitted files even when it can't read every submission (decision 97), so a
   // submission can show up here by its files alone.
   const filesOnly = [...new Set(files.map((file) => file.submission_no))].filter((no) => !data.submissions.some((submission) => submission.submission_no === no));
-  const rows: (Submission | { submission_no: number; created_at: number; filesOnly: true })[] = [...data.submissions, ...filesOnly.map((no) => ({ submission_no: no, created_at: files.find((file) => file.submission_no === no)?.created_at ?? 0, filesOnly: true as const }))].sort((a, b) => b.submission_no - a.submission_no);
+  const rows: (Submission | { submission_no: number; created_at: number; filesOnly: true })[] = [...data.submissions, ...filesOnly.map((no) => ({ submission_no: no, created_at: files.find((file) => file.submission_no === no && typeof file.created_at === "number")?.created_at ?? 0, filesOnly: true as const }))].sort((a, b) => b.submission_no - a.submission_no);
   const brief = briefAuthor(data);
   const briefBy = { name: nameOf(brief.id, me, names), kind: kindOf(brief.id), organization: brief.org ? (orgNames[brief.org] ?? brief.org) : undefined, viewer: brief.id === me };
   return (
@@ -206,9 +206,11 @@ export function Details({ data, me, names, orgNames, overseen = false }: Section
                 Submission {submission.submission_no}
                 {submission.submission_no === task.approved_submission_no ? <ApprovedMark /> : null}
                 {submission.submission_no === task.submission_no ? <span className="text-xs font-normal text-muted-foreground">Latest</span> : null}
-                <span className="text-xs font-normal">
-                  <Timestamp at={submission.created_at} />
-                </span>
+                {submission.created_at > 0 ? (
+                  <span className="text-xs font-normal">
+                    <Timestamp at={submission.created_at} />
+                  </span>
+                ) : null}
               </p>
               {"filesOnly" in submission ? (
                 <p className="text-xs text-muted-foreground">Only its files are shown to you.</p>

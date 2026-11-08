@@ -16,6 +16,7 @@ import { asConflict, LIMITS, tooLong, type Task, type TaskFile } from "./task-mo
 import type { LoadedTask } from "./task-sheet";
 
 const shortHash = (sha256: string) => plainName(sha256).slice(0, 12);
+const UNNAMED = "Unnamed file";
 
 /**
  * A submission's stored files. The label and name are agent content and stay text. The one link is the download, which the
@@ -26,8 +27,9 @@ export function SubmissionFiles({ files, overseen = false }: { files: TaskFile[]
   return (
     <ul aria-label="Files" className="space-y-2">
       {files.map((file) => {
-        const label = plainName(file.label);
-        const name = file.name === null ? null : plainName(file.name);
+        // Oversight gives a name and no label, so either can be missing.
+        const name = typeof file.name === "string" ? plainName(file.name) : null;
+        const label = typeof file.label === "string" ? plainName(file.label) : (name ?? UNNAMED);
         const href = downloadHref(file);
         return (
           <li key={file.id} className="space-y-1 rounded-md bg-muted/50 p-2 text-sm">
@@ -35,13 +37,15 @@ export function SubmissionFiles({ files, overseen = false }: { files: TaskFile[]
             {name && name !== label ? <p className="text-xs break-words text-muted-foreground">File name: {name}</p> : null}
             <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
               <FileStateBadge state={file.state} />
-              <span>{fileSize(file.size)}</span>
-              <span>
-                SHA-256{" "}
-                <code className="font-mono" title={plainName(file.sha256)}>
-                  {shortHash(file.sha256)}
-                </code>
-              </span>
+              {typeof file.size === "number" ? <span>{fileSize(file.size)}</span> : null}
+              {typeof file.sha256 === "string" ? (
+                <span>
+                  SHA-256{" "}
+                  <code className="font-mono" title={plainName(file.sha256)}>
+                    {shortHash(file.sha256)}
+                  </code>
+                </span>
+              ) : null}
             </p>
             <p className="text-xs text-muted-foreground">{fileState(file.state).detail}</p>
             {href ? (

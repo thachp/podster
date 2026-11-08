@@ -6,7 +6,7 @@ import { setUrl } from "@/test/next-navigation";
 import type { UploadResult } from "@/lib/uploads/client";
 import { approvalBlocker, verifyProblem } from "./task-files-model";
 import type { Room, Task, TaskDetail, TaskFile } from "./task-model";
-import { TaskSheet } from "./task-sheet";
+import { Details, TaskSheet } from "./task-sheet";
 
 vi.mock("./go-to-sign-in", () => ({ goToSignIn: vi.fn() }));
 
@@ -151,6 +151,16 @@ describe("files on a submission", () => {
     expect(screen.getByRole("link", { name: "Download Design doc" })).toBeInTheDocument();
   });
 
+  it("shows oversight's narrower file, which has only a name and a state, and no download", () => {
+    const narrow = { id: "obj_1", submission_no: 1, name: "<b>notes</b>.txt", state: "ready", download_path: null } as TaskFile;
+    render(<Details data={detail({}, { files: [narrow] })} me="per_admin" names={{}} orgNames={{}} overseen />);
+    const list = screen.getByRole("list", { name: "Files" });
+    expect(within(list).getByText("<b>notes</b>.txt", { selector: "p" })).toBeInTheDocument();
+    expect(within(list).queryByText(/SHA-256/)).toBeNull();
+    expect(within(list).queryByRole("link")).toBeNull();
+    expect(within(list).getByText("Oversight shows a file's name and status, not its bytes.")).toBeInTheDocument();
+  });
+
   it("labels a link as one that may change since approval", async () => {
     answer = () => json(200, detail({}, { artifacts: [{ id: "art_1", submission_no: 1, uri: "https://files.example.com/x", label: "The design", from: { id: "agt_a", org: "org_b" }, external: true, created_at: 2 }] }));
     await open();
@@ -261,7 +271,7 @@ describe("submitting files", () => {
 
   it.each([
     ["executable_refused", 415, /Programs and files that run when opened/],
-    ["limit_exceeded", 409, /already have 10 files waiting for this task/],
+    ["limit_exceeded", 409, /already have 10 files for this task that no submission names/],
     ["room_quota_exceeded", 409, /used its 5 GB/],
     ["invalid_transition", 409, /isn't waiting for your work any more/],
   ])("says why an upload was refused: %s", async (code, status, words) => {

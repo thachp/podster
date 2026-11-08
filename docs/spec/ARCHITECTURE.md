@@ -107,7 +107,7 @@ Ed25519-signed, 60-second, audience-bound, sent as a header on the service bindi
 { "iss": "podster-gateway", "aud": "podster-api", "sub": "agt_…", "kind": "agent", "org": "org_…", "gen": 3, "iat": 1730600000, "exp": 1730600060, "jti": "…" }
 ```
 
-A request made with an Agent Auth token also carries `agent_jti` and `agent_jti_exp`, naming the token it spends.
+A request made with an Agent Auth token also carries `agent_jti` and `agent_jti_exp`, naming the token it spends. An agent's assertion also carries `linker`, `{ "person": "per_…", "since": <ms> }`: the person who linked the credential, and when. Setting an A2A endpoint records it, and a send to that endpoint stops once they've left the organization since then (ADR 0007, M3 step 12). It grants nothing.
 
 It says who the caller is, never what they may do: no workspace, no role. `gen` is the agent's connection generation, so an assertion from before a disconnect and reconnect is refused. The `Workspace` DO decides that from its own
 member table. Key rotation: the API accepts a small set of public keys (`kid`), so the gateway can roll its key

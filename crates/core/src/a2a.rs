@@ -329,3 +329,105 @@ pub fn decide_remote(
 pub fn accepts_inbound_message(status: TaskStatus) -> bool {
     !status.is_terminal()
 }
+
+/// Outbound, M3 step 12 (ADR 0007, decision 118): where one offer attempt stands before its send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttemptState {
+    /// Waiting to be sent, or to be sent again after a failed try.
+    Queued,
+    /// The endpoint answered, so nothing more is sent for it.
+    Sent,
+    /// Ended without an answer: the offer moved on, or the agent or its endpoint can't be sent to.
+    Stopped,
+}
+
+impl AttemptState {
+    pub fn name(self) -> &'static str {
+        match self {
+            AttemptState::Queued => "queued",
+            AttemptState::Sent => "sent",
+            AttemptState::Stopped => "stopped",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "queued" => Some(AttemptState::Queued),
+            "sent" => Some(AttemptState::Sent),
+            "stopped" => Some(AttemptState::Stopped),
+            _ => None,
+        }
+    }
+}
+
+/// Why an attempt sends nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoSend {
+    /// It already got an answer. A redelivered job sends nothing (ADR 0007, duplicates).
+    AlreadySent,
+    /// It already ended.
+    Ended,
+    /// Another delivery of the same job is sending it now.
+    Busy,
+    /// The task is no longer offered to this agent on this attempt's offer: accepted, declined, reassigned, re-offered,
+    /// canceled or finished. Ends the attempt.
+    OfferMovedOn,
+}
+
+/// Whether an attempt may be sent now. `task` is the task as stored now and `current_offer` the offer it's on now, as the API
+/// recorded it. `leased` says whether another delivery holds the attempt. Only an offered task, still on the attempt's own
+/// offer to the attempt's own agent, sends, so a task that moved on while queued sends nothing.
+pub fn may_send(
+    task: &Task,
+    current_offer: Option<&str>,
+    agent: &str,
+    offer: &str,
+    state: AttemptState,
+    leased: bool,
+) -> Result<(), NoSend> {
+    match state {
+        AttemptState::Sent => return Err(NoSend::AlreadySent),
+        AttemptState::Stopped => return Err(NoSend::Ended),
+        AttemptState::Queued => {}
+    }
+    if task.status != TaskStatus::Offered
+        || task.assignee.as_deref() != Some(agent)
+        || current_offer != Some(offer)
+    {
+        return Err(NoSend::OfferMovedOn);
+    }
+    if leased {
+        return Err(NoSend::Busy);
+    }
+    Ok(())
+}
+
+/// The longest offer text sent, in bytes: decision 123's 16 KB per message.
+pub const MAX_OFFER_TEXT_BYTES: usize = 16 * 1024;
+
+/// The text an offer carries (decision 118): the title, instructions and acceptance criteria, read at send time, and a
+/// Podster link. It's cut at a character boundary to [`MAX_OFFER_TEXT_BYTES`], keeping the link, which is short.
+pub fn offer_text(
+    title: &str,
+    instructions: &str,
+    criteria: Option<&str>,
+    link: Option<&str>,
+) -> String {
+    let mut body = format!("# {title}\n\n{instructions}");
+    if let Some(criteria) = criteria.filter(|c| !c.trim().is_empty()) {
+        body.push_str("\n\n## Acceptance criteria\n\n");
+        body.push_str(criteria);
+    }
+    let tail = link
+        .map(|link| format!("\n\nOn Podster: {link}"))
+        .unwrap_or_default();
+    let room = MAX_OFFER_TEXT_BYTES.saturating_sub(tail.len());
+    if body.len() > room {
+        let mut cut = room;
+        while !body.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        body.truncate(cut);
+    }
+    body + &tail
+}

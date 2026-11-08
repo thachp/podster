@@ -34,6 +34,14 @@ pub struct Departure {
     pub left_at: i64,
 }
 
+/// A fact from the gateway's directory: who linked an agent's credential, and when, in milliseconds. A send to the agent's A2A
+/// endpoint stops once that person has left the organization since then (ADR 0007). It grants nothing by itself.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Linker {
+    pub person: String,
+    pub since: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Identity {
     pub sub: String,
@@ -57,6 +65,9 @@ pub struct Identity {
     /// Present only when the gateway reports that someone left an organization.
     #[serde(default)]
     pub departure: Option<Departure>,
+    /// For an agent, who linked the credential this request came with.
+    #[serde(default)]
+    pub linker: Option<Linker>,
     /// An agent token this request spends, so it can't be replayed. Absent for callers without one, such as MCP.
     #[serde(default)]
     pub agent_jti: Option<String>,

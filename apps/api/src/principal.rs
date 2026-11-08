@@ -53,6 +53,11 @@ CREATE TABLE IF NOT EXISTS org_departure (org_id TEXT NOT NULL, left_at INTEGER 
 CREATE TABLE IF NOT EXISTS org_departure_room (org_id TEXT NOT NULL, left_at INTEGER NOT NULL, workspace_id TEXT NOT NULL,
   applied INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (org_id, left_at, workspace_id));
 ";
+/// Every departure from an organization, kept for good. `org_departure` above goes once its rooms have all heard, but a
+/// send to an A2A endpoint someone set can come much later, and must still see that they left (ADR 0007, step 12).
+const LEFT_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS org_left (org_id TEXT NOT NULL, left_at INTEGER NOT NULL, PRIMARY KEY (org_id, left_at));
+";
 /// The room index lags behind commits, so a room joined just before a removal can be missing from the first sweep, and
 /// a failing index write can keep it missing for much longer. A room that never hears can't reach recovery, so sweeps
 /// carry on for about 30 days, further and further apart. An upper bound keeps a departure from running forever.
@@ -155,6 +160,40 @@ pub async fn check_not_departed(env: &Env, person: &str, org: &str, since: i64) 
     } else {
         Err(ApiError::access_revoked())
     }
+}
+
+/// Whether a person has left an organization since `since`, in milliseconds, from their own Principal. Unlike
+/// [`check_not_departed`], an answer that isn't a clear yes or no is an error, never a departure, so the caller can refuse to
+/// act without treating an outage as a departure.
+pub async fn departed_since(env: &Env, person: &str, org: &str, since: i64) -> R<bool> {
+    let body = json!({ "org": org, "since": since, "person": person });
+    let mut response = internal(env, person, "/internal/departed", &body).await?;
+    if response.status_code() != 200 {
+        return Err(ApiError::internal("departure check unavailable"));
+    }
+    let answer: Value = response.json().await?;
+    answer["departed"]
+        .as_bool()
+        .ok_or_else(|| ApiError::internal("departure check unavailable"))
+}
+
+/// Asks the agent's Principal whether, and where, to send it an A2A offer. An answer that isn't 200 is an error.
+pub async fn claim_a2a_for(env: &Env, agent: &str) -> R<Value> {
+    let mut response = internal(env, agent, "/internal/a2a-endpoint-claim", &json!({})).await?;
+    if response.status_code() != 200 {
+        return Err(ApiError::internal("a2a claim unavailable"));
+    }
+    Ok(response.json().await?)
+}
+
+/// Counts one A2A send toward switching the agent's endpoint off.
+pub async fn report_a2a_for(env: &Env, agent: &str, version: u64, ok: bool) -> R<Value> {
+    let body = json!({ "version": version, "ok": ok });
+    let mut response = internal(env, agent, "/internal/a2a-endpoint-report", &body).await?;
+    if response.status_code() != 200 {
+        return Err(ApiError::internal("a2a report unavailable"));
+    }
+    Ok(response.json().await?)
 }
 
 /// Asks the agent's Principal what to send.
@@ -795,7 +834,12 @@ impl Principal {
 
     /// The agent's A2A endpoint: read, set or delete, for the agent or its organization's admin (decision 119). Setting needs an
     /// active connection, as wake does, so nothing can be set to survive a disconnect.
-    async fn endpoint_command(&self, method: Method, req: &mut Request) -> R<Value> {
+    async fn endpoint_command(
+        &self,
+        method: Method,
+        req: &mut Request,
+        caller: &Caller,
+    ) -> R<Value> {
         let sql = self.state.storage().sql();
         match method {
             Method::Get => a2a_endpoint::status_json(&sql, a2a_endpoint::key(&self.env).as_deref()),
@@ -805,12 +849,30 @@ impl Principal {
                     .map_err(|_| ApiError::invalid_argument())?;
                 let key = a2a_endpoint::key(&self.env);
                 let (store, now) = (sql.clone(), now_ms());
+                let caller = caller.clone();
                 self.in_transaction(move || {
                     let conn = connection(&store)?
                         .filter(|c| c["status"].as_str() == Some(ACTIVE))
                         .ok_or_else(ApiError::agent_disconnected)?;
                     let agent = text(&conn["id"]).unwrap_or_default();
-                    a2a_endpoint::set(&store, key.as_deref(), &agent, &body, now)
+                    let org = text(&conn["org_id"]).unwrap_or_default();
+                    // Who set it, so a send stops once they've left (step 12): the agent's linker, or the admin, from their
+                    // current membership. Without one, nothing is set.
+                    let (person, since) = match caller.kind.as_str() {
+                        "agent" => caller.linker.as_ref().map(|l| (l.person.clone(), l.since)),
+                        _ => caller
+                            .org_since
+                            .get(&org)
+                            .map(|since| (caller.id.clone(), *since)),
+                    }
+                    .filter(|(person, _)| crate::valid_id(person))
+                    .ok_or_else(ApiError::not_allowed)?;
+                    let setter = a2a_endpoint::Setter {
+                        person: &person,
+                        org: &org,
+                        since,
+                    };
+                    a2a_endpoint::set(&store, key.as_deref(), &agent, &setter, &body, now)
                 })
             }
             Method::Delete => a2a_endpoint::delete(&sql),
@@ -1148,16 +1210,37 @@ impl Principal {
                     body["actor"].as_str().unwrap_or_default().into(),
                     DEPARTURE_SWEEPS.into(),
                 ])?;
+                exec(&sql, LEFT_SCHEMA, vec![])?;
+                exec(
+                    &sql,
+                    "INSERT OR IGNORE INTO org_left (org_id, left_at) VALUES (?, ?)",
+                    vec![
+                        body["org"].as_str().unwrap_or_default().into(),
+                        body["left_at"]
+                            .as_i64()
+                            .ok_or_else(ApiError::invalid_argument)?
+                            .into(),
+                    ],
+                )?;
                 // The alarm does the rooms, so answering the gateway doesn't depend on how many there are.
                 self.arm_next_sweep().await?;
                 return Ok(json!({ "recorded": true }));
             }
             "/internal/departed" => {
                 let body: Value = req.json().await?;
+                // Tests can't otherwise make this Principal fail to answer.
+                #[cfg(feature = "failpoints")]
+                if body["person"]
+                    .as_str()
+                    .is_some_and(|p| p.starts_with("per_unavailable_"))
+                {
+                    return Err(ApiError::api(503, "unavailable"));
+                }
                 exec(&sql, DEPARTURE_SCHEMA, vec![])?;
+                exec(&sql, LEFT_SCHEMA, vec![])?;
                 let found = rows(
                     &sql,
-                    "SELECT 1 FROM org_departure WHERE org_id = ? AND left_at >= ? LIMIT 1",
+                    "SELECT 1 FROM org_departure WHERE org_id = ?1 AND left_at >= ?2 UNION ALL SELECT 1 FROM org_left WHERE org_id = ?1 AND left_at >= ?2 LIMIT 1",
                     vec![
                         body["org"].as_str().unwrap_or_default().into(),
                         body["since"].as_i64().unwrap_or(0).into(),
@@ -1250,10 +1333,42 @@ impl Principal {
                 return Ok(outcome);
             }
             "/internal/a2a-endpoint-claim" => {
-                return a2a_endpoint::claim(&sql, a2a_endpoint::key(&self.env).as_deref());
+                let claim = a2a_endpoint::claim(&sql, a2a_endpoint::key(&self.env).as_deref())?;
+                if claim["send"] != Value::Bool(true) {
+                    return Ok(claim);
+                }
+                // Whoever set the endpoint must still be in the agent's organization. Their own Principal knows. If it can't
+                // say, this fails and nothing is sent.
+                let setter = &claim["setter"];
+                let (person, org) = (
+                    setter["person"].as_str().unwrap_or_default(),
+                    setter["org"].as_str().unwrap_or_default(),
+                );
+                let since = setter["since"].as_i64().unwrap_or(0);
+                if !crate::valid_id(person) || !crate::valid_id(org) {
+                    return Ok(json!({ "send": false, "reason": "setter_unknown" }));
+                }
+                if departed_since(&self.env, person, org, since).await? {
+                    let store = sql.clone();
+                    // Only the registration the claim read, so a set that landed during the check isn't undone.
+                    let version = claim["version"].as_i64().unwrap_or(-1);
+                    self.in_transaction(move || a2a_endpoint::delete_version(&store, version))?;
+                    console_log!(
+                        "{}",
+                        json!({ "event": "a2a.endpoint_setter_left", "agent": claim["agent_id"], "version": version })
+                    );
+                    return Ok(json!({ "send": false, "reason": "setter_departed" }));
+                }
+                return Ok(claim);
             }
             "/internal/a2a-endpoint-report" => {
                 let body: Value = req.json().await?;
+                // Tests can't otherwise make a report fail after a send. It fails once, then the table is gone.
+                #[cfg(feature = "failpoints")]
+                if !rows(&sql, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_fail_report'", vec![])?.is_empty() {
+                    exec(&sql, "DROP TABLE test_fail_report", vec![])?;
+                    return Err(ApiError::api(503, "unavailable"));
+                }
                 let (store, now) = (sql.clone(), now_ms());
                 return self.in_transaction(move || a2a_endpoint::report(&store, &body, now));
             }
@@ -1303,7 +1418,7 @@ impl Principal {
                 return self.wake_command(method, &mut req).await;
             }
             (["v1", "inbox", "a2a-endpoint"], method) if caller.kind == "agent" => {
-                return self.endpoint_command(method, &mut req).await;
+                return self.endpoint_command(method, &mut req, &caller).await;
             }
             (["v1", "inbox", ..], _) => return Err(ApiError::not_found()),
             _ => {}
@@ -1376,7 +1491,9 @@ impl Principal {
             (method @ (Method::Put | Method::Delete), Some("wake")) => {
                 self.wake_command(method, &mut req).await
             }
-            (method, Some("a2a-endpoint")) => self.endpoint_command(method, &mut req).await,
+            (method, Some("a2a-endpoint")) => {
+                self.endpoint_command(method, &mut req, &caller).await
+            }
             // Oversight: the agent or an authorized person can look, and looking never moves the cursor.
             // Rooms this agent is in or has left, from the listing read model. This shows them and decides nothing.
             (Method::Get, Some("rooms")) => {

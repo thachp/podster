@@ -99,9 +99,17 @@ async fn handle(env: &Env, message: Message<Value>) {
     }
 }
 
-/// Handles a batch together, so a slow receiver doesn't hold up the others in it.
+/// One consumer per Worker, so the A2A queue and its dead-letter queue are dispatched by name. Everything else is wake's.
 #[event(queue)]
 pub async fn consume(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()> {
+    let queue = batch.queue();
+    if queue.starts_with("podster-a2a-dlq") {
+        return crate::a2a_out::consume_dead(batch, &env).await;
+    }
+    if queue.starts_with("podster-a2a") {
+        return crate::a2a_out::consume(batch, &env).await;
+    }
+    // Handles a batch together, so a slow receiver doesn't hold up the others in it.
     join_all(
         batch
             .messages()?

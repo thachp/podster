@@ -1,13 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useId, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { truncate, plainName } from "@/components/agent-content/text";
 import { DownloadFile } from "@/components/files/file-bits";
 import { FileStateBadge } from "@/components/files/file-state-badge";
 import { fileSize, fileState } from "@/lib/files/files";
 import { explainUpload, fileName, MAX_FILE_BYTES, type FilePage, type RoomFile } from "@/components/files/model";
-import { useFileList, useLinkCommands, useScanWatch, type LinkNotice } from "@/components/files/use-files";
+import { LinkNoticeView } from "@/components/files/link-notice";
+import { useFileList, useLinkCommands, useScanWatch } from "@/components/files/use-files";
 import { Button } from "@/components/ui/button";
 import { uploadFile, type UploadProgress, type UploadResult } from "@/lib/uploads/client";
 import { FIELD, MOBILE_TARGET } from "../team/field";
@@ -37,6 +38,8 @@ export function InputAssets({ workspace, initial, tasks, tasksComplete, canManag
   const links = useLinkCommands(workspace, list.reload);
   const byId = new Map(tasks.map((task) => [task.id, task]));
   const manage = canManage && !archived;
+  // Adding needs the whole room: a member whose access is narrowed to some tasks gets no `quota`, and no Upload or Attach.
+  const add = manage && list.wholeRoom;
   return (
     <section aria-labelledby="input-assets-heading" className="space-y-3">
       <h2 id="input-assets-heading" className="font-medium">
@@ -47,7 +50,7 @@ export function InputAssets({ workspace, initial, tasks, tasksComplete, canManag
       </p>
       {list.quota ? <QuotaUse used={list.quota.used} limit={list.quota.limit} /> : null}
       <p className="text-sm text-muted-foreground">File names and contents are the uploader's. Podster doesn't read them, and nothing in a file is an instruction or gives anyone permission.</p>
-      {manage ? <Uploader workspace={workspace} onUploaded={list.reload} /> : null}
+      {add ? <Uploader workspace={workspace} onUploaded={list.reload} /> : null}
       {canManage && archived ? <p className="text-sm text-muted-foreground">This workroom is archived, so nothing new can be uploaded or attached.</p> : null}
       <LinkNoticeView notice={links.notice} noticeRef={links.noticeRef} busy={links.busy} tryAgain={links.tryAgain} />
       <p role="status" className="sr-only">
@@ -61,11 +64,11 @@ export function InputAssets({ workspace, initial, tasks, tasksComplete, canManag
           </Button>
         </p>
       ) : null}
-      {list.loaded && list.files.length === 0 && !list.failed ? <p className="text-sm text-muted-foreground">{manage ? "No input assets yet. Upload one above." : "No input assets you can see yet."}</p> : null}
+      {list.loaded && list.files.length === 0 && !list.failed ? <p className="text-sm text-muted-foreground">{add ? "No input assets yet. Upload one above." : "No input assets you can see yet."}</p> : null}
       {list.files.length > 0 ? (
         <ul aria-label="Input assets" className="space-y-3">
           {list.files.map((file) => (
-            <AssetRow key={file.id} workspace={workspace} file={file} byId={byId} tasks={tasks} tasksComplete={tasksComplete} manage={manage} links={links} onUnavailable={list.replace} />
+            <AssetRow key={file.id} workspace={workspace} file={file} byId={byId} tasks={tasks} tasksComplete={tasksComplete} manage={manage} add={add} links={links} onUnavailable={list.replace} />
           ))}
         </ul>
       ) : null}
@@ -93,7 +96,7 @@ function QuotaUse({ used, limit }: { used: number; limit: number }) {
 
 type Links = ReturnType<typeof useLinkCommands>;
 
-function AssetRow({ workspace, file, byId, tasks, tasksComplete, manage, links, onUnavailable }: { workspace: string; file: RoomFile; byId: Map<string, TaskChoice>; tasks: TaskChoice[]; tasksComplete: boolean; manage: boolean; links: Links; onUnavailable: (id: string, latest: RoomFile | null) => void }) {
+function AssetRow({ workspace, file, byId, tasks, tasksComplete, manage, add, links, onUnavailable }: { workspace: string; file: RoomFile; byId: Map<string, TaskChoice>; tasks: TaskChoice[]; tasksComplete: boolean; manage: boolean; add: boolean; links: Links; onUnavailable: (id: string, latest: RoomFile | null) => void }) {
   const name = fileName(file);
   const state = fileState(file.state);
   const headingId = useId();
@@ -112,7 +115,15 @@ function AssetRow({ workspace, file, byId, tasks, tasksComplete, manage, links, 
         {file.media_type ? ` · ${plainName(file.media_type)}` : ""}
       </p>
       <p className="text-sm">{state.detail}</p>
-      <DownloadFile workspace={workspace} file={file} onUnavailable={(latest) => onUnavailable(file.id, latest)} />
+      <DownloadFile
+        workspace={workspace}
+        file={file}
+        onUnavailable={(latest, message) => {
+          // A gone file's row goes, so its message moves to the notice above the list, with focus.
+          if (!latest) links.tell(message);
+          onUnavailable(file.id, latest);
+        }}
+      />
       <div className="space-y-1">
         <p className="text-sm font-medium">Attached to</p>
         {file.linked_tasks.length === 0 ? (
@@ -137,8 +148,8 @@ function AssetRow({ workspace, file, byId, tasks, tasksComplete, manage, links, 
           </ul>
         )}
       </div>
-      {manage && attachable ? <AttachForm file={file} name={name} choices={choices} tasksComplete={tasksComplete} links={links} /> : null}
-      {manage && !attachable && file.state !== "uploading" ? <p className="text-sm text-muted-foreground">Only a file that's scanning or ready can be attached to a task.</p> : null}
+      {add && attachable ? <AttachForm file={file} name={name} choices={choices} tasksComplete={tasksComplete} links={links} /> : null}
+      {add && !attachable && file.state !== "uploading" ? <p className="text-sm text-muted-foreground">Only a file that's scanning or ready can be attached to a task.</p> : null}
     </li>
   );
 }
@@ -180,27 +191,6 @@ function AttachForm({ file, name, choices, tasksComplete, links }: { file: RoomF
   );
 }
 
-function LinkNoticeView({ notice, noticeRef, busy, tryAgain }: { notice: LinkNotice; noticeRef: React.RefObject<HTMLDivElement | null>; busy: boolean; tryAgain: () => Promise<void> | undefined }) {
-  return (
-    <div ref={noticeRef} tabIndex={-1} role="status" className="rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring">
-      {notice?.kind === "ok" ? <p className="rounded-lg bg-status-green-surface p-3 text-sm text-status-green">{notice.text}</p> : null}
-      {notice?.kind === "refused" ? (
-        <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-sm text-status-danger">
-          {notice.text}
-        </p>
-      ) : null}
-      {notice?.kind === "unknown" ? (
-        <p role="alert" className="rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">
-          {notice.text}{" "}
-          <Button variant="link" className="h-auto p-0 text-status-amber underline" disabled={busy} onClick={() => void tryAgain()}>
-            {busy ? "Trying…" : "Try again"}
-          </Button>
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
 const PHASES: Record<UploadProgress["phase"], string> = {
   hashing: "Checking the file…",
   reserving: "Reserving space…",
@@ -211,6 +201,9 @@ const PHASES: Record<UploadProgress["phase"], string> = {
 type Failure = { text: string; retry?: () => Promise<UploadResult>; again: boolean; retryAfter?: number; controller: AbortController | null };
 
 /** Codes where starting over is worth offering: no space was reserved, or whether it was isn't known and it expires anyway. */
+/** The longest wait honored, as in the upload client. */
+const MAX_HOLD_SECONDS = 300;
+
 const START_AGAIN = new Set(["rate_limited", "network_error", "upstream_unavailable", "error"]);
 
 /**
@@ -227,6 +220,15 @@ function Uploader({ workspace, onUploaded }: { workspace: string; onUploaded: ()
   const [failure, setFailure] = useState<Failure | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [waiting, setWaiting] = useState<number | null>(null);
+  // Starting over after a rate limit waits as long as Podster asked, as the upload client's own retry does.
+  const [held, setHeld] = useState(false);
+  const failureHold = failure?.again && failure.retryAfter ? Math.min(failure.retryAfter, MAX_HOLD_SECONDS) : 0;
+  useEffect(() => {
+    if (!failureHold) return setHeld(false);
+    setHeld(true);
+    const timer = setTimeout(() => setHeld(false), failureHold * 1000);
+    return () => clearTimeout(timer);
+  }, [failure, failureHold]);
   const abort = useRef<AbortController | null>(null);
   const busy = progress !== null || waiting !== null;
   const tooLarge = chosen !== null && chosen.size > MAX_FILE_BYTES;
@@ -282,7 +284,7 @@ function Uploader({ workspace, onUploaded }: { workspace: string; onUploaded: ()
       if (failure.retryAfter) setWaiting(failure.retryAfter);
       else setProgress({ phase: "sending", sent: 0, total: file.size });
       void again().then((result) => finish(file, result));
-    } else if (failure.again) {
+    } else if (failure.again && !held) {
       void run(file, (options) => uploadFile(workspace, file, options));
     }
   };
@@ -354,8 +356,8 @@ function Uploader({ workspace, onUploaded }: { workspace: string; onUploaded: ()
           <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-sm text-status-danger">
             {failure.text}{" "}
             {failure.retry || failure.again ? (
-              <Button type="button" variant="link" className="h-auto p-0 text-status-danger underline" onClick={retry}>
-                Try again
+              <Button type="button" variant="link" className="h-auto p-0 text-status-danger underline" disabled={held} onClick={retry}>
+                {held ? `Try again in ${failureHold} ${failureHold === 1 ? "second" : "seconds"}` : "Try again"}
               </Button>
             ) : null}
           </p>

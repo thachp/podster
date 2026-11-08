@@ -15,6 +15,8 @@ export function useFileList(workspace: string, initial: FilePage | null, taskId?
   const [failed, setFailed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [quota, setQuota] = useState<Quota | null>(validQuota(initial?.quota));
+  // The API sends `quota` only to someone who sees the whole room, so its presence is the sign. Display only: Rust decides.
+  const [wholeRoom, setWholeRoom] = useState(initial?.quota !== undefined);
   const query = taskId ? `task_id=${encodeURIComponent(taskId)}&` : "";
 
   const readPage = useCallback(
@@ -27,13 +29,15 @@ export function useFileList(workspace: string, initial: FilePage | null, taskId?
     [workspace, query],
   );
 
-  /** From the start again, as far as the list had reached, so a refresh never shortens what someone has scrolled to. */
+  /**
+   * From the start again, until the API says there's no more, so a refresh never shortens what someone has scrolled to. Pages
+   * aren't a fixed size for every viewer, so counting what's on screen can't say how far to read.
+   */
   const reload = useCallback(async () => {
     setLoading(true);
-    const pages = Math.max(1, Math.ceil(files.length / 50));
     const next: RoomFile[] = [];
     let from: number | null = 0;
-    for (let page = 0; page < pages && from !== null; page += 1) {
+    for (let page = 0; page < MAX_RELOAD_PAGES && from !== null; page += 1) {
       const read: FilePage | null = await readPage(from);
       if (!read) {
         setFailed(true);
@@ -41,7 +45,10 @@ export function useFileList(workspace: string, initial: FilePage | null, taskId?
         return;
       }
       next.push(...read.files);
-      if (page === 0) setQuota(validQuota(read.quota));
+      if (page === 0) {
+        setQuota(validQuota(read.quota));
+        setWholeRoom(read.quota !== undefined);
+      }
       from = read.next_cursor;
     }
     setFiles(next);
@@ -49,7 +56,7 @@ export function useFileList(workspace: string, initial: FilePage | null, taskId?
     setFailed(false);
     setLoaded(true);
     setLoading(false);
-  }, [files.length, readPage]);
+  }, [readPage]);
 
   const loadMore = async () => {
     if (cursor === null) return;
@@ -72,8 +79,11 @@ export function useFileList(workspace: string, initial: FilePage | null, taskId?
     void reload();
   }, [reload]);
 
-  return { files, quota, more: cursor !== null, loaded, failed, loading, reload, loadMore, replace };
+  return { files, quota, wholeRoom, more: cursor !== null, loaded, failed, loading, reload, loadMore, replace };
 }
+
+/** A bound on one refresh, far past what a room's 5 GB holds at 50 a page, so a cursor that never ends can't loop forever. */
+const MAX_RELOAD_PAGES = 200;
 
 /** A figure that isn't two sensible numbers isn't shown, rather than shown wrong. */
 function validQuota(quota: Quota | undefined): Quota | null {
@@ -165,7 +175,12 @@ export function useLinkCommands(workspace: string, afterChange: () => Promise<vo
     run({ path: `${base(workspace)}/files/${encodeURIComponent(fileId)}/links`, body: { task_id: taskId }, method: "POST", key: crypto.randomUUID() }, success, false);
   const detach = (fileId: string, taskId: string, success: string) =>
     run({ path: `${base(workspace)}/files/${encodeURIComponent(fileId)}/links/${encodeURIComponent(taskId)}`, method: "DELETE", key: crypto.randomUUID() }, success, false);
+  /** A refusal that isn't a command's, such as a file that went while someone downloaded it, in the same place, with focus on it. */
+  const tell = (text: string) => {
+    setNotice({ kind: "refused", text });
+    noticeRef.current?.focus();
+  };
   const tryAgain = () => (pending.current ? run(pending.current.attempt, pending.current.success, true) : undefined);
 
-  return { notice, noticeRef, busy, attach, detach, tryAgain, clear: () => setNotice(null) };
+  return { notice, noticeRef, busy, attach, detach, tryAgain, tell, clear: () => setNotice(null) };
 }

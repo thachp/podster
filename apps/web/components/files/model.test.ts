@@ -15,6 +15,7 @@ describe("refusals", () => {
   it("says what each attach refusal means", () => {
     expect(explainLink("file_not_available", 409)).toMatch(/scanning or ready/);
     expect(explainLink("task_closed", 409)).toMatch(/completed or canceled/);
+    expect(explainLink("file_removed", 409)).toMatch(/was removed from the workroom/);
     expect(explainLink("limit_exceeded", 409)).toMatch(/50 files/);
     expect(explainLink("rate_limited", 429, 1)).toMatch(/Wait 1 second and/);
     expect(explainLink("whatever", 429, 3)).toMatch(/Wait 3 seconds/);

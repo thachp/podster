@@ -84,7 +84,10 @@ try {
         backend.stop();
         await stopped;
         // The runtime under wrangler goes a moment later, and it holds the files and the port until it does.
-        for (let tries = 0; tries < 100 && (await fetch(gatewayBase, { signal: AbortSignal.timeout(1_000) }).then(() => true, () => false)); tries++) await new Promise((wait) => setTimeout(wait, 200));
+        const answers = () => fetch(gatewayBase, { signal: AbortSignal.timeout(1_000) }).then(() => true, () => false);
+        for (let tries = 0; tries < 100 && (await answers()); tries++) await new Promise((wait) => setTimeout(wait, 200));
+        // Writing under a live runtime could corrupt the room or be overwritten, so a gateway that still answers stops the run.
+        if (await answers()) throw new Error("the Workers still answer after being stopped, so the file states weren't written");
         await writeFileStates(persist, message.changes);
         backend = await startBackend();
         await waitForStack();

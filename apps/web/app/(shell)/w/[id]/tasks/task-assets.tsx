@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { DownloadFile } from "@/components/files/file-bits";
+import { LinkNoticeView } from "@/components/files/link-notice";
 import { FileStateBadge } from "@/components/files/file-state-badge";
 import { fileName } from "@/components/files/model";
 import { fileSize, fileState } from "@/lib/files/files";
@@ -29,22 +30,7 @@ export function TaskAssets({ workspace, taskId, canManage, archived }: Props) {
   return (
     <section className="space-y-2">
       <h3 className="font-medium">Attached files</h3>
-      <div ref={links.noticeRef} tabIndex={-1} role="status" className="rounded-lg text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring">
-        {links.notice?.kind === "ok" ? <p className="rounded-lg bg-status-green-surface p-3 text-status-green">{links.notice.text}</p> : null}
-        {links.notice?.kind === "refused" ? (
-          <p role="alert" className="rounded-lg bg-status-danger-surface p-3 text-status-danger">
-            {links.notice.text}
-          </p>
-        ) : null}
-        {links.notice?.kind === "unknown" ? (
-          <p role="alert" className="rounded-lg bg-status-amber-surface p-3 text-status-amber">
-            {links.notice.text}{" "}
-            <Button variant="link" className="h-auto p-0 text-status-amber underline" disabled={links.busy} onClick={() => void links.tryAgain()}>
-              {links.busy ? "Trying…" : "Try again"}
-            </Button>
-          </p>
-        ) : null}
-      </div>
+      <LinkNoticeView notice={links.notice} noticeRef={links.noticeRef} busy={links.busy} tryAgain={links.tryAgain} />
       <p role="status" className="sr-only">
         {announcement}
       </p>
@@ -73,7 +59,12 @@ export function TaskAssets({ workspace, taskId, canManage, archived }: Props) {
                   </p>
                   <p className="text-muted-foreground">{fileState(file.state).detail}</p>
                   <div className="flex flex-wrap items-center gap-2">
-                    <DownloadFile workspace={workspace} file={file} onUnavailable={(latest) => list.replace(file.id, latest)} />
+                    <DownloadFile workspace={workspace} file={file} onUnavailable={(latest, message) => {
+                        // A gone file's row goes, so its message moves to the notice above the list, with focus.
+                        if (!latest) links.tell(message);
+                        list.replace(file.id, latest);
+                      }}
+                    />
                     {manage ? (
                       <Button type="button" variant="ghost" size="sm" className="max-md:h-11" disabled={links.busy} onClick={() => void links.detach(file.id, taskId, `Removed ${name} from this task. Its assignee can no longer read it through this task.`)}>
                         Remove from task<span className="sr-only">: {name}</span>

@@ -6,6 +6,8 @@ import { InputAssets, type TaskChoice } from "./input-assets";
 
 const upload = vi.hoisted(() => ({ uploadFile: vi.fn() }));
 vi.mock("@/lib/uploads/client", () => upload);
+const signIn = vi.hoisted(() => ({ goToSignIn: vi.fn() }));
+vi.mock("@/app/(shell)/w/[id]/tasks/go-to-sign-in", () => signIn);
 
 type Sent = { method: string; url: string; body: unknown; key: string | null };
 let sent: Sent[] = [];
@@ -24,12 +26,13 @@ beforeEach(() => {
   files = [file()];
   answer = () => undefined;
   upload.uploadFile.mockReset();
+  signIn.goToSignIn.mockReset();
   vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
     const request = { method: init.method ?? "GET", url, body: init.body ? JSON.parse(String(init.body)) : undefined, key: new Headers(init.headers).get("idempotency-key") };
     sent.push(request);
     const special = answer(request);
     if (special) return special;
-    if (request.method === "GET" && url.includes("/files?")) return json({ files, next_cursor: null });
+    if (request.method === "GET" && url.includes("/files?")) return json({ files, next_cursor: null, quota: WHOLE_ROOM });
     const one = files.find((known) => url.endsWith(`/files/${known.id}`));
     if (request.method === "GET" && one) return json(one);
     return json({ linked: true });
@@ -40,7 +43,9 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const show = (props: Partial<React.ComponentProps<typeof InputAssets>> = {}) => render(<InputAssets workspace="ws_1" initial={{ files, next_cursor: null }} tasks={tasks} tasksComplete canManage archived={false} {...props} />);
+/** `quota` comes only to someone who sees the whole room. */
+const WHOLE_ROOM = { used: 0, limit: 5_000_000_000 };
+const show = (props: Partial<React.ComponentProps<typeof InputAssets>> = {}) => render(<InputAssets workspace="ws_1" initial={{ files, next_cursor: null, quota: WHOLE_ROOM }} tasks={tasks} tasksComplete canManage archived={false} {...props} />);
 const row = (name: string) => screen.getByRole("listitem", { name });
 
 describe("the list", () => {
@@ -120,6 +125,27 @@ describe("downloads", () => {
     files = [file({ state: "blocked", download_path: null })];
     await userEvent.click(screen.getByRole("button", { name: "Download brief.pdf" }));
     expect(await screen.findByText(/can't be downloaded now\. Its state is Blocked/)).toBeInTheDocument();
+  });
+
+  it("keeps saying a gone file is gone after its row goes, with focus on the notice", async () => {
+    files = [file(), file({ id: "obj_2", name: "notes.txt" })];
+    show();
+    answer = (request) => (request.url.endsWith("/files/obj_1") ? json({ error: { code: "file_not_found" } }, 404) : undefined);
+    await userEvent.click(screen.getByRole("button", { name: "Download brief.pdf" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("brief.pdf isn't there any more, or your access no longer includes it.");
+    expect(screen.queryByRole("listitem", { name: "brief.pdf" })).not.toBeInTheDocument();
+    expect(alert.closest("[tabindex='-1']")).toHaveFocus();
+    expect(row("notes.txt")).toBeInTheDocument();
+  });
+
+  it("sends a signed-out person to sign in, rather than calling the file gone", async () => {
+    show();
+    answer = (request) => (request.url.endsWith("/files/obj_1") ? json({ error: { code: "unauthenticated" } }, 401) : undefined);
+    await userEvent.click(screen.getByRole("button", { name: "Download brief.pdf" }));
+    await vi.waitFor(() => expect(signIn.goToSignIn).toHaveBeenCalledTimes(1));
+    expect(row("brief.pdf")).toBeInTheDocument();
+    expect(screen.queryByText(/isn't there any more/)).not.toBeInTheDocument();
   });
 
   it("starts an attachment download through this host's /api", async () => {
@@ -207,7 +233,7 @@ describe("attaching", () => {
     await userEvent.click(screen.getByRole("button", { name: "Remove brief.pdf from Write the plan" }));
     const notice = await screen.findByText(/Removed brief\.pdf from Write the plan/);
     expect(sent.find((request) => request.method === "DELETE")?.url).toBe("/api/v1/workspaces/ws_1/files/obj_1/links/tsk_open");
-    expect(notice.parentElement).toHaveFocus();
+    expect(notice.closest("[tabindex='-1']")).toHaveFocus();
     expect(await screen.findByText("No tasks you can see.")).toBeInTheDocument();
   });
 });
@@ -268,6 +294,26 @@ describe("uploading", () => {
     expect(await screen.findByText(/Uploaded notes\.txt/)).toBeInTheDocument();
   });
 
+  it("holds Try again until a refused reservation's retry-after passes, at most 300 seconds", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    upload.uploadFile.mockResolvedValueOnce({ ok: false, status: 429, code: "rate_limited", retryAfter: 15 });
+    show();
+    await user.upload(screen.getByLabelText("Asset upload"), new File(["x"], "notes.txt", { type: "text/plain" }));
+    await user.click(screen.getByRole("button", { name: "Upload" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Wait 15 seconds and try again.");
+    expect(screen.getByRole("button", { name: "Try again in 15 seconds" })).toBeDisabled();
+    await act(() => vi.advanceTimersByTimeAsync(14_000));
+    expect(screen.getByRole("button", { name: "Try again in 15 seconds" })).toBeDisabled();
+    await act(() => vi.advanceTimersByTimeAsync(1_000));
+    upload.uploadFile.mockResolvedValueOnce({ ok: false, status: 429, code: "rate_limited", retryAfter: 9_000 });
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(upload.uploadFile).toHaveBeenCalledTimes(2);
+    expect(await screen.findByRole("button", { name: "Try again in 300 seconds" })).toBeDisabled();
+    await act(() => vi.advanceTimersByTimeAsync(300_000));
+    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+  });
+
   it("can be canceled", async () => {
     upload.uploadFile.mockImplementation(
       (_ws: string, _file: File, options: { signal: AbortSignal }) => new Promise((done) => options.signal.addEventListener("abort", () => done({ ok: false, status: 0, code: "upload_canceled" }))),
@@ -287,10 +333,16 @@ describe("quota", () => {
     expect(screen.getByRole("meter", { name: "Workroom storage used" })).toBeInTheDocument();
   });
 
-  it("shows no figure without one, only the limit", () => {
-    show();
+  it("shows no figure without one, only the limit, and offers a narrowed member no upload or attach", () => {
+    // Only someone who sees the whole room gets `quota`, so a member without it is narrowed to some tasks.
+    files = [file({ linked_tasks: ["tsk_open"] })];
+    show({ initial: { files, next_cursor: null } });
     expect(screen.queryByText(/ used,/)).not.toBeInTheDocument();
     expect(screen.queryByRole("meter")).not.toBeInTheDocument();
     expect(screen.getByText(/workroom holds up to 5 GB/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Asset upload")).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: /Attach to a task/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Upload one above/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Download brief.pdf" })).toBeInTheDocument();
   });
 });

@@ -76,6 +76,8 @@ export function explainLink(code: string, status: number, retryAfter?: number) {
   switch (code) {
     case "file_not_available":
       return "Only a file that's scanning or ready can be attached. This one is blocked, its scan failed, or it hasn't finished uploading.";
+    case "file_removed":
+      return "This file was removed from the workroom, so it can't be attached. Its record stays, but its contents are gone.";
     case "task_closed":
       return "That task is completed or canceled, so files can't be attached to it. Removing a file still works.";
     case "limit_exceeded":

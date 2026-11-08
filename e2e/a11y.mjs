@@ -246,6 +246,8 @@ async function seed() {
   await owner.must("PUT", `/v1/workspaces/${plannedRoom}/plan/start`, { start_date: "2026-11-07", timezone: "America/New_York", plan_revision: planRevision });
 
   // INPUT ASSET FIXTURE (screen 9a). Test-only, and last, because setting its scan states restarts the Workers. Why, in asset-fixture.mjs.
+  // Checked before uploading, so a run that can't set the states fails before it leaves files behind.
+  ok(canAskRunner(), RUN_THROUGH_RUNNER);
   const inputAssets = await seedInputAssets({ gatewayBase, owner, room, task: reviewScreen.id });
   await askRunner({ type: "set-file-states", changes: inputAssets.changes });
   // END INPUT ASSET FIXTURE
@@ -389,10 +391,12 @@ const newContext = () => browser.newContext({ reducedMotion: "reduce", viewport:
 const signedOut = await newContext();
 const contexts = new Map();
 
-/** Sign-up belongs to the application host once `APP_URL` is set, so it runs in the browser there. The session works on both hosts. */
+const RUN_THROUGH_RUNNER = "Run this through run-a11y.mjs, which can restart the Workers.";
+const canAskRunner = () => typeof process.send === "function";
+
 /** Asks run-a11y.mjs to do what only it can, with the Workers stopped, and waits for it to say it's done. */
 function askRunner(request) {
-  ok(typeof process.send === "function", "Run this through run-a11y.mjs, which can restart the Workers.");
+  ok(canAskRunner(), RUN_THROUGH_RUNNER);
   return new Promise((done, fail) => {
     const answer = (message) => {
       if (message?.type !== `${request.type}:done`) return;
@@ -405,6 +409,7 @@ function askRunner(request) {
   });
 }
 
+/** Sign-up belongs to the application host once `APP_URL` is set, so it runs in the browser there. The session works on both hosts. */
 async function signUp(label) {
   const context = await newContext();
   const page = await context.newPage();

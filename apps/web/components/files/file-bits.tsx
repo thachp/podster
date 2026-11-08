@@ -4,11 +4,21 @@ import { Download } from "lucide-react";
 import { useState } from "react";
 import { cn } from "cn";
 import { Button } from "@/components/ui/button";
+import { goToSignIn } from "@/app/(shell)/w/[id]/tasks/go-to-sign-in";
 import { clientQuery } from "@/lib/gateway/client";
 import { downloadHref, fileState } from "@/lib/files/files";
 import { fileName, type RoomFile } from "./model";
 
-type DownloadProps = { workspace: string; file: Pick<RoomFile, "id" | "name" | "state" | "download_path">; onUnavailable?: (latest: RoomFile | null) => void; className?: string };
+type DownloadProps = {
+  workspace: string;
+  file: Pick<RoomFile, "id" | "name" | "state" | "download_path">;
+  /**
+   * Called when the re-read finds the file can't be downloaded: with the file as it is now, or with null when it's gone. When it's
+   * gone the list drops its row, and this with it, so the caller says `message` somewhere that stays.
+   */
+  onUnavailable?: (latest: RoomFile | null, message: string) => void;
+  className?: string;
+};
 
 /**
  * Downloads a ready file as an attachment, through this host's `/api`. It reads the file once more first, so a file that was
@@ -31,14 +41,17 @@ export function DownloadFile({ workspace, file, onUnavailable, className }: Down
     if (!latest.ok) {
       if (latest.status === 429) return setProblem("Too many requests, so the download didn't start. Wait a minute and try again.");
       if (latest.status >= 500) return setProblem("Couldn't reach Podster, so the download didn't start. Try again.");
-      onUnavailable?.(null);
-      return setProblem("This file isn't there any more, or your access no longer includes it.");
+      if (latest.status === 401) return goToSignIn();
+      const gone = `${name} isn't there any more, or your access no longer includes it.`;
+      if (onUnavailable) return onUnavailable(null, gone);
+      return setProblem(gone);
     }
     // Only what the shared rule makes a link (Ready, with a path of the API's own shape) is followed.
     const href = downloadHref(latest.data);
     if (!href) {
-      onUnavailable?.(latest.data);
-      return setProblem(`This file can't be downloaded now. Its state is ${fileState(latest.data.state).label}.`);
+      const message = `This file can't be downloaded now. Its state is ${fileState(latest.data.state).label}.`;
+      onUnavailable?.(latest.data, message);
+      return setProblem(message);
     }
     // An attachment, so the page stays where it is, and the browser's own downloads show the file.
     const link = document.createElement("a");

@@ -1112,3 +1112,36 @@ describe("changing the reviewer or requester", () => {
     expect(commands()[0].key).toBe(commands()[1].key);
   });
 });
+
+describe("attached files", () => {
+  const attached = {
+    files: [
+      { id: "obj_r", name: "spec.pdf", size: 1200, sha256: "a".repeat(64), media_type: "application/pdf", state: "ready", download_path: "/v1/files/ws_1/obj_r", linked_tasks: ["tsk_1"] },
+      { id: "obj_s", name: "notes.txt", size: 10, sha256: "b".repeat(64), media_type: "text/plain", state: "scanning", download_path: null, linked_tasks: ["tsk_1"] },
+    ],
+    next_cursor: null,
+  };
+  beforeEach(() => {
+    answer = (url) => (url.includes("/files?") ? json(200, attached) : json(200, detail()));
+  });
+
+  it("sit between the criteria and the submissions, with a download for a ready file only, and Remove for whoever may attach", async () => {
+    await open();
+    const list = await screen.findByRole("list", { name: "Attached files" });
+    expect(calls.some((call) => call.url === "/api/v1/workspaces/ws_1/files?task_id=tsk_1&cursor=0")).toBe(true);
+    const headings = screen.getAllByRole("heading", { level: 3 }).map((heading) => heading.textContent);
+    expect(headings.indexOf("Attached files")).toBe(headings.indexOf("Acceptance criteria") + 1);
+    expect(headings.indexOf("Submissions")).toBe(headings.indexOf("Attached files") + 1);
+    expect(within(list).getByRole("button", { name: "Download spec.pdf" })).toBeInTheDocument();
+    expect(within(list).queryByRole("button", { name: "Download notes.txt" })).not.toBeInTheDocument();
+    expect(within(list).getByText("Scanning")).toBeInTheDocument();
+    expect(within(list).getAllByRole("button", { name: /^Remove from task/ })).toHaveLength(2);
+  });
+
+  it("give a guest assignee the files to read, with no Remove", async () => {
+    await open({ me: "per_g", room: { ...ROOM, members: [...(ROOM.members ?? []), { principal_id: "per_g", kind: "person", org_id: "org_c", role: "guest" }] } });
+    const list = await screen.findByRole("list", { name: "Attached files" });
+    expect(within(list).getByRole("button", { name: "Download spec.pdf" })).toBeInTheDocument();
+    expect(within(list).queryByRole("button", { name: /^Remove from task/ })).not.toBeInTheDocument();
+  });
+});

@@ -143,11 +143,11 @@ describe("uploading a file for a submission", () => {
     }
   });
 
-  it("holds one uploader to ten unsubmitted files for a task, counting uploads still arriving", async () => {
+  it("holds one uploader to ten unsubmitted files for a task, counting uploads still arriving (decision 99)", async () => {
     const { id, task } = await accepted();
     const start = async () => api(GUEST, "POST", `/v1/workspaces/${id}/uploads`, { name: "x.txt", size: TEXT.length, sha256: await sha256(TEXT), task_id: task });
     await upload(GUEST, id, { task });
-    await upload(GUEST, id, { task, state: "blocked" });
+    await upload(GUEST, id, { task, state: "scanning" });
     const arriving = [];
     for (let i = 0; i < 8; i++) {
       const made = await start();
@@ -156,12 +156,35 @@ describe("uploading a file for a submission", () => {
     }
     const refused = await start();
     expect([refused.status, refused.code]).toEqual([409, "limit_exceeded"]);
-    // An upload whose grant ended holds nothing, so it no longer counts.
+    // An upload whose grant ended, with no attempt under way, can't arrive, so it no longer counts.
     await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET upload_expires_at = 0 WHERE id = ?", arriving[0]));
-    expect((await start()).status).toBe(200);
+    const replaced = await start();
+    expect(replaced.status).toBe(200);
     expect((await start()).code).toBe("limit_exceeded");
     // Input assets, and another uploader's files, are counted apart.
     expect((await upload(MEMBER, id)).length).toBeGreaterThan(0);
+  });
+
+  it("counts an attempt still under way after its grant ended, until the attempt's own limit", async () => {
+    const { id, task } = await accepted();
+    const start = async () => api(GUEST, "POST", `/v1/workspaces/${id}/uploads`, { name: "x.txt", size: TEXT.length, sha256: await sha256(TEXT), task_id: task });
+    const arriving = [];
+    for (let i = 0; i < 10; i++) arriving.push((await start()).body.id);
+    expect((await start()).code).toBe("limit_exceeded");
+    // The grant ended a second ago, but an attempt started before then can still finish.
+    const justEnded = Date.now() - 1000;
+    await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET upload_expires_at = ?, attempt_id = 'att_1' WHERE id = ?", justEnded, arriving[0]));
+    expect((await start()).code).toBe("limit_exceeded");
+    // Once that attempt can't be running any more either, the space is free.
+    await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET upload_expires_at = 0 WHERE id = ?", arriving[0]));
+    expect((await start()).status).toBe(200);
+  });
+
+  it("doesn't count blocked or failed files, which can never be submitted, so failed scans don't lock the assignee out", async () => {
+    const { id, task } = await accepted();
+    for (let i = 0; i < 10; i++) await upload(GUEST, id, { task, state: i % 2 ? "blocked" : "failed" });
+    const more = await api(GUEST, "POST", `/v1/workspaces/${id}/uploads`, { name: "x.txt", size: TEXT.length, sha256: await sha256(TEXT), task_id: task });
+    expect(more.status, JSON.stringify(more.body)).toBe(200);
   });
 
   it("drops only the uploads someone may no longer finish, when their access narrows", async () => {
@@ -258,6 +281,20 @@ describe("the reviewer named on a task (decision 97)", () => {
     // Another task's submitted file, which they don't review, stays out of reach.
     expect((await api(MEMBER, "GET", `/v1/workspaces/${id}/files/${elsewhere}`)).code).toBe("file_not_found");
     expect((await download(MEMBER, id, elsewhere)).status).toBe(404);
+  });
+});
+
+describe("oversight of a task's files", () => {
+  it("shows an organization's admin only the name and state of their agent's submitted files, with no path", async () => {
+    const { id, task, taskPath } = await accepted();
+    const object = await upload(GUEST, id, { task });
+    expect((await submit(taskPath, { files: [{ id: object, label: "Final report" }] })).status).toBe(200);
+    const read = await api(orgAdmin(GUEST.org), "GET", `/v1/workspaces/${id}/agents/${GUEST.id}/tasks/${task}`);
+    expect(read.status, JSON.stringify(read.body)).toBe(200);
+    expect(read.body.files).toEqual([{ id: object, submission_no: 1, name: "report.txt", state: "ready", download_path: null }]);
+    // The agent itself, reading the same task, gets everything.
+    const own = await api(GUEST, "GET", taskPath);
+    expect(own.body.files[0]).toMatchObject({ id: object, label: "Final report", sha256: await sha256(TEXT), download_path: `/v1/files/${id}/${object}` });
   });
 });
 

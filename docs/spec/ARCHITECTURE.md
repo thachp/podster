@@ -437,7 +437,7 @@ Activity reads the existing `event` table through a per-viewer visibility filter
 
 ```
 asset(id, title, visibility: room|public, current_version, created_by, created_at)
-stored_object(id, name, size, sha256, state: uploading|scanning|ready|blocked|failed, media_type?, object_key?, attempt_id?, uploaded_by, created_at, upload_expires_at, stored_at?, scanning_since?)     -- built: nothing leaves scanning yet; removal comes with step 8
+stored_object(id, name, size, sha256, state: uploading|scanning|ready|blocked|failed, media_type?, object_key?, attempt_id?, uploaded_by, created_at, upload_expires_at, stored_at?, scanning_since?, scan_reason?, scan_sha256?, scan_database_json?, scanned_at?)     -- built; removal comes with step 8
 artifact += object_id?     -- a row has either this or a link; a submission number is the version
 task += approved_submission_no?     -- built: set by verify_task
 ```

@@ -397,6 +397,29 @@ paths:
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/CreateUpload" } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/files/{file}:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: file, in: path, required: true, schema: { type: string } }]
+    get:
+      operationId: getFile
+      tags: [queries]
+      summary: "A file's `id`, `name`, `size`, `sha256`, `media_type` and `state`, and `download_path`, which is null unless the caller may download it now. The path carries no authority. Whoever sees the whole room sees every file, and someone limited to their own tasks sees only files linked to those tasks, so until files can be linked they see none. A file the caller can't see answers `file_not_found` (404), as an unknown one does. Other refusals: `access_revoked` (403) for someone removed from the room and `workspace_not_found` (404) for an outsider"
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/agents/{agent}/files/{file}:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: agent, in: path, required: true, schema: { type: string } }, { name: file, in: path, required: true, schema: { type: string } }]
+    get:
+      operationId: getOverseenFile
+      tags: [queries]
+      summary: "Read-only oversight: `id`, `name` and `state` of a file the organization's agent can see, and nothing else, for an admin of an invited organization with no place in the room (decision 58). There's no way to the bytes this way. Refusals: `not_allowed` (403) for someone in the room, `workspace_not_found` (404) for an outsider and `file_not_found` (404)"
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/files/{ws}/{file}:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: file, in: path, required: true, schema: { type: string } }]
+    get:
+      operationId: downloadFile
+      tags: [queries]
+      summary: "A file's bytes, always as an attachment, with `X-Content-Type-Options: nosniff` and no caching. People use their session at `/api/v1/files/{ws}/{file}`. Agents call `/v1/files/{ws}/{file}` with their own credential in `Authorization: Bearer`, an Agent Auth JWT, which is spent, or an MCP access token. There's no download token or signed URL: the credential, the caller's current place in the room and the file's state are all checked at the start of every download. A download already under way isn't cut off, and ranges aren't supported. Only a `ready` file downloads. Refusals: `file_not_found` (404) for a file the caller can't see, or that doesn't exist, `file_not_available` (409) for one they can see in any other state, or whose bytes are gone, `storage_unavailable` (502), `workspace_not_found` (404) for someone not in the room, or a malformed room ID, `access_revoked` (403) for someone removed from the room, `invalid_credential` (401), `credential_owner_left`, `agent_disconnected` and `agent_unclaimed` (403), for an agent, the capability path's own refusals for `get_asset_link` in its shape, `{ error, message }`, such as `capability_not_granted`, `constraint_violated`, `grant_revoked` and `agent_revoked` (403), and `rate_limited` (429)"
+      responses:
+        "200": { description: "The file", content: { application/octet-stream: { schema: { type: string, format: binary } } } }
+        default: { $ref: "#/components/responses/Error" }
   /v1/uploads/{ws}/{object}:
     parameters: [{ $ref: "#/components/parameters/ws" }, { name: object, in: path, required: true, schema: { type: string } }]
     put:

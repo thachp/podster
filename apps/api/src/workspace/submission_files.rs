@@ -305,7 +305,7 @@ pub(super) fn for_task(
             "external": row["submitted_org"].as_str() != Some(who.org.as_str()), "created_at": row["created_at"],
         }));
     }
-    out.extend(unsubmitted(sql, who, task, oversight, &room)?);
+    out.extend(unsubmitted(sql, who, task, oversight, &room, now_ms())?);
     Ok(out)
 }
 
@@ -319,6 +319,7 @@ fn unsubmitted(
     task: &Task,
     oversight: bool,
     room: &str,
+    now: i64,
 ) -> R<Vec<Value>> {
     let found = rows(
         sql,
@@ -330,9 +331,9 @@ fn unsubmitted(
         vec![
             task.id.as_str().into(),
             who.caller.id.as_str().into(),
-            now_ms().into(),
+            now.into(),
             (crate::objects::TOTAL_LIMIT_MS as i64).into(),
-            now_ms().into(),
+            now.into(),
         ],
     )?;
     let mut out = Vec::new();

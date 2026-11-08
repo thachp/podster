@@ -662,7 +662,8 @@ describe("the bytes of an upload", () => {
   });
 
   describe("a reservation that lapses during an upload", () => {
-    const reservationEnds = (id: string, object: string) => inRoom(id, (sql) => sql.exec("UPDATE stored_object SET upload_expires_at = 1 WHERE id = ?", object));
+    // A moment ago: the reservation is gone, and the attempt that began before then is still within its own limit.
+    const reservationEnds = (id: string, object: string) => inRoom(id, (sql) => sql.exec("UPDATE stored_object SET upload_expires_at = ? WHERE id = ?", Date.now() - 1000, object));
 
     it("still finishes if the file fits", async () => {
       const { id, uploads } = await room();

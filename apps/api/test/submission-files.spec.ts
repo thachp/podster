@@ -12,18 +12,20 @@ const MEMBER: Who = { id: "agt_sf_member", org: "org_sf" };
 const GUEST: Who = { id: "agt_sf_guest", org: "org_sf_guest" };
 const OTHER_GUEST: Who = { id: "agt_sf_other", org: "org_sf" };
 const orgAdmin = (org: string): Who => ({ id: `per_sf_admin_${org}`, kind: "person", org, adminOrgs: [org] });
+/** A room admin who isn't its owner. */
+const ADMIN: Who = { id: "per_sf_room_admin", kind: "person", org: "org_sf" };
 
-async function assertion(who: Who) {
+async function assertion(who: Who, claims: object = {}) {
   const now = Math.floor(Date.now() / 1000);
   const isAgent = (who.kind ?? "agent") === "agent";
-  return new SignJWT({ kind: who.kind ?? "agent", org: who.org, ...(isAgent ? { gen: who.gen ?? 1 } : { orgs: [who.org], admin_orgs: who.adminOrgs ?? [] }) })
+  return new SignJWT({ kind: who.kind ?? "agent", org: who.org, ...(isAgent ? { gen: who.gen ?? 1 } : { orgs: [who.org], admin_orgs: who.adminOrgs ?? [] }), ...claims })
     .setProtectedHeader({ alg: "EdDSA", kid: "test" }).setIssuer("podster-gateway").setSubject(who.id).setAudience("podster-api")
     .setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID()).sign(key);
 }
 
 let counter = 0;
-async function api(who: Who, method: string, path: string, body?: unknown) {
-  const headers: Record<string, string> = { "x-podster-assertion": await assertion(who), "content-type": "application/json" };
+async function api(who: Who, method: string, path: string, body?: unknown, claims: object = {}) {
+  const headers: Record<string, string> = { "x-podster-assertion": await assertion(who, claims), "content-type": "application/json" };
   if (method !== "GET") headers["idempotency-key"] = `sf-key-${++counter}`;
   const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: method === "GET" ? undefined : JSON.stringify(body ?? {}) });
   const text = await res.text();
@@ -50,8 +52,10 @@ const setState = (id: string, object: string, state: string) => inRoom(id, (sql)
 /** A room with a member and two guests, and a task the owner offered to GUEST, which GUEST accepted. */
 async function accepted() {
   const id: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Submissions" })).body.id;
-  for (const [who, role] of [[MEMBER, "member"], [OTHER_GUEST, "guest"]] as const) {
-    const r = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: "agent", org_id: who.org, role, policy_version: await version(id) });
+  for (const [who, role] of [[MEMBER, "member"], [OTHER_GUEST, "guest"], [ADMIN, "admin"]] as const) {
+    // A person is added with the gateway's word that they're in the organization's directory.
+    const claims = who.kind === "person" ? { target_member: { person: who.id, orgs: { [who.org]: 1 } } } : {};
+    const r = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: who.kind ?? "agent", org_id: who.org, role, policy_version: await version(id) }, claims);
     expect(r.status, `add ${who.id}: ${JSON.stringify(r.body)}`).toBe(200);
   }
   // The assignee is another organization's agent, so its organization's admin can oversee it.
@@ -180,6 +184,42 @@ describe("uploading a file for a submission", () => {
     expect((await start()).status).toBe(200);
   });
 
+  it("refuses to complete an attempt past its own limit after the grant, so the cap's count is exact", async () => {
+    const { id, task } = await accepted();
+    const room = BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
+    // As the Worker asks the room: as nobody, naming the room.
+    const nobody = JSON.stringify({ id: "", kind: "person", org: "", orgs: [], admin_orgs: [], org_since: {}, target_member: null, gen: null, workspace_id: id });
+    const step = async (path: string, body: object) => {
+      const res: Response = await room.fetch(`https://do/internal/${path}`, { method: "POST", headers: { "x-podster-caller": nobody }, body: JSON.stringify(body) });
+      return { status: res.status, body: (await res.json()) as any };
+    };
+    // An attempt under way, as the Worker's begin step leaves it, with the grant ending when asked.
+    const attempt = async (endsAt: number) => {
+      const made = await api(GUEST, "POST", `/v1/workspaces/${id}/uploads`, { name: "x.txt", size: TEXT.length, sha256: await sha256(TEXT), task_id: task });
+      await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET attempt_id = 'att_1', object_key = 'k', upload_expires_at = ? WHERE id = ?", endsAt, made.body.id));
+      return step("upload-complete", { id: made.body.id, attempt: "att_1", size: TEXT.length, sha256: await sha256(TEXT), media_type: "text/plain; charset=utf-8" });
+    };
+    // The grant ended a moment ago, and the attempt that began before then is still within its own limit.
+    expect((await attempt(Date.now() - 1000)).status).toBe(200);
+    // Long past both, nothing can finish.
+    const late = await attempt(0);
+    expect([late.status, late.body.error?.code]).toEqual([404, "upload_not_found"]);
+  });
+
+  it("records a scanner's verdict on a file uploaded for a task", async () => {
+    const { id, task } = await accepted();
+    const object = await upload(GUEST, id, { task, state: "scanning" });
+    const row = await inRoom(id, (sql) => sql.exec("SELECT sha256, object_key, size FROM stored_object WHERE id = ?", object).toArray()[0]);
+    const answer = await SELF.fetch("https://api.internal/internal/scan-result", {
+      method: "POST",
+      headers: { "x-podster-scanner": "test-scanner-secret" },
+      body: JSON.stringify({ v: 1, workspace_id: id, object_id: object, key: row.object_key, report: "no_known_malware", reason: "none", sha256: row.sha256, bytes: row.size, database: { engine: "1.5.4", version: "28176", built_at: new Date(Date.now() - 86_400_000).toISOString() }, scanned_at: 1 }),
+    });
+    expect(answer.status, await answer.clone().text()).toBe(200);
+    expect(((await answer.json()) as any).state).toBe("ready");
+    expect(await inRoom(id, (sql) => sql.exec("SELECT state, for_task FROM stored_object WHERE id = ?", object).toArray()[0])).toEqual({ state: "ready", for_task: task });
+  });
+
   it("doesn't count blocked or failed files, which can never be submitted, so failed scans don't lock the assignee out", async () => {
     const { id, task } = await accepted();
     for (let i = 0; i < 10; i++) await upload(GUEST, id, { task, state: i % 2 ? "blocked" : "failed" });
@@ -297,13 +337,30 @@ describe("an uploader's own unsubmitted files on the task", () => {
     expect(mine[0]).toMatchObject({ submission_no: null, label: null, name: "report.txt", size: TEXT.length, download_path: `/v1/files/${id}/${ready}` });
     expect(mine[1].download_path).toBeNull();
     expect(mine[2]).toMatchObject({ name: "big.txt", size: 5, download_path: null });
-    for (const who of [OWNER, MEMBER, OTHER_GUEST]) {
+    // Everyone else who can read the task gets an answer, with none of them in it.
+    for (const who of [OWNER, ADMIN, MEMBER]) {
       const read = await api(who, "GET", taskPath);
-      expect(read.body?.files ?? [], who.id).toEqual([]);
+      expect(read.status, who.id).toBe(200);
+      expect(read.body.files, who.id).toEqual([]);
     }
+    // A guest not on the task can't read it at all.
+    expect((await api(OTHER_GUEST, "GET", taskPath)).status).toBe(404);
     // Oversight of the uploader gets names and states only.
     const overseen = (await api(orgAdmin(GUEST.org), "GET", `/v1/workspaces/${id}/agents/${GUEST.id}/tasks/${task}`)).body.files;
     expect(overseen[0]).toEqual({ id: ready, submitted: false, submission_no: null, name: "report.txt", state: "ready", download_path: null });
+  });
+
+  it("shows a new assignee nothing of the earlier assignee's unsubmitted files", async () => {
+    const { id, task, taskPath } = await accepted();
+    const earlier = await upload(GUEST, id, { task });
+    expect((await api(GUEST, "POST", `${taskPath}/release`, { version: await taskVersion(taskPath), reason: "Can't." })).status).toBe(200);
+    expect((await api(OWNER, "POST", `${taskPath}/assign`, { version: await taskVersion(taskPath), assignee: OTHER_GUEST.id })).status).toBe(200);
+    expect((await api(OTHER_GUEST, "POST", `${taskPath}/accept`, { version: await taskVersion(taskPath) })).status).toBe(200);
+    const read = await api(OTHER_GUEST, "GET", taskPath);
+    expect(read.status).toBe(200);
+    expect(read.body.files).toEqual([]);
+    expect((await api(OTHER_GUEST, "GET", `/v1/workspaces/${id}/files/${earlier}`)).code).toBe("file_not_found");
+    expect((await download(OTHER_GUEST, id, earlier)).status).toBe(404);
   });
 
   it("puts submitted files first, and drops a file from the unsubmitted ones once a submission names it", async () => {

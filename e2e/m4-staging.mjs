@@ -31,6 +31,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AuthAgent, linkedA2aToken, McpAgent, ok, Person, sleep, Target } from "./lib.mjs";
+import { JsonStream } from "./tail-stream.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "..");
@@ -64,6 +65,13 @@ if (isLocal && signupSecret) {
 }
 
 const target = new Target(base, { pollMs: isLocal ? 150 : 1000 });
+// `--operator-id` signs the test operator in, prints its person ID for OPERATORS, signs out and stops: one take of the test
+// sign-up, so the owner can name it before the first full run.
+const operatorIdOnly = args.includes("--operator-id");
+if (operatorIdOnly && isLocal) {
+  console.error("--operator-id is for staging's test operator.");
+  process.exit(2);
+}
 const RUN = `M4 staging ${new Date().toISOString().slice(0, 16)}`;
 
 // ---- reporting ----
@@ -150,6 +158,8 @@ const claim = (agent, handle, role, extra = {}) => agent.call("claim_public_open
 
 /** Every room this run made public, with its owner, so the end can make each private again. */
 const published = new Map();
+/** IDs and handles only this run made, to find its own events in the tails. */
+const runIds = new Set();
 
 /** A new room. An organization holds at most 20, so the owner moves to a new one of its own every 18. */
 const roomsMade = new Map();
@@ -157,7 +167,9 @@ async function newRoom(owner, name, extra = {}) {
   const made = roomsMade.get(owner) ?? 0;
   if (made > 0 && made % 18 === 0) await owner.useNewOrg(`${RUN} rooms ${made / 18}`);
   roomsMade.set(owner, made + 1);
-  return owner.createRoom(name, extra);
+  const id = await owner.createRoom(name, extra);
+  runIds.add(id);
+  return id;
 }
 
 /**
@@ -181,6 +193,7 @@ async function publish(owner, id) {
   const done = await owner.dash("PUT", `/v1/workspaces/${id}/visibility`, { visibility: "public", view_hash });
   ok(done.ok, `publishing answered ${done.status} ${done.code ?? ""}`);
   published.set(id, owner);
+  runIds.add(done.body.public_handle);
   return done.body.public_handle;
 }
 async function unpublish(owner, id, extra = {}) {
@@ -197,6 +210,20 @@ async function allExplore(who) {
     ok(res.ok, `Explore answered ${res.status} ${res.code ?? ""}`);
     handles.push(...res.body.workrooms.map((w) => w.handle));
     cursor = res.body.next_cursor;
+    if (!cursor) break;
+  }
+  return handles;
+}
+
+/** Every handle discover_workrooms lists for an agent, following its cursor. It must answer. */
+async function allDiscover(agent) {
+  const handles = [];
+  let cursor;
+  for (let n = 0; n < 50; n++) {
+    const res = await agent.call("discover_workrooms", cursor ? { cursor } : {});
+    ok(res.ok, `discover_workrooms answered ${res.code ?? "nothing"}`);
+    handles.push(...(res.data?.workrooms ?? []).map((w) => w.handle));
+    cursor = res.data?.next_cursor;
     if (!cursor) break;
   }
   return handles;
@@ -252,41 +279,51 @@ const randomHandle = () => `pub_${randomBytes(16).toString("hex")}`;
 
 // ---- logs (M4-16, staging only) ----
 
-/** `wrangler tail` for each app, started here with the ambient login, its output kept in memory. */
+/** `wrangler tail` for each app, started here with the ambient login, read as a stream of JSON values. */
 const tails = [];
-async function startTails() {
+function startTails() {
   for (const appDir of ["api", "gateway", "web"]) {
     const cwd = join(repo, "apps", appDir);
-    const proc = spawn(join(cwd, "node_modules/.bin/wrangler"), ["tail", "--env", "staging", "--format", "json"], { cwd, stdio: ["ignore", "pipe", "pipe"] });
-    const tail = { app: appDir, proc, out: [], said: [] };
-    proc.stdout.on("data", (chunk) => tail.out.push(String(chunk)));
-    proc.stderr.on("data", (chunk) => tail.said.push(String(chunk)));
+    const tail = { app: appDir, stream: new JsonStream(), error: null, proc: null };
+    tail.proc = spawn(join(cwd, "node_modules/.bin/wrangler"), ["tail", "--env", "staging", "--format", "json"], { cwd, stdio: ["ignore", "pipe", "ignore"] });
+    // A missing wrangler, or one that can't start, fails the check rather than the whole run.
+    tail.proc.on("error", (error) => (tail.error = error.code ?? "spawn_failed"));
+    tail.proc.stdout.on("data", (chunk) => tail.stream.push(chunk));
     tails.push(tail);
   }
-  // A tail says it's connected before any event reaches it.
-  const connected = await within(60, async () => tails.every((t) => /connected|created tail/i.test(t.said.join("") + t.out.join(""))), 500);
-  return connected !== null;
 }
 function stopTails() {
-  for (const tail of tails) tail.proc.kill("SIGINT");
+  for (const tail of tails) if (tail.proc && tail.proc.exitCode === null) tail.proc.kill("SIGINT");
 }
-/** Each tailed event: what the app itself logged, and the request's URL. */
-function tailedEvents() {
-  const events = [];
-  for (const tail of tails) {
-    for (const line of tail.out.join("").split("\n")) {
-      try {
-        const event = JSON.parse(line);
-        events.push({ app: tail.app, url: event?.event?.request?.url ?? "", logged: JSON.stringify([event?.logs ?? [], event?.exceptions ?? []]) });
-      } catch {
-        // A partial line between chunks.
-      }
-    }
-  }
-  return events;
+/** Every event a tail has seen, as text, to search. */
+const tailText = (tail) => tail.stream.values.map((value) => JSON.stringify(value));
+/**
+ * Proves every tail is connected by sending requests of the run's own, with a marker in their paths, until each app's tail
+ * holds an event naming it. Wrangler's banner text isn't relied on.
+ */
+async function tailsConnected(owner) {
+  const marker = randomBytes(16).toString("hex");
+  runIds.add(marker);
+  const connected = await within(120, async () => {
+    if (tails.some((t) => t.error)) return true;
+    await rawPage(`pub_${marker}`).then((res) => res.arrayBuffer()).catch(() => null);
+    await owner.dash("GET", `/v1/workspaces/ws_${marker}`).catch(() => null);
+    return tails.every((t) => tailText(t).some((text) => text.includes(marker)));
+  }, 5000);
+  const failed = tails.filter((t) => t.error).map((t) => `${t.app}: ${t.error}`);
+  return { ok: connected !== null && failed.length === 0, detail: failed.length ? failed.join(", ") : connected === null ? `no marker in ${tails.filter((t) => !tailText(t).some((text) => text.includes(marker))).map((t) => t.app).join(", ")} within 120 s` : "" };
 }
+/** What each app itself logged, apart from the platform's own record of the request. */
+const appLogged = (tail) => tail.stream.values.map((value) => JSON.stringify([value?.logs ?? [], value?.exceptions ?? []])).join("\n");
 
 // ---- the run ----
+
+if (operatorIdOnly) {
+  const operator = await operatorPerson();
+  console.log(`The test operator is ${operator.id}. Name it in the API's OPERATORS once, before the first full run.`);
+  await signOutAll();
+  process.exit(0);
+}
 
 const canaryPattern = /zq[a-z]+[0-9a-f]{12}/;
 const roomIds = [];
@@ -319,7 +356,9 @@ try {
     await step("staging's test operator, and the logs", async () => {
       operator = await operatorPerson();
       console.log(`     The test operator is ${operator.id}. The owner names it in the API's OPERATORS once; M4-14 fails until then.`);
-      check(await startTails(), "wrangler tail is connected to the API, the gateway and the web app");
+      startTails();
+      const connected = await tailsConnected(owner);
+      check(connected.ok, "wrangler tail is connected to the API, the gateway and the web app, shown by the run's own marker requests", connected.detail);
     });
   }
 
@@ -368,9 +407,9 @@ try {
     const json = await pool[0].call("get_public_workroom", { handle: room.handle });
     check(json.ok, "get_public_workroom answers", json.code);
     responses.push(["get_public_workroom", JSON.stringify(json.data)]);
-    const discovered = await pool[0].call("discover_workrooms", {});
-    check(discovered.ok, "discover_workrooms answers", discovered.code);
-    responses.push(["discover_workrooms", JSON.stringify(discovered.data)]);
+    const discovered = await allDiscover(pool[0]);
+    check(discovered.includes(room.handle), "discover_workrooms lists the canary room, so its entry is searched too");
+    responses.push(["discover_workrooms", JSON.stringify(await pool[0].call("discover_workrooms", {}))]);
     const listed = await allExplore(owner);
     check(listed.includes(room.handle), "Explore lists the canary room, so its card is searched too");
     responses.push(["Explore for a person", JSON.stringify(await owner.dash("GET", "/v1/public/explore"))]);
@@ -518,9 +557,9 @@ try {
     const stranger = pool[14].owner;
     const explored = await allExplore(stranger);
     check(explored.includes(visible.handle), "Explore answers and lists a public room");
-    const discovered = await pool[6].call("discover_workrooms", {});
-    check(discovered.ok, "discover_workrooms answers", discovered.code);
-    const both = JSON.stringify(explored) + JSON.stringify(discovered.data);
+    const discovered = await allDiscover(pool[6]);
+    check(discovered.includes(visible.handle), "discover_workrooms answers and lists a public room");
+    const both = JSON.stringify(explored) + JSON.stringify(discovered);
     check(!both.includes(secretName) && !both.includes(id), "the private room is absent from both");
     refusedWith(await pool[6].call("get_public_workroom", { handle: id }), undefined, "workspace_not_found", "not found by ID");
     check((await pageText(id)).status === 404, "and its ID as a page is not-found");
@@ -531,22 +570,24 @@ try {
     const rooms = [];
     for (let n = 0; n < 6; n++) rooms.push(await publicRoom(owner, `${RUN} limits ${n}`));
     const busy = pool[7];
-    const codes = [];
-    for (const room of rooms.slice(0, 4)) codes.push((await claim(busy, room.handle, room.roles[0])).code ?? "ok");
-    check(codes.slice(0, 3).every((c) => c === "ok") && String(codes[3]).includes("limit_exceeded"), "an agent holds at most 3 public claims at once", codes.join(", "));
-    for (const room of rooms.slice(0, 3)) await busy.must("release_role", { workspace_id: room.id, role_id: room.roles[0] });
-    const hourly = [];
-    for (const room of rooms.slice(3, 6)) hourly.push((await claim(busy, room.handle, room.roles[0])).code ?? "ok");
-    check(hourly.filter((c) => c === "ok").length === 2 && String(hourly.at(-1)).includes("limit_exceeded"), "an agent makes at most 5 public claims an hour", hourly.join(", "));
-    // An invited claim in a private room isn't counted: the same agent, past its public hour, still takes one.
+    // An invited claim in a private room, between its public ones, which mustn't count toward either public limit.
     const invitedRoom = await newRoom(owner, `${RUN} invited`);
     const opening = await owner.must("POST", `/v1/workspaces/${invitedRoom}/roles`, { title: "Invited seat", responsibilities: "Help", preset: "guest", capacity: 1, policy_version: await owner.policyVersion(invitedRoom) });
     const invitation = await owner.invite(invitedRoom, busy.org, { work_role_id: opening.id });
     const accepted = await busy.owner.accept(invitation.token, busy.org, [busy]);
     check(accepted.ok, "the agent's owner accepts an invitation for it", accepted.code);
+    const codes = [];
+    for (const room of rooms.slice(0, 2)) codes.push((await claim(busy, room.handle, room.roles[0])).code ?? "ok");
     const invitedClaim = await busy.call("claim_role", { idempotency_key: randomUUID(), workspace_id: invitedRoom, role_id: opening.id });
-    check(invitedClaim.ok, "an invited claim works past the public hour, since it isn't counted", invitedClaim.code);
-    refusedWith(await claim(busy, rooms[5].handle, rooms[5].roles[0]), undefined, "limit_exceeded", "and the public count is unchanged by it");
+    check(invitedClaim.ok, "it takes an invited claim", invitedClaim.code);
+    for (const room of rooms.slice(2, 4)) codes.push((await claim(busy, room.handle, room.roles[0])).code ?? "ok");
+    // Were the invited claim counted, the third public claim would already be refused.
+    check(codes.slice(0, 3).every((c) => c === "ok") && String(codes[3]).includes("limit_exceeded"), "an agent holds at most 3 public claims at once, an invited one not counted", codes.join(", "));
+    for (const room of rooms.slice(0, 3)) await busy.must("release_role", { workspace_id: room.id, role_id: room.roles[0] });
+    const hourly = [];
+    for (const room of rooms.slice(3, 6)) hourly.push((await claim(busy, room.handle, room.roles[0])).code ?? "ok");
+    // Were the invited claim counted, the hour would end a claim sooner.
+    check(hourly.filter((c) => c === "ok").length === 2 && String(hourly.at(-1)).includes("limit_exceeded"), "an agent makes at most 5 public claims an hour, an invited one not counted", hourly.join(", "));
     // The room's own hour: 20 claims, then limit_exceeded.
     const roomful = await publicRoom(owner, `${RUN} roomful`, { openings: [{ title: "Many seats", responsibilities: "Sit", preset: "public_participant", capacity: 50 }] });
     const extra = await agentOf(pool[15].owner, `${RUN} agent 21`);
@@ -586,9 +627,17 @@ try {
     if (limited) await sleep(61_000);
     // A forged address can't dodge it: Cloudflare's edge sets cf-connecting-ip itself.
     if (!isLocal) {
-      const forged = await flood(() => ({ "cf-connecting-ip": `198.51.100.${Math.floor(Math.random() * 250) + 1}` }));
-      check(forged !== null, "a forged cf-connecting-ip doesn't dodge the limit", forged ? `refused at request ${forged.n}` : "no 429 in 400 requests");
-      if (forged) await sleep(61_000);
+      // Any answer but the page or the limit is named, by status only, so a rejection of the header isn't read as the limit.
+      let outcome = null;
+      for (let n = 1; n <= 400 && !outcome; n++) {
+        const res = await rawPage(room.handle, { headers: { "cf-connecting-ip": `198.51.100.${Math.floor(Math.random() * 250) + 1}` } });
+        await res.arrayBuffer();
+        if (res.status === 429) outcome = { kind: "limited", n };
+        else if (res.status !== 200) outcome = { kind: "other", n, status: res.status };
+      }
+      if (outcome?.kind === "other") record("fail", "a forged cf-connecting-ip got an answer other than the page or the limit", `HTTP ${outcome.status} at request ${outcome.n}`);
+      else check(outcome?.kind === "limited", "a forged cf-connecting-ip doesn't dodge the limit", outcome ? `refused at request ${outcome.n}` : "no 429 in 400 requests");
+      if (outcome) await sleep(61_000);
     } else owed("a forged cf-connecting-ip", "only Cloudflare's edge can show it overwrites the header; checked on staging");
   });
 
@@ -652,8 +701,8 @@ try {
     const { view_hash } = await owner.must("GET", `/v1/workspaces/${room.id}/visibility`);
     refusedWith(await owner.dash("PUT", `/v1/workspaces/${room.id}/visibility`, { visibility: "public", view_hash }), 403, "room_suspended", "and can't publish again");
     await operator.must("POST", `/v1/moderation/reports/${report.body.id}/lift-room`, { reason: "spam" });
-    await publish(owner, room.id);
-    check(true, "once lifted, it can publish again");
+    const back = await publish(owner, room.id);
+    check((await within(40, async () => (await page(back)).status === 200)) !== null, "once lifted, it publishes again and its page is served");
   });
 
   // ---- M4-15: the public read isn't on the gateway's hostname ----
@@ -716,16 +765,19 @@ try {
     if (isLocal) return skip("the logs during the run", "the local runner checks the Workers' own output instead");
     await sleep(5_000);
     stopTails();
-    const events = tailedEvents();
-    const ours = events.filter((e) => roomIds.some((id) => e.url.includes(id)));
-    check(ours.length > 0, "the tail holds this run's own requests", `${events.length} events, ${ours.length} naming this run's canary room`);
-    const logged = events.map((e) => e.logged).join("\n");
+    for (const tail of tails) {
+      const ours = tailText(tail).filter((text) => [...runIds].some((id) => text.includes(id))).length;
+      check(!tail.error && ours > 0, `the ${tail.app}'s tail holds this run's own requests`, tail.error ?? `${tail.stream.values.length} events, ${ours} of this run's`);
+    }
+    const logged = tails.map(appLogged).join("\n");
     check(!canaryPattern.test(logged), "no canary in what the apps logged");
     check(!logged.includes("Staging run report."), "no report note in what the apps logged");
     check(!/[A-Za-z0-9_-]{8,}:[A-Za-z0-9_-]{8,}:[A-Za-z0-9_-]{24,}/.test(logged), "no access token in what the apps logged");
-    const ip = await fetch("https://api.ipify.org", { signal: AbortSignal.timeout(15_000) }).then((r) => (r.ok ? r.text() : null)).catch(() => null);
-    check(Boolean(ip && /^[0-9a-f.:]+$/i.test(ip.trim())), "this run's own IP address is known, to look for it");
-    if (ip) check(!logged.includes(ip.trim()), "no client IP address in what the apps logged");
+    // The address Cloudflare itself saw for this run, IPv4 or IPv6, from the same host the run used.
+    const trace = await fetch(`${base}/cdn-cgi/trace`, { signal: AbortSignal.timeout(15_000) }).then((r) => (r.ok ? r.text() : "")).catch(() => "");
+    const ip = /^ip=(.+)$/m.exec(trace)?.[1]?.trim();
+    check(Boolean(ip && /^[0-9a-f.:]+$/i.test(ip)), "the address Cloudflare saw for this run is known, to look for it");
+    if (ip) check(!logged.includes(ip), "no client IP address in what the apps logged");
   });
 } catch (error) {
   record("fail", "the run stopped", cause(error));

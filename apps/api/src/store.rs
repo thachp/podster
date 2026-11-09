@@ -200,6 +200,9 @@ ALTER TABLE workspace ADD COLUMN published_at INTEGER;
 ALTER TABLE workspace ADD COLUMN topic TEXT;
 ALTER TABLE workspace ADD COLUMN public_claims_paused INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE work_role ADD COLUMN publicly_claimable INTEGER NOT NULL DEFAULT 0;
+", "
+CREATE TABLE public_index_outbox (id INTEGER PRIMARY KEY CHECK (id = 1), seq INTEGER NOT NULL, pending INTEGER NOT NULL, written TEXT);
+INSERT INTO public_index_outbox (id, seq, pending) SELECT 1, COALESCE((SELECT MAX(seq) FROM event), 0), 1 FROM workspace WHERE visibility = 'public';
 "];
 
 pub fn int(value: &Value) -> i64 {
@@ -521,6 +524,25 @@ pub fn record_event_about(
 }
 
 /// The same, answering the new event's ID.
+/// Marks the discovery index due after an event in a public room, or the event that made it private, so the row reaches
+/// `public_workroom_index` in `seq` order. A private room writes nothing there. One row holds the newest `seq`, since the
+/// projection reads the room as it stands, not the event, and `written` holds the last row sent, so an event that changes
+/// none of the index's keys, such as a message, costs no write to D1.
+fn mark_public_index(sql: &SqlStorage, kind: &str, event_id: &str) -> R<()> {
+    let public = rows(sql, "SELECT visibility FROM workspace", vec![])?
+        .first()
+        .is_some_and(|r| r["visibility"].as_str() == Some("public"));
+    if !public && kind != "room.unpublished" {
+        return Ok(());
+    }
+    exec(
+        sql,
+        "INSERT INTO public_index_outbox (id, seq, pending) SELECT 1, seq, 1 FROM event WHERE id = ?
+           ON CONFLICT (id) DO UPDATE SET seq = excluded.seq, pending = 1",
+        vec![event_id.into()],
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn record_event_with_id(
     sql: &SqlStorage,
@@ -555,6 +577,7 @@ fn record_event_with_id(
         transition.prior_status.map_or(V::Null, V::from), transition.new_status.map_or(V::Null, V::from),
         transition.task_version.map_or(V::Null, |v| V::from(v as i64)), now.into(), subject.map_or(V::Null, V::from),
     ])?;
+    mark_public_index(sql, kind, &event_id)?;
     for recipient in recipients {
         exec(sql, "INSERT INTO outbox (event_id, recipient_principal_id, next_attempt_at) VALUES (?, ?, ?)",
             vec![event_id.as_str().into(), recipient.into(), now.into()])?;

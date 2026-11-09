@@ -378,7 +378,9 @@ describe("a room from before this", () => {
     inRoom(id, (sql) => {
       // The newer migrations come off first, newest first: submitted files' flag, expected outputs, removal, input assets linked
       // to tasks, then files on submissions.
-      // M4 step 5's room visibility, the newest migration, then step 13b's change requests, step 13's read-back and step 12's A2A attempts.
+      // M4 step 6's discovery outbox, the newest migration, then step 5's room visibility, step 13b's change requests, step 13's read-back and step 12's A2A attempts.
+      sql.exec("DROP TABLE public_index_outbox");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("ALTER TABLE work_role DROP COLUMN publicly_claimable");
       sql.exec("ALTER TABLE workspace DROP COLUMN public_claims_paused");
       sql.exec("ALTER TABLE workspace DROP COLUMN topic");

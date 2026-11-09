@@ -362,3 +362,133 @@ pub(super) fn handle_set_topic(
     }
     Ok(json!({ "topic": new }))
 }
+
+/// What the drain writes, as JSON, so it can tell whether anything changed since the last write.
+fn index_json(row: &podster_policy::public::PublicIndexRow) -> Value {
+    json!({
+        "resolvable": row.resolvable, "listed": row.listed, "public_handle": row.public_handle, "topic": row.topic.map(Topic::name),
+        "has_open_opening": row.has_open_opening, "published_at": row.published_at,
+    })
+}
+
+/// The handle the room's latest publish made, from its audit row (step 5), so a tombstone names the handle that went away
+/// rather than reading the room's current one. `None` for a room never published.
+fn last_published_handle(sql: &SqlStorage) -> R<Option<String>> {
+    Ok(rows(
+        sql,
+        "SELECT new_json FROM audit_event WHERE action = 'visibility.published' ORDER BY seq DESC LIMIT 1",
+        vec![],
+    )?
+    .first()
+    .and_then(|r| r["new_json"].as_str().map(str::to_owned))
+    .and_then(|j| serde_json::from_str::<Value>(&j).ok())
+    .and_then(|v| v["public_handle"].as_str().map(str::to_owned)))
+}
+
+/// Writes the room's discovery row to `public_workroom_index` when an event marked it due (M4 step 6). The row is the room as
+/// it stands, written with the newest `seq`, and D1 keeps a row only if its `seq` is newer, so a late or repeated write can't
+/// restore an older one. A row that hasn't changed since the last write costs nothing. If D1 refuses the write because it
+/// holds a newer `seq` (a lost, restored or reordered row), the cached copy is cleared, so the next event writes the row in
+/// full. A failure leaves it due for the next alarm, and the alarm logs the error code and the room's ID only.
+pub(super) async fn drain_public_index(sql: &SqlStorage, db: &D1Database) -> R<()> {
+    if !store::is_initialized(sql)? || store::needs_migration(sql)? {
+        return Ok(());
+    }
+    let Some(due) = rows(
+        sql,
+        "SELECT seq, written FROM public_index_outbox WHERE pending = 1",
+        vec![],
+    )?
+    .into_iter()
+    .next() else {
+        return Ok(());
+    };
+    let seq = int(&due["seq"]);
+    let state = room_state(sql)?;
+    let row = podster_policy::public::index_row(&state, last_published_handle(sql)?.as_deref());
+    // D1 keeps milliseconds, as the room does. The policy's row is in whole seconds, so the time comes from the column.
+    let published_ms = if row.resolvable {
+        rows(sql, "SELECT published_at FROM workspace", vec![])?
+            .first()
+            .and_then(|r| r["published_at"].as_i64())
+    } else {
+        None
+    };
+    let json = index_json(&row).to_string();
+    let mut applied = true;
+    if due["written"].as_str() != Some(json.as_str()) {
+        let args: Vec<JsValue> = vec![
+            state.room.workspace_id.as_str().into(),
+            row.public_handle
+                .as_deref()
+                .map_or(JsValue::NULL, JsValue::from),
+            row.topic
+                .map(Topic::name)
+                .map_or(JsValue::NULL, JsValue::from),
+            JsValue::from_f64(f64::from(u8::from(row.has_open_opening))),
+            published_ms.map_or(JsValue::NULL, |at| JsValue::from_f64(at as f64)),
+            JsValue::from_f64(f64::from(u8::from(row.resolvable))),
+            JsValue::from_f64(f64::from(u8::from(row.listed))),
+            JsValue::from_f64(seq as f64),
+        ];
+        let result = db.prepare("INSERT INTO public_workroom_index (workspace_id, public_handle, topic, has_open_opening, published_at, resolvable, listed, updated_seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT (workspace_id) DO UPDATE SET public_handle = excluded.public_handle, topic = excluded.topic, has_open_opening = excluded.has_open_opening,
+                published_at = excluded.published_at, resolvable = excluded.resolvable, listed = excluded.listed, updated_seq = excluded.updated_seq
+              WHERE excluded.updated_seq > public_workroom_index.updated_seq")
+            .bind(&args)?
+            .run()
+            .await?;
+        // No change means the seq guard refused it: D1 holds a newer seq than the room's.
+        applied = result
+            .meta()?
+            .and_then(|meta| meta.changes)
+            .is_none_or(|changes| changes > 0);
+    }
+    #[cfg(feature = "failpoints")]
+    land_test_command(sql)?;
+    // Only if nothing newer came in while the write was out: otherwise it stays due, and the next alarm writes that.
+    exec(
+        sql,
+        "UPDATE public_index_outbox SET pending = 0, written = ? WHERE seq = ?",
+        vec![
+            if applied {
+                json.as_str().into()
+            } else {
+                worker::SqlStorageValue::Null
+            },
+            seq.into(),
+        ],
+    )
+}
+
+/// Test builds only: a command marking the row due again while the D1 write was out, when a test asked for one.
+#[cfg(feature = "failpoints")]
+fn land_test_command(sql: &SqlStorage) -> R<()> {
+    let asked = !rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_index_inflight'",
+        vec![],
+    )?
+    .is_empty();
+    if asked {
+        exec(sql, "DROP TABLE test_index_inflight", vec![])?;
+        exec(
+            sql,
+            "UPDATE public_index_outbox SET seq = seq + 1, pending = 1",
+            vec![],
+        )?;
+    }
+    Ok(())
+}
+
+/// Whether the discovery row is due, for the alarm.
+pub(super) fn public_index_due(sql: &SqlStorage) -> R<bool> {
+    Ok(store::is_initialized(sql)?
+        && !store::needs_migration(sql)?
+        && !rows(
+            sql,
+            "SELECT seq FROM public_index_outbox WHERE pending = 1",
+            vec![],
+        )?
+        .is_empty())
+}

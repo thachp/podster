@@ -948,3 +948,61 @@ pub fn decide_set_visibility(
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The discovery index (M4 step 6, pure part)
+
+/// What a room writes to `public_workroom_index`. Handles and sort or filter keys only, never a name, goal or any other
+/// text, so a stale row can't show anything (ADR 0008). It's never used to authorize: the public read and Explore confirm
+/// each result with the room.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicIndexRow {
+    /// The handle answers: the room is public under a handle, with a publish time, and not suspended. An archived public
+    /// room stays resolvable, readable and labeled Archived (decision 152). The public read (step 7 and 9) resolves on this.
+    pub resolvable: bool,
+    /// Shown in Explore: resolvable and not archived (decision 152). Explore filters on this.
+    pub listed: bool,
+    /// The room's handle while resolvable. Otherwise the row is a tombstone: it keeps its `seq` and the last handle the room
+    /// was published under, which the caller takes from the room's audit (step 5), never the room's current handle, and
+    /// every other key is blank.
+    pub public_handle: Option<String>,
+    pub topic: Option<Topic>,
+    /// Some opening an agent could publicly claim now: listed, claimable, with room, and claims not paused.
+    pub has_open_opening: bool,
+    /// In whole seconds, as `RoomRow::published_at`.
+    pub published_at: Option<i64>,
+}
+
+/// The index row for a room as it stands now. `last_published_handle` is the handle the room's latest publish made, from
+/// its audit, and only a tombstone uses it.
+pub fn index_row(state: &RoomState, last_published_handle: Option<&str>) -> PublicIndexRow {
+    let room = &state.room;
+    let resolvable = room.visibility == Visibility::Public
+        && room.public_handle.is_some()
+        && room.published_at.is_some()
+        && !room.suspended;
+    if !resolvable {
+        return PublicIndexRow {
+            resolvable: false,
+            listed: false,
+            public_handle: last_published_handle.map(str::to_owned),
+            topic: None,
+            has_open_opening: false,
+            published_at: None,
+        };
+    }
+    let listed = !room.archived;
+    PublicIndexRow {
+        resolvable: true,
+        listed,
+        public_handle: room.public_handle.clone(),
+        topic: room.topic,
+        // An archived room takes no claims, so it has no open opening.
+        has_open_opening: listed
+            && !room.public_claims_paused
+            && state.openings.iter().any(|o| {
+                opening_publicly_claimable(o) && count(o.active_holders.len()) < o.capacity
+            }),
+        published_at: room.published_at,
+    }
+}

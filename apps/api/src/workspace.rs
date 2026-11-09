@@ -3239,7 +3239,9 @@ impl Workspace {
         let migrated = !store::needs_migration(&sql)?;
         let now = Date::now().as_millis() as i64;
         let mut due: Option<i64> = None;
-        if !rows(&sql, "SELECT seq FROM index_outbox LIMIT 1", vec![])?.is_empty() {
+        if !rows(&sql, "SELECT seq FROM index_outbox LIMIT 1", vec![])?.is_empty()
+            || (migrated && visibility::public_index_due(&sql)?)
+        {
             due = Some(now + if index_failed { 5000 } else { 50 });
         }
         if !outbox_held(&sql)? {
@@ -4193,6 +4195,23 @@ impl DurableObject for Workspace {
         if let Err(error) = &index {
             console_error!("index projection failed: {:?}", error);
         }
+        let sql = self.state.storage().sql();
+        let public_index = match self.env.d1("DB") {
+            Ok(db) => visibility::drain_public_index(&sql, &db).await,
+            Err(error) => Err(error.into()),
+        };
+        if let Err(error) = &public_index {
+            // The error code and the room's ID only. An internal error's message can carry D1's text, so it's never logged.
+            let room = rows(&sql, "SELECT id FROM workspace", vec![])
+                .ok()
+                .and_then(|r| r.first().and_then(|r| text(&r["id"])))
+                .unwrap_or_default();
+            console_error!(
+                "public index projection failed: room={} code={}",
+                room,
+                error.code().unwrap_or("internal_error")
+            );
+        }
         // A stuck scan fails closed here, and this failing holds up nothing else.
         if let Err(error) = self.expire_scans() {
             console_error!("couldn't end overdue scans: {:?}", error.code());
@@ -4207,7 +4226,10 @@ impl DurableObject for Workspace {
         if let Err(error) = &outbox {
             console_error!("outbox drain failed: {:?}", error);
         }
-        if let Err(error) = self.arm(index.is_err(), outbox.is_err()).await {
+        if let Err(error) = self
+            .arm(index.is_err() || public_index.is_err(), outbox.is_err())
+            .await
+        {
             console_error!("couldn't schedule delivery: {:?}", error);
             self.state
                 .storage()

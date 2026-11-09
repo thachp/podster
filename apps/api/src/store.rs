@@ -188,6 +188,11 @@ ALTER TABLE event ADD COLUMN origin_ref TEXT;
 ALTER TABLE audit_event ADD COLUMN origin TEXT;
 ALTER TABLE audit_event ADD COLUMN origin_ref TEXT;
 ALTER TABLE message ADD COLUMN origin TEXT;
+", "
+ALTER TABLE a2a_attempt ADD COLUMN kind TEXT NOT NULL DEFAULT 'offer';
+ALTER TABLE a2a_attempt ADD COLUMN remote_context_id TEXT;
+ALTER TABLE a2a_attempt ADD COLUMN reference_task_id TEXT;
+ALTER TABLE a2a_attempt ADD COLUMN reference_context_id TEXT;
 "];
 
 pub fn int(value: &Value) -> i64 {
@@ -604,6 +609,14 @@ pub fn record_decision(
             .flatten()
             .filter(|to| to.starts_with(crate::AGENT_ID_PREFIX) && current.iter().any(|r| r == to))
             .map(str::to_string);
+        // A change request on work the agent's endpoint completed goes back to that endpoint as a new A2A task, by the same
+        // path (decision 114, step 13b). Only while the task is back with the agent, who's still here.
+        let changes_for = (draft.kind == EventKind::TaskChangesRequested
+            && decision.task.status == TaskStatus::Accepted)
+            .then_some(decision.task.assignee.as_deref())
+            .flatten()
+            .filter(|to| to.starts_with(crate::AGENT_ID_PREFIX) && current.iter().any(|r| r == to))
+            .map(str::to_string);
         let event_id = record_event_with_id(
             sql,
             draft.kind.name(),
@@ -616,6 +629,9 @@ pub fn record_decision(
         )?;
         if let Some(agent) = offered_to {
             record_offer_attempt(sql, &decision.task.id, &agent, &event_id, now)?;
+        }
+        if let Some(agent) = changes_for {
+            record_change_request_attempt(sql, &decision.task.id, &agent, &event_id, now)?;
         }
     }
     // A canceled task's remote tasks are told, once each, and no longer read (ADR 0007, step 13). Only a sent attempt still
@@ -638,6 +654,33 @@ pub fn record_offer_attempt(
 ) -> R<()> {
     exec(sql, "INSERT INTO a2a_attempt (id, task_id, agent_id, offer_id, state, next_queue_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)", vec![
         format!("att_{}", uuid::Uuid::new_v4().simple()).into(), task.into(), agent.into(), offer.into(), now.into(), now.into(), now.into(),
+    ])
+}
+
+/// Records a change-request attempt (decision 114), if the submission it's about came from the agent's endpoint: the task's
+/// latest `task.submitted` event was made by reading an attempt's remote task back. The new remote task names that one in `referenceTaskIds`, with its
+/// `contextId`. A submission made any other way has no remote task to refer to, so nothing goes out and the agent hears through
+/// its inbox, as it does now.
+pub fn record_change_request_attempt(
+    sql: &SqlStorage,
+    task: &str,
+    agent: &str,
+    change_request: &str,
+    now: i64,
+) -> R<()> {
+    // The submission the change request is about is the task's latest. Only one a read of the agent's own endpoint made counts,
+    // and it names its attempt.
+    let completed = rows(sql, "SELECT a.remote_task_id, a.remote_context_id FROM a2a_attempt a
+        WHERE a.id = (SELECT e.origin_ref FROM event e WHERE e.origin = 'a2a_remote'
+          AND e.seq = (SELECT max(seq) FROM event WHERE task_id = ?1 AND type = 'task.submitted'))
+        AND a.task_id = ?1 AND a.agent_id = ?2 AND a.state = 'sent' AND a.remote_task_id IS NOT NULL", vec![task.into(), agent.into()])?;
+    let Some(reference) = completed.first() else {
+        return Ok(());
+    };
+    exec(sql, "INSERT INTO a2a_attempt (id, task_id, agent_id, offer_id, state, next_queue_at, created_at, updated_at, kind, reference_task_id, reference_context_id)
+        VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, 'change_request', ?, ?)", vec![
+        format!("att_{}", uuid::Uuid::new_v4().simple()).into(), task.into(), agent.into(), change_request.into(), now.into(), now.into(), now.into(),
+        reference["remote_task_id"].as_str().map_or(V::Null, V::from), reference["remote_context_id"].as_str().map_or(V::Null, V::from),
     ])
 }
 

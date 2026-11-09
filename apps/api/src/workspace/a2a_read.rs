@@ -444,9 +444,8 @@ pub(super) fn read_apply(
         end_reading(sql, id, "no_task", now)?;
         return Ok(json!({ "applied": false, "reason": "no_task" }));
     };
-    let current = rows(sql, "SELECT id FROM event WHERE task_id = ? AND type = 'task.offered' ORDER BY seq DESC LIMIT 1", vec![task_id.into()])?
-        .first()
-        .and_then(|r| text(&r["id"]));
+    // The offer or change request this attempt was sent for, and the one the task is on now (step 13b).
+    let current = super::a2a_out::current_for(sql, super::a2a_out::kind_of(&row), task_id)?;
     let remote = &body["remote"];
     let last_state = row["last_state"].as_str().map(RemoteState::from_name);
     let attempt = Attempt {

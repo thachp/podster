@@ -1,5 +1,5 @@
 // M3's A2A run against a deployment, through the A2A project's own JavaScript client, `@a2a-js/sdk`, and not the gateway's
-// code. It covers steps 8 to 11:
+// code. It covers steps 8 to 11, and what steps 12 to 14 can show without an outside A2A server:
 //
 // - discovery from the Agent Card;
 // - OAuth to the `/a2a` audience;
@@ -9,6 +9,10 @@
 // - the refusals: a hidden task, a stale version, another agent's task;
 // - an agent's A2A endpoint with a bearer token (step 11): set, read, rotate, the org admin's read, delete and disconnect.
 //   Nothing is sent to it at step 11, so its host is a made-up name under example.com, which passes egress policy.
+// - outbound (step 12): an offer to an agent whose endpoint is a made-up name that doesn't resolve fails, is retried, and
+//   switches the endpoint off after 3 failures in a row, with the task untouched;
+// - files (step 14): a ready input file downloads at /a2a/files with the agent's /a2a token, and only with that one. That
+//   needs the scanner, so a run without one, such as the local rehearsal, skips it.
 //
 // The token and signing secret must never be shown: not in a read, and not in this script's own output, which it checks at
 // the end. A token is `e2eA2aTok_…` and a secret `a2asec_…`, so the local runner can look for both in the Workers' logs.
@@ -29,8 +33,8 @@
 import { AgentCard } from "@a2a-js/sdk";
 import { ClientFactory, ClientFactoryOptions, JsonRpcTransportFactory } from "@a2a-js/sdk/client";
 import { auth as sdkAuth } from "@modelcontextprotocol/sdk/client/auth.js";
-import { randomBytes, randomUUID } from "node:crypto";
-import { key, McpAgent, ok, Person, Target } from "./lib.mjs";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { key, McpAgent, ok, Person, sleep, Target } from "./lib.mjs";
 
 const args = process.argv.slice(2);
 const option = (name) => {
@@ -338,6 +342,95 @@ async function run() {
 
   section("Endpoint (step 11)");
   await endpoint(owner);
+
+  section("Outbound to an unreachable endpoint (step 12)");
+  await unreachable(owner, lead);
+
+  section("Input files over /a2a/files (step 14)");
+  await a2aFiles(owner, lead, guest, guestToken);
+}
+
+/**
+ * Step 12 without an outside server: an endpoint at a name that doesn't resolve. The offer's send fails, the queue retries it
+ * as the same message, and three failures in a row switch the endpoint off. Nothing about the task changes, and nothing is
+ * shown but IDs and counts. A retry waits a minute, so this takes a few minutes.
+ */
+async function unreachable(owner, lead) {
+  const agent = await McpAgent.connect(target, owner, "A2A staging unreachable");
+  await owner.addAgent(room, agent, "guest");
+  const url = `https://a2a-unreachable-${randomBytes(6).toString("hex")}.example.com/a2a`;
+  let task;
+  await step("an offer to an unreachable endpoint", async () => {
+    const set = await agent.call("set_a2a_endpoint", { url });
+    if (typeof set.data?.signing_secret === "string") secrets.add(set.data.signing_secret);
+    check(set.ok && set.data?.enabled === true, "the agent sets an endpoint at a name that doesn't resolve", set.ok ? "" : set.code);
+    if (!set.ok) return;
+    task = (await lead.must("create_task", { workspace_id: room, title: "A2A staging: to an unreachable endpoint", instructions: "From the A2A staging run.", assignee: agent.id })).id;
+    const deadline = Date.now() + (isLocal ? 6 : 10) * 60_000;
+    let read;
+    let most = 0;
+    for (;;) {
+      read = (await agent.call("get_a2a_endpoint", {})).data;
+      most = Math.max(most, read?.consecutive_failures ?? 0);
+      if (!read || read.enabled === false || Date.now() > deadline) break;
+      await sleep(isLocal ? 2_000 : 10_000);
+    }
+    check(most >= 1, "the send fails and is counted", `${most} in a row at most`);
+    check(read?.enabled === false && read?.consecutive_failures === 3, "after 3 failures in a row the endpoint switches off", read ? `enabled ${read.enabled}, ${read.consecutive_failures} failures` : "no endpoint");
+    const admin = await owner.dash("GET", `/agents/${agent.id}/a2a-endpoint`);
+    check(admin.status === 200 && admin.body?.enabled === false && admin.body?.consecutive_failures === 3, "the org admin reads it as off after repeated failures, as the Agent Sheet shows", `HTTP ${admin.status}`);
+    check(hides(admin.body, ...secrets) && !("signing_secret" in (admin.body ?? {})), "and the read holds no secret or token");
+    const now = await lead.must("get_task", { workspace_id: room, task_id: task }, false);
+    check(now.task.status === "offered" && now.task.assignee === agent.id, "the task is untouched: still offered to the agent", now.task.status);
+  });
+}
+
+function sha256(data) {
+  return createHash("sha256").update(data).digest("hex");
+}
+
+/**
+ * Step 14's download: a ready input file, linked to a task offered to the guest, downloads at `/a2a/files` with the guest's
+ * `/a2a` token, as an attachment with `nosniff` and `no-store`. Its MCP token doesn't open it there, and its `/a2a` token
+ * doesn't open `/v1/files`. The file must be scanned ready first, so without a scanner this is skipped.
+ */
+async function a2aFiles(owner, lead, guest, guestToken) {
+  if (!guestToken) return skip("the /a2a/files download", "no /a2a token");
+  await step("/a2a/files", async () => {
+    const data = Buffer.from(`A2A staging input ${randomUUID()}\n`);
+    const created = await owner.dash("POST", `/v1/workspaces/${room}/uploads`, { name: "a2a-staging-input.txt", size: data.length, sha256: sha256(data) });
+    if (!created.ok) return check(false, "the owner starts an input upload", `HTTP ${created.status} ${created.code ?? ""}`);
+    secrets.add(created.body.token);
+    const sent = await target.http(created.body.upload_path, { method: "PUT", headers: { authorization: `Bearer ${created.body.token}` }, body: data });
+    check(sent.status === 200, "and sends its bytes", `HTTP ${sent.status}`);
+    await sent.body?.cancel();
+    const id = created.body.id;
+    const deadline = Date.now() + (isLocal ? 15_000 : 180_000);
+    let state;
+    for (;;) {
+      state = (await owner.dash("GET", `/v1/workspaces/${room}/files/${id}`)).body?.state;
+      if (state !== "scanning" || Date.now() > deadline) break;
+      await sleep(isLocal ? 500 : 3_000);
+    }
+    if (state !== "ready") return skip("the /a2a/files download", isLocal && state === "scanning" ? "no scanner in the local stack" : `the file is ${state}`);
+    const task = (await lead.must("create_task", { workspace_id: room, title: "A2A staging: with an input file", instructions: "From the A2A staging run.", assignee: guest.id })).id;
+    const linked = await owner.dash("POST", `/v1/workspaces/${room}/files/${id}/links`, { task_id: task });
+    check(linked.ok, "the file is linked to a task offered to the guest", `HTTP ${linked.status}`);
+    const get = (path, token) => target.http(path, { headers: { authorization: `Bearer ${token}` } });
+    const res = await get(`/a2a/files/${room}/${id}`, guestToken);
+    const body = Buffer.from(await res.arrayBuffer());
+    check(res.status === 200 && body.equals(data), "the guest downloads it at /a2a/files with its /a2a token", `HTTP ${res.status}, ${body.length} bytes`);
+    check((res.headers.get("content-disposition") ?? "").startsWith("attachment;") && res.headers.get("x-content-type-options") === "nosniff" && /\bno-store\b/.test(res.headers.get("cache-control") ?? ""), "as an attachment, with nosniff and no-store");
+    const viaMcp = await get(`/a2a/files/${room}/${id}`, guest.accessToken());
+    check(viaMcp.status === 401, "its MCP token doesn't open /a2a/files", `HTTP ${viaMcp.status}`);
+    await viaMcp.body?.cancel();
+    const v1 = await get(`/v1/files/${room}/${id}`, guestToken);
+    check(v1.status === 401, "and its /a2a token doesn't open /v1/files", `HTTP ${v1.status}`);
+    await v1.body?.cancel();
+    const missing = await get(`/a2a/files/${room}/obj_${"0".repeat(32)}`, guestToken);
+    check(missing.status === 404, "a file that doesn't exist answers 404", `HTTP ${missing.status}`);
+    await missing.body?.cancel();
+  });
 }
 
 /** The text of a value, to look for a token or secret in it. */

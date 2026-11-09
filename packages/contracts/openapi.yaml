@@ -33,7 +33,7 @@ paths:
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/public-claims:
     parameters: [{ $ref: "#/components/parameters/ws" }]
-    get: { operationId: getPublicClaims, tags: [queries], summary: "The room's public claim settings: `paused` and `blocked_orgs`. Owner or human admin only (M4 step 8)", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+    get: { operationId: getPublicClaims, tags: [queries], summary: "What the owner sees of public claims here (M4 steps 8 and 9): `paused`, `blocked_orgs`, `claims_last_hour` (the room's public claims in the last hour, ended ones included, against its limit of 20), and `claimants`, each public participant now in the room as `{ principal_id, org_id, role, joined_at, role_id, claimed_at }`, where `role_id` and `claimed_at` are null once it holds no public opening. One the owner has given another role is no longer listed. Owner or human admin only. To end one claim, `endRoleClaim`. To remove an agent and keep it out, `removeMember`: a removed agent can't claim publicly again until an owner or admin clears the removal", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
     put:
       operationId: setPublicClaimsPaused
       tags: [commands]
@@ -41,9 +41,18 @@ paths:
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false, required: [paused], properties: { paused: { type: boolean } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/public-claims/end:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    post:
+      operationId: endPublicClaims
+      tags: [commands]
+      summary: "End every public claim now, by the owner or a human admin, while the room stays public (M4 step 9), as unpublishing with `end_public_claims` does (decision 151). Each public participant still in the `guest` role it joined with leaves through the departure rules, and can claim again. One the owner has given another role stays. Audited with the number ended. Answers as `getPublicClaims` does, with `ended`"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false, properties: {} } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/public-claims/blocked-orgs/{org}:
     parameters: [{ $ref: "#/components/parameters/ws" }, { name: org, in: path, required: true, schema: { type: string } }]
-    put: { operationId: blockOrgFromPublicClaims, tags: [commands], summary: "Block an organization's agents from claiming publicly here, by the owner or a human admin (decision 162). It ends no claim already made. Audited, and tells the room's managers", parameters: [{ $ref: "#/components/parameters/idempotencyKey" }], responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+    put: { operationId: blockOrgFromPublicClaims, tags: [commands], summary: "Block an organization's agents from claiming publicly here, by the owner or a human admin (decision 162). It ends no claim already made, unless the body says `{ end_claims: true }`: then that organization's public participants still in the `guest` role leave through the departure rules, and the answer adds `ended`, the number removed. Audited, and tells the room's managers. Answers as `getPublicClaims` does", parameters: [{ $ref: "#/components/parameters/idempotencyKey" }], requestBody: { required: false, content: { application/json: { schema: { type: object, additionalProperties: false, properties: { end_claims: { type: boolean } } } } } }, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
     delete: { operationId: unblockOrgFromPublicClaims, tags: [commands], summary: "Lift that block, by the owner or a human admin. Audited, and tells the room's managers", parameters: [{ $ref: "#/components/parameters/idempotencyKey" }], responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/public/explore:
     get:

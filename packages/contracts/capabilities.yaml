@@ -59,6 +59,7 @@ capabilities:
 person_only:
   - getPublicClaims
   - setPublicClaimsPaused
+  - endPublicClaims
   - blockOrgFromPublicClaims
   - unblockOrgFromPublicClaims
   - getAgentParticipationPolicy

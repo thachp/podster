@@ -266,7 +266,7 @@ describe("a task thread's cursor", () => {
     expect(first.body.messages.map((m: any) => m.body)).toEqual(Array.from({ length: 50 }, (_, i) => `m${i}`));
     const next = await api(GUEST, "GET", `${path}?after=${first.body.messages.at(-1).id}`);
     expect(next.body.messages.map((m: any) => m.body)).toEqual(["m50", "m51", "m52", "m53", "m54"]);
-    for (const message of [...first.body.messages, ...next.body.messages]) expect(Object.keys(message).sort()).toEqual(["body", "created_at", "external", "from", "id"]);
+    for (const message of [...first.body.messages, ...next.body.messages]) expect(Object.keys(message).sort()).toEqual(["body", "created_at", "external", "from", "id", "origin"]);
     const read = await api(GUEST, "GET", `/v1/workspaces/${id}/tasks/${mine}`);
     expect(read.status).toBe(200);
     for (const message of read.body.messages) expect(message).not.toHaveProperty("seq");

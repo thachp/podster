@@ -371,6 +371,7 @@ describe("the discovery index (step 6)", () => {
     await inRoom(id, (sql) => {
       // Step 8's public claims came after, so they come off first.
       sql.exec("DROP TABLE public_claim_block");
+      sql.exec("DROP INDEX role_claim_public");
       sql.exec("ALTER TABLE role_claim DROP COLUMN public");
       sql.exec("ALTER TABLE member DROP COLUMN joined_via");
       sql.exec("UPDATE schema_version SET version = version - 1");
@@ -388,6 +389,7 @@ describe("the discovery index (step 6)", () => {
     await inRoom(quiet, (sql) => {
       // Step 8's public claims came after, so they come off first.
       sql.exec("DROP TABLE public_claim_block");
+      sql.exec("DROP INDEX role_claim_public");
       sql.exec("ALTER TABLE role_claim DROP COLUMN public");
       sql.exec("ALTER TABLE member DROP COLUMN joined_via");
       sql.exec("UPDATE schema_version SET version = version - 1");

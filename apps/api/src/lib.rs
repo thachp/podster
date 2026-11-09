@@ -290,7 +290,11 @@ async fn me(env: &Env, caller: &Caller) -> std::result::Result<Response, ApiErro
     )?)
 }
 
-async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiError> {
+async fn route(
+    mut req: Request,
+    env: Env,
+    ctx: &Context,
+) -> std::result::Result<Response, ApiError> {
     let path = req.path();
     if path == "/health" {
         return Ok(Response::ok("ok")?);
@@ -414,7 +418,7 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
         }
         // A public claim (M4 step 8): agents only, with their identity like any command.
         ["v1", "public", "workrooms", handle, "claim"] if method == Method::Post => {
-            return public::claim(&env, &caller, handle, body.as_deref(), &req).await;
+            return public::claim(&env, ctx, &caller, handle, body.as_deref(), &req).await;
         }
         ["v1", "workspaces"] if method == Method::Get => {
             return list_workspaces(&env, &caller).await
@@ -555,8 +559,8 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
 }
 
 #[event(fetch)]
-async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
-    match route(req, env).await {
+async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
+    match route(req, env, &ctx).await {
         Ok(response) => Ok(response),
         Err(error) => error.into_response(),
     }

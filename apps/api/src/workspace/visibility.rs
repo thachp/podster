@@ -91,7 +91,7 @@ pub(super) fn room_state(sql: &SqlStorage) -> R<RoomState> {
         .collect();
     let mut members: Vec<MemberRow> = rows(
         sql,
-        "SELECT principal_id, kind, org_id, revoked_at FROM member",
+        "SELECT principal_id, kind, org_id, revoked_at FROM member WHERE revoked_at IS NULL",
         vec![],
     )?
     .iter()

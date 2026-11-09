@@ -278,3 +278,143 @@ describe("unpublishing (decision 151)", () => {
     expect(await inRoom(ended.id, (sql) => sql.exec("SELECT status FROM role_claim WHERE principal_id = ?", goes.id).one().status)).not.toBe("active");
   });
 });
+
+/** Settling runs after the response, so a test waits for it. */
+async function eventually<T>(read: () => Promise<T>, done: (value: T) => boolean): Promise<T> {
+  let value = await read();
+  for (let n = 0; n < 50 && !done(value); n++) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    value = await read();
+  }
+  return value;
+}
+const counts = (principal: string) => inPrincipal(principal, (sql) => {
+  const exists = sql.exec("SELECT name FROM sqlite_master WHERE name = 'public_claim'").toArray().length > 0;
+  if (!exists) return { entries: [], hour: 0, reservations: 0 };
+  return {
+    entries: sql.exec("SELECT key, state FROM public_claim ORDER BY key").toArray(),
+    hour: sql.exec("SELECT COUNT(*) AS n FROM public_claim_hour").one().n,
+    reservations: sql.exec("SELECT COUNT(*) AS n FROM public_claim_reservation").one().n,
+  };
+});
+
+describe("the deeper review's checks", () => {
+  it("counts two claims at once from one agent for one room exactly once, whichever settles first (item 1)", async () => {
+    for (const validFirst of [true, false]) {
+      const room = await publicRoom();
+      const taker = await agent();
+      const valid = () => claim(taker, room.handle, room.role);
+      const bad = () => claim(taker, room.handle, "role_nope");
+      const [first, second] = validFirst ? await Promise.all([valid(), bad()]) : await Promise.all([bad(), valid()]);
+      const answers = validFirst ? [first, second] : [second, first];
+      expect(answers[0].status, answers[0].text).toBe(200);
+      expect(answers[1].code).toBe("role_not_found");
+      const settled = await eventually(() => counts(taker.id), (c: any) => c.reservations === 0 && c.entries.every((e: any) => e.state === "active"));
+      expect(settled).toEqual({ entries: [{ key: room.id, state: "active" }], hour: 1, reservations: 0 });
+      const person = await eventually(() => counts(`per_linker_${taker.id}`), (c: any) => c.reservations === 0);
+      expect(person).toEqual({ entries: [{ key: `${taker.id}:${room.id}`, state: "active" }], hour: 1, reservations: 0 });
+    }
+  });
+
+  it("keeps a claim counted when its confirm is lost, and confirms it on a retry (item 2)", async () => {
+    const room = await publicRoom();
+    const taker = await agent();
+    await BINDINGS.DB.prepare("CREATE TABLE IF NOT EXISTS test_fail_confirm (principal TEXT)").run();
+    await BINDINGS.DB.prepare("INSERT INTO test_fail_confirm (principal) VALUES (?)").bind(taker.id).run();
+    expect((await claim(taker, room.handle, room.role)).status).toBe(200);
+    // The agent's confirm was lost, so its entry is still pending.
+    const lost = await eventually(() => counts(taker.id), (c: any) => c.entries.length === 1);
+    expect(lost.entries).toEqual([{ key: room.id, state: "pending" }]);
+    // Two minutes on, it counts as a claim. It isn't dropped.
+    await inPrincipal(taker.id, (sql) => sql.exec("UPDATE public_claim SET at = at - 180000"));
+    const other = await publicRoom();
+    expect((await claim(taker, other.handle, other.role)).status).toBe(200);
+    expect((await eventually(() => counts(taker.id), (c: any) => c.entries.length === 2 && c.entries.every((e: any) => e.state === "active"))).entries).toEqual(
+      [{ key: room.id, state: "active" }, { key: other.id, state: "active" }].sort((a, b) => a.key.localeCompare(b.key)),
+    );
+    // A retry of the first claim confirms it again, and counts nothing new.
+    const hour = (await counts(taker.id)).hour;
+    expect((await claim(taker, room.handle, room.role)).status).toBe(200);
+    expect((await counts(taker.id)).hour).toBe(hour);
+  });
+
+  it("refuses an organization the room revoked (item 3)", async () => {
+    const room = await publicRoom();
+    const taker = await agent();
+    const revoked = await api(OWNER, "DELETE", `/v1/workspaces/${room.id}/organizations/${taker.org}`, { policy_version: await version(room.id) });
+    expect(revoked.status, revoked.text).toBe(200);
+    expect((await claim(taker, room.handle, room.role)).code).toBe("not_allowed");
+  });
+
+  it("forgets how someone joined when they join again another way, so ending public claims leaves them (item 4)", async () => {
+    const room = await publicRoom();
+    const taker = await agent(ORG);
+    expect((await claim(taker, room.handle, room.role)).status).toBe(200);
+    expect((await release(taker, room.id, room.role)).status).toBe(200);
+    const added = await api(OWNER, "POST", `/v1/workspaces/${room.id}/members`, { principal_id: taker.id, kind: "agent", org_id: ORG, role: "member", policy_version: await version(room.id) });
+    expect(added.status, added.text).toBe(200);
+    expect(await inRoom(room.id, (sql) => sql.exec("SELECT joined_via FROM member WHERE principal_id = ?", taker.id).one().joined_via)).toBeNull();
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${room.id}/visibility`, { visibility: "private", end_public_claims: true })).status).toBe(200);
+    expect((await api(taker, "GET", `/v1/workspaces/${room.id}`)).status).toBe(200);
+  });
+
+  it("ends a public claimant's membership with its claim, released or ended by the room (item 5)", async () => {
+    const room = await publicRoom();
+    const releases = await agent();
+    expect((await claim(releases, room.handle, room.role)).status).toBe(200);
+    expect((await release(releases, room.id, room.role)).body).toMatchObject({ status: "released", member: "left" });
+    expect((await api(releases, "GET", `/v1/workspaces/${room.id}`)).code).toBe("access_revoked");
+    const ended = await agent();
+    expect((await claim(ended, room.handle, room.role)).status).toBe(200);
+    const endedByRoom = await api(OWNER, "DELETE", `/v1/workspaces/${room.id}/roles/${room.role}/claims/${ended.id}`, { policy_version: await version(room.id) });
+    expect(endedByRoom.status, endedByRoom.text).toBe(200);
+    expect((await api(ended, "GET", `/v1/workspaces/${room.id}`)).code).toBe("access_revoked");
+    // Each left through the departure rules, with a reason that lets it claim again.
+    const reasons = await inRoom(room.id, (sql) => sql.exec("SELECT principal_id, revocation_reason FROM member WHERE joined_via = 'public' OR principal_id IN (?, ?) ORDER BY principal_id", releases.id, ended.id).toArray().map((r: any) => r.revocation_reason));
+    expect(reasons.sort()).toEqual(["public_claim_ended", "public_claim_released"]);
+    expect((await claim(releases, room.handle, room.role)).status).toBe(200);
+  });
+
+  it("frees a count only on its room's word: a room that can't answer keeps it (item 6)", async () => {
+    const taker = await agent();
+    // Three counted claims in rooms that don't exist, so none can answer.
+    await inPrincipal(taker.id, (sql) => {
+      sql.exec("CREATE TABLE IF NOT EXISTS public_claim (key TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL, hour_seq INTEGER); CREATE TABLE IF NOT EXISTS public_claim_hour (seq INTEGER PRIMARY KEY, key TEXT NOT NULL, at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS public_claim_reservation (key TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY (key, id));");
+      for (const n of [1, 2, 3]) sql.exec("INSERT INTO public_claim (key, workspace_id, state, at) VALUES (?, ?, 'active', ?)", `ws_gone_${n}`, `ws_gone_${n}`, Date.now());
+    });
+    const room = await publicRoom();
+    expect((await claim(taker, room.handle, room.role)).code).toBe("limit_exceeded");
+    expect((await counts(taker.id)).entries).toHaveLength(3);
+  });
+
+  it("doesn't pin a count to an archived room (item 7)", async () => {
+    const rooms = await Promise.all(Array.from({ length: 4 }, () => publicRoom()));
+    const taker = await agent();
+    for (const room of rooms.slice(0, 3)) expect((await claim(taker, room.handle, room.role)).status).toBe(200);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${rooms[0].id}/archive`, { policy_version: await version(rooms[0].id) })).status).toBe(200);
+    expect((await claim(taker, rooms[3].handle, rooms[3].role)).status).toBe(200);
+    // Archiving changed nothing else: the claimant is still in the archived room.
+    expect((await api(taker, "GET", `/v1/workspaces/${rooms[0].id}`)).status).toBe(200);
+  });
+
+  it("doesn't mark the index for task and message events (item 9)", async () => {
+    const room = await publicRoom();
+    const before = await inRoom(room.id, (sql) => sql.exec("SELECT seq, pending FROM public_index_outbox").one());
+    const task = await api(OWNER, "POST", `/v1/workspaces/${room.id}/tasks`, { title: "T", instructions: "I" });
+    await api(OWNER, "POST", `/v1/workspaces/${room.id}/tasks/${task.body.id}/messages`, { body: "hello" });
+    expect(await inRoom(room.id, (sql) => sql.exec("SELECT seq, pending FROM public_index_outbox").one())).toEqual(before);
+    // Anything else still marks it.
+    await api(OWNER, "PUT", `/v1/workspaces/${room.id}/topic`, { topic: "film" });
+    expect((await inRoom(room.id, (sql) => sql.exec("SELECT seq, pending FROM public_index_outbox").one())).seq).toBeGreaterThan(before.seq);
+  });
+
+  it("doesn't tell a public claimant who owns the room or wrote its brief (item 10)", async () => {
+    const room = await publicRoom();
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${room.id}/brief`, { goal: "Count the reef", policy_version: await version(room.id) })).status).toBe(200);
+    const taker = await agent();
+    expect((await claim(taker, room.handle, room.role)).status).toBe(200);
+    const seen = await api(taker, "GET", `/v1/workspaces/${room.id}`);
+    expect(seen.body).toMatchObject({ owner: null, brief_by: null, goal: "Count the reef" });
+    expect(seen.text).not.toContain(OWNER.id);
+  });
+});

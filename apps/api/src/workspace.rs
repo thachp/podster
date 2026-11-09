@@ -807,7 +807,8 @@ fn write_member(
 ) -> R<()> {
     exec(sql, "INSERT INTO member (principal_id, kind, org_id, role, guest_can_create, join_generation, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (principal_id) DO UPDATE SET kind = excluded.kind, org_id = excluded.org_id, role = excluded.role, guest_can_create = excluded.guest_can_create,
-        join_generation = excluded.join_generation, added_by = excluded.added_by, added_at = excluded.added_at, revoked_at = NULL, revocation_reason = NULL, owner_consented_at = NULL", vec![
+        join_generation = excluded.join_generation, added_by = excluded.added_by, added_at = excluded.added_at, revoked_at = NULL, revocation_reason = NULL, owner_consented_at = NULL,
+        joined_via = NULL", vec![
         principal.into(), kind.into(), org.into(), role.into(), flag(guest_can_create), generation.map_or(worker::SqlStorageValue::Null, |g| (g as i64).into()), added_by.into(), now.into(),
     ])?;
     // Joining starts from the role's preset, so scopes someone held before they left don't come back with them.
@@ -2181,6 +2182,13 @@ mod queries {
             rows(sql, "SELECT principal_id, kind, org_id, role, guest_can_create FROM member WHERE revoked_at IS NULL ORDER BY added_at", vec![])?
         };
         let manages = authorize_workroom(caller, WorkroomAction::ManageAccess) == Verdict::Allow;
+        // Someone who joined by a public claim isn't told who owns the room or wrote its brief: those are person IDs.
+        let public_participant = !rows(
+            sql,
+            "SELECT principal_id FROM member WHERE principal_id = ? AND joined_via = 'public'",
+            vec![caller.id.as_str().into()],
+        )?
+        .is_empty();
         let mut listed = Vec::with_capacity(members.len());
         for m in &members {
             let mut entry = json!({
@@ -2197,10 +2205,10 @@ mod queries {
             listed.push(entry);
         }
         let mut answer = json!({
-            "id": room["id"], "name": room["name"], "owner": room["owner_person_id"], "status": room["status"],
+            "id": room["id"], "name": room["name"], "owner": if public_participant { Value::Null } else { room["owner_person_id"].clone() }, "status": room["status"],
             // Written by the room's owner or admins, and for reading only. `brief_external` marks it as another organization's.
             "require_person_review": int(&room["require_person_review"]) != 0,
-            "goal": room["goal"], "context": room["context"], "brief_by": room["brief_by"], "brief_external": room["owner_org_id"].as_str() != Some(who.org.as_str()),
+            "goal": room["goal"], "context": room["context"], "brief_by": if public_participant { Value::Null } else { room["brief_by"].clone() }, "brief_external": room["owner_org_id"].as_str() != Some(who.org.as_str()),
             "access": access_json(caller.kind, caller.role, caller.scopes),
             "policy_version": manages.then(|| room["policy_version"].clone()), "members": listed,
         });

@@ -86,6 +86,7 @@ const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromNam
 const undoSubmittedFlagMigration = (state: any) => {
   // M4 step 8's public claims, the newest migration, then step 6's discovery outbox, step 5's room visibility, step 13b's change requests, step 13's read-back and step 12's A2A attempts.
   state.storage.sql.exec("DROP TABLE public_claim_block");
+  state.storage.sql.exec("DROP INDEX role_claim_public");
   state.storage.sql.exec("ALTER TABLE role_claim DROP COLUMN public");
   state.storage.sql.exec("ALTER TABLE member DROP COLUMN joined_via");
   state.storage.sql.exec("UPDATE schema_version SET version = version - 1");

@@ -762,9 +762,9 @@ pub async fn reserve_public_claim(
     whose: &str,
     key: &str,
     workspace: &str,
-    replace_stale: bool,
+    reservation: &str,
 ) -> R<Option<(String, Vec<(String, String)>)>> {
-    let body = json!({ "whose": whose, "key": key, "workspace_id": workspace, "replace_stale": replace_stale });
+    let body = json!({ "whose": whose, "key": key, "workspace_id": workspace, "reservation": reservation });
     let mut response = internal(env, principal, "/internal/public-claim-reserve", &body).await?;
     if response.status_code() != 200 {
         return Err(ApiError::internal("couldn't reserve a public claim"));
@@ -794,9 +794,17 @@ pub async fn reserve_public_claim(
     Ok(Some((code, active)))
 }
 
-/// Confirms, releases or ends a public claim on one Principal's count.
-pub async fn settle_public_claim(env: &Env, principal: &str, key: &str, outcome: &str) -> R<()> {
-    let body = json!({ "key": key, "outcome": outcome });
+/// Confirms, releases or ends a public claim on one Principal's count. `release` gives back only `reservation`.
+pub async fn settle_public_claim(
+    env: &Env,
+    principal: &str,
+    whose: &str,
+    key: &str,
+    workspace: &str,
+    reservation: &str,
+    outcome: &str,
+) -> R<()> {
+    let body = json!({ "key": key, "outcome": outcome, "whose": whose, "workspace_id": workspace, "reservation": reservation });
     let response = internal(env, principal, "/internal/public-claim-settle", &body).await?;
     if response.status_code() != 200 {
         return Err(ApiError::internal("couldn't settle a public claim"));

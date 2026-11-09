@@ -79,21 +79,54 @@ fn held(sql: &SqlStorage, agent: &str) -> R<Option<(String, Value)>> {
     .and_then(|row| text(&row["role_id"]).map(|role| (role, row["claimed_at"].clone()))))
 }
 
+/// For counting: `held` or `not_held`. A claim in an archived room reports as not held, so an archived room pins nobody's
+/// count. Archiving changes nothing else about it.
 pub(super) fn status(sql: &SqlStorage, url: &Url) -> R<Value> {
     let agent = url
         .query_pairs()
         .find(|(key, _)| key == "principal")
         .map(|(_, value)| value.into_owned())
         .ok_or_else(ApiError::invalid_argument)?;
-    Ok(json!({ "active": held(sql, &agent)?.is_some() }))
+    let archived = rows(sql, "SELECT status FROM workspace", vec![])?
+        .first()
+        .is_some_and(|row| row["status"].as_str() == Some("archived"));
+    let state = if !archived && held(sql, &agent)?.is_some() {
+        "held"
+    } else {
+        "not_held"
+    };
+    Ok(json!({ "state": state }))
 }
 
-/// Public claims made here in the last hour, ended ones included, since ending a claim doesn't give the hour back.
+/// A public claimant's membership ends with its claim, whether it released it or the room ended it, through the departure
+/// rules, so strangers can't stay on as guests no limit counts. `true` if it left.
+pub(super) fn leave_with_claim(
+    sql: &SqlStorage,
+    actor: &Caller,
+    principal: &str,
+    reason: &str,
+    now: i64,
+) -> R<bool> {
+    let public = !rows(
+        sql,
+        "SELECT principal_id FROM member WHERE principal_id = ? AND joined_via = ? AND revoked_at IS NULL",
+        vec![principal.into(), JOINED_PUBLICLY.into()],
+    )?
+    .is_empty();
+    if public {
+        remove_member(sql, actor, kind_name(actor), principal, reason, now)?;
+    }
+    Ok(public)
+}
+
+/// Public claims made here in the last hour, ended ones included, since ending a claim doesn't give the hour back. Only
+/// the hour's rows are read, by the index on public claims' times.
 fn claims_last_hour(sql: &SqlStorage, now: i64) -> R<u32> {
+    let since = now - podster_core::public_claims::PUBLIC_CLAIM_WINDOW_SECS * 1000;
     let times: Vec<i64> = rows(
         sql,
-        "SELECT claimed_at FROM role_claim WHERE public = 1",
-        vec![],
+        "SELECT claimed_at FROM role_claim WHERE public = 1 AND claimed_at > ?",
+        vec![since.into()],
     )?
     .iter()
     .map(|row| int(&row["claimed_at"]) / 1000)
@@ -105,6 +138,16 @@ fn org_blocked(sql: &SqlStorage, org: &str) -> R<bool> {
     Ok(!rows(
         sql,
         "SELECT org_id FROM public_claim_block WHERE org_id = ?",
+        vec![org.into()],
+    )?
+    .is_empty())
+}
+
+/// An organization the room revoked can't come back by a public claim either: only a new invitation lets it return.
+fn org_revoked(sql: &SqlStorage, org: &str) -> R<bool> {
+    Ok(!rows(
+        sql,
+        "SELECT org_id FROM org_revocation WHERE org_id = ?",
         vec![org.into()],
     )?
     .is_empty())
@@ -165,11 +208,8 @@ pub(super) fn claim(
     };
     let preset = decide_public_claim(public_rooms_enabled, &state, handle, role_id, claimant)
         .map_err(refusal)?;
-    check_room(
-        org_blocked(sql, &identity.org)?,
-        claims_last_hour(sql, now)?,
-    )
-    .map_err(limit)?;
+    let blocked = org_blocked(sql, &identity.org)? || org_revoked(sql, &identity.org)?;
+    check_room(blocked, claims_last_hour(sql, now)?).map_err(limit)?;
     require_past_fence(sql, agent, generation)?;
     if active_count(sql)? + 1 >= MAX_MEMBERS {
         return Err(ApiError::limit_exceeded());
@@ -228,7 +268,8 @@ pub(super) fn claim(
 pub(super) fn end_all(sql: &SqlStorage, actor: &Caller, now: i64) -> R<u32> {
     let claimants: Vec<String> = rows(
         sql,
-        "SELECT principal_id FROM member WHERE joined_via = ? AND revoked_at IS NULL",
+        // Only those still in the guest role they joined with. One the owner has since made more is the owner's to remove.
+        "SELECT principal_id FROM member WHERE joined_via = ? AND role = 'guest' AND revoked_at IS NULL",
         vec![JOINED_PUBLICLY.into()],
     )?
     .iter()

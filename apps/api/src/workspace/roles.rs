@@ -733,6 +733,16 @@ pub(super) fn handle_release_role(
         now,
     )?
     .unwrap_or(caller.scopes);
+    // A public claimant is in the room only for its claim, so releasing it leaves the room too.
+    if super::public_claims::leave_with_claim(
+        sql,
+        caller,
+        &caller.id,
+        "public_claim_released",
+        now,
+    )? {
+        return Ok(json!({ "role_id": id, "status": "released", "member": "left" }));
+    }
     let role = rows(
         sql,
         "SELECT role FROM member WHERE principal_id = ?",
@@ -779,6 +789,11 @@ pub(super) fn handle_end_claim(
         now,
     )?
     .unwrap_or(Scopes::PUBLIC_PARTICIPANT);
+    if super::public_claims::leave_with_claim(sql, caller, principal, "public_claim_ended", now)? {
+        return Ok(
+            json!({ "role_id": id, "principal_id": principal, "status": "revoked", "member": "left" }),
+        );
+    }
     // Ending this isn't an opening to claim another straight away. What the room offered before no longer stands.
     withdraw_role_invites(sql, principal)?;
     let found = rows(

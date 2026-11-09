@@ -296,15 +296,25 @@ async fn entry(env: &Env, caller: &Caller, row: &Value, req: &Request) -> Option
 // Public claims (M4 step 8)
 
 /// A Principal's count to reserve on: whose it is, the Principal, and the claim's key there.
+#[derive(Clone)]
 struct Count {
     whose: &'static str,
     principal: String,
     key: String,
 }
 
-/// Whether `agent` holds a public claim in `workspace` now, by the room's own answer. A room that can't say counts as
-/// holding it, so a count is only ever dropped on the room's word.
-async fn holds_public_claim(env: &Env, workspace: &str, agent: &str) -> bool {
+/// What a room says about an agent's public claim there.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Held {
+    Yes,
+    No,
+    /// The room didn't answer. It's treated as not held when deciding whether a request is a retry, since reservations
+    /// count a claim once either way, and as held when deciding whether to free a count, so a count is only ever freed
+    /// on the room's word.
+    Unknown,
+}
+
+async fn held(env: &Env, workspace: &str, agent: &str) -> Held {
     let read = async {
         let path = format!(
             "{}?principal={agent}",
@@ -320,16 +330,26 @@ async fn holds_public_claim(env: &Env, workspace: &str, agent: &str) -> bool {
         )
         .await?;
         if response.status_code() != 200 {
-            return Ok::<_, ApiError>(true);
+            return Ok::<_, ApiError>(Held::Unknown);
         }
-        Ok(response.json::<Value>().await?["active"].as_bool() != Some(false))
+        Ok(match response.json::<Value>().await?["state"].as_str() {
+            Some("held") => Held::Yes,
+            Some("not_held") => Held::No,
+            _ => Held::Unknown,
+        })
     };
-    read.await.unwrap_or(true)
+    read.await.unwrap_or(Held::Unknown)
 }
 
-/// Reserves one count, and at a limit checks each claim it counted as active with its room, ending the ones the room
-/// says have ended, then asks once more. `Err` carries the limit's refusal.
-async fn reserve(env: &Env, count: &Count, workspace: &str, agent: &str) -> R<()> {
+/// Reserves one count under this request's `reservation`, and at an "at once" limit checks each claim it counted with
+/// its room, ending only the ones the room says it doesn't hold, then asks once more. `Err` carries the refusal.
+async fn reserve(
+    env: &Env,
+    count: &Count,
+    workspace: &str,
+    agent: &str,
+    reservation: &str,
+) -> R<()> {
     let mut checked = false;
     loop {
         let refused = principal::reserve_public_claim(
@@ -338,7 +358,7 @@ async fn reserve(env: &Env, count: &Count, workspace: &str, agent: &str) -> R<()
             count.whose,
             &count.key,
             workspace,
-            true,
+            reservation,
         )
         .await?;
         let Some((code, active)) = refused else {
@@ -368,8 +388,17 @@ async fn reserve(env: &Env, count: &Count, workspace: &str, agent: &str) -> R<()
                 },
                 _ => agent.to_string(),
             };
-            if !holds_public_claim(env, room_id, &holder).await {
-                principal::settle_public_claim(env, &count.principal, key, "end").await?;
+            if held(env, room_id, &holder).await == Held::No {
+                principal::settle_public_claim(
+                    env,
+                    &count.principal,
+                    count.whose,
+                    key,
+                    room_id,
+                    reservation,
+                    "end",
+                )
+                .await?;
                 freed = true;
             }
         }
@@ -381,9 +410,11 @@ async fn reserve(env: &Env, count: &Count, workspace: &str, agent: &str) -> R<()
 
 /// `POST /v1/public/workrooms/{handle}/claim { role_id }`: an agent whose owner allows it joins a public room as a guest
 /// and claims an opening (decision 159). The agent's, its linking person's and its organization's counts are reserved on
-/// their Principals, the room decides, and each count is confirmed or given back by its answer.
+/// their Principals under this request's own reservation, the room decides, and each count is confirmed or given back by
+/// its answer. Settling runs past the response, so a client that goes away can't stop it.
 pub async fn claim(
     env: &Env,
+    ctx: &Context,
     caller: &Caller,
     handle: &str,
     body: Option<&str>,
@@ -426,7 +457,7 @@ pub async fn claim(
     // The owner's consent is checked first, and the room recorded on the agent, as any join does.
     let generation = principal::register_room(env, &agent, &caller.org, &workspace, true).await?;
     let pair = format!("{agent}:{workspace}");
-    let counts = [
+    let counts = vec![
         Count {
             whose: "agent",
             principal: agent.clone(),
@@ -443,16 +474,25 @@ pub async fn claim(
             key: pair,
         },
     ];
-    // A claim the agent already holds here is the room's to answer, with nothing counted again.
-    let retry = holds_public_claim(env, &workspace, &agent).await;
-    let mut reserved: Vec<&Count> = vec![];
+    let reservation = format!("rsv_{}", uuid::Uuid::new_v4().simple());
+    // A claim the agent already holds here is the room's to answer, and is only confirmed again. Anything else, a room
+    // that didn't say included, reserves: the same claim asked for twice still counts once.
+    let retry = held(env, &workspace, &agent).await == Held::Yes;
+    let mut reserved: Vec<Count> = vec![];
     if !retry {
         for count in &counts {
-            if let Err(error) = reserve(env, count, &workspace, &agent).await {
-                settle_all(env, &reserved, "release").await;
+            if let Err(error) = reserve(env, count, &workspace, &agent, &reservation).await {
+                settle_later(
+                    ctx,
+                    env,
+                    reserved,
+                    workspace.clone(),
+                    reservation.clone(),
+                    "release",
+                );
                 return Err(error);
             }
-            reserved.push(count);
+            reserved.push(count.clone());
         }
     }
     let mut asking = caller.clone();
@@ -471,26 +511,75 @@ pub async fn claim(
     )
     .await;
     match &answer {
+        // A claim that stands is counted, a retry's included, so a confirm lost earlier can't leave it uncounted.
         Ok(response) if response.status_code() == 200 => {
-            settle_all(env, &reserved, "confirm").await
+            settle_later(ctx, env, counts, workspace, reservation, "confirm");
         }
-        // A refusal gives the counts back. If the room's answer was lost, they stay pending and expire, so it fails closed.
-        Ok(_) => settle_all(env, &reserved, "release").await,
+        Ok(_) => settle_later(ctx, env, reserved, workspace, reservation, "release"),
+        // The room's answer was lost: the counts stay pending, then active, until the room says the claim isn't held.
         Err(_) => {}
     }
     answer
 }
 
-async fn settle_all(env: &Env, counts: &[&Count], outcome: &str) {
-    for count in counts {
-        if let Err(error) =
-            principal::settle_public_claim(env, &count.principal, &count.key, outcome).await
-        {
-            console_error!(
-                "public claim count not settled: {} {:?}",
+/// Settles counts after the response, in `wait_until`.
+fn settle_later(
+    ctx: &Context,
+    env: &Env,
+    counts: Vec<Count>,
+    workspace: String,
+    reservation: String,
+    outcome: &'static str,
+) {
+    if counts.is_empty() {
+        return;
+    }
+    let env = env.clone();
+    ctx.wait_until(async move {
+        for count in &counts {
+            #[cfg(feature = "failpoints")]
+            if outcome == "confirm" && test_fail_confirm(&env, &count.principal).await {
+                continue;
+            }
+            if let Err(error) = principal::settle_public_claim(
+                &env,
+                &count.principal,
                 count.whose,
-                error.code()
-            );
+                &count.key,
+                &workspace,
+                &reservation,
+                outcome,
+            )
+            .await
+            {
+                console_error!(
+                    "public claim count not settled: {} {:?}",
+                    count.whose,
+                    error.code()
+                );
+            }
         }
+    });
+}
+
+/// Test builds only: a test can make one confirm fail, by naming the Principal in D1's test table.
+#[cfg(feature = "failpoints")]
+async fn test_fail_confirm(env: &Env, principal: &str) -> bool {
+    let Ok(db) = env.d1("DB") else { return false };
+    let found = db
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_fail_confirm'",
+        )
+        .first::<Value>(None)
+        .await;
+    if !matches!(found, Ok(Some(_))) {
+        return false;
+    }
+    match db
+        .prepare("DELETE FROM test_fail_confirm WHERE principal = ? RETURNING principal")
+        .bind(&[principal.into()])
+    {
+        Ok(q) => matches!(q.first::<Value>(None).await, Ok(Some(_))),
+        Err(_) => false,
     }
 }

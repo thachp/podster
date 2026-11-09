@@ -202,6 +202,7 @@ ALTER TABLE workspace ADD COLUMN public_claims_paused INTEGER NOT NULL DEFAULT 0
 ALTER TABLE work_role ADD COLUMN publicly_claimable INTEGER NOT NULL DEFAULT 0;
 ", "
 CREATE TABLE public_index_outbox (id INTEGER PRIMARY KEY CHECK (id = 1), seq INTEGER NOT NULL, pending INTEGER NOT NULL, written TEXT);
+INSERT INTO public_index_outbox (id, seq, pending) SELECT 1, COALESCE((SELECT MAX(seq) FROM event), 0), 1 FROM workspace WHERE visibility = 'public';
 "];
 
 pub fn int(value: &Value) -> i64 {

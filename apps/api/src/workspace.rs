@@ -4201,7 +4201,16 @@ impl DurableObject for Workspace {
             Err(error) => Err(error.into()),
         };
         if let Err(error) = &public_index {
-            console_error!("public index projection failed: {:?}", error.code());
+            // The error code and the room's ID only. An internal error's message can carry D1's text, so it's never logged.
+            let room = rows(&sql, "SELECT id FROM workspace", vec![])
+                .ok()
+                .and_then(|r| r.first().and_then(|r| text(&r["id"])))
+                .unwrap_or_default();
+            console_error!(
+                "public index projection failed: room={} code={}",
+                room,
+                error.code().unwrap_or("internal_error")
+            );
         }
         // A stuck scan fails closed here, and this failing holds up nothing else.
         if let Err(error) = self.expire_scans() {

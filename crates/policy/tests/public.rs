@@ -875,6 +875,7 @@ fn a_public_room_is_listed_with_its_keys_only() {
     assert_eq!(
         row,
         PublicIndexRow {
+            resolvable: true,
             listed: true,
             public_handle: Some(HANDLE.into()),
             topic: Some(Topic::Research),
@@ -901,22 +902,41 @@ fn an_open_opening_needs_room_an_unpaused_room_and_a_claimable_setting() {
 }
 
 #[test]
-fn a_private_archived_or_suspended_room_is_a_blank_tombstone() {
+fn an_archived_public_room_resolves_but_isnt_listed() {
+    let mut archived = public_room();
+    archived.room.archived = true;
+    archived.room.topic = Some(Topic::Film);
+    assert_eq!(
+        index_row(&archived, Some("pub_old")),
+        PublicIndexRow {
+            resolvable: true,
+            listed: false,
+            public_handle: Some(HANDLE.into()),
+            topic: Some(Topic::Film),
+            has_open_opening: false,
+            published_at: Some(1_794_096_000),
+        }
+    );
+}
+
+#[test]
+fn a_private_suspended_or_undated_room_is_a_blank_tombstone() {
     let blank = PublicIndexRow {
+        resolvable: false,
         listed: false,
         public_handle: None,
         topic: None,
         has_open_opening: false,
         published_at: None,
     };
-    let mut archived = public_room();
-    archived.room.archived = true;
-    archived.room.topic = Some(Topic::Film);
     let mut suspended = public_room();
     suspended.room.suspended = true;
+    let mut suspended_archived = public_room();
+    suspended_archived.room.suspended = true;
+    suspended_archived.room.archived = true;
     let mut no_time = public_room();
     no_time.room.published_at = None;
-    for state in [private_room(), archived, suspended, no_time] {
+    for state in [private_room(), suspended, suspended_archived, no_time] {
         assert_eq!(index_row(&state, None), blank);
         // A tombstone keeps the last handle it's given, never the room's current one.
         let tombstone = index_row(&state, Some("pub_00000000000000000000000000000001"));

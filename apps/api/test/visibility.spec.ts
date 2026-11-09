@@ -1,6 +1,6 @@
 import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 // A room's visibility (M4 step 5, ADR 0008): the owner's preview, publishing with its hash, going private, the topic, and
 // `publicly_claimable` on openings. `PUBLIC_ROOMS` is off unless a test build's request says `x-test-public-rooms: on`.
@@ -272,8 +272,8 @@ describe("the discovery index (step 6)", () => {
     const published = (await publish(id)).body;
     await drain(id);
     const row = await indexRow(id);
-    expect(row).toMatchObject({ workspace_id: id, public_handle: published.public_handle, topic: "research", has_open_opening: 1, published_at: published.published_at, listed: 1 });
-    expect(Object.keys(row).sort()).toEqual(["has_open_opening", "listed", "public_handle", "published_at", "topic", "updated_seq", "workspace_id"]);
+    expect(row).toMatchObject({ workspace_id: id, public_handle: published.public_handle, topic: "research", has_open_opening: 1, published_at: published.published_at, resolvable: 1, listed: 1 });
+    expect(Object.keys(row).sort()).toEqual(["has_open_opening", "listed", "public_handle", "published_at", "resolvable", "topic", "updated_seq", "workspace_id"]);
     expect(JSON.stringify(row)).not.toContain("Billing v2");
   });
 
@@ -295,19 +295,97 @@ describe("the discovery index (step 6)", () => {
     expect(second.updated_seq).toBeGreaterThan(first.updated_seq);
   });
 
-  it("delists a room that goes private or is archived, keeping a tombstone with the handle that went, and lists a republish under its new handle", async () => {
+  it("leaves a tombstone with the handle that went when a room goes private, and lists a republish under its new handle", async () => {
     const id = await room();
     const first = (await publish(id)).body.public_handle;
     await drain(id);
     await unpublish(id);
     await drain(id);
-    expect(await indexRow(id)).toMatchObject({ listed: 0, public_handle: first, topic: null, has_open_opening: 0, published_at: null });
+    expect(await indexRow(id)).toMatchObject({ resolvable: 0, listed: 0, public_handle: first, topic: null, has_open_opening: 0, published_at: null });
     const again = (await publish(id)).body.public_handle;
     await drain(id);
-    expect(await indexRow(id)).toMatchObject({ listed: 1, public_handle: again });
+    expect(await indexRow(id)).toMatchObject({ resolvable: 1, listed: 1, public_handle: again });
+  });
+
+  it("keeps an archived public room resolvable but out of Explore, and lists it again when it's unarchived", async () => {
+    const id = await room();
+    await api(OWNER, "PUT", `/v1/workspaces/${id}/topic`, { topic: "research" });
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/roles`, { title: "Reviewer", responsibilities: "Read it", preset: "guest", publicly_claimable: true, policy_version: await version(id) })).status).toBe(200);
+    const published = (await publish(id)).body;
+    await drain(id);
     expect((await api(OWNER, "POST", `/v1/workspaces/${id}/archive`, { policy_version: await version(id) })).status).toBe(200);
     await drain(id);
-    expect(await indexRow(id)).toMatchObject({ listed: 0, public_handle: again });
+    // Decision 152: the link still answers, labeled Archived, and Explore leaves it out. An archived room takes no claims.
+    expect(await indexRow(id)).toMatchObject({ resolvable: 1, listed: 0, public_handle: published.public_handle, topic: "research", has_open_opening: 0, published_at: published.published_at });
+    const unarchived = await api(OWNER, "POST", `/v1/workspaces/${id}/unarchive`, { policy_version: await version(id) });
+    expect(unarchived.status, unarchived.text).toBe(200);
+    await drain(id);
+    expect(await indexRow(id)).toMatchObject({ resolvable: 1, listed: 1, public_handle: published.public_handle, has_open_opening: 1 });
+  });
+
+  it("writes one row with the new handle when a room goes private and public again before any write, and the old handle is gone", async () => {
+    const id = await room();
+    const first = (await publish(id)).body.public_handle;
+    await unpublish(id);
+    const second = (await publish(id)).body.public_handle;
+    await drain(id);
+    const all = await BINDINGS.DB.prepare("SELECT * FROM public_workroom_index WHERE workspace_id = ? OR public_handle IN (?, ?)").bind(id, first, second).all();
+    expect(all.results).toHaveLength(1);
+    expect(all.results[0]).toMatchObject({ workspace_id: id, public_handle: second, resolvable: 1, listed: 1 });
+  });
+
+  it("writes nothing more for a formerly public room than its tombstone", async () => {
+    const id = await room();
+    await publish(id);
+    await drain(id);
+    await unpublish(id);
+    await drain(id);
+    const tombstone = await indexRow(id);
+    const outbox = await due(id);
+    await api(OWNER, "PUT", `/v1/workspaces/${id}/topic`, { topic: "film" });
+    const task = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "T", instructions: "I", assignee: MEMBER.id });
+    await api(OWNER, "POST", `/v1/workspaces/${id}/tasks/${task.body.id}/messages`, { body: "hello" });
+    await drain(id);
+    expect(await indexRow(id)).toEqual(tombstone);
+    expect(await due(id)).toEqual(outbox);
+  });
+
+  it("leaves the row due when a command lands while the write is out", async () => {
+    const id = await room();
+    // Test builds land a command, which marks the row due with a newer seq, after the D1 write and before it's settled. It's
+    // asked for before the publish, since the alarm can fire on its own straight after.
+    await inRoom(id, (sql) => sql.exec("CREATE TABLE test_index_inflight (x INTEGER)"));
+    await publish(id);
+    const seq = await inRoom(id, (sql) => sql.exec("SELECT seq FROM event WHERE type = 'room.published'").one().seq);
+    await drain(id);
+    // The first write carried the publish's seq. The row stayed due, so a second write carried the newer one.
+    expect(await due(id)).toEqual([{ seq: seq + 1, pending: 0 }]);
+    expect((await indexRow(id)).updated_seq).toBe(seq + 1);
+    expect(await inRoom(id, (sql) => sql.exec("SELECT name FROM sqlite_master WHERE name = 'test_index_inflight'").toArray())).toEqual([]);
+  });
+
+  it("writes the row once after the migration for a room that's already public", async () => {
+    const id = await room();
+    const published = (await publish(id)).body;
+    // Back to before this migration, with the room already public and nothing in D1.
+    await inRoom(id, (sql) => {
+      sql.exec("DROP TABLE public_index_outbox");
+      sql.exec("UPDATE schema_version SET version = version - 1");
+    });
+    // An alarm may already have written it, so it's taken out of D1 too.
+    await BINDINGS.DB.prepare("DELETE FROM public_workroom_index WHERE workspace_id = ?").bind(id).run();
+    // A read migrates the room. It records no event, so only the migration can mark the row due.
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
+    await drain(id);
+    expect(await indexRow(id)).toMatchObject({ public_handle: published.public_handle, resolvable: 1, listed: 1 });
+    // A private room gets nothing.
+    const quiet = await room();
+    await inRoom(quiet, (sql) => {
+      sql.exec("DROP TABLE public_index_outbox");
+      sql.exec("UPDATE schema_version SET version = version - 1");
+    });
+    expect((await api(OWNER, "GET", `/v1/workspaces/${quiet}`)).status).toBe(200);
+    expect(await due(quiet)).toEqual([]);
   });
 
   it("takes a tombstone's handle from the audit, not the room's current handle", async () => {
@@ -343,11 +421,31 @@ describe("the discovery index (step 6)", () => {
     expect(await indexRow(id)).toMatchObject({ updated_seq: 1000000, listed: 0, public_handle: null });
   });
 
-  it("stays due while D1 fails, and catches up once it works", async () => {
+  it("rewrites a row D1 refused once D1 would take it, even if nothing in the room changed", async () => {
     const id = await room();
     await publish(id);
+    await drain(id);
+    // D1 holds a newer seq, so the next write is refused, and the room forgets what it wrote.
+    await BINDINGS.DB.prepare("UPDATE public_workroom_index SET updated_seq = 1000000, listed = 0 WHERE workspace_id = ?").bind(id).run();
+    await api(OWNER, "PUT", `/v1/workspaces/${id}/topic`, { topic: "other" });
+    await drain(id);
+    const written = await inRoom(id, (sql) => sql.exec("SELECT written FROM public_index_outbox").one().written);
+    expect(written).toBeNull();
+    // D1 goes back, as a restore would. An event that changes no key still writes the row in full.
+    await BINDINGS.DB.prepare("UPDATE public_workroom_index SET updated_seq = 1 WHERE workspace_id = ?").bind(id).run();
+    const task = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "T", instructions: "I", assignee: MEMBER.id });
+    expect(task.status).toBe(200);
+    await drain(id);
+    expect(await indexRow(id)).toMatchObject({ topic: "other", listed: 1 });
+    expect((await indexRow(id)).updated_seq).toBeGreaterThan(1);
+  });
+
+  it("stays due while D1 fails, and catches up once it works", async () => {
+    const id = await room();
+    // D1 fails from before the publish, since the alarm can fire on its own straight after.
     await BINDINGS.DB.prepare("ALTER TABLE public_workroom_index RENAME TO public_workroom_index_away").run();
     try {
+      await publish(id);
       await drain(id);
       expect((await due(id))[0].pending).toBe(1);
     } finally {
@@ -356,6 +454,31 @@ describe("the discovery index (step 6)", () => {
     await drain(id);
     expect((await due(id))[0].pending).toBe(0);
     expect((await indexRow(id)).listed).toBe(1);
+  });
+
+  it("logs a failed write with the error code and the room's ID only", async () => {
+    const id = await room();
+    // The alarm can fire on its own straight after the publish, so D1 fails and the spy listens from before it.
+    const errors = vi.spyOn(console, "error");
+    await BINDINGS.DB.prepare("ALTER TABLE public_workroom_index RENAME TO public_workroom_index_away").run();
+    let handle = "";
+    let lines: string[] = [];
+    try {
+      handle = (await publish(id)).body.public_handle;
+      for (let n = 0; n < 50 && lines.length === 0; n++) {
+        await runDurableObjectAlarm(stub(id));
+        lines = errors.mock.calls.map((call) => call.map(String).join(" ")).filter((line) => line.includes("public index projection failed"));
+        if (lines.length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    } finally {
+      await BINDINGS.DB.prepare("ALTER TABLE public_workroom_index_away RENAME TO public_workroom_index").run();
+      errors.mockRestore();
+    }
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      expect(line).toBe(`public index projection failed: room=${id} code=internal_error`);
+      for (const needle of [handle, "Billing", OWNER.id, "public_workroom_index"]) expect(line).not.toContain(needle);
+    }
   });
 });
 

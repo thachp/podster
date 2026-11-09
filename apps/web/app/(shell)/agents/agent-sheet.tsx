@@ -75,7 +75,15 @@ const roomLabel = (room: Pick<AgentRoom, "workspace_name">) => plainName(room.wo
 
 function AgentDetails({ api, organization, description }: { api: SheetApi<AgentDetail>; organization: string | undefined; description: string | null }) {
   const { data: agent, run, saving } = api;
-  const [confirming, setConfirming] = useState<Confirming | null>(null);
+  const [confirming, setConfirmingState] = useState<Confirming | null>(null);
+  const disconnectButton = useRef<HTMLButtonElement | null>(null);
+  const connectionHeading = useRef<HTMLHeadingElement | null>(null);
+  // The control that opened the dialog, so focus can go back to it.
+  const closedFrom = useRef<HTMLElement | null>(null);
+  const setConfirming = (next: Confirming | null) => {
+    if (next) closedFrom.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setConfirmingState(next);
+  };
   const [notice, setNotice] = useState<string | null>(null);
   // A command whose answer was lost. It may have happened, so neither "done" nor "nothing changed" would be true.
   const [unconfirmed, setUnconfirmed] = useState(false);
@@ -171,7 +179,7 @@ function AgentDetails({ api, organization, description }: { api: SheetApi<AgentD
       ) : null}
 
       <section aria-labelledby="agent-connection" className="space-y-2">
-        <h3 id="agent-connection" className="font-medium">
+        <h3 id="agent-connection" ref={connectionHeading} tabIndex={-1} className="font-medium">
           Connection
         </h3>
         <div aria-live="polite">
@@ -202,7 +210,7 @@ function AgentDetails({ api, organization, description }: { api: SheetApi<AgentD
           </div>
         ) : null}
         {active ? (
-          <Button variant="destructive" className="min-h-11 sm:min-h-9" disabled={saving} onClick={() => setConfirming({ kind: "disconnect" })}>
+          <Button ref={disconnectButton} variant="destructive" className="min-h-11 sm:min-h-9" disabled={saving} onClick={() => setConfirming({ kind: "disconnect" })}>
             Disconnect
           </Button>
         ) : null}
@@ -308,7 +316,15 @@ function AgentDetails({ api, organization, description }: { api: SheetApi<AgentD
       <InboxOversight key={agent.id} agent={agent} name={name} openable={agent.ownRooms ?? []} />
 
       <AlertDialog open={confirming !== null}>
-        <AlertDialogContent onEscapeKeyDown={() => setConfirming(null)}>
+        <AlertDialogContent
+          onEscapeKeyDown={() => setConfirming(null)}
+          onCloseAutoFocus={(event) => {
+            // Back to what opened it, or, if that's gone, as after a disconnect, to the section it was in.
+            event.preventDefault();
+            const back = closedFrom.current;
+            (back?.isConnected ? back : connectionHeading.current)?.focus();
+          }}
+        >
           {confirming?.kind === "disconnect" ? (
             <>
               <AlertDialogHeader>

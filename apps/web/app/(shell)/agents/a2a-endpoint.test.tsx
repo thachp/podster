@@ -97,11 +97,26 @@ describe("the A2A endpoint on the agent Sheet", () => {
     render(<Screen />);
     const here = await section();
     await user.click(here.getByRole("button", { name: "New signing secret" }));
+    // It asks first, since agents using the old secret will reject offers until they have the new one.
+    const asked = await screen.findByRole("alertdialog");
+    expect(asked.textContent).toContain("will reject signed offers until they get the new one");
+    await user.click(within(asked).getByRole("button", { name: "Keep the current one" }));
+    expect(writes()).toEqual([]);
+    await waitFor(() => expect(document.activeElement).toBe(here.getByRole("button", { name: "New signing secret" })));
+    await user.click(here.getByRole("button", { name: "New signing secret" }));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Make a new secret" }));
     await waitFor(() => expect(writes()[0]).toMatchObject({ method: "PUT", body: { url: ENDPOINT.url, rotate_secret: true } }));
     expect(await here.findByText("a2asec_" + "b".repeat(64))).toBeTruthy();
+    // Focus moves to the shown-once secret, and back to what made it after Done.
+    await waitFor(() => expect(document.activeElement).toBe(here.getByRole("status")));
+    await user.click(here.getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(document.activeElement).toBe(here.getByRole("button", { name: "New signing secret" })));
     await user.click(here.getByRole("button", { name: "Remove" }));
     const dialog = await screen.findByRole("alertdialog");
-    await user.click(within(dialog).getByRole("button", { name: "Remove" }));
+    await user.click(within(dialog).getByRole("button", { name: "Keep it" }));
+    await waitFor(() => expect(document.activeElement).toBe(here.getByRole("button", { name: "Remove" })));
+    await user.click(here.getByRole("button", { name: "Remove" }));
+    await user.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Remove" }));
     await waitFor(() => expect(writes().at(-1)).toMatchObject({ url: "/api/agents/agt_1/a2a-endpoint", method: "DELETE" }));
   });
 
@@ -113,6 +128,29 @@ describe("the A2A endpoint on the agent Sheet", () => {
     expect(here.getByText("Token can't be used, so set it again")).toBeTruthy();
     expect(here.getByText("3 in a row")).toBeTruthy();
     expect(here.queryByRole("button", { name: "Change" })).toBeNull();
+  });
+});
+
+describe("the token", () => {
+  it("is only ever sent with the URL it was typed for: changing the URL, cancelling or starting again clears it", async () => {
+    answer = (url, method) => (method === "PUT" ? Response.json({ ...ENDPOINT }) : undefined);
+    const user = userEvent.setup();
+    render(<Screen />);
+    const here = await section();
+    await user.click(here.getByRole("button", { name: "Change" }));
+    await user.type(here.getByLabelText("Bearer token (optional)"), "tok_for_a");
+    await user.type(here.getByLabelText("Endpoint URL"), "https://b.example/a2a");
+    expect((here.getByLabelText("Bearer token (optional)") as HTMLInputElement).value).toBe("");
+    await user.type(here.getByLabelText("Bearer token (optional)"), "tok_again");
+    await user.click(here.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(document.activeElement).toBe(here.getByRole("button", { name: "Change" })));
+    await user.click(here.getByRole("button", { name: "Change" }));
+    expect((here.getByLabelText("Bearer token (optional)") as HTMLInputElement).value).toBe("");
+    expect((here.getByLabelText("Endpoint URL") as HTMLInputElement).value).toBe("");
+    await user.type(here.getByLabelText("Endpoint URL"), "https://c.example/a2a");
+    await user.click(here.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(writes()).toHaveLength(1));
+    expect(writes()[0].body).toEqual({ url: "https://c.example/a2a" });
   });
 });
 

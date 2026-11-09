@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -40,7 +40,41 @@ export function A2aEndpointSection({ name, endpoint, active, saving, run, onUnco
   const [token, setToken] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
   const [secret, setSecret] = useState<string | null>(null);
-  const [removing, setRemoving] = useState(false);
+  // One confirmation at a time: removing the endpoint, or replacing its signing secret.
+  const [confirming, setConfirming] = useState<"remove" | "rotate" | null>(null);
+  // Where focus goes back to after the secret panel or a dialog closes.
+  const trigger = useRef<HTMLButtonElement | null>(null);
+  const changeButton = useRef<HTMLButtonElement | null>(null);
+  const rotateButton = useRef<HTMLButtonElement | null>(null);
+  const removeButton = useRef<HTMLButtonElement | null>(null);
+  const secretPanel = useRef<HTMLDivElement | null>(null);
+  const heading = useRef<HTMLHeadingElement | null>(null);
+  useEffect(() => {
+    if (secret) secretPanel.current?.focus();
+  }, [secret]);
+  /** Back to the button that started it, else to Change, else to the section's heading, as after a removal. */
+  const returnFocus = () => {
+    const back = [trigger.current, changeButton.current].find((el) => el?.isConnected);
+    (back ?? heading.current)?.focus();
+  };
+  /** A token is only ever for the URL it was typed with, so any change to the URL, or leaving the form, clears it. */
+  const editUrl = (value: string) => {
+    setUrl(value);
+    setToken("");
+  };
+  // The form replaces the buttons, so focus goes back to Change once it's rendered again.
+  const refocusChange = useRef(false);
+  useEffect(() => {
+    if (editing || !refocusChange.current) return;
+    refocusChange.current = false;
+    (changeButton.current ?? heading.current)?.focus();
+  }, [editing]);
+  const closeForm = () => {
+    refocusChange.current = true;
+    setEditing(false);
+    setToken("");
+    setUrl("");
+  };
   const host = endpointHost(endpoint);
   const path = (target: string) => `/api/agents/${encodeURIComponent(target)}/a2a-endpoint`;
 
@@ -68,8 +102,12 @@ export function A2aEndpointSection({ name, endpoint, active, saving, run, onUnco
     if (!result) return;
     if (!result.ok) return setProblem(REFUSALS[result.code] ?? "Podster couldn't set it.");
     setSecret(result.data.signing_secret ?? null);
+    // A new secret takes focus itself. Otherwise it goes back to Change.
+    refocusChange.current = !result.data.signing_secret;
+    trigger.current = null;
     setEditing(false);
     setToken("");
+    setUrl("");
   }
 
   async function rotate() {
@@ -80,7 +118,7 @@ export function A2aEndpointSection({ name, endpoint, active, saving, run, onUnco
   }
 
   async function remove() {
-    setRemoving(false);
+    setConfirming(null);
     setSecret(null);
     const result = await send(undefined, "DELETE");
     if (result && !result.ok) setProblem("Podster couldn't remove it.");
@@ -88,7 +126,7 @@ export function A2aEndpointSection({ name, endpoint, active, saving, run, onUnco
 
   return (
     <section aria-labelledby="agent-a2a" className="space-y-2">
-      <h3 id="agent-a2a" className="font-medium">
+      <h3 id="agent-a2a" ref={heading} tabIndex={-1} className="font-medium">
         A2A endpoint
       </h3>
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-sm">
@@ -114,11 +152,11 @@ export function A2aEndpointSection({ name, endpoint, active, saving, run, onUnco
       {endpoint && !endpoint.enabled ? <p className="text-sm text-status-amber">Off, so nothing is sent. Setting it again turns it back on.</p> : null}
 
       {secret ? (
-        <div role="status" className="space-y-1 rounded-lg border p-3 text-sm">
-          <p className="font-medium">Signing secret, shown only now</p>
+        <div role="status" ref={secretPanel} tabIndex={-1} aria-labelledby="agent-a2a-secret" className="space-y-1 rounded-lg border p-3 text-sm">
+          <p id="agent-a2a-secret" className="font-medium">Signing secret, shown only now</p>
           <p className="font-mono break-all">{secret}</p>
           <p className="text-xs text-muted-foreground">Give it to the agent to check each request's signature. Podster won't show it again: if it's lost, make a new one.</p>
-          <Button variant="outline" size="sm" onClick={() => setSecret(null)}>
+          <Button variant="outline" size="sm" onClick={() => { setSecret(null); returnFocus(); }}>
             Done
           </Button>
         </div>
@@ -133,7 +171,7 @@ export function A2aEndpointSection({ name, endpoint, active, saving, run, onUnco
         <form className="space-y-2" onSubmit={save} noValidate>
           <div className="space-y-1">
             <Label htmlFor={ids.url}>Endpoint URL</Label>
-            <Input id={ids.url} type="url" inputMode="url" autoComplete="off" value={url} onChange={(e) => setUrl(e.target.value)} aria-describedby={problem ? ids.problem : undefined} required />
+            <Input id={ids.url} type="url" inputMode="url" autoComplete="off" value={url} onChange={(e) => editUrl(e.target.value)} aria-describedby={problem ? ids.problem : undefined} required />
           </div>
           <div className="space-y-1">
             <Label htmlFor={ids.token}>Bearer token (optional)</Label>
@@ -144,22 +182,22 @@ export function A2aEndpointSection({ name, endpoint, active, saving, run, onUnco
             <Button type="submit" className="min-h-11 sm:min-h-9" disabled={saving}>
               Save
             </Button>
-            <Button type="button" variant="outline" className="min-h-11 sm:min-h-9" onClick={() => setEditing(false)}>
+            <Button type="button" variant="outline" className="min-h-11 sm:min-h-9" onClick={closeForm}>
               Cancel
             </Button>
           </div>
         </form>
       ) : active ? (
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" className="min-h-11 sm:min-h-9" disabled={saving} onClick={() => { setUrl(""); setProblem(null); setEditing(true); }}>
+          <Button ref={changeButton} variant="outline" className="min-h-11 sm:min-h-9" disabled={saving} onClick={() => { trigger.current = changeButton.current; setUrl(""); setToken(""); setProblem(null); setEditing(true); }}>
             {endpoint ? "Change" : "Set endpoint"}
           </Button>
           {endpoint ? (
             <>
-              <Button variant="outline" className="min-h-11 sm:min-h-9" disabled={saving} onClick={() => void rotate()}>
+              <Button ref={rotateButton} variant="outline" className="min-h-11 sm:min-h-9" disabled={saving} onClick={() => { trigger.current = rotateButton.current; setConfirming("rotate"); }}>
                 New signing secret
               </Button>
-              <Button variant="destructive" className="min-h-11 sm:min-h-9" disabled={saving} onClick={() => setRemoving(true)}>
+              <Button ref={removeButton} variant="destructive" className="min-h-11 sm:min-h-9" disabled={saving} onClick={() => { trigger.current = removeButton.current; setConfirming("remove"); }}>
                 Remove
               </Button>
             </>
@@ -167,16 +205,45 @@ export function A2aEndpointSection({ name, endpoint, active, saving, run, onUnco
         </div>
       ) : null}
 
-      <AlertDialog open={removing}>
-        <AlertDialogContent onEscapeKeyDown={() => setRemoving(false)}>
-          <AlertDialogHeader>
-            <AlertDialogTitle className="break-words">Remove “{name}”'s A2A endpoint?</AlertDialogTitle>
-            <AlertDialogDescription>Podster stops sending it offers, and its signing secret and token are deleted. Offers already sent stop being read back.</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel onClick={() => setRemoving(false)}>Keep it</AlertDialogCancel>
-            <AlertDialogAction onClick={() => void remove()}>Remove</AlertDialogAction>
-          </AlertDialogFooter>
+      <AlertDialog open={confirming !== null}>
+        <AlertDialogContent
+          onEscapeKeyDown={() => setConfirming(null)}
+          onCloseAutoFocus={(event) => {
+            // The secret panel takes focus itself when a new secret shows.
+            event.preventDefault();
+            if (!secret) returnFocus();
+          }}
+        >
+          {confirming === "rotate" ? (
+            <>
+              <AlertDialogHeader>
+                <AlertDialogTitle className="break-words">Make a new signing secret for “{name}”?</AlertDialogTitle>
+                <AlertDialogDescription>Agents using the old secret will reject signed offers until they get the new one. The new secret is shown once.</AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel onClick={() => setConfirming(null)}>Keep the current one</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={() => {
+                    setConfirming(null);
+                    void rotate();
+                  }}
+                >
+                  Make a new secret
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </>
+          ) : (
+            <>
+              <AlertDialogHeader>
+                <AlertDialogTitle className="break-words">Remove “{name}”'s A2A endpoint?</AlertDialogTitle>
+                <AlertDialogDescription>Podster stops sending it offers, and its signing secret and token are deleted. Offers already sent stop being read back.</AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel onClick={() => setConfirming(null)}>Keep it</AlertDialogCancel>
+                <AlertDialogAction onClick={() => void remove()}>Remove</AlertDialogAction>
+              </AlertDialogFooter>
+            </>
+          )}
         </AlertDialogContent>
       </AlertDialog>
     </section>

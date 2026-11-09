@@ -44,6 +44,8 @@ capabilities:
   # The public read surface (M4 step 7). Every caller gets the same view, and nothing here grants anything in a room.
   get_public_workroom: { kind: query, operation: getPublicWorkroom }
   discover_workrooms: { kind: query, operation: explorePublicWorkrooms }
+  # Safe to retry: asking again for the claim the agent holds answers as the first time and counts nothing.
+  claim_public_opening: { kind: command, operation: claimPublicOpening, idempotent_by_design: true }
   set_a2a_endpoint: { kind: command, operation: setA2aEndpoint, idempotent_by_design: true }
   delete_a2a_endpoint: { kind: command, operation: deleteA2aEndpoint, idempotent_by_design: true }
 
@@ -55,6 +57,10 @@ capabilities:
 # is idempotent by design: it sets a whole value, and is audited on the agent's Principal with no event or outbox, as
 # setAgentA2aEndpoint is, because it's the agent's own configuration and not room state.
 person_only:
+  - getPublicClaims
+  - setPublicClaimsPaused
+  - blockOrgFromPublicClaims
+  - unblockOrgFromPublicClaims
   - getAgentParticipationPolicy
   - setAgentParticipationPolicy
   - getAgentA2aEndpoint

@@ -15,6 +15,7 @@ type R<T> = std::result::Result<T, ApiError>;
 
 mod a2a_endpoint;
 mod participation;
+mod public_claims;
 
 const SCHEMA: &str = "
 CREATE TABLE connection (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, name TEXT NOT NULL, generation INTEGER NOT NULL,
@@ -753,6 +754,68 @@ pub async fn register_room(
     Ok(int(&body["generation"]) as u64)
 }
 
+/// Reserves a public claim on one Principal's count (M4 step 8). `held` is the room's word on whether the agent holds
+/// this claim now: `yes`, `no` or `unknown`. `Ok(Ok(retry))` when reserved, `retry` saying it counted nothing because the
+/// room said the claim is held, or `Ok(Err(..))` with the limit's code and the claims it counted as active, each as its
+/// key and room.
+#[allow(clippy::too_many_arguments)]
+pub async fn reserve_public_claim(
+    env: &Env,
+    principal: &str,
+    whose: &str,
+    key: &str,
+    workspace: &str,
+    reservation: &str,
+    held: &str,
+) -> R<Result<bool, (String, Vec<(String, String)>)>> {
+    let body = json!({ "whose": whose, "key": key, "workspace_id": workspace, "reservation": reservation, "held": held });
+    let mut response = internal(env, principal, "/internal/public-claim-reserve", &body).await?;
+    if response.status_code() != 200 {
+        return Err(ApiError::internal("couldn't reserve a public claim"));
+    }
+    let answer: Value = response.json().await?;
+    if answer["reserved"].as_bool() == Some(true) {
+        return Ok(Ok(answer["retry"].as_bool() != Some(false)));
+    }
+    let code = answer["code"]
+        .as_str()
+        .unwrap_or("limit_exceeded")
+        .to_string();
+    let active = answer["active"]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|e| {
+                    Some((
+                        e["key"].as_str()?.to_owned(),
+                        e["workspace_id"].as_str()?.to_owned(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Err((code, active)))
+}
+
+/// Confirms, releases or ends a public claim on one Principal's count. `release` gives back only `reservation`.
+pub async fn settle_public_claim(
+    env: &Env,
+    principal: &str,
+    whose: &str,
+    key: &str,
+    workspace: &str,
+    reservation: &str,
+    outcome: &str,
+) -> R<()> {
+    let body = json!({ "key": key, "outcome": outcome, "whose": whose, "workspace_id": workspace, "reservation": reservation });
+    let response = internal(env, principal, "/internal/public-claim-settle", &body).await?;
+    if response.status_code() != 200 {
+        return Err(ApiError::internal("couldn't settle a public claim"));
+    }
+    Ok(())
+}
+
 /// The wait after a sweep with this many left: it doubles from a minute up to a day.
 fn sweep_gap_ms(sweeps_left: i64) -> i64 {
     let done = (DEPARTURE_SWEEPS - sweeps_left).clamp(0, 20) as u32;
@@ -1393,6 +1456,16 @@ impl Principal {
             "/internal/unread" => {
                 let (acked, _, _) = inbox_state(&sql)?;
                 return Ok(json!({ "unread": unread_count(&sql, acked, now_ms())? }));
+            }
+            "/internal/public-claim-reserve" => {
+                let body: Value = req.json().await?;
+                let (store, now) = (sql.clone(), now_ms());
+                return self.in_transaction(move || public_claims::reserve(&store, &body, now));
+            }
+            "/internal/public-claim-settle" => {
+                let body: Value = req.json().await?;
+                let (store, now) = (sql.clone(), now_ms());
+                return self.in_transaction(move || public_claims::settle(&store, &body, now));
             }
             "/internal/register-room" => {
                 let body: Value = req.json().await?;

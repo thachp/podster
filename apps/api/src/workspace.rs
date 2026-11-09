@@ -84,12 +84,14 @@ mod outputs;
 mod plan;
 mod planned;
 mod public;
+mod public_claims;
 mod removal;
 mod roles;
 mod submission_files;
 mod visibility;
 
 pub(crate) use public::{INTERNAL_EXPLORE_ENTRY, INTERNAL_PUBLIC_PAGE};
+pub(crate) use public_claims::{INTERNAL_PUBLIC_CLAIM, INTERNAL_PUBLIC_CLAIM_STATUS};
 pub(crate) use visibility::public_rooms_enabled;
 
 /// The caller as this room knows them. `org` comes from stored state, not the request.
@@ -805,7 +807,8 @@ fn write_member(
 ) -> R<()> {
     exec(sql, "INSERT INTO member (principal_id, kind, org_id, role, guest_can_create, join_generation, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (principal_id) DO UPDATE SET kind = excluded.kind, org_id = excluded.org_id, role = excluded.role, guest_can_create = excluded.guest_can_create,
-        join_generation = excluded.join_generation, added_by = excluded.added_by, added_at = excluded.added_at, revoked_at = NULL, revocation_reason = NULL, owner_consented_at = NULL", vec![
+        join_generation = excluded.join_generation, added_by = excluded.added_by, added_at = excluded.added_at, revoked_at = NULL, revocation_reason = NULL, owner_consented_at = NULL,
+        joined_via = NULL", vec![
         principal.into(), kind.into(), org.into(), role.into(), flag(guest_can_create), generation.map_or(worker::SqlStorageValue::Null, |g| (g as i64).into()), added_by.into(), now.into(),
     ])?;
     // Joining starts from the role's preset, so scopes someone held before they left don't come back with them.
@@ -1166,9 +1169,12 @@ fn handle_change_role(
             access_json(target_kind, parse_role(&role), scopes),
         )
     });
+    public_claims::owner_changed_role(sql, principal, &role, scopes)?;
     exec(
         sql,
-        "UPDATE member SET role = ?, guest_can_create = ? WHERE principal_id = ?",
+        // A public participant the owner gives another role is the owner's now, no longer one who joined publicly.
+        "UPDATE member SET joined_via = CASE WHEN role = ?1 THEN joined_via END, role = ?1, guest_can_create = ?2
+           WHERE principal_id = ?3",
         vec![
             role.as_str().into(),
             flag(guest_can_create),
@@ -1333,9 +1339,12 @@ fn handle_change_access(
     }
     let org = text(&member["org_id"]).unwrap_or_default();
     store::write_grant(sql, principal, next, &caller.id, now)?;
+    public_claims::owner_changed_role(sql, principal, &role, next)?;
     exec(
         sql,
-        "UPDATE member SET role = ?, guest_can_create = ? WHERE principal_id = ?",
+        // A public participant the owner gives another role is the owner's now, no longer one who joined publicly.
+        "UPDATE member SET joined_via = CASE WHEN role = ?1 THEN joined_via END, role = ?1, guest_can_create = ?2
+           WHERE principal_id = ?3",
         vec![
             role.as_str().into(),
             flag(role == "guest" && next.tasks.can_create()),
@@ -2179,6 +2188,13 @@ mod queries {
             rows(sql, "SELECT principal_id, kind, org_id, role, guest_can_create FROM member WHERE revoked_at IS NULL ORDER BY added_at", vec![])?
         };
         let manages = authorize_workroom(caller, WorkroomAction::ManageAccess) == Verdict::Allow;
+        // Someone who joined by a public claim isn't told who owns the room or wrote its brief: those are person IDs.
+        let public_participant = !rows(
+            sql,
+            "SELECT principal_id FROM member WHERE principal_id = ? AND joined_via = 'public'",
+            vec![caller.id.as_str().into()],
+        )?
+        .is_empty();
         let mut listed = Vec::with_capacity(members.len());
         for m in &members {
             let mut entry = json!({
@@ -2195,10 +2211,10 @@ mod queries {
             listed.push(entry);
         }
         let mut answer = json!({
-            "id": room["id"], "name": room["name"], "owner": room["owner_person_id"], "status": room["status"],
+            "id": room["id"], "name": room["name"], "owner": if public_participant { Value::Null } else { room["owner_person_id"].clone() }, "status": room["status"],
             // Written by the room's owner or admins, and for reading only. `brief_external` marks it as another organization's.
             "require_person_review": int(&room["require_person_review"]) != 0,
-            "goal": room["goal"], "context": room["context"], "brief_by": room["brief_by"], "brief_external": room["owner_org_id"].as_str() != Some(who.org.as_str()),
+            "goal": room["goal"], "context": room["context"], "brief_by": if public_participant { Value::Null } else { room["brief_by"].clone() }, "brief_external": room["owner_org_id"].as_str() != Some(who.org.as_str()),
             "access": access_json(caller.kind, caller.role, caller.scopes),
             "policy_version": manages.then(|| room["policy_version"].clone()), "members": listed,
         });
@@ -3507,11 +3523,52 @@ impl Workspace {
         public::explore(&sql, &reader, enabled, &url)
     }
 
+    /// A public claim, or its status (M4 step 8). The claimant isn't a member yet, so no caller is resolved: the claim runs
+    /// in one transaction from the verified agent the Worker sends.
+    async fn public_claim(&self, mut req: Request) -> R<Value> {
+        let sql = self.state.storage().sql();
+        let enabled = visibility::public_rooms_enabled(&self.env, &req)?;
+        if !store::is_initialized(&sql)? {
+            return Err(ApiError::workspace_not_found());
+        }
+        self.migrate_if_needed()?;
+        if req.path() == public_claims::INTERNAL_PUBLIC_CLAIM_STATUS {
+            return public_claims::status(&sql, &req.url()?);
+        }
+        let identity: Identity = serde_json::from_str(
+            &req.headers()
+                .get(CALLER_HEADER)?
+                .ok_or_else(|| ApiError::internal("missing caller"))?,
+        )?;
+        let body: Value =
+            serde_json::from_str(&req.text().await?).map_err(|_| ApiError::invalid_argument())?;
+        let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+        let slot = out.clone();
+        let store = sql.clone();
+        transaction_sync(&self.state, move || {
+            *slot.borrow_mut() = Some(public_claims::claim(
+                &store,
+                &identity,
+                enabled,
+                &body,
+                now_ms(),
+            )?);
+            Ok(())
+        })?;
+        let answer = out.borrow_mut().take();
+        answer.ok_or_else(|| ApiError::internal("public claim answered nothing"))
+    }
+
     async fn dispatch(&self, mut req: Request) -> R<Value> {
         if req.path() == public::INTERNAL_PUBLIC_PAGE
             || req.path() == public::INTERNAL_EXPLORE_ENTRY
         {
             return self.public_read(req).await;
+        }
+        if req.path() == public_claims::INTERNAL_PUBLIC_CLAIM
+            || req.path() == public_claims::INTERNAL_PUBLIC_CLAIM_STATUS
+        {
+            return self.public_claim(req).await;
         }
         if req.path() == "/internal/org-departure" {
             let body: Value = req.json().await?;
@@ -3699,6 +3756,7 @@ impl Workspace {
                 ["collaboration", "costs"] => collaboration::read_costs(&sql, &who, &url),
                 ["brief"] => queries::get_brief(&sql, &who),
                 ["visibility"] => visibility::read(&sql, &who, public_rooms),
+                ["public-claims"] => public_claims::read(&sql, &who.caller),
                 ["activity"] => queries::list_activity(&sql, &who, &url),
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
                 ["tasks", id] => queries::get_task(&sql, &who, id, false),
@@ -4076,6 +4134,40 @@ impl Workspace {
                     visibility::handle_set_visibility(sql, who, &body, public_rooms, now)
                 },
             ),
+            (Method::Put, ["public-claims"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| public_claims::handle_pause(sql, &who.caller, &body, now),
+            ),
+            (Method::Put, ["public-claims", "blocked-orgs", org]) => {
+                let org = (*org).to_string();
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| {
+                        public_claims::handle_block(sql, &who.caller, &org, true, now)
+                    },
+                )
+            }
+            (Method::Delete, ["public-claims", "blocked-orgs", org]) => {
+                let org = (*org).to_string();
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| {
+                        public_claims::handle_block(sql, &who.caller, &org, false, now)
+                    },
+                )
+            }
             (Method::Put, ["topic"]) => self.command(
                 &identity,
                 key,

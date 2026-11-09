@@ -203,6 +203,11 @@ ALTER TABLE work_role ADD COLUMN publicly_claimable INTEGER NOT NULL DEFAULT 0;
 ", "
 CREATE TABLE public_index_outbox (id INTEGER PRIMARY KEY CHECK (id = 1), seq INTEGER NOT NULL, pending INTEGER NOT NULL, written TEXT);
 INSERT INTO public_index_outbox (id, seq, pending) SELECT 1, COALESCE((SELECT MAX(seq) FROM event), 0), 1 FROM workspace WHERE visibility = 'public';
+", "
+ALTER TABLE member ADD COLUMN joined_via TEXT;
+ALTER TABLE role_claim ADD COLUMN public INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE public_claim_block (org_id TEXT PRIMARY KEY, blocked_by TEXT NOT NULL, blocked_at INTEGER NOT NULL);
+CREATE INDEX role_claim_public ON role_claim (claimed_at) WHERE public = 1;
 "];
 
 pub fn int(value: &Value) -> i64 {
@@ -533,6 +538,10 @@ fn mark_public_index(sql: &SqlStorage, kind: &str, event_id: &str) -> R<()> {
         .first()
         .is_some_and(|r| r["visibility"].as_str() == Some("public"));
     if !public && kind != "room.unpublished" {
+        return Ok(());
+    }
+    // Task and message events can't change any index key, so they don't mark it (step 8's narrowing of step 6's rule).
+    if kind.starts_with("task.") {
         return Ok(());
     }
     exec(

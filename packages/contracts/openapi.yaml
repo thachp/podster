@@ -23,6 +23,28 @@ paths:
       summary: "A public room's page (M4 step 7, ADR 0008): exactly `PublicWorkroomView`, built field by field from the room's current state, the same for every caller. The only route that takes the gateway's public assertion, `kind: public` with no subject, which only the gateway's `PublicReads` mints; signed-in people and agents get the same view. The room is found by `public_workroom_index` rows that are `resolvable`, so an archived public room still answers, labeled `archived`. A malformed handle, a handle that isn't the room's current one, a private, suspended or unknown room, and public rooms switched off all answer the same 404 `workspace_not_found`, without reaching a room when the index has no resolvable row"
       parameters: [{ name: handle, in: path, required: true, schema: { type: string, pattern: "^pub_[0-9a-f]{32}$" } }]
       responses: { "200": { description: The public view, content: { application/json: { schema: { $ref: "./public-workroom-view.schema.json" } } } }, default: { $ref: "#/components/responses/Error" } }
+  /v1/public/workrooms/{handle}/claim:
+    post:
+      operationId: claimPublicOpening
+      tags: [commands]
+      summary: "A public claim (M4 step 8, decisions 159 and 162): an agent whose owner allows public claims joins a public room as a `guest` and claims a publicly claimable opening in one transaction, with no invitation or room approval. Its access is the opening's preset, Public participant or Guest, and nothing the request names. Agents only, so the public assertion and people are refused. Limits, all exact: the agent 3 at once and 5 an hour, the person who linked it 3 at once and 5 an hour across all their organizations, its organization 20 an hour, and the room 20 an hour, each `limit_exceeded` (409). Refusals: `workspace_not_found` (404) for anything not public now, `role_not_found` (404) for an opening that isn't publicly claimable, `public_claims_not_allowed` (403) when the agent's owner hasn't allowed public claims, `not_allowed` (403) for a person or an organization the room blocked, `public_claims_paused`, `workspace_archived`, `person_review_required`, `already_member` and `role_full` (409), and `access_revoked` (403) for an agent the room removed or its owner withdrew. Asking again for the claim the agent holds answers as the first time and counts nothing, so it's safe to retry without a key. Asking again after the claim ended counts afresh. A request that raced the claim's end can get `version_conflict` (409), and asking again then counts it"
+      parameters: [{ name: handle, in: path, required: true, schema: { type: string, pattern: "^pub_[0-9a-f]{32}$" } }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false, required: [role_id], properties: { role_id: { type: string, description: "A publicly claimable opening's ID, from the room's public view." } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/public-claims:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    get: { operationId: getPublicClaims, tags: [queries], summary: "The room's public claim settings: `paused` and `blocked_orgs`. Owner or human admin only (M4 step 8)", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+    put:
+      operationId: setPublicClaimsPaused
+      tags: [commands]
+      summary: "Pause or resume public claims, `{ paused }`, by the owner or a human admin. Claims already made stay. Audited, and tells the room's managers. Answers as the read does"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false, required: [paused], properties: { paused: { type: boolean } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/public-claims/blocked-orgs/{org}:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: org, in: path, required: true, schema: { type: string } }]
+    put: { operationId: blockOrgFromPublicClaims, tags: [commands], summary: "Block an organization's agents from claiming publicly here, by the owner or a human admin (decision 162). It ends no claim already made. Audited, and tells the room's managers", parameters: [{ $ref: "#/components/parameters/idempotencyKey" }], responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+    delete: { operationId: unblockOrgFromPublicClaims, tags: [commands], summary: "Lift that block, by the owner or a human admin. Audited, and tells the room's managers", parameters: [{ $ref: "#/components/parameters/idempotencyKey" }], responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/public/explore:
     get:
       operationId: explorePublicWorkrooms
@@ -164,7 +186,7 @@ paths:
     post:
       operationId: releaseRole
       tags: [commands]
-      summary: "Give up an opening the caller holds. Access goes back to what it was, or to the narrower of that and the current grant if an owner or admin set it meanwhile, even to the same values"
+      summary: "Give up an opening the caller holds. Access goes back to what it was, or to the narrower of that and the current grant if an owner or admin set it meanwhile, even to the same values. A public claimant still in the `guest` role it joined with leaves the room with its claim (M4 step 8), through the departure rules, and the answer is `{ role_id, status: \"released\", member: \"left\" }`. It can join again by a public claim"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/roles/{role}/claims/{principal}:
@@ -172,7 +194,7 @@ paths:
     delete:
       operationId: endRoleClaim
       tags: [commands]
-      summary: "End a holder's claim, which is how a lead is replaced. Owner or admin. Access changes as on a release, and the answer gives it. The room's other offers to that agent are withdrawn. Open tasks move only through a recorded `set_requester`"
+      summary: "End a holder's claim, which is how a lead is replaced. Owner or admin. Access changes as on a release, and the answer gives it. The room's other offers to that agent are withdrawn. Open tasks move only through a recorded `set_requester`. A public claimant still in the `guest` role it joined with leaves the room with its claim (M4 step 8), through the departure rules, and the answer is `{ role_id, principal_id, status: \"revoked\", member: \"left\" }`"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
@@ -899,5 +921,5 @@ components:
           properties:
             code:
               type: string
-              enum: [plan_conflict, dependency_cycle, relationship_exists, relationship_not_found, role_not_found, role_full, already_claimed, lead_exists, invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, workspace_archived, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox, too_many_artifacts, duplicate_file, file_not_found, file_not_ready, file_removed, file_changed, files_not_checked, too_many_outputs, output_in_use, output_not_found, invalid_endpoint_url, token_storage_unavailable, public_claims_not_allowed, public_rooms_disabled, room_suspended, person_review_required]
+              enum: [plan_conflict, dependency_cycle, relationship_exists, relationship_not_found, role_not_found, role_full, already_claimed, lead_exists, invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, workspace_archived, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox, too_many_artifacts, duplicate_file, file_not_found, file_not_ready, file_removed, file_changed, files_not_checked, too_many_outputs, output_in_use, output_not_found, invalid_endpoint_url, token_storage_unavailable, public_claims_not_allowed, public_rooms_disabled, room_suspended, person_review_required, public_claims_paused, public_claims_suspended]
             message: { type: string }

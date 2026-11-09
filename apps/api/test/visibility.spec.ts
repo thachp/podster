@@ -357,7 +357,14 @@ describe("the discovery index (step 6)", () => {
     await inRoom(id, (sql) => sql.exec("CREATE TABLE test_index_inflight (x INTEGER)"));
     await publish(id);
     const seq = await inRoom(id, (sql) => sql.exec("SELECT seq FROM event WHERE type = 'room.published'").one().seq);
-    await drain(id);
+    // The alarm may already be running on its own, and while it is there's none to run, so this runs alarms until the
+    // second write has landed, for at most 5 s.
+    for (let n = 0; n < 250; n++) {
+      await runDurableObjectAlarm(stub(id));
+      const now = await due(id);
+      if (now.length === 1 && now[0].seq === seq + 1 && now[0].pending === 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
     // The first write carried the publish's seq. The row stayed due, so a second write carried the newer one.
     expect(await due(id)).toEqual([{ seq: seq + 1, pending: 0 }]);
     expect((await indexRow(id)).updated_seq).toBe(seq + 1);
@@ -369,6 +376,12 @@ describe("the discovery index (step 6)", () => {
     const published = (await publish(id)).body;
     // Back to before this migration, with the room already public and nothing in D1.
     await inRoom(id, (sql) => {
+      // Step 8's public claims came after, so they come off first.
+      sql.exec("DROP TABLE public_claim_block");
+      sql.exec("DROP INDEX role_claim_public");
+      sql.exec("ALTER TABLE role_claim DROP COLUMN public");
+      sql.exec("ALTER TABLE member DROP COLUMN joined_via");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE public_index_outbox");
       sql.exec("UPDATE schema_version SET version = version - 1");
     });
@@ -381,6 +394,12 @@ describe("the discovery index (step 6)", () => {
     // A private room gets nothing.
     const quiet = await room();
     await inRoom(quiet, (sql) => {
+      // Step 8's public claims came after, so they come off first.
+      sql.exec("DROP TABLE public_claim_block");
+      sql.exec("DROP INDEX role_claim_public");
+      sql.exec("ALTER TABLE role_claim DROP COLUMN public");
+      sql.exec("ALTER TABLE member DROP COLUMN joined_via");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE public_index_outbox");
       sql.exec("UPDATE schema_version SET version = version - 1");
     });
@@ -431,10 +450,11 @@ describe("the discovery index (step 6)", () => {
     await drain(id);
     const written = await inRoom(id, (sql) => sql.exec("SELECT written FROM public_index_outbox").one().written);
     expect(written).toBeNull();
-    // D1 goes back, as a restore would. An event that changes no key still writes the row in full.
+    // D1 goes back, as a restore would. An event that changes no key still writes the row in full. (Task events don't
+    // mark the row since step 8, so a brief change is the event here.)
     await BINDINGS.DB.prepare("UPDATE public_workroom_index SET updated_seq = 1 WHERE workspace_id = ?").bind(id).run();
-    const task = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "T", instructions: "I", assignee: MEMBER.id });
-    expect(task.status).toBe(200);
+    const brief = await api(OWNER, "PUT", `/v1/workspaces/${id}/brief`, { goal: "Changed", policy_version: (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version });
+    expect(brief.status, brief.text).toBe(200);
     await drain(id);
     expect(await indexRow(id)).toMatchObject({ topic: "other", listed: 1 });
     expect((await indexRow(id)).updated_seq).toBeGreaterThan(1);

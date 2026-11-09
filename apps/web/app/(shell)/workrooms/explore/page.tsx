@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { webEnv } from "@/lib/gateway/env";
 import { gatewayQuery, rateLimited } from "@/lib/gateway/server";
 import { underLimit } from "@/lib/public/limit";
+import { visibleText } from "@/lib/public/visible-text";
 import { exploreQuery, isHandle, openNow, TOPICS, type ExplorePage } from "./model";
 
 type Params = { topic?: string; open?: string; cursor?: string; claim?: string; opening?: string };
@@ -94,7 +95,7 @@ export default async function Explore({ searchParams }: { searchParams?: Promise
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   {/* The public page itself, which has no script and is the same for everyone. */}
                   <a href={`/p/${room.handle}`} className="min-w-0 break-words font-medium text-primary underline">
-                    {room.content.name}
+                    {visibleText(room.content.name)}
                   </a>
                   <span className="flex flex-wrap gap-2">
                     {room.content.topic ? <Badge variant="outline">{room.content.topic}</Badge> : null}

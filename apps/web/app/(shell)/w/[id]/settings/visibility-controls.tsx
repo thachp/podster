@@ -1,17 +1,14 @@
 "use client";
 
 import { useId, useRef, useState } from "react";
-import { plainName } from "@/components/agent-content/text";
 import { Badge } from "@/components/ui/badge";
+import { visibleText } from "@/lib/public/visible-text";
 import { useEarlyInput } from "@/hooks/use-early-input";
 import { Button } from "@/components/ui/button";
 import { CommandNotice, useCommands } from "../team/commands";
 import { ConfirmAction } from "../team/confirm-action";
 import { FIELD, MOBILE_TARGET } from "../team/field";
 import { explainVisibilityRefusal, openingSummary, publishBlock, STALE_PREVIEW, suspensionReason, topicLabel, TOPICS, workflowLabel, type PublicPreview, type RoomVisibility } from "./visibility-model";
-
-/** Several lines, as typed, without the invisible and bidirectional characters that could make it read as something else. */
-const plainBlock = (text: string) => text.replace(/(?![\n‌‍])[\p{Cc}\p{Cf}]/gu, "");
 
 const day = (at: number) => new Date(at).toISOString().slice(0, 10);
 
@@ -24,11 +21,11 @@ export function PreviewFields({ preview }: { preview: PublicPreview }) {
   return (
     <dl className="grid gap-x-4 gap-y-2 rounded-lg border p-3 text-sm sm:grid-cols-[auto_minmax(0,1fr)]">
       <dt className="text-muted-foreground">Name</dt>
-      <dd className="min-w-0 break-words">{plainName(preview.name)}</dd>
+      <dd className="min-w-0 break-words">{visibleText(preview.name)}</dd>
       <dt className="text-muted-foreground">Goal</dt>
-      <dd className={text}>{preview.goal === null ? <span className="text-muted-foreground">None</span> : plainBlock(preview.goal)}</dd>
+      <dd className={text}>{preview.goal === null ? <span className="text-muted-foreground">None</span> : visibleText(preview.goal)}</dd>
       <dt className="text-muted-foreground">Context</dt>
-      <dd className={text}>{preview.context === null ? <span className="text-muted-foreground">None</span> : plainBlock(preview.context)}</dd>
+      <dd className={text}>{preview.context === null ? <span className="text-muted-foreground">None</span> : visibleText(preview.context)}</dd>
       <dt className="text-muted-foreground">Topic</dt>
       <dd>{topicLabel(preview.topic)}</dd>
       <dt className="text-muted-foreground">Workflow</dt>
@@ -41,10 +38,10 @@ export function PreviewFields({ preview }: { preview: PublicPreview }) {
           <ul className="space-y-2">
             {preview.openings.map((opening, index) => (
               <li key={`${opening.title}-${index}`} className="space-y-1">
-                <p className="break-words font-medium">{plainName(opening.title)}</p>
+                <p className="break-words font-medium">{visibleText(opening.title)}</p>
                 <p className="text-muted-foreground">{openingSummary(opening)}</p>
-                <p className={text}>{plainBlock(opening.responsibilities)}</p>
-                {opening.id !== null ? <Badge variant="outline">Claimable from the public page</Badge> : null}
+                <p className={text}>{visibleText(opening.responsibilities)}</p>
+                {opening.publicly_claimable ? <Badge variant="outline">Claimable from the public page</Badge> : null}
               </li>
             ))}
           </ul>
@@ -58,8 +55,8 @@ export function PreviewFields({ preview }: { preview: PublicPreview }) {
           <ul className="space-y-1">
             {preview.outputs.map((output, index) => (
               <li key={`${output.title}-${index}`} className="break-words">
-                {plainName(output.title)} · {output.ready ? "Ready" : "Not ready"}
-                {output.description ? <span className={`block text-muted-foreground ${text}`}>{plainBlock(output.description)}</span> : null}
+                {visibleText(output.title)} · {output.ready ? "Ready" : "Not ready"}
+                {output.description ? <span className={`block text-muted-foreground ${text}`}>{visibleText(output.description)}</span> : null}
               </li>
             ))}
           </ul>
@@ -97,7 +94,8 @@ export function VisibilityControls({ roomId, state, isOwner, archived }: { roomI
   const isPublic = state.visibility === "public";
   const shownTopic = topic ?? state.topic ?? "";
   const topicChanged = topic !== null && topic !== (state.topic ?? "");
-  const block = publishBlock(state, { isOwner, archived });
+  // An unsaved topic would change the view, so publishing now would name a view the owner isn't looking at.
+  const block = publishBlock(state, { isOwner, archived }) ?? (topicChanged ? "Save the topic first." : null);
   const busy = pending || retrying;
 
   const saveTopic = async () => {
@@ -133,9 +131,13 @@ export function VisibilityControls({ roomId, state, isOwner, archived }: { roomI
       ) : null}
       {isPublic ? (
         <div className="space-y-1">
-          <p>
-            Public{state.published_on ? ` since ${state.published_on}` : ""}. Anyone with the link can read the page, without signing in, and signed-in people and agents can find it in Explore.
-          </p>
+          {state.public_rooms_enabled ? (
+            <p>
+              Public{state.published_on ? ` since ${state.published_on}` : ""}. Anyone with the link can read the page, without signing in, and signed-in people and agents can find it in Explore.
+            </p>
+          ) : (
+            <p>Public{state.published_on ? ` since ${state.published_on}` : ""}, but Podster isn&apos;t serving public pages right now. Its page answers not found until it does.</p>
+          )}
           {state.public_handle ? (
             <p className="text-sm">
               <a href={`/p/${encodeURIComponent(state.public_handle)}`} className="text-primary underline">

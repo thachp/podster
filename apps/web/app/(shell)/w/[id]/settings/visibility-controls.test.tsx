@@ -2,7 +2,9 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setUrl } from "@/test/next-navigation";
-import { VisibilityControls } from "./visibility-controls";
+import { roomPage } from "@/lib/public/render";
+import { visibleText } from "@/lib/public/visible-text";
+import { PreviewFields, VisibilityControls } from "./visibility-controls";
 import { publishBlock, type RoomVisibility } from "./visibility-model";
 
 const HASH = "a".repeat(64);
@@ -124,6 +126,53 @@ describe("visibility in Settings", () => {
     show({ ...base(), suspension: { reason: "impersonation", at: Date.UTC(2026, 10, 8) } });
     expect(screen.getByRole("note")).toHaveTextContent("Suspended by Podster on 2026-11-08, for impersonation.");
     expect(screen.getByRole("button", { name: "Make public" })).toBeDisabled();
+  });
+
+  it("shows the same visible text as the public page, with the same invisible characters removed", () => {
+    const hidden = (text: string) => `${text}\u202E\u200B\u{E0041}\u{E0001}`;
+    const seeds = { name: hidden("Reef survey"), goal: `Count${"\u200B"} the ${"\u202E"}fish`, context: `Line one\nLine ${"\u202E"}two${"\u{E0067}"}`, title: hidden("Diver"), responsibilities: `Dive${"\u200B"} daily`, outputTitle: hidden("Fish count"), description: `Per ${"\u202E"}reef` };
+    const preview = {
+      ...base().preview,
+      name: seeds.name,
+      goal: seeds.goal,
+      context: seeds.context,
+      openings: [{ capacity: 2, filled: 0, id: "rol_1", lead: false, preset: "guest", publicly_claimable: true, responsibilities: seeds.responsibilities, title: seeds.title }],
+      outputs: [{ description: seeds.description, ready: false, title: seeds.outputTitle }],
+    };
+    const { container } = render(<PreviewFields preview={preview} />);
+    const page = new DOMParser().parseFromString(roomPage({ handle: `pub_${"1".repeat(32)}`, published_on: "2026-11-09", content: preview }), "text/html");
+    const shown = container.textContent ?? "";
+    const served = page.body.textContent ?? "";
+    for (const seed of Object.values(seeds)) {
+      const visible = visibleText(seed);
+      expect(visible).not.toBe(seed);
+      expect(shown, seed).toContain(visible);
+      expect(served, seed).toContain(visible);
+    }
+    const invisible = /[\u202E\u200B\u{E0000}-\u{E007F}]/u;
+    expect(shown).not.toMatch(invisible);
+    expect(served).not.toMatch(invisible);
+  });
+
+  it("bases the claimable badge on the opening's setting, as the public page does", () => {
+    const state = base();
+    state.preview.openings = [{ ...state.preview.openings[0], id: null, publicly_claimable: true }];
+    show(state);
+    expect(screen.getByText("Claimable from the public page")).toBeInTheDocument();
+  });
+
+  it("won't publish while the topic has unsaved changes", async () => {
+    show();
+    await userEvent.selectOptions(screen.getByLabelText("Topic"), "research");
+    const button = screen.getByRole("button", { name: "Make public" });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAccessibleDescription("Save the topic first.");
+  });
+
+  it("says a public room isn't being served while public pages are off", () => {
+    show({ ...base(), visibility: "public", public_handle: "pub_0123456789abcdef0123456789abcdef", published_on: "2026-11-09", public_rooms_enabled: false });
+    expect(screen.getByText(/Public since 2026-11-09, but Podster isn't serving public pages right now/)).toBeInTheDocument();
+    expect(screen.queryByText(/Anyone with the link can read/)).toBeNull();
   });
 
   it("saves a topic, or clears it", async () => {

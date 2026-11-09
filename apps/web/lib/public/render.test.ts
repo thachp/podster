@@ -134,3 +134,15 @@ describe("the public room page", () => {
     expect(notFoundPage()).toContain("There's no public workroom at this address.");
   });
 });
+
+describe("invisible characters on the public page", () => {
+  it("removes bidi overrides, zero-width and tag characters from every field, before escaping and Markdown", () => {
+    const html = roomPage(view({ name: "Re‮ef\u{E0041}", goal: "**Count​** <b‮>", context: "x\u{E0001}", openings: [{ id: "r", title: "Div‮er", responsibilities: "Di​ve", capacity: 1, filled: 0, preset: "guest", lead: false, publicly_claimable: true }], outputs: [{ title: "O​ne", description: "D‮esc", ready: true }] }));
+    expect(html).not.toMatch(/[‮​\u{E0000}-\u{E007F}]/u);
+    expect(html).toContain("<h1>Reef</h1>");
+    expect(html).toContain("<strong>Count</strong> &lt;b&gt;");
+    expect(html).toContain("<h3>Diver");
+    // Joiners stay, since scripts such as Persian need them.
+    expect(roomPage(view({ name: "می‌خواهم" }))).toContain("می‌خواهم");
+  });
+});

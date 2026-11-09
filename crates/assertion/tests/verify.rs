@@ -225,3 +225,83 @@ fn a_target_member_claim_is_read_and_is_optional() {
         })
     );
 }
+
+fn public_claims() -> Value {
+    json!({ "iss": ISSUER, "aud": AUDIENCE, "kind": "public", "jti": "p1", "iat": NOW, "exp": NOW + 60 })
+}
+
+#[test]
+fn only_the_room_page_takes_a_public_assertion() {
+    let token = sign(&public_claims());
+    // Every other route verifies with `verify`, which refuses it.
+    assert_eq!(verify(&token, &keys(), NOW), Err(AssertionError::Malformed));
+    match verify_room_page_caller(&token, &keys(), NOW).unwrap() {
+        RoomPageCaller::Public(public) => assert_eq!(public.jti, "p1"),
+        RoomPageCaller::SignedIn(_) => panic!("read as signed in"),
+    }
+    // A signed-in caller still reads as one.
+    assert!(matches!(
+        verify_room_page_caller(&sign(&claims()), &keys(), NOW).unwrap(),
+        RoomPageCaller::SignedIn(identity) if identity.sub == "agt_1"
+    ));
+}
+
+#[test]
+fn a_public_assertion_names_no_one() {
+    for (field, value) in [
+        ("sub", json!("per_1")),
+        ("org", json!("org_1")),
+        ("gen", json!(1)),
+        ("orgs", json!(["org_1"])),
+        ("admin_orgs", json!(["org_1"])),
+        ("target_member", json!({ "person": "per_1", "orgs": {} })),
+        ("linker", json!({ "person": "per_1", "since": 1 })),
+        ("anything", json!(true)),
+    ] {
+        let mut c = public_claims();
+        c[field] = value;
+        assert_eq!(
+            verify_room_page_caller(&sign(&c), &keys(), NOW),
+            Err(AssertionError::Malformed),
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn a_public_assertion_is_checked_like_any_other() {
+    let mut expired = public_claims();
+    expired["exp"] = json!(NOW - 10);
+    expired["iat"] = json!(NOW - 20);
+    assert_eq!(
+        verify_room_page_caller(&sign(&expired), &keys(), NOW),
+        Err(AssertionError::Expired)
+    );
+    let mut long = public_claims();
+    long["exp"] = json!(NOW + 600);
+    assert_eq!(
+        verify_room_page_caller(&sign(&long), &keys(), NOW),
+        Err(AssertionError::LifetimeTooLong)
+    );
+    let mut audience = public_claims();
+    audience["aud"] = json!("elsewhere");
+    assert_eq!(
+        verify_room_page_caller(&sign(&audience), &keys(), NOW),
+        Err(AssertionError::WrongAudience)
+    );
+    let forged = sign_raw(
+        &json!({ "alg": "EdDSA", "kid": "k1" }),
+        &public_claims(),
+        &key(2),
+    );
+    assert_eq!(
+        verify_room_page_caller(&forged, &keys(), NOW),
+        Err(AssertionError::BadSignature)
+    );
+    let mut empty = public_claims();
+    empty["jti"] = json!("");
+    assert_eq!(
+        verify_room_page_caller(&sign(&empty), &keys(), NOW),
+        Err(AssertionError::Malformed)
+    );
+}

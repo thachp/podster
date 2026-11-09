@@ -33,3 +33,20 @@ export async function mintAssertion(identity: Identity, jwkJson: string): Promis
     .setJti(crypto.randomUUID())
     .sign(key);
 }
+
+/**
+ * The public room page's assertion (ADR 0008): `kind: "public"`, with no subject, organization or anything else. Only
+ * `PublicReads` mints it, from nothing a client sends, and the API takes it on that one route.
+ */
+export async function mintPublicAssertion(jwkJson: string): Promise<string> {
+  const { key, kid } = await signingKey(jwkJson);
+  const now = Math.floor(Date.now() / 1000);
+  return new SignJWT({ kind: "public" })
+    .setProtectedHeader({ alg: "EdDSA", kid })
+    .setIssuer("podster-gateway")
+    .setAudience("podster-api")
+    .setIssuedAt(now)
+    .setExpirationTime(now + 60)
+    .setJti(crypto.randomUUID())
+    .sign(key);
+}

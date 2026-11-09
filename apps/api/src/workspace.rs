@@ -83,10 +83,14 @@ mod objects;
 mod outputs;
 mod plan;
 mod planned;
+mod public;
 mod removal;
 mod roles;
 mod submission_files;
 mod visibility;
+
+pub(crate) use public::{INTERNAL_EXPLORE_ENTRY, INTERNAL_PUBLIC_PAGE};
+pub(crate) use visibility::public_rooms_enabled;
 
 /// The caller as this room knows them. `org` comes from stored state, not the request.
 struct Participant {
@@ -3481,7 +3485,34 @@ impl Workspace {
         Ok(json!({ "applied": true }))
     }
 
+    /// A public read (M4 step 7). It runs before any caller is resolved, since the page's reader may be nobody, and an
+    /// unknown room answers not-found without being created.
+    async fn public_read(&self, req: Request) -> R<Value> {
+        let sql = self.state.storage().sql();
+        let enabled = visibility::public_rooms_enabled(&self.env, &req)?;
+        let reader: Option<Identity> = match req.headers().get(CALLER_HEADER)? {
+            Some(raw) => Some(serde_json::from_str(&raw)?),
+            None => None,
+        };
+        let url = req.url()?;
+        if req.method() != Method::Get || !store::is_initialized(&sql)? {
+            return Err(ApiError::workspace_not_found());
+        }
+        self.migrate_if_needed()?;
+        if req.path() == public::INTERNAL_PUBLIC_PAGE {
+            return public::page(&sql, reader.as_ref(), enabled, &url);
+        }
+        // Explore needs sign-in (decision 155).
+        let reader = reader.ok_or_else(ApiError::workspace_not_found)?;
+        public::explore(&sql, &reader, enabled, &url)
+    }
+
     async fn dispatch(&self, mut req: Request) -> R<Value> {
+        if req.path() == public::INTERNAL_PUBLIC_PAGE
+            || req.path() == public::INTERNAL_EXPLORE_ENTRY
+        {
+            return self.public_read(req).await;
+        }
         if req.path() == "/internal/org-departure" {
             let body: Value = req.json().await?;
             return self.org_departure(&body);

@@ -16,6 +16,23 @@ tags:
 paths:
   /v1/me:
     get: { operationId: getMe, tags: [queries], summary: Current identity, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/public/workrooms/{handle}:
+    get:
+      operationId: getPublicWorkroom
+      tags: [queries]
+      summary: "A public room's page (M4 step 7, ADR 0008): exactly `PublicWorkroomView`, built field by field from the room's current state, the same for every caller. The only route that takes the gateway's public assertion, `kind: public` with no subject, which only the gateway's `PublicReads` mints; signed-in people and agents get the same view. The room is found by `public_workroom_index` rows that are `resolvable`, so an archived public room still answers, labeled `archived`. A malformed handle, a handle that isn't the room's current one, a private, suspended or unknown room, and public rooms switched off all answer the same 404 `workspace_not_found`, without reaching a room when the index has no resolvable row"
+      parameters: [{ name: handle, in: path, required: true, schema: { type: string, pattern: "^pub_[0-9a-f]{32}$" } }]
+      responses: { "200": { description: The public view, content: { application/json: { schema: { $ref: "./public-workroom-view.schema.json" } } } }, default: { $ref: "#/components/responses/Error" } }
+  /v1/public/explore:
+    get:
+      operationId: explorePublicWorkrooms
+      tags: [queries]
+      summary: "Explore (decision 155): signed-in people and agents only, so the public assertion is refused with `invalid_assertion`. A page of at most 20 candidates from `public_workroom_index` rows that are `listed`, newest published first, each confirmed public and read from its room's current state; any its room doesn't confirm, or that doesn't answer in time, is left out, so a page can hold fewer than 20 and `next_cursor` still moves on. `next_cursor` is opaque and null at the end. Filters: `topic` from the fixed list, and `open` true for rooms with an opening an agent can claim publicly now. An unknown parameter or a bad cursor is `invalid_argument`. With public rooms off the page is empty"
+      parameters:
+        - { name: topic, in: query, schema: { type: string } }
+        - { name: open, in: query, schema: { type: boolean } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses: { "200": { description: A page, content: { application/json: { schema: { type: object, additionalProperties: false, required: [workrooms, next_cursor], properties: { workrooms: { type: array, maxItems: 20, items: { $ref: "./public-workroom-view.schema.json" } }, next_cursor: { type: [string, "null"] } } } } } }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/cards:
     get: { operationId: listWorkspaceCards, tags: [queries], summary: "A page of the directory, 20 rooms at most, from `offset`, with `next_offset` when there's more. The listing read model says which rooms to ask, and each room says what this person sees: a row the room refuses is left out, and one it can't answer for has a null `card`", parameters: [{ name: offset, in: query, schema: { type: integer, minimum: 0 } }], responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/workspaces/{workspace_id}/card:

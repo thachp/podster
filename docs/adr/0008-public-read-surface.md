@@ -93,7 +93,7 @@ A public room is named on the public surface by a handle, `pub_` and 128 random 
 - **What:** only a successful view. Not-found, errors and `429` are never cached, so publishing shows at once and a not-found can't be pinned.
 - **Browsers and the edge in front of `apps/web`:** every public response says `Cache-Control: no-store`. The page is rendered per request from the gateway's cached view.
 - **Invalidation:** none is needed for correctness. A view outlives unpublish or suspension by at most 30 seconds, which is the stated bound (M4-03). The Cache API is per data center, so deleting an entry on unpublish would clear only one location, and purging everywhere would need an API token, a new secret the owner would have to set (question 5). The bound is what the confirmation promises: "may stay visible for up to a minute".
-- **Agents' reads** through `get_public_workroom` use the same cached view.
+- **Agents' reads** through `get_public_workroom` aren't served from the page's cache. Each one reaches the API as the agent, so its token is spent and its connection checked, as on every capability, and it counts against the agent's per-credential limit. They get the same view, with the same fields copied. (Changed at step 7: a cached answer would have skipped the token's spend.)
 
 ### Rate limiting
 

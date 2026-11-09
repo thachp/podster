@@ -46,5 +46,19 @@ for (const [path, item] of Object.entries(organizations.paths)) {
   }
 }
 
+// The public view (ADR 0008) is closed at every level, so a field reaches the public surface only by being named here.
+const view = JSON.parse(readFileSync(new URL("public-workroom-view.schema.json", import.meta.url), "utf8"));
+const closed = (schema, at) => {
+  if (schema.type === "object" || schema.properties) {
+    if (schema.additionalProperties !== false) problems.push(`public-workroom-view.schema.json: ${at} isn't closed`);
+    const names = Object.keys(schema.properties ?? {});
+    if ((schema.required ?? []).slice().sort().join() !== names.slice().sort().join()) problems.push(`public-workroom-view.schema.json: ${at} must require exactly its properties`);
+    for (const [name, child] of Object.entries(schema.properties ?? {})) closed(child, `${at}.${name}`);
+  }
+  if (schema.items) closed(schema.items, `${at}[]`);
+};
+closed(view, "view");
+for (const id of ["getPublicWorkroom", "explorePublicWorkrooms"]) if (!operations.has(id)) problems.push(`${id}: the public read's operation is missing`);
+
 if (problems.length) { console.error(problems.join("\n")); process.exit(1); }
 console.log(`${Object.keys(capabilities).length} capabilities match ${operations.size} operations`);

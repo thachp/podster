@@ -56,6 +56,25 @@ async function fakeHook(request: Request) {
   return new Response("ok");
 }
 
+/** Each `path` and `method` in the contract, read line by line, since this package has no YAML parser. */
+function contractRoutes() {
+  const text = readFileSync(new URL("../../packages/contracts/openapi.yaml", import.meta.url), "utf8");
+  const routes: { path: string; method: string; operation: string }[] = [];
+  let path = "";
+  let method = "";
+  for (const line of text.split("\n")) {
+    const p = line.match(/^  (\/[^:]+):\s*$/);
+    if (p) { path = p[1]; continue; }
+    const m = line.match(/^    (get|post|put|delete):/);
+    if (m && path) method = m[1].toUpperCase();
+    const op = line.match(/operationId: ([A-Za-z0-9]+)/);
+    if (op && path && method) { routes.push({ path, method, operation: op[1] }); method = ""; }
+  }
+  const operations = text.match(/operationId: /g)?.length ?? 0;
+  if (routes.length !== operations) throw new Error(`read ${routes.length} routes of ${operations} operations`);
+  return routes;
+}
+
 export default defineConfig({
   plugins: [
     cloudflareTest({
@@ -80,8 +99,11 @@ export default defineConfig({
           // A test value only. The real key is the owner's to set (decision 122).
           A2A_TOKEN_KEY: "0f".repeat(32),
           TEST_WRANGLER: readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8"),
-          TEST_D1_SCHEMA: ["0001_membership_index.sql", "0002_room_status.sql", "0003_membership_by_org.sql", "0004_ownerless_rooms.sql", "0005_public_workroom_index.sql"].map((name) => readFileSync(new URL(`./migrations/${name}`, import.meta.url), "utf8")).join("\n").replace(/--.*$/gm, ""),
+          TEST_D1_SCHEMA: ["0001_membership_index.sql", "0002_room_status.sql", "0003_membership_by_org.sql", "0004_ownerless_rooms.sql", "0005_public_workroom_index.sql", "0006_public_explore_order.sql"].map((name) => readFileSync(new URL(`./migrations/${name}`, import.meta.url), "utf8")).join("\n").replace(/--.*$/gm, ""),
           TEST_SIGNING_JWK: JSON.stringify(privateKey.export({ format: "jwk" })),
+          // Every route the contract lists, for the route-list test (M4 step 7), and the public view's schema.
+          TEST_API_ROUTES: JSON.stringify(contractRoutes()),
+          TEST_PUBLIC_VIEW_SCHEMA: readFileSync(new URL("../../packages/contracts/public-workroom-view.schema.json", import.meta.url), "utf8"),
         },
       },
     }),

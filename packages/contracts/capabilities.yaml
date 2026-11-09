@@ -41,6 +41,9 @@ capabilities:
   set_wake: { kind: command, operation: setWake, idempotent_by_design: true }
   delete_wake: { kind: command, operation: deleteWake, idempotent_by_design: true }
   get_a2a_endpoint: { kind: query, operation: getA2aEndpoint }
+  # The public read surface (M4 step 7). Every caller gets the same view, and nothing here grants anything in a room.
+  get_public_workroom: { kind: query, operation: getPublicWorkroom }
+  discover_workrooms: { kind: query, operation: explorePublicWorkrooms }
   set_a2a_endpoint: { kind: command, operation: setA2aEndpoint, idempotent_by_design: true }
   delete_a2a_endpoint: { kind: command, operation: deleteA2aEndpoint, idempotent_by_design: true }
 

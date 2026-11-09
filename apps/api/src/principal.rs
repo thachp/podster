@@ -754,8 +754,11 @@ pub async fn register_room(
     Ok(int(&body["generation"]) as u64)
 }
 
-/// Reserves a public claim on one Principal's count (M4 step 8). `Ok(None)` when reserved, or the limit's code and the
-/// claims it counted as active, each as its key and room.
+/// Reserves a public claim on one Principal's count (M4 step 8). `held` is the room's word on whether the agent holds
+/// this claim now: `yes`, `no` or `unknown`. `Ok(Ok(retry))` when reserved, `retry` saying it counted nothing because the
+/// room said the claim is held, or `Ok(Err(..))` with the limit's code and the claims it counted as active, each as its
+/// key and room.
+#[allow(clippy::too_many_arguments)]
 pub async fn reserve_public_claim(
     env: &Env,
     principal: &str,
@@ -763,15 +766,16 @@ pub async fn reserve_public_claim(
     key: &str,
     workspace: &str,
     reservation: &str,
-) -> R<Option<(String, Vec<(String, String)>)>> {
-    let body = json!({ "whose": whose, "key": key, "workspace_id": workspace, "reservation": reservation });
+    held: &str,
+) -> R<Result<bool, (String, Vec<(String, String)>)>> {
+    let body = json!({ "whose": whose, "key": key, "workspace_id": workspace, "reservation": reservation, "held": held });
     let mut response = internal(env, principal, "/internal/public-claim-reserve", &body).await?;
     if response.status_code() != 200 {
         return Err(ApiError::internal("couldn't reserve a public claim"));
     }
     let answer: Value = response.json().await?;
     if answer["reserved"].as_bool() == Some(true) {
-        return Ok(None);
+        return Ok(Ok(answer["retry"].as_bool() != Some(false)));
     }
     let code = answer["code"]
         .as_str()
@@ -791,7 +795,7 @@ pub async fn reserve_public_claim(
                 .collect()
         })
         .unwrap_or_default();
-    Ok(Some((code, active)))
+    Ok(Err((code, active)))
 }
 
 /// Confirms, releases or ends a public claim on one Principal's count. `release` gives back only `reservation`.

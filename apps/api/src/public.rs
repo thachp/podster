@@ -308,10 +308,19 @@ struct Count {
 enum Held {
     Yes,
     No,
-    /// The room didn't answer. It's treated as not held when deciding whether a request is a retry, since reservations
-    /// count a claim once either way, and as held when deciding whether to free a count, so a count is only ever freed
-    /// on the room's word.
+    /// The room didn't answer. A count already here is then counted afresh, and kept if the claim is refused, and a count
+    /// is only ever freed on the room's word.
     Unknown,
+}
+
+impl Held {
+    fn word(self) -> &'static str {
+        match self {
+            Held::Yes => "yes",
+            Held::No => "no",
+            Held::Unknown => "unknown",
+        }
+    }
 }
 
 async fn held(env: &Env, workspace: &str, agent: &str) -> Held {
@@ -342,14 +351,16 @@ async fn held(env: &Env, workspace: &str, agent: &str) -> Held {
 }
 
 /// Reserves one count under this request's `reservation`, and at an "at once" limit checks each claim it counted with
-/// its room, ending only the ones the room says it doesn't hold, then asks once more. `Err` carries the refusal.
+/// its room, ending only the ones the room says it doesn't hold, then asks once more. `Ok(retry)` says it counted nothing
+/// because the room said the claim is held, and `Err` carries the refusal.
 async fn reserve(
     env: &Env,
     count: &Count,
     workspace: &str,
     agent: &str,
     reservation: &str,
-) -> R<()> {
+    here: Held,
+) -> R<bool> {
     let mut checked = false;
     loop {
         let refused = principal::reserve_public_claim(
@@ -359,10 +370,12 @@ async fn reserve(
             &count.key,
             workspace,
             reservation,
+            here.word(),
         )
         .await?;
-        let Some((code, active)) = refused else {
-            return Ok(());
+        let (code, active) = match refused {
+            Ok(retry) => return Ok(retry),
+            Err(refusal) => refusal,
         };
         // Only an "at once" limit can be freed by a claim that ended. An hourly one can't.
         let freeable = count.whose != "org" && !active.is_empty() && !checked;
@@ -475,13 +488,17 @@ pub async fn claim(
         },
     ];
     let reservation = format!("rsv_{}", uuid::Uuid::new_v4().simple());
-    // A claim the agent already holds here is the room's to answer, and is only confirmed again. Anything else, a room
-    // that didn't say included, reserves: the same claim asked for twice still counts once.
-    let retry = held(env, &workspace, &agent).await == Held::Yes;
+    // Every request reserves. The room's word on whether the agent holds this claim now tells each Principal a retry,
+    // which counts nothing, from a claim asked for again after it ended, which counts afresh.
+    let here = held(env, &workspace, &agent).await;
+    #[cfg(feature = "failpoints")]
+    let here = test_force_held(env, &agent, here).await;
     let mut reserved: Vec<Count> = vec![];
-    if !retry {
-        for count in &counts {
-            if let Err(error) = reserve(env, count, &workspace, &agent, &reservation).await {
+    let mut retry_only = false;
+    for count in &counts {
+        match reserve(env, count, &workspace, &agent, &reservation, here).await {
+            Ok(retry) => retry_only |= retry,
+            Err(error) => {
                 settle_later(
                     ctx,
                     env,
@@ -492,15 +509,17 @@ pub async fn claim(
                 );
                 return Err(error);
             }
-            reserved.push(count.clone());
         }
+        reserved.push(count.clone());
     }
     let mut asking = caller.clone();
     asking.workspace_id = workspace.clone();
     let headers = caller_header(&asking)?;
     test_headers(req, &headers)?;
-    let request =
-        json!({ "handle": handle, "role_id": role_id, "generation": generation }).to_string();
+    // A request some count took as a retry may only be a retry in the room. If the claim ended in the meantime, the room
+    // refuses it rather than make a claim nothing counted, and asking again counts it.
+    let request = json!({ "handle": handle, "role_id": role_id, "generation": generation, "retry_only": retry_only })
+        .to_string();
     let answer = forward(
         room(env, &workspace)?,
         crate::workspace::INTERNAL_PUBLIC_CLAIM,
@@ -511,7 +530,7 @@ pub async fn claim(
     )
     .await;
     match &answer {
-        // A claim that stands is counted, a retry's included, so a confirm lost earlier can't leave it uncounted.
+        // A claim that stands is confirmed, a retry's included, so a confirm lost earlier can't leave it unsettled.
         Ok(response) if response.status_code() == 200 => {
             settle_later(ctx, env, counts, workspace, reservation, "confirm");
         }
@@ -582,4 +601,35 @@ async fn test_fail_confirm(env: &Env, principal: &str) -> bool {
         Ok(q) => matches!(q.first::<Value>(None).await, Ok(Some(_))),
         Err(_) => false,
     }
+}
+
+/// Test builds only: a test can force the room's word on whether the agent holds its claim, by naming the agent in D1's
+/// `test_force_held` or `test_force_unknown` table, to reach a race or a room that doesn't answer on demand.
+#[cfg(feature = "failpoints")]
+async fn test_force_held(env: &Env, agent: &str, here: Held) -> Held {
+    let Ok(db) = env.d1("DB") else { return here };
+    for (table, forced) in [
+        ("test_force_held", Held::Yes),
+        ("test_force_unknown", Held::Unknown),
+    ] {
+        let Ok(exists) = db
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .bind(&[table.into()])
+        else {
+            continue;
+        };
+        if !matches!(exists.first::<Value>(None).await, Ok(Some(_))) {
+            continue;
+        }
+        let Ok(named) = db
+            .prepare(format!("SELECT principal FROM {table} WHERE principal = ?"))
+            .bind(&[agent.into()])
+        else {
+            continue;
+        };
+        if matches!(named.first::<Value>(None).await, Ok(Some(_))) {
+            return forced;
+        }
+    }
+    here
 }

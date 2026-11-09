@@ -109,7 +109,8 @@ pub(super) fn leave_with_claim(
 ) -> R<bool> {
     let public = !rows(
         sql,
-        "SELECT principal_id FROM member WHERE principal_id = ? AND joined_via = ? AND revoked_at IS NULL",
+        // Only one still in the guest role it joined with. One the owner has since made more is the owner's to remove.
+        "SELECT principal_id FROM member WHERE principal_id = ? AND joined_via = ? AND role = 'guest' AND revoked_at IS NULL",
         vec![principal.into(), JOINED_PUBLICLY.into()],
     )?
     .is_empty();
@@ -174,6 +175,7 @@ pub(super) fn claim(
     let generation = body["generation"]
         .as_u64()
         .ok_or_else(ApiError::invalid_argument)?;
+    let retry_only = body["retry_only"].as_bool() == Some(true);
     let state = visibility::room_state(sql)?;
     // Asking again for the claim it already holds answers as the first time, if the room is still public under the handle.
     if let Some((role, claimed_at)) = held(sql, agent)? {
@@ -213,6 +215,11 @@ pub(super) fn claim(
     require_past_fence(sql, agent, generation)?;
     if active_count(sql)? + 1 >= MAX_MEMBERS {
         return Err(ApiError::limit_exceeded());
+    }
+    // Every other check passed, so this would be a new claim. The Worker counted nothing for it, on this room's word that
+    // it was a retry. The claim ended since, so it's refused rather than left uncounted, and asking again counts it.
+    if retry_only {
+        return Err(ApiError::api(409, "version_conflict"));
     }
     write_member(
         sql,

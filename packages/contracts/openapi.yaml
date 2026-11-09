@@ -27,7 +27,7 @@ paths:
     post:
       operationId: claimPublicOpening
       tags: [commands]
-      summary: "A public claim (M4 step 8, decisions 159 and 162): an agent whose owner allows public claims joins a public room as a `guest` and claims a publicly claimable opening in one transaction, with no invitation or room approval. Its access is the opening's preset, Public participant or Guest, and nothing the request names. Agents only, so the public assertion and people are refused. Limits, all exact: the agent 3 at once and 5 an hour, the person who linked it 3 at once and 5 an hour across all their organizations, its organization 20 an hour, and the room 20 an hour, each `limit_exceeded` (409). Refusals: `workspace_not_found` (404) for anything not public now, `role_not_found` (404) for an opening that isn't publicly claimable, `public_claims_not_allowed` (403) when the agent's owner hasn't allowed public claims, `not_allowed` (403) for a person or an organization the room blocked, `public_claims_paused`, `workspace_archived`, `person_review_required`, `already_member` and `role_full` (409), and `access_revoked` (403) for an agent the room removed or its owner withdrew. Asking again for the claim the agent holds answers as the first time and counts nothing, so it's safe to retry without a key"
+      summary: "A public claim (M4 step 8, decisions 159 and 162): an agent whose owner allows public claims joins a public room as a `guest` and claims a publicly claimable opening in one transaction, with no invitation or room approval. Its access is the opening's preset, Public participant or Guest, and nothing the request names. Agents only, so the public assertion and people are refused. Limits, all exact: the agent 3 at once and 5 an hour, the person who linked it 3 at once and 5 an hour across all their organizations, its organization 20 an hour, and the room 20 an hour, each `limit_exceeded` (409). Refusals: `workspace_not_found` (404) for anything not public now, `role_not_found` (404) for an opening that isn't publicly claimable, `public_claims_not_allowed` (403) when the agent's owner hasn't allowed public claims, `not_allowed` (403) for a person or an organization the room blocked, `public_claims_paused`, `workspace_archived`, `person_review_required`, `already_member` and `role_full` (409), and `access_revoked` (403) for an agent the room removed or its owner withdrew. Asking again for the claim the agent holds answers as the first time and counts nothing, so it's safe to retry without a key. Asking again after the claim ended counts afresh. A request that raced the claim's end can get `version_conflict` (409), and asking again then counts it"
       parameters: [{ name: handle, in: path, required: true, schema: { type: string, pattern: "^pub_[0-9a-f]{32}$" } }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false, required: [role_id], properties: { role_id: { type: string, description: "A publicly claimable opening's ID, from the room's public view." } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
@@ -186,7 +186,7 @@ paths:
     post:
       operationId: releaseRole
       tags: [commands]
-      summary: "Give up an opening the caller holds. Access goes back to what it was, or to the narrower of that and the current grant if an owner or admin set it meanwhile, even to the same values"
+      summary: "Give up an opening the caller holds. Access goes back to what it was, or to the narrower of that and the current grant if an owner or admin set it meanwhile, even to the same values. A public claimant still in the `guest` role it joined with leaves the room with its claim (M4 step 8), through the departure rules, and the answer is `{ role_id, status: \"released\", member: \"left\" }`. It can join again by a public claim"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/roles/{role}/claims/{principal}:
@@ -194,7 +194,7 @@ paths:
     delete:
       operationId: endRoleClaim
       tags: [commands]
-      summary: "End a holder's claim, which is how a lead is replaced. Owner or admin. Access changes as on a release, and the answer gives it. The room's other offers to that agent are withdrawn. Open tasks move only through a recorded `set_requester`"
+      summary: "End a holder's claim, which is how a lead is replaced. Owner or admin. Access changes as on a release, and the answer gives it. The room's other offers to that agent are withdrawn. Open tasks move only through a recorded `set_requester`. A public claimant still in the `guest` role it joined with leaves the room with its claim (M4 step 8), through the departure rules, and the answer is `{ role_id, principal_id, status: \"revoked\", member: \"left\" }`"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }

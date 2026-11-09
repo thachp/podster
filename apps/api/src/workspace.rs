@@ -1171,7 +1171,9 @@ fn handle_change_role(
     });
     exec(
         sql,
-        "UPDATE member SET role = ?, guest_can_create = ? WHERE principal_id = ?",
+        // A public participant the owner gives another role is the owner's now, no longer one who joined publicly.
+        "UPDATE member SET joined_via = CASE WHEN role = ?1 THEN joined_via END, role = ?1, guest_can_create = ?2
+           WHERE principal_id = ?3",
         vec![
             role.as_str().into(),
             flag(guest_can_create),
@@ -1338,7 +1340,9 @@ fn handle_change_access(
     store::write_grant(sql, principal, next, &caller.id, now)?;
     exec(
         sql,
-        "UPDATE member SET role = ?, guest_can_create = ? WHERE principal_id = ?",
+        // A public participant the owner gives another role is the owner's now, no longer one who joined publicly.
+        "UPDATE member SET joined_via = CASE WHEN role = ?1 THEN joined_via END, role = ?1, guest_can_create = ?2
+           WHERE principal_id = ?3",
         vec![
             role.as_str().into(),
             flag(role == "guest" && next.tasks.can_create()),

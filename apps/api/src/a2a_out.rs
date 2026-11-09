@@ -214,11 +214,16 @@ fn request_body(
             link: link.as_deref(),
         })
         .collect();
+    // The host the links are on, named in the offer as the only place to send the download credential.
+    let host = gateway
+        .and_then(|g| g.split("://").nth(1))
+        .map(|rest| rest.split('/').next().unwrap_or(rest));
     let text = offer_text_with_files(
         task["title"].as_str().unwrap_or_default(),
         task["instructions"].as_str().unwrap_or_default(),
         task["acceptance_criteria"].as_str(),
         &files,
+        host,
         link,
     );
     let task_id = task["task_id"].as_str().unwrap_or_default();

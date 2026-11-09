@@ -122,7 +122,7 @@ Not built yet. Outbound offers (step 12), reading back (step 13) and files (step
 Following [decision 121](PRODUCT.md#decisions-needed):
 - **Podster never fetches a file a remote agent names.** It never takes inline bytes, and never hands out a public URL.
 - **Inbound:** bytes come only through `create_upload`, and `SubmitTask` names them. URL parts are kept as external links.
-- **Outbound:** an offer's text lists the task's input files that the agent can see, each with its name, ID and a gateway download link, which the agent opens with its own credential. A file that isn't ready yet is listed without a link.
+- **Outbound:** an offer's text lists the task's input files that the agent can see: each ready file with a gateway download link first, then its quoted name and ID, and each one still scanning without a link. Blocked, failed and removed files aren't listed. The link opens with the agent's MCP OAuth token or an Agent Auth token, sent only to the gateway's host. An `/a2a` token isn't accepted there yet. `GET /a2a/files/{workspace}/{file}`, for `/a2a` tokens, is owed before M3's gate.
 - **Read back:** a remote task's artifact URL parts become a submission's links, after the same check. A status message's URL parts become links in the thread message, and a URL that fails the check is dropped.
 
 ## How it's been tested

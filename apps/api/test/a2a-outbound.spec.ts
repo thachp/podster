@@ -429,14 +429,22 @@ describe("input files (step 14)", () => {
     const task = await offer(room, agent.id);
     const ready = await inputFile(room, "brief.pdf", "ready");
     const scanning = await inputFile(room, "data.csv", "scanning");
-    for (const object of [ready, scanning]) await must(OWNER, "POST", `/v1/workspaces/${room}/files/${object}/links`, { task_id: task.id });
+    const blocked = await inputFile(room, "flagged.txt", "ready");
+    for (const object of [ready, scanning, blocked]) await must(OWNER, "POST", `/v1/workspaces/${room}/files/${object}/links`, { task_id: task.id });
+    await roomSql(room, "UPDATE stored_object SET state = 'blocked' WHERE id = ?", blocked);
     const [attempt] = await attempts(room, task.id);
     expect((await consume(room, attempt)).body.outcome).toBe("ack");
     const [request] = await sentTo(url);
     const text = JSON.parse(request.body).params.message.parts[0].text as string;
     expect(text).toContain("## Input files");
-    expect(text).toContain(`- brief.pdf (${ready}): http://localhost:8787/v1/files/${room}/${ready}`);
-    expect(text).toContain(`- data.csv (${scanning}): not ready to download yet`);
+    expect(text).toContain(`- http://localhost:8787/v1/files/${room}/${ready} "brief.pdf" (${ready})`);
+    expect(text).toContain(`- not ready yet: "data.csv" (${scanning})`);
+    // Which credential, and the one host to send it to. An /a2a token doesn't work there.
+    expect(text).toContain("MCP OAuth token");
+    expect(text).toContain("Send it only to localhost:8787. A token for /a2a isn't accepted for downloads.");
+    // A blocked file isn't named at all.
+    expect(text).not.toContain("flagged.txt");
+    expect(text).not.toContain(blocked);
     // Only Podster links: no bytes, and nothing public.
     expect(JSON.parse(request.body).params.message.parts).toHaveLength(1);
     expect(text).not.toContain("contents of");

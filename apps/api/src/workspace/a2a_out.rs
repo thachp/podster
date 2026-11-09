@@ -193,7 +193,7 @@ pub(super) fn begin(sql: &SqlStorage, identity: &Identity, body: &Value, now: i6
 }
 
 /// The task's input files as this agent may see them now (M3 step 14, decision 121): each one's ID, name, and download path
-/// once it can be downloaded. A file hidden from the agent isn't named.
+/// once it's ready. A file hidden from the agent, or blocked, failed or removed, isn't named.
 fn input_files(sql: &SqlStorage, caller: &Caller, task: &str) -> R<Vec<Value>> {
     let linked = rows(
         sql,
@@ -206,7 +206,12 @@ fn input_files(sql: &SqlStorage, caller: &Caller, task: &str) -> R<Vec<Value>> {
         if let Some(file) =
             super::downloads::file_json(sql, caller, &super::downloads::file_row(sql, id)?)?
         {
-            files.push(json!({ "id": file["id"], "name": file["name"], "download_path": file["download_path"] }));
+            // Only a ready file, with its link, or one still scanning, without. Blocked, failed and removed files aren't named.
+            match file["state"].as_str() {
+                Some("ready") => files.push(json!({ "id": file["id"], "name": file["name"], "download_path": file["download_path"] })),
+                Some("scanning") => files.push(json!({ "id": file["id"], "name": file["name"], "download_path": null })),
+                _ => {}
+            }
         }
     }
     Ok(files)

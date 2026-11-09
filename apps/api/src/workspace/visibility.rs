@@ -489,11 +489,15 @@ fn land_test_command(sql: &SqlStorage) -> R<()> {
 /// How often a room checks that its discovery row is still in D1 as it wrote it (M4 step 12, the reconcile step 6's review
 /// asked for). A row lost or changed while the room's `written` copy still matches would otherwise never be written again.
 pub(super) const INDEX_VERIFY_MS: i64 = 6 * 60 * 60 * 1000;
+/// A confirmed tombstone changes only when the room writes something else, so it's checked weekly, which still repairs one that
+/// drifted or was deleted.
+pub(super) const TOMBSTONE_VERIFY_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// After a check fails, the next waits 5 s, doubling each time up to 30 minutes, plus up to a fifth more at random.
 pub(super) const VERIFY_RETRY_FIRST_MS: i64 = 5_000;
 pub(super) const VERIFY_RETRY_MAX_MS: i64 = 30 * 60 * 1000;
 /// The room's key-value storage holds the schedule, so it survives a restart and needs no schema change: when the next check is
-/// due, how many have failed in a row, and the cached row last confirmed as a tombstone.
+/// due, how many have failed in a row, and the cached row last confirmed as a tombstone, which is checked weekly until the room
+/// writes something else.
 pub(super) const VERIFY_NEXT_KEY: &str = "public_index_verify_next";
 pub(super) const VERIFY_FAILURES_KEY: &str = "public_index_verify_failures";
 pub(super) const VERIFIED_TOMBSTONE_KEY: &str = "public_index_verified_tombstone";
@@ -525,8 +529,8 @@ pub(super) fn index_to_check(sql: &SqlStorage) -> R<Option<String>> {
 }
 
 pub(super) enum IndexCheck {
-    /// D1 holds what the room wrote. `tombstone` is set when that's a row nobody can resolve, which needn't be checked again
-    /// until the room writes something else.
+    /// D1 holds what the room wrote. `tombstone` is set when that's a row nobody can resolve, which is checked weekly from
+    /// then until the room writes something else.
     Matches { tombstone: bool },
     /// It was missing or different, and is due to be written again.
     Repaired,

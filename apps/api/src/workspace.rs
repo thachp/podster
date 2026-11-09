@@ -3305,23 +3305,31 @@ impl Workspace {
         a2a_read::drain(&self.env, &sql, &workspace_id, now).await
     }
 
-    /// When the room's next discovery-row check is due, or `None` when there's nothing to check: no row yet, a write already
-    /// due, or a tombstone already confirmed. A room with no time yet gets one at random within the interval, so rooms that were
-    /// public before this deploy don't all check at once.
+    /// When the room's next discovery-row check is due, or `None` when there's nothing to check: no row yet, or a write already
+    /// due. A room with no time yet gets one at random within the interval, so rooms that were public before this deploy don't
+    /// all check at once. A confirmed tombstone waits a week; once the room writes something else, it's back within 6 hours.
     async fn index_check_due(&self, sql: &SqlStorage, now: i64) -> R<Option<i64>> {
         let Some(written) = visibility::index_to_check(sql)? else {
             return Ok(None);
         };
         let storage = self.state.storage();
-        if storage
+        let tombstone = storage
             .get::<String>(visibility::VERIFIED_TOMBSTONE_KEY)
             .await
             .ok()
-            .flatten()
-            .as_deref()
-            == Some(written.as_str())
-        {
-            return Ok(None);
+            .flatten();
+        if tombstone.is_some_and(|confirmed| confirmed != written) {
+            storage.delete(visibility::VERIFIED_TOMBSTONE_KEY).await?;
+            let soon = now + visibility::INDEX_VERIFY_MS;
+            let next = storage
+                .get::<i64>(visibility::VERIFY_NEXT_KEY)
+                .await
+                .ok()
+                .flatten();
+            if next.is_none_or(|next| next > soon) {
+                storage.put(visibility::VERIFY_NEXT_KEY, soon).await?;
+                return Ok(Some(soon));
+            }
         }
         if let Some(next) = storage
             .get::<i64>(visibility::VERIFY_NEXT_KEY)
@@ -3362,12 +3370,12 @@ impl Workspace {
                     .await
                     .map(|_| ());
                 if saved.is_ok() {
-                    saved = storage
-                        .put(
-                            visibility::VERIFY_NEXT_KEY,
-                            now + visibility::INDEX_VERIFY_MS,
-                        )
-                        .await;
+                    let wait = if confirmed.is_some() {
+                        visibility::TOMBSTONE_VERIFY_MS
+                    } else {
+                        visibility::INDEX_VERIFY_MS
+                    };
+                    saved = storage.put(visibility::VERIFY_NEXT_KEY, now + wait).await;
                 }
                 if let (Ok(()), Some(written)) = (&saved, confirmed) {
                     saved = storage

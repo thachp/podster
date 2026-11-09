@@ -1,7 +1,7 @@
 // The local gateway and API, shared by the journey and the accessibility checks. Everything lives in e2e/.local and is
 // thrown away, so each run starts empty.
 import { spawn, spawnSync } from "node:child_process";
-import { generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
@@ -70,7 +70,8 @@ export function prepareStack({ skipBuild = false, apiVars = {} } = {}) {
     JSON.stringify({
       ...apiBase,
       main: join(api, "build/index.js"),
-      vars: { ASSERTION_KEYS: JSON.stringify({ [kid]: publicKey.export({ format: "jwk" }).x }), ...apiVars },
+      // A throwaway Explore cursor key, so a local run can page past Explore's first page, as a deployment with its secret set can.
+      vars: { ASSERTION_KEYS: JSON.stringify({ [kid]: publicKey.export({ format: "jwk" }).x }), EXPLORE_CURSOR_KEY: randomBytes(32).toString("hex"), ...apiVars },
       d1_databases: apiBase.d1_databases.map((db) => ({ ...db, database_id: "e2e-api", migrations_dir: join(api, "migrations") })),
     }),
   );

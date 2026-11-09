@@ -284,6 +284,14 @@ cd e2e && node m4-staging.mjs --base-url https://gateway-staging.podster.dev --a
 
 `node run-m4-staging.mjs` rehearses it against the local stack, with public rooms on for that run only and the gateway's real limits, and `--public-rooms-off` checks that it stops when they're off.
 
+## Explore's cursor key
+
+`EXPLORE_CURSOR_KEY` seals Explore's cursors (M4 step 14): 64 hex characters, such as the output of `openssl rand -hex 32`. **The owner sets it**, and nobody else does. Until then Explore shows its first page only and refuses any cursor, so it's needed before `PUBLIC_ROOMS` is switched on. Changing it later only ends cursors already handed out.
+
+```bash
+cd apps/api && npx wrangler secret put EXPLORE_CURSOR_KEY --env staging
+```
+
 ## Checking uploads on staging
 
 `e2e/upload-check.mjs` sends real uploads down the deployed path, so it shows what the edge does with a chunked upload, which local runs can't. It needs a person's session cookie, and it leaves a room named "Upload check" behind.

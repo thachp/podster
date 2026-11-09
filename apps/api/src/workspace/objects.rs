@@ -7,7 +7,8 @@ use super::*;
 use crate::objects::{refusal, upload_not_found};
 use podster_core::files::{
     check_upload, expire_scan, fits_participant_quota, fits_room_quota, is_sha256, record_scan,
-    scan_database_fits, FileRefusal, ObjectState, ScanOutcome, UploadRequest, SCAN_DEADLINE_MS,
+    scan_database_fits, scan_send_backoff_ms, scans_to_queue, FileRefusal, ObjectState,
+    ScanOutcome, UploadRequest, ROOM_SCANS_QUEUED, SCAN_DEADLINE_MS, SCAN_WAIT_LIMIT_MS,
 };
 
 /// How long an upload may be started after it's created. Its reservation ends then too, whatever is under way. An attempt already
@@ -352,10 +353,12 @@ fn complete(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         .as_str()
         .ok_or_else(ApiError::invalid_argument)?;
     let state = ObjectState::Scanning.name();
+    // It waits for the room's turn on the scan queue: `scanning_since` is set when the room puts it there, and its hour starts
+    // then (M4 step 14).
     exec(
         sql,
-        "UPDATE stored_object SET state = ?, media_type = ?, stored_at = ?, scanning_since = ?, uploader_json = NULL, token_hash = '' WHERE id = ?",
-        vec![state.into(), media_type.into(), now.into(), now.into(), id.into()],
+        "UPDATE stored_object SET state = ?, media_type = ?, stored_at = ?, scanning_since = NULL, uploader_json = NULL, token_hash = '' WHERE id = ?",
+        vec![state.into(), media_type.into(), now.into(), id.into()],
     )?;
     audit_file(
         sql,
@@ -428,7 +431,9 @@ fn record_verdict(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     if outcome == ScanOutcome::NoKnownMalware && database.is_none() {
         return Err(ApiError::invalid_argument());
     }
-    let next = record_scan(state, outcome, int(&row["scanning_since"]), now).map_err(refusal)?;
+    // A verdict for a file still waiting its turn, such as an old job sent again, counts from now: it isn't late.
+    let since = row["scanning_since"].as_i64().unwrap_or(now);
+    let next = record_scan(state, outcome, since, now).map_err(refusal)?;
     // A repeat of what's settled changes nothing, and keeps the report that settled it.
     if next == state && state != ObjectState::Scanning {
         return Ok(json!({ "state": state.name() }));
@@ -465,16 +470,132 @@ fn record_verdict(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     Ok(json!({ "state": next.name() }))
 }
 
-/// Ends scans with no verdict after the hour. No verdict sends nothing, so this is what makes a stuck scan fail closed.
+/// A room's files on the shared scan queue now, and those waiting for its turn.
+fn scan_counts(sql: &SqlStorage) -> R<(usize, usize)> {
+    let found = rows(
+        sql,
+        "SELECT COUNT(scanning_since) AS queued, COUNT(*) - COUNT(scanning_since) AS waiting FROM stored_object WHERE state = 'scanning'",
+        vec![],
+    )?;
+    let count = |name: &str| found.first().map_or(0, |r| int(&r[name]).max(0) as usize);
+    Ok((count("queued"), count("waiting")))
+}
+
+/// Whether the room has a file waiting that it could put on the queue now.
+pub(super) fn scan_turn_due(sql: &SqlStorage) -> R<bool> {
+    let (queued, waiting) = scan_counts(sql)?;
+    Ok(scans_to_queue(queued, waiting) > 0)
+}
+
+/// One scan to send: no name or claimed type, as the queue's message carries.
+pub(super) struct QueuedScan {
+    pub id: String,
+    pub key: String,
+    pub size: u64,
+    pub sha256: String,
+    /// When its hour started. A scan sent again carries its first time, so the scanner's too-late skip matches the room's hour.
+    pub queued_at: i64,
+}
+
+/// Takes the room's next turns on the scan queue, oldest arrival first, up to `ROOM_SCANS_QUEUED` there at once, and starts
+/// each one's hour. The caller sends them after this commits, and gives back any it couldn't send.
+pub(super) fn take_scan_turns(sql: &SqlStorage, now: i64) -> R<Vec<QueuedScan>> {
+    let (queued, waiting) = scan_counts(sql)?;
+    let take = scans_to_queue(queued, waiting).min(ROOM_SCANS_QUEUED);
+    if take == 0 {
+        return Ok(Vec::new());
+    }
+    let found = rows(
+        sql,
+        "SELECT id, object_key, size, sha256 FROM stored_object WHERE state = 'scanning' AND scanning_since IS NULL ORDER BY stored_at, id LIMIT ?",
+        vec![(take as i64).into()],
+    )?;
+    let mut turns = Vec::new();
+    for row in &found {
+        let id = text(&row["id"]).unwrap_or_default();
+        exec(
+            sql,
+            "UPDATE stored_object SET scanning_since = ? WHERE id = ? AND state = 'scanning' AND scanning_since IS NULL",
+            vec![now.into(), id.as_str().into()],
+        )?;
+        turns.push(QueuedScan {
+            id,
+            key: text(&row["object_key"]).unwrap_or_default(),
+            size: int(&row["size"]).max(0) as u64,
+            sha256: text(&row["sha256"]).unwrap_or_default(),
+            queued_at: now,
+        });
+    }
+    Ok(turns)
+}
+
+/// How long a queued scan may go without a verdict before it's sent once more. Long, since a room can't tell a send that
+/// never arrived from one waiting behind others, and a duplicate is scanned in full.
+pub(super) const SCAN_RESEND_AFTER_MS: i64 = 30 * 60 * 1000;
+/// The room's key-value storage marks a scan already sent once more, so it's never sent a third time.
+const SCAN_RESENT_PREFIX: &str = "scan_resent:";
+
+/// Queued scans with no verdict after `SCAN_RESEND_AFTER_MS`, oldest first, up to the room's share.
+fn stale_scan_turns(sql: &SqlStorage, now: i64) -> R<Vec<QueuedScan>> {
+    let found = rows(
+        sql,
+        "SELECT id, object_key, size, sha256, scanning_since FROM stored_object INDEXED BY stored_object_scanning WHERE state = 'scanning' AND scanning_since <= ? ORDER BY scanning_since, id LIMIT ?",
+        vec![(now - SCAN_RESEND_AFTER_MS).into(), (ROOM_SCANS_QUEUED as i64).into()],
+    )?;
+    Ok(found
+        .iter()
+        .map(|row| QueuedScan {
+            id: text(&row["id"]).unwrap_or_default(),
+            key: text(&row["object_key"]).unwrap_or_default(),
+            size: int(&row["size"]).max(0) as u64,
+            sha256: text(&row["sha256"]).unwrap_or_default(),
+            queued_at: int(&row["scanning_since"]),
+        })
+        .collect())
+}
+
+/// When the next queued scan reaches `SCAN_RESEND_AFTER_MS` with no verdict, for the alarm. Only scans not there yet count,
+/// so one already past it, sent again or not, never brings the alarm back in a loop.
+pub(super) fn next_scan_resend(sql: &SqlStorage, now: i64) -> R<Option<i64>> {
+    Ok(rows(
+        sql,
+        "SELECT MIN(scanning_since) AS first FROM stored_object INDEXED BY stored_object_scanning WHERE state = 'scanning' AND scanning_since > ?",
+        vec![(now - SCAN_RESEND_AFTER_MS).into()],
+    )?
+    .first()
+    .filter(|row| row["first"].is_number())
+    .map(|row| int(&row["first"]) + SCAN_RESEND_AFTER_MS))
+}
+
+/// A turn whose message couldn't be sent waits again, so the next alarm tries it.
+pub(super) fn give_back_scan_turn(sql: &SqlStorage, id: &str, at: i64) -> R<()> {
+    exec(
+        sql,
+        "UPDATE stored_object SET scanning_since = NULL WHERE id = ? AND state = 'scanning' AND scanning_since = ?",
+        vec![id.into(), at.into()],
+    )
+}
+
+/// Ends scans with no verdict after the hour. No verdict sends nothing, so this is what makes a stuck scan fail closed. A file
+/// that waited a day for its room's turn fails closed the same way.
 fn expire_overdue_scans(sql: &SqlStorage, now: i64) -> R<()> {
-    let overdue = rows(
+    let mut overdue = rows(
         sql,
         "SELECT id, scanning_since FROM stored_object INDEXED BY stored_object_scanning WHERE state = 'scanning' AND scanning_since <= ? ORDER BY scanning_since LIMIT ?",
         vec![(now - SCAN_DEADLINE_MS).into(), EXPIRED_SCANS_PER_ALARM.into()],
     )?;
+    overdue.extend(rows(
+        sql,
+        "SELECT id, NULL AS scanning_since FROM stored_object WHERE state = 'scanning' AND scanning_since IS NULL AND stored_at <= ? ORDER BY stored_at LIMIT ?",
+        vec![(now - SCAN_WAIT_LIMIT_MS).into(), EXPIRED_SCANS_PER_ALARM.into()],
+    )?);
     for row in &overdue {
         let id = text(&row["id"]).unwrap_or_default();
-        let next = expire_scan(ObjectState::Scanning, int(&row["scanning_since"]), now);
+        // A file that never got its turn has no hour of its own, and is late by the day it waited.
+        let next = match row["scanning_since"].as_i64() {
+            Some(since) => expire_scan(ObjectState::Scanning, since, now),
+            None => ObjectState::Failed,
+        };
         exec(
             sql,
             "UPDATE stored_object SET state = ?, scanned_at = ? WHERE id = ?",
@@ -505,17 +626,24 @@ fn expire_overdue_scans(sql: &SqlStorage, now: i64) -> R<()> {
     Ok(())
 }
 
-/// When the room next has a scan to end, if any.
+/// When the room next has a scan to end, if any: an hour after the first file went on the queue, or a day after the first
+/// still waiting arrived.
 pub(super) fn next_scan_expiry(sql: &SqlStorage, now: i64) -> R<Option<i64>> {
-    let found = rows(
-        sql,
-        "SELECT MIN(scanning_since) AS first FROM stored_object INDEXED BY stored_object_scanning WHERE state = 'scanning'",
-        vec![],
-    )?;
-    Ok(found
-        .first()
-        .filter(|row| row["first"].is_number())
-        .map(|row| (int(&row["first"]) + SCAN_DEADLINE_MS).max(now + EXPIRY_REARM_MS)))
+    let first = |query: &str| -> R<Option<i64>> {
+        Ok(rows(sql, query, vec![])?
+            .first()
+            .filter(|row| row["first"].is_number())
+            .map(|row| int(&row["first"])))
+    };
+    let queued = first("SELECT MIN(scanning_since) AS first FROM stored_object INDEXED BY stored_object_scanning WHERE state = 'scanning'")?
+        .map(|at| at + SCAN_DEADLINE_MS);
+    let waiting = first("SELECT MIN(stored_at) AS first FROM stored_object WHERE state = 'scanning' AND scanning_since IS NULL")?
+        .map(|at| at + SCAN_WAIT_LIMIT_MS);
+    Ok(match (queued, waiting) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+    .map(|at| at.max(now + EXPIRY_REARM_MS)))
 }
 
 impl Workspace {
@@ -527,6 +655,174 @@ impl Workspace {
             return Ok(());
         }
         transaction_sync(&self.state, move || expire_overdue_scans(&sql, now_ms()))
+    }
+
+    /// Puts the room's next files on the scan queue, as many as its share allows, after the turns commit. One that couldn't be
+    /// sent waits again. Logs IDs only.
+    pub(super) async fn queue_scan_turns(&self) {
+        let sql = self.state.storage().sql();
+        if !matches!(store::is_initialized(&sql), Ok(true))
+            || !matches!(store::needs_migration(&sql), Ok(false))
+        {
+            return;
+        }
+        self.clear_settled_resend_markers(&sql).await;
+        let now = now_ms();
+        // After a send failed, the queue gets a rest before the room asks again.
+        if now < self.scan_send_retry_at.get() {
+            return;
+        }
+        let out: Rc<RefCell<Vec<QueuedScan>>> = Rc::new(RefCell::new(Vec::new()));
+        let slot = out.clone();
+        let taken = {
+            let sql = sql.clone();
+            transaction_sync(&self.state, move || {
+                *slot.borrow_mut() = take_scan_turns(&sql, now)?;
+                Ok(())
+            })
+        };
+        if let Err(error) = taken {
+            console_error!("couldn't take scan turns: {:?}", error.code());
+            return;
+        }
+        let turns = out.take();
+        let room = room_id(&sql).unwrap_or_default();
+        let mut turns = turns.into_iter();
+        while let Some(turn) = turns.next() {
+            if self.send_scan(&room, &turn).await {
+                continue;
+            }
+            // The first failure ends the pass: this turn and the ones not yet sent wait again, and the queue gets a rest.
+            for back in std::iter::once(turn).chain(turns.by_ref()) {
+                let sql = sql.clone();
+                let id = back.id.clone();
+                if let Err(error) =
+                    transaction_sync(&self.state, move || give_back_scan_turn(&sql, &id, now))
+                {
+                    console_error!("couldn't give back a scan turn: {:?}", error.code());
+                }
+            }
+            self.scan_send_failed(&room, now);
+            return;
+        }
+        // A turn held a while with no verdict may never have reached the queue, as when the room was evicted between taking
+        // it and sending it. It's sent once more, and a second verdict for it changes nothing.
+        let stale = stale_scan_turns(&sql, now).unwrap_or_default();
+        for turn in stale {
+            let marker = format!("{SCAN_RESENT_PREFIX}{}", turn.id);
+            if self
+                .state
+                .storage()
+                .get::<i64>(&marker)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                continue;
+            }
+            if !self.send_scan(&room, &turn).await {
+                self.scan_send_failed(&room, now);
+                return;
+            }
+            if let Err(error) = self.state.storage().put(&marker, now).await {
+                console_error!("couldn't record a scan sent again: {:?}", error);
+            }
+        }
+        self.scan_send_failures.set(0);
+        self.scan_send_retry_at.set(0);
+    }
+
+    /// Whether a queued scan is past `SCAN_RESEND_AFTER_MS` with no re-send yet, so the alarm comes back for it rather than
+    /// waiting for another reason to run.
+    pub(super) async fn scan_resend_pending(&self, sql: &SqlStorage, now: i64) -> bool {
+        let Ok(stale) = stale_scan_turns(sql, now) else {
+            return false;
+        };
+        for turn in stale {
+            let marker = format!("{SCAN_RESENT_PREFIX}{}", turn.id);
+            if self
+                .state
+                .storage()
+                .get::<i64>(&marker)
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Deletes the re-send marker of every file that's settled, by a verdict or an expiry, so markers don't pile up.
+    async fn clear_settled_resend_markers(&self, sql: &SqlStorage) {
+        let Ok(found) = self
+            .state
+            .storage()
+            .list_with_options(ListOptions::new().prefix(SCAN_RESENT_PREFIX))
+            .await
+        else {
+            return;
+        };
+        for key in found.keys() {
+            let Some(key) = key.ok().and_then(|k| k.as_string()) else {
+                continue;
+            };
+            let id = key.trim_start_matches(SCAN_RESENT_PREFIX);
+            let scanning = rows(
+                sql,
+                "SELECT 1 FROM stored_object WHERE id = ? AND state = 'scanning'",
+                vec![id.into()],
+            )
+            .is_ok_and(|r| !r.is_empty());
+            if !scanning {
+                if let Err(error) = self.state.storage().delete(&key).await {
+                    console_error!("couldn't clear a scan's re-send marker: {:?}", error);
+                }
+            }
+        }
+    }
+
+    /// Sends one scan job. Test builds can make every send fail, to check what a failed send leaves.
+    async fn send_scan(&self, room: &str, turn: &QueuedScan) -> bool {
+        #[cfg(feature = "failpoints")]
+        {
+            let sql = self.state.storage().sql();
+            let failing = rows(&sql, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_scan_send_fails'", vec![])
+                .is_ok_and(|found| !found.is_empty());
+            if failing {
+                return false;
+            }
+        }
+        crate::objects::queue_scan(
+            &self.env,
+            room,
+            &turn.id,
+            &turn.key,
+            turn.size,
+            &turn.sha256,
+            turn.queued_at,
+        )
+        .await
+    }
+
+    /// Backs off after a failed send: 5 seconds, doubling to 5 minutes. A restart forgets it, as it forgets sweep failures.
+    fn scan_send_failed(&self, room: &str, now: i64) {
+        let failures = self.scan_send_failures.get().saturating_add(1);
+        self.scan_send_failures.set(failures);
+        let wait = scan_send_backoff_ms(failures);
+        self.scan_send_retry_at.set(now + wait);
+        console_error!(
+            "{}",
+            json!({ "at": "upload.scan_not_queued", "room": room, "failures": failures })
+        );
+    }
+
+    /// When the room may next send a scan, for the alarm.
+    pub(super) fn scan_send_allowed_at(&self) -> i64 {
+        self.scan_send_retry_at.get()
     }
 
     pub(super) fn scan_verdict(&self, body: Value) -> R<Value> {

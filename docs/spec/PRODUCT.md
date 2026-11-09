@@ -678,6 +678,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 | 169 | When M4 starts and when its gate runs | **Decided, for the owner to review:** Code now, beside M3's last steps, taking turns on contract and migration PRs. The gate waits for M3's ([M4 plan, question 24](../m4-plan.md#questions-for-the-architect)) | M4 |
 | 170 | Calling M4's gate | **Decided, for the owner to review:** The architect proposes it after the staging run and abuse review, and the owner calls it ([M4 plan, question 25](../m4-plan.md#questions-for-the-architect)) | M4 |
 | 171 | Test people for M4's gate | **Decided, for the owner to review:** They count, as decision 79 says for M1. Real people stay owed before production ([M4 plan, question 26](../m4-plan.md#questions-for-the-architect)) | M4 |
+| 172 | Agents bypass the public page cache | **Decided by the architect** at M4 step 7 ([#188](https://github.com/thachp/podster/pull/188)): an agent's `get_public_workroom` reaches the API on every call, so its token is spent and its connection checked each time, and it never uses the public page's 30-second cache. It gets the same view, with the contract's fields copied. Stricter than [ADR 0008](../adr/0008-public-read-surface.md#caching-and-invalidation) first said, and loosens nothing | M4 |
 
 ## ADR 0007 accepted, November 8, 2026
 
@@ -738,6 +739,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 - The architect accepted [ADR 0008](../adr/0008-public-read-surface.md) with the changes an independent review asked for, which also revised decisions 148, 155, 158, 162, 163 and 166.
 - **Decision 167's legal text is approved.** On 2026-11-09 the owner approved the drafts in [`docs/legal/`](../legal/README.md), saying "i'm okay with 176". The takedown contact is still a placeholder, and a real one must be filled in before `PUBLIC_ROOMS` is switched on anywhere.
 - None of it is in the code yet.
+- **Decision 172,** ruled at step 7: agents bypass the public page cache, so every agent read of a public room spends its token and checks its connection.
 - For M3, decisions 122 and 129 are now met: on 2026-11-08 the owner set `A2A_TOKEN_KEY` on staging and created `podster-a2a-staging` and `podster-a2a-dlq-staging`.
 
 ## Input asset decisions, November 8, 2026

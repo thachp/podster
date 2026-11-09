@@ -698,7 +698,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 
 - The two-person kernel journey ran on staging with the owner and a second person, each signed in with their own GitHub account. It got 52 passed, 0 failed, 0 gaps, against `main` at `1d28ee2`, and the AC-19 probe passed right after on the same deployment. [m0-gate.md](../m0-gate.md#journey-on-staging-with-two-people) has the run.
 - So M0 has passed on a deployment, not only by the owner's acceptance. AC-16 closes on local proof by ruling, and AC-20, AC-21 and the partial items' other halves are still local only, as m0-gate.md lists.
-- That closes the two-person journey that decisions 79, 131, 145 and 171 left owed before production. The rest of what they owe stays open: decision 23 and gap 8 with an OAuth sign-up, ADR 0001's probes, a second real person in the browser, and each later milestone's own real-people checks.
+- That closes the two-person journey that decisions 79, 131, 145 and 171 left owed before production. It also passes decision 23 and m0-gate.md's gap 8 on a deployment: the owner confirmed that the second person's sign-in was their first on staging, so an OAuth sign-up made the one personal organization the run read. The rest of what they owe stays open: ADR 0001's probes, a second real person in the browser, and each later milestone's own real-people checks.
 
 ## M2 gate, November 8, 2026
 

@@ -1475,7 +1475,48 @@ impl Principal {
                 }
                 return Ok(claim);
             }
-            "/internal/a2a-endpoint-pin" => return a2a_endpoint::pin(&sql),
+            "/internal/a2a-endpoint-pin" => {
+                #[cfg(feature = "failpoints")]
+                if !rows(&sql, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_fail_pin'", vec![])?.is_empty() {
+                    return Err(ApiError::internal("injected pin failure"));
+                }
+                let pin = a2a_endpoint::pin(&sql)?;
+                let answer = |active: bool, reason: Option<&str>| {
+                    let mut out =
+                        json!({ "active": active, "url": pin["url"], "version": pin["version"] });
+                    if let Some(reason) = reason {
+                        out["reason"] = json!(reason);
+                    }
+                    out
+                };
+                if pin["active"] != Value::Bool(true) {
+                    return Ok(answer(false, None));
+                }
+                // As a claim does: whoever set the endpoint must still be in the agent's organization, and if that can't be
+                // told, the endpoint isn't in force. Deleting the registration is left to the next claim, which does it.
+                let setter = &pin["setter"];
+                let (person, org) = (
+                    setter["person"].as_str().unwrap_or_default(),
+                    setter["org"].as_str().unwrap_or_default(),
+                );
+                if !crate::valid_id(person) || !crate::valid_id(org) {
+                    return Ok(answer(false, Some("setter_unknown")));
+                }
+                return Ok(
+                    match departed_since(
+                        &self.env,
+                        person,
+                        org,
+                        setter["since"].as_i64().unwrap_or(0),
+                    )
+                    .await
+                    {
+                        Ok(false) => answer(true, None),
+                        Ok(true) => answer(false, Some("setter_departed")),
+                        Err(_) => answer(false, Some("setter_unknown")),
+                    },
+                );
+            }
             "/internal/a2a-endpoint-report" => {
                 let body: Value = req.json().await?;
                 // Tests can't otherwise make a report fail after a send. It fails once, then the table is gone.

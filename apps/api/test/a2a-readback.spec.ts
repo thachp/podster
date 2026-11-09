@@ -744,7 +744,7 @@ describe("a server that answers once done (decision 174)", () => {
       expect(await roomSql(room, "SELECT attempt_id FROM a2a_held WHERE task_id = ?", taskId)).toEqual([{ attempt_id: attemptId }]);
     };
 
-    for (const status of [500, 409]) {
+    for (const status of [500, 400]) {
       it(`a held submit that fails with ${status} after writing is undone, and the accept stands with the hold`, async () => {
         const { room, task: t, attempt, agent } = await sentOffer(`/a2a/blocking-${++counter}`);
         await failHeldSubmit(room, status);
@@ -761,6 +761,39 @@ describe("a server that answers once done (decision 174)", () => {
       await must(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: t.version });
       await unchanged(room, t.id, attempt.id);
     });
+
+    it("submits nothing if the endpoint's setter has left the agent's organization since, and the hold stays", async () => {
+      const room = await newRoom();
+      const linker: Who = { id: `per_rb_linker_${++counter}`, kind: "person", org: ORG, adminOrgs: [] };
+      const { agent } = await target(room, `/a2a/blocking-${++counter}`, { linker: linker.id });
+      const t = await offer(room, agent.id);
+      const [attempt] = await attempts(room, t.id);
+      expect((await consume(room, attempt)).body.outcome).toBe("ack");
+      expect(await roomSql(room, "SELECT attempt_id FROM a2a_held WHERE task_id = ?", t.id)).toEqual([{ attempt_id: attempt.id }]);
+      // The gateway's own removal says so, as it does when a member is removed.
+      await must({ ...linker, departure: { person: linker.id, org: ORG, left_at: Date.now() } }, "POST", "/v1/org-departures", {});
+      await must(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: t.version });
+      await unchanged(room, t.id, attempt.id);
+    });
+
+    it("submits nothing when the agent's Principal can't answer for its endpoint", async () => {
+      const { room, task: t, attempt, agent } = await sentOffer(`/a2a/blocking-${++counter}`);
+      const principal = BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(agent.id));
+      await runInDurableObject(principal, (_: any, state: any) => state.storage.sql.exec("CREATE TABLE test_fail_pin (x)"));
+      expect((await api(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: t.version })).status).toBe(200);
+      await unchanged(room, t.id, attempt.id);
+    });
+
+    for (const kind of ["archive", "remove"]) {
+      it(`submits nothing if the room is ${kind === "archive" ? "archived" : "rid of the agent"} after the accept commits and before the submit`, async () => {
+        const { room, task: t, attempt, agent } = await sentOffer(`/a2a/blocking-${++counter}`);
+        await roomSql(room, `CREATE TABLE test_before_held_submit (kind TEXT); INSERT INTO test_before_held_submit VALUES ('${kind}')`);
+        const accepted = await api(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: t.version });
+        expect(accepted.status).toBe(200);
+        // The accept committed before the change. The submit's own transaction checks the room and the agent again.
+        await unchanged(room, t.id, attempt.id);
+      });
+    }
 
     it("submits nothing if the endpoint was switched off since", async () => {
       const { room, task: t, attempt, agent } = await sentOffer(`/a2a/blocking-${++counter}`);

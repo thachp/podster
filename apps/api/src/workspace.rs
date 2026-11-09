@@ -2733,6 +2733,20 @@ impl Workspace {
                     && pin["url"].as_str() == Some(held.url.as_str())
                     && pin["version"].as_i64() == Some(held.version) =>
             {
+                // A test can change the room between the accept and the submit, so the submit's own checks are seen to hold.
+                #[cfg(feature = "failpoints")]
+                if let Some(kind) = rows(&sql, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_before_held_submit'", vec![])
+                    .ok()
+                    .filter(|r| !r.is_empty())
+                    .and_then(|_| rows(&sql, "SELECT kind FROM test_before_held_submit", vec![]).ok())
+                    .and_then(|r| r.first().and_then(|r| text(&r["kind"])))
+                {
+                    let _ = match kind.as_str() {
+                        "archive" => exec(&sql, "UPDATE workspace SET status = ?", vec![ARCHIVED.into()]),
+                        "remove" => exec(&sql, "UPDATE member SET revoked_at = ? WHERE principal_id = ?", vec![now_ms().into(), identity.id.as_str().into()]),
+                        _ => Ok(()),
+                    };
+                }
                 let (identity, task_id, attempt) =
                     (identity.clone(), task_id.to_string(), held.attempt.clone());
                 let submitted = Rc::new(RefCell::new(false));

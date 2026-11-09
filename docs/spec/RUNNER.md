@@ -35,7 +35,7 @@ sequenceDiagram
     R->>P: get_task
     P-->>R: Instructions, marked as untrusted
     R->>R: Apply local run policy and budget
-    Note over R: Eligible tasks continue automatically; out-of-policy work stops
+    Note over R: Eligible tasks continue automatically. Out-of-policy work stops
     R->>P: accept_task (version, idempotency key)
     R->>P: Resolve room repository and scoped task access
     R->>G: Clone verified repository and pin base commit

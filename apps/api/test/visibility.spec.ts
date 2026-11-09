@@ -357,7 +357,14 @@ describe("the discovery index (step 6)", () => {
     await inRoom(id, (sql) => sql.exec("CREATE TABLE test_index_inflight (x INTEGER)"));
     await publish(id);
     const seq = await inRoom(id, (sql) => sql.exec("SELECT seq FROM event WHERE type = 'room.published'").one().seq);
-    await drain(id);
+    // The alarm may already be running on its own, and while it is there's none to run, so this runs alarms until the
+    // second write has landed, for at most 5 s.
+    for (let n = 0; n < 250; n++) {
+      await runDurableObjectAlarm(stub(id));
+      const now = await due(id);
+      if (now.length === 1 && now[0].seq === seq + 1 && now[0].pending === 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
     // The first write carried the publish's seq. The row stayed due, so a second write carried the newer one.
     expect(await due(id)).toEqual([{ seq: seq + 1, pending: 0 }]);
     expect((await indexRow(id)).updated_seq).toBe(seq + 1);

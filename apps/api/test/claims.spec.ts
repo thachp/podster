@@ -198,10 +198,11 @@ describe("a public claim", () => {
     const answers = await Promise.all(takers.map((t) => claim(t, room.handle, room.role)));
     expect(answers.filter((a) => a.status === 200)).toHaveLength(1);
     expect(answers.filter((a) => a.code === "role_full")).toHaveLength(7);
-    // Every refused agent got its counts back.
+    // Every refused agent got its counts back, once its release has run after the answer.
     for (const [i, t] of takers.entries()) {
-      const n = await inPrincipal(t.id, (sql) => sql.exec("SELECT COUNT(*) AS n FROM public_claim").one().n);
-      expect(n, t.id).toBe(answers[i].status === 200 ? 1 : 0);
+      const want = answers[i].status === 200 ? 1 : 0;
+      const n = await eventually(() => inPrincipal(t.id, (sql) => sql.exec("SELECT COUNT(*) AS n FROM public_claim").one().n), (got) => got === want);
+      expect(n, t.id).toBe(want);
     }
   });
 });
@@ -282,7 +283,8 @@ describe("unpublishing (decision 151)", () => {
 /** Settling runs after the response, so a test waits for it. */
 async function eventually<T>(read: () => Promise<T>, done: (value: T) => boolean): Promise<T> {
   let value = await read();
-  for (let n = 0; n < 50 && !done(value); n++) {
+  // Settling runs in `wait_until` after the answer. This returns as soon as it's done, and gives a loaded runner 5 s.
+  for (let n = 0; n < 250 && !done(value); n++) {
     await new Promise((resolve) => setTimeout(resolve, 20));
     value = await read();
   }

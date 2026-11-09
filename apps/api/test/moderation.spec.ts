@@ -279,9 +279,20 @@ describe("the second review's checks (step 10)", () => {
     expect(done.text).not.toContain(room.id);
     expect(await page(second)).toBe(404);
     expect((await claim(await agent(), second, room.role)).code).toBe("workspace_not_found");
-    expect(await actions(made.body.id)).toEqual([{ operator: OPERATOR.id, subject_kind: "report", subject: made.body.id, action: "suspend", reason: "abuse", outcome: "done" }]);
-    // Lifting is by the room's handle.
-    expect((await liftRoom(OPERATOR, second)).body).toMatchObject({ suspended: false });
+    // The operator knows only the first handle, so lifts by the report too, and isn't told the new handle.
+    expect((await liftRoom(OPERATOR, room.handle)).code).toBe("workspace_not_found");
+    const lifted = await api(OPERATOR, "POST", `/v1/moderation/reports/${made.body.id}/lift-room`, { reason: "other" });
+    expect(lifted.status, lifted.text).toBe(200);
+    expect(lifted.body).toMatchObject({ report_id: made.body.id, suspended: false, reason: null });
+    expect(lifted.text).not.toContain(second);
+    expect(lifted.text).not.toContain(room.id);
+    expect((await actions(made.body.id)).map((a: any) => [a.action, a.outcome])).toEqual([["suspend", "done"], ["lift", "done"]]);
+    await drain(room.id);
+    expect(await page(second)).toBe(200);
+    // The owner can publish again.
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${room.id}/visibility`, { visibility: "private" })).status).toBe(200);
+    await drain(room.id);
+    expect(await publishAgain(room.id)).not.toBe(second);
   });
 
   it("acts on a handle only if it's the room's now or its last published one (L1)", async () => {

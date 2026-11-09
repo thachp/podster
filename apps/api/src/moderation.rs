@@ -286,7 +286,8 @@ async fn suspend_room(
     let mut response = match answered {
         Ok(response) => response,
         Err(error) => {
-            finish(env, seq, error.code().unwrap_or("internal_error")).await;
+            // The room's answer was lost: the action may have committed, so it's no refusal.
+            finish(env, seq, "unknown").await;
             return Err(error);
         }
     };
@@ -333,13 +334,14 @@ pub async fn set_room_suspension(
     }
 }
 
-/// `POST /v1/moderation/reports/{report}/suspend-room { reason }`: an operator suspends the room a report was about, found
-/// from the report on the server, so it works after the owner made the room private or published it again under a new
-/// handle. The room's internal ID is never shown.
+/// `POST /v1/moderation/reports/{report}/suspend-room` or `/lift-room`, `{ reason }`: an operator suspends or lifts the
+/// room a report was about, found from the report on the server, so it works after the owner made the room private or
+/// published it again under a new handle. Neither the room's internal ID nor its handle is shown.
 pub async fn suspend_room_by_report(
     env: &Env,
     caller: &Caller,
     report: &str,
+    suspended: bool,
     body: Option<&str>,
 ) -> R<Response> {
     require_operator(env, caller)?;
@@ -357,7 +359,7 @@ pub async fn suspend_room_by_report(
         .ok_or_else(ApiError::not_found)?
         .to_string();
     match suspend_room(
-        env, &caller.id, &workspace, None, "report", report, true, reason,
+        env, &caller.id, &workspace, None, "report", report, suspended, reason,
     )
     .await?
     {
@@ -389,7 +391,12 @@ pub async fn set_agent_suspension(
         match principal::set_public_claims_suspension(env, agent, suspended, reason.name()).await {
             Ok(answer) => answer,
             Err(error) => {
-                finish(env, seq, error.code().unwrap_or("internal_error")).await;
+                // Only the Principal's own refusal is one. Anything else may have landed.
+                let outcome = match error.code() {
+                    Some("agent_not_found") => "agent_not_found",
+                    _ => "unknown",
+                };
+                finish(env, seq, outcome).await;
                 return Err(error);
             }
         };

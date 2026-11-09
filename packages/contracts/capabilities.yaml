@@ -64,6 +64,7 @@ person_only:
   - listReports
   - suspendRoomPublicSurface
   - suspendRoomByReport
+  - liftRoomByReport
   - liftRoomSuspension
   - suspendAgentPublicClaims
   - liftAgentPublicClaimsSuspension

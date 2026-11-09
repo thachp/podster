@@ -257,6 +257,8 @@ cd apps/api && npx wrangler secret put A2A_TOKEN_KEY --env staging
 
 `OPERATORS` names Podster's operators (M4 step 10, decision 158): their person IDs, separated by commas. An operator can suspend and lift a room's public surface and an agent's public claims, and reads reports. **The owner names them and runs this**, and nobody else does. It's unset until then, and while it's unset nobody is an operator, so every moderation route answers `not_allowed`.
 
+Operators work from `/moderation` on the dashboard. For anyone else, that page answers not found.
+
 ```bash
 cd apps/api && npx wrangler secret put OPERATORS --env staging
 ```

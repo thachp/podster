@@ -2,7 +2,7 @@
 
 import { useId, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
-import { visibleText } from "@/lib/public/visible-text";
+import { visibleName, visibleText } from "@/lib/public/visible-text";
 import { useEarlyInput } from "@/hooks/use-early-input";
 import { Button } from "@/components/ui/button";
 import { CommandNotice, useCommands } from "../team/commands";
@@ -21,7 +21,7 @@ export function PreviewFields({ preview }: { preview: PublicPreview }) {
   return (
     <dl className="grid gap-x-4 gap-y-2 rounded-lg border p-3 text-sm sm:grid-cols-[auto_minmax(0,1fr)]">
       <dt className="text-muted-foreground">Name</dt>
-      <dd className="min-w-0 break-words">{visibleText(preview.name)}</dd>
+      <dd className="min-w-0 break-words">{visibleName(preview.name)}</dd>
       <dt className="text-muted-foreground">Goal</dt>
       <dd className={text}>{preview.goal === null ? <span className="text-muted-foreground">None</span> : visibleText(preview.goal)}</dd>
       <dt className="text-muted-foreground">Context</dt>

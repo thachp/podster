@@ -1,8 +1,19 @@
 /**
  * Owner text as it's shown, on the public room page and in the owner's preview of it alike, so what the owner confirms is
- * what anyone reads (M4 step 11). Removes control and invisible format characters, which could make text read as something
- * else: bidirectional overrides such as U+202E, zero-width characters such as U+200B, and tag characters. It keeps line
- * breaks and tabs, which Markdown needs, and the joiners U+200C and U+200D, which scripts such as Persian need.
+ * what anyone reads (M4 step 11). Removes what could make text read as something else or look empty while it isn't:
+ * control and format characters, such as the bidirectional override U+202E, zero-width U+200B and tag characters; every
+ * Unicode Default_Ignorable code point, such as the Hangul filler U+3164, variation selectors and the combining grapheme
+ * joiner U+034F; and the blank Braille pattern U+2800, which isn't ignorable but shows as nothing. It keeps line breaks and
+ * tabs, which Markdown needs, and the joiners U+200C and U+200D, which scripts such as Persian need.
  * Applied before escaping and before Markdown.
  */
-export const visibleText = (text: string) => text.replace(/(?![\n\t‌‍])[\p{Cc}\p{Cf}]/gu, "");
+export const visibleText = (text: string) => text.replace(/(?![\n\t‌‍])[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}⠀]/gu, "");
+
+/**
+ * A room's name as shown: its visible text, or "Unnamed" when that would still look empty, so a page never has a blank
+ * title. Joiners, combining marks and private-use characters stay in the name shown, but alone they show nothing.
+ */
+export function visibleName(name: unknown) {
+  const visible = typeof name === "string" ? visibleText(name) : "";
+  return visible.replace(/[\u200C\u200D\p{M}\p{Co}\s]/gu, "") ? visible : "Unnamed";
+}

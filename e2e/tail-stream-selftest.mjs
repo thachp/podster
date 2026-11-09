@@ -35,4 +35,18 @@ const byLine = output.split("\n").flatMap((line) => {
   }
 });
 check(!byLine.some((value) => value && typeof value === "object" && "event" in value), "reading line by line would have found no event");
+// A noise line with an unbalanced brace before the events: they still all parse, from the next line that starts one.
+{
+  const stream = new JsonStream().push(`a { stray brace and [ bracket\n${output}`);
+  check(JSON.stringify(stream.values) === JSON.stringify(expected) && stream.error === null, "events after a noise line with an unbalanced brace still parse");
+}
+// Text that never forms a value, past the cap, is dropped and reported, and the buffer doesn't grow without bound.
+{
+  const stream = new JsonStream();
+  const noise = `[${" x".repeat(1024)}`;
+  for (let n = 0; n < 700; n++) stream.push(noise);
+  check(stream.error !== null, "over 1 MB that never forms a value is reported");
+  stream.push(`\n${JSON.stringify(expected[0], null, 4)}\n`);
+  check(stream.values.length === 1 && stream.values[0].id === 0, "and events after it still parse");
+}
 process.exit(failed ? 1 : 0);

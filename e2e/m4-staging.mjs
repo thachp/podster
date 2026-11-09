@@ -215,18 +215,20 @@ async function allExplore(who) {
   return handles;
 }
 
-/** Every handle discover_workrooms lists for an agent, following its cursor. It must answer. */
+/** Every handle discover_workrooms lists for an agent, following its cursor, and every page as it came. It must answer. */
 async function allDiscover(agent) {
   const handles = [];
+  const pages = [];
   let cursor;
   for (let n = 0; n < 50; n++) {
     const res = await agent.call("discover_workrooms", cursor ? { cursor } : {});
     ok(res.ok, `discover_workrooms answered ${res.code ?? "nothing"}`);
+    pages.push(res.data);
     handles.push(...(res.data?.workrooms ?? []).map((w) => w.handle));
     cursor = res.data?.next_cursor;
     if (!cursor) break;
   }
-  return handles;
+  return Object.assign(handles, { pages });
 }
 
 /** The public page as anyone sees it, signed out, with nothing about who asks: exactly what came back, 429 included. */
@@ -288,6 +290,7 @@ function startTails() {
     tail.proc = spawn(join(cwd, "node_modules/.bin/wrangler"), ["tail", "--env", "staging", "--format", "json"], { cwd, stdio: ["ignore", "pipe", "ignore"] });
     // A missing wrangler, or one that can't start, fails the check rather than the whole run.
     tail.proc.on("error", (error) => (tail.error = error.code ?? "spawn_failed"));
+    tail.proc.stdout.setEncoding("utf8");
     tail.proc.stdout.on("data", (chunk) => tail.stream.push(chunk));
     tails.push(tail);
   }
@@ -297,26 +300,56 @@ function stopTails() {
 }
 /** Every event a tail has seen, as text, to search. */
 const tailText = (tail) => tail.stream.values.map((value) => JSON.stringify(value));
+/** Why a tail can't be trusted now: wrangler failed to start or has exited (its exit code only), or its stream overflowed. */
+const tailProblem = (tail) => tail.error ?? (tail.proc?.exitCode !== null && tail.proc?.exitCode !== undefined ? `wrangler exited with code ${tail.proc.exitCode}` : tail.stream.error);
 /**
- * Proves every tail is connected by sending requests of the run's own, with a marker in their paths, until each app's tail
- * holds an event naming it. Wrangler's banner text isn't relied on.
+ * Sends requests of the run's own with a fresh marker in their paths until every tail holds an event naming it, bounded.
+ * Used to show the tails are connected at the start, and still alive at the end. Wrangler's banner text isn't relied on,
+ * and the marker isn't one of the run's own IDs, so it never counts as one of the run's events.
  */
-async function tailsConnected(owner) {
+async function markerSeenInEveryTail(owner, seconds) {
   const marker = randomBytes(16).toString("hex");
-  runIds.add(marker);
-  const connected = await within(120, async () => {
-    if (tails.some((t) => t.error)) return true;
+  const seen = await within(seconds, async () => {
+    if (tails.some(tailProblem)) return true;
     await rawPage(`pub_${marker}`).then((res) => res.arrayBuffer()).catch(() => null);
     await owner.dash("GET", `/v1/workspaces/ws_${marker}`).catch(() => null);
     return tails.every((t) => tailText(t).some((text) => text.includes(marker)));
   }, 5000);
-  const failed = tails.filter((t) => t.error).map((t) => `${t.app}: ${t.error}`);
-  return { ok: connected !== null && failed.length === 0, detail: failed.length ? failed.join(", ") : connected === null ? `no marker in ${tails.filter((t) => !tailText(t).some((text) => text.includes(marker))).map((t) => t.app).join(", ")} within 120 s` : "" };
+  const problems = tails.filter(tailProblem).map((t) => `${t.app}: ${tailProblem(t)}`);
+  if (problems.length) return { ok: false, detail: problems.join(", ") };
+  if (seen === null) return { ok: false, detail: `the marker never arrived in ${tails.filter((t) => !tailText(t).some((text) => text.includes(marker))).map((t) => t.app).join(", ")} within ${seconds} s` };
+  return { ok: true, detail: "" };
 }
 /** What each app itself logged, apart from the platform's own record of the request. */
 const appLogged = (tail) => tail.stream.values.map((value) => JSON.stringify([value?.logs ?? [], value?.exceptions ?? []])).join("\n");
 
 // ---- the run ----
+
+/** Stops the tails, makes every room this run made public private again, and signs everyone out. Runs once. */
+let cleaned = null;
+function cleanUp() {
+  cleaned ??= (async () => {
+    stopTails();
+    let left = 0;
+    const count = published.size;
+    for (const [id, roomOwner] of published) {
+      const done = await roomOwner.dash("PUT", `/v1/workspaces/${id}/visibility`, { visibility: "private" }).catch(() => null);
+      if (done?.ok) published.delete(id);
+      else left += 1;
+    }
+    console.log(`\n${count - left} rooms made private again${left ? `, ${left} couldn't be` : ""}`);
+    if (left) results.push({ status: "fail", title: "rooms left public" });
+    await signOutAll();
+  })();
+  return cleaned;
+}
+// Ctrl-C, or a stop from outside, still makes the run's rooms private, and the run fails.
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => {
+    console.error(`\nStopped by ${signal}. Making this run's rooms private again.`);
+    cleanUp().finally(() => process.exit(130));
+  });
+}
 
 if (operatorIdOnly) {
   const operator = await operatorPerson();
@@ -350,16 +383,19 @@ try {
     check(true, "public rooms are on, and the web app serves a public page");
   }
 
-  // The operator, and the logs, both needed on staging.
+  // The logs, needed on staging. A tail that can't connect stops the run here, before it spends the day's sign-ups.
   let operator = null;
   if (!isLocal) {
-    await step("staging's test operator, and the logs", async () => {
-      operator = await operatorPerson();
-      console.log(`     The test operator is ${operator.id}. The owner names it in the API's OPERATORS once; M4-14 fails until then.`);
-      startTails();
-      const connected = await tailsConnected(owner);
-      check(connected.ok, "wrangler tail is connected to the API, the gateway and the web app, shown by the run's own marker requests", connected.detail);
+    section("staging's logs, and the test operator");
+    startTails();
+    const connected = await markerSeenInEveryTail(owner, 120);
+    check(connected.ok, "wrangler tail is connected to the API, the gateway and the web app, shown by the run's own marker requests", connected.detail);
+    if (!connected.ok) throw new Error(`stopping before any more sign-ups: a tail isn't connected (${connected.detail})`);
+    operator = await operatorPerson().catch((error) => {
+      record("fail", "the test operator signs in", cause(error));
+      return null;
     });
+    if (operator) console.log(`     The test operator is ${operator.id}. The owner names it in the API's OPERATORS once; M4-14 fails until then.`);
   }
 
   // People for the limits: 21, each with one MCP or Agent Auth agent. Their owners also play the run's other people.
@@ -409,7 +445,7 @@ try {
     responses.push(["get_public_workroom", JSON.stringify(json.data)]);
     const discovered = await allDiscover(pool[0]);
     check(discovered.includes(room.handle), "discover_workrooms lists the canary room, so its entry is searched too");
-    responses.push(["discover_workrooms", JSON.stringify(await pool[0].call("discover_workrooms", {}))]);
+    responses.push(["discover_workrooms, every page", JSON.stringify(discovered.pages)]);
     const listed = await allExplore(owner);
     check(listed.includes(room.handle), "Explore lists the canary room, so its card is searched too");
     responses.push(["Explore for a person", JSON.stringify(await owner.dash("GET", "/v1/public/explore"))]);
@@ -763,7 +799,10 @@ try {
   // ---- M4-16: the logs ----
   await step("M4-16 the apps' logs carry IDs only", async () => {
     if (isLocal) return skip("the logs during the run", "the local runner checks the Workers' own output instead");
-    await sleep(5_000);
+    // Every tail must still be alive now: a closing marker has to reach each, and none may have exited.
+    const closing = await markerSeenInEveryTail(owner, 60);
+    check(closing.ok, "every tail is still connected at the end, shown by a closing marker", closing.detail);
+    await sleep(3_000);
     stopTails();
     for (const tail of tails) {
       const ours = tailText(tail).filter((text) => [...runIds].some((id) => text.includes(id))).length;
@@ -782,17 +821,7 @@ try {
 } catch (error) {
   record("fail", "the run stopped", cause(error));
 } finally {
-  stopTails();
-  // Every room this run made public goes private again, whatever happened.
-  let left = 0;
-  const count = published.size;
-  for (const [id, roomOwner] of published) {
-    const done = await roomOwner.dash("PUT", `/v1/workspaces/${id}/visibility`, { visibility: "private" }).catch(() => null);
-    if (!done?.ok) left += 1;
-  }
-  console.log(`\n${count - left} rooms made private again${left ? `, ${left} couldn't be` : ""}`);
-  if (left) results.push({ status: "fail", title: "rooms left public" });
-  await signOutAll();
+  await cleanUp();
 }
 
 const tally = (status) => results.filter((r) => r.status === status).length;

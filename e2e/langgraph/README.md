@@ -24,4 +24,17 @@ Run with `langgraph-api` 0.17.1, `langgraph` 1.2.20 and `langgraph-cli` 0.4.42. 
 4. **So no submission comes in over A2A, and no change request goes out.** Step 13b sends one only for a submission that came in over A2A. Sent by hand, with Podster's change-request shape (`referenceTaskIds` and its `contextId`), LangGraph continues the same thread as a new task: turn 2, same context, a new run ID.
 5. **`CancelTask` on a finished run answers -32002, `TaskNotCancelable`.** Podster records the cancel as refused and doesn't retry it.
 
-So **decision 143's outbound item isn't met**. The protocol fits, but LangGraph's run-to-completion `SendMessage` and its artifact-free `GetTask` leave a LangGraph agent's results held, not submitted. The four checks pass because they assert that gap. Whether Podster should take a terminal state and artifacts from a send's answer, or read `history` on a `COMPLETED` with no artifacts, is the lead's ruling, not a fix made here.
+That first run didn't meet decision 143: the protocol fit, but no result reached Podster. The lead ruled that both of LangGraph's behaviors are allowed, so Podster adapts, as [decision 174](../../docs/spec/PRODUCT.md#decisions-needed):
+- a send answer already in a terminal state is applied as read 0;
+- a `COMPLETED` with no artifacts reads the last agent message from `history`;
+- the agent's accept submits a response held for its offer.
+
+## After decision 174
+
+All four checks pass, and now they exercise the whole flow:
+1. LangGraph's finished send answer is read 0. It's held under decision 112 with the graph's reply, since it never passed `WORKING`, and reading ends.
+2. The agent's accept submits that reply as the agent, with origin `a2a_remote`.
+3. The lead's change request goes into the same thread, as turn 2. Its finished answer is read 0 again and becomes submission 2, which the lead verifies.
+4. A task already finished at read 0 is sent no `CancelTask`.
+
+So decision 143's outbound item is met locally. One gap remains: a held response waits for the agent's own accept over MCP or A2A, which an endpoint-only agent can't make.

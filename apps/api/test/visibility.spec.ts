@@ -443,10 +443,11 @@ describe("the discovery index (step 6)", () => {
     await drain(id);
     const written = await inRoom(id, (sql) => sql.exec("SELECT written FROM public_index_outbox").one().written);
     expect(written).toBeNull();
-    // D1 goes back, as a restore would. An event that changes no key still writes the row in full.
+    // D1 goes back, as a restore would. An event that changes no key still writes the row in full. (Task events don't
+    // mark the row since step 8, so a brief change is the event here.)
     await BINDINGS.DB.prepare("UPDATE public_workroom_index SET updated_seq = 1 WHERE workspace_id = ?").bind(id).run();
-    const task = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "T", instructions: "I", assignee: MEMBER.id });
-    expect(task.status).toBe(200);
+    const brief = await api(OWNER, "PUT", `/v1/workspaces/${id}/brief`, { goal: "Changed", policy_version: (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version });
+    expect(brief.status, brief.text).toBe(200);
     await drain(id);
     expect(await indexRow(id)).toMatchObject({ topic: "other", listed: 1 });
     expect((await indexRow(id)).updated_seq).toBeGreaterThan(1);

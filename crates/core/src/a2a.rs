@@ -413,14 +413,72 @@ pub fn offer_text(
     criteria: Option<&str>,
     link: Option<&str>,
 ) -> String {
+    offer_text_with_files(title, instructions, criteria, &[], link)
+}
+
+/// One input file an offer names (M3 step 14, decision 121): its name, its ID, and a Podster link that needs the agent's own
+/// credential to open, or none when it can't be downloaded yet. Never bytes, and never a public URL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InputFile<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub link: Option<&'a str>,
+}
+
+/// At most this much of an offer goes to its list of input files. Past it, the rest are counted, not listed.
+pub const MAX_FILES_SECTION_BYTES: usize = 4 * 1024;
+
+fn files_section(files: &[InputFile<'_>]) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let mut section =
+        String::from("\n\n## Input files\n\nOpen each with your own Podster credential.\n");
+    let mut listed = 0;
+    for file in files {
+        // A name is the uploader's text: one line of it, so it can't add a heading or a link of its own.
+        let name: String = file
+            .name
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        let line = match file.link {
+            Some(link) => format!("\n- {name} ({}): {link}", file.id),
+            None => format!("\n- {name} ({}): not ready to download yet", file.id),
+        };
+        if section.len() + line.len() > MAX_FILES_SECTION_BYTES {
+            break;
+        }
+        section.push_str(&line);
+        listed += 1;
+    }
+    if listed < files.len() {
+        section.push_str(&format!(
+            "\n- and {} more, listed on the task",
+            files.len() - listed
+        ));
+    }
+    section
+}
+
+/// [`offer_text`] with the task's input files listed after the task's own text. The list and the link are kept whole, and
+/// only the task's text is cut to fit.
+pub fn offer_text_with_files(
+    title: &str,
+    instructions: &str,
+    criteria: Option<&str>,
+    files: &[InputFile<'_>],
+    link: Option<&str>,
+) -> String {
     let mut body = format!("# {title}\n\n{instructions}");
     if let Some(criteria) = criteria.filter(|c| !c.trim().is_empty()) {
         body.push_str("\n\n## Acceptance criteria\n\n");
         body.push_str(criteria);
     }
-    let tail = link
-        .map(|link| format!("\n\nOn Podster: {link}"))
-        .unwrap_or_default();
+    let tail = files_section(files)
+        + &link
+            .map(|link| format!("\n\nOn Podster: {link}"))
+            .unwrap_or_default();
     let room = MAX_OFFER_TEXT_BYTES.saturating_sub(tail.len());
     if body.len() > room {
         let mut cut = room;

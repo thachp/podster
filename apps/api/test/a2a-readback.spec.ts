@@ -377,6 +377,19 @@ describe("review fixes", () => {
   });
 });
 
+describe("links (step 14)", () => {
+  it("a status message's url parts become links in the thread, and one that fails the check is dropped", async () => {
+    const { room, attempt, task: t, remote } = await sentOffer();
+    await script(remote, [task(remote, "TASK_STATE_INPUT_REQUIRED", { status: { message: { parts: [
+      { text: "Is this the right file?" }, { url: "https://example.com/draft.pdf", filename: "[x](https://evil.test)" }, { url: "javascript:alert(1)" },
+    ] } } })]);
+    await readOnce(room, attempt.id);
+    expect(await roomSql(room, "SELECT body FROM message WHERE task_id = ?", t.id)).toEqual([
+      { body: "Is this the right file?\n\nLink from the agent: https://example.com/draft.pdf" },
+    ]);
+  });
+});
+
 describe("cancel out", () => {
   const cancelJob = async (room: string, attempt: any) => {
     await fireAlarm(room);

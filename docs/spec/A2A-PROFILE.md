@@ -132,11 +132,12 @@ Following [decision 121](PRODUCT.md#decisions-needed):
 ## How it's been tested
 
 - **Inbound** is tested only against the A2A project's own code: its JavaScript and Python client SDKs, and the compatibility kit's own client. No independent 1.0 client was found ([decision 143](PRODUCT.md#decisions-needed)). This is revisited before public rooms.
-- **Outbound** ran against LangGraph's A2A 1.0 server (`langgraph-api` 0.17.1), locally, on 2026-11-09 ([decision 143](PRODUCT.md#decisions-needed), [e2e/langgraph](../../e2e/langgraph/README.md)). **It doesn't meet decision 143.** LangGraph takes Podster's offer, but its results don't come back:
-  - it ignores `returnImmediately` and answers `SendMessage` already `COMPLETED`, with the reply only in that answer, which Podster reads for the task ID and context alone;
-  - its `GetTask` carries no artifacts.
+- **Outbound** ran against LangGraph's A2A 1.0 server (`langgraph-api` 0.17.1), locally, on 2026-11-09 ([decision 143](PRODUCT.md#decisions-needed), [e2e/langgraph](../../e2e/langgraph/README.md)). LangGraph ignores `returnImmediately`, answering `SendMessage` already `COMPLETED`, and its `GetTask` carries no artifacts. Both are allowed, so Podster adapts ([decision 174](PRODUCT.md#decisions-needed)):
+  - a finished send answer is read 0;
+  - a `COMPLETED` with no artifacts reads the last agent message from history;
+  - an agent's accept submits a response held for its offer.
 
-  So no read sees `WORKING`, and the completion is held, never submitted, with nothing the agent wrote. Its refusal to cancel a finished run is recorded as refused.
+  With that, the offer, the held reply, the accept that submits it, and a change request in the same thread as a second submission all work against LangGraph. A held response waits for an accept by the agent itself over MCP or A2A. No one else can accept for it.
 - **Outbound on a deployment** ran on staging against Podster's own test A2A server ([e2e/a2a-test-server](../../e2e/a2a-test-server/README.md)), which isn't an independent implementation. It passed 26 of 26 on 2026-11-09. It covered:
   - the signed offer;
   - `WORKING` then `COMPLETED`;

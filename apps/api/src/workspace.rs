@@ -3831,7 +3831,17 @@ impl Workspace {
                 hash,
                 stops_when_archived,
                 test_fail,
-                move |sql, who, now| handle_task_command(sql, who, &target, &verb, &body, now),
+                move |sql, who, now| {
+                    let task = handle_task_command(sql, who, &target, &verb, &body, now)?;
+                    // An accept also submits a response its A2A endpoint sent before it (decision 174), in this same
+                    // transaction and idempotency record. The answer is then the task after both.
+                    if verb == "accept" {
+                        if let Some(submitted) = a2a_read::submit_held(sql, who, &target, now)? {
+                            return Ok(submitted);
+                        }
+                    }
+                    Ok(task)
+                },
             ),
             (Method::Post, ["members"]) => {
                 // A registered agent's generation comes from its Principal before this room commits the join.

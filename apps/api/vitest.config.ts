@@ -31,6 +31,9 @@ function a2aAnswer(path: string, body: string) {
     if (answer?.httpStatus) return new Response(null, { status: answer.httpStatus });
     return rpc(answer ?? { id: parsed.params?.id, status: { state: parsed.method === "CancelTask" ? "TASK_STATE_CANCELED" : "TASK_STATE_SUBMITTED" } });
   }
+  // A server that ignores returnImmediately and answers once its work is done (decision 174), with or without artifacts.
+  if (path.startsWith("/a2a/blocking-empty")) return rpc({ task: { id: `remote-${path.split("/").pop()}`, contextId: "c", status: { state: "TASK_STATE_COMPLETED", message: { role: "ROLE_AGENT", parts: [{ text: "Task completed successfully" }] } } } });
+  if (path.startsWith("/a2a/blocking")) return rpc({ task: { id: `remote-${path.split("/").pop()}`, contextId: "c", status: { state: "TASK_STATE_COMPLETED" }, artifacts: [{ name: "Reply", parts: [{ text: "Done at once." }, { url: "https://example.com/blocked" }] }] } });
   if (path.startsWith("/a2a/message")) return rpc({ message: { messageId: "m-1", role: "ROLE_AGENT", parts: [{ text: "Noted." }] } });
   if (path.startsWith("/a2a/error")) return new Response(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32001, message: "no" } }));
   if (path.startsWith("/a2a/big")) return rpc({ task: { id: "remote-big", status: { state: "TASK_STATE_SUBMITTED" } }, padding: "x".repeat(70 * 1024) });

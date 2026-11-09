@@ -142,7 +142,8 @@ pub struct Endpoint<'a> {
 /// One read of the remote task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RemoteRead<'a> {
-    /// Each read job's number, in the order they were queued.
+    /// Each read job's number, in the order they were queued. 0 is the send's own answer, when it already carried a task in
+    /// a terminal state (decision 174): it applies only before any read has.
     pub read_no: u32,
     /// The task ID the remote response named.
     pub remote_task_id: &'a str,
@@ -264,7 +265,10 @@ pub fn decide_remote(
     if attempt.ended {
         return ignored(attempt, Ignored::Ended, true);
     }
-    if read.read_no <= attempt.last_read_no {
+    // Read 0, the send's own answer, counts once and only before any read: after one, nothing has been applied yet only if
+    // `last_state` is still empty.
+    let first_send_answer = read.read_no == 0 && attempt.last_state.is_none();
+    if read.read_no <= attempt.last_read_no && !first_send_answer {
         return ignored(attempt, Ignored::Stale, false);
     }
     let pinned = endpoint.is_some_and(|now| {

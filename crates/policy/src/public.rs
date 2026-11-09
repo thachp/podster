@@ -736,3 +736,165 @@ pub fn decide_public_claim(
     }
     Ok(opening.preset)
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Room visibility commands (M4 step 5, pure part)
+
+/// A new public handle from 16 random bytes. The room supplies the bytes from its random source, so this stays pure.
+pub fn public_handle_from(random: [u8; 16]) -> String {
+    let mut handle = String::from(PUBLIC_HANDLE_PREFIX);
+    for b in random {
+        handle.push_str(&format!("{b:02x}"));
+    }
+    handle
+}
+
+/// A topic not on the fixed list. Carries nothing the caller sent, so it's safe to log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnknownTopic;
+
+impl UnknownTopic {
+    pub fn code(self) -> &'static str {
+        "invalid_argument"
+    }
+}
+
+/// A topic from a request: `None` clears it, and anything not on the fixed list is refused.
+pub fn parse_topic(name: Option<&str>) -> Result<Option<Topic>, UnknownTopic> {
+    match name {
+        None => Ok(None),
+        Some(name) => Topic::from_name(name).map(Some).ok_or(UnknownTopic),
+    }
+}
+
+/// Why an opening's settings were refused when it's created or changed. No content, so it's safe to log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpeningSettingRefusal {
+    /// A lead opening can't be claimed publicly (decision 153).
+    LeadNotPublic,
+    /// Only Public participant and Guest openings can be claimed publicly (decision 154).
+    PresetNotPublic,
+}
+
+impl OpeningSettingRefusal {
+    pub fn code(self) -> &'static str {
+        "invalid_argument"
+    }
+
+    /// The field to name in the refusal.
+    pub fn field(self) -> &'static str {
+        match self {
+            OpeningSettingRefusal::LeadNotPublic => "is_lead",
+            OpeningSettingRefusal::PresetNotPublic => "preset",
+        }
+    }
+}
+
+/// Whether an opening may be stored with these settings. Checked on every create and change, including a change to its
+/// preset or lead mark alone, so `publicly_claimable` never sits on an opening that can't use it. A private room's
+/// openings follow the same rule, so going public needs no clean-up.
+pub fn check_opening_setting(
+    preset: Preset,
+    is_lead: bool,
+    publicly_claimable: bool,
+) -> Result<(), OpeningSettingRefusal> {
+    if !publicly_claimable {
+        return Ok(());
+    }
+    if is_lead {
+        return Err(OpeningSettingRefusal::LeadNotPublic);
+    }
+    if !matches!(preset, Preset::PublicParticipant | Preset::Guest) {
+        return Err(OpeningSettingRefusal::PresetNotPublic);
+    }
+    Ok(())
+}
+
+/// What `set_visibility` asks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VisibilityRequest {
+    /// Go public with the content the owner previewed, named by its hash.
+    Publish { view_hash: String },
+    /// Go private, ending public claims too if the owner ticked it (decision 151).
+    Unpublish { end_public_claims: bool },
+}
+
+/// What the room commits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VisibilityChange {
+    /// Make a new handle, record the time, and go public.
+    Publish,
+    Unpublish {
+        end_public_claims: bool,
+    },
+    /// Already as asked. Nothing is written, and the answer is the room's current visibility.
+    NoChange,
+}
+
+impl VisibilityChange {
+    /// The event to record, which carries IDs only. `None` when nothing changes.
+    pub fn event_type(self) -> Option<&'static str> {
+        match self {
+            VisibilityChange::Publish => Some("room.published"),
+            VisibilityChange::Unpublish { .. } => Some("room.unpublished"),
+            VisibilityChange::NoChange => None,
+        }
+    }
+
+    /// A stable reason code for the audit row.
+    pub fn audit_reason(self) -> Option<&'static str> {
+        match self {
+            VisibilityChange::Publish => Some("visibility.published"),
+            VisibilityChange::Unpublish {
+                end_public_claims: false,
+            } => Some("visibility.unpublished"),
+            VisibilityChange::Unpublish {
+                end_public_claims: true,
+            } => Some("visibility.unpublished_claims_ended"),
+            VisibilityChange::NoChange => None,
+        }
+    }
+}
+
+/// Why `set_visibility` was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VisibilityRefusal {
+    /// The caller may not make this change: `Forbidden` or `NotParticipant`.
+    Denied(Verdict),
+    Publish(PublishRefusal),
+}
+
+/// The whole decision for `set_visibility`: who may, then what happens. Authority comes first, so someone who may not
+/// publish learns nothing about the room's state from the refusal.
+pub fn decide_set_visibility(
+    caller: &Caller,
+    public_rooms_enabled: bool,
+    state: &RoomState,
+    request: &VisibilityRequest,
+) -> Result<VisibilityChange, VisibilityRefusal> {
+    let to = match request {
+        VisibilityRequest::Publish { .. } => Visibility::Public,
+        VisibilityRequest::Unpublish { .. } => Visibility::Private,
+    };
+    match authorize_set_visibility(caller, to) {
+        Verdict::Allow => {}
+        verdict => return Err(VisibilityRefusal::Denied(verdict)),
+    }
+    match request {
+        VisibilityRequest::Publish { view_hash } => {
+            match decide_publish(public_rooms_enabled, state, view_hash) {
+                Ok(PublishOutcome::Publish) => Ok(VisibilityChange::Publish),
+                Ok(PublishOutcome::AlreadyPublic) => Ok(VisibilityChange::NoChange),
+                Err(refusal) => Err(VisibilityRefusal::Publish(refusal)),
+            }
+        }
+        VisibilityRequest::Unpublish { end_public_claims } => {
+            match decide_unpublish(state, *end_public_claims) {
+                UnpublishOutcome::Unpublish { end_public_claims } => {
+                    Ok(VisibilityChange::Unpublish { end_public_claims })
+                }
+                UnpublishOutcome::AlreadyPrivate => Ok(VisibilityChange::NoChange),
+            }
+        }
+    }
+}

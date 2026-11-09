@@ -28,7 +28,7 @@ const [gatewayPort, webPort] = [await freePort(), await freePort()];
 const gatewayBase = `http://localhost:${gatewayPort}`;
 // Node resolves only plain localhost, and the public page needs no name of its own.
 const app = `http://localhost:${webPort}`;
-// 21 people sign up and connect agents in a minute, past a real person's limits, so only this run's config raises the gateway's.
+// The gateway's own limits, as staging enforces them, so a rehearsal shows the run paces itself.
 const gatewayConfig = join(local, "gateway.wrangler.jsonc");
 const { env: _env, ...gatewayBaseConfig } = parseJsonc(readFileSync(join(gateway, "wrangler.jsonc"), "utf8"));
 writeFileSync(
@@ -37,13 +37,12 @@ writeFileSync(
     ...gatewayBaseConfig,
     main: join(gateway, "src/index.ts"),
     d1_databases: gatewayBaseConfig.d1_databases.map((db) => ({ ...db, migrations_dir: join(gateway, "migrations") })),
-    ratelimits: gatewayBaseConfig.ratelimits.map((limit) => ({ ...limit, simple: { limit: 100_000, period: 60 } })),
   }),
 );
 const registry = { WRANGLER_REGISTRY_PATH: join(local, "registry") };
 // No APP_URL on the gateway: with one, it starts sessions only on the app's host, and this run's people sign up with a password
 // on the gateway's, as the other local rehearsals do. The web app still reaches the gateway through its binding.
-const vars = { AUTH_SECRET: randomBytes(32).toString("base64"), ASSERTION_SIGNING_JWK: JSON.stringify({ ...privateKey.export({ format: "jwk" }), kid }), BASE_URL: gatewayBase, ENABLE_PASSWORD_SIGNIN: "true", STRICT_PER_MINUTE: "100000" };
+const vars = { AUTH_SECRET: randomBytes(32).toString("base64"), ASSERTION_SIGNING_JWK: JSON.stringify({ ...privateKey.export({ format: "jwk" }), kid }), BASE_URL: gatewayBase, ENABLE_PASSWORD_SIGNIN: "true" };
 const backend = startGateway({ gateway, apiConfig, persist, gatewayConfig, port: gatewayPort, inspectorPort: await freePort(), env: registry, vars, logLevel: "log" });
 const dashboard = startWrangler({
   cwd: web,
@@ -69,7 +68,7 @@ for (;;) {
 
 const said = [];
 const code = await new Promise((done) => {
-  const proc = spawn(process.execPath, [join(here, "m4-staging.mjs"), "--base-url", gatewayBase, "--app-url", app], { cwd: here, stdio: ["ignore", "inherit", "pipe"], env: { ...process.env, PODSTER_E2E_SIGNUP_SECRET: "", PODSTER_E2E_OPERATOR_COOKIE: "" } });
+  const proc = spawn(process.execPath, [join(here, "m4-staging.mjs"), "--base-url", gatewayBase, "--app-url", app], { cwd: here, stdio: ["ignore", "inherit", "pipe"], env: { ...process.env, PODSTER_E2E_SIGNUP_SECRET: "" } });
   proc.stderr.on("data", (chunk) => {
     said.push(String(chunk));
     process.stderr.write(chunk);

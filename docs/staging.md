@@ -263,6 +263,20 @@ Operators work from `/moderation` on the dashboard. For anyone else, that page a
 cd apps/api && npx wrangler secret put OPERATORS --env staging
 ```
 
+## M4's staging run
+
+`e2e/m4-staging.mjs` runs M4's acceptance tests, M4-01 to M4-17. It needs public rooms on, which is **the owner's call at the gate**, and stops at once with exit code 3 while they're off. It makes 23 test people with the test sign-up, an operator's session for M4-14, and the API's logs for M4-16, taken during the run.
+
+```bash
+cd apps/api && npx wrangler tail --env staging --format json > /tmp/m4-tail.json
+```
+
+```bash
+cd e2e && PODSTER_E2E_SIGNUP_SECRET=… PODSTER_E2E_OPERATOR_COOKIE=… node m4-staging.mjs --base-url https://gateway-staging.podster.dev --app-url https://app-staging.podster.dev --tail-log /tmp/m4-tail.json
+```
+
+`node run-m4-staging.mjs` rehearses it against the local stack with public rooms on for that run only, and `--public-rooms-off` checks that it stops when they're off.
+
 ## Checking uploads on staging
 
 `e2e/upload-check.mjs` sends real uploads down the deployed path, so it shows what the edge does with a chunked upload, which local runs can't. It needs a person's session cookie, and it leaves a room named "Upload check" behind.

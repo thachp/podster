@@ -10,7 +10,7 @@
 //! - **The organization's `Principal`** counts its agents' public claims in the last hour.
 //!
 //! All of them are in the Rust API, so Rust decides every limit. (The M4 plan first put the hourly ones in the gateway's
-//! `StrictCounter`; step 8 kept them in Rust instead.)
+//! `StrictCounter`; decision 173 keeps them in Rust.)
 //!
 //! Only public claims count. A claim through an invitation, or an owner or admin naming an agent, never does.
 //!

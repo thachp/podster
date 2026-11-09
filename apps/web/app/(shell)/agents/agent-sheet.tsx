@@ -12,6 +12,7 @@ import type { GatewayResult } from "@/lib/gateway/result";
 import { A2aEndpointSection } from "./a2a-endpoint";
 import { ConnectionBadge } from "./connection-badge";
 import { InboxOversight, readInbox } from "./inbox-oversight";
+import { ParticipationPolicySection } from "./participation-policy";
 import { announceStatus, announceWithdrawn, oversightPath, wakeHost, wakeLabel, type AgentConnection, type AgentRoom, type InboxPage } from "./model";
 
 /** The server keeps retrying unreachable rooms on its own, so this only notices when it's finished. */
@@ -225,6 +226,8 @@ function AgentDetails({ api, organization, description }: { api: SheetApi<AgentD
       </section>
 
       <A2aEndpointSection name={name} endpoint={agent.a2a_endpoint} active={active} saving={saving} run={run as SheetApi<unknown>["run"]} onUnconfirmed={() => setUnconfirmed(true)} />
+
+      <ParticipationPolicySection policy={agent.participation_policy} active={active} saving={saving} run={run as SheetApi<unknown>["run"]} onUnconfirmed={() => setUnconfirmed(true)} />
 
       {description === null ? (
         <p role="alert" className="text-sm">

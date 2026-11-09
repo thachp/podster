@@ -9,7 +9,8 @@ import { Input } from "@/components/ui/input";
 import { clientCommand, clientQuery } from "@/lib/gateway/client";
 import { TEXTAREA } from "../../w/[id]/settings/brief-controls";
 import { FIELD, MOBILE_TARGET } from "../../w/[id]/team/field";
-import { PRESET_LABELS, presetOptions, roleFitsLimits } from "../../w/[id]/team/model";
+import { canBePublic, PRESET_LABELS, presetOptions, roleFitsLimits } from "../../w/[id]/team/model";
+import { PublicClaimToggle } from "../../w/[id]/team/public-claim-toggle";
 
 const MAX_NAME_BYTES = 200;
 const MAX_GOAL_BYTES = 2048;
@@ -28,9 +29,18 @@ export function createProblem(status: number, code: string) {
   return status === 403 ? "That didn't work, and no workroom was created. Only an organization's admins can create its workrooms." : "That didn't work, and no workroom was created.";
 }
 
-type RoleDraft = { key: number; title: string; responsibilities: string; capacity: string; preset: string; isLead: boolean };
+type RoleDraft = { key: number; title: string; responsibilities: string; capacity: string; preset: string; isLead: boolean; claimable: boolean };
 
-const emptyRole = (key: number): RoleDraft => ({ key, title: "", responsibilities: "", capacity: "1", preset: "member", isLead: false });
+const emptyRole = (key: number): RoleDraft => ({ key, title: "", responsibilities: "", capacity: "1", preset: "member", isLead: false, claimable: false });
+
+/** The switch only holds where Rust would take it. */
+export const sendsClaimable = (role: Pick<RoleDraft, "claimable" | "preset" | "isLead">) => role.claimable && canBePublic(role.preset, role.isLead);
+
+/**
+ * Where a new room goes. Nothing is public at creation: a room that should be goes to Settings, where its owner sees exactly
+ * what the API would publish and confirms it there (decision 146).
+ */
+export const landingFor = (room: string, visibility: "private" | "public") => (visibility === "public" ? `/w/${room}/settings#settings-visibility` : `/w/${room}/overview`);
 
 /** Each opening costs two requests, and a person has 120 a minute across everything. More than this can wait for Team. */
 const MAX_OPENINGS = 20;
@@ -48,7 +58,7 @@ async function addOpening(base: string, role: RoleDraft, key: string): Promise<A
   try {
     const read = await clientQuery<{ policy_version: number | null }>(base);
     if (!read.ok) return read.status === 429 ? "limited" : read.status >= 500 ? "unknown" : "refused";
-    const shape = role.isLead ? { is_lead: true } : { capacity: Number(role.capacity), preset: role.preset };
+    const shape = role.isLead ? { is_lead: true } : { capacity: Number(role.capacity), preset: role.preset, ...(sendsClaimable(role) ? { publicly_claimable: true } : {}) };
     const result = await clientCommand(`${base}/roles`, { policy_version: read.data.policy_version, title: role.title.trim(), responsibilities: role.responsibilities.trim(), ...shape }, { idempotencyKey: key });
     if (result.ok || result.code === "idempotency_mismatch") return "added";
     return result.status === 429 ? "limited" : result.status >= 500 ? "unknown" : "refused";
@@ -63,6 +73,7 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
   const [goal, setGoal] = useState("");
   const [context, setContext] = useState("");
   const [roles, setRoles] = useState<RoleDraft[]>([]);
+  const [visibility, setVisibility] = useState<"private" | "public">("private");
   const nextRole = useRef(0);
   // A room that exists, with what's known of each opening. Sending the form again would make a second room.
   const [madeRoom, setMadeRoom] = useState<string | null>(null);
@@ -128,7 +139,7 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
     setProgress(null);
     if (roles.every((role) => known[role.key] === "added")) {
       created.current = true;
-      router.push(`/w/${room}/overview`);
+      router.push(landingFor(room, visibility));
       return;
     }
     setMadeRoom(room);
@@ -236,6 +247,7 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
                   </label>
                 </div>
               )}
+              <PublicClaimToggle checked={role.claimable} preset={role.isLead ? "coordinator" : role.preset} isLead={role.isLead} disabled={locked} onChange={(claimable) => editRole(role.key, { claimable })} />
               {roleProblems[index] ? <p className="text-sm text-status-danger">{roleProblems[index]}</p> : null}
               <Button type="button" size="sm" variant="ghost" className={MOBILE_TARGET} aria-label={`Remove opening ${number}`} aria-disabled={locked || undefined} onClick={() => removeOpening(role.key)}>
                 Remove
@@ -250,6 +262,28 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
           }}>
           Add an opening
         </Button>
+      </fieldset>
+      <fieldset className="space-y-2" disabled={madeRoom !== null}>
+        <legend className="font-medium">Visibility</legend>
+        <label className="flex items-start gap-2 text-sm">
+          <input type="radio" name="visibility" className="mt-1 size-4" value="private" checked={visibility === "private"} onChange={() => !locked && setVisibility("private")} />
+          <span>
+            Private
+            <span className="block text-muted-foreground">Only people and agents added or invited here can open it.</span>
+          </span>
+        </label>
+        <label className="flex items-start gap-2 text-sm">
+          <input type="radio" name="visibility" className="mt-1 size-4" value="public" checked={visibility === "public"} onChange={() => !locked && setVisibility("public")} />
+          <span>
+            Public, once you confirm
+            <span className="block text-muted-foreground">Its name, goal, context, openings, expected outputs and participant count become readable by anyone. Who's here, tasks, messages and files never do.</span>
+          </span>
+        </label>
+        {visibility === "public" ? (
+          <p role="note" className="rounded-lg bg-status-amber-surface p-3 text-sm">
+            This creates the workroom private. Settings then shows exactly what would be public, and nothing is public until you confirm it there. A public workroom needs a person to review, which you turn on there too.
+          </p>
+        ) : null}
       </fieldset>
       <p className="text-sm text-muted-foreground">{organization ? <>Owned by {plainName(organization)}. You can switch organization from your profile menu. You'll be its owner.</> : "Owned by your current organization. You'll be its owner."}</p>
       {personal ? <p className="text-sm text-muted-foreground">This is your personal organization, so nobody can take this workroom over if you can't get back into your account. Use a team organization if it may need a successor.</p> : null}
@@ -272,6 +306,11 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
               <a href={`/w/${madeRoom}/team`} className="underline">
                 Go to Team
               </a>
+              {visibility === "public" ? (
+                <a href={landingFor(madeRoom, "public")} className="underline">
+                  Make it public in Settings
+                </a>
+              ) : null}
             </div>
           </div>
         ) : null}

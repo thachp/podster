@@ -13,6 +13,8 @@ import { BriefControls } from "./brief-controls";
 import { ReviewPolicy } from "./review-policy";
 import { RoomControls } from "./room-controls";
 import { TransferOwnership } from "./transfer-ownership";
+import { VisibilityControls } from "./visibility-controls";
+import type { RoomVisibility } from "./visibility-model";
 
 const Section = ({ id, title, children }: { id: string; title: string; children: React.ReactNode }) => (
   <section aria-labelledby={id} className="space-y-2">
@@ -29,7 +31,7 @@ export default async function Settings({ params, searchParams }: { params: Promi
   // Owner and admins only. For anyone else this page isn't there; the API refuses the writes either way.
   if (!canManageWorkroom(room) || room.policy_version === null) notFound();
   const after = pageAfter(query.after);
-  const [identity, audit] = await Promise.all([getIdentity(), gatewayQuery<{ audit: AuditRow[]; next_cursor: number | null }>(`/api/v1/workspaces/${id}/audit?after=${after}`)]);
+  const [identity, audit, visibility] = await Promise.all([getIdentity(), gatewayQuery<{ audit: AuditRow[]; next_cursor: number | null }>(`/api/v1/workspaces/${id}/audit?after=${after}`), gatewayQuery<RoomVisibility>(`/api/v1/workspaces/${id}/visibility`)]);
   const admins = membersOf(room).filter((member) => member.role === "admin");
   const isOwner = identity.ok && identity.data.id === room.owner;
   // Only what to offer. Rust checks all of this again when asked.
@@ -48,9 +50,13 @@ export default async function Settings({ params, searchParams }: { params: Promi
           <dt className="text-muted-foreground">Status</dt>
           <dd>{isArchived(room) ? "Archived" : "Active"}</dd>
           <dt className="text-muted-foreground">Visibility</dt>
-          <dd>Private. Only people and agents added or invited here can open it.</dd>
+          <dd>{visibility.ok ? (visibility.data.visibility === "public" ? "Public" : "Private") : "Couldn't read it"}</dd>
         </dl>
         <RoomControls roomId={id} name={room.name} policyVersion={room.policy_version} archived={isArchived(room)} />
+      </Section>
+
+      <Section id="settings-visibility" title="Visibility">
+        {visibility.ok ? <VisibilityControls roomId={id} state={visibility.data} isOwner={isOwner} archived={isArchived(room)} /> : <ReadFailure />}
       </Section>
 
       <Section id="settings-brief" title="Goal and context">

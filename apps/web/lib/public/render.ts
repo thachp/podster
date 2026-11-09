@@ -1,6 +1,7 @@
 import type { ElementContent, RootContent } from "hast";
 import { parseBody } from "@/components/agent-content/parse";
 import { destinationHost, safeLinkUrl } from "@/components/agent-content/text";
+import { visibleText } from "./visible-text";
 
 // The public room page (M4 step 11(b), ADR 0008, decision 163) as plain HTML with no script, built on the server. Every
 // value comes from the room's public view, written by its owner and admins, and is escaped here. Markdown goes through the
@@ -66,7 +67,9 @@ function write(nodes: (RootContent | ElementContent)[]): string {
 }
 
 /** Markdown from the room's owner, written inert. Past the budget, or if it won't parse, it's plain text. */
-export function inertMarkdown(source: string, budget: FormatBudget = pageBudget()): string {
+export function inertMarkdown(raw: string, budget: FormatBudget = pageBudget()): string {
+  // What the owner previewed: the same characters are removed there.
+  const source = visibleText(raw);
   const bytes = utf8Bytes(source);
   if (bytes > FIELD_FORMAT_BYTES || bytes > budget.left || delimiters(source) > FIELD_DELIMITERS) return plainText(source);
   budget.left -= bytes;
@@ -76,7 +79,7 @@ export function inertMarkdown(source: string, budget: FormatBudget = pageBudget(
 }
 
 /** A line of text with no formatting, such as a title. */
-export const plain = (value: unknown) => escapeHtml(typeof value === "string" ? value : "");
+export const plain = (value: unknown) => escapeHtml(typeof value === "string" ? visibleText(value) : "");
 
 export type PublicOpening = { id: string | null; title: string; responsibilities: string; capacity: number; filled: number; preset: string; lead: boolean; publicly_claimable: boolean };
 export type PublicOutput = { title: string; description: string | null; ready: boolean };

@@ -118,17 +118,33 @@ describe("Team's role openings", () => {
     expect(sent[0]).toEqual({ method: "POST", url: `/api/v1/workspaces/${ROOM}/roles`, body: { policy_version: 4, title: "Reviewer", responsibilities: "Checks work", capacity: 3, preset: "guest" } });
     await user.type(within(form).getByLabelText("Title"), "Lead");
     await user.type(within(form).getByLabelText("Responsibilities"), "Runs it");
-    await user.click(within(form).getByRole("checkbox"));
+    await user.click(within(form).getByRole("checkbox", { name: /lead coordinator/i }));
     expect(within(form).queryByLabelText("Openings")).toBeNull();
     await user.click(add);
     await waitFor(() => expect(sent).toHaveLength(2));
     expect(sent[1]?.body).toEqual({ policy_version: 4, title: "Lead", responsibilities: "Runs it", is_lead: true });
   });
 
+  it("marks an opening claimable publicly only with a preset that can take it", async () => {
+    const user = userEvent.setup();
+    render(<TeamScreen {...props} roles={{ roles: [{ ...vacant, preset: "guest", publicly_claimable: true }], external: false }} />);
+    expect(within(openingNamed("Engineer")).getByText("Claimable publicly")).toBeInTheDocument();
+    const form = screen.getByRole("heading", { name: "Add an opening" }).closest("form") as HTMLElement;
+    const claimable = within(form).getByRole("checkbox", { name: /Claimable from the public page/ });
+    expect(claimable).toBeDisabled();
+    await user.type(within(form).getByLabelText("Title"), "Helper");
+    await user.type(within(form).getByLabelText("Responsibilities"), "Helps");
+    await user.selectOptions(within(form).getByLabelText("Access preset a claim copies"), "public_participant");
+    await user.click(claimable);
+    await user.click(within(form).getByRole("button", { name: "Add opening" }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]?.body).toEqual({ policy_version: 4, title: "Helper", responsibilities: "Helps", capacity: 1, preset: "public_participant", publicly_claimable: true });
+  });
+
   it("offers no second lead", () => {
     render(<TeamScreen {...props} />);
     const form = screen.getByRole("heading", { name: "Add an opening" }).closest("form") as HTMLElement;
-    expect(within(form).getByRole("checkbox")).toBeDisabled();
+    expect(within(form).getByRole("checkbox", { name: /lead coordinator/i })).toBeDisabled();
     expect(within(form).getByText("This workroom already has a lead opening.")).toBeInTheDocument();
   });
 
@@ -139,7 +155,7 @@ describe("Team's role openings", () => {
     const form = screen.getByRole("heading", { name: "Add an opening" }).closest("form") as HTMLElement;
     await user.type(within(form).getByLabelText("Title"), "Lead");
     await user.type(within(form).getByLabelText("Responsibilities"), "Runs it");
-    await user.click(within(form).getByRole("checkbox"));
+    await user.click(within(form).getByRole("checkbox", { name: /lead coordinator/i }));
     await user.click(within(form).getByRole("button", { name: "Add opening" }));
     expect(await screen.findByText(/already has a lead opening. Nothing changed/)).toBeInTheDocument();
     expect(within(form).getByLabelText("Title")).toHaveValue("Lead");
@@ -298,7 +314,7 @@ describe("Managing an opening", () => {
   it("won't close or move the lead mark while someone holds it", async () => {
     const sheet = await open("rol_lead");
     expect(await within(sheet).findByRole("button", { name: "Close opening" })).toBeDisabled();
-    expect(within(sheet).getByRole("checkbox")).toBeDisabled();
+    expect(within(sheet).getByRole("checkbox", { name: /lead coordinator/i })).toBeDisabled();
     expect(within(sheet).getByText("An opening can be closed once nobody holds it.")).toBeInTheDocument();
   });
 

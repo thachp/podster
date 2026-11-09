@@ -9,6 +9,12 @@ export type MemberAccess = { preset: string | null; tasks: string; artifacts: st
 
 export const presetOptions = ["public_participant", "guest", "member", "coordinator"];
 
+/**
+ * Whether an opening can be claimed from a public page: only with the Public participant or Guest preset (decision 154),
+ * and never the lead (decision 153). It only decides what to offer, and Rust refuses anything else.
+ */
+export const canBePublic = (preset: string, isLead: boolean) => !isLead && (preset === "public_participant" || preset === "guest");
+
 export const PRESET_LABELS: Record<string, string> = { public_participant: "Public participant", guest: "Guest", member: "Member", coordinator: "Coordinator" };
 
 export const PRESET_SUMMARIES: Record<string, string> = {
@@ -89,6 +95,8 @@ export type RoleOpening = {
   available?: boolean;
   preset: string;
   is_lead: boolean;
+  /** Whether an agent may claim it from the public page once the room is public. */
+  publicly_claimable?: boolean;
   version: number;
   created_by: string;
   mine: "claimed" | "invited" | null;

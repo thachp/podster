@@ -97,17 +97,29 @@ fn attempt_row(sql: &SqlStorage, id: &str) -> R<Option<Value>> {
 /// The event a task is on now for an attempt of this kind: its latest offer, or its latest change request (step 13b). An
 /// attempt belongs to the event it was recorded with, so a newer one ends it.
 pub(super) fn current_for(sql: &SqlStorage, kind: AttemptKind, task: &str) -> R<Option<String>> {
-    let event = match kind {
-        AttemptKind::Offer => "task.offered",
-        AttemptKind::ChangeRequest => "task.changes_requested",
-    };
-    Ok(rows(
-        sql,
-        "SELECT id FROM event WHERE task_id = ? AND type = ? ORDER BY seq DESC LIMIT 1",
-        vec![task.into(), event.into()],
-    )?
-    .first()
-    .and_then(|r| text(&r["id"])))
+    match kind {
+        AttemptKind::Offer => Ok(rows(
+            sql,
+            "SELECT id FROM event WHERE task_id = ? AND type = 'task.offered' ORDER BY seq DESC LIMIT 1",
+            vec![task.into()],
+        )?
+        .first()
+        .and_then(|r| text(&r["id"]))),
+        // The latest change request, unless new work with the agent started after it (`current_change_request`). Only the
+        // events that can decide it are read, from the newest change request on.
+        AttemptKind::ChangeRequest => {
+            let events = rows(
+                sql,
+                "SELECT type, id FROM event WHERE task_id = ?1 AND type IN ('task.changes_requested', 'task.offered', 'task.accepted', 'task.released', 'task.submitted')
+                   AND seq >= coalesce((SELECT max(seq) FROM event WHERE task_id = ?1 AND type = 'task.changes_requested'), 0) ORDER BY seq",
+                vec![task.into()],
+            )?;
+            Ok(podster_core::a2a::current_change_request(
+                events.iter().map(|r| (r["type"].as_str().unwrap_or_default(), r["id"].as_str().unwrap_or_default())),
+            )
+            .map(str::to_string))
+        }
+    }
 }
 
 /// An attempt's kind. One recorded before step 13b is an offer.
@@ -190,8 +202,14 @@ pub(super) fn begin(sql: &SqlStorage, identity: &Identity, body: &Value, now: i6
         Ok(()) => {}
         Err(NoSend::Busy) => return Ok(json!({ "send": false, "reason": "busy", "retry": true })),
         Err(NoSend::OfferMovedOn) => {
-            stop(sql, id, "offer_moved_on", now)?;
-            return Ok(no_send("offer_moved_on"));
+            // A change request whose work the agent gave back, or that a newer one replaced, is superseded.
+            let reason = if kind == AttemptKind::ChangeRequest {
+                "superseded"
+            } else {
+                "offer_moved_on"
+            };
+            stop(sql, id, reason, now)?;
+            return Ok(no_send(reason));
         }
         Err(NoSend::AlreadySent) => return Ok(no_send("already_sent")),
         Err(NoSend::Ended) => return Ok(no_send("ended")),

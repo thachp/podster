@@ -632,3 +632,28 @@ pub fn change_request_text(
         link,
     )
 }
+
+/// Events that start a new piece of work with the agent. A change request older than any of these is superseded: it was about
+/// work the agent has since given back, been offered again, accepted again or submitted (decision 114, step 13b review).
+pub const SUPERSEDES_CHANGE_REQUEST: [&str; 4] = [
+    "task.offered",
+    "task.accepted",
+    "task.released",
+    "task.submitted",
+];
+
+/// The change request a task is on now, from its events oldest first as `(type, id)`: the latest `task.changes_requested`,
+/// unless an event in [`SUPERSEDES_CHANGE_REQUEST`] came after it, and then none. Only that one may send or be read back.
+pub fn current_change_request<'a>(
+    events: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Option<&'a str> {
+    let mut current = None;
+    for (kind, id) in events {
+        if kind == "task.changes_requested" {
+            current = Some(id);
+        } else if SUPERSEDES_CHANGE_REQUEST.contains(&kind) {
+            current = None;
+        }
+    }
+    current
+}

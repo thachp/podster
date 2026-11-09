@@ -460,8 +460,50 @@ describe("change requests out (step 13b)", () => {
     // Submission 2 was made by hand, so the second change request has no remote task to refer to, and makes no attempt.
     expect((await attempts(room, t.id)).filter((a) => a.kind === "change_request")).toHaveLength(1);
     expect((await consume(room, first)).body.outcome).toBe("ack");
-    expect((await row(room, first.id))).toMatchObject({ state: "stopped", ended_reason: "offer_moved_on" });
+    expect((await row(room, first.id))).toMatchObject({ state: "stopped", ended_reason: "superseded" });
     expect((await sentTo(url)).filter((r) => JSON.parse(r.body).method === "SendMessage" && JSON.parse(r.body).params.message.referenceTaskIds?.length)).toEqual([]);
+  });
+});
+
+describe("a change request superseded by new work (step 13b review)", () => {
+  /** The agent gives the task back, the owner offers it to the same agent again, and it accepts. */
+  async function releaseReofferAccept(room: string, taskId: string, agentId: string) {
+    const agent = { id: agentId, org: ORG };
+    const now = await taskRow(room, taskId);
+    const released = await must(agent, "POST", `/v1/workspaces/${room}/tasks/${taskId}/release`, { version: now.version, reason: "Giving it back." });
+    const offered = await must(LEAD, "POST", `/v1/workspaces/${room}/tasks/${taskId}/assign`, { version: released.version, assignee: agentId });
+    await must(agent, "POST", `/v1/workspaces/${room}/tasks/${taskId}/accept`, { version: offered.version });
+    expect((await taskRow(room, taskId)).status).toBe("accepted");
+  }
+  async function remotelySubmitted() {
+    const sent = await sentOffer();
+    await script(sent.remote, [task(sent.remote, "TASK_STATE_WORKING"), task(sent.remote, "TASK_STATE_COMPLETED", { artifacts: [{ name: "v1", parts: [{ url: "https://example.com/v1" }] }] })]);
+    await readOnce(sent.room, sent.attempt.id);
+    await readOnce(sent.room, sent.attempt.id);
+    await must(LEAD, "POST", `/v1/workspaces/${sent.room}/tasks/${sent.task.id}/request-changes`, { submission_no: 1, reason: "Old reason." });
+    const [change] = (await attempts(sent.room, sent.task.id)).filter((a) => a.kind === "change_request");
+    return { ...sent, change };
+  }
+
+  it("a queued change request isn't sent into the new assignment, and ends as superseded", async () => {
+    const { room, task: t, agent, url, change } = await remotelySubmitted();
+    await releaseReofferAccept(room, t.id, agent.id);
+    expect((await consume(room, change)).body.outcome).toBe("ack");
+    expect(await row(room, change.id)).toMatchObject({ state: "stopped", ended_reason: "superseded" });
+    const crSends = (await sentTo(url)).filter((r) => JSON.stringify(JSON.parse(r.body).params?.message ?? {}).includes("Old reason."));
+    expect(crSends).toEqual([]);
+  });
+
+  it("a sent change request's completion applies nothing to the new assignment, and its reading ends", async () => {
+    const { room, task: t, agent, remote, change } = await remotelySubmitted();
+    expect((await consume(room, change)).body.outcome).toBe("ack");
+    expect((await row(room, change.id)).state).toBe("sent");
+    await releaseReofferAccept(room, t.id, agent.id);
+    await script(remote, [task(remote, "TASK_STATE_COMPLETED", { artifacts: [{ name: "v2", parts: [{ url: "https://example.com/stale" }] }] })]);
+    await readOnce(room, change.id);
+    expect((await taskRow(room, t.id)).status).toBe("accepted");
+    expect(await roomSql(room, "SELECT count(*) AS n FROM artifact WHERE uri = 'https://example.com/stale'")).toEqual([{ n: 0 }]);
+    expect(await row(room, change.id)).toMatchObject({ reading_ended: 1, read_ended_reason: "superseded" });
   });
 });
 

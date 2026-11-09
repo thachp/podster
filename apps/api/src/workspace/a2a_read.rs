@@ -445,7 +445,11 @@ pub(super) fn read_apply(
         return Ok(json!({ "applied": false, "reason": "no_task" }));
     };
     // The offer or change request this attempt was sent for, and the one the task is on now (step 13b).
-    let current = super::a2a_out::current_for(sql, super::a2a_out::kind_of(&row), task_id)?;
+    let kind = super::a2a_out::kind_of(&row);
+    let current = super::a2a_out::current_for(sql, kind, task_id)?;
+    // A change request that new work superseded is read no more, and nothing it reports applies (step 13b review).
+    let superseded = kind == podster_core::a2a::AttemptKind::ChangeRequest
+        && current.as_deref() != row["offer_id"].as_str();
     let remote = &body["remote"];
     let last_state = row["last_state"].as_str().map(RemoteState::from_name);
     let attempt = Attempt {
@@ -491,7 +495,16 @@ pub(super) fn read_apply(
         ],
     )?;
     if decision.stop_reading {
-        end_reading(sql, id, "read_ended", now)?;
+        end_reading(
+            sql,
+            id,
+            if superseded {
+                "superseded"
+            } else {
+                "read_ended"
+            },
+            now,
+        )?;
     }
     let mut effect = effect_name(&decision.effect);
     // The same guard every room command runs, inside this transaction, so an archive during the read still stops its

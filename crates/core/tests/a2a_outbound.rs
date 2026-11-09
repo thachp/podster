@@ -362,3 +362,49 @@ fn a_change_request_says_which_submission_and_why() {
     assert!(text.ends_with("On Podster: https://app.example/w/ws_1/tasks"));
     assert!(change_request_text("T", 1, &"x".repeat(20_000), None).len() <= MAX_OFFER_TEXT_BYTES);
 }
+
+#[test]
+fn a_change_request_is_current_only_until_new_work_starts() {
+    let cr =
+        |events: &[(&'static str, &'static str)]| current_change_request(events.iter().copied());
+    assert_eq!(
+        cr(&[("task.submitted", "e1"), ("task.changes_requested", "cr1")]),
+        Some("cr1")
+    );
+    // Messages and edits don't end it.
+    assert_eq!(
+        cr(&[
+            ("task.changes_requested", "cr1"),
+            ("task.message", "m"),
+            ("task.updated", "u")
+        ]),
+        Some("cr1")
+    );
+    // Released, offered again and accepted again: it was about other work.
+    assert_eq!(
+        cr(&[
+            ("task.changes_requested", "cr1"),
+            ("task.released", "r"),
+            ("task.offered", "o"),
+            ("task.accepted", "a")
+        ]),
+        None
+    );
+    for later in SUPERSEDES_CHANGE_REQUEST {
+        assert_eq!(
+            cr(&[("task.changes_requested", "cr1"), (later, "x")]),
+            None,
+            "{later}"
+        );
+    }
+    // A newer change request after new work is the current one.
+    assert_eq!(
+        cr(&[
+            ("task.changes_requested", "cr1"),
+            ("task.submitted", "s"),
+            ("task.changes_requested", "cr2")
+        ]),
+        Some("cr2")
+    );
+    assert_eq!(cr(&[]), None);
+}

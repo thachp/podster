@@ -6,8 +6,9 @@ const nextConfig: NextConfig = {
     return [
       {
         // Not `/api/`: vinext lets these replace a route handler's own headers, which would undo a download's. Those routes add
-        // the same headers themselves, where the gateway sent none.
-        source: "/((?!api/).*)",
+        // the same headers themselves, where the gateway sent none. Nor the public room page, its stylesheet or robots.txt,
+        // which send their own: the page's CSP allows no script at all (ADR 0008).
+        source: "/((?!api/|p/|p-assets/|robots\\.txt$).*)",
         headers: SECURITY_HEADERS.map(([key, value]) => ({ key, value })),
       },
       {

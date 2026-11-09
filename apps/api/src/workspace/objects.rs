@@ -526,6 +526,45 @@ pub(super) fn take_scan_turns(sql: &SqlStorage, now: i64) -> R<Vec<QueuedScan>> 
     Ok(turns)
 }
 
+/// How long a queued scan may go without a verdict before it's sent once more.
+pub(super) const SCAN_RESEND_AFTER_MS: i64 = 5 * 60 * 1000;
+/// The room's key-value storage marks a scan already sent once more, so it's never sent a third time.
+const SCAN_RESENT_PREFIX: &str = "scan_resent:";
+/// After a send fails: 5 seconds, doubling each time, up to 5 minutes.
+const SCAN_SEND_RETRY_FIRST_MS: i64 = 5_000;
+const SCAN_SEND_RETRY_MAX_MS: i64 = 5 * 60 * 1000;
+
+/// Queued scans with no verdict after `SCAN_RESEND_AFTER_MS`, oldest first, up to the room's share.
+fn stale_scan_turns(sql: &SqlStorage, now: i64) -> R<Vec<QueuedScan>> {
+    let found = rows(
+        sql,
+        "SELECT id, object_key, size, sha256 FROM stored_object INDEXED BY stored_object_scanning WHERE state = 'scanning' AND scanning_since <= ? ORDER BY scanning_since, id LIMIT ?",
+        vec![(now - SCAN_RESEND_AFTER_MS).into(), (ROOM_SCANS_QUEUED as i64).into()],
+    )?;
+    Ok(found
+        .iter()
+        .map(|row| QueuedScan {
+            id: text(&row["id"]).unwrap_or_default(),
+            key: text(&row["object_key"]).unwrap_or_default(),
+            size: int(&row["size"]).max(0) as u64,
+            sha256: text(&row["sha256"]).unwrap_or_default(),
+        })
+        .collect())
+}
+
+/// When the next queued scan reaches `SCAN_RESEND_AFTER_MS` with no verdict, for the alarm. Only scans not there yet count,
+/// so one already past it, sent again or not, never brings the alarm back in a loop.
+pub(super) fn next_scan_resend(sql: &SqlStorage, now: i64) -> R<Option<i64>> {
+    Ok(rows(
+        sql,
+        "SELECT MIN(scanning_since) AS first FROM stored_object INDEXED BY stored_object_scanning WHERE state = 'scanning' AND scanning_since > ?",
+        vec![(now - SCAN_RESEND_AFTER_MS).into()],
+    )?
+    .first()
+    .filter(|row| row["first"].is_number())
+    .map(|row| int(&row["first"]) + SCAN_RESEND_AFTER_MS))
+}
+
 /// A turn whose message couldn't be sent waits again, so the next alarm tries it.
 pub(super) fn give_back_scan_turn(sql: &SqlStorage, id: &str, at: i64) -> R<()> {
     exec(
@@ -626,6 +665,10 @@ impl Workspace {
             return;
         }
         let now = now_ms();
+        // After a send failed, the queue gets a rest before the room asks again.
+        if now < self.scan_send_retry_at.get() {
+            return;
+        }
         let out: Rc<RefCell<Vec<QueuedScan>>> = Rc::new(RefCell::new(Vec::new()));
         let slot = out.clone();
         let taken = {
@@ -640,34 +683,91 @@ impl Workspace {
             return;
         }
         let turns = out.take();
-        if turns.is_empty() {
-            return;
-        }
         let room = room_id(&sql).unwrap_or_default();
-        for turn in turns {
-            let sent = crate::objects::queue_scan(
-                &self.env,
-                &room,
-                &turn.id,
-                &turn.key,
-                turn.size,
-                &turn.sha256,
-            )
-            .await;
-            if !sent {
-                console_error!(
-                    "{}",
-                    json!({ "at": "upload.scan_not_queued", "room": room, "object": turn.id })
-                );
+        let mut turns = turns.into_iter();
+        while let Some(turn) = turns.next() {
+            if self.send_scan(&room, &turn).await {
+                continue;
+            }
+            // The first failure ends the pass: this turn and the ones not yet sent wait again, and the queue gets a rest.
+            for back in std::iter::once(turn).chain(turns.by_ref()) {
                 let sql = sql.clone();
-                let id = turn.id.clone();
+                let id = back.id.clone();
                 if let Err(error) =
                     transaction_sync(&self.state, move || give_back_scan_turn(&sql, &id, now))
                 {
                     console_error!("couldn't give back a scan turn: {:?}", error.code());
                 }
             }
+            self.scan_send_failed(&room, now);
+            return;
         }
+        // A turn held a while with no verdict may never have reached the queue, as when the room was evicted between taking
+        // it and sending it. It's sent once more, and a second verdict for it changes nothing.
+        let stale = stale_scan_turns(&sql, now).unwrap_or_default();
+        for turn in stale {
+            let marker = format!("{SCAN_RESENT_PREFIX}{}", turn.id);
+            if self
+                .state
+                .storage()
+                .get::<i64>(&marker)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                continue;
+            }
+            if !self.send_scan(&room, &turn).await {
+                self.scan_send_failed(&room, now);
+                return;
+            }
+            if let Err(error) = self.state.storage().put(&marker, now).await {
+                console_error!("couldn't record a scan sent again: {:?}", error);
+            }
+        }
+        self.scan_send_failures.set(0);
+        self.scan_send_retry_at.set(0);
+    }
+
+    /// Sends one scan job. Test builds can make every send fail, to check what a failed send leaves.
+    async fn send_scan(&self, room: &str, turn: &QueuedScan) -> bool {
+        #[cfg(feature = "failpoints")]
+        {
+            let sql = self.state.storage().sql();
+            let failing = rows(&sql, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_scan_send_fails'", vec![])
+                .is_ok_and(|found| !found.is_empty());
+            if failing {
+                return false;
+            }
+        }
+        crate::objects::queue_scan(
+            &self.env,
+            room,
+            &turn.id,
+            &turn.key,
+            turn.size,
+            &turn.sha256,
+        )
+        .await
+    }
+
+    /// Backs off after a failed send: 5 seconds, doubling to 5 minutes. A restart forgets it, as it forgets sweep failures.
+    fn scan_send_failed(&self, room: &str, now: i64) {
+        let failures = self.scan_send_failures.get().saturating_add(1);
+        self.scan_send_failures.set(failures);
+        let wait = (SCAN_SEND_RETRY_FIRST_MS << failures.saturating_sub(1).min(10))
+            .min(SCAN_SEND_RETRY_MAX_MS);
+        self.scan_send_retry_at.set(now + wait);
+        console_error!(
+            "{}",
+            json!({ "at": "upload.scan_not_queued", "room": room, "failures": failures })
+        );
+    }
+
+    /// When the room may next send a scan, for the alarm.
+    pub(super) fn scan_send_allowed_at(&self) -> i64 {
+        self.scan_send_retry_at.get()
     }
 
     pub(super) fn scan_verdict(&self, body: Value) -> R<Value> {

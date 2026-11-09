@@ -294,6 +294,27 @@ pub(super) fn claim(sql: &SqlStorage, key: Option<&[u8]>) -> R<Value> {
     }))
 }
 
+/// `/internal/a2a-endpoint-pin`: the endpoint's URL and version, and whether it's usable now, with no secret or token, so a
+/// room can check a held response's endpoint is still the one in force before submitting it (decision 174). It also names
+/// who set it, so the route can check they're still in the agent's organization, as a claim does. The route strips that.
+pub(super) fn pin(sql: &SqlStorage) -> R<Value> {
+    let inactive = json!({ "active": false });
+    let Some(conn) = connection(sql)? else {
+        return Ok(inactive);
+    };
+    let Some(row) = current(sql)? else {
+        return Ok(inactive);
+    };
+    let url = text(&row["url"]).unwrap_or_default();
+    let active = conn["status"].as_str() == Some(ACTIVE)
+        && int(&row["enabled"]) == 1
+        && check_endpoint_url(&url).is_ok();
+    Ok(json!({
+        "active": active, "url": url, "version": int(&row["version"]).max(0),
+        "setter": { "person": row["set_by"], "org": row["set_by_org"], "since": row["set_by_since"] },
+    }))
+}
+
 /// `/internal/a2a-endpoint-report` with `{ "version": n, "ok": bool }`: counts one request's result toward switching the
 /// endpoint off. A report for an older version, or a deleted or switched-off endpoint, changes nothing.
 pub(super) fn report(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {

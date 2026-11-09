@@ -586,26 +586,22 @@ pub(super) fn read_apply(
     )
 }
 
-/// Decision 174: when the agent accepts a task whose offer's response was held, the held note and links are submitted as the
-/// agent, right after the accept and in its transaction, so the two commit or replay together. Only a response held for the
-/// task's current offer, from an offer attempt and this agent, counts: one from an earlier offer, or from a change request,
-/// is never submitted. The submit runs through policy and `decide` like any other. If they refuse it, nothing was written,
-/// the accept stands and the hold stays visible. Its events and audit row are marked `a2a_remote` with the attempt's ID.
-/// Answers the task after the submit, or `None` if nothing was submitted.
-pub(super) fn submit_held(
-    sql: &SqlStorage,
-    who: &Participant,
-    task_id: &str,
-    now: i64,
-) -> R<Option<Value>> {
-    let agent = who.caller.id.as_str();
+/// A response held for the task's current offer, from an offer attempt by this agent, with the endpoint it came from. Only
+/// that one may be submitted (decision 174): one held for an earlier offer, or from a change request, never is.
+pub(super) struct Held {
+    pub attempt: String,
+    pub url: String,
+    pub version: i64,
+    note: Option<String>,
+    links: Value,
+}
+
+/// The usable held response for `agent`'s accepted task, if any: with a note or at least one link.
+pub(super) fn held_for(sql: &SqlStorage, agent: &str, task_id: &str) -> R<Option<Held>> {
     let Some(task) = load_task(sql, task_id)? else {
         return Ok(None);
     };
-    if kind_name(&who.caller) != "agent"
-        || task.status != TaskStatus::Accepted
-        || task.assignee.as_deref() != Some(agent)
-    {
+    if task.status != TaskStatus::Accepted || task.assignee.as_deref() != Some(agent) {
         return Ok(None);
     }
     let Some(offer) =
@@ -613,9 +609,9 @@ pub(super) fn submit_held(
     else {
         return Ok(None);
     };
-    let Some(held) = rows(
+    let Some(row) = rows(
         sql,
-        "SELECT h.attempt_id, h.note, h.links_json FROM a2a_held h JOIN a2a_attempt a ON a.id = h.attempt_id
+        "SELECT h.attempt_id, h.note, h.links_json, a.endpoint_url, a.endpoint_version FROM a2a_held h JOIN a2a_attempt a ON a.id = h.attempt_id
           WHERE h.task_id = ? AND a.agent_id = ? AND a.offer_id = ? AND coalesce(a.kind, 'offer') = 'offer'
           ORDER BY h.created_at DESC LIMIT 1",
         vec![task_id.into(), agent.into(), offer.as_str().into()],
@@ -624,13 +620,46 @@ pub(super) fn submit_held(
     .next() else {
         return Ok(None);
     };
-    let links: Value = serde_json::from_str(held["links_json"].as_str().unwrap_or("[]"))
+    let links: Value = serde_json::from_str(row["links_json"].as_str().unwrap_or("[]"))
         .unwrap_or_else(|_| json!([]));
-    let note = held["note"].as_str().filter(|n| !n.trim().is_empty());
+    let note = row["note"]
+        .as_str()
+        .filter(|n| !n.trim().is_empty())
+        .map(str::to_string);
     if note.is_none() && links.as_array().is_none_or(Vec::is_empty) {
         return Ok(None);
     }
-    let attempt = held["attempt_id"].as_str().unwrap_or_default();
+    Ok(Some(Held {
+        attempt: row["attempt_id"].as_str().unwrap_or_default().to_string(),
+        url: row["endpoint_url"].as_str().unwrap_or_default().to_string(),
+        version: int(&row["endpoint_version"]),
+        note,
+        links,
+    }))
+}
+
+/// Decision 174: after the agent's accept has committed, submits the response its endpoint held for that offer, as the agent,
+/// in a transaction of its own. The caller has checked the endpoint is still the one the response came from. Everything is
+/// checked again here against current state: the same held response must still be the usable one, and the submit goes through
+/// policy and `decide`. The held row is consumed with it. Any error rolls this back alone, so the accept stands and the hold
+/// stays. Its events and audit row are marked `a2a_remote` with the attempt's ID. Answers whether it submitted.
+pub(super) fn submit_held(
+    sql: &SqlStorage,
+    who: &Participant,
+    task_id: &str,
+    attempt: &str,
+    now: i64,
+) -> R<bool> {
+    let agent = who.caller.id.as_str();
+    if kind_name(&who.caller) != "agent" {
+        return Ok(false);
+    }
+    let Some(held) = held_for(sql, agent, task_id)?.filter(|h| h.attempt == attempt) else {
+        return Ok(false);
+    };
+    let Some(task) = load_task(sql, task_id)? else {
+        return Ok(false);
+    };
     let events_before = rows(
         sql,
         "SELECT coalesce(max(seq), 0) AS seq FROM event",
@@ -641,13 +670,8 @@ pub(super) fn submit_held(
     let audit_before = rows(sql, "SELECT audit_seq FROM workspace", vec![])?
         .first()
         .map_or(0, |r| int(&r["audit_seq"]));
-    let body = json!({ "version": task.version, "note": note, "artifacts": links });
-    let submitted = match handle_task_command(sql, who, task_id, "submit", &body, now) {
-        Ok(submitted) => submitted,
-        // Refused before anything was written: the accept stands, and the hold stays as it was.
-        Err(error) if error.status_and_code().0 < 500 => return Ok(None),
-        Err(error) => return Err(error),
-    };
+    let body = json!({ "version": task.version, "note": held.note, "artifacts": held.links });
+    handle_task_command(sql, who, task_id, "submit", &body, now)?;
     audit_row(sql, agent, "agent", "task.submit", task_id, None, None, now)?;
     exec(
         sql,
@@ -659,7 +683,30 @@ pub(super) fn submit_held(
         "UPDATE audit_event SET origin = ?, origin_ref = ? WHERE seq > ?",
         vec![ORIGIN.into(), attempt.into(), audit_before.into()],
     )?;
-    Ok(Some(submitted))
+    // Consumed: its note and links are now the submission's.
+    exec(
+        sql,
+        "DELETE FROM a2a_held WHERE attempt_id = ?",
+        vec![attempt.into()],
+    )?;
+    #[cfg(feature = "failpoints")]
+    if let Some(status) = rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_fail_held_submit'",
+        vec![],
+    )?
+    .first()
+    .and_then(|_| rows(sql, "SELECT status FROM test_fail_held_submit", vec![]).ok())
+    .and_then(|r| r.first().map(|r| int(&r["status"])))
+    {
+        // After the submit's writes, so the test shows they're all undone.
+        return Err(if status >= 500 {
+            ApiError::internal("injected held submit failure")
+        } else {
+            ApiError::invalid_argument()
+        });
+    }
+    Ok(true)
 }
 
 /// `/internal/a2a-cancel-begin`: whether to send `CancelTask` for this attempt, and to which remote task and endpoint.

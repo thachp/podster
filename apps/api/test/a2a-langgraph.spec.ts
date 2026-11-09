@@ -106,7 +106,9 @@ describe.skipIf(!ASSISTANT)("outbound against LangGraph's A2A server", () => {
   it("submits the held reply when the agent accepts, then a change request goes into the same thread and comes back as submission 2", async () => {
     const { room, agent, task, attempt } = await sentToLangGraph();
     const accepted = await must(agent, "POST", `/v1/workspaces/${room}/tasks/${task.id}/accept`, { version: task.version });
-    expect(accepted.status).toBe("submitted");
+    // The accept answers for itself. The held reply is submitted right after it.
+    expect(accepted.status).toBe("accepted");
+    expect((await taskRow(room, task.id)).status).toBe("submitted");
     const [first] = await roomSql(room, "SELECT note, submitted_by FROM submission WHERE task_id = ? AND submission_no = 1", task.id);
     expect(first).toMatchObject({ submitted_by: agent.id });
     expect(first.note).toMatch(/^LangGraph test graph: turn 1, /);

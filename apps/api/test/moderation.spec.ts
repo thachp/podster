@@ -318,4 +318,22 @@ describe("the second review's checks (step 10)", () => {
     expect(again.body).toEqual(first.body);
     expect((await report(reporter, { handle: room.handle, reason: "abuse", note: "one" }, { key: "retry-after-private" })).code).toBe("idempotency_mismatch");
   });
+
+  it("marks an action whose answer was lost as unknown, not a refusal, since it may have landed", async () => {
+    await BINDINGS.DB.prepare("CREATE TABLE IF NOT EXISTS test_lose_operator_answer (subject TEXT)").run();
+    // An agent's suspension that landed, with its answer lost.
+    const taker = await agent();
+    await BINDINGS.DB.prepare("INSERT INTO test_lose_operator_answer (subject) VALUES (?)").bind(taker.id).run();
+    const lost = await api(OPERATOR, "POST", `/v1/moderation/agents/${taker.id}/suspend`, { reason: "spam" });
+    expect(lost.status).toBe(500);
+    expect(await actions(taker.id)).toEqual([{ operator: OPERATOR.id, subject_kind: "agent", subject: taker.id, action: "suspend", reason: "spam", outcome: "unknown" }]);
+    const room = await publicRoom();
+    expect((await claim(taker, room.handle, room.role)).code).toBe("public_claims_suspended");
+    // A room's, the same.
+    const other = await publicRoom();
+    await BINDINGS.DB.prepare("INSERT INTO test_lose_operator_answer (subject) VALUES (?)").bind(other.handle).run();
+    expect((await suspendRoom(OPERATOR, other.handle)).status).toBe(500);
+    expect((await actions(other.handle)).map((a: any) => a.outcome)).toEqual(["unknown"]);
+    expect((await api(OWNER, "GET", `/v1/workspaces/${other.id}/visibility`)).body.suspension).toMatchObject({ reason: "abuse" });
+  });
 });

@@ -9,6 +9,11 @@ export type WebEnv = {
   GATEWAY_URL: string;
   SIGN_IN_PROVIDERS: string;
   LOCAL_PASSWORD_SIGNIN: string;
+  /** The gateway's PublicReads entrypoint, the public room page's one way to its view (M4 step 7). */
+  PUBLIC_READS?: { getWorkroom(handle: string): Promise<{ status: 200; view: Record<string, unknown> } | { status: 404 }> };
+  /** Per client address: the signed-out room page, and Explore, where one request reads up to 20 rooms (M4 step 11(b)). */
+  PUBLIC_PAGE_LIMIT?: import("../public/limit").RateLimiter;
+  EXPLORE_LIMIT?: import("../public/limit").RateLimiter;
 };
 
 export const webEnv = () => env as unknown as WebEnv;

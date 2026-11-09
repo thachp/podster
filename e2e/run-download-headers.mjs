@@ -1,7 +1,8 @@
 // What a browser gets when it downloads a file through the dashboard: the built web Worker, run by wrangler, in front of a stub gateway
 // that answers as the real one does for a ready file. Nothing on this path can make a file ready yet, as scanning's API isn't built, so the
 // stub stands in for the gateway and the API. This checks only what the web Worker does to the answer, which is where vinext's config
-// headers once replaced the file's own. It also checks that a page keeps the dashboard's CSP.
+// headers once replaced the file's own. It also checks that a page keeps the dashboard's CSP, and that the public room page
+// (M4 step 11(b)) is served with its own headers and no script, through the stub's PublicReads entrypoint.
 //
 //   node run-download-headers.mjs [--skip-web-build]
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -18,7 +19,12 @@ mkdirSync(local, { recursive: true });
 const stub = join(local, "stub-gateway.mjs");
 writeFileSync(
   stub,
-  `export default { fetch(request) {
+  `import { WorkerEntrypoint } from "cloudflare:workers";
+const VIEW = ${JSON.stringify({ handle: `pub_${"a".repeat(32)}`, published_on: "2026-11-09", content: { name: "Reef <script>x</script>", goal: "**Count** the fish", context: null, topic: "research", workflow: "general", openings: [], outputs: [], participant_count: 2, person_review: true, archived: false } })};
+export class PublicReads extends WorkerEntrypoint {
+  async getWorkroom(handle) { return handle === VIEW.handle ? { status: 200, view: VIEW } : { status: 404 }; }
+}
+export default { fetch(request) {
   const { pathname } = new URL(request.url);
   if (pathname === "/api/v1/files/ws_1/obj_1") return new Response(${JSON.stringify(BODY)}, { headers: {
     "content-type": "application/octet-stream", "content-disposition": ${JSON.stringify(DISPOSITION)}, "x-content-type-options": "nosniff",
@@ -76,6 +82,35 @@ async function main() {
   check(page.status === 200, "a dashboard page answers", String(page.status));
   check(page.headers.get("content-security-policy")?.startsWith("default-src 'self'") === true, "and keeps the dashboard's CSP", page.headers.get("content-security-policy"));
   check(page.headers.get("referrer-policy") === "same-origin" && page.headers.get("x-frame-options") === "DENY" && page.headers.get("x-content-type-options") === "nosniff", "and its other headers");
+
+  const PUBLIC_CSP = "default-src 'none'; script-src 'none'; style-src 'self'; img-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'";
+  const publicHeaders = (response) =>
+    response.headers.get("content-security-policy") === PUBLIC_CSP &&
+    response.headers.get("x-robots-tag") === "noindex, nofollow" &&
+    response.headers.get("cache-control") === "no-store" &&
+    response.headers.get("x-frame-options") === "DENY" &&
+    response.headers.get("referrer-policy") === "same-origin";
+  const room = await fetch(`${app}/p/pub_${"a".repeat(32)}`);
+  const roomBody = await room.text();
+  check(room.status === 200, "a public room page answers", String(room.status));
+  check(publicHeaders(room), "with only its own CSP and the public headers", room.headers.get("content-security-policy"));
+  check(!/<script/i.test(roomBody) && roomBody.includes("Reef &lt;script&gt;x&lt;/script&gt;") && roomBody.includes("<strong>Count</strong>"), "and no script, with the owner's text inert");
+  const signedIn = await fetch(`${app}/p/pub_${"a".repeat(32)}`, { headers: { cookie: "better-auth.session_token=abc" } });
+  check((await signedIn.text()) === roomBody, "and the same bytes for a signed-in viewer");
+  const gone = await fetch(`${app}/p/pub_${"b".repeat(32)}`);
+  await gone.text();
+  check(gone.status === 404 && publicHeaders(gone), "a handle that isn't public is a 404 with the same headers", String(gone.status));
+  const style = await fetch(`${app}/p-assets/style`);
+  await style.text();
+  check(style.status === 200 && style.headers.get("content-type")?.startsWith("text/css") === true && publicHeaders(style), "its stylesheet comes from this host with the same headers");
+  // Only those exact paths send their own headers. Anything else under them is the dashboard's, with the dashboard's headers.
+  for (const path of ["/p/x/y", "/p-assets/other"]) {
+    const other = await fetch(`${app}${path}`, { redirect: "manual" });
+    await other.text();
+    check(other.headers.get("content-security-policy")?.startsWith("default-src 'self'") === true && other.headers.get("x-frame-options") === "DENY" && other.headers.get("x-content-type-options") === "nosniff", `${path} gets the dashboard's headers`, `${other.status} ${other.headers.get("content-security-policy")}`);
+  }
+  const robots = await fetch(`${app}/robots.txt`);
+  check(robots.status === 200 && (await robots.text()).includes("Allow: /"), "robots.txt allows crawling, so the noindex is seen");
 }
 
 try {

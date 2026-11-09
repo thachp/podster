@@ -37,11 +37,47 @@ export function contractView(view: any): Record<string, unknown> {
   return top;
 }
 
-/** A handle as the cache and the API take it, or null for anything that can't be one. */
+/** The handle exactly as the API takes it, or null. No trimming or case folding, so every path answers one not-found. */
 export function normalizeHandle(handle: unknown): string | null {
-  if (typeof handle !== "string") return null;
-  const lowered = handle.trim().toLowerCase();
-  return HANDLE.test(lowered) ? lowered : null;
+  return typeof handle === "string" && HANDLE.test(handle) ? handle : null;
+}
+
+/** An Explore page with only the contract's fields in each entry. */
+export function contractPage(page: any): { workrooms: Record<string, unknown>[]; next_cursor: string | null } {
+  return { workrooms: (Array.isArray(page?.workrooms) ? page.workrooms : []).map(contractView), next_cursor: typeof page?.next_cursor === "string" ? page.next_cursor : null };
+}
+
+export type PublicRead = "workroom" | "explore";
+
+/** Which public read an API path is, by its path alone, without a query. */
+export function publicReadOf(path: string): PublicRead | null {
+  if (path === "/v1/public/explore") return "explore";
+  return /^\/v1\/public\/workrooms\/[^/]+$/.test(path) ? "workroom" : null;
+}
+
+/** The agent capabilities that are public reads. */
+export const PUBLIC_READ_CAPABILITIES: Record<string, PublicRead> = { get_public_workroom: "workroom", discover_workrooms: "explore" };
+
+/**
+ * The one field filter for every public read the gateway returns: `PublicReads`, agents' capabilities and people's
+ * passthrough (ADR 0008, layer 3).
+ */
+export function filterPublicRead(read: PublicRead, body: unknown): Record<string, unknown> {
+  return read === "workroom" ? contractView(body) : contractPage(body);
+}
+
+/**
+ * A signed-in person's public read through the dashboard's passthrough: a 200 carries only the contract's fields, and
+ * every answer on these paths says `no-store`. `null` leaves any other path to the passthrough as it was.
+ */
+export async function publicPassthrough(path: string, response: Response): Promise<Response | null> {
+  const read = publicReadOf(path);
+  if (!read) return null;
+  const headers = { "content-type": "application/json", "cache-control": "no-store" };
+  if (response.status !== 200) return new Response(response.body, { status: response.status, headers });
+  const body = await response.json().catch(() => undefined);
+  if (body === undefined) return new Response(JSON.stringify({ error: { code: "upstream_unavailable", message: "upstream_unavailable" } }), { status: 502, headers });
+  return new Response(JSON.stringify(filterPublicRead(read, body)), { status: 200, headers });
 }
 
 type Fetch = (handle: string) => Promise<Response>;
@@ -55,14 +91,23 @@ export async function publicView(handle: unknown, fetchView: Fetch, store: Store
   const normalized = normalizeHandle(handle);
   if (!normalized) return NOT_FOUND;
   const key = new Request(`${CACHE_ORIGIN}/workrooms/${normalized}`);
-  const hit = await store?.match(key).catch(() => undefined);
-  if (hit) return { status: 200, view: contractView(await hit.json()) };
+  const hit = await store?.match(key).catch(cacheTrouble);
+  if (hit) {
+    // A corrupt entry is treated as a miss would be, never served.
+    const cached = await hit.json().catch(() => undefined);
+    if (cached !== undefined) {
+      const view = filterPublicRead("workroom", cached);
+      if (view.handle === normalized) return { status: 200, view };
+    }
+  }
   const response = await fetchView(normalized);
   if (response.status !== 200) return NOT_FOUND;
-  const view = contractView(await response.json());
+  const body = await response.json().catch(() => undefined);
+  if (body === undefined) return NOT_FOUND;
+  const view = filterPublicRead("workroom", body);
   // The API's view is canonical, so a mismatched handle means something's wrong: it's not served or kept.
   if (view.handle !== normalized) return NOT_FOUND;
-  await store?.put(key, new Response(JSON.stringify(view), { headers: { "content-type": "application/json", "cache-control": `max-age=${PUBLIC_VIEW_SECONDS}` } })).catch(() => undefined);
+  await store?.put(key, new Response(JSON.stringify(view), { headers: { "content-type": "application/json", "cache-control": `max-age=${PUBLIC_VIEW_SECONDS}` } })).catch(cacheTrouble);
   return { status: 200, view };
 }
 
@@ -80,7 +125,27 @@ export function viewFetcher(env: PublicEnv): Fetch {
   };
 }
 
-const defaultCache = (): Store | null => (typeof caches !== "undefined" ? (caches as unknown as { default: Cache }).default : null);
+/** The public views' own named cache, apart from anything else the gateway might keep. */
+export const PUBLIC_VIEW_CACHE = "podster-public-views";
+
+let troubleLogged = false;
+/** A cache that throws is a miss. It's logged once per isolate, with no handle or ID. */
+function cacheTrouble(): undefined {
+  if (!troubleLogged) {
+    troubleLogged = true;
+    console.error("public view cache unavailable");
+  }
+  return undefined;
+}
+
+async function viewCache(): Promise<Store | null> {
+  if (typeof caches === "undefined") return null;
+  try {
+    return await caches.open(PUBLIC_VIEW_CACHE);
+  } catch {
+    return cacheTrouble() ?? null;
+  }
+}
 
 /**
  * The public read for `apps/web`, by service binding only. No route of the gateway reaches it, so no custom domain can, and
@@ -88,6 +153,6 @@ const defaultCache = (): Store | null => (typeof caches !== "undefined" ? (cache
  */
 export class PublicReads extends WorkerEntrypoint<PublicEnv> {
   async getWorkroom(handle: string): Promise<PublicAnswer> {
-    return publicView(handle, viewFetcher(this.env), defaultCache());
+    return publicView(handle, viewFetcher(this.env), await viewCache());
   }
 }

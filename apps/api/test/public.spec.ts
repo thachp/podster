@@ -191,6 +191,15 @@ describe("the room page", () => {
     const handle = await publish(id);
     expect((await page(handle, { ...OUTSIDE_AGENT, gen: 99 })).status).not.toBe(200);
   });
+
+  it("spends a signed-in agent's token, so a replay is refused", async () => {
+    const id = await room();
+    const handle = await publish(id);
+    const spend = { agent_jti: `plugin:${crypto.randomUUID()}`, agent_jti_exp: Math.floor(Date.now() / 1000) + 60 };
+    expect((await page(handle, OUTSIDE_AGENT, { claims: spend })).status).toBe(200);
+    const replayed = await page(handle, OUTSIDE_AGENT, { claims: spend });
+    expect([replayed.status, replayed.code]).toEqual([401, "jwt_replay"]);
+  });
 });
 
 describe("the canary test (M4-01)", () => {

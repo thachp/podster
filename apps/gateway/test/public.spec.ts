@@ -1,10 +1,10 @@
 import { env, SELF } from "cloudflare:test";
 import { decodeJwt, decodeProtectedHeader } from "jose";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mintPublicAssertion } from "../src/assertion";
 import { CAPABILITIES } from "../src/capabilities";
 import { allowedPassthrough } from "../src/index";
-import { contractView, normalizeHandle, publicView, PUBLIC_VIEW_SECONDS, VIEW_FIELDS, viewFetcher } from "../src/public/reads";
+import { contractView, filterPublicRead, normalizeHandle, publicPassthrough, publicView, PUBLIC_READ_CAPABILITIES, PUBLIC_VIEW_SECONDS, VIEW_FIELDS, viewFetcher } from "../src/public/reads";
 
 // The gateway's side of the public read (M4 step 7, ADR 0008): the public assertion, the 30-second cache keyed by the
 // handle alone, the contract's fields copied as a second filter, and the two agent capabilities.
@@ -66,8 +66,7 @@ describe("the cached view", () => {
     let asked = 0;
     const fetchView = async (handle: string) => { asked++; return Response.json(view(handle)); };
     expect(await publicView(HANDLE, fetchView, cache)).toEqual({ status: 200, view: view() });
-    // The same handle, however it was typed, is one entry and one API call.
-    expect(await publicView(` ${HANDLE.toUpperCase()} `, fetchView, cache)).toEqual({ status: 200, view: view() });
+    expect(await publicView(HANDLE, fetchView, cache)).toEqual({ status: 200, view: view() });
     expect(asked).toBe(1);
     expect([...cache.kept.keys()]).toEqual([`https://public-view.podster.internal/workrooms/${HANDLE}`]);
   });
@@ -82,11 +81,41 @@ describe("the cached view", () => {
 
   it("answers not-found for anything that can't be a handle, without asking the API", async () => {
     let asked = 0;
-    for (const handle of ["", "pub_", `${HANDLE}0`, "ws_123", `pub_${"g".repeat(32)}`, null, 7, { handle: HANDLE }]) {
-      expect(await publicView(handle, async () => { asked++; return Response.json(view()); }, null)).toEqual({ status: 404 });
+    // Matching is exact, as in the API: upper case or padding is the same not-found, not another spelling of the handle.
+    for (const handle of ["", "pub_", `${HANDLE}0`, "ws_123", `pub_${"g".repeat(32)}`, HANDLE.toUpperCase(), `PUB_${HANDLE.slice(4)}`, ` ${HANDLE}`, `${HANDLE} `, `${HANDLE}\n`, null, 7, { handle: HANDLE }]) {
+      expect(await publicView(handle, async () => { asked++; return Response.json(view()); }, null), JSON.stringify(handle)).toEqual({ status: 404 });
     }
     expect(asked).toBe(0);
-    expect(normalizeHandle(HANDLE.toUpperCase())).toBe(HANDLE);
+    expect(normalizeHandle(HANDLE)).toBe(HANDLE);
+    expect(normalizeHandle(HANDLE.toUpperCase())).toBeNull();
+  });
+
+  it("treats a corrupt cache entry as a miss, and a 200 that isn't JSON as not-found", async () => {
+    const cache = memoryCache();
+    cache.kept.set(`https://public-view.podster.internal/workrooms/${HANDLE}`, "{not json");
+    let asked = 0;
+    expect(await publicView(HANDLE, async () => { asked++; return Response.json(view()); }, cache)).toEqual({ status: 200, view: view() });
+    expect(asked).toBe(1);
+    const fresh = memoryCache();
+    expect(await publicView(HANDLE, async () => new Response("<html>oops</html>", { status: 200 }), fresh)).toEqual({ status: 404 });
+    expect(fresh.kept.size).toBe(0);
+    // A cached view for another handle isn't served either.
+    const crossed = memoryCache();
+    crossed.kept.set(`https://public-view.podster.internal/workrooms/${HANDLE}`, JSON.stringify(view(`pub_${"cd".repeat(16)}`)));
+    expect(await publicView(HANDLE, async () => new Response("{}", { status: 404 }), crossed)).toEqual({ status: 404 });
+  });
+
+  it("treats a cache that throws as a miss, and logs it once with no handle", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const broken = { match: async () => { throw new Error(`boom ${HANDLE}`); }, put: async () => { throw new Error(`boom ${HANDLE}`); } };
+    try {
+      for (let n = 0; n < 3; n++) expect(await publicView(HANDLE, async () => Response.json(view()), broken)).toEqual({ status: 200, view: view() });
+      const lines = errors.mock.calls.map((call) => call.map(String).join(" "));
+      expect(lines.length).toBeLessThanOrEqual(1);
+      for (const line of lines) expect(line).not.toContain("pub_");
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   it("copies only the contract's fields, at every level", async () => {
@@ -106,6 +135,45 @@ describe("the cached view", () => {
     expect([...VIEW_FIELDS.content].sort()).toEqual(Object.keys(schema.properties.content.properties).sort());
     expect([...VIEW_FIELDS.opening].sort()).toEqual(Object.keys(schema.properties.content.properties.openings.items.properties).sort());
     expect([...VIEW_FIELDS.output].sort()).toEqual(Object.keys(schema.properties.content.properties.outputs.items.properties).sort());
+  });
+});
+
+describe("one field filter for every caller", () => {
+  const planted = () => {
+    const extra = view() as any;
+    extra.workspace_id = "ws_secret";
+    extra.content.owner = "per_secret";
+    extra.content.openings[0].created_by = "per_secret";
+    extra.content.outputs[0].current_task_id = "t_secret";
+    return extra;
+  };
+
+  it("strips a planted field at every level from a signed-in person's room page and Explore, and says no-store", async () => {
+    const workroom = await publicPassthrough(`/v1/public/workrooms/${HANDLE}`, Response.json(planted()));
+    expect(workroom!.status).toBe(200);
+    expect(workroom!.headers.get("cache-control")).toBe("no-store");
+    const workroomText = await workroom!.text();
+    expect(workroomText).not.toContain("secret");
+    expect(JSON.parse(workroomText)).toEqual(view());
+    const page = await publicPassthrough("/v1/public/explore", Response.json({ workrooms: [planted(), planted()], next_cursor: "ab", total: 99, workspace_ids: ["ws_secret"] }));
+    expect(page!.headers.get("cache-control")).toBe("no-store");
+    const pageText = await page!.text();
+    expect(pageText).not.toContain("secret");
+    expect(JSON.parse(pageText)).toEqual({ workrooms: [view(), view()], next_cursor: "ab" });
+  });
+
+  it("passes refusals on, marked no-store, and leaves every other path alone", async () => {
+    const refused = await publicPassthrough("/v1/public/explore", new Response(JSON.stringify({ error: { code: "invalid_argument" } }), { status: 400 }));
+    expect([refused!.status, refused!.headers.get("cache-control")]).toEqual([400, "no-store"]);
+    expect(await publicPassthrough("/v1/workspaces/ws_1", Response.json({ ok: true }))).toBeNull();
+    expect(await publicPassthrough(`/v1/public/workrooms/${HANDLE}/more`, Response.json({}))).toBeNull();
+    const broken = await publicPassthrough("/v1/public/explore", new Response("not json", { status: 200 }));
+    expect(broken!.status).toBe(502);
+  });
+
+  it("is the same filter the agents' capabilities use", () => {
+    expect(PUBLIC_READ_CAPABILITIES).toEqual({ get_public_workroom: "workroom", discover_workrooms: "explore" });
+    expect(filterPublicRead("workroom", planted())).toEqual(view());
   });
 });
 

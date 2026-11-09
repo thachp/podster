@@ -2968,3 +2968,16 @@ describe("downloading a file through the gateway", () => {
     expect(await reply(await dashboard(b, "GET", `/v1/files/${made.body.id}/obj_unknown`))).toEqual({ status: 404, code: "workspace_not_found" });
   });
 });
+
+describe("a person's public reads (M4 step 7)", () => {
+  it("go through the contract's field filter, marked no-store", async () => {
+    const who = await signUp();
+    const page = await dashboard(who, "GET", "/v1/public/explore");
+    expect(page.status).toBe(200);
+    expect(page.headers.get("cache-control")).toBe("no-store");
+    // Public rooms are off in this suite, so the page is empty and the room page is the one not-found.
+    expect(await page.json()).toEqual({ workrooms: [], next_cursor: null });
+    const room = await dashboard(who, "GET", `/v1/public/workrooms/pub_${"ab".repeat(16)}`);
+    expect([room.status, room.headers.get("cache-control"), (await room.json<any>()).error.code]).toEqual([404, "no-store", "workspace_not_found"]);
+  });
+});

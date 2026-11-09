@@ -120,6 +120,32 @@ pub(super) fn leave_with_claim(
     Ok(public)
 }
 
+/// When the owner gives a public participant another role, that's the owner's decision and stands: the access its claim
+/// goes back to on release becomes the one the owner gave. Call before the member row changes role.
+pub(super) fn owner_changed_role(
+    sql: &SqlStorage,
+    principal: &str,
+    role: &str,
+    scopes: Scopes,
+) -> R<()> {
+    exec(
+        sql,
+        "UPDATE role_claim SET prior_role = ?1, prior_tasks = ?2, prior_artifacts = ?3, prior_conversations = ?4,
+           prior_review = ?5
+         WHERE principal_id = ?6 AND status = 'active' AND public = 1 AND EXISTS (
+           SELECT 1 FROM member WHERE principal_id = ?6 AND joined_via = ?7 AND role != ?1)",
+        vec![
+            role.into(),
+            scopes.tasks.name().into(),
+            scopes.artifacts.name().into(),
+            scopes.conversations.name().into(),
+            scopes.review.name().into(),
+            principal.into(),
+            JOINED_PUBLICLY.into(),
+        ],
+    )
+}
+
 /// Public claims made here in the last hour, ended ones included, since ending a claim doesn't give the hour back. Only
 /// the hour's rows are read, by the index on public claims' times.
 fn claims_last_hour(sql: &SqlStorage, now: i64) -> R<u32> {

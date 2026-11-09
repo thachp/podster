@@ -557,6 +557,8 @@ fn settle_later(
     ctx.wait_until(async move {
         for count in &counts {
             #[cfg(feature = "failpoints")]
+            test_hold_settle(&env, &count.principal).await;
+            #[cfg(feature = "failpoints")]
             if outcome == "confirm" && test_fail_confirm(&env, &count.principal).await {
                 continue;
             }
@@ -632,4 +634,35 @@ async fn test_force_held(env: &Env, agent: &str, here: Held) -> Held {
         }
     }
     here
+}
+
+/// Test builds only: a test can hold a Principal's settling back, by naming it in D1's `test_hold_settle` table, until it
+/// deletes the row or five seconds pass.
+#[cfg(feature = "failpoints")]
+async fn test_hold_settle(env: &Env, principal: &str) {
+    let Ok(db) = env.d1("DB") else { return };
+    for _ in 0..250 {
+        let Ok(exists) = db
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_hold_settle'",
+            )
+            .first::<Value>(None)
+            .await
+        else {
+            return;
+        };
+        if exists.is_none() {
+            return;
+        }
+        let Ok(named) = db
+            .prepare("SELECT principal FROM test_hold_settle WHERE principal = ?")
+            .bind(&[principal.into()])
+        else {
+            return;
+        };
+        if !matches!(named.first::<Value>(None).await, Ok(Some(_))) {
+            return;
+        }
+        worker::Delay::from(std::time::Duration::from_millis(20)).await;
+    }
 }

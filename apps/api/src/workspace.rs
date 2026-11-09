@@ -1169,6 +1169,7 @@ fn handle_change_role(
             access_json(target_kind, parse_role(&role), scopes),
         )
     });
+    public_claims::owner_changed_role(sql, principal, &role, scopes)?;
     exec(
         sql,
         // A public participant the owner gives another role is the owner's now, no longer one who joined publicly.
@@ -1338,6 +1339,7 @@ fn handle_change_access(
     }
     let org = text(&member["org_id"]).unwrap_or_default();
     store::write_grant(sql, principal, next, &caller.id, now)?;
+    public_claims::owner_changed_role(sql, principal, &role, next)?;
     exec(
         sql,
         // A public participant the owner gives another role is the owner's now, no longer one who joined publicly.

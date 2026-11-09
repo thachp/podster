@@ -106,15 +106,16 @@ fn held(body: &Value) -> R<Held> {
     }
 }
 
-/// Reserves one public claim, or refuses at a limit. `{ whose, key, workspace_id, reservation, held }`. An entry already
-/// here for the key is one of three things:
+/// Reserves one public claim, or refuses at a limit. `{ whose, key, workspace_id, reservation, held }`:
 ///
-/// - **A retry**, when the room says it holds the claim: it takes this request's reservation and counts nothing, and
-///   answers `retry`, so the room takes the request only as a retry.
-/// - **A request in parallel**, when it's unsettled with reservations on it: the same, so the claim counts once.
-/// - **Stale** otherwise, since nothing here learns when a claim ends: it's counted afresh, with every limit and an hour.
-///   If the room said the claim isn't held, the old entry goes first. If the room didn't answer, the old entry is kept
-///   as `replacing`, and a refusal puts it back, so a claim that may still stand is never left uncounted.
+/// - **A retry**, when the room says it holds the claim and an entry is here: it takes this request's reservation,
+///   counts nothing, and answers `retry`, so the room takes the request only as a retry. An organization's entry goes
+///   once the claim is confirmed, so for an organization a retry needs no entry.
+/// - **Stale**, any other entry, pending ones included: the room said the claim isn't held or didn't answer, so this may
+///   be a new claim, and nothing here learns when a claim ends. It's counted afresh, with every limit and an hour.
+///   Counting twice in a race is the price, and fails closed. If the room said the claim isn't held, the old entry and
+///   its reservations go first, so a lost answer can't keep the new one alive. If the room didn't answer, the old entry
+///   is kept as `replacing`, and a refusal puts it back, so a claim that may still stand is never left uncounted.
 pub(super) fn reserve(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     exec(sql, SCHEMA, vec![])?;
     let whose = whose(body)?;
@@ -123,26 +124,28 @@ pub(super) fn reserve(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     let reservation = field(body, "reservation")?;
     let held = held(body)?;
     tidy(sql, whose, now)?;
-    let existing = rows(
+    let existing = !rows(
         sql,
-        "SELECT state, (SELECT COUNT(*) FROM public_claim_reservation r WHERE r.key = c.key) AS live
-           FROM public_claim c WHERE key = ?",
+        "SELECT key FROM public_claim WHERE key = ?",
         vec![key.into()],
-    )?;
+    )?
+    .is_empty();
+    if held == Held::Yes && (existing || whose == Whose::Org) {
+        take(sql, key, reservation)?;
+        return Ok(json!({ "reserved": true, "counted": false, "retry": true }));
+    }
     let mut replacing = false;
-    if let Some(entry) = existing.first() {
-        let unsettled = entry["state"].as_str() != Some("active") && int(&entry["live"]) > 0;
-        if held == Held::Yes || unsettled {
-            take(sql, key, reservation)?;
-            // A parallel request's count stands until that request is settled, and confirming this one keeps it. A retry's
-            // rests on the room's word read before, so the room must find it still a retry.
-            return Ok(json!({ "reserved": true, "counted": false, "retry": !unsettled }));
-        }
+    if existing {
         if held == Held::No {
             // The room's word: the claim ended. Its hour stays.
             exec(
                 sql,
                 "DELETE FROM public_claim WHERE key = ?",
+                vec![key.into()],
+            )?;
+            exec(
+                sql,
+                "DELETE FROM public_claim_reservation WHERE key = ?",
                 vec![key.into()],
             )?;
         } else {

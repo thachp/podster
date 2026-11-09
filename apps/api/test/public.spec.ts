@@ -32,12 +32,13 @@ async function publicAssertion(extra: object = {}) {
 }
 
 let counter = 0;
-type Opts = { claims?: object; on?: boolean; token?: string };
+type Opts = { claims?: object; on?: boolean; token?: string; cursorKey?: "unset" | "empty" | "short" };
 async function api(who: Who | "public", method: string, path: string, body?: unknown, opts: Opts = {}) {
   const token = opts.token ?? (who === "public" ? await publicAssertion() : await assertion(who, opts.claims ?? {}));
   const headers: Record<string, string> = { "x-podster-assertion": token, "content-type": "application/json" };
   if (method !== "GET") headers["idempotency-key"] = `pub-key-${++counter}`;
   if (opts.on) headers["x-test-public-rooms"] = "on";
+  if (opts.cursorKey) headers["x-test-cursor-key"] = opts.cursorKey;
   const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: method === "GET" ? undefined : JSON.stringify(body ?? {}) });
   const text = await res.text();
   let parsed: any = null;
@@ -351,6 +352,68 @@ describe("Explore", () => {
     } finally {
       await BINDINGS.DB.prepare("DELETE FROM public_workroom_index WHERE workspace_id LIKE 'ws_explore_fake_%' OR workspace_id = 'ws_hang_explore'").run();
     }
+  });
+
+  // M4 step 14: the cursor is sealed, so it says nothing about the handle it names and can't be changed or forged.
+  it("seals its cursor, and refuses one changed, forged or of the old unsealed form", async () => {
+    const future = Date.now() + 20_000_000;
+    const fakes = Array.from({ length: 21 }, (_, n) => ({ ws: `ws_sealed_fake_${n}`, handle: `pub_${n.toString(16).padStart(32, "e")}`, at: future - n }));
+    for (const fake of fakes) {
+      await BINDINGS.DB.prepare("INSERT INTO public_workroom_index (workspace_id, public_handle, topic, has_open_opening, published_at, resolvable, listed, updated_seq) VALUES (?, ?, 'marketing', 0, ?, 1, 1, 1)").bind(fake.ws, fake.handle, fake.at).run();
+    }
+    try {
+      const first = await explore(STRANGER, "?topic=marketing");
+      const cursor: string = first.body.next_cursor;
+      expect(cursor).toMatch(/^[0-9a-f]{1,200}$/);
+      // The 20th candidate's handle and time, in any form, aren't in it.
+      const last = fakes[19];
+      const hex = (text: string) => [...new TextEncoder().encode(text)].map((b) => b.toString(16).padStart(2, "0")).join("");
+      for (const needle of [last.handle, hex(last.handle), String(last.at), hex(String(last.at))]) expect(cursor).not.toContain(needle);
+      // It works, and the same page asked twice gives a different cursor for the same place.
+      expect((await explore(STRANGER, `?topic=marketing&cursor=${cursor}`)).status).toBe(200);
+      expect((await explore(STRANGER, "?topic=marketing")).body.next_cursor).not.toBe(cursor);
+      const flipped = cursor.slice(0, -1) + (cursor.endsWith("0") ? "1" : "0");
+      const unsealed = hex(`${last.at}.${last.handle}`);
+      for (const bad of [flipped, cursor.slice(0, -2), unsealed, "ab".repeat(40)]) {
+        expect((await explore(STRANGER, `?topic=marketing&cursor=${bad}`)).code, bad).toBe("invalid_argument");
+      }
+    } finally {
+      await BINDINGS.DB.prepare("DELETE FROM public_workroom_index WHERE workspace_id LIKE 'ws_sealed_fake_%'").run();
+    }
+  });
+
+  it("shows only its first page, and refuses every cursor, while the key is unset, empty or the wrong length", async () => {
+    const future = Date.now() + 30_000_000;
+    for (let n = 0; n < 21; n++) {
+      await BINDINGS.DB.prepare("INSERT INTO public_workroom_index (workspace_id, public_handle, topic, has_open_opening, published_at, resolvable, listed, updated_seq) VALUES (?, ?, 'other', 0, ?, 1, 1, 1)").bind(`ws_nokey_fake_${n}`, `pub_${n.toString(16).padStart(32, "d")}`, future - n).run();
+    }
+    try {
+      const sealed = (await explore(STRANGER, "?topic=other")).body.next_cursor;
+      expect(sealed).toMatch(/^[0-9a-f]+$/);
+      for (const cursorKey of ["unset", "empty", "short"] as const) {
+        const first = await explore(STRANGER, "?topic=other", { cursorKey });
+        expect(first.status, cursorKey).toBe(200);
+        expect(first.body.next_cursor, cursorKey).toBeNull();
+        const paged = await explore(STRANGER, `?topic=other&cursor=${sealed}`, { cursorKey });
+        expect([paged.status, paged.code], cursorKey).toEqual([400, "invalid_argument"]);
+      }
+    } finally {
+      await BINDINGS.DB.prepare("DELETE FROM public_workroom_index WHERE workspace_id LIKE 'ws_nokey_fake_%'").run();
+    }
+  });
+
+  it("refuses a cursor over 200 characters, and one sealed under another key", async () => {
+    const tooLong = "ab".repeat(101);
+    expect((await explore(STRANGER, `?cursor=${tooLong}`)).code).toBe("invalid_argument");
+    // A well-formed cursor, sealed exactly as the API seals one, but under a key that isn't this deployment's.
+    const otherKey = await crypto.subtle.importKey("raw", crypto.getRandomValues(new Uint8Array(32)), "AES-GCM", false, ["encrypt"]);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const position = new TextEncoder().encode(`${Date.now()}.pub_${"c".repeat(32)}`);
+    const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: new TextEncoder().encode("podster-sealed:v1:explore-cursor") }, otherKey, position));
+    const hex = (bytes: Uint8Array) => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const forged = hex(iv) + hex(sealed);
+    expect(forged.length).toBeLessThanOrEqual(200);
+    expect((await explore(STRANGER, `?cursor=${forged}`)).code).toBe("invalid_argument");
   });
 
   it("is empty with public rooms off", async () => {

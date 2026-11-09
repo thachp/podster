@@ -118,6 +118,7 @@ export default defineConfig({
           OPERATORS: "per_operator_one, per_operator_two",
           // A test value only. The real key is the owner's to set (decision 122).
           A2A_TOKEN_KEY: "0f".repeat(32),
+          EXPLORE_CURSOR_KEY: "a5".repeat(32),
           // Set only by e2e/run-langgraph-check.mjs. Empty, a2a-langgraph.spec.ts skips.
           TEST_LANGGRAPH_ASSISTANT: process.env.PODSTER_LANGGRAPH_URL ? (process.env.PODSTER_LANGGRAPH_ASSISTANT ?? "") : "",
           TEST_WRANGLER: readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8"),

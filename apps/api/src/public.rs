@@ -12,6 +12,7 @@ use crate::error::ApiError;
 use crate::{caller_header, forward, principal, Caller};
 use futures_util::future::{join_all, select, Either};
 use podster_assertion::{verify_room_page_caller, KeySet, Kind, RoomPageCaller};
+use podster_egress::endpoint::{open_labeled, parse_key, seal_labeled, NONCE_BYTES};
 use podster_policy::public::{is_public_handle, parse_topic, Topic};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -135,31 +136,92 @@ pub async fn room_page(req: Request, env: Env, handle: &str) -> R<Response> {
     Ok(response)
 }
 
-/// An Explore cursor names the last candidate a page took: its publish time and handle, both public. It's hex so it reads
-/// as opaque, and anything that doesn't parse back is refused.
-fn encode_cursor(published_at: i64, handle: &str) -> String {
-    format!("{published_at}.{handle}")
-        .bytes()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+/// The secret holding the Explore cursor's sealing key, 64 hex characters (M4 step 14). The owner sets it with
+/// `wrangler secret put EXPLORE_CURSOR_KEY`.
+const CURSOR_KEY_SECRET: &str = "EXPLORE_CURSOR_KEY";
+/// What a sealed cursor is bound to, so nothing else sealed under the key opens as one.
+const CURSOR_LABEL: &str = "explore-cursor";
+/// Longer than any cursor this writes: a 12-byte nonce, the position and a 16-byte tag, in hex.
+const MAX_CURSOR_CHARS: usize = 200;
+
+/// The cursor's key, or why there isn't one: `explore.cursor_key_unset`, or `explore.cursor_key_invalid` for a value that isn't
+/// 64 hex characters. Either fails closed. The caller logs the code only when it matters, when a cursor arrives or a next page
+/// would have been offered, and nothing of the value is ever in it.
+fn cursor_key(env: &Env, req: &Request) -> Result<Vec<u8>, &'static str> {
+    const UNSET: &str = "explore.cursor_key_unset";
+    // Test builds only: a request can ask to be served as if the key were unset, empty or the wrong length.
+    #[cfg(feature = "failpoints")]
+    let secret = match req
+        .headers()
+        .get("x-test-cursor-key")
+        .ok()
+        .flatten()
+        .as_deref()
+    {
+        Some("unset") => return Err(UNSET),
+        Some("empty") => String::new(),
+        Some("short") => "ab".repeat(16),
+        _ => env
+            .secret(CURSOR_KEY_SECRET)
+            .map_err(|_| UNSET)?
+            .to_string(),
+    };
+    #[cfg(not(feature = "failpoints"))]
+    let secret = {
+        let _ = req;
+        env.secret(CURSOR_KEY_SECRET)
+            .map_err(|_| UNSET)?
+            .to_string()
+    };
+    if secret.trim().is_empty() {
+        return Err(UNSET);
+    }
+    parse_key(&secret).ok_or("explore.cursor_key_invalid")
 }
 
-fn decode_cursor(cursor: &str) -> Option<(i64, String)> {
-    if !cursor.len().is_multiple_of(2) || cursor.len() > 160 {
+/// A fresh nonce from the Worker's own `crypto.getRandomValues`. Without one, no cursor is written.
+fn fresh_nonce() -> Option<[u8; NONCE_BYTES]> {
+    use wasm_bindgen::JsCast;
+    let crypto = js_sys::Reflect::get(&js_sys::global(), &"crypto".into()).ok()?;
+    let fill: js_sys::Function = js_sys::Reflect::get(&crypto, &"getRandomValues".into())
+        .ok()?
+        .dyn_into()
+        .ok()?;
+    let array = js_sys::Uint8Array::new_with_length(NONCE_BYTES as u32);
+    fill.call1(&crypto, &array).ok()?;
+    array.to_vec().try_into().ok()
+}
+
+/// An Explore cursor names the last candidate a page took: its publish time and handle. It's sealed (M4 step 14), so whoever
+/// holds it can't read the handle, which may be a room suspended since, or change the position. Without a key, none is
+/// written: there's no unsealed fallback.
+fn encode_cursor(key: &[u8], published_at: i64, handle: &str) -> Option<String> {
+    seal_labeled(
+        key,
+        &fresh_nonce()?,
+        CURSOR_LABEL,
+        &format!("{published_at}.{handle}"),
+    )
+    .ok()
+}
+
+/// A cursor this wrote under the same key, or `None`. With no key every cursor is refused, an old unsealed one included, and
+/// the reason is logged.
+fn decode_cursor(key: Result<&[u8], &str>, cursor: &str) -> Option<(i64, String)> {
+    let key = match key {
+        Ok(key) => key,
+        Err(code) => {
+            console_error!("{}", code);
+            return None;
+        }
+    };
+    if cursor.len() > MAX_CURSOR_CHARS {
         return None;
     }
-    let bytes: Option<Vec<u8>> = (0..cursor.len())
-        .step_by(2)
-        .map(|i| {
-            cursor
-                .get(i..i + 2)
-                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
-        })
-        .collect();
-    let text = String::from_utf8(bytes?).ok()?;
+    let text = open_labeled(key, CURSOR_LABEL, cursor).ok()?;
     let (written, handle) = text.split_once('.')?;
     let at: i64 = written.parse().ok()?;
-    // Only the form `encode_cursor` writes, so one position has one cursor.
+    // Only the form `encode_cursor` writes, so one position has one meaning.
     (is_public_handle(handle) && written == at.to_string()).then(|| (at, handle.to_owned()))
 }
 
@@ -169,7 +231,7 @@ struct Filters {
     after: Option<(i64, String)>,
 }
 
-fn filters(url: &Url) -> R<Filters> {
+fn filters(url: &Url, sealing: Result<&[u8], &str>) -> R<Filters> {
     let mut found = Filters {
         topic: None,
         open: false,
@@ -189,7 +251,8 @@ fn filters(url: &Url) -> R<Filters> {
                 }
             }
             "cursor" => {
-                found.after = Some(decode_cursor(&value).ok_or_else(ApiError::invalid_argument)?)
+                found.after =
+                    Some(decode_cursor(sealing, &value).ok_or_else(ApiError::invalid_argument)?)
             }
             _ => return Err(ApiError::invalid_argument()),
         }
@@ -200,7 +263,8 @@ fn filters(url: &Url) -> R<Filters> {
 /// Explore: a page of candidates from the index's `listed` rows, newest published first, each confirmed and read from its
 /// room. A candidate its room doesn't confirm, or that doesn't answer in time, is left out, and the cursor still moves on.
 pub async fn explore(env: &Env, caller: &Caller, url: &Url, req: &Request) -> R<Response> {
-    let filters = filters(url)?;
+    let key = cursor_key(env, req);
+    let filters = filters(url, key.as_deref().map_err(|code| *code))?;
     if !enabled(env, req)? {
         return Ok(Response::from_json(
             &json!({ "workrooms": [], "next_cursor": null }),
@@ -239,7 +303,14 @@ pub async fn explore(env: &Env, caller: &Caller, url: &Url, req: &Request) -> R<
             last["published_at"].as_f64(),
             last["public_handle"].as_str(),
         ) {
-            (Some(at), Some(handle)) => Some(encode_cursor(at as i64, handle)),
+            (Some(at), Some(handle)) => match &key {
+                Ok(key) => encode_cursor(key, at as i64, handle),
+                Err(code) => {
+                    // Fails closed: Explore shows its first page and no more until the owner sets a valid key.
+                    console_error!("{}", code);
+                    None
+                }
+            },
             _ => None,
         },
         _ => None,

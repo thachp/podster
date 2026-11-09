@@ -167,6 +167,27 @@ CREATE TABLE a2a_attempt (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, agent_id T
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 CREATE INDEX a2a_attempt_outbox ON a2a_attempt (next_queue_at) WHERE queued = 0;
 CREATE INDEX a2a_attempt_task ON a2a_attempt (task_id, created_at);
+", "
+ALTER TABLE a2a_attempt ADD COLUMN reading_ended INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE a2a_attempt ADD COLUMN read_until INTEGER;
+ALTER TABLE a2a_attempt ADD COLUMN next_read_at INTEGER;
+ALTER TABLE a2a_attempt ADD COLUMN read_no INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE a2a_attempt ADD COLUMN read_queued INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE a2a_attempt ADD COLUMN read_queued_at INTEGER;
+ALTER TABLE a2a_attempt ADD COLUMN last_read_no INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE a2a_attempt ADD COLUMN last_state TEXT;
+ALTER TABLE a2a_attempt ADD COLUMN working_seen INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE a2a_attempt ADD COLUMN read_ended_reason TEXT;
+ALTER TABLE a2a_attempt ADD COLUMN cancel_state TEXT;
+CREATE INDEX a2a_attempt_reads ON a2a_attempt (next_read_at) WHERE reading_ended = 0;
+CREATE INDEX a2a_attempt_cancels ON a2a_attempt (cancel_state) WHERE cancel_state = 'due';
+CREATE TABLE a2a_held (attempt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, read_no INTEGER NOT NULL, note TEXT, links_json TEXT NOT NULL,
+  working_seen INTEGER NOT NULL, created_at INTEGER NOT NULL, dropped_links INTEGER NOT NULL DEFAULT 0);
+ALTER TABLE event ADD COLUMN origin TEXT;
+ALTER TABLE event ADD COLUMN origin_ref TEXT;
+ALTER TABLE audit_event ADD COLUMN origin TEXT;
+ALTER TABLE audit_event ADD COLUMN origin_ref TEXT;
+ALTER TABLE message ADD COLUMN origin TEXT;
 "];
 
 pub fn int(value: &Value) -> i64 {
@@ -596,6 +617,12 @@ pub fn record_decision(
         if let Some(agent) = offered_to {
             record_offer_attempt(sql, &decision.task.id, &agent, &event_id, now)?;
         }
+    }
+    // A canceled task's remote tasks are told, once each, and no longer read (ADR 0007, step 13). Only a sent attempt still
+    // being read has a remote task to cancel.
+    if decision.task.status == TaskStatus::Canceled && prior_status != TaskStatus::Canceled {
+        exec(sql, "UPDATE a2a_attempt SET cancel_state = 'due', reading_ended = 1, read_ended_reason = 'task_canceled', updated_at = ?
+          WHERE task_id = ? AND state = 'sent' AND remote_task_id IS NOT NULL AND reading_ended = 0", vec![now.into(), decision.task.id.as_str().into()])?;
     }
     Ok(())
 }

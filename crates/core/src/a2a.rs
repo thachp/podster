@@ -431,3 +431,32 @@ pub fn offer_text(
     }
     body + &tail
 }
+
+/// M3 step 13 (decision 117): how long after each read the next one waits. It backs off from 1 minute to 1 hour, and stays at
+/// an hour.
+pub const READ_DELAYS_MINUTES: [i64; 7] = [1, 2, 4, 8, 16, 32, 60];
+/// How long an attempt is read for after its send: 7 days.
+pub const READ_FOR_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// The wait before read `next`, in milliseconds. Read 1 waits a minute after the send, and from read 7 on it's an hour.
+pub fn read_delay_ms(next: u32) -> i64 {
+    let at = next.max(1) as usize - 1;
+    let minutes = READ_DELAYS_MINUTES
+        .get(at)
+        .or(READ_DELAYS_MINUTES.last())
+        .copied()
+        .unwrap_or(60);
+    minutes * 60 * 1000
+}
+
+/// Whether another read is due to be queued: reading hasn't ended, and the 7 days aren't over. Once they are, reading ends.
+pub fn reading_open(now: i64, read_until: i64, ended: bool) -> bool {
+    !ended && now < read_until
+}
+
+/// Decision 123's caps on what a remote agent sends back. Past any of them, the whole answer is refused as a failed read, never
+/// cut. What's kept is data: a status message becomes a thread message and artifacts become a submission's note and links,
+/// each still checked by policy and `decide` as the agent's own command.
+pub const MAX_REMOTE_PARTS: usize = 8;
+pub const MAX_REMOTE_ARTIFACTS: usize = crate::MAX_ARTIFACTS;
+pub const MAX_REMOTE_TEXT_BYTES: usize = 16 * 1024;

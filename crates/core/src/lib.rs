@@ -555,8 +555,9 @@ fn require_criteria(criteria: &Option<String>) -> Result<(), CoreError> {
     Ok(())
 }
 
-/// Artifact links must be HTTPS, because a dashboard will render them.
-fn require_artifact(artifact: &Artifact) -> Result<(), CoreError> {
+/// Artifact links must be HTTPS, because a dashboard will render them. Public, so links held from a remote A2A agent
+/// are checked the same way before they're kept.
+pub fn require_artifact(artifact: &Artifact) -> Result<(), CoreError> {
     let authority = artifact
         .uri
         .strip_prefix("https://")

@@ -645,6 +645,9 @@ describe("the discovery-index reconcile", () => {
   it("spreads a room's first check across the interval", async () => {
     const before = Date.now();
     const { id } = await published();
+    // The room's own alarm may have run before the test's, and still be awaiting D1 when drain returns, so the time is
+    // waited for, bounded, rather than read once.
+    await vi.waitFor(async () => expect(await stored(id, NEXT)).toBeTypeOf("number"), { timeout: 10_000, interval: 100 });
     const first = await stored(id, NEXT);
     expect(first).toBeGreaterThanOrEqual(before);
     expect(first).toBeLessThanOrEqual(Date.now() + SIX_HOURS);

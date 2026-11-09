@@ -33,8 +33,29 @@ pub const ROOM_QUOTA_BYTES: u64 = 5_000_000_000;
 /// Decision 161: in a public room, each public participant may hold at most 1 GB of the room's files, counted as the room's
 /// 5 GB is. Others in the room aren't limited by it.
 pub const PUBLIC_PARTICIPANT_QUOTA_BYTES: u64 = 1_000_000_000;
-/// No result within an hour fails the scan.
+/// No result within an hour of a file going on the scan queue fails the scan.
 pub const SCAN_DEADLINE_MS: i64 = 60 * 60 * 1000;
+/// Per-room fairness in the scan queue (M4 step 14): a room has at most this many files on the shared queue at once, and its
+/// others wait in the room for its turn, so one busy room can't push every other room's scans past the hour. A room's own
+/// backlog only delays itself.
+pub const ROOM_SCANS_QUEUED: usize = 4;
+/// A file still waiting for its room's turn after a day fails closed, as a scan with no verdict does.
+pub const SCAN_WAIT_LIMIT_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// After a scan send fails: 5 seconds, doubling each time, up to 5 minutes.
+pub const SCAN_SEND_RETRY_FIRST_MS: i64 = 5_000;
+pub const SCAN_SEND_RETRY_MAX_MS: i64 = 5 * 60 * 1000;
+
+/// How long a room waits after `failures` scan sends have failed in a row.
+pub fn scan_send_backoff_ms(failures: u32) -> i64 {
+    let doublings = failures.saturating_sub(1).min(16);
+    (SCAN_SEND_RETRY_FIRST_MS << doublings).min(SCAN_SEND_RETRY_MAX_MS)
+}
+
+/// How many of a room's waiting files to put on the queue now, given how many it already has there.
+pub fn scans_to_queue(queued: usize, waiting: usize) -> usize {
+    ROOM_SCANS_QUEUED.saturating_sub(queued).min(waiting)
+}
 /// Decision 84: signatures older than this can't make a file available.
 pub const MAX_SIGNATURE_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// How far ahead of the room's clock a signature database's build time may be, for clocks that disagree.

@@ -2588,6 +2588,9 @@ pub struct Workspace {
     denial_alarm_set: std::cell::Cell<bool>,
     /// File sweeps that failed in a row, which backs off how soon the alarm comes back for them. A restart forgets it.
     sweep_failures: std::cell::Cell<u32>,
+    /// Scan sends that failed in a row, and when the room may send again. A restart forgets both.
+    scan_send_failures: std::cell::Cell<u32>,
+    scan_send_retry_at: std::cell::Cell<i64>,
     /// Whether nothing is held from a failed migration, so a request needn't look. A restart looks again.
     held_clear: std::cell::Cell<bool>,
 }
@@ -3445,6 +3448,26 @@ impl Workspace {
             .transpose()?
             .flatten()
         {
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
+        // A file waiting for the room's turn on the scan queue, when the room has a turn free.
+        // After a failed send, not before the room's rest is over.
+        if migrated && objects::scan_turn_due(&sql)? {
+            let next = (now + 10).max(self.scan_send_allowed_at());
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
+        // A queued scan past its re-send time with no re-send yet, as after a failed one, has its own alarm.
+        if migrated && self.scan_resend_pending(&sql, now).await {
+            let next = (now + 10).max(self.scan_send_allowed_at());
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
+        // A queued scan reaching its re-send time with no verdict is sent once more.
+        if let Some(next) = migrated
+            .then(|| objects::next_scan_resend(&sql, now))
+            .transpose()?
+            .flatten()
+        {
+            let next = next.max(now + 10).max(self.scan_send_allowed_at());
             due = Some(due.map_or(next, |d| d.min(next)));
         }
         // Like every other due time here, it can only bring the alarm earlier.
@@ -4477,6 +4500,8 @@ impl DurableObject for Workspace {
             denials_held: RefCell::new(HeldDenials::new()),
             denial_alarm_set: std::cell::Cell::new(false),
             sweep_failures: std::cell::Cell::new(0),
+            scan_send_failures: std::cell::Cell::new(0),
+            scan_send_retry_at: std::cell::Cell::new(0),
             held_clear: std::cell::Cell::new(false),
         }
     }
@@ -4555,6 +4580,8 @@ impl DurableObject for Workspace {
         if let Err(error) = self.expire_scans() {
             console_error!("couldn't end overdue scans: {:?}", error.code());
         }
+        // Before anything slower, so a room's turn on the scan queue isn't held up.
+        self.queue_scan_turns().await;
         self.sweep_files().await;
         // One failing doesn't hold up the other.
         let outbox = self.drain_outbox().await;

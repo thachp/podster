@@ -420,5 +420,10 @@ describe("Explore", () => {
     const id = await room("Explore while off");
     await publish(id);
     expect((await explore(STRANGER, "", { on: false })).body).toEqual({ workrooms: [], next_cursor: null });
+    // Off is checked first: a bad cursor or an unset key isn't read, or refused, while public rooms are off.
+    for (const query of ["?cursor=zz", "?topic=nonsense"]) {
+      const off = await explore(STRANGER, query, { on: false, cursorKey: "unset" });
+      expect([off.status, off.body], query).toEqual([200, { workrooms: [], next_cursor: null }]);
+    }
   });
 });

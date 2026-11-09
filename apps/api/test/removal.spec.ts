@@ -621,6 +621,9 @@ describe("deletes that fail, and the limits on each alarm", () => {
     };
     const batch = await removed(`rooms/${id}/objects/aa-failbatch/x`);
     const stuck = await removed(`rooms/${id}/objects/ab-stuck/x`);
+    // Each file's arrival armed the alarm that takes its scan turn (M4 step 14). It runs here, before the strays exist, so the
+    // forced sweep below is the only pass over them.
+    await alarm(id);
     // Fresh strays after them fill more than three pages of ten.
     for (let i = 0; i < 35; i++) await BINDINGS.ASSETS.put(`rooms/${id}/objects/z${String(i).padStart(2, "0")}/a`, new Uint8Array([1]));
     const before = Date.now();

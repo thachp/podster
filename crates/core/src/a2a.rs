@@ -463,16 +463,17 @@ pub fn offer_file_name(name: &str) -> String {
 }
 
 /// The input-file list. Each line puts Podster's link first and the name after it, in quotes, so a name can't pose as the
-/// link. `host` is where the links are, the only place the agent should send its credential. An `/a2a` token isn't one of
-/// the credentials that work there (ADR 0007, audiences).
+/// link. `host` is where the links are, the only place the agent should send its credential. The links are under the A2A
+/// resource, `/a2a/files/...`, so the token they take is the agent's `/a2a` token, the one it reached Podster's A2A server
+/// with. An `/mcp` token doesn't work there, as an `/a2a` token doesn't at `/v1/files` (ADR 0007, audiences).
 fn files_section(files: &[InputFile<'_>], host: Option<&str>) -> String {
     if files.is_empty() {
         return String::new();
     }
     let at = host.map_or("the Podster gateway".to_string(), |host| host.to_string());
     let mut section = format!(
-        "\n\n## Input files\n\nDownload each link with your agent's MCP OAuth token, the one you use at /mcp, or an Agent Auth token, \
-         as `Authorization: Bearer`. Send it only to {at}. A token for /a2a isn't accepted for downloads.\n"
+        "\n\n## Input files\n\nDownload each link with your Podster OAuth token for /a2a, as `Authorization: Bearer`. \
+         Send it only to {at}.\n"
     );
     let mut listed = 0;
     for file in files {

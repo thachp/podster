@@ -7,6 +7,8 @@ import { mintAssertion, type Identity } from "./assertion";
 import { clientKey } from "./index";
 
 const FILE_PATH = /^\/v1\/files\/[\w-]+\/[\w-]+$/;
+/** The same file under the A2A resource (M3, ADR 0007): only an `/a2a`-audience token opens it. */
+const A2A_FILE_PATH = /^\/a2a\/files\/([\w-]+)\/([\w-]+)$/;
 const BEARER = /^Bearer ([^\s,]{1,8192})$/;
 /** How long the API may take to start answering. A file takes as long as it takes after that. */
 const START_TIMEOUT_MS = 10_000;
@@ -47,9 +49,26 @@ export async function serveFile(env: FileEnv, identity: Identity, path: string):
   return new Response(response.body, { status: 200, headers });
 }
 
+type Identify = (token: string) => Promise<Identity | Response | null>;
+
 /** The path for agents. `identify` reads the credential fresh, and answers `null` if it isn't one, or a refusal if it has ended. */
-export async function handleAgentDownload(request: Request, url: URL, env: FileEnv, identify: (token: string) => Promise<Identity | Response | null>, withinLimit: (key: string) => Promise<boolean>): Promise<Response | null> {
+export async function handleAgentDownload(request: Request, url: URL, env: FileEnv, identify: Identify, withinLimit: (key: string) => Promise<boolean>): Promise<Response | null> {
   if (!isFilePath(url.pathname)) return null;
+  return download(request, url.pathname, env, identify, withinLimit);
+}
+
+/**
+ * `GET /a2a/files/{workspace}/{file}`: the same download for an agent that holds only an `/a2a` token. `identify` accepts
+ * nothing else, so the audiences stay apart (#157): an `/mcp` token doesn't work here, and an `/a2a` token doesn't work at
+ * `/v1/files`. The API runs the same file and visibility checks, on the same `/v1/files` path, and its headers pass the same way.
+ */
+export async function handleA2aDownload(request: Request, url: URL, env: FileEnv, identify: Identify, withinLimit: (key: string) => Promise<boolean>): Promise<Response | null> {
+  const match = url.pathname.match(A2A_FILE_PATH);
+  if (!match) return null;
+  return download(request, `/v1/files/${match[1]}/${match[2]}`, env, identify, withinLimit);
+}
+
+async function download(request: Request, apiPath: string, env: FileEnv, identify: Identify, withinLimit: (key: string) => Promise<boolean>): Promise<Response> {
   if (request.method !== "GET") return answer("not_found", 405, { allow: "GET" });
   const token = request.headers.get("authorization")?.match(BEARER)?.[1];
   if (!token) return answer("invalid_credential", 401);
@@ -61,5 +80,5 @@ export async function handleAgentDownload(request: Request, url: URL, env: FileE
   if (identity instanceof Response) return identity;
   // Before an Agent Auth token is spent, so an agent that was limited can retry with the same one.
   if (!(await withinLimit(`agent:${identity.id}`))) return limited();
-  return serveFile(env, identity, url.pathname);
+  return serveFile(env, identity, apiPath);
 }

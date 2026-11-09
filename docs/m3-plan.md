@@ -166,7 +166,7 @@ The owner accepted every recommendation on 2026-11-08 ("sure"). Each row links t
 - **The outbound run against LangGraph's server.** [Decision 143](spec/PRODUCT.md#decisions-needed) makes it the outbound independent implementation, with fasta2a's server as backup. It hasn't run, because starting it was refused by the session permission check, so step 12's interoperability run still needs a way to run it.
 - **Spike C on staging,** with the owner's yes in that session ([decision 126](spec/PRODUCT.md#decisions-needed)): real egress, timeouts and queue timing.
 - **Step 13b, `request_changes` out** ([decision 114](spec/PRODUCT.md#decisions-needed)). Until it's built, a change request on a completed remote task reaches the agent only through its inbox, and nothing goes to its endpoint.
-- **An A2A download route for input files,** `GET /a2a/files/{workspace}/{file}`, accepting only `/a2a`-audience tokens, with the same `file_json` and visibility checks as `/v1/files`. Until it's built, an offer's file links need the agent's MCP or Agent Auth credential, because `/v1/files` refuses an `/a2a` token (#157's audience split). It's a contract change, so it follows #179.
+- **An A2A download route for input files.** Built on `claude/m3-a2a-files`: `GET /a2a/files/{workspace}/{file}` accepts only `/a2a`-audience tokens, through the same API path and checks as `/v1/files`, and offers link to it. Not yet run on a deployment.
 - **A real outbound round trip on a deployment:** a send, reads back to a submission, and a cancel. It needs an A2A server staging can reach, which is a new cloud resource needing the owner's yes, or the LangGraph run above. Steps 12 and 13 are tested only against the test pool's fake endpoint.
 
 ## Owed before production that M3 touches

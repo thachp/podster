@@ -57,6 +57,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup show
       - run: cargo install worker-build --version 0.8.7 --locked
+      # worker-build fetches wasm-bindgen and wasm-opt from GitHub releases unless they're already in its cache, and those
+      # downloads fail often enough to block merges. The key follows Cargo.lock, which pins the wasm-bindgen version.
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/worker-build
+          key: worker-build-0.8.7-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: worker-build-0.8.7-${{ runner.os }}-
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -84,6 +91,13 @@ jobs:
       # UI-10 and UI-11, against the real Workers in a real browser.
       - run: rustup show
       - run: cargo install worker-build --version 0.8.7 --locked
+      # worker-build fetches wasm-bindgen and wasm-opt from GitHub releases unless they're already in its cache, and those
+      # downloads fail often enough to block merges. The key follows Cargo.lock, which pins the wasm-bindgen version.
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/worker-build
+          key: worker-build-0.8.7-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: worker-build-0.8.7-${{ runner.os }}-
       - run: npm ci
         working-directory: apps/gateway
       - run: npm ci
@@ -122,6 +136,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup show
       - run: cargo install worker-build --version 0.8.7 --locked
+      # worker-build fetches wasm-bindgen and wasm-opt from GitHub releases unless they're already in its cache, and those
+      # downloads fail often enough to block merges. The key follows Cargo.lock, which pins the wasm-bindgen version.
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/worker-build
+          key: worker-build-0.8.7-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: worker-build-0.8.7-${{ runner.os }}-
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -140,6 +161,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup show
       - run: cargo install worker-build --version 0.8.7 --locked
+      # worker-build fetches wasm-bindgen and wasm-opt from GitHub releases unless they're already in its cache, and those
+      # downloads fail often enough to block merges. The key follows Cargo.lock, which pins the wasm-bindgen version.
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/worker-build
+          key: worker-build-0.8.7-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: worker-build-0.8.7-${{ runner.os }}-
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22

@@ -256,6 +256,18 @@ describe("Activity", () => {
 
 describe("Settings", () => {
   const audit = { ok: true as const, data: { audit: [], next_cursor: null } };
+  const preview = { archived: false, context: null, goal: null, name: "Launch room", openings: [], outputs: [], participant_count: 1, person_review: false, topic: null, workflow: "general" };
+  const visibility = { ok: true as const, data: { visibility: "private", public_handle: null, published_at: null, published_on: null, topic: null, public_claims_paused: false, suspension: null, public_rooms_enabled: false, preview, view_hash: "a".repeat(64) } };
+  beforeEach(() => replies.set("/api/v1/workspaces/ws_1/visibility", visibility));
+
+  it("says a failed visibility read failed, not that the workroom is private", async () => {
+    replies.set("/api/v1/workspaces/ws_1/audit", audit);
+    replies.set("/api/v1/workspaces/ws_1/visibility", failed(503));
+    render(await Settings({ params, searchParams }));
+    expect(screen.getByText("Couldn't read it")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Make public" })).toBeNull();
+    expect(screen.getByRole("alert")).toHaveTextContent("Couldn't refresh.");
+  });
 
   it("isn't there for someone who can't manage", async () => {
     room.policy_version = null;

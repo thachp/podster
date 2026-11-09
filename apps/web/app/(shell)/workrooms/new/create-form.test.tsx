@@ -2,7 +2,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { currentUrl, setUrl } from "@/test/next-navigation";
-import { CreateWorkroomForm } from "./create-form";
+import { CreateWorkroomForm, landingFor, sendsClaimable } from "./create-form";
 
 const answer = (status: number, body: unknown) => vi.stubGlobal("fetch", async () => new Response(JSON.stringify(body), { status }));
 
@@ -199,14 +199,52 @@ describe("role openings when creating a workroom", () => {
     const [first, second] = [screen.getByRole("group", { name: "Opening 1" }), screen.getByRole("group", { name: "Opening 2" })];
     expect(screen.getByRole("button", { name: "Create workroom" })).toBeDisabled();
     await fill(first, "Lead", "Runs it");
-    await userEvent.click(within(first).getByRole("checkbox"));
-    expect(within(second).getByRole("checkbox")).toBeDisabled();
+    await userEvent.click(within(first).getByRole("checkbox", { name: /lead coordinator/i }));
+    expect(within(second).getByRole("checkbox", { name: /lead coordinator/i })).toBeDisabled();
     await fill(second, "Engineer", "Builds it");
     await userEvent.click(screen.getByRole("button", { name: "Create workroom" }));
     await vi.waitFor(() => expect(currentUrl()).toBe("/w/ws_new/overview"));
     expect(sent.map((r) => r.url)).toEqual(["/api/v1/workspaces", "/api/v1/workspaces/ws_new/roles", "/api/v1/workspaces/ws_new/roles"]);
     expect(sent[1]?.body).toEqual({ policy_version: 3, title: "Lead", responsibilities: "Runs it", is_lead: true });
     expect(sent[2]?.body).toEqual({ policy_version: 4, title: "Engineer", responsibilities: "Builds it", capacity: 1, preset: "member" });
+  });
+
+  it("sends the public-claim switch only for a preset that can take it, and goes to Settings to publish", async () => {
+    setUrl("/workrooms/new");
+    stub();
+    render(<CreateWorkroomForm organization="Org A" />);
+    await userEvent.type(screen.getByLabelText("Name"), "Launch room");
+    await userEvent.click(screen.getByRole("button", { name: "Add an opening" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add an opening" }));
+    const [first, second] = [screen.getByRole("group", { name: "Opening 1" }), screen.getByRole("group", { name: "Opening 2" })];
+    const claimable = (group: HTMLElement) => within(group).getByRole("checkbox", { name: /Claimable from the public page/ });
+    // Member can't be claimed publicly, so the switch isn't offered.
+    expect(claimable(first)).toBeDisabled();
+    await fill(first, "Helper", "Helps");
+    await userEvent.selectOptions(within(first).getByLabelText("Access preset a claim copies"), "public_participant");
+    await userEvent.click(claimable(first));
+    await fill(second, "Engineer", "Builds it");
+    await userEvent.selectOptions(within(second).getByLabelText("Access preset a claim copies"), "guest");
+    await userEvent.click(claimable(second));
+    // Moved back to a preset that can't take it, so it isn't sent.
+    await userEvent.selectOptions(within(second).getByLabelText("Access preset a claim copies"), "member");
+    expect(claimable(second)).not.toBeChecked();
+    await userEvent.click(screen.getByRole("radio", { name: /Public, once you confirm/ }));
+    expect(screen.getByRole("note")).toHaveTextContent(/nothing is public until you confirm it there/);
+    await userEvent.click(screen.getByRole("button", { name: "Create workroom" }));
+    // The test router keeps no hash; `landingFor` below checks it.
+    await vi.waitFor(() => expect(currentUrl()).toBe("/w/ws_new/settings"));
+    // Creating sends nothing about visibility: the room starts private.
+    expect(sent[0]?.body).toEqual({ name: "Launch room" });
+    expect(sent[1]?.body).toEqual({ policy_version: 3, title: "Helper", responsibilities: "Helps", capacity: 1, preset: "public_participant", publicly_claimable: true });
+    expect(sent[2]?.body).toEqual({ policy_version: 4, title: "Engineer", responsibilities: "Builds it", capacity: 1, preset: "member" });
+  });
+
+  it("never sends the switch for the lead", () => {
+    expect(sendsClaimable({ claimable: true, preset: "guest", isLead: true })).toBe(false);
+    expect(sendsClaimable({ claimable: true, preset: "guest", isLead: false })).toBe(true);
+    expect(landingFor("ws_1", "private")).toBe("/w/ws_1/overview");
+    expect(landingFor("ws_1", "public")).toBe("/w/ws_1/settings#settings-visibility");
   });
 
   const setUp = async (titles: string[]) => {
@@ -311,7 +349,7 @@ describe("role openings when creating a workroom", () => {
     expect(title).toHaveValue("One");
     // The controls that can't be read-only say so, and do nothing. Both matter, so press each.
     const group = within(screen.getByRole("group", { name: "Opening 1" }));
-    const lead = group.getByRole("checkbox");
+    const lead = group.getByRole("checkbox", { name: /lead coordinator/i });
     const preset = group.getByLabelText("Access preset a claim copies");
     const remove = group.getByRole("button", { name: "Remove opening 1" });
     for (const control of [lead, preset, remove]) expect(control).toHaveAttribute("aria-disabled", "true");

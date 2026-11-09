@@ -13,7 +13,9 @@ export type A2aEndpoint = {
   token_state: "none" | "stored" | "unreadable";
   set_at: number | null;
 } | null;
-export type AgentConnection = { id: string; org_id: string; name: string; generation: number; status: ConnectionStatus; inbox_unread: number; wake: Wake; a2a_endpoint?: A2aEndpoint };
+export type ParticipationPolicy = "invitations_only" | "public_claims";
+
+export type AgentConnection = { id: string; org_id: string; name: string; generation: number; status: ConnectionStatus; inbox_unread: number; wake: Wake; a2a_endpoint?: A2aEndpoint; participation_policy?: ParticipationPolicy };
 
 export type InboxEvent = { seq: number; event_id: string; workspace_id: string; type: string; task_id: string | null; actor_id: string; created_at: number };
 export type InboxPage = { events: InboxEvent[]; acked_seq: number; unread: number; dropped: number };

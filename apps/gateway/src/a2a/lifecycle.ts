@@ -44,7 +44,7 @@ const ALLOWED: Record<LifecycleMethod, string[]> = {
   "podster.lifecycle.v1.AcceptTask": ["id", "version", "requestId", "reason"],
   "podster.lifecycle.v1.DeclineTask": ["id", "version", "requestId", "reason"],
   "podster.lifecycle.v1.ReleaseTask": ["id", "version", "requestId", "reason"],
-  "podster.lifecycle.v1.SubmitTask": ["id", "version", "requestId", "note", "artifacts"],
+  "podster.lifecycle.v1.SubmitTask": ["id", "version", "requestId", "note", "artifacts", "files"],
 };
 
 type Parsed = { workspaceId: string; taskId: string; a2aId: string; requestId: string; args: Record<string, unknown> };
@@ -73,7 +73,17 @@ function parse(method: LifecycleMethod, params: unknown): Parsed {
       if (typeof p.note !== "string" || bytes(p.note) > MAX_NOTE_BYTES) throw malformed(`note is text of at most ${MAX_NOTE_BYTES} bytes.`);
       args.note = p.note;
     }
-    // Links only for now. Files arrive with step 14, through create_upload.
+    // Files are only ones the agent uploaded with create_upload for this task (decision 121): this names them, and the API's
+    // rules decide whether they may be submitted. Podster never takes bytes or a URL to fetch here.
+    const files = p.files ?? [];
+    if (!Array.isArray(files) || files.length > MAX_ARTIFACTS) throw malformed(`files is a list of at most ${MAX_ARTIFACTS} uploads.`);
+    args.files = files.map((f) => {
+      const keys = f && typeof f === "object" ? Object.keys(f) : [];
+      if (!f || typeof f !== "object" || Array.isArray(f) || typeof (f as any).id !== "string" || keys.some((k) => k !== "id" && k !== "label") || ((f as any).label !== undefined && typeof (f as any).label !== "string")) {
+        throw malformed("Each file is { id, label? }, an upload from create_upload for this task.");
+      }
+      return (f as any).label === undefined ? { id: (f as any).id } : { id: (f as any).id, label: (f as any).label };
+    });
     const artifacts = p.artifacts ?? [];
     if (!Array.isArray(artifacts) || artifacts.length > MAX_ARTIFACTS) throw malformed(`artifacts is a list of at most ${MAX_ARTIFACTS} links.`);
     args.artifacts = artifacts.map((a) => {
@@ -90,8 +100,12 @@ const HIDDEN = new Set(["task_not_found", "workspace_not_found", "not_allowed", 
 /** Fixed API codes that mean the request itself can't be done as sent. They're named in the answer, never a body. */
 const MALFORMED = new Set(["invalid_argument", "limit_exceeded", "commit_changed", "submission_mismatch", "self_sign_off"]);
 
+/** A submission's files, refused after the task itself was found and authorized, so naming them reveals nothing. */
+const FILE_REFUSALS = new Set(["file_not_found", "file_not_ready", "file_removed", "duplicate_file", "too_many_artifacts"]);
+
 function refusal(status: number, body: any): Error {
   const code = body?.error?.code;
+  if (typeof code === "string" && FILE_REFUSALS.has(code)) return malformed(`Podster couldn't take those files: ${code}.`);
   if (status === 404 || status === 403 || HIDDEN.has(code)) return new TaskNotFoundError("Task not found.");
   if (code === "version_conflict") return malformed("The task has changed since that version. Read it again with GetTask.");
   if (code === "invalid_transition") return new UnsupportedOperationError("The task's current state doesn't allow that.");

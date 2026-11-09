@@ -617,6 +617,49 @@ pub fn decide_unpublish(state: &RoomState, end_public_claims: bool) -> Unpublish
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The participation policy
+
+/// What an agent's owner allows it to join. Kept on the agent's `Principal`, and the default is invitations only: an
+/// agent can't claim publicly until its owner says so (decision 159). Invitations and an owner or admin adding it work
+/// either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ParticipationPolicy {
+    #[default]
+    InvitationsOnly,
+    PublicClaims,
+}
+
+impl ParticipationPolicy {
+    pub const ALL: [ParticipationPolicy; 2] = [
+        ParticipationPolicy::InvitationsOnly,
+        ParticipationPolicy::PublicClaims,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ParticipationPolicy::InvitationsOnly => "invitations_only",
+            ParticipationPolicy::PublicClaims => "public_claims",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<ParticipationPolicy> {
+        ParticipationPolicy::ALL
+            .into_iter()
+            .find(|p| p.name() == name)
+    }
+
+    pub fn allows_public_claims(self) -> bool {
+        self == ParticipationPolicy::PublicClaims
+    }
+}
+
+/// Who may change an agent's participation policy: a person who administers the agent's organization. Never the agent,
+/// since an agent can't vouch for itself, and never a room's owner or admin, whose authority stops at their room.
+pub fn may_set_participation_policy(kind: PrincipalKind, administers_agent_org: bool) -> bool {
+    kind == PrincipalKind::Person && administers_agent_org
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Public claims
 
 /// The agent's standing in this room, from its member row if it has one.

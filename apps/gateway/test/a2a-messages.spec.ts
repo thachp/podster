@@ -140,6 +140,18 @@ describe("what's refused", () => {
     expect((await thread(offered)).length).toBe(before);
   });
 
+  it("keeps a url part as an external link in the text, and never fetches it (step 14)", async () => {
+    const msg = { message: { messageId: crypto.randomUUID(), role: "ROLE_USER", taskId: id(room, offered), parts: [{ text: "See this." }, { url: "https://example.com/spec.pdf", filename: "[click](https://evil.test)" }] } };
+    expect((await a2a("SendMessage", msg, guest.a2a)).body.result).toBeDefined();
+    expect((await thread(offered)).at(-1).body).toBe("See this.\n\nLink from the client: https://example.com/spec.pdf");
+    const before = (await thread(offered)).length;
+    for (const url of ["http://example.com/x", "https://user@example.com/x", "https:///nohost", "https://example.com/a b", `https://example.com/${"x".repeat(2100)}`]) {
+      const bad = { message: { messageId: crypto.randomUUID(), role: "ROLE_USER", taskId: id(room, offered), parts: [{ url }] } };
+      expect((await a2a("SendMessage", bad, guest.a2a)).body.error, url.slice(0, 40)).toBeDefined();
+    }
+    expect((await thread(offered)).length).toBe(before);
+  });
+
   it("accepts a contextId that is the task's own id", async () => {
     expect((await a2a("SendMessage", text(id(room, offered), "With context.", crypto.randomUUID(), { contextId: id(room, offered) }), guest.a2a)).body.result).toBeDefined();
   });

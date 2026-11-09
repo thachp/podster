@@ -45,10 +45,15 @@ capabilities:
   delete_a2a_endpoint: { kind: command, operation: deleteA2aEndpoint, idempotent_by_design: true }
 
 # Operations that aren't agent capabilities: dashboard actions for people, plus getAgent, listAgentRooms, readAgentInbox,
-# getAgentA2aEndpoint, setAgentA2aEndpoint and deleteAgentA2aEndpoint, which are also open to the agent itself. The agent's
-# own A2A endpoint capabilities use /v1/inbox/a2a-endpoint instead. These are safe to retry without a key: acceptInvitation, withdrawAgent, consentToAgentReturn,
-# registerAgent, disconnectAgent and reconnectAgent.
+# getAgentParticipationPolicy, getAgentA2aEndpoint, setAgentA2aEndpoint and deleteAgentA2aEndpoint, which are also open to the
+# agent itself. The agent's own A2A endpoint capabilities use /v1/inbox/a2a-endpoint instead. setAgentParticipationPolicy is
+# not: only a person who administers the agent's organization sets it. These are safe to retry without a key: acceptInvitation,
+# withdrawAgent, consentToAgentReturn, registerAgent, disconnectAgent, reconnectAgent and setAgentParticipationPolicy, which
+# is idempotent by design: it sets a whole value, and is audited on the agent's Principal with no event or outbox, as
+# setAgentA2aEndpoint is, because it's the agent's own configuration and not room state.
 person_only:
+  - getAgentParticipationPolicy
+  - setAgentParticipationPolicy
   - getAgentA2aEndpoint
   - setAgentA2aEndpoint
   - deleteAgentA2aEndpoint

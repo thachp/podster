@@ -10,10 +10,27 @@ const pub = publicKey.export({ format: "jwk" });
 // Wake's outbound requests land here, so tests can see them and choose how the far end answers.
 const hookRequests: { host: string; path: string; signature: string | null; agent: string | null; authorization: string | null; a2aVersion: string | null; body: string }[] = [];
 
+// GetTask and CancelTask answers a test scripts for each remote task ID (M3 step 13). Each read takes the next one, and the
+// last repeats. An answer is a JSON-RPC `result`, or `{ error }`, or `{ raw }` for a body sent as is, or `{ httpStatus }`.
+const scripts = new Map<string, unknown[]>();
+function scripted(key: string) {
+  const answers = scripts.get(key);
+  if (!answers?.length) return undefined;
+  return answers.length > 1 ? answers.shift() : answers[0];
+}
+
 // An A2A endpoint's answers to SendMessage, chosen by path (M3 step 12).
 function a2aAnswer(path: string, body: string) {
-  const id = (() => { try { return JSON.parse(body).id ?? null; } catch { return null; } })();
+  const parsed = (() => { try { return JSON.parse(body); } catch { return {}; } })();
+  const id = parsed.id ?? null;
   const rpc = (result: unknown) => new Response(JSON.stringify({ jsonrpc: "2.0", id, result }), { headers: { "content-type": "application/json" } });
+  if (parsed.method === "GetTask" || parsed.method === "CancelTask") {
+    const answer: any = scripted(parsed.method === "GetTask" ? parsed.params?.id : `${parsed.params?.id}:cancel`);
+    if (answer?.raw !== undefined) return new Response(answer.raw, { headers: { "content-type": "application/json" } });
+    if (answer?.error) return new Response(JSON.stringify({ jsonrpc: "2.0", id, error: answer.error }));
+    if (answer?.httpStatus) return new Response(null, { status: answer.httpStatus });
+    return rpc(answer ?? { id: parsed.params?.id, status: { state: parsed.method === "CancelTask" ? "TASK_STATE_CANCELED" : "TASK_STATE_SUBMITTED" } });
+  }
   if (path.startsWith("/a2a/message")) return rpc({ message: { messageId: "m-1", role: "ROLE_AGENT", parts: [{ text: "Noted." }] } });
   if (path.startsWith("/a2a/error")) return new Response(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32001, message: "no" } }));
   if (path.startsWith("/a2a/big")) return rpc({ task: { id: "remote-big", status: { state: "TASK_STATE_SUBMITTED" } }, padding: "x".repeat(70 * 1024) });
@@ -25,6 +42,11 @@ function a2aAnswer(path: string, body: string) {
 async function fakeHook(request: Request) {
   const url = new URL(request.url);
   if (url.hostname === "hook-log.example.com") return new Response(JSON.stringify(hookRequests));
+  if (url.hostname === "a2a-script.example.com") {
+    const { key, answers } = await request.json() as { key: string; answers: unknown[] };
+    scripts.set(key, answers);
+    return new Response("ok");
+  }
   const body = await request.text();
   hookRequests.push({ host: url.hostname, path: url.pathname, signature: request.headers.get("x-podster-signature"), agent: request.headers.get("user-agent"), authorization: request.headers.get("authorization"), a2aVersion: request.headers.get("a2a-version"), body });
   if (url.pathname.startsWith("/hang")) await new Promise((resolve) => setTimeout(resolve, 5000));

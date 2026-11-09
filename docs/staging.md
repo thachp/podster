@@ -243,6 +243,7 @@ What `apps/api/wrangler.jsonc` binds under `env.staging`, and the secrets it rea
 | Secret | `SCANNER_SECRET` | The scanner's shared secret |
 | Secret | `A2A_TOKEN_KEY` | Seals A2A endpoint bearer tokens. The owner set it on 2026-11-08 |
 | Var | `APP_URL` | `https://app-staging.podster.dev`, for the link in an A2A offer |
+| Var | `GATEWAY_URL` | `https://gateway-staging.podster.dev`, for the input-file links in an A2A offer, which the agent opens with its own credential |
 
 ## The A2A token key
 

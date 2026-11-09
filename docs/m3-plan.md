@@ -88,8 +88,9 @@ C changes `packages/contracts` and M adds a migration or room schema. The order 
 | 10 | Inbound lifecycle through the Podster extension: accept, decline, release, and submit with text and links | Yes | | 9 | 11 |
 | 11 | Endpoint registration on the `Principal`: set, delete and status, checked against the egress policy, with the credential from question 16 | Yes | Yes | 7 | 8, 9, 10 |
 | 12 | Outbound offers: outbox, queue, `SendMessage` with `return_immediately`, the stored mapping of one A2A task per offer attempt, retries with the same `messageId`, and switching off after repeated failures | | Yes | 5, 11 | Built on `claude/m3-step12-outbound`. The queues exist. Not yet run on staging, and the LangGraph run is still owed |
-| 13 | Remote updates, as question 11 decides: read back, mapped through step 5 into a submission, a held response, a release or nothing. `cancel_task` sent out | Yes | Yes | 12 | |
-| 14 | Files: inbound submissions with files from `create_upload`, offers that link input files as Podster links, and remote file references kept as external links | Yes | | 10, 13, M2 steps 5 and 6 | 15 |
+| 13 | Remote updates, as question 11 decides: read back, mapped through step 5 into a submission, a held response, a release or nothing. `cancel_task` sent out | Yes | Yes | 12 | Built on `claude/m3-step13-readback`, waiting for #173. Not run on staging |
+| 13b | `request_changes` on a completed remote task, sent out as a new A2A task with `referenceTaskIds` and the same `contextId` ([decision 114](spec/PRODUCT.md#decisions-needed)). Split from 13 on 2026-11-08, because it's a second send path | Yes | Yes | 13 | |
+| 14 | Files: inbound submissions with files from `create_upload`, offers that link input files as Podster links, and remote file references kept as external links | Yes | | 10, 13, M2 steps 5 and 6 | Built on `claude/m3-step14-files`, with no contract or migration change |
 | 15 | Screens: endpoint status on the agent's Sheet, and held responses flagged to the requester in the Task Sheet | | | 11, 13, M2 step 9b | 14 |
 | 16 | Staging run: AC-12, AC-18, AC-24, criterion 4 across protocols, and the implementations [decision 143](spec/PRODUCT.md#decisions-needed) names. The kit runs only if a way to run it has been found ([decision 142](spec/PRODUCT.md#decisions-needed)). Its non-fitting checks are listed in the profile ([decision 141](spec/PRODUCT.md#decisions-needed)). Then the owner rules, and the profile is published | | | All, M2's gate | |
 
@@ -164,10 +165,13 @@ The owner accepted every recommendation on 2026-11-08 ("sure"). Each row links t
 - **The compatibility kit.** It hasn't run, because the session permission check refuses running its code and the owner won't run it by hand ([decision 142](spec/PRODUCT.md#decisions-needed)). It must run some other way before any support claim.
 - **The outbound run against LangGraph's server.** [Decision 143](spec/PRODUCT.md#decisions-needed) makes it the outbound independent implementation, with fasta2a's server as backup. It hasn't run, because starting it was refused by the session permission check, so step 12's interoperability run still needs a way to run it.
 - **Spike C on staging,** with the owner's yes in that session ([decision 126](spec/PRODUCT.md#decisions-needed)): real egress, timeouts and queue timing.
+- **Step 13b, `request_changes` out** ([decision 114](spec/PRODUCT.md#decisions-needed)). Until it's built, a change request on a completed remote task reaches the agent only through its inbox, and nothing goes to its endpoint.
+- **An A2A download route for input files,** `GET /a2a/files/{workspace}/{file}`, accepting only `/a2a`-audience tokens, with the same `file_json` and visibility checks as `/v1/files`. Until it's built, an offer's file links need the agent's MCP or Agent Auth credential, because `/v1/files` refuses an `/a2a` token (#157's audience split). It's a contract change, so it follows #179.
+- **A real outbound round trip on a deployment:** a send, reads back to a submission, and a cancel. It needs an A2A server staging can reach, which is a new cloud resource needing the owner's yes, or the LangGraph run above. Steps 12 and 13 are tested only against the test pool's fake endpoint.
 
 ## Owed before production that M3 touches
 
-- **Two real people and their own sign-ins.** The [two-person kernel journey](m0-gate.md) still hasn't run on a deployment. M3 adds agents from other organizations, so its cross-organization checks need the same.
+- **Two real people and their own sign-ins.** Done: the [two-person kernel journey](m0-gate.md) passed on staging on 2026-11-09 at 1d28ee2, with two real people, 52 passed, 0 failed, 0 gaps. #178 records it. M3's agents from other organizations still need their cross-organization checks run the same way.
 - **A forged `cf-connecting-ip`.** It's still open on the [M2 plan](m2-plan.md#checks-the-spike-left-open). A2A's rate limits are per client, as MCP's are, so they rest on it too.
 - **Key rotation.** Agent keys can't be rotated yet. Rotating an endpoint's stored token (question 16) needs its own path before production.
 - **Guest uploads.** [Decision 96](spec/PRODUCT.md#decisions-needed) counts external agents' submission files toward the room's quota during private pilots, and is revisited before public rooms. M3's remote agents are the main case.

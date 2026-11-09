@@ -411,3 +411,43 @@ describe("the room's one alarm", () => {
   });
 });
 
+describe("input files (step 14)", () => {
+  const sha256 = async (data: Uint8Array) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", data))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  async function inputFile(room: string, name: string, state: string) {
+    const data = new TextEncoder().encode(`contents of ${name}`);
+    const made = await must(OWNER, "POST", `/v1/workspaces/${room}/uploads`, { name, size: data.length, sha256: await sha256(data) });
+    const sent = await SELF.fetch(`https://api.internal${made.upload_path}`, { method: "PUT", headers: { authorization: `Bearer ${made.token}` }, body: data as any });
+    expect(sent.status).toBe(200);
+    await sent.text();
+    await roomSql(room, "UPDATE stored_object SET state = ? WHERE id = ?", state, made.id);
+    return made.id as string;
+  }
+
+  it("an offer names its input files, each with a gateway link the agent opens with its own credential", async () => {
+    const room = await newRoom();
+    const { agent, url } = await target(room);
+    const task = await offer(room, agent.id);
+    const ready = await inputFile(room, "brief.pdf", "ready");
+    const scanning = await inputFile(room, "data.csv", "scanning");
+    const blocked = await inputFile(room, "flagged.txt", "ready");
+    for (const object of [ready, scanning, blocked]) await must(OWNER, "POST", `/v1/workspaces/${room}/files/${object}/links`, { task_id: task.id });
+    await roomSql(room, "UPDATE stored_object SET state = 'blocked' WHERE id = ?", blocked);
+    const [attempt] = await attempts(room, task.id);
+    expect((await consume(room, attempt)).body.outcome).toBe("ack");
+    const [request] = await sentTo(url);
+    const text = JSON.parse(request.body).params.message.parts[0].text as string;
+    expect(text).toContain("## Input files");
+    expect(text).toContain(`- http://localhost:8787/v1/files/${room}/${ready} "brief.pdf" (${ready})`);
+    expect(text).toContain(`- not ready yet: "data.csv" (${scanning})`);
+    // Which credential, and the one host to send it to. An /a2a token doesn't work there.
+    expect(text).toContain("MCP OAuth token");
+    expect(text).toContain("Send it only to localhost:8787. A token for /a2a isn't accepted for downloads.");
+    // A blocked file isn't named at all.
+    expect(text).not.toContain("flagged.txt");
+    expect(text).not.toContain(blocked);
+    // Only Podster links: no bytes, and nothing public.
+    expect(JSON.parse(request.body).params.message.parts).toHaveLength(1);
+    expect(text).not.toContain("contents of");
+  });
+});
+

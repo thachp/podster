@@ -148,6 +148,26 @@ describe("what decides, and what's refused", () => {
   });
 });
 
+describe("files (step 14)", () => {
+  it("names uploads from create_upload, which the API's rules decide, and refuses a file by name, never as a missing task", async () => {
+    const task = await make(guest.id);
+    const accepted = (await call("AcceptTask", { id: id(room, task), version: await versionOf(task) })).body.result;
+    const v = accepted.metadata["podster.dev/version"];
+    const upload = await mcpTool(guest.mcp, "create_upload", { workspace_id: room, task_id: task, name: "report.pdf", size: 4, sha256: "0".repeat(64), idempotency_key: crypto.randomUUID() });
+    expect(upload.code).toBeUndefined();
+    // Uploaded but never sent or scanned, so the API refuses it as not ready.
+    const notReady = await call("SubmitTask", { id: id(room, task), version: v, files: [{ id: upload.data.id, label: "Report" }] });
+    expect(notReady.body.error.message).toMatch(/file_not_ready/);
+    const missing = await call("SubmitTask", { id: id(room, task), version: v, files: [{ id: `obj_${"0".repeat(32)}` }] });
+    expect(missing.body.error.message).toMatch(/file_not_found/);
+    expect(reason(missing.body)).not.toMatch(/TASK_NOT_FOUND/);
+    for (const files of [[{ id: upload.data.id, extra: 1 }], [{ id: upload.data.id, label: 7 }], [{ uri: "https://example.com/f" }], "obj_x", Array.from({ length: 11 }, () => ({ id: upload.data.id }))]) {
+      expect((await call("SubmitTask", { id: id(room, task), version: v, files })).body.error, JSON.stringify(files).slice(0, 60)).toBeDefined();
+    }
+    expect((await read(task)).metadata["podster.dev/status"]).toBe("accepted");
+  });
+});
+
 describe("the review's fixes", () => {
   const raw = (body: unknown) =>
     http("/a2a", { method: "POST", headers: { authorization: `Bearer ${guest.a2a}`, "content-type": "application/json", "A2A-Version": "1.0", ...ON }, body: JSON.stringify(body) });

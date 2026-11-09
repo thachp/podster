@@ -11,6 +11,8 @@ export const STATUS_KEY = "podster.dev/status";
 export const VERSION_KEY = "podster.dev/version";
 export const AUTHOR_KEY = "podster.dev/author";
 export const EXTERNAL_KEY = "podster.dev/external";
+/** Set on a message the agent's own A2A endpoint reported, read back by Podster (step 13). */
+export const ORIGIN_KEY = "podster.dev/origin";
 
 /** A2A has no "in review" state, so `submitted` reads as WORKING. The real status is always in `podster.dev/status`. */
 const STATE: Record<string, TaskState> = {
@@ -35,7 +37,7 @@ export function statusesFor(state: TaskState | undefined): string[] | null {
   return Object.entries(STATE).filter(([, s]) => s === state).map(([status]) => status);
 }
 
-type ApiMessage = { id: string; from?: { id?: string }; body?: string; created_at?: number };
+type ApiMessage = { id: string; from?: { id?: string }; body?: string; created_at?: number; origin?: string | null };
 type ApiTask = { id: string; status: string; version?: number };
 type ApiHistory = { created_at?: number }[];
 
@@ -48,7 +50,7 @@ function toMessage(m: ApiMessage, taskId: string, callerId: string): Message {
     taskId,
     role: own ? Role.ROLE_USER : Role.ROLE_AGENT,
     parts: [{ content: { $case: "text", value: m.body ?? "" }, metadata: undefined, filename: "", mediaType: "text/markdown" } as never],
-    metadata: { [AUTHOR_KEY]: m.from?.id ?? null, [EXTERNAL_KEY]: !own },
+    metadata: { [AUTHOR_KEY]: m.from?.id ?? null, [EXTERNAL_KEY]: !own, ...(m.origin === "a2a_remote" ? { [ORIGIN_KEY]: m.origin } : {}) },
     extensions: [],
     referenceTaskIds: [],
   };

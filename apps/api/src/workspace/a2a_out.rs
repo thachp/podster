@@ -188,8 +188,33 @@ pub(super) fn begin(sql: &SqlStorage, identity: &Identity, body: &Value, now: i6
     )?;
     Ok(json!({
         "send": true, "task_id": task.id, "title": task.title, "instructions": task.instructions,
-        "acceptance_criteria": task.acceptance_criteria,
+        "acceptance_criteria": task.acceptance_criteria, "files": input_files(sql, &who.caller, &task.id)?,
     }))
+}
+
+/// The task's input files as this agent may see them now (M3 step 14, decision 121): each one's ID, name, and download path
+/// once it's ready. A file hidden from the agent, or blocked, failed or removed, isn't named.
+fn input_files(sql: &SqlStorage, caller: &Caller, task: &str) -> R<Vec<Value>> {
+    let linked = rows(
+        sql,
+        "SELECT object_id FROM asset_link WHERE task_id = ? ORDER BY linked_at, object_id",
+        vec![task.into()],
+    )?;
+    let mut files = Vec::new();
+    for row in &linked {
+        let id = row["object_id"].as_str().unwrap_or_default();
+        if let Some(file) =
+            super::downloads::file_json(sql, caller, &super::downloads::file_row(sql, id)?)?
+        {
+            // Only a ready file, with its link, or one still scanning, without. Blocked, failed and removed files aren't named.
+            match file["state"].as_str() {
+                Some("ready") => files.push(json!({ "id": file["id"], "name": file["name"], "download_path": file["download_path"] })),
+                Some("scanning") => files.push(json!({ "id": file["id"], "name": file["name"], "download_path": null })),
+                _ => {}
+            }
+        }
+    }
+    Ok(files)
 }
 
 /// `/internal/a2a-finish`: how one send went. `sent` stores the one remote task the endpoint answered with, `retry` puts the
@@ -233,6 +258,10 @@ pub(super) fn finish(sql: &SqlStorage, identity: &Identity, body: &Value, now: i
             exec(sql, "UPDATE a2a_attempt SET state = 'sent', remote_task_id = ?, lease_until = NULL, updated_at = ? WHERE id = ? AND state = 'queued'", vec![
                 remote.map_or(V::Null, V::from), now.into(), id.into(),
             ])?;
+            // A remote task is read back from a minute on (step 13). A message with no task has nothing to read.
+            if remote.is_some() && attempt["state"].as_str() == Some("queued") {
+                super::a2a_read::start_reading(sql, id, now)?;
+            }
         }
         Some("retry") => {
             pin(sql)?;

@@ -25,9 +25,9 @@ async function assertion(who: Who, claims: object = {}) {
 }
 
 let counter = 0;
-async function api(who: Who, method: string, path: string, body?: unknown, opts: { claims?: object; on?: boolean } = {}) {
+async function api(who: Who, method: string, path: string, body?: unknown, opts: { claims?: object; on?: boolean; key?: string } = {}) {
   const headers: Record<string, string> = { "x-podster-assertion": await assertion(who, opts.claims ?? {}), "content-type": "application/json" };
-  if (method !== "GET") headers["idempotency-key"] = `claim-key-${++counter}`;
+  if (method !== "GET") headers["idempotency-key"] = opts.key ?? `claim-key-${++counter}`;
   if (opts.on ?? true) headers["x-test-public-rooms"] = "on";
   const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: method === "GET" ? undefined : JSON.stringify(body ?? {}) });
   const text = await res.text();
@@ -669,5 +669,38 @@ describe("owner controls in public rooms (M4 step 9)", () => {
   it("keeps person review on while the room is public", async () => {
     const room = await publicRoom();
     expect((await api(OWNER, "PUT", `/v1/workspaces/${room.id}/review-policy`, { require_person: false, policy_version: await version(room.id) })).code).toBe("person_review_required");
+  });
+
+  it("replays a stored answer only to a caller who may still manage the room (step 9 review, L1)", async () => {
+    const room = await publicRoom();
+    const asked = [
+      ["PUT", `/v1/workspaces/${room.id}/public-claims`, { paused: true }],
+      ["PUT", `/v1/workspaces/${room.id}/public-claims/blocked-orgs/org_replay`, {}],
+      ["DELETE", `/v1/workspaces/${room.id}/public-claims/blocked-orgs/org_replay`, {}],
+      ["POST", `/v1/workspaces/${room.id}/public-claims/end`, {}],
+    ] as const;
+    const keys = asked.map((_, n) => `replay-${room.id}-${n}`);
+    for (const [n, [method, path, body]] of asked.entries()) {
+      const first = await api(ADMIN, method, path, body, { key: keys[n] });
+      expect(first.status, first.text).toBe(200);
+      // Asked again while still an admin, it's the stored answer.
+      expect((await api(ADMIN, method, path, body, { key: keys[n] })).status).toBe(200);
+    }
+    const demoted = await api(OWNER, "POST", `/v1/workspaces/${room.id}/members/${ADMIN.id}/role`, { role: "member", policy_version: await version(room.id) }, { claims: { target_member: { person: ADMIN.id, orgs: { [ORG]: 1 } } } });
+    expect(demoted.status, demoted.text).toBe(200);
+    for (const [n, [method, path, body]] of asked.entries()) {
+      expect((await api(ADMIN, method, path, body, { key: keys[n] })).code, `${method} ${path}`).toBe("not_allowed");
+    }
+  });
+
+  it("lists only claimants still in the guest role they joined with, as ending them does (step 9 review, L2)", async () => {
+    const room = await publicRoom();
+    const [stays, raised] = [await agent(), await agent()];
+    for (const who of [stays, raised]) expect((await claim(who, room.handle, room.role)).status).toBe(200);
+    // A role raised by a path that doesn't clear how it joined.
+    await inRoom(room.id, (sql) => sql.exec("UPDATE member SET role = 'member' WHERE principal_id = ?", raised.id));
+    expect((await settings(room.id)).claimants.map((c: any) => c.principal_id)).toEqual([stays.id]);
+    const ended = await api(OWNER, "POST", `/v1/workspaces/${room.id}/public-claims/end`, {});
+    expect(ended.body.ended).toBe(1);
   });
 });

@@ -230,7 +230,7 @@ pub(super) fn claim(
         kind: PrincipalKind::Agent,
         // The agent's Principal refused before this if its owner hadn't allowed public claims.
         allows_public_claims: true,
-        // Operator suspension comes in step 10.
+        // The agent's Principal refused before this if an operator had suspended its public claims (M4 step 10).
         public_claims_suspended: false,
         standing: standing(sql, agent)?,
     };
@@ -416,7 +416,7 @@ fn settings(sql: &SqlStorage, now: i64) -> R<Value> {
         sql,
         "SELECT m.principal_id, m.org_id, m.role, m.added_at, c.role_id, c.claimed_at FROM member m
            LEFT JOIN role_claim c ON c.principal_id = m.principal_id AND c.status = 'active' AND c.public = 1
-         WHERE m.joined_via = ? AND m.revoked_at IS NULL ORDER BY m.added_at, m.principal_id",
+         WHERE m.joined_via = ? AND m.role = 'guest' AND m.revoked_at IS NULL ORDER BY m.added_at, m.principal_id",
         vec![JOINED_PUBLICLY.into()],
     )?
     .iter()
@@ -441,6 +441,12 @@ fn paused(sql: &SqlStorage) -> R<bool> {
             .first()
             .is_some_and(|row| int(&row["public_claims_paused"]) != 0),
     )
+}
+
+/// Whether the caller may manage public claims here now: the owner or a human admin. Checked again before a stored
+/// answer is replayed, so one demoted since can't replay it.
+pub(super) fn may_manage(caller: &Caller) -> R<()> {
+    ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageRoom))
 }
 
 /// `GET public-claims`: what the owner sees of public claims here, for the owner and human admins.

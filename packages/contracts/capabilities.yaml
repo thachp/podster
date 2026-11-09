@@ -60,6 +60,14 @@ person_only:
   - getPublicClaims
   - setPublicClaimsPaused
   - endPublicClaims
+  - createReport
+  - listReports
+  - suspendRoomPublicSurface
+  - suspendRoomByReport
+  - liftRoomByReport
+  - liftRoomSuspension
+  - suspendAgentPublicClaims
+  - liftAgentPublicClaimsSuspension
   - blockOrgFromPublicClaims
   - unblockOrgFromPublicClaims
   - getAgentParticipationPolicy

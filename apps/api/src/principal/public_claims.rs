@@ -317,3 +317,45 @@ pub(super) fn settle(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     }
     Ok(json!({ "settled": true }))
 }
+
+/// An operator's suspension of this agent's public claims (M4 step 10, decision 158). While it stands, every public claim is
+/// refused with `public_claims_suspended`. Claims already made stay: an operator can't end claims.
+const SUSPENSION_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS public_claims_suspension (id INTEGER PRIMARY KEY CHECK (id = 1), reason TEXT NOT NULL,
+  at INTEGER NOT NULL);
+";
+
+/// Whether an operator has suspended this agent's public claims.
+pub(super) fn suspended(sql: &SqlStorage) -> R<bool> {
+    exec(sql, SUSPENSION_SCHEMA, vec![])?;
+    Ok(!rows(sql, "SELECT id FROM public_claims_suspension", vec![])?.is_empty())
+}
+
+/// `{ suspended, reason }`, from the Worker for a verified operator, whose ID stays in the `Moderation` object's log.
+/// Answers `{ suspended, reason, at }`.
+pub(super) fn set_suspension(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
+    exec(sql, SUSPENSION_SCHEMA, vec![])?;
+    let suspend = body["suspended"]
+        .as_bool()
+        .ok_or_else(ApiError::invalid_argument)?;
+    let reason = field(body, "reason")?;
+    if suspend {
+        exec(
+            sql,
+            "INSERT INTO public_claims_suspension (id, reason, at) VALUES (1, ?, ?)
+               ON CONFLICT (id) DO NOTHING",
+            vec![reason.into(), now.into()],
+        )?;
+    } else {
+        exec(sql, "DELETE FROM public_claims_suspension", vec![])?;
+    }
+    let now_held = rows(
+        sql,
+        "SELECT reason, at FROM public_claims_suspension",
+        vec![],
+    )?;
+    Ok(match now_held.first() {
+        Some(row) => json!({ "suspended": true, "reason": row["reason"], "at": row["at"] }),
+        None => json!({ "suspended": false, "reason": null, "at": null }),
+    })
+}

@@ -377,6 +377,10 @@ describe("the discovery index (step 6)", () => {
     // Back to before this migration, with the room already public and nothing in D1.
     await inRoom(id, (sql) => {
       // Step 8's public claims came after, so they come off first.
+      // M4 step 10's operator suspension, the newest migration, comes off first.
+      sql.exec("ALTER TABLE workspace DROP COLUMN suspension_reason");
+      sql.exec("ALTER TABLE workspace DROP COLUMN suspended_at");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE public_claim_block");
       sql.exec("DROP INDEX role_claim_public");
       sql.exec("ALTER TABLE role_claim DROP COLUMN public");
@@ -395,6 +399,10 @@ describe("the discovery index (step 6)", () => {
     const quiet = await room();
     await inRoom(quiet, (sql) => {
       // Step 8's public claims came after, so they come off first.
+      // M4 step 10's operator suspension, the newest migration, comes off first.
+      sql.exec("ALTER TABLE workspace DROP COLUMN suspension_reason");
+      sql.exec("ALTER TABLE workspace DROP COLUMN suspended_at");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE public_claim_block");
       sql.exec("DROP INDEX role_claim_public");
       sql.exec("ALTER TABLE role_claim DROP COLUMN public");

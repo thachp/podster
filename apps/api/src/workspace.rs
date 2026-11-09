@@ -79,6 +79,7 @@ mod collaboration;
 mod cursor;
 mod downloads;
 mod held;
+mod moderation;
 mod objects;
 mod outputs;
 mod plan;
@@ -90,6 +91,7 @@ mod roles;
 mod submission_files;
 mod visibility;
 
+pub(crate) use moderation::INTERNAL_SUSPENSION;
 pub(crate) use public::{INTERNAL_EXPLORE_ENTRY, INTERNAL_PUBLIC_PAGE};
 pub(crate) use public_claims::{INTERNAL_PUBLIC_CLAIM, INTERNAL_PUBLIC_CLAIM_STATUS};
 pub(crate) use visibility::public_rooms_enabled;
@@ -3559,7 +3561,30 @@ impl Workspace {
         answer.ok_or_else(|| ApiError::internal("public claim answered nothing"))
     }
 
+    /// An operator suspends or lifts the room's public surface (M4 step 10). The Worker has checked the operator.
+    async fn operator_suspension(&self, mut req: Request) -> R<Value> {
+        let sql = self.state.storage().sql();
+        if !store::is_initialized(&sql)? {
+            return Err(ApiError::workspace_not_found());
+        }
+        self.migrate_if_needed()?;
+        let body: Value =
+            serde_json::from_str(&req.text().await?).map_err(|_| ApiError::invalid_argument())?;
+        let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+        let slot = out.clone();
+        let store = sql.clone();
+        transaction_sync(&self.state, move || {
+            *slot.borrow_mut() = Some(moderation::set(&store, &body, now_ms())?);
+            Ok(())
+        })?;
+        let answer = out.borrow_mut().take();
+        answer.ok_or_else(|| ApiError::internal("suspension answered nothing"))
+    }
+
     async fn dispatch(&self, mut req: Request) -> R<Value> {
+        if req.path() == moderation::INTERNAL_SUSPENSION {
+            return self.operator_suspension(req).await;
+        }
         if req.path() == public::INTERNAL_PUBLIC_PAGE
             || req.path() == public::INTERNAL_EXPLORE_ENTRY
         {
@@ -4134,30 +4159,34 @@ impl Workspace {
                     visibility::handle_set_visibility(sql, who, &body, public_rooms, now)
                 },
             ),
-            (Method::Put, ["public-claims"]) => self.command(
+            // A stored answer is replayed only to a caller who may still manage the room.
+            (Method::Put, ["public-claims"]) => self.command_checked(
                 &identity,
                 key,
                 hash,
                 stops_when_archived,
                 test_fail,
+                |_: &SqlStorage, who: &Participant| public_claims::may_manage(&who.caller),
                 move |sql, who, now| public_claims::handle_pause(sql, &who.caller, &body, now),
             ),
-            (Method::Post, ["public-claims", "end"]) => self.command(
+            (Method::Post, ["public-claims", "end"]) => self.command_checked(
                 &identity,
                 key,
                 hash,
                 stops_when_archived,
                 test_fail,
+                |_: &SqlStorage, who: &Participant| public_claims::may_manage(&who.caller),
                 move |sql, who, now| public_claims::handle_end(sql, &who.caller, &body, now),
             ),
             (Method::Put, ["public-claims", "blocked-orgs", org]) => {
                 let org = (*org).to_string();
-                self.command(
+                self.command_checked(
                     &identity,
                     key,
                     hash,
                     stops_when_archived,
                     test_fail,
+                    |_: &SqlStorage, who: &Participant| public_claims::may_manage(&who.caller),
                     move |sql, who, now| {
                         public_claims::handle_block(sql, &who.caller, &org, true, &body, now)
                     },
@@ -4165,12 +4194,13 @@ impl Workspace {
             }
             (Method::Delete, ["public-claims", "blocked-orgs", org]) => {
                 let org = (*org).to_string();
-                self.command(
+                self.command_checked(
                     &identity,
                     key,
                     hash,
                     stops_when_archived,
                     test_fail,
+                    |_: &SqlStorage, who: &Participant| public_claims::may_manage(&who.caller),
                     move |sql, who, now| {
                         public_claims::handle_block(sql, &who.caller, &org, false, &body, now)
                     },

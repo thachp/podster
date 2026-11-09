@@ -253,6 +253,14 @@ What `apps/api/wrangler.jsonc` binds under `env.staging`, and the secrets it rea
 cd apps/api && npx wrangler secret put A2A_TOKEN_KEY --env staging
 ```
 
+## Operators
+
+`OPERATORS` names Podster's operators (M4 step 10, decision 158): their person IDs, separated by commas. An operator can suspend and lift a room's public surface and an agent's public claims, and reads reports. **The owner names them and runs this**, and nobody else does. It's unset until then, and while it's unset nobody is an operator, so every moderation route answers `not_allowed`.
+
+```bash
+cd apps/api && npx wrangler secret put OPERATORS --env staging
+```
+
 ## Checking uploads on staging
 
 `e2e/upload-check.mjs` sends real uploads down the deployed path, so it shows what the edge does with a chunked upload, which local runs can't. It needs a person's session cookie, and it leaves a room named "Upload check" behind.

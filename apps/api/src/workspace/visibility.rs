@@ -136,8 +136,7 @@ pub(super) fn room_state(sql: &SqlStorage) -> R<RoomState> {
             public_handle: text(&room["public_handle"]),
             // The column is milliseconds, as every time in the room is; the policy reads whole seconds.
             published_at: room["published_at"].as_i64().map(|ms| ms.div_euclid(1000)),
-            // Operator suspension comes in step 10.
-            suspended: false,
+            suspended: !room["suspended_at"].is_null(),
             public_claims_paused: int(&room["public_claims_paused"]) != 0,
         },
         openings,
@@ -166,6 +165,8 @@ pub(super) fn read(sql: &SqlStorage, who: &Participant, public_rooms_enabled: bo
         "published_on": room.published_at.map(utc_day),
         "topic": room.topic.map(Topic::name),
         "public_claims_paused": room.public_claims_paused,
+        // "Suspended by Podster", with the operator's reason code, until an operator lifts it.
+        "suspension": super::moderation::suspension(sql)?,
         "public_rooms_enabled": public_rooms_enabled,
         "preview": preview,
         "view_hash": content_hash(&content),
@@ -377,7 +378,7 @@ fn index_json(row: &podster_policy::public::PublicIndexRow) -> Value {
 
 /// The handle the room's latest publish made, from its audit row (step 5), so a tombstone names the handle that went away
 /// rather than reading the room's current one. `None` for a room never published.
-fn last_published_handle(sql: &SqlStorage) -> R<Option<String>> {
+pub(super) fn last_published_handle(sql: &SqlStorage) -> R<Option<String>> {
     Ok(rows(
         sql,
         "SELECT new_json FROM audit_event WHERE action = 'visibility.published' ORDER BY seq DESC LIMIT 1",

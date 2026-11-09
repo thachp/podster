@@ -224,7 +224,7 @@ describe("a scanner's verdict", () => {
 describe("a scan with no verdict", () => {
   const overdue = (id: string, object: string) => inRoom(id, (sql) => sql.exec("UPDATE stored_object SET scanning_since = ? WHERE id = ?", Date.now() - HOUR - 1000, object));
 
-  it("sets the room's alarm when the file arrives, to the end of its hour", async () => {
+  it("takes the file's scan turn when it arrives, then sets the alarm to the end of its hour", async () => {
     const id = await room();
     const hash = await sha256(DATA);
     const upload = (await api("POST", `/v1/workspaces/${id}/uploads`, { name: "n.txt", size: DATA.length, sha256: hash })).body;
@@ -237,6 +237,11 @@ describe("a scan with no verdict", () => {
     });
     const before = Date.now();
     expect((await SELF.fetch(`https://api.internal${upload.upload_path}`, { method: "PUT", headers: { authorization: `Bearer ${upload.token}` }, body: DATA })).status).toBe(200);
+    // The room's turn on the scan queue is due at once, and its hour starts when it takes it.
+    await vi.waitFor(async () => {
+      const [file] = await inRoom(id, (sql) => sql.exec("SELECT scanning_since FROM stored_object WHERE id = ?", upload.id).toArray());
+      expect(file.scanning_since).toBeGreaterThanOrEqual(before);
+    });
     const alarm = await inRoom(id, (_sql, state) => state.storage.getAlarm());
     expect(alarm).toBeGreaterThan(before + HOUR - 5000);
     expect(alarm).toBeLessThan(Date.now() + HOUR + 5000);
@@ -494,5 +499,76 @@ describe("a room from before this", () => {
       notNull: sql.exec("SELECT \"notnull\" AS n FROM pragma_table_info('audit_event') WHERE name = 'seq'").one().n,
     }));
     expect([unique, notNull]).toEqual([1, 1]);
+  });
+});
+
+// M4 step 14: per-room fairness in the scan queue. A room has at most 4 files on the shared queue at once, and its others wait in
+// the room for its turn, so one busy room can't push other rooms' scans past the hour.
+describe("each room's share of the scan queue", () => {
+  const jobsFor = async (id: string) => ((await (await fetch("https://hook-log.example.com/")).json()) as any[]).filter((r) => r.path === "/__queue").map((r) => JSON.parse(r.body)).filter((job) => job.workspace_id === id);
+  const counts = (id: string) =>
+    inRoom(id, (sql) => sql.exec("SELECT COUNT(scanning_since) AS queued, COUNT(*) - COUNT(scanning_since) AS waiting FROM stored_object WHERE state = 'scanning'").one()) as Promise<{ queued: number; waiting: number }>;
+  /** Runs the room's alarm until its turns are taken, as the platform would. */
+  const settle = async (id: string) => {
+    for (let n = 0; n < 3; n++) {
+      await runInDurableObject(stub(id), (_: any, state: any) => state.storage.setAlarm(Date.now() + 60_000));
+      await runDurableObjectAlarm(stub(id));
+    }
+  };
+
+  it("puts at most 4 of a room's files on the queue, and the next when a verdict frees a turn", async () => {
+    const id = await room();
+    const files = [];
+    for (let n = 0; n < 6; n++) files.push(await stored(id, `f${n}.txt`));
+    await settle(id);
+    expect(await counts(id)).toEqual({ queued: 4, waiting: 2 });
+    await vi.waitFor(async () => expect((await jobsFor(id)).map((job) => job.object_id).sort()).toEqual(files.slice(0, 4).map((f) => f.id).sort()));
+    // The oldest arrivals went first.
+    const first = files[0];
+    expect((await answer(await send(verdict(id, first)))).body.state).toBe("ready");
+    await settle(id);
+    expect(await counts(id)).toEqual({ queued: 4, waiting: 1 });
+    await vi.waitFor(async () => expect((await jobsFor(id)).map((job) => job.object_id)).toContain(files[4].id));
+    expect((await jobsFor(id)).map((job) => job.object_id)).not.toContain(files[5].id);
+  });
+
+  it("doesn't hold up another room behind a busy one", async () => {
+    const busy = await room();
+    for (let n = 0; n < 8; n++) await stored(busy, `b${n}.txt`);
+    await settle(busy);
+    const quiet = await room();
+    const file = await stored(quiet);
+    await settle(quiet);
+    expect(await counts(busy)).toEqual({ queued: 4, waiting: 4 });
+    expect(await counts(quiet)).toEqual({ queued: 1, waiting: 0 });
+    await vi.waitFor(async () => expect((await jobsFor(quiet)).map((job) => job.object_id)).toEqual([file.id]));
+  });
+
+  it("starts a file's hour when it's queued, not when it arrived", async () => {
+    const id = await room();
+    const files = [];
+    for (let n = 0; n < 5; n++) files.push(await stored(id, `h${n}.txt`));
+    await settle(id);
+    const waiting = files[4];
+    // Arrived long ago, but still waiting its turn: no hour has started, so the alarm doesn't fail it.
+    await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET stored_at = ? WHERE id = ?", Date.now() - 2 * HOUR, waiting.id));
+    await settle(id);
+    expect((await row(id, waiting.id)).state).toBe("scanning");
+    expect((await row(id, waiting.id)).scanning_since).toBeNull();
+    // A verdict for it, as from an old job delivered again, isn't late either.
+    expect((await answer(await send(verdict(id, waiting)))).body.state).toBe("ready");
+  });
+
+  it("fails closed a file that waited a day for its turn", async () => {
+    const id = await room();
+    const files = [];
+    for (let n = 0; n < 5; n++) files.push(await stored(id, `d${n}.txt`));
+    await settle(id);
+    const waiting = files[4];
+    await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET stored_at = ? WHERE id = ?", Date.now() - 24 * HOUR - 1000, waiting.id));
+    await settle(id);
+    expect((await row(id, waiting.id)).state).toBe("failed");
+    const expired = await inRoom(id, (sql) => sql.exec("SELECT target_id FROM audit_event WHERE action = 'object.scan_expired'").toArray());
+    expect(expired.map((r: any) => r.target_id)).toEqual([waiting.id]);
   });
 });

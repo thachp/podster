@@ -3447,6 +3447,11 @@ impl Workspace {
         {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
+        // A file waiting for the room's turn on the scan queue, when the room has a turn free.
+        if migrated && objects::scan_turn_due(&sql)? {
+            let next = now + 10;
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
         // Like every other due time here, it can only bring the alarm earlier.
         if let Some(next) = (migrated && !outbox_held(&sql)?)
             .then(|| a2a_out::next_due(&sql))
@@ -4555,6 +4560,8 @@ impl DurableObject for Workspace {
         if let Err(error) = self.expire_scans() {
             console_error!("couldn't end overdue scans: {:?}", error.code());
         }
+        // Before anything slower, so a room's turn on the scan queue isn't held up.
+        self.queue_scan_turns().await;
         self.sweep_files().await;
         // One failing doesn't hold up the other.
         let outbox = self.drain_outbox().await;

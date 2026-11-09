@@ -245,6 +245,32 @@ struct ScanJob<'a> {
     queued_at: i64,
 }
 
+/// Sends one scan to the shared queue. The room calls this when it's that room's turn, so false only means it waits again.
+pub(crate) async fn queue_scan(
+    env: &Env,
+    room: &str,
+    id: &str,
+    key: &str,
+    size: u64,
+    sha256: &str,
+) -> bool {
+    let job = ScanJob {
+        v: 1,
+        workspace_id: room,
+        object_id: id,
+        key,
+        size,
+        sha256,
+        queued_at: Date::now().as_millis() as i64,
+    };
+    match env.queue("SCAN") {
+        Ok(queue) => within_room_limit(queue.send(&job))
+            .await
+            .is_some_and(|sent| sent.is_ok()),
+        Err(_) => false,
+    }
+}
+
 /// What only the uploader's Principal knows, read fresh. An agent's connection may have ended, and a person may have left the
 /// organization they uploaded through, since the token was issued. Rooms hear of both later.
 async fn uploader_still_here(env: &Env, begun: &Value) -> R<()> {
@@ -434,29 +460,7 @@ pub async fn stream_upload(mut req: Request, env: Env, room: &str, id: &str) -> 
         return Ok(answer);
     }
     log("upload.stored", "ok");
-    // A file that never gets here ends as `failed` when the room's hour runs out, so a failed send can't let anything through, and
-    // the file has arrived either way.
-    let job = ScanJob {
-        v: 1,
-        workspace_id: room,
-        object_id: id,
-        key: &key,
-        size: seen.bytes,
-        sha256: &received_sha256,
-        queued_at: Date::now().as_millis() as i64,
-    };
-    let queued = match env.queue("SCAN") {
-        Ok(queue) => within_room_limit(queue.send(&job))
-            .await
-            .map(|sent| sent.is_ok()),
-        Err(_) => Some(false),
-    };
-    if queued != Some(true) {
-        console_error!(
-            "{}",
-            json!({ "at": "upload.scan_not_queued", "room": room, "object": id })
-        );
-    }
+    // The room puts the file on the scan queue itself, from its alarm, when it's the room's turn (M4 step 14).
     let body: Value = answer.json().await?;
     Ok(Response::from_json(&body)?)
 }

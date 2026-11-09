@@ -1751,3 +1751,16 @@ fn only_a_type_the_upload_rules_chose_is_served() {
         );
     }
 }
+
+#[test]
+fn a_room_keeps_at_most_four_scans_on_the_shared_queue() {
+    assert_eq!(ROOM_SCANS_QUEUED, 4);
+    assert_eq!(scans_to_queue(0, 50), 4);
+    assert_eq!(scans_to_queue(3, 50), 1);
+    assert_eq!(scans_to_queue(4, 50), 0);
+    // A count past the cap, as after a deploy with more already queued, queues nothing more.
+    assert_eq!(scans_to_queue(9, 50), 0);
+    assert_eq!(scans_to_queue(0, 2), 2);
+    assert_eq!(scans_to_queue(0, 0), 0);
+    assert_eq!(SCAN_WAIT_LIMIT_MS, 24 * 60 * 60 * 1000);
+}

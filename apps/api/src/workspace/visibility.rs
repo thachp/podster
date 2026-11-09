@@ -14,7 +14,7 @@ use podster_policy::public::{
 pub(super) const PUBLIC_ROOMS_VAR: &str = "PUBLIC_ROOMS";
 
 /// Whether public rooms are switched on. Test builds can also switch them on for one request.
-pub(super) fn public_rooms_enabled(env: &Env, req: &Request) -> R<bool> {
+pub(crate) fn public_rooms_enabled(env: &Env, req: &Request) -> R<bool> {
     let set = env
         .var(PUBLIC_ROOMS_VAR)
         .is_ok_and(|value| value.to_string() == "true");

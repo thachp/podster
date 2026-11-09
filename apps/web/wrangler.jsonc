@@ -12,7 +12,9 @@
     "binding": "ASSETS",
     "run_worker_first": ["/*", "!/_next/static/*", "!/*/_next/static/*"]
   },
-  "services": [{ "binding": "GATEWAY", "service": "podster-gateway" }],
+  // PUBLIC_READS is the gateway's PublicReads entrypoint, the public room page's one way to its view (M4 step 7, ADR 0008).
+  // Only this binding reaches it: no route or custom domain does.
+  "services": [{ "binding": "GATEWAY", "service": "podster-gateway" }, { "binding": "PUBLIC_READS", "service": "podster-gateway", "entrypoint": "PublicReads" }],
   // Local run only. Password sign-in also needs ENABLE_PASSWORD_SIGNIN on the gateway, which refuses it on a real hostname.
   "vars": { "APP_URL": "http://app.localhost:3000", "GATEWAY_URL": "http://localhost:8787", "SIGN_IN_PROVIDERS": "", "LOCAL_PASSWORD_SIGNIN": "true" },
   "env": {
@@ -20,7 +22,7 @@
       "workers_dev": false,
       "preview_urls": false,
       "routes": [{ "pattern": "app-staging.podster.dev", "custom_domain": true }],
-      "services": [{ "binding": "GATEWAY", "service": "podster-gateway-staging" }],
+      "services": [{ "binding": "GATEWAY", "service": "podster-gateway-staging" }, { "binding": "PUBLIC_READS", "service": "podster-gateway-staging", "entrypoint": "PublicReads" }],
       "vars": { "APP_URL": "https://app-staging.podster.dev", "GATEWAY_URL": "https://gateway-staging.podster.dev", "SIGN_IN_PROVIDERS": "github,email", "LOCAL_PASSWORD_SIGNIN": "false" }
     }
   }

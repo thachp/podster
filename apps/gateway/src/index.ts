@@ -17,6 +17,10 @@ import { handleUpload } from "./uploads";
 import { answerA2a, checkA2aRequest, handleA2aCard, isA2aPath } from "./a2a";
 import type { ApiReads } from "./a2a/reads";
 import { buildOAuth, resourceKind, routeOAuth } from "./oauth";
+import { filterPublicRead, publicPassthrough, PUBLIC_READ_CAPABILITIES } from "./public/reads";
+
+// The public read for `apps/web`, by service binding only (M4 step 7).
+export { PublicReads } from "./public/reads";
 
 export interface Env {
   DB: D1Database;
@@ -285,6 +289,14 @@ export async function callApi(env: Pick<Env, "API" | "ASSERTION_SIGNING_JWK">, i
 
 async function runCapability(env: Env, identity: Identity, capability: Capability, args: Record<string, unknown>) {
   const response = await callApi(env, identity, toApiCall(capability, args));
+  // The public read's views carry only the contract's fields (ADR 0008). Agents aren't served from the page's cache
+  // (decision 172): each call reaches the API, so its token is spent and its connection checked.
+  const read = Object.hasOwn(PUBLIC_READ_CAPABILITIES, capability.name) ? PUBLIC_READ_CAPABILITIES[capability.name] : undefined;
+  if (response.status === 200 && read) {
+    const body = await response.json().catch(() => undefined);
+    if (body === undefined) return { status: 502, body: { error: { code: "upstream_unavailable", message: "upstream_unavailable" } } as any };
+    return { status: 200, body: filterPublicRead(read, body) as any };
+  }
   return { status: response.status, body: (await response.json()) as any };
 }
 
@@ -1200,6 +1212,9 @@ const appHandler = {
       body: text,
       idempotencyKey: request.headers.get("idempotency-key") ?? undefined,
     });
+    // A person's public read gets the same field filter as everyone else's.
+    const publicRead = await publicPassthrough(path, response);
+    if (publicRead) return publicRead;
     return new Response(response.body, { status: response.status, headers: { "content-type": "application/json" } });
   },
 };

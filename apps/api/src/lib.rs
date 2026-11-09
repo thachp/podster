@@ -8,6 +8,7 @@ mod downloads;
 mod error;
 mod objects;
 mod principal;
+mod public;
 mod store;
 mod wake;
 mod workspace;
@@ -335,6 +336,16 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
         }
     }
 
+    // The public room page is the one route that takes the public assertion, so it's verified on its own, before the
+    // identity every other route needs (M4 step 7).
+    {
+        let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        if let Some(handle) = public::room_page_handle(&req.method(), &parts) {
+            let handle = handle.to_string();
+            return public::room_page(req, env, &handle).await;
+        }
+    }
+
     let token = req
         .headers()
         .get("x-podster-assertion")?
@@ -396,6 +407,10 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
                 .id_from_name(&caller.id)?
                 .get_stub()?;
             return forward(stub, &path, &query, caller_header(&caller)?, method, body).await;
+        }
+        // Explore needs sign-in (decision 155), so it takes only an identity.
+        ["v1", "public", "explore"] if method == Method::Get => {
+            return public::explore(&env, &caller, &url, &req).await;
         }
         ["v1", "workspaces"] if method == Method::Get => {
             return list_workspaces(&env, &caller).await

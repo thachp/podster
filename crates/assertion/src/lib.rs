@@ -127,8 +127,33 @@ impl KeySet {
     }
 }
 
-/// Verifies a compact JWS and its claims. `now` is seconds since the epoch.
-pub fn verify(token: &str, keys: &KeySet, now: i64) -> Result<Identity, AssertionError> {
+/// The gateway's assertion for a read with nobody signed in: `kind: "public"`, and no subject, organization, generation or
+/// anything else. Only the gateway's `PublicReads` mints it, from nothing a client sends. It names no one, so it carries
+/// nothing to authorize, and only [`verify_room_page_caller`] accepts it: [`verify`] refuses it, because `public` isn't a
+/// [`Kind`].
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicAssertion {
+    kind: String,
+    pub jti: String,
+    pub iat: i64,
+    pub exp: i64,
+    // Checked before this is read. Named so `deny_unknown_fields` lets them through.
+    #[serde(rename = "aud")]
+    _aud: String,
+    #[serde(rename = "iss")]
+    _iss: String,
+}
+
+/// Who may be reading a public room's page: nobody signed in, or someone who is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RoomPageCaller {
+    Public(PublicAssertion),
+    SignedIn(Box<Identity>),
+}
+
+/// Verifies the signature, the key, the audience and the issuer, and returns the claims' bytes.
+fn verified_claims(token: &str, keys: &KeySet) -> Result<Vec<u8>, AssertionError> {
     let mut parts = token.split('.');
     let (Some(header), Some(payload), Some(signature), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
@@ -175,25 +200,63 @@ pub fn verify(token: &str, keys: &KeySet, now: i64) -> Result<Identity, Assertio
     if audience.iss.as_deref() != Some(ISSUER) {
         return Err(AssertionError::WrongIssuer);
     }
+    Ok(claims)
+}
+
+fn check_lifetime(iat: i64, exp: i64, now: i64) -> Result<(), AssertionError> {
+    if exp <= iat {
+        return Err(AssertionError::Malformed);
+    }
+    if exp.saturating_sub(iat) > MAX_LIFETIME_SECS {
+        return Err(AssertionError::LifetimeTooLong);
+    }
+    if now >= exp.saturating_add(CLOCK_SKEW_SECS) {
+        return Err(AssertionError::Expired);
+    }
+    if iat > now.saturating_add(CLOCK_SKEW_SECS) {
+        return Err(AssertionError::NotYetValid);
+    }
+    Ok(())
+}
+
+fn identity_from(claims: &[u8], now: i64) -> Result<Identity, AssertionError> {
     let identity: Identity =
-        serde_json::from_slice(&claims).map_err(|_| AssertionError::Malformed)?;
+        serde_json::from_slice(claims).map_err(|_| AssertionError::Malformed)?;
     if identity.sub.is_empty() || identity.org.is_empty() || identity.jti.is_empty() {
         return Err(AssertionError::Malformed);
     }
     if identity.kind == Kind::Agent && identity.gen.is_none() {
         return Err(AssertionError::Malformed);
     }
-    if identity.exp <= identity.iat {
+    check_lifetime(identity.iat, identity.exp, now)?;
+    Ok(identity)
+}
+
+/// Verifies a compact JWS and its claims, for a signed-in caller. `now` is seconds since the epoch. A public assertion is
+/// refused here, as malformed.
+pub fn verify(token: &str, keys: &KeySet, now: i64) -> Result<Identity, AssertionError> {
+    identity_from(&verified_claims(token, keys)?, now)
+}
+
+/// For the public room page's route alone: a signed-in caller, or the public assertion with exactly `kind`, `jti`, `iat`,
+/// `exp`, `aud` and `iss`, and nothing else.
+pub fn verify_room_page_caller(
+    token: &str,
+    keys: &KeySet,
+    now: i64,
+) -> Result<RoomPageCaller, AssertionError> {
+    let claims = verified_claims(token, keys)?;
+    let kind: serde_json::Value =
+        serde_json::from_slice(&claims).map_err(|_| AssertionError::Malformed)?;
+    if kind.get("kind").and_then(serde_json::Value::as_str) != Some("public") {
+        return identity_from(&claims, now)
+            .map(|identity| RoomPageCaller::SignedIn(Box::new(identity)));
+    }
+    let public: PublicAssertion =
+        serde_json::from_slice(&claims).map_err(|_| AssertionError::Malformed)?;
+    if public.kind != "public" || public.jti.is_empty() {
         return Err(AssertionError::Malformed);
     }
-    if identity.exp.saturating_sub(identity.iat) > MAX_LIFETIME_SECS {
-        return Err(AssertionError::LifetimeTooLong);
-    }
-    if now >= identity.exp.saturating_add(CLOCK_SKEW_SECS) {
-        return Err(AssertionError::Expired);
-    }
-    if identity.iat > now.saturating_add(CLOCK_SKEW_SECS) {
-        return Err(AssertionError::NotYetValid);
-    }
-    Ok(identity)
+    check_lifetime(public.iat, public.exp, now)?;
+    Ok(RoomPageCaller::Public(public))
 }

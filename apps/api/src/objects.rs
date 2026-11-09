@@ -49,9 +49,10 @@ pub const BUCKET: &str = "ASSETS";
 /// What a refusal looks like to whoever asked.
 pub fn refusal(refused: FileRefusal) -> ApiError {
     let status = match refused {
-        FileRefusal::RoomArchived | FileRefusal::QuotaExceeded | FileRefusal::InvalidTransition => {
-            409
-        }
+        FileRefusal::RoomArchived
+        | FileRefusal::QuotaExceeded
+        | FileRefusal::ParticipantQuotaExceeded
+        | FileRefusal::InvalidTransition => 409,
         FileRefusal::TooLarge => 413,
         FileRefusal::Mismatch | FileRefusal::BadName => 422,
         FileRefusal::Executable

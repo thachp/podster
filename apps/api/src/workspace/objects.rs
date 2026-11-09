@@ -6,8 +6,8 @@
 use super::*;
 use crate::objects::{refusal, upload_not_found};
 use podster_core::files::{
-    check_upload, expire_scan, fits_room_quota, is_sha256, record_scan, scan_database_fits,
-    FileRefusal, ObjectState, ScanOutcome, UploadRequest, SCAN_DEADLINE_MS,
+    check_upload, expire_scan, fits_participant_quota, fits_room_quota, is_sha256, record_scan,
+    scan_database_fits, FileRefusal, ObjectState, ScanOutcome, UploadRequest, SCAN_DEADLINE_MS,
 };
 
 /// How long an upload may be started after it's created. Its reservation ends then too, whatever is under way. An attempt already
@@ -33,6 +33,33 @@ pub(super) fn room_used(sql: &SqlStorage, now: i64, except: &str) -> R<u64> {
         vec![now.into(), except.into()],
     )?;
     Ok(found.first().map_or(0, |row| int(&row["used"])).max(0) as u64)
+}
+
+/// What one uploader holds of the room's files, counted as `room_used` counts the room, leaving out `except`.
+fn held_by(sql: &SqlStorage, uploader: &str, now: i64, except: &str) -> R<u64> {
+    let found = rows(
+        sql,
+        "SELECT COALESCE(SUM(size), 0) AS used FROM stored_object WHERE uploaded_by = ? AND ((state <> 'uploading' AND state <> 'removed') OR (state = 'uploading' AND upload_expires_at > ?)) AND id <> ?",
+        vec![uploader.into(), now.into(), except.into()],
+    )?;
+    Ok(found.first().map_or(0, |row| int(&row["used"])).max(0) as u64)
+}
+
+/// Decision 161: a public participant may hold at most 1 GB of the room's files. Asked beside the room's 5 GB, when an upload
+/// starts and again when it finishes, as that is. Everyone else is limited only by the room's.
+fn check_participant_quota(
+    sql: &SqlStorage,
+    uploader: &str,
+    size: u64,
+    now: i64,
+    except: &str,
+) -> R<()> {
+    if super::public_claims::is_public_participant(sql, uploader)?
+        && !fits_participant_quota(held_by(sql, uploader, now, except)?, size)
+    {
+        return Err(refusal(FileRefusal::ParticipantQuotaExceeded));
+    }
+    Ok(())
 }
 
 pub(super) fn room_id(sql: &SqlStorage) -> R<String> {
@@ -72,6 +99,7 @@ pub(super) fn handle_create(
         room_archived: room_archived(sql)?,
     })
     .map_err(refusal)?;
+    check_participant_quota(sql, &caller.id, accepted.size, now, "")?;
     let id = format!("obj_{}", uuid::Uuid::new_v4().simple());
     let token = format!(
         "upl_{}{}",
@@ -313,6 +341,13 @@ fn complete(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     if !fits_room_quota(room_used(sql, now, id)?, int(&row["size"]).max(0) as u64) {
         return Err(refusal(FileRefusal::QuotaExceeded));
     }
+    check_participant_quota(
+        sql,
+        &who.caller.id,
+        int(&row["size"]).max(0) as u64,
+        now,
+        id,
+    )?;
     let media_type = body["media_type"]
         .as_str()
         .ok_or_else(ApiError::invalid_argument)?;

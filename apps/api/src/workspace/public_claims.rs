@@ -21,6 +21,17 @@ pub(crate) const INTERNAL_PUBLIC_CLAIM_STATUS: &str = "/internal/public-claim-st
 /// How a public claimant joined, on its member row.
 const JOINED_PUBLICLY: &str = "public";
 
+/// Whether someone is a public participant here now: they joined by a public claim and still hold the guest role it gave them.
+/// One the owner has since given another role isn't, as everywhere else in public claims.
+pub(super) fn is_public_participant(sql: &SqlStorage, principal: &str) -> R<bool> {
+    Ok(!rows(
+        sql,
+        "SELECT principal_id FROM member WHERE principal_id = ? AND joined_via = ? AND role = 'guest' AND revoked_at IS NULL",
+        vec![principal.into(), JOINED_PUBLICLY.into()],
+    )?
+    .is_empty())
+}
+
 fn refusal(refusal: PublicClaimRefusal) -> ApiError {
     let status = match refusal {
         PublicClaimRefusal::RoomHidden | PublicClaimRefusal::OpeningHidden => 404,

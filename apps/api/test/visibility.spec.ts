@@ -614,67 +614,132 @@ describe("the deeper review's checks", () => {
   });
 });
 
-// M4 step 12: the discovery-index reconcile step 6's review asked for. A row lost from D1 while the room's cached copy still
-// matches is written again within the check's interval, without any public change.
+// M4 step 12: the discovery-index reconcile step 6's review asked for. A row lost or changed in D1 while the room's cached copy
+// still matches is written again at the next check, without any public change. The schedule is set explicitly here, so nothing
+// depends on the random first check.
 describe("the discovery-index reconcile", () => {
   const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
   const drain = async (id: string) => {
     for (let n = 0; n < 5; n++) await runDurableObjectAlarm(stub(id));
   };
   const indexRow = async (id: string) => BINDINGS.DB.prepare("SELECT * FROM public_workroom_index WHERE workspace_id = ?").bind(id).first();
-  const KEY = "public_index_verified_at";
+  const NEXT = "public_index_verify_next";
+  const FAILURES = "public_index_verify_failures";
+  const TOMBSTONE = "public_index_verified_tombstone";
   const SIX_HOURS = 6 * 60 * 60 * 1000;
-  const checkedAt = (id: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.get(KEY));
-  /** Makes the last check older than the interval, and makes sure an alarm is set to run it. */
-  const age = (id: string) =>
+  const stored = (id: string, key: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.get(key));
+  /** Sets when the next check is due, and makes sure an alarm is set to run it. */
+  const checkAt = (id: string, at: number) =>
     runInDurableObject(stub(id), async (_: any, state: any) => {
-      await state.storage.put(KEY, Date.now() - SIX_HOURS - 1);
+      await state.storage.put(NEXT, at);
       await state.storage.setAlarm(Date.now() + 60_000);
     });
+  const due = (id: string) => checkAt(id, Date.now() - 1);
+  const published = async () => {
+    const id = await room();
+    const body = (await publish(id)).body;
+    await drain(id);
+    return { id, handle: body.public_handle as string };
+  };
+
+  it("spreads a room's first check across the interval", async () => {
+    const before = Date.now();
+    const { id } = await published();
+    const first = await stored(id, NEXT);
+    expect(first).toBeGreaterThanOrEqual(before);
+    expect(first).toBeLessThanOrEqual(Date.now() + SIX_HOURS);
+  });
 
   it("writes a lost row again once the check is due, and not before", async () => {
-    const id = await room();
-    const published = (await publish(id)).body;
-    await drain(id);
-    expect(await indexRow(id)).toMatchObject({ public_handle: published.public_handle, resolvable: 1 });
-    expect(typeof (await checkedAt(id))).toBe("number");
+    const { id, handle } = await published();
     await BINDINGS.DB.prepare("DELETE FROM public_workroom_index WHERE workspace_id = ?").bind(id).run();
-    // The room's alarm stays set for the next check.
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm())).not.toBeNull();
+    await checkAt(id, Date.now() + 60 * 60 * 1000);
     await drain(id);
     expect(await indexRow(id)).toBeNull();
-    await age(id);
+    await due(id);
     await drain(id);
-    expect(await indexRow(id)).toMatchObject({ public_handle: published.public_handle, resolvable: 1, listed: 1 });
+    expect(await indexRow(id)).toMatchObject({ public_handle: handle, resolvable: 1, listed: 1 });
+    expect(await stored(id, NEXT)).toBeGreaterThan(Date.now() + SIX_HOURS - 60_000);
   });
 
-  it("rewrites a row older than the room's, and leaves a newer one to the seq guard", async () => {
-    const id = await room();
-    await publish(id);
+  it("rewrites a row whose content drifted, whatever its seq", async () => {
+    const { id, handle } = await published();
+    const seq = (await indexRow(id)).updated_seq;
+    await BINDINGS.DB.prepare("UPDATE public_workroom_index SET listed = 0 WHERE workspace_id = ?").bind(id).run();
+    await due(id);
     await drain(id);
-    await BINDINGS.DB.prepare("UPDATE public_workroom_index SET updated_seq = 0, listed = 0 WHERE workspace_id = ?").bind(id).run();
-    await age(id);
+    expect(await indexRow(id)).toMatchObject({ public_handle: handle, listed: 1, updated_seq: seq });
+    // A row claiming a newer seq than the room's is still the room's to decide.
+    await BINDINGS.DB.prepare("UPDATE public_workroom_index SET updated_seq = 1000000, public_handle = NULL, resolvable = 0 WHERE workspace_id = ?").bind(id).run();
+    await due(id);
     await drain(id);
-    expect(await indexRow(id)).toMatchObject({ listed: 1 });
-    await BINDINGS.DB.prepare("UPDATE public_workroom_index SET updated_seq = 1000000, listed = 0 WHERE workspace_id = ?").bind(id).run();
-    await age(id);
-    await drain(id);
-    expect(await indexRow(id)).toMatchObject({ updated_seq: 1000000, listed: 0 });
+    expect(await indexRow(id)).toMatchObject({ public_handle: handle, resolvable: 1, listed: 1, updated_seq: seq });
   });
 
-  it("keeps a private room's tombstone too, and checks nothing for a room never public", async () => {
-    const id = await room();
-    await publish(id);
+  it("leaves a row that matches alone", async () => {
+    const { id } = await published();
+    const before = await indexRow(id);
+    await due(id);
     await drain(id);
+    expect(await indexRow(id)).toEqual(before);
+  });
+
+  it("stops checking once a tombstone is confirmed, until the room writes something else", async () => {
+    const { id } = await published();
     expect((await unpublish(id)).status).toBe(200);
     await drain(id);
-    await BINDINGS.DB.prepare("DELETE FROM public_workroom_index WHERE workspace_id = ?").bind(id).run();
-    await age(id);
+    await due(id);
     await drain(id);
     expect(await indexRow(id)).toMatchObject({ resolvable: 0, listed: 0 });
+    expect(typeof (await stored(id, TOMBSTONE))).toBe("string");
+    // Confirmed, so a tombstone that goes missing now isn't looked for.
+    await BINDINGS.DB.prepare("DELETE FROM public_workroom_index WHERE workspace_id = ?").bind(id).run();
+    await due(id);
+    await drain(id);
+    expect(await indexRow(id)).toBeNull();
+    // Publishing again writes a new row, and checks resume.
+    const again = (await publish(id)).body;
+    await drain(id);
+    await BINDINGS.DB.prepare("DELETE FROM public_workroom_index WHERE workspace_id = ?").bind(id).run();
+    await due(id);
+    await drain(id);
+    expect(await indexRow(id)).toMatchObject({ public_handle: again.public_handle, resolvable: 1 });
+  });
+
+  it("checks nothing for a room never public", async () => {
     const quiet = await room();
     await api(OWNER, "PUT", `/v1/workspaces/${quiet}/topic`, { topic: "film" });
     await drain(quiet);
-    expect(await checkedAt(quiet)).toBeUndefined();
+    expect(await stored(quiet, NEXT)).toBeUndefined();
+  });
+
+  it("backs off from 5 s, longer after each failure, while D1 fails", async () => {
+    const { id } = await published();
+    await BINDINGS.DB.prepare("ALTER TABLE public_workroom_index RENAME TO public_workroom_index_away").run();
+    try {
+      const waits: number[] = [];
+      for (let n = 1; n <= 3; n++) {
+        await due(id);
+        const before = Date.now();
+        await runDurableObjectAlarm(stub(id));
+        expect(await stored(id, FAILURES)).toBe(n);
+        const next = (await stored(id, NEXT)) as number;
+        const alarm = (await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm())) as number;
+        expect(next - before).toBeGreaterThanOrEqual(5_000 * 2 ** (n - 1));
+        expect(next - before).toBeLessThanOrEqual(5_000 * 2 ** (n - 1) * 1.2 + 1_000);
+        // Nothing else is due, so the alarm waits for it too, and never spins.
+        expect(alarm - before).toBeGreaterThanOrEqual(5_000);
+        waits.push(next - before);
+      }
+      expect(waits[1]).toBeGreaterThan(waits[0]);
+      expect(waits[2]).toBeGreaterThan(waits[1]);
+    } finally {
+      await BINDINGS.DB.prepare("ALTER TABLE public_workroom_index_away RENAME TO public_workroom_index").run();
+    }
+    // Once D1 answers, the count resets and the next check is the full interval away.
+    await due(id);
+    await drain(id);
+    expect(await stored(id, FAILURES)).toBeUndefined();
+    expect(await stored(id, NEXT)).toBeGreaterThan(Date.now() + SIX_HOURS - 60_000);
   });
 });

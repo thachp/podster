@@ -7,6 +7,7 @@ describe("refusals", () => {
     expect(explainUpload("file_too_large", 413)).toMatch(/over 100 MB/);
     expect(explainUpload("executable_refused", 415)).toMatch(/programs, installers/);
     expect(explainUpload("room_quota_exceeded", 409)).toMatch(/5 GB/);
+    expect(explainUpload("participant_quota_exceeded", 409)).toMatch(/1 GB.*Nothing was uploaded/);
     expect(explainUpload("rate_limited", 429, 12)).toMatch(/Wait 12 seconds/);
     expect(explainUpload("rate_limited", 429)).toMatch(/Wait a minute/);
     expect(explainUpload("something_new", 415)).toMatch(/isn't accepted/);

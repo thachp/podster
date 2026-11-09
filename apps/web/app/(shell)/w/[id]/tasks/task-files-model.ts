@@ -16,6 +16,7 @@ export function approvalBlocker(files: Pick<TaskFile, "state">[]) {
 const UPLOAD_REFUSED: Record<string, string> = {
   file_too_large: "It's over 100 MB, which is the most a file can be.",
   room_quota_exceeded: "This workroom has used its 5 GB of file space.",
+  participant_quota_exceeded: "Its uploader joined from the public page and holds its 1 GB of this workroom's file space.",
   workspace_archived: "This workroom is archived, so nothing can be added to it.",
   invalid_file_name: "Its name can't be used. Rename it and add it again.",
   executable_refused: "Programs and files that run when opened can't be uploaded. Put code in a zip.",

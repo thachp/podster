@@ -34,6 +34,8 @@ export function explainUpload(code: string, status: number, retryAfter?: number)
       return "This file is over 100 MB, the most one file can be. Nothing was uploaded.";
     case "executable_refused":
       return "Podster doesn't take programs, installers or files that run when opened. Nothing was uploaded. Code can go inside a zip.";
+    case "participant_quota_exceeded":
+      return "You joined this workroom from its public page, and you hold the 1 GB of its file space that allows. Nothing was uploaded.";
     case "room_quota_exceeded":
       return "This workroom doesn't have space for this file. It holds up to 5 GB, counting every file kept. Nothing was uploaded.";
     case "invalid_file_name":

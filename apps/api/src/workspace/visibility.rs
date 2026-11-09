@@ -486,6 +486,110 @@ fn land_test_command(sql: &SqlStorage) -> R<()> {
     Ok(())
 }
 
+/// How often a room checks that its discovery row is still in D1 as it wrote it (M4 step 12, the reconcile step 6's review
+/// asked for). A row lost or changed while the room's `written` copy still matches would otherwise never be written again.
+pub(super) const INDEX_VERIFY_MS: i64 = 6 * 60 * 60 * 1000;
+/// After a check fails, the next waits 5 s, doubling each time up to 30 minutes, plus up to a fifth more at random.
+pub(super) const VERIFY_RETRY_FIRST_MS: i64 = 5_000;
+pub(super) const VERIFY_RETRY_MAX_MS: i64 = 30 * 60 * 1000;
+/// The room's key-value storage holds the schedule, so it survives a restart and needs no schema change: when the next check is
+/// due, how many have failed in a row, and the cached row last confirmed as a tombstone.
+pub(super) const VERIFY_NEXT_KEY: &str = "public_index_verify_next";
+pub(super) const VERIFY_FAILURES_KEY: &str = "public_index_verify_failures";
+pub(super) const VERIFIED_TOMBSTONE_KEY: &str = "public_index_verified_tombstone";
+
+/// The wait after `failures` checks in a row have failed, with `jitter` from 0 to 1.
+pub fn verify_backoff_ms(failures: u32, jitter: f64) -> i64 {
+    let doublings = failures.saturating_sub(1).min(20);
+    let base = VERIFY_RETRY_FIRST_MS
+        .saturating_mul(1_i64 << doublings)
+        .min(VERIFY_RETRY_MAX_MS);
+    base + (base as f64 * 0.2 * jitter.clamp(0.0, 1.0)) as i64
+}
+
+/// What the room has to check: the copy it last wrote (empty if a write was refused), once it has a discovery row and no
+/// write is due, which would rewrite it anyway. `None` when there's nothing to check.
+pub(super) fn index_to_check(sql: &SqlStorage) -> R<Option<String>> {
+    if !store::is_initialized(sql)? || store::needs_migration(sql)? {
+        return Ok(None);
+    }
+    let found = rows(
+        sql,
+        "SELECT pending, written FROM public_index_outbox",
+        vec![],
+    )?;
+    Ok(found
+        .first()
+        .filter(|row| int(&row["pending"]) == 0)
+        .map(|row| row["written"].as_str().unwrap_or("").to_string()))
+}
+
+pub(super) enum IndexCheck {
+    /// D1 holds what the room wrote. `tombstone` is set when that's a row nobody can resolve, which needn't be checked again
+    /// until the room writes something else.
+    Matches { tombstone: bool },
+    /// It was missing or different, and is due to be written again.
+    Repaired,
+}
+
+/// The D1 row in `index_json`'s shape, to compare with what the room wrote. Times are compared in whole seconds, as the policy
+/// keeps them, and only while the row is resolvable, since that's the only time the room writes one.
+fn d1_row_json(row: &Value) -> Value {
+    let flag = |name: &str| row[name].as_f64().is_some_and(|n| n != 0.0);
+    let resolvable = flag("resolvable");
+    json!({
+        "resolvable": resolvable, "listed": flag("listed"), "public_handle": row["public_handle"], "topic": row["topic"],
+        "has_open_opening": flag("has_open_opening"),
+        "published_at": if resolvable { row["published_at"].as_f64().map_or(Value::Null, |ms| json!((ms as i64).div_euclid(1000))) } else { Value::Null },
+    })
+}
+
+fn comparable(written: &str) -> Option<Value> {
+    let mut value: Value = serde_json::from_str(written).ok()?;
+    if value["resolvable"] != json!(true) {
+        value["published_at"] = Value::Null;
+    }
+    Some(value)
+}
+
+/// Reads the room's discovery row from D1 and compares it, field by field, with what the room last wrote. Anything else, a
+/// missing row, a changed one or one newer than the room's, is deleted and marked due, so the next drain writes it in full and
+/// a drifted row fails closed meanwhile: only this room writes its row, and the room's state decides.
+pub(super) async fn verify_public_index(
+    sql: &SqlStorage,
+    db: &D1Database,
+) -> R<Option<IndexCheck>> {
+    let Some(written) = index_to_check(sql)? else {
+        return Ok(None);
+    };
+    let room = super::objects::room_id(sql)?;
+    let found = db
+        .prepare("SELECT public_handle, topic, has_open_opening, published_at, resolvable, listed FROM public_workroom_index WHERE workspace_id = ?")
+        .bind(&[room.as_str().into()])?
+        .first::<Value>(None)
+        .await?;
+    let expected = comparable(&written);
+    if let (Some(row), Some(expected)) = (&found, &expected) {
+        if d1_row_json(row) == *expected {
+            return Ok(Some(IndexCheck::Matches {
+                tombstone: expected["resolvable"] != json!(true),
+            }));
+        }
+    }
+    if found.is_some() {
+        db.prepare("DELETE FROM public_workroom_index WHERE workspace_id = ?")
+            .bind(&[room.as_str().into()])?
+            .run()
+            .await?;
+    }
+    exec(
+        sql,
+        "UPDATE public_index_outbox SET pending = 1, written = NULL WHERE pending = 0",
+        vec![],
+    )?;
+    Ok(Some(IndexCheck::Repaired))
+}
+
 /// Whether the discovery row is due, for the alarm.
 pub(super) fn public_index_due(sql: &SqlStorage) -> R<bool> {
     Ok(store::is_initialized(sql)?

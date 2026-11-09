@@ -3305,6 +3305,103 @@ impl Workspace {
         a2a_read::drain(&self.env, &sql, &workspace_id, now).await
     }
 
+    /// When the room's next discovery-row check is due, or `None` when there's nothing to check: no row yet, a write already
+    /// due, or a tombstone already confirmed. A room with no time yet gets one at random within the interval, so rooms that were
+    /// public before this deploy don't all check at once.
+    async fn index_check_due(&self, sql: &SqlStorage, now: i64) -> R<Option<i64>> {
+        let Some(written) = visibility::index_to_check(sql)? else {
+            return Ok(None);
+        };
+        let storage = self.state.storage();
+        if storage
+            .get::<String>(visibility::VERIFIED_TOMBSTONE_KEY)
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(written.as_str())
+        {
+            return Ok(None);
+        }
+        if let Some(next) = storage
+            .get::<i64>(visibility::VERIFY_NEXT_KEY)
+            .await
+            .ok()
+            .flatten()
+        {
+            return Ok(Some(next));
+        }
+        let first = now + (js_sys::Math::random() * visibility::INDEX_VERIFY_MS as f64) as i64;
+        storage.put(visibility::VERIFY_NEXT_KEY, first).await?;
+        Ok(Some(first))
+    }
+
+    /// The discovery-index reconcile, when it's due. A failed check waits longer each time, from 5 s up to 30 minutes, kept in
+    /// storage so a restart doesn't reset it, and logs the error code and the room's ID only.
+    async fn verify_public_index(&self, sql: &SqlStorage) {
+        let now = Date::now().as_millis() as i64;
+        if !matches!(self.index_check_due(sql, now).await, Ok(Some(due)) if due <= now) {
+            return;
+        }
+        let checked = match self.env.d1("DB") {
+            Ok(db) => visibility::verify_public_index(sql, &db).await,
+            Err(error) => Err(error.into()),
+        };
+        let storage = self.state.storage();
+        let recorded = match checked {
+            Ok(outcome) => {
+                let confirmed = match (&outcome, visibility::index_to_check(sql)) {
+                    (
+                        Some(visibility::IndexCheck::Matches { tombstone: true }),
+                        Ok(Some(written)),
+                    ) => Some(written),
+                    _ => None,
+                };
+                let mut saved = storage
+                    .delete(visibility::VERIFY_FAILURES_KEY)
+                    .await
+                    .map(|_| ());
+                if saved.is_ok() {
+                    saved = storage
+                        .put(
+                            visibility::VERIFY_NEXT_KEY,
+                            now + visibility::INDEX_VERIFY_MS,
+                        )
+                        .await;
+                }
+                if let (Ok(()), Some(written)) = (&saved, confirmed) {
+                    saved = storage
+                        .put(visibility::VERIFIED_TOMBSTONE_KEY, written)
+                        .await;
+                }
+                saved
+            }
+            Err(error) => {
+                let room = objects::room_id(sql).unwrap_or_default();
+                console_error!(
+                    "public index check failed: room={} code={}",
+                    room,
+                    error.code().unwrap_or("internal_error")
+                );
+                let failures = storage
+                    .get::<u32>(visibility::VERIFY_FAILURES_KEY)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                let wait = visibility::verify_backoff_ms(failures, js_sys::Math::random());
+                match storage.put(visibility::VERIFY_FAILURES_KEY, failures).await {
+                    Ok(()) => storage.put(visibility::VERIFY_NEXT_KEY, now + wait).await,
+                    Err(error) => Err(error),
+                }
+            }
+        };
+        if let Err(error) = recorded {
+            console_error!("couldn't record the index check: {:?}", error);
+        }
+    }
+
     /// Schedules the alarm for whatever is due next, moving it earlier if needed. Never later: a pending alarm that
     /// finds nothing to do costs nothing, and a missed one would strand events.
     async fn arm(&self, index_failed: bool, outbox_failed: bool) -> R<()> {
@@ -3356,6 +3453,10 @@ impl Workspace {
             .transpose()?
             .flatten()
         {
+            let next = next.max(now + 10);
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
+        if let Some(next) = self.index_check_due(&sql, now).await? {
             let next = next.max(now + 10);
             due = Some(due.map_or(next, |d| d.min(next)));
         }
@@ -4214,12 +4315,14 @@ impl Workspace {
                 test_fail,
                 move |sql, who, now| handle_change_access(sql, &who.caller, &target, &body, now),
             ),
-            (Method::Put, ["visibility"]) => self.command(
+            // A stored answer is the room's visibility read, so it's replayed only to someone who may still manage the room.
+            (Method::Put, ["visibility"]) => self.command_checked(
                 &identity,
                 key,
                 hash,
                 stops_when_archived,
                 test_fail,
+                |_: &SqlStorage, who: &Participant| public_claims::may_manage(&who.caller),
                 move |sql, who, now| {
                     visibility::handle_set_visibility(sql, who, &body, public_rooms, now)
                 },
@@ -4422,6 +4525,8 @@ impl DurableObject for Workspace {
             console_error!("index projection failed: {:?}", error);
         }
         let sql = self.state.storage().sql();
+        // The reconcile first, so a row it finds missing is written in this same alarm.
+        self.verify_public_index(&sql).await;
         let public_index = match self.env.d1("DB") {
             Ok(db) => visibility::drain_public_index(&sql, &db).await,
             Err(error) => Err(error.into()),

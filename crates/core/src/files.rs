@@ -30,6 +30,9 @@ use std::fmt;
 pub const MAX_FILE_BYTES: u64 = 100_000_000;
 /// 5 GB per room, counting every version kept.
 pub const ROOM_QUOTA_BYTES: u64 = 5_000_000_000;
+/// Decision 161: in a public room, each public participant may hold at most 1 GB of the room's files, counted as the room's
+/// 5 GB is. Others in the room aren't limited by it.
+pub const PUBLIC_PARTICIPANT_QUOTA_BYTES: u64 = 1_000_000_000;
 /// No result within an hour fails the scan.
 pub const SCAN_DEADLINE_MS: i64 = 60 * 60 * 1000;
 /// Decision 84: signatures older than this can't make a file available.
@@ -62,6 +65,8 @@ pub enum FileRefusal {
     TooLarge,
     /// `room_quota_exceeded`
     QuotaExceeded,
+    /// `participant_quota_exceeded`: a public participant's 1 GB of the room's files is used.
+    ParticipantQuotaExceeded,
     /// `invalid_file_name`
     BadName,
     /// `executable_refused`
@@ -86,6 +91,7 @@ impl FileRefusal {
             FileRefusal::RoomArchived => "workspace_archived",
             FileRefusal::TooLarge => "file_too_large",
             FileRefusal::QuotaExceeded => "room_quota_exceeded",
+            FileRefusal::ParticipantQuotaExceeded => "participant_quota_exceeded",
             FileRefusal::BadName => "invalid_file_name",
             FileRefusal::Executable => "executable_refused",
             FileRefusal::PasswordProtected => "password_protected_refused",
@@ -358,6 +364,13 @@ pub fn fits_room_quota(room_used: u64, size: u64) -> bool {
     room_used
         .checked_add(size)
         .is_some_and(|total| total <= ROOM_QUOTA_BYTES)
+}
+
+/// Whether a file fits beside what one public participant already holds of the room's files (decision 161). Asked with the
+/// room's own check, when an upload starts and when it finishes.
+pub fn fits_participant_quota(held: u64, size: u64) -> bool {
+    held.checked_add(size)
+        .is_some_and(|total| total <= PUBLIC_PARTICIPANT_QUOTA_BYTES)
 }
 
 /// Checks a request before any byte arrives. Who may ask is `podster-policy`'s question, and it runs first.

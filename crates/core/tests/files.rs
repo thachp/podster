@@ -50,6 +50,15 @@ fn a_room_can_fill_exactly_and_no_further() {
 }
 
 #[test]
+fn a_public_participant_can_hold_exactly_1_gb_and_no_more() {
+    assert_eq!(PUBLIC_PARTICIPANT_QUOTA_BYTES, 1_000_000_000);
+    assert!(fits_participant_quota(999_999_000, 1_000));
+    assert!(!fits_participant_quota(999_999_001, 1_000));
+    assert!(!fits_participant_quota(1_000_000_000, 1));
+    assert!(!fits_participant_quota(u64::MAX - 5, 10));
+}
+
+#[test]
 fn quota_arithmetic_cannot_wrap_around() {
     assert_eq!(
         check_upload(request(10, u64::MAX - 5)).unwrap_err(),
@@ -1541,6 +1550,7 @@ fn refusals_have_stable_codes_and_carry_nothing_from_the_file() {
         (R::RoomArchived, "workspace_archived"),
         (R::TooLarge, "file_too_large"),
         (R::QuotaExceeded, "room_quota_exceeded"),
+        (R::ParticipantQuotaExceeded, "participant_quota_exceeded"),
         (R::BadName, "invalid_file_name"),
         (R::Executable, "executable_refused"),
         (R::PasswordProtected, "password_protected_refused"),

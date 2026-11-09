@@ -291,3 +291,206 @@ async fn entry(env: &Env, caller: &Caller, row: &Value, req: &Request) -> Option
     };
     outcome
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Public claims (M4 step 8)
+
+/// A Principal's count to reserve on: whose it is, the Principal, and the claim's key there.
+struct Count {
+    whose: &'static str,
+    principal: String,
+    key: String,
+}
+
+/// Whether `agent` holds a public claim in `workspace` now, by the room's own answer. A room that can't say counts as
+/// holding it, so a count is only ever dropped on the room's word.
+async fn holds_public_claim(env: &Env, workspace: &str, agent: &str) -> bool {
+    let read = async {
+        let path = format!(
+            "{}?principal={agent}",
+            crate::workspace::INTERNAL_PUBLIC_CLAIM_STATUS
+        );
+        let mut response = forward(
+            room(env, workspace)?,
+            &path,
+            "",
+            Headers::new(),
+            Method::Get,
+            None,
+        )
+        .await?;
+        if response.status_code() != 200 {
+            return Ok::<_, ApiError>(true);
+        }
+        Ok(response.json::<Value>().await?["active"].as_bool() != Some(false))
+    };
+    read.await.unwrap_or(true)
+}
+
+/// Reserves one count, and at a limit checks each claim it counted as active with its room, ending the ones the room
+/// says have ended, then asks once more. `Err` carries the limit's refusal.
+async fn reserve(env: &Env, count: &Count, workspace: &str, agent: &str) -> R<()> {
+    let mut checked = false;
+    loop {
+        let refused = principal::reserve_public_claim(
+            env,
+            &count.principal,
+            count.whose,
+            &count.key,
+            workspace,
+            true,
+        )
+        .await?;
+        let Some((code, active)) = refused else {
+            return Ok(());
+        };
+        // Only an "at once" limit can be freed by a claim that ended. An hourly one can't.
+        let freeable = count.whose != "org" && !active.is_empty() && !checked;
+        if !freeable {
+            return Err(if code == "not_allowed" {
+                ApiError::not_allowed()
+            } else {
+                ApiError::limit_exceeded()
+            });
+        }
+        checked = true;
+        let mut freed = false;
+        // At most 3 are listed, so this asks at most 3 rooms.
+        for (key, room_id) in active
+            .iter()
+            .take(podster_core::public_claims::MAX_PERSON_ACTIVE_PUBLIC_CLAIMS as usize)
+        {
+            // A person's key is `agent:room`, since their count spans every agent they linked.
+            let holder = match count.whose {
+                "person" => match key.split_once(':') {
+                    Some((holder, _)) => holder.to_string(),
+                    None => continue,
+                },
+                _ => agent.to_string(),
+            };
+            if !holds_public_claim(env, room_id, &holder).await {
+                principal::settle_public_claim(env, &count.principal, key, "end").await?;
+                freed = true;
+            }
+        }
+        if !freed {
+            return Err(ApiError::limit_exceeded());
+        }
+    }
+}
+
+/// `POST /v1/public/workrooms/{handle}/claim { role_id }`: an agent whose owner allows it joins a public room as a guest
+/// and claims an opening (decision 159). The agent's, its linking person's and its organization's counts are reserved on
+/// their Principals, the room decides, and each count is confirmed or given back by its answer.
+pub async fn claim(
+    env: &Env,
+    caller: &Caller,
+    handle: &str,
+    body: Option<&str>,
+    req: &Request,
+) -> R<Response> {
+    if caller.kind != "agent" {
+        return Err(ApiError::not_allowed());
+    }
+    // Every agent credential has a linker. One without can't be counted against a person, so it can't claim publicly.
+    let person = caller
+        .linker
+        .as_ref()
+        .map(|l| l.person.clone())
+        .ok_or_else(ApiError::not_allowed)?;
+    let parsed: Value =
+        serde_json::from_str(body.unwrap_or("")).map_err(|_| ApiError::invalid_argument())?;
+    let fields = parsed.as_object().ok_or_else(ApiError::invalid_argument)?;
+    if fields.keys().any(|k| k != "role_id") {
+        return Err(ApiError::invalid_argument());
+    }
+    let role_id = parsed["role_id"]
+        .as_str()
+        .filter(|id| crate::valid_id(id))
+        .ok_or_else(ApiError::invalid_argument)?
+        .to_string();
+    if !enabled(env, req)? || !is_public_handle(handle) {
+        return not_found();
+    }
+    let found = env
+        .d1("DB")?
+        .prepare("SELECT workspace_id FROM public_workroom_index WHERE public_handle = ? AND resolvable = 1")
+        .bind(&[handle.into()])?
+        .first::<Value>(None)
+        .await?;
+    let Some(workspace) = found.and_then(|row| row["workspace_id"].as_str().map(str::to_owned))
+    else {
+        return not_found();
+    };
+    let agent = caller.id.clone();
+    // The owner's consent is checked first, and the room recorded on the agent, as any join does.
+    let generation = principal::register_room(env, &agent, &caller.org, &workspace, true).await?;
+    let pair = format!("{agent}:{workspace}");
+    let counts = [
+        Count {
+            whose: "agent",
+            principal: agent.clone(),
+            key: workspace.clone(),
+        },
+        Count {
+            whose: "person",
+            principal: person,
+            key: pair.clone(),
+        },
+        Count {
+            whose: "org",
+            principal: caller.org.clone(),
+            key: pair,
+        },
+    ];
+    // A claim the agent already holds here is the room's to answer, with nothing counted again.
+    let retry = holds_public_claim(env, &workspace, &agent).await;
+    let mut reserved: Vec<&Count> = vec![];
+    if !retry {
+        for count in &counts {
+            if let Err(error) = reserve(env, count, &workspace, &agent).await {
+                settle_all(env, &reserved, "release").await;
+                return Err(error);
+            }
+            reserved.push(count);
+        }
+    }
+    let mut asking = caller.clone();
+    asking.workspace_id = workspace.clone();
+    let headers = caller_header(&asking)?;
+    test_headers(req, &headers)?;
+    let request =
+        json!({ "handle": handle, "role_id": role_id, "generation": generation }).to_string();
+    let answer = forward(
+        room(env, &workspace)?,
+        crate::workspace::INTERNAL_PUBLIC_CLAIM,
+        "",
+        headers,
+        Method::Post,
+        Some(request),
+    )
+    .await;
+    match &answer {
+        Ok(response) if response.status_code() == 200 => {
+            settle_all(env, &reserved, "confirm").await
+        }
+        // A refusal gives the counts back. If the room's answer was lost, they stay pending and expire, so it fails closed.
+        Ok(_) => settle_all(env, &reserved, "release").await,
+        Err(_) => {}
+    }
+    answer
+}
+
+async fn settle_all(env: &Env, counts: &[&Count], outcome: &str) {
+    for count in counts {
+        if let Err(error) =
+            principal::settle_public_claim(env, &count.principal, &count.key, outcome).await
+        {
+            console_error!(
+                "public claim count not settled: {} {:?}",
+                count.whose,
+                error.code()
+            );
+        }
+    }
+}

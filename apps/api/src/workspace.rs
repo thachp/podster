@@ -84,12 +84,14 @@ mod outputs;
 mod plan;
 mod planned;
 mod public;
+mod public_claims;
 mod removal;
 mod roles;
 mod submission_files;
 mod visibility;
 
 pub(crate) use public::{INTERNAL_EXPLORE_ENTRY, INTERNAL_PUBLIC_PAGE};
+pub(crate) use public_claims::{INTERNAL_PUBLIC_CLAIM, INTERNAL_PUBLIC_CLAIM_STATUS};
 pub(crate) use visibility::public_rooms_enabled;
 
 /// The caller as this room knows them. `org` comes from stored state, not the request.
@@ -3507,11 +3509,52 @@ impl Workspace {
         public::explore(&sql, &reader, enabled, &url)
     }
 
+    /// A public claim, or its status (M4 step 8). The claimant isn't a member yet, so no caller is resolved: the claim runs
+    /// in one transaction from the verified agent the Worker sends.
+    async fn public_claim(&self, mut req: Request) -> R<Value> {
+        let sql = self.state.storage().sql();
+        let enabled = visibility::public_rooms_enabled(&self.env, &req)?;
+        if !store::is_initialized(&sql)? {
+            return Err(ApiError::workspace_not_found());
+        }
+        self.migrate_if_needed()?;
+        if req.path() == public_claims::INTERNAL_PUBLIC_CLAIM_STATUS {
+            return public_claims::status(&sql, &req.url()?);
+        }
+        let identity: Identity = serde_json::from_str(
+            &req.headers()
+                .get(CALLER_HEADER)?
+                .ok_or_else(|| ApiError::internal("missing caller"))?,
+        )?;
+        let body: Value =
+            serde_json::from_str(&req.text().await?).map_err(|_| ApiError::invalid_argument())?;
+        let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+        let slot = out.clone();
+        let store = sql.clone();
+        transaction_sync(&self.state, move || {
+            *slot.borrow_mut() = Some(public_claims::claim(
+                &store,
+                &identity,
+                enabled,
+                &body,
+                now_ms(),
+            )?);
+            Ok(())
+        })?;
+        let answer = out.borrow_mut().take();
+        answer.ok_or_else(|| ApiError::internal("public claim answered nothing"))
+    }
+
     async fn dispatch(&self, mut req: Request) -> R<Value> {
         if req.path() == public::INTERNAL_PUBLIC_PAGE
             || req.path() == public::INTERNAL_EXPLORE_ENTRY
         {
             return self.public_read(req).await;
+        }
+        if req.path() == public_claims::INTERNAL_PUBLIC_CLAIM
+            || req.path() == public_claims::INTERNAL_PUBLIC_CLAIM_STATUS
+        {
+            return self.public_claim(req).await;
         }
         if req.path() == "/internal/org-departure" {
             let body: Value = req.json().await?;
@@ -3699,6 +3742,7 @@ impl Workspace {
                 ["collaboration", "costs"] => collaboration::read_costs(&sql, &who, &url),
                 ["brief"] => queries::get_brief(&sql, &who),
                 ["visibility"] => visibility::read(&sql, &who, public_rooms),
+                ["public-claims"] => public_claims::read(&sql, &who.caller),
                 ["activity"] => queries::list_activity(&sql, &who, &url),
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
                 ["tasks", id] => queries::get_task(&sql, &who, id, false),
@@ -4076,6 +4120,40 @@ impl Workspace {
                     visibility::handle_set_visibility(sql, who, &body, public_rooms, now)
                 },
             ),
+            (Method::Put, ["public-claims"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| public_claims::handle_pause(sql, &who.caller, &body, now),
+            ),
+            (Method::Put, ["public-claims", "blocked-orgs", org]) => {
+                let org = (*org).to_string();
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| {
+                        public_claims::handle_block(sql, &who.caller, &org, true, now)
+                    },
+                )
+            }
+            (Method::Delete, ["public-claims", "blocked-orgs", org]) => {
+                let org = (*org).to_string();
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| {
+                        public_claims::handle_block(sql, &who.caller, &org, false, now)
+                    },
+                )
+            }
             (Method::Put, ["topic"]) => self.command(
                 &identity,
                 key,

@@ -4,10 +4,13 @@
 //! couldn't read is a refusal, never a pass. The counts live in different places, and each place checks its own:
 //!
 //! - **The room** counts its public claims in the last hour, and holds the owner's block on organizations.
-//! - **The agent's `Principal`** counts its public claims now active, across rooms.
+//! - **The agent's `Principal`** counts its public claims now active, across rooms, and those made in the last hour.
 //! - **The linking person's `Principal`** counts public claims now active by every agent that person linked, across all
-//!   their organizations.
-//! - **`StrictCounter`** in the gateway counts claims in the last hour per agent, per person and per organization.
+//!   their organizations, and those made in the last hour.
+//! - **The organization's `Principal`** counts its agents' public claims in the last hour.
+//!
+//! All of them are in the Rust API, so Rust decides every limit. (The M4 plan first put the hourly ones in the gateway's
+//! `StrictCounter`; step 8 kept them in Rust instead.)
 //!
 //! Only public claims count. A claim through an invitation, or an owner or admin naming an agent, never does.
 //!
@@ -103,7 +106,7 @@ pub fn check_person_active(active: u32) -> Result<(), PublicClaimLimit> {
     )
 }
 
-/// The hourly counts kept by `StrictCounter`, before the claim is attempted.
+/// The hourly counts, each kept by its own `Principal`, before the claim is attempted. A Principal fills in only its own.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HourlyCounts {
     pub agent: u32,
@@ -111,7 +114,7 @@ pub struct HourlyCounts {
     pub org: u32,
 }
 
-/// `StrictCounter`'s checks, agent first, then person, then organization.
+/// The hourly checks, agent first, then person, then organization.
 pub fn check_hourly(counts: HourlyCounts) -> Result<(), PublicClaimLimit> {
     below(
         counts.agent,

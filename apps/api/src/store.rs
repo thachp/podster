@@ -203,6 +203,10 @@ ALTER TABLE work_role ADD COLUMN publicly_claimable INTEGER NOT NULL DEFAULT 0;
 ", "
 CREATE TABLE public_index_outbox (id INTEGER PRIMARY KEY CHECK (id = 1), seq INTEGER NOT NULL, pending INTEGER NOT NULL, written TEXT);
 INSERT INTO public_index_outbox (id, seq, pending) SELECT 1, COALESCE((SELECT MAX(seq) FROM event), 0), 1 FROM workspace WHERE visibility = 'public';
+", "
+ALTER TABLE member ADD COLUMN joined_via TEXT;
+ALTER TABLE role_claim ADD COLUMN public INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE public_claim_block (org_id TEXT PRIMARY KEY, blocked_by TEXT NOT NULL, blocked_at INTEGER NOT NULL);
 "];
 
 pub fn int(value: &Value) -> i64 {

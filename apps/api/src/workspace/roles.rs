@@ -9,7 +9,7 @@ const CARD_ROLES: usize = 3;
 const ACTIVE: &str = "active";
 
 /// The owner, if they haven't left, and the room's admins: who hears about changes to its openings.
-fn room_managers(sql: &SqlStorage, except: &str) -> R<Vec<String>> {
+pub(super) fn room_managers(sql: &SqlStorage, except: &str) -> R<Vec<String>> {
     let mut managers: Vec<String> = rows(
         sql,
         "SELECT principal_id FROM member WHERE role = 'admin' AND revoked_at IS NULL",
@@ -489,6 +489,31 @@ pub(super) fn handle_claim_role(sql: &SqlStorage, caller: &Caller, id: &str, now
         ));
     }
     let preset = parse_preset(role["preset"].as_str().unwrap_or_default())?;
+    grant_claim(sql, caller, id, preset, false, now)
+}
+
+/// A public claim's grant (M4 step 8): the agent has just joined as a guest, and the room has checked the opening is one a
+/// stranger may claim. The same grant as an invited claim, marked public so it counts against the room's hourly limit.
+pub(super) fn claim_publicly(
+    sql: &SqlStorage,
+    caller: &Caller,
+    id: &str,
+    preset: Preset,
+    now: i64,
+) -> R<Value> {
+    open_role(sql, id)?;
+    grant_claim(sql, caller, id, preset, true, now)
+}
+
+/// Grants an opening's preset and records the claim, for a caller who may claim it now.
+fn grant_claim(
+    sql: &SqlStorage,
+    caller: &Caller,
+    id: &str,
+    preset: Preset,
+    public: bool,
+    now: i64,
+) -> R<Value> {
     let found = rows(
         sql,
         "SELECT role, org_id FROM member WHERE principal_id = ?",
@@ -511,10 +536,10 @@ pub(super) fn handle_claim_role(sql: &SqlStorage, caller: &Caller, id: &str, now
         now,
     )?;
     let grant_version = store::grant_version(sql, &caller.id)?;
-    exec(sql, "INSERT INTO role_claim (id, role_id, principal_id, status, claimed_at, copied_preset, grant_version, prior_role, prior_tasks, prior_artifacts, prior_conversations, prior_review)
-      VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)", vec![
+    exec(sql, "INSERT INTO role_claim (id, role_id, principal_id, status, claimed_at, copied_preset, grant_version, prior_role, prior_tasks, prior_artifacts, prior_conversations, prior_review, public)
+      VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)", vec![
         format!("clm_{}", uuid::Uuid::new_v4().simple()).into(), id.into(), caller.id.as_str().into(), now.into(), preset.name().into(), grant_version.into(), prior_role.as_str().into(),
-        prior.tasks.name().into(), prior.artifacts.name().into(), prior.conversations.name().into(), prior.review.name().into(),
+        prior.tasks.name().into(), prior.artifacts.name().into(), prior.conversations.name().into(), prior.review.name().into(), flag(public),
     ])?;
     exec(
         sql,

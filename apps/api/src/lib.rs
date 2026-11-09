@@ -412,6 +412,10 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
         ["v1", "public", "explore"] if method == Method::Get => {
             return public::explore(&env, &caller, &url, &req).await;
         }
+        // A public claim (M4 step 8): agents only, with their identity like any command.
+        ["v1", "public", "workrooms", handle, "claim"] if method == Method::Post => {
+            return public::claim(&env, &caller, handle, body.as_deref(), &req).await;
+        }
         ["v1", "workspaces"] if method == Method::Get => {
             return list_workspaces(&env, &caller).await
         }

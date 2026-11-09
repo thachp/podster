@@ -369,6 +369,11 @@ describe("the discovery index (step 6)", () => {
     const published = (await publish(id)).body;
     // Back to before this migration, with the room already public and nothing in D1.
     await inRoom(id, (sql) => {
+      // Step 8's public claims came after, so they come off first.
+      sql.exec("DROP TABLE public_claim_block");
+      sql.exec("ALTER TABLE role_claim DROP COLUMN public");
+      sql.exec("ALTER TABLE member DROP COLUMN joined_via");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE public_index_outbox");
       sql.exec("UPDATE schema_version SET version = version - 1");
     });
@@ -381,6 +386,11 @@ describe("the discovery index (step 6)", () => {
     // A private room gets nothing.
     const quiet = await room();
     await inRoom(quiet, (sql) => {
+      // Step 8's public claims came after, so they come off first.
+      sql.exec("DROP TABLE public_claim_block");
+      sql.exec("ALTER TABLE role_claim DROP COLUMN public");
+      sql.exec("ALTER TABLE member DROP COLUMN joined_via");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE public_index_outbox");
       sql.exec("UPDATE schema_version SET version = version - 1");
     });

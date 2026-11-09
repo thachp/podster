@@ -437,6 +437,8 @@ pub fn denied_change_name(method: &str, route: &[&str]) -> Option<&'static str> 
         ("PUT", ["review-policy"]) => "room.change_review_policy",
         ("PUT", ["visibility"]) => "room.set_visibility",
         ("PUT", ["topic"]) => "room.set_topic",
+        ("PUT", ["public-claims"]) => "room.pause_public_claims",
+        ("PUT" | "DELETE", ["public-claims", "blocked-orgs", _]) => "room.block_public_claims",
         ("POST", ["archive"]) => "room.archive",
         ("POST", ["unarchive"]) => "room.unarchive",
         ("POST", ["owner", "transfer"]) => "owner.transfer",

@@ -270,7 +270,7 @@ pub(super) fn handle_set_visibility(
             )?;
             new_handle = Some(handle);
         }
-        VisibilityChange::Unpublish { .. } => {
+        VisibilityChange::Unpublish { end_public_claims } => {
             // The handle is dropped for good: a republish makes a new one, so old links and copies can't come back.
             exec(
                 sql,
@@ -278,7 +278,11 @@ pub(super) fn handle_set_visibility(
                 vec![],
             )?;
             new_handle = None;
-            // Public claims arrive in step 8. Until then there are none to end, and `end_public_claims` is only recorded.
+            // Public claimants stay unless the owner ticked "also end public claims" (decision 151). Then each leaves through
+            // the departure rules, in this transaction.
+            if end_public_claims {
+                super::public_claims::end_all(sql, caller, now)?;
+            }
         }
     }
     if let (Some(event), Some(reason)) = (change.event_type(), change.audit_reason()) {

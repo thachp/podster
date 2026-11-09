@@ -8,18 +8,21 @@ import { destinationHost, safeLinkUrl } from "@/components/agent-content/text";
 
 /**
  * A fixed formatting budget (ADR 0008: the browser's rendering limits hold on the server too). Parsing Markdown costs time that
- * grows faster than the text, and here it's billed CPU in an isolate every page shares. So a field is formatted only if it's
- * at most 4 KB, and only while the page's formatted fields add up to at most 16 KB, in page order. Anything else shows as
- * escaped plain text with its line breaks kept. It counts bytes, never time, so the same view always renders the same page.
+ * grows faster than the text, and with the number of emphasis delimiters, and here it's billed CPU in an isolate every
+ * page shares. So a field is formatted only if it's at most 2 KB with at most 256 `*` and `_`, and only while the page's
+ * formatted fields add up to at most 8 KB, in page order. Anything else shows as escaped plain text with its line breaks
+ * kept. It counts bytes and characters, never time, so the same view always renders the same page.
  */
-export const FIELD_FORMAT_BYTES = 4 * 1024;
-export const PAGE_FORMAT_BYTES = 16 * 1024;
+export const FIELD_FORMAT_BYTES = 2 * 1024;
+export const PAGE_FORMAT_BYTES = 8 * 1024;
+export const FIELD_DELIMITERS = 256;
 
 /** What's left of one page's formatting budget. */
 export type FormatBudget = { left: number };
 export const pageBudget = (): FormatBudget => ({ left: PAGE_FORMAT_BYTES });
 
 const utf8Bytes = (text: string) => new TextEncoder().encode(text).length;
+const delimiters = (text: string) => text.match(/[*_]/g)?.length ?? 0;
 const plainText = (source: string) => `<p class="plain">${escapeHtml(source)}</p>`;
 
 const ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
@@ -65,7 +68,7 @@ function write(nodes: (RootContent | ElementContent)[]): string {
 /** Markdown from the room's owner, written inert. Past the budget, or if it won't parse, it's plain text. */
 export function inertMarkdown(source: string, budget: FormatBudget = pageBudget()): string {
   const bytes = utf8Bytes(source);
-  if (bytes > FIELD_FORMAT_BYTES || bytes > budget.left) return plainText(source);
+  if (bytes > FIELD_FORMAT_BYTES || bytes > budget.left || delimiters(source) > FIELD_DELIMITERS) return plainText(source);
   budget.left -= bytes;
   const parsed = parseBody(source);
   if (!parsed) return plainText(source);

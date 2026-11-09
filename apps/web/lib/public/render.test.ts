@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { FIELD_FORMAT_BYTES, inertMarkdown, notFoundPage, PAGE_FORMAT_BYTES, pageBudget, roomPage, type PublicView } from "./render";
+import { FIELD_DELIMITERS, FIELD_FORMAT_BYTES, inertMarkdown, notFoundPage, PAGE_FORMAT_BYTES, pageBudget, roomPage, type PublicView } from "./render";
 
 const view = (content: Partial<PublicView["content"]> = {}): PublicView => ({
   handle: `pub_${"1".repeat(32)}`,
@@ -62,45 +62,72 @@ describe("the public room page", () => {
     expect(inertMarkdown(`${"> ".repeat(500)}deep`)).toMatch(/^<p class="plain">&gt; &gt;/);
   });
 
-  it("formats a field only within its 4 KB, and shows one past it as escaped plain text with its lines kept", () => {
-    const fits = "**b**\n".repeat(FIELD_FORMAT_BYTES / 6);
+  it("formats a field only within its 2 KB, and shows one past it as escaped plain text with its lines kept", () => {
+    const fits = `**b**\n${"b\n".repeat((FIELD_FORMAT_BYTES - 6) / 2)}`;
+    expect(new TextEncoder().encode(fits).length).toBe(FIELD_FORMAT_BYTES);
     expect(inertMarkdown(fits)).toContain("<strong>b</strong>");
-    const over = `${"**b**\n".repeat(FIELD_FORMAT_BYTES / 6)}<i>x</i>\n**c**`;
+    const over = `${"b\n".repeat(FIELD_FORMAT_BYTES / 2)}<i>x</i>\n**c**`;
     const html = inertMarkdown(over);
-    expect(html).toMatch(/^<p class="plain">\*\*b\*\*\n\*\*b\*\*/);
+    expect(html).toMatch(/^<p class="plain">b\nb\n/);
     expect(html).toContain("&lt;i&gt;x&lt;/i&gt;\n**c**</p>");
     expect(html).not.toContain("<strong>");
-    // Bytes, not characters: 1,366 three-byte characters are past 4 KB.
-    expect(inertMarkdown(`**${"界".repeat(1366)}**`)).toMatch(/^<p class="plain">/);
+    // Bytes, not characters: 683 three-byte characters are past 2 KB.
+    expect(inertMarkdown(`**${"界".repeat(683)}**`)).toMatch(/^<p class="plain">/);
   });
 
-  it("stops formatting once the page has formatted 16 KB, in page order, whatever the field", () => {
-    const field = "*a* ".repeat(1000); // 4,000 bytes
+  it("formats a field only with at most 256 emphasis delimiters", () => {
+    const at = `${"*a* ".repeat(FIELD_DELIMITERS / 2)}`;
+    expect(inertMarkdown(at)).toContain("<em>a</em>");
+    expect(inertMarkdown(`${at}_`)).toMatch(/^<p class="plain">\*a\* /);
+  });
+
+  it("stops formatting once the page has formatted 8 KB, in page order, whatever the field", () => {
+    const field = "word ".repeat(400); // 2,000 bytes, no delimiters
     const budget = pageBudget();
-    const out = [1, 2, 3, 4, 5].map(() => inertMarkdown(field, budget));
+    const out = [1, 2, 3, 4, 5].map(() => inertMarkdown(`*a* ${field}`, budget));
     expect(out.slice(0, 4).every((html) => html.includes("<em>a</em>"))).toBe(true);
     expect(out[4]).toMatch(/^<p class="plain">/);
-    expect(budget.left).toBe(PAGE_FORMAT_BYTES - 16_000);
+    expect(budget.left).toBe(PAGE_FORMAT_BYTES - 4 * 2_004);
     // A field small enough for what's left still fits.
     expect(inertMarkdown("*z*", budget)).toContain("<em>z</em>");
   });
 
-  it("renders the worst room the limits allow in well under a second, the same every time", () => {
-    const pattern = (bytes: number) => "*a".repeat(bytes / 2);
-    const worst = view({
-      goal: pattern(2 * 1024),
-      context: pattern(32 * 1024),
-      openings: Array.from({ length: 50 }, (_, i) => ({ id: `role_${i}`, title: `Role ${i}`, responsibilities: pattern(4 * 1024), capacity: 50, filled: 0, preset: "public_participant", lead: false, publicly_claimable: true })),
-      outputs: Array.from({ length: 50 }, (_, i) => ({ title: `Output ${i}`, description: pattern(4 * 1024), ready: false })),
+  // The worst rooms the limits allow, for each delimiter pattern the review found costly. The counts are the guard; the
+  // time is only a loose bound, so a slow CI runner can't make it flake.
+  describe.each(["*a", "*a_", "a*_", "*_ "])("the worst room made of %j", (unit) => {
+    const fill = (bytes: number) => unit.repeat(Math.ceil(bytes / unit.length)).slice(0, bytes);
+    /** As costly as a field can be and still be formatted: 256 delimiters of the pattern, padded to 2 KB. */
+    const capped = () => {
+      let text = "";
+      while ((text + unit).match(/[*_]/g)!.length <= FIELD_DELIMITERS) text += unit;
+      return text.padEnd(FIELD_FORMAT_BYTES, "a");
+    };
+    const room = (field: (bytes: number) => string) =>
+      view({
+        goal: field(2 * 1024),
+        context: field(32 * 1024),
+        openings: Array.from({ length: 50 }, (_, i) => ({ id: `role_${i}`, title: `Role ${i}`, responsibilities: field(4 * 1024), capacity: 50, filled: 0, preset: "public_participant", lead: false, publicly_claimable: true })),
+        outputs: Array.from({ length: 50 }, (_, i) => ({ title: `Output ${i}`, description: field(4 * 1024), ready: false })),
+      });
+    const plainCount = (html: string) => html.match(/<p class="plain">/g)?.length ?? 0;
+
+    it("formats nothing when every field is full of delimiters", () => {
+      const started = performance.now();
+      const html = roomPage(room(fill));
+      expect(performance.now() - started).toBeLessThan(1_000);
+      expect(plainCount(html)).toBe(102);
+      expect(html).not.toMatch(/<(em|strong)>/);
+      expect(roomPage(room(fill))).toBe(html);
     });
-    roomPage(worst);
-    const started = performance.now();
-    const html = roomPage(worst);
-    const took = performance.now() - started;
-    expect(took).toBeLessThan(250);
-    expect(roomPage(worst)).toBe(html);
-    // The goal and three openings fit the page's 16 KB; the 32 KB context and everything after are plain text.
-    expect(html.match(/<p class="plain">/g)?.length).toBe(1 + 47 + 50);
+
+    it("formats only the first 8 KB of fields at the delimiter cap", () => {
+      const started = performance.now();
+      const html = roomPage(room(capped));
+      expect(performance.now() - started).toBeLessThan(1_000);
+      // The goal, the context and two openings fill the 8 KB; the other 98 fields are plain text.
+      expect(plainCount(html)).toBe(98);
+      expect(roomPage(room(capped))).toBe(html);
+    });
   });
 
   it("has one not-found page", () => {

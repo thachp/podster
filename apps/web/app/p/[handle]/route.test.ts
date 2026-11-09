@@ -82,6 +82,18 @@ describe("GET /p/{handle}", () => {
     expect((await get(HANDLE, { headers: { "cf-connecting-ip": "2001:db8:1:3::1" } })).status).toBe(200);
   });
 
+  it("never serves a cached page once the view is gone", async () => {
+    const shown = await get(HANDLE);
+    expect(shown.status).toBe(200);
+    expect(await shown.text()).toContain("Reef");
+    env.PUBLIC_READS.getWorkroom = vi.fn(async () => ({ status: 404 }));
+    const gone = await get(HANDLE);
+    expect(gone.status).toBe(404);
+    const body = await gone.text();
+    expect(body).toContain("There's no public workroom at this address.");
+    expect(body).not.toContain("Reef");
+  });
+
   it("renders a view once while it's unchanged, and again when it changes", async () => {
     const first = await (await get(HANDLE)).text();
     const again = await (await get(HANDLE)).text();

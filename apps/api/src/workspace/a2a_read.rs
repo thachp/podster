@@ -409,7 +409,7 @@ fn run_effect(
     }
 }
 
-/// `/internal/a2a-read-apply` with `{ attempt, read, url, version, remote }`. `url` and `version` are the endpoint as the
+/// `/internal/a2a-read-apply` with `{ attempt, read, url, version, remote }`. `read` 0 is a send's own terminal answer. `url` and `version` are the endpoint as the
 /// Principal registered it at this read, and `remote` is what the consumer parsed under the caps: `id`, `state`, and the
 /// optional `message`, `note` and `links`. One transaction: `decide_remote`, recording the read, and the effect.
 pub(super) fn read_apply(
@@ -424,11 +424,17 @@ pub(super) fn read_apply(
     };
     let id = row["id"].as_str().unwrap_or_default();
     let read = body["read"].as_i64().unwrap_or(-1);
-    if int(&row["reading_ended"]) == 1
-        || int(&row["read_queued"]) != 1
-        || int(&row["read_no"]) != read
-        || read < 1
-    {
+    // Read 0 is the send's own answer, already terminal (decision 174). It applies right after the send is recorded, before
+    // any read is queued or applied. Every other read is the one queued last.
+    let stale = if read == 0 {
+        row["state"].as_str() != Some("sent")
+            || int(&row["read_no"]) != 0
+            || int(&row["read_queued"]) != 0
+            || !row["last_state"].is_null()
+    } else {
+        int(&row["read_queued"]) != 1 || int(&row["read_no"]) != read || read < 1
+    };
+    if int(&row["reading_ended"]) == 1 || stale {
         return Ok(json!({ "applied": false, "reason": "stale" }));
     }
     let who = match resolve_caller(sql, identity) {

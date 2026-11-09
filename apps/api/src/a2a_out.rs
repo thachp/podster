@@ -7,7 +7,9 @@
 //! 2. the room rechecks the task and the agent's access from its own state, and only then gives the text;
 //! 3. `SendMessage` goes out with `returnImmediately`, signed as wake's requests are, with the bearer token if one is stored,
 //!    a timeout, and no redirects. Its `messageId` is the attempt's ID, so a retry is the same message;
-//! 4. the result counts toward switching the endpoint off, and the room records the one remote task it answered with.
+//! 4. the result counts toward switching the endpoint off, and the room records the one remote task it answered with;
+//! 5. a server may ignore `returnImmediately` and answer with a task that's already finished. That answer is then applied as
+//!    read 0, exactly as a `GetTask` answer would be (decision 174).
 //!
 //! The text is the one thing that leaves Podster with content in it. It, the URL, the token, the secret and the remote's
 //! answer are never logged: logs carry IDs and outcomes only.
@@ -20,7 +22,7 @@ use futures_util::{
 };
 use podster_core::a2a::{
     change_request_text, offer_text_with_files, valid_remote_task_id, AttemptKind, InputFile,
-    MAX_REMOTE_ARTIFACTS, MAX_REMOTE_PARTS, MAX_REMOTE_TEXT_BYTES,
+    RemoteState, MAX_REMOTE_ARTIFACTS, MAX_REMOTE_PARTS, MAX_REMOTE_TEXT_BYTES,
 };
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -95,8 +97,9 @@ async fn room(
 /// What the endpoint said.
 enum Sent {
     /// It answered with a task, whose ID is valid, or with a message and no task.
-    /// The remote task's ID and its `contextId`, if it gave one that passes the same check.
-    Answered(Option<String>, Option<String>),
+    /// The remote task's ID and its `contextId`, if it gave one that passes the same check, and the task as a read would
+    /// keep it, if it's already in a terminal state and within the caps (decision 174).
+    Answered(Option<String>, Option<String>, Option<Value>),
     /// Anything else: a refusal, a redirect, a timeout, a JSON-RPC error, an answer too big or that can't be read.
     Failed,
 }
@@ -137,9 +140,13 @@ fn answered(body: &Value) -> Sent {
                 .as_str()
                 .filter(|c| valid_remote_task_id(c))
                 .map(str::to_string),
+            // Kept exactly as a GetTask answer would be, under the same caps.
+            remote_of(&json!({ "result": result["task"] })).filter(|remote| {
+                RemoteState::from_name(remote["state"].as_str().unwrap_or_default()).is_terminal()
+            }),
         ),
         Some(_) => Sent::Failed,
-        None if result["message"].is_object() => Sent::Answered(None, None),
+        None if result["message"].is_object() => Sent::Answered(None, None, None),
         None => Sent::Failed,
     }
 }
@@ -380,7 +387,7 @@ pub async fn process(env: &Env, job: &Value) -> R<Outcome> {
     .await;
     let pinned = json!({ "attempt": attempt, "url": url, "version": version });
     match sent {
-        Sent::Answered(remote, context) => {
+        Sent::Answered(remote, context, terminal) => {
             // Recorded before anything else, so a failure after this can't send the offer again: a retry finds it sent and
             // only reports it.
             let mut finish = pinned;
@@ -390,6 +397,22 @@ pub async fn process(env: &Env, job: &Value) -> R<Outcome> {
             room(env, ws, crate::INTERNAL_A2A_FINISH, agent, &claim, &finish).await?;
             report_a2a_for(env, agent, version, true).await?;
             log("a2a.send", ws, attempt, agent, "sent");
+            // Already finished: applied now as read 0. If this fails, nothing is lost: the reads that follow see the same
+            // task, so it's logged and the job still ends.
+            if let Some(terminal) = terminal {
+                let secret = claim["signing_secret"].as_str().unwrap_or_default();
+                let remote =
+                    with_history(url, secret, claim["token"].as_str(), attempt, 0, terminal).await;
+                let applied = room(env, ws, crate::INTERNAL_A2A_READ_APPLY, agent, &claim, &json!({
+                    "attempt": attempt, "read": 0, "url": url, "version": version, "remote": remote,
+                }))
+                .await;
+                let effect = match &applied {
+                    Ok(applied) => applied["effect"].as_str().unwrap_or("nothing"),
+                    Err(_) => "read0_failed",
+                };
+                log("a2a.read", ws, attempt, agent, effect);
+            }
             Ok(Outcome::Ack)
         }
         Sent::Failed => {
@@ -521,6 +544,65 @@ fn remote_of(body: &Value) -> Option<Value> {
     }))
 }
 
+/// Decision 174: a `COMPLETED` read with no artifacts, so no note and no links, gets one more `GetTask` with `historyLength` 1.
+/// The last agent message's text and URL parts become the note and links, under the same caps as artifacts, and they're data.
+/// Anything else, a failure or nothing usable, leaves the read as it was, so the existing hold stands.
+async fn with_history(
+    url: &str,
+    secret: &str,
+    token: Option<&str>,
+    attempt: &str,
+    read: i64,
+    mut remote: Value,
+) -> Value {
+    let empty = remote["note"].is_null() && remote["links"].as_array().is_none_or(Vec::is_empty);
+    if remote["state"].as_str() != Some(RemoteState::Completed.name()) || !empty {
+        return remote;
+    }
+    let body = json!({
+        "jsonrpc": "2.0", "id": format!("{attempt}:{read}:history"), "method": "GetTask",
+        "params": { "id": remote["id"], "historyLength": 1 },
+    })
+    .to_string();
+    if let Some((note, links)) = rpc(url, secret, token, &body)
+        .await
+        .and_then(|answer| reply_of(&answer, remote["id"].as_str().unwrap_or_default()))
+    {
+        remote["note"] = note.map_or(Value::Null, Value::from);
+        remote["links"] = Value::Array(links);
+    }
+    remote
+}
+
+/// The last agent message in a `GetTask` answer's history, for the same remote task: its text as a note and its URL parts as
+/// links. `None` if there's no such message, it's past a cap, or it has nothing usable.
+fn reply_of(answer: &Value, remote_id: &str) -> Option<(Option<String>, Vec<Value>)> {
+    if answer.get("error").is_some_and(|e| !e.is_null())
+        || answer["result"]["id"].as_str() != Some(remote_id)
+    {
+        return None;
+    }
+    let message = answer["result"]["history"]
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|m| m["role"].as_str() == Some("ROLE_AGENT"))?;
+    let parts = &message["parts"];
+    let text = texts_of(parts)?;
+    let links: Vec<Value> = parts
+        .as_array()?
+        .iter()
+        .filter_map(|part| {
+            let uri = part["url"].as_str()?;
+            Some(json!({ "uri": uri, "label": part["filename"].as_str().unwrap_or("Result") }))
+        })
+        .collect();
+    if links.len() > MAX_REMOTE_ARTIFACTS || (text.trim().is_empty() && links.is_empty()) {
+        return None;
+    }
+    Some(((!text.trim().is_empty()).then_some(text), links))
+}
+
 /// A read job (step 13): the same checks as a send, the endpoint still the one the offer went to, then `GetTask`, and the
 /// room applies what it says. A read the endpoint didn't answer usably isn't retried by the queue: the room schedules the next.
 async fn process_read(env: &Env, ws: &str, attempt: &str, agent: &str, read: i64) -> R<Outcome> {
@@ -591,6 +673,9 @@ async fn process_read(env: &Env, ws: &str, attempt: &str, agent: &str, read: i64
     report_a2a_for(env, agent, version, remote.is_some()).await?;
     match remote {
         Some(remote) => {
+            let secret = claim["signing_secret"].as_str().unwrap_or_default();
+            let remote =
+                with_history(url, secret, claim["token"].as_str(), attempt, read, remote).await;
             let applied = room(env, ws, crate::INTERNAL_A2A_READ_APPLY, agent, &claim, &json!({
                 "attempt": attempt, "read": read, "url": url, "version": version, "remote": remote,
             }))

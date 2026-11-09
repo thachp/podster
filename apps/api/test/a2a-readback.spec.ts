@@ -579,3 +579,65 @@ describe("cancel out", () => {
     expect((await row(room, attempt.id)).cancel_state).toBeNull();
   });
 });
+
+describe("a server that answers once done (decision 174)", () => {
+  const held = async (room: string, attemptId: string) =>
+    (await roomSql(room, "SELECT read_no, note, links_json, working_seen FROM a2a_held WHERE attempt_id = ?", attemptId)).map(({ links_json, ...rest }: any) => ({ ...rest, links: JSON.parse(links_json) }));
+
+  it("applies a send answered already COMPLETED as read 0, with its artifacts: held before acceptance, and reading ends", async () => {
+    const { room, task: t, attempt, agent } = await sentOffer(`/a2a/blocking-${++counter}`);
+    expect(await row(room, attempt.id)).toMatchObject({ last_read_no: 0, last_state: "TASK_STATE_COMPLETED", working_seen: 0, reading_ended: 1, read_ended_reason: "read_ended" });
+    expect((await taskRow(room, t.id)).status).toBe("offered");
+    expect(await held(room, attempt.id)).toEqual([{ read_no: 0, note: "Done at once.", links: [{ uri: "https://example.com/blocked", label: "Reply" }], working_seen: 0 }]);
+    expect(await roomSql(room, "SELECT actor_id, origin, origin_ref FROM event WHERE task_id = ? AND type = 'task.a2a_response_held'", t.id)).toEqual([{ actor_id: agent.id, origin: "a2a_remote", origin_ref: attempt.id }]);
+    // A redelivered send job finds it sent, and applies nothing again.
+    expect((await consume(room, attempt)).body.outcome).toBe("ack");
+    expect(await roomSql(room, "SELECT count(*) AS n FROM event WHERE task_id = ? AND type = 'task.a2a_response_held'", t.id)).toEqual([{ n: 1 }]);
+  });
+
+  it("reads history once for a terminal send answer with no artifacts, and holds the last agent message", async () => {
+    const path = `/a2a/blocking-empty-${++counter}`;
+    const remoteId = `remote-blocking-empty-${counter}`;
+    await script(remoteId, [{ ...task(remoteId, "TASK_STATE_COMPLETED"), history: [{ role: "ROLE_USER", parts: [{ text: "The offer." }] }, { role: "ROLE_AGENT", parts: [{ text: "Here's the brief." }, { url: "https://example.com/brief" }] }] }]);
+    const { room, attempt, url } = await sentOffer(path);
+    const followUps = (await sentTo(url)).map((r) => JSON.parse(r.body)).filter((b) => b.method === "GetTask");
+    expect(followUps).toEqual([{ jsonrpc: "2.0", id: `${attempt.id}:0:history`, method: "GetTask", params: { id: remoteId, historyLength: 1 } }]);
+    expect(await held(room, attempt.id)).toEqual([{ read_no: 0, note: "Here's the brief.", links: [{ uri: "https://example.com/brief", label: "Result" }], working_seen: 0 }]);
+  });
+
+  it("after the agent accepted, a COMPLETED read with only history submits the last agent message", async () => {
+    const { room, task: t, attempt, agent, remote } = await sentOffer();
+    const accepted = await must(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: t.version });
+    expect(accepted.status).toBe("accepted");
+    await script(remote, [
+      task(remote, "TASK_STATE_COMPLETED", { status: { message: { role: "ROLE_AGENT", parts: [{ text: "Task completed successfully" }] } } }),
+      { ...task(remote, "TASK_STATE_COMPLETED"), history: [{ role: "ROLE_AGENT", parts: [{ text: "Two paragraphs, with the dates." }, { url: "https://example.com/v2", filename: "brief.md" }] }] },
+    ]);
+    expect((await readOnce(room, attempt.id)).body.outcome).toBe("ack");
+    expect((await taskRow(room, t.id)).status).toBe("submitted");
+    expect(await roomSql(room, "SELECT note, submitted_by FROM submission WHERE task_id = ?", t.id)).toEqual([{ note: "Two paragraphs, with the dates.", submitted_by: agent.id }]);
+    expect(await roomSql(room, "SELECT uri, label FROM artifact WHERE task_id = ?", t.id)).toEqual([{ uri: "https://example.com/v2", label: "brief.md" }]);
+    expect(await roomSql(room, "SELECT origin FROM event WHERE task_id = ? AND type = 'task.submitted'", t.id)).toEqual([{ origin: "a2a_remote" }]);
+  });
+
+  it("keeps the hold as before when the history has nothing usable, or the follow-up fails", async () => {
+    for (const second of [{ ...task("x", "TASK_STATE_COMPLETED"), history: [{ role: "ROLE_USER", parts: [{ text: "Only mine." }] }] }, { httpStatus: 500 }, { ...task("someone-else", "TASK_STATE_COMPLETED"), history: [{ role: "ROLE_AGENT", parts: [{ text: "Not this task's." }] }] }]) {
+      const { room, task: t, attempt, agent, remote } = await sentOffer();
+      const accepted = await must(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: t.version });
+      const fixed = (second as any).history ? { ...(second as any), id: (second as any).id === "x" ? remote : (second as any).id } : second;
+      await script(remote, [task(remote, "TASK_STATE_COMPLETED"), fixed]);
+      expect((await readOnce(room, attempt.id)).body.outcome).toBe("ack");
+      expect((await taskRow(room, t.id)).status).toBe(accepted.status);
+      expect(await held(room, attempt.id)).toEqual([{ read_no: 1, note: null, links: [], working_seen: 0 }]);
+    }
+  });
+
+  it("caps the history reply as artifacts are: past 16 KB nothing is taken, and the hold stands", async () => {
+    const { room, task: t, attempt, agent, remote } = await sentOffer();
+    await must(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: t.version });
+    await script(remote, [task(remote, "TASK_STATE_COMPLETED"), { ...task(remote, "TASK_STATE_COMPLETED"), history: [{ role: "ROLE_AGENT", parts: [{ text: "x".repeat(16 * 1024 + 1) }] }] }]);
+    await readOnce(room, attempt.id);
+    expect(await roomSql(room, "SELECT count(*) AS n FROM submission WHERE task_id = ?", t.id)).toEqual([{ n: 0 }]);
+    expect((await held(room, attempt.id))[0]).toMatchObject({ note: null });
+  });
+});

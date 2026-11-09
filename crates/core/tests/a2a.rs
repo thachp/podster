@@ -401,6 +401,55 @@ fn a_duplicate_read_changes_nothing() {
 }
 
 #[test]
+fn the_send_answer_applies_as_read_0_once_and_only_before_any_read() {
+    // Decision 174: a send answered with a task already COMPLETED is read 0, before the first GetTask.
+    let first = decide_remote(
+        &offered(),
+        Some(OFFER),
+        &attempt(),
+        Some(&ENDPOINT),
+        &read(0, Completed),
+    );
+    assert_eq!(
+        first.effect,
+        E::Hold {
+            working_seen: false
+        }
+    );
+    assert!(first.applied);
+    assert!(first.stop_reading);
+    // Applied once, it's recorded as state COMPLETED at read 0, so a redelivered send answer is stale.
+    let again = Attempt {
+        last_read_no: 0,
+        last_state: Some(Completed),
+        ..attempt()
+    };
+    let decision = decide_remote(
+        &offered(),
+        Some(OFFER),
+        &again,
+        Some(&ENDPOINT),
+        &read(0, Completed),
+    );
+    assert_eq!(decision.effect, E::Nothing(Ignored::Stale));
+    // And after any read, it's stale too.
+    let after = Attempt {
+        last_read_no: 1,
+        last_state: Some(Working),
+        working_seen: true,
+        ..attempt()
+    };
+    let late = decide_remote(
+        &accepted(),
+        Some(OFFER),
+        &after,
+        Some(&ENDPOINT),
+        &read(0, Completed),
+    );
+    assert_eq!(late.effect, E::Nothing(Ignored::Stale));
+}
+
+#[test]
 fn an_out_of_order_read_older_than_the_last_applied_changes_nothing() {
     // Read 3 reported COMPLETED and was applied. Read 2's WORKING arrives afterwards.
     let a = Attempt {

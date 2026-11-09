@@ -684,7 +684,8 @@ describe("the discovery-index reconcile", () => {
     expect(await indexRow(id)).toEqual(before);
   });
 
-  it("stops checking once a tombstone is confirmed, until the room writes something else", async () => {
+  it("checks a confirmed tombstone weekly, and within 6 hours again once the room publishes", async () => {
+    const WEEK = 7 * 24 * 60 * 60 * 1000;
     const { id } = await published();
     expect((await unpublish(id)).status).toBe(200);
     await drain(id);
@@ -692,14 +693,17 @@ describe("the discovery-index reconcile", () => {
     await drain(id);
     expect(await indexRow(id)).toMatchObject({ resolvable: 0, listed: 0 });
     expect(typeof (await stored(id, TOMBSTONE))).toBe("string");
-    // Confirmed, so a tombstone that goes missing now isn't looked for.
+    expect(await stored(id, NEXT)).toBeGreaterThan(Date.now() + WEEK - 60_000);
+    // Still checked, so a tombstone that drifted or went missing is repaired at the weekly check.
     await BINDINGS.DB.prepare("DELETE FROM public_workroom_index WHERE workspace_id = ?").bind(id).run();
     await due(id);
     await drain(id);
-    expect(await indexRow(id)).toBeNull();
-    // Publishing again writes a new row, and checks resume.
+    expect(await indexRow(id)).toMatchObject({ resolvable: 0, listed: 0 });
+    // Publishing again writes a new row, and the next check comes back within 6 hours.
     const again = (await publish(id)).body;
     await drain(id);
+    expect(await stored(id, TOMBSTONE)).toBeUndefined();
+    expect(await stored(id, NEXT)).toBeLessThanOrEqual(Date.now() + SIX_HOURS);
     await BINDINGS.DB.prepare("DELETE FROM public_workroom_index WHERE workspace_id = ?").bind(id).run();
     await due(id);
     await drain(id);

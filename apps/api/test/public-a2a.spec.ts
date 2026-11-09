@@ -109,6 +109,7 @@ describe("both protocols in one public room (M4-17)", () => {
       expect(claimed.status, claimed.text).toBe(200);
     }
     const members = await roomSql(room, "SELECT principal_id, role, joined_via FROM member WHERE principal_id IN (?, ?)", overA2a.id, overApi.id);
+    expect(members).toHaveLength(2);
     expect(members.every((m) => m.role === "guest" && m.joined_via === "public")).toBe(true);
 
     // The A2A participant sets its own endpoint, as any connected agent can.
@@ -128,16 +129,29 @@ describe("both protocols in one public room (M4-17)", () => {
 
     // Its remote task is read back: WORKING accepts, COMPLETED submits, each as the agent itself, marked a2a_remote.
     await script(remote, [remoteTask(remote, "TASK_STATE_WORKING"), remoteTask(remote, "TASK_STATE_COMPLETED", { artifacts: [{ name: "Brief", parts: [{ text: "Here's the brief." }] }] })]);
+    const getTasks = async () => (await sentTo(url)).filter((b) => b.method === "GetTask").length;
+    /** Delivers a read job again, and checks it asked nothing and changed nothing. */
+    const redeliveredDoesNothing = async (queued: any) => {
+      const [asked, before] = [await getTasks(), await history(room, a2aTask.id)];
+      await redeliverRead(room, queued);
+      expect(await getTasks(), "no GetTask for a redelivered read").toBe(asked);
+      expect(await history(room, a2aTask.id)).toEqual(before);
+    };
     const first = await readOnce(room, sent.id);
     expect(first.body.outcome).toBe("ack");
-    // The same read delivered again does nothing.
-    await redeliverRead(room, first.queued);
-    await readOnce(room, sent.id);
+    expect(await getTasks()).toBe(1);
+    await redeliveredDoesNothing(first.queued);
+    const second = await readOnce(room, sent.id);
+    expect(second.body.outcome).toBe("ack");
+    expect(await getTasks()).toBe(2);
+    await redeliveredDoesNothing(second.queued);
     const a2aHistory = await history(room, a2aTask.id);
     expect(count(a2aHistory, "task.accepted")).toBe(1);
     expect(count(a2aHistory, "task.submitted")).toBe(1);
     expect(a2aHistory.find((e) => e.type === "task.accepted").origin).toBe("a2a_remote");
     expect(a2aHistory.find((e) => e.type === "task.submitted").origin).toBe("a2a_remote");
+    expect(a2aHistory.find((e) => e.type === "task.accepted").actor_id).toBe(overA2a.id);
+    expect(a2aHistory.find((e) => e.type === "task.submitted").actor_id).toBe(overA2a.id);
     const [submission] = await roomSql(room, "SELECT submitted_by, note FROM submission WHERE task_id = ?", a2aTask.id);
     expect(submission).toEqual({ submitted_by: overA2a.id, note: "Here's the brief." });
 
@@ -157,8 +171,10 @@ describe("both protocols in one public room (M4-17)", () => {
     // Two tasks in the room, one per participant, and no competing ones from any redelivery.
     const tasks = await roomSql(room, "SELECT id, assignee_id, status FROM task ORDER BY created_at");
     expect(tasks.map((t) => [t.assignee_id, t.status])).toEqual([[overA2a.id, "submitted"], [overApi.id, "submitted"]]);
-    // A public participant sees only its own task.
-    const seen = await must(overApi, "GET", `/v1/workspaces/${room}/tasks`);
-    expect(seen.tasks.map((t: any) => t.id)).toEqual([apiTask.id]);
+    // Each public participant sees only its own task.
+    for (const [who, own] of [[overA2a, a2aTask.id], [overApi, apiTask.id]] as const) {
+      const seen = await must(who, "GET", `/v1/workspaces/${room}/tasks`);
+      expect(seen.tasks.map((t: any) => t.id), who.id).toEqual([own]);
+    }
   });
 });

@@ -437,11 +437,10 @@ describe("input files (step 14)", () => {
     const [request] = await sentTo(url);
     const text = JSON.parse(request.body).params.message.parts[0].text as string;
     expect(text).toContain("## Input files");
-    expect(text).toContain(`- http://localhost:8787/v1/files/${room}/${ready} "brief.pdf" (${ready})`);
+    expect(text).toContain(`- http://localhost:8787/a2a/files/${room}/${ready} "brief.pdf" (${ready})`);
     expect(text).toContain(`- not ready yet: "data.csv" (${scanning})`);
-    // Which credential, and the one host to send it to. An /a2a token doesn't work there.
-    expect(text).toContain("MCP OAuth token");
-    expect(text).toContain("Send it only to localhost:8787. A token for /a2a isn't accepted for downloads.");
+    // Which credential, and the one host to send it to.
+    expect(text).toContain("Download each link with your Podster OAuth token for /a2a, as `Authorization: Bearer`. Send it only to localhost:8787.");
     // A blocked file isn't named at all.
     expect(text).not.toContain("flagged.txt");
     expect(text).not.toContain(blocked);

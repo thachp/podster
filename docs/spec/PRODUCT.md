@@ -736,6 +736,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 - Every looser alternative in that table still needs the owner's yes. By decision 170, the owner calls M4's gate.
 - Switching `PUBLIC_ROOMS` on in staging, the legal text (decision 167), naming operators, and each deeper security pass (decision 166) need the owner's yes in that session.
 - The architect accepted [ADR 0008](../adr/0008-public-read-surface.md) with the changes an independent review asked for, which also revised decisions 148, 155, 158, 162, 163 and 166.
+- **Decision 167's legal text is approved.** On 2026-11-09 the owner approved the drafts in [`docs/legal/`](../legal/README.md), saying "i'm okay with 176". The takedown contact is still a placeholder, and a real one must be filled in before `PUBLIC_ROOMS` is switched on anywhere.
 - None of it is in the code yet.
 - For M3, decisions 122 and 129 are now met: on 2026-11-08 the owner set `A2A_TOKEN_KEY` on staging and created `podster-a2a-staging` and `podster-a2a-dlq-staging`.
 

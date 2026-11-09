@@ -6,8 +6,21 @@ import { destinationHost, safeLinkUrl } from "@/components/agent-content/text";
 // value comes from the room's public view, written by its owner and admins, and is escaped here. Markdown goes through the
 // app's inert parser, and only its allowed elements are written, each with no attributes but a link's checked address.
 
-/** The goal and context limits from DESIGN section 8: what's past them shows as plain text. */
-export const MAX_FORMATTED_CHARS = 32 * 1024;
+/**
+ * A fixed formatting budget (ADR 0008: the browser's rendering limits hold on the server too). Parsing Markdown costs time that
+ * grows faster than the text, and here it's billed CPU in an isolate every page shares. So a field is formatted only if it's
+ * at most 4 KB, and only while the page's formatted fields add up to at most 16 KB, in page order. Anything else shows as
+ * escaped plain text with its line breaks kept. It counts bytes, never time, so the same view always renders the same page.
+ */
+export const FIELD_FORMAT_BYTES = 4 * 1024;
+export const PAGE_FORMAT_BYTES = 16 * 1024;
+
+/** What's left of one page's formatting budget. */
+export type FormatBudget = { left: number };
+export const pageBudget = (): FormatBudget => ({ left: PAGE_FORMAT_BYTES });
+
+const utf8Bytes = (text: string) => new TextEncoder().encode(text).length;
+const plainText = (source: string) => `<p class="plain">${escapeHtml(source)}</p>`;
 
 const ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 export const escapeHtml = (text: string) => text.replace(/[&<>"']/g, (c) => ESCAPES[c]);
@@ -49,11 +62,13 @@ function write(nodes: (RootContent | ElementContent)[]): string {
   return out;
 }
 
-/** Markdown from the room's owner, written inert. Past the limits, or if it won't parse, it's plain text. */
-export function inertMarkdown(source: string): string {
-  if (source.length > MAX_FORMATTED_CHARS) return `<p class="plain">${escapeHtml(source)}</p>`;
+/** Markdown from the room's owner, written inert. Past the budget, or if it won't parse, it's plain text. */
+export function inertMarkdown(source: string, budget: FormatBudget = pageBudget()): string {
+  const bytes = utf8Bytes(source);
+  if (bytes > FIELD_FORMAT_BYTES || bytes > budget.left) return plainText(source);
+  budget.left -= bytes;
   const parsed = parseBody(source);
-  if (!parsed) return `<p class="plain">${escapeHtml(source)}</p>`;
+  if (!parsed) return plainText(source);
   return write(parsed.tree.children);
 }
 
@@ -96,7 +111,7 @@ ${body}
 /** The stylesheet the page loads, from this host, since its CSP allows no inline style. */
 export const PUBLIC_STYLESHEET = "/p-assets/style";
 
-function opening(o: PublicOpening, handle: string) {
+function opening(o: PublicOpening, handle: string, budget: FormatBudget) {
   const open = o.publicly_claimable && o.id && o.filled < o.capacity;
   const claim = open
     ? `<p><a class="action" href="/workrooms/explore?${new URLSearchParams({ claim: handle, opening: String(o.id) }).toString().replace(/&/g, "&amp;")}">Claim with an agent</a></p>`
@@ -104,20 +119,22 @@ function opening(o: PublicOpening, handle: string) {
   return `<li class="card">
 <h3>${plain(o.title)}${o.lead ? ` <span class="tag">Lead</span>` : ""}</h3>
 <p class="muted">${count(o.filled)} of ${count(o.capacity)} filled · ${plain(PRESETS[o.preset] ?? o.preset)}${o.publicly_claimable ? " · Open to agents" : ""}</p>
-<div class="text">${inertMarkdown(typeof o.responsibilities === "string" ? o.responsibilities : "")}</div>
+<div class="text">${inertMarkdown(typeof o.responsibilities === "string" ? o.responsibilities : "", budget)}</div>
 ${claim}</li>`;
 }
 
-function output(o: PublicOutput) {
+function output(o: PublicOutput, budget: FormatBudget) {
   return `<li class="card">
 <h3>${plain(o.title)} <span class="tag">${o.ready ? "Ready" : "Not ready"}</span></h3>
-${o.description ? `<div class="text">${inertMarkdown(o.description)}</div>` : ""}
+${o.description ? `<div class="text">${inertMarkdown(o.description, budget)}</div>` : ""}
 </li>`;
 }
 
 /** The whole page for a public room's view. */
 export function roomPage(view: PublicView): string {
   const c = view.content;
+  // One budget for the page, spent in the order the page reads.
+  const budget = pageBudget();
   const facts = [
     c.archived ? "Archived" : null,
     c.topic ? `Topic: ${topicLabel(c.topic)}` : null,
@@ -132,10 +149,10 @@ export function roomPage(view: PublicView): string {
 <h1>${plain(c.name)}</h1>
 <p class="muted">${facts.map(escapeHtml).join(" · ")}</p>
 ${c.archived ? `<p class="notice">This workroom is archived. It takes no new claims.</p>` : ""}
-${c.goal ? `<section><h2>Goal</h2><div class="text">${inertMarkdown(c.goal)}</div></section>` : ""}
-${c.context ? `<section><h2>Context</h2><div class="text">${inertMarkdown(c.context)}</div></section>` : ""}
-<section><h2>Openings</h2>${openings.length ? `<ul class="list">${openings.map((o) => opening(o, view.handle)).join("\n")}</ul>` : `<p class="muted">No openings.</p>`}</section>
-${outputs.length ? `<section><h2>Expected outputs</h2><ul class="list">${outputs.map(output).join("\n")}</ul></section>` : ""}
+${c.goal ? `<section><h2>Goal</h2><div class="text">${inertMarkdown(c.goal, budget)}</div></section>` : ""}
+${c.context ? `<section><h2>Context</h2><div class="text">${inertMarkdown(c.context, budget)}</div></section>` : ""}
+<section><h2>Openings</h2>${openings.length ? `<ul class="list">${openings.map((o) => opening(o, view.handle, budget)).join("\n")}</ul>` : `<p class="muted">No openings.</p>`}</section>
+${outputs.length ? `<section><h2>Expected outputs</h2><ul class="list">${outputs.map((o) => output(o, budget)).join("\n")}</ul></section>` : ""}
 <p class="muted small">Agents claim openings through Podster with their owner's permission. Everything here was written by the workroom's owner.</p>
 </article>`;
   return shell(`${plain(c.name)} · Podster`, body);

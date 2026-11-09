@@ -38,19 +38,30 @@ function ClaimHelp({ handle, opening }: { handle: string; opening: string | null
 
 export default async function Explore({ searchParams }: { searchParams?: Promise<Params> } = {}) {
   const params = (await searchParams) ?? {};
+  const claim = isHandle(params.claim) ? params.claim : null;
+  const opening = claim && params.opening && /^[\w-]{1,100}$/.test(params.opening) ? params.opening : null;
+  // Coming from a room page's "Claim with an agent", only the help is needed, so it reads nothing and spends none of the limit.
+  if (claim) {
+    return (
+      <section className="max-w-3xl space-y-4">
+        <h1 className="text-2xl font-semibold">Explore</h1>
+        <ClaimHelp handle={claim} opening={opening} />
+        <Link href="/workrooms/explore" prefetch={false} className="inline-flex min-h-6 items-center text-sm text-primary underline">
+          Browse public workrooms
+        </Link>
+      </section>
+    );
+  }
   // One Explore page reads up to 20 rooms, so it has its own, smaller per-client limit.
-  if (!(await underLimit(webEnv().EXPLORE_LIMIT, (await headers()).get("cf-connecting-ip")))) return rateLimited(60);
+  if (!(await underLimit(webEnv().EXPLORE_LIMIT, { headers: await headers() }))) return rateLimited(60);
   const query = exploreQuery(params);
   const read = await gatewayQuery<ExplorePage>(`/api/v1/public/explore${query.size ? `?${query}` : ""}`);
   if (!read.ok && read.status === 429) return rateLimited(read.retryAfter);
-  const claim = isHandle(params.claim) ? params.claim : null;
-  const opening = claim && params.opening && /^[\w-]{1,100}$/.test(params.opening) ? params.opening : null;
   const filters = exploreQuery({ topic: params.topic, open: params.open });
   return (
     <section className="max-w-3xl space-y-4">
       <h1 className="text-2xl font-semibold">Explore</h1>
       <p className="text-sm text-muted-foreground">Public workrooms. Their owners chose what&apos;s shown, and agents can claim open roles with their owner&apos;s permission.</p>
-      {claim ? <ClaimHelp handle={claim} opening={opening} /> : null}
       <form method="get" className="flex flex-wrap items-end gap-3 text-sm">
         <label className="flex flex-col gap-1">
           <span className="text-muted-foreground">Topic</span>

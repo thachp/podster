@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inertMarkdown, notFoundPage, roomPage, type PublicView } from "./render";
+import { FIELD_FORMAT_BYTES, inertMarkdown, notFoundPage, PAGE_FORMAT_BYTES, pageBudget, roomPage, type PublicView } from "./render";
 
 const view = (content: Partial<PublicView["content"]> = {}): PublicView => ({
   handle: `pub_${"1".repeat(32)}`,
@@ -62,9 +62,45 @@ describe("the public room page", () => {
     expect(inertMarkdown(`${"> ".repeat(500)}deep`)).toMatch(/^<p class="plain">&gt; &gt;/);
   });
 
-  it("shows text past the formatting limit as plain text", () => {
-    const long = "**b** ".repeat(7000);
-    expect(inertMarkdown(long)).toMatch(/^<p class="plain">\*\*b\*\*/);
+  it("formats a field only within its 4 KB, and shows one past it as escaped plain text with its lines kept", () => {
+    const fits = "**b**\n".repeat(FIELD_FORMAT_BYTES / 6);
+    expect(inertMarkdown(fits)).toContain("<strong>b</strong>");
+    const over = `${"**b**\n".repeat(FIELD_FORMAT_BYTES / 6)}<i>x</i>\n**c**`;
+    const html = inertMarkdown(over);
+    expect(html).toMatch(/^<p class="plain">\*\*b\*\*\n\*\*b\*\*/);
+    expect(html).toContain("&lt;i&gt;x&lt;/i&gt;\n**c**</p>");
+    expect(html).not.toContain("<strong>");
+    // Bytes, not characters: 1,366 three-byte characters are past 4 KB.
+    expect(inertMarkdown(`**${"界".repeat(1366)}**`)).toMatch(/^<p class="plain">/);
+  });
+
+  it("stops formatting once the page has formatted 16 KB, in page order, whatever the field", () => {
+    const field = "*a* ".repeat(1000); // 4,000 bytes
+    const budget = pageBudget();
+    const out = [1, 2, 3, 4, 5].map(() => inertMarkdown(field, budget));
+    expect(out.slice(0, 4).every((html) => html.includes("<em>a</em>"))).toBe(true);
+    expect(out[4]).toMatch(/^<p class="plain">/);
+    expect(budget.left).toBe(PAGE_FORMAT_BYTES - 16_000);
+    // A field small enough for what's left still fits.
+    expect(inertMarkdown("*z*", budget)).toContain("<em>z</em>");
+  });
+
+  it("renders the worst room the limits allow in well under a second, the same every time", () => {
+    const pattern = (bytes: number) => "*a".repeat(bytes / 2);
+    const worst = view({
+      goal: pattern(2 * 1024),
+      context: pattern(32 * 1024),
+      openings: Array.from({ length: 50 }, (_, i) => ({ id: `role_${i}`, title: `Role ${i}`, responsibilities: pattern(4 * 1024), capacity: 50, filled: 0, preset: "public_participant", lead: false, publicly_claimable: true })),
+      outputs: Array.from({ length: 50 }, (_, i) => ({ title: `Output ${i}`, description: pattern(4 * 1024), ready: false })),
+    });
+    roomPage(worst);
+    const started = performance.now();
+    const html = roomPage(worst);
+    const took = performance.now() - started;
+    expect(took).toBeLessThan(250);
+    expect(roomPage(worst)).toBe(html);
+    // The goal and three openings fit the page's 16 KB; the 32 KB context and everything after are plain text.
+    expect(html.match(/<p class="plain">/g)?.length).toBe(1 + 47 + 50);
   });
 
   it("has one not-found page", () => {

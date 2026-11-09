@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const env: Record<string, any> = {};
 vi.mock("@/lib/gateway/env", () => ({ webEnv: () => env }));
 const { GET } = await import("./route");
+const { clearPageCache } = await import("@/lib/public/page-cache");
 const { GET: style } = await import("../../p-assets/style/route");
 
 const HANDLE = `pub_${"a".repeat(32)}`;
@@ -17,6 +18,7 @@ function expectPublicHeaders(response: Response) {
 }
 
 beforeEach(() => {
+  clearPageCache();
   for (const key of Object.keys(env)) delete env[key];
   env.PUBLIC_READS = { getWorkroom: vi.fn(async (handle: string) => (handle === HANDLE ? { status: 200, view: VIEW } : { status: 404 })) };
   env.PUBLIC_PAGE_LIMIT = { limit: vi.fn(async () => ({ success: true })) };
@@ -71,6 +73,21 @@ describe("GET /p/{handle}", () => {
     expect(limited.headers.get("retry-after")).toBe("60");
     expect(env.PUBLIC_READS.getWorkroom).not.toHaveBeenCalled();
     expect((await get(HANDLE, { headers: { "cf-connecting-ip": "198.51.100.1" } })).status).toBe(200);
+  });
+
+  it("limits an IPv6 client by its /64", async () => {
+    env.PUBLIC_PAGE_LIMIT.limit = vi.fn(async ({ key }: { key: string }) => ({ success: key !== "2001:db8:1:2" }));
+    expect((await get(HANDLE, { headers: { "cf-connecting-ip": "2001:db8:1:2::1" } })).status).toBe(429);
+    expect((await get(HANDLE, { headers: { "cf-connecting-ip": "2001:db8:1:2:ffff::9" } })).status).toBe(429);
+    expect((await get(HANDLE, { headers: { "cf-connecting-ip": "2001:db8:1:3::1" } })).status).toBe(200);
+  });
+
+  it("renders a view once while it's unchanged, and again when it changes", async () => {
+    const first = await (await get(HANDLE)).text();
+    const again = await (await get(HANDLE)).text();
+    expect(again).toBe(first);
+    env.PUBLIC_READS.getWorkroom = vi.fn(async () => ({ status: 200, view: { ...VIEW, content: { ...VIEW.content, name: "Reef renamed" } } }));
+    expect(await (await get(HANDLE)).text()).toContain("Reef renamed");
   });
 
   it("fails open when the limiter fails", async () => {

@@ -103,6 +103,12 @@ async function main() {
   const style = await fetch(`${app}/p-assets/style`);
   await style.text();
   check(style.status === 200 && style.headers.get("content-type")?.startsWith("text/css") === true && publicHeaders(style), "its stylesheet comes from this host with the same headers");
+  // Only those exact paths send their own headers. Anything else under them is the dashboard's, with the dashboard's headers.
+  for (const path of ["/p/x/y", "/p-assets/other"]) {
+    const other = await fetch(`${app}${path}`, { redirect: "manual" });
+    await other.text();
+    check(other.headers.get("content-security-policy")?.startsWith("default-src 'self'") === true && other.headers.get("x-frame-options") === "DENY" && other.headers.get("x-content-type-options") === "nosniff", `${path} gets the dashboard's headers`, `${other.status} ${other.headers.get("content-security-policy")}`);
+  }
   const robots = await fetch(`${app}/robots.txt`);
   check(robots.status === 200 && (await robots.text()).includes("Allow: /"), "robots.txt allows crawling, so the noindex is seen");
 }

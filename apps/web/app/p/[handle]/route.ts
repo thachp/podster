@@ -1,6 +1,7 @@
 import { webEnv } from "@/lib/gateway/env";
 import { publicResponse } from "@/lib/public/headers";
 import { underLimit } from "@/lib/public/limit";
+import { cachedPage, viewKey } from "@/lib/public/page-cache";
 import { limitedPage, notFoundPage, roomPage, type PublicView } from "@/lib/public/render";
 
 /**
@@ -10,7 +11,7 @@ import { limitedPage, notFoundPage, roomPage, type PublicView } from "@/lib/publ
  */
 export async function GET(request: Request, context: { params: Promise<{ handle: string }> }) {
   const env = webEnv();
-  if (!(await underLimit(env.PUBLIC_PAGE_LIMIT, request.headers.get("cf-connecting-ip")))) {
+  if (!(await underLimit(env.PUBLIC_PAGE_LIMIT, request))) {
     return publicResponse(limitedPage(), 429, undefined, [["Retry-After", "60"]]);
   }
   const { handle } = await context.params;
@@ -24,5 +25,6 @@ export async function GET(request: Request, context: { params: Promise<{ handle:
     return publicResponse(notFoundPage(), 404);
   }
   if (answer.status !== 200 || (answer.view as { handle?: unknown }).handle !== handle) return publicResponse(notFoundPage(), 404);
-  return publicResponse(roomPage(answer.view as unknown as PublicView), 200);
+  const view = answer.view as unknown as PublicView;
+  return publicResponse(cachedPage(await viewKey(handle, answer.view), () => roomPage(view)), 200);
 }

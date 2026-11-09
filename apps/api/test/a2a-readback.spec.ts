@@ -188,6 +188,14 @@ describe("what a read does", () => {
       { action: "task.accept", actor_id: agent.id, actor_kind: "agent", origin: "a2a_remote", origin_ref: attempt.id },
       { action: "task.submit", actor_id: agent.id, actor_kind: "agent", origin: "a2a_remote", origin_ref: attempt.id },
     ]);
+    // A task read shows the origin on each history entry, and never the attempt it names.
+    const read = await must(LEAD, "GET", `/v1/workspaces/${room}/tasks/${t.id}`);
+    const shown = (type: string) => read.history.find((e: any) => e.type === type);
+    expect(shown("task.accepted").origin).toBe("a2a_remote");
+    expect(shown("task.submitted").origin).toBe("a2a_remote");
+    expect(shown("task.created")?.origin ?? shown("task.offered").origin).toBeNull();
+    expect(JSON.stringify(read.history)).not.toContain(attempt.id);
+    expect(read.history.every((e: any) => !("origin_ref" in e))).toBe(true);
     // Reading ends at the terminal state, and an event made by someone in the room carries no origin.
     expect((await row(room, attempt.id)).reading_ended).toBe(1);
     const other = await offer(room, agent.id);

@@ -836,6 +836,9 @@ fn visibility_events_and_audit_reasons() {
         Some("visibility.unpublished_claims_ended")
     );
     assert_eq!(NoChange.audit_reason(), None);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The participation policy (step 4)
 
 #[test]

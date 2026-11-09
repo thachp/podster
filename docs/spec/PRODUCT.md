@@ -58,7 +58,7 @@ The existing two-agent task lifecycle, authorization checks and durable inbox ar
 
 | Milestone | Delivers | Gate |
 | --- | --- | --- |
-| **M0 Kernel** | Two-agent task lifecycle, inbox and wake; workroom owner and admins; revocation fence; basic dashboard | [Kernel success criteria](#coordination-kernel-success-criteria) plus AC-01 to AC-07, AC-09, AC-12 to AC-17, AC-19 to AC-22, AC-25, AC-26, AC-29 and AC-30, for the features M0 includes |
+| **M0 Kernel** | Two-agent task lifecycle, inbox and wake; workroom owner and admins; revocation fence; basic dashboard | [Kernel success criteria](#coordination-kernel-success-criteria) plus AC-01 to AC-07, AC-09, AC-12 to AC-17, AC-19 to AC-22, AC-25, AC-26, AC-29 and AC-30, for the features M0 includes. **Passed on a deployment, with two real people, on 2026-11-09, at `1d28ee2`**, apart from the parts that close on local proof or stay local only ([what ran](../m0-gate.md#journey-on-staging-with-two-people)). Before that it was accepted by the owner on 2026-11-05 |
 | **M1 Private workrooms** | Goal and context, work roles and invited claims, lead, scoped access, activity, collaboration list and map | Expanded criteria 1 (without input assets and expected outputs, which M2 adds), 3, 4 and 5 for private rooms. **Met by the owner's ruling on 2026-11-06, at `5ae3dad`** ([decision 80](#decisions-needed), [what it rests on](../m0-gate.md#what-the-call-on-m1-rests-on)) |
 | **M2 Assets and artifacts** ([plan](../m2-plan.md)) | Upload, scanning, expected and versioned outputs, exact-version review | The input assets and expected outputs in expanded criterion 1; expanded criterion 6; upload policy. **Met on staging with test people, by the lead's call on 2026-11-08, at `137cfd6`, for the owner to review** ([decision 145](#decisions-needed), [the run it rests on](../m2-plan.md#checks-the-spike-left-open)) |
 | **M3 A2A** ([proposed plan](../m3-plan.md)) | Published profile, adapter, interoperability and authorization tests | Protocol gates below |
@@ -694,12 +694,18 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 - This is a product-design proposal, not a standing instruction to execute arbitrary future tasks or provision credentials. Provider decision 28 and M7's security/provider gates remain in force.
 - On 2026-11-08 the owner left it to the lead whether these were rulings, and the lead recorded them as proposals, since they're M7 work and automatic runs loosen the safest-options stance of decision 26.
 
+## M0 two-person run, November 9, 2026
+
+- The two-person kernel journey ran on staging with the owner and a second person, each signed in with their own GitHub account. It got 52 passed, 0 failed, 0 gaps, against `main` at `1d28ee2`, and the AC-19 probe passed right after on the same deployment. [m0-gate.md](../m0-gate.md#journey-on-staging-with-two-people) has the run.
+- So M0 has passed on a deployment, not only by the owner's acceptance. AC-16 closes on local proof by ruling, and AC-20, AC-21 and the partial items' other halves are still local only, as m0-gate.md lists.
+- That closes the two-person journey that decisions 79, 131, 145 and 171 left owed before production. The rest of what they owe stays open: decision 23 and gap 8 with an OAuth sign-up, ADR 0001's probes, a second real person in the browser, and each later milestone's own real-people checks.
+
 ## M2 gate, November 8, 2026
 
 - The lead called M2 met on staging with test people, now decision 145. The lead acted under the owner's delegation, which the lead reports as "i'm make u the architect.. and that you are free to decide on my behalf". It's recorded for the owner to review, as M1's call was (decisions 79 and 80).
 - **What it rests on:** the full M2 staging run of `e2e/m2-staging.mjs`, by the lead with `--big` against main `137cfd6`, with the API, gateway, web and scanner all deployed, in room `ws_9af0c5de042947639615f3e795be6c35`. It got 56 passed, 0 failed, 3 skipped. It covered scanning, downloads, the upload policy's refusals, a 100 MB file, input assets, submission files and exact-version approval, expected outputs and removal. [The M2 plan](../m2-plan.md#checks-the-spike-left-open) has this run and the earlier ones.
 - **Owed before production:**
-  - The two-person journey with real people and their own sign-ins.
+  - The two-person journey with real people and their own sign-ins. Done on 2026-11-09: see [M0's two-person run](#m0-two-person-run-november-9-2026).
   - An upload from another network. This run's 100 MB upload passed from the lead's Mac, but earlier runs failed there at the network layer.
   - A Firefox and screen-reader pass on the M2 screens: asset upload, the Task Sheet's files and review, and the Artifacts tab.
   - The hour sweep on a deployment, and scanning under load. One run can't show the sweep, and every scan so far ran alone.

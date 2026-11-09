@@ -187,7 +187,7 @@ fn an_offer_lists_its_input_files_link_first_with_the_credential_and_host_and_ke
         InputFile {
             id: "obj_1",
             name: "brief.pdf",
-            link: Some("https://gw.example/v1/files/ws_1/obj_1"),
+            link: Some("https://gw.example/a2a/files/ws_1/obj_1"),
         },
         InputFile {
             id: "obj_2",
@@ -204,11 +204,10 @@ fn an_offer_lists_its_input_files_link_first_with_the_credential_and_host_and_ke
         Some("https://app.example/w/ws_1/tasks"),
     );
     assert!(text.contains("## Input files"));
-    assert!(text.contains("MCP OAuth token"));
-    assert!(
-        text.contains("Send it only to gw.example. A token for /a2a isn't accepted for downloads.")
-    );
-    assert!(text.contains("\n- https://gw.example/v1/files/ws_1/obj_1 \"brief.pdf\" (obj_1)"));
+    assert!(text.contains(
+        "Download each link with your Podster OAuth token for /a2a, as `Authorization: Bearer`. Send it only to gw.example."
+    ));
+    assert!(text.contains("\n- https://gw.example/a2a/files/ws_1/obj_1 \"brief.pdf\" (obj_1)"));
     assert!(text.contains("\n- not ready yet: \"data # Heading\" (obj_2)"));
     assert!(text.ends_with("On Podster: https://app.example/w/ws_1/tasks"));
     assert_eq!(
@@ -232,12 +231,12 @@ fn a_name_cant_pose_as_a_link_or_break_its_line() {
     let files = [InputFile {
         id: "obj_1",
         name: fake,
-        link: Some("https://gw.example/v1/files/ws_1/obj_1"),
+        link: Some("https://gw.example/a2a/files/ws_1/obj_1"),
     }];
     let text = offer_text_with_files("T", "I", None, &files, Some("gw.example"), None);
     let line = text.lines().find(|l| l.contains("obj_1")).unwrap();
     // Podster's link comes first, and the name stays quoted on the same line.
-    assert!(line.starts_with("- https://gw.example/v1/files/ws_1/obj_1 \""));
+    assert!(line.starts_with("- https://gw.example/a2a/files/ws_1/obj_1 \""));
     assert!(line.ends_with("\" (obj_1)"));
     assert_eq!(
         offer_file_name(&"n".repeat(500)).chars().count(),

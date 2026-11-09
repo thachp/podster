@@ -12,7 +12,7 @@ import { mintAssertion, type Identity } from "./assertion";
 import { CAPABILITIES, InvalidArguments, jsonSchema, toApiCall, zodShape, type ApiCall, type Capability } from "./capabilities";
 import { EMAIL_LINK_ROUTE, EMAIL_LINK_SECONDS, EMAIL_VERIFY_ROUTE, emailSignInEnabled, handleEmailLink, handleEmailVerify, linkMustNotReach, linkTokenHash, sendSignInLink, type EmailBinding } from "./email-sign-in";
 import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TEST_SIGNUP_ROUTE } from "./test-people";
-import { handleAgentDownload, isFilePath, serveFile } from "./downloads";
+import { handleA2aDownload, handleAgentDownload, isFilePath, serveFile } from "./downloads";
 import { handleUpload } from "./uploads";
 import { answerA2a, checkA2aRequest, handleA2aCard, isA2aPath } from "./a2a";
 import type { ApiReads } from "./a2a/reads";
@@ -1083,6 +1083,10 @@ const appHandler = {
     if (upload) return upload;
     const download = await handleAgentDownload(request, url, publicEnv, (token) => agentFromCredential(publicEnv, token, request), (key) => withinLimit(publicEnv.RL_ACCOUNT, key));
     if (download) return download;
+    if (!onApplicationHost) {
+      const a2aDownload = await handleA2aDownload(request, url, publicEnv, (token) => agentFromA2aToken(publicEnv, token), (key) => withinLimit(publicEnv.RL_ACCOUNT, key));
+      if (a2aDownload) return a2aDownload;
+    }
     if (publicEnv.APP_URL && !onApplicationHost) {
       const moved = await movedToApplicationHost(request, publicEnv, publicEnv.APP_URL);
       if (moved) return moved;
@@ -1345,6 +1349,25 @@ async function agentFromCredential(env: Env, token: string, request: Request): P
     if (!externalId || !forMcp(held.audience, env.BASE_URL)) return null;
     const identity = await resolveAgent(env, "mcp_oauth", externalId);
     return held.scope?.includes("mcp") ? identity : notGranted(DOWNLOAD_CAPABILITY);
+  } catch (error) {
+    if (error instanceof AgentRefused) return denied(error.message, 403);
+    throw error;
+  }
+}
+
+/**
+ * Who an `/a2a` token says it is, for `/a2a/files`. Only a token issued for the `/a2a` resource, with the `a2a` scope, and
+ * linked to an agent counts. An Agent Auth JWT, an `/mcp` token and a legacy token with no audience are all `null`, so they're
+ * answered as no credential at all. A credential that ended, including whoever connected it leaving, is refused.
+ */
+async function agentFromA2aToken(env: Env, token: string): Promise<Identity | Response | null> {
+  if (token.split(".").length === 3) return null;
+  try {
+    const held = await env.OAUTH_PROVIDER.unwrapToken<{ externalId?: string }>(token);
+    const externalId = held?.grant.props?.externalId;
+    if (!externalId || resourceKind(env.BASE_URL, held.audience) !== "a2a" || held.audience === undefined) return null;
+    if (!held.scope?.includes("a2a")) return denied("insufficient_scope", 403);
+    return await resolveAgent(env, "mcp_oauth", externalId);
   } catch (error) {
     if (error instanceof AgentRefused) return denied(error.message, 403);
     throw error;

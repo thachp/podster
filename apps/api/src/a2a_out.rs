@@ -196,12 +196,16 @@ fn request_body(
     link: Option<&str>,
     gateway: Option<&str>,
 ) -> String {
-    // Input files are Podster links on the gateway, opened with the agent's own credential. Never bytes, never a public URL.
+    // Input files are Podster links on the gateway's A2A resource, opened with the agent's `/a2a` token. Never bytes, never a
+    // public URL.
     let listed = task["files"].as_array().cloned().unwrap_or_default();
     let links: Vec<Option<String>> = listed
         .iter()
         .map(|f| match (gateway, f["download_path"].as_str()) {
-            (Some(gateway), Some(path)) => Some(format!("{gateway}{path}")),
+            // The same file under the A2A resource, which takes the agent's `/a2a` token. Only the API's own path is rewritten.
+            (Some(gateway), Some(path)) => path
+                .strip_prefix("/v1/files/")
+                .map(|rest| format!("{gateway}/a2a/files/{rest}")),
             _ => None,
         })
         .collect();

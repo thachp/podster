@@ -646,9 +646,13 @@ describe("a server that answers once done (decision 174)", () => {
     const { room, task: t, attempt, agent } = await sentOffer(`/a2a/blocking-${++counter}`);
     const [first, replay] = await sameKey(agent, `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: t.version });
     expect(first.status).toBe(200);
-    expect(first.body.status).toBe("submitted");
+    // The answer is the accept's own. The submit follows it, in a transaction of its own.
+    expect(first.body.status).toBe("accepted");
+    expect((await taskRow(room, t.id)).status).toBe("submitted");
     // A replay of the accept answers the same, and submits nothing more.
     expect(replay).toEqual(first);
+    // The held row is consumed with the submit.
+    expect(await roomSql(room, "SELECT count(*) AS n FROM a2a_held WHERE task_id = ?", t.id)).toEqual([{ n: 0 }]);
     expect(await roomSql(room, "SELECT submission_no, note, submitted_by FROM submission WHERE task_id = ?", t.id)).toEqual([{ submission_no: 1, note: "Done at once.", submitted_by: agent.id }]);
     expect(await roomSql(room, "SELECT uri, label FROM artifact WHERE task_id = ?", t.id)).toEqual([{ uri: "https://example.com/blocked", label: "Reply" }]);
     // The accept is the agent's own. The submit is marked as what its A2A endpoint sent.
@@ -657,7 +661,7 @@ describe("a server that answers once done (decision 174)", () => {
       { type: "task.submitted", actor_id: agent.id, origin: "a2a_remote", origin_ref: attempt.id },
     ]);
     // Accepting again, with a new key, is refused: the task is in review, and nothing more is submitted.
-    expect((await api(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: first.body.version })).status).not.toBe(200);
+    expect((await api(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: (await taskRow(room, t.id)).version })).status).not.toBe(200);
     expect(await roomSql(room, "SELECT count(*) AS n FROM submission WHERE task_id = ?", t.id)).toEqual([{ n: 1 }]);
   });
 
@@ -679,6 +683,109 @@ describe("a server that answers once done (decision 174)", () => {
     expect(accepted.status).toBe("accepted");
     expect(await roomSql(room, "SELECT count(*) AS n FROM submission WHERE task_id = ?", t.id)).toEqual([{ n: 0 }]);
     expect(await roomSql(room, "SELECT attempt_id FROM a2a_held WHERE task_id = ?", t.id)).toEqual([{ attempt_id: attempt.id }]);
+  });
+
+  it("sends exactly one history follow-up, and a failed one isn't counted toward the endpoint's failures", async () => {
+    const { room, task: t, attempt, agent, remote, url } = await sentOffer();
+    await must(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: t.version });
+    await script(remote, [task(remote, "TASK_STATE_COMPLETED"), { httpStatus: 500 }]);
+    await readOnce(room, attempt.id);
+    const followUps = (await sentTo(url)).map((r) => JSON.parse(r.body)).filter((b) => b.method === "GetTask" && b.params?.historyLength === 1);
+    // Without the follow-up there'd be none: this is the request that got the 500.
+    expect(followUps).toEqual([{ jsonrpc: "2.0", id: `${attempt.id}:1:history`, method: "GetTask", params: { id: remote, historyLength: 1 } }]);
+    expect((await must(agent, "GET", "/v1/inbox/a2a-endpoint")).consecutive_failures).toBe(0);
+    expect((await held(room, attempt.id))[0]).toMatchObject({ read_no: 1, note: null });
+  });
+
+  it("makes no history follow-up for a read naming another remote task", async () => {
+    const { room, task: t, attempt, agent, remote, url } = await sentOffer();
+    await must(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: t.version });
+    await script(remote, [task("someone-elses-task", "TASK_STATE_COMPLETED")]);
+    await readOnce(room, attempt.id);
+    expect((await sentTo(url)).map((r) => JSON.parse(r.body)).filter((b) => b.params?.historyLength === 1)).toEqual([]);
+  });
+
+  describe("the room's read-0 gate", () => {
+    const apply = (room: string, agentId: string, attemptId: string, remote: string) =>
+      roomStub(room).fetch("https://workspace/internal/a2a-read-apply", {
+        method: "POST",
+        headers: { "x-podster-caller": JSON.stringify({ id: agentId, kind: "agent", org: ORG, gen: 1, workspace_id: room }) },
+        body: JSON.stringify({ attempt: attemptId, read: 0, url: `https://${HOST}/a2a/x`, version: 1, remote: { id: remote, state: "TASK_STATE_COMPLETED", note: "Late.", links: [] } }),
+      }).then((r) => r.json() as Promise<any>);
+
+    it("refuses read 0 once a read was applied, while one is queued, and for an attempt not yet sent", async () => {
+      const applied = await sentOffer();
+      await script(applied.remote, [task(applied.remote, "TASK_STATE_WORKING")]);
+      await readOnce(applied.room, applied.attempt.id);
+      expect(await apply(applied.room, applied.agent.id, applied.attempt.id, applied.remote)).toMatchObject({ applied: false, reason: "stale" });
+
+      const queued = await sentOffer();
+      await roomSql(queued.room, "UPDATE a2a_attempt SET next_read_at = 0 WHERE id = ?", queued.attempt.id);
+      await fireAlarm(queued.room);
+      expect((await row(queued.room, queued.attempt.id)).read_queued).toBe(1);
+      expect(await apply(queued.room, queued.agent.id, queued.attempt.id, queued.remote)).toMatchObject({ applied: false, reason: "stale" });
+
+      const room = await newRoom();
+      const fresh = await target(room);
+      const created = await offer(room, fresh.agent.id);
+      const [unsent] = await attempts(room, created.id);
+      expect(await apply(room, fresh.agent.id, unsent.id, "remote-x")).toMatchObject({ applied: false, reason: "stale" });
+      expect(await roomSql(room, "SELECT count(*) AS n FROM a2a_held WHERE task_id = ?", created.id)).toEqual([{ n: 0 }]);
+    });
+  });
+
+  describe("the held submit after an accept", () => {
+    const failHeldSubmit = (room: string, status: number) =>
+      roomSql(room, `CREATE TABLE test_fail_held_submit (status INTEGER); INSERT INTO test_fail_held_submit VALUES (${status})`);
+    const unchanged = async (room: string, taskId: string, attemptId: string) => {
+      expect((await taskRow(room, taskId)).status).toBe("accepted");
+      expect(await roomSql(room, "SELECT count(*) AS n FROM submission WHERE task_id = ?", taskId)).toEqual([{ n: 0 }]);
+      expect(await roomSql(room, "SELECT count(*) AS n FROM event WHERE task_id = ? AND type = 'task.submitted'", taskId)).toEqual([{ n: 0 }]);
+      expect(await roomSql(room, "SELECT attempt_id FROM a2a_held WHERE task_id = ?", taskId)).toEqual([{ attempt_id: attemptId }]);
+    };
+
+    for (const status of [500, 409]) {
+      it(`a held submit that fails with ${status} after writing is undone, and the accept stands with the hold`, async () => {
+        const { room, task: t, attempt, agent } = await sentOffer(`/a2a/blocking-${++counter}`);
+        await failHeldSubmit(room, status);
+        const accepted = await api(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: t.version });
+        expect(accepted.status).toBe(200);
+        expect(accepted.body.status).toBe("accepted");
+        await unchanged(room, t.id, attempt.id);
+      });
+    }
+
+    it("submits nothing, failing closed, if the endpoint was re-pointed since the response was held", async () => {
+      const { room, task: t, attempt, agent } = await sentOffer(`/a2a/blocking-${++counter}`);
+      await must(agent, "PUT", "/v1/inbox/a2a-endpoint", { url: `https://${HOST}/a2a/elsewhere-${++counter}` });
+      await must(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: t.version });
+      await unchanged(room, t.id, attempt.id);
+    });
+
+    it("submits nothing if the endpoint was switched off since", async () => {
+      const { room, task: t, attempt, agent } = await sentOffer(`/a2a/blocking-${++counter}`);
+      const principal = BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(agent.id));
+      await runInDurableObject(principal, (_: any, state: any) => state.storage.sql.exec("UPDATE a2a_endpoint SET enabled = 0"));
+      await must(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: t.version });
+      await unchanged(room, t.id, attempt.id);
+    });
+
+    it("submits nothing when the room is archived: the accept itself is refused", async () => {
+      const { room, task: t, attempt, agent } = await sentOffer(`/a2a/blocking-${++counter}`);
+      await must(OWNER, "POST", `/v1/workspaces/${room}/archive`, { policy_version: await version(room) });
+      expect((await api(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: t.version })).status).not.toBe(200);
+      expect((await taskRow(room, t.id)).status).toBe("offered");
+      expect(await roomSql(room, "SELECT count(*) AS n FROM submission WHERE task_id = ?", t.id)).toEqual([{ n: 0 }]);
+      expect(await roomSql(room, "SELECT attempt_id FROM a2a_held WHERE task_id = ?", t.id)).toEqual([{ attempt_id: attempt.id }]);
+    });
+
+    it("submits nothing for an agent removed from the room: the accept itself is refused", async () => {
+      const { room, task: t, attempt, agent } = await sentOffer(`/a2a/blocking-${++counter}`);
+      await must(OWNER, "DELETE", `/v1/workspaces/${room}/members/${agent.id}`, { policy_version: await version(room) });
+      expect((await api(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: t.version })).status).not.toBe(200);
+      expect(await roomSql(room, "SELECT count(*) AS n FROM submission WHERE task_id = ?", t.id)).toEqual([{ n: 0 }]);
+      expect(await roomSql(room, "SELECT attempt_id FROM a2a_held WHERE task_id = ?", t.id)).toEqual([{ attempt_id: attempt.id }]);
+    });
   });
 
   it("caps the history reply as artifacts are: past 16 KB nothing is taken, and the hold stands", async () => {

@@ -679,7 +679,7 @@ paths:
       operationId: acceptTask
       tags: [commands]
       summary: The acceptTask command
-      description: "If the agent's A2A endpoint already sent a finished response for this offer, which was held (decision 174), the accept also submits it as the agent, in the same transaction, marked `a2a_remote`. The answer is then the task in review."
+      description: "If the agent's A2A endpoint already sent a finished response for this offer, which was held (decision 174), the accept is followed by submitting it as the agent, marked `a2a_remote`, but only while that endpoint is still the agent's active one at the same version. The answer is the accepted task, and reading the task afterwards shows the submission. If the submit fails, the accept stands and the response stays held."
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/VersionedReason" } } } }
       responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }

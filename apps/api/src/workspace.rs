@@ -2717,6 +2717,47 @@ impl Workspace {
         value.ok_or_else(|| ApiError::internal("command produced no result"))
     }
 
+    /// Decision 174: after an accept has committed, submits the response its agent's A2A endpoint held for that offer. Only if
+    /// that endpoint is still the agent's active, enabled endpoint at the version the response came from: the agent's
+    /// Principal says, and if it can't, nothing is submitted. Then one transaction of its own, which rechecks the agent's
+    /// access, the archive and the task, so a failure of any kind leaves the accept and the hold. Logs carry IDs only.
+    async fn submit_held_after_accept(&self, identity: &Identity, task_id: &str) {
+        let sql = self.state.storage().sql();
+        let held = match a2a_read::held_for(&sql, &identity.id, task_id) {
+            Ok(Some(held)) => held,
+            _ => return,
+        };
+        let outcome = match principal::a2a_endpoint_pin_for(&self.env, &identity.id).await {
+            Ok(pin)
+                if pin["active"] == Value::Bool(true)
+                    && pin["url"].as_str() == Some(held.url.as_str())
+                    && pin["version"].as_i64() == Some(held.version) =>
+            {
+                let (identity, task_id, attempt) =
+                    (identity.clone(), task_id.to_string(), held.attempt.clone());
+                let submitted = Rc::new(RefCell::new(false));
+                let slot = submitted.clone();
+                match transaction_sync(&self.state, move || {
+                    let who = resolve_caller(&sql, &identity)?;
+                    command_guard(&sql)?;
+                    *slot.borrow_mut() =
+                        a2a_read::submit_held(&sql, &who, &task_id, &attempt, now_ms())?;
+                    Ok(())
+                }) {
+                    Ok(()) if *submitted.borrow() => "submitted",
+                    Ok(()) => "not_submitted",
+                    Err(_) => "refused",
+                }
+            }
+            Ok(_) => "endpoint_changed",
+            Err(_) => "endpoint_unknown",
+        };
+        console_log!(
+            "{}",
+            json!({ "event": "a2a.held_submit", "ws": identity.workspace_id, "task": task_id, "attempt": held.attempt, "agent": identity.id, "outcome": outcome })
+        );
+    }
+
     /// Runs ownership recovery, for someone who may have no role in this room, so it can't go through `command`. An
     /// organization's admin outside the room is told nothing until the room records that its owner left, so a refusal
     /// can't confirm that the room exists or who owns it. Their own retry gets its stored answer, even though recovery
@@ -3825,24 +3866,24 @@ impl Workspace {
                 test_fail,
                 move |sql, who, now| handle_send_message(sql, who, &target, &body, now),
             ),
-            (Method::Post, ["tasks", _, _]) => self.command(
-                &identity,
-                key,
-                hash,
-                stops_when_archived,
-                test_fail,
-                move |sql, who, now| {
-                    let task = handle_task_command(sql, who, &target, &verb, &body, now)?;
-                    // An accept also submits a response its A2A endpoint sent before it (decision 174), in this same
-                    // transaction and idempotency record. The answer is then the task after both.
-                    if verb == "accept" {
-                        if let Some(submitted) = a2a_read::submit_held(sql, who, &target, now)? {
-                            return Ok(submitted);
-                        }
-                    }
-                    Ok(task)
-                },
-            ),
+            (Method::Post, ["tasks", _, _]) => {
+                let accept = verb == "accept";
+                let task_id = target.clone();
+                let task = self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| handle_task_command(sql, who, &target, &verb, &body, now),
+                )?;
+                // Then, on its own, a response the agent's A2A endpoint sent before the accept is submitted (decision 174).
+                // The accept's answer is the one stored for it, so a replay answers the same.
+                if accept {
+                    self.submit_held_after_accept(&identity, &task_id).await;
+                }
+                Ok(task)
+            }
             (Method::Post, ["members"]) => {
                 // A registered agent's generation comes from its Principal before this room commits the join.
                 let mut registered = None;

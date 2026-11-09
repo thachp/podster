@@ -399,19 +399,41 @@ pub async fn process(env: &Env, job: &Value) -> R<Outcome> {
             log("a2a.send", ws, attempt, agent, "sent");
             // Already finished: applied now as read 0. If this fails, nothing is lost: the reads that follow see the same
             // task, so it's logged and the job still ends.
-            if let Some(terminal) = terminal {
-                let secret = claim["signing_secret"].as_str().unwrap_or_default();
-                let remote =
-                    with_history(url, secret, claim["token"].as_str(), attempt, 0, terminal).await;
-                let applied = room(env, ws, crate::INTERNAL_A2A_READ_APPLY, agent, &claim, &json!({
-                    "attempt": attempt, "read": 0, "url": url, "version": version, "remote": remote,
-                }))
-                .await;
-                let effect = match &applied {
-                    Ok(applied) => applied["effect"].as_str().unwrap_or("nothing"),
-                    Err(_) => "read0_failed",
+            // The send took time, so the agent and its endpoint are claimed again first: still connected, still set by
+            // someone in its organization, and still the same URL and version. Otherwise nothing is applied or fetched.
+            if let (Some(terminal), Some(remote_id)) = (terminal, remote.as_deref()) {
+                let again = claim_a2a_for(env, agent).await;
+                let effect = match again {
+                    Ok(again)
+                        if again["send"] == Value::Bool(true)
+                            && again["url"] == claim["url"]
+                            && again["version"].as_u64() == Some(version) =>
+                    {
+                        let secret = again["signing_secret"].as_str().unwrap_or_default();
+                        let remote = with_history(
+                            url,
+                            secret,
+                            again["token"].as_str(),
+                            attempt,
+                            0,
+                            remote_id,
+                            terminal,
+                        )
+                        .await;
+                        let applied = room(env, ws, crate::INTERNAL_A2A_READ_APPLY, agent, &again, &json!({
+                            "attempt": attempt, "read": 0, "url": url, "version": version, "remote": remote,
+                        }))
+                        .await;
+                        match applied {
+                            Ok(applied) => {
+                                applied["effect"].as_str().unwrap_or("nothing").to_string()
+                            }
+                            Err(_) => "read0_failed".to_string(),
+                        }
+                    }
+                    _ => "read0_skipped".to_string(),
                 };
-                log("a2a.read", ws, attempt, agent, effect);
+                log("a2a.read", ws, attempt, agent, &effect);
             }
             Ok(Outcome::Ack)
         }
@@ -553,8 +575,13 @@ async fn with_history(
     token: Option<&str>,
     attempt: &str,
     read: i64,
+    expected: &str,
     mut remote: Value,
 ) -> Value {
+    // Only for the remote task Podster recorded. An answer about any other is ignored by the room anyway.
+    if remote["id"].as_str() != Some(expected) {
+        return remote;
+    }
     let empty = remote["note"].is_null() && remote["links"].as_array().is_none_or(Vec::is_empty);
     if remote["state"].as_str() != Some(RemoteState::Completed.name()) || !empty {
         return remote;
@@ -674,8 +701,16 @@ async fn process_read(env: &Env, ws: &str, attempt: &str, agent: &str, read: i64
     match remote {
         Some(remote) => {
             let secret = claim["signing_secret"].as_str().unwrap_or_default();
-            let remote =
-                with_history(url, secret, claim["token"].as_str(), attempt, read, remote).await;
+            let remote = with_history(
+                url,
+                secret,
+                claim["token"].as_str(),
+                attempt,
+                read,
+                begun["remote_task_id"].as_str().unwrap_or_default(),
+                remote,
+            )
+            .await;
             let applied = room(env, ws, crate::INTERNAL_A2A_READ_APPLY, agent, &claim, &json!({
                 "attempt": attempt, "read": read, "url": url, "version": version, "remote": remote,
             }))

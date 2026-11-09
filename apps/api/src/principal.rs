@@ -190,6 +190,16 @@ pub async fn claim_a2a_for(env: &Env, agent: &str) -> R<Value> {
     Ok(response.json().await?)
 }
 
+/// Where the agent's A2A endpoint points now, with no secret or token: `{ active, url, version }`. `active` is false unless the
+/// agent is connected and the endpoint is set, switched on and still passes egress policy (decision 174). An error is an error.
+pub async fn a2a_endpoint_pin_for(env: &Env, agent: &str) -> R<Value> {
+    let mut response = internal(env, agent, "/internal/a2a-endpoint-pin", &json!({})).await?;
+    if response.status_code() != 200 {
+        return Err(ApiError::internal("a2a endpoint pin unavailable"));
+    }
+    Ok(response.json().await?)
+}
+
 /// Counts one A2A send toward switching the agent's endpoint off.
 pub async fn report_a2a_for(env: &Env, agent: &str, version: u64, ok: bool) -> R<Value> {
     let body = json!({ "version": version, "ok": ok });
@@ -1465,6 +1475,7 @@ impl Principal {
                 }
                 return Ok(claim);
             }
+            "/internal/a2a-endpoint-pin" => return a2a_endpoint::pin(&sql),
             "/internal/a2a-endpoint-report" => {
                 let body: Value = req.json().await?;
                 // Tests can't otherwise make a report fail after a send. It fails once, then the table is gone.

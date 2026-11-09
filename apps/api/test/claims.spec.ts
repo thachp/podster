@@ -189,7 +189,9 @@ describe("a public claim", () => {
     await api(OWNER, "PUT", `/v1/workspaces/${room.id}/public-claims/blocked-orgs/org_x`, {});
     const audit = await inRoom(room.id, (sql) => sql.exec("SELECT action FROM audit_event WHERE action LIKE 'public_claims.%' ORDER BY seq").toArray().map((r: any) => r.action));
     expect(audit).toEqual(["public_claims.paused", "public_claims.org_blocked"]);
-    expect((await api(OWNER, "GET", `/v1/workspaces/${room.id}/public-claims`)).body).toEqual({ paused: true, blocked_orgs: ["org_x"] });
+    const read = (await api(OWNER, "GET", `/v1/workspaces/${room.id}/public-claims`)).body;
+    expect(read).toMatchObject({ paused: true, blocked_orgs: ["org_x"], claims_last_hour: 1 });
+    expect(read.claimants.map((c: any) => c.principal_id)).toEqual([taker.id]);
   });
 
   it("lets exactly one of many simultaneous claims take the last place (M4-04)", async () => {
@@ -566,5 +568,106 @@ describe("the second review's checks", () => {
     const other = await agent(org);
     expect((await claim(other, room.handle, room.role)).status).toBe(200);
     expect(await eventually(() => hour(org), (h) => h === 2)).toBe(2);
+  });
+
+  it("keeps an unsettled count another request may stand on, when the room says not held and refuses (follow-up)", async () => {
+    const room = await publicRoom();
+    const taker = await agent();
+    // The first claim commits, but its answer is lost on the agent's count, which stays pending with its reservation.
+    await BINDINGS.DB.prepare("CREATE TABLE IF NOT EXISTS test_fail_confirm (principal TEXT)").run();
+    await BINDINGS.DB.prepare("INSERT INTO test_fail_confirm (principal) VALUES (?)").bind(taker.id).run();
+    expect((await claim(taker, room.handle, room.role)).status).toBe(200);
+    const lost = await eventually(() => counts(taker.id), (c: any) => c.entries.length === 1);
+    expect(lost).toEqual({ entries: [{ key: room.id, state: "pending" }], hour: 1, reservations: 1 });
+    // A request that read "not held" before that claim committed, and that the room refuses.
+    await BINDINGS.DB.prepare("CREATE TABLE IF NOT EXISTS test_force_not_held (principal TEXT)").run();
+    await BINDINGS.DB.prepare("INSERT INTO test_force_not_held (principal) VALUES (?)").bind(taker.id).run();
+    const refused = await claim(taker, room.handle, "role_nope");
+    await BINDINGS.DB.prepare("DELETE FROM test_force_not_held WHERE principal = ?").bind(taker.id).run();
+    expect(refused.code).toBe("role_not_found");
+    // The standing claim is still counted at once, and only the refused request's hour was given back.
+    const after = await eventually(() => counts(taker.id), (c: any) => c.reservations === 1 && c.entries.every((e: any) => e.state === "active"));
+    expect(after).toEqual({ entries: [{ key: room.id, state: "active" }], hour: 1, reservations: 1 });
+  });
+});
+
+describe("owner controls in public rooms (M4 step 9)", () => {
+  const settings = async (room: string) => (await api(OWNER, "GET", `/v1/workspaces/${room}/public-claims`)).body;
+
+  it("shows the owner each public claimant, with the opening it holds, and the room's claims this hour", async () => {
+    const room = await publicRoom();
+    const holds = await agent();
+    const releases = await agent();
+    const promoted = await agent(ORG);
+    for (const who of [holds, releases, promoted]) expect((await claim(who, room.handle, room.role)).status).toBe(200);
+    expect((await release(releases, room.id, room.role)).status).toBe(200);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${room.id}/members/${promoted.id}/role`, { role: "member", policy_version: await version(room.id) })).status).toBe(200);
+    const seen = await settings(room.id);
+    // The one that released left with its claim, and the promoted one is the owner's now: neither is listed.
+    expect(seen.claimants).toHaveLength(1);
+    expect(seen.claimants[0]).toMatchObject({ principal_id: holds.id, org_id: holds.org, role: "guest", role_id: room.role });
+    expect(typeof seen.claimants[0].joined_at).toBe("number");
+    expect(typeof seen.claimants[0].claimed_at).toBe("number");
+    // Ended claims still count against the room's hour.
+    expect(seen.claims_last_hour).toBe(3);
+    // A human admin sees it too. A claimant doesn't.
+    expect((await api(ADMIN, "GET", `/v1/workspaces/${room.id}/public-claims`)).status).toBe(200);
+    expect((await api(holds, "GET", `/v1/workspaces/${room.id}/public-claims`)).code).toBe("not_allowed");
+  });
+
+  it("ends every public claim while the room stays public, keeping one the owner promoted (endPublicClaims)", async () => {
+    const room = await publicRoom();
+    const [a, b] = [await agent(), await agent()];
+    const promoted = await agent(ORG);
+    for (const who of [a, b, promoted]) expect((await claim(who, room.handle, room.role)).status).toBe(200);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${room.id}/members/${promoted.id}/role`, { role: "member", policy_version: await version(room.id) })).status).toBe(200);
+    expect((await api(a, "POST", `/v1/workspaces/${room.id}/public-claims/end`, {})).code).toBe("not_allowed");
+    expect((await api(OWNER, "POST", `/v1/workspaces/${room.id}/public-claims/end`, { org_id: a.org })).code).toBe("invalid_argument");
+    const ended = await api(ADMIN, "POST", `/v1/workspaces/${room.id}/public-claims/end`, {});
+    expect(ended.status, ended.text).toBe(200);
+    expect(ended.body).toMatchObject({ ended: 2, claimants: [] });
+    for (const who of [a, b]) expect((await api(who, "GET", `/v1/workspaces/${room.id}`)).code).toBe("access_revoked");
+    expect((await api(promoted, "GET", `/v1/workspaces/${room.id}`)).status).toBe(200);
+    // Each left through the departure rules, and the room is still public, so each can claim again.
+    const reasons = await inRoom(room.id, (sql) => sql.exec("SELECT revocation_reason FROM member WHERE principal_id IN (?, ?)", a.id, b.id).toArray().map((r: any) => r.revocation_reason));
+    expect(reasons).toEqual(["public_claims_ended", "public_claims_ended"]);
+    expect((await api(OWNER, "GET", `/v1/workspaces/${room.id}/visibility`)).body.visibility).toBe("public");
+    expect((await claim(a, room.handle, room.role)).status).toBe(200);
+    const audit = await inRoom(room.id, (sql) => sql.exec("SELECT new_json FROM audit_event WHERE action = 'public_claims.ended'").toArray());
+    expect(audit.map((r: any) => JSON.parse(r.new_json))).toEqual([{ ended: 2 }]);
+  });
+
+  it("can end a blocked organization's public claims with the block, and only that organization's", async () => {
+    const room = await publicRoom();
+    const org = `org_claim_blocked_${crypto.randomUUID().slice(0, 6)}`;
+    const [x, y] = [await agent(org), await agent(org)];
+    const other = await agent();
+    for (const who of [x, y, other]) expect((await claim(who, room.handle, room.role)).status).toBe(200);
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${room.id}/public-claims/blocked-orgs/${org}`, { end_claims: "yes" })).code).toBe("invalid_argument");
+    const blocked = await api(OWNER, "PUT", `/v1/workspaces/${room.id}/public-claims/blocked-orgs/${org}`, { end_claims: true });
+    expect(blocked.status, blocked.text).toBe(200);
+    expect(blocked.body).toMatchObject({ ended: 2, blocked_orgs: [org] });
+    expect(blocked.body.claimants.map((c: any) => c.principal_id)).toEqual([other.id]);
+    expect((await claim(x, room.handle, room.role)).code).toBe("not_allowed");
+    // Lifting the block lets them claim again.
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${room.id}/public-claims/blocked-orgs/${org}`)).status).toBe(200);
+    expect((await claim(x, room.handle, room.role)).status).toBe(200);
+  });
+
+  it("keeps a removed agent out until an owner or admin clears the removal", async () => {
+    const room = await publicRoom();
+    const taker = await agent();
+    expect((await claim(taker, room.handle, room.role)).status).toBe(200);
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${room.id}/members/${taker.id}`, { policy_version: await version(room.id) })).status).toBe(200);
+    expect((await settings(room.id)).claimants).toEqual([]);
+    expect((await claim(taker, room.handle, room.role)).code).toBe("access_revoked");
+    const cleared = await api(OWNER, "POST", `/v1/workspaces/${room.id}/members/${taker.id}/clear-removal`, { policy_version: await version(room.id) });
+    expect(cleared.status, cleared.text).toBe(200);
+    expect((await claim(taker, room.handle, room.role)).status).toBe(200);
+  });
+
+  it("keeps person review on while the room is public", async () => {
+    const room = await publicRoom();
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${room.id}/review-policy`, { require_person: false, policy_version: await version(room.id) })).code).toBe("person_review_required");
   });
 });

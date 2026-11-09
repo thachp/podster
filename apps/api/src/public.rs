@@ -606,13 +606,14 @@ async fn test_fail_confirm(env: &Env, principal: &str) -> bool {
 }
 
 /// Test builds only: a test can force the room's word on whether the agent holds its claim, by naming the agent in D1's
-/// `test_force_held` or `test_force_unknown` table, to reach a race or a room that doesn't answer on demand.
+/// `test_force_held`, `test_force_unknown` or `test_force_not_held` table, to reach a race or a room that doesn't answer on demand.
 #[cfg(feature = "failpoints")]
 async fn test_force_held(env: &Env, agent: &str, here: Held) -> Held {
     let Ok(db) = env.d1("DB") else { return here };
     for (table, forced) in [
         ("test_force_held", Held::Yes),
         ("test_force_unknown", Held::Unknown),
+        ("test_force_not_held", Held::No),
     ] {
         let Ok(exists) = db
             .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")

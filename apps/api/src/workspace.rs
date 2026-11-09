@@ -3756,7 +3756,7 @@ impl Workspace {
                 ["collaboration", "costs"] => collaboration::read_costs(&sql, &who, &url),
                 ["brief"] => queries::get_brief(&sql, &who),
                 ["visibility"] => visibility::read(&sql, &who, public_rooms),
-                ["public-claims"] => public_claims::read(&sql, &who.caller),
+                ["public-claims"] => public_claims::read(&sql, &who.caller, now_ms()),
                 ["activity"] => queries::list_activity(&sql, &who, &url),
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
                 ["tasks", id] => queries::get_task(&sql, &who, id, false),
@@ -4142,6 +4142,14 @@ impl Workspace {
                 test_fail,
                 move |sql, who, now| public_claims::handle_pause(sql, &who.caller, &body, now),
             ),
+            (Method::Post, ["public-claims", "end"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| public_claims::handle_end(sql, &who.caller, &body, now),
+            ),
             (Method::Put, ["public-claims", "blocked-orgs", org]) => {
                 let org = (*org).to_string();
                 self.command(
@@ -4151,7 +4159,7 @@ impl Workspace {
                     stops_when_archived,
                     test_fail,
                     move |sql, who, now| {
-                        public_claims::handle_block(sql, &who.caller, &org, true, now)
+                        public_claims::handle_block(sql, &who.caller, &org, true, &body, now)
                     },
                 )
             }
@@ -4164,7 +4172,7 @@ impl Workspace {
                     stops_when_archived,
                     test_fail,
                     move |sql, who, now| {
-                        public_claims::handle_block(sql, &who.caller, &org, false, now)
+                        public_claims::handle_block(sql, &who.caller, &org, false, &body, now)
                     },
                 )
             }

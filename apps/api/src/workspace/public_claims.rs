@@ -299,11 +299,18 @@ pub(super) fn claim(
 /// Removes every public claimant now in the room through the departure rules, when the owner ends public claims on
 /// unpublishing (decision 151). Each can join again by a public claim if the room is public again.
 pub(super) fn end_all(sql: &SqlStorage, actor: &Caller, now: i64) -> R<u32> {
+    end_public(sql, actor, None, now)
+}
+
+/// Removes the public claimants now in the room, or only one organization's, through the departure rules. Only those
+/// still in the guest role they joined with: one the owner has since made more is the owner's to remove. Each can claim
+/// again, unless its organization is blocked.
+fn end_public(sql: &SqlStorage, actor: &Caller, org: Option<&str>, now: i64) -> R<u32> {
     let claimants: Vec<String> = rows(
         sql,
-        // Only those still in the guest role they joined with. One the owner has since made more is the owner's to remove.
-        "SELECT principal_id FROM member WHERE joined_via = ? AND role = 'guest' AND revoked_at IS NULL",
-        vec![JOINED_PUBLICLY.into()],
+        "SELECT principal_id FROM member WHERE joined_via = ?1 AND role = 'guest' AND revoked_at IS NULL
+           AND (?2 IS NULL OR org_id = ?2)",
+        vec![JOINED_PUBLICLY.into(), org.map(str::to_owned).into()],
     )?
     .iter()
     .filter_map(|row| text(&row["principal_id"]))
@@ -319,6 +326,30 @@ pub(super) fn end_all(sql: &SqlStorage, actor: &Caller, now: i64) -> R<u32> {
         )?;
     }
     Ok(u32::try_from(claimants.len()).unwrap_or(u32::MAX))
+}
+
+/// `POST public-claims/end {}`: the owner or a human admin ends every public claim now, staying public, as unpublishing
+/// with "also end public claims" does. Audited with the number ended. Answers as the read does, with `ended`.
+pub(super) fn handle_end(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) -> R<Value> {
+    ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageRoom))?;
+    if !body.as_object().is_some_and(|fields| fields.is_empty()) {
+        return Err(ApiError::invalid_argument());
+    }
+    let ended = end_public(sql, caller, None, now)?;
+    if ended > 0 {
+        audit(
+            sql,
+            caller,
+            "public_claims.ended",
+            "workspace",
+            None,
+            Some(json!({ "ended": ended }).to_string()),
+            now,
+        )?;
+    }
+    let mut answer = settings(sql, now)?;
+    answer["ended"] = json!(ended);
+    Ok(answer)
 }
 
 /// `PUT public-claims { paused }`: the owner or a human admin pauses or resumes public claims. Claims already made stay.
@@ -367,10 +398,12 @@ pub(super) fn handle_pause(sql: &SqlStorage, caller: &Caller, body: &Value, now:
             now,
         )?;
     }
-    blocks(sql, paused)
+    settings(sql, now)
 }
 
-fn blocks(sql: &SqlStorage, paused: bool) -> R<Value> {
+/// What the owner sees of public claims here: the pause switch, the blocked organizations, the room's public claims in
+/// the last hour, and each public claimant now in the room, with the opening it holds, if any.
+fn settings(sql: &SqlStorage, now: i64) -> R<Value> {
     let orgs: Vec<Value> = rows(
         sql,
         "SELECT org_id FROM public_claim_block ORDER BY org_id",
@@ -379,7 +412,27 @@ fn blocks(sql: &SqlStorage, paused: bool) -> R<Value> {
     .iter()
     .map(|row| row["org_id"].clone())
     .collect();
-    Ok(json!({ "paused": paused, "blocked_orgs": orgs }))
+    let claimants: Vec<Value> = rows(
+        sql,
+        "SELECT m.principal_id, m.org_id, m.role, m.added_at, c.role_id, c.claimed_at FROM member m
+           LEFT JOIN role_claim c ON c.principal_id = m.principal_id AND c.status = 'active' AND c.public = 1
+         WHERE m.joined_via = ? AND m.revoked_at IS NULL ORDER BY m.added_at, m.principal_id",
+        vec![JOINED_PUBLICLY.into()],
+    )?
+    .iter()
+    .map(|row| {
+        json!({
+            "principal_id": row["principal_id"], "org_id": row["org_id"], "role": row["role"],
+            "joined_at": row["added_at"], "role_id": row["role_id"], "claimed_at": row["claimed_at"],
+        })
+    })
+    .collect();
+    Ok(json!({
+        "paused": paused(sql)?,
+        "blocked_orgs": orgs,
+        "claims_last_hour": claims_last_hour(sql, now)?,
+        "claimants": claimants,
+    }))
 }
 
 fn paused(sql: &SqlStorage) -> R<bool> {
@@ -390,23 +443,42 @@ fn paused(sql: &SqlStorage) -> R<bool> {
     )
 }
 
-/// `GET public-claims`: the pause switch and the blocked organizations, for the owner and human admins.
-pub(super) fn read(sql: &SqlStorage, caller: &Caller) -> R<Value> {
+/// `GET public-claims`: what the owner sees of public claims here, for the owner and human admins.
+pub(super) fn read(sql: &SqlStorage, caller: &Caller, now: i64) -> R<Value> {
     ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageRoom))?;
-    blocks(sql, paused(sql)?)
+    settings(sql, now)
 }
 
 /// `PUT` or `DELETE public-claims/blocked-orgs/{org}`: the owner or a human admin blocks an organization's agents from
-/// claiming publicly here, or lifts that. A block ends no claim already made; removing those agents is step 9's.
+/// claiming publicly here, or lifts that. A block ends no claim already made, unless `PUT` says `{ end_claims: true }`:
+/// then that organization's public claimants leave too, through the departure rules.
 pub(super) fn handle_block(
     sql: &SqlStorage,
     caller: &Caller,
     org: &str,
     blocked: bool,
+    body: &Value,
     now: i64,
 ) -> R<Value> {
     ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageRoom))?;
     require_id(org)?;
+    // Only a block can end claims. Lifting one reads no body, as before.
+    let end_claims = if blocked {
+        let fields = match body {
+            Value::Null => serde_json::Map::new(),
+            Value::Object(fields) => fields.clone(),
+            _ => return Err(ApiError::invalid_argument()),
+        };
+        if fields.keys().any(|k| k != "end_claims") {
+            return Err(ApiError::invalid_argument());
+        }
+        match fields.get("end_claims") {
+            None => false,
+            Some(value) => value.as_bool().ok_or_else(ApiError::invalid_argument)?,
+        }
+    } else {
+        false
+    };
     let prior = org_blocked(sql, org)?;
     if prior != blocked {
         if blocked {
@@ -450,5 +522,22 @@ pub(super) fn handle_block(
             now,
         )?;
     }
-    blocks(sql, paused(sql)?)
+    if !end_claims {
+        return settings(sql, now);
+    }
+    let ended = end_public(sql, caller, Some(org), now)?;
+    if ended > 0 {
+        audit(
+            sql,
+            caller,
+            "public_claims.ended",
+            org,
+            None,
+            Some(json!({ "ended": ended }).to_string()),
+            now,
+        )?;
+    }
+    let mut answer = settings(sql, now)?;
+    answer["ended"] = json!(ended);
+    Ok(answer)
 }

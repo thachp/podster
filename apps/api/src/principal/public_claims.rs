@@ -113,9 +113,10 @@ fn held(body: &Value) -> R<Held> {
 ///   once the claim is confirmed, so for an organization a retry needs no entry.
 /// - **Stale**, any other entry, pending ones included: the room said the claim isn't held or didn't answer, so this may
 ///   be a new claim, and nothing here learns when a claim ends. It's counted afresh, with every limit and an hour.
-///   Counting twice in a race is the price, and fails closed. If the room said the claim isn't held, the old entry and
-///   its reservations go first, so a lost answer can't keep the new one alive. If the room didn't answer, the old entry
-///   is kept as `replacing`, and a refusal puts it back, so a claim that may still stand is never left uncounted.
+///   Counting twice in a race is the price, and fails closed. If the room said the claim isn't held and the old entry
+///   is settled, it and its reservations go first, so a lost answer can't keep the new one alive. If the room didn't
+///   answer, or the old entry is still unsettled with reservations on it, another request's claim may stand on it, so
+///   it's kept as `replacing`, and a refusal puts it back: a claim that may still stand is never left uncounted.
 pub(super) fn reserve(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     exec(sql, SCHEMA, vec![])?;
     let whose = whose(body)?;
@@ -124,19 +125,24 @@ pub(super) fn reserve(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     let reservation = field(body, "reservation")?;
     let held = held(body)?;
     tidy(sql, whose, now)?;
-    let existing = !rows(
+    let entry = rows(
         sql,
-        "SELECT key FROM public_claim WHERE key = ?",
+        "SELECT state, (SELECT COUNT(*) FROM public_claim_reservation r WHERE r.key = c.key) AS live
+           FROM public_claim c WHERE key = ?",
         vec![key.into()],
-    )?
-    .is_empty();
+    )?;
+    let existing = !entry.is_empty();
+    // Another request is still out on it: its room answer may be lost with its claim committed.
+    let unsettled = entry
+        .first()
+        .is_some_and(|e| e["state"].as_str() != Some("active") && int(&e["live"]) > 0);
     if held == Held::Yes && (existing || whose == Whose::Org) {
         take(sql, key, reservation)?;
         return Ok(json!({ "reserved": true, "counted": false, "retry": true }));
     }
     let mut replacing = false;
     if existing {
-        if held == Held::No {
+        if held == Held::No && !unsettled {
             // The room's word: the claim ended. Its hour stays.
             exec(
                 sql,
@@ -226,7 +232,8 @@ fn take(sql: &SqlStorage, key: &str, reservation: &str) -> R<()> {
 ///   idempotent, and makes the entry if it went missing, so a lost answer can't leave a standing claim uncounted.
 /// - **`release`** gives back this request's reservation when the room refused. The entry and its hour go only when no
 ///   reservation is left on it and it was never confirmed, so another request's claim keeps its count. An entry that was
-///   `replacing` an older one goes back to that one, active, giving back only the new hour.
+///   `replacing` an older one goes back to that one, active, giving back only the new hour, even with the older one's
+///   reservations still on it.
 /// - **`end`** drops an active entry the room says has ended, keeping its hour.
 pub(super) fn settle(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     exec(sql, SCHEMA, vec![])?;
@@ -274,7 +281,9 @@ pub(super) fn settle(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
             )?;
             if let Some(entry) = entry.first() {
                 let state = entry["state"].as_str();
-                if !others && matches!(state, Some("pending" | "replacing")) {
+                // A `replacing` entry goes back to what it replaced whatever else is on it, since reservations left on it
+                // are the older request's, whose claim may stand. A pending one goes only with its last reservation.
+                if (state == Some("pending") && !others) || state == Some("replacing") {
                     if state == Some("pending") {
                         exec(
                             sql,

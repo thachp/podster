@@ -170,7 +170,12 @@ What proves each gate item, and how far that proof has got. This is modeled on [
 Last updated 2026-11-09 UTC, with every M3 build step merged (1 to 15, 13b, and `/a2a/files`) and the owner-approved gate runs done.
 
 **The gate run, 2026-11-09.** The owner approved three items that day, answering "yes, yes, option a": LangGraph locally, Spike C on staging, and the test A2A server from [#184](https://github.com/thachp/podster/pull/184)'s option A. All three ran.
-- **The outside round trip and Spike C on staging.** `e2e/a2a-roundtrip.mjs` passed 20 of 20, with 0 failed, against staging in room `ws_7d0b6d16b8c64834af001019b9df2520`. Staging ran API version `6a01b16a` and gateway `cbae6ee2`. The far end was [the test A2A server](../e2e/a2a-test-server/README.md), `podster-a2a-test-staging` on `workers.dev`. It checks the signature and bearer, and a run's values reach it sealed in the bearer, so no Worker secret is set per run. The owner set its one key, `RUN_KEY`, once. The run showed:
+- **The outside round trip and Spike C on staging.** `e2e/a2a-roundtrip.mjs` passed 20 of 20, with 0 failed, against staging in room `ws_7d0b6d16b8c64834af001019b9df2520`. Staging ran API version `6a01b16a` and gateway `cbae6ee2`. The far end was [the test A2A server](../e2e/a2a-test-server/README.md), `podster-a2a-test-staging` on `workers.dev`. It checks the signature and bearer, as a real agent would. Its address is `https://podster-a2a-test-staging.podster-dev.workers.dev`. The lead accepted this design for how a run's values reach it:
+  - The server holds one secret, `RUN_KEY`, 64 hex characters. The owner set it once. Its local copy is `~/.config/podster/a2a-test-run.key`, mode 600, on the machine that runs the check, and it's never printed or committed.
+  - Each run seals the endpoint's signing secret, the agent's `/a2a` token and an expiry under `RUN_KEY` with AES-256-GCM. It sets the result as the endpoint's bearer token, which Podster stores sealed again.
+  - The expiry is at most 1 hour, and the server refuses a bearer that claims longer.
+  - The server opens the bearer and verifies `X-Podster-Signature` with the signing secret inside. Without `RUN_KEY` nobody can make a bearer it accepts, so nobody can choose the secret it checks against, and the signature check isn't weakened.
+  - So no Worker secret is set per run. The run showed:
   - an offer with an input file going out signed;
   - the server downloading the file over `/a2a/files` with the agent's `/a2a` token, HTTP 200 with the same SHA-256;
   - `WORKING` read back as an acceptance and `COMPLETED` as a submission, both as the agent with origin `a2a_remote`;
@@ -183,6 +188,7 @@ Last updated 2026-11-09 UTC, with every M3 build step merged (1 to 15, 13b, and 
   - change request to resubmission: 198 s.
 
   Real egress to `workers.dev` works under `global_fetch_strictly_public`. An endpoint that answers after 15 s fails at the 10 s timeout, and one that redirects to `169.254.169.254` isn't followed. Each failed 3 times in a row and switched off in about 160 s, with its task untouched. No token, secret, key or sealed bearer was in the run's output.
+- **After the expiry was cut to 1 hour,** the Worker was redeployed as version `3c94e8a2`. `--only round-trip` passed 14 of 14 on staging, in room `ws_9433883dc89b43ce972bb85caa0a332a`.
 - **A first run failed 4 of 20.** The account's `workers.dev` subdomain was renamed from `agentlater` to `podster-dev` while the run was going, so every send after the first offer failed DNS. The rerun used the new name.
 - **LangGraph** ([decision 143](spec/PRODUCT.md#decisions-needed)) ran locally: `langgraph-api` 0.17.1 with [one trivial graph](../e2e/langgraph/README.md), against Podster's real send, read-back and cancel code in workerd (`apps/api/test/a2a-langgraph.spec.ts`, through `e2e/run-langgraph-check.mjs`). All 4 checks passed. The protocol fits, but **LangGraph's results don't reach Podster:**
   - it ignores `returnImmediately` and answers `SendMessage` only once its run ends;

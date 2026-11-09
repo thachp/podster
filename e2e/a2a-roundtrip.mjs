@@ -91,7 +91,7 @@ async function remoteAgent(label, path) {
   if (!first.ok) throw new Error(`set_a2a_endpoint: ${first.code}`);
   const signing = first.data.signing_secret;
   secrets.add(signing);
-  const bearer = await seal(runKeyValue, { s: signing, a: a2a, x: Math.floor(Date.now() / 1000) + 3 * 3600 });
+  const bearer = await seal(runKeyValue, { s: signing, a: a2a, x: Math.floor(Date.now() / 1000) + 3600 });
   secrets.add(bearer);
   const second = await agent.call("set_a2a_endpoint", { url, token: bearer });
   return { agent, url, signing, first: first.data, second: second.ok ? second.data : { code: second.code } };

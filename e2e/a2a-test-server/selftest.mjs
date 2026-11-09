@@ -46,6 +46,7 @@ const otherKey = await seal(await runKey(randomBytes(32).toString("hex")), { s: 
 check((await call(plain, { auth: otherKey })).status === 401, "a bearer sealed under another key: 401");
 check((await call(plain, { auth: await seal(key, { s: secret, x: now() - 1 }) })).status === 401, "an expired bearer: 401");
 check((await call(plain, { auth: `${bearer.slice(0, -2)}AA` })).status === 401, "an altered bearer: 401");
+check((await call(plain, { auth: await seal(key, { s: secret, x: now() + 2 * 3600 }) })).status === 401, "a bearer that claims to live past an hour: 401");
 check((await call(plain, { signature: await sign("a2asec_wrong", now(), JSON.stringify(plain)) })).status === 401, "a signature under another secret: 401");
 check((await call(plain, { at: now() - 900 })).status === 401, "a signature 15 minutes old: 401");
 check((await call(plain, { signature: "t=1,v1=zz" })).status === 401, "a malformed signature: 401");

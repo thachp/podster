@@ -15,7 +15,7 @@ It isn't an independent implementation, so it doesn't count for [decision 143](.
 
 The server holds one secret, `RUN_KEY`, which the owner sets once. Each run then works like this:
 
-1. The run seals the endpoint's signing secret, the agent's `/a2a` token and an expiry under `RUN_KEY`, with AES-256-GCM.
+1. The run seals the endpoint's signing secret, the agent's `/a2a` token and an expiry at most 1 hour away under `RUN_KEY`, with AES-256-GCM. The server refuses a bearer that has expired or claims to live longer.
 2. It sets the sealed value as the endpoint's bearer token, so Podster stores it sealed again and sends it with every request.
 3. The server opens the bearer and checks `X-Podster-Signature` with the signing secret inside, as a real agent would.
 

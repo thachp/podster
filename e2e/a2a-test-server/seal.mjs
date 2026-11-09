@@ -31,14 +31,17 @@ export async function seal(key, values) {
   return PREFIX + b64url(out);
 }
 
-/** The values in a bearer, or null if it isn't one this key made, or it has expired. */
+/** The longest a sealed bearer may live: a run takes about 13 minutes. */
+export const MAX_LIFETIME_SECONDS = 3600;
+
+/** The values in a bearer, or null if it isn't one this key made, has expired, or claims to live past an hour from now. */
 export async function open(key, bearer, nowSeconds) {
   if (typeof bearer !== "string" || !bearer.startsWith(PREFIX) || bearer.length > 4096) return null;
   try {
     const bytes = unb64url(bearer.slice(PREFIX.length));
     const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: bytes.slice(0, 12), additionalData: AAD }, key, bytes.slice(12));
     const values = JSON.parse(new TextDecoder().decode(plain));
-    if (typeof values?.s !== "string" || !Number.isInteger(values?.x) || values.x < nowSeconds) return null;
+    if (typeof values?.s !== "string" || !Number.isInteger(values?.x) || values.x < nowSeconds || values.x > nowSeconds + MAX_LIFETIME_SECONDS) return null;
     return values;
   } catch {
     return null;

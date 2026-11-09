@@ -1532,13 +1532,23 @@ impl Principal {
                 if !podster_policy::public::may_set_participation_policy(kind, administers) {
                     return Err(ApiError::not_allowed());
                 }
-                if conn["status"].as_str() != Some(ACTIVE) {
-                    return Err(ApiError::agent_disconnected());
-                }
+                // The body is read first, because a disconnect, and even a reconnect, can land while it arrives. The connection
+                // is then checked again in the transaction that writes, against the generation seen before the wait, so a
+                // consent given before a disconnect can never be written after it and survive a reconnect (decision 159).
                 let body: Value = serde_json::from_str(&req.text().await?)
                     .map_err(|_| ApiError::invalid_argument())?;
+                let seen_generation = int(&conn["generation"]);
                 let (store, actor, now) = (sql.clone(), caller.id.clone(), now_ms());
-                self.in_transaction(move || participation::set(&store, &actor, &body, now))
+                self.in_transaction(move || {
+                    let still = connection(&store)?.is_some_and(|c| {
+                        c["status"].as_str() == Some(ACTIVE)
+                            && int(&c["generation"]) == seen_generation
+                    });
+                    if !still {
+                        return Err(ApiError::agent_disconnected());
+                    }
+                    participation::set(&store, &actor, &body, now)
+                })
             }
             (method @ (Method::Put | Method::Delete), Some("wake")) => {
                 self.wake_command(method, &mut req).await

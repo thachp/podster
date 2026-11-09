@@ -153,3 +153,80 @@ describe("registering a room for a public claim", () => {
     expect(await registered(agent)).toEqual(expect.arrayContaining(["ws_pp_invited", "ws_pp_old_caller"]));
   });
 });
+
+describe("people who don't administer the agent's organization now", () => {
+  it("refuses an admin who left the organization, a demoted admin, a guest from another organization and another agent", async () => {
+    const agent = await newAgent();
+    const sibling = await newAgent();
+    // The gateway builds each assertion from current memberships, so someone who left only administers their personal
+    // organization now, and a demoted admin is a plain member.
+    const departed: Who = { id: "per_pp_departed", kind: "person", org: "org_pp_departed_personal", adminOrgs: ["org_pp_departed_personal"] };
+    const demoted: Who = { id: "per_pp_demoted", kind: "person", org: ORG, adminOrgs: [] };
+    // A person from an invited organization who shares a room with the agent: a room grants nothing over an agent.
+    const guest: Who = { id: "per_pp_guest", kind: "person", org: "org_pp_guest", adminOrgs: ["org_pp_guest"] };
+    for (const who of [departed, demoted, guest, sibling]) {
+      expect((await setPolicy(who, agent, { policy: "public_claims" })).code, who.id).toBe("agent_not_found");
+      expect((await api(who, "GET", path(agent))).code, who.id).toBe("agent_not_found");
+    }
+    expect((await api(ADMIN, "GET", path(agent))).body).toMatchObject({ policy: "invitations_only", history: [] });
+  });
+});
+
+describe("a disconnect while a set's body is still arriving", () => {
+  /** A PUT straight to the agent's Principal with its body held open, while `meanwhile` runs, then the body finishes. */
+  async function setWhile(agent: Who, meanwhile: () => Promise<void>) {
+    let finish: (() => void) | undefined;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        finish = () => {
+          controller.enqueue(new TextEncoder().encode(JSON.stringify({ policy: "public_claims" })));
+          controller.close();
+        };
+      },
+    });
+    const pending = stub(agent).fetch(`https://principal.internal${path(agent)}`, {
+      method: "PUT",
+      headers: { "x-podster-caller": JSON.stringify({ id: ADMIN.id, kind: "person", org: ORG, orgs: [ORG], admin_orgs: [ORG] }) },
+      body: stream,
+      duplex: "half",
+    } as RequestInit);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await meanwhile();
+    finish?.();
+    const res = await pending;
+    return { status: res.status, body: (await res.json()) as any };
+  }
+
+  const disconnect = async (agent: Who) => {
+    const off = await api(ADMIN, "POST", `/v1/agents/${agent.id}/disconnect`);
+    expect(off.status, off.text).toBe(200);
+  };
+  const reconnect = async (agent: Who) => expect(await api(ADMIN, "POST", `/v1/agents/${agent.id}/reconnect`)).toMatchObject({ status: 200 });
+
+  it("refuses the set, so no consent survives the reconnect", async () => {
+    const agent = await newAgent();
+    const res = await setWhile(agent, () => disconnect(agent));
+    expect(res.body.error?.code).toBe("agent_disconnected");
+    await reconnect(agent);
+    const read = await api(ADMIN, "GET", path(agent));
+    expect(read.body.policy).toBe("invitations_only");
+    expect(read.body.history).toEqual([]);
+  });
+
+  it("refuses it when the agent was disconnected and reconnected while it arrived", async () => {
+    const agent = await newAgent();
+    const res = await setWhile(agent, async () => {
+      await disconnect(agent);
+      await reconnect(agent);
+    });
+    expect(res.body.error?.code).toBe("agent_disconnected");
+    expect((await api(ADMIN, "GET", path(agent))).body.policy).toBe("invitations_only");
+  });
+
+  it("still sets it when nothing changed meanwhile", async () => {
+    const agent = await newAgent();
+    const res = await setWhile(agent, async () => {});
+    expect(res.status).toBe(200);
+    expect(res.body.policy).toBe("public_claims");
+  });
+});

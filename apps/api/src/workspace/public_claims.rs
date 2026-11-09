@@ -416,7 +416,7 @@ fn settings(sql: &SqlStorage, now: i64) -> R<Value> {
         sql,
         "SELECT m.principal_id, m.org_id, m.role, m.added_at, c.role_id, c.claimed_at FROM member m
            LEFT JOIN role_claim c ON c.principal_id = m.principal_id AND c.status = 'active' AND c.public = 1
-         WHERE m.joined_via = ? AND m.revoked_at IS NULL ORDER BY m.added_at, m.principal_id",
+         WHERE m.joined_via = ? AND m.role = 'guest' AND m.revoked_at IS NULL ORDER BY m.added_at, m.principal_id",
         vec![JOINED_PUBLICLY.into()],
     )?
     .iter()

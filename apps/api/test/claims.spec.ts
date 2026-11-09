@@ -693,4 +693,14 @@ describe("owner controls in public rooms (M4 step 9)", () => {
     }
   });
 
+  it("lists only claimants still in the guest role they joined with, as ending them does (step 9 review, L2)", async () => {
+    const room = await publicRoom();
+    const [stays, raised] = [await agent(), await agent()];
+    for (const who of [stays, raised]) expect((await claim(who, room.handle, room.role)).status).toBe(200);
+    // A role raised by a path that doesn't clear how it joined.
+    await inRoom(room.id, (sql) => sql.exec("UPDATE member SET role = 'member' WHERE principal_id = ?", raised.id));
+    expect((await settings(room.id)).claimants.map((c: any) => c.principal_id)).toEqual([stays.id]);
+    const ended = await api(OWNER, "POST", `/v1/workspaces/${room.id}/public-claims/end`, {});
+    expect(ended.body.ended).toBe(1);
+  });
 });

@@ -11,9 +11,11 @@
   "preview_urls": false,
   "durable_objects": { "bindings": [
     { "name": "WORKSPACE", "class_name": "Workspace" },
-    { "name": "PRINCIPAL", "class_name": "Principal" }
+    { "name": "PRINCIPAL", "class_name": "Principal" },
+    // Reports and operator actions (M4 step 10), in one object so the daily report limit is exact.
+    { "name": "MODERATION", "class_name": "Moderation" }
   ] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Workspace", "Principal"] }],
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Workspace", "Principal"] }, { "tag": "v2", "new_sqlite_classes": ["Moderation"] }],
   // The real database ID is set when staging is created. Only the listing read model lives here.
   "d1_databases": [{ "binding": "DB", "database_name": "podster-api", "database_id": "local-only", "migrations_dir": "migrations" }]
   // ASSERTION_KEYS is a secret: a JSON object of kid to base64url Ed25519 public key. SCANNER_SECRET is the same value as the scanner
@@ -23,6 +25,8 @@
   ,"r2_buckets": [{ "binding": "ASSETS", "bucket_name": "podster-assets" }]
   // The application's address, for the link in an A2A offer, and the gateway's, for its input files. Only links: opening
   // either needs the agent's own sign-in or credential.
+  // OPERATORS, the person IDs of Podster operators separated by commas (decision 158), is set nowhere here: naming
+  // operators is the owner's call (M4 plan). Without it nobody is an operator.
   ,"vars": { "APP_URL": "http://app.localhost:3000", "GATEWAY_URL": "http://localhost:8787" }
   // A2A offers (M3 step 12, decision 129) have their own queue, apart from wake's. It holds IDs only. A job whose retries run
   // out goes to the dead-letter queue, whose consumer logs its IDs and acknowledges it.
@@ -50,7 +54,8 @@
       },
       "durable_objects": { "bindings": [
         { "name": "WORKSPACE", "class_name": "Workspace" },
-        { "name": "PRINCIPAL", "class_name": "Principal" }
+        { "name": "PRINCIPAL", "class_name": "Principal" },
+        { "name": "MODERATION", "class_name": "Moderation" }
       ] },
       "d1_databases": [{ "binding": "DB", "database_name": "podster-api-staging", "database_id": "31b8cc7a-1e7a-424d-8689-f95f96f0a487", "migrations_dir": "migrations" }]
     }

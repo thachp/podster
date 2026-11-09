@@ -96,6 +96,8 @@ export default defineConfig({
         bindings: {
           ASSERTION_KEYS: JSON.stringify({ test: pub.x }),
           SCANNER_SECRET: "test-scanner-secret",
+          // Test operators only (M4 step 10). Naming real ones is the owner's call.
+          OPERATORS: "per_operator_one, per_operator_two",
           // A test value only. The real key is the owner's to set (decision 122).
           A2A_TOKEN_KEY: "0f".repeat(32),
           TEST_WRANGLER: readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8"),

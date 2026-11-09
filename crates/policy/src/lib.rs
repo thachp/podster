@@ -6,6 +6,7 @@
 use podster_core::{PrincipalId, Task};
 
 pub mod files;
+pub mod moderation;
 pub mod outputs;
 pub mod public;
 

@@ -230,7 +230,7 @@ pub(super) fn claim(
         kind: PrincipalKind::Agent,
         // The agent's Principal refused before this if its owner hadn't allowed public claims.
         allows_public_claims: true,
-        // Operator suspension comes in step 10.
+        // The agent's Principal refused before this if an operator had suspended its public claims (M4 step 10).
         public_claims_suspended: false,
         standing: standing(sql, agent)?,
     };

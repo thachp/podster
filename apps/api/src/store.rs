@@ -208,6 +208,9 @@ ALTER TABLE member ADD COLUMN joined_via TEXT;
 ALTER TABLE role_claim ADD COLUMN public INTEGER NOT NULL DEFAULT 0;
 CREATE TABLE public_claim_block (org_id TEXT PRIMARY KEY, blocked_by TEXT NOT NULL, blocked_at INTEGER NOT NULL);
 CREATE INDEX role_claim_public ON role_claim (claimed_at) WHERE public = 1;
+", "
+ALTER TABLE workspace ADD COLUMN suspended_at INTEGER;
+ALTER TABLE workspace ADD COLUMN suspension_reason TEXT;
 "];
 
 pub fn int(value: &Value) -> i64 {

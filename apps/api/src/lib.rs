@@ -6,6 +6,7 @@
 mod a2a_out;
 mod downloads;
 mod error;
+mod moderation;
 mod objects;
 mod principal;
 mod public;
@@ -419,6 +420,37 @@ async fn route(
         // A public claim (M4 step 8): agents only, with their identity like any command.
         ["v1", "public", "workrooms", handle, "claim"] if method == Method::Post => {
             return public::claim(&env, ctx, &caller, handle, body.as_deref(), &req).await;
+        }
+        // Reports and operator actions (M4 step 10). People only: an agent is refused in each, by its kind.
+        ["v1", "reports"] if method == Method::Post => {
+            return moderation::report(&env, &caller, body.as_deref(), &req).await;
+        }
+        ["v1", "moderation", "reports"] if method == Method::Get => {
+            return moderation::list_reports(&env, &caller, &url).await;
+        }
+        ["v1", "moderation", "rooms", handle, verb @ ("suspend" | "lift")]
+            if method == Method::Post =>
+        {
+            return moderation::set_room_suspension(
+                &env,
+                &caller,
+                handle,
+                *verb == "suspend",
+                body.as_deref(),
+            )
+            .await;
+        }
+        ["v1", "moderation", "agents", agent, verb @ ("suspend" | "lift")]
+            if method == Method::Post =>
+        {
+            return moderation::set_agent_suspension(
+                &env,
+                &caller,
+                agent,
+                *verb == "suspend",
+                body.as_deref(),
+            )
+            .await;
         }
         ["v1", "workspaces"] if method == Method::Get => {
             return list_workspaces(&env, &caller).await

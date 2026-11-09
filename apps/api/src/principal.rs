@@ -93,6 +93,7 @@ const MAX_REPLAY_KEY_BYTES: usize = 512;
 
 const ACTIVE: &str = "active";
 const PUBLIC_CLAIMS_NOT_ALLOWED: &str = "public_claims_not_allowed";
+const PUBLIC_CLAIMS_SUSPENDED: &str = "public_claims_suspended";
 const DISCONNECTING: &str = "disconnecting";
 const DISCONNECTED: &str = "disconnected";
 const RETRY_SECS: u64 = 5;
@@ -725,7 +726,7 @@ fn ack_inbox(sql: &SqlStorage, up_to: i64, now: i64) -> R<Value> {
 /// removing one could let a disconnect miss a room.
 ///
 /// A `public_claim` is also refused, with `public_claims_not_allowed`, unless the agent's owner allows public claims
-/// (decision 159). Nothing claims publicly yet: M4 step 8 does.
+/// (decision 159), and with `public_claims_suspended` while an operator has suspended its public claims (decision 158).
 pub async fn register_room(
     env: &Env,
     agent: &str,
@@ -742,8 +743,10 @@ pub async fn register_room(
     .await?;
     if response.status_code() == 403 {
         let body: Value = response.json().await.unwrap_or(Value::Null);
-        if body["error"]["code"].as_str() == Some(PUBLIC_CLAIMS_NOT_ALLOWED) {
-            return Err(ApiError::api(403, PUBLIC_CLAIMS_NOT_ALLOWED));
+        for code in [PUBLIC_CLAIMS_NOT_ALLOWED, PUBLIC_CLAIMS_SUSPENDED] {
+            if body["error"]["code"].as_str() == Some(code) {
+                return Err(ApiError::api(403, code));
+            }
         }
         return Err(ApiError::not_allowed());
     }
@@ -796,6 +799,27 @@ pub async fn reserve_public_claim(
         })
         .unwrap_or_default();
     Ok(Err((code, active)))
+}
+
+/// Suspends or lifts an agent's public claims, for a verified operator (M4 step 10).
+pub async fn set_public_claims_suspension(
+    env: &Env,
+    agent: &str,
+    suspended: bool,
+    reason: &str,
+    operator: &str,
+) -> R<Value> {
+    let body = json!({ "suspended": suspended, "reason": reason, "operator": operator });
+    let mut response = internal(env, agent, "/internal/public-claims-suspension", &body).await?;
+    if response.status_code() == 404 {
+        return Err(ApiError::agent_not_found());
+    }
+    if response.status_code() != 200 {
+        return Err(ApiError::internal(
+            "couldn't set a public claims suspension",
+        ));
+    }
+    Ok(response.json().await?)
 }
 
 /// Confirms, releases or ends a public claim on one Principal's count. `release` gives back only `reservation`.
@@ -1467,6 +1491,16 @@ impl Principal {
                 let (store, now) = (sql.clone(), now_ms());
                 return self.in_transaction(move || public_claims::settle(&store, &body, now));
             }
+            "/internal/public-claims-suspension" => {
+                // Only an agent that was ever registered: an operator's typo mustn't make a Principal.
+                if connection(&sql)?.is_none() {
+                    return Err(ApiError::agent_not_found());
+                }
+                let body: Value = req.json().await?;
+                let (store, now) = (sql.clone(), now_ms());
+                return self
+                    .in_transaction(move || public_claims::set_suspension(&store, &body, now));
+            }
             "/internal/register-room" => {
                 let body: Value = req.json().await?;
                 let conn = connection(&sql)?.ok_or_else(ApiError::agent_disconnected)?;
@@ -1480,6 +1514,10 @@ impl Principal {
                     && !participation::current(&sql)?.allows_public_claims()
                 {
                     return Err(ApiError::api(403, PUBLIC_CLAIMS_NOT_ALLOWED));
+                }
+                // An operator's suspension refuses every public claim (M4 step 10). Invited ones are unaffected.
+                if body["public_claim"].as_bool() == Some(true) && public_claims::suspended(&sql)? {
+                    return Err(ApiError::api(403, PUBLIC_CLAIMS_SUSPENDED));
                 }
                 exec(&sql, "INSERT OR IGNORE INTO room_registry (workspace_id, registered_at) VALUES (?, ?)",
                     vec![body["workspace_id"].as_str().unwrap_or("").into(), now_ms().into()])?;

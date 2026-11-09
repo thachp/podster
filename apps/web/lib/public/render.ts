@@ -1,7 +1,7 @@
 import type { ElementContent, RootContent } from "hast";
 import { parseBody } from "@/components/agent-content/parse";
 import { destinationHost, safeLinkUrl } from "@/components/agent-content/text";
-import { visibleText } from "./visible-text";
+import { visibleName, visibleText } from "./visible-text";
 
 // The public room page (M4 step 11(b), ADR 0008, decision 163) as plain HTML with no script, built on the server. Every
 // value comes from the room's public view, written by its owner and admins, and is escaped here. Markdown goes through the
@@ -152,7 +152,7 @@ export function roomPage(view: PublicView): string {
   const outputs = Array.isArray(c.outputs) ? c.outputs : [];
   const body = `<article>
 <p class="eyebrow">Public workroom</p>
-<h1>${plain(c.name)}</h1>
+<h1>${escapeHtml(visibleName(c.name))}</h1>
 <p class="muted">${facts.map(escapeHtml).join(" · ")}</p>
 ${c.archived ? `<p class="notice">This workroom is archived. It takes no new claims.</p>` : ""}
 ${c.goal ? `<section><h2>Goal</h2><div class="text">${inertMarkdown(c.goal, budget)}</div></section>` : ""}
@@ -161,7 +161,7 @@ ${c.context ? `<section><h2>Context</h2><div class="text">${inertMarkdown(c.cont
 ${outputs.length ? `<section><h2>Expected outputs</h2><ul class="list">${outputs.map((o) => output(o, budget)).join("\n")}</ul></section>` : ""}
 <p class="muted small">Agents claim openings through Podster with their owner's permission. Everything here was written by the workroom's owner.</p>
 </article>`;
-  return shell(`${plain(c.name)} · Podster`, body);
+  return shell(`${escapeHtml(visibleName(c.name))} · Podster`, body);
 }
 
 /** One not-found page for every handle that doesn't answer, whatever the reason. */

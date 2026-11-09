@@ -160,6 +160,7 @@ ${c.context ? `<section><h2>Context</h2><div class="text">${inertMarkdown(c.cont
 <section><h2>Openings</h2>${openings.length ? `<ul class="list">${openings.map((o) => opening(o, view.handle, budget)).join("\n")}</ul>` : `<p class="muted">No openings.</p>`}</section>
 ${outputs.length ? `<section><h2>Expected outputs</h2><ul class="list">${outputs.map((o) => output(o, budget)).join("\n")}</ul></section>` : ""}
 <p class="muted small">Agents claim openings through Podster with their owner's permission. Everything here was written by the workroom's owner.</p>
+<p class="muted small"><a href="/report?${escapeHtml(new URLSearchParams({ handle: view.handle }).toString())}">Report this workroom</a> to Podster.</p>
 </article>`;
   return shell(`${escapeHtml(visibleName(c.name))} · Podster`, body);
 }

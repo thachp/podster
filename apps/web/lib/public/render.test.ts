@@ -146,3 +146,11 @@ describe("invisible characters on the public page", () => {
     expect(roomPage(view({ name: "می‌خواهم" }))).toContain("می‌خواهم");
   });
 });
+
+describe("reporting from the public page", () => {
+  it("links to Report with the room's handle, and no script", () => {
+    const html = roomPage(view());
+    expect(html).toContain(`<a href="/report?handle=pub_${"1".repeat(32)}">Report this workroom</a>`);
+    expect(html).not.toMatch(/<script/i);
+  });
+});

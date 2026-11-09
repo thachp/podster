@@ -207,6 +207,12 @@ pub fn open(key: &[u8], agent: &str, version: u64, stored: &str) -> Result<Strin
     String::from_utf8(plain).map_err(|_| SealError::NotOpenable)
 }
 
+/// What a labeled seal is bound to: its scheme's version and its label, so a later scheme, or another use of the same key,
+/// never opens as this one.
+fn sealed_aad(label: &str) -> String {
+    format!("podster-sealed:v1:{label}")
+}
+
 /// Seals a short value that leaves Podster and comes back, such as an Explore cursor (M4 step 14), so whoever holds it can
 /// neither read nor change it. `label` names what it is and is bound in, so a value sealed as one thing never opens as
 /// another. The result is lower-case hex only: the nonce, then the ciphertext with its tag. `nonce` must be fresh for every
@@ -223,7 +229,7 @@ pub fn seal_labeled(
             Nonce::from_slice(nonce),
             Payload {
                 msg: value.as_bytes(),
-                aad: format!("podster-sealed:{label}").as_bytes(),
+                aad: sealed_aad(label).as_bytes(),
             },
         )
         .map_err(|_| SealError::BadKey)?;
@@ -243,7 +249,7 @@ pub fn open_labeled(key: &[u8], label: &str, sealed: &str) -> Result<String, Sea
             Nonce::from_slice(nonce),
             Payload {
                 msg: body,
-                aad: format!("podster-sealed:{label}").as_bytes(),
+                aad: sealed_aad(label).as_bytes(),
             },
         )
         .map_err(|_| SealError::NotOpenable)?;
@@ -264,14 +270,10 @@ mod tests {
 
     #[test]
     fn a_labeled_value_opens_only_under_its_key_and_label() {
-        let key = [7_u8; KEY_BYTES];
-        let sealed = seal_labeled(
-            &key,
-            &[1; NONCE_BYTES],
-            "explore-cursor",
-            "1794256373910.pub_ab",
-        )
-        .unwrap();
+        let key = key();
+        let other_key = test_bytes("other key", KEY_BYTES);
+        let first = nonce("first cursor");
+        let sealed = seal_labeled(&key, &first, "explore-cursor", "1794256373910.pub_ab").unwrap();
         assert!(sealed
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
@@ -285,7 +287,7 @@ mod tests {
             Err(SealError::NotOpenable)
         );
         assert_eq!(
-            open_labeled(&[8; KEY_BYTES], "explore-cursor", &sealed),
+            open_labeled(&other_key, "explore-cursor", &sealed),
             Err(SealError::NotOpenable)
         );
         // One flipped character, a cut one, or nothing past the nonce, never opens.
@@ -318,11 +320,37 @@ mod tests {
             sealed,
             seal_labeled(
                 &key,
-                &[2; NONCE_BYTES],
+                &nonce("second cursor"),
                 "explore-cursor",
                 "1794256373910.pub_ab"
             )
             .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_labeled_seal_names_its_version() {
+        // Sealed by hand under the old, unversioned binding, it doesn't open: the version is part of what's bound.
+        let key = key();
+        let at = nonce("unversioned");
+        let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
+        let old = cipher
+            .encrypt(
+                Nonce::from_slice(&at),
+                Payload {
+                    msg: b"1.pub_ab",
+                    aad: b"podster-sealed:explore-cursor",
+                },
+            )
+            .unwrap();
+        let unversioned = format!("{}{}", hex(&at), hex(&old));
+        assert_eq!(
+            open_labeled(&key, "explore-cursor", &unversioned),
+            Err(SealError::NotOpenable)
+        );
+        assert_eq!(
+            sealed_aad("explore-cursor"),
+            "podster-sealed:v1:explore-cursor"
         );
     }
 

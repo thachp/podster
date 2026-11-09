@@ -32,13 +32,13 @@ async function publicAssertion(extra: object = {}) {
 }
 
 let counter = 0;
-type Opts = { claims?: object; on?: boolean; token?: string; noCursorKey?: boolean };
+type Opts = { claims?: object; on?: boolean; token?: string; cursorKey?: "unset" | "empty" | "short" };
 async function api(who: Who | "public", method: string, path: string, body?: unknown, opts: Opts = {}) {
   const token = opts.token ?? (who === "public" ? await publicAssertion() : await assertion(who, opts.claims ?? {}));
   const headers: Record<string, string> = { "x-podster-assertion": token, "content-type": "application/json" };
   if (method !== "GET") headers["idempotency-key"] = `pub-key-${++counter}`;
   if (opts.on) headers["x-test-public-rooms"] = "on";
-  if (opts.noCursorKey) headers["x-test-cursor-key"] = "unset";
+  if (opts.cursorKey) headers["x-test-cursor-key"] = opts.cursorKey;
   const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: method === "GET" ? undefined : JSON.stringify(body ?? {}) });
   const text = await res.text();
   let parsed: any = null;
@@ -382,7 +382,7 @@ describe("Explore", () => {
     }
   });
 
-  it("shows only its first page, and refuses every cursor, until the owner sets the key", async () => {
+  it("shows only its first page, and refuses every cursor, while the key is unset, empty or the wrong length", async () => {
     const future = Date.now() + 30_000_000;
     for (let n = 0; n < 21; n++) {
       await BINDINGS.DB.prepare("INSERT INTO public_workroom_index (workspace_id, public_handle, topic, has_open_opening, published_at, resolvable, listed, updated_seq) VALUES (?, ?, 'other', 0, ?, 1, 1, 1)").bind(`ws_nokey_fake_${n}`, `pub_${n.toString(16).padStart(32, "d")}`, future - n).run();
@@ -390,13 +390,30 @@ describe("Explore", () => {
     try {
       const sealed = (await explore(STRANGER, "?topic=other")).body.next_cursor;
       expect(sealed).toMatch(/^[0-9a-f]+$/);
-      const unset = await explore(STRANGER, "?topic=other", { noCursorKey: true });
-      expect(unset.status).toBe(200);
-      expect(unset.body.next_cursor).toBeNull();
-      expect((await explore(STRANGER, `?topic=other&cursor=${sealed}`, { noCursorKey: true })).code).toBe("invalid_argument");
+      for (const cursorKey of ["unset", "empty", "short"] as const) {
+        const first = await explore(STRANGER, "?topic=other", { cursorKey });
+        expect(first.status, cursorKey).toBe(200);
+        expect(first.body.next_cursor, cursorKey).toBeNull();
+        const paged = await explore(STRANGER, `?topic=other&cursor=${sealed}`, { cursorKey });
+        expect([paged.status, paged.code], cursorKey).toEqual([400, "invalid_argument"]);
+      }
     } finally {
       await BINDINGS.DB.prepare("DELETE FROM public_workroom_index WHERE workspace_id LIKE 'ws_nokey_fake_%'").run();
     }
+  });
+
+  it("refuses a cursor over 200 characters, and one sealed under another key", async () => {
+    const tooLong = "ab".repeat(101);
+    expect((await explore(STRANGER, `?cursor=${tooLong}`)).code).toBe("invalid_argument");
+    // A well-formed cursor, sealed exactly as the API seals one, but under a key that isn't this deployment's.
+    const otherKey = await crypto.subtle.importKey("raw", crypto.getRandomValues(new Uint8Array(32)), "AES-GCM", false, ["encrypt"]);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const position = new TextEncoder().encode(`${Date.now()}.pub_${"c".repeat(32)}`);
+    const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: new TextEncoder().encode("podster-sealed:v1:explore-cursor") }, otherKey, position));
+    const hex = (bytes: Uint8Array) => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const forged = hex(iv) + hex(sealed);
+    expect(forged.length).toBeLessThanOrEqual(200);
+    expect((await explore(STRANGER, `?cursor=${forged}`)).code).toBe("invalid_argument");
   });
 
   it("is empty with public rooms off", async () => {

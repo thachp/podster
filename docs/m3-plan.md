@@ -67,7 +67,7 @@ All three ran locally. Each folder's README has the details.
 - **C** ([#140](https://github.com/thachp/podster/pull/140), `spikes/m3-a2a-outbound`), the local half only:
   - **Passed:** 10 tests in workerd through a local queue, against the project's own SDK server.
   - **Found:** the SDK server makes a second task for a resent `messageId`.
-  - **Not run:** an independent server. Starting LangGraph's was refused by the permission check. The staging half waits for the owner's yes.
+  - **Not run then:** an independent server, since starting LangGraph's was refused by the permission check. Both LangGraph and the staging half ran on 2026-11-09, with the owner's yes. See M3's gate checklist.
 
 ## Build order
 
@@ -78,7 +78,7 @@ C changes `packages/contracts` and M adds a migration or room schema. The order 
 | 0 | ADR 0007 draft: the profile, from the owner's rulings | | | Rulings. **Done** ([#145](https://github.com/thachp/podster/pull/145)) | 1, 2, 3 |
 | 1 | Spike A | | | Questions 1, 2, 3, 18 and 22. **Done**, without the kit ([#138](https://github.com/thachp/podster/pull/138)) | 0, 2, 3 |
 | 2 | Spike B | | | Questions 1 and 5. **Done** ([#139](https://github.com/thachp/podster/pull/139)) | 0, 1, 3 |
-| 3 | Spike C | | | Questions 1, 16 and 20. **Local half done** ([#140](https://github.com/thachp/podster/pull/140)). The staging half waits for the owner's yes | 0, 1, 2 |
+| 3 | Spike C | | | Questions 1, 16 and 20. **Done.** The local half is [#140](https://github.com/thachp/podster/pull/140), and the staging half ran on 2026-11-09 with the owner's yes, as recorded under M3's gate checklist | 0, 1, 2 |
 | 4 | ADR 0007 with spike results, accepted by the owner | | | 0 to 3. **Done:** accepted on 2026-11-08 | |
 | 5 | Pure mapping in `crates/core/src/a2a.rs`, with one line in `lib.rs`: a remote state plus the current Podster state gives one command, a hold or nothing. Tests include late and out-of-order updates | | | 4, M2 finished | 6 |
 | 6 | Gateway module `apps/gateway/src/a2a/`: Agent Card, JSON-RPC envelope, version check, and every operation answering its named "not supported" error. The profile is `docs/spec/A2A-PROFILE.md`, and a gateway test checks the card lists only the operations it names. `check.mjs` covers only `openapi.yaml` and `capabilities.yaml`, so nothing here changes `packages/contracts` | | | 4, M2 finished. **Done** ([#155](https://github.com/thachp/podster/pull/155)) | 5 |
@@ -98,7 +98,7 @@ C changes `packages/contracts` and M adds a migration or room schema. The order 
 
 **Steps that still need the owner's yes in that session:**
 
-- **Spike C on staging,** by [decision 126](spec/PRODUCT.md#decisions-needed). Until then it runs locally only.
+- **Spike C on staging,** by [decision 126](spec/PRODUCT.md#decisions-needed). The owner said yes on 2026-11-09, and it ran that day.
 - **Step 11's encryption secret** for stored endpoint tokens, by [decision 122](spec/PRODUCT.md#decisions-needed). The owner sets it.
 - **Step 12's queue and dead-letter queue,** by [decision 129](spec/PRODUCT.md#decisions-needed). The owner created `podster-a2a-staging` and `podster-a2a-dlq-staging` on 2026-11-08.
 
@@ -167,7 +167,41 @@ What proves each gate item, and how far that proof has got. This is modeled on [
 - **Passed on staging:** the staging check passed against `gateway-staging.podster.dev`, at the commit given.
 - **Owed:** nothing yet proves it.
 
-Last updated 2026-11-09 UTC, with every M3 build step merged: 1 to 15, 13b, and `/a2a/files`.
+Last updated 2026-11-09 UTC, with every M3 build step merged (1 to 15, 13b, and `/a2a/files`) and the owner-approved gate runs done.
+
+**The gate run, 2026-11-09.** The owner approved three items that day, answering "yes, yes, option a": LangGraph locally, Spike C on staging, and the test A2A server from [#184](https://github.com/thachp/podster/pull/184)'s option A. All three ran.
+- **The outside round trip and Spike C on staging.** `e2e/a2a-roundtrip.mjs` passed 26 of 26, with 0 failed, after #194's review fixes. It ran against staging in room `ws_1659316eb6114fc99c949e0f42881009`, with staging on API version `f9813a81` and gateway `2aa10d4b`, and the test server on version `982b35b8`.
+  - **The far end** was [the test A2A server](../e2e/a2a-test-server/README.md), `podster-a2a-test-staging`, at `https://podster-a2a-test-staging.podster-dev.workers.dev`. It checks the signature and bearer, as a real agent would.
+  - **The lead accepted this design** for how a run's values reach it:
+    - The server holds one secret, `RUN_KEY`, 64 hex characters, which the owner set once. Its local copy is `~/.config/podster/a2a-test-run.key`, on the machine that runs the check. The run refuses the file unless only its owner can read it, and the key is never printed or committed.
+    - Each run seals the endpoint's signing secret, the agent's `/a2a` token and an expiry under `RUN_KEY` with AES-256-GCM. It sets the result as the endpoint's bearer token, which Podster stores sealed again. The run checks every agent's endpoint holds it, as `stored`.
+    - The expiry is at most 1 hour, and the server refuses a bearer that claims longer.
+    - The server opens the bearer and verifies `X-Podster-Signature` with the signing secret inside. Without `RUN_KEY` nobody can make a bearer it accepts, so nobody can choose the secret it checks against, and the signature check isn't weakened.
+    - So no Worker secret is set per run.
+  - **The run showed:**
+    - an offer with an input file going out signed;
+    - the server downloading the file over `/a2a/files` with the agent's `/a2a` token, HTTP 200 with the same SHA-256;
+    - `WORKING` read back as an acceptance and `COMPLETED` as a submission, both as the agent with origin `a2a_remote`;
+    - a change request going out as a new A2A task naming the completed one in `referenceTaskIds`, which the server's note shows arrived in the first task's context. It was read back as a second submission, which the lead verified;
+    - a task canceled while the remote worked staying canceled. `CancelTask` reaching the server isn't shown, since it keeps nothing.
+- **Spike C's timing** on the deployment:
+  - offered to the send reaching the server: 6.5 s, and between 6.0 and 11.4 s across the runs;
+  - offered to accepted: 73 s, which is the first read at 1 minute;
+  - accepted to submitted: 126 s, the second read at 2 minutes;
+  - change request to resubmission: 198 s.
+
+  Real egress to `workers.dev` works under `global_fetch_strictly_public`.
+- **Spike C's failures.** Before relying on Podster's failure, the run asks the server directly, with that run's own signed request and bearer:
+  - `/a2a/slow` answered HTTP 200 after 15.2 s. Podster's sends to it then failed 3 times in a row, and the endpoint switched off in 165 s with its task untouched. That counts as the 10 s timeout.
+  - `/a2a/redirect` answered 302 to `http://169.254.169.254/latest/meta-data/`. Podster's sends to it failed 3 times, and it switched off in 137 s with its task untouched. That counts as the redirect not being followed.
+
+  No session cookie, OAuth token, signing secret, key or sealed bearer was in the run's output: 17 values were checked.
+- **Earlier runs** were made before the review fixes. A first full run failed 4 of 20: the owner renamed the account's `workers.dev` subdomain from `agentlater` to `podster-dev` while it was going, so every send after the first offer failed DNS. With the new name, a full run passed 20 of 20, and a round-trip-only run passed 14 of 14.
+- **LangGraph** ([decision 143](spec/PRODUCT.md#decisions-needed)) ran locally: `langgraph-api` 0.17.1 with [one trivial graph](../e2e/langgraph/README.md), against Podster's real send, read-back and cancel code in workerd (`apps/api/test/a2a-langgraph.spec.ts`, through `e2e/run-langgraph-check.mjs`). Its 4 checks pass, but they assert the gap. **Decision 143's outbound item isn't met:** the protocol fits, but LangGraph's results don't reach Podster. Its refusal to cancel a finished run (-32002) is recorded as refused. The cause, exactly:
+  - **`SendMessage`:** `langgraph_api/api/a2a.py`'s `handle_message_send` never reads `configuration.returnImmediately`. It joins the run (`client.runs.join`) and answers once the run ends, with `result.task` already `TASK_STATE_COMPLETED` and the graph's reply as an artifact, `name: "Assistant Response"` with one text part. **Podster's `answered()` keeps only `result.task.id` and `contextId`, and drops that answer's `status.state` and `artifacts`.**
+  - **`GetTask`:** it answers `status.state: TASK_STATE_COMPLETED` with a fixed `status.message`, "Task completed successfully", and no `artifacts` field at all. That holds whether `historyLength` is absent, 0 or 5. The graph's reply is only in `history`, as a `ROLE_AGENT` message, and only when `historyLength` isn't 0. **Podster sends `historyLength: 0`, reads no `history`, and for `COMPLETED` takes the note and links only from `artifacts`, never from the status message.**
+  - **No `WORKING`:** since the run has ended before `SendMessage` answers, no read can ever see `WORKING`. So `COMPLETED` on read 1 is held under decision 112. After a manual accept, it maps to a submit with no note and no link, which the room refuses and holds instead. No submission ever comes in over A2A, so no change request goes out (step 13b). A graph longer than Podster's 10 s send timeout would fail to send at all.
+- **The compatibility kit** ([decision 142](spec/PRODUCT.md#decisions-needed)) still hasn't run. This session's permission check refused installing and running its code, even with the owner's yes relayed through the lead. `e2e/run-a2a-kit.mjs` is ready: it runs the kit over JSON-RPC against the local stack, through a proxy that adds an agent's `/a2a` token, since the kit sends none.
 
 **The staging run.** The lead ran `e2e/a2a-staging.mjs` (at `097fb21`) against staging at main `0794706` on 2026-11-09. It passed 59, failed 0 and skipped 0, in room `ws_234f0ec64e074e00b8daa716e8f68b15`. The deployed versions were API `88c50951`, gateway `f19887bc` and web `4fdfed72`. The run includes the unreachable endpoint's switch-off and a real ready-file download over `/a2a/files` with the `/a2a` token. M2's staging check passed 51, failed 0 and skipped 4 on the same deploy.
 
@@ -177,12 +211,12 @@ Last updated 2026-11-09 UTC, with every M3 build step merged: 1 to 15, 13b, and 
 | --- | --- | --- |
 | The profile is published | [A2A-PROFILE.md](spec/A2A-PROFILE.md), with the operations, the lifecycle extension, files and the kit's exceptions | Published in the repository. The kit's exception list waits on the kit run |
 | Inbound interoperability, implementation 1: the A2A project's JavaScript client | `e2e/a2a-staging.mjs`, through `@a2a-js/sdk` 1.3.0: discovery, OAuth to `/a2a`, `GetTask`, `ListTasks` with paging, `SendMessage` with a retry, the lifecycle extension, and the refusals | Passed locally. Passed on staging, 2026-11-09 at `0794706` |
-| Inbound interoperability, implementation 2: the Python client and the kit's client ([decision 143](spec/PRODUCT.md#decisions-needed)) | The A2A compatibility kit ([decision 142](spec/PRODUCT.md#decisions-needed)) | **Owed.** It hasn't run, because the session permission check refuses running the kit's code |
-| Outbound interoperability, with an independent server | LangGraph's `langgraph-api`, with fasta2a as backup ([decision 143](spec/PRODUCT.md#decisions-needed)), receiving an offer and reporting `WORKING` and `COMPLETED` | **Owed.** Starting it was refused by the permission check. See the round trip below |
+| Inbound interoperability, implementation 2: the Python client and the kit's client ([decision 143](spec/PRODUCT.md#decisions-needed)) | The A2A compatibility kit ([decision 142](spec/PRODUCT.md#decisions-needed)), through `e2e/run-a2a-kit.mjs` | **Owed.** It hasn't run. The session permission check refused installing and running the kit's code on 2026-11-09 |
+| Outbound interoperability, with an independent server | LangGraph's `langgraph-api` 0.17.1 ([decision 143](spec/PRODUCT.md#decisions-needed)), through `e2e/run-langgraph-check.mjs` | **Not met.** The protocol fits, but LangGraph's results don't reach Podster. It ran locally on 2026-11-09: the offer is taken and its task and context are recorded, but no read sees `WORKING` and none carries artifacts, so the completion is held, never submitted. The cause is under the gate run above |
 | Outbound behavior without an outside server | `e2e/a2a-staging.mjs`, unreachable endpoint: an offer to an endpoint that doesn't resolve fails, is retried as the same message, and switches the endpoint off after 3 failures, with the task untouched and the admin's read off. `apps/api/test/a2a-outbound.spec.ts` and `a2a-readback.spec.ts` cover the rest against a scripted endpoint | Passed locally. Passed on staging, 2026-11-09 at `0794706` |
 | AC-12: forged, expired or wrong-audience credentials are refused, as on other paths | `apps/gateway/test/oauth-split.spec.ts` (an `/mcp` token at `/a2a` and the reverse), `a2a-files.spec.ts` (only `/a2a` tokens at `/a2a/files`, and `/v1/files` still refuses them), and the assertion tests M0 already passed. `e2e/a2a-staging.mjs` checks an `/a2a` token is refused at `/mcp`, and the `/a2a/files` audience both ways | Passed locally. Passed on staging, 2026-11-09 at `0794706` |
 | AC-18: A2A instructions to elevate access stay data | `a2a-messages.spec.ts` (a message's own fields and text never move the task), `a2a-readback.spec.ts` (remote text is posted as a message, a remote `AUTH_REQUIRED` grants nothing, and artifact text becomes a note, never a command) | Passed locally |
-| AC-24: a remote completion records a submission only, or is held before acceptance, and grants nothing | `a2a-readback.spec.ts`: `WORKING` then `COMPLETED` gives accept then submit, never verify. `COMPLETED` at once is held, and the requester is told. A refused submission is held. Events are marked `a2a_remote` | Passed locally. **On a deployment: owed**, with the round trip |
+| AC-24: a remote completion records a submission only, or is held before acceptance, and grants nothing | `a2a-readback.spec.ts`: `WORKING` then `COMPLETED` gives accept then submit, never verify. `COMPLETED` at once is held, and the requester is told. A refused submission is held. Events are marked `a2a_remote` | Passed locally. Passed on staging, 2026-11-09, by the round trip: accept then submit as the agent, origin `a2a_remote`, never verify |
 | Expanded criterion 4: one task history across protocols, and duplicates create no competing tasks | `a2a-messages.spec.ts` (a retried `messageId` posts once), `a2a-lifecycle.spec.ts` (a retried `requestId` acts once), `a2a-outbound.spec.ts` (a redelivered send sends nothing, and a recorded answer is never sent again), `a2a-readback.spec.ts` (a stale or redelivered read number does nothing). MCP and A2A act on the same task and history | Passed locally. Passed on staging, 2026-11-09 at `0794706`, for the inbound retries (`messageId` and `requestId`) |
 
 ### Behavior M3 adds, by step
@@ -190,18 +224,20 @@ Last updated 2026-11-09 UTC, with every M3 build step merged: 1 to 15, 13b, and 
 | Item | How it's verified | Status |
 | --- | --- | --- |
 | Endpoint registration with a sealed token (step 11) | `a2a-endpoint.spec.ts`, and `e2e/a2a-staging.mjs` "Endpoint": set, read, rotate, the admin's read, delete and disconnect, with no token or secret in any output | Passed locally. Passed on staging, 2026-11-09 at `0794706` |
-| Offers out, from the outbox through the queue, with the send-time rechecks (step 12) | `a2a-outbound.spec.ts`: IDs-only jobs, `returnImmediately`, the signature and token, the answer recorded first, retries as the same message, switching off after 3 failures, the setter's departure, and the dead-letter queue | Passed locally. Passed on staging, 2026-11-09 at `0794706`, for the failure half: an unreachable endpoint fails, retries and switches off. The success half is owed, with the round trip |
-| Reading back by `GetTask`, and cancel out (step 13) | `a2a-readback.spec.ts`: the backoff, the 7 days, the caps refused whole, the archive guard, origin on messages and events, and `CancelTask` once | Passed locally |
-| Change requests out (step 13b) | `a2a-readback.spec.ts`: `referenceTaskIds` and `contextId` from Podster's own stored rows, and superseded by new work | Passed locally |
+| Offers out, from the outbox through the queue, with the send-time rechecks (step 12) | `a2a-outbound.spec.ts`: IDs-only jobs, `returnImmediately`, the signature and token, the answer recorded first, retries as the same message, switching off after 3 failures, the setter's departure, and the dead-letter queue | Passed locally. Passed on staging, 2026-11-09 at `0794706`, for the failure half: an unreachable endpoint fails, retries and switches off. Passed on staging, 2026-11-09, for the success half, and for a timeout and a refused redirect, by the round trip |
+| Reading back by `GetTask`, and cancel out (step 13) | `a2a-readback.spec.ts`: the backoff, the 7 days, the caps refused whole, the archive guard, origin on messages and events, and `CancelTask` once | Passed locally. Passed on staging, 2026-11-09, for reading back: `WORKING` and `COMPLETED`, with origin on events. **`CancelTask` delivery isn't shown on a deployment:** the test server keeps nothing, so the run only shows Podster's task staying canceled. `a2a-readback.spec.ts` covers delivery locally |
+| Change requests out (step 13b) | `a2a-readback.spec.ts`: `referenceTaskIds` and `contextId` from Podster's own stored rows, and superseded by new work | Passed locally. Passed on staging, 2026-11-09, by the round trip |
 | Files (step 14, and `/a2a/files`) | `a2a-lifecycle.spec.ts` (`SubmitTask.files`), `a2a-messages.spec.ts` (URL parts as links), `a2a-outbound.spec.ts` (an offer's file links), `a2a-files.spec.ts` (the route's audience), and `e2e/a2a-staging.mjs` (a ready file downloads at `/a2a/files` with the `/a2a` token only) | Passed locally, without the download, which needs a scanner. Passed on staging, 2026-11-09 at `0794706`, with a real ready file |
 | Screens (step 15) | `apps/web` tests: the Agent Sheet's endpoint section, and origin labels on the Task Sheet. `run-a11y.mjs` | Passed locally |
 
 ## Owed before M3's gate
 
-- **A real round trip to an outside A2A server.** An offer goes out, then the server's `WORKING` and `COMPLETED` are read back as an acceptance and a submission. Its download of an input file goes over `/a2a/files`, and a change request is sent and read back. That needs an A2A server staging can reach. It's a new cloud resource, so the owner must approve it. A proposal is in the PR that added this checklist.
-- **The outbound run against LangGraph's server** ([decision 143](spec/PRODUCT.md#decisions-needed)), or fasta2a's. It hasn't run, because starting it was refused by the session permission check. It may be the same run as the round trip, if the test server is LangGraph's.
-- **The compatibility kit** ([decision 142](spec/PRODUCT.md#decisions-needed)). It hasn't run, for the same reason. It must run some other way before any support claim.
-- **Spike C on staging** ([decision 126](spec/PRODUCT.md#decisions-needed)): real egress, timeouts and queue timing. The unreachable-endpoint check covers the failure half. The success half needs the round trip.
+- **The compatibility kit** ([decision 142](spec/PRODUCT.md#decisions-needed)). The session permission check refused it on 2026-11-09. It runs with `node e2e/run-a2a-kit.mjs --kit <checkout>` once the kit may be installed and run in a session. Until then, no support claim rests on it, and the profile's exception list stays provisional.
+- **Decision 143's outbound item is unmet.** Against LangGraph, the protocol fits but no result reaches Podster. LangGraph's `SendMessage` ignores `returnImmediately` and answers already `COMPLETED`, with the reply only in that answer's artifacts. Its `GetTask` has no artifacts, only a fixed status message and, with `historyLength` above 0, the reply in `history`. Podster drops the send answer's state and artifacts, sends `historyLength: 0`, and takes a completion's content only from `artifacts`. Whether that's Podster's mapping to fix or LangGraph's gap to document is the lead's ruling. Podster's possible changes:
+  - take a terminal state and artifacts from the send's answer;
+  - on `COMPLETED` with no artifacts, read the agent's last `history` message.
+- **fasta2a, the backup independent server,** is the next item, not this PR's. The owner's approval covered starting LangGraph and the kit only, so running fasta2a's server needs the owner's yes in that session.
+- **The test A2A server.** Keeping it costs nothing, since it's one Worker with no storage that refuses anything not sealed under `RUN_KEY`, and it lets the round trip run again with no new secrets. Deleting it is `wrangler delete podster-a2a-test-staging`, as #184 planned. That's the owner's call.
 
 ## Owed before production that M3 touches
 

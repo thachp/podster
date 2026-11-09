@@ -52,11 +52,26 @@ async function fakeHook(request: Request) {
   }
   const body = await request.text();
   hookRequests.push({ host: url.hostname, path: url.pathname, signature: request.headers.get("x-podster-signature"), agent: request.headers.get("user-agent"), authorization: request.headers.get("authorization"), a2aVersion: request.headers.get("a2a-version"), body });
+  if (url.hostname === "langgraph.example.com") return langgraph(request, url, body);
   if (url.pathname.startsWith("/hang")) await new Promise((resolve) => setTimeout(resolve, 5000));
   if (url.pathname.startsWith("/fail")) return new Response("no", { status: 500 });
   if (url.pathname.startsWith("/redirect")) return new Response(null, { status: 302, headers: { location: "https://elsewhere.example.com/" } });
   if (url.pathname.startsWith("/a2a")) return a2aAnswer(url.pathname, body);
   return new Response("ok");
+}
+
+// LangGraph's A2A server, when a2a-langgraph.spec.ts runs against one (decision 143). The API sends to the made-up public name
+// langgraph.example.com, which passes egress policy as any agent's endpoint would, and only this test runtime forwards it to
+// the local server named by PODSTER_LANGGRAPH_URL. Podster's own egress rules are unchanged.
+async function langgraph(request: Request, url: URL, body: string) {
+  const base = process.env.PODSTER_LANGGRAPH_URL;
+  if (!base || !/^http:\/\/127\.0\.0\.1:\d+$/.test(base)) return new Response("no LangGraph server for this run", { status: 502 });
+  const headers: Record<string, string> = {};
+  for (const name of ["content-type", "a2a-version", "x-podster-signature", "authorization", "user-agent"]) {
+    const value = request.headers.get(name);
+    if (value) headers[name] = value;
+  }
+  return fetch(`${base}${url.pathname}`, { method: request.method, headers, body: request.method === "GET" ? undefined : body, redirect: "manual" });
 }
 
 /** Each `path` and `method` in the contract, read line by line, since this package has no YAML parser. */
@@ -103,6 +118,8 @@ export default defineConfig({
           OPERATORS: "per_operator_one, per_operator_two",
           // A test value only. The real key is the owner's to set (decision 122).
           A2A_TOKEN_KEY: "0f".repeat(32),
+          // Set only by e2e/run-langgraph-check.mjs. Empty, a2a-langgraph.spec.ts skips.
+          TEST_LANGGRAPH_ASSISTANT: process.env.PODSTER_LANGGRAPH_URL ? (process.env.PODSTER_LANGGRAPH_ASSISTANT ?? "") : "",
           TEST_WRANGLER: readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8"),
           TEST_D1_SCHEMA: ["0001_membership_index.sql", "0002_room_status.sql", "0003_membership_by_org.sql", "0004_ownerless_rooms.sql", "0005_public_workroom_index.sql", "0006_public_explore_order.sql"].map((name) => readFileSync(new URL(`./migrations/${name}`, import.meta.url), "utf8")).join("\n").replace(/--.*$/gm, ""),
           TEST_SIGNING_JWK: JSON.stringify(privateKey.export({ format: "jwk" })),

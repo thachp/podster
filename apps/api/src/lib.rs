@@ -518,7 +518,12 @@ async fn route(mut req: Request, env: Env) -> std::result::Result<Response, ApiE
     caller.workspace_id = workspace_id;
     let headers = caller_header(&caller)?;
     let forwarded: &[&str] = if cfg!(feature = "failpoints") {
-        &["idempotency-key", "x-test-fail", "x-test-join-generation"]
+        &[
+            "idempotency-key",
+            "x-test-fail",
+            "x-test-join-generation",
+            "x-test-public-rooms",
+        ]
     } else {
         &["idempotency-key"]
     };

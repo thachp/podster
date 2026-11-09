@@ -693,6 +693,152 @@ fn row_order_doesnt_change_the_view_or_its_hash() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Room visibility commands (step 5, pure part)
+
+#[test]
+fn a_new_handle_is_a_valid_handle() {
+    let handle = public_handle_from([0xab; 16]);
+    assert_eq!(handle, format!("pub_{}", "ab".repeat(16)));
+    assert!(is_public_handle(&handle));
+    assert!(is_public_handle(&public_handle_from([0; 16])));
+    assert!(is_public_handle(&public_handle_from([0xff; 16])));
+}
+
+#[test]
+fn topics_come_from_the_fixed_list() {
+    assert_eq!(parse_topic(None), Ok(None));
+    assert_eq!(parse_topic(Some("film")), Ok(Some(Topic::Film)));
+    assert_eq!(parse_topic(Some("Film")), Err(UnknownTopic));
+    assert_eq!(parse_topic(Some("buy-now")), Err(UnknownTopic));
+    assert_eq!(parse_topic(Some("")), Err(UnknownTopic));
+}
+
+#[test]
+fn only_public_participant_and_guest_openings_can_be_marked_claimable() {
+    use OpeningSettingRefusal::*;
+    for preset in Preset::ALL {
+        assert_eq!(check_opening_setting(preset, false, false), Ok(()));
+        assert_eq!(check_opening_setting(preset, true, false), Ok(()));
+        assert_eq!(
+            check_opening_setting(preset, true, true),
+            Err(LeadNotPublic)
+        );
+    }
+    assert_eq!(
+        check_opening_setting(Preset::PublicParticipant, false, true),
+        Ok(())
+    );
+    assert_eq!(check_opening_setting(Preset::Guest, false, true), Ok(()));
+    assert_eq!(
+        check_opening_setting(Preset::Member, false, true),
+        Err(PresetNotPublic)
+    );
+    assert_eq!(
+        check_opening_setting(Preset::Coordinator, false, true),
+        Err(PresetNotPublic)
+    );
+    assert_eq!(LeadNotPublic.field(), "is_lead");
+    assert_eq!(PresetNotPublic.code(), "invalid_argument");
+}
+
+#[test]
+fn set_visibility_checks_authority_first() {
+    let owner = caller(PrincipalKind::Person, Role::Owner);
+    let admin = caller(PrincipalKind::Person, Role::Admin);
+    let outsider = caller(PrincipalKind::Person, Role::None);
+    let agent = caller(PrincipalKind::Agent, Role::Owner);
+    let state = private_room();
+    let publish = VisibilityRequest::Publish {
+        view_hash: content_hash(&public_content(&state)),
+    };
+    let stale = VisibilityRequest::Publish {
+        view_hash: "0".repeat(64),
+    };
+
+    assert_eq!(
+        decide_set_visibility(&owner, true, &state, &publish),
+        Ok(VisibilityChange::Publish)
+    );
+    // Someone who may not publish gets their refusal, not the stale preview's.
+    assert_eq!(
+        decide_set_visibility(&admin, true, &state, &stale),
+        Err(VisibilityRefusal::Denied(Verdict::Forbidden))
+    );
+    assert_eq!(
+        decide_set_visibility(&outsider, true, &state, &stale),
+        Err(VisibilityRefusal::Denied(Verdict::NotParticipant))
+    );
+    assert_eq!(
+        decide_set_visibility(&agent, true, &state, &publish),
+        Err(VisibilityRefusal::Denied(Verdict::Forbidden))
+    );
+    assert_eq!(
+        decide_set_visibility(&owner, true, &state, &stale),
+        Err(VisibilityRefusal::Publish(PublishRefusal::StalePreview))
+    );
+    assert_eq!(
+        decide_set_visibility(&owner, false, &state, &publish),
+        Err(VisibilityRefusal::Publish(PublishRefusal::Disabled))
+    );
+
+    let public = public_room();
+    let again = VisibilityRequest::Publish {
+        view_hash: content_hash(&public_content(&public)),
+    };
+    assert_eq!(
+        decide_set_visibility(&owner, true, &public, &again),
+        Ok(VisibilityChange::NoChange)
+    );
+    let unpublish = VisibilityRequest::Unpublish {
+        end_public_claims: true,
+    };
+    assert_eq!(
+        decide_set_visibility(&admin, true, &public, &unpublish),
+        Ok(VisibilityChange::Unpublish {
+            end_public_claims: true
+        })
+    );
+    // Going private works even with the feature off, since it only reduces exposure.
+    assert_eq!(
+        decide_set_visibility(&admin, false, &public, &unpublish),
+        Ok(VisibilityChange::Unpublish {
+            end_public_claims: true
+        })
+    );
+    assert_eq!(
+        decide_set_visibility(&admin, true, &state, &unpublish),
+        Ok(VisibilityChange::NoChange)
+    );
+    assert_eq!(
+        decide_set_visibility(&agent, true, &public, &unpublish),
+        Err(VisibilityRefusal::Denied(Verdict::Forbidden))
+    );
+}
+
+#[test]
+fn visibility_events_and_audit_reasons() {
+    use VisibilityChange::*;
+    assert_eq!(Publish.event_type(), Some("room.published"));
+    assert_eq!(
+        Unpublish {
+            end_public_claims: false
+        }
+        .event_type(),
+        Some("room.unpublished")
+    );
+    assert_eq!(NoChange.event_type(), None);
+    assert_eq!(Publish.audit_reason(), Some("visibility.published"));
+    assert_eq!(
+        Unpublish {
+            end_public_claims: true
+        }
+        .audit_reason(),
+        Some("visibility.unpublished_claims_ended")
+    );
+    assert_eq!(NoChange.audit_reason(), None);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The participation policy (step 4)
 
 #[test]
@@ -716,4 +862,22 @@ fn only_a_person_administering_the_agents_org_sets_it() {
     assert!(!may_set_participation_policy(PrincipalKind::Person, false));
     assert!(!may_set_participation_policy(PrincipalKind::Agent, true));
     assert!(!may_set_participation_policy(PrincipalKind::Agent, false));
+}
+
+#[test]
+fn publish_refusal_codes_match_the_api() {
+    assert_eq!(PublishRefusal::Disabled.code(), "public_rooms_disabled");
+    assert_eq!(PublishRefusal::Archived.code(), "workspace_archived");
+    assert_eq!(PublishRefusal::Suspended.code(), "room_suspended");
+    assert_eq!(PublishRefusal::StalePreview.code(), "version_conflict");
+    assert_eq!(
+        PublishRefusal::PersonReviewOff.code(),
+        "person_review_required"
+    );
+}
+
+#[test]
+fn person_review_stays_on_while_public() {
+    assert!(!may_turn_off_person_review(Visibility::Public));
+    assert!(may_turn_off_person_review(Visibility::Private));
 }

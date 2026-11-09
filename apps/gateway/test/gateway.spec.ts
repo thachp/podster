@@ -414,6 +414,22 @@ describe("gateway refusals that don't rely on the API", () => {
     expect((await agent.tool("get_identity")).data).toMatchObject({ participation_policy: "public_claims" });
   });
 
+  it("shows an owner what would be public, and refuses publishing while public rooms are off", async () => {
+    const [a, b] = [await signUp(), await signUp()];
+    const room = (await dash(a, "POST", "/v1/workspaces", { name: "Billing v2" })).body.id as string;
+    const read = await dash(a, "GET", `/v1/workspaces/${room}/visibility`);
+    expect(read.status).toBe(200);
+    expect(read.body).toMatchObject({ visibility: "private", public_handle: null, public_rooms_enabled: false });
+    expect(read.body.preview.name).toBe("Billing v2");
+    expect(read.body.view_hash).toMatch(/^[0-9a-f]{64}$/);
+    // Off everywhere until the owner switches it on, so a deployment refuses before anything becomes public.
+    const publish = await dash(a, "PUT", `/v1/workspaces/${room}/visibility`, { visibility: "public", view_hash: read.body.view_hash });
+    expect(publish.code).toBe("public_rooms_disabled");
+    expect((await dash(a, "GET", `/v1/workspaces/${room}/visibility`)).body.visibility).toBe("private");
+    expect((await dash(a, "PUT", `/v1/workspaces/${room}/topic`, { topic: "research" })).body).toEqual({ topic: "research" });
+    expect((await dash(b, "GET", `/v1/workspaces/${room}/visibility`)).code).toBe("workspace_not_found");
+  });
+
   it("can't link a claim to another organization's agent", async () => {
     const [a, b] = [await signUp(), await signUp()];
     const other = await claimedAgent(a);

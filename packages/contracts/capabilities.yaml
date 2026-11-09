@@ -68,6 +68,9 @@ person_only:
   - updateOutput
   - removeOutput
   - setReviewPolicy
+  - getRoomVisibility
+  - setRoomVisibility
+  - setRoomTopic
   - createRole
   - updateRole
   - closeRole

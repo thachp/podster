@@ -1,0 +1,364 @@
+//! A room's visibility (M4 step 5): the owner's preview, going public and private, and the topic. The rules are
+//! `podster_policy::public` (ADR 0008, decisions 146 to 155 and 159). Nothing here is reachable without signing in: the
+//! public read comes in step 7.
+//!
+//! **`PUBLIC_ROOMS`** is off unless the Worker's variable says `true`. It's set nowhere in `wrangler.jsonc`, so it's off in
+//! every environment until the owner switches it on. While it's off, publishing is refused and going private still works.
+use super::*;
+use podster_policy::public::{
+    content_hash, decide_set_visibility, parse_topic, public_content, public_handle_from, utc_day,
+    MemberRow, OpeningRow, OutputRow, PublishRefusal, RoomRow, RoomState, Topic, Visibility,
+    VisibilityChange, VisibilityRefusal, VisibilityRequest, Workflow,
+};
+
+pub(super) const PUBLIC_ROOMS_VAR: &str = "PUBLIC_ROOMS";
+
+/// Whether public rooms are switched on. Test builds can also switch them on for one request.
+pub(super) fn public_rooms_enabled(env: &Env, req: &Request) -> R<bool> {
+    let set = env
+        .var(PUBLIC_ROOMS_VAR)
+        .is_ok_and(|value| value.to_string() == "true");
+    #[cfg(feature = "failpoints")]
+    if req.headers().get("x-test-public-rooms")?.as_deref() == Some("on") {
+        return Ok(true);
+    }
+    #[cfg(not(feature = "failpoints"))]
+    let _ = req;
+    Ok(set)
+}
+
+fn visibility_of(row: &Value) -> Visibility {
+    if row["visibility"].as_str() == Some("public") {
+        Visibility::Public
+    } else {
+        Visibility::Private
+    }
+}
+
+/// The room's rows, as `podster_policy::public` reads them. They carry more than is ever public; the policy picks.
+pub(super) fn room_state(sql: &SqlStorage) -> R<RoomState> {
+    let room = rows(sql, "SELECT * FROM workspace", vec![])?
+        .into_iter()
+        .next()
+        .ok_or_else(ApiError::workspace_not_found)?;
+    let openings = rows(sql, "SELECT * FROM work_role", vec![])?
+        .iter()
+        .map(|row| {
+            let id = text(&row["id"]).unwrap_or_default();
+            let holders = rows(
+                sql,
+                "SELECT principal_id FROM role_claim WHERE role_id = ? AND status = 'active'",
+                vec![id.as_str().into()],
+            )?
+            .iter()
+            .filter_map(|claim| text(&claim["principal_id"]))
+            .collect();
+            Ok(OpeningRow {
+                id,
+                title: text(&row["title"]).unwrap_or_default(),
+                responsibilities: text(&row["responsibilities"]).unwrap_or_default(),
+                capacity: u32::try_from(int(&row["capacity"])).unwrap_or(0),
+                // An unknown preset can't be claimed publicly, so it fails closed as the narrowest.
+                preset: row["preset"]
+                    .as_str()
+                    .and_then(Preset::from_name)
+                    .unwrap_or(Preset::PublicParticipant),
+                is_lead: int(&row["is_lead"]) != 0,
+                publicly_claimable: int(&row["publicly_claimable"]) != 0,
+                created_by: text(&row["created_by"]).unwrap_or_default(),
+                created_at: int(&row["created_at"]),
+                version: u64::try_from(int(&row["version"])).unwrap_or(0),
+                closed_at: row["closed_at"].as_i64(),
+                active_holders: holders,
+            })
+        })
+        .collect::<R<Vec<_>>>()?;
+    let outputs = rows(sql, "SELECT * FROM expected_output", vec![])?
+        .iter()
+        .map(|row| OutputRow {
+            id: text(&row["id"]).unwrap_or_default(),
+            title: text(&row["title"]).unwrap_or_default(),
+            description: text(&row["description"]),
+            // The same rule as the outputs read and the card: Ready once it has an approved version.
+            ready: row["current_task_id"].as_str().is_some(),
+            created_by: text(&row["created_by"]).unwrap_or_default(),
+            removed_at: row["removed_at"].as_i64(),
+            current_task_id: text(&row["current_task_id"]),
+            current_submission_no: row["current_submission_no"]
+                .as_i64()
+                .and_then(|n| u32::try_from(n).ok()),
+        })
+        .collect();
+    let mut members: Vec<MemberRow> = rows(
+        sql,
+        "SELECT principal_id, kind, org_id, revoked_at FROM member",
+        vec![],
+    )?
+    .iter()
+    .map(|row| MemberRow {
+        principal_id: text(&row["principal_id"]).unwrap_or_default(),
+        kind: if row["kind"].as_str() == Some("person") {
+            PrincipalKind::Person
+        } else {
+            PrincipalKind::Agent
+        },
+        org_id: text(&row["org_id"]).unwrap_or_default(),
+        revoked_at: row["revoked_at"].as_i64(),
+    })
+    .collect();
+    // The owner is a column, not a member row, and counts as a participant until they leave.
+    let owner = text(&room["owner_person_id"]).unwrap_or_default();
+    if !members.iter().any(|m| m.principal_id == owner) {
+        members.push(MemberRow {
+            principal_id: owner.clone(),
+            kind: PrincipalKind::Person,
+            org_id: text(&room["owner_org_id"]).unwrap_or_default(),
+            revoked_at: room["owner_left_at"].as_i64(),
+        });
+    }
+    Ok(RoomState {
+        room: RoomRow {
+            workspace_id: text(&room["id"]).unwrap_or_default(),
+            name: text(&room["name"]).unwrap_or_default(),
+            goal: text(&room["goal"]),
+            context: text(&room["context"]),
+            brief_by: text(&room["brief_by"]),
+            owner_org_id: text(&room["owner_org_id"]).unwrap_or_default(),
+            owner_person_id: owner,
+            policy_version: u64::try_from(int(&room["policy_version"])).unwrap_or(0),
+            created_at: int(&room["created_at"]),
+            archived: room["status"].as_str() == Some("archived"),
+            // Engineering rooms come with managed repositories (M5). Until then every room is General.
+            workflow: Workflow::General,
+            topic: room["topic"].as_str().and_then(Topic::from_name),
+            require_person_review: int(&room["require_person_review"]) != 0,
+            visibility: visibility_of(&room),
+            public_handle: text(&room["public_handle"]),
+            // The column is milliseconds, as every time in the room is; the policy reads whole seconds.
+            published_at: room["published_at"].as_i64().map(|ms| ms.div_euclid(1000)),
+            // Operator suspension comes in step 10.
+            suspended: false,
+            public_claims_paused: int(&room["public_claims_paused"]) != 0,
+        },
+        openings,
+        outputs,
+        members,
+    })
+}
+
+/// The owner's and admins' view of the room's visibility: where it stands, and the exact content that would be public,
+/// with the hash a publish names. Anyone else in the room gets `not_allowed`.
+pub(super) fn read(sql: &SqlStorage, who: &Participant, public_rooms_enabled: bool) -> R<Value> {
+    ApiError::from_verdict(authorize_workroom(&who.caller, WorkroomAction::ManageRoom))?;
+    let state = room_state(sql)?;
+    let content = public_content(&state);
+    let preview: Value =
+        serde_json::from_str(&content.to_json()).map_err(|_| ApiError::internal("preview json"))?;
+    let room = &state.room;
+    Ok(json!({
+        "visibility": if room.visibility == Visibility::Public { "public" } else { "private" },
+        "public_handle": room.public_handle,
+        // Milliseconds, as every time the API answers with.
+        "published_at": rows(sql, "SELECT published_at FROM workspace", vec![])?
+            .first()
+            .map_or(Value::Null, |r| r["published_at"].clone()),
+        // The UTC day the public page shows, from the policy's seconds.
+        "published_on": room.published_at.map(utc_day),
+        "topic": room.topic.map(Topic::name),
+        "public_claims_paused": room.public_claims_paused,
+        "public_rooms_enabled": public_rooms_enabled,
+        "preview": preview,
+        "view_hash": content_hash(&content),
+    }))
+}
+
+fn parse_request(body: &Value) -> R<VisibilityRequest> {
+    let fields = body.as_object().ok_or_else(ApiError::invalid_argument)?;
+    match body["visibility"].as_str() {
+        Some("public") => {
+            if fields.keys().any(|k| k != "visibility" && k != "view_hash") {
+                return Err(ApiError::invalid_argument());
+            }
+            let view_hash = body["view_hash"]
+                .as_str()
+                .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+                .ok_or_else(ApiError::invalid_argument)?;
+            Ok(VisibilityRequest::Publish {
+                view_hash: view_hash.to_ascii_lowercase(),
+            })
+        }
+        Some("private") => {
+            if fields
+                .keys()
+                .any(|k| k != "visibility" && k != "end_public_claims")
+            {
+                return Err(ApiError::invalid_argument());
+            }
+            let end_public_claims = match body.get("end_public_claims") {
+                None => false,
+                Some(value) => value.as_bool().ok_or_else(ApiError::invalid_argument)?,
+            };
+            Ok(VisibilityRequest::Unpublish { end_public_claims })
+        }
+        _ => Err(ApiError::invalid_argument()),
+    }
+}
+
+/// 16 bytes from two v4 UUIDs, 244 random bits, through SHA-256, for a handle's 128 bits.
+fn handle_bytes() -> [u8; 16] {
+    let digest = Sha256::digest(
+        format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        )
+        .as_bytes(),
+    );
+    let mut bytes = [0u8; 16];
+    for (out, b) in bytes.iter_mut().zip(digest.iter()) {
+        *out = *b;
+    }
+    bytes
+}
+
+fn refusal(refusal: VisibilityRefusal) -> ApiError {
+    match refusal {
+        VisibilityRefusal::Denied(verdict) => match ApiError::from_verdict(verdict) {
+            Err(error) => error,
+            Ok(()) => ApiError::not_allowed(),
+        },
+        // One mapping for the code: the policy's. Only the status is chosen here.
+        VisibilityRefusal::Publish(refusal) => match refusal {
+            PublishRefusal::StalePreview => {
+                ApiError::from_core(&podster_core::CoreError::VersionConflict)
+            }
+            PublishRefusal::Archived => ApiError::workspace_archived(),
+            PublishRefusal::Disabled | PublishRefusal::Suspended => {
+                ApiError::api(403, refusal.code())
+            }
+            PublishRefusal::PersonReviewOff => ApiError::api(409, refusal.code()),
+        },
+    }
+}
+
+/// `set_visibility`: go public naming the previewed content's hash, or go private. Authority comes first. A change commits
+/// the room's columns, an audit row and an event to everyone in the room together, and answers as `read` does.
+pub(super) fn handle_set_visibility(
+    sql: &SqlStorage,
+    who: &Participant,
+    body: &Value,
+    public_rooms_enabled: bool,
+    now: i64,
+) -> R<Value> {
+    let caller = &who.caller;
+    let request = parse_request(body)?;
+    let state = room_state(sql)?;
+    let change =
+        decide_set_visibility(caller, public_rooms_enabled, &state, &request).map_err(refusal)?;
+    // The handle the room had, and the one it has after. Both go in the audit row, so an old link can always be traced to
+    // its room after the room goes private or republishes. A handle is a public ID, so this stays ID-only.
+    let prior_handle = state.room.public_handle.clone();
+    let mut new_handle = prior_handle.clone();
+    match change {
+        VisibilityChange::NoChange => {}
+        VisibilityChange::Publish => {
+            let handle = public_handle_from(handle_bytes());
+            exec(
+                sql,
+                "UPDATE workspace SET visibility = 'public', public_handle = ?, published_at = ?",
+                vec![handle.as_str().into(), now.into()],
+            )?;
+            new_handle = Some(handle);
+        }
+        VisibilityChange::Unpublish { .. } => {
+            // The handle is dropped for good: a republish makes a new one, so old links and copies can't come back.
+            exec(
+                sql,
+                "UPDATE workspace SET visibility = 'private', public_handle = NULL, published_at = NULL",
+                vec![],
+            )?;
+            new_handle = None;
+            // Public claims arrive in step 8. Until then there are none to end, and `end_public_claims` is only recorded.
+        }
+    }
+    if let (Some(event), Some(reason)) = (change.event_type(), change.audit_reason()) {
+        let prior = if state.room.visibility == Visibility::Public {
+            "public"
+        } else {
+            "private"
+        };
+        let new = if change == VisibilityChange::Publish {
+            "public"
+        } else {
+            "private"
+        };
+        audit(
+            sql,
+            caller,
+            reason,
+            "workspace",
+            Some(json!({ "visibility": prior, "public_handle": prior_handle }).to_string()),
+            Some(json!({ "visibility": new, "public_handle": new_handle }).to_string()),
+            now,
+        )?;
+        let mut everyone = room_people(sql)?;
+        everyone.retain(|principal| *principal != caller.id);
+        record_event(
+            sql,
+            event,
+            &caller.id,
+            None,
+            &Transition::NONE,
+            everyone,
+            now,
+        )?;
+    }
+    read(sql, who, public_rooms_enabled)
+}
+
+/// Sets or clears the room's topic, from the fixed list: the owner or a human admin.
+pub(super) fn handle_set_topic(
+    sql: &SqlStorage,
+    caller: &Caller,
+    body: &Value,
+    now: i64,
+) -> R<Value> {
+    ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageRoom))?;
+    let fields = body.as_object().ok_or_else(ApiError::invalid_argument)?;
+    if fields.keys().any(|k| k != "topic") || !fields.contains_key("topic") {
+        return Err(ApiError::invalid_argument());
+    }
+    let topic = match &body["topic"] {
+        Value::Null => None,
+        Value::String(name) => parse_topic(Some(name)).map_err(|_| ApiError::invalid_argument())?,
+        _ => return Err(ApiError::invalid_argument()),
+    };
+    let prior = rows(sql, "SELECT topic FROM workspace", vec![])?
+        .first()
+        .and_then(|r| text(&r["topic"]));
+    let new = topic.map(|t| t.name().to_string());
+    if prior != new {
+        exec(sql, "UPDATE workspace SET topic = ?", vec![opt(&new)])?;
+        audit(
+            sql,
+            caller,
+            "workspace.topic_changed",
+            "workspace",
+            Some(json!({ "topic": prior }).to_string()),
+            Some(json!({ "topic": new }).to_string()),
+            now,
+        )?;
+        let mut everyone = room_people(sql)?;
+        everyone.retain(|principal| *principal != caller.id);
+        record_event(
+            sql,
+            "workspace.topic_changed",
+            &caller.id,
+            None,
+            &Transition::NONE,
+            everyone,
+            now,
+        )?;
+    }
+    Ok(json!({ "topic": new }))
+}

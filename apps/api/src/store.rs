@@ -193,6 +193,13 @@ ALTER TABLE a2a_attempt ADD COLUMN kind TEXT NOT NULL DEFAULT 'offer';
 ALTER TABLE a2a_attempt ADD COLUMN remote_context_id TEXT;
 ALTER TABLE a2a_attempt ADD COLUMN reference_task_id TEXT;
 ALTER TABLE a2a_attempt ADD COLUMN reference_context_id TEXT;
+", "
+ALTER TABLE workspace ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private';
+ALTER TABLE workspace ADD COLUMN public_handle TEXT;
+ALTER TABLE workspace ADD COLUMN published_at INTEGER;
+ALTER TABLE workspace ADD COLUMN topic TEXT;
+ALTER TABLE workspace ADD COLUMN public_claims_paused INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE work_role ADD COLUMN publicly_claimable INTEGER NOT NULL DEFAULT 0;
 "];
 
 pub fn int(value: &Value) -> i64 {

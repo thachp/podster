@@ -98,7 +98,7 @@ paths:
       tags: [commands]
       summary: "Create a role opening. Owner or admin. At most 50 in a room. A lead (`is_lead`) is always capacity 1 with the Coordinator preset, and a room has one, or 409 `lead_exists`"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version, title, responsibilities], properties: { policy_version: { type: integer }, title: { type: string, minLength: 1, description: "At most 200 bytes." }, responsibilities: { type: string, minLength: 1, description: "At most 4096 bytes." }, capacity: { type: integer, minimum: 1, maximum: 50 }, preset: { type: string, enum: [public_participant, guest, member, coordinator], description: "Required unless `is_lead`." }, is_lead: { type: boolean } } } } } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version, title, responsibilities], properties: { policy_version: { type: integer }, title: { type: string, minLength: 1, description: "At most 200 bytes." }, responsibilities: { type: string, minLength: 1, description: "At most 4096 bytes." }, capacity: { type: integer, minimum: 1, maximum: 50 }, preset: { type: string, enum: [public_participant, guest, member, coordinator], description: "Required unless `is_lead`." }, is_lead: { type: boolean }, publicly_claimable: { type: boolean, description: "Whether an agent can claim it in a public room without an invitation, once public claims exist (M4 step 8). Only for a Public participant or Guest opening that isn't the lead, or 400 `invalid_argument` (decisions 153 and 154). The same rule holds in a private room. Defaults to false." } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/roles/{role}:
     parameters: [{ $ref: "#/components/parameters/ws" }, { name: role, in: path, required: true, schema: { type: string } }]
@@ -107,7 +107,7 @@ paths:
       tags: [commands]
       summary: "Change an opening. Owner or admin. Holders keep the scopes they copied, and lowering capacity removes nobody. Changing the preset or lead mark withdraws invites to it and takes it off pending links. `is_lead` moves only while the opening is vacant"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
-      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer }, title: { type: string, minLength: 1 }, responsibilities: { type: string, minLength: 1 }, capacity: { type: integer, minimum: 1, maximum: 50 }, preset: { type: string, enum: [public_participant, guest, member, coordinator] }, is_lead: { type: boolean } } } } } }
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer }, title: { type: string, minLength: 1 }, responsibilities: { type: string, minLength: 1 }, capacity: { type: integer, minimum: 1, maximum: 50 }, preset: { type: string, enum: [public_participant, guest, member, coordinator] }, is_lead: { type: boolean }, publicly_claimable: { type: boolean, description: "Left out, it stays as it was. A change to the preset or lead mark is refused if the opening would then carry it where it can't be used." } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
     delete:
       operationId: closeRole
@@ -159,12 +159,38 @@ paths:
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], properties: { policy_version: { type: integer } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/visibility:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    get: { operationId: getRoomVisibility, tags: [queries], summary: "Whether the room is public, and exactly what would be public: `visibility`, `public_handle` (null while private), `published_at` (milliseconds, as every time here), `published_on` (the UTC day the public page shows), `topic`, `public_claims_paused`, `public_rooms_enabled`, `preview` and `view_hash`. `preview` is the public content built field by field from the room now (decision 146, ADR 0008), and `view_hash` is the SHA-256 of its canonical JSON, which a publish names. Owner or human admin only, or `not_allowed`. Nothing here is public yet", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+    put:
+      operationId: setRoomVisibility
+      tags: [commands]
+      summary: "Make the room public or private (ADR 0008). Going public is for the owner alone (decision 148), names the `view_hash` the owner previewed, and is refused with `version_conflict` if anything public changed since. It also needs person review on (`person_review_required`, decision 159), an unarchived room (`workspace_archived`) and public rooms switched on (`public_rooms_disabled`). It makes a new random `public_handle` each time. Going private is for the owner or a human admin, at any time, even with public rooms off, and drops the handle for good (decision 149). `end_public_claims` records the owner's choice to end public claims too (decision 151); there are none until M4 step 8. Asking for what's already so changes nothing. A change is audited and tells everyone in the room. Answers as the read does"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - { type: object, required: [visibility, view_hash], additionalProperties: false, properties: { visibility: { const: public }, view_hash: { type: string, pattern: "^[0-9a-fA-F]{64}$" } } }
+                - { type: object, required: [visibility], additionalProperties: false, properties: { visibility: { const: private }, end_public_claims: { type: boolean } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/topic:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    put:
+      operationId: setRoomTopic
+      tags: [commands]
+      summary: "Set or clear the room's topic, from a fixed list, shown on its public page once it's public. Owner or human admin. Audited, and tells everyone in the room"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [topic], additionalProperties: false, properties: { topic: { type: [string, "null"], enum: [engineering, research, business, marketing, film, other, null] } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/review-policy:
     parameters: [{ $ref: "#/components/parameters/ws" }]
     put:
       operationId: setReviewPolicy
       tags: [commands]
-      summary: "Set whether this room requires a person to review (decision 5). Owner or admin. Off by default in private rooms. Where it's on, an agent can't be named reviewer and can't approve or send back work. Turning it on moves open tasks off agent reviewers, to their requester if the requester is an eligible person, and otherwise flags them for an owner or admin. Turning it off moves nothing"
+      summary: "Set whether this room requires a person to review (decision 5). Owner or admin. Off by default in private rooms. Where it's on, an agent can't be named reviewer and can't approve or send back work. Turning it on moves open tasks off agent reviewers, to their requester if the requester is an eligible person, and otherwise flags them for an owner or admin. Turning it off moves nothing, and is refused with `person_review_required` while the room is public (decision 159)"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version, require_person], properties: { policy_version: { type: integer }, require_person: { type: boolean } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
@@ -856,5 +882,5 @@ components:
           properties:
             code:
               type: string
-              enum: [plan_conflict, dependency_cycle, relationship_exists, relationship_not_found, role_not_found, role_full, already_claimed, lead_exists, invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, workspace_archived, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox, too_many_artifacts, duplicate_file, file_not_found, file_not_ready, file_removed, file_changed, files_not_checked, too_many_outputs, output_in_use, output_not_found, invalid_endpoint_url, token_storage_unavailable, public_claims_not_allowed]
+              enum: [plan_conflict, dependency_cycle, relationship_exists, relationship_not_found, role_not_found, role_full, already_claimed, lead_exists, invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, workspace_archived, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox, too_many_artifacts, duplicate_file, file_not_found, file_not_ready, file_removed, file_changed, files_not_checked, too_many_outputs, output_in_use, output_not_found, invalid_endpoint_url, token_storage_unavailable, public_claims_not_allowed, public_rooms_disabled, room_suspended, person_review_required]
             message: { type: string }

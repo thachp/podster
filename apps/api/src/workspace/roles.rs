@@ -85,16 +85,34 @@ fn lead_field(body: &Value) -> R<Option<bool>> {
     }
 }
 
+fn claimable_field(body: &Value) -> R<Option<bool>> {
+    match body.get("publicly_claimable") {
+        None => Ok(None),
+        Some(value) => value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(ApiError::invalid_argument),
+    }
+}
+
+/// Whether an opening may carry `publicly_claimable` with this preset and lead mark (decisions 153 and 154). Checked on every
+/// create and change, so the setting never sits on an opening that can't use it, even in a private room.
+fn check_claimable(preset: Preset, is_lead: bool, claimable: bool) -> R<()> {
+    podster_policy::public::check_opening_setting(preset, is_lead, claimable)
+        .map_err(|_| ApiError::invalid_argument())
+}
+
 fn role_json(row: &Value, filled: i64) -> Value {
     json!({
         "id": row["id"], "title": row["title"], "responsibilities": row["responsibilities"], "capacity": row["capacity"],
-        "filled": filled, "preset": row["preset"], "is_lead": int(&row["is_lead"]) != 0, "version": row["version"], "created_by": row["created_by"],
+        "filled": filled, "preset": row["preset"], "is_lead": int(&row["is_lead"]) != 0,
+        "publicly_claimable": int(&row["publicly_claimable"]) != 0, "version": row["version"], "created_by": row["created_by"],
     })
 }
 
 /// A role's configuration for the audit log. Its title and responsibilities are written text, so they stay out.
-fn role_audit(capacity: i64, preset: &str, is_lead: bool) -> String {
-    json!({ "capacity": capacity, "preset": preset, "is_lead": is_lead }).to_string()
+fn role_audit(capacity: i64, preset: &str, is_lead: bool, claimable: bool) -> String {
+    json!({ "capacity": capacity, "preset": preset, "is_lead": is_lead, "publicly_claimable": claimable }).to_string()
 }
 
 pub(super) fn handle_create_role(
@@ -127,6 +145,8 @@ pub(super) fn handle_create_role(
         )
     };
     validate_role(&title, &responsibilities, capacity).map_err(|e| ApiError::from_core(&e))?;
+    let claimable = claimable_field(body)?.unwrap_or(false);
+    check_claimable(preset, is_lead, claimable)?;
     if is_lead && lead_exists(sql)? {
         return Err(ApiError::lead_exists());
     }
@@ -141,8 +161,8 @@ pub(super) fn handle_create_role(
         return Err(ApiError::limit_exceeded());
     }
     let id = format!("rol_{}", uuid::Uuid::new_v4().simple());
-    exec(sql, "INSERT INTO work_role (id, title, responsibilities, capacity, preset, is_lead, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", vec![
-        id.as_str().into(), title.as_str().into(), responsibilities.as_str().into(), capacity.into(), preset.name().into(), flag(is_lead), caller.id.as_str().into(), now.into(),
+    exec(sql, "INSERT INTO work_role (id, title, responsibilities, capacity, preset, is_lead, publicly_claimable, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", vec![
+        id.as_str().into(), title.as_str().into(), responsibilities.as_str().into(), capacity.into(), preset.name().into(), flag(is_lead), flag(claimable), caller.id.as_str().into(), now.into(),
     ])?;
     audit(
         sql,
@@ -150,7 +170,7 @@ pub(super) fn handle_create_role(
         "role.created",
         &id,
         None,
-        Some(role_audit(capacity, preset.name(), is_lead)),
+        Some(role_audit(capacity, preset.name(), is_lead, claimable)),
         now,
     )?;
     let mut everyone = room_people(sql)?;
@@ -218,13 +238,16 @@ pub(super) fn handle_update_role(
         )
     };
     validate_role(&title, &responsibilities, capacity).map_err(|e| ApiError::from_core(&e))?;
+    let was_claimable = int(&role["publicly_claimable"]) != 0;
+    let claimable = claimable_field(body)?.unwrap_or(was_claimable);
+    check_claimable(preset, is_lead, claimable)?;
     // What an agent agreed to look at isn't what they'd now get, so anything already offered goes with the old terms.
     if role["preset"].as_str() != Some(preset.name()) || is_lead != was_lead {
         withdraw_offers_of_role(sql, id)?;
     }
     // Lowering capacity below the holders blocks further claims and removes nobody. Holders keep what they copied.
-    exec(sql, "UPDATE work_role SET title = ?, responsibilities = ?, capacity = ?, preset = ?, is_lead = ?, version = version + 1 WHERE id = ?", vec![
-        title.as_str().into(), responsibilities.as_str().into(), capacity.into(), preset.name().into(), flag(is_lead), id.into(),
+    exec(sql, "UPDATE work_role SET title = ?, responsibilities = ?, capacity = ?, preset = ?, is_lead = ?, publicly_claimable = ?, version = version + 1 WHERE id = ?", vec![
+        title.as_str().into(), responsibilities.as_str().into(), capacity.into(), preset.name().into(), flag(is_lead), flag(claimable), id.into(),
     ])?;
     audit(
         sql,
@@ -235,8 +258,9 @@ pub(super) fn handle_update_role(
             int(&role["capacity"]),
             role["preset"].as_str().unwrap_or_default(),
             was_lead,
+            was_claimable,
         )),
-        Some(role_audit(capacity, preset.name(), is_lead)),
+        Some(role_audit(capacity, preset.name(), is_lead, claimable)),
         now,
     )?;
     let mut everyone = room_people(sql)?;

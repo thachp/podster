@@ -428,6 +428,10 @@ async fn route(
         ["v1", "moderation", "reports"] if method == Method::Get => {
             return moderation::list_reports(&env, &caller, &url).await;
         }
+        ["v1", "moderation", "reports", report, "suspend-room"] if method == Method::Post => {
+            return moderation::suspend_room_by_report(&env, &caller, report, body.as_deref())
+                .await;
+        }
         ["v1", "moderation", "rooms", handle, verb @ ("suspend" | "lift")]
             if method == Method::Post =>
         {

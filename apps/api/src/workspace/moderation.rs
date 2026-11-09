@@ -21,8 +21,15 @@ pub(super) fn suspension(sql: &SqlStorage) -> R<Value> {
     ))
 }
 
-/// `{ suspended, reason, operator }`: suspends or lifts, audited as the operator, with an event that marks the index row
-/// due and tells the room's managers. Doing what's already so changes nothing. Answers `{ suspended, reason, at }`.
+/// Who the room records for an operator's action. The owner sees "Suspended by Podster" (decision 158), so the operator's
+/// own ID stays in the `Moderation` object's log and never reaches the room's events, inbox or audit.
+const PODSTER: &str = "podster";
+const PODSTER_KIND: &str = "system";
+
+/// `{ suspended, reason, handle? }`: suspends or lifts, audited as Podster, with an event that marks the index row due and
+/// tells the room's managers. With `handle`, the room acts only if it's the room's handle now or its last published one, so
+/// an index row can't point an operator at the wrong room; an action from a report names the room itself and sends none.
+/// Doing what's already so changes nothing. Answers `{ suspended, reason, at }`.
 pub(super) fn set(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     let suspended = body["suspended"]
         .as_bool()
@@ -31,10 +38,16 @@ pub(super) fn set(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         .as_str()
         .and_then(podster_policy::moderation::Reason::from_name)
         .ok_or_else(ApiError::invalid_argument)?;
-    let operator = body["operator"]
-        .as_str()
-        .filter(|id| crate::valid_id(id))
-        .ok_or_else(ApiError::invalid_argument)?;
+    if let Some(handle) = body.get("handle").filter(|h| !h.is_null()) {
+        let handle = handle.as_str().ok_or_else(ApiError::invalid_argument)?;
+        let current = rows(sql, "SELECT public_handle FROM workspace", vec![])?
+            .first()
+            .and_then(|row| text(&row["public_handle"]));
+        let last = super::visibility::last_published_handle(sql)?;
+        if current.as_deref() != Some(handle) && last.as_deref() != Some(handle) {
+            return Err(ApiError::workspace_not_found());
+        }
+    }
     let prior = suspension(sql)?;
     if prior.is_null() == suspended {
         if suspended {
@@ -52,8 +65,8 @@ pub(super) fn set(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         }
         audit_as(
             sql,
-            operator,
-            "person",
+            PODSTER,
+            PODSTER_KIND,
             if suspended {
                 "room.suspended"
             } else {
@@ -71,10 +84,10 @@ pub(super) fn set(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
             } else {
                 "room.suspension_lifted"
             },
-            operator,
+            PODSTER,
             None,
             &Transition::NONE,
-            roles::room_managers(sql, operator)?,
+            roles::room_managers(sql, PODSTER)?,
             now,
         )?;
     }

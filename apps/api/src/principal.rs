@@ -807,9 +807,8 @@ pub async fn set_public_claims_suspension(
     agent: &str,
     suspended: bool,
     reason: &str,
-    operator: &str,
 ) -> R<Value> {
-    let body = json!({ "suspended": suspended, "reason": reason, "operator": operator });
+    let body = json!({ "suspended": suspended, "reason": reason });
     let mut response = internal(env, agent, "/internal/public-claims-suspension", &body).await?;
     if response.status_code() == 404 {
         return Err(ApiError::agent_not_found());

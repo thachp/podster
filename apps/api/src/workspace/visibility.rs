@@ -378,7 +378,7 @@ fn index_json(row: &podster_policy::public::PublicIndexRow) -> Value {
 
 /// The handle the room's latest publish made, from its audit row (step 5), so a tombstone names the handle that went away
 /// rather than reading the room's current one. `None` for a room never published.
-fn last_published_handle(sql: &SqlStorage) -> R<Option<String>> {
+pub(super) fn last_published_handle(sql: &SqlStorage) -> R<Option<String>> {
     Ok(rows(
         sql,
         "SELECT new_json FROM audit_event WHERE action = 'visibility.published' ORDER BY seq DESC LIMIT 1",

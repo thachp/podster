@@ -97,6 +97,14 @@ const person = (n: string): Who => ({ id: `per_mod_reporter_${n}_${crypto.random
 const report = (who: Who, body: object, opts: { key?: string } = {}) => api(who, "POST", "/v1/reports", body, opts);
 const indexRow = (id: string) => BINDINGS.DB.prepare("SELECT resolvable, listed FROM public_workroom_index WHERE workspace_id = ?").bind(id).first();
 const suspendRoom = (who: Who, handle: string, reason = "abuse") => api(who, "POST", `/v1/moderation/rooms/${handle}/suspend`, { reason });
+const actions = (subject: string) => runInDurableObject(BINDINGS.MODERATION.get(BINDINGS.MODERATION.idFromName("moderation")), (_: any, state: any) => state.storage.sql.exec("SELECT operator, subject_kind, subject, action, reason, outcome FROM operator_action WHERE subject = ? ORDER BY seq", subject).toArray());
+const publishAgain = async (id: string) => {
+  const hash = (await api(OWNER, "GET", `/v1/workspaces/${id}/visibility`)).body.view_hash;
+  const done = await api(OWNER, "PUT", `/v1/workspaces/${id}/visibility`, { visibility: "public", view_hash: hash });
+  expect(done.status, done.text).toBe(200);
+  await drain(id);
+  return done.body.public_handle as string;
+};
 const liftRoom = (who: Who, handle: string) => api(who, "POST", `/v1/moderation/rooms/${handle}/lift`, { reason: "other" });
 
 describe("reports (decision 160)", () => {
@@ -193,7 +201,9 @@ describe("suspending a room's public surface (decision 158)", () => {
     const seen = (await api(OWNER, "GET", `/v1/workspaces/${room.id}/visibility`)).body;
     expect(seen).toMatchObject({ visibility: "public", suspension: { reason: "abuse", at: suspended.body.at } });
     const audit = await inRoom(room.id, (sql) => sql.exec("SELECT actor_id, action FROM audit_event WHERE action LIKE 'room.suspen%' ORDER BY seq").toArray());
-    expect(audit).toEqual([{ actor_id: OPERATOR.id, action: "room.suspended" }]);
+    // Recorded as Podster: the operator's ID stays in Podster's own log.
+    expect(audit).toEqual([{ actor_id: "podster", action: "room.suspended" }]);
+    expect(await inRoom(room.id, (sql) => sql.exec("SELECT COUNT(*) AS n FROM event WHERE actor_id = ?", OPERATOR.id).one().n)).toBe(0);
     // The owner can make it private, but not public again.
     expect((await api(OWNER, "PUT", `/v1/workspaces/${room.id}/visibility`, { visibility: "private" })).status).toBe(200);
     const hash = (await api(OWNER, "GET", `/v1/workspaces/${room.id}/visibility`)).body.view_hash;
@@ -237,10 +247,64 @@ describe("suspending an agent's public claims (decision 158)", () => {
     // An agent never registered is refused, and no Principal is made for it.
     expect((await api(OPERATOR, "POST", "/v1/moderation/agents/agt_never_registered/suspend", { reason: "spam" })).code).toBe("agent_not_found");
     // Each action is logged by the moderation object, with IDs and codes only.
-    const actions = await runInDurableObject(BINDINGS.MODERATION.get(BINDINGS.MODERATION.idFromName("moderation")), (_: any, state: any) => state.storage.sql.exec("SELECT operator, subject_kind, subject, action, reason FROM operator_action WHERE subject = ? ORDER BY seq", taker.id).toArray());
-    expect(actions).toEqual([
-      { operator: OPERATOR.id, subject_kind: "agent", subject: taker.id, action: "suspend", reason: "spam" },
-      { operator: OPERATOR.id, subject_kind: "agent", subject: taker.id, action: "lift", reason: "other" },
+    // Each action is recorded before it's carried out, with its outcome after, IDs and codes only.
+    expect(await actions(taker.id)).toEqual([
+      { operator: OPERATOR.id, subject_kind: "agent", subject: taker.id, action: "suspend", reason: "spam", outcome: "done" },
+      { operator: OPERATOR.id, subject_kind: "agent", subject: taker.id, action: "lift", reason: "other", outcome: "done" },
     ]);
+    expect(await actions("agt_never_registered")).toEqual([
+      { operator: OPERATOR.id, subject_kind: "agent", subject: "agt_never_registered", action: "suspend", reason: "spam", outcome: "agent_not_found" },
+    ]);
+  });
+});
+
+describe("the second review's checks (step 10)", () => {
+  it("suspends the room a report was about after its owner published it again under a new handle (M1)", async () => {
+    const room = await publicRoom();
+    const made = await report(person("e"), { handle: room.handle, reason: "abuse" });
+    expect(made.status).toBe(200);
+    // The owner rotates the handle.
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${room.id}/visibility`, { visibility: "private" })).status).toBe(200);
+    await drain(room.id);
+    const second = await publishAgain(room.id);
+    expect(second).not.toBe(room.handle);
+    // The old handle no longer finds the room.
+    expect((await suspendRoom(OPERATOR, room.handle)).code).toBe("workspace_not_found");
+    const byReport = (who: Who, id: string) => api(who, "POST", `/v1/moderation/reports/${id}/suspend-room`, { reason: "abuse" });
+    expect((await byReport(OWNER, made.body.id)).code).toBe("not_allowed");
+    expect((await byReport(OPERATOR, `rpt_${"0".repeat(32)}`)).code).toBe("not_found");
+    const done = await byReport(OPERATOR, made.body.id);
+    expect(done.status, done.text).toBe(200);
+    expect(done.body).toMatchObject({ report_id: made.body.id, suspended: true, reason: "abuse" });
+    expect(done.text).not.toContain(room.id);
+    expect(await page(second)).toBe(404);
+    expect((await claim(await agent(), second, room.role)).code).toBe("workspace_not_found");
+    expect(await actions(made.body.id)).toEqual([{ operator: OPERATOR.id, subject_kind: "report", subject: made.body.id, action: "suspend", reason: "abuse", outcome: "done" }]);
+    // Lifting is by the room's handle.
+    expect((await liftRoom(OPERATOR, second)).body).toMatchObject({ suspended: false });
+  });
+
+  it("acts on a handle only if it's the room's now or its last published one (L1)", async () => {
+    const room = await publicRoom();
+    // An index row pointing a handle the room never had at it.
+    const stray = `pub_${"a".repeat(32)}`;
+    await BINDINGS.DB.prepare("UPDATE public_workroom_index SET public_handle = ? WHERE workspace_id = ?").bind(stray, room.id).run();
+    expect((await suspendRoom(OPERATOR, stray)).code).toBe("workspace_not_found");
+    expect((await api(OWNER, "GET", `/v1/workspaces/${room.id}/visibility`)).body.suspension).toBeNull();
+    expect(await actions(stray)).toEqual([{ operator: OPERATOR.id, subject_kind: "room", subject: stray, action: "suspend", reason: "abuse", outcome: "refused_404" }]);
+  });
+
+  it("answers a report's retry before looking at the room, and refuses its key with a different request (L4)", async () => {
+    const room = await publicRoom();
+    const reporter = person("f");
+    const first = await report(reporter, { handle: room.handle, reason: "spam", note: "one" }, { key: "retry-after-private" });
+    expect(first.status).toBe(200);
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${room.id}/visibility`, { visibility: "private" })).status).toBe(200);
+    await drain(room.id);
+    // Reordered keys are the same request.
+    const again = await report(reporter, { note: "one", reason: "spam", handle: room.handle }, { key: "retry-after-private" });
+    expect(again.status, again.text).toBe(200);
+    expect(again.body).toEqual(first.body);
+    expect((await report(reporter, { handle: room.handle, reason: "abuse", note: "one" }, { key: "retry-after-private" })).code).toBe("idempotency_mismatch");
   });
 });

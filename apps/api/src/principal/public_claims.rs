@@ -322,7 +322,7 @@ pub(super) fn settle(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
 /// refused with `public_claims_suspended`. Claims already made stay: an operator can't end claims.
 const SUSPENSION_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS public_claims_suspension (id INTEGER PRIMARY KEY CHECK (id = 1), reason TEXT NOT NULL,
-  at INTEGER NOT NULL, operator TEXT NOT NULL);
+  at INTEGER NOT NULL);
 ";
 
 /// Whether an operator has suspended this agent's public claims.
@@ -331,20 +331,20 @@ pub(super) fn suspended(sql: &SqlStorage) -> R<bool> {
     Ok(!rows(sql, "SELECT id FROM public_claims_suspension", vec![])?.is_empty())
 }
 
-/// `{ suspended, reason, operator }`, from the Worker for a verified operator. Answers `{ suspended, reason, at }`.
+/// `{ suspended, reason }`, from the Worker for a verified operator, whose ID stays in the `Moderation` object's log.
+/// Answers `{ suspended, reason, at }`.
 pub(super) fn set_suspension(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     exec(sql, SUSPENSION_SCHEMA, vec![])?;
     let suspend = body["suspended"]
         .as_bool()
         .ok_or_else(ApiError::invalid_argument)?;
     let reason = field(body, "reason")?;
-    let operator = field(body, "operator")?;
     if suspend {
         exec(
             sql,
-            "INSERT INTO public_claims_suspension (id, reason, at, operator) VALUES (1, ?, ?, ?)
+            "INSERT INTO public_claims_suspension (id, reason, at) VALUES (1, ?, ?)
                ON CONFLICT (id) DO NOTHING",
-            vec![reason.into(), now.into(), operator.into()],
+            vec![reason.into(), now.into()],
         )?;
     } else {
         exec(sql, "DELETE FROM public_claims_suspension", vec![])?;

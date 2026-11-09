@@ -1,7 +1,7 @@
 //! Reports and operator actions (M4 step 10, decisions 158 and 160).
 //!
 //! One `Moderation` Durable Object keeps every report and every operator action, so the daily report limit is exact.
-//! Operators are person IDs in the `OPERATORS` variable, checked here in Rust against the verified caller. They see
+//! Operators are person IDs in the `OPERATORS` secret, checked here in Rust against the verified caller. They see
 //! reports, never a room's private state, and their only powers are suspending and lifting a room's public surface, which
 //! the room itself records and decides from, and an agent's public claims, which the agent's `Principal` keeps.
 //!
@@ -14,6 +14,7 @@ use podster_policy::moderation::{
 };
 use podster_policy::public::is_public_handle;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::rc::Rc;
 use worker::*;
@@ -25,11 +26,12 @@ const PAGE: i64 = 50;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS report (seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, reporter TEXT NOT NULL,
-  request_key TEXT NOT NULL, handle TEXT NOT NULL, workspace_id TEXT NOT NULL, agent_id TEXT, reason TEXT NOT NULL,
-  note TEXT, created_at INTEGER NOT NULL, UNIQUE (reporter, request_key));
+  request_key TEXT NOT NULL, request_hash TEXT NOT NULL, handle TEXT NOT NULL, workspace_id TEXT NOT NULL, agent_id TEXT,
+  reason TEXT NOT NULL, note TEXT, created_at INTEGER NOT NULL, UNIQUE (reporter, request_key));
 CREATE INDEX IF NOT EXISTS report_by_reporter ON report (reporter, created_at);
 CREATE TABLE IF NOT EXISTS operator_action (seq INTEGER PRIMARY KEY, operator TEXT NOT NULL, subject_kind TEXT NOT NULL,
-  subject TEXT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL, at INTEGER NOT NULL);
+  subject TEXT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL, at INTEGER NOT NULL,
+  outcome TEXT NOT NULL DEFAULT 'pending', ended_at INTEGER);
 ";
 
 fn now_ms() -> i64 {
@@ -57,9 +59,11 @@ async fn call(env: &Env, path: &str, method: Method, body: Option<Value>) -> R<R
 
 /// Refuses anyone who isn't a configured operator. An agent never is.
 fn require_operator(env: &Env, caller: &Caller) -> R<()> {
+    // A secret on staging, which the owner sets (docs/staging.md), or a plain binding in tests.
     let configured = env
-        .var("OPERATORS")
+        .secret("OPERATORS")
         .map(|v| v.to_string())
+        .or_else(|_| env.var("OPERATORS").map(|v| v.to_string()))
         .unwrap_or_default();
     if is_operator(&caller.kind, &caller.id, &parse_operators(&configured)) {
         Ok(())
@@ -136,6 +140,31 @@ pub async fn report(env: &Env, caller: &Caller, body: Option<&str>, req: &Reques
     // The checks that need no count first, so a bad request doesn't reach the room or the queue.
     check_report(&caller.kind, reason, note.as_deref(), 0)
         .map_err(|refusal| ApiError::api(status_of(refusal.code()), refusal.code()))?;
+    // The same request, by its parsed fields, so a retry with reordered keys is still the same one.
+    let hash = format!(
+        "{:x}",
+        Sha256::digest(
+            json!({ "handle": handle, "agent_id": agent, "reason": reason, "note": note })
+                .to_string()
+                .as_bytes()
+        )
+    );
+    // A retry answers with the report it made before the room is looked up, so one made private or suspended since still
+    // gets its answer. The same key with a different request is refused.
+    let mut earlier = call(
+        env,
+        "/report-lookup",
+        Method::Post,
+        Some(json!({ "reporter": caller.id, "request_key": key, "request_hash": hash })),
+    )
+    .await?;
+    if earlier.status_code() != 200 {
+        return Ok(earlier);
+    }
+    let found: Value = earlier.json().await?;
+    if !found["report"].is_null() {
+        return Ok(Response::from_json(&found["report"])?);
+    }
     if !crate::workspace::public_rooms_enabled(env, req)? {
         return Err(ApiError::workspace_not_found());
     }
@@ -143,8 +172,8 @@ pub async fn report(env: &Env, caller: &Caller, body: Option<&str>, req: &Reques
         return Err(ApiError::workspace_not_found());
     };
     let request = json!({
-        "reporter": caller.id, "request_key": key, "handle": handle, "workspace_id": workspace, "agent_id": agent,
-        "reason": reason, "note": note,
+        "reporter": caller.id, "request_key": key, "request_hash": hash, "handle": handle, "workspace_id": workspace,
+        "agent_id": agent, "reason": reason, "note": note,
     });
     call(env, "/report", Method::Post, Some(request)).await
 }
@@ -186,15 +215,88 @@ fn reason_of(body: Option<&str>) -> R<Reason> {
         .ok_or_else(ApiError::invalid_argument)
 }
 
-async fn log(env: &Env, operator: &str, kind: &str, subject: &str, action: &str, reason: Reason) {
+/// Writes the operator's action as intent before it's carried out, so no action happens without a row. `Err` refuses the
+/// action. Answers the row's number, for [`finish`].
+async fn begin(
+    env: &Env,
+    operator: &str,
+    kind: &str,
+    subject: &str,
+    action: &str,
+    reason: Reason,
+) -> R<i64> {
     let entry = json!({ "operator": operator, "subject_kind": kind, "subject": subject, "action": action, "reason": reason.name() });
-    let logged = match call(env, "/action", Method::Post, Some(entry)).await {
+    let mut response = call(env, "/action-begin", Method::Post, Some(entry)).await?;
+    if response.status_code() != 200 {
+        return Err(ApiError::internal("operator action not recorded"));
+    }
+    let body: Value = response.json().await?;
+    body["seq"]
+        .as_i64()
+        .ok_or_else(|| ApiError::internal("operator action not recorded"))
+}
+
+/// Marks how the action ended: `done`, or the refusal's code. A row left `pending` is an action whose outcome was lost.
+async fn finish(env: &Env, seq: i64, outcome: &str) {
+    let marked = match call(
+        env,
+        "/action-end",
+        Method::Post,
+        Some(json!({ "seq": seq, "outcome": outcome })),
+    )
+    .await
+    {
         Ok(response) => response.status_code() == 200,
         Err(_) => false,
     };
-    if !logged {
-        console_error!("operator action not logged: kind={kind} action={action}");
+    if !marked {
+        console_error!("operator action outcome not recorded: seq={seq}");
     }
+}
+
+/// Asks the room to suspend or lift, recorded as intent first and its outcome after. `handle` is checked by the room; a
+/// report's action names the room itself and sends none.
+#[allow(clippy::too_many_arguments)]
+async fn suspend_room(
+    env: &Env,
+    operator: &str,
+    workspace: &str,
+    handle: Option<&str>,
+    subject_kind: &str,
+    subject: &str,
+    suspended: bool,
+    reason: Reason,
+) -> R<std::result::Result<Value, Response>> {
+    let action = if suspended { "suspend" } else { "lift" };
+    let seq = begin(env, operator, subject_kind, subject, action, reason).await?;
+    let request = json!({ "suspended": suspended, "reason": reason.name(), "handle": handle });
+    let stub = env
+        .durable_object("WORKSPACE")?
+        .id_from_name(workspace)?
+        .get_stub()?;
+    let answered = forward(
+        stub,
+        crate::workspace::INTERNAL_SUSPENSION,
+        "",
+        Headers::new(),
+        Method::Post,
+        Some(request.to_string()),
+    )
+    .await;
+    let mut response = match answered {
+        Ok(response) => response,
+        Err(error) => {
+            finish(env, seq, error.code().unwrap_or("internal_error")).await;
+            return Err(error);
+        }
+    };
+    if response.status_code() != 200 {
+        finish(env, seq, &format!("refused_{}", response.status_code())).await;
+        return Ok(Err(response));
+    }
+    let answer: Value = response.json().await?;
+    finish(env, seq, "done").await;
+    Ok(Ok(answer))
 }
 
 /// `POST /v1/moderation/rooms/{handle}/suspend` or `/lift`, `{ reason }`: an operator suspends or lifts a room's public
@@ -211,28 +313,60 @@ pub async fn set_room_suspension(
     let Some(workspace) = room_for_handle(env, handle, false).await? else {
         return Err(ApiError::workspace_not_found());
     };
-    let request = json!({ "suspended": suspended, "reason": reason.name(), "operator": caller.id });
-    let stub = env
-        .durable_object("WORKSPACE")?
-        .id_from_name(&workspace)?
-        .get_stub()?;
-    let mut response = forward(
-        stub,
-        crate::workspace::INTERNAL_SUSPENSION,
-        "",
-        Headers::new(),
-        Method::Post,
-        Some(request.to_string()),
+    match suspend_room(
+        env,
+        &caller.id,
+        &workspace,
+        Some(handle),
+        "room",
+        handle,
+        suspended,
+        reason,
     )
-    .await?;
-    if response.status_code() != 200 {
-        return Ok(response);
+    .await?
+    {
+        Ok(mut answer) => {
+            answer["handle"] = json!(handle);
+            Ok(Response::from_json(&answer)?)
+        }
+        Err(refused) => Ok(refused),
     }
-    let mut answer: Value = response.json().await?;
-    let action = if suspended { "suspend" } else { "lift" };
-    log(env, &caller.id, "room", handle, action, reason).await;
-    answer["handle"] = json!(handle);
-    Ok(Response::from_json(&answer)?)
+}
+
+/// `POST /v1/moderation/reports/{report}/suspend-room { reason }`: an operator suspends the room a report was about, found
+/// from the report on the server, so it works after the owner made the room private or published it again under a new
+/// handle. The room's internal ID is never shown.
+pub async fn suspend_room_by_report(
+    env: &Env,
+    caller: &Caller,
+    report: &str,
+    body: Option<&str>,
+) -> R<Response> {
+    require_operator(env, caller)?;
+    let reason = reason_of(body)?;
+    if !report.starts_with("rpt_") || !valid_id(report) {
+        return Err(ApiError::not_found());
+    }
+    let mut found = call(env, &format!("/report-room?id={report}"), Method::Get, None).await?;
+    if found.status_code() != 200 {
+        return Ok(found);
+    }
+    let room: Value = found.json().await?;
+    let workspace = room["workspace_id"]
+        .as_str()
+        .ok_or_else(ApiError::not_found)?
+        .to_string();
+    match suspend_room(
+        env, &caller.id, &workspace, None, "report", report, true, reason,
+    )
+    .await?
+    {
+        Ok(mut answer) => {
+            answer["report_id"] = json!(report);
+            Ok(Response::from_json(&answer)?)
+        }
+        Err(refused) => Ok(refused),
+    }
 }
 
 /// `POST /v1/moderation/agents/{agent}/suspend` or `/lift`, `{ reason }`: an operator suspends or lifts an agent's public
@@ -249,11 +383,17 @@ pub async fn set_agent_suspension(
     if !valid_id(agent) || !agent.starts_with("agt_") {
         return Err(ApiError::agent_not_found());
     }
-    let mut answer =
-        principal::set_public_claims_suspension(env, agent, suspended, reason.name(), &caller.id)
-            .await?;
     let action = if suspended { "suspend" } else { "lift" };
-    log(env, &caller.id, "agent", agent, action, reason).await;
+    let seq = begin(env, &caller.id, "agent", agent, action, reason).await?;
+    let mut answer =
+        match principal::set_public_claims_suspension(env, agent, suspended, reason.name()).await {
+            Ok(answer) => answer,
+            Err(error) => {
+                finish(env, seq, error.code().unwrap_or("internal_error")).await;
+                return Err(error);
+            }
+        };
+    finish(env, seq, "done").await;
     answer["agent_id"] = json!(agent);
     Ok(Response::from_json(&answer)?)
 }
@@ -291,7 +431,28 @@ impl Moderation {
                     .and_then(|(_, v)| v.parse::<i64>().ok());
                 list(&sql, before)
             }
-            (Method::Post, "/action") => {
+            (Method::Post, "/report-lookup") => {
+                let body: Value = req.json().await?;
+                Ok(json!({ "report": earlier_report(&sql, &body)? }))
+            }
+            // The room a report was about, for an operator's action. The Worker never answers with it.
+            (Method::Get, "/report-room") => {
+                let id = req
+                    .url()?
+                    .query_pairs()
+                    .find(|(k, _)| k == "id")
+                    .map(|(_, v)| v.into_owned())
+                    .unwrap_or_default();
+                rows(
+                    &sql,
+                    "SELECT workspace_id FROM report WHERE id = ?",
+                    vec![id.into()],
+                )?
+                .first()
+                .map(|row| json!({ "workspace_id": row["workspace_id"] }))
+                .ok_or_else(ApiError::not_found)
+            }
+            (Method::Post, "/action-begin") => {
                 let body: Value = req.json().await?;
                 exec(
                     &sql,
@@ -305,7 +466,23 @@ impl Moderation {
                         now_ms().into(),
                     ],
                 )?;
-                Ok(json!({ "logged": true }))
+                let seq = rows(&sql, "SELECT last_insert_rowid() AS seq", vec![])?
+                    .first()
+                    .map_or(0, |row| int(&row["seq"]));
+                Ok(json!({ "seq": seq }))
+            }
+            (Method::Post, "/action-end") => {
+                let body: Value = req.json().await?;
+                exec(
+                    &sql,
+                    "UPDATE operator_action SET outcome = ?, ended_at = ? WHERE seq = ? AND outcome = 'pending'",
+                    vec![
+                        body["outcome"].as_str().unwrap_or("unknown").into(),
+                        now_ms().into(),
+                        body["seq"].as_i64().unwrap_or(0).into(),
+                    ],
+                )?;
+                Ok(json!({ "marked": true }))
             }
             _ => Err(ApiError::not_found()),
         }
@@ -317,13 +494,10 @@ impl Moderation {
 fn keep_report(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     let text = |name: &str| body[name].as_str().unwrap_or_default().to_string();
     let (reporter, key) = (text("reporter"), text("request_key"));
-    let earlier = rows(
-        sql,
-        "SELECT id, created_at FROM report WHERE reporter = ? AND request_key = ?",
-        vec![reporter.as_str().into(), key.as_str().into()],
-    )?;
-    if let Some(row) = earlier.first() {
-        return Ok(json!({ "id": row["id"], "created_at": row["created_at"] }));
+    // Asked again while the first was being kept.
+    let earlier = earlier_report(sql, body)?;
+    if !earlier.is_null() {
+        return Ok(earlier);
     }
     let made = rows(
         sql,
@@ -343,12 +517,13 @@ fn keep_report(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     let id = format!("rpt_{}", uuid::Uuid::new_v4().simple());
     exec(
         sql,
-        "INSERT INTO report (id, reporter, request_key, handle, workspace_id, agent_id, reason, note, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO report (id, reporter, request_key, request_hash, handle, workspace_id, agent_id, reason, note, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         vec![
             id.as_str().into(),
             reporter.as_str().into(),
             key.as_str().into(),
+            text("request_hash").into(),
             text("handle").into(),
             text("workspace_id").into(),
             body["agent_id"].as_str().map(str::to_owned).into(),
@@ -358,6 +533,26 @@ fn keep_report(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         ],
     )?;
     Ok(json!({ "id": id, "created_at": now }))
+}
+
+/// The report this reporter made with this key, as its answer, or null. The same key with a different request is
+/// refused with `idempotency_mismatch`, as every other command does.
+fn earlier_report(sql: &SqlStorage, body: &Value) -> R<Value> {
+    let found = rows(
+        sql,
+        "SELECT id, created_at, request_hash FROM report WHERE reporter = ? AND request_key = ?",
+        vec![
+            body["reporter"].as_str().unwrap_or_default().into(),
+            body["request_key"].as_str().unwrap_or_default().into(),
+        ],
+    )?;
+    let Some(row) = found.first() else {
+        return Ok(Value::Null);
+    };
+    if row["request_hash"].as_str() != body["request_hash"].as_str() {
+        return Err(ApiError::idempotency_mismatch());
+    }
+    Ok(json!({ "id": row["id"], "created_at": row["created_at"] }))
 }
 
 /// A page of reports, newest first. Neither the reporter nor the room's internal ID is shown: an operator sees the handle,

@@ -435,6 +435,8 @@ pub fn denied_change_name(method: &str, route: &[&str]) -> Option<&'static str> 
         ("PUT", ["name"]) => "room.rename",
         ("PUT", ["brief"]) => "room.change_brief",
         ("PUT", ["review-policy"]) => "room.change_review_policy",
+        ("PUT", ["visibility"]) => "room.set_visibility",
+        ("PUT", ["topic"]) => "room.set_topic",
         ("POST", ["archive"]) => "room.archive",
         ("POST", ["unarchive"]) => "room.unarchive",
         ("POST", ["owner", "transfer"]) => "owner.transfer",
@@ -696,12 +698,16 @@ pub fn may_decide_review(kind: PrincipalKind, room_requires_person: bool) -> boo
 
 /// Room events anyone in the room can see, whatever their scope: what they can already read in the room's brief and
 /// openings. Everything else about the room, such as who joined or left, follows what they can see of its participants.
-pub const EVENTS_FOR_EVERYONE: [&str; 11] = [
+pub const EVENTS_FOR_EVERYONE: [&str; 14] = [
     "workspace.created",
     "workspace.archived",
     "workspace.unarchived",
     "workspace.brief_changed",
     "workspace.review_policy_changed",
+    // Everyone in a room should know when what it says becomes public, or stops being (ADR 0008). IDs only.
+    "room.published",
+    "room.unpublished",
+    "workspace.topic_changed",
     "role.created",
     "role.updated",
     "role.closed",

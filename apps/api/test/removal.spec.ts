@@ -228,7 +228,14 @@ describe("the room's sweep", () => {
   it("plans one sweep an hour after migrating a room that holds files, and none for a room that doesn't", async () => {
     const undoRemoval = (id: string) => runInDurableObject(stub(id), (_: any, state: any) => {
       // The migrations after this one come off first: submitted files' flag, then expected outputs.
-      // Step 13's read-back, the newest migration, then step 12's A2A attempts.
+      // M4 step 5's room visibility, the newest migration, then step 13's read-back and step 12's A2A attempts.
+      state.storage.sql.exec("ALTER TABLE work_role DROP COLUMN publicly_claimable");
+      state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN public_claims_paused");
+      state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN topic");
+      state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN published_at");
+      state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN public_handle");
+      state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN visibility");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP INDEX a2a_attempt_reads");
       state.storage.sql.exec("DROP INDEX a2a_attempt_cancels");
       state.storage.sql.exec("DROP TABLE a2a_held");
@@ -354,7 +361,14 @@ describe("the room's sweep", () => {
     const object = await file(id);
     await runInDurableObject(stub(id), (_: any, state: any) => {
       // The migrations after this one come off first: submitted files' flag, then expected outputs.
-      // Step 13's read-back, the newest migration, then step 12's A2A attempts.
+      // M4 step 5's room visibility, the newest migration, then step 13's read-back and step 12's A2A attempts.
+      state.storage.sql.exec("ALTER TABLE work_role DROP COLUMN publicly_claimable");
+      state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN public_claims_paused");
+      state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN topic");
+      state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN published_at");
+      state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN public_handle");
+      state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN visibility");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP INDEX a2a_attempt_reads");
       state.storage.sql.exec("DROP INDEX a2a_attempt_cancels");
       state.storage.sql.exec("DROP TABLE a2a_held");
@@ -623,7 +637,14 @@ describe("removal by the rules, review fixes", () => {
     await runInDurableObject(stub(id), (_: any, state: any) => {
       const sql = state.storage.sql;
       sql.exec("INSERT INTO submission_file (task_id, submission_no, object_id, sha256, size, label, submitted_by, submitted_org, created_at) VALUES (?, 1, ?, ?, 1, 'x', ?, ?, 456)", t.body.id, named, "0".repeat(64), MEMBER.id, MEMBER.org);
-      // Step 13's read-back, the newest migration, then step 12's A2A attempts.
+      // M4 step 5's room visibility, the newest migration, then step 13's read-back and step 12's A2A attempts.
+      state.storage.sql.exec("ALTER TABLE work_role DROP COLUMN publicly_claimable");
+      state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN public_claims_paused");
+      state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN topic");
+      state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN published_at");
+      state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN public_handle");
+      state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN visibility");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP INDEX a2a_attempt_reads");
       state.storage.sql.exec("DROP INDEX a2a_attempt_cancels");
       state.storage.sql.exec("DROP TABLE a2a_held");

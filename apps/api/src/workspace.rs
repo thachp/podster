@@ -86,6 +86,7 @@ mod planned;
 mod removal;
 mod roles;
 mod submission_files;
+mod visibility;
 
 /// The caller as this room knows them. `org` comes from stored state, not the request.
 struct Participant {
@@ -1436,6 +1437,14 @@ fn handle_set_review_policy(sql: &SqlStorage, caller: &Caller, body: &Value, now
         .and_then(Value::as_bool)
         .ok_or_else(ApiError::invalid_argument)?;
     let prior = store::requires_person_review(sql)?;
+    // A public room always has a person review (decision 159), so it can't be turned off until the room is private again.
+    if !require_person
+        && rows(sql, "SELECT visibility FROM workspace", vec![])?
+            .first()
+            .is_some_and(|r| r["visibility"].as_str() == Some("public"))
+    {
+        return Err(ApiError::api(409, "person_review_required"));
+    }
     if prior != require_person {
         exec(
             sql,
@@ -3604,6 +3613,7 @@ impl Workspace {
         }
         // Authority comes before anything about the request, so an outsider gets one answer for every request.
         let who = resolve_caller(&sql, &identity)?;
+        let public_rooms = visibility::public_rooms_enabled(&self.env, &req)?;
 
         let segments: Vec<String> = path
             .trim_start_matches('/')
@@ -3621,6 +3631,9 @@ impl Workspace {
             (Method::Post, ["unarchive"])
                 // Decision 93: archiving doesn't shield harmful content from a takedown.
                 | (Method::Post, ["files", _, "remove"])
+                // An archived public room stays readable (decision 152), so it can still be made private. Publishing one is
+                // refused by `podster_policy::public::decide_publish`.
+                | (Method::Put, ["visibility"])
                 | (
                     Method::Delete,
                     ["members" | "organizations" | "invitations", _]
@@ -3646,6 +3659,7 @@ impl Workspace {
                 #[cfg(feature = "failpoints")]
                 ["collaboration", "costs"] => collaboration::read_costs(&sql, &who, &url),
                 ["brief"] => queries::get_brief(&sql, &who),
+                ["visibility"] => visibility::read(&sql, &who, public_rooms),
                 ["activity"] => queries::list_activity(&sql, &who, &url),
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
                 ["tasks", id] => queries::get_task(&sql, &who, id, false),
@@ -4012,6 +4026,24 @@ impl Workspace {
                 stops_when_archived,
                 test_fail,
                 move |sql, who, now| handle_change_access(sql, &who.caller, &target, &body, now),
+            ),
+            (Method::Put, ["visibility"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| {
+                    visibility::handle_set_visibility(sql, who, &body, public_rooms, now)
+                },
+            ),
+            (Method::Put, ["topic"]) => self.command(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                move |sql, who, now| visibility::handle_set_topic(sql, &who.caller, &body, now),
             ),
             (Method::Put, ["review-policy"]) => self.command(
                 &identity,

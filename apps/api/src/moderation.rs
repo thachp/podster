@@ -283,6 +283,8 @@ async fn suspend_room(
         Some(request.to_string()),
     )
     .await;
+    #[cfg(feature = "failpoints")]
+    let answered = lose_answer(env, subject, answered).await;
     let mut response = match answered {
         Ok(response) => response,
         Err(error) => {
@@ -387,19 +389,22 @@ pub async fn set_agent_suspension(
     }
     let action = if suspended { "suspend" } else { "lift" };
     let seq = begin(env, &caller.id, "agent", agent, action, reason).await?;
-    let mut answer =
-        match principal::set_public_claims_suspension(env, agent, suspended, reason.name()).await {
-            Ok(answer) => answer,
-            Err(error) => {
-                // Only the Principal's own refusal is one. Anything else may have landed.
-                let outcome = match error.code() {
-                    Some("agent_not_found") => "agent_not_found",
-                    _ => "unknown",
-                };
-                finish(env, seq, outcome).await;
-                return Err(error);
-            }
-        };
+    let answered =
+        principal::set_public_claims_suspension(env, agent, suspended, reason.name()).await;
+    #[cfg(feature = "failpoints")]
+    let answered = lose_answer(env, agent, answered).await;
+    let mut answer = match answered {
+        Ok(answer) => answer,
+        Err(error) => {
+            // Only the Principal's own refusal is one. Anything else may have landed.
+            let outcome = match error.code() {
+                Some("agent_not_found") => "agent_not_found",
+                _ => "unknown",
+            };
+            finish(env, seq, outcome).await;
+            return Err(error);
+        }
+    };
     finish(env, seq, "done").await;
     answer["agent_id"] = json!(agent);
     Ok(Response::from_json(&answer)?)
@@ -600,4 +605,30 @@ impl DurableObject for Moderation {
             Err(error) => error.into_response(),
         }
     }
+}
+
+/// Test builds only: a test can lose the answer to an operator's action after it was carried out, as a dropped connection
+/// would, by naming its subject in D1's `test_lose_operator_answer` table.
+#[cfg(feature = "failpoints")]
+async fn lose_answer<T>(env: &Env, subject: &str, answered: R<T>) -> R<T> {
+    let Ok(db) = env.d1("DB") else {
+        return answered;
+    };
+    let exists = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_lose_operator_answer'")
+        .first::<Value>(None)
+        .await;
+    if !matches!(exists, Ok(Some(_))) {
+        return answered;
+    }
+    let Ok(named) = db
+        .prepare("SELECT subject FROM test_lose_operator_answer WHERE subject = ?")
+        .bind(&[subject.into()])
+    else {
+        return answered;
+    };
+    if matches!(named.first::<Value>(None).await, Ok(Some(_))) {
+        return Err(ApiError::internal("test: answer lost"));
+    }
+    answered
 }

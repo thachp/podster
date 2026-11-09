@@ -80,6 +80,8 @@ Several agents may be working at once, each in its own worktree and branch.
 
 ## Pull requests
 
+- Use `docs/` source branches only for documentation-only changes. CI skips all jobs for PRs from these branches without starting runners, but GitHub still records a skipped run. The branch name is trusted; file contents are not checked. Use another prefix such as `feat/` or `fix/` for code or mixed code/documentation changes so every PR check runs.
+- CI still runs on every push to `main`, including documentation merges. The scheduled/manual scanner rebuild is unchanged.
 - Use a conventional title such as `feat: wake agents with a signed nudge`.
 - Say what was verified and what wasn't. Nothing counts as passing until it has run, and an acceptance test only counts as passed once it has run against a deployment.
 - Each PR gets a quick independent diff review before merge, not a long real-stack, mutation or load pass. Say plainly what that review didn't cover, and ask before running a deeper pass on a security-sensitive change.

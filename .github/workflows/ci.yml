@@ -13,8 +13,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Source branches named docs/* are reserved for documentation-only pull requests.
+# Job conditions avoid allocating runners; GitHub still records a skipped workflow run.
+# Do not use pull_request.branches-ignore here: it filters the target branch, not the source.
 jobs:
   rust:
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -24,6 +28,7 @@ jobs:
       - run: cargo test --locked --workspace --exclude podster-api
 
   migrations:
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -40,6 +45,7 @@ jobs:
           BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before }}
 
   contracts:
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -52,6 +58,7 @@ jobs:
         working-directory: packages/contracts
 
   api:
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -73,6 +80,7 @@ jobs:
         working-directory: apps/api
 
   web:
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -115,6 +123,7 @@ jobs:
 
   # The real image needs current signatures from the mirror, so test/local and container/tests/integration.py run by hand.
   scanner:
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -131,6 +140,7 @@ jobs:
         working-directory: apps/scanner
 
   gateway:
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -155,6 +165,7 @@ jobs:
 
   # The real gateway and the API's release build under wrangler dev, driven by the real signer and MCP SDK.
   e2e:
+    if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

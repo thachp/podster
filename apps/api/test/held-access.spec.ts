@@ -1,4 +1,4 @@
-import { env, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
 
@@ -160,9 +160,15 @@ describe("a room whose migration fails", () => {
     expect((await revoke(id, 99)).status).toBe(200);
     // The outbox is free to send again, but the alarm sends nothing while the fence is held, and comes back later.
     await inRoom(id, (sql) => sql.exec("DROP TABLE test_hold_outbox"));
-    await runInDurableObject(stub(id), (instance: any) => instance.alarm());
+    // Run the alarm as the runtime does, with nothing else due soon. An alarm the room set earlier, milliseconds away, would
+    // otherwise fire by itself around this check, and while it runs none is scheduled.
+    await inRoom(id, (_sql, state) => state.storage.setAlarm(Date.now() + 60_000));
+    expect(await runDurableObjectAlarm(stub(id))).toBe(true);
     expect(await queued()).toBeGreaterThan(0);
-    expect(await inRoom(id, (_sql, state) => state.storage.getAlarm())).not.toBeNull();
+    // It comes back on the outbox's failure delay, 5 seconds, not straight away.
+    const next = await inRoom(id, (_sql, state) => state.storage.getAlarm());
+    expect(next).not.toBeNull();
+    expect(next as number).toBeGreaterThan(Date.now() + 1_000);
     const before = await inRoom(id, (sql) => sql.exec("SELECT e.type FROM outbox o JOIN event e ON e.id = o.event_id WHERE o.recipient_principal_id = ?", AGENT.id).toArray().map((r: any) => r.type));
     expect(before).not.toContain("member.revoked");
     // Once the room migrates, the fence applies and takes back what was waiting for the agent.

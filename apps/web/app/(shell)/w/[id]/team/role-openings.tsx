@@ -15,7 +15,8 @@ import { kindOf } from "../tasks/task-model";
 import type { Send } from "./commands";
 import { ConfirmAction } from "./confirm-action";
 import { FIELD, MOBILE_TARGET } from "./field";
-import { explainRefusal, membersOf, PRESET_LABELS, PRESET_SUMMARIES, presetOptions, roleFitsLimits, type Member, type RoleOpening, type RoleRead } from "./model";
+import { PublicClaimToggle } from "./public-claim-toggle";
+import { canBePublic, explainRefusal, membersOf, PRESET_LABELS, PRESET_SUMMARIES, presetOptions, roleFitsLimits, type Member, type RoleOpening, type RoleRead } from "./model";
 
 const TEXTAREA = `${FIELD} h-auto py-2`;
 
@@ -69,6 +70,7 @@ export function RoleOpenings({ base, room, read, canManage, archived, send, labe
                   <div className="flex flex-wrap items-center gap-2">
                     {role.is_lead ? <Badge>Lead coordinator</Badge> : null}
                     <Badge variant="secondary">{PRESET_LABELS[role.preset] ?? role.preset}</Badge>
+                    {role.publicly_claimable ? <Badge variant="outline">Claimable publicly</Badge> : null}
                     <span className="text-sm text-muted-foreground">{fillOf(role)}</span>
                   </div>
                 </div>
@@ -104,6 +106,7 @@ function AddOpening({ base, room, hasLead, send }: { base: string; room: string;
   const [capacity, setCapacity] = useState("1");
   const [preset, setPreset] = useState("member");
   const [isLead, setIsLead] = useState(false);
+  const [claimable, setClaimable] = useState(false);
   const [pending, setPending] = useState(false);
   const openings = Number(capacity);
   const problem = roleFitsLimits(title, responsibilities, isLead ? 1 : openings);
@@ -112,7 +115,7 @@ function AddOpening({ base, room, hasLead, send }: { base: string; room: string;
     event.preventDefault();
     if (problem || pending) return;
     setPending(true);
-    const body = isLead ? { title: title.trim(), responsibilities: responsibilities.trim(), is_lead: true } : { title: title.trim(), responsibilities: responsibilities.trim(), capacity: openings, preset };
+    const body = isLead ? { title: title.trim(), responsibilities: responsibilities.trim(), is_lead: true } : { title: title.trim(), responsibilities: responsibilities.trim(), capacity: openings, preset, ...(claimable && canBePublic(preset, false) ? { publicly_claimable: true } : {}) };
     await send(`${base}/roles`, body, `Opening added to “${room}”. It's empty until an agent you invite claims it.`, {
       focus: true,
       explain: explainRoleRefusal,
@@ -121,6 +124,7 @@ function AddOpening({ base, room, hasLead, send }: { base: string; room: string;
         setResponsibilities("");
         setCapacity("1");
         setIsLead(false);
+        setClaimable(false);
       },
     });
     setPending(false);
@@ -163,6 +167,7 @@ function AddOpening({ base, room, hasLead, send }: { base: string; room: string;
         </div>
       )}
       <p className="text-sm text-muted-foreground">{PRESET_SUMMARIES[isLead ? "coordinator" : preset]}</p>
+      <PublicClaimToggle checked={claimable} preset={preset} isLead={isLead} onChange={setClaimable} />
       {problem && (title || responsibilities) ? <p className="text-sm text-status-danger">{problem}</p> : null}
       <Button type="submit" size="sm" className={MOBILE_TARGET} disabled={pending || problem !== null}>
         {pending ? "Adding…" : "Add opening"}
@@ -231,6 +236,10 @@ function RoleBody({ api, base, label, setDone, statusRef }: { api: SheetApi<Load
   const [capacity, setCapacity] = useState(String(role.capacity));
   const [preset, setPreset] = useState(role.preset);
   const [isLead, setIsLead] = useState(role.is_lead);
+  const [claimable, setClaimable] = useState(role.publicly_claimable === true);
+  // What would be saved: the switch only holds where it can apply.
+  const claimableNow = claimable && canBePublic(preset, isLead);
+  const claimableChanged = claimableNow !== (role.publicly_claimable === true);
   const [invitee, setInvitee] = useState("");
   // One key per intent, so sending the same thing again after an unknown outcome gets the stored answer.
   const keys = useRef(new Map<string, string>());
@@ -263,7 +272,7 @@ function RoleBody({ api, base, label, setDone, statusRef }: { api: SheetApi<Load
     keys.current.delete("save");
   };
   // Worked out from the form, because any command's success clears the Sheet's flag, and an invite doesn't save what's typed.
-  const edited = title !== role.title || responsibilities !== role.responsibilities || isLead !== role.is_lead || (!isLead && (capacity !== String(role.capacity) || preset !== role.preset));
+  const edited = title !== role.title || responsibilities !== role.responsibilities || isLead !== role.is_lead || claimableChanged || (!isLead && (capacity !== String(role.capacity) || preset !== role.preset));
   useEffect(() => {
     if (dirty !== edited) setDirty(edited);
   }, [dirty, edited, setDirty]);
@@ -271,7 +280,7 @@ function RoleBody({ api, base, label, setDone, statusRef }: { api: SheetApi<Load
   const save = () =>
     act(
       "save",
-      (idempotencyKey, version) => clientCommand(path, { policy_version: version, title: title.trim(), responsibilities: responsibilities.trim(), ...(isLead === role.is_lead ? {} : { is_lead: isLead }), ...(isLead ? {} : { capacity: Number(capacity), preset }) }, { method: "PUT", idempotencyKey }),
+      (idempotencyKey, version) => clientCommand(path, { policy_version: version, title: title.trim(), responsibilities: responsibilities.trim(), ...(isLead === role.is_lead ? {} : { is_lead: isLead }), ...(isLead ? {} : { capacity: Number(capacity), preset }), ...(claimableChanged ? { publicly_claimable: claimableNow } : {}) }, { method: "PUT", idempotencyKey }),
       "Saved. Everyone in this workroom sees the opening's new details.",
     );
   const invite = async () => {
@@ -401,6 +410,7 @@ function RoleBody({ api, base, label, setDone, statusRef }: { api: SheetApi<Load
                 </label>
               </div>
             )}
+            <PublicClaimToggle checked={claimable} preset={preset} isLead={isLead} onChange={(next) => edit(() => setClaimable(next))} />
             {Number(capacity) < holders.length ? <p role="note" className="rounded-lg bg-status-amber-surface p-3 text-sm">Lowering this removes nobody. It only stops further claims.</p> : null}
             {termsChanged ? (
               <p role="note" className="rounded-lg bg-status-amber-surface p-3 text-sm">

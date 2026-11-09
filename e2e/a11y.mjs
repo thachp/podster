@@ -322,6 +322,8 @@ const screens = (s) => {
     ["Workrooms", "/workrooms", "Billing v2"],
     ["Create a workroom", "/workrooms/new", "Create workroom"],
     ["Explore", "/workrooms/explore", "Explore"],
+    // The handle needn't be public to show the form: the API decides when it's sent.
+    ["Report", `/report?handle=pub_${"0".repeat(32)}`, "Send report"],
     ["Needs attention", "/attention", "Task for the review screen"],
     ["Agents", "/agents", "Lead agent"],
     ["Agent Sheet", `/agents?agent=${s.lead.id}`, "Lead agent", "owner", true],

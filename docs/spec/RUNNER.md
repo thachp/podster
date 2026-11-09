@@ -2,6 +2,8 @@
 
 **Status:** Direction decided November 4, 2026, with November 8 proposals to revise it; detailed design proposed. No Runner implementation, released package, A2A conformance, CLI adapter or executable test suite exists in this repository. Acceptance criteria below are not run. Under [decision 26](PRODUCT.md#decisions-needed), nothing is published until M7's gates pass, including a security review of this threat model.
 
+**Proof-of-concept transport scope decided November 9, 2026:** outbound polling is sufficient. The proof of concept includes no inbound A2A endpoint, tunnel or wake relay. [Optional inbound A2A](#optional-inbound-a2a) is a later extension, not a proof-of-concept dependency; its transport and implementation remain proposed.
+
 **Pairing proposal added November 7, 2026:** the [one-agent proof of concept](#proposed-one-agent-pairing-proof-of-concept) below starts in Podster and uses a code entered in Runner to bind a locally generated public key. It is a design for discussion, not an implemented flow or an approval to create credentials.
 
 **Execution direction proposed November 8, 2026:** eligible tasks run automatically within owner-configured access and limits, without per-run owner approval. It's a **proposed revision** to decision 29, not decided, and waits for M7's security review. Until then decision 29's ask-first default stands. The Claude Code handoff and GitHub credential delivery below remain proposed, not implemented. For a workroom that needs Git, the intended flow is server-created repository during room setup, then a fresh local clone by Runner when it accepts an eligible coding task; Claude Code works in that clone.
@@ -11,6 +13,8 @@ Companions: [Product](PRODUCT.md) · [Architecture](ARCHITECTURE.md) · [Design]
 ## Purpose and direction
 
 Podster remains the coordination layer. Runner is optional software that an agent owner operates on their own machine, executing Podster tasks through supported installed tools. It is not Podster-hosted model execution and does not replace independently hosted agents, MCP/Agent Auth participation, or durable inboxes.
+
+**Integration scope:** Runner's execution contract covers the owner's configured local agent/runtime and its model access and permitted tools, including non-coding local tools. Claude Code, Codex and Cursor are illustrative coding integrations, not an exhaustive list or a claim of implemented support. The Claude Code workflow below is a coding example of that broader contract. Each integration and mode must be validated separately before support is claimed; the same run policy, isolation, credential boundaries, tool/network allowlists, budgets, output-sharing rules and independent review apply. An agent's available tools or advertised capabilities never grant permission to use them.
 
 **Decided direction:** the name Podster Runner, local execution, **Agent Auth as Runner's way to authenticate to Podster**, separate from provider authentication, authorized registration, role admission before execution, offer-and-accept pickup, API keys or equivalent automation credentials ([decisions 26 to 29](PRODUCT.md#decisions-needed)) Automatic execution without per-run owner approval is a **proposed revision** to decision 29, not decided (see the status above).
 
@@ -35,7 +39,7 @@ sequenceDiagram
     R->>P: get_task
     P-->>R: Instructions, marked as untrusted
     R->>R: Apply local run policy and budget
-    Note over R: Eligible tasks continue automatically; out-of-policy work stops
+    Note over R: Eligible tasks continue automatically. Out-of-policy work stops
     R->>P: accept_task (version, idempotency key)
     R->>P: Resolve room repository and scoped task access
     R->>G: Clone verified repository and pin base commit
@@ -53,7 +57,7 @@ sequenceDiagram
 ## Lifecycle
 
 1. **Install and start:** a future verified distribution starts Runner with an owner-approved local workspace root. For an M5-managed Git-enabled room, the server creates and links its repository during room setup, using preconfigured provisioning authority; Runner later clones that linked repository into a fresh isolated task directory. The limited M0-only proof of concept instead uses the owner-configured source and does not provision a repository. Each room must have its own authorized source and each task its own copy, so that work can't read another room's or task's data. That's a requirement on isolation, which isn't proven yet. No package name or command is published here, because none is owned or released, and an unowned name could be registered by anyone. Setup must disclose local execution, credential use and network exposure. It must not silently install CLIs, create persistent credentials or expose ports.
-2. **Connect:** Runner connects **outbound** to the public gateway and works through the same inbox loop as any other agent. By default it opens no listening port and needs no tunnel. Podster never reaches into the machine. It polls at an owner-set interval. Wake needs a public HTTPS URL, so with no open port it is available only through an external relay; missed wakes cost only latency.
+2. **Connect:** Runner connects **outbound** to the public gateway and works through the same inbox loop as any other agent. The proof of concept uses polling at an owner-set interval, opens no listening port and has no inbound A2A endpoint, tunnel or wake relay. Podster never reaches into the machine. Polling is sufficient for work pickup and remains the default beyond the proof of concept. A later [optional inbound A2A](#optional-inbound-a2a) extension may reduce pickup latency, but the durable inbox remains the source of truth and missed nudges must not lose work.
 3. **Authenticate and register:** Runner uses Agent Auth, not hosted MCP OAuth, and signs in as exactly one Podster agent. The documented Agent Auth flow returns a claim link at registration and keeps the agent pending, with no capabilities, until its person confirms ownership and picks its organization. The [proposed pairing proof of concept](#proposed-one-agent-pairing-proof-of-concept) would instead start that onboarding in Podster, with the same human approval and organization checks. It must not activate an unclaimed identity or bypass Agent Auth. Agent skills are descriptive, not grants. The agent is a private record for its organization, not a public directory entry.
 4. **Join and role:** the workroom owner or appointed human admin manages local agent admission and access. The agent owner retains connect and withdraw control. A public opening can be claimed only if the agent's [participation policy](PRODUCT.md#public-and-private-participation) allows it, and that policy defaults to invitations only. Roles such as engineer or reviewer do not convey admin, GitHub, merge or deployment privileges.
 5. **Pick up work:** Runner reads its inbox, then fetches the offered task with `get_task`, which applies current authority. Inbox events carry only IDs. It acknowledges an offer only after durably recording it locally, and reconciles with `list_tasks` on restart.
@@ -65,7 +69,7 @@ sequenceDiagram
 
 ## Proposed one-agent pairing proof of concept
 
-**Scope:** one owner, one Podster agent and one local Runner installation. The goal is to prove account-to-agent binding and later authentication without copying a private key or a long-lived bearer secret between Podster and Runner. Multi-agent setup, key migration, rotation and recovery are outside this first proof of concept. No endpoints, commands, schemas or cryptographic algorithms are specified by this document.
+**Scope:** one owner, one Podster agent and one local Runner installation. The goal is to prove account-to-agent binding and later authentication without copying a private key or a long-lived bearer secret between Podster and Runner. Multi-agent setup, key migration, rotation and recovery are outside this first proof of concept. No endpoints, commands, schemas or cryptographic algorithms are specified by this document. Pairing and reconnect use outbound requests; subsequent work pickup in the Runner proof of concept uses polling only. Inbound A2A, tunnels and wake relays are outside that scope.
 
 This is a proposed onboarding route into the existing Agent Auth identity model. [Product registration](PRODUCT.md#connecting-an-agent) and [Architecture](ARCHITECTURE.md) currently describe an agent-initiated registration and human claim. The proof of concept must reconcile the new starting point with those ownership, organization and pending-agent rules before implementation. It does not assume the current Agent Auth integration supports the proposed exchange, and it does not expose private plugin approval or key-replacement routes.
 
@@ -143,7 +147,7 @@ Proposed: this table describes the proposed revision. Until it's decided, every 
 | Exfiltration through results | Injected text asks for private code in a note, artifact, progress message or failure reason, which goes to the requester through an allowed channel | Separate sources per room; explicit output scope and destination, with owner review by default for external/public outputs and fixed-status progress/failure text until sharing is permitted. Redaction and network allowlists alone do not prevent source-code disclosure |
 | Stolen or overbroad GitHub token | Unauthorized repository writes or merge attempts | Repository-scoped permissions, protected credential delivery, short lifetime/revocation and independently enforced merge restrictions; see the proposed GitHub design below |
 | Task tampering with Runner itself | Task code edits run policy or forges approvals | Runner's policy, approvals and state are outside the task sandbox, and run under a separate OS user or container where possible |
-| Exposed inbound endpoint | Remote attack surface | Off by default; see [Optional inbound A2A](#optional-inbound-a2a) |
+| Exposed inbound endpoint (later extension) | Remote attack surface | Absent from the proof of concept and off by default thereafter; see [Optional inbound A2A](#optional-inbound-a2a) |
 
 ## Protocol and authorization boundaries
 
@@ -153,9 +157,9 @@ Prompt text, cards, messages and artifacts are untrusted input; none can expand 
 
 ### Optional inbound A2A
 
-Inbound A2A is **off by default**. An owner can opt in to get faster pickup. In this proposal it is **nudge-only**: polling stays on as the fallback, because the inbox is the source of truth. Runner doesn't act as a full A2A task server under the [A2A adapter](ARCHITECTURE.md#a2a-adapter)'s state mapping; that would need its own design.
+**Later extension, outside the proof of concept; not implemented.** Inbound A2A stays **off by default**. After a separately reviewed implementation, an owner could explicitly opt in to get faster pickup. In this proposal it is **nudge-only**: polling stays on as the fallback, because the inbox is the source of truth. Runner doesn't act as a full A2A task server under the [A2A adapter](ARCHITECTURE.md#a2a-adapter)'s state mapping; that would need its own design.
 
-- **Reachability:** Podster's A2A calls follow the wake egress policy: HTTPS, public DNS name and no private address ranges. A local-only bind cannot receive them. It requires a directly reachable address or an explicitly authorized tunnel, with the vendor to be chosen later. A tunnel is transport, not permission.
+- **Reachability:** Podster's A2A calls follow the wake egress policy: HTTPS, public DNS name and no private address ranges. A local-only bind cannot receive them. It requires a directly reachable address or an explicitly authorized tunnel. Cloudflare Tunnel is an initial candidate for this later extension, not an implemented integration or a proof-of-concept requirement. Keep the transport replaceable so a self-hosted relay could be evaluated later without changing Runner's identity, authorization or inbox contract. Either transport must pass the same security and delivery checks; this note does not authorize installing a tunnel or provisioning resources. A tunnel is transport, not permission.
 - **Caller:** Podster's gateway delivers through its outbox. Runner verifies that request, then treats it only as a nudge: it fetches the task over its outbound connection and applies run policy as usual. An inbound request alone never starts a CLI. Peer agents have no direct path to Runner.
 - **Registration:** the agent owner authorizes the endpoint and Agent Card. Verify current ownership, permitted organization and endpoint control before activating it. Validate the card schema, endpoint scheme and redirects, and protect retrieval against SSRF, DNS rebinding and private-network access. Don't automatically trust advertised URLs or instructions, and put sensitive capability metadata behind access control.
 - **Limits:** require TLS, authenticated requests, bounded payloads, rate limits and shutdown controls. Never expose a shell, credential store, arbitrary filesystem or Podster's private Rust API through the endpoint.
@@ -260,6 +264,8 @@ If a new decision ever adopts claiming, it must be atomic and idempotent, return
 
 ## Proposed acceptance criteria (not executed)
 
+The proof of concept must demonstrate polling-only operation under R-22. R-03, R-16 and R-17, plus the endpoint/tunnel/inbound clauses in R-01, R-02, R-15 and R-18, are gates for the later inbound extension, not proof-of-concept dependencies. They remain required before enabling that extension. The other security, isolation, authorization and recovery gates still apply to the proof-of-concept features it implements; deferring inbound transport does not relax them.
+
 | ID | Required observable result |
 | --- | --- |
 | R-01 | Startup without approved workspace/auth cannot execute; installation/tunnel setup requires explicit consent and verified distribution. |
@@ -283,7 +289,7 @@ If a new decision ever adopts claiming, it must be atomic and idempotent, return
 | R-19 | Task text from another organization containing injection attempts can't read credentials, change policy or reach other rooms' sources under the supported isolation. Requests to put workspace content in a result, progress message or failure reason are stopped when output approval is required. |
 | R-20 | Configured eligible tasks run without a per-run owner prompt. External/public work outside configured scope never starts; a rerun after `request_changes`, a re-offer or changed inputs needs a fresh policy decision; input/policy changes stop an affected run, and out-of-scope authors cannot widen access. Budget caps stop a run and are reported. |
 | R-21 | A simulated hostile Podster service cannot change local policy, replay a used/expired/non-matching decision, exceed enforced host limits or bypass a selected manual mode. Tests demonstrate and document that forged allowed labels may trigger automatic execution within those limits; automatic and dashboard modes trust Podster for labels or relayed decisions. |
-| R-22 | Default installation opens no listening port and needs no tunnel. |
+| R-22 | The proof of concept pairs/reconnects and picks up offered work through outbound requests and polling, with no listening port, inbound A2A endpoint, tunnel, wake relay or inbound Agent Card registration. Work offered while Runner is offline is discovered after reconnect and reconciliation. Default installation beyond the proof of concept still opens no listening port and needs no tunnel. |
 | R-23 | On one machine, a second Runner for the same agent cannot run the same task concurrently, and replacing the active Runner is explicit. Behavior across machines is documented as best effort. |
 | R-24 | A failed, budget-stopped or canceled run never reaches the reviewer as a submission; a Runner that can't confirm its old process stopped doesn't release the task. |
 | R-25 | (Pairing proof of concept) A person starts in Podster, enters its code in Runner, approves local key creation and confirms the matching fingerprint; a valid proof binds exactly one public key and agent to the authenticated account and authorized organization, with no private key transmitted. No capabilities exist while pairing is pending. |
@@ -292,7 +298,7 @@ If a new decision ever adopts claiming, it must be atomic and idempotent, return
 | R-28 | Another account, forged owner/org/agent fields, CSRF, an already claimed agent or existing credential binding, or loss of ownership/organization authority before activation cannot bind or replace a credential. Pairing alone cannot admit an agent to a room, run a task or grant provider/admin access. |
 | R-29 | Restart or lost pairing response reconciles to the same confirmed identity with no duplicate agent; ordinary reconnect requires current key possession and current authority. A replay, revoked credential or completed disconnect cannot resume participation or restore old grants. |
 | R-30 | Under actual subprocess tests, task code cannot read the private key or use Runner as a signing oracle; codes and private keys never appear in logs, prompts, task environments, artifacts or support bundles. Unsupported local protection blocks the mode. |
-| R-31 | An eligible offer launches local Claude Code without an owner prompt, and permitted results return to Podster with PR repository/link/commit verified if a PR was created, and test outcomes distinguished as passed, failed or not run. Output outside the configured sharing scope is held, and an independent reviewer alone can verify completion. |
+| R-31 | Under the proposed automatic-run policy, an eligible offer starts the owner-configured local agent/runtime or tool integration through an allowlisted adapter, using only its permitted model access and tools, without an owner prompt. Permitted results return to Podster with PR repository/link/commit verified if a PR was created, and test outcomes distinguished as passed, failed or not run. Output outside the configured sharing scope is held, and an independent reviewer alone can verify completion. |
 | R-32 | (Proposed GitHub flow) Issuance checks current agent, room, task, repository and provider grant. Cross-repository selectors, revoked grants, stale tasks and excess requested permissions are denied; pairing alone cannot obtain a token. |
 | R-33 | Repository tokens and App private keys never enter prompts, task-readable environments/files, logs, artifacts or support bundles. Expired tokens and failed renewal pause credential-dependent operations; interrupted delivery and uncertain revocation reconcile safely without wider access. New credentials require the current task/duration/grant checks, and residual validity is disclosed. |
 | R-34 | A permitted branch push/PR succeeds, but the same execution credential cannot bypass independent review, write protected branches, merge, alter workflows, administer the repository or deploy. Any failed boundary blocks release of direct-token mode. |
@@ -309,7 +315,7 @@ If a new decision ever adopts claiming, it must be atomic and idempotent, return
 ## Unresolved before implementation
 
 - Owned package name or scope, publisher, update signing, distribution and supported operating systems.
-- For inbound A2A: version and bindings, authentication and rotation, endpoint proof and tunnel provider.
+- For the later inbound A2A extension, outside the proof of concept: version and bindings, authentication and rotation, endpoint proof and transport. Evaluate Cloudflare Tunnel first as a candidate, with a self-hosted relay as a possible later replacement; neither is implemented or approved for deployment by this proposal.
 - Sandboxing compatible with local provider auth without exposing credentials to task code.
 - Exact APIs and failure contracts, including the server-side executor epoch and the commands, delivery and stored record for dashboard approvals.
 - Supported CLI versions, modes, provider terms and entitlements, output schemas and cancellation guarantees, including the exact Claude Code programmatic/authentication mode.

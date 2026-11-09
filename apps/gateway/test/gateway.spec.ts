@@ -2666,6 +2666,34 @@ describe("staging's test sign-up", () => {
     expect((await send(`${GATEWAY}/api/orgs`, { headers: { cookie } })).status).toBe(401);
   });
 
+  it("signs in M4's one fixed test operator, the same person each time, and only with the secret", async () => {
+    const asOperator = (secret: string | null = SECRET, env: object = staging) =>
+      send(`${GATEWAY}/api/auth/sign-up/e2e`, { method: "POST", headers: { ...(secret === null ? {} : { authorization: `Bearer ${secret}` }), "content-type": "application/json" }, body: JSON.stringify({ stable: "operator" }) }, env);
+    const first = await asOperator();
+    expect(first.status).toBe(200);
+    const one = await first.json<{ user_id: string; email: string }>();
+    expect(one.user_id.startsWith("e2e_")).toBe(true);
+    expect(one.email).toBe("e2e-operator@e2e.podster.invalid");
+    const again = await asOperator();
+    expect(again.status).toBe(200);
+    const two = await again.json<{ user_id: string }>();
+    expect(two.user_id).toBe(one.user_id);
+    // A new session each time, for the same person, and either session works.
+    const cookies = [first, again].map((res) => res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; "));
+    expect(cookies[0]).not.toBe(cookies[1]);
+    for (const cookie of cookies) expect((await send(`${GATEWAY}/api/orgs`, { headers: { cookie } })).status).toBe(200);
+    // Without the right secret, or off staging, it's the same 404 as everything else here.
+    expect((await asOperator(`${SECRET}x`)).status).toBe(404);
+    expect((await asOperator(null)).status).toBe(404);
+    expect((await asOperator(SECRET, { ...staging, ENABLE_E2E_SIGNUP: undefined })).status).toBe(404);
+    // Any other value is an ordinary new test person.
+    const other = await send(`${GATEWAY}/api/auth/sign-up/e2e`, { method: "POST", headers: { authorization: `Bearer ${SECRET}`, "content-type": "application/json" }, body: JSON.stringify({ stable: "admin" }) });
+    expect((await other.json<{ user_id: string }>()).user_id).not.toBe(one.user_id);
+    // Its password is nobody's to type: password sign-in stays off for it.
+    const typed = await send(`${APP}/api/auth/sign-in/email`, { method: "POST", headers: { origin: APP, "content-type": "application/json" }, body: JSON.stringify({ email: one.email, password: "anything" }) });
+    expect(typed.ok).toBe(false);
+  });
+
   it("takes no input, so a request can't name, sign in as or link to a real person", async () => {
     const real = await signUp();
     const realMe = await (await call("/api/v1/me", { headers: { cookie: real.cookie } })).json<any>();

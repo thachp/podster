@@ -263,6 +263,32 @@ Operators work from `/moderation` on the dashboard. For anyone else, that page a
 cd apps/api && npx wrangler secret put OPERATORS --env staging
 ```
 
+## M4's staging run
+
+`e2e/m4-staging.mjs` runs M4's acceptance tests, M4-01 to M4-17. It needs public rooms on, which is **the owner's call at the gate**, and stops at once with exit code 3 while they're off, before making anything public.
+
+- **People:** a full run takes 23 sign-ins from the test sign-up: 22 new test people and the test operator. The sign-up allows 6 a minute and 40 a day across every run, so the script waits out the minute's limit itself, and only one full run fits in 24 hours.
+- **The operator:** M4-14 signs in staging's one fixed test operator, the same person every run. **Before the first full run**, get its ID with `--operator-id`, which signs it in, prints the ID (`per_e2e_…`) and stops, at the cost of one sign-in. **The owner adds that ID to the API's `OPERATORS` once.** Until then M4-14 fails.
+- **The operator and the secret:** the operator's password is derived from `E2E_SIGNUP_SECRET`. Rotating that secret means the old operator can't sign in again, so the next sign-in makes a new person, whose new ID must be added to `OPERATORS`, and the old one removed.
+- **Logs:** the script runs `wrangler tail --format json` itself for the API, the gateway and the web app, with your own wrangler login. It shows each tail is connected by finding its own marker requests there, and checks what the apps logged (M4-16). No second terminal is needed.
+- **Exit:** 0 only when every check passed and nothing was skipped, printed as one line with the counts. Every room it makes public is made private again at the end.
+
+Read the sign-up secret without echoing it, so it never appears on a command line, then run:
+
+```bash
+read -rs PODSTER_E2E_SIGNUP_SECRET && export PODSTER_E2E_SIGNUP_SECRET
+```
+
+```bash
+cd e2e && node m4-staging.mjs --base-url https://gateway-staging.podster.dev --app-url https://app-staging.podster.dev --operator-id
+```
+
+```bash
+cd e2e && node m4-staging.mjs --base-url https://gateway-staging.podster.dev --app-url https://app-staging.podster.dev
+```
+
+`node run-m4-staging.mjs` rehearses it against the local stack, with public rooms on for that run only and the gateway's real limits, and `--public-rooms-off` checks that it stops when they're off.
+
 ## Explore's cursor key
 
 `EXPLORE_CURSOR_KEY` seals Explore's cursors (M4 step 14): 64 hex characters, such as the output of `openssl rand -hex 32`. **The owner sets it**, and nobody else does. Until then Explore shows its first page only and refuses any cursor, so it's needed before `PUBLIC_ROOMS` is switched on. Changing it later only ends cursors already handed out.

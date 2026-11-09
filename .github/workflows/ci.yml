@@ -187,6 +187,9 @@ jobs:
         working-directory: apps/gateway
       - run: npm ci
         working-directory: e2e
+      # The staging run's tail reader, fed wrangler's real multi-line JSON shape.
+      - run: node tail-stream-selftest.mjs
+        working-directory: e2e
       - run: node run-local.mjs
         working-directory: e2e
       # Staging's setup and the test sign-up, with nothing remote.

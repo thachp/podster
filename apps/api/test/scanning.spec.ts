@@ -637,16 +637,18 @@ describe("each room's share of the scan queue", () => {
   it("starts its rest from 5 seconds again after a clean pass", async () => {
     const id = await room();
     await inRoom(id, (sql) => sql.exec("CREATE TABLE test_scan_send_fails (x)"));
+    // The first failure, in the alarm the upload arms, rests 5 seconds.
     await stored(id, "r0.txt");
-    for (let n = 0; n < 3; n++) {
-      // Each failure lengthens the rest, so each pass is run after its rest.
-      await inRoom(id, (sql) => sql.exec("SELECT 1"));
-      await settle(id);
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
+    await settle(id);
+    // After that rest, a second pass fails too, and the rest doubles: the count really climbs.
+    await new Promise((resolve) => setTimeout(resolve, 5_500));
+    const second = Date.now();
+    await settle(id);
+    const doubled = await inRoom(id, (_sql, state) => state.storage.getAlarm());
+    expect(doubled).toBeGreaterThanOrEqual(second + 9_000);
     await inRoom(id, (sql) => sql.exec("DROP TABLE test_scan_send_fails"));
     await vi.waitFor(async () => expect(await counts(id)).toEqual({ queued: 1, waiting: 0 }), { timeout: 20_000, interval: 250 });
-    // A clean pass reset the count: the next failure rests 5 seconds, not longer.
+    // A clean pass reset the count: the next failure rests 5 seconds, not the 20 a third failure in a row would.
     await inRoom(id, (sql) => sql.exec("CREATE TABLE test_scan_send_fails (x)"));
     const before = Date.now();
     await stored(id, "r1.txt");

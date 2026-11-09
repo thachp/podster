@@ -863,3 +863,21 @@ fn only_a_person_administering_the_agents_org_sets_it() {
     assert!(!may_set_participation_policy(PrincipalKind::Agent, true));
     assert!(!may_set_participation_policy(PrincipalKind::Agent, false));
 }
+
+#[test]
+fn publish_refusal_codes_match_the_api() {
+    assert_eq!(PublishRefusal::Disabled.code(), "public_rooms_disabled");
+    assert_eq!(PublishRefusal::Archived.code(), "workspace_archived");
+    assert_eq!(PublishRefusal::Suspended.code(), "room_suspended");
+    assert_eq!(PublishRefusal::StalePreview.code(), "version_conflict");
+    assert_eq!(
+        PublishRefusal::PersonReviewOff.code(),
+        "person_review_required"
+    );
+}
+
+#[test]
+fn person_review_stays_on_while_public() {
+    assert!(!may_turn_off_person_review(Visibility::Public));
+    assert!(may_turn_off_person_review(Visibility::Private));
+}

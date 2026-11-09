@@ -1437,12 +1437,16 @@ fn handle_set_review_policy(sql: &SqlStorage, caller: &Caller, body: &Value, now
         .and_then(Value::as_bool)
         .ok_or_else(ApiError::invalid_argument)?;
     let prior = store::requires_person_review(sql)?;
-    // A public room always has a person review (decision 159), so it can't be turned off until the room is private again.
-    if !require_person
-        && rows(sql, "SELECT visibility FROM workspace", vec![])?
-            .first()
-            .is_some_and(|r| r["visibility"].as_str() == Some("public"))
-    {
+    // A public room always has a person review (decision 159): `may_turn_off_person_review` decides.
+    let public = rows(sql, "SELECT visibility FROM workspace", vec![])?
+        .first()
+        .is_some_and(|r| r["visibility"].as_str() == Some("public"));
+    let visibility = if public {
+        podster_policy::public::Visibility::Public
+    } else {
+        podster_policy::public::Visibility::Private
+    };
+    if !require_person && !podster_policy::public::may_turn_off_person_review(visibility) {
         return Err(ApiError::api(409, "person_review_required"));
     }
     if prior != require_person {

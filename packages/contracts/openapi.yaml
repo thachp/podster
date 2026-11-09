@@ -161,7 +161,7 @@ paths:
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/visibility:
     parameters: [{ $ref: "#/components/parameters/ws" }]
-    get: { operationId: getRoomVisibility, tags: [queries], summary: "Whether the room is public, and exactly what would be public: `visibility`, `public_handle` (null while private), `published_at`, `topic`, `public_claims_paused`, `public_rooms_enabled`, `preview` and `view_hash`. `preview` is the public content built field by field from the room now (decision 146, ADR 0008), and `view_hash` is the SHA-256 of its canonical JSON, which a publish names. Owner or human admin only, or `not_allowed`. Nothing here is public yet", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+    get: { operationId: getRoomVisibility, tags: [queries], summary: "Whether the room is public, and exactly what would be public: `visibility`, `public_handle` (null while private), `published_at` (milliseconds, as every time here), `published_on` (the UTC day the public page shows), `topic`, `public_claims_paused`, `public_rooms_enabled`, `preview` and `view_hash`. `preview` is the public content built field by field from the room now (decision 146, ADR 0008), and `view_hash` is the SHA-256 of its canonical JSON, which a publish names. Owner or human admin only, or `not_allowed`. Nothing here is public yet", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
     put:
       operationId: setRoomVisibility
       tags: [commands]

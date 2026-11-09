@@ -24,10 +24,11 @@ async function assertion(who: Who, claims: object = {}) {
 }
 
 let counter = 0;
-async function api(who: Who, method: string, path: string, body?: unknown, opts: { claims?: object; key?: string; on?: boolean } = {}) {
+async function api(who: Who, method: string, path: string, body?: unknown, opts: { claims?: object; key?: string; on?: boolean; fail?: boolean } = {}) {
   const headers: Record<string, string> = { "x-podster-assertion": await assertion(who, opts.claims ?? {}), "content-type": "application/json" };
   if (method !== "GET") headers["idempotency-key"] = opts.key ?? `vis-key-${++counter}`;
   if (opts.on) headers["x-test-public-rooms"] = "on";
+  if (opts.fail) headers["x-test-fail"] = "1";
   const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: method === "GET" ? undefined : JSON.stringify(body ?? {}) });
   const text = await res.text();
   const parsed = text ? JSON.parse(text) : null;
@@ -72,7 +73,7 @@ describe("the preview", () => {
     const id = await room();
     const read = await preview(id);
     expect(read.status, read.text).toBe(200);
-    expect(read.body).toMatchObject({ visibility: "private", public_handle: null, published_at: null, topic: null, public_claims_paused: false, public_rooms_enabled: false });
+    expect(read.body).toMatchObject({ visibility: "private", public_handle: null, published_at: null, published_on: null, topic: null, public_claims_paused: false, public_rooms_enabled: false });
     expect(read.body.view_hash).toMatch(/^[0-9a-f]{64}$/);
     expect(read.body.preview).toMatchObject({ name: "Billing v2", workflow: "general", person_review: true, archived: false, openings: [], outputs: [] });
     // The owner, the admin and the member agent.
@@ -115,7 +116,8 @@ describe("publishing", () => {
     const events = await inRoom(id, (sql) => sql.exec("SELECT type, actor_id FROM event WHERE type = 'room.published'").toArray());
     expect(events).toEqual([{ type: "room.published", actor_id: OWNER.id }]);
     const audit = await inRoom(id, (sql) => sql.exec("SELECT action, prior_json, new_json FROM audit_event WHERE action LIKE 'visibility.%'").toArray());
-    expect(audit).toEqual([{ action: "visibility.published", prior_json: '{"visibility":"private"}', new_json: '{"visibility":"public"}' }]);
+    // The handle goes in the audit row, so an old link can be traced to its room after it goes private or republishes.
+    expect(audit.map((r: any) => ({ ...r, prior_json: JSON.parse(r.prior_json), new_json: JSON.parse(r.new_json) }))).toEqual([{ action: "visibility.published", prior_json: { visibility: "private", public_handle: null }, new_json: { visibility: "public", public_handle: done.body.public_handle } }]);
     // The member agent sees it in the room's activity.
     const activity = await api(MEMBER, "GET", `/v1/workspaces/${id}/activity`);
     expect(activity.body.events.map((e: any) => e.type)).toContain("room.published");
@@ -180,12 +182,15 @@ describe("going private", () => {
     const first = (await publish(id)).body.public_handle;
     const off = await unpublish(id, ADMIN, true);
     expect(off.status, off.text).toBe(200);
-    expect(off.body).toMatchObject({ visibility: "private", public_handle: null, published_at: null });
-    const audit = await inRoom(id, (sql) => sql.exec("SELECT action, actor_id FROM audit_event WHERE action = 'visibility.unpublished_claims_ended'").toArray());
-    expect(audit).toEqual([{ action: "visibility.unpublished_claims_ended", actor_id: ADMIN.id }]);
+    expect(off.body).toMatchObject({ visibility: "private", public_handle: null, published_at: null, published_on: null });
+    const audit = await inRoom(id, (sql) => sql.exec("SELECT action, actor_id, prior_json, new_json FROM audit_event WHERE action = 'visibility.unpublished_claims_ended'").toArray());
+    expect(audit.map((r: any) => ({ ...r, prior_json: JSON.parse(r.prior_json), new_json: JSON.parse(r.new_json) }))).toEqual([{ action: "visibility.unpublished_claims_ended", actor_id: ADMIN.id, prior_json: { visibility: "public", public_handle: first }, new_json: { visibility: "private", public_handle: null } }]);
     const second = (await publish(id)).body.public_handle;
     expect(second).toMatch(/^pub_[0-9a-f]{32}$/);
     expect(second).not.toBe(first);
+    // Both handles stay traced to this room, each in the row that made it.
+    const made = await inRoom(id, (sql) => sql.exec("SELECT new_json FROM audit_event WHERE action = 'visibility.published' ORDER BY seq").toArray().map((r: any) => JSON.parse(r.new_json).public_handle));
+    expect(made).toEqual([first, second]);
   });
 
   it("works with public rooms off, and in an archived room, but never for an agent", async () => {
@@ -239,5 +244,109 @@ describe("publicly claimable openings", () => {
 describe("the switch", () => {
   it("is set nowhere in the Worker's configuration", () => {
     expect(BINDINGS.TEST_WRANGLER).not.toContain("PUBLIC_ROOMS");
+  });
+});
+
+describe("the deeper review's checks", () => {
+  /** What a visibility change writes, in one read. The outbox may drain on an alarm, so it's counted as never growing. */
+  const written = (id: string, key: string) => inRoom(id, (sql) => ({
+    room: sql.exec("SELECT visibility, public_handle, published_at FROM workspace").one(),
+    events: sql.exec("SELECT COUNT(*) AS n FROM event WHERE type IN ('room.published', 'room.unpublished')").one().n,
+    audit: sql.exec("SELECT COUNT(*) AS n FROM audit_event WHERE action LIKE 'visibility.%'").one().n,
+    outbox: sql.exec("SELECT COUNT(*) AS n FROM outbox").one().n,
+    orphans: sql.exec("SELECT COUNT(*) AS n FROM outbox WHERE event_id NOT IN (SELECT id FROM event)").one().n,
+    keys: sql.exec("SELECT COUNT(*) AS n FROM idempotency WHERE key = ?", key).one().n,
+  }));
+
+  it("leaves nothing behind when a publish or an unpublish fails partway, and a retry does the work", async () => {
+    const id = await room();
+    const hash = (await preview(id)).body.view_hash;
+    const body = { visibility: "public", view_hash: hash };
+    const before = await written(id, "vis-fail-publish");
+    const failed = await api(OWNER, "PUT", `/v1/workspaces/${id}/visibility`, body, { on: true, fail: true, key: "vis-fail-publish" });
+    expect([failed.status, failed.code]).toEqual([500, "internal_error"]);
+    const after = await written(id, "vis-fail-publish");
+    expect(after).toMatchObject({ room: before.room, events: before.events, audit: before.audit, orphans: 0, keys: 0 });
+    expect(after.outbox).toBeLessThanOrEqual(before.outbox);
+    expect(before.room).toEqual({ visibility: "private", public_handle: null, published_at: null });
+    const done = await api(OWNER, "PUT", `/v1/workspaces/${id}/visibility`, body, { on: true, key: "vis-fail-publish" });
+    expect(done.status, done.text).toBe(200);
+
+    const off = { visibility: "private" };
+    const public_ = await written(id, "vis-fail-unpublish");
+    const failedOff = await api(OWNER, "PUT", `/v1/workspaces/${id}/visibility`, off, { fail: true, key: "vis-fail-unpublish" });
+    expect([failedOff.status, failedOff.code]).toEqual([500, "internal_error"]);
+    const afterOff = await written(id, "vis-fail-unpublish");
+    expect(afterOff).toMatchObject({ room: public_.room, events: public_.events, audit: public_.audit, orphans: 0, keys: 0 });
+    expect(afterOff.outbox).toBeLessThanOrEqual(public_.outbox);
+    expect(public_.room.public_handle).toBe(done.body.public_handle);
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/visibility`, off, { key: "vis-fail-unpublish" })).body.visibility).toBe("private");
+  });
+
+  it("refuses a former owner, whether they handed the room on or left", async () => {
+    const handed = await room();
+    const claims = { target_member: { person: ADMIN.id, orgs: { [ORG]: 1 } } };
+    const moved = await api(OWNER, "POST", `/v1/workspaces/${handed}/owner/transfer`, { to: ADMIN.id, policy_version: await version(handed) }, { claims });
+    expect(moved.status, moved.text).toBe(200);
+    const hash = (await preview(handed, ADMIN)).body.view_hash;
+    expect((await publish(handed, OWNER, { hash })).code).toBe("not_allowed");
+    expect((await preview(handed, ADMIN)).body.visibility).toBe("private");
+    // The new owner may.
+    expect((await publish(handed, ADMIN, { hash })).status).toBe(200);
+
+    const left = await room();
+    const leftHash = (await preview(left)).body.view_hash;
+    await inRoom(left, (sql) => sql.exec("UPDATE workspace SET owner_left_at = ?", Date.now() - 1000));
+    const refused = await publish(left, OWNER, { hash: leftHash });
+    expect(refused.status, refused.text).not.toBe(200);
+    expect(await inRoom(left, (sql) => sql.exec("SELECT visibility, public_handle FROM workspace").one())).toEqual({ visibility: "private", public_handle: null });
+  });
+
+  it("refuses an agent stored with the admin role, for publishing and the preview", async () => {
+    const id = await room();
+    const hash = (await preview(id)).body.view_hash;
+    await inRoom(id, (sql) => sql.exec("UPDATE member SET role = 'admin' WHERE principal_id = ?", MEMBER.id));
+    expect((await preview(id, MEMBER)).code).toBe("not_allowed");
+    expect((await publish(id, MEMBER, { hash })).code).toBe("not_allowed");
+    expect((await publish(id)).status).toBe(200);
+    expect((await unpublish(id, MEMBER)).code).toBe("not_allowed");
+    expect((await preview(id)).body.visibility).toBe("public");
+  });
+
+  it("accepts an uppercase view hash as the same hash", async () => {
+    const id = await room();
+    const hash: string = (await preview(id)).body.view_hash;
+    expect(hash).toMatch(/[a-f]/);
+    const done = await publish(id, OWNER, { hash: hash.toUpperCase() });
+    expect(done.status, done.text).toBe(200);
+    expect(done.body.view_hash).toBe(hash);
+  });
+
+  it("records the visibility events with no text, only IDs", async () => {
+    const id = await room();
+    await publish(id);
+    await unpublish(id);
+    const events = await inRoom(id, (sql) => sql.exec("SELECT * FROM event WHERE type IN ('room.published', 'room.unpublished') ORDER BY seq").toArray());
+    expect(events.map((e: any) => e.type)).toEqual(["room.published", "room.unpublished"]);
+    for (const event of events) {
+      expect(event).toMatchObject({ actor_id: OWNER.id, task_id: null, reason: null, prior_status: null, new_status: null, task_version: null, subject_id: null });
+      for (const [column, value] of Object.entries(event)) {
+        if (typeof value !== "string" || column === "type") continue;
+        expect(value, column).toMatch(/^[a-z]+_[A-Za-z0-9_]+$/);
+      }
+      expect(JSON.stringify(event)).not.toContain("Billing");
+    }
+  });
+
+  it("dates a fresh publish today, in UTC", async () => {
+    const id = await room();
+    const before = Date.now();
+    const done = await publish(id);
+    const after = Date.now();
+    expect(done.body.published_at).toBeGreaterThanOrEqual(before);
+    expect(done.body.published_at).toBeLessThanOrEqual(after);
+    const days = [before, after].map((ms) => new Date(ms).toISOString().slice(0, 10));
+    expect(days).toContain(done.body.published_on);
+    expect((await preview(id)).body.published_on).toBe(done.body.published_on);
   });
 });

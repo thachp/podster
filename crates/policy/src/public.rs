@@ -146,7 +146,8 @@ pub struct RoomRow {
     pub require_person_review: bool,
     pub visibility: Visibility,
     pub public_handle: Option<String>,
-    /// When the room last went public, in seconds. Only the day is shown.
+    /// When the room last went public, in whole seconds since the Unix epoch, UTC. The room stores milliseconds, as all its
+    /// times are, and converts when it builds this row. Only the day is shown.
     pub published_at: Option<i64>,
     /// Set by a Podster operator. A suspended room answers not-found publicly and can't be published.
     pub suspended: bool,
@@ -552,13 +553,19 @@ pub enum PublishRefusal {
 impl PublishRefusal {
     pub fn code(self) -> &'static str {
         match self {
-            PublishRefusal::Disabled => "not_allowed",
+            PublishRefusal::Disabled => "public_rooms_disabled",
             PublishRefusal::Archived => "workspace_archived",
             PublishRefusal::Suspended => "room_suspended",
             PublishRefusal::StalePreview => "version_conflict",
             PublishRefusal::PersonReviewOff => "person_review_required",
         }
     }
+}
+
+/// Whether person review may be turned off in a room with this visibility. A public room always has a person review
+/// (decision 159), so it stays on until the room is private again. Turning it on is always allowed.
+pub fn may_turn_off_person_review(visibility: Visibility) -> bool {
+    visibility != Visibility::Public
 }
 
 /// What publishing does, once the caller may.

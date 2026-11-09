@@ -6,9 +6,9 @@
 //! every environment until the owner switches it on. While it's off, publishing is refused and going private still works.
 use super::*;
 use podster_policy::public::{
-    content_hash, decide_set_visibility, parse_topic, public_content, public_handle_from,
-    MemberRow, OpeningRow, OutputRow, RoomRow, RoomState, Topic, Visibility, VisibilityChange,
-    VisibilityRefusal, VisibilityRequest, Workflow,
+    content_hash, decide_set_visibility, parse_topic, public_content, public_handle_from, utc_day,
+    MemberRow, OpeningRow, OutputRow, PublishRefusal, RoomRow, RoomState, Topic, Visibility,
+    VisibilityChange, VisibilityRefusal, VisibilityRequest, Workflow,
 };
 
 pub(super) const PUBLIC_ROOMS_VAR: &str = "PUBLIC_ROOMS";
@@ -134,7 +134,8 @@ pub(super) fn room_state(sql: &SqlStorage) -> R<RoomState> {
             require_person_review: int(&room["require_person_review"]) != 0,
             visibility: visibility_of(&room),
             public_handle: text(&room["public_handle"]),
-            published_at: room["published_at"].as_i64(),
+            // The column is milliseconds, as every time in the room is; the policy reads whole seconds.
+            published_at: room["published_at"].as_i64().map(|ms| ms.div_euclid(1000)),
             // Operator suspension comes in step 10.
             suspended: false,
             public_claims_paused: int(&room["public_claims_paused"]) != 0,
@@ -157,7 +158,12 @@ pub(super) fn read(sql: &SqlStorage, who: &Participant, public_rooms_enabled: bo
     Ok(json!({
         "visibility": if room.visibility == Visibility::Public { "public" } else { "private" },
         "public_handle": room.public_handle,
-        "published_at": room.published_at,
+        // Milliseconds, as every time the API answers with.
+        "published_at": rows(sql, "SELECT published_at FROM workspace", vec![])?
+            .first()
+            .map_or(Value::Null, |r| r["published_at"].clone()),
+        // The UTC day the public page shows, from the policy's seconds.
+        "published_on": room.published_at.map(utc_day),
         "topic": room.topic.map(Topic::name),
         "public_claims_paused": room.public_claims_paused,
         "public_rooms_enabled": public_rooms_enabled,
@@ -221,20 +227,16 @@ fn refusal(refusal: VisibilityRefusal) -> ApiError {
             Err(error) => error,
             Ok(()) => ApiError::not_allowed(),
         },
+        // One mapping for the code: the policy's. Only the status is chosen here.
         VisibilityRefusal::Publish(refusal) => match refusal {
-            podster_policy::public::PublishRefusal::StalePreview => {
+            PublishRefusal::StalePreview => {
                 ApiError::from_core(&podster_core::CoreError::VersionConflict)
             }
-            podster_policy::public::PublishRefusal::Archived => ApiError::workspace_archived(),
-            podster_policy::public::PublishRefusal::Disabled => {
-                ApiError::api(403, "public_rooms_disabled")
+            PublishRefusal::Archived => ApiError::workspace_archived(),
+            PublishRefusal::Disabled | PublishRefusal::Suspended => {
+                ApiError::api(403, refusal.code())
             }
-            podster_policy::public::PublishRefusal::Suspended => {
-                ApiError::api(403, "room_suspended")
-            }
-            podster_policy::public::PublishRefusal::PersonReviewOff => {
-                ApiError::api(409, "person_review_required")
-            }
+            PublishRefusal::PersonReviewOff => ApiError::api(409, refusal.code()),
         },
     }
 }
@@ -253,6 +255,10 @@ pub(super) fn handle_set_visibility(
     let state = room_state(sql)?;
     let change =
         decide_set_visibility(caller, public_rooms_enabled, &state, &request).map_err(refusal)?;
+    // The handle the room had, and the one it has after. Both go in the audit row, so an old link can always be traced to
+    // its room after the room goes private or republishes. A handle is a public ID, so this stays ID-only.
+    let prior_handle = state.room.public_handle.clone();
+    let mut new_handle = prior_handle.clone();
     match change {
         VisibilityChange::NoChange => {}
         VisibilityChange::Publish => {
@@ -262,6 +268,7 @@ pub(super) fn handle_set_visibility(
                 "UPDATE workspace SET visibility = 'public', public_handle = ?, published_at = ?",
                 vec![handle.as_str().into(), now.into()],
             )?;
+            new_handle = Some(handle);
         }
         VisibilityChange::Unpublish { .. } => {
             // The handle is dropped for good: a republish makes a new one, so old links and copies can't come back.
@@ -270,6 +277,7 @@ pub(super) fn handle_set_visibility(
                 "UPDATE workspace SET visibility = 'private', public_handle = NULL, published_at = NULL",
                 vec![],
             )?;
+            new_handle = None;
             // Public claims arrive in step 8. Until then there are none to end, and `end_public_claims` is only recorded.
         }
     }
@@ -289,8 +297,8 @@ pub(super) fn handle_set_visibility(
             caller,
             reason,
             "workspace",
-            Some(json!({ "visibility": prior }).to_string()),
-            Some(json!({ "visibility": new }).to_string()),
+            Some(json!({ "visibility": prior, "public_handle": prior_handle }).to_string()),
+            Some(json!({ "visibility": new, "public_handle": new_handle }).to_string()),
             now,
         )?;
         let mut everyone = room_people(sql)?;

@@ -188,11 +188,18 @@ async function publicRoom(owner, name, { openings = [{ title: "Surveyor", respon
   ok((await within(40, async () => (await page(handle)).status === 200)) !== null, `${name}'s public page wasn't served within 40 seconds`);
   return { id, handle, roles };
 }
+/** Set once clean-up starts: nothing more is published, and a publish already on its way is waited for, then undone. */
+let stopping = false;
+const publishing = new Set();
 async function publish(owner, id) {
+  ok(!stopping, "the run is stopping, so nothing more is published");
   const { view_hash } = await owner.must("GET", `/v1/workspaces/${id}/visibility`);
-  const done = await owner.dash("PUT", `/v1/workspaces/${id}/visibility`, { visibility: "public", view_hash });
+  const request = owner.dash("PUT", `/v1/workspaces/${id}/visibility`, { visibility: "public", view_hash });
+  publishing.add(request);
+  const done = await request.finally(() => publishing.delete(request));
+  // Recorded whatever happens next, so clean-up makes it private even if it landed while stopping.
+  if (done.ok) published.set(id, owner);
   ok(done.ok, `publishing answered ${done.status} ${done.code ?? ""}`);
-  published.set(id, owner);
   runIds.add(done.body.public_handle);
   return done.body.public_handle;
 }
@@ -301,7 +308,11 @@ function stopTails() {
 /** Every event a tail has seen, as text, to search. */
 const tailText = (tail) => tail.stream.values.map((value) => JSON.stringify(value));
 /** Why a tail can't be trusted now: wrangler failed to start or has exited (its exit code only), or its stream overflowed. */
-const tailProblem = (tail) => tail.error ?? (tail.proc?.exitCode !== null && tail.proc?.exitCode !== undefined ? `wrangler exited with code ${tail.proc.exitCode}` : tail.stream.error);
+const tailProblem = (tail) =>
+  tail.error ??
+  (tail.proc?.exitCode !== null && tail.proc?.exitCode !== undefined ? `wrangler exited with code ${tail.proc.exitCode}` : null) ??
+  (tail.proc?.signalCode ? `wrangler was stopped by ${tail.proc.signalCode}` : null) ??
+  tail.stream.error;
 /**
  * Sends requests of the run's own with a fresh marker in their paths until every tail holds an event naming it, bounded.
  * Used to show the tails are connected at the start, and still alive at the end. Wrangler's banner text isn't relied on,
@@ -329,7 +340,10 @@ const appLogged = (tail) => tail.stream.values.map((value) => JSON.stringify([va
 let cleaned = null;
 function cleanUp() {
   cleaned ??= (async () => {
+    stopping = true;
     stopTails();
+    // A publish already sent may land after this starts: wait for it, bounded, so its room is in the list below.
+    await Promise.race([Promise.allSettled([...publishing]), sleep(60_000)]);
     let left = 0;
     const count = published.size;
     for (const [id, roomOwner] of published) {
@@ -806,7 +820,9 @@ try {
     stopTails();
     for (const tail of tails) {
       const ours = tailText(tail).filter((text) => [...runIds].some((id) => text.includes(id))).length;
-      check(!tail.error && ours > 0, `the ${tail.app}'s tail holds this run's own requests`, tail.error ?? `${tail.stream.values.length} events, ${ours} of this run's`);
+      // Stopped by the run just now, so a signal isn't a problem here; an error, or an overflow in the last moments, is.
+      const problem = tail.error ?? tail.stream.error;
+      check(!problem && ours > 0, `the ${tail.app}'s tail holds this run's own requests`, problem ?? `${tail.stream.values.length} events, ${ours} of this run's`);
     }
     const logged = tails.map(appLogged).join("\n");
     check(!canaryPattern.test(logged), "no canary in what the apps logged");

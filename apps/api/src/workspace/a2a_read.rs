@@ -586,6 +586,82 @@ pub(super) fn read_apply(
     )
 }
 
+/// Decision 174: when the agent accepts a task whose offer's response was held, the held note and links are submitted as the
+/// agent, right after the accept and in its transaction, so the two commit or replay together. Only a response held for the
+/// task's current offer, from an offer attempt and this agent, counts: one from an earlier offer, or from a change request,
+/// is never submitted. The submit runs through policy and `decide` like any other. If they refuse it, nothing was written,
+/// the accept stands and the hold stays visible. Its events and audit row are marked `a2a_remote` with the attempt's ID.
+/// Answers the task after the submit, or `None` if nothing was submitted.
+pub(super) fn submit_held(
+    sql: &SqlStorage,
+    who: &Participant,
+    task_id: &str,
+    now: i64,
+) -> R<Option<Value>> {
+    let agent = who.caller.id.as_str();
+    let Some(task) = load_task(sql, task_id)? else {
+        return Ok(None);
+    };
+    if kind_name(&who.caller) != "agent"
+        || task.status != TaskStatus::Accepted
+        || task.assignee.as_deref() != Some(agent)
+    {
+        return Ok(None);
+    }
+    let Some(offer) =
+        super::a2a_out::current_for(sql, podster_core::a2a::AttemptKind::Offer, task_id)?
+    else {
+        return Ok(None);
+    };
+    let Some(held) = rows(
+        sql,
+        "SELECT h.attempt_id, h.note, h.links_json FROM a2a_held h JOIN a2a_attempt a ON a.id = h.attempt_id
+          WHERE h.task_id = ? AND a.agent_id = ? AND a.offer_id = ? AND coalesce(a.kind, 'offer') = 'offer'
+          ORDER BY h.created_at DESC LIMIT 1",
+        vec![task_id.into(), agent.into(), offer.as_str().into()],
+    )?
+    .into_iter()
+    .next() else {
+        return Ok(None);
+    };
+    let links: Value = serde_json::from_str(held["links_json"].as_str().unwrap_or("[]"))
+        .unwrap_or_else(|_| json!([]));
+    let note = held["note"].as_str().filter(|n| !n.trim().is_empty());
+    if note.is_none() && links.as_array().is_none_or(Vec::is_empty) {
+        return Ok(None);
+    }
+    let attempt = held["attempt_id"].as_str().unwrap_or_default();
+    let events_before = rows(
+        sql,
+        "SELECT coalesce(max(seq), 0) AS seq FROM event",
+        vec![],
+    )?
+    .first()
+    .map_or(0, |r| int(&r["seq"]));
+    let audit_before = rows(sql, "SELECT audit_seq FROM workspace", vec![])?
+        .first()
+        .map_or(0, |r| int(&r["audit_seq"]));
+    let body = json!({ "version": task.version, "note": note, "artifacts": links });
+    let submitted = match handle_task_command(sql, who, task_id, "submit", &body, now) {
+        Ok(submitted) => submitted,
+        // Refused before anything was written: the accept stands, and the hold stays as it was.
+        Err(error) if error.status_and_code().0 < 500 => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    audit_row(sql, agent, "agent", "task.submit", task_id, None, None, now)?;
+    exec(
+        sql,
+        "UPDATE event SET origin = ?, origin_ref = ? WHERE seq > ?",
+        vec![ORIGIN.into(), attempt.into(), events_before.into()],
+    )?;
+    exec(
+        sql,
+        "UPDATE audit_event SET origin = ?, origin_ref = ? WHERE seq > ?",
+        vec![ORIGIN.into(), attempt.into(), audit_before.into()],
+    )?;
+    Ok(Some(submitted))
+}
+
 /// `/internal/a2a-cancel-begin`: whether to send `CancelTask` for this attempt, and to which remote task and endpoint.
 fn cancel_begin(sql: &SqlStorage, identity: &Identity, body: &Value) -> R<Value> {
     match attempt_for(sql, identity, body)? {

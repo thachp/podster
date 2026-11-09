@@ -632,6 +632,55 @@ describe("a server that answers once done (decision 174)", () => {
     }
   });
 
+  /** The same command twice with one idempotency key, as a client retry sends it. */
+  const sameKey = async (who: Who, path: string, body: unknown) => {
+    const key = `rb-replay-${++counter}`;
+    const once = async () => {
+      const res = await SELF.fetch(`https://api.internal${path}`, { method: "POST", headers: { "x-podster-assertion": await assertion(who), "content-type": "application/json", "idempotency-key": key }, body: JSON.stringify(body) });
+      return { status: res.status, body: (await res.json()) as any };
+    };
+    return [await once(), await once()];
+  };
+
+  it("submits a held response when its agent accepts the offer, once, as the agent, marked a2a_remote", async () => {
+    const { room, task: t, attempt, agent } = await sentOffer(`/a2a/blocking-${++counter}`);
+    const [first, replay] = await sameKey(agent, `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: t.version });
+    expect(first.status).toBe(200);
+    expect(first.body.status).toBe("submitted");
+    // A replay of the accept answers the same, and submits nothing more.
+    expect(replay).toEqual(first);
+    expect(await roomSql(room, "SELECT submission_no, note, submitted_by FROM submission WHERE task_id = ?", t.id)).toEqual([{ submission_no: 1, note: "Done at once.", submitted_by: agent.id }]);
+    expect(await roomSql(room, "SELECT uri, label FROM artifact WHERE task_id = ?", t.id)).toEqual([{ uri: "https://example.com/blocked", label: "Reply" }]);
+    // The accept is the agent's own. The submit is marked as what its A2A endpoint sent.
+    expect(await roomSql(room, "SELECT type, actor_id, origin, origin_ref FROM event WHERE task_id = ? AND type IN ('task.accepted', 'task.submitted') ORDER BY seq", t.id)).toEqual([
+      { type: "task.accepted", actor_id: agent.id, origin: null, origin_ref: null },
+      { type: "task.submitted", actor_id: agent.id, origin: "a2a_remote", origin_ref: attempt.id },
+    ]);
+    // Accepting again, with a new key, is refused: the task is in review, and nothing more is submitted.
+    expect((await api(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: first.body.version })).status).not.toBe(200);
+    expect(await roomSql(room, "SELECT count(*) AS n FROM submission WHERE task_id = ?", t.id)).toEqual([{ n: 1 }]);
+  });
+
+  it("never submits a response held for an earlier offer", async () => {
+    const { room, task: t, attempt, agent } = await sentOffer(`/a2a/blocking-${++counter}`);
+    expect((await row(room, attempt.id)).reading_ended).toBe(1);
+    const declined = await must(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/decline`, { version: t.version, reason: "Not now." });
+    const offered = await must(LEAD, "POST", `/v1/workspaces/${room}/tasks/${t.id}/assign`, { version: declined.version, assignee: agent.id });
+    // The new offer's own send hasn't run, so the only held response is the first offer's.
+    const accepted = await must(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: offered.version });
+    expect(accepted.status).toBe("accepted");
+    expect(await roomSql(room, "SELECT count(*) AS n FROM submission WHERE task_id = ?", t.id)).toEqual([{ n: 0 }]);
+    expect(await roomSql(room, "SELECT count(*) AS n FROM a2a_held WHERE task_id = ?", t.id)).toEqual([{ n: 1 }]);
+  });
+
+  it("leaves the accept and the hold when the held response has nothing to submit", async () => {
+    const { room, task: t, attempt, agent } = await sentOffer(`/a2a/blocking-empty-${++counter}`);
+    const accepted = await must(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: t.version });
+    expect(accepted.status).toBe("accepted");
+    expect(await roomSql(room, "SELECT count(*) AS n FROM submission WHERE task_id = ?", t.id)).toEqual([{ n: 0 }]);
+    expect(await roomSql(room, "SELECT attempt_id FROM a2a_held WHERE task_id = ?", t.id)).toEqual([{ attempt_id: attempt.id }]);
+  });
+
   it("caps the history reply as artifacts are: past 16 KB nothing is taken, and the hold stands", async () => {
     const { room, task: t, attempt, agent, remote } = await sentOffer();
     await must(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/accept`, { version: t.version });

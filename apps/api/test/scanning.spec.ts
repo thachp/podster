@@ -378,7 +378,7 @@ describe("a room from before this", () => {
     inRoom(id, (sql) => {
       // The newer migrations come off first, newest first: submitted files' flag, expected outputs, removal, input assets linked
       // to tasks, then files on submissions.
-      // M4 step 5's room visibility, the newest migration, then step 13's read-back and step 12's A2A attempts.
+      // M4 step 5's room visibility, the newest migration, then step 13b's change requests, step 13's read-back and step 12's A2A attempts.
       sql.exec("ALTER TABLE work_role DROP COLUMN publicly_claimable");
       sql.exec("ALTER TABLE workspace DROP COLUMN public_claims_paused");
       sql.exec("ALTER TABLE workspace DROP COLUMN topic");
@@ -386,7 +386,12 @@ describe("a room from before this", () => {
       sql.exec("ALTER TABLE workspace DROP COLUMN public_handle");
       sql.exec("ALTER TABLE workspace DROP COLUMN visibility");
       sql.exec("UPDATE schema_version SET version = version - 1");
-      sql.exec("DROP INDEX a2a_attempt_reads");
+      sql.exec("ALTER TABLE a2a_attempt DROP COLUMN kind");
+      sql.exec("ALTER TABLE a2a_attempt DROP COLUMN remote_context_id");
+      sql.exec("ALTER TABLE a2a_attempt DROP COLUMN reference_task_id");
+      sql.exec("ALTER TABLE a2a_attempt DROP COLUMN reference_context_id");
+      sql.exec("UPDATE schema_version SET version = version - 1");
+          sql.exec("DROP INDEX a2a_attempt_reads");
       sql.exec("DROP INDEX a2a_attempt_cancels");
       sql.exec("DROP TABLE a2a_held");
       sql.exec("ALTER TABLE event DROP COLUMN origin");

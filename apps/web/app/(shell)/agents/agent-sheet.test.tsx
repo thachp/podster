@@ -119,6 +119,8 @@ describe("the agent Sheet", () => {
     await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Keep connected" }));
     expect(commands()).toEqual([]);
     expect(screen.getByText("Connected")).toBeInTheDocument();
+    // Focus goes back to the button that opened it.
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Disconnect" })));
   });
 
   it("agent text is inert, and quoted only as data in a confirmation", async () => {

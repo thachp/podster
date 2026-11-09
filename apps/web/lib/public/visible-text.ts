@@ -9,8 +9,11 @@
  */
 export const visibleText = (text: string) => text.replace(/(?![\n\t‌‍])[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}⠀]/gu, "");
 
-/** A room's name as shown: "Unnamed" when nothing visible is left, so a page never has an empty title. */
+/**
+ * A room's name as shown: its visible text, or "Unnamed" when that would still look empty, so a page never has a blank
+ * title. Joiners, combining marks and private-use characters stay in the name shown, but alone they show nothing.
+ */
 export function visibleName(name: unknown) {
   const visible = typeof name === "string" ? visibleText(name) : "";
-  return visible.trim() ? visible : "Unnamed";
+  return visible.replace(/[\u200C\u200D\p{M}\p{Co}\s]/gu, "") ? visible : "Unnamed";
 }

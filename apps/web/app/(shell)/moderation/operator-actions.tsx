@@ -9,80 +9,109 @@ import { explainOperatorRefusal, reasonLabel, REASONS, type QueuedReport } from 
 type Answer = { suspended: boolean; reason: string };
 
 /**
- * An operator's actions on one report. The room is found from the report on the server, so they work whatever its handle
- * is now. Each carries the chosen reason code. A lost answer keeps its key, so Try again can't act twice.
+ * One operator action, with its own command state, so one action's pending answer never replaces another's. The operator
+ * routes don't honor idempotency keys yet (owed from step 10, L6), so Try again after a lost answer sends the action again.
+ * Each sets a state rather than toggling it, so a second send ends the same way, but it's recorded twice.
  */
-export function OperatorActions({ report }: { report: QueuedReport }) {
+function Action({ label, destructive, title, description, confirm, path, reason, success }: { label: string; destructive?: boolean; title: string; description: string; confirm: string; path: string; reason: string; success: (answer: Answer) => string }) {
   const commands = useCommands(null);
-  const { send, retrying } = commands;
-  const id = useId();
-  const [reason, setReason] = useState(REASONS.some((r) => r.value === report.reason) ? report.reason : "other");
   const after = useRef<HTMLDivElement>(null);
-  const base = "/api/v1/moderation";
-  const said = (what: string) => (answer: Answer) => `${what} ${answer.suspended ? "suspended" : "no longer suspended"}, for ${reasonLabel(answer.reason).toLowerCase()}.`;
-  const act = (path: string, success: (answer: Answer) => string) => send<Answer>(path, { reason }, success, { explain: explainOperatorRefusal });
-
   return (
-    <div className="space-y-2">
+    <div className="space-y-1">
+      <ConfirmAction
+        label={label}
+        variant={destructive ? "destructive" : "outline"}
+        destructive={destructive}
+        disabled={commands.retrying || reason === ""}
+        title={title}
+        description={description}
+        confirm={confirm}
+        action={() => commands.send<Answer>(path, { reason }, success, { explain: explainOperatorRefusal })}
+        focusAfter={after}
+      />
       <div ref={after} tabIndex={-1} className="outline-none">
         <CommandNotice commands={commands} />
       </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <label htmlFor={id} className="text-sm">
-          Reason recorded
-        </label>
-        <select id={id} className={`${FIELD} w-auto`} value={reason} disabled={retrying} onChange={(event) => setReason(event.target.value)}>
-          {REASONS.map((option) => (
-            <option key={option.value} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
+    </div>
+  );
+}
+
+function ReasonPicker({ value, onChange, label, empty }: { value: string; onChange: (value: string) => void; label: string; empty?: string }) {
+  const id = useId();
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <label htmlFor={id} className="text-sm">
+        {label}
+      </label>
+      <select id={id} className={`${FIELD} w-auto`} value={value} onChange={(event) => onChange(event.target.value)}>
+        {empty ? <option value="">{empty}</option> : null}
+        {REASONS.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+const said = (what: string) => (answer: Answer) => `${what} ${answer.suspended ? "suspended" : "no longer suspended"}, for ${reasonLabel(answer.reason).toLowerCase()}.`;
+
+/**
+ * An operator's actions on one report. The room is found from the report on the server, so they work whatever its handle
+ * is now. The agent is only the one the reporter named, which nothing checked, so its reason starts empty and is the
+ * operator's own choice.
+ */
+export function OperatorActions({ report }: { report: QueuedReport }) {
+  const [roomReason, setRoomReason] = useState(REASONS.some((r) => r.value === report.reason) ? report.reason : "other");
+  const [agentReason, setAgentReason] = useState("");
+  const base = "/api/v1/moderation";
+  const room = `${base}/reports/${encodeURIComponent(report.id)}`;
+  const named = `the workroom reported in ${report.id} (${report.handle})`;
+  return (
+    <div className="space-y-3">
+      <div className="space-y-2">
+        <ReasonPicker label="Reason recorded for the workroom" value={roomReason} onChange={setRoomReason} />
+        <div className="flex flex-wrap items-start gap-2">
+          <Action
+            label="Suspend workroom"
+            destructive
+            title={`Suspend ${named}?`}
+            description={`Its public page answers not found, it leaves Explore and public claims are refused. Its owner sees "Suspended by Podster" and the reason (${reasonLabel(roomReason)}), and can't publish it again until it's lifted. Nothing inside the workroom changes.`}
+            confirm="Suspend"
+            path={`${room}/suspend-room`}
+            reason={roomReason}
+            success={said("Workroom")}
+          />
+          <Action label="Lift workroom suspension" title={`Lift the suspension of ${named}?`} description="If it's still public, its page answers again and it's back in Explore." confirm="Lift" path={`${room}/lift-room`} reason={roomReason} success={said("Workroom")} />
+        </div>
       </div>
-      <div className="flex flex-wrap gap-2">
-        <ConfirmAction
-          label="Suspend workroom"
-          destructive
-          disabled={retrying}
-          title="Suspend this workroom's public surface?"
-          description={`Its public page answers not found, it leaves Explore and public claims are refused. Its owner sees "Suspended by Podster" and the reason (${reasonLabel(reason)}), and can't publish it again until it's lifted. Nothing inside the workroom changes.`}
-          confirm="Suspend"
-          action={() => act(`${base}/reports/${encodeURIComponent(report.id)}/suspend-room`, said("Workroom"))}
-          focusAfter={after}
-        />
-        <ConfirmAction
-          label="Lift workroom suspension"
-          disabled={retrying}
-          title="Lift this workroom's suspension?"
-          description="If it's still public, its page answers again and it's back in Explore."
-          confirm="Lift"
-          action={() => act(`${base}/reports/${encodeURIComponent(report.id)}/lift-room`, said("Workroom"))}
-          focusAfter={after}
-        />
-        {report.agent_id ? (
-          <>
-            <ConfirmAction
+      {report.agent_id ? (
+        <div className="space-y-2">
+          <ReasonPicker label="Reason recorded for the agent" value={agentReason} onChange={setAgentReason} empty="Choose a reason" />
+          <div className="flex flex-wrap items-start gap-2">
+            <Action
               label="Suspend agent's public claims"
               destructive
-              disabled={retrying}
-              title={`Suspend ${report.agent_id}'s public claims?`}
-              description="Every public claim it makes is refused. Claims it already holds, and work it was invited to, stay."
+              title={`Suspend the public claims of ${report.agent_id}, the agent named in ${report.id}?`}
+              description="The reporter named this agent, and nothing has checked that it was in the workroom or did anything. Every public claim it makes is refused. Claims it already holds, and work it was invited to, stay."
               confirm="Suspend"
-              action={() => act(`${base}/agents/${encodeURIComponent(report.agent_id!)}/suspend`, said("Agent's public claims"))}
-              focusAfter={after}
+              path={`${base}/agents/${encodeURIComponent(report.agent_id)}/suspend`}
+              reason={agentReason}
+              success={said("Agent's public claims")}
             />
-            <ConfirmAction
+            <Action
               label="Lift agent's suspension"
-              disabled={retrying}
-              title={`Lift ${report.agent_id}'s public claims suspension?`}
-              description="It can claim publicly again, where its organization allows it."
+              title={`Lift the public claims suspension of ${report.agent_id}, the agent named in ${report.id}?`}
+              description="The reporter named this agent, and nothing has checked it. It can claim publicly again, where its organization allows it."
               confirm="Lift"
-              action={() => act(`${base}/agents/${encodeURIComponent(report.agent_id!)}/lift`, said("Agent's public claims"))}
-              focusAfter={after}
+              path={`${base}/agents/${encodeURIComponent(report.agent_id)}/lift`}
+              reason={agentReason}
+              success={said("Agent's public claims")}
             />
-          </>
-        ) : null}
-      </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

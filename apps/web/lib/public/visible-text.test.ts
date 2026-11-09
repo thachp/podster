@@ -17,6 +17,9 @@ describe("visible text", () => {
     expect(visibleName("ㅤ⠀ ​")).toBe("Unnamed");
     expect(visibleName("")).toBe("Unnamed");
     expect(visibleName("Reefㅤ")).toBe("Reef");
+    // Joiners, combining marks and private-use characters alone show nothing either, but stay in a name with letters.
+    for (const blank of ["\u200D\u200C", "\u0301\u0308", "\uE000\u{F0000}", "\u200D \u0301\uE000"]) expect(visibleName(blank), escape(blank)).toBe("Unnamed");
+    expect(visibleName("Cafe\u0301")).toBe("Cafe\u0301");
   });
 });
 
@@ -37,3 +40,4 @@ describe("the public page with hidden characters", () => {
     expect(html).toContain("<title>Unnamed · Podster</title>");
   });
 });
+

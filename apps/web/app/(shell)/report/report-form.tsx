@@ -9,21 +9,31 @@ import { TEXTAREA } from "../w/[id]/settings/brief-controls";
 import { MOBILE_TARGET } from "../w/[id]/team/field";
 import { AGENT, explainReportRefusal, MAX_NOTE_BYTES, noteTooLong, REASONS, type Reason } from "../moderation/model";
 
-type Result = { kind: "sent" } | { kind: "refused"; text: string } | { kind: "unknown" } | null;
+type Result = { kind: "sent" } | { kind: "refused"; text: string } | { kind: "unknown"; text: string } | null;
+
+const UNKNOWN = "We can't tell whether this was sent. Send it again unchanged: if it went through, it won't be sent twice.";
+
+/** After an unknown outcome, a refusal of the retry says nothing about the first attempt, which may have gone through. */
+function stillUnknown(status: number) {
+  if (status === 401) return "You've been signed out, so we still can't tell whether this was sent. Sign in and check before sending it again.";
+  if (status === 429) return "Too many requests, so we still can't tell whether this was sent. Wait a minute and try again.";
+  return "We still can't tell whether this was sent. Reload the page before sending it again.";
+}
 
 /**
  * Sends one report. Each intent has one idempotency key, so a retry after a lost answer is the same request and the API
  * answers it with the first report. Changing anything makes it a new intent.
  */
-export function ReportForm({ handle, agent }: { handle: string; agent: string | null }) {
+export function ReportForm({ handle }: { handle: string }) {
   const early = useEarlyInput();
   const ids = { note: useId(), agent: useId() };
   const [reason, setReason] = useState<Reason | null>(null);
-  const [agentId, setAgentId] = useState(agent ?? "");
+  const [agentId, setAgentId] = useState("");
   const [note, setNote] = useState("");
   const [pending, setPending] = useState(false);
   const [result, setResult] = useState<Result>(null);
-  const attempt = useRef<{ intent: string; key: string } | null>(null);
+  // The intent's key, and whether an earlier send of it had an unknown outcome.
+  const attempt = useRef<{ intent: string; key: string; unknown: boolean } | null>(null);
   const notice = useRef<HTMLDivElement>(null);
   const trimmedAgent = agentId.trim();
   const agentWrong = trimmedAgent !== "" && !AGENT.test(trimmedAgent);
@@ -35,16 +45,21 @@ export function ReportForm({ handle, agent }: { handle: string; agent: string | 
     if (pending || blocked) return;
     const body = { handle, reason, agent_id: trimmedAgent || null, note: note.trim() || null };
     const intent = JSON.stringify(body);
-    if (attempt.current?.intent !== intent) attempt.current = { intent, key: crypto.randomUUID() };
+    if (attempt.current?.intent !== intent) attempt.current = { intent, key: crypto.randomUUID(), unknown: false };
+    const current = attempt.current;
     setPending(true);
     setResult(null);
     try {
-      const answer = await clientCommand<{ id: string }>("/api/v1/reports", body, { idempotencyKey: attempt.current.key });
+      const answer = await clientCommand<{ id: string }>("/api/v1/reports", body, { idempotencyKey: current.key });
       if (answer.ok) setResult({ kind: "sent" });
-      else if (answer.status >= 500) setResult({ kind: "unknown" });
+      else if (answer.status >= 500) {
+        current.unknown = true;
+        setResult({ kind: "unknown", text: UNKNOWN });
+      } else if (current.unknown) setResult({ kind: "unknown", text: stillUnknown(answer.status) });
       else setResult({ kind: "refused", text: explainReportRefusal(answer.code, answer.status) });
     } catch {
-      setResult({ kind: "unknown" });
+      current.unknown = true;
+      setResult({ kind: "unknown", text: UNKNOWN });
     }
     setPending(false);
     requestAnimationFrame(() => notice.current?.focus());
@@ -96,7 +111,7 @@ export function ReportForm({ handle, agent }: { handle: string; agent: string | 
         ) : null}
         {result?.kind === "unknown" ? (
           <p role="alert" className="rounded-lg bg-status-amber-surface p-3 text-status-amber">
-            We can&apos;t tell whether this was sent. Send it again unchanged: if it went through, it won&apos;t be sent twice.
+            {result.text}
           </p>
         ) : null}
       </div>

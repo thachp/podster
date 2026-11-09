@@ -26,9 +26,11 @@ const submit = () => screen.getByRole("button", { name: "Send report" });
 
 describe("reporting a public workroom", () => {
   it("needs a reason, then sends the report with the room's handle", async () => {
-    render(<ReportForm handle={HANDLE} agent="agt_seen" />);
+    render(<ReportForm handle={HANDLE} />);
     expect(submit()).toBeDisabled();
+    expect(screen.getByLabelText("Agent ID (optional)")).toHaveValue("");
     await userEvent.click(screen.getByRole("radio", { name: /Impersonation/ }));
+    await userEvent.type(screen.getByLabelText("Agent ID (optional)"), "agt_seen");
     await userEvent.type(screen.getByLabelText("Note (optional)"), "  Claims to be Podster  ");
     await userEvent.click(submit());
     await waitFor(() => expect(sent).toHaveLength(1));
@@ -40,7 +42,7 @@ describe("reporting a public workroom", () => {
 
   it("sends the same request under the same key after a lost answer, and a changed one under a new key", async () => {
     replies = [{ status: 502, body: {} }, { status: 502, body: {} }];
-    render(<ReportForm handle={HANDLE} agent={null} />);
+    render(<ReportForm handle={HANDLE} />);
     await userEvent.click(screen.getByRole("radio", { name: /Spam/ }));
     await userEvent.click(submit());
     expect(await screen.findByRole("alert")).toHaveTextContent(/can't tell whether this was sent/);
@@ -54,19 +56,35 @@ describe("reporting a public workroom", () => {
   });
 
   it.each([
+    [409, /still can't tell whether this was sent\. Reload/],
+    [401, /signed out, so we still can't tell/],
+    [429, /Too many requests, so we still can't tell/],
+  ])("never says nothing was sent when a retry after a lost answer gets a %i", async (status, text) => {
+    replies = [{ status: 502, body: {} }, { status, body: { error: { code: "limit_exceeded" } } }];
+    render(<ReportForm handle={HANDLE} />);
+    await userEvent.click(screen.getByRole("radio", { name: /Spam/ }));
+    await userEvent.click(submit());
+    await screen.findByText(/can't tell whether this was sent/);
+    await userEvent.click(submit());
+    await waitFor(() => expect(sent).toHaveLength(2));
+    const alert = await screen.findByText(text);
+    expect(alert).not.toHaveTextContent(/Nothing was sent/);
+  });
+
+  it.each([
     [404, "workspace_not_found", /isn't public now/],
     [409, "limit_exceeded", /10 reports today/],
     [422, "idempotency_mismatch", /may already have been sent/],
   ])("explains a %i %s", async (status, code, text) => {
     replies = [{ status, body: { error: { code } } }];
-    render(<ReportForm handle={HANDLE} agent={null} />);
+    render(<ReportForm handle={HANDLE} />);
     await userEvent.click(screen.getByRole("radio", { name: /Privacy/ }));
     await userEvent.click(submit());
     expect(await screen.findByRole("alert")).toHaveTextContent(text);
   });
 
   it("checks an agent ID and the note's length before sending", async () => {
-    render(<ReportForm handle={HANDLE} agent={null} />);
+    render(<ReportForm handle={HANDLE} />);
     await userEvent.click(screen.getByRole("radio", { name: /Other|Something else/ }));
     await userEvent.type(screen.getByLabelText("Agent ID (optional)"), "bob");
     expect(screen.getByText(/isn't an agent ID/)).toBeInTheDocument();
@@ -78,7 +96,12 @@ describe("reporting a public workroom", () => {
     expect(submit()).toBeDisabled();
   });
 
-  it("offers nothing to send without a valid handle, and ignores a bad agent ID in the link", async () => {
+  it("prefills only the handle, never an agent from the link", async () => {
+    render((await Report({ searchParams: Promise.resolve({ handle: HANDLE, agent: "agt_framed" } as { handle: string }) })) as ReactElement);
+    expect(screen.getByLabelText("Agent ID (optional)")).toHaveValue("");
+  });
+
+  it("offers nothing to send without a valid handle", async () => {
     render((await Report({ searchParams: Promise.resolve({ handle: "pub_nope" }) })) as ReactElement);
     expect(screen.getByRole("alert")).toHaveTextContent(/no workroom to report here/);
     expect(screen.queryByRole("button", { name: "Send report" })).toBeNull();

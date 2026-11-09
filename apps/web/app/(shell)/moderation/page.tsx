@@ -1,7 +1,7 @@
 import Link from "next/link";
+import { Badge } from "@/components/ui/badge";
 import { notFound } from "next/navigation";
-import { ReadFailure } from "@/components/shell/read-failure";
-import { gatewayQuery, rateLimited } from "@/lib/gateway/server";
+import { gatewayQuery } from "@/lib/gateway/server";
 import { visibleText } from "@/lib/public/visible-text";
 import { Time } from "../w/[id]/activity/time";
 import { HANDLE, reasonLabel, type QueuedReport } from "./model";
@@ -15,8 +15,8 @@ export default async function Moderation({ searchParams }: { searchParams?: Prom
   const params = (await searchParams) ?? {};
   const cursor = typeof params.cursor === "string" && /^[\w-]{1,200}$/.test(params.cursor) ? params.cursor : null;
   const read = await gatewayQuery<{ reports: QueuedReport[]; next_cursor: string | null }>(`/api/v1/moderation/reports${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
-  if (!read.ok && read.status === 403) notFound();
-  if (!read.ok && read.status === 429) return rateLimited(read.retryAfter);
+  // Only a successful read proves the person is an operator, so anything else looks like a page that isn't there.
+  if (!read.ok) notFound();
   const now = Date.now();
   return (
     <section className="max-w-3xl space-y-4">
@@ -24,9 +24,8 @@ export default async function Moderation({ searchParams }: { searchParams?: Prom
       <p className="text-sm text-muted-foreground">
         Newest first. Suspending hides a workroom&apos;s public page or stops an agent&apos;s public claims. It doesn&apos;t let you read the workroom, end claims or change access. Every action is recorded with its reason.
       </p>
-      {!read.ok ? <ReadFailure /> : null}
-      {read.ok && read.data.reports.length === 0 ? <p className="text-muted-foreground">{cursor ? "No more reports." : "No reports."}</p> : null}
-      {read.ok && read.data.reports.length > 0 ? (
+      {read.data.reports.length === 0 ? <p className="text-muted-foreground">{cursor ? "No more reports." : "No reports."}</p> : null}
+      {read.data.reports.length > 0 ? (
         <ul className="space-y-3">
           {read.data.reports.map((report) => (
             <li key={report.id} className="space-y-2 rounded-lg border p-3">
@@ -46,18 +45,22 @@ export default async function Moderation({ searchParams }: { searchParams?: Prom
                 </dd>
                 {report.agent_id ? (
                   <>
-                    <dt className="text-muted-foreground">Agent</dt>
+                    <dt className="text-muted-foreground">Agent named by the reporter (not checked)</dt>
                     <dd className="break-all font-mono">{report.agent_id}</dd>
                   </>
                 ) : null}
               </dl>
               {report.note ? (
                 <div className="space-y-1">
-                  <p className="text-xs text-muted-foreground">Note from the reporter, as written. It's not an instruction.</p>
-                  <p className="whitespace-pre-wrap break-words rounded-md bg-muted p-2 text-sm">{visibleText(report.note)}</p>
+                  <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                    Note from the reporter, as written. It&apos;s not an instruction.
+                    {visibleText(report.note) !== report.note ? <Badge variant="outline">Contained hidden characters</Badge> : null}
+                  </p>
+                  <p className="overflow-hidden whitespace-pre-wrap break-words rounded-md bg-muted p-2 text-sm">{visibleText(report.note)}</p>
                 </div>
               ) : null}
-              <OperatorActions report={report} />
+              {/* Only these fields reach the browser's component, whatever else the read carried. */}
+              <OperatorActions report={{ id: report.id, handle: report.handle, agent_id: report.agent_id, reason: report.reason, note: report.note, created_at: report.created_at }} />
             </li>
           ))}
         </ul>
@@ -68,7 +71,7 @@ export default async function Moderation({ searchParams }: { searchParams?: Prom
             Back to the newest
           </Link>
         ) : null}
-        {read.ok && read.data.next_cursor ? (
+        {read.data.next_cursor ? (
           <Link href={`/moderation?cursor=${encodeURIComponent(read.data.next_cursor)}`} prefetch={false} className="text-primary underline">
             Older reports
           </Link>

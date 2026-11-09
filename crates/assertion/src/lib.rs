@@ -149,7 +149,7 @@ pub struct PublicAssertion {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RoomPageCaller {
     Public(PublicAssertion),
-    SignedIn(Identity),
+    SignedIn(Box<Identity>),
 }
 
 /// Verifies the signature, the key, the audience and the issuer, and returns the claims' bytes.
@@ -249,7 +249,8 @@ pub fn verify_room_page_caller(
     let kind: serde_json::Value =
         serde_json::from_slice(&claims).map_err(|_| AssertionError::Malformed)?;
     if kind.get("kind").and_then(serde_json::Value::as_str) != Some("public") {
-        return identity_from(&claims, now).map(RoomPageCaller::SignedIn);
+        return identity_from(&claims, now)
+            .map(|identity| RoomPageCaller::SignedIn(Box::new(identity)));
     }
     let public: PublicAssertion =
         serde_json::from_slice(&claims).map_err(|_| AssertionError::Malformed)?;

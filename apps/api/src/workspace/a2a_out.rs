@@ -6,7 +6,7 @@
 //! Whether the agent has an endpoint, is still connected, and whoever set it is still in its organization is the agent's
 //! Principal's to say, and the consumer asks it before beginning. Logs carry IDs only.
 use super::*;
-use podster_core::a2a::{may_send, valid_remote_task_id, AttemptState, NoSend};
+use podster_core::a2a::{may_send_kind, valid_remote_task_id, AttemptKind, AttemptState, NoSend};
 
 const QUEUE_BATCH: i64 = 50;
 const QUEUE_MAX_BACKOFF_MS: i64 = 5 * 60 * 1000;
@@ -94,15 +94,28 @@ fn attempt_row(sql: &SqlStorage, id: &str) -> R<Option<Value>> {
     .next())
 }
 
-/// The offer a task is on now: its latest `task.offered` event. An attempt belongs to the offer it was recorded with.
-fn current_offer(sql: &SqlStorage, task: &str) -> R<Option<String>> {
+/// The event a task is on now for an attempt of this kind: its latest offer, or its latest change request (step 13b). An
+/// attempt belongs to the event it was recorded with, so a newer one ends it.
+pub(super) fn current_for(sql: &SqlStorage, kind: AttemptKind, task: &str) -> R<Option<String>> {
+    let event = match kind {
+        AttemptKind::Offer => "task.offered",
+        AttemptKind::ChangeRequest => "task.changes_requested",
+    };
     Ok(rows(
         sql,
-        "SELECT id FROM event WHERE task_id = ? AND type = 'task.offered' ORDER BY seq DESC LIMIT 1",
-        vec![task.into()],
+        "SELECT id FROM event WHERE task_id = ? AND type = ? ORDER BY seq DESC LIMIT 1",
+        vec![task.into(), event.into()],
     )?
     .first()
     .and_then(|r| text(&r["id"])))
+}
+
+/// An attempt's kind. One recorded before step 13b is an offer.
+pub(super) fn kind_of(attempt: &Value) -> AttemptKind {
+    attempt["kind"]
+        .as_str()
+        .and_then(AttemptKind::from_name)
+        .unwrap_or(AttemptKind::Offer)
 }
 
 fn stop(sql: &SqlStorage, id: &str, reason: &str, now: i64) -> R<()> {
@@ -164,9 +177,11 @@ pub(super) fn begin(sql: &SqlStorage, identity: &Identity, body: &Value, now: i6
     let leased = attempt["lease_until"]
         .as_i64()
         .is_some_and(|until| until > now);
-    match may_send(
+    let kind = kind_of(&attempt);
+    match may_send_kind(
+        kind,
         &task,
-        current_offer(sql, task_id)?.as_deref(),
+        current_for(sql, kind, task_id)?.as_deref(),
         &identity.id,
         offer,
         state,
@@ -186,8 +201,24 @@ pub(super) fn begin(sql: &SqlStorage, identity: &Identity, body: &Value, now: i6
         "UPDATE a2a_attempt SET lease_until = ?, tries = tries + 1, updated_at = ? WHERE id = ?",
         vec![(now + SEND_LEASE_MS).into(), now.into(), id.into()],
     )?;
+    if kind == AttemptKind::ChangeRequest {
+        // The reviewer's reason, read now from the change request's own event, and the remote task it refers to.
+        let reason = rows(
+            sql,
+            "SELECT reason FROM event WHERE id = ?",
+            vec![offer.into()],
+        )?
+        .first()
+        .and_then(|r| text(&r["reason"]))
+        .unwrap_or_default();
+        return Ok(json!({
+            "send": true, "kind": kind.name(), "task_id": task.id, "title": task.title, "reason": reason,
+            "submission_no": task.submission_no, "reference_task_id": attempt["reference_task_id"],
+            "reference_context_id": attempt["reference_context_id"],
+        }));
+    }
     Ok(json!({
-        "send": true, "task_id": task.id, "title": task.title, "instructions": task.instructions,
+        "send": true, "kind": kind.name(), "task_id": task.id, "title": task.title, "instructions": task.instructions,
         "acceptance_criteria": task.acceptance_criteria, "files": input_files(sql, &who.caller, &task.id)?,
     }))
 }
@@ -255,8 +286,13 @@ pub(super) fn finish(sql: &SqlStorage, identity: &Identity, body: &Value, now: i
                 return Err(ApiError::api(409, "already_sent"));
             }
             pin(sql)?;
-            exec(sql, "UPDATE a2a_attempt SET state = 'sent', remote_task_id = ?, lease_until = NULL, updated_at = ? WHERE id = ? AND state = 'queued'", vec![
-                remote.map_or(V::Null, V::from), now.into(), id.into(),
+            // The remote task's context, so a later change request can stay in it (decision 114). One that fails the ID check
+            // isn't kept.
+            let context = body["remote_context_id"]
+                .as_str()
+                .filter(|c| valid_remote_task_id(c));
+            exec(sql, "UPDATE a2a_attempt SET state = 'sent', remote_task_id = ?, remote_context_id = ?, lease_until = NULL, updated_at = ? WHERE id = ? AND state = 'queued'", vec![
+                remote.map_or(V::Null, V::from), context.map_or(V::Null, V::from), now.into(), id.into(),
             ])?;
             // A remote task is read back from a minute on (step 13). A message with no task has nothing to read.
             if remote.is_some() && attempt["state"].as_str() == Some("queued") {

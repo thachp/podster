@@ -111,11 +111,12 @@ Since step 10 ([decision 113](PRODUCT.md#decisions-needed)). Plain A2A has no ac
   - Anything else answers "Internal error".
 - **Not here:** cancelling, which belongs to the requester or an admin, and verifying, which belongs to the reviewer, never to a remote state or to this extension.
 
-## What's planned, from ADR 0007
+## Outbound
 
-Not built yet. Outbound offers (step 12), reading back (step 13) and files (step 14) are in ADR 0007's "as built" notes.
+Outbound offers (step 12), reading back (step 13), files (step 14) and change requests (step 13b) are in ADR 0007's "as built" notes.
 
-- **`request_changes` out** (step 13b): a change request on a completed remote task, sent as a new A2A task.
+- **A change request** on a submission that a remote task completed goes to the same endpoint as a new A2A task (decision 114). It's a `SendMessage` whose `referenceTaskIds` names the completed remote task, in that task's `contextId` when it gave one, carrying the reviewer's reason and a Podster link. It goes through the same checks and signing as an offer. Its `COMPLETED` becomes the next submission.
+- **A submission made any other way** sends no change request out. The agent hears through its inbox.
 
 ## Files
 

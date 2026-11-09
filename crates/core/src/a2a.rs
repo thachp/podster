@@ -385,14 +385,73 @@ pub fn may_send(
     state: AttemptState,
     leased: bool,
 ) -> Result<(), NoSend> {
+    may_send_kind(
+        AttemptKind::Offer,
+        task,
+        current_offer,
+        agent,
+        offer,
+        state,
+        leased,
+    )
+}
+
+/// What an attempt sends (decision 114, M3 step 13b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttemptKind {
+    /// A task offered to the agent: sent while the task is offered to it.
+    Offer,
+    /// A change request on a submission the agent's endpoint completed: a new A2A task with `referenceTaskIds` and the same
+    /// `contextId`, sent while the task is back with the agent on that change request.
+    ChangeRequest,
+}
+
+impl AttemptKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            AttemptKind::Offer => "offer",
+            AttemptKind::ChangeRequest => "change_request",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "offer" => Some(AttemptKind::Offer),
+            "change_request" => Some(AttemptKind::ChangeRequest),
+            _ => None,
+        }
+    }
+
+    /// The task status an attempt of this kind is for. A change request sends the task back to the agent as accepted.
+    pub fn status(self) -> TaskStatus {
+        match self {
+            AttemptKind::Offer => TaskStatus::Offered,
+            AttemptKind::ChangeRequest => TaskStatus::Accepted,
+        }
+    }
+}
+
+/// [`may_send`] for either kind. `current` is the event the task is on now for that kind: its latest offer, or its latest
+/// change request, as the API recorded it. An attempt sends only while the task is in that kind's status, with the attempt's
+/// agent, on the attempt's own event, so a newer offer or change request, or anything else that moved the task, sends nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn may_send_kind(
+    kind: AttemptKind,
+    task: &Task,
+    current: Option<&str>,
+    agent: &str,
+    trigger: &str,
+    state: AttemptState,
+    leased: bool,
+) -> Result<(), NoSend> {
     match state {
         AttemptState::Sent => return Err(NoSend::AlreadySent),
         AttemptState::Stopped => return Err(NoSend::Ended),
         AttemptState::Queued => {}
     }
-    if task.status != TaskStatus::Offered
+    if task.status != kind.status()
         || task.assignee.as_deref() != Some(agent)
-        || current_offer != Some(offer)
+        || current != Some(trigger)
     {
         return Err(NoSend::OfferMovedOn);
     }
@@ -555,3 +614,21 @@ pub fn reading_open(now: i64, read_until: i64, ended: bool) -> bool {
 pub const MAX_REMOTE_PARTS: usize = 8;
 pub const MAX_REMOTE_ARTIFACTS: usize = crate::MAX_ARTIFACTS;
 pub const MAX_REMOTE_TEXT_BYTES: usize = 16 * 1024;
+
+/// The text a change request carries (decision 114): which task, which submission it's about, the reviewer's reason, and the
+/// Podster link. The reason is the reviewer's own words, read at send time, and is cut to fit like an offer's text.
+pub fn change_request_text(
+    title: &str,
+    submission_no: u32,
+    reason: &str,
+    link: Option<&str>,
+) -> String {
+    offer_text_with_files(
+        &format!("Changes requested: {title}"),
+        &format!("The reviewer asked for changes to submission {submission_no}:\n\n{reason}"),
+        None,
+        &[],
+        None,
+        link,
+    )
+}

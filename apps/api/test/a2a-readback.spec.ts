@@ -390,6 +390,73 @@ describe("links (step 14)", () => {
   });
 });
 
+describe("change requests out (step 13b)", () => {
+  /** A task the agent's endpoint completed, read back as submission 1. */
+  async function submittedRemotely() {
+    const sent = await sentOffer();
+    await script(sent.remote, [task(sent.remote, "TASK_STATE_WORKING"), task(sent.remote, "TASK_STATE_COMPLETED", { artifacts: [{ name: "Draft", parts: [{ url: "https://example.com/v1" }] }] })]);
+    await readOnce(sent.room, sent.attempt.id);
+    await readOnce(sent.room, sent.attempt.id);
+    expect((await taskRow(sent.room, sent.task.id)).status).toBe("submitted");
+    return sent;
+  }
+  const requestChanges = (room: string, taskId: string, reason: string, submission_no = 1) =>
+    must(LEAD, "POST", `/v1/workspaces/${room}/tasks/${taskId}/request-changes`, { submission_no, reason });
+
+  it("goes out as a new A2A task naming the completed one, in its context, by step 12's path, and is read back", async () => {
+    const { room, attempt, agent, task: t, url, remote, secret } = await submittedRemotely();
+    expect(attempt.remote_context_id ?? (await row(room, attempt.id)).remote_context_id).toBe("c");
+    await requestChanges(room, t.id, "Add the dates, please.");
+    const change = (await attempts(room, t.id)).find((a) => a.kind === "change_request");
+    expect(change).toMatchObject({ agent_id: agent.id, state: "queued", reference_task_id: remote, reference_context_id: "c" });
+    const [requested] = await roomSql(room, "SELECT id FROM event WHERE task_id = ? AND type = 'task.changes_requested'", t.id);
+    expect(change.offer_id).toBe(requested.id);
+    expect((await consume(room, change)).body.outcome).toBe("ack");
+    const sends = (await sentTo(url)).filter((r) => JSON.parse(r.body).method === "SendMessage");
+    expect(sends).toHaveLength(2);
+    const body = JSON.parse(sends[1].body);
+    expect(body).toMatchObject({ id: change.id, params: { configuration: { returnImmediately: true }, message: { messageId: change.id, role: "ROLE_USER", referenceTaskIds: [remote], contextId: "c" } } });
+    expect(body.params.message.parts[0].text).toContain("# Changes requested: Draft the brief");
+    expect(body.params.message.parts[0].text).toContain("changes to submission 1:\n\nAdd the dates, please.");
+    expect(await verifies(secret, sends[1].signature, sends[1].body)).toBe(true);
+    expect(sends[1].authorization).toBe(`Bearer ${TOKEN}`);
+    // Read back like any sent attempt: its COMPLETED is the next submission, never a verify.
+    await script(remote, [task(remote, "TASK_STATE_COMPLETED", { artifacts: [{ name: "Draft 2", parts: [{ url: "https://example.com/v2" }] }] })]);
+    await readOnce(room, change.id);
+    const after = await taskRow(room, t.id);
+    expect(after.status).toBe("submitted");
+    expect(await roomSql(room, "SELECT uri FROM artifact WHERE task_id = ? AND submission_no = 2", t.id)).toEqual([{ uri: "https://example.com/v2" }]);
+  });
+
+  it("isn't made for a submission that didn't come from the endpoint", async () => {
+    const room = await newRoom();
+    const { agent } = await target(room);
+    const created = await offer(room, agent.id);
+    const accepted = await must(agent, "POST", `/v1/workspaces/${room}/tasks/${created.id}/accept`, { version: created.version });
+    await must(agent, "POST", `/v1/workspaces/${room}/tasks/${created.id}/submit`, { version: accepted.version, note: "Done by hand." });
+    await requestChanges(room, created.id, "More, please.");
+    expect((await attempts(room, created.id)).filter((a) => a.kind === "change_request")).toEqual([]);
+  });
+
+  it("sends nothing once a newer change request has moved the task on, and makes none for a hand-made submission", async () => {
+    const { room, task: t, url, remote } = await submittedRemotely();
+    await requestChanges(room, t.id, "First.");
+    const [first] = (await attempts(room, t.id)).filter((a) => a.kind === "change_request");
+    // The agent resubmits by hand, and a second change request comes.
+    const now = await taskRow(room, t.id);
+    const agent = { id: now.assignee_id, org: ORG };
+    const resubmitted = await must(agent, "POST", `/v1/workspaces/${room}/tasks/${t.id}/submit`, { version: now.version, note: "Again." });
+    expect(resubmitted.status).toBe("submitted");
+    await script(remote, [task(remote, "TASK_STATE_SUBMITTED")]);
+    await requestChanges(room, t.id, "Second.", 2);
+    // Submission 2 was made by hand, so the second change request has no remote task to refer to, and makes no attempt.
+    expect((await attempts(room, t.id)).filter((a) => a.kind === "change_request")).toHaveLength(1);
+    expect((await consume(room, first)).body.outcome).toBe("ack");
+    expect((await row(room, first.id))).toMatchObject({ state: "stopped", ended_reason: "offer_moved_on" });
+    expect((await sentTo(url)).filter((r) => JSON.parse(r.body).method === "SendMessage" && JSON.parse(r.body).params.message.referenceTaskIds?.length)).toEqual([]);
+  });
+});
+
 describe("cancel out", () => {
   const cancelJob = async (room: string, attempt: any) => {
     await fireAlarm(room);

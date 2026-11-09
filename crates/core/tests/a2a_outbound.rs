@@ -258,3 +258,153 @@ fn a_long_list_of_files_is_counted_past_its_share() {
     assert!(text.contains("more, listed on the task"));
     assert!(text.len() < MAX_FILES_SECTION_BYTES + 200);
 }
+
+#[test]
+fn a_change_request_sends_only_while_the_task_is_back_with_the_agent_on_it() {
+    let task = offered();
+    let accepted = step(
+        &task,
+        AGENT,
+        Command::Accept {
+            version: task.version,
+        },
+    );
+    let cr = AttemptKind::ChangeRequest;
+    assert_eq!(
+        may_send_kind(
+            cr,
+            &accepted,
+            Some("evt_cr"),
+            AGENT,
+            "evt_cr",
+            Queued,
+            false
+        ),
+        Ok(())
+    );
+    // A newer change request, an offered task, and another agent each send nothing.
+    assert_eq!(
+        may_send_kind(
+            cr,
+            &accepted,
+            Some("evt_newer"),
+            AGENT,
+            "evt_cr",
+            Queued,
+            false
+        ),
+        Err(NoSend::OfferMovedOn)
+    );
+    assert_eq!(
+        may_send_kind(cr, &task, Some("evt_cr"), AGENT, "evt_cr", Queued, false),
+        Err(NoSend::OfferMovedOn)
+    );
+    assert_eq!(
+        may_send_kind(
+            cr,
+            &accepted,
+            Some("evt_cr"),
+            "agt_other",
+            "evt_cr",
+            Queued,
+            false
+        ),
+        Err(NoSend::OfferMovedOn)
+    );
+    // Released back to open, or canceled.
+    let released = step(
+        &accepted,
+        AGENT,
+        Command::Release {
+            version: accepted.version,
+            reason: "no".into(),
+        },
+    );
+    assert_eq!(
+        may_send_kind(
+            cr,
+            &released,
+            Some("evt_cr"),
+            AGENT,
+            "evt_cr",
+            Queued,
+            false
+        ),
+        Err(NoSend::OfferMovedOn)
+    );
+    // An offer attempt is unchanged by this.
+    assert_eq!(
+        may_send_kind(
+            AttemptKind::Offer,
+            &task,
+            Some(OFFER),
+            AGENT,
+            OFFER,
+            Queued,
+            false
+        ),
+        Ok(())
+    );
+    for kind in [AttemptKind::Offer, cr] {
+        assert_eq!(AttemptKind::from_name(kind.name()), Some(kind));
+    }
+}
+
+#[test]
+fn a_change_request_says_which_submission_and_why() {
+    let text = change_request_text(
+        "Write it",
+        2,
+        "Add the dates.",
+        Some("https://app.example/w/ws_1/tasks"),
+    );
+    assert!(text.starts_with("# Changes requested: Write it\n\nThe reviewer asked for changes to submission 2:\n\nAdd the dates."));
+    assert!(text.ends_with("On Podster: https://app.example/w/ws_1/tasks"));
+    assert!(change_request_text("T", 1, &"x".repeat(20_000), None).len() <= MAX_OFFER_TEXT_BYTES);
+}
+
+#[test]
+fn a_change_request_is_current_only_until_new_work_starts() {
+    let cr =
+        |events: &[(&'static str, &'static str)]| current_change_request(events.iter().copied());
+    assert_eq!(
+        cr(&[("task.submitted", "e1"), ("task.changes_requested", "cr1")]),
+        Some("cr1")
+    );
+    // Messages and edits don't end it.
+    assert_eq!(
+        cr(&[
+            ("task.changes_requested", "cr1"),
+            ("task.message", "m"),
+            ("task.updated", "u")
+        ]),
+        Some("cr1")
+    );
+    // Released, offered again and accepted again: it was about other work.
+    assert_eq!(
+        cr(&[
+            ("task.changes_requested", "cr1"),
+            ("task.released", "r"),
+            ("task.offered", "o"),
+            ("task.accepted", "a")
+        ]),
+        None
+    );
+    for later in SUPERSEDES_CHANGE_REQUEST {
+        assert_eq!(
+            cr(&[("task.changes_requested", "cr1"), (later, "x")]),
+            None,
+            "{later}"
+        );
+    }
+    // A newer change request after new work is the current one.
+    assert_eq!(
+        cr(&[
+            ("task.changes_requested", "cr1"),
+            ("task.submitted", "s"),
+            ("task.changes_requested", "cr2")
+        ]),
+        Some("cr2")
+    );
+    assert_eq!(cr(&[]), None);
+}

@@ -1437,12 +1437,16 @@ fn handle_set_review_policy(sql: &SqlStorage, caller: &Caller, body: &Value, now
         .and_then(Value::as_bool)
         .ok_or_else(ApiError::invalid_argument)?;
     let prior = store::requires_person_review(sql)?;
-    // A public room always has a person review (decision 159), so it can't be turned off until the room is private again.
-    if !require_person
-        && rows(sql, "SELECT visibility FROM workspace", vec![])?
-            .first()
-            .is_some_and(|r| r["visibility"].as_str() == Some("public"))
-    {
+    // A public room always has a person review (decision 159): `may_turn_off_person_review` decides.
+    let public = rows(sql, "SELECT visibility FROM workspace", vec![])?
+        .first()
+        .is_some_and(|r| r["visibility"].as_str() == Some("public"));
+    let visibility = if public {
+        podster_policy::public::Visibility::Public
+    } else {
+        podster_policy::public::Visibility::Private
+    };
+    if !require_person && !podster_policy::public::may_turn_off_person_review(visibility) {
         return Err(ApiError::api(409, "person_review_required"));
     }
     if prior != require_person {
@@ -2457,7 +2461,9 @@ mod queries {
         }
         let messages: Vec<Value> = messages.iter().map(|m| message_json(m, &who.org)).collect();
         // In order, without saying where each entry sits among the room's events, which would count the ones not shown.
-        let history = rows(sql, "SELECT id, type, actor_id, actor_org, reason, prior_status, new_status, task_version, created_at FROM event WHERE task_id = ?1 AND (type <> ?2 OR ?3) ORDER BY seq", vec![id.into(), podster_policy::TASK_PLAN_CHANGED.into(), flag(sees_whole_room(&who.caller))])?;
+        // `origin` is set by the room alone, `a2a_remote` for what a read of the agent's own A2A endpoint did (step 13). The
+        // attempt it names stays out, since it's no ID a reader can use.
+        let history = rows(sql, "SELECT id, type, actor_id, actor_org, reason, prior_status, new_status, task_version, created_at, origin FROM event WHERE task_id = ?1 AND (type <> ?2 OR ?3) ORDER BY seq", vec![id.into(), podster_policy::TASK_PLAN_CHANGED.into(), flag(sees_whole_room(&who.caller))])?;
         let marked = |row: &Value, id: &str, org: &str| -> Value {
             let mut out = row.clone();
             if let Some(map) = out.as_object_mut() {

@@ -1,6 +1,7 @@
 -- Explore's list of candidate public rooms (M4 step 6, ADR 0008). Handles and sort or filter keys only, never a name, goal
 -- or any other text. A read model: it's never used to authorize, and Explore confirms each result with its room. A row
--- that stops being listed keeps only its room's ID and `updated_seq`, as a tombstone, so a late retry can't list it again.
+-- that stops being listed is a tombstone: it keeps its room's ID, `updated_seq`, so a late retry can't list it again, and the
+-- last handle the room was published under, taken from the room's audit. `published_at` is in milliseconds.
 CREATE TABLE public_workroom_index (
   workspace_id TEXT PRIMARY KEY,
   public_handle TEXT UNIQUE,

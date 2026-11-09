@@ -19,8 +19,8 @@ use futures_util::{
     StreamExt,
 };
 use podster_core::a2a::{
-    offer_text_with_files, valid_remote_task_id, InputFile, MAX_REMOTE_ARTIFACTS, MAX_REMOTE_PARTS,
-    MAX_REMOTE_TEXT_BYTES,
+    change_request_text, offer_text_with_files, valid_remote_task_id, AttemptKind, InputFile,
+    MAX_REMOTE_ARTIFACTS, MAX_REMOTE_PARTS, MAX_REMOTE_TEXT_BYTES,
 };
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -95,7 +95,8 @@ async fn room(
 /// What the endpoint said.
 enum Sent {
     /// It answered with a task, whose ID is valid, or with a message and no task.
-    Answered(Option<String>),
+    /// The remote task's ID and its `contextId`, if it gave one that passes the same check.
+    Answered(Option<String>, Option<String>),
     /// Anything else: a refusal, a redirect, a timeout, a JSON-RPC error, an answer too big or that can't be read.
     Failed,
 }
@@ -130,9 +131,15 @@ fn answered(body: &Value) -> Sent {
     }
     let result = &body["result"];
     match result["task"]["id"].as_str() {
-        Some(id) if valid_remote_task_id(id) => Sent::Answered(Some(id.to_string())),
+        Some(id) if valid_remote_task_id(id) => Sent::Answered(
+            Some(id.to_string()),
+            result["task"]["contextId"]
+                .as_str()
+                .filter(|c| valid_remote_task_id(c))
+                .map(str::to_string),
+        ),
         Some(_) => Sent::Failed,
-        None if result["message"].is_object() => Sent::Answered(None),
+        None if result["message"].is_object() => Sent::Answered(None, None),
         None => Sent::Failed,
     }
 }
@@ -196,6 +203,9 @@ fn request_body(
     link: Option<&str>,
     gateway: Option<&str>,
 ) -> String {
+    if task["kind"].as_str() == Some(AttemptKind::ChangeRequest.name()) {
+        return change_request_body(ws, attempt, task, link);
+    }
     // Input files are Podster links on the gateway's A2A resource, opened with the agent's `/a2a` token. Never bytes, never a
     // public URL.
     let listed = task["files"].as_array().cloned().unwrap_or_default();
@@ -241,6 +251,32 @@ fn request_body(
             },
             "configuration": { "returnImmediately": true },
         },
+    })
+    .to_string()
+}
+
+/// A change request as a new A2A task (decision 114): the reviewer's reason, referring to the remote task that completed the
+/// submission, in its `contextId` when it gave one. Same `messageId` rule, signing and `returnImmediately` as an offer.
+fn change_request_body(ws: &str, attempt: &str, task: &Value, link: Option<&str>) -> String {
+    let text = change_request_text(
+        task["title"].as_str().unwrap_or_default(),
+        task["submission_no"].as_u64().unwrap_or(0) as u32,
+        task["reason"].as_str().unwrap_or_default(),
+        link,
+    );
+    let task_id = task["task_id"].as_str().unwrap_or_default();
+    let mut message = json!({
+        "messageId": attempt, "role": "ROLE_USER",
+        "parts": [{ "text": text, "mediaType": "text/markdown" }],
+        "referenceTaskIds": task["reference_task_id"].as_str().map_or_else(Vec::new, |id| vec![id.to_string()]),
+        "metadata": { TASK_KEY: format!("{ws}:{task_id}"), ATTEMPT_KEY: attempt },
+    });
+    if let Some(context) = task["reference_context_id"].as_str() {
+        message["contextId"] = json!(context);
+    }
+    json!({
+        "jsonrpc": "2.0", "id": attempt, "method": "SendMessage",
+        "params": { "message": message, "configuration": { "returnImmediately": true } },
     })
     .to_string()
 }
@@ -344,12 +380,13 @@ pub async fn process(env: &Env, job: &Value) -> R<Outcome> {
     .await;
     let pinned = json!({ "attempt": attempt, "url": url, "version": version });
     match sent {
-        Sent::Answered(remote) => {
+        Sent::Answered(remote, context) => {
             // Recorded before anything else, so a failure after this can't send the offer again: a retry finds it sent and
             // only reports it.
             let mut finish = pinned;
             finish["outcome"] = json!("sent");
             finish["remote_task_id"] = json!(remote);
+            finish["remote_context_id"] = json!(context);
             room(env, ws, crate::INTERNAL_A2A_FINISH, agent, &claim, &finish).await?;
             report_a2a_for(env, agent, version, true).await?;
             log("a2a.send", ws, attempt, agent, "sent");

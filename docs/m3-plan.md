@@ -87,11 +87,11 @@ C changes `packages/contracts` and M adds a migration or room schema. The order 
 | 9 | Inbound messages: `SendMessage` with a `taskId` becomes `send_message`, with `messageId` as the idempotency key, size limits and `external` marking. No `taskId` is refused | Yes | Only if `messageId` can't use the idempotency record | 8. **Done** ([#167](https://github.com/thachp/podster/pull/167)) | 11 |
 | 10 | Inbound lifecycle through the Podster extension: accept, decline, release, and submit with text and links | Yes | | 9 | 11 |
 | 11 | Endpoint registration on the `Principal`: set, delete and status, checked against the egress policy, with the credential from question 16 | Yes | Yes | 7 | 8, 9, 10 |
-| 12 | Outbound offers: outbox, queue, `SendMessage` with `return_immediately`, the stored mapping of one A2A task per offer attempt, retries with the same `messageId`, and switching off after repeated failures | | Yes | 5, 11 | Built on `claude/m3-step12-outbound`. The queues exist. Not yet run on staging, and the LangGraph run is still owed |
-| 13 | Remote updates, as question 11 decides: read back, mapped through step 5 into a submission, a held response, a release or nothing. `cancel_task` sent out | Yes | Yes | 12 | Built on `claude/m3-step13-readback`, waiting for #173. Not run on staging |
-| 13b | `request_changes` on a completed remote task, sent out as a new A2A task with `referenceTaskIds` and the same `contextId` ([decision 114](spec/PRODUCT.md#decisions-needed)). Split from 13 on 2026-11-08, because it's a second send path | Yes | Yes | 13 | |
-| 14 | Files: inbound submissions with files from `create_upload`, offers that link input files as Podster links, and remote file references kept as external links | Yes | | 10, 13, M2 steps 5 and 6 | Built on `claude/m3-step14-files`, with no contract or migration change |
-| 15 | Screens: endpoint status on the agent's Sheet, and held responses flagged to the requester in the Task Sheet | | | 11, 13, M2 step 9b | 14 |
+| 12 | Outbound offers: outbox, queue, `SendMessage` with `return_immediately`, the stored mapping of one A2A task per offer attempt, retries with the same `messageId`, and switching off after repeated failures | | Yes | 5, 11 | **Done** ([#173](https://github.com/thachp/podster/pull/173)). Passed on staging for the failure half, 2026-11-09 at `0794706` |
+| 13 | Remote updates, as question 11 decides: read back, mapped through step 5 into a submission, a held response, a release or nothing. `cancel_task` sent out | Yes | Yes | 12 | **Done** ([#177](https://github.com/thachp/podster/pull/177)) |
+| 13b | `request_changes` on a completed remote task, sent out as a new A2A task with `referenceTaskIds` and the same `contextId` ([decision 114](spec/PRODUCT.md#decisions-needed)). Split from 13 on 2026-11-08, because it's a second send path | Yes | Yes | 13 | **Done** ([#183](https://github.com/thachp/podster/pull/183)), with `origin` on history entries |
+| 14 | Files: inbound submissions with files from `create_upload`, offers that link input files as Podster links, and remote file references kept as external links | Yes | | 10, 13, M2 steps 5 and 6 | **Done** ([#180](https://github.com/thachp/podster/pull/180), and `/a2a/files` in [#181](https://github.com/thachp/podster/pull/181)). Passed on staging, 2026-11-09 at `0794706` |
+| 15 | Screens: endpoint status on the agent's Sheet, and held responses flagged to the requester in the Task Sheet | | | 11, 13, M2 step 9b | **Done** ([#182](https://github.com/thachp/podster/pull/182)) |
 | 16 | Staging run: AC-12, AC-18, AC-24, criterion 4 across protocols, and the implementations [decision 143](spec/PRODUCT.md#decisions-needed) names. The kit runs only if a way to run it has been found ([decision 142](spec/PRODUCT.md#decisions-needed)). Its non-fitting checks are listed in the profile ([decision 141](spec/PRODUCT.md#decisions-needed)). Then the owner rules, and the profile is published | | | All, M2's gate | |
 
 **What runs in parallel:** the three spikes and the ADR draft. Steps 5 and 6. Step 11 is built beside 8 to 10, because it's in the `Principal` and they're in the `Workspace` path. Steps 9 to 11 change contracts and 11 adds a migration, so they're built side by side and still merge one at a time. Steps 14 and 15, which are in different folders.
@@ -160,14 +160,48 @@ The owner accepted every recommendation on 2026-11-08 ("sure"). Each row links t
   - So I found no A2A client there. A search can miss one.
 - **Built on `a2a-sdk`, from their PyPI metadata:** CrewAI 1.15.37 pins `a2a-sdk~=0.3.10`. Google ADK 2.14.0 and `agent-framework-a2a` 1.0.0b261106 depend on `a2a-sdk`.
 
+## M3's gate checklist
+
+What proves each gate item, and how far that proof has got. This is modeled on [M0's gate](m0-gate.md), and an item only moves when the run has actually happened.
+- **Passed locally:** a test passes under Miniflare or `wrangler dev`. For a staging check, it passed in its local rehearsal (`run-a2a-staging.mjs`).
+- **Passed on staging:** the staging check passed against `gateway-staging.podster.dev`, at the commit given.
+- **Owed:** nothing yet proves it.
+
+Last updated 2026-11-09 UTC, with every M3 build step merged: 1 to 15, 13b, and `/a2a/files`.
+
+**The staging run.** The lead ran `e2e/a2a-staging.mjs` (at `097fb21`) against staging at main `0794706` on 2026-11-09. It passed 59, failed 0 and skipped 0, in room `ws_234f0ec64e074e00b8daa716e8f68b15`. The deployed versions were API `88c50951`, gateway `f19887bc` and web `4fdfed72`. The run includes the unreachable endpoint's switch-off and a real ready-file download over `/a2a/files` with the `/a2a` token. M2's staging check passed 51, failed 0 and skipped 4 on the same deploy.
+
+### Protocol gates
+
+| Gate item | How it's verified | Status |
+| --- | --- | --- |
+| The profile is published | [A2A-PROFILE.md](spec/A2A-PROFILE.md), with the operations, the lifecycle extension, files and the kit's exceptions | Published in the repository. The kit's exception list waits on the kit run |
+| Inbound interoperability, implementation 1: the A2A project's JavaScript client | `e2e/a2a-staging.mjs`, through `@a2a-js/sdk` 1.3.0: discovery, OAuth to `/a2a`, `GetTask`, `ListTasks` with paging, `SendMessage` with a retry, the lifecycle extension, and the refusals | Passed locally. Passed on staging, 2026-11-09 at `0794706` |
+| Inbound interoperability, implementation 2: the Python client and the kit's client ([decision 143](spec/PRODUCT.md#decisions-needed)) | The A2A compatibility kit ([decision 142](spec/PRODUCT.md#decisions-needed)) | **Owed.** It hasn't run, because the session permission check refuses running the kit's code |
+| Outbound interoperability, with an independent server | LangGraph's `langgraph-api`, with fasta2a as backup ([decision 143](spec/PRODUCT.md#decisions-needed)), receiving an offer and reporting `WORKING` and `COMPLETED` | **Owed.** Starting it was refused by the permission check. See the round trip below |
+| Outbound behavior without an outside server | `e2e/a2a-staging.mjs`, unreachable endpoint: an offer to an endpoint that doesn't resolve fails, is retried as the same message, and switches the endpoint off after 3 failures, with the task untouched and the admin's read off. `apps/api/test/a2a-outbound.spec.ts` and `a2a-readback.spec.ts` cover the rest against a scripted endpoint | Passed locally. Passed on staging, 2026-11-09 at `0794706` |
+| AC-12: forged, expired or wrong-audience credentials are refused, as on other paths | `apps/gateway/test/oauth-split.spec.ts` (an `/mcp` token at `/a2a` and the reverse), `a2a-files.spec.ts` (only `/a2a` tokens at `/a2a/files`, and `/v1/files` still refuses them), and the assertion tests M0 already passed. `e2e/a2a-staging.mjs` checks an `/a2a` token is refused at `/mcp`, and the `/a2a/files` audience both ways | Passed locally. Passed on staging, 2026-11-09 at `0794706` |
+| AC-18: A2A instructions to elevate access stay data | `a2a-messages.spec.ts` (a message's own fields and text never move the task), `a2a-readback.spec.ts` (remote text is posted as a message, a remote `AUTH_REQUIRED` grants nothing, and artifact text becomes a note, never a command) | Passed locally |
+| AC-24: a remote completion records a submission only, or is held before acceptance, and grants nothing | `a2a-readback.spec.ts`: `WORKING` then `COMPLETED` gives accept then submit, never verify. `COMPLETED` at once is held, and the requester is told. A refused submission is held. Events are marked `a2a_remote` | Passed locally. **On a deployment: owed**, with the round trip |
+| Expanded criterion 4: one task history across protocols, and duplicates create no competing tasks | `a2a-messages.spec.ts` (a retried `messageId` posts once), `a2a-lifecycle.spec.ts` (a retried `requestId` acts once), `a2a-outbound.spec.ts` (a redelivered send sends nothing, and a recorded answer is never sent again), `a2a-readback.spec.ts` (a stale or redelivered read number does nothing). MCP and A2A act on the same task and history | Passed locally. Passed on staging, 2026-11-09 at `0794706`, for the inbound retries (`messageId` and `requestId`) |
+
+### Behavior M3 adds, by step
+
+| Item | How it's verified | Status |
+| --- | --- | --- |
+| Endpoint registration with a sealed token (step 11) | `a2a-endpoint.spec.ts`, and `e2e/a2a-staging.mjs` "Endpoint": set, read, rotate, the admin's read, delete and disconnect, with no token or secret in any output | Passed locally. Passed on staging, 2026-11-09 at `0794706` |
+| Offers out, from the outbox through the queue, with the send-time rechecks (step 12) | `a2a-outbound.spec.ts`: IDs-only jobs, `returnImmediately`, the signature and token, the answer recorded first, retries as the same message, switching off after 3 failures, the setter's departure, and the dead-letter queue | Passed locally. Passed on staging, 2026-11-09 at `0794706`, for the failure half: an unreachable endpoint fails, retries and switches off. The success half is owed, with the round trip |
+| Reading back by `GetTask`, and cancel out (step 13) | `a2a-readback.spec.ts`: the backoff, the 7 days, the caps refused whole, the archive guard, origin on messages and events, and `CancelTask` once | Passed locally |
+| Change requests out (step 13b) | `a2a-readback.spec.ts`: `referenceTaskIds` and `contextId` from Podster's own stored rows, and superseded by new work | Passed locally |
+| Files (step 14, and `/a2a/files`) | `a2a-lifecycle.spec.ts` (`SubmitTask.files`), `a2a-messages.spec.ts` (URL parts as links), `a2a-outbound.spec.ts` (an offer's file links), `a2a-files.spec.ts` (the route's audience), and `e2e/a2a-staging.mjs` (a ready file downloads at `/a2a/files` with the `/a2a` token only) | Passed locally, without the download, which needs a scanner. Passed on staging, 2026-11-09 at `0794706`, with a real ready file |
+| Screens (step 15) | `apps/web` tests: the Agent Sheet's endpoint section, and origin labels on the Task Sheet. `run-a11y.mjs` | Passed locally |
+
 ## Owed before M3's gate
 
-- **The compatibility kit.** It hasn't run, because the session permission check refuses running its code and the owner won't run it by hand ([decision 142](spec/PRODUCT.md#decisions-needed)). It must run some other way before any support claim.
-- **The outbound run against LangGraph's server.** [Decision 143](spec/PRODUCT.md#decisions-needed) makes it the outbound independent implementation, with fasta2a's server as backup. It hasn't run, because starting it was refused by the session permission check, so step 12's interoperability run still needs a way to run it.
-- **Spike C on staging,** with the owner's yes in that session ([decision 126](spec/PRODUCT.md#decisions-needed)): real egress, timeouts and queue timing.
-- **Step 13b, `request_changes` out** ([decision 114](spec/PRODUCT.md#decisions-needed)). Until it's built, a change request on a completed remote task reaches the agent only through its inbox, and nothing goes to its endpoint.
-- **An A2A download route for input files.** Built on `claude/m3-a2a-files`: `GET /a2a/files/{workspace}/{file}` accepts only `/a2a`-audience tokens, through the same API path and checks as `/v1/files`, and offers link to it. Not yet run on a deployment.
-- **A real outbound round trip on a deployment:** a send, reads back to a submission, and a cancel. It needs an A2A server staging can reach, which is a new cloud resource needing the owner's yes, or the LangGraph run above. Steps 12 and 13 are tested only against the test pool's fake endpoint.
+- **A real round trip to an outside A2A server.** An offer goes out, then the server's `WORKING` and `COMPLETED` are read back as an acceptance and a submission. Its download of an input file goes over `/a2a/files`, and a change request is sent and read back. That needs an A2A server staging can reach. It's a new cloud resource, so the owner must approve it. A proposal is in the PR that added this checklist.
+- **The outbound run against LangGraph's server** ([decision 143](spec/PRODUCT.md#decisions-needed)), or fasta2a's. It hasn't run, because starting it was refused by the session permission check. It may be the same run as the round trip, if the test server is LangGraph's.
+- **The compatibility kit** ([decision 142](spec/PRODUCT.md#decisions-needed)). It hasn't run, for the same reason. It must run some other way before any support claim.
+- **Spike C on staging** ([decision 126](spec/PRODUCT.md#decisions-needed)): real egress, timeouts and queue timing. The unreachable-endpoint check covers the failure half. The success half needs the round trip.
 
 ## Owed before production that M3 touches
 

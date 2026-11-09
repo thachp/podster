@@ -871,7 +871,7 @@ fn only_a_person_administering_the_agents_org_sets_it() {
 fn a_public_room_is_listed_with_its_keys_only() {
     let mut state = public_room();
     state.room.topic = Some(Topic::Research);
-    let row = index_row(&state);
+    let row = index_row(&state, Some("pub_old"));
     assert_eq!(
         row,
         PublicIndexRow {
@@ -888,16 +888,16 @@ fn a_public_room_is_listed_with_its_keys_only() {
 fn an_open_opening_needs_room_an_unpaused_room_and_a_claimable_setting() {
     let mut full = public_room();
     full.openings[0].active_holders = vec!["a".into(), "b".into()];
-    assert!(!index_row(&full).has_open_opening);
+    assert!(!index_row(&full, None).has_open_opening);
     let mut paused = public_room();
     paused.room.public_claims_paused = true;
-    assert!(!index_row(&paused).has_open_opening);
+    assert!(!index_row(&paused, None).has_open_opening);
     let mut invited_only = public_room();
     invited_only.openings[0].publicly_claimable = false;
-    assert!(!index_row(&invited_only).has_open_opening);
+    assert!(!index_row(&invited_only, None).has_open_opening);
     let mut lead = public_room();
     lead.openings[0].is_lead = true;
-    assert!(!index_row(&lead).has_open_opening);
+    assert!(!index_row(&lead, None).has_open_opening);
 }
 
 #[test]
@@ -917,6 +917,33 @@ fn a_private_archived_or_suspended_room_is_a_blank_tombstone() {
     let mut no_time = public_room();
     no_time.room.published_at = None;
     for state in [private_room(), archived, suspended, no_time] {
-        assert_eq!(index_row(&state), blank);
+        assert_eq!(index_row(&state, None), blank);
+        // A tombstone keeps the last handle it's given, never the room's current one.
+        let tombstone = index_row(&state, Some("pub_00000000000000000000000000000001"));
+        assert_eq!(
+            tombstone,
+            PublicIndexRow {
+                public_handle: Some("pub_00000000000000000000000000000001".into()),
+                ..blank.clone()
+            }
+        );
     }
+}
+
+#[test]
+fn publish_refusal_codes_match_the_api() {
+    assert_eq!(PublishRefusal::Disabled.code(), "public_rooms_disabled");
+    assert_eq!(PublishRefusal::Archived.code(), "workspace_archived");
+    assert_eq!(PublishRefusal::Suspended.code(), "room_suspended");
+    assert_eq!(PublishRefusal::StalePreview.code(), "version_conflict");
+    assert_eq!(
+        PublishRefusal::PersonReviewOff.code(),
+        "person_review_required"
+    );
+}
+
+#[test]
+fn person_review_stays_on_while_public() {
+    assert!(!may_turn_off_person_review(Visibility::Public));
+    assert!(may_turn_off_person_review(Visibility::Private));
 }

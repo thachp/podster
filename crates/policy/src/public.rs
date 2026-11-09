@@ -146,7 +146,8 @@ pub struct RoomRow {
     pub require_person_review: bool,
     pub visibility: Visibility,
     pub public_handle: Option<String>,
-    /// When the room last went public, in seconds. Only the day is shown.
+    /// When the room last went public, in whole seconds since the Unix epoch, UTC. The room stores milliseconds, as all its
+    /// times are, and converts when it builds this row. Only the day is shown.
     pub published_at: Option<i64>,
     /// Set by a Podster operator. A suspended room answers not-found publicly and can't be published.
     pub suspended: bool,
@@ -552,13 +553,19 @@ pub enum PublishRefusal {
 impl PublishRefusal {
     pub fn code(self) -> &'static str {
         match self {
-            PublishRefusal::Disabled => "not_allowed",
+            PublishRefusal::Disabled => "public_rooms_disabled",
             PublishRefusal::Archived => "workspace_archived",
             PublishRefusal::Suspended => "room_suspended",
             PublishRefusal::StalePreview => "version_conflict",
             PublishRefusal::PersonReviewOff => "person_review_required",
         }
     }
+}
+
+/// Whether person review may be turned off in a room with this visibility. A public room always has a person review
+/// (decision 159), so it stays on until the room is private again. Turning it on is always allowed.
+pub fn may_turn_off_person_review(visibility: Visibility) -> bool {
+    visibility != Visibility::Public
 }
 
 /// What publishing does, once the caller may.
@@ -952,16 +959,20 @@ pub fn decide_set_visibility(
 pub struct PublicIndexRow {
     /// Listed only while the room is public under a handle, unarchived and not suspended (decision 152).
     pub listed: bool,
-    /// The keys below are blank on a delisted row, which is kept only as a tombstone for its `seq`.
+    /// The room's handle while listed. A delisted row is a tombstone: it keeps its `seq` and the last handle the room was
+    /// published under, which the caller takes from the room's audit (step 5), never the room's current handle. Every other
+    /// key is blank.
     pub public_handle: Option<String>,
     pub topic: Option<Topic>,
     /// Some opening an agent could publicly claim now: claimable, with room, and claims not paused.
     pub has_open_opening: bool,
+    /// In whole seconds, as `RoomRow::published_at`.
     pub published_at: Option<i64>,
 }
 
-/// The index row for a room as it stands now.
-pub fn index_row(state: &RoomState) -> PublicIndexRow {
+/// The index row for a room as it stands now. `last_published_handle` is the handle the room's latest publish made, from
+/// its audit, and only a tombstone uses it.
+pub fn index_row(state: &RoomState, last_published_handle: Option<&str>) -> PublicIndexRow {
     let room = &state.room;
     let listed = room.visibility == Visibility::Public
         && room.public_handle.is_some()
@@ -971,7 +982,7 @@ pub fn index_row(state: &RoomState) -> PublicIndexRow {
     if !listed {
         return PublicIndexRow {
             listed: false,
-            public_handle: None,
+            public_handle: last_published_handle.map(str::to_owned),
             topic: None,
             has_open_opening: false,
             published_at: None,

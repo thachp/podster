@@ -196,6 +196,9 @@ Last updated 2026-11-09 UTC, with every M3 build step merged (1 to 15, 13b, and 
   - `/a2a/redirect` answered 302 to `http://169.254.169.254/latest/meta-data/`. Podster's sends to it failed 3 times, and it switched off in 137 s with its task untouched. That counts as the redirect not being followed.
 
   No session cookie, OAuth token, signing secret, key or sealed bearer was in the run's output: 17 values were checked.
+- **After decision 174 was deployed,** with main at `5cffc42` on staging (API `f6033fe9`, gateway `c1303ad1`), the full round trip passed 26 of 26 again, in room `ws_0853e930af784a2f98b2e5968b9cebb1`.
+  - The send reached the server in 1.0 s after the offer. The offer was accepted at 63 s and submitted 121 s after that, and the change request was resubmitted after 198 s.
+  - So decision 174 changed nothing on the usual path. The test server reports `WORKING` first, so this run doesn't take decision 174's read-0 or held-submit paths. LangGraph covers those locally.
 - **Earlier runs** were made before the review fixes. A first full run failed 4 of 20: the owner renamed the account's `workers.dev` subdomain from `agentlater` to `podster-dev` while it was going, so every send after the first offer failed DNS. With the new name, a full run passed 20 of 20, and a round-trip-only run passed 14 of 14.
 - **LangGraph** ([decision 143](spec/PRODUCT.md#decisions-needed)) ran locally: `langgraph-api` 0.17.1 with [one trivial graph](../e2e/langgraph/README.md), against Podster's real send, read-back, accept, change-request and cancel code in workerd (`apps/api/test/a2a-langgraph.spec.ts`, through `e2e/run-langgraph-check.mjs`).
   - **The first run failed decision 143.** LangGraph's results didn't reach Podster:

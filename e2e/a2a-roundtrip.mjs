@@ -18,10 +18,10 @@
 // no Worker secret is set per run. It prints IDs, counts, times and HTTP statuses, and checks at the end that no token,
 // secret or sealed bearer is in its own output.
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { keyCheck, runKey, seal } from "./a2a-test-server/seal.mjs";
+import { keyCheck, runKey, seal, sign } from "./a2a-test-server/seal.mjs";
 import { key, linkedA2aToken, McpAgent, Person, sleep, Target } from "./lib.mjs";
 
 const args = process.argv.slice(2);
@@ -42,7 +42,12 @@ if (!signupSecret) {
   console.error("Set PODSTER_E2E_SIGNUP_SECRET for staging's test sign-up.");
   process.exit(2);
 }
-const keyHex = readFileSync(process.env.PODSTER_A2A_TEST_KEY_FILE ?? join(homedir(), ".config/podster/a2a-test-run.key"), "utf8").trim();
+const keyFile = process.env.PODSTER_A2A_TEST_KEY_FILE ?? join(homedir(), ".config/podster/a2a-test-run.key");
+if ((statSync(keyFile).mode & 0o077) !== 0) {
+  console.error(`${keyFile} must be readable by its owner only: chmod 600 it.`);
+  process.exit(2);
+}
+const keyHex = readFileSync(keyFile, "utf8").trim();
 const runKeyValue = await runKey(keyHex);
 
 const written = [];
@@ -83,6 +88,7 @@ const agents = [];
 async function remoteAgent(label, path) {
   const agent = await McpAgent.connect(target, owner, label);
   agents.push(agent);
+  secrets.add(agent.accessToken());
   await owner.addAgent(room, agent, "guest");
   const a2a = await linkedA2aToken(target, owner, agent);
   secrets.add(a2a);
@@ -94,7 +100,8 @@ async function remoteAgent(label, path) {
   const bearer = await seal(runKeyValue, { s: signing, a: a2a, x: Math.floor(Date.now() / 1000) + 3600 });
   secrets.add(bearer);
   const second = await agent.call("set_a2a_endpoint", { url, token: bearer });
-  return { agent, url, signing, first: first.data, second: second.ok ? second.data : { code: second.code } };
+  check(second.ok && second.data?.token_state === "stored" && second.data?.version === first.data.version && !("signing_secret" in second.data), `${label}: its endpoint holds the sealed bearer, with the same version and secret`, second.ok ? `version ${second.data?.version}, token ${second.data?.token_state}` : second.code);
+  return { agent, url, signing, bearer, first: first.data, second: second.ok ? second.data : { code: second.code } };
 }
 
 const getTask = async (task) => lead.must("get_task", { workspace_id: room, task_id: task }, false);
@@ -170,7 +177,9 @@ async function roundTrip(remote) {
     const endpoint = (await remote.agent.call("get_a2a_endpoint", {})).data;
     const since = `endpoint enabled ${endpoint?.enabled}, ${endpoint?.consecutive_failures} failures, token ${endpoint?.token_state}; ` + back.history.slice(back.history.indexOf(requested)).map((h) => `${h.type}${h.origin ? `(${h.origin})` : ""}`).join(" ");
     check(back.task.status === "submitted" && resubmitted?.origin === "a2a_remote" && sub?.submitted_by === remote.agent.id, "the change request goes out and COMPLETED reads back as a second submission, from the A2A endpoint", `${back.task.status}, ${back.submissions.length} submissions; since the request: ${since}`);
-    check(/Kind: change\./.test(sub?.note ?? "") && sub.note.includes(`Changes for remote task: ${first}.`), "it went out as a new A2A task naming the completed one in referenceTaskIds, in the same context");
+    check(/Kind: change\./.test(sub?.note ?? "") && sub.note.includes(`Changes for remote task: ${first}.`), "it went out as a new A2A task naming the completed one in referenceTaskIds");
+    // The first task's context is ctx.<its own random part>, and the server notes the context the change request carried.
+    check(sub?.note?.includes(`Context received: ${first}.`), "in the first task's context", /Context received: (\S+)\./.exec(sub?.note ?? "")?.[1]);
     if (requested && resubmitted) note("Spike C timing, change request", `requested to resubmitted ${seconds(resubmitted.created_at - requested.created_at)}`);
     const verified = await lead.call("verify_task", { idempotency_key: key(), workspace_id: room, task_id: task, submission_no: 2 });
     check(verified.ok, "the lead verifies it", verified.ok ? "" : verified.code);
@@ -192,8 +201,29 @@ async function cancel(remote) {
 }
 
 /** Spike C's failure half on the deployment: the send times out, or a redirect isn't followed, 3 times, then the endpoint is off. */
-async function failing(remote, what) {
+/**
+ * What the server itself does at a Spike C path, asked directly with this run's own signing secret and bearer, so a failure
+ * Podster then records is that behavior and not a bad bearer, an expired one or DNS.
+ */
+async function probe(remote) {
+  const body = JSON.stringify({ jsonrpc: "2.0", id: "probe:1", method: "GetTask", params: { id: "rt.o.0.n.000000000000" } });
+  const started = Date.now();
+  const res = await fetch(remote.url, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": "application/json", authorization: `Bearer ${remote.bearer}`, "x-podster-signature": await sign(remote.signing, Math.floor(Date.now() / 1000), body) },
+    body,
+  });
+  await res.arrayBuffer();
+  return { status: res.status, location: res.headers.get("location"), ms: Date.now() - started };
+}
+
+async function failing(remote, what, expected) {
   await step(what, async () => {
+    const seen = await probe(remote);
+    const behaves = expected === "slow" ? seen.status === 200 && seen.ms > 10_000 : seen.status === 302 && seen.location === "http://169.254.169.254/latest/meta-data/";
+    check(behaves, `${what}: asked directly with this run's signed request and bearer, the server does it`, `HTTP ${seen.status} after ${seconds(seen.ms)}${seen.location ? `, to ${seen.location}` : ""}`);
+    if (!behaves) return;
     const started = Date.now();
     const task = (await lead.must("create_task", { workspace_id: room, title: `M3 gate: ${what}`, instructions: "Spike C.", assignee: remote.agent.id })).id;
     const deadline = Date.now() + 12 * 60_000;
@@ -223,13 +253,15 @@ async function run() {
   const cookie = await Person.testSessionCookie(target, "Person A", signupSecret);
   owner = await Person.fromCookie(target, "Person A", cookie);
   owner.cookieForSignOut = cookie;
+  secrets.add(cookie);
   room = await owner.createRoom(`M3 gate round trip ${new Date().toISOString().slice(0, 19)}`);
   console.log(`Room ${room}.`);
   lead = await McpAgent.connect(target, owner, "M3 gate lead");
+  secrets.add(lead.accessToken());
   agents.push(lead);
   await owner.addAgent(room, lead, "member");
   const main = await remoteAgent("M3 gate remote", "/a2a");
-  check(/^a2asec_[0-9a-f]{64}$/.test(main.signing) && main.second.version === main.first.version && !("signing_secret" in main.second) && main.second.token_state === "stored", "the remote agent sets its endpoint, then its sealed bearer, keeping the version and secret", `version ${main.second.version}, token ${main.second.token_state ?? main.second.code}`);
+  check(/^a2asec_[0-9a-f]{64}$/.test(main.signing), "the endpoint's signing secret is shown once, when it's set");
   if (only === "round-trip") {
     section("Round trip");
     return roundTrip(main);
@@ -242,8 +274,8 @@ async function run() {
       await roundTrip(main);
       await cancel(main);
     })(),
-    failing(slow, "an answer after 15 s, past the 10 s timeout"),
-    failing(redirect, "a redirect to the metadata address"),
+    failing(slow, "an answer after 15 s, past the 10 s timeout", "slow"),
+    failing(redirect, "a redirect to the metadata address", "redirect"),
   ]);
 }
 
@@ -270,7 +302,7 @@ try {
 }
 const output = written.join("");
 const leaked = [...secrets].filter((s) => s && output.includes(s)).length;
-check(leaked === 0, "no token, secret, key or sealed bearer anywhere in this script's output", `${secrets.size} values checked`);
+check(leaked === 0, "no session cookie, OAuth token, signing secret, key or sealed bearer anywhere in this script's output", `${secrets.size} values checked`);
 const failed = results.filter((r) => r.status === "fail").length;
 const passed = results.filter((r) => r.status === "ok").length;
 console.log(`\n${passed} passed, ${failed} failed. Room ${room}.`);

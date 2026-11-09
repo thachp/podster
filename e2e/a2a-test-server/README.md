@@ -35,7 +35,7 @@ CLOUDFLARE_ACCOUNT_ID=<the account that holds podster.dev> ~/repos/podster/apps/
 - **`GetTask`** answers `WORKING` on read 1, read from the JSON-RPC id `<attempt>:<read>`. From read 2 on, it answers `COMPLETED`, with one artifact holding:
   - a note naming the download's HTTP status and the first 12 hex characters of the bytes' SHA-256;
   - when Podster's send reached it;
-  - for a change request, which task it changes;
+  - for a change request, which task it changes and the `contextId` it arrived with;
   - one `example.com` URL.
 - **`CancelTask`** answers `CANCELED`.
 

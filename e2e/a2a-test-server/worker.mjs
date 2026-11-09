@@ -123,7 +123,7 @@ function parse(taskId) {
   const o = /^rt\.o\.([0-9a-z]+)\.([0-9a-z-]+)\.([0-9a-f]{12})$/.exec(taskId);
   if (o) return { kind: "offer", received: parseInt(o[1], 36), download: o[2], own: o[3], context: o[3] };
   const c = /^rt\.c\.([0-9a-z]+)\.([0-9a-f]{12}|-)\.([0-9a-f]{12})\.([0-9a-f]{12}|-)$/.exec(taskId);
-  if (c) return { kind: "change", received: parseInt(c[1], 36), referenced: c[2], own: c[3], context: c[4] === "-" ? c[3] : c[4] };
+  if (c) return { kind: "change", received: parseInt(c[1], 36), referenced: c[2], own: c[3], context: c[4] === "-" ? c[3] : c[4], contextReceived: c[4] === "-" ? "none" : c[4] };
   return null;
 }
 
@@ -138,7 +138,7 @@ function getTask(rpcId, taskId) {
     `Remote task: ${task.own}. Kind: ${task.kind}. Sent to it at ${new Date(task.received).toISOString()}. Read ${read} at ${new Date().toISOString()}.`,
   ];
   if (task.kind === "offer") lines.push(`Input file: ${task.download === "n" ? "none linked" : task.download}.`);
-  else lines.push(`Changes for remote task: ${task.referenced}.`);
+  else lines.push(`Changes for remote task: ${task.referenced}.`, `Context received: ${task.contextReceived}.`);
   return rpcResult(rpcId, {
     ...base,
     status: { state: "TASK_STATE_COMPLETED" },

@@ -80,7 +80,11 @@ const change = await call(send({ ...offer("Changes, please."), referenceTaskIds:
 const changed = change.body?.result?.task;
 check(changed?.id?.startsWith("rt.c.") && changed.contextId === task.contextId, "a change request becomes a new task in the referenced task's context", changed?.id);
 const after = await call({ jsonrpc: "2.0", id: "att_2:2", method: "GetTask", params: { id: changed.id } });
-check(after.body?.result?.artifacts?.[0]?.parts?.[0]?.text?.includes(`Changes for remote task: ${own}.`), "and its completion names the task it changes");
+const afterText = after.body?.result?.artifacts?.[0]?.parts?.[0]?.text ?? "";
+check(afterText.includes(`Changes for remote task: ${own}.`) && afterText.includes(`Context received: ${own}.`), "and its completion names the task it changes and the context it was sent in");
+const noContext = (await call(send({ ...offer("Changes."), referenceTaskIds: [task.id] }, "att_3"))).body?.result?.task;
+const noContextRead = await call({ jsonrpc: "2.0", id: "att_3:2", method: "GetTask", params: { id: noContext.id } });
+check(noContextRead.body?.result?.artifacts?.[0]?.parts?.[0]?.text?.includes("Context received: none."), "a change request sent with no contextId says so");
 
 // ---- cancel, Spike C paths, other methods ----
 const canceled = await call({ jsonrpc: "2.0", id: "att_1:cancel", method: "CancelTask", params: { id: task.id } });

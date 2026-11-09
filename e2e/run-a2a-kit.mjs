@@ -61,6 +61,15 @@ const token = await linkedA2aToken(target, owner, agent);
 const proxyPort = await freePort();
 const proxyBase = `http://127.0.0.1:${proxyPort}`;
 const proxy = createServer(async (req, res) => {
+  try {
+    await forward(req, res);
+  } catch {
+    if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "proxy_upstream_failed" }));
+  }
+});
+/** One request to the gateway, with the agent's bearer, and the card's URLs pointed at the proxy. */
+async function forward(req, res) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   const headers = new Headers();
@@ -74,7 +83,7 @@ const proxy = createServer(async (req, res) => {
     if (!["content-length", "content-encoding", "transfer-encoding"].includes(name)) out[name] = value;
   });
   res.writeHead(upstream.status, out).end(body);
-});
+}
 await new Promise((done) => proxy.listen(proxyPort, "127.0.0.1", done));
 console.log(`Podster at ${base}, the kit's proxy at ${proxyBase}, room ${room}, agent ${agent.id}.`);
 

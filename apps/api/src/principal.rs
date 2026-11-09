@@ -14,6 +14,7 @@ use worker::*;
 type R<T> = std::result::Result<T, ApiError>;
 
 mod a2a_endpoint;
+mod participation;
 
 const SCHEMA: &str = "
 CREATE TABLE connection (id TEXT PRIMARY KEY, org_id TEXT NOT NULL, name TEXT NOT NULL, generation INTEGER NOT NULL,
@@ -90,6 +91,7 @@ const PAGE_MAX: i64 = 50;
 const MAX_REPLAY_KEY_BYTES: usize = 512;
 
 const ACTIVE: &str = "active";
+const PUBLIC_CLAIMS_NOT_ALLOWED: &str = "public_claims_not_allowed";
 const DISCONNECTING: &str = "disconnecting";
 const DISCONNECTED: &str = "disconnected";
 const RETRY_SECS: u64 = 5;
@@ -720,14 +722,30 @@ fn ack_inbox(sql: &SqlStorage, up_to: i64, now: i64) -> R<Value> {
 /// Records a room before a join commits, so a later disconnect always reaches it. Refused unless the agent is
 /// active and belongs to `org`. Entries are never removed: a stale one costs only a harmless extra revoke, while
 /// removing one could let a disconnect miss a room.
-pub async fn register_room(env: &Env, agent: &str, org: &str, workspace_id: &str) -> R<u64> {
+///
+/// A `public_claim` is also refused, with `public_claims_not_allowed`, unless the agent's owner allows public claims
+/// (decision 159). Nothing claims publicly yet: M4 step 8 does.
+pub async fn register_room(
+    env: &Env,
+    agent: &str,
+    org: &str,
+    workspace_id: &str,
+    public_claim: bool,
+) -> R<u64> {
     let mut response = internal(
         env,
         agent,
         "/internal/register-room",
-        &json!({ "workspace_id": workspace_id, "org_id": org }),
+        &json!({ "workspace_id": workspace_id, "org_id": org, "public_claim": public_claim }),
     )
     .await?;
+    if response.status_code() == 403 {
+        let body: Value = response.json().await.unwrap_or(Value::Null);
+        if body["error"]["code"].as_str() == Some(PUBLIC_CLAIMS_NOT_ALLOWED) {
+            return Err(ApiError::api(403, PUBLIC_CLAIMS_NOT_ALLOWED));
+        }
+        return Err(ApiError::not_allowed());
+    }
     if response.status_code() != 200 {
         return Err(ApiError::not_allowed());
     }
@@ -1384,6 +1402,12 @@ impl Principal {
                 {
                     return Err(ApiError::agent_disconnected());
                 }
+                // Checked before the room is recorded, so a refused public claim leaves nothing behind.
+                if body["public_claim"].as_bool() == Some(true)
+                    && !participation::current(&sql)?.allows_public_claims()
+                {
+                    return Err(ApiError::api(403, PUBLIC_CLAIMS_NOT_ALLOWED));
+                }
                 exec(&sql, "INSERT OR IGNORE INTO room_registry (workspace_id, registered_at) VALUES (?, ?)",
                     vec![body["workspace_id"].as_str().unwrap_or("").into(), now_ms().into()])?;
                 return Ok(json!({ "generation": conn["generation"] }));
@@ -1486,7 +1510,45 @@ impl Principal {
                 identity["wake"] = wake_json(&sql)?;
                 identity["a2a_endpoint"] =
                     a2a_endpoint::status_json(&sql, a2a_endpoint::key(&self.env).as_deref())?;
+                identity["participation_policy"] = participation::json(&sql)?["policy"].clone();
                 Ok(identity)
+            }
+            // The agent and its organization's admins can read it, and the admins see its history.
+            (Method::Get, Some("participation-policy")) => {
+                let mut policy = participation::json(&sql)?;
+                if is_org_admin {
+                    policy["history"] = participation::audit(&sql)?["entries"].clone();
+                }
+                Ok(policy)
+            }
+            // Only a person who administers the agent's organization sets it: never the agent itself (decision 159).
+            (Method::Put, Some("participation-policy")) => {
+                let kind = if caller.kind == "person" {
+                    podster_policy::PrincipalKind::Person
+                } else {
+                    podster_policy::PrincipalKind::Agent
+                };
+                let administers = caller.admin_orgs.iter().any(|o| o == org);
+                if !podster_policy::public::may_set_participation_policy(kind, administers) {
+                    return Err(ApiError::not_allowed());
+                }
+                // The body is read first, because a disconnect, and even a reconnect, can land while it arrives. The connection
+                // is then checked again in the transaction that writes, against the generation seen before the wait, so a
+                // consent given before a disconnect can never be written after it and survive a reconnect (decision 159).
+                let body: Value = serde_json::from_str(&req.text().await?)
+                    .map_err(|_| ApiError::invalid_argument())?;
+                let seen_generation = int(&conn["generation"]);
+                let (store, actor, now) = (sql.clone(), caller.id.clone(), now_ms());
+                self.in_transaction(move || {
+                    let still = connection(&store)?.is_some_and(|c| {
+                        c["status"].as_str() == Some(ACTIVE)
+                            && int(&c["generation"]) == seen_generation
+                    });
+                    if !still {
+                        return Err(ApiError::agent_disconnected());
+                    }
+                    participation::set(&store, &actor, &body, now)
+                })
             }
             (method @ (Method::Put | Method::Delete), Some("wake")) => {
                 self.wake_command(method, &mut req).await
@@ -1545,6 +1607,8 @@ impl Principal {
                     delete_wake(&sql, now_ms())?;
                     // So does the A2A endpoint, with its signing secret and token (ADR 0007).
                     a2a_endpoint::delete(&sql)?;
+                    // And the owner's consent to public claims, which was given for this connection (decision 159).
+                    participation::reset(&sql, now_ms())?;
                 }
                 self.fan_out().await?;
                 Ok(connection_json(

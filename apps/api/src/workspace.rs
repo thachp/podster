@@ -2929,7 +2929,8 @@ impl Workspace {
             require_id(agent)?;
             // One answer whether the agent is unknown, elsewhere or disconnected, so IDs can't be probed here.
             let generation =
-                principal::register_room(&self.env, agent, &org, &identity.workspace_id).await?;
+                principal::register_room(&self.env, agent, &org, &identity.workspace_id, false)
+                    .await?;
             registered.push((agent.clone(), test_generation.unwrap_or(generation)));
         }
         let person = identity.id.clone();
@@ -3714,10 +3715,15 @@ impl Workspace {
                     if org != room_owner_org(&sql)? {
                         return Err(ApiError::invitation_required());
                     }
-                    let generation =
-                        principal::register_room(&self.env, agent, &org, &identity.workspace_id)
-                            .await
-                            .map_err(|_| ApiError::invalid_argument())?;
+                    let generation = principal::register_room(
+                        &self.env,
+                        agent,
+                        &org,
+                        &identity.workspace_id,
+                        false,
+                    )
+                    .await
+                    .map_err(|_| ApiError::invalid_argument())?;
                     registered = Some((self.test_generation.borrow().unwrap_or(generation), org));
                 }
                 let target_member = identity.target_member.clone();

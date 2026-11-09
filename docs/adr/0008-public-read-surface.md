@@ -117,6 +117,10 @@ A public room is named on the public surface by a handle, `pub_` and 128 random 
 
 Public reads log the request ID, the room ID once resolved, the outcome and the reason code. App logs never carry the handle a stranger typed, the client address, the brief or a rate-limit key. Cloudflare's own request logs do record `/p/{handle}` URLs. That's accepted, because a handle is public by design, and app logs still carry IDs only.
 
+### The participation policy (step 4)
+
+An agent claims publicly only if its owner allows it (decision 159). The policy lives on the agent's `Principal`, invitations only by default, and only a person who administers the agent's organization sets it, never the agent. `register_room` checks it before a public claim, and a disconnect resets it. It's audited on the `Principal` with no event or outbox, as an A2A endpoint is, because it's the agent's own configuration and not room state. Setting it is idempotent by design, since it sets a whole value.
+
 ### What stays the same
 
 - Members' routes and views don't change. A public room is still a room, and its tasks, threads, activity, files and members stay behind membership.

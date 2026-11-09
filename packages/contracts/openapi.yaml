@@ -340,12 +340,21 @@ paths:
     post: { operationId: consentToAgentReturn, tags: [commands], summary: The agent's organization allows it back, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/agents/{agent}:
     parameters: [{ name: agent, in: path, required: true, schema: { type: string } }]
-    get: { operationId: getAgent, tags: [queries], summary: An agent's connection. Itself and its organization's admins only, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+    get: { operationId: getAgent, tags: [queries], summary: "An agent's connection, with `participation_policy`. Itself and its organization's admins only", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
     put:
       operationId: registerAgent
       tags: [commands]
       summary: Record a claimed agent's organization. An admin of that organization only
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [org_id], properties: { org_id: { type: string }, name: { type: string } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/agents/{agent}/participation-policy:
+    parameters: [{ name: agent, in: path, required: true, schema: { type: string } }]
+    get: { operationId: getAgentParticipationPolicy, tags: [queries], summary: "The agent's participation policy: `policy`, `invitations_only` or `public_claims`, and `set_at`, null if it was never set. The default is `invitations_only` (decision 159). The agent and its organization's admins can read it, and the admins also get `history`, newest first: `prior`, `policy`, `actor_id`, `reason` and `created_at`, with IDs and policy names only", responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+    put:
+      operationId: setAgentParticipationPolicy
+      tags: [commands]
+      summary: "Set whether the agent's owner allows it to claim openings in public rooms without an invitation (decision 159). Invitations and an owner or admin adding it work either way. Only a person who administers the agent's organization, checked against their current memberships. The agent itself gets `not_allowed`. Anyone else, including a person of the same organization who isn't its admin, gets `agent_not_found`, the same as for an unknown agent, so the agent's existence isn't revealed. Needs an active connection, checked again in the transaction that writes, so a disconnect while the request arrives refuses it with `agent_disconnected`. A disconnect resets it to `invitations_only`. Idempotent by design: it sets a whole value. Each change is audited on the agent's Principal, with no event or outbox. It's checked before a public claim, and tightening it later doesn't end a claim already made"
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy], additionalProperties: false, properties: { policy: { type: string, enum: [invitations_only, public_claims] } } } } } }
       responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
   /v1/agents/{agent}/a2a-endpoint:
     parameters: [{ name: agent, in: path, required: true, schema: { type: string } }]
@@ -847,5 +856,5 @@ components:
           properties:
             code:
               type: string
-              enum: [plan_conflict, dependency_cycle, relationship_exists, relationship_not_found, role_not_found, role_full, already_claimed, lead_exists, invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, workspace_archived, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox, too_many_artifacts, duplicate_file, file_not_found, file_not_ready, file_removed, file_changed, files_not_checked, too_many_outputs, output_in_use, output_not_found, invalid_endpoint_url, token_storage_unavailable]
+              enum: [plan_conflict, dependency_cycle, relationship_exists, relationship_not_found, role_not_found, role_full, already_claimed, lead_exists, invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, workspace_archived, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox, too_many_artifacts, duplicate_file, file_not_found, file_not_ready, file_removed, file_changed, files_not_checked, too_many_outputs, output_in_use, output_not_found, invalid_endpoint_url, token_storage_unavailable, public_claims_not_allowed]
             message: { type: string }

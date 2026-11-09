@@ -182,11 +182,12 @@ ALTER TABLE a2a_attempt ADD COLUMN cancel_state TEXT;
 CREATE INDEX a2a_attempt_reads ON a2a_attempt (next_read_at) WHERE reading_ended = 0;
 CREATE INDEX a2a_attempt_cancels ON a2a_attempt (cancel_state) WHERE cancel_state = 'due';
 CREATE TABLE a2a_held (attempt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, read_no INTEGER NOT NULL, note TEXT, links_json TEXT NOT NULL,
-  working_seen INTEGER NOT NULL, created_at INTEGER NOT NULL);
+  working_seen INTEGER NOT NULL, created_at INTEGER NOT NULL, dropped_links INTEGER NOT NULL DEFAULT 0);
 ALTER TABLE event ADD COLUMN origin TEXT;
 ALTER TABLE event ADD COLUMN origin_ref TEXT;
 ALTER TABLE audit_event ADD COLUMN origin TEXT;
 ALTER TABLE audit_event ADD COLUMN origin_ref TEXT;
+ALTER TABLE message ADD COLUMN origin TEXT;
 "];
 
 pub fn int(value: &Value) -> i64 {

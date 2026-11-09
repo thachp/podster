@@ -386,6 +386,7 @@ describe("a room from before this", () => {
       sql.exec("ALTER TABLE event DROP COLUMN origin_ref");
       sql.exec("ALTER TABLE audit_event DROP COLUMN origin");
       sql.exec("ALTER TABLE audit_event DROP COLUMN origin_ref");
+      sql.exec("ALTER TABLE message DROP COLUMN origin");
       sql.exec("ALTER TABLE a2a_attempt DROP COLUMN reading_ended");
       sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_until");
       sql.exec("ALTER TABLE a2a_attempt DROP COLUMN next_read_at");

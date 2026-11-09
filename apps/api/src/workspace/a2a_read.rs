@@ -23,6 +23,9 @@ const REQUEUE_MS: i64 = 60_000;
 pub(super) const HELD_EVENT: &str = "task.a2a_response_held";
 pub(super) const REMOTE_CANCELED_EVENT: &str = "task.a2a_remote_canceled";
 pub(super) const REMOTE_FAILED_EVENT: &str = "task.a2a_remote_failed";
+/// Posted in place of a remote status message over decision 123's 16 KB, which isn't shown (ADR 0007).
+pub(super) const TOO_LONG_NOTE: &str =
+    "The agent's A2A endpoint sent a message that was too long to show here.";
 
 fn attempt_for(sql: &SqlStorage, identity: &Identity, body: &Value) -> R<Option<Value>> {
     let id = body["attempt"].as_str().unwrap_or_default();
@@ -290,10 +293,23 @@ fn hold(
     working_seen: bool,
     now: i64,
 ) -> R<()> {
-    let links = remote["links"].as_array().cloned().unwrap_or_default();
-    exec(sql, "INSERT OR REPLACE INTO a2a_held (attempt_id, task_id, read_no, note, links_json, working_seen, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", vec![
+    // Only links that pass the same check as a submission's are kept. The rest are dropped and counted.
+    let offered = remote["links"].as_array().cloned().unwrap_or_default();
+    let links: Vec<Value> = offered
+        .iter()
+        .filter(|link| {
+            let artifact = podster_core::Artifact {
+                uri: link["uri"].as_str().unwrap_or_default().to_string(),
+                label: link["label"].as_str().unwrap_or_default().to_string(),
+            };
+            podster_core::require_artifact(&artifact).is_ok()
+        })
+        .map(|link| json!({ "uri": link["uri"], "label": link["label"] }))
+        .collect();
+    let dropped = (offered.len() - links.len()) as i64;
+    exec(sql, "INSERT OR REPLACE INTO a2a_held (attempt_id, task_id, read_no, note, links_json, working_seen, created_at, dropped_links) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", vec![
         attempt.into(), task.id.as_str().into(), read.into(), remote["note"].as_str().map_or(V::Null, V::from), Value::Array(links).to_string().into(),
-        i64::from(working_seen).into(), now.into(),
+        i64::from(working_seen).into(), now.into(), dropped.into(),
     ])?;
     record_event(
         sql,
@@ -346,10 +362,25 @@ fn run_effect(
             )
         }
         RemoteEffect::Message => {
-            match remote["message"].as_str().filter(|m| !m.trim().is_empty()) {
+            // Over the cap, a fixed note says so, and the remote's text isn't shown.
+            let text = if remote["message_too_long"] == Value::Bool(true) {
+                Some(TOO_LONG_NOTE)
+            } else {
+                remote["message"].as_str().filter(|m| !m.trim().is_empty())
+            };
+            match text {
                 Some(text) => {
-                    handle_send_message(sql, who, &task.id, &json!({ "body": text }), now)
-                        .map(|_| ())
+                    let posted =
+                        handle_send_message(sql, who, &task.id, &json!({ "body": text }), now)?;
+                    // Marked on the message itself, so the thread can show where it came from.
+                    exec(
+                        sql,
+                        "UPDATE message SET origin = ? WHERE id = ?",
+                        vec![
+                            ORIGIN.into(),
+                            posted["id"].as_str().unwrap_or_default().into(),
+                        ],
+                    )
                 }
                 None => Ok(()),
             }
@@ -464,6 +495,14 @@ pub(super) fn read_apply(
         end_reading(sql, id, "read_ended", now)?;
     }
     let mut effect = effect_name(&decision.effect);
+    // The same guard every room command runs, inside this transaction, so an archive during the read still stops its
+    // effect. The read is recorded, with no effect, and reading ends.
+    if command_guard(sql).is_err() {
+        end_reading(sql, id, "room_archived", now)?;
+        return Ok(
+            json!({ "applied": decision.applied, "effect": "nothing", "reason": "room_archived" }),
+        );
+    }
     if fallback != Fallback::Nothing {
         let events_before = rows(
             sql,

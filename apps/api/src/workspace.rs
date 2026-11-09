@@ -1806,6 +1806,15 @@ fn barred_by_revocation(sql: &SqlStorage, org: &str, invitation: &Value) -> R<bo
         .is_some_and(|row| int(&invitation["created_at"]) <= int(&row["revoked_at"])))
 }
 
+/// What every command that changes the room checks before it runs, in its own transaction: today, that the room isn't
+/// archived. Commands from outside a request, such as a remote A2A agent's, run it too, so no guard added here is skipped.
+fn command_guard(sql: &SqlStorage) -> R<()> {
+    if room_archived(sql)? {
+        return Err(ApiError::workspace_archived());
+    }
+    Ok(())
+}
+
 fn room_archived(sql: &SqlStorage) -> R<bool> {
     Ok(rows(sql, "SELECT status FROM workspace", vec![])?
         .first()
@@ -2406,6 +2415,8 @@ mod queries {
         json!({
             "id": row["id"], "from": { "id": row["sender_id"], "org": row["sender_org"] },
             "external": row["sender_org"].as_str() != Some(reader_org), "body": row["body"], "created_at": row["created_at"],
+            // `a2a_remote` when the agent's A2A endpoint reported it, so a thread can say so. Always external content.
+            "origin": row["origin"],
         })
     }
 
@@ -2651,8 +2662,8 @@ impl Workspace {
                 *slot.borrow_mut() = Some(answer);
                 return Ok(());
             }
-            if stops_when_archived && room_archived(&sql)? {
-                return Err(ApiError::workspace_archived());
+            if stops_when_archived {
+                command_guard(&sql)?;
             }
             let value = handler(&sql, &who, now)?;
             store_answer(&sql, &identity.id, &key, &hash, &value, now)?;

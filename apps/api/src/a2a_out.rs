@@ -352,7 +352,20 @@ fn remote_of(body: &Value) -> Option<Value> {
     if state.len() > 64 {
         return None;
     }
-    let message = texts_of(&result["status"]["message"]["parts"])?;
+    // A status message's text over 16 KB isn't refused: the room posts a fixed note in its place (ADR 0007). Too many parts
+    // still refuses the whole answer.
+    let status_parts = &result["status"]["message"]["parts"];
+    if status_parts
+        .as_array()
+        .is_some_and(|p| p.len() > MAX_REMOTE_PARTS)
+        || !(status_parts.is_null() || status_parts.is_array())
+    {
+        return None;
+    }
+    let (message, message_too_long) = match texts_of(status_parts) {
+        Some(text) => (text, false),
+        None => (String::new(), true),
+    };
     let artifacts = match &result["artifacts"] {
         Value::Null => vec![],
         Value::Array(items) if items.len() <= MAX_REMOTE_ARTIFACTS => items.clone(),
@@ -384,6 +397,7 @@ fn remote_of(body: &Value) -> Option<Value> {
     Some(json!({
         "id": id, "state": state,
         "message": (!message.is_empty()).then_some(message),
+        "message_too_long": message_too_long,
         "note": (!note.is_empty()).then_some(note),
         "links": links,
     }))

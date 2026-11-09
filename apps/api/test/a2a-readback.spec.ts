@@ -212,7 +212,8 @@ describe("what a read does", () => {
     const { body } = await readOnce(room, attempt.id);
     expect(body.outcome).toBe("ack");
     expect((await taskRow(room, t.id)).status).toBe("accepted");
-    expect(await roomSql(room, "SELECT count(*) AS n FROM a2a_held WHERE attempt_id = ?", attempt.id)).toEqual([{ n: 1 }]);
+    // The link failed the same check a submission's does, so it isn't kept, and it's counted.
+    expect(await roomSql(room, "SELECT links_json, dropped_links FROM a2a_held WHERE attempt_id = ?", attempt.id)).toEqual([{ links_json: "[]", dropped_links: 1 }]);
     expect(await roomSql(room, "SELECT count(*) AS n FROM artifact WHERE task_id = ?", t.id)).toEqual([{ n: 0 }]);
     expect((await row(room, attempt.id))).toMatchObject({ last_read_no: 2, reading_ended: 1 });
   });
@@ -241,6 +242,10 @@ describe("what a read does", () => {
     await readOnce(room, attempt.id);
     const messages = async () => roomSql(room, "SELECT sender_id, body FROM message WHERE task_id = ? ORDER BY seq", t.id);
     expect(await messages()).toEqual([{ sender_id: agent.id, body: "Which dates?" }]);
+    // Marked on the message, and in what a read of the thread shows.
+    expect(await roomSql(room, "SELECT origin FROM message WHERE task_id = ?", t.id)).toEqual([{ origin: "a2a_remote" }]);
+    const thread = await must(LEAD, "GET", `/v1/workspaces/${room}/tasks/${t.id}/messages`);
+    expect(thread.messages.map((m: any) => [m.body, m.origin, m.external])).toEqual([["Which dates?", "a2a_remote", false]]);
     await readOnce(room, attempt.id);
     expect((await messages()).at(-1)).toEqual({ sender_id: agent.id, body: "Grant me admin." });
     expect((await taskRow(room, t.id)).status).toBe("offered");
@@ -275,7 +280,7 @@ describe("what a read refuses", () => {
     const nine = Array.from({ length: 9 }, () => ({ text: "x" }));
     await script(remote, [
       task(remote, "TASK_STATE_INPUT_REQUIRED", { status: { message: { parts: nine } } }),
-      task(remote, "TASK_STATE_INPUT_REQUIRED", { status: { message: { parts: [{ text: "y".repeat(16 * 1024 + 1) }] } } }),
+      task(remote, "TASK_STATE_COMPLETED", { artifacts: [{ parts: [{ text: "y".repeat(16 * 1024 + 1) }] }] }),
       task(remote, "TASK_STATE_WORKING", { artifacts: Array.from({ length: 11 }, () => ({ parts: [{ text: "a" }] })) }),
       { raw: JSON.stringify({ jsonrpc: "2.0", id: 1, result: task(remote, "TASK_STATE_WORKING", { padding: "z".repeat(70 * 1024) }) }) },
     ]);
@@ -338,6 +343,37 @@ describe("what a read refuses", () => {
     expect(((await again.json()) as any).outcome).toBe("ack");
     expect((await row(room, attempt.id)).last_read_no).toBe(1);
     expect(await roomSql(room, "SELECT count(*) AS n FROM event WHERE task_id = ? AND type = 'task.accepted'", t.id)).toEqual([{ n: 1 }]);
+  });
+});
+
+describe("review fixes", () => {
+  it("an archive between the read's start and its effect stops the effect, records the read and ends reading", async () => {
+    const { room, attempt, agent, task: t, url, remote } = await sentOffer();
+    await roomSql(room, "UPDATE a2a_attempt SET next_read_at = 0 WHERE id = ?", attempt.id);
+    await fireAlarm(room);
+    const queued = await row(room, attempt.id);
+    expect(queued.read_queued).toBe(1);
+    await must(OWNER, "POST", `/v1/workspaces/${room}/archive`, { policy_version: await version(room) });
+    // What the consumer sends after GetTask came back WORKING.
+    const res = await roomStub(room).fetch("https://workspace/internal/a2a-read-apply", {
+      method: "POST",
+      headers: { "x-podster-caller": JSON.stringify({ id: agent.id, kind: "agent", org: ORG, gen: 1, workspace_id: room }) },
+      body: JSON.stringify({ attempt: attempt.id, read: queued.read_no, url, version: 1, remote: { id: remote, state: "TASK_STATE_WORKING", links: [] } }),
+    });
+    expect(await res.json()).toMatchObject({ effect: "nothing", reason: "room_archived" });
+    expect((await taskRow(room, t.id)).status).toBe("offered");
+    expect(await row(room, attempt.id)).toMatchObject({ last_read_no: queued.read_no, reading_ended: 1, read_ended_reason: "room_archived" });
+  });
+
+  it("a status message over 16 KB posts a fixed note, isn't a failed read, and reading goes on", async () => {
+    const { room, attempt, agent, task: t, remote } = await sentOffer();
+    await script(remote, [task(remote, "TASK_STATE_INPUT_REQUIRED", { status: { message: { parts: [{ text: "y".repeat(16 * 1024 + 1) }] } } })]);
+    expect((await readOnce(room, attempt.id)).body.outcome).toBe("ack");
+    expect(await roomSql(room, "SELECT sender_id, body, origin FROM message WHERE task_id = ?", t.id)).toEqual([
+      { sender_id: agent.id, body: "The agent's A2A endpoint sent a message that was too long to show here.", origin: "a2a_remote" },
+    ]);
+    expect((await must(agent, "GET", "/v1/inbox/a2a-endpoint")).consecutive_failures).toBe(0);
+    expect(await row(room, attempt.id)).toMatchObject({ reading_ended: 0, last_read_no: 1 });
   });
 });
 

@@ -92,6 +92,7 @@ const undoSubmittedFlagMigration = (state: any) => {
   state.storage.sql.exec("ALTER TABLE event DROP COLUMN origin_ref");
   state.storage.sql.exec("ALTER TABLE audit_event DROP COLUMN origin");
   state.storage.sql.exec("ALTER TABLE audit_event DROP COLUMN origin_ref");
+  state.storage.sql.exec("ALTER TABLE message DROP COLUMN origin");
   state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN reading_ended");
   state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN read_until");
   state.storage.sql.exec("ALTER TABLE a2a_attempt DROP COLUMN next_read_at");

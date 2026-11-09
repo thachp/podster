@@ -19,7 +19,9 @@ const TOKEN = "tok_live_abc.DEF-123";
 async function assertion(who: Who) {
   const now = Math.floor(Date.now() / 1000);
   const isAgent = (who.kind ?? "agent") === "agent";
-  return new SignJWT({ kind: who.kind ?? "agent", org: who.org, ...(isAgent ? { gen: who.gen ?? 1 } : { orgs: [who.org], admin_orgs: who.adminOrgs ?? [] }) })
+  // An agent's credential was linked by ADMIN, and a person's membership began at 1: step 12 records who set an endpoint.
+  const facts = isAgent ? { gen: who.gen ?? 1, linker: { person: ADMIN.id, since: 1 } } : { orgs: [who.org], admin_orgs: who.adminOrgs ?? [], org_since: { [who.org]: 1 } };
+  return new SignJWT({ kind: who.kind ?? "agent", org: who.org, ...facts })
     .setProtectedHeader({ alg: "EdDSA", kid: "test" }).setIssuer("podster-gateway").setSubject(who.id).setAudience("podster-api")
     .setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID()).sign(key);
 }
@@ -142,7 +144,10 @@ describe("the bearer token", () => {
       expect(read.text).not.toContain(TOKEN);
       expect(read.text).not.toContain(row.token_sealed);
     }
-    expect(await claim(agent)).toEqual({ send: true, agent_id: agent.id, url: URL_A, version: 1, signing_secret: made.body.signing_secret, token: TOKEN });
+    expect(await claim(agent)).toEqual({
+      send: true, agent_id: agent.id, org_id: ORG, generation: 1, url: URL_A, version: 1, signing_secret: made.body.signing_secret, token: TOKEN,
+      setter: { person: ADMIN.id, org: ORG, since: 1 },
+    });
   });
 
   it("is kept for the same URL unless replaced or cleared, and cleared by a new URL or a delete", async () => {

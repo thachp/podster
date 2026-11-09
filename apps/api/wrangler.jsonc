@@ -21,18 +21,31 @@
   // owner sets it (decision 122, docs/staging.md), and without it endpoints can be set but tokens can't.
   // Private, with no public access or S3 keys. Every byte goes through the API.
   ,"r2_buckets": [{ "binding": "ASSETS", "bucket_name": "podster-assets" }]
+  // The application's address, for the link in an A2A offer. Only a link: opening it needs the agent's own sign-in.
+  ,"vars": { "APP_URL": "http://app.localhost:3000" }
+  // A2A offers (M3 step 12, decision 129) have their own queue, apart from wake's. It holds IDs only. A job whose retries run
+  // out goes to the dead-letter queue, whose consumer logs its IDs and acknowledges it.
   ,"queues": {
-    "producers": [{ "binding": "WAKE", "queue": "podster-wake" }, { "binding": "SCAN", "queue": "podster-scan" }],
-    "consumers": [{ "queue": "podster-wake", "max_batch_size": 6, "max_batch_timeout": 5, "max_retries": 5 }]
+    "producers": [{ "binding": "WAKE", "queue": "podster-wake" }, { "binding": "SCAN", "queue": "podster-scan" }, { "binding": "A2A", "queue": "podster-a2a" }],
+    "consumers": [
+      { "queue": "podster-wake", "max_batch_size": 6, "max_batch_timeout": 5, "max_retries": 5 },
+      { "queue": "podster-a2a", "max_batch_size": 6, "max_batch_timeout": 5, "max_retries": 5, "dead_letter_queue": "podster-a2a-dlq" },
+      { "queue": "podster-a2a-dlq", "max_batch_size": 6, "max_batch_timeout": 5 }
+    ]
   },
   "env": {
     "staging": {
       "workers_dev": false,
       "preview_urls": false,
       "r2_buckets": [{ "binding": "ASSETS", "bucket_name": "podster-assets-staging" }],
+      "vars": { "APP_URL": "https://app-staging.podster.dev" },
       "queues": {
-        "producers": [{ "binding": "WAKE", "queue": "podster-wake-staging" }, { "binding": "SCAN", "queue": "podster-scan-staging" }],
-        "consumers": [{ "queue": "podster-wake-staging", "max_batch_size": 6, "max_batch_timeout": 5, "max_retries": 5 }]
+        "producers": [{ "binding": "WAKE", "queue": "podster-wake-staging" }, { "binding": "SCAN", "queue": "podster-scan-staging" }, { "binding": "A2A", "queue": "podster-a2a-staging" }],
+        "consumers": [
+          { "queue": "podster-wake-staging", "max_batch_size": 6, "max_batch_timeout": 5, "max_retries": 5 },
+          { "queue": "podster-a2a-staging", "max_batch_size": 6, "max_batch_timeout": 5, "max_retries": 5, "dead_letter_queue": "podster-a2a-dlq-staging" },
+          { "queue": "podster-a2a-dlq-staging", "max_batch_size": 6, "max_batch_timeout": 5 }
+        ]
       },
       "durable_objects": { "bindings": [
         { "name": "WORKSPACE", "class_name": "Workspace" },

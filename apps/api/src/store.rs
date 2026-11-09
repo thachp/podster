@@ -160,6 +160,13 @@ CREATE INDEX task_expected_output ON task (expected_output_id) WHERE expected_ou
 ALTER TABLE stored_object ADD COLUMN submitted_at INTEGER;
 UPDATE stored_object SET submitted_at = (SELECT MIN(s.created_at) FROM submission_file s WHERE s.object_id = stored_object.id) WHERE EXISTS (SELECT 1 FROM submission_file s WHERE s.object_id = stored_object.id);
 CREATE INDEX stored_object_unsubmitted ON stored_object (for_task) WHERE for_task IS NOT NULL AND submitted_at IS NULL AND state <> 'removed';
+", "
+CREATE TABLE a2a_attempt (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, agent_id TEXT NOT NULL, offer_id TEXT NOT NULL, state TEXT NOT NULL,
+  queued INTEGER NOT NULL DEFAULT 0, queue_failures INTEGER NOT NULL DEFAULT 0, next_queue_at INTEGER NOT NULL, lease_until INTEGER,
+  tries INTEGER NOT NULL DEFAULT 0, endpoint_url TEXT, endpoint_version INTEGER, remote_task_id TEXT, ended_reason TEXT,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE INDEX a2a_attempt_outbox ON a2a_attempt (next_queue_at) WHERE queued = 0;
+CREATE INDEX a2a_attempt_task ON a2a_attempt (task_id, created_at);
 "];
 
 pub fn int(value: &Value) -> i64 {
@@ -474,6 +481,24 @@ pub fn record_event_about(
     recipients: impl IntoIterator<Item = String>,
     now: i64,
 ) -> R<()> {
+    record_event_with_id(
+        sql, kind, actor, subject, task_id, transition, recipients, now,
+    )
+    .map(|_| ())
+}
+
+/// The same, answering the new event's ID.
+#[allow(clippy::too_many_arguments)]
+fn record_event_with_id(
+    sql: &SqlStorage,
+    kind: &str,
+    actor: &str,
+    subject: Option<&str>,
+    task_id: Option<&str>,
+    transition: &Transition,
+    recipients: impl IntoIterator<Item = String>,
+    now: i64,
+) -> R<String> {
     let event_id = format!("evt_{}", uuid::Uuid::new_v4().simple());
     let actor_org = {
         let room = rows(
@@ -501,7 +526,7 @@ pub fn record_event_about(
         exec(sql, "INSERT INTO outbox (event_id, recipient_principal_id, next_attempt_at) VALUES (?, ?, ?)",
             vec![event_id.as_str().into(), recipient.into(), now.into()])?;
     }
-    Ok(())
+    Ok(event_id)
 }
 
 /// Human owners and admins, who handle tasks a departure left needing attention.
@@ -551,17 +576,42 @@ pub fn record_decision(
             new_status: Some(decision.task.status.name()),
             task_version: Some(decision.task.version),
         };
-        record_event(
+        // An offer to an agent that's still here, from someone else, also gets an A2A offer attempt, in this transaction. Its
+        // Principal decides at send time whether there's an endpoint to send to (ADR 0007, step 12).
+        let offered_to = (draft.kind == EventKind::TaskOffered)
+            .then_some(decision.task.assignee.as_deref())
+            .flatten()
+            .filter(|to| to.starts_with(crate::AGENT_ID_PREFIX) && current.iter().any(|r| r == to))
+            .map(str::to_string);
+        let event_id = record_event_with_id(
             sql,
             draft.kind.name(),
             actor,
+            None,
             Some(&decision.task.id),
             &transition,
             current,
             now,
         )?;
+        if let Some(agent) = offered_to {
+            record_offer_attempt(sql, &decision.task.id, &agent, &event_id, now)?;
+        }
     }
     Ok(())
+}
+
+/// Records one A2A offer attempt and its outbox row, which is the attempt itself while `queued` is 0. The ID is also the
+/// outbound message's `messageId`, so every retry of it is the same message.
+pub fn record_offer_attempt(
+    sql: &SqlStorage,
+    task: &str,
+    agent: &str,
+    offer: &str,
+    now: i64,
+) -> R<()> {
+    exec(sql, "INSERT INTO a2a_attempt (id, task_id, agent_id, offer_id, state, next_queue_at, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?)", vec![
+        format!("att_{}", uuid::Uuid::new_v4().simple()).into(), task.into(), agent.into(), offer.into(), now.into(), now.into(), now.into(),
+    ])
 }
 
 /// Calls the runtime's `storage.transactionSync`, which `worker` doesn't expose. Any error or trap rolls back.

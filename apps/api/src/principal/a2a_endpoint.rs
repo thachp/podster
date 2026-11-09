@@ -4,6 +4,10 @@
 //! The signing secret is shown once, when a registration version is made. The bearer token is write-only: sealed when set,
 //! opened only for a send, and never in a read, an event, the inbox or a log. Both go when the URL changes, on delete and on
 //! disconnect. Logs carry IDs only, never the URL or either credential.
+//!
+//! Each set records who set it: the person who linked the agent's credential, or the admin. A send stops, and the endpoint
+//! is deleted, once that person has left the agent's organization since (ADR 0007, step 12). Their own Principal records
+//! the departure, so a claim asks it, and refuses to send if it can't tell.
 use super::*;
 use podster_egress::endpoint::{
     check_endpoint_url, decide_report, decide_set, open, parse_key, seal, valid_bearer_token,
@@ -15,8 +19,36 @@ use podster_egress::endpoint::{
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS a2a_endpoint (id INTEGER PRIMARY KEY CHECK (id = 1), url TEXT NOT NULL DEFAULT '', version INTEGER NOT NULL DEFAULT 0,
   signing_secret TEXT NOT NULL DEFAULT '', token_sealed TEXT, enabled INTEGER NOT NULL DEFAULT 0, consecutive_failures INTEGER NOT NULL DEFAULT 0,
-  set_at INTEGER, last_report_at INTEGER);
+  set_at INTEGER, last_report_at INTEGER, set_by TEXT, set_by_org TEXT, set_by_since INTEGER);
 ";
+
+/// Who set the endpoint: a person, the organization it's for, and since when that person's link or membership counts, in
+/// milliseconds. A departure from that organization at or after `since` ends the endpoint.
+pub(super) struct Setter<'a> {
+    pub person: &'a str,
+    pub org: &'a str,
+    pub since: i64,
+}
+
+/// Creates the table, and adds step 12's columns to one made before them. Forward-only.
+fn ensure_schema(sql: &SqlStorage) -> R<()> {
+    exec(sql, SCHEMA, vec![])?;
+    let has_setter = !rows(
+        sql,
+        "SELECT name FROM pragma_table_info('a2a_endpoint') WHERE name = 'set_by'",
+        vec![],
+    )?
+    .is_empty();
+    if !has_setter {
+        exec(
+            sql,
+            "ALTER TABLE a2a_endpoint ADD COLUMN set_by TEXT; ALTER TABLE a2a_endpoint ADD COLUMN set_by_org TEXT;
+             ALTER TABLE a2a_endpoint ADD COLUMN set_by_since INTEGER;",
+            vec![],
+        )?;
+    }
+    Ok(())
+}
 
 /// The Worker secret holding the sealing key, 64 hex characters. The owner sets it (decision 122).
 pub(super) const KEY_SECRET: &str = "A2A_TOKEN_KEY";
@@ -112,6 +144,7 @@ pub(super) fn set(
     sql: &SqlStorage,
     key: Option<&[u8]>,
     agent: &str,
+    setter: &Setter<'_>,
     body: &Value,
     now: i64,
 ) -> R<Value> {
@@ -142,7 +175,7 @@ pub(super) fn set(
     if token.is_some() && key.is_none() {
         return Err(no_token_storage());
     }
-    exec(sql, SCHEMA, vec![])?;
+    ensure_schema(sql)?;
     let row = stored(sql)?;
     let current_url = row
         .as_ref()
@@ -167,15 +200,20 @@ pub(super) fn set(
     };
     exec(
         sql,
-        "INSERT INTO a2a_endpoint (id, url, version, signing_secret, token_sealed, enabled, consecutive_failures, set_at) VALUES (1, ?, ?, ?, ?, 1, 0, ?)
+        "INSERT INTO a2a_endpoint (id, url, version, signing_secret, token_sealed, enabled, consecutive_failures, set_at, set_by, set_by_org, set_by_since)
+          VALUES (1, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?)
           ON CONFLICT (id) DO UPDATE SET url = excluded.url, version = excluded.version, signing_secret = excluded.signing_secret,
-            token_sealed = excluded.token_sealed, enabled = 1, consecutive_failures = 0, set_at = excluded.set_at",
+            token_sealed = excluded.token_sealed, enabled = 1, consecutive_failures = 0, set_at = excluded.set_at,
+            set_by = excluded.set_by, set_by_org = excluded.set_by_org, set_by_since = excluded.set_by_since",
         vec![
             url.as_str().into(),
             (outcome.version as i64).into(),
             secret.as_str().into(),
             sealed.as_deref().map_or(SqlStorageValue::Null, SqlStorageValue::from),
             now.into(),
+            setter.person.into(),
+            setter.org.into(),
+            setter.since.into(),
         ],
     )?;
     let mut out = status_json(sql, key)?;
@@ -189,13 +227,23 @@ pub(super) fn set(
 /// past it. Deleting nothing is fine.
 pub(super) fn delete(sql: &SqlStorage) -> R<Value> {
     if stored(sql)?.is_some() {
+        ensure_schema(sql)?;
         exec(
             sql,
-            "UPDATE a2a_endpoint SET url = '', signing_secret = '', token_sealed = NULL, enabled = 0, consecutive_failures = 0",
+            "UPDATE a2a_endpoint SET url = '', signing_secret = '', token_sealed = NULL, enabled = 0, consecutive_failures = 0, set_by = NULL",
             vec![],
         )?;
     }
     Ok(json!({ "deleted": true }))
+}
+
+/// Deletes the endpoint only if it's still at `version`, as `delete` does. A newer registration, set since the caller looked,
+/// is someone else's to end.
+pub(super) fn delete_version(sql: &SqlStorage, version: i64) -> R<Value> {
+    match current(sql)? {
+        Some(row) if int(&row["version"]) == version => delete(sql),
+        _ => Ok(json!({ "deleted": false })),
+    }
 }
 
 /// `/internal/a2a-endpoint-claim`, for the outbound consumer: what it needs to send, if it may. Only for an active agent with
@@ -220,6 +268,14 @@ pub(super) fn claim(sql: &SqlStorage, key: Option<&[u8]>) -> R<Value> {
         exec(sql, "UPDATE a2a_endpoint SET enabled = 0", vec![])?;
         return Ok(skip("refused_url"));
     }
+    // Set before step 12 recorded who set it: it sends nothing until it's set again.
+    let (Some(set_by), Some(set_by_org), Some(set_by_since)) = (
+        text(&row["set_by"]),
+        text(&row["set_by_org"]),
+        row["set_by_since"].as_i64(),
+    ) else {
+        return Ok(skip("setter_unknown"));
+    };
     let version = int(&row["version"]).max(0) as u64;
     let token = match row["token_sealed"].as_str() {
         None => Value::Null,
@@ -232,7 +288,9 @@ pub(super) fn claim(sql: &SqlStorage, key: Option<&[u8]>) -> R<Value> {
         }
     };
     Ok(json!({
-        "send": true, "agent_id": conn["id"], "url": url, "version": version, "signing_secret": row["signing_secret"], "token": token,
+        "send": true, "agent_id": conn["id"], "org_id": conn["org_id"], "generation": conn["generation"], "url": url, "version": version,
+        "signing_secret": row["signing_secret"], "token": token,
+        "setter": { "person": set_by, "org": set_by_org, "since": set_by_since },
     }))
 }
 

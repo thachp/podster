@@ -25,6 +25,8 @@
   ,"r2_buckets": [{ "binding": "ASSETS", "bucket_name": "podster-assets" }]
   // The application's address, for the link in an A2A offer, and the gateway's, for its input files. Only links: opening
   // either needs the agent's own sign-in or credential.
+  // EXPLORE_CURSOR_KEY is 64 hex characters that seal Explore's cursors (M4 step 14). Until the owner sets it with
+  // `wrangler secret put EXPLORE_CURSOR_KEY`, Explore shows its first page only, and refuses any cursor.
   // OPERATORS, the person IDs of Podster operators separated by commas (decision 158), is a secret the owner sets
   // (docs/staging.md), and is set nowhere here. Without it nobody is an operator.
   ,"vars": { "APP_URL": "http://app.localhost:3000", "GATEWAY_URL": "http://localhost:8787" }

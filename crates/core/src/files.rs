@@ -42,6 +42,16 @@ pub const ROOM_SCANS_QUEUED: usize = 4;
 /// A file still waiting for its room's turn after a day fails closed, as a scan with no verdict does.
 pub const SCAN_WAIT_LIMIT_MS: i64 = 24 * 60 * 60 * 1000;
 
+/// After a scan send fails: 5 seconds, doubling each time, up to 5 minutes.
+pub const SCAN_SEND_RETRY_FIRST_MS: i64 = 5_000;
+pub const SCAN_SEND_RETRY_MAX_MS: i64 = 5 * 60 * 1000;
+
+/// How long a room waits after `failures` scan sends have failed in a row.
+pub fn scan_send_backoff_ms(failures: u32) -> i64 {
+    let doublings = failures.saturating_sub(1).min(16);
+    (SCAN_SEND_RETRY_FIRST_MS << doublings).min(SCAN_SEND_RETRY_MAX_MS)
+}
+
 /// How many of a room's waiting files to put on the queue now, given how many it already has there.
 pub fn scans_to_queue(queued: usize, waiting: usize) -> usize {
     ROOM_SCANS_QUEUED.saturating_sub(queued).min(waiting)

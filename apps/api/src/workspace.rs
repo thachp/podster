@@ -3456,7 +3456,12 @@ impl Workspace {
             let next = (now + 10).max(self.scan_send_allowed_at());
             due = Some(due.map_or(next, |d| d.min(next)));
         }
-        // A queued scan with no verdict after 5 minutes is sent once more.
+        // A queued scan past its re-send time with no re-send yet, as after a failed one, has its own alarm.
+        if migrated && self.scan_resend_pending(&sql, now).await {
+            let next = (now + 10).max(self.scan_send_allowed_at());
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
+        // A queued scan reaching its re-send time with no verdict is sent once more.
         if let Some(next) = migrated
             .then(|| objects::next_scan_resend(&sql, now))
             .transpose()?

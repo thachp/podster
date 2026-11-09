@@ -7,8 +7,8 @@ use super::*;
 use crate::objects::{refusal, upload_not_found};
 use podster_core::files::{
     check_upload, expire_scan, fits_participant_quota, fits_room_quota, is_sha256, record_scan,
-    scan_database_fits, scans_to_queue, FileRefusal, ObjectState, ScanOutcome, UploadRequest,
-    ROOM_SCANS_QUEUED, SCAN_DEADLINE_MS, SCAN_WAIT_LIMIT_MS,
+    scan_database_fits, scan_send_backoff_ms, scans_to_queue, FileRefusal, ObjectState,
+    ScanOutcome, UploadRequest, ROOM_SCANS_QUEUED, SCAN_DEADLINE_MS, SCAN_WAIT_LIMIT_MS,
 };
 
 /// How long an upload may be started after it's created. Its reservation ends then too, whatever is under way. An attempt already
@@ -493,6 +493,8 @@ pub(super) struct QueuedScan {
     pub key: String,
     pub size: u64,
     pub sha256: String,
+    /// When its hour started. A scan sent again carries its first time, so the scanner's too-late skip matches the room's hour.
+    pub queued_at: i64,
 }
 
 /// Takes the room's next turns on the scan queue, oldest arrival first, up to `ROOM_SCANS_QUEUED` there at once, and starts
@@ -521,24 +523,23 @@ pub(super) fn take_scan_turns(sql: &SqlStorage, now: i64) -> R<Vec<QueuedScan>> 
             key: text(&row["object_key"]).unwrap_or_default(),
             size: int(&row["size"]).max(0) as u64,
             sha256: text(&row["sha256"]).unwrap_or_default(),
+            queued_at: now,
         });
     }
     Ok(turns)
 }
 
-/// How long a queued scan may go without a verdict before it's sent once more.
-pub(super) const SCAN_RESEND_AFTER_MS: i64 = 5 * 60 * 1000;
+/// How long a queued scan may go without a verdict before it's sent once more. Long, since a room can't tell a send that
+/// never arrived from one waiting behind others, and a duplicate is scanned in full.
+pub(super) const SCAN_RESEND_AFTER_MS: i64 = 30 * 60 * 1000;
 /// The room's key-value storage marks a scan already sent once more, so it's never sent a third time.
 const SCAN_RESENT_PREFIX: &str = "scan_resent:";
-/// After a send fails: 5 seconds, doubling each time, up to 5 minutes.
-const SCAN_SEND_RETRY_FIRST_MS: i64 = 5_000;
-const SCAN_SEND_RETRY_MAX_MS: i64 = 5 * 60 * 1000;
 
 /// Queued scans with no verdict after `SCAN_RESEND_AFTER_MS`, oldest first, up to the room's share.
 fn stale_scan_turns(sql: &SqlStorage, now: i64) -> R<Vec<QueuedScan>> {
     let found = rows(
         sql,
-        "SELECT id, object_key, size, sha256 FROM stored_object INDEXED BY stored_object_scanning WHERE state = 'scanning' AND scanning_since <= ? ORDER BY scanning_since, id LIMIT ?",
+        "SELECT id, object_key, size, sha256, scanning_since FROM stored_object INDEXED BY stored_object_scanning WHERE state = 'scanning' AND scanning_since <= ? ORDER BY scanning_since, id LIMIT ?",
         vec![(now - SCAN_RESEND_AFTER_MS).into(), (ROOM_SCANS_QUEUED as i64).into()],
     )?;
     Ok(found
@@ -548,6 +549,7 @@ fn stale_scan_turns(sql: &SqlStorage, now: i64) -> R<Vec<QueuedScan>> {
             key: text(&row["object_key"]).unwrap_or_default(),
             size: int(&row["size"]).max(0) as u64,
             sha256: text(&row["sha256"]).unwrap_or_default(),
+            queued_at: int(&row["scanning_since"]),
         })
         .collect())
 }
@@ -664,6 +666,7 @@ impl Workspace {
         {
             return;
         }
+        self.clear_settled_resend_markers(&sql).await;
         let now = now_ms();
         // After a send failed, the queue gets a rest before the room asks again.
         if now < self.scan_send_retry_at.get() {
@@ -730,6 +733,58 @@ impl Workspace {
         self.scan_send_retry_at.set(0);
     }
 
+    /// Whether a queued scan is past `SCAN_RESEND_AFTER_MS` with no re-send yet, so the alarm comes back for it rather than
+    /// waiting for another reason to run.
+    pub(super) async fn scan_resend_pending(&self, sql: &SqlStorage, now: i64) -> bool {
+        let Ok(stale) = stale_scan_turns(sql, now) else {
+            return false;
+        };
+        for turn in stale {
+            let marker = format!("{SCAN_RESENT_PREFIX}{}", turn.id);
+            if self
+                .state
+                .storage()
+                .get::<i64>(&marker)
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Deletes the re-send marker of every file that's settled, by a verdict or an expiry, so markers don't pile up.
+    async fn clear_settled_resend_markers(&self, sql: &SqlStorage) {
+        let Ok(found) = self
+            .state
+            .storage()
+            .list_with_options(ListOptions::new().prefix(SCAN_RESENT_PREFIX))
+            .await
+        else {
+            return;
+        };
+        for key in found.keys() {
+            let Some(key) = key.ok().and_then(|k| k.as_string()) else {
+                continue;
+            };
+            let id = key.trim_start_matches(SCAN_RESENT_PREFIX);
+            let scanning = rows(
+                sql,
+                "SELECT 1 FROM stored_object WHERE id = ? AND state = 'scanning'",
+                vec![id.into()],
+            )
+            .is_ok_and(|r| !r.is_empty());
+            if !scanning {
+                if let Err(error) = self.state.storage().delete(&key).await {
+                    console_error!("couldn't clear a scan's re-send marker: {:?}", error);
+                }
+            }
+        }
+    }
+
     /// Sends one scan job. Test builds can make every send fail, to check what a failed send leaves.
     async fn send_scan(&self, room: &str, turn: &QueuedScan) -> bool {
         #[cfg(feature = "failpoints")]
@@ -748,6 +803,7 @@ impl Workspace {
             &turn.key,
             turn.size,
             &turn.sha256,
+            turn.queued_at,
         )
         .await
     }
@@ -756,8 +812,7 @@ impl Workspace {
     fn scan_send_failed(&self, room: &str, now: i64) {
         let failures = self.scan_send_failures.get().saturating_add(1);
         self.scan_send_failures.set(failures);
-        let wait = (SCAN_SEND_RETRY_FIRST_MS << failures.saturating_sub(1).min(10))
-            .min(SCAN_SEND_RETRY_MAX_MS);
+        let wait = scan_send_backoff_ms(failures);
         self.scan_send_retry_at.set(now + wait);
         console_error!(
             "{}",

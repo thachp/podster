@@ -179,6 +179,14 @@ fn cursor_key(env: &Env, req: &Request) -> Result<Vec<u8>, &'static str> {
     parse_key(&secret).ok_or("explore.cursor_key_invalid")
 }
 
+/// Logs a missing or invalid cursor key at most once per isolate, so a deployment without it isn't a log line per request.
+fn log_key_problem(code: &str) {
+    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        console_error!("{}", code);
+    }
+}
+
 /// A fresh nonce from the Worker's own `crypto.getRandomValues`. Without one, no cursor is written.
 fn fresh_nonce() -> Option<[u8; NONCE_BYTES]> {
     use wasm_bindgen::JsCast;
@@ -211,7 +219,7 @@ fn decode_cursor(key: Result<&[u8], &str>, cursor: &str) -> Option<(i64, String)
     let key = match key {
         Ok(key) => key,
         Err(code) => {
-            console_error!("{}", code);
+            log_key_problem(code);
             return None;
         }
     };
@@ -263,13 +271,14 @@ fn filters(url: &Url, sealing: Result<&[u8], &str>) -> R<Filters> {
 /// Explore: a page of candidates from the index's `listed` rows, newest published first, each confirmed and read from its
 /// room. A candidate its room doesn't confirm, or that doesn't answer in time, is left out, and the cursor still moves on.
 pub async fn explore(env: &Env, caller: &Caller, url: &Url, req: &Request) -> R<Response> {
-    let key = cursor_key(env, req);
-    let filters = filters(url, key.as_deref().map_err(|code| *code))?;
+    // Off answers the same empty page whatever was asked, before anything reads the key or the filters.
     if !enabled(env, req)? {
         return Ok(Response::from_json(
             &json!({ "workrooms": [], "next_cursor": null }),
         )?);
     }
+    let key = cursor_key(env, req);
+    let filters = filters(url, key.as_deref().map_err(|code| *code))?;
     let mut sql = String::from(
         "SELECT workspace_id, public_handle, published_at FROM public_workroom_index WHERE listed = 1",
     );
@@ -307,7 +316,7 @@ pub async fn explore(env: &Env, caller: &Caller, url: &Url, req: &Request) -> R<
                 Ok(key) => encode_cursor(key, at as i64, handle),
                 Err(code) => {
                     // Fails closed: Explore shows its first page and no more until the owner sets a valid key.
-                    console_error!("{}", code);
+                    log_key_problem(code);
                     None
                 }
             },

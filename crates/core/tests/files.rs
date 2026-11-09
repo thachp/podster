@@ -1764,3 +1764,15 @@ fn a_room_keeps_at_most_four_scans_on_the_shared_queue() {
     assert_eq!(scans_to_queue(0, 0), 0);
     assert_eq!(SCAN_WAIT_LIMIT_MS, 24 * 60 * 60 * 1000);
 }
+
+#[test]
+fn a_failed_scan_send_backs_off_from_5_seconds_to_a_5_minute_ceiling() {
+    assert_eq!(scan_send_backoff_ms(1), 5_000);
+    assert_eq!(scan_send_backoff_ms(2), 10_000);
+    assert_eq!(scan_send_backoff_ms(6), 160_000);
+    assert_eq!(scan_send_backoff_ms(7), 300_000);
+    assert_eq!(scan_send_backoff_ms(8), 300_000);
+    assert_eq!(scan_send_backoff_ms(u32::MAX), 300_000);
+    // Zero, as after a clean pass resets the count, is the first step's wait if it's ever asked.
+    assert_eq!(scan_send_backoff_ms(0), 5_000);
+}

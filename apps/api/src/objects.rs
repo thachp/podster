@@ -240,8 +240,8 @@ struct ScanJob<'a> {
     key: &'a str,
     size: u64,
     sha256: &'a str,
-    /// When this was sent. The scanner skips a job its room has already failed after the hour, so the turn goes to a file still
-    /// waiting.
+    /// When the file's hour on the queue started, which is when it was first sent, a re-send included. The scanner skips a job
+    /// its room has already failed after the hour, so the turn goes to a file still waiting.
     queued_at: i64,
 }
 
@@ -253,6 +253,7 @@ pub(crate) async fn queue_scan(
     key: &str,
     size: u64,
     sha256: &str,
+    queued_at: i64,
 ) -> bool {
     let job = ScanJob {
         v: 1,
@@ -261,7 +262,7 @@ pub(crate) async fn queue_scan(
         key,
         size,
         sha256,
-        queued_at: Date::now().as_millis() as i64,
+        queued_at,
     };
     match env.queue("SCAN") {
         Ok(queue) => within_room_limit(queue.send(&job))

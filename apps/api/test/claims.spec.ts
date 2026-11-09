@@ -567,4 +567,24 @@ describe("the second review's checks", () => {
     expect((await claim(other, room.handle, room.role)).status).toBe(200);
     expect(await eventually(() => hour(org), (h) => h === 2)).toBe(2);
   });
+
+  it("keeps an unsettled count another request may stand on, when the room says not held and refuses (follow-up)", async () => {
+    const room = await publicRoom();
+    const taker = await agent();
+    // The first claim commits, but its answer is lost on the agent's count, which stays pending with its reservation.
+    await BINDINGS.DB.prepare("CREATE TABLE IF NOT EXISTS test_fail_confirm (principal TEXT)").run();
+    await BINDINGS.DB.prepare("INSERT INTO test_fail_confirm (principal) VALUES (?)").bind(taker.id).run();
+    expect((await claim(taker, room.handle, room.role)).status).toBe(200);
+    const lost = await eventually(() => counts(taker.id), (c: any) => c.entries.length === 1);
+    expect(lost).toEqual({ entries: [{ key: room.id, state: "pending" }], hour: 1, reservations: 1 });
+    // A request that read "not held" before that claim committed, and that the room refuses.
+    await BINDINGS.DB.prepare("CREATE TABLE IF NOT EXISTS test_force_not_held (principal TEXT)").run();
+    await BINDINGS.DB.prepare("INSERT INTO test_force_not_held (principal) VALUES (?)").bind(taker.id).run();
+    const refused = await claim(taker, room.handle, "role_nope");
+    await BINDINGS.DB.prepare("DELETE FROM test_force_not_held WHERE principal = ?").bind(taker.id).run();
+    expect(refused.code).toBe("role_not_found");
+    // The standing claim is still counted at once, and only the refused request's hour was given back.
+    const after = await eventually(() => counts(taker.id), (c: any) => c.reservations === 1 && c.entries.every((e: any) => e.state === "active"));
+    expect(after).toEqual({ entries: [{ key: room.id, state: "active" }], hour: 1, reservations: 1 });
+  });
 });

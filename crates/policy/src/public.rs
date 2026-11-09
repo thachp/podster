@@ -941,3 +941,50 @@ pub fn decide_set_visibility(
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The discovery index (M4 step 6, pure part)
+
+/// What a room writes to `public_workroom_index`, Explore's list of candidates. Handles and sort or filter keys only, never
+/// a name, goal or any other text, so a stale row can't show anything (ADR 0008). It's never used to authorize: Explore
+/// confirms each result with its room.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicIndexRow {
+    /// Listed only while the room is public under a handle, unarchived and not suspended (decision 152).
+    pub listed: bool,
+    /// The keys below are blank on a delisted row, which is kept only as a tombstone for its `seq`.
+    pub public_handle: Option<String>,
+    pub topic: Option<Topic>,
+    /// Some opening an agent could publicly claim now: claimable, with room, and claims not paused.
+    pub has_open_opening: bool,
+    pub published_at: Option<i64>,
+}
+
+/// The index row for a room as it stands now.
+pub fn index_row(state: &RoomState) -> PublicIndexRow {
+    let room = &state.room;
+    let listed = room.visibility == Visibility::Public
+        && room.public_handle.is_some()
+        && room.published_at.is_some()
+        && !room.archived
+        && !room.suspended;
+    if !listed {
+        return PublicIndexRow {
+            listed: false,
+            public_handle: None,
+            topic: None,
+            has_open_opening: false,
+            published_at: None,
+        };
+    }
+    PublicIndexRow {
+        listed: true,
+        public_handle: room.public_handle.clone(),
+        topic: room.topic,
+        has_open_opening: !room.public_claims_paused
+            && state.openings.iter().any(|o| {
+                opening_publicly_claimable(o) && count(o.active_holders.len()) < o.capacity
+            }),
+        published_at: room.published_at,
+    }
+}

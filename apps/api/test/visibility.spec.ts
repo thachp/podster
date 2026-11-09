@@ -1,4 +1,4 @@
-import { env, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
 
@@ -239,5 +239,95 @@ describe("publicly claimable openings", () => {
 describe("the switch", () => {
   it("is set nowhere in the Worker's configuration", () => {
     expect(BINDINGS.TEST_WRANGLER).not.toContain("PUBLIC_ROOMS");
+  });
+});
+
+describe("the discovery index (step 6)", () => {
+  const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
+  /** Runs the room's alarm until nothing is due, as the platform would. */
+  const drain = async (id: string) => {
+    for (let n = 0; n < 5; n++) await runDurableObjectAlarm(stub(id));
+  };
+  const indexRow = async (id: string) =>
+    BINDINGS.DB.prepare("SELECT * FROM public_workroom_index WHERE workspace_id = ?").bind(id).first();
+  const due = (id: string) => inRoom(id, (sql) => sql.exec("SELECT seq, pending FROM public_index_outbox").toArray());
+
+  it("writes nothing for a private room", async () => {
+    const id = await room();
+    await api(OWNER, "PUT", `/v1/workspaces/${id}/topic`, { topic: "film" });
+    await drain(id);
+    expect(await indexRow(id)).toBeNull();
+    expect(await due(id)).toEqual([]);
+  });
+
+  it("lists a public room with its handle and keys, and no text", async () => {
+    const id = await room();
+    await api(OWNER, "PUT", `/v1/workspaces/${id}/topic`, { topic: "research" });
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/roles`, { title: "Reviewer", responsibilities: "Read it", preset: "guest", publicly_claimable: true, policy_version: await version(id) })).status).toBe(200);
+    const published = (await publish(id)).body;
+    await drain(id);
+    const row = await indexRow(id);
+    expect(row).toMatchObject({ workspace_id: id, public_handle: published.public_handle, topic: "research", has_open_opening: 1, published_at: published.published_at, listed: 1 });
+    expect(Object.keys(row).sort()).toEqual(["has_open_opening", "listed", "public_handle", "published_at", "topic", "updated_seq", "workspace_id"]);
+    expect(JSON.stringify(row)).not.toContain("Billing v2");
+  });
+
+  it("follows changes to its keys, and an unchanged row writes nothing", async () => {
+    const id = await room();
+    await publish(id);
+    await drain(id);
+    const first = await indexRow(id);
+    expect(first.has_open_opening).toBe(0);
+    // A message changes no key, so the row in D1 keeps its seq.
+    const task = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "T", instructions: "I", assignee: MEMBER.id });
+    await api(OWNER, "POST", `/v1/workspaces/${id}/tasks/${task.body.id}/messages`, { body: "hello" });
+    await drain(id);
+    expect((await indexRow(id)).updated_seq).toBe(first.updated_seq);
+    await api(ADMIN, "PUT", `/v1/workspaces/${id}/topic`, { topic: "film" });
+    await drain(id);
+    const second = await indexRow(id);
+    expect(second.topic).toBe("film");
+    expect(second.updated_seq).toBeGreaterThan(first.updated_seq);
+  });
+
+  it("delists a room that goes private or is archived, keeping a blank tombstone, and lists a republish under its new handle", async () => {
+    const id = await room();
+    await publish(id);
+    await drain(id);
+    await unpublish(id);
+    await drain(id);
+    expect(await indexRow(id)).toMatchObject({ listed: 0, public_handle: null, topic: null, has_open_opening: 0, published_at: null });
+    const again = (await publish(id)).body.public_handle;
+    await drain(id);
+    expect(await indexRow(id)).toMatchObject({ listed: 1, public_handle: again });
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/archive`, { policy_version: await version(id) })).status).toBe(200);
+    await drain(id);
+    expect(await indexRow(id)).toMatchObject({ listed: 0, public_handle: null });
+  });
+
+  it("never lets an older write restore a row", async () => {
+    const id = await room();
+    await publish(id);
+    await drain(id);
+    // A newer row, as if a later write had landed first.
+    await BINDINGS.DB.prepare("UPDATE public_workroom_index SET updated_seq = 1000000, listed = 0, public_handle = NULL WHERE workspace_id = ?").bind(id).run();
+    await api(OWNER, "PUT", `/v1/workspaces/${id}/topic`, { topic: "other" });
+    await drain(id);
+    expect(await indexRow(id)).toMatchObject({ updated_seq: 1000000, listed: 0, public_handle: null });
+  });
+
+  it("stays due while D1 fails, and catches up once it works", async () => {
+    const id = await room();
+    await publish(id);
+    await BINDINGS.DB.prepare("ALTER TABLE public_workroom_index RENAME TO public_workroom_index_away").run();
+    try {
+      await drain(id);
+      expect((await due(id))[0].pending).toBe(1);
+    } finally {
+      await BINDINGS.DB.prepare("ALTER TABLE public_workroom_index_away RENAME TO public_workroom_index").run();
+    }
+    await drain(id);
+    expect((await due(id))[0].pending).toBe(0);
+    expect((await indexRow(id)).listed).toBe(1);
   });
 });

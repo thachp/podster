@@ -354,3 +354,75 @@ pub(super) fn handle_set_topic(
     }
     Ok(json!({ "topic": new }))
 }
+
+/// What the drain writes, as JSON, so it can tell whether anything changed since the last write.
+fn index_json(row: &podster_policy::public::PublicIndexRow) -> Value {
+    json!({
+        "listed": row.listed, "public_handle": row.public_handle, "topic": row.topic.map(Topic::name),
+        "has_open_opening": row.has_open_opening, "published_at": row.published_at,
+    })
+}
+
+/// Writes the room's discovery row to `public_workroom_index` when an event marked it due (M4 step 6). The row is the room as
+/// it stands, written with the newest `seq`, and D1 keeps a row only if its `seq` is newer, so a late or repeated write can't
+/// restore an older one. A row that hasn't changed since the last write costs nothing. A failure leaves it due for the
+/// next alarm. Logs carry the room's ID only.
+pub(super) async fn drain_public_index(sql: &SqlStorage, db: &D1Database) -> R<()> {
+    if !store::is_initialized(sql)? || store::needs_migration(sql)? {
+        return Ok(());
+    }
+    let Some(due) = rows(
+        sql,
+        "SELECT seq, written FROM public_index_outbox WHERE pending = 1",
+        vec![],
+    )?
+    .into_iter()
+    .next() else {
+        return Ok(());
+    };
+    let seq = int(&due["seq"]);
+    let state = room_state(sql)?;
+    let row = podster_policy::public::index_row(&state);
+    let json = index_json(&row).to_string();
+    if due["written"].as_str() != Some(json.as_str()) {
+        let args: Vec<JsValue> = vec![
+            state.room.workspace_id.as_str().into(),
+            row.public_handle
+                .as_deref()
+                .map_or(JsValue::NULL, JsValue::from),
+            row.topic
+                .map(Topic::name)
+                .map_or(JsValue::NULL, JsValue::from),
+            JsValue::from_f64(f64::from(u8::from(row.has_open_opening))),
+            row.published_at
+                .map_or(JsValue::NULL, |at| JsValue::from_f64(at as f64)),
+            JsValue::from_f64(f64::from(u8::from(row.listed))),
+            JsValue::from_f64(seq as f64),
+        ];
+        db.prepare("INSERT INTO public_workroom_index (workspace_id, public_handle, topic, has_open_opening, published_at, listed, updated_seq) VALUES (?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT (workspace_id) DO UPDATE SET public_handle = excluded.public_handle, topic = excluded.topic, has_open_opening = excluded.has_open_opening,
+                published_at = excluded.published_at, listed = excluded.listed, updated_seq = excluded.updated_seq
+              WHERE excluded.updated_seq > public_workroom_index.updated_seq")
+            .bind(&args)?
+            .run()
+            .await?;
+    }
+    // Only if nothing newer came in while the write was out: otherwise it stays due, and the next alarm writes that.
+    exec(
+        sql,
+        "UPDATE public_index_outbox SET pending = 0, written = ? WHERE seq = ?",
+        vec![json.as_str().into(), seq.into()],
+    )
+}
+
+/// Whether the discovery row is due, for the alarm.
+pub(super) fn public_index_due(sql: &SqlStorage) -> R<bool> {
+    Ok(store::is_initialized(sql)?
+        && !store::needs_migration(sql)?
+        && !rows(
+            sql,
+            "SELECT seq FROM public_index_outbox WHERE pending = 1",
+            vec![],
+        )?
+        .is_empty())
+}

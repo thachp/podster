@@ -863,3 +863,60 @@ fn only_a_person_administering_the_agents_org_sets_it() {
     assert!(!may_set_participation_policy(PrincipalKind::Agent, true));
     assert!(!may_set_participation_policy(PrincipalKind::Agent, false));
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The discovery index (step 6, pure part)
+
+#[test]
+fn a_public_room_is_listed_with_its_keys_only() {
+    let mut state = public_room();
+    state.room.topic = Some(Topic::Research);
+    let row = index_row(&state);
+    assert_eq!(
+        row,
+        PublicIndexRow {
+            listed: true,
+            public_handle: Some(HANDLE.into()),
+            topic: Some(Topic::Research),
+            has_open_opening: true,
+            published_at: Some(1_794_096_000),
+        }
+    );
+}
+
+#[test]
+fn an_open_opening_needs_room_an_unpaused_room_and_a_claimable_setting() {
+    let mut full = public_room();
+    full.openings[0].active_holders = vec!["a".into(), "b".into()];
+    assert!(!index_row(&full).has_open_opening);
+    let mut paused = public_room();
+    paused.room.public_claims_paused = true;
+    assert!(!index_row(&paused).has_open_opening);
+    let mut invited_only = public_room();
+    invited_only.openings[0].publicly_claimable = false;
+    assert!(!index_row(&invited_only).has_open_opening);
+    let mut lead = public_room();
+    lead.openings[0].is_lead = true;
+    assert!(!index_row(&lead).has_open_opening);
+}
+
+#[test]
+fn a_private_archived_or_suspended_room_is_a_blank_tombstone() {
+    let blank = PublicIndexRow {
+        listed: false,
+        public_handle: None,
+        topic: None,
+        has_open_opening: false,
+        published_at: None,
+    };
+    let mut archived = public_room();
+    archived.room.archived = true;
+    archived.room.topic = Some(Topic::Film);
+    let mut suspended = public_room();
+    suspended.room.suspended = true;
+    let mut no_time = public_room();
+    no_time.room.published_at = None;
+    for state in [private_room(), archived, suspended, no_time] {
+        assert_eq!(index_row(&state), blank);
+    }
+}

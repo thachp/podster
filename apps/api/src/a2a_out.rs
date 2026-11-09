@@ -19,7 +19,8 @@ use futures_util::{
     StreamExt,
 };
 use podster_core::a2a::{
-    offer_text, valid_remote_task_id, MAX_REMOTE_ARTIFACTS, MAX_REMOTE_PARTS, MAX_REMOTE_TEXT_BYTES,
+    offer_text_with_files, valid_remote_task_id, InputFile, MAX_REMOTE_ARTIFACTS, MAX_REMOTE_PARTS,
+    MAX_REMOTE_TEXT_BYTES,
 };
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -188,11 +189,41 @@ async fn send(url: &str, secret: &str, token: Option<&str>, body: &str) -> Sent 
 }
 
 /// The exact JSON-RPC body: one text part, and the A2A task ID and attempt as metadata.
-fn request_body(ws: &str, attempt: &str, task: &Value, link: Option<&str>) -> String {
-    let text = offer_text(
+fn request_body(
+    ws: &str,
+    attempt: &str,
+    task: &Value,
+    link: Option<&str>,
+    gateway: Option<&str>,
+) -> String {
+    // Input files are Podster links on the gateway, opened with the agent's own credential. Never bytes, never a public URL.
+    let listed = task["files"].as_array().cloned().unwrap_or_default();
+    let links: Vec<Option<String>> = listed
+        .iter()
+        .map(|f| match (gateway, f["download_path"].as_str()) {
+            (Some(gateway), Some(path)) => Some(format!("{gateway}{path}")),
+            _ => None,
+        })
+        .collect();
+    let files: Vec<InputFile> = listed
+        .iter()
+        .zip(&links)
+        .map(|(f, link)| InputFile {
+            id: f["id"].as_str().unwrap_or_default(),
+            name: f["name"].as_str().unwrap_or_default(),
+            link: link.as_deref(),
+        })
+        .collect();
+    // The host the links are on, named in the offer as the only place to send the download credential.
+    let host = gateway
+        .and_then(|g| g.split("://").nth(1))
+        .map(|rest| rest.split('/').next().unwrap_or(rest));
+    let text = offer_text_with_files(
         task["title"].as_str().unwrap_or_default(),
         task["instructions"].as_str().unwrap_or_default(),
         task["acceptance_criteria"].as_str(),
+        &files,
+        host,
         link,
     );
     let task_id = task["task_id"].as_str().unwrap_or_default();
@@ -208,6 +239,13 @@ fn request_body(ws: &str, attempt: &str, task: &Value, link: Option<&str>) -> St
         },
     })
     .to_string()
+}
+
+/// The gateway's public address, where an agent downloads a file with its own credential, if the API knows it.
+fn gateway_url(env: &Env) -> Option<String> {
+    let base = env.var("GATEWAY_URL").ok()?.to_string();
+    let base = base.trim_end_matches('/').to_string();
+    (base.starts_with("https://") || base.starts_with("http://")).then_some(base)
 }
 
 /// The room's task page, if the API knows the application's address. A link the agent opens needs its own sign-in.
@@ -286,7 +324,13 @@ pub async fn process(env: &Env, job: &Value) -> R<Outcome> {
     }
     let url = claim["url"].as_str().unwrap_or_default();
     let version = claim["version"].as_u64().unwrap_or(0);
-    let body = request_body(ws, attempt, &begun, link(env, ws).as_deref());
+    let body = request_body(
+        ws,
+        attempt,
+        &begun,
+        link(env, ws).as_deref(),
+        gateway_url(env).as_deref(),
+    );
     let sent = send(
         url,
         claim["signing_secret"].as_str().unwrap_or_default(),
@@ -338,6 +382,38 @@ fn texts_of(parts: &Value) -> Option<String> {
     (text.len() <= MAX_REMOTE_TEXT_BYTES).then_some(text)
 }
 
+/// A message's URL parts, appended to its text as external links, one a line (M3 step 14, decision 121). Only a URL that passes
+/// the same check as a submission's links is kept, and nothing is ever fetched. The link is the URL alone, so a label the
+/// remote wrote can't dress it up.
+fn with_links(text: String, parts: &Value) -> String {
+    let links: Vec<&str> = parts
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p["url"].as_str())
+        .filter(|uri| {
+            podster_core::require_artifact(&podster_core::Artifact {
+                uri: uri.to_string(),
+                label: "Link".to_string(),
+            })
+            .is_ok()
+        })
+        .collect();
+    if links.is_empty() {
+        return text;
+    }
+    let listed = links
+        .iter()
+        .map(|uri| format!("Link from the agent: {uri}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() {
+        listed
+    } else {
+        format!("{text}\n\n{listed}")
+    }
+}
+
 /// What Podster keeps of a `GetTask` answer: the task's ID and state, its status message's text, and its artifacts' text as
 /// a note and URL parts as links. It's data. `None` if it isn't a task, or anything is past a cap.
 fn remote_of(body: &Value) -> Option<Value> {
@@ -362,10 +438,11 @@ fn remote_of(body: &Value) -> Option<Value> {
     {
         return None;
     }
-    let (message, message_too_long) = match texts_of(status_parts) {
-        Some(text) => (text, false),
-        None => (String::new(), true),
-    };
+    let (message, message_too_long) =
+        match texts_of(status_parts).map(|text| with_links(text, status_parts)) {
+            Some(text) if text.len() <= MAX_REMOTE_TEXT_BYTES => (text, false),
+            _ => (String::new(), true),
+        };
     let artifacts = match &result["artifacts"] {
         Value::Null => vec![],
         Value::Array(items) if items.len() <= MAX_REMOTE_ARTIFACTS => items.clone(),

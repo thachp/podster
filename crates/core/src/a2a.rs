@@ -413,14 +413,108 @@ pub fn offer_text(
     criteria: Option<&str>,
     link: Option<&str>,
 ) -> String {
+    offer_text_with_files(title, instructions, criteria, &[], None, link)
+}
+
+/// One input file an offer names (M3 step 14, decision 121): its name, its ID, and a Podster link that needs the agent's own
+/// credential to open, or none when it can't be downloaded yet. Never bytes, and never a public URL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InputFile<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub link: Option<&'a str>,
+}
+
+/// At most this much of an offer goes to its list of input files. Past it, the rest are counted, not listed.
+pub const MAX_FILES_SECTION_BYTES: usize = 4 * 1024;
+
+/// The longest file name an offer shows, in characters. Longer ones are cut, with an ellipsis.
+pub const MAX_OFFER_FILE_NAME_CHARS: usize = 120;
+
+/// A file name as an offer shows it: the uploader's text, kept to one plain line. Control characters, line and paragraph
+/// separators and bidi controls become spaces, a double quote becomes a single one so the name can't close its quotes, and
+/// it's cut to [`MAX_OFFER_FILE_NAME_CHARS`].
+pub fn offer_file_name(name: &str) -> String {
+    let hidden = |c: char| {
+        c.is_control()
+            || matches!(c, '\u{2028}' | '\u{2029}' | '\u{0085}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    };
+    let clean: String = name
+        .chars()
+        .map(|c| {
+            if hidden(c) {
+                ' '
+            } else if c == '"' {
+                '\''
+            } else {
+                c
+            }
+        })
+        .collect();
+    if clean.chars().count() > MAX_OFFER_FILE_NAME_CHARS {
+        clean
+            .chars()
+            .take(MAX_OFFER_FILE_NAME_CHARS - 1)
+            .chain(['…'])
+            .collect()
+    } else {
+        clean
+    }
+}
+
+/// The input-file list. Each line puts Podster's link first and the name after it, in quotes, so a name can't pose as the
+/// link. `host` is where the links are, the only place the agent should send its credential. An `/a2a` token isn't one of
+/// the credentials that work there (ADR 0007, audiences).
+fn files_section(files: &[InputFile<'_>], host: Option<&str>) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let at = host.map_or("the Podster gateway".to_string(), |host| host.to_string());
+    let mut section = format!(
+        "\n\n## Input files\n\nDownload each link with your agent's MCP OAuth token, the one you use at /mcp, or an Agent Auth token, \
+         as `Authorization: Bearer`. Send it only to {at}. A token for /a2a isn't accepted for downloads.\n"
+    );
+    let mut listed = 0;
+    for file in files {
+        let name = offer_file_name(file.name);
+        let line = match file.link {
+            Some(link) => format!("\n- {link} \"{name}\" ({})", file.id),
+            None => format!("\n- not ready yet: \"{name}\" ({})", file.id),
+        };
+        if section.len() + line.len() > MAX_FILES_SECTION_BYTES {
+            break;
+        }
+        section.push_str(&line);
+        listed += 1;
+    }
+    if listed < files.len() {
+        section.push_str(&format!(
+            "\n- and {} more, listed on the task",
+            files.len() - listed
+        ));
+    }
+    section
+}
+
+/// [`offer_text`] with the task's input files listed after the task's own text. The list and the link are kept whole, and
+/// only the task's text is cut to fit.
+pub fn offer_text_with_files(
+    title: &str,
+    instructions: &str,
+    criteria: Option<&str>,
+    files: &[InputFile<'_>],
+    files_host: Option<&str>,
+    link: Option<&str>,
+) -> String {
     let mut body = format!("# {title}\n\n{instructions}");
     if let Some(criteria) = criteria.filter(|c| !c.trim().is_empty()) {
         body.push_str("\n\n## Acceptance criteria\n\n");
         body.push_str(criteria);
     }
-    let tail = link
-        .map(|link| format!("\n\nOn Podster: {link}"))
-        .unwrap_or_default();
+    let tail = files_section(files, files_host)
+        + &link
+            .map(|link| format!("\n\nOn Podster: {link}"))
+            .unwrap_or_default();
     let room = MAX_OFFER_TEXT_BYTES.saturating_sub(tail.len());
     if body.len() > room {
         let mut cut = room;

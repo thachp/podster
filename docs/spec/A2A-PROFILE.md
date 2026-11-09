@@ -74,7 +74,8 @@ Since step 9. `SendMessage` posts to an existing task's thread, through the same
 - **Who may post** is the room's call. A task the caller can't see answers `TaskNotFoundError` before anything else, as a missing one does.
 - **A finished task** takes no more A2A messages (spec 3.1.1). Rust refuses one once a task is completed or canceled, and it answers `UnsupportedOperationError`. Messages over MCP aren't affected. A room that's archived answers the same way.
 - **Retries:** `messageId` is the idempotency key, as `a2a-msg:<messageId>`, scoped by the API to the caller in the task's room. A retry with the same task and text posts nothing new and answers as the first did. The same `messageId` for other text or another task in the same room is refused. Each room keeps its own records, so a `messageId` is unique per task's room: the same one sent to a task in another room posts there too. Records last as long as the API keeps idempotency records. A `messageId` is 1 to 200 printable characters with no spaces.
-- **Limits:** text parts only, 1 to 8 of them, joined by a blank line, and 16 KB in all ([decision 123](PRODUCT.md#decisions-needed)). URL, file and data parts are refused. Podster never fetches a reference ([decision 121](PRODUCT.md#decisions-needed)), and step 14 makes a URL an external link.
+- **Limits:** text and URL parts only, 1 to 8 of them, joined by a blank line, and 16 KB in all ([decision 123](PRODUCT.md#decisions-needed)). Inline bytes (`raw`) and data parts are refused.
+- **URL parts** become external links in the text: a line `Link from the client: <url>`, the URL alone, so a part's file name or label can't dress it up. Podster never fetches it ([decision 121](PRODUCT.md#decisions-needed)). A URL must be `https`, with a host, no credentials and no spaces, at most 2 KB, which is the same rule a submission's links follow. Otherwise the message is refused. To send a file's bytes, upload it with `create_upload`.
 - **Dropped, never read:** the message's `metadata`, `extensions` and `referenceTaskIds`, and the request's own `metadata`. `role` must be `ROLE_USER`. Every `podster.dev/*` key in what Podster returns is Podster's.
 - **`returnImmediately`** changes nothing, because Podster never waits on work. `configuration.historyLength` cuts the history returned.
 
@@ -90,7 +91,7 @@ Since step 10 ([decision 113](PRODUCT.md#decisions-needed)). Plain A2A has no ac
 | `podster.lifecycle.v1.AcceptTask` | `accept_task` | `id`, `version`, `requestId`, and an optional `reason` |
 | `podster.lifecycle.v1.DeclineTask` | `decline_task` | `id`, `version`, `requestId`, `reason` |
 | `podster.lifecycle.v1.ReleaseTask` | `release_task` | `id`, `version`, `requestId`, `reason` |
-| `podster.lifecycle.v1.SubmitTask` | `submit_task` | `id`, `version`, `requestId`, and an optional `note` and `artifacts` |
+| `podster.lifecycle.v1.SubmitTask` | `submit_task` | `id`, `version`, `requestId`, and an optional `note`, `artifacts` and `files` |
 
 - **Parameters:**
   - `id` is the task's A2A ID.
@@ -98,7 +99,8 @@ Since step 10 ([decision 113](PRODUCT.md#decisions-needed)). Plain A2A has no ac
   - `requestId` is the idempotency key, as `a2a-lc:<requestId>`, scoped to the caller in the task's room, and apart from messages' keys: 1 to 200 printable characters with no spaces. A retry with the same parameters does nothing new, and the same `requestId` for anything else is refused.
   - `reason` is 1 to 4 KB of text.
   - `note` is up to 16 KB.
-  - `artifacts` is up to 10 links of `{ uri, label }`. Files come with step 14.
+  - `artifacts` is up to 10 links of `{ uri, label }`.
+  - `files` is up to 10 of `{ id, label? }`. Each names an upload the agent made with `create_upload` and `task_id`, over MCP as the same agent, and which has scanned as ready. M2's rules decide them: the uploader, the task, the state, at most 10 links and files together, and each file pinned to its hash. A file the API refuses answers `RequestMalformedError` naming its code, such as `file_not_ready` or `file_not_found`, never `TaskNotFoundError`, because the task was already found.
   - Any other parameter is refused, so nothing a client adds is read for meaning.
 - **Answers:** the task, as `GetTask` reads it afterwards. If the command leaves the caller unable to see the task, as a decline does, the answer is the task as the command left it, with no history.
 - **Refusals:**
@@ -111,9 +113,17 @@ Since step 10 ([decision 113](PRODUCT.md#decisions-needed)). Plain A2A has no ac
 
 ## What's planned, from ADR 0007
 
-None of this is built yet:
+Not built yet. Outbound offers (step 12), reading back (step 13) and files (step 14) are in ADR 0007's "as built" notes.
 
-- **Outbound:** offers go to a registered endpoint under ADR 0007's rules for outbound offers.
+- **`request_changes` out** (step 13b): a change request on a completed remote task, sent as a new A2A task.
+
+## Files
+
+Following [decision 121](PRODUCT.md#decisions-needed):
+- **Podster never fetches a file a remote agent names.** It never takes inline bytes, and never hands out a public URL.
+- **Inbound:** bytes come only through `create_upload`, and `SubmitTask` names them. URL parts are kept as external links.
+- **Outbound:** an offer's text lists the task's input files that the agent can see: each ready file with a gateway download link first, then its quoted name and ID, and each one still scanning without a link. Blocked, failed and removed files aren't listed. The link opens with the agent's MCP OAuth token or an Agent Auth token, sent only to the gateway's host. An `/a2a` token isn't accepted there yet. `GET /a2a/files/{workspace}/{file}`, for `/a2a` tokens, is owed before M3's gate.
+- **Read back:** a remote task's artifact URL parts become a submission's links, after the same check. A status message's URL parts become links in the thread message, and a URL that fails the check is dropped.
 
 ## How it's been tested
 

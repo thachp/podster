@@ -17,6 +17,13 @@ export const MAX_PARTS = 8;
 const MESSAGE_ID = /^[\x21-\x7e]{1,200}$/;
 export const idempotencyKey = (messageId: string) => `a2a-msg:${messageId}`;
 
+/** A link Podster will keep, by the same rule as a submission's links in `crates/core`: `https`, a host, no credentials. */
+export function externalLink(uri: unknown): uri is string {
+  if (typeof uri !== "string" || new TextEncoder().encode(uri).length > 2048 || /[\s\p{Cc}]/u.test(uri) || !uri.startsWith("https://")) return false;
+  const host = uri.slice("https://".length).split(/[/?#]/)[0] ?? "";
+  return host !== "" && !host.includes("@");
+}
+
 /** The thread text a message carries. Every other field of the message is dropped, never read for meaning. */
 function textOf(params: SendMessageRequest): { messageId: string; taskId: string; text: string } {
   const message = params.message;
@@ -29,10 +36,14 @@ function textOf(params: SendMessageRequest): { messageId: string; taskId: string
   const parts = message.parts ?? [];
   if (parts.length === 0 || parts.length > MAX_PARTS) throw new RequestMalformedError(`A message has 1 to ${MAX_PARTS} parts.`);
   const texts = parts.map((p) => {
-    // Decision 121: Podster never fetches a file reference, and inline bytes are refused. A URL becomes an external link
-    // only with step 14, so for now any part that isn't text is refused.
-    if (p.content?.$case !== "text") throw new RequestMalformedError("Only text parts are accepted.");
-    return p.content.value;
+    // Decision 121: Podster never fetches a file reference, and inline bytes are refused. A URL is kept as an external link
+    // in the text, the URL alone, so nothing the client labels it with dresses it up.
+    if (p.content?.$case === "text") return p.content.value;
+    if (p.content?.$case === "url") {
+      if (!externalLink(p.content.value)) throw new RequestMalformedError("A url part is an https URL with a host and no credentials or spaces, of at most 2048 bytes.");
+      return `Link from the client: ${p.content.value}`;
+    }
+    throw new RequestMalformedError("Only text and url parts are accepted. Upload a file with create_upload instead.");
   });
   const text = texts.join("\n\n");
   if (text.trim() === "") throw new RequestMalformedError("A message needs some text.");

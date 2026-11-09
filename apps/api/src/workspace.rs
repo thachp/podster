@@ -4134,30 +4134,34 @@ impl Workspace {
                     visibility::handle_set_visibility(sql, who, &body, public_rooms, now)
                 },
             ),
-            (Method::Put, ["public-claims"]) => self.command(
+            // A stored answer is replayed only to a caller who may still manage the room.
+            (Method::Put, ["public-claims"]) => self.command_checked(
                 &identity,
                 key,
                 hash,
                 stops_when_archived,
                 test_fail,
+                |_: &SqlStorage, who: &Participant| public_claims::may_manage(&who.caller),
                 move |sql, who, now| public_claims::handle_pause(sql, &who.caller, &body, now),
             ),
-            (Method::Post, ["public-claims", "end"]) => self.command(
+            (Method::Post, ["public-claims", "end"]) => self.command_checked(
                 &identity,
                 key,
                 hash,
                 stops_when_archived,
                 test_fail,
+                |_: &SqlStorage, who: &Participant| public_claims::may_manage(&who.caller),
                 move |sql, who, now| public_claims::handle_end(sql, &who.caller, &body, now),
             ),
             (Method::Put, ["public-claims", "blocked-orgs", org]) => {
                 let org = (*org).to_string();
-                self.command(
+                self.command_checked(
                     &identity,
                     key,
                     hash,
                     stops_when_archived,
                     test_fail,
+                    |_: &SqlStorage, who: &Participant| public_claims::may_manage(&who.caller),
                     move |sql, who, now| {
                         public_claims::handle_block(sql, &who.caller, &org, true, &body, now)
                     },
@@ -4165,12 +4169,13 @@ impl Workspace {
             }
             (Method::Delete, ["public-claims", "blocked-orgs", org]) => {
                 let org = (*org).to_string();
-                self.command(
+                self.command_checked(
                     &identity,
                     key,
                     hash,
                     stops_when_archived,
                     test_fail,
+                    |_: &SqlStorage, who: &Participant| public_claims::may_manage(&who.caller),
                     move |sql, who, now| {
                         public_claims::handle_block(sql, &who.caller, &org, false, &body, now)
                     },

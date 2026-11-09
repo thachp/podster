@@ -443,6 +443,12 @@ fn paused(sql: &SqlStorage) -> R<bool> {
     )
 }
 
+/// Whether the caller may manage public claims here now: the owner or a human admin. Checked again before a stored
+/// answer is replayed, so one demoted since can't replay it.
+pub(super) fn may_manage(caller: &Caller) -> R<()> {
+    ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageRoom))
+}
+
 /// `GET public-claims`: what the owner sees of public claims here, for the owner and human admins.
 pub(super) fn read(sql: &SqlStorage, caller: &Caller, now: i64) -> R<Value> {
     ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ManageRoom))?;

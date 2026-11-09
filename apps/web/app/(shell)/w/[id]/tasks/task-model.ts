@@ -34,7 +34,8 @@ export function summaryOf(task: TaskSummary): TaskSummary {
 }
 
 export type From = { id: string; org: string };
-export type Message = { id: string; from: From; external: boolean; body: string; created_at: number };
+/** `origin` is `a2a_remote` when the agent's own A2A endpoint reported it and Podster posted it (M3 step 13). It's still the agent's content. */
+export type Message = { id: string; from: From; external: boolean; body: string; created_at: number; origin?: string | null };
 export type Artifact = { id: string; submission_no: number; uri: string; label: string; from: From; external: boolean; created_at: number };
 /**
  * A stored file on a submission, as the task read lists it. `sha256` and `size` are what the submission pinned, and `state` is
@@ -44,7 +45,7 @@ export type Artifact = { id: string; submission_no: number; uri: string; label: 
  */
 export type TaskFile = { id: string; submitted?: boolean; submission_no: number | null; label?: string | null; name: string | null; size?: number; sha256?: string; media_type?: string | null; state: string | null; download_path: string | null; from?: From; external?: boolean; created_at?: number };
 export type Submission = { submission_no: number; task_version: number; note: string | null; commit_sha: string | null; from: From; external: boolean; created_at: number };
-export type HistoryEvent = { id: string; type: string; from: From; external: boolean; reason: string | null; prior_status: string | null; new_status: string | null; task_version: number | null; created_at: number };
+export type HistoryEvent = { id: string; type: string; from: From; external: boolean; reason: string | null; prior_status: string | null; new_status: string | null; task_version: number | null; created_at: number; origin?: string | null };
 /** What the viewer's access leaves out of this read. Without it, empty lists can't be told from a task with nothing in them. */
 export type TaskVisibility = { submissions: "all" | "own"; conversation: boolean };
 /** The expected output a task works toward. `removed` means it was removed since the task named it. */
@@ -116,7 +117,14 @@ const VERBS: Record<string, string> = {
   "task.needs_attention": "recorded that someone left, so the task needs a new reviewer or requester",
   "task.message": "posted a message",
   "task.output_changed": "changed the expected output",
+  // From the agent's A2A endpoint, read back by Podster (M3 step 13). Each is recorded, and none is a decision.
+  "task.a2a_response_held": "reported a finished result through its A2A endpoint before accepting, so it's held, not submitted",
+  "task.a2a_remote_canceled": "reported through its A2A endpoint that it canceled its side. This task is unchanged",
+  "task.a2a_remote_failed": "reported through its A2A endpoint that the work failed. The submission is still for the reviewer to decide",
 };
+
+/** Whether Podster posted this from what the agent's own A2A endpoint reported. */
+export const viaA2a = (item: { origin?: string | null }) => item.origin === "a2a_remote";
 
 /** An edit to the instructions or criteria of an accepted task (decision 4). It's recorded as an offer, and no actual offer starts from `accepted`. */
 const isReofferingEdit = (event: Pick<HistoryEvent, "type" | "prior_status">) => event.type === "task.offered" && event.prior_status === "accepted";

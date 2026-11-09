@@ -9,6 +9,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Button } from "@/components/ui/button";
 import { clientCommand, clientQuery } from "@/lib/gateway/client";
 import type { GatewayResult } from "@/lib/gateway/result";
+import { A2aEndpointSection } from "./a2a-endpoint";
 import { ConnectionBadge } from "./connection-badge";
 import { InboxOversight, readInbox } from "./inbox-oversight";
 import { announceStatus, announceWithdrawn, oversightPath, wakeHost, wakeLabel, type AgentConnection, type AgentRoom, type InboxPage } from "./model";
@@ -214,6 +215,8 @@ function AgentDetails({ api, organization, description }: { api: SheetApi<AgentD
           </div>
         ) : null}
       </section>
+
+      <A2aEndpointSection name={name} endpoint={agent.a2a_endpoint} active={active} saving={saving} run={run as SheetApi<unknown>["run"]} onUnconfirmed={() => setUnconfirmed(true)} />
 
       {description === null ? (
         <p role="alert" className="text-sm">

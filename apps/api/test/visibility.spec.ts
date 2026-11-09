@@ -613,3 +613,68 @@ describe("the deeper review's checks", () => {
     expect((await preview(id)).body.published_on).toBe(done.body.published_on);
   });
 });
+
+// M4 step 12: the discovery-index reconcile step 6's review asked for. A row lost from D1 while the room's cached copy still
+// matches is written again within the check's interval, without any public change.
+describe("the discovery-index reconcile", () => {
+  const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
+  const drain = async (id: string) => {
+    for (let n = 0; n < 5; n++) await runDurableObjectAlarm(stub(id));
+  };
+  const indexRow = async (id: string) => BINDINGS.DB.prepare("SELECT * FROM public_workroom_index WHERE workspace_id = ?").bind(id).first();
+  const KEY = "public_index_verified_at";
+  const SIX_HOURS = 6 * 60 * 60 * 1000;
+  const checkedAt = (id: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.get(KEY));
+  /** Makes the last check older than the interval, and makes sure an alarm is set to run it. */
+  const age = (id: string) =>
+    runInDurableObject(stub(id), async (_: any, state: any) => {
+      await state.storage.put(KEY, Date.now() - SIX_HOURS - 1);
+      await state.storage.setAlarm(Date.now() + 60_000);
+    });
+
+  it("writes a lost row again once the check is due, and not before", async () => {
+    const id = await room();
+    const published = (await publish(id)).body;
+    await drain(id);
+    expect(await indexRow(id)).toMatchObject({ public_handle: published.public_handle, resolvable: 1 });
+    expect(typeof (await checkedAt(id))).toBe("number");
+    await BINDINGS.DB.prepare("DELETE FROM public_workroom_index WHERE workspace_id = ?").bind(id).run();
+    // The room's alarm stays set for the next check.
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm())).not.toBeNull();
+    await drain(id);
+    expect(await indexRow(id)).toBeNull();
+    await age(id);
+    await drain(id);
+    expect(await indexRow(id)).toMatchObject({ public_handle: published.public_handle, resolvable: 1, listed: 1 });
+  });
+
+  it("rewrites a row older than the room's, and leaves a newer one to the seq guard", async () => {
+    const id = await room();
+    await publish(id);
+    await drain(id);
+    await BINDINGS.DB.prepare("UPDATE public_workroom_index SET updated_seq = 0, listed = 0 WHERE workspace_id = ?").bind(id).run();
+    await age(id);
+    await drain(id);
+    expect(await indexRow(id)).toMatchObject({ listed: 1 });
+    await BINDINGS.DB.prepare("UPDATE public_workroom_index SET updated_seq = 1000000, listed = 0 WHERE workspace_id = ?").bind(id).run();
+    await age(id);
+    await drain(id);
+    expect(await indexRow(id)).toMatchObject({ updated_seq: 1000000, listed: 0 });
+  });
+
+  it("keeps a private room's tombstone too, and checks nothing for a room never public", async () => {
+    const id = await room();
+    await publish(id);
+    await drain(id);
+    expect((await unpublish(id)).status).toBe(200);
+    await drain(id);
+    await BINDINGS.DB.prepare("DELETE FROM public_workroom_index WHERE workspace_id = ?").bind(id).run();
+    await age(id);
+    await drain(id);
+    expect(await indexRow(id)).toMatchObject({ resolvable: 0, listed: 0 });
+    const quiet = await room();
+    await api(OWNER, "PUT", `/v1/workspaces/${quiet}/topic`, { topic: "film" });
+    await drain(quiet);
+    expect(await checkedAt(quiet)).toBeUndefined();
+  });
+});

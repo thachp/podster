@@ -704,3 +704,78 @@ describe("owner controls in public rooms (M4 step 9)", () => {
     expect(ended.body.ended).toBe(1);
   });
 });
+
+// M4 step 12, decision 161: a public participant may hold at most 1 GB of the room's files, beside the room's 5 GB.
+describe("a public participant's share of the room's files", () => {
+  const sha = async (data: Uint8Array) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", data))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const DATA = new TextEncoder().encode("count");
+
+  /** A public room whose claimant holds an accepted task, and already holds `held` bytes of the room's files. */
+  async function claimantWithTask(held: number) {
+    const room = await publicRoom();
+    const taker = await agent();
+    expect((await claim(taker, room.handle, room.role)).status).toBe(200);
+    const task = await api(OWNER, "POST", `/v1/workspaces/${room.id}/tasks`, { title: "Count", instructions: "Count the fish.", assignee: taker.id });
+    expect(task.status, task.text).toBe(200);
+    const accepted = await api(taker, "POST", `/v1/workspaces/${room.id}/tasks/${task.body.id}/accept`, { version: 1 });
+    expect(accepted.status, accepted.text).toBe(200);
+    // What it already holds: a kept file of that size, without sending its bytes.
+    await keep(room.id, taker.id, held);
+    return { room, taker, task: task.body.id as string };
+  }
+  const keep = (room: string, who: string, size: number) =>
+    inRoom(room, (sql) =>
+      sql.exec(
+        "INSERT INTO stored_object (id, name, size, sha256, state, token_hash, uploaded_by, created_at, upload_expires_at) VALUES (?, 'kept.txt', ?, ?, 'ready', '', ?, ?, ?)",
+        `obj_kept_${crypto.randomUUID().replace(/-/g, "")}`, size, "0".repeat(64), who, Date.now(), Date.now(),
+      ),
+    );
+  const start = async (who: Who, room: string, task: string, size: number) =>
+    api(who, "POST", `/v1/workspaces/${room}/uploads`, { name: "notes.txt", size, sha256: size === DATA.length ? await sha(DATA) : "a".repeat(64), task_id: task });
+
+  it("lets it fill exactly 1 GB, counting uploads still arriving, and no more", async () => {
+    const { room, taker, task } = await claimantWithTask(950_000_000);
+    const over = await start(taker, room.id, task, 50_000_001);
+    expect(over.status, over.text).toBe(409);
+    expect(over.code).toBe("participant_quota_exceeded");
+    expect((await start(taker, room.id, task, 50_000_000)).status).toBe(200);
+    // The upload not yet arrived holds its space.
+    const next = await start(taker, room.id, task, 1);
+    expect(next.code).toBe("participant_quota_exceeded");
+  });
+
+  it("checks again when the bytes arrive, as the room's quota is", async () => {
+    const { room, taker, task } = await claimantWithTask(1_000_000_000 - DATA.length);
+    const made = await start(taker, room.id, task, DATA.length);
+    expect(made.status, made.text).toBe(200);
+    // Something else of its arrives first, so this one no longer fits.
+    await keep(room.id, taker.id, 1);
+    const sent = await SELF.fetch(`https://api.internal${made.body.upload_path}`, { method: "PUT", headers: { authorization: `Bearer ${made.body.token}` }, body: DATA as any });
+    const body = await sent.json<any>();
+    expect(sent.status).toBe(409);
+    expect(body.error.code).toBe("participant_quota_exceeded");
+  });
+
+  it("doesn't limit one the owner has given another role, or anyone else", async () => {
+    const { room, taker, task } = await claimantWithTask(1_000_000_000);
+    expect((await start(taker, room.id, task, 1)).code).toBe("participant_quota_exceeded");
+    const promoted = await api(OWNER, "POST", `/v1/workspaces/${room.id}/members/${taker.id}/role`, { role: "member", policy_version: await version(room.id) });
+    expect(promoted.status, promoted.text).toBe(200);
+    expect((await start(taker, room.id, task, 1)).status).toBe(200);
+  });
+});
+
+// M4 step 12: a publish's stored answer is replayed only to someone who may still manage the room.
+describe("replaying a visibility change", () => {
+  it("refuses a stored answer to an admin who has since lost the role", async () => {
+    const room = await publicRoom();
+    const key = `vis-${crypto.randomUUID()}`;
+    const first = await api(ADMIN, "PUT", `/v1/workspaces/${room.id}/visibility`, { visibility: "private" }, { key });
+    expect(first.status, first.text).toBe(200);
+    const demoted = await api(OWNER, "POST", `/v1/workspaces/${room.id}/members/${ADMIN.id}/role`, { role: "member", policy_version: await version(room.id) }, { claims: { target_member: { person: ADMIN.id, orgs: { [ORG]: 1 } } } });
+    expect(demoted.status, demoted.text).toBe(200);
+    const again = await api(ADMIN, "PUT", `/v1/workspaces/${room.id}/visibility`, { visibility: "private" }, { key });
+    expect(again.status).toBe(403);
+    expect(again.body?.visibility).toBeUndefined();
+  });
+});

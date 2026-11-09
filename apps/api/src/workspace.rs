@@ -3252,6 +3252,50 @@ impl Workspace {
 
     /// Schedules the alarm for whatever is due next, moving it earlier if needed. Never later: a pending alarm that
     /// finds nothing to do costs nothing, and a missed one would strand events.
+    /// When the room last checked its discovery row. A read that fails counts as never, so it checks again.
+    async fn index_verified_at(&self) -> Option<i64> {
+        self.state
+            .storage()
+            .get::<i64>(visibility::INDEX_VERIFIED_KEY)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// The discovery-index reconcile, when it's due. A failure leaves the time unrecorded, so the next alarm tries again, and
+    /// logs the error code and the room's ID only.
+    async fn verify_public_index(&self, sql: &SqlStorage) {
+        let now = Date::now().as_millis() as i64;
+        if !matches!(visibility::index_verify_due(sql, self.index_verified_at().await), Ok(Some(due)) if due <= now)
+        {
+            return;
+        }
+        let checked = match self.env.d1("DB") {
+            Ok(db) => visibility::verify_public_index(sql, &db).await,
+            Err(error) => Err(error.into()),
+        };
+        match checked {
+            Ok(()) => {
+                if let Err(error) = self
+                    .state
+                    .storage()
+                    .put(visibility::INDEX_VERIFIED_KEY, now)
+                    .await
+                {
+                    console_error!("couldn't record the index check: {:?}", error);
+                }
+            }
+            Err(error) => {
+                let room = objects::room_id(sql).unwrap_or_default();
+                console_error!(
+                    "public index check failed: room={} code={}",
+                    room,
+                    error.code().unwrap_or("internal_error")
+                );
+            }
+        }
+    }
+
     async fn arm(&self, index_failed: bool, outbox_failed: bool) -> R<()> {
         let sql = self.state.storage().sql();
         if !store::is_initialized(&sql)? {
@@ -3301,6 +3345,10 @@ impl Workspace {
             .transpose()?
             .flatten()
         {
+            let next = next.max(now + 10);
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
+        if let Some(next) = visibility::index_verify_due(&sql, self.index_verified_at().await)? {
             let next = next.max(now + 10);
             due = Some(due.map_or(next, |d| d.min(next)));
         }
@@ -4159,12 +4207,14 @@ impl Workspace {
                 test_fail,
                 move |sql, who, now| handle_change_access(sql, &who.caller, &target, &body, now),
             ),
-            (Method::Put, ["visibility"]) => self.command(
+            // A stored answer is the room's visibility read, so it's replayed only to someone who may still manage the room.
+            (Method::Put, ["visibility"]) => self.command_checked(
                 &identity,
                 key,
                 hash,
                 stops_when_archived,
                 test_fail,
+                |_: &SqlStorage, who: &Participant| public_claims::may_manage(&who.caller),
                 move |sql, who, now| {
                     visibility::handle_set_visibility(sql, who, &body, public_rooms, now)
                 },
@@ -4367,6 +4417,8 @@ impl DurableObject for Workspace {
             console_error!("index projection failed: {:?}", error);
         }
         let sql = self.state.storage().sql();
+        // The reconcile first, so a row it finds missing is written in this same alarm.
+        self.verify_public_index(&sql).await;
         let public_index = match self.env.d1("DB") {
             Ok(db) => visibility::drain_public_index(&sql, &db).await,
             Err(error) => Err(error.into()),

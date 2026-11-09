@@ -486,6 +486,59 @@ fn land_test_command(sql: &SqlStorage) -> R<()> {
     Ok(())
 }
 
+/// How often a room checks that its discovery row is still in D1 (M4 step 12, the reconcile step 6's review asked for). A
+/// row lost while the room's `written` copy still matches would otherwise never be written again, and the room would answer
+/// not-found to its public page and Explore until its next public change.
+pub(super) const INDEX_VERIFY_MS: i64 = 6 * 60 * 60 * 1000;
+/// Where the room keeps when it last checked, in its key-value storage, so the check needs no schema change.
+pub(super) const INDEX_VERIFIED_KEY: &str = "public_index_verified_at";
+
+/// When the room should next check its discovery row: only once it has one to keep, and not while a write is already due,
+/// which rewrites it anyway. A room that has never checked is due now.
+pub(super) fn index_verify_due(sql: &SqlStorage, verified_at: Option<i64>) -> R<Option<i64>> {
+    if !store::is_initialized(sql)? || store::needs_migration(sql)? {
+        return Ok(None);
+    }
+    let found = rows(sql, "SELECT pending FROM public_index_outbox", vec![])?;
+    Ok(match found.first() {
+        Some(row) if int(&row["pending"]) == 0 => {
+            Some(verified_at.unwrap_or(0).saturating_add(INDEX_VERIFY_MS))
+        }
+        _ => None,
+    })
+}
+
+/// Reads the room's discovery row from D1, and marks it due again if it's missing or older than what the room last wrote,
+/// clearing the cached copy so the next drain writes it in full. A row as new or newer is left alone: the seq guard decides
+/// between writes, as it always has.
+pub(super) async fn verify_public_index(sql: &SqlStorage, db: &D1Database) -> R<()> {
+    let Some(outbox) = rows(sql, "SELECT seq, pending FROM public_index_outbox", vec![])?
+        .into_iter()
+        .next()
+    else {
+        return Ok(());
+    };
+    if int(&outbox["pending"]) != 0 {
+        return Ok(());
+    }
+    let seq = int(&outbox["seq"]);
+    let room = super::objects::room_id(sql)?;
+    let found = db
+        .prepare("SELECT updated_seq FROM public_workroom_index WHERE workspace_id = ?")
+        .bind(&[room.as_str().into()])?
+        .first::<Value>(None)
+        .await?;
+    let behind = found.is_none_or(|row| row["updated_seq"].as_i64().unwrap_or(0) < seq);
+    if behind {
+        exec(
+            sql,
+            "UPDATE public_index_outbox SET pending = 1, written = NULL WHERE seq = ? AND pending = 0",
+            vec![seq.into()],
+        )?;
+    }
+    Ok(())
+}
+
 /// Whether the discovery row is due, for the alarm.
 pub(super) fn public_index_due(sql: &SqlStorage) -> R<bool> {
     Ok(store::is_initialized(sql)?

@@ -682,7 +682,9 @@ impl Workspace {
             })
         };
         if let Err(error) = taken {
+            // A pass that can't even take its turns rests like a failed send, or the alarm would come straight back.
             console_error!("couldn't take scan turns: {:?}", error.code());
+            self.scan_send_failed(&room_id(&sql).unwrap_or_default(), now);
             return;
         }
         let turns = out.take();
@@ -725,8 +727,11 @@ impl Workspace {
                 self.scan_send_failed(&room, now);
                 return;
             }
-            if let Err(error) = self.state.storage().put(&marker, now).await {
-                console_error!("couldn't record a scan sent again: {:?}", error);
+            if self.state.storage().put(&marker, now).await.is_err() {
+                // Sent, but with nothing to say so, the re-send would look pending again: rest first, as after a failure.
+                console_error!("scan.resend_mark_failed");
+                self.scan_send_failed(&room, now);
+                return;
             }
         }
         self.scan_send_failures.set(0);
@@ -771,16 +776,17 @@ impl Workspace {
                 continue;
             };
             let id = key.trim_start_matches(SCAN_RESENT_PREFIX);
-            let scanning = rows(
-                sql,
-                "SELECT 1 FROM stored_object WHERE id = ? AND state = 'scanning'",
-                vec![id.into()],
-            )
-            .is_ok_and(|r| !r.is_empty());
-            if !scanning {
-                if let Err(error) = self.state.storage().delete(&key).await {
-                    console_error!("couldn't clear a scan's re-send marker: {:?}", error);
-                }
+            // Only a file known to have settled loses its mark: a lookup that fails keeps it, so it's never sent a third time.
+            let settled = matches!(
+                rows(
+                    sql,
+                    "SELECT 1 FROM stored_object WHERE id = ? AND state = 'scanning'",
+                    vec![id.into()],
+                ),
+                Ok(found) if found.is_empty()
+            );
+            if settled && self.state.storage().delete(&key).await.is_err() {
+                console_error!("scan.resend_mark_clear_failed");
             }
         }
     }

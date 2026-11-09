@@ -1886,13 +1886,15 @@ describe("inbox", () => {
     await releaseOutbox(id);
     await runInDurableObject(stub(id), async (_: any, state: any) => {
       state.storage.sql.exec("UPDATE outbox SET next_attempt_at = ? WHERE recipient_principal_id = ?", Date.now() + 300_000, bob.id);
-      state.storage.sql.exec("UPDATE outbox SET next_attempt_at = ? WHERE recipient_principal_id = ?", Date.now() + 2000, carol.id);
+      // Far enough off that the alarm can't fire while the test reads it, under load too.
+      state.storage.sql.exec("UPDATE outbox SET next_attempt_at = ? WHERE recipient_principal_id = ?", Date.now() + 30_000, carol.id);
       await state.storage.setAlarm(Date.now() + 3_600_000);
     });
     // Any write schedules delivery, even one that's refused.
     expect((await api(OWNER, "POST", tasks, {})).status).toBeGreaterThanOrEqual(400);
     const alarm = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm());
-    expect(alarm).toBeLessThanOrEqual(Date.now() + 2500);
+    expect(alarm).not.toBeNull();
+    expect(alarm).toBeLessThanOrEqual(Date.now() + 30_500);
   });
 
   it("if the drain itself fails, it retries after a few seconds rather than in a loop", async () => {

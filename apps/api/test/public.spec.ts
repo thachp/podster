@@ -403,7 +403,14 @@ describe("Explore", () => {
   });
 
   it("refuses a cursor over 200 characters, and one sealed under another key", async () => {
-    const tooLong = "ab".repeat(101);
+    // A value sealed exactly as the API seals a cursor, under this deployment's own key, but over 200 characters.
+    const hexOf = (bytes: Uint8Array) => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const ownKey = await crypto.subtle.importKey("raw", Uint8Array.from(BINDINGS.EXPLORE_CURSOR_KEY.match(/../g).map((h: string) => parseInt(h, 16))), "AES-GCM", false, ["encrypt"]);
+    const longIv = crypto.getRandomValues(new Uint8Array(12));
+    const longPlain = new TextEncoder().encode(`${Date.now()}.pub_${"c".repeat(32)}${"0".repeat(64)}`);
+    const longSealed = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: longIv, additionalData: new TextEncoder().encode("podster-sealed:v1:explore-cursor") }, ownKey, longPlain));
+    const tooLong = hexOf(longIv) + hexOf(longSealed);
+    expect(tooLong.length).toBeGreaterThan(200);
     expect((await explore(STRANGER, `?cursor=${tooLong}`)).code).toBe("invalid_argument");
     // A well-formed cursor, sealed exactly as the API seals one, but under a key that isn't this deployment's.
     const otherKey = await crypto.subtle.importKey("raw", crypto.getRandomValues(new Uint8Array(32)), "AES-GCM", false, ["encrypt"]);

@@ -3409,7 +3409,8 @@ impl Workspace {
             }
         };
         if let Err(error) = recorded {
-            console_error!("couldn't record the index check: {:?}", error);
+            let _ = error;
+            console_error!("public_index.check_record_failed");
         }
     }
 

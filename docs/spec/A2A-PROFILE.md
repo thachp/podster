@@ -132,8 +132,13 @@ Following [decision 121](PRODUCT.md#decisions-needed):
 ## How it's been tested
 
 - **Inbound** is tested only against the A2A project's own code: its JavaScript and Python client SDKs, and the compatibility kit's own client. No independent 1.0 client was found ([decision 143](PRODUCT.md#decisions-needed)). This is revisited before public rooms.
-- **Outbound** is to be tested against LangGraph's A2A 1.0 server, with fasta2a's as backup. **That hasn't run.**
-- **The compatibility kit hasn't run.** The session permission check refuses running its code, and the owner won't run it by hand ([decision 142](PRODUCT.md#decisions-needed)). Nothing here claims what a kit run would show.
+- **Outbound** ran against LangGraph's A2A 1.0 server (`langgraph-api` 0.17.1), locally, on 2026-11-09 ([decision 143](PRODUCT.md#decisions-needed), [e2e/langgraph](../../e2e/langgraph/README.md)). Podster's offer, read-back and cancel work with it. But LangGraph's results don't reach Podster:
+  - it ignores `returnImmediately` and answers `SendMessage` only once its run ends;
+  - its `GetTask` carries no artifacts.
+
+  So a LangGraph agent's completion is held, never submitted, and no change request follows one. Its refusal to cancel a finished run is recorded as refused.
+- **Outbound on a deployment** ran on staging against Podster's own test A2A server ([e2e/a2a-test-server](../../e2e/a2a-test-server/README.md)), which isn't an independent implementation. It passed 20 of 20 on 2026-11-09. It covered the signed offer, `WORKING` then `COMPLETED`, an input file over `/a2a/files`, a change request, a timeout and a refused redirect.
+- **The compatibility kit hasn't run.** The session permission check refuses installing and running its code, and the owner won't run it by hand ([decision 142](PRODUCT.md#decisions-needed)). `e2e/run-a2a-kit.mjs` is ready for when it may run. Nothing here claims what a kit run would show.
 
 ## Compatibility kit exceptions
 

@@ -191,6 +191,27 @@ describe("what the Sheet shows", () => {
     expect(screen.getByText("(ftp://ab)")).toBeInTheDocument();
   });
 
+  it("says when the agent's own A2A endpoint reported a message or an event, and flags a held response (M3 step 15)", async () => {
+    const user = userEvent.setup();
+    const held = { id: "evt_h", type: "task.a2a_response_held", from: { id: "agt_a", org: "org_b" }, external: true, reason: null, prior_status: null, new_status: null, task_version: 2, created_at: 5, origin: "a2a_remote" };
+    answer = () => json(200, detail({}, {
+      messages: [
+        { id: "msg_r", from: { id: "agt_a", org: "org_b" }, external: true, body: "Which dates?", created_at: 3, origin: "a2a_remote" },
+        { id: "msg_p", from: { id: "agt_a", org: "org_b" }, external: true, body: "Posted directly.", created_at: 4, origin: null },
+      ],
+      history: [held],
+    }));
+    await open();
+    await user.click(screen.getByRole("tab", { name: /Discussion/ }));
+    const thread = screen.getByRole("tabpanel");
+    expect(within(thread).getAllByText(/Reported through the agent's A2A endpoint/)).toHaveLength(1);
+    await user.click(screen.getByRole("tab", { name: "Activity" }));
+    const activity = screen.getByRole("tabpanel");
+    expect(within(activity).getByText(/held, not submitted/)).toBeInTheDocument();
+    expect(within(activity).getByText("· through its A2A endpoint")).toBeInTheDocument();
+    expect(within(activity).getByText(/isn't a submission and needs no review/)).toBeInTheDocument();
+  });
+
   it("uses the design's verbs in the history", async () => {
     const user = userEvent.setup();
     await open();

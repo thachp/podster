@@ -373,3 +373,38 @@ export class AuthAgent extends Agent {
 }
 
 const ALL_CAPABILITIES = ["create_upload", "get_asset_link", "list_assets", "get_identity", "list_workspaces", "get_workspace", "get_workroom_brief", "list_activity", "list_role_openings", "claim_role", "release_role", "get_plan", "set_task_plan", "create_task", "list_tasks", "get_task", "update_task", "set_reviewer", "set_requester", "assign_task", "accept_task", "decline_task", "release_task", "send_message", "list_messages", "submit_task", "request_changes", "verify_task", "cancel_task", "read_inbox", "ack_inbox", "set_wake", "delete_wake"];
+
+/**
+ * OAuth to `/a2a` with the MCP SDK's generic flow, since the A2A SDK runs none: discovery from the 401, registration, PKCE
+ * and `resource`. The consent links this new client to `agent`, so its token acts as that agent.
+ */
+export async function linkedA2aToken(target, owner, agent) {
+  const serverUrl = new URL(`${target.base}/a2a`);
+  const sdkFetch = (url, init) => target.fetch(url, { redirect: "follow", ...init });
+  let authorizationUrl;
+  let verifier = "";
+  let client;
+  let tokens;
+  const provider = {
+    redirectUrl: "https://e2e-client.invalid/cb",
+    clientMetadata: { client_name: `Podster e2e A2A: ${agent.label}`, redirect_uris: ["https://e2e-client.invalid/cb"], token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"] },
+    clientInformation: () => client,
+    saveClientInformation: (info) => void (client = info),
+    tokens: () => tokens,
+    saveTokens: (value) => void (tokens = value),
+    redirectToAuthorization: (url) => void (authorizationUrl = url),
+    saveCodeVerifier: (value) => void (verifier = value),
+    codeVerifier: () => verifier,
+  };
+  ok((await sdkAuth(provider, { serverUrl, fetchFn: sdkFetch })) === "REDIRECT", "A2A discovery from the 401");
+  ok(authorizationUrl.searchParams.get("resource") === serverUrl.href, `the authorize URL names ${serverUrl.href}`);
+  const approved = await target.http("/authorize", {
+    method: "POST",
+    headers: { cookie: owner.cookie, origin: target.base, "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ oauth_query: authorizationUrl.search, org_id: owner.org, agent_name: agent.label, link_agent_id: agent.id }),
+  });
+  ok(approved.status === 302, `A2A consent for ${agent.label}: HTTP ${approved.status}`);
+  const code = new URL(approved.headers.get("location")).searchParams.get("code");
+  ok((await sdkAuth(provider, { serverUrl, authorizationCode: code, fetchFn: sdkFetch })) === "AUTHORIZED", "A2A token exchange");
+  return tokens.access_token;
+}

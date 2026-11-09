@@ -32,9 +32,8 @@
 // Podster works for a real client over the network, which the gateway's own tests can't.
 import { AgentCard } from "@a2a-js/sdk";
 import { ClientFactory, ClientFactoryOptions, JsonRpcTransportFactory } from "@a2a-js/sdk/client";
-import { auth as sdkAuth } from "@modelcontextprotocol/sdk/client/auth.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { key, McpAgent, ok, Person, sleep, Target } from "./lib.mjs";
+import { key, linkedA2aToken, McpAgent, ok, Person, sleep, Target } from "./lib.mjs";
 
 const args = process.argv.slice(2);
 const option = (name) => {
@@ -150,40 +149,8 @@ async function signOut() {
 
 // ---- an A2A agent: its own OAuth client, linked on consent to an agent that already exists ----
 
-/**
- * OAuth to `/a2a` with the MCP SDK's generic flow, since the A2A SDK runs none: discovery from the 401, registration, PKCE
- * and `resource`. The consent links this new client to `agent`, so its token acts as that agent.
- */
-async function a2aToken(owner, agent) {
-  const serverUrl = new URL(`${target.base}/a2a`);
-  const sdkFetch = (url, init) => target.fetch(url, { redirect: "follow", ...init });
-  let authorizationUrl;
-  let verifier = "";
-  let client;
-  let tokens;
-  const provider = {
-    redirectUrl: "https://e2e-client.invalid/cb",
-    clientMetadata: { client_name: `Podster e2e A2A: ${agent.label}`, redirect_uris: ["https://e2e-client.invalid/cb"], token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"] },
-    clientInformation: () => client,
-    saveClientInformation: (info) => void (client = info),
-    tokens: () => tokens,
-    saveTokens: (value) => void (tokens = value),
-    redirectToAuthorization: (url) => void (authorizationUrl = url),
-    saveCodeVerifier: (value) => void (verifier = value),
-    codeVerifier: () => verifier,
-  };
-  ok((await sdkAuth(provider, { serverUrl, fetchFn: sdkFetch })) === "REDIRECT", "A2A discovery from the 401");
-  ok(authorizationUrl.searchParams.get("resource") === serverUrl.href, `the authorize URL names ${serverUrl.href}`);
-  const approved = await target.http("/authorize", {
-    method: "POST",
-    headers: { cookie: owner.cookie, origin: target.base, "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ oauth_query: authorizationUrl.search, org_id: owner.org, agent_name: agent.label, link_agent_id: agent.id }),
-  });
-  ok(approved.status === 302, `A2A consent for ${agent.label}: HTTP ${approved.status}`);
-  const code = new URL(approved.headers.get("location")).searchParams.get("code");
-  ok((await sdkAuth(provider, { serverUrl, authorizationCode: code, fetchFn: sdkFetch })) === "AUTHORIZED", "A2A token exchange");
-  return tokens.access_token;
-}
+/** The agent's own `/a2a` token, through the shared OAuth flow in lib.mjs. */
+const a2aToken = (owner, agent) => linkedA2aToken(target, owner, agent);
 
 /** The A2A SDK's client, discovering Podster from its card, with the token on every request. */
 async function a2aClient(token) {

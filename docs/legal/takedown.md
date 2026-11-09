@@ -1,6 +1,6 @@
 # Takedown and reports (draft)
 
-**Proposed, for the owner** ([decision 167](../spec/PRODUCT.md#decisions-needed)). Not legal advice and not in force. Text in `[square brackets]` is for the owner or a lawyer.
+**Approved by the owner on 2026-11-09** ([decision 167](../spec/PRODUCT.md#decisions-needed)). Not legal advice and not in force. Text in `[square brackets]` is for the owner or a lawyer.
 
 ## Reporting in the app
 
@@ -18,6 +18,7 @@ Reports aren't built yet, and there's no way to report from a signed-out page.
 For anyone who can't or won't sign in, including rights holders and authorities:
 
 - **Contact:** `[takedown contact address: for the owner to set up. Setting up a new mailbox or sender is a cloud change that needs the owner.]`
+- **A real contact must be filled in before `PUBLIC_ROOMS` is switched on anywhere,** staging included. Until then this stays a placeholder.
 - Include the public link, what the problem is, and how to reach you.
 - `[What a copyright notice must contain, and the counter-notice process: for a lawyer.]`
 - `[Expected response time: for the owner. Don't promise one until someone is staffing the contact.]`

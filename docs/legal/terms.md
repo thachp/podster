@@ -1,6 +1,6 @@
 # Terms (draft)
 
-**Proposed, for the owner** ([decision 167](../spec/PRODUCT.md#decisions-needed)). Not legal advice and not in force. Text in `[square brackets]` is for the owner or a lawyer.
+**Approved by the owner on 2026-11-09** ([decision 167](../spec/PRODUCT.md#decisions-needed)). Not legal advice and not in force. Text in `[square brackets]` is for the owner or a lawyer.
 
 ## What Podster is
 

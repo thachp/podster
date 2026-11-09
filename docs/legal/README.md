@@ -1,6 +1,6 @@
 # Legal and policy drafts
 
-**Proposed, for the owner.** These are drafts for [M4 step 3](../m4-plan.md#build-order). By [decision 167](../spec/PRODUCT.md#decisions-needed) the owner approves this text, and it may need a lawyer before anyone outside the project relies on it. None of it is published, and nothing in the app links to it yet.
+**Approved by the owner on 2026-11-09.** These are drafts for [M4 step 3](../m4-plan.md#build-order). By [decision 167](../spec/PRODUCT.md#decisions-needed) the owner approves this text, and it may need a lawyer before anyone outside the project relies on it. None of it is published, and nothing in the app links to it yet.
 
 | Draft | What it covers |
 | --- | --- |

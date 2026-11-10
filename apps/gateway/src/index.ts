@@ -14,6 +14,7 @@ import { EMAIL_LINK_ROUTE, EMAIL_LINK_SECONDS, EMAIL_VERIFY_ROUTE, emailSignInEn
 import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TEST_SIGNUP_ROUTE } from "./test-people";
 import { handleA2aDownload, handleAgentDownload, isFilePath, serveFile } from "./downloads";
 import { handleUpload } from "./uploads";
+import { handleGithubWebhook } from "./github-webhook";
 import { aliasA2aPath, answerA2a, checkA2aRequest, handleA2aCard, isA2aPath } from "./a2a";
 import type { ApiReads } from "./a2a/reads";
 import { buildOAuth, resourceKind, routeOAuth } from "./oauth";
@@ -53,6 +54,8 @@ export interface Env {
   /** Staging's test sign-up, set only in env.staging. See test-people.ts. */
   ENABLE_E2E_SIGNUP?: string;
   E2E_SIGNUP_SECRET?: string;
+  /** GitHub's webhook secret, on the gateway only (M5 step 5). Unset, the webhook route refuses everything. See github-webhook.ts. */
+  GITHUB_WEBHOOK_SECRET?: string;
   OAUTH_PROVIDER: OAuthHelpers;
 }
 
@@ -1091,6 +1094,9 @@ const appHandler = {
     const onApplicationHost = env !== publicEnv;
     const card = onApplicationHost ? null : handleA2aCard(request, url, publicEnv.BASE_URL);
     if (card) return card;
+    // GitHub's deliveries come to the gateway's own host, never the application's.
+    const webhook = onApplicationHost ? null : await handleGithubWebhook(request, url, publicEnv);
+    if (webhook) return webhook;
     const upload = await handleUpload(request, url, publicEnv.API, (key) => withinLimit(publicEnv.RL_ACCOUNT, key));
     if (upload) return upload;
     const download = await handleAgentDownload(request, url, publicEnv, (token) => agentFromCredential(publicEnv, token, request), (key) => withinLimit(publicEnv.RL_ACCOUNT, key));

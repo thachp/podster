@@ -421,8 +421,13 @@ describe("the delivery migration", () => {
     const version = () => inRoom(id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
     const columns = (table: string) => inRoom(id, (sql) => sql.exec(`SELECT name FROM pragma_table_info('${table}') ORDER BY cid`).toArray().map((c: any) => c.name));
     const newest = await version();
-    // Back to the release before this one.
+    // Back to the release before this one. Step 4's migration came after it, so that's undone too and runs again behind it.
     await inRoom(id, (sql) => {
+      sql.exec("ALTER TABLE repo_request DROP COLUMN job_not_before");
+      sql.exec("ALTER TABLE repo_request DROP COLUMN job_failures");
+      sql.exec("ALTER TABLE repo_request DROP COLUMN retry_after");
+      sql.exec("ALTER TABLE repo_request DROP COLUMN runs");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE provider_delivery");
       sql.exec("ALTER TABLE task_change DROP COLUMN nudged_at");
       sql.exec("ALTER TABLE repo_link DROP COLUMN indexed_at");

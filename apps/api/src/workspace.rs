@@ -84,6 +84,7 @@ mod objects;
 mod outputs;
 mod plan;
 mod planned;
+mod provisioning;
 mod public;
 mod public_claims;
 mod removal;
@@ -2614,6 +2615,9 @@ pub struct Workspace {
     /// Scan sends that failed in a row, and when the room may send again. A restart forgets both.
     scan_send_failures: std::cell::Cell<u32>,
     scan_send_retry_at: std::cell::Cell<i64>,
+    /// When the provisioning job may next run, for the one case the room couldn't write that down. The wait itself is
+    /// kept in `repo_request`, so a restart doesn't forget it.
+    provision_not_before: std::cell::Cell<i64>,
     /// Whether nothing is held from a failed migration, so a request needn't look. A restart looks again.
     held_clear: std::cell::Cell<bool>,
 }
@@ -3519,6 +3523,14 @@ impl Workspace {
         if let Some(next) = removal::next_due(&sql, now, self.sweep_failures.get())? {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
+        // A pending request for the room's repository, not before the wait a job that couldn't finish left.
+        if let Some(next) = migrated
+            .then(|| self.provisioning_due_at(&sql, now))
+            .transpose()?
+            .flatten()
+        {
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
         // The oldest webhook delivery ID, when it's time to forget it.
         if let Some(next) = migrated
             .then(|| repositories::next_delivery_expiry(&sql, now))
@@ -3807,6 +3819,9 @@ impl Workspace {
         }
         if req.path() == repositories::INTERNAL_PROVIDER_DELIVERY {
             return self.provider_delivery(req).await;
+        }
+        if req.path() == repositories::INTERNAL_LINK_HOLDS {
+            return self.answer_link_holds(req).await;
         }
         if req.path() == public::INTERNAL_PUBLIC_PAGE
             || req.path() == public::INTERNAL_EXPLORE_ENTRY
@@ -4398,6 +4413,48 @@ impl Workspace {
                     visibility::handle_set_visibility(sql, who, &body, public_rooms, now)
                 },
             ),
+            // The room's repository (M5 step 4). The organization's delegation is asked first, outside the transaction, and
+            // counts for nothing unless the caller is the room's owner. A stored answer goes only to the owner.
+            (Method::Post, ["repository"]) => {
+                let delegated = self.org_delegated().await == Some(true);
+                let switched_on = provisioning::enabled(&self.env, &sql)?;
+                self.command_checked(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    |sql: &SqlStorage, who: &Participant| {
+                        provisioning::may_request(sql, &who.caller)
+                    },
+                    move |sql, who, now| {
+                        provisioning::request(sql, who, &body, switched_on, delegated, now)
+                    },
+                )
+            }
+            (Method::Post, ["repository", "retry"]) => {
+                let delegated = self.org_delegated().await == Some(true);
+                let switched_on = provisioning::enabled(&self.env, &sql)?;
+                let suffix: String = uuid::Uuid::new_v4()
+                    .simple()
+                    .to_string()
+                    .chars()
+                    .take(6)
+                    .collect();
+                self.command_checked(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    |sql: &SqlStorage, who: &Participant| {
+                        provisioning::may_request(sql, &who.caller)
+                    },
+                    move |sql, who, now| {
+                        provisioning::retry(sql, who, &body, switched_on, delegated, &suffix, now)
+                    },
+                )
+            }
             // A stored answer is replayed only to a caller who may still manage the room.
             (Method::Put, ["public-claims"]) => self.command_checked(
                 &identity,
@@ -4582,6 +4639,7 @@ impl DurableObject for Workspace {
             sweep_failures: std::cell::Cell::new(0),
             scan_send_failures: std::cell::Cell::new(0),
             scan_send_retry_at: std::cell::Cell::new(0),
+            provision_not_before: std::cell::Cell::new(0),
             held_clear: std::cell::Cell::new(false),
         }
     }
@@ -4656,6 +4714,12 @@ impl DurableObject for Workspace {
                 error.code().unwrap_or("internal_error")
             );
         }
+        // A pending request for the room's repository. It always leaves the request ready, failed or uncertain.
+        let provisioned = self.provision().await;
+        if let Err(error) = &provisioned {
+            console_error!("provisioning failed: {:?}", error.code());
+        }
+        // The job keeps its own wait, so its failure doesn't bring the alarm back in five seconds.
         let repo_index = self.repository_upkeep(&sql).await;
         // A stuck scan fails closed here, and this failing holds up nothing else.
         if let Err(error) = self.expire_scans() {

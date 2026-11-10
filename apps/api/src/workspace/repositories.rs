@@ -196,11 +196,49 @@ pub(super) fn index_due(sql: &SqlStorage) -> R<bool> {
     .is_empty())
 }
 
+/// The room's answer to another room that found this one holding a routing row: whether this room's link really is that
+/// repository. A room that was never made, or has no link, or another repository, doesn't hold it.
+pub(super) const INTERNAL_LINK_HOLDS: &str = "/internal/repo-link-holds";
+
+pub(super) fn link_holds(sql: &SqlStorage, body: &Value) -> R<Value> {
+    let asked = body["repository"].as_i64();
+    let linked = rows(sql, "SELECT provider_repo_id FROM repo_link", vec![])?
+        .first()
+        .map(|link| int(&link["provider_repo_id"]));
+    Ok(json!({ "holds": asked.is_some() && asked == linked }))
+}
+
+/// Asks the room a routing row names whether it's really linked to that repository. If it can't be asked, it's taken to
+/// be, so a row is only ever taken from a room that said it isn't its own.
+async fn holder_confirms(env: &Env, holder: &str, repository: i64) -> bool {
+    if !crate::valid_id(holder) {
+        return false;
+    }
+    let ask = async {
+        let stub = env
+            .durable_object("WORKSPACE")?
+            .id_from_name(holder)?
+            .get_stub()?;
+        let mut answer = crate::forward(
+            stub,
+            INTERNAL_LINK_HOLDS,
+            "",
+            Headers::new(),
+            Method::Post,
+            Some(json!({ "repository": repository }).to_string()),
+        )
+        .await?;
+        let body: Value = answer.json().await?;
+        Ok::<_, ApiError>(body["holds"].as_bool())
+    };
+    !matches!(ask.await, Ok(Some(false)))
+}
+
 /// Writes the room's row in `repo_room_index`, once, after its link exists. The row routes a delivery here and authorizes
-/// nothing. A repository ID another room already holds is left with that room and logged by ID, and this room's row is
-/// marked as refused with a zero so the alarm doesn't keep trying: deliveries for it then reach the other room, which drops
-/// them unless the repository really is its own.
-pub(super) async fn drain_index(sql: &SqlStorage, db: &D1Database) -> R<()> {
+/// nothing. If another room's row is in the way, that room is asked whether the repository is really its own. A row whose
+/// room says no, a stale or squatted one, is replaced. A row whose room says yes, or can't be asked, is left, and this
+/// room's is marked as refused with a zero so the alarm doesn't keep trying.
+pub(super) async fn drain_index(sql: &SqlStorage, db: &D1Database, env: &Env) -> R<()> {
     if !store::is_initialized(sql)? || store::needs_migration(sql)? {
         return Ok(());
     }
@@ -235,10 +273,31 @@ pub(super) async fn drain_index(sql: &SqlStorage, db: &D1Database) -> R<()> {
         .bind(&key())?
         .first::<Value>(None)
         .await?;
-    let ours = holder
+    let holder = holder
         .as_ref()
         .and_then(|found| found["workspace_id"].as_str())
-        == Some(room.as_str());
+        .unwrap_or_default()
+        .to_string();
+    let mut ours = holder == room;
+    if !ours && !holder_confirms(env, &holder, repository).await {
+        // Only if it's still that room's row: another room may have taken it meanwhile.
+        let mut swap = key();
+        swap.insert(0, room.as_str().into());
+        swap.push(holder.as_str().into());
+        let replaced = db
+            .prepare("UPDATE repo_room_index SET workspace_id = ? WHERE provider = ? AND provider_repo_id = ? AND workspace_id = ?")
+            .bind(&swap)?
+            .run()
+            .await?;
+        ours = replaced
+            .meta()?
+            .and_then(|meta| meta.changes)
+            .is_some_and(|changes| changes > 0);
+        console_log!(
+            "{}",
+            json!({ "at": "repo_index.replaced_stale_row", "room": room, "repository": repository, "replaced": ours })
+        );
+    }
     if !ours {
         console_error!(
             "{}",
@@ -253,6 +312,18 @@ pub(super) async fn drain_index(sql: &SqlStorage, db: &D1Database) -> R<()> {
 }
 
 impl Workspace {
+    /// Another room asking whether this one is linked to a repository. A room that was never made stays empty.
+    pub(super) async fn answer_link_holds(&self, mut req: Request) -> R<Value> {
+        let sql = self.state.storage().sql();
+        if !store::is_initialized(&sql)? {
+            return Ok(json!({ "holds": false }));
+        }
+        self.migrate_if_needed()?;
+        let body: Value =
+            serde_json::from_str(&req.text().await?).map_err(|_| ApiError::invalid_argument())?;
+        link_holds(&sql, &body)
+    }
+
     /// A provider's delivery, in a transaction of its own. An unknown room answers as one that isn't this repository's.
     pub(super) async fn provider_delivery(&self, mut req: Request) -> R<Value> {
         let sql = self.state.storage().sql();
@@ -285,7 +356,7 @@ impl Workspace {
             console_error!("couldn't forget old deliveries: {:?}", error.code());
         }
         let written = match self.env.d1("DB") {
-            Ok(db) => drain_index(sql, &db).await,
+            Ok(db) => drain_index(sql, &db, &self.env).await,
             Err(error) => Err(error.into()),
         };
         if let Err(error) = &written {

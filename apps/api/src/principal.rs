@@ -863,6 +863,85 @@ fn retry_delay_ms(failures: i64) -> i64 {
     (DEPARTURE_RETRY_MIN_MS << doublings).min(DEPARTURE_RETRY_MAX_MS)
 }
 
+/// An organization's delegations from Podster's platform, in the `Principal` named for the organization (M5 step 4). For
+/// a managed repository Podster's platform is the resource owner, so only a Podster operator gives or takes this back,
+/// and a room's owner can ask for a repository only while their organization holds it (AC-10). Every change is kept.
+const ORG_DELEGATION_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS org_provider_delegation (provider TEXT PRIMARY KEY, granted INTEGER NOT NULL, set_by TEXT NOT NULL, set_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS org_provider_delegation_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, granted INTEGER NOT NULL, set_by TEXT NOT NULL, set_at INTEGER NOT NULL);
+";
+
+/// Whether an organization holds the provisioning delegation for a provider: `{ provider, granted, set_by, set_at }`.
+pub async fn org_delegation(env: &Env, org: &str, provider: &str) -> R<Value> {
+    let body = json!({ "provider": provider });
+    let mut response = internal(env, org, "/internal/org-delegation", &body).await?;
+    if response.status_code() != 200 {
+        return Err(ApiError::internal("couldn't read the delegation"));
+    }
+    Ok(response.json().await?)
+}
+
+/// `GET` or `PUT /v1/orgs/{org}/provisioning-delegation`. Reading is for a Podster operator or an admin of that
+/// organization. Setting, `{ granted }`, is for a Podster operator alone: an organization can't give itself authority
+/// over Podster's GitHub organization. An agent is refused in both.
+pub async fn provisioning_delegation(
+    env: &Env,
+    caller: &Caller,
+    org: &str,
+    set: Option<&str>,
+) -> R<Response> {
+    if !crate::valid_id(org) {
+        return Err(ApiError::not_found());
+    }
+    let operator = crate::moderation::require_operator(env, caller).is_ok();
+    let Some(raw) = set else {
+        let admin = caller.kind == "person" && caller.admin_orgs.iter().any(|o| o == org);
+        if !operator && !admin {
+            return Err(ApiError::not_allowed());
+        }
+        return Ok(Response::from_json(
+            &org_delegation(env, org, "github").await?,
+        )?);
+    };
+    if !operator {
+        return Err(ApiError::not_allowed());
+    }
+    let body: Value = serde_json::from_str(raw).map_err(|_| ApiError::invalid_argument())?;
+    let granted = body
+        .as_object()
+        .filter(|fields| fields.len() == 1)
+        .and_then(|fields| fields.get("granted"))
+        .and_then(Value::as_bool)
+        .ok_or_else(ApiError::invalid_argument)?;
+    let change = json!({ "provider": "github", "granted": granted, "by": caller.id, "org": org });
+    let mut response = internal(env, org, "/internal/org-delegation-set", &change).await?;
+    match response.status_code() {
+        200 => {}
+        // The organization's own object has never held a room for it.
+        404 => return Err(ApiError::api(404, "organization_not_found")),
+        _ => return Err(ApiError::internal("couldn't set the delegation")),
+    }
+    let answer: Value = response.json().await?;
+    // In the operators' own record too, beside their other actions. The organization's object already holds the change.
+    crate::moderation::record_operator_action(
+        env,
+        &caller.id,
+        "organization",
+        org,
+        if granted {
+            "provisioning_delegation.granted"
+        } else {
+            "provisioning_delegation.revoked"
+        },
+    )
+    .await;
+    console_log!(
+        "{}",
+        json!({ "at": "org.delegation_set", "org": org, "provider": "github", "granted": granted, "by": caller.id })
+    );
+    Ok(Response::from_json(&answer)?)
+}
+
 /// Takes one of an organization's room slots, or refuses at the limit.
 pub async fn reserve_org_room(env: &Env, org: &str, workspace: &str) -> R<()> {
     let body = json!({ "org": org, "workspace": workspace });
@@ -1302,6 +1381,58 @@ impl Principal {
                     vec![workspace.as_str().into()],
                 )?;
                 return Ok(json!({ "reserved": true }));
+            }
+            "/internal/org-delegation" | "/internal/org-delegation-set" => {
+                let body: Value = req.json().await?;
+                let provider = body["provider"].as_str().unwrap_or_default().to_string();
+                exec(&sql, ORG_DELEGATION_SCHEMA, vec![])?;
+                if path == "/internal/org-delegation-set" {
+                    // An organization the API has never seen a room of isn't one to delegate to. This object records
+                    // each room as it's made. Rooms from before it kept that record are in the listing, which here
+                    // only says whether the organization is known.
+                    exec(&sql, ORG_ROOMS_SCHEMA, vec![])?;
+                    let mut known =
+                        !rows(&sql, "SELECT workspace_id FROM org_room LIMIT 1", vec![])?
+                            .is_empty();
+                    if !known {
+                        known = self
+                            .env
+                            .d1("DB")?
+                            .prepare(
+                                "SELECT 1 AS known FROM membership_index WHERE org_id = ? LIMIT 1",
+                            )
+                            .bind(&[body["org"].as_str().unwrap_or_default().into()])?
+                            .first::<Value>(None)
+                            .await?
+                            .is_some();
+                    }
+                    if !known {
+                        return Err(ApiError::api(404, "organization_not_found"));
+                    }
+                    let granted = body["granted"]
+                        .as_bool()
+                        .ok_or_else(ApiError::invalid_argument)?;
+                    let by = body["by"].as_str().unwrap_or_default().to_string();
+                    let state = self.state.storage().sql();
+                    let name = provider.clone();
+                    transaction_sync(&self.state, move || {
+                        let now = now_ms();
+                        exec(&state, "INSERT INTO org_provider_delegation (provider, granted, set_by, set_at) VALUES (?, ?, ?, ?)
+                            ON CONFLICT (provider) DO UPDATE SET granted = excluded.granted, set_by = excluded.set_by, set_at = excluded.set_at",
+                            vec![name.as_str().into(), i64::from(granted).into(), by.as_str().into(), now.into()])?;
+                        exec(&state, "INSERT INTO org_provider_delegation_log (provider, granted, set_by, set_at) VALUES (?, ?, ?, ?)",
+                            vec![name.as_str().into(), i64::from(granted).into(), by.as_str().into(), now.into()])
+                    })?;
+                }
+                let held = rows(&sql, "SELECT granted, set_by, set_at FROM org_provider_delegation WHERE provider = ?", vec![provider.as_str().into()])?;
+                return Ok(match held.first() {
+                    Some(row) => {
+                        json!({ "provider": provider, "granted": int(&row["granted"]) != 0, "set_by": row["set_by"], "set_at": row["set_at"] })
+                    }
+                    None => {
+                        json!({ "provider": provider, "granted": false, "set_by": null, "set_at": null })
+                    }
+                });
             }
             "/internal/org-room-release" => {
                 let body: Value = req.json().await?;

@@ -57,8 +57,38 @@ async fn call(env: &Env, path: &str, method: Method, body: Option<Value>) -> R<R
     .await
 }
 
+/// Writes an operator's action that has already happened into the operators' record. The action stands whether or not
+/// this does, so a failure is logged by ID and goes no further.
+pub(crate) async fn record_operator_action(
+    env: &Env,
+    operator: &str,
+    subject_kind: &str,
+    subject: &str,
+    action: &str,
+) {
+    let begin = json!({ "operator": operator, "subject_kind": subject_kind, "subject": subject, "action": action, "reason": "other" });
+    let recorded = async {
+        let mut begun = call(env, "/action-begin", Method::Post, Some(begin)).await?;
+        let seq: Value = begun.json().await?;
+        call(
+            env,
+            "/action-end",
+            Method::Post,
+            Some(json!({ "seq": seq["seq"], "outcome": "done" })),
+        )
+        .await?;
+        Ok::<_, ApiError>(())
+    };
+    if recorded.await.is_err() {
+        console_error!(
+            "{}",
+            json!({ "at": "operator_action.not_recorded", "operator": operator, "subject": subject, "action": action })
+        );
+    }
+}
+
 /// Refuses anyone who isn't a configured operator. An agent never is.
-fn require_operator(env: &Env, caller: &Caller) -> R<()> {
+pub(crate) fn require_operator(env: &Env, caller: &Caller) -> R<()> {
     // A secret on staging, which the owner sets (docs/staging.md), or a plain binding in tests.
     let configured = env
         .secret("OPERATORS")

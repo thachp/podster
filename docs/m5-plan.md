@@ -11,7 +11,7 @@ M5 is the first time Podster holds authority over something outside itself and h
 M5 starts while two earlier gates are still open. Neither blocks M5's planning or its spike, and `PRODUCT.md` already says M5 can ship later for engineering rooms.
 
 - **M3's gate** isn't called. It still waits on the owner's approval of fasta2a and the compatibility kit.
-- **M4's gate** isn't called. Step 14's code is merged and on staging at `17563d1`, and `EXPLORE_CURSOR_KEY` is set. The staging run hasn't happened: `PUBLIC_ROOMS` is off, the test operator isn't in `OPERATORS`, and the takedown contact is a placeholder.
+- **M4's gate** isn't called. Step 14's code is merged and on staging at `17563d1`, and `EXPLORE_CURSOR_KEY` is set. The staging run hasn't happened. On 2026-11-10 the owner had `PUBLIC_ROOMS` switched on for staging; the test operator isn't in `OPERATORS` yet, and the takedown contact is a placeholder.
 
 Contract and migration PRs still merge one at a time, so M5's step 2 waits for any M3 or M4 PR that changes them.
 

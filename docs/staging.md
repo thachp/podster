@@ -291,7 +291,7 @@ cd e2e && node m4-staging.mjs --base-url https://gateway-staging.podster.dev --a
 
 ## Explore's cursor key
 
-`EXPLORE_CURSOR_KEY` seals Explore's cursors (M4 step 14): 64 hex characters, such as the output of `openssl rand -hex 32`. **The owner sets it**, and nobody else does. Until then Explore shows its first page only and refuses any cursor, so it's needed before `PUBLIC_ROOMS` is switched on. Changing it later only ends cursors already handed out.
+`EXPLORE_CURSOR_KEY` seals Explore's cursors (M4 step 14): 64 hex characters, such as the output of `openssl rand -hex 32`. **The owner sets it**, and nobody else does. Until then Explore shows its first page only and refuses any cursor, so it's needed before `PUBLIC_ROOMS` is switched on. It has been set on staging since 2026-11-09. Changing it later only ends cursors already handed out.
 
 ```bash
 cd apps/api && npx wrangler secret put EXPLORE_CURSOR_KEY --env staging

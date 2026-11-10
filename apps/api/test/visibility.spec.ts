@@ -242,6 +242,7 @@ describe("publicly claimable openings", () => {
 });
 
 describe("the switch", () => {
+  // This reads the configuration file. A variable set on the deployed Worker by hand wouldn't show here.
   it("is set for staging only in the Worker's configuration", () => {
     const config = JSON.parse(BINDINGS.TEST_WRANGLER.replace(/^\s*\/\/.*$/gm, ""));
     expect(config.vars?.PUBLIC_ROOMS).toBeUndefined();

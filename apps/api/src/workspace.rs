@@ -548,7 +548,13 @@ fn handle_task_command_with(
     if let Command::Verify { submission_no, .. } = &command {
         observed.approved_files = submission_files::approval(sql, &task, *submission_no)?;
     }
-    // A linked task's pull request, as Podster just read it, is checked against the room's link here.
+    // A linked task's pull request, as Podster just read it, is checked against the room's link here. First the
+    // decision is taken once without the read, so a stale or malformed command is answered as that, `version_conflict`
+    // included, and never with anything about a pull request.
+    if context.reads_for(&task, verb) {
+        decide(&task, &caller.id, command.clone(), &observed)
+            .map_err(|e| ApiError::from_core(&e))?;
+    }
     let pinned = changes::before_decide(sql, context, &task, verb, body, &mut observed)?;
     let decision =
         decide(&task, &caller.id, command, &observed).map_err(|e| ApiError::from_core(&e))?;
@@ -2567,8 +2573,14 @@ mod queries {
             .map(|r| marked(r, "actor_id", "actor_org"))
             .collect();
         let files = super::submission_files::for_task(sql, who, &task, oversight)?;
+        // A task's pull request is for people who see the task and for its assignee and reviewer, not everyone who may read it.
+        let change = if podster_policy::repositories::sees_task_change(&who.caller, &task) {
+            super::changes::of_task(sql, &task.id)?
+        } else {
+            Value::Null
+        };
         Ok(json!({
-            "task": task_json(&task), "expected_output": super::outputs::of_task(sql, &task.id, oversight)?, "change": super::changes::of_task(sql, &task.id)?, "submissions": submissions, "artifacts": artifacts, "files": files, "messages": messages, "history": history,
+            "task": task_json(&task), "expected_output": super::outputs::of_task(sql, &task.id, oversight)?, "change": change, "submissions": submissions, "artifacts": artifacts, "files": files, "messages": messages, "history": history,
             // Says what's limited, so empty lists and null reasons aren't read as "none exist".
             "visible": { "submissions": if view.artifacts == ArtifactView::All { "all" } else { "own" }, "conversation": view.conversation },
         }))

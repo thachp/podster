@@ -426,6 +426,13 @@ describe("the delivery migration", () => {
       // M5 step 6's agent tokens, the newest migration, come off first.
       // M5 step 7a's read bookkeeping, the newest migration, comes off first.
       sql.exec("DROP TABLE repo_read");
+      sql.exec("ALTER TABLE repo_link DROP COLUMN reads_not_before");
+      sql.exec("ALTER TABLE repo_link DROP COLUMN read_failures");
+      sql.exec("ALTER TABLE task_change DROP COLUMN pr_draft");
+      sql.exec("ALTER TABLE task_change DROP COLUMN commit_changed_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN unwatched_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN not_found_reads");
+      sql.exec("ALTER TABLE task_change DROP COLUMN read_failures");
       sql.exec("ALTER TABLE task_change DROP COLUMN merged_by_id");
       sql.exec("ALTER TABLE task_change DROP COLUMN unchanged_reads");
       sql.exec("ALTER TABLE task_change DROP COLUMN read_at");
@@ -450,7 +457,7 @@ describe("the delivery migration", () => {
     expect(await version()).toBe(newest);
     expect(await columns("provider_delivery")).toEqual(["delivery_id", "body_sha256", "received_at", "expires_at"]);
     expect(await columns("task_change")).toContain("nudged_at");
-    expect((await columns("repo_link")).at(-1)).toBe("indexed_at");
+    expect(await columns("repo_link")).toContain("indexed_at");
     // The link and the change are as they were, and the delivery that migrated it was taken.
     const kept = await change(id) as any;
     expect(kept).toMatchObject({ task_id: task, provider_repo_id: repo, pr_number: 7, reviewed_commit_sha: REVIEWED });

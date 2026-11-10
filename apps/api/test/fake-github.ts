@@ -43,13 +43,13 @@ type Script = {
  * no_repositories, long_life (two hours), slow (answers after 200 ms), or hang (no answer in time). `revoke` is a status
  * for revoking, if not 204.
  */
-type AgentScript = { mode?: string; revoke?: number; pulls?: Record<string, Pull>; pullRead?: number };
+type AgentScript = { mode?: string; revoke?: number; pulls?: Record<string, Pull | null>; pullRead?: number };
 /**
  * A pull request of a test's repository, for the server's own read (M5 step 7a). `head_repo` and `base_repo` default to
  * the repository itself; `head_repo: null` is a fork that's gone. `as_number` answers with another number than asked.
- * `padding` makes the description that many bytes long.
+ * `padding` makes the description that many bytes long. A null entry removes the pull request.
  */
-type Pull = { head_sha: string; base_sha: string; base_ref?: string; head_repo?: number | null; base_repo?: number; state?: "open" | "closed"; merged?: boolean; merge_commit_sha?: string; merged_by?: number; as_number?: number; padding?: number };
+type Pull = { head_sha: string; base_sha: string; base_ref?: string; head_repo?: number | null; base_repo?: number; state?: "open" | "closed"; merged?: boolean; merge_commit_sha?: string; merged_by?: number; as_number?: number; padding?: number; draft?: boolean };
 /** Every read an agent-token App token made, by repository: what it asked for and what the token could do. */
 const agentReads: { repo: number; path: string; permissions: Record<string, string>; status: number }[] = [];
 type AgentToken = { token: string; repo: number[] | "all"; permissions: Record<string, string>; asked: unknown; forRepo: number };
@@ -279,6 +279,7 @@ function agentRead(request: Request, path: string, bearer: string): Response | n
     number: pull.as_number ?? Number(asked[2]),
     state: pull.state ?? (merged ? "closed" : "open"),
     merged,
+    draft: pull.draft === true,
     merge_commit_sha: merged ? (pull.merge_commit_sha ?? null) : null,
     merged_by: merged && pull.merged_by ? { id: pull.merged_by, login: "SECRET-MERGER" } : null,
     title: "SECRET-PR-TITLE",

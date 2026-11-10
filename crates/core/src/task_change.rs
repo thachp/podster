@@ -49,9 +49,13 @@ pub struct PullSeen {
     /// The repository its head branch is in. `None` when the provider names none, as for a deleted fork.
     pub head_repo_id: Option<i64>,
     pub head_sha: String,
-    pub base_ref: String,
+    /// The branch it targets. `None` when the provider's name for it isn't one a branch of ours could have, such as
+    /// one too long to be the default branch: that reads as "not the default branch", never as unreadable.
+    pub base_ref: Option<String>,
     pub base_sha: String,
     pub state: PullState,
+    /// Whether its author still marks it as a draft. A flag, and nothing else about it.
+    pub draft: bool,
     /// The merge commit, once merged.
     pub merge_sha: Option<String>,
     /// The provider's ID for the account that merged it.
@@ -69,6 +73,8 @@ pub enum LinkRefusal {
     WrongBase,
     /// It's closed or already merged.
     NotOpen,
+    /// Its author still marks it as a draft. A draft can't be merged, and review is of work marked ready.
+    Draft,
     /// Another task in the room already has this pull request.
     InUse,
     /// The task already has a different pull request.
@@ -82,6 +88,7 @@ impl LinkRefusal {
             LinkRefusal::FromFork => "pull_request_from_fork",
             LinkRefusal::WrongBase => "pull_request_wrong_base",
             LinkRefusal::NotOpen => "pull_request_not_open",
+            LinkRefusal::Draft => "pull_request_draft",
             LinkRefusal::InUse => "pull_request_in_use",
             LinkRefusal::Changed => "pull_request_changed",
         }
@@ -108,6 +115,11 @@ pub fn check_pull_number(
     Ok(())
 }
 
+/// Whether the pull request targets the linked repository's default branch.
+pub fn targets_default(linked: &Linked, seen: &PullSeen) -> bool {
+    !linked.default_branch.is_empty() && seen.base_ref.as_deref() == Some(linked.default_branch)
+}
+
 /// Whether the pull request read just now may be this task's change. Checked at submission and again at review, on a
 /// fresh read each time, because an agent's token can edit a pull request.
 pub fn check_pull(linked: &Linked, named: i64, seen: &PullSeen) -> Result<(), LinkRefusal> {
@@ -117,11 +129,14 @@ pub fn check_pull(linked: &Linked, named: i64, seen: &PullSeen) -> Result<(), Li
     if seen.head_repo_id != Some(linked.repo_id) {
         return Err(LinkRefusal::FromFork);
     }
-    if seen.base_ref != linked.default_branch {
+    if !targets_default(linked, seen) {
         return Err(LinkRefusal::WrongBase);
     }
     if seen.state != PullState::Open {
         return Err(LinkRefusal::NotOpen);
+    }
+    if seen.draft {
+        return Err(LinkRefusal::Draft);
     }
     Ok(())
 }
@@ -145,7 +160,10 @@ pub struct Held<'a> {
     /// Whether the base was the default branch at the last read.
     pub base_is_default: Option<bool>,
     pub state: Option<PullState>,
+    pub draft: Option<bool>,
     pub reviewed_commit_sha: Option<&'a str>,
+    /// Whether the head has already been recorded as having left the reviewed commit. That record is never cleared.
+    pub commit_changed_recorded: bool,
     pub merge_state: MergeState,
     /// Whether a merge has already been recorded for it.
     pub merge_recorded: bool,
@@ -157,8 +175,8 @@ pub struct Observation {
     /// Something the room holds differs from what was read, so this is recorded with an event. A read that found
     /// nothing new only moves the observation time.
     pub changed: bool,
-    /// The head has just moved off the reviewed commit. The approval stands, the reviewed commit stays the reviewed
-    /// commit, and the fact is recorded once.
+    /// The head is off the reviewed commit and that hasn't been recorded yet. The approval stands, the reviewed commit
+    /// stays the reviewed commit, and the fact is recorded once and kept, even if the branch is later put back.
     pub commit_changed: bool,
     /// A merge seen for the first time, and whether Podster asked for it.
     pub merge: Option<ObservedMerge>,
@@ -167,14 +185,16 @@ pub struct Observation {
 /// Compares a fresh read with what the room held. It decides only what to record: nothing here un-approves a task, moves
 /// a reviewed commit, or counts a merge as Podster's.
 pub fn observe(task: &Task, linked: &Linked, held: &Held, seen: &PullSeen) -> Observation {
-    let base_is_default = seen.base_ref == linked.default_branch;
+    let base_is_default = targets_default(linked, seen);
     let changed = held.head_sha != Some(seen.head_sha.as_str())
         || held.head_repo_id != seen.head_repo_id
         || held.base_is_default != Some(base_is_default)
-        || held.state != Some(seen.state);
-    let commit_changed = held.reviewed_commit_sha.is_some_and(|reviewed| {
-        reviewed != seen.head_sha && held.head_sha.is_none_or(|head| head == reviewed)
-    });
+        || held.state != Some(seen.state)
+        || held.draft != Some(seen.draft);
+    let commit_changed = !held.commit_changed_recorded
+        && held
+            .reviewed_commit_sha
+            .is_some_and(|reviewed| reviewed != seen.head_sha);
     let merge = (seen.state == PullState::Merged && !held.merge_recorded)
         .then(|| classify_observed_merge(task, held.merge_state, &seen.head_sha));
     Observation {
@@ -182,6 +202,42 @@ pub fn observe(task: &Task, linked: &Linked, held: &Held, seen: &PullSeen) -> Ob
         commit_changed,
         merge,
     }
+}
+
+/// After this many reads in a row that found no such pull request, the job stops watching the change. Proposed.
+pub const MAX_NOT_FOUND_READS: u32 = 5;
+
+/// What a failed read by the refresh job means for what's read next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadFailure {
+    /// The provider refused Podster itself (`401` or `403`): a key or a permission. Every change in the room would
+    /// fail the same way, so the whole room's reads wait.
+    Refused,
+    /// No such pull request (`404`).
+    NotFound,
+    /// Anything else: no answer, an error, or an answer that couldn't be read.
+    Other,
+}
+
+pub fn classify_read_failure(status: u16) -> ReadFailure {
+    match status {
+        401 | 403 => ReadFailure::Refused,
+        404 => ReadFailure::NotFound,
+        _ => ReadFailure::Other,
+    }
+}
+
+/// How long to wait after a run of failed reads: a minute, doubling to an hour. Zero failures is no wait.
+pub fn read_retry_wait_ms(consecutive_failures: u32) -> i64 {
+    match consecutive_failures {
+        0 => 0,
+        failures => crate::provider_deliveries::poll_wait_ms(failures - 1),
+    }
+}
+
+/// Whether a change that keeps answering "no such pull request" stops being watched.
+pub fn stops_watching(consecutive_not_found: u32) -> bool {
+    consecutive_not_found >= MAX_NOT_FOUND_READS
 }
 
 #[cfg(test)]
@@ -204,9 +260,10 @@ mod tests {
             repo_id: Some(REPO),
             head_repo_id: Some(REPO),
             head_sha: sha("a1"),
-            base_ref: "main".to_string(),
+            base_ref: Some("main".to_string()),
             base_sha: sha("b2"),
             state: PullState::Open,
+            draft: false,
             merge_sha: None,
             merged_by_id: None,
         }
@@ -242,7 +299,9 @@ mod tests {
             head_repo_id: Some(REPO),
             base_is_default: Some(true),
             state: Some(PullState::Open),
+            draft: Some(false),
             reviewed_commit_sha: reviewed,
+            commit_changed_recorded: false,
             merge_state: MergeState::NotRequested,
             merge_recorded: false,
         }
@@ -302,7 +361,7 @@ mod tests {
             ),
             (
                 PullSeen {
-                    base_ref: "release".to_string(),
+                    base_ref: Some("release".to_string()),
                     ..seen()
                 },
                 LinkRefusal::WrongBase,
@@ -332,18 +391,19 @@ mod tests {
             LinkRefusal::NotOpen,
             LinkRefusal::InUse,
             LinkRefusal::Changed,
+            LinkRefusal::Draft,
         ]
         .into_iter()
         .map(LinkRefusal::code)
         .collect();
-        assert_eq!(codes.len(), 6);
+        assert_eq!(codes.len(), 7);
     }
 
     #[test]
     fn a_fork_is_refused_before_its_base_or_state_is_looked_at() {
         let pull = PullSeen {
             head_repo_id: Some(1),
-            base_ref: "other".to_string(),
+            base_ref: Some("other".to_string()),
             state: PullState::Closed,
             ..seen()
         };
@@ -416,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn a_head_that_moves_off_the_reviewed_commit_is_recorded_once() {
+    fn a_head_off_the_reviewed_commit_is_recorded_once_and_stays_recorded_when_put_back() {
         let reviewed = sha("a1");
         let moved = PullSeen {
             head_sha: sha("d4"),
@@ -430,16 +490,89 @@ mod tests {
             &moved,
         );
         assert!(first.changed && first.commit_changed);
-        // The room now holds the moved head. Reading it again, or seeing it move further, says nothing new about review.
+        // Once recorded, nothing records it again: not the same head, a further one, or the reviewed commit put back.
         let later = sha("d4");
-        let again = observe(&approved, &LINKED, &held(&later, Some(&reviewed)), &moved);
-        assert!(!again.changed && !again.commit_changed);
+        let recorded = Held {
+            commit_changed_recorded: true,
+            ..held(&later, Some(&reviewed))
+        };
+        assert!(!observe(&approved, &LINKED, &recorded, &moved).commit_changed);
         let further = PullSeen {
             head_sha: sha("e5"),
             ..seen()
         };
-        let third = observe(&approved, &LINKED, &held(&later, Some(&reviewed)), &further);
-        assert!(third.changed && !third.commit_changed);
+        assert!(!observe(&approved, &LINKED, &recorded, &further).commit_changed);
+        let back = observe(&approved, &LINKED, &recorded, &seen());
+        assert!(back.changed && !back.commit_changed);
+        // A room that held the moved head without the record, as one upgraded mid-way would, still records it.
+        assert!(observe(&approved, &LINKED, &held(&later, Some(&reviewed)), &moved).commit_changed);
+    }
+
+    #[test]
+    fn a_draft_is_refused_after_everything_else_and_going_back_to_draft_is_a_change() {
+        let draft = PullSeen {
+            draft: true,
+            ..seen()
+        };
+        assert_eq!(check_pull(&LINKED, 7, &draft), Err(LinkRefusal::Draft));
+        let closed_draft = PullSeen {
+            state: PullState::Closed,
+            ..draft.clone()
+        };
+        assert_eq!(
+            check_pull(&LINKED, 7, &closed_draft),
+            Err(LinkRefusal::NotOpen)
+        );
+        let reviewed = sha("a1");
+        let got = observe(
+            &task(TaskStatus::Completed, true),
+            &LINKED,
+            &held(&reviewed, Some(&reviewed)),
+            &draft,
+        );
+        assert!(got.changed && !got.commit_changed);
+        assert_eq!(got.merge, None);
+    }
+
+    #[test]
+    fn a_base_with_no_usable_name_is_never_the_default_branch() {
+        let unnamed = PullSeen {
+            base_ref: None,
+            ..seen()
+        };
+        assert_eq!(
+            check_pull(&LINKED, 7, &unnamed),
+            Err(LinkRefusal::WrongBase)
+        );
+        let nameless = Linked {
+            repo_id: REPO,
+            default_branch: "",
+        };
+        let empty = PullSeen {
+            base_ref: Some(String::new()),
+            ..seen()
+        };
+        assert_eq!(
+            check_pull(&nameless, 7, &empty),
+            Err(LinkRefusal::WrongBase)
+        );
+    }
+
+    #[test]
+    fn failed_reads_wait_longer_each_time_and_a_missing_pull_request_stops_being_watched() {
+        assert_eq!(read_retry_wait_ms(0), 0);
+        assert_eq!(read_retry_wait_ms(1), 60_000);
+        assert_eq!(read_retry_wait_ms(2), 120_000);
+        assert_eq!(read_retry_wait_ms(7), 3_600_000);
+        assert_eq!(read_retry_wait_ms(u32::MAX), 3_600_000);
+        assert_eq!(classify_read_failure(401), ReadFailure::Refused);
+        assert_eq!(classify_read_failure(403), ReadFailure::Refused);
+        assert_eq!(classify_read_failure(404), ReadFailure::NotFound);
+        for other in [0, 422, 429, 500, 502] {
+            assert_eq!(classify_read_failure(other), ReadFailure::Other, "{other}");
+        }
+        assert!(!stops_watching(MAX_NOT_FOUND_READS - 1));
+        assert!(stops_watching(MAX_NOT_FOUND_READS));
     }
 
     #[test]
@@ -447,7 +580,7 @@ mod tests {
         let head = sha("a1");
         for pull in [
             PullSeen {
-                base_ref: "other".to_string(),
+                base_ref: Some("other".to_string()),
                 ..seen()
             },
             PullSeen {

@@ -89,6 +89,13 @@ describe("the managed repositories migration", () => {
     await inRoom(id, (sql) => {
       // M5 step 7a's read bookkeeping, the newest migration, comes off first.
       sql.exec("DROP TABLE repo_read");
+      sql.exec("ALTER TABLE repo_link DROP COLUMN reads_not_before");
+      sql.exec("ALTER TABLE repo_link DROP COLUMN read_failures");
+      sql.exec("ALTER TABLE task_change DROP COLUMN pr_draft");
+      sql.exec("ALTER TABLE task_change DROP COLUMN commit_changed_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN unwatched_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN not_found_reads");
+      sql.exec("ALTER TABLE task_change DROP COLUMN read_failures");
       sql.exec("ALTER TABLE task_change DROP COLUMN merged_by_id");
       sql.exec("ALTER TABLE task_change DROP COLUMN unchanged_reads");
       sql.exec("ALTER TABLE task_change DROP COLUMN read_at");
@@ -106,9 +113,9 @@ describe("the managed repositories migration", () => {
     expect(await schemaVersion(id)).toBe(newest);
     expect(await columns(id, "repo_request")).toEqual(["id", "singleton", "state", "name", "visibility", "attempt", "provider_name", "provider_repo_id", "reason", "requested_by", "requested_at", "updated_at", "runs", "retry_after", "job_failures", "job_not_before"]);
     expect(await columns(id, "repo_request_attempt")).toEqual(["request_id", "attempt", "provider_name", "outcome", "at"]);
-    expect(await columns(id, "repo_link")).toEqual(["id", "singleton", "request_id", "provider", "provider_repo_id", "provider_org_id", "full_name", "visibility", "default_branch", "status", "status_reason", "created_by", "created_at", "verified_at", "updated_at", "indexed_at"]);
+    expect(await columns(id, "repo_link")).toEqual(["id", "singleton", "request_id", "provider", "provider_repo_id", "provider_org_id", "full_name", "visibility", "default_branch", "status", "status_reason", "created_by", "created_at", "verified_at", "updated_at", "indexed_at", "read_failures", "reads_not_before"]);
     expect(await columns(id, "provider_grant")).toEqual(["id", "principal_id", "provider", "provider_repo_id", "action", "delegated_by", "created_at", "expires_at", "revoked_at", "revoked_by"]);
-    expect(await columns(id, "task_change")).toEqual(["task_id", "provider_repo_id", "pr_number", "submission_no", "reviewed_commit_sha", "observed_head_sha", "head_observed_at", "checks_state", "checks_json", "checks_observed_at", "merge_state", "merge_reason", "merge_sha", "merge_requested_by", "merge_requested_at", "merge_observed_at", "created_at", "updated_at", "head_repo_id", "base_ref", "reviewed_base_sha", "merge_base_sha", "pr_state", "pr_observed_at", "nudged_at", "observed_base_sha", "read_at", "unchanged_reads", "merged_by_id"]);
+    expect(await columns(id, "task_change")).toEqual(["task_id", "provider_repo_id", "pr_number", "submission_no", "reviewed_commit_sha", "observed_head_sha", "head_observed_at", "checks_state", "checks_json", "checks_observed_at", "merge_state", "merge_reason", "merge_sha", "merge_requested_by", "merge_requested_at", "merge_observed_at", "created_at", "updated_at", "head_repo_id", "base_ref", "reviewed_base_sha", "merge_base_sha", "pr_state", "pr_observed_at", "nudged_at", "observed_base_sha", "read_at", "unchanged_reads", "merged_by_id", "read_failures", "not_found_reads", "unwatched_at", "commit_changed_at", "pr_draft"]);
     // Nothing is made up for a room that never asked for a repository, and what it held is as it was.
     expect((await footprint(id)).rows).toEqual([0, 0, 0, 0, 0]);
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}/tasks/${task}`)).body.task).toMatchObject({ id: task, title: "Add the parser", assignee: ASSIGNEE.id });

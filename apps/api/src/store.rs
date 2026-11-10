@@ -250,7 +250,14 @@ ALTER TABLE task_change ADD COLUMN observed_base_sha TEXT;
 ALTER TABLE task_change ADD COLUMN read_at INTEGER;
 ALTER TABLE task_change ADD COLUMN unchanged_reads INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE task_change ADD COLUMN merged_by_id INTEGER;
-CREATE TABLE repo_read (at INTEGER NOT NULL, kind TEXT NOT NULL);
+ALTER TABLE task_change ADD COLUMN read_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE task_change ADD COLUMN not_found_reads INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE task_change ADD COLUMN unwatched_at INTEGER;
+ALTER TABLE task_change ADD COLUMN commit_changed_at INTEGER;
+ALTER TABLE task_change ADD COLUMN pr_draft INTEGER;
+ALTER TABLE repo_link ADD COLUMN read_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE repo_link ADD COLUMN reads_not_before INTEGER;
+CREATE TABLE repo_read (at INTEGER NOT NULL, kind TEXT NOT NULL, caller TEXT);
 CREATE INDEX repo_read_at ON repo_read (at);
 "];
 

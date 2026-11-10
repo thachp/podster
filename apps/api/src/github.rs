@@ -43,6 +43,8 @@ const MAX_ANSWER_BYTES: usize = 256 * 1024;
 /// A pull request's answer carries its whole description, which its author writes and Podster never keeps. This is room
 /// for the longest GitHub allows, so a long description can't make a pull request unreadable.
 const MAX_PULL_ANSWER_BYTES: usize = 1024 * 1024;
+/// The longest base branch name read out of a pull request. A longer one is kept as no name at all.
+const MAX_BRANCH_NAME_BYTES: usize = 255;
 /// A repository Podster made has two rulesets. Reading a few more is enough to see that something else is there.
 const MAX_RULESETS_READ: usize = 5;
 pub const REVIEW_RULESET_NAME: &str = "podster-review";
@@ -775,7 +777,7 @@ pub(crate) trait PullReader {
     async fn read_pull(&self, repo_id: i64, number: i64) -> PullRead;
 }
 
-/// A pull request as GitHub describes it, keeping IDs, commit IDs, the base branch and the state. Its title, body,
+/// A pull request as GitHub describes it, keeping IDs, commit IDs, the base branch, the state and the draft flag. Its title, body,
 /// head branch name, labels and author are never read out of the answer.
 fn pull_seen(answer: &Value) -> Option<PullSeen> {
     let sha = |value: &Value| {
@@ -796,12 +798,14 @@ fn pull_seen(answer: &Value) -> Option<PullSeen> {
         repo_id: id(&answer["base"]["repo"]["id"]),
         head_repo_id: id(&answer["head"]["repo"]["id"]),
         head_sha: sha(&answer["head"]["sha"])?,
-        base_ref: answer["base"]["ref"]
-            .as_str()
-            .filter(|name| !name.is_empty() && name.len() <= 255)?
-            .to_string(),
+        // A name too long to be a branch of ours isn't the default branch. That's a pull request on the wrong base,
+        // not one that can't be read.
+        base_ref: Some(answer["base"]["ref"].as_str()?)
+            .filter(|name| !name.is_empty() && name.len() <= MAX_BRANCH_NAME_BYTES)
+            .map(str::to_string),
         base_sha: sha(&answer["base"]["sha"])?,
         state,
+        draft: answer["draft"].as_bool()?,
         merge_sha: merged.then(|| sha(&answer["merge_commit_sha"])).flatten(),
         merged_by_id: merged.then(|| id(&answer["merged_by"]["id"])).flatten(),
     })
@@ -809,7 +813,7 @@ fn pull_seen(answer: &Value) -> Option<PullSeen> {
 
 impl PullReader for AgentTokens {
     /// **Which App reads (ruled by the architect, 2026-11-10):** the agent-token App, with a token for this one
-    /// repository that can only read. Never the provisioning App, which holds Administration, and never the merge App,
+    /// repository that can read its pull requests and metadata, and nothing else: not its contents. Never the provisioning App, which holds Administration, and never the merge App,
     /// which is kept for marking and merging. A token that came back wider than asked is revoked unused.
     async fn read_pull(&self, repo_id: i64, number: i64) -> PullRead {
         let wanted = TokenPermissions::READER.pairs();

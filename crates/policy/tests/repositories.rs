@@ -627,17 +627,15 @@ fn the_repository_its_grants_and_a_tasks_change_are_seen_by_those_the_specs_name
                 role != Role::None,
                 "{kind:?} {role:?}"
             );
-            // A task's change follows the task.
+            // A task's change is narrower than the task (M5 step 7a's ruling): a person who sees the task and isn't a
+            // guest, or the task's own assignee or reviewer.
             for party in PARTIES {
                 let who = caller(party, kind, role);
+                let shown =
+                    matches!(party, "asg" | "rev") || (kind == Person && role != Role::Guest);
                 assert_eq!(
                     sees_task_change(&who, &task),
-                    can_see_task(&who, &task),
-                    "{kind:?} {role:?} {party}"
-                );
-                assert_eq!(
-                    sees_task_change(&who, &task),
-                    role != Role::None && sees(kind, role, party),
+                    can_see_task(&who, &task) && shown,
                     "{kind:?} {role:?} {party}"
                 );
             }
@@ -779,4 +777,39 @@ fn only_a_human_owner_or_admin_sees_every_grant() {
     ] {
         assert!(!sees_every_grant(&who), "{}", who.id);
     }
+}
+
+#[test]
+fn a_tasks_change_is_shown_to_people_who_see_the_task_and_to_its_assignee_and_reviewer() {
+    let t = task();
+    // People in the room who see the task.
+    for role in [Role::Owner, Role::Admin, Role::Member] {
+        assert!(
+            sees_task_change(&caller("someone", Person, role), &t),
+            "{role:?}"
+        );
+    }
+    // The task's own assignee and reviewer, whatever they are: an agent, a guest, a public-claim participant.
+    for (id, kind, role) in [
+        ("asg", Agent, Role::Member),
+        ("asg", Agent, Role::Guest),
+        ("rev", Agent, Role::Guest),
+        ("rev", Person, Role::Guest),
+    ] {
+        assert!(
+            sees_task_change(&caller(id, kind, role), &t),
+            "{id} {kind:?} {role:?}"
+        );
+    }
+    // Not another agent, even one that reads every task, and not a guest who is only the requester or reads the task.
+    let mut reads_all = caller("other", Agent, Role::Member);
+    reads_all.scopes = Scopes::for_role(Role::Admin, false);
+    assert!(can_see_task(&reads_all, &t));
+    assert!(!sees_task_change(&reads_all, &t));
+    assert!(!sees_task_change(&caller("other", Agent, Role::Member), &t));
+    assert!(!sees_task_change(&caller("req", Person, Role::Guest), &t));
+    assert!(!sees_task_change(&caller("req", Agent, Role::Guest), &t));
+    // Nobody who can't see the task, or who has left.
+    assert!(!sees_task_change(&caller("asg", Agent, Role::None), &t));
+    assert!(!sees_task_change(&caller("gone", Person, Role::None), &t));
 }

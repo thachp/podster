@@ -21,7 +21,7 @@ const orgAdmin: Who = { id: "per_tc_orgadmin", kind: "person", org: ORG, adminOr
 /** Each test's own repository, so the fake's state for it is the test's alone while other specs run beside it. */
 let REPO_ID = 0;
 let nextRepo = 9_000_000 + Math.floor(Math.random() * 1_000_000) * 10;
-const READ_ONLY = { contents: "read", metadata: "read", pull_requests: "read" };
+const READ_ONLY = { metadata: "read", pull_requests: "read" };
 const HEAD = "a1".repeat(20);
 const HEAD2 = "c3".repeat(20);
 const BASE = "b2".repeat(20);
@@ -52,7 +52,7 @@ const must = async (who: Who, method: string, path: string, body?: unknown, opti
   return res.body;
 };
 
-type Pull = { head_sha: string; base_sha: string; base_ref?: string; head_repo?: number | null; base_repo?: number; state?: "open" | "closed"; merged?: boolean; merge_commit_sha?: string; merged_by?: number; as_number?: number; padding?: number };
+type Pull = { head_sha: string; base_sha: string; base_ref?: string; head_repo?: number | null; base_repo?: number; state?: "open" | "closed"; merged?: boolean; merge_commit_sha?: string; merged_by?: number; as_number?: number; padding?: number; draft?: boolean };
 const fake = (body: object) => fetch("https://github-fake.example.com/agent-repo", { method: "POST", body: JSON.stringify({ id: REPO_ID, ...body }) });
 /** Sets one pull request of this test's repository, as GitHub would answer for it. */
 const pull = (number: number, patch: Partial<Pull> = {}) => fake({ pulls: { [number]: { head_sha: HEAD, base_sha: BASE, ...patch } } });
@@ -178,7 +178,7 @@ describe("linking a pull request at submission", () => {
     expect(shown).toEqual({
       provider_repo_id: REPO_ID, pr_number: 7, submission_no: 1, pr_state: "open", pr_observed_at: row.pr_observed_at, observed_head_sha: HEAD, head_observed_at: row.head_observed_at,
       head_in_repository: true, base_is_default: true, observed_base_sha: BASE, reviewed_commit_sha: null, reviewed_base_sha: null, commit_changed: false,
-      merge_state: "not_requested", merge_reason: null, merge_sha: null, merge_observed_at: null,
+      pr_draft: false, commit_changed_at: null, watched: true, merge_state: "not_requested", merge_reason: null, merge_sha: null, merge_observed_at: null,
     });
   });
 
@@ -200,6 +200,10 @@ describe("linking a pull request at submission", () => {
     await tried(12, { head_repo: null }, [409, "pull_request_from_fork"]);
     // Not into the default branch.
     await tried(13, { base_ref: "release" }, [409, "pull_request_wrong_base"]);
+    // Into a branch whose name is too long to be one of ours: the wrong base, not an unreadable pull request.
+    await tried(18, { base_ref: "b".repeat(300) }, [409, "pull_request_wrong_base"]);
+    // Still marked as a draft by its author.
+    await tried(17, { draft: true }, [409, "pull_request_draft"]);
     // Closed, or already merged.
     await tried(14, { state: "closed" }, [409, "pull_request_not_open"]);
     await tried(15, { merged: true, merge_commit_sha: MERGE }, [409, "pull_request_not_open"]);
@@ -214,6 +218,10 @@ describe("linking a pull request at submission", () => {
     // Neither does a commit that isn't a full ID.
     const short = await submit(AGENT, id, t.task, { version: t.version, commit_sha: "a1b2c3d", pr_number: 7 });
     expect([short.status, short.code]).toEqual([400, "invalid_argument"]);
+    expect((await reads()).length).toBe(before);
+    // A stale command is answered as stale, and never reads a pull request or says anything about one.
+    const stale = await submit(AGENT, id, t.task, { version: t.version + 5, commit_sha: HEAD, pr_number: 404 });
+    expect([stale.status, stale.code]).toEqual([409, "version_conflict"]);
     expect((await reads()).length).toBe(before);
     expect(await change(id, t.task)).toBeNull();
     expect((await taskRow(id, t.task)).status).toBe("accepted");
@@ -306,16 +314,31 @@ describe("linking a pull request at submission", () => {
     expect(await reads()).toEqual([]);
   });
 
-  it("holds reads for commands to 60 an hour for the room", async () => {
-    const id = await room();
-    const t = await accepted(id);
-    await inRoom(id, (sql) => { for (let n = 0; n < 60; n++) sql.exec("INSERT INTO repo_read (at, kind) VALUES (?, 'command')", Date.now()); });
-    const got = await submit(AGENT, id, t.task, { version: t.version, commit_sha: HEAD, pr_number: 7 });
-    expect([got.status, got.code]).toEqual([429, "rate_limited"]);
-    expect(await minted()).toEqual([]);
-    // The refresh job's reads are counted apart, and an hour on there's room again.
-    await inRoom(id, (sql) => sql.exec("UPDATE repo_read SET kind = 'job'"));
-    expect((await submit(AGENT, id, t.task, { version: t.version, commit_sha: HEAD, pr_number: 7 })).status).toBe(200);
+  it("holds reads for commands to 60 an hour for the room and 20 for any one caller, so one caller can't spend the room's", async () => {
+    const r = await submitted();
+    // The assignee has used its own allowance, on wrong commits say. Its next read is refused.
+    await inRoom(r.id, (sql) => { for (let n = 0; n < 19; n++) sql.exec("INSERT INTO repo_read (at, kind, caller) VALUES (?, 'command', ?)", Date.now(), AGENT.id); });
+    const back = await must(OWNER, "POST", `/v1/workspaces/${r.id}/tasks/${r.task}/request-changes`, { submission_no: 1, reason: "More" });
+    const mintedBefore = (await minted()).length;
+    const spent = await submit(AGENT, r.id, r.task, { version: back.version, commit_sha: HEAD, pr_number: 7 });
+    expect([spent.status, spent.code]).toEqual([429, "rate_limited"]);
+    expect((await minted()).length).toBe(mintedBefore);
+    // The reviewer's approval of another task isn't held up by it.
+    const other = await accepted(r.id, OTHER);
+    await pull(8);
+    expect((await submit(OTHER, r.id, other.task, { version: other.version, commit_sha: HEAD, pr_number: 8 })).status).toBe(200);
+    expect((await verify(OWNER, r.id, other.task, { submission_no: 1, commit_sha: HEAD })).status).toBe(200);
+    // The room's own cap holds everyone, and the refresh job's reads are counted apart from it.
+    const third = await accepted(r.id, OTHER);
+    await pull(9);
+    await inRoom(r.id, (sql) => { sql.exec("DELETE FROM repo_read"); for (let n = 0; n < 60; n++) sql.exec("INSERT INTO repo_read (at, kind, caller) VALUES (?, 'command', ?)", Date.now(), `agt_tc_x${n}`); });
+    const full = await submit(OTHER, r.id, third.task, { version: third.version, commit_sha: HEAD, pr_number: 9 });
+    expect([full.status, full.code]).toEqual([429, "rate_limited"]);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_read SET kind = 'job', caller = NULL"));
+    expect((await submit(OTHER, r.id, third.task, { version: third.version, commit_sha: HEAD, pr_number: 9 })).status).toBe(200);
+    // An hour on, the assignee has room again.
+    await inRoom(r.id, (sql) => { sql.exec("DELETE FROM repo_read"); for (let n = 0; n < 20; n++) sql.exec("INSERT INTO repo_read (at, kind, caller) VALUES (?, 'command', ?)", Date.now() - 3_600_001, AGENT.id); });
+    expect((await submit(AGENT, r.id, r.task, { version: back.version, commit_sha: HEAD, pr_number: 7 })).status).toBe(200);
   });
 
   it("answers a hidden room as a missing one and a hidden task as a missing one, and reads nothing for either", async () => {
@@ -426,8 +449,8 @@ describe("review pins the commit", () => {
 
   it("refuses to approve a pull request that's no longer one the task may have", async () => {
     const r = await submitted();
-    for (const [patch, code] of [[{ state: "closed" }, "pull_request_not_open"], [{ base_ref: "other" }, "pull_request_wrong_base"], [{ head_repo: REPO_ID + 1 }, "pull_request_from_fork"]] as const) {
-      await pull(7, { head_sha: HEAD, base_sha: BASE, state: "open", base_ref: "main", head_repo: REPO_ID, ...patch });
+    for (const [patch, code] of [[{ state: "closed" }, "pull_request_not_open"], [{ base_ref: "other" }, "pull_request_wrong_base"], [{ head_repo: REPO_ID + 1 }, "pull_request_from_fork"], [{ draft: true }, "pull_request_draft"]] as const) {
+      await pull(7, { head_sha: HEAD, base_sha: BASE, state: "open", base_ref: "main", head_repo: REPO_ID, draft: false, ...patch });
       const got = await verify(OWNER, r.id, r.task, { submission_no: 1, commit_sha: HEAD });
       expect([got.status, got.code], code).toEqual([409, code]);
     }
@@ -438,7 +461,32 @@ describe("review pins the commit", () => {
     // The assignee can't approve its own work, and that costs no read.
     const before = (await reads()).length;
     expect((await verify(AGENT, r.id, r.task, { submission_no: 1, commit_sha: HEAD })).status).toBe(403);
+    // A change on record for some other repository isn't this room's, and isn't read or approved.
+    await fake({ pullRead: 200 });
+    await pull(7);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET provider_repo_id = provider_repo_id + 1"));
+    const elsewhere = await verify(OWNER, r.id, r.task, { submission_no: 1, commit_sha: HEAD });
+    expect([elsewhere.status, elsewhere.code]).toEqual([409, "change_not_found"]);
     expect((await reads()).length).toBe(before);
+    expect((await taskRow(r.id, r.task)).status).toBe("submitted");
+  });
+
+  it("refuses with pull_request_unread, and approves nothing, when the room changes while GitHub is being read", async () => {
+    const r = await submitted();
+    await settle(r.id);
+    // GitHub takes 200 ms to answer. Meanwhile the task's record comes to name another pull request.
+    await fake({ mode: "slow" });
+    const pending = verify(OWNER, r.id, r.task, { submission_no: 1, commit_sha: HEAD });
+    await new Promise((x) => setTimeout(x, 60));
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET pr_number = 8"));
+    const got = await pending;
+    expect([got.status, got.code]).toEqual([409, "pull_request_unread"]);
+    expect(await taskRow(r.id, r.task)).toMatchObject({ status: "submitted", approved_submission_no: null });
+    expect(await change(r.id, r.task)).toMatchObject({ pr_number: 8, reviewed_commit_sha: null });
+    // Sent again once the room is settled, it's read and decided afresh.
+    await fake({ mode: "ok" });
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET pr_number = 7"));
+    expect((await verify(OWNER, r.id, r.task, { submission_no: 1, commit_sha: HEAD })).status).toBe(200);
   });
 });
 
@@ -510,7 +558,9 @@ describe("the refresh job", () => {
     // The approval and the reviewed commit stand.
     expect(await taskRow(r.id, r.task)).toMatchObject({ status: "completed", approved_submission_no: 1 });
     expect(await change(r.id, r.task)).toMatchObject({ reviewed_commit_sha: HEAD, reviewed_base_sha: BASE, merge_state: "not_requested", merge_reason: null });
-    expect((await must(OWNER, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`)).change).toMatchObject({ commit_changed: true, reviewed_commit_sha: HEAD, observed_head_sha: HEAD2 });
+    const shown = (await must(OWNER, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`)).change;
+    expect(shown).toMatchObject({ commit_changed: true, reviewed_commit_sha: HEAD, observed_head_sha: HEAD2 });
+    expect(shown.commit_changed_at).toBeGreaterThan(0);
     const recorded = (await events(r.id)).filter((e) => e.type === "task_change.commit_changed");
     expect(recorded).toEqual([{ type: "task_change.commit_changed", actor_id: "system", task_id: r.task, reason: "commit_changed" }]);
     // The room's owner and admin are told, by ID.
@@ -531,6 +581,35 @@ describe("the refresh job", () => {
     await nudge(r.id);
     await eventually(r.id, async () => expect((await change(r.id, r.task)).observed_head_sha).toBe("e5".repeat(20)));
     expect((await events(r.id)).filter((e) => e.type === "task_change.commit_changed")).toHaveLength(1);
+    // Pushed back to the reviewed commit: it stays changed, with the time it was first seen (plan decision 6).
+    await pull(7, { head_sha: HEAD });
+    await nudge(r.id);
+    await eventually(r.id, async () => expect((await change(r.id, r.task)).observed_head_sha).toBe(HEAD));
+    expect((await must(OWNER, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`)).change).toMatchObject({ commit_changed: true, commit_changed_at: shown.commit_changed_at, observed_head_sha: HEAD, reviewed_commit_sha: HEAD });
+    expect((await events(r.id)).filter((e) => e.type === "task_change.commit_changed")).toHaveLength(1);
+  });
+
+  it("records a pull request that went back to draft after review as a change of state, and un-approves nothing", async () => {
+    const r = await approved();
+    await settle(r.id);
+    await pull(7, { draft: true });
+    await nudge(r.id);
+    await eventually(r.id, async () => expect((await change(r.id, r.task)).pr_draft).toBe(1));
+    expect(await taskRow(r.id, r.task)).toMatchObject({ status: "completed", approved_submission_no: 1 });
+    expect(await change(r.id, r.task)).toMatchObject({ pr_state: "open", reviewed_commit_sha: HEAD, commit_changed_at: null });
+    expect((await events(r.id)).at(-1)).toEqual({ type: "task_change.observed", actor_id: "system", task_id: r.task, reason: "draft" });
+    expect((await must(OWNER, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`)).change).toMatchObject({ pr_draft: true, commit_changed: false });
+  });
+
+  it("leaves a merge Podster asked for to the merge job, so a recorded observed merge is always one it didn't ask for", async () => {
+    const r = await approved();
+    await settle(r.id);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET merge_state = 'requested'"));
+    await pull(7, { merged: true, merge_commit_sha: MERGE, merged_by: 31337 });
+    await nudge(r.id);
+    await eventually(r.id, async () => expect((await change(r.id, r.task)).pr_state).toBe("merged"));
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "requested", merge_reason: null, merge_sha: null, merged_by_id: null, merge_observed_at: null });
+    expect((await events(r.id)).filter((e) => e.type === "task_change.merge_observed")).toEqual([]);
   });
 
   it("records a merge Podster didn't ask for, with its reason, and never as a success", async () => {
@@ -583,7 +662,107 @@ describe("the refresh job", () => {
     await nudge(r.id);
     await eventually(r.id, async () => expect((await reads()).length).toBe(before + 1));
     await eventually(r.id, async () => expect((await change(r.id, r.task)).read_at).toBeGreaterThan(1));
-    expect(await change(r.id, r.task)).toMatchObject({ pr_state: "closed", unchanged_reads: 0 });
+    expect(await change(r.id, r.task)).toMatchObject({ pr_state: "closed", read_failures: 1 });
+  });
+
+  it("waits longer after each failed read, a minute doubling to an hour, and starts over once one works", async () => {
+    const r = await submitted();
+    await settle(r.id);
+    // One unchanged read first, so the poll's own backoff is seen to survive a failure.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?", Date.now() - 60_001));
+    await eventually(r.id, async () => expect((await change(r.id, r.task)).unchanged_reads).toBe(1));
+    await settle(r.id);
+    await fake({ pullRead: 500 });
+    const failed = async () => (await reads()).filter((read) => read.status === 500).length;
+    await nudge(r.id);
+    await eventually(r.id, async () => expect(await change(r.id, r.task)).toMatchObject({ read_failures: 1, unchanged_reads: 1 }));
+    expect(await failed()).toBe(1);
+    // Inside the minute nothing reads it, whatever a delivery says.
+    await nudge(r.id);
+    await alarm(r.id, 2);
+    expect(await failed()).toBe(1);
+    // After a minute it's tried again, and then not for two.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?", Date.now() - 60_001));
+    await nudge(r.id);
+    await eventually(r.id, async () => expect((await change(r.id, r.task)).read_failures).toBe(2));
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?", Date.now() - 100_000));
+    await nudge(r.id);
+    await alarm(r.id, 2);
+    expect(await failed()).toBe(2);
+    // The wait never passes an hour.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_failures = 40, read_at = ?", Date.now() - 3_600_001));
+    await nudge(r.id);
+    await eventually(r.id, async () => expect(await failed()).toBe(3));
+    // A read that works ends the run.
+    await fake({ pullRead: 200 });
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?", Date.now() - 3_600_001));
+    await nudge(r.id);
+    await eventually(r.id, async () => expect(await change(r.id, r.task)).toMatchObject({ read_failures: 0, not_found_reads: 0 }));
+  });
+
+  it("stops watching a pull request that's gone after five reads in a row, and says so once", async () => {
+    const r = await submitted();
+    await settle(r.id);
+    await fake({ pulls: { 7: null } });
+    const gone = async () => (await reads()).filter((read) => read.status === 404).length;
+    for (let n = 1; n <= 5; n++) {
+      await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?", Date.now() - 3_600_001));
+      await nudge(r.id);
+      await eventually(r.id, async () => expect((await change(r.id, r.task)).not_found_reads).toBe(n));
+      await settle(r.id);
+    }
+    expect(await gone()).toBe(5);
+    const row = await change(r.id, r.task);
+    expect(row.unwatched_at).toBeGreaterThan(0);
+    expect(row).toMatchObject({ pr_state: "open", observed_head_sha: HEAD, read_failures: 5 });
+    expect((await events(r.id)).filter((e) => e.type === "task_change.unwatched")).toEqual([{ type: "task_change.unwatched", actor_id: "system", task_id: r.task, reason: "pull_request_not_found" }]);
+    expect((await must(OWNER, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`)).change.watched).toBe(false);
+    // It isn't read again, however long passes or whatever a delivery says.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = 1"));
+    await nudge(r.id);
+    await alarm(r.id, 2);
+    expect(await gone()).toBe(5);
+    // One 404 between other failures doesn't count towards it: the run has to be unbroken.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET unwatched_at = NULL, not_found_reads = 4, read_at = 1"));
+    await fake({ pullRead: 500 });
+    await nudge(r.id);
+    await eventually(r.id, async () => expect((await change(r.id, r.task)).not_found_reads).toBe(0));
+    expect((await change(r.id, r.task)).unwatched_at).toBeNull();
+  });
+
+  it("makes the whole room's reads wait when GitHub refuses Podster itself, not each change in turn", async () => {
+    const r = await submitted();
+    const second = await accepted(r.id, OTHER);
+    await pull(8);
+    expect((await submit(OTHER, r.id, second.task, { version: second.version, commit_sha: HEAD, pr_number: 8 })).status).toBe(200);
+    await settle(r.id);
+    const link = () => inRoom(r.id, (sql) => sql.exec("SELECT read_failures, reads_not_before FROM repo_link").one() as any);
+    const refusedReads = async () => (await reads()).filter((read) => read.status === 403).length;
+    await fake({ pullRead: 403 });
+    const before = Date.now();
+    await nudge(r.id);
+    await eventually(r.id, async () => expect((await link()).read_failures).toBe(1));
+    await settle(r.id);
+    // Both changes were due, and one read was enough to know. Neither change is marked as failing on its own.
+    expect(await refusedReads()).toBe(1);
+    expect((await link()).reads_not_before).toBeGreaterThanOrEqual(before + 60_000);
+    expect([(await change(r.id, r.task)).read_failures, (await change(r.id, second.task)).read_failures]).toEqual([0, 0]);
+    // While the room waits nothing is read, and the alarm isn't set for sooner.
+    await nudge(r.id);
+    await alarm(r.id, 2);
+    expect(await refusedReads()).toBe(1);
+    // The wait over and still refused: twice as long.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET reads_not_before = ?", Date.now() - 1));
+    const again = Date.now();
+    await nudge(r.id);
+    await eventually(r.id, async () => expect((await link()).read_failures).toBe(2));
+    expect((await link()).reads_not_before).toBeGreaterThanOrEqual(again + 120_000);
+    await settle(r.id);
+    // Put right, the next read clears it for the room.
+    await fake({ pullRead: 200 });
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET reads_not_before = ?", Date.now() - 1));
+    await nudge(r.id);
+    await eventually(r.id, async () => expect(await link()).toEqual({ read_failures: 0, reads_not_before: null }));
   });
 
   it("doesn't read for a task that's back with its agent, a room whose repository isn't ready, or a room with the switch off", async () => {
@@ -602,6 +781,32 @@ describe("the refresh job", () => {
     await nudge(r.id);
     await alarm(r.id, 2);
     expect((await reads()).length).toBe(before);
+  });
+});
+
+describe("who is shown a task's change", () => {
+  it("shows it to people who see the task and to its assignee and reviewer, and to no other agent or guest", async () => {
+    const r = await submitted();
+    const seenBy = async (who: Who) => {
+      const got = await api(who, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`);
+      return got.status === 200 ? (got.body.change === null ? "hidden" : "shown") : got.status;
+    };
+    // The owner, who reviews it; an admin; and the agent it's assigned to.
+    expect([await seenBy(OWNER), await seenBy(ADMIN), await seenBy(AGENT)]).toEqual(["shown", "shown", "shown"]);
+    // Another agent in the room reads the task, and isn't shown its pull request.
+    expect(await seenBy(OTHER)).toBe("hidden");
+    // A public-claim participant doesn't see the task at all, and someone outside doesn't see the room.
+    expect([await seenBy(PUBLIC), await seenBy(OUTSIDER)]).toEqual([404, 404]);
+    // Made the reviewer, the public-claim participant is a party to it and is shown it. Given the task to read and no
+    // more, it isn't.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task SET requester_id = ? WHERE id = ?", PUBLIC.id, r.task));
+    expect(await seenBy(PUBLIC)).toBe("hidden");
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task SET reviewer_id = ? WHERE id = ?", PUBLIC.id, r.task));
+    expect(await seenBy(PUBLIC)).toBe("shown");
+    // Nothing of it is on the room's public page or in the task list.
+    const listed = JSON.stringify(await must(OWNER, "GET", `/v1/workspaces/${r.id}/tasks`));
+    expect(listed).not.toContain("pr_number");
+    expect(listed).not.toContain(HEAD);
   });
 });
 
@@ -633,6 +838,8 @@ describe("what's kept and logged", () => {
     await settle(r.id);
     await fake({ pullRead: 200 });
     await pull(7, { head_sha: HEAD2, merged: true, merge_commit_sha: MERGE, merged_by: 31337 });
+    // The failed reads left a wait. It's over.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?", Date.now() - 3_600_001));
     await nudge(r.id);
     await eventually(r.id, async () => expect((await change(r.id, r.task)).pr_state).toBe("merged"));
     answers.push(JSON.stringify(await must(OWNER, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`)));
@@ -672,13 +879,16 @@ describe("the room migration", () => {
     const newest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
     await inRoom(r.id, (sql) => {
       sql.exec("DROP TABLE repo_read");
-      for (const column of ["merged_by_id", "unchanged_reads", "read_at", "observed_base_sha"]) sql.exec(`ALTER TABLE task_change DROP COLUMN ${column}`);
+      for (const column of ["pr_draft", "commit_changed_at", "unwatched_at", "not_found_reads", "read_failures", "merged_by_id", "unchanged_reads", "read_at", "observed_base_sha"]) sql.exec(`ALTER TABLE task_change DROP COLUMN ${column}`);
+      for (const column of ["reads_not_before", "read_failures"]) sql.exec(`ALTER TABLE repo_link DROP COLUMN ${column}`);
       sql.exec("UPDATE schema_version SET version = version - 1");
     });
     await must(OWNER, "GET", `/v1/workspaces/${r.id}`);
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(newest);
-    expect(await change(r.id, r.task)).toMatchObject({ pr_number: 7, observed_head_sha: HEAD, observed_base_sha: null, read_at: null, unchanged_reads: 0, merged_by_id: null });
-    expect(await inRoom(r.id, (sql) => sql.exec("SELECT count(*) AS n FROM repo_read").one().n)).toBe(0);
+    // The runtime may already have read the change again by now, which fills these in. The columns are there either way.
+    expect(await change(r.id, r.task)).toMatchObject({ pr_number: 7, read_failures: 0, not_found_reads: 0, unwatched_at: null, commit_changed_at: null, merged_by_id: null });
+    expect(await inRoom(r.id, (sql) => sql.exec("SELECT read_failures, reads_not_before FROM repo_link").one())).toEqual({ read_failures: 0, reads_not_before: null });
+    expect(await inRoom(r.id, (sql) => sql.exec("SELECT name FROM pragma_table_info('repo_read')").toArray().map((c: any) => c.name))).toEqual(["at", "kind", "caller"]);
     // A change with no read on record is due one.
     await pull(7, { head_sha: HEAD2 });
     await eventually(r.id, async () => expect((await change(r.id, r.task)).observed_head_sha).toBe(HEAD2));

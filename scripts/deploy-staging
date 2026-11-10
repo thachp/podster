@@ -15,6 +15,8 @@ It refuses, before changing anything, unless:
   - CLOUDFLARE_ACCOUNT_ID is set (docs/staging.md keeps the ID out of this repo)
   - worker-build is 0.8.7
   - the checkout is detached at origin/main's tip after a fetch, with nothing changed or untracked
+  - ci.yml's run on main for that commit has finished as success. It reruns nothing: a failed
+    run is looked into, not deployed
   - no D1 migration is pending on podster-api-staging or podster-gateway-staging, or
     --apply-migrations names exactly the pending set, by file name, such as
     --apply-migrations 0007_repo_room_index.sql. It then applies them first and lists again.
@@ -22,7 +24,8 @@ It refuses, before changing anything, unless:
 It sets CI=true, so wrangler asks nothing, and runs `npm ci` in each app it deploys.
 
 Exit codes: 0 deployed and every probe passed; 1 refused, nothing on staging changed; 2 wrong usage;
-3 stopped after it began changing staging (the output says where); 4 deployed, but a probe failed.
+3 stopped after it began changing staging (the output says where, and which Workers had already
+deployed, with their version IDs); 4 deployed, but a probe failed.
 EOF
 }
 
@@ -53,7 +56,21 @@ fi
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 refuse() { echo "REFUSE  $*"; echo "deploy-staging: refused, nothing on staging changed"; exit 1; }
-stop() { echo "STOPPED $*"; echo "deploy-staging: stopped part-way. Staging may have changed; read the output above."; exit 3; }
+# Each deployed Worker and its version ID, one per line, as they happen.
+versions=""
+show_versions() { printf '%s' "$versions" | while read -r worker version; do echo "version $worker $version"; done; }
+stop() {
+  echo
+  echo "STOPPED $*"
+  if [ -n "$versions" ]; then
+    echo "deployed before it stopped, and still deployed:"
+    show_versions
+  else
+    echo "no Worker was deployed before it stopped"
+  fi
+  echo "deploy-staging: stopped part-way. Staging may have changed; read the output above."
+  exit 3
+}
 step() { echo; echo "== $*"; }
 
 # --- what must hold before anything runs ---
@@ -75,7 +92,15 @@ here=$(git rev-parse HEAD)
 tip=$(git rev-parse --verify --quiet origin/main) || refuse "origin/main doesn't exist"
 if [ "$here" != "$tip" ]; then refuse "the checkout is at $here, and origin/main is at $tip"; fi
 if [ -n "$(git status --porcelain)" ]; then refuse "the checkout has changed or untracked files"; fi
-echo "deploying $here, origin/main's tip, to staging"
+# Only a commit whose own CI passed on main. A run that failed, flake or not, is the caller's to look into.
+ci=$(gh run list --workflow ci.yml --branch main --event push --commit "$here" --limit 1 --json status,conclusion \
+  --jq '.[] | [.status, (if (.conclusion // "") == "" then "none" else .conclusion end)] | @tsv') \
+  || refuse "could not read ci.yml's run on main for $here"
+if [ -z "$ci" ]; then refuse "ci.yml has no run on main for $here"; fi
+IFS=$'\t' read -r ci_status ci_conclusion <<< "$ci"
+if [ "$ci_status" != completed ]; then refuse "ci.yml's run on main for $here is still $ci_status"; fi
+if [ "$ci_conclusion" != success ]; then refuse "ci.yml's run on main for $here ended as $ci_conclusion, not success"; fi
+echo "deploying $here, origin/main's tip, with ci.yml green on main, to staging"
 
 export CLOUDFLARE_ACCOUNT_ID
 export CI=true
@@ -139,7 +164,6 @@ if [ -n "$all_pending" ]; then
 fi
 
 # --- deploys: the API first, then the gateway, then the web app ---
-versions=""
 record() { # record WORKER OUTPUT-FILE
   local version
   version=$(sed -n 's/^Current Version ID:[[:space:]]*//p' "$2" | tail -1 | tr -d '\r')
@@ -158,24 +182,33 @@ done
 if [ "$web" = true ]; then
   step "building the web app for staging"
   rm -rf apps/web/dist
-  (cd apps/web && CLOUDFLARE_ENV=staging npm run build) || stop "building the web app failed. The API and gateway are deployed"
+  (cd apps/web && CLOUDFLARE_ENV=staging npm run build) || stop "building the web app failed"
   built=apps/web/dist/server/wrangler.json
-  [ -f "$built" ] || stop "the build wrote no $built. The API and gateway are deployed"
-  # The file the build writes carries no environment name, so check it is staging's before deploying it.
-  routes=$(node --input-type=commonjs -e '
+  [ -f "$built" ] || stop "the build wrote no $built"
+  # The deploy command names no environment, because the build already chose one. So check the file the build
+  # wrote is staging's in every way that decides where it lands and what it reaches, before deploying it.
+  wrong=$(node --input-type=commonjs -e '
     const config = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-    process.stdout.write((config.routes ?? []).map((route) => route.pattern ?? route).join(","));
-  ' "$built") || stop "could not read $built. The API and gateway are deployed"
-  if [ "$routes" != app-staging.podster.dev ]; then
-    stop "$built routes to '${routes:-nothing}', not app-staging.podster.dev alone, so it wasn't deployed. The API and gateway are deployed"
-  fi
+    const wrong = [];
+    if (config.name !== "podster-web-staging") wrong.push(`its name is ${config.name}`);
+    if (config.workers_dev !== false) wrong.push(`workers_dev is ${config.workers_dev}`);
+    const routes = (config.routes ?? []).map((route) => route.pattern ?? route).join(",");
+    if (routes !== "app-staging.podster.dev") wrong.push(`its routes are ${routes || "none"}`);
+    const services = config.services ?? [];
+    if (services.length === 0) wrong.push("it binds no service");
+    for (const { binding, service } of services) {
+      if (!String(service).endsWith("-staging")) wrong.push(`its ${binding} binding is ${service}`);
+    }
+    process.stdout.write(wrong.join("; "));
+  ' "$built") || stop "could not read $built, so the web app wasn't deployed"
+  if [ -n "$wrong" ]; then stop "$built isn't staging's ($wrong), so the web app wasn't deployed"; fi
   step "deploying the web app"
   (cd apps/web && npx wrangler deploy --config dist/server/wrangler.json) | tee "$log" || stop "deploying the web app failed"
   record podster-web-staging "$log"
 fi
 
 step "deployed $here"
-printf '%s' "$versions" | while read -r worker version; do echo "version $worker $version"; done
+show_versions
 
 step "signed-out probes"
 if ! "$root/scripts/staging-probes"; then

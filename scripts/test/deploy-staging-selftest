@@ -1,11 +1,32 @@
 #!/usr/bin/env bash
 # Checks every refusal of scripts/deploy-staging, in a scratch repository with stand-ins for npm, npx (wrangler),
-# worker-build and curl. Git is real and local. Nothing reaches the network or Cloudflare.
+# worker-build, gh and curl. Git is real and local. Nothing reaches the network or Cloudflare. One section gives the
+# stand-in gh real JSON, captured into scripts/test/fixtures, and runs the script's own jq over it, so it needs `jq`.
 #
 #   scripts/test/deploy-staging-selftest
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 stub_curl
+
+# $fix/main-ci holds what `gh run list ... --jq` would print. $fix/main-ci.json holds gh's JSON instead, and the
+# --jq expression the script passed is run over it.
+stub gh <<'EOF'
+#!/usr/bin/env bash
+fix="$(dirname "$0")/../fix"
+echo "gh $*" >> "$fix/calls"
+case "$*" in
+  "run list --workflow ci.yml --branch main --event push --commit "*" --limit 1 --json status,conclusion --jq "*)
+    if [ -f "$fix/main-ci.json" ]; then
+      for last in "$@"; do :; done
+      jq -r "$last" "$fix/main-ci.json"
+      exit
+    fi
+    [ "$(cat "$fix/main-ci")" = gh-fails ] && exit 1
+    cat "$fix/main-ci"
+    ;;
+  *) echo "stand-in gh: unexpected: gh $*" >&2; exit 97 ;;
+esac
+EOF
 
 stub worker-build <<'EOF'
 #!/usr/bin/env bash
@@ -94,7 +115,23 @@ fresh() {
   echo "Current Version ID: 5cb57391-a010-4425-afb4-091fa2644f67" > "$fix/version-api"
   echo "Current Version ID: cd068ed1-3873-43c6-b066-be36c66c7eff" > "$fix/version-gateway"
   echo "Current Version ID: 11111111-2222-4333-8444-555555555555" > "$fix/version-web"
-  echo '{"name":"podster-web-staging","routes":[{"pattern":"app-staging.podster.dev","custom_domain":true}]}' > "$fix/web-config"
+  printf 'completed\tsuccess\n' > "$fix/main-ci"
+  # What the staging build wrote on 2026-11-10, less what the script doesn't read.
+  web_config '.'
+}
+web_config() { # web_config JQ: the staging build's file, changed
+  jq "$1" > "$fix/web-config" <<'JSON'
+{
+  "name": "podster-web-staging",
+  "topLevelName": "podster-web",
+  "workers_dev": false,
+  "routes": [{ "pattern": "app-staging.podster.dev", "custom_domain": true }],
+  "services": [
+    { "binding": "GATEWAY", "service": "podster-gateway-staging" },
+    { "binding": "PUBLIC_READS", "service": "podster-gateway-staging", "entrypoint": "PublicReads" }
+  ]
+}
+JSON
 }
 deploy() { # deploy EXPECTED-EXIT [ARG...]
   local expected=$1
@@ -127,6 +164,8 @@ check "  each Worker's version ID is recorded" said '^version podster-api-stagin
 check "  the gateway's too" said '^version podster-gateway-staging cd068ed1-3873-43c6-b066-be36c66c7eff$'
 check "  the probes run after the deploys, one line each" test "$(grep -c '^PASS ' "$tmp/out")" -eq 4
 check "  no secret or variable is set" never_called 'secret|--var|versions'
+check "  main's CI was asked about, for the commit being deployed" called "^gh run list --workflow ci.yml --branch main --event push --commit $(git -C "$work" rev-parse HEAD) "
+check "  before anything else ran" test "$(order '^gh run list')" -eq 1
 fresh
 
 # --- the checkout ---
@@ -159,6 +198,40 @@ refused "a changed file" 'changed or untracked'
 
 git -C "$work" remote set-url origin "$tmp/nowhere.git"
 refused "an origin that can't be fetched" 'could not fetch origin'
+
+# --- main's CI for the commit ---
+: > "$fix/main-ci"
+refused "a tip with no ci.yml run on main" 'ci.yml has no run on main'
+
+printf 'in_progress\tnone\n' > "$fix/main-ci"
+refused "a tip whose ci.yml run is still going" 'is still in_progress'
+
+printf 'queued\tnone\n' > "$fix/main-ci"
+refused "a tip whose ci.yml run is queued" 'is still queued'
+
+for conclusion in failure cancelled timed_out skipped; do
+  printf 'completed\t%s\n' "$conclusion" > "$fix/main-ci"
+  refused "a tip whose ci.yml run ended as $conclusion" "ended as $conclusion, not success"
+done
+
+echo gh-fails > "$fix/main-ci"
+refused "a ci.yml run gh can't read" "could not read ci.yml's run on main"
+
+
+# The same, from gh's real JSON for main's run on #252's merge commit, through the script's own jq.
+check "the self-test has jq" test -x "$(command -v jq)"
+cp "$scripts/test/fixtures/main-run.json" "$fix/main-ci.json"
+check "the captured run, a success, lets it deploy: exit 0" deploy 0
+fresh
+
+jq '.[0].conclusion = "failure"' "$scripts/test/fixtures/main-run.json" > "$fix/main-ci.json"
+refused "the captured run, had it failed" 'ended as failure, not success'
+
+jq '.[0].status = "in_progress" | .[0].conclusion = null' "$scripts/test/fixtures/main-run.json" > "$fix/main-ci.json"
+refused "the captured run, while it was going" 'is still in_progress'
+
+echo '[]' > "$fix/main-ci.json"
+refused "an empty list of runs" 'ci.yml has no run on main'
 
 # --- migrations ---
 table 0007_repo_room_index.sql > "$fix/pending-podster-api-staging"
@@ -226,11 +299,26 @@ touch "$fix/deploy-fails-api"
 check "a failed API deploy stops it, exit 3" deploy 3
 check "  and the gateway isn't deployed" never_called '\[in gateway\] .*deploy|deploy .*\[in gateway\]'
 check "  and the probes don't run" never_called '^curl '
+check "  and says no Worker was deployed" said '^no Worker was deployed before it stopped$'
+fresh
+
+touch "$fix/deploy-fails-gateway"
+check "a gateway deploy that fails after the API deployed stops it, exit 3" deploy 3
+check "  and says the API is what deployed" said '^deployed before it stopped, and still deployed:$'
+check "  with the API's version ID" said '^version podster-api-staging 5cb57391-a010-4425-afb4-091fa2644f67$'
+check "  and no version for the gateway" test "$(grep -c '^version ' "$tmp/out")" -eq 1
+check "  and the probes don't run" never_called '^curl '
+fresh
+
+touch "$fix/deploy-fails-gateway"
+check "the same with --web: exit 3" deploy 3 --web
+check "  and the web app isn't built or deployed" never_called 'run build|deploy --config'
 fresh
 
 echo "Deployed, but with no version line" > "$fix/version-gateway"
 check "a deploy that prints no version ID stops it, exit 3" deploy 3
 check "  and says which Worker" said 'STOPPED podster-gateway-staging deployed, but its output has no version ID'
+check "  and still gives the API's version ID" said '^version podster-api-staging 5cb57391-a010-4425-afb4-091fa2644f67$'
 fresh
 
 echo 200 > "$fix/me.status"
@@ -248,19 +336,34 @@ check "  the order is API, gateway, web" before 'deploy --env staging \[in gatew
 check "  the web app's version ID is recorded" said '^version podster-web-staging 11111111-2222-4333-8444-555555555555$'
 fresh
 
-echo '{"name":"podster-web","routes":[{"pattern":"app.podster.dev","custom_domain":true}]}' > "$fix/web-config"
-check "--web with a build that isn't staging's stops it, exit 3" deploy 3 --web
-check "  and the web app isn't deployed" never_called 'deploy --config'
-fresh
+not_staging() { # not_staging TITLE JQ WHAT-IT-SAYS: the staging build's file with one thing changed
+  web_config "$2"
+  check "--web with a build whose $1 stops it, exit 3" deploy 3 --web
+  check "  and says what is wrong" said "STOPPED .*isn't staging's \\(.*$3"
+  check "  and the web app isn't deployed" never_called 'deploy --config'
+  check "  and the API's and gateway's version IDs are given" test "$(grep -c -E '^version podster-(api|gateway)-staging ' "$tmp/out")" -eq 2
+  fresh
+}
+not_staging "name is the top-level one" '.name = "podster-web"' 'its name is podster-web'
+not_staging "name is missing" 'del(.name)' 'its name is undefined'
+not_staging "workers_dev is on" '.workers_dev = true' 'workers_dev is true'
+not_staging "workers_dev is missing" 'del(.workers_dev)' 'workers_dev is undefined'
+not_staging "route is another host" '.routes[0].pattern = "app.podster.dev"' 'its routes are app.podster.dev'
+not_staging "routes have a second host" '.routes += [{ "pattern": "app.podster.dev" }]' 'its routes are app-staging.podster.dev,app.podster.dev'
+not_staging "routes are missing" 'del(.routes)' 'its routes are none'
+not_staging "gateway binding isn't staging's" '.services[0].service = "podster-gateway"' 'its GATEWAY binding is podster-gateway'
+not_staging "second binding isn't staging's" '.services[1].service = "podster-gateway"' 'its PUBLIC_READS binding is podster-gateway'
+not_staging "service bindings are missing" 'del(.services)' 'it binds no service'
 
-echo '{"name":"podster-web"}' > "$fix/web-config"
-check "--web with a build that has no route stops it, exit 3" deploy 3 --web
+echo 'not json' > "$fix/web-config"
+check "--web with a build file that isn't JSON stops it, exit 3" deploy 3 --web
 check "  and the web app isn't deployed" never_called 'deploy --config'
 fresh
 
 touch "$fix/web-build-fails"
 check "--web with a failed build stops it, exit 3" deploy 3 --web
 check "  and the web app isn't deployed" never_called 'deploy --config'
+check "  and the API's and gateway's version IDs are given" test "$(grep -c -E '^version podster-(api|gateway)-staging ' "$tmp/out")" -eq 2
 fresh
 
 # --- usage, and what the script can't do at all ---
@@ -275,6 +378,7 @@ check "none of those ran anything" test ! -s "$fix/calls"
 script="$scripts/deploy-staging"
 check "the script never says 'production'" test "$(grep -c -i 'production' "$script")" -eq 0
 check "the only environment it names is staging" test "$(grep -o -E -- '--env[ =]+[^ )"]+|CLOUDFLARE_ENV=[A-Za-z]+' "$script" | sort -u | tr '\n' ' ')" = "--env staging CLOUDFLARE_ENV=staging "
+check "the one thing it asks GitHub is ci.yml's run on main" test "$(grep -o -E '(^|[ (])gh [a-z]+ [a-z]+' "$script" | sort -u | tr -d '(' | xargs)" = "gh run list"
 check "it has no command that sets a secret or a variable" test "$(grep -c -E 'wrangler[^|]* (secret|versions)|--var' "$script")" -eq 0
 check "every deploy it runs is staging's, or the staging build's file" \
   test "$(grep -c -E 'npx wrangler deploy' "$script")" -eq "$(grep -c -E 'npx wrangler deploy (--env staging|--config dist/server/wrangler\.json)\)' "$script")"

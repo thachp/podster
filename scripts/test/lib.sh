@@ -50,7 +50,7 @@ while [ $# -gt 0 ]; do
     -X) method=$2; shift ;;
     -o) out=$2; shift ;;
     -D) headers=$2; shift ;;
-    -H | -w | --proto | --max-time) shift ;;
+    -H | -w | --proto | --max-time | --data-raw) shift ;;
     https://*) url=$1 ;;
   esac
   shift
@@ -82,7 +82,7 @@ healthy_staging() {
   echo 401 > "$fix/me.status"; echo '{"error":{"code":"unauthenticated"}}' > "$fix/me.body"
   echo 401 > "$fix/a2a.status"; echo '{"error":"unauthorized"}' > "$fix/a2a.body"
   echo 401 > "$fix/a2a-slash.status"; echo '{"error":"unauthorized"}' > "$fix/a2a-slash.body"
-  echo 401 > "$fix/webhook.status"; echo '{"error":{"code":"invalid_signature"}}' > "$fix/webhook.body"
+  echo 404 > "$fix/webhook.status"; echo '{"error":{"code":"not_found"}}' > "$fix/webhook.body"
   echo 404 > "$fix/public.status"; echo '<!doctype html><title>Not found</title><p>Not found</p>' > "$fix/public.body"
   printf 'HTTP/2 404\r\ncontent-type: text/html\r\nCache-Control: no-store, no-transform\r\n\r\n' > "$fix/public.headers"
 }

@@ -6,6 +6,15 @@ set -euo pipefail
 GATEWAY="https://gateway-staging.podster.dev"
 APP="https://app-staging.podster.dev"
 
+# What the gateway answers an A2A call that carries no credential.
+A2A_SIGNED_OUT_STATUS=401
+# A well-formed A2A call, so that the missing credential is the only thing wrong with it.
+A2A_CALL='{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"tsk_00000000000000000000000000000000"}}'
+# What the gateway answers a GitHub delivery while GITHUB_WEBHOOK_SECRET is unset on staging: the path isn't there.
+# CHANGE THIS TO 401 once the owner sets that secret. An unsigned delivery is then refused as invalid_signature, and
+# this probe fails until the constant says so. apps/gateway/test/github-webhook.spec.ts pins both answers.
+WEBHOOK_STATUS_WHILE_SECRET_UNSET=404
+
 usage() {
   cat <<'EOF'
 Usage: scripts/staging-probes
@@ -13,8 +22,10 @@ Usage: scripts/staging-probes
 Sends five signed-out requests to staging and prints PASS or FAIL for each probe:
 
   me        GET  gateway /api/v1/me is 401
-  a2a       POST gateway /a2a and /a2a/ answer with the same status and body
-  webhook   POST gateway /webhooks/github with no signature is refused with a 4xx
+  a2a       POST gateway /a2a and /a2a/, a well-formed A2A call with no credential, are both
+            401 with the same body
+  webhook   POST gateway /webhooks/github with no signature is 404, the answer while the
+            webhook secret is unset (the script says what to change when the owner sets it)
   public    GET  app /p/pub_0000000000000000000000 as HTML is 404, with
             Cache-Control "no-store, no-transform" and no <script in the body
 
@@ -38,10 +49,11 @@ failed=0
 pass() { echo "PASS $1: $2"; }
 fail() { echo "FAIL $1: $2"; failed=1; }
 
-# request METHOD URL [ACCEPT]: sets STATUS, and leaves the answer in $work/body and $work/headers. A request that
-# gets no answer has STATUS 000, which no probe accepts.
+# request METHOD URL [CURL-ARG...]: sets STATUS, and leaves the answer in $work/body and $work/headers. A request
+# that gets no answer has STATUS 000, which no probe accepts.
 request() {
-  local method=$1 url=$2 accept=${3:-}
+  local method=$1 url=$2
+  shift 2
   case "$url" in
     "$GATEWAY"/* | "$APP"/*) ;;
     *) echo "staging-probes: refusing to request $url" >&2; exit 1 ;;
@@ -49,37 +61,35 @@ request() {
   : > "$work/body"
   : > "$work/headers"
   local args=(-q -sS --proto "=https" --max-time 30 -X "$method" -o "$work/body" -D "$work/headers" -w "%{http_code}")
-  if [ "$method" = POST ]; then args+=(-H "Content-Length: 0"); fi
-  if [ -n "$accept" ]; then args+=(-H "Accept: $accept"); fi
   # An empty environment, so no proxy, netrc or config of the caller's applies.
-  STATUS=$(env -i PATH="$PATH" curl "${args[@]}" "$url") || STATUS=000
+  STATUS=$(env -i PATH="$PATH" curl "${args[@]}" ${1+"$@"} "$url") || STATUS=000
   case "$STATUS" in [0-9][0-9][0-9]) ;; *) STATUS=000 ;; esac
 }
 
 request GET "$GATEWAY/api/v1/me"
 if [ "$STATUS" = 401 ]; then pass me "signed out, /api/v1/me is 401"; else fail me "/api/v1/me is $STATUS, wanted 401"; fi
 
-request POST "$GATEWAY/a2a"
+a2a_call=(-H "Content-Type: application/json" -H "A2A-Version: 1.0" --data-raw "$A2A_CALL")
+request POST "$GATEWAY/a2a" "${a2a_call[@]}"
 first=$STATUS
 cp "$work/body" "$work/a2a-body"
-request POST "$GATEWAY/a2a/"
-if [ "$first" = 000 ] || [ "$STATUS" = 000 ]; then
-  fail a2a "no answer from /a2a ($first) or /a2a/ ($STATUS)"
-elif [ "$first" != "$STATUS" ]; then
-  fail a2a "/a2a is $first and /a2a/ is $STATUS"
+request POST "$GATEWAY/a2a/" "${a2a_call[@]}"
+if [ "$first" != "$A2A_SIGNED_OUT_STATUS" ] || [ "$STATUS" != "$A2A_SIGNED_OUT_STATUS" ]; then
+  fail a2a "/a2a is $first and /a2a/ is $STATUS, wanted $A2A_SIGNED_OUT_STATUS from both"
 elif ! cmp -s "$work/a2a-body" "$work/body"; then
   fail a2a "/a2a and /a2a/ are both $first, with different bodies"
 else
-  pass a2a "/a2a and /a2a/ both answer $first with the same body"
+  pass a2a "with no credential, /a2a and /a2a/ both answer $first with the same body"
 fi
 
-request POST "$GATEWAY/webhooks/github"
-case "$STATUS" in
-  4[0-9][0-9]) pass webhook "an unsigned delivery is refused with $STATUS" ;;
-  *) fail webhook "an unsigned delivery got $STATUS, wanted a 4xx" ;;
-esac
+request POST "$GATEWAY/webhooks/github" -H "Content-Length: 0"
+if [ "$STATUS" = "$WEBHOOK_STATUS_WHILE_SECRET_UNSET" ]; then
+  pass webhook "an unsigned delivery is refused with $STATUS, as while the webhook secret is unset"
+else
+  fail webhook "an unsigned delivery got $STATUS, wanted $WEBHOOK_STATUS_WHILE_SECRET_UNSET (see WEBHOOK_STATUS_WHILE_SECRET_UNSET in this script)"
+fi
 
-request GET "$APP/p/pub_0000000000000000000000" "text/html"
+request GET "$APP/p/pub_0000000000000000000000" -H "Accept: text/html"
 cache=$(tr -d '\r' < "$work/headers" | grep -i '^cache-control:' | sed 's/^[^:]*:[[:space:]]*//' || true)
 if [ "$STATUS" != 404 ]; then
   fail public "an unknown public page is $STATUS, wanted 404"

@@ -77,6 +77,9 @@ Several agents may be working at once, each in its own worktree and branch.
 - Only one PR at a time should change `packages/contracts` or add a migration. These merge first.
 - `apps/api/src/workspace.rs`, `apps/gateway/src/index.ts`, `crates/core/src/lib.rs` and the two large test specs are where conflicts are most likely. Keep changes to them small.
 - Don't create or change cloud resources, secrets or DNS, and don't deploy, unless the owner asks in that session. There is one staging environment, and it deploys to the Cloudflare account that holds `podster.dev`.
+- Name a scratch file that sessions might share after its PR number or branch. Two sessions overwrote each other's `pr-body.md`.
+- Run the heavy local suites one at a time, and prefer CI for the full set when several sessions are active. A load average of 24 caused timeouts.
+- A third-party tool or browser started by a script gets the allow-listed environment from `e2e/child-env.mjs`, never the full one.
 
 ## Scripts agents must use
 
@@ -84,9 +87,6 @@ Each has `--help`, and refuses when a condition isn't met. Don't do these by han
 
 - **Merges go through `scripts/merge-gate <pr> <full-sha>`**, at the full sha that was reviewed. It only reports until you add `--merge`.
 - **Staging deploys go through `scripts/deploy-staging`.** It ends with `scripts/staging-probes`, the signed-out probes, which also run on their own.
-- Name a scratch file that sessions might share after its PR number or branch. Two sessions overwrote each other's `pr-body.md`.
-- Run the heavy local suites one at a time, and prefer CI for the full set when several sessions are active. A load average of 24 caused timeouts.
-- A third-party tool or browser started by a script gets the allow-listed environment from `e2e/child-env.mjs`, never the full one.
 
 ## Pull requests
 

@@ -60,6 +60,11 @@ person_only:
   # M5 step 2. get_repo_access, merge_task and get_task_release_status aren't listed anywhere yet: each arrives with the
   # step that builds it, so no agent sees a merge tool before the merge path exists (AC-17).
   - getRepository
+  # M5 step 5b. Grants on the room's repository are given and taken back by people. An agent learns of its grant only
+  # through a token, from step 6.
+  - listRepositoryGrants
+  - grantRepositoryAction
+  - revokeRepositoryGrant
   - getPublicClaims
   - setPublicClaimsPaused
   - endPublicClaims

@@ -87,7 +87,7 @@ async function main() {
   const publicHeaders = (response) =>
     response.headers.get("content-security-policy") === PUBLIC_CSP &&
     response.headers.get("x-robots-tag") === "noindex, nofollow" &&
-    response.headers.get("cache-control") === "no-store" &&
+    response.headers.get("cache-control") === "no-store, no-transform" &&
     response.headers.get("x-frame-options") === "DENY" &&
     response.headers.get("referrer-policy") === "same-origin";
   const room = await fetch(`${app}/p/pub_${"a".repeat(32)}`);

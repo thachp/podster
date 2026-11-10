@@ -256,7 +256,7 @@ function getWithHost(url, hostHeader) {
   const parsed = new URL(url);
   const send = parsed.protocol === "https:" ? httpsRequest : httpRequest;
   return new Promise((resolve, reject) => {
-    const req = send({ hostname: parsed.hostname, port: parsed.port || undefined, path: parsed.pathname + parsed.search, method: "GET", headers: { host: hostHeader }, servername: parsed.hostname, timeout: 30_000 }, (res) => {
+    const req = send({ hostname: parsed.hostname, port: parsed.port || undefined, path: parsed.pathname + parsed.search, method: "GET", headers: { host: hostHeader, ...AS_BROWSER }, servername: parsed.hostname, timeout: 30_000 }, (res) => {
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
       res.on("end", () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString("utf8") }));
@@ -276,7 +276,19 @@ async function within(seconds, done, stepMs = 1000) {
 }
 // The public view is cached for 30 seconds (decision 150), so a change shows within that.
 const CACHE_SECONDS = 30;
-const PUBLIC_HEADERS = { "x-robots-tag": "noindex, nofollow", "cache-control": "no-store", "x-frame-options": "DENY", "referrer-policy": "same-origin" };
+// How long after a change every cached copy is surely gone: the cache's 30 seconds and a margin.
+const CACHE_CLEAR_SECONDS = CACHE_SECONDS + 10;
+// What a browser's navigation sends. Cloudflare's edge rewrites HTML only for a request that takes HTML, so the checks on the
+// page's own bytes ask as a browser does, or an edge rewrite would go unseen.
+const AS_BROWSER = { accept: "text/html" };
+/** Where two bodies first differ, and their lengths, or "" when they're the same. */
+function difference(a, b) {
+  if (a === b) return "";
+  let at = 0;
+  while (at < a.length && at < b.length && a[at] === b[at]) at++;
+  return `first differs at offset ${at}; ${b.length} characters against ${a.length}`;
+}
+const PUBLIC_HEADERS = { "x-robots-tag": "noindex, nofollow", "cache-control": "no-store, no-transform", "x-frame-options": "DENY", "referrer-policy": "same-origin" };
 const publicHeadersOk = (headers) => Object.entries(PUBLIC_HEADERS).every(([name, value]) => headers.get(name) === value);
 const strictCsp = (headers) => ["script-src 'none'", "form-action 'none'", "frame-ancestors 'none'"].every((part) => (headers.get("content-security-policy") ?? "").includes(part));
 const randomHandle = () => `pub_${randomBytes(16).toString("hex")}`;
@@ -482,7 +494,7 @@ try {
       ["a room's internal ID", live.id],
       ["a malformed handle", "pub_not-a-handle"],
     ];
-    await within(CACHE_SECONDS + 10, async () => (await pageText(privateRoom.handle)).status === 404 && (await pageText(republished.handle)).status === 404, 2000);
+    await within(CACHE_CLEAR_SECONDS, async () => (await pageText(privateRoom.handle)).status === 404 && (await pageText(republished.handle)).status === 404, 2000);
     const seen = [];
     for (const [label, handle] of cases) {
       const started = Date.now();
@@ -503,6 +515,7 @@ try {
     check(claimed.ok, "a public participant joins first", claimed.code);
     check((await allExplore(owner)).includes(room.handle), "it's in Explore while public");
     await unpublish(owner, room.id);
+    const unpublishedAt = Date.now();
     // Two connections, each every 2 seconds and a second apart, which stays inside the per-client limit.
     const [a, b] = await Promise.all([0, 1].map(async (n) => {
       await sleep(n * 1000);
@@ -514,7 +527,15 @@ try {
     check(still.ok, "the public participant keeps its access", still.code);
     const again = await publish(owner, room.id);
     check(again !== room.handle, "republishing gives a new handle");
-    check((await pageText(room.handle)).status === 404, "and the old one stays not-found");
+    // A cached copy of the old handle's view may be served for 30 seconds after the unpublish (ADR 0008), and one answer of
+    // not-found doesn't show every copy is gone, so this waits the window out, as M4-02 does, and then reads several times.
+    await sleep(Math.max(0, unpublishedAt + CACHE_CLEAR_SECONDS * 1000 - Date.now()));
+    const old = [];
+    for (let n = 0; n < 5; n++) {
+      old.push((await pageText(room.handle, { headers: { connection: "close" } })).status);
+      await sleep(1000);
+    }
+    check(old.every((status) => status === 404), `and the old one stays not-found, ${CACHE_CLEAR_SECONDS} seconds after the unpublish`, `HTTP ${old.join(", ")} on 5 reads`);
   });
 
   // ---- M4-04: one of 20 takes the last place ----
@@ -642,11 +663,13 @@ try {
   // ---- M4-10 and M4-11: the per-client limit, and the public headers ----
   await step("M4-10 and M4-11 the per-client limit and the public headers", async () => {
     const room = await publicRoom(owner, `${RUN} headers`);
-    const shown = await pageText(room.handle);
+    const shown = await pageText(room.handle, { headers: AS_BROWSER });
     check(shown.status === 200 && publicHeadersOk(shown.headers) && strictCsp(shown.headers), "a public page carries the public headers and its strict CSP");
-    check(!/<script|\son\w+\s*=/i.test(shown.body), "it has no script element or inline handler");
-    const missing = await pageText(randomHandle());
+    const scriptAt = shown.body.search(/<script|\son\w+\s*=/i);
+    check(scriptAt === -1, "asked for as a browser does, it has no script element or inline handler", scriptAt === -1 ? "" : `at offset ${scriptAt} of ${shown.body.length}`);
+    const missing = await pageText(randomHandle(), { headers: AS_BROWSER });
     check(missing.status === 404 && publicHeadersOk(missing.headers) && strictCsp(missing.headers), "a not-found carries them too");
+    check(!/<script/i.test(missing.body), "and has no script element either");
     const robots = await fetch(`${app}/robots.txt`);
     check(robots.status === 200 && (await robots.text()).includes("Allow: /"), "robots.txt allows crawling, so noindex is seen");
     const flood = async (headers = () => ({})) => {
@@ -664,17 +687,30 @@ try {
     if (limited) await sleep(61_000);
     // A forged address can't dodge it: Cloudflare's edge sets cf-connecting-ip itself.
     if (!isLocal) {
-      // Any answer but the page or the limit is named, by status only, so a rejection of the header isn't read as the limit.
+      // Either the edge refuses the request before the app sees it, or the app still counts the real client and limits it.
+      // The edge's refusal is a 403 saying exactly "error code: 1000", with none of the app's own public headers, so a 403
+      // from the app itself isn't taken for it. Any other answer is named, by status only.
+      const forged = () => rawPage(room.handle, { headers: { "cf-connecting-ip": `198.51.100.${Math.floor(Math.random() * 250) + 1}` } });
+      const edgeRefused = (res, body) => res.status === 403 && /^error code: 1000\n?$/.test(body) && !res.headers.has("content-security-policy") && !res.headers.has("x-robots-tag");
       let outcome = null;
       for (let n = 1; n <= 400 && !outcome; n++) {
-        const res = await rawPage(room.handle, { headers: { "cf-connecting-ip": `198.51.100.${Math.floor(Math.random() * 250) + 1}` } });
-        await res.arrayBuffer();
+        const res = await forged();
+        const body = await res.text();
         if (res.status === 429) outcome = { kind: "limited", n };
+        else if (edgeRefused(res, body)) outcome = { kind: "edge", n };
         else if (res.status !== 200) outcome = { kind: "other", n, status: res.status };
       }
-      if (outcome?.kind === "other") record("fail", "a forged cf-connecting-ip got an answer other than the page or the limit", `HTTP ${outcome.status} at request ${outcome.n}`);
-      else check(outcome?.kind === "limited", "a forged cf-connecting-ip doesn't dodge the limit", outcome ? `refused at request ${outcome.n}` : "no 429 in 400 requests");
-      if (outcome) await sleep(61_000);
+      if (outcome?.kind === "other") record("fail", "a forged cf-connecting-ip got an answer other than the page, the limit or the edge's refusal", `HTTP ${outcome.status} at request ${outcome.n}`);
+      else if (outcome?.kind === "edge") {
+        // The refusal must be what every forged request gets, not one answer among pages.
+        let refused = 0;
+        for (let n = 0; n < 5; n++) {
+          const res = await forged();
+          if (edgeRefused(res, await res.text())) refused += 1;
+        }
+        check(outcome.n === 1 && refused === 5, "Cloudflare's edge refuses a forged cf-connecting-ip before the app, so it can't choose the client the limit counts", `403 error code: 1000 first at request ${outcome.n}, then on ${refused} of 5 more`);
+      } else check(outcome?.kind === "limited", "a forged cf-connecting-ip doesn't dodge the limit", outcome ? `refused at request ${outcome.n}` : "no 429 in 400 requests");
+      if (outcome?.kind === "limited") await sleep(61_000);
     } else owed("a forged cf-connecting-ip", "only Cloudflare's edge can show it overwrites the header; checked on staging");
   });
 
@@ -694,19 +730,25 @@ try {
   // ---- M4-13: one page for everyone ----
   await step("M4-13 the same bytes for every request", async () => {
     const room = await publicRoom(owner, `${RUN} same bytes`);
-    const plain = (await pageText(room.handle)).body;
+    // Every request asks as a browser does, and one doesn't, so a rewrite the edge makes only for browsers shows as a difference.
+    const plain = (await pageText(room.handle, { headers: AS_BROWSER })).body;
     const variants = [
-      ["the owner's own session", { headers: { cookie: owner.cookie } }],
-      ["an Authorization header", { headers: { authorization: "Bearer not-a-token" } }],
-      ["odd forwarding headers", { headers: { "x-forwarded-host": "evil.example", "x-forwarded-for": "203.0.113.7", "x-forwarded-proto": "http" } }],
+      ["the owner's own session", { headers: { ...AS_BROWSER, cookie: owner.cookie } }],
+      ["an Authorization header", { headers: { ...AS_BROWSER, authorization: "Bearer not-a-token" } }],
+      ["odd forwarding headers", { headers: { ...AS_BROWSER, "x-forwarded-host": "evil.example", "x-forwarded-for": "203.0.113.7", "x-forwarded-proto": "http" } }],
+      ["a client that asks for anything, not HTML", { headers: { accept: "*/*" } }],
     ];
-    for (const [label, init] of variants) check((await pageText(room.handle, init)).body === plain, `with ${label}`);
-    const query = await page(`${room.handle}?utm_source=x&debug=1`);
-    check((await query.text()) === plain, "with extra query strings");
+    for (const [label, init] of variants) {
+      const differs = difference(plain, (await pageText(room.handle, init)).body);
+      check(!differs, `with ${label}`, differs);
+    }
+    const query = await page(`${room.handle}?utm_source=x&debug=1`, { headers: AS_BROWSER });
+    const queryDiffers = difference(plain, await query.text());
+    check(!queryDiffers, "with extra query strings", queryDiffers);
     // Locally any Host reaches the app; on staging an odd Host must still route to it, so it's the right name written oddly.
     const oddHost = isLocal ? "evil.example" : `${new URL(app).hostname.toUpperCase()}:443`;
     const odd = await getWithHost(`${app}/p/${room.handle}`, oddHost);
-    check(odd.status === 200 && odd.body === plain, `with an odd Host, ${oddHost}`, `${odd.status}`);
+    check(odd.status === 200 && odd.body === plain, `with an odd Host, ${oddHost}`, [`HTTP ${odd.status}`, difference(plain, odd.body)].filter(Boolean).join("; "));
     const own = await fetch(`${app}/w/${room.id}/overview`, { headers: { cookie: owner.cookie }, redirect: "manual" });
     const ownBody = await own.text();
     check(own.status === 200 && !(own.headers.get("content-security-policy") ?? "").includes("script-src 'none'") && !ownBody.includes("Public workroom</p>"), "the owner's own room page is the dashboard's, not the public one", `${own.status}`);

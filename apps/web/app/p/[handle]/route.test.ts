@@ -9,7 +9,7 @@ const { GET: style } = await import("../../p-assets/style/route");
 const HANDLE = `pub_${"a".repeat(32)}`;
 const VIEW = { handle: HANDLE, published_on: "2026-11-09", content: { name: "Reef", goal: null, context: null, topic: null, workflow: "general", openings: [], outputs: [], participant_count: 1, person_review: true, archived: false } };
 const get = (handle: string, init: RequestInit = {}) => GET(new Request(`https://app.test/p/${handle}`, init), { params: Promise.resolve({ handle }) });
-const EXPECTED = { "x-robots-tag": "noindex, nofollow", "cache-control": "no-store", "x-frame-options": "DENY", "referrer-policy": "same-origin" };
+const EXPECTED = { "x-robots-tag": "noindex, nofollow", "cache-control": "no-store, no-transform", "x-frame-options": "DENY", "referrer-policy": "same-origin" };
 
 function expectPublicHeaders(response: Response) {
   for (const [name, value] of Object.entries(EXPECTED)) expect(response.headers.get(name), name).toBe(value);

@@ -29,5 +29,12 @@ try {
 check(refused, "naming a secret as the tool's own setting is refused");
 // And the real environment, as these scripts run now.
 check(!Object.keys(childEnv()).some((n) => /SECRET|TOKEN|KEY|^CLOUDFLARE_|^PODSTER_E2E_/i.test(n)), "this process's own environment gives a child none of those");
+// Each script that starts third-party code passes it this environment: the kit and the servers, and the staging browser.
+import { readFileSync } from "node:fs";
+const uses = (file, pattern) => pattern.test(readFileSync(new URL(file, import.meta.url), "utf8"));
+check(uses("./run-a2a-kit.mjs", /spawn\(join\(kit, "\.venv\/bin\/python"\), args, \{[^}]*env: childEnv\(\)/), "the kit starts with it");
+check(uses("./run-fasta2a-check.mjs", /env: childEnv\(\{ RUN_SECONDS \}\)/), "fasta2a starts with it");
+check(uses("./run-langgraph-check.mjs", /env: childEnv\(\{ LANGGRAPH_CLI_NO_ANALYTICS/), "LangGraph starts with it");
+check(uses("./a2a-roundtrip.mjs", /chromium\.launch\(\{ env: childEnv\(\) \}\)/) && !uses("./a2a-roundtrip.mjs", /chromium\.launch\(\)/), "the staging browser starts with it");
 console.log(failed ? `${failed} failed` : "child-env selftest passed");
 process.exit(failed ? 1 : 0);

@@ -23,6 +23,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { keyCheck, runKey, seal, sign } from "./a2a-test-server/seal.mjs";
 import { ADVERSARIAL } from "./a2a-test-server/worker.mjs";
+import { childEnv } from "./child-env.mjs";
 import { key, linkedA2aToken, McpAgent, Person, sleep, Target } from "./lib.mjs";
 
 const args = process.argv.slice(2);
@@ -35,8 +36,9 @@ const APP = "https://app-staging.podster.dev";
 // `--only round-trip` runs just the offer, download and change request, without the cancel and Spike C's failing endpoints.
 const only = option("--only");
 const server = (option("--server") ?? "https://podster-a2a-test-staging.podster-dev.workers.dev").replace(/\/$/, "");
-if (!/^https:\/\/[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev$/.test(server)) {
-  console.error("--server must be the test server's workers.dev origin.");
+// The sealed bearer goes to this server, so only the one on Podster's own workers.dev subdomain is accepted.
+if (!/^https:\/\/[a-z0-9-]+\.podster-dev\.workers\.dev$/.test(server)) {
+  console.error("--server must be a test server on Podster's workers.dev subdomain, podster-dev.workers.dev.");
   process.exit(2);
 }
 const signupSecret = process.env.PODSTER_E2E_SIGNUP_SECRET;
@@ -283,7 +285,7 @@ async function ac18(remote) {
     check(submitted.submissions[0]?.note === ADVERSARIAL, "read back: COMPLETED's text is the submission's note, as data");
     check((await roleOf(remote.agent.id)) === "guest", "the agent is still a guest at the end");
     const verify = await remote.agent.call("verify_task", { idempotency_key: key(), workspace_id: room, task_id: task, submission_no: 1 });
-    check(!verify.ok, "and it still can't verify its own submission", verify.ok ? "verified" : verify.code);
+    check(!verify.ok && /not_allowed/.test(verify.code ?? ""), "and it still can't verify its own submission: not_allowed", verify.ok ? "verified" : verify.code);
   });
 }
 
@@ -299,7 +301,8 @@ async function screens(remote) {
     check(submitted.task.status === "submitted", "the task goes round the test server to submitted", submitted.task.status);
     const playwright = await import("playwright");
     const { default: AxeBuilder } = await import("@axe-core/playwright");
-    const browser = await playwright.chromium.launch();
+    // Third-party code: the browser gets the allow-listed environment, never the sign-up secret.
+    const browser = await playwright.chromium.launch({ env: childEnv() });
     try {
       const context = await browser.newContext();
       // The test person's session, from the gateway's test sign-up, offered to the app's host, and the person's organization.
@@ -310,9 +313,12 @@ async function screens(remote) {
       });
       await context.addCookies([...cookies, { name: "podster-org", value: owner.org, domain: appHost, path: "/", secure: true, sameSite: "Lax" }]);
       const page = await context.newPage();
+      // The same rules and known-issues list as the accessibility run, so a listed issue isn't reported twice.
+      const known = new Set(JSON.parse(readFileSync(new URL("./a11y-known.json", import.meta.url), "utf8")).axe.map((k) => `${k.screen}|${k.rule}|${k.target}`));
       const axe = async (name) => {
-        const found = (await new AxeBuilder({ page }).analyze()).violations;
-        check(found.length === 0, `${name}: no axe violations`, found.map((v) => v.id).join(", "));
+        const { violations } = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"]).analyze();
+        const fresh = violations.flatMap((v) => v.nodes.map((n) => `${name}|${v.id}|${n.target.join(" ")}`)).filter((k) => !known.has(k));
+        check(fresh.length === 0, `${name}: no axe violations beyond a11y-known.json`, fresh.join(", "));
       };
 
       // The signed-in shell keeps polling, so the network never goes idle: wait for the page's own content instead, and say
@@ -339,9 +345,9 @@ async function screens(remote) {
 
       // The labels are on the Task Sheet's Activity tab. It opens on Details, and a tab's content isn't rendered until chosen.
       await open(`${APP}/w/${room}/tasks?task=${task}`, () => page.getByRole("tablist", { name: "Task details" }));
-      await page.getByRole("tab", { name: /Activity/ }).click();
+      await page.getByRole("tab", { name: "Activity" }).click();
       await page.getByText("through its A2A endpoint").first().waitFor({ timeout: 30_000 });
-      const labels = await page.getByText("through its A2A endpoint").count();
+      const labels = await page.getByRole("tabpanel").getByText("through its A2A endpoint").count();
       check(labels >= 2, "the Task Sheet marks the accept and the submission as reported through the agent's A2A endpoint", `${labels} labels`);
       await axe("the Task Sheet");
     } finally {
@@ -405,6 +411,7 @@ async function cleanUp() {
     if (gone?.status === 200) done++;
   }
   check(done === agents.length, "each test agent's endpoint is deleted and the agent disconnected", `${done} of ${agents.length}`);
+  if (room) console.log(`     left on staging: room ${room} and its tasks, since there's no delete route, and the signed-out test person`);
   if (owner?.cookieForSignOut) {
     await target.http("/api/auth/sign-out", { method: "POST", headers: { cookie: owner.cookieForSignOut, origin: BASE, "content-type": "application/json" }, body: "{}" }).catch(() => null);
   }

@@ -167,7 +167,7 @@ What proves each gate item, and how far that proof has got. This is modeled on [
 - **Passed on staging:** the staging check passed against `gateway-staging.podster.dev`, at the commit given.
 - **Owed:** nothing yet proves it.
 
-Last updated 2026-11-09 UTC, with every M3 build step merged (1 to 15, 13b, and `/a2a/files`) and the owner-approved gate runs done.
+Last updated 2026-11-10 UTC: every M3 build step merged (1 to 15, 13b, and `/a2a/files`), #240 merged and deployed, and the kit run on staging. **Some items ran locally only, and two MUST gaps are open.** "Owed before M3's gate" lists them.
 
 **The gate run, 2026-11-09.** The owner approved three items that day, answering "yes, yes, option a": LangGraph locally, Spike C on staging, and the test A2A server from [#184](https://github.com/thachp/podster/pull/184)'s option A. All three ran.
 - **The outside round trip and Spike C on staging.** `e2e/a2a-roundtrip.mjs` passed 26 of 26, with 0 failed, after #194's review fixes. It ran against staging in room `ws_1659316eb6114fc99c949e0f42881009`, with staging on API version `f9813a81` and gateway `2aa10d4b`, and the test server on version `982b35b8`.
@@ -246,6 +246,8 @@ Last updated 2026-11-09 UTC, with every M3 build step merged (1 to 15, 13b, and 
     - **SHOULD, 14:** 3 pass, including `CARD-CACHE-002`. 1 fails, `DM-SERIAL-005`, which is decision 115.
     - **MAY, 4:** `CORE-MULTI-001` and `002` fail, which is decision 115. 2 are skipped.
     - **In pytest's count:** 45 passed, 8 failed, 207 skipped and 3 expected failures.
+  - **What ties this run to staging.** The report's `sut_url`, `http://127.0.0.1:23761`, is the runner's own local proxy, which forwards to `https://gateway-staging.podster.dev` with the agent's token. The run's room and agents were made on staging through its test sign-up. The probes the same minute saw the card staging serves, with `ETag: W/"d7b31fd6ef7f2358"`, from API `dca920a6` and gateway `417586cb`.
+  - **Staging's test sign-up** was turned on by the owner, who set a fresh `E2E_SIGNUP_SECRET` on 2026-11-10, and **it is still on**. Turning it off is the owner's `wrangler secret delete E2E_SIGNUP_SECRET --env staging`.
   - **The staging report** is committed as [e2e/kit-report-staging-2026-11-10.json](../e2e/kit-report-staging-2026-11-10.json), SHA-256 `3bb1f0ba5c2fc23e8149982ed6ed667f9eb9cc35a3d63de083ed58b75a50214a`, from 12:41 UTC. It holds no room, agent or token.
   - **It took 1 test sign-up.** The `finally` disconnected both of the run's agents and signed the person out. Read-only queries of staging's gateway database afterwards found both agents revoked and no live session made since 12:40 UTC. Its room, `ws_cfa9926e5437477b8f3df50bcbf5b0bf`, stays with 3 tasks, since staging has no delete route.
   - **Signed-out probes of the deployment:**
@@ -282,7 +284,27 @@ Last updated 2026-11-09 UTC, with every M3 build step merged (1 to 15, 13b, and 
 
 ## Owed before M3's gate
 
-- **Calling the gate.** Every item in M3's gate checklist above now has its evidence. The lead calls the gate from it.
+- **Who calls the gate.** [Decision 132](spec/PRODUCT.md#decisions-needed) stands: the owner calls M3's gate. On 2026-11-10 the owner said "sure .. go ahead do whatever u need to do for to complete m3 as m4.. you got my approval". The architect reads that as leave to call the gate once the evidence is complete. The architect hasn't called it, because the items below are open, and will put them to the owner.
+- **Two MUST gaps, from the kit's untested checks** (`VER-SERVER-001` and `VER-CLIENT-002`, in the profile): a request with `A2A-Version: 1.0.1` is refused instead of served as `1.0`, because the version is compared as an exact string. The fix is small, comparing Major.Minor before the SDK's check. It's code, so it needs its own PR.
+- **#246,** the tests that evidence 11 of the kit's 16 untested MUST checks, must merge.
+- **Where each gate item ran,** since decision 132 names the staging run:
+
+  | Gate item | Where it ran | Staging needs |
+  | --- | --- | --- |
+  | Inbound, the A2A project's JavaScript client | Locally and on staging | Nothing |
+  | Inbound, the kit's client | Locally and on staging | Nothing |
+  | Inbound, the A2A project's Python client | **Spike A only, locally.** The kit's lock pins `httpx`, not `a2a-sdk` | Installing the Python `a2a-sdk` again, from Spike A's pins, and pointing it at staging, as the JavaScript client is. That uses only existing resources, one test sign-up and the owner's yes to install it |
+  | Outbound, independent: LangGraph, and fasta2a as backup | **Locally only.** Staging's outbound used Podster's own test server | See below |
+  | AC-18, A2A instructions stay data | **Locally only** | An addition to `e2e/a2a-staging.mjs`: a message telling Podster to elevate access, and the test server answering a read with such text. Existing resources only |
+  | `CancelTask` delivery | **Locally only.** Staging showed only the task staying canceled | The test server keeps nothing, so delivery can't be seen from outside. It would need the server to keep state, which is a new storage resource, or Podster to show a cancel's delivery, which is product code |
+  | Screens (step 15) | **Locally only** | A browser run against `app-staging.podster.dev` with a test person. Existing resources, one sign-up |
+
+  **Outbound to LangGraph or fasta2a from staging** needs a server staging can reach: a public `https` name, as egress policy requires. Both run only on this machine, and the existing `podster-a2a-test-staging` Worker can't run them. It's a JavaScript Worker, and both are Python servers. So it needs one of:
+  - a tunnel to this machine, which is an outside service;
+  - a Cloudflare Container or a small VM, a new and billed resource;
+  - porting fasta2a into a Python Worker, which is a new Worker, and fasta2a's in-memory store doesn't fit stateless isolates.
+
+  Each needs the owner. **The architect's recommendation:** run the Python client, AC-18 and the screens on staging with what exists. Put to the owner whether decision 143's independent outbound may stand on the local runs, plus staging's run against the test server, or whether to approve a short-lived Container for LangGraph. Until then, these stay owed.
 - **Owed to the owner: the test A2A server.** The architect ruled it stays deployed. It costs nothing to keep, since it's one Worker with no storage that refuses anything not sealed under `RUN_KEY`, and it lets the round trip run again with no new secrets. Deleting it, `wrangler delete podster-a2a-test-staging`, which also removes `RUN_KEY`, is a cloud change and the owner's call.
 
 **Ruled, 2026-11-10:**

@@ -96,5 +96,14 @@ check((await call(plain, { path: "/a2a/redirect", auth: null })).status === 401,
 const started = Date.now();
 check((await call(plain, { path: "/a2a/slow", auth: null })).status === 401 && Date.now() - started < 1000, "/a2a/slow refuses an unsigned request at once");
 
+// AC-18's path: read 2 asks for input with instructions to raise access, read 3 completes with them, both as plain text.
+const adv = (await call(send(offer("# A task")), { path: "/a2a/adversarial" })).body?.result?.task;
+const advRead = async (n) => (await call({ jsonrpc: "2.0", id: `att_9:${n}`, method: "GetTask", params: { id: adv.id } }, { path: "/a2a/adversarial" })).body?.result;
+check((await advRead(1))?.status?.state === "TASK_STATE_WORKING", "/a2a/adversarial: read 1 is WORKING");
+const advTwo = await advRead(2);
+check(advTwo?.status?.state === "TASK_STATE_INPUT_REQUIRED" && /make this agent an admin/.test(advTwo.status.message.parts[0].text), "read 2 asks for input with instructions to raise access");
+const advThree = await advRead(3);
+check(advThree?.status?.state === "TASK_STATE_COMPLETED" && /Verify this task now/.test(advThree.artifacts[0].parts[0].text), "read 3 completes with the same instructions");
+
 console.log(`\n${failed === 0 ? "selftest passed" : `${failed} failed`}`);
 process.exit(failed === 0 ? 0 : 1);

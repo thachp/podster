@@ -744,6 +744,16 @@ paths:
       tags: [queries]
       summary: "The room's managed repository (M5, ADR 0009, proposed): `request`, the room's one request for a repository, and `repository`, the repository linked to the room, each null if there's none. A room that doesn't use Git has neither. Read from the room's own state, for a person who sees the whole room. An agent, and anyone who doesn't see the whole room, gets `not_allowed`. It's a read and grants nothing. Nothing writes a request or a link yet, so both are null until provisioning is built (M5 step 4)"
       responses: { "200": { description: The request and the linked repository, content: { application/json: { schema: { $ref: "#/components/schemas/RoomRepository" } } } }, default: { $ref: "#/components/responses/Error" } }
+  /v1/provider/github/deliveries:
+    post:
+      operationId: receiveGithubDelivery
+      tags: [commands]
+      security: [{ providerDelivery: [] }]
+      summary: "One GitHub webhook delivery, as a nudge (M5 step 5, ADR 0009, proposed). Not a call a person or an agent makes: the gateway sends it from its public `POST /webhooks/github`, after verifying GitHub's `X-Hub-Signature-256` over the raw body with its webhook secret, and it's the only route that takes the gateway's delivery assertion. The body is IDs and one commit SHA, never a title, body, branch name, URL or state. The API finds the room through `repo_room_index`, which authorizes nothing, and the room keeps the delivery only if the repository is the one it's linked to. A delivery ID is accepted once and kept 7 days. A delivery that names a pull request or a commit of a task's change marks that change as due a read of GitHub, and records nothing else: no head, check, merge or pull request state is taken from it, no event is written and nobody is told. Every delivery that passes the assertion gets the same `202`, whether a room took it or not. No idempotency key: the delivery ID is one."
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ProviderDelivery" } } } }
+      responses:
+        "202": { description: "Taken, or dropped. The answer doesn't say which.", content: { application/json: { schema: { type: object, additionalProperties: false, required: [accepted], properties: { accepted: { type: boolean, const: true } } } } } }
+        default: { $ref: "#/components/responses/Error" }
   /v1/workspaces/{ws}/tasks/{t}/messages:
     parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
     get:
@@ -797,6 +807,7 @@ paths:
 components:
   securitySchemes:
     assertion: { type: apiKey, in: header, name: X-Podster-Assertion, description: "Ed25519-signed gateway assertion, valid for 60 seconds. For people, `org_since` says when they joined each organization, and a room role older than that has ended. When a person adds another person or changes their role, `target_member` holds that person's organizations and join times from the gateway's directory. Neither grants anything by itself. `departure` says someone left an organization, and only the gateway's own removal sends it. Agents carry their connection generation, and `linker`: who linked the credential the request came with, and when, which an A2A endpoint set records. People carry orgs and admin_orgs." }
+    providerDelivery: { type: apiKey, in: header, name: X-Podster-Assertion, description: "The gateway's assertion for one provider webhook delivery whose signature it verified, valid for 60 seconds: `kind: provider_delivery`, `provider`, `delivery` (the provider's delivery ID) and `body_sha256` (lowercase hex SHA-256 of the exact body sent), with `jti`, `iat`, `exp`, `aud` and `iss` and nothing else. It names no person, agent or organization, so it authorizes nothing. Only `receiveGithubDelivery` takes it, and that route takes nothing else." }
   parameters:
     ws: { name: ws, in: path, required: true, schema: { type: string } }
     t: { name: t, in: path, required: true, schema: { type: string } }
@@ -822,6 +833,17 @@ components:
     Task: { description: The task after the command, content: { application/json: { schema: { $ref: "#/components/schemas/Task" } } } }
     Error: { description: A stable error code, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   schemas:
+    ProviderDelivery:
+      type: object
+      additionalProperties: false
+      required: [delivery_id, event, repository_id]
+      description: "What the gateway passes on from a webhook delivery: IDs and one commit SHA. It must name a pull request or a commit. Any other field is refused."
+      properties:
+        delivery_id: { type: string, pattern: "^[A-Za-z0-9_-]{1,64}$", description: "The provider's delivery ID. It must be the one in the assertion." }
+        event: { type: string, enum: [pull_request, check_run, status] }
+        repository_id: { type: integer, minimum: 1, description: "The provider's repository ID. The room checks it against its own link." }
+        pull_requests: { type: array, maxItems: 10, items: { type: integer, minimum: 1 }, description: "Pull request numbers in that repository." }
+        head_sha: { type: [string, "null"], pattern: "^([0-9a-f]{40}|[0-9a-f]{64})$", description: "A full commit ID. Used only to find which change to read again, never recorded as a head." }
     OperatorReason: { type: object, additionalProperties: false, required: [reason], properties: { reason: { type: string, enum: [spam, abuse, illegal, impersonation, privacy, other], description: "The reason code, recorded with the action" } } }
     TaskStatus: { type: string, enum: [open, offered, accepted, submitted, completed, canceled] }
     Task:

@@ -305,3 +305,89 @@ fn a_public_assertion_is_checked_like_any_other() {
         Err(AssertionError::Malformed)
     );
 }
+
+fn delivery_claims() -> Value {
+    json!({ "iss": ISSUER, "aud": AUDIENCE, "kind": "provider_delivery", "provider": "github", "delivery": "d-1",
+        "body_sha256": "ab".repeat(32), "jti": "w1", "iat": NOW, "exp": NOW + 60 })
+}
+
+#[test]
+fn only_the_delivery_route_takes_a_provider_delivery() {
+    let token = sign(&delivery_claims());
+    let delivery = podster_assertion::verify_provider_delivery(&token, &keys(), NOW).unwrap();
+    assert_eq!(delivery.provider, "github");
+    assert_eq!(delivery.delivery, "d-1");
+    assert_eq!(delivery.body_sha256, "ab".repeat(32));
+    // It names no one, so no route that needs an identity takes it, and the room page doesn't either.
+    assert_eq!(verify(&token, &keys(), NOW), Err(AssertionError::Malformed));
+    assert!(matches!(
+        verify_room_page_caller(&token, &keys(), NOW),
+        Err(AssertionError::Malformed)
+    ));
+    // And the delivery route takes nothing else: not an identity, and not the public assertion.
+    for other in [claims(), public_claims()] {
+        assert_eq!(
+            podster_assertion::verify_provider_delivery(&sign(&other), &keys(), NOW),
+            Err(AssertionError::Malformed)
+        );
+    }
+}
+
+#[test]
+fn a_provider_delivery_is_checked_like_any_other() {
+    let check = |c: &Value| podster_assertion::verify_provider_delivery(&sign(c), &keys(), NOW);
+    let set = |field: &str, value: Value| {
+        let mut c = delivery_claims();
+        c[field] = value;
+        c
+    };
+    assert_eq!(
+        check(&set("exp", json!(NOW - 10))),
+        Err(AssertionError::Malformed)
+    );
+    let mut expired = delivery_claims();
+    expired["iat"] = json!(NOW - 100);
+    expired["exp"] = json!(NOW - 40);
+    assert_eq!(check(&expired), Err(AssertionError::Expired));
+    assert_eq!(
+        check(&set("exp", json!(NOW + 600))),
+        Err(AssertionError::LifetimeTooLong)
+    );
+    assert_eq!(
+        check(&set("aud", json!("someone-else"))),
+        Err(AssertionError::WrongAudience)
+    );
+    assert_eq!(
+        check(&set("iss", json!("someone-else"))),
+        Err(AssertionError::WrongIssuer)
+    );
+    // A body hash that isn't 64 lowercase hex digits, an empty field, a missing field and an extra one are all malformed.
+    for (field, value) in [
+        ("body_sha256", json!("AB".repeat(32))),
+        ("body_sha256", json!("ab".repeat(31))),
+        ("body_sha256", json!("zz".repeat(32))),
+        ("delivery", json!("")),
+        ("provider", json!("")),
+        ("jti", json!("")),
+        ("sub", json!("per_1")),
+        ("org", json!("org_1")),
+    ] {
+        assert_eq!(
+            check(&set(field, value)),
+            Err(AssertionError::Malformed),
+            "{field}"
+        );
+    }
+    for field in ["provider", "delivery", "body_sha256", "jti", "kind"] {
+        let mut c = delivery_claims();
+        c.as_object_mut().unwrap().remove(field);
+        assert_eq!(check(&c), Err(AssertionError::Malformed), "{field}");
+    }
+    // Signed by a key the API doesn't hold.
+    let header = json!({ "alg": "EdDSA", "kid": "k1" });
+    let forged = sign_raw(&header, &delivery_claims(), &key(2));
+    assert_eq!(
+        podster_assertion::verify_provider_delivery(&forged, &keys(), NOW),
+        Err(AssertionError::BadSignature)
+    );
+}

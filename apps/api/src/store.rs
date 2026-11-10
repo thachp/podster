@@ -226,6 +226,11 @@ CREATE TABLE task_change (task_id TEXT PRIMARY KEY, provider_repo_id INTEGER NOT
   merge_sha TEXT, merge_requested_by TEXT, merge_requested_at INTEGER, merge_observed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
   head_repo_id INTEGER, base_ref TEXT, reviewed_base_sha TEXT, merge_base_sha TEXT, pr_state TEXT, pr_observed_at INTEGER);
 CREATE UNIQUE INDEX task_change_pr ON task_change (provider_repo_id, pr_number);
+", "
+CREATE TABLE provider_delivery (delivery_id TEXT PRIMARY KEY, received_at INTEGER NOT NULL, expires_at INTEGER NOT NULL) WITHOUT ROWID;
+CREATE INDEX provider_delivery_expiry ON provider_delivery (expires_at);
+ALTER TABLE task_change ADD COLUMN nudged_at INTEGER;
+ALTER TABLE repo_link ADD COLUMN indexed_at INTEGER;
 "];
 
 pub fn int(value: &Value) -> i64 {

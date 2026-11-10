@@ -1,6 +1,7 @@
-import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { alarmPass, alarmQuiet } from "./alarm.ts";
 
 // M5 step 4: provisioning a room's managed repository. Every GitHub call lands on test/fake-github.ts, which the test
 // runtime puts in place of the network, so nothing here or in CI reaches GitHub. The fake checks the App's JWT and the
@@ -50,9 +51,16 @@ beforeAll(async () => {
   const res = await SELF.fetch(`https://api.internal/v1/agents/${AGENT.id}`, { method: "PUT", headers: { "x-podster-assertion": await assertion({ id: "per_pv_agents_admin", kind: "person", org: AGENT.org, adminOrgs: [AGENT.org] }) }, body: JSON.stringify({ org_id: AGENT.org, name: AGENT.id }) });
   if (res.status !== 200) throw new Error(`register: ${res.status}`);
 });
-afterEach(() => vi.restoreAllMocks());
-
 const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
+/** The rooms this test made. */
+const made: string[] = [];
+afterEach(async () => {
+  vi.restoreAllMocks();
+  // The fake keeps one list of calls, which the next test's room resets and then reads whole. A job still running for one
+  // of this test's rooms would add to it, so each room is left with no alarm run under way and none to come.
+  for (const id of made.splice(0)) await alarmQuiet(stub(id));
+});
+
 const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(stub(id), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
 const delegate = (org: string, granted = true, by: Who = OPERATOR) => api(by, "PUT", `/v1/orgs/${org}/provisioning-delegation`, { granted });
 
@@ -64,7 +72,7 @@ let orgs = 0;
 async function known(org: string, id: string) {
   for (let i = 0; i < 80; i++) {
     if (await BINDINGS.DB.prepare("SELECT 1 FROM membership_index WHERE org_id = ? LIMIT 1").bind(org).first()) return;
-    await runDurableObjectAlarm(stub(id));
+    await alarmPass(stub(id));
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error("the organization never showed in the listing");
@@ -79,6 +87,7 @@ async function room(options: { delegated?: boolean; script?: object; switchedOn?
   const org = `org_pv_${++orgs}_${crypto.randomUUID().slice(0, 8)}`;
   const owner: Who = { id: `per_pv_owner_${orgs}`, kind: "person", org, adminOrgs: [org] };
   const id: string = (await api(owner, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+  made.push(id);
   if (options.switchedOn !== false) await inRoom(id, (sql) => sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)"));
   await known(org, id);
   if (options.delegated !== false) expect((await delegate(org)).status).toBe(200);
@@ -105,7 +114,7 @@ const read = async (r: { id: string; owner: Who }) => (await api(r.owner, "GET",
 /** Lets the room's alarm run the job until the request is no longer pending. */
 async function settled(r: { id: string; owner: Who }) {
   for (let i = 0; i < 80; i++) {
-    await runDurableObjectAlarm(stub(r.id));
+    await alarmPass(stub(r.id));
     const now = await read(r);
     if (now.request && now.request.state !== "pending") return now;
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -197,7 +206,7 @@ describe("asking for the room's repository", () => {
     // Another organization's delegation is no use to this one.
     const other = await room();
     expect((await ask(r)).code).toBe("not_delegated");
-    await runDurableObjectAlarm(stub(r.id));
+    await alarmPass(stub(r.id));
     expect((await github()).calls).toEqual([]);
     expect(other.org).not.toBe(r.org);
   });
@@ -250,8 +259,6 @@ describe("asking for the room's repository", () => {
     expect([second.status, second.code]).toEqual([409, "repo_request_exists"]);
     const audit = await inRoom(r.id, (sql) => sql.exec("SELECT action, actor_id FROM audit_event WHERE action LIKE 'repository.%'").toArray());
     expect(audit).toEqual([{ action: "repository.requested", actor_id: r.owner.id }]);
-    // Let the job finish, so it isn't still talking to the fake when the next test resets it.
-    await settled(r);
   });
 });
 
@@ -304,11 +311,11 @@ describe("the provisioning job", () => {
     expect((await rowsOf(r.id, "repo_request_attempt")).map((a) => [a.attempt, a.provider_name, a.outcome])).toEqual([[1, "engineering", "created"]]);
     expect((await eventTypes(r.id)).filter((t) => t.startsWith("repository."))).toEqual(["repository.requested", "repository.ready"]);
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT action FROM audit_event WHERE action LIKE 'repository.%' ORDER BY seq").toArray().map((a: any) => a.action))).toEqual(["repository.requested", "repository.linked"]);
-    for (let i = 0; i < 40 && (await indexRow(id)) === null; i++) { await runDurableObjectAlarm(stub(r.id)); await new Promise((x) => setTimeout(x, 50)); }
+    for (let i = 0; i < 40 && (await indexRow(id)) === null; i++) { await alarmPass(stub(r.id)); await new Promise((x) => setTimeout(x, 50)); }
     expect(await indexRow(id)).toBe(r.id);
     // It doesn't run again: nothing more goes to GitHub, and a retry has nothing to retry.
     await fake("/forget-calls");
-    await runDurableObjectAlarm(stub(r.id));
+    await alarmPass(stub(r.id));
     expect((await github()).calls).toEqual([]);
     expect([(await retry(r)).status, (await retry(r)).code]).toEqual([409, "already_ready"]);
     expect((await ask(r)).code).toBe("repo_request_exists");
@@ -317,7 +324,7 @@ describe("the provisioning job", () => {
   it("makes nothing for a room that doesn't ask", async () => {
     const r = await room();
     expect((await api(r.owner, "POST", `/v1/workspaces/${r.id}/tasks`, { title: "Write the brief", instructions: "Write it." })).status).toBe(200);
-    for (let i = 0; i < 3; i++) await runDurableObjectAlarm(stub(r.id));
+    for (let i = 0; i < 3; i++) await alarmPass(stub(r.id));
     expect((await github()).calls).toEqual([]);
     expect(await read(r)).toEqual({ request: null, repository: null });
   });
@@ -353,13 +360,14 @@ describe("the provisioning job", () => {
     await pending(moved.id, "per_pv_former_owner");
     expect((await poke(moved)).request).toMatchObject({ state: "failed", reason: "requester_not_owner" });
     // The room was archived.
+    // Archived before the request is there, so an alarm the runtime runs on its own can't find it in an open room.
     const archived = await room();
-    await pending(archived.id, archived.owner.id);
     await inRoom(archived.id, (sql) => sql.exec("UPDATE workspace SET status = 'archived'"));
+    await pending(archived.id, archived.owner.id);
     // Any command arms the room's alarm, refused or not.
     await api(archived.owner, "PUT", `/v1/workspaces/${archived.id}/name`, { name: "Engineering two", policy_version: 1 });
-    await runDurableObjectAlarm(stub(archived.id));
-    for (let i = 0; i < 40 && (await rowsOf(archived.id, "repo_request"))[0].state === "pending"; i++) { await runDurableObjectAlarm(stub(archived.id)); await new Promise((x) => setTimeout(x, 50)); }
+    await alarmPass(stub(archived.id));
+    for (let i = 0; i < 40 && (await rowsOf(archived.id, "repo_request"))[0].state === "pending"; i++) { await alarmPass(stub(archived.id)); await new Promise((x) => setTimeout(x, 50)); }
     expect((await rowsOf(archived.id, "repo_request"))[0]).toMatchObject({ state: "failed", reason: "room_archived" });
     expect((await github()).calls).toEqual([]);
     for (const r of [undelegated, moved, archived]) expect(await rowsOf(r.id, "repo_request_attempt")).toEqual([]);
@@ -377,7 +385,7 @@ describe("the provisioning job", () => {
       const orphans = (await github()).repos.map((x) => x.id);
       // The job doesn't run again by itself, and nobody looks a repository up by its name.
       await fake("/forget-calls");
-      await runDurableObjectAlarm(stub(r.id));
+      await alarmPass(stub(r.id));
       expect((await github()).calls).toEqual([]);
       const again = await retry(r);
       expect(again.status, again.text).toBe(200);
@@ -669,7 +677,7 @@ describe("the provisioning job", () => {
     await inRoom(r.id, (sql) => sql.exec("CREATE TRIGGER stuck BEFORE UPDATE ON repo_request_attempt BEGIN SELECT RAISE(ABORT, 'stuck'); END"));
     const before = Date.now();
     await ask(r);
-    const waiting = async () => { for (let i = 0; i < 12; i++) { await runDurableObjectAlarm(stub(r.id)); await new Promise((x) => setTimeout(x, 50)); } return (await rowsOf(r.id, "repo_request"))[0]; };
+    const waiting = async () => { for (let i = 0; i < 12; i++) { await alarmPass(stub(r.id)); await new Promise((x) => setTimeout(x, 50)); } return (await rowsOf(r.id, "repo_request"))[0]; };
     const first = await waiting();
     expect(first).toMatchObject({ state: "pending", runs: 1, job_failures: 1 });
     // The wait is a column in the room, not a number in memory, so a restart doesn't forget it. Five seconds at first.
@@ -746,7 +754,7 @@ describe("the provisioning job", () => {
     await fake("/forget-calls");
     await inRoom(r.id, (sql) => sql.exec("UPDATE repo_request SET retry_after = 0"));
     expect((await retry(r, undefined, true)).code).toBe("retry_limit_reached");
-    await runDurableObjectAlarm(stub(r.id));
+    await alarmPass(stub(r.id));
     expect((await github()).calls).toEqual([]);
     expect((await rowsOf(r.id, "repo_request_attempt")).map((a) => a.attempt)).toEqual([1, 2, 3, 4, 5]);
   });
@@ -757,14 +765,14 @@ describe("the provisioning job", () => {
     await BINDINGS.DB.prepare("INSERT INTO repo_room_index (provider, provider_repo_id, workspace_id) VALUES ('github', 61000, 'ws_pv_never_made')").run();
     await ask(r);
     expect((await settled(r)).repository.provider_repo_id).toBe(61000);
-    for (let i = 0; i < 40 && (await indexRow(61000)) !== r.id; i++) { await runDurableObjectAlarm(stub(r.id)); await new Promise((x) => setTimeout(x, 50)); }
+    for (let i = 0; i < 40 && (await indexRow(61000)) !== r.id; i++) { await alarmPass(stub(r.id)); await new Promise((x) => setTimeout(x, 50)); }
     expect(await indexRow(61000)).toBe(r.id);
     expect((await rowsOf(r.id, "repo_link"))[0].indexed_at).toBeGreaterThan(0);
     // A second room that claims the same ID doesn't take the row: the first room confirms it.
     const squatter = await room({ script: { nextId: 62000 } });
     await inRoom(squatter.id, (sql) => sql.exec("INSERT INTO repo_link (id, request_id, provider, provider_repo_id, provider_org_id, full_name, visibility, default_branch, status, created_by, created_at, updated_at) VALUES ('rl_x', 'rr_x', 'github', 61000, 4242, 'x/y', 'public', 'main', 'ready', 'per_x', 1, 1)"));
     expect((await api(squatter.owner, "PUT", `/v1/workspaces/${squatter.id}/name`, { name: "Squatter", policy_version: (await api(squatter.owner, "GET", `/v1/workspaces/${squatter.id}`)).body.policy_version })).status).toBe(200);
-    for (let i = 0; i < 40 && (await rowsOf(squatter.id, "repo_link"))[0].indexed_at === null; i++) { await runDurableObjectAlarm(stub(squatter.id)); await new Promise((x) => setTimeout(x, 50)); }
+    for (let i = 0; i < 40 && (await rowsOf(squatter.id, "repo_link"))[0].indexed_at === null; i++) { await alarmPass(stub(squatter.id)); await new Promise((x) => setTimeout(x, 50)); }
     expect((await rowsOf(squatter.id, "repo_link"))[0].indexed_at).toBe(0);
     expect(await indexRow(61000)).toBe(r.id);
   });

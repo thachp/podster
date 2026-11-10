@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import { test } from "node:test";
-import { appJwt, looksLikeTestOrg, orgAllowed, restrictionRuleset } from "./spike.mjs";
+import { appJwt, argsProblem, looksLikeTestOrg, orgAllowed, restrictionRuleset } from "./spike.mjs";
 
 test("a restriction ruleset names the merge App as the only bypass actor and targets the default branch", () => {
   const full = restrictionRuleset({ name: "x", statusAppId: 7, pullRequest: true, update: true, bypassAppId: 7 });
@@ -45,5 +45,15 @@ test("another organization runs only when the owner repeats its name exactly", (
   assert.ok(orgAllowed("podsterx", "podsterx"));
   for (const [org, confirm] of [["podsterx", undefined], ["podsterx", ""], ["podsterx", "Podsterx"], ["podster", "podsterx"], [undefined, undefined], ["", ""], ["a/b", "a/b"]]) {
     assert.ok(!orgAllowed(org, confirm), `${org} ${confirm}`);
+  }
+});
+
+test("unknown arguments are refused, and the merge-restriction mode runs alone", () => {
+  assert.equal(argsProblem([]), null);
+  assert.equal(argsProblem(["--merge-restriction"]), null);
+  assert.equal(argsProblem(["--cleanup", "--public-only"]), null);
+  assert.match(argsProblem(["--bogus"]), /Unknown argument: --bogus/);
+  for (const other of ["--allow-public", "--public-only", "--cleanup"]) {
+    assert.match(argsProblem(["--merge-restriction", other]), new RegExp(`can't be combined with ${other}`));
   }
 });

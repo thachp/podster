@@ -64,6 +64,18 @@ export function restrictionRuleset({ name, statusAppId = null, pullRequest = fal
   };
 }
 
+// Returns why these arguments can't run, or null. The merge-restriction mode runs
+// alone, so a flag it would ignore is refused instead.
+export function argsProblem(list) {
+  const unknown = list.filter((x) => !KNOWN_ARGS.includes(x));
+  if (unknown.length > 0) return `Unknown argument: ${unknown.join(", ")}`;
+  if (list.includes("--merge-restriction")) {
+    const clash = list.filter((x) => ["--allow-public", "--public-only", "--cleanup"].includes(x));
+    if (clash.length > 0) return `--merge-restriction runs alone; it can't be combined with ${clash.join(", ")}`;
+  }
+  return null;
+}
+
 async function gh(token, method, path, body) {
   const res = await fetch(`${API}${path}`, {
     method,
@@ -91,8 +103,8 @@ const b64 = (s) => Buffer.from(s).toString("base64");
 
 async function main() {
   const args = new Set(process.argv.slice(2));
-  const unknown = [...args].filter((x) => !KNOWN_ARGS.includes(x));
-  if (unknown.length > 0) throw new Error(`Unknown argument: ${unknown.join(", ")}`);
+  const problem = argsProblem([...args]);
+  if (problem) throw new Error(problem);
   const org = process.env.M5_ORG;
   const keyDir = process.env.M5_KEY_DIR ?? join(homedir(), ".podster", "m5-spike");
   const apps = {
@@ -112,7 +124,7 @@ async function main() {
   try {
     await run({ args, org, apps, stamp, results, broad });
   } finally {
-    // Broad tokens live for an hour unless revoked.
+    // Tokens live for an hour unless revoked. The merge-restriction mode adds its scoped agent token here.
     for (const token of broad) await gh(token, "DELETE", "/installation/token").catch(() => {});
     if (results.length > 0) finish(results, stamp);
   }
@@ -159,7 +171,7 @@ async function run({ args, org, apps, stamp, results, broad }) {
         if (repo.owner.login.toLowerCase() !== org.toLowerCase() || !repo.name.startsWith(PREFIX)) continue;
         if (args.has("--public-only") && repo.private !== false) continue;
         const del = await gh(provisionAll, "DELETE", `/repos/${org}/${repo.name}`);
-        console.log(`delete ${repo.name}: ${del.status}`);
+        record(0, `cleanup: delete ${repo.name}`, { status: del.status, message: del.message, repository: repo.private === false ? "public" : "private" });
       }
       if (repos.length < 100) break;
     }
@@ -167,7 +179,7 @@ async function run({ args, org, apps, stamp, results, broad }) {
   }
 
   if (args.has("--merge-restriction")) {
-    await mergeRestriction({ org, apps, stamp, record });
+    await mergeRestriction({ org, apps, stamp, record, revoke: broad });
     return;
   }
 
@@ -339,7 +351,7 @@ async function run({ args, org, apps, stamp, results, broad }) {
 // Can a ruleset restrict WHO updates the default branch, so that only the merge App
 // merges even after the required status exists? One public repository, three
 // variants in turn; each variant's rulesets are deleted before the next.
-async function mergeRestriction({ org, apps, stamp, record }) {
+async function mergeRestriction({ org, apps, stamp, record, revoke }) {
   const RISK = "merge-restriction";
   const provisionAll = apps.provision.all;
   const mergeAll = apps.merge.all;
@@ -358,6 +370,16 @@ async function mergeRestriction({ org, apps, stamp, record }) {
   }
   record(RISK, "scoped agent token for the repository", { status: agent.status, message: agent.message, granted: agent.granted });
   if (!agent.token) return;
+  revoke.push(agent.token);
+
+  // The variants share one repository, so each starts and ends with a check that
+  // no ruleset is left from the one before.
+  const rulesetsNow = async (label) => {
+    const r = await gh(provisionAll, "GET", `${at}/rulesets`);
+    const names = Array.isArray(r.json) ? r.json.map((x) => x.name) : null;
+    record(RISK, label, { status: r.status, message: r.message, count: names?.length ?? null, names });
+    return names;
+  };
 
   const variants = [
     {
@@ -384,6 +406,11 @@ async function mergeRestriction({ org, apps, stamp, record }) {
   ];
 
   for (const v of variants) {
+    const before = await rulesetsNow(`${v.key}: rulesets on the repository before this variant`);
+    if (before === null || before.length > 0) {
+      record(RISK, `${v.key}: skipped`, { status: null, message: "Rulesets from an earlier variant are still there, or couldn't be listed." });
+      continue;
+    }
     const ids = [];
     let active = true;
     for (const body of v.rulesets) {
@@ -408,6 +435,7 @@ async function mergeRestriction({ org, apps, stamp, record }) {
         const del = await gh(provisionAll, "DELETE", `${at}/rulesets/${id}`);
         record(RISK, `${v.key}: delete ruleset ${id}`, { status: del.status, message: del.message });
       }
+      await rulesetsNow(`${v.key}: rulesets on the repository after its deletes`);
     }
   }
 }

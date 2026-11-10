@@ -79,7 +79,15 @@ for (const [at, expected] of Object.entries(states)) {
   const [schema, field] = at.split(".");
   if (api.components.schemas[schema]?.properties?.[field]?.enum?.join() !== expected) problems.push(`${at}: must be exactly ${expected}`);
 }
-for (const schema of ["RepoRequest", "RepoLink", "RoomRepository"]) {
+// M5 step 5b: grants are given, taken back and listed by people only, and name only the room and a grant.
+for (const [id, params] of [["listRepositoryGrants", "ws"], ["grantRepositoryAction", "ws"], ["revokeRepositoryGrant", "ws,grant"]]) {
+  const found = operations.get(id);
+  if (!found) problems.push(`${id}: the repository grant operation is missing`);
+  else if ([...found.path.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).join() !== params) problems.push(`${id}: its path may name only ${params}`);
+  if (!personOnly.includes(id)) problems.push(`${id}: must be person_only`);
+}
+if (api.components.schemas.RepoGrant?.properties?.action?.enum?.join() !== "push,merge") problems.push("RepoGrant.action: must be exactly push,merge");
+for (const schema of ["RepoRequest", "RepoLink", "RoomRepository", "RepoGrant", "RepoGrantList"]) {
   if (api.components.schemas[schema]?.additionalProperties !== false) problems.push(`${schema}: isn't closed`);
 }
 

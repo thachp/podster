@@ -66,6 +66,11 @@ person_only:
   - retryRepositorySetup
   - getProvisioningDelegation
   - setProvisioningDelegation
+  # M5 step 5b. Grants on the room's repository are given and taken back by people. An agent learns of its grant only
+  # through a token, from step 6.
+  - listRepositoryGrants
+  - grantRepositoryAction
+  - revokeRepositoryGrant
   - getPublicClaims
   - setPublicClaimsPaused
   - endPublicClaims

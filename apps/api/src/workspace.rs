@@ -26,7 +26,7 @@ use podster_policy::{
     sees_notices_about_itself, sees_planned_relationships, sees_who_planned, sees_whole_plan,
     sees_whole_room, task_view, ArtifactScope, ArtifactView, Caller, ConversationScope, Preset,
     PrincipalKind, ReviewScope, Role, Scopes, TaskAction, TaskScope, Verdict, WorkroomAction,
-    EVENTS_FOR_EVERYONE,
+    EVENTS_FOR_EVERYONE, REPO_GRANT_EVENTS,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -1647,6 +1647,7 @@ fn remove_member(
     )?;
     roles::withdraw_role_invites(sql, principal)?;
     exec(sql, "UPDATE member SET revoked_at = ?, revocation_reason = ?, owner_consented_at = NULL WHERE principal_id = ?", vec![now.into(), reason.into(), principal.into()])?;
+    repositories::end_grants_of_removed(sql, &actor.id, actor_kind, principal, now)?;
     apply_departure_rules(sql, actor, principal, now)?;
     objects::drop_uploads_of(sql, &actor.id, actor_kind, principal, now)?;
     end_invitations_of(sql, &actor.id, actor_kind, principal, reason, now)?;
@@ -2020,6 +2021,13 @@ fn handle_transfer_owner(
         .and_then(|room| room["owner_since"].as_i64())
         .unwrap_or(now);
     set_owner(sql, &to, joined)?;
+    repositories::end_grants_after_owner_change(
+        sql,
+        &caller.id,
+        kind_name(caller),
+        Some(&to),
+        now,
+    )?;
     exec(
         sql,
         "INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at) VALUES (?, 'person', ?, 'admin', ?, ?)",
@@ -2084,6 +2092,8 @@ fn apply_recovery(
     }
     let joined = joined_org(target_member, &to, &org)?;
     set_owner(sql, &to, joined)?;
+    // Rejoining never restores earlier authority, so recovery ends every grant, even when it names the former owner again.
+    repositories::end_grants_after_owner_change(sql, actor, "person", None, now)?;
     if to != former {
         queue_index(sql, &former, &org, None, now)?;
     }
@@ -2304,18 +2314,30 @@ mod queries {
             } else {
                 String::new()
             };
+            // A grant's holder sees its events, whatever their role.
+            let grant_events = REPO_GRANT_EVENTS.map(|kind| format!("'{kind}'")).join(", ");
+            let about_themselves =
+                format!("{about_themselves} OR (type IN ({grant_events}) AND subject_id = ?4)");
             query.push_str(&format!(" AND ((task_id IS NULL AND (type IN ({everyone}) OR actor_id = ?4{about_themselves})) OR task_id IN (SELECT id FROM task WHERE requester_id = ?4 OR assignee_id = ?4 OR reviewer_id = ?4))"));
+        }
+        // A grant's events follow `can_see_event`: a human owner or admin, the holder and whoever acted. Filtering them here
+        // too keeps a page from being taken up by events the viewer can't see.
+        if !podster_policy::repositories::sees_every_grant(caller) {
+            let grant_events = REPO_GRANT_EVENTS.map(|kind| format!("'{kind}'")).join(", ");
+            query.push_str(&format!(" AND (task_id IS NOT NULL OR type NOT IN ({grant_events}) OR subject_id = ?4 OR actor_id = ?4)"));
         }
         query.push_str(if newest {
             " ORDER BY seq DESC"
         } else {
             " ORDER BY seq"
         });
-        query.push_str(if whole_room { " LIMIT ?4" } else { " LIMIT ?5" });
-        let mut bindings = vec![edge.into(), opt(&task_filter), opt(&actor_filter)];
-        if !whole_room {
-            bindings.push(id.into());
-        }
+        query.push_str(" LIMIT ?5");
+        let mut bindings = vec![
+            edge.into(),
+            opt(&task_filter),
+            opt(&actor_filter),
+            id.into(),
+        ];
         // One row past the page, which only says whether there is more, so a full last page doesn't promise another.
         bindings.push((limit + 1).into());
         let found = rows(sql, &query, bindings)?;
@@ -3972,6 +3994,8 @@ impl Workspace {
                 // An archived public room stays readable (decision 152), so it can still be made private. Publishing one is
                 // refused by `podster_policy::public::decide_publish`.
                 | (Method::Put, ["visibility"])
+                // Taking a repository grant back only lessens authority, as a removal does.
+                | (Method::Delete, ["repository", "grants", _])
                 | (
                     Method::Delete,
                     ["members" | "organizations" | "invitations", _]
@@ -4004,6 +4028,7 @@ impl Workspace {
                 ["tasks", id] => queries::get_task(&sql, &who, id, false),
                 ["tasks", id, "messages"] => queries::list_messages(&sql, &who, id, &url),
                 ["repository"] => repositories::read(&sql, &who),
+                ["repository", "grants"] => repositories::read_grants(&sql, &who),
                 ["events"] => queries::list_events(&sql, &who.caller, &url),
                 ["audit"] => queries::list_audit(&sql, &who.caller, &url),
                 _ => Err(ApiError::not_found()),
@@ -4559,6 +4584,46 @@ impl Workspace {
                 test_fail,
                 move |sql, who, now| handle_revoke_member(sql, &who.caller, &target, &body, now),
             ),
+            // A stored grant is replayed only to someone who may still give one.
+            (Method::Post, ["repository", "grants"]) => self.command_checked(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                |_: &SqlStorage, who: &Participant| repositories::may_still_grant(&who.caller),
+                move |sql, who, now| repositories::handle_grant(sql, &who.caller, &body, now),
+            ),
+            // A stored answer is replayed only to someone who may still take that grant back.
+            (Method::Delete, ["repository", "grants", grant]) => {
+                let (grant, admin_orgs) = ((*grant).to_string(), identity.admin_orgs.clone());
+                let (recheck_grant, recheck_orgs) = (grant.clone(), admin_orgs.clone());
+                self.command_checked(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql: &SqlStorage, who: &Participant| {
+                        repositories::may_still_revoke(
+                            sql,
+                            &who.caller,
+                            &recheck_orgs,
+                            &recheck_grant,
+                        )
+                    },
+                    move |sql, who, now| {
+                        repositories::handle_revoke(
+                            sql,
+                            &who.caller,
+                            &admin_orgs,
+                            &grant,
+                            &body,
+                            now,
+                        )
+                    },
+                )
+            }
             _ => Err(ApiError::not_found()),
         }
     }

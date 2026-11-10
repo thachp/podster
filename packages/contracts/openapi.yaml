@@ -773,6 +773,29 @@ paths:
       summary: "Give an organization the provisioning delegation or take it back, `{ granted }`, by a Podster operator only. For a managed repository Podster's platform is the resource owner, so an organization's own admins can't give it to themselves. An organization the API has never seen a room of gets `organization_not_found` (404). Every change is kept with who made it, in the organization's object and in the operators' record. Taking it back stops new requests and any job that hasn't called the provider yet. It doesn't touch a repository already linked. Setting the same value again changes nothing but the time."
       requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false, required: [granted], properties: { granted: { type: boolean } } } } } }
       responses: { "200": { description: The delegation, content: { application/json: { schema: { $ref: "#/components/schemas/ProvisioningDelegation" } } } }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/repository/grants:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    get:
+      operationId: listRepositoryGrants
+      tags: [queries]
+      summary: "The grants on the room's repository that aren't revoked (M5 step 5b, ADR 0009, proposed), for a person: a human owner or admin sees every one, anyone else in the room their own. `state` is `live`, `expired`, or `stale` when its giver no longer holds the repository's delegation, and is for showing: a grant is checked again at every use. An agent gets `not_allowed`"
+      responses: { "200": { description: The grants, content: { application/json: { schema: { $ref: "#/components/schemas/RepoGrantList" } } } }, default: { $ref: "#/components/responses/Error" } }
+    post:
+      operationId: grantRepositoryAction
+      tags: [commands]
+      summary: "Give a participant one action, `push` or `merge`, on the room's repository (M5 step 5b, ADR 0009, proposed). Only the room's owner, as a person whose owner authority holds: an admin has room authority and not the repository's delegation, `no_provider_delegation`. The participant must be in the room, `grantee_not_participant`, and not there through a public claim, `grantee_public`. A room with no linked repository answers `repo_not_linked`; a degraded or suspended one still takes a grant, which nothing uses until it's ready. `expires_at` must be in the future. Granting the same again changes nothing; a new expiry, or a grant over an expired row or an earlier owner's, revokes that row and adds one. Audited, and tells the participant. A grant authorizes nothing by itself: it's checked again at every use. An agent gets `not_allowed`"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version, principal_id, action], additionalProperties: false, properties: { policy_version: { type: integer }, principal_id: { type: string }, action: { type: string, enum: [push, merge] }, expires_at: { type: [integer, "null"] } } } } } }
+      responses: { "200": { description: The grant, content: { application/json: { schema: { $ref: "#/components/schemas/RepoGrant" } } } }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/repository/grants/{grant}:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: grant, in: path, required: true, schema: { type: string } }]
+    delete:
+      operationId: revokeRepositoryGrant
+      tags: [commands]
+      summary: "Take back a grant on the room's repository (M5 step 5b, ADR 0009, proposed): the room's owner, a person in the room who administers its organization, or the grant's holder for their own. Nobody else, `not_allowed`. A grant the caller may not see answers `grant_not_found`, as a missing one does. Taking back a revoked grant changes nothing. Works in an archived room. Audited, and tells the holder. An agent gets `not_allowed`"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], additionalProperties: false, properties: { policy_version: { type: integer } } } } } }
+      responses: { "200": { description: The grant, content: { application/json: { schema: { $ref: "#/components/schemas/RepoGrant" } } } }, default: { $ref: "#/components/responses/Error" } }
   /v1/provider/github/deliveries:
     post:
       operationId: receiveGithubDelivery
@@ -1047,6 +1070,25 @@ components:
         granted: { type: boolean }
         set_by: { type: [string, "null"], description: "The operator who last set it, or null if nobody has." }
         set_at: { type: [integer, "null"] }
+    RepoGrant:
+      type: object
+      additionalProperties: false
+      required: [id, principal_id, action, delegated_by, created_at, expires_at, revoked_at, state]
+      properties:
+        id: { type: string }
+        principal_id: { type: string }
+        action: { type: string, enum: [push, merge] }
+        delegated_by: { type: string }
+        created_at: { type: integer }
+        expires_at: { type: [integer, "null"] }
+        revoked_at: { type: [integer, "null"] }
+        state: { type: string, enum: [live, expired, stale, revoked] }
+    RepoGrantList:
+      type: object
+      additionalProperties: false
+      required: [grants]
+      properties:
+        grants: { type: array, items: { $ref: "#/components/schemas/RepoGrant" } }
     RoomRepository:
       type: object
       additionalProperties: false

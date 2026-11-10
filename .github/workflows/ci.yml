@@ -193,6 +193,9 @@ jobs:
       # The staging run's publishing and clean-up: a stop at any point of a publish leaves no room public.
       - run: node room-publisher-selftest.mjs
         working-directory: e2e
+      # Third-party test tools (the A2A kit, fasta2a, LangGraph) get an allow-listed environment, never a secret of ours.
+      - run: node child-env-selftest.mjs
+        working-directory: e2e
       - run: node run-local.mjs
         working-directory: e2e
       # Staging's setup and the test sign-up, with nothing remote.

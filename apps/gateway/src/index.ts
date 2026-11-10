@@ -15,7 +15,7 @@ import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TE
 import { handleA2aDownload, handleAgentDownload, isFilePath, serveFile } from "./downloads";
 import { handleUpload } from "./uploads";
 import { handleGithubWebhook } from "./github-webhook";
-import { answerA2a, checkA2aRequest, handleA2aCard, isA2aPath } from "./a2a";
+import { aliasA2aPath, answerA2a, checkA2aRequest, handleA2aCard, isA2aPath } from "./a2a";
 import type { ApiReads } from "./a2a/reads";
 import { buildOAuth, resourceKind, routeOAuth } from "./oauth";
 import { filterPublicRead, publicPassthrough, PUBLIC_READ_CAPABILITIES } from "./public/reads";
@@ -1500,6 +1500,8 @@ export default {
     ctx.waitUntil(Promise.all([cleanUp(env), retryDepartures(env)]));
   },
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    // Before anything else, so `/a2a/` gets exactly `/a2a`'s limits, checks and answers (decision 190).
+    request = aliasA2aPath(request);
     const insecure = insecureRequest(request, env);
     if (insecure) return insecure;
     const limitedResponse = await limitByClient(request, env);

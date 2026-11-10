@@ -27,6 +27,12 @@ export CLOUDFLARE_ACCOUNT_ID=<the account that holds podster.dev>
 
 Run every `wrangler` command from the app folder named in its step, so it uses that app's pinned version.
 
+## Shipping a change
+
+Agents deploy with `scripts/deploy-staging`, and not by hand. It takes main's tip once its CI has passed, applies only the migrations you name, deploys the API, then the gateway, then with `--web` the dashboard, and ends with the signed-out probes in `scripts/staging-probes`. `scripts/deploy-staging --help` lists what it refuses. It sets no secret or variable, and doesn't deploy the scanner.
+
+The steps below are what it follows. They stay here as the reference, and for rebuilding staging.
+
 ## First deploy
 
 This has been done once for staging, so it's kept here for rebuilding it, and as the outline for production. To ship a change, apply any new migrations, then run `npx wrangler deploy --env staging` from the app that changed, with the API first if both did. Migrations always go first: for example, the API's webhook delivery route (M5 step 5) reads `repo_room_index`, so `0007_repo_room_index.sql` must be applied to `podster-api-staging` before that API is deployed, or the route fails closed.

@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Checks that each staging probe can fail, with a stand-in curl and no network.
+#
+#   scripts/test/staging-probes-selftest
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+probes="$scripts/staging-probes"
+stub_curl
+
+healthy_staging
+check "a healthy staging passes, exit 0" run 0 "$probes"
+check "it prints one PASS line per probe" test "$(grep -c '^PASS ' "$tmp/out")" -eq 4
+check "it makes exactly five requests" test "$(wc -l < "$fix/calls" | tr -d ' ')" -eq 5
+check "every request goes to a staging host" test "$(grep -c -E ' https://(gateway|app)-staging\.podster\.dev/[^ ]*$' "$fix/calls")" -eq 5
+check "no request carries a cookie or a credential" never_called 'cookie|authorization|--user|--location|--netrc| -[ubcLn] '
+check "the public page is asked for as HTML" called 'Accept: text/html .*https://app-staging.podster.dev/p/pub_0000000000000000000000$'
+a2a_call='-H Content-Type: application/json -H A2A-Version: 1\.0 --data-raw \{"jsonrpc":"2\.0","id":1,"method":"GetTask","params":\{"id":"tsk_0{32}"\}\}'
+check "/a2a gets a well-formed A2A call" called "$a2a_call https://gateway-staging.podster.dev/a2a\$"
+check "  and /a2a/ gets the same one" called "$a2a_call https://gateway-staging.podster.dev/a2a/\$"
+
+refuses() { # refuses TITLE PROBE: the fixtures were changed by the caller
+  check "$1, exit 1" run 1 "$probes"
+  check "  and the $2 probe says FAIL" said "^FAIL $2: "
+  healthy_staging
+}
+
+echo 200 > "$fix/me.status"
+refuses "/api/v1/me answering 200 is refused" me
+
+echo 404 > "$fix/a2a-slash.status"
+refuses "/a2a and /a2a/ with different statuses are refused" a2a
+
+echo '{"error":"not_found"}' > "$fix/a2a-slash.body"
+refuses "/a2a and /a2a/ with different bodies are refused" a2a
+
+echo unreachable > "$fix/a2a.status"; echo unreachable > "$fix/a2a-slash.status"
+refuses "/a2a and /a2a/ both unreachable are refused, though identical" a2a
+
+for status in 415 404 500 502 200 403; do
+  echo "$status" > "$fix/a2a.status"; echo "$status" > "$fix/a2a-slash.status"
+  refuses "/a2a and /a2a/ both answering $status, with the same body, are refused" a2a
+done
+
+echo 404 > "$fix/a2a-slash.status"; echo '{"error":"unauthorized"}' > "$fix/a2a-slash.body"
+refuses "/a2a at 401 with /a2a/ not found is refused" a2a
+
+for status in 500 202 401 400 403; do
+  echo "$status" > "$fix/webhook.status"
+  refuses "an unsigned webhook answered with $status is refused" webhook
+done
+check "the webhook's status is one named constant, with what to change beside it" \
+  test "$(grep -c -E '^WEBHOOK_STATUS_WHILE_SECRET_UNSET=404$|CHANGE THIS TO 401 once the owner sets' "$probes")" -eq 2
+gateway_tests="$scripts/../apps/gateway/test"
+check "  and the gateway's tests pin that answer while no secret is set" grep -q -F 'expect([status, code]).toEqual([404, "not_found"]);' "$gateway_tests/github-webhook.spec.ts"
+check "the A2A status is the gateway tests' answer with no credential" grep -q -F 'expect(res.status).toBe(401);' "$gateway_tests/a2a.spec.ts"
+
+echo 200 > "$fix/public.status"
+refuses "an unknown public page answering 200 is refused" public
+
+printf 'HTTP/2 404\r\ncache-control: no-store\r\n\r\n' > "$fix/public.headers"
+refuses "a public 404 without no-transform is refused" public
+
+printf 'HTTP/2 404\r\ncontent-type: text/html\r\n\r\n' > "$fix/public.headers"
+refuses "a public 404 with no Cache-Control is refused" public
+
+echo '<!doctype html><SCRIPT src="/x.js"></SCRIPT>' > "$fix/public.body"
+refuses "a public 404 with a script is refused" public
+
+echo unreachable > "$fix/me.status"
+refuses "a host nothing answers on is refused" me
+
+check "an argument is refused, exit 2" run 2 "$probes" https://example.com
+check "  and nothing was requested" test ! -s "$fix/calls"
+check "--help exits 0" run 0 "$probes" --help
+check "  and nothing was requested" test ! -s "$fix/calls"
+check "the script names no host but the two staging ones" test "$(grep -o -E 'https?://[A-Za-z0-9.-]+' "$probes" | sort -u | tr '\n' ' ')" = "https://app-staging.podster.dev https://gateway-staging.podster.dev "
+
+finish staging-probes

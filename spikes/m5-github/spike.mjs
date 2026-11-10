@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 const API = "https://api.github.com";
 const PREFIX = "m5-spike-";
 const STATUS_CONTEXT = "podster/review";
+const KNOWN_ARGS = ["--allow-public", "--cleanup", "--public-only"];
 
 export function appJwt(appId, pem, now = Math.floor(Date.now() / 1000)) {
   const enc = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -66,6 +67,8 @@ const b64 = (s) => Buffer.from(s).toString("base64");
 
 async function main() {
   const args = new Set(process.argv.slice(2));
+  const unknown = [...args].filter((x) => !KNOWN_ARGS.includes(x));
+  if (unknown.length > 0) throw new Error(`Unknown argument: ${unknown.join(", ")}`);
   const org = process.env.M5_ORG;
   const keyDir = process.env.M5_KEY_DIR ?? join(homedir(), ".podster", "m5-spike");
   const apps = {
@@ -130,7 +133,7 @@ async function run({ args, org, apps, stamp, results, broad }) {
       const repos = list.json.repositories ?? [];
       for (const repo of repos) {
         if (repo.owner.login.toLowerCase() !== org.toLowerCase() || !repo.name.startsWith(PREFIX)) continue;
-        if (args.has("--public-only") && repo.private) continue;
+        if (args.has("--public-only") && repo.private !== false) continue;
         const del = await gh(provisionAll, "DELETE", `/repos/${org}/${repo.name}`);
         console.log(`delete ${repo.name}: ${del.status}`);
       }

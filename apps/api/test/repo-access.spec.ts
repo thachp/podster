@@ -84,6 +84,21 @@ const setKeys = (id: string, current: string | null, previous: string | null) =>
 const alarm = async (id: string, times = 2) => {
   for (let n = 0; n < times; n++) await runDurableObjectAlarm(stub(id));
 };
+/**
+ * Retries a check until it holds, running the room's alarm between tries. The test runtime also runs alarms on its own as
+ * they come due, and while one is running `runDurableObjectAlarm` returns at once, so a check straight after can race it.
+ */
+const eventually = async (id: string, check: () => Promise<void>) => {
+  for (let n = 0; ; n++) {
+    try {
+      return await check();
+    } catch (error) {
+      if (n >= 30) throw error;
+      await alarm(id, 1);
+      await new Promise((x) => setTimeout(x, 100));
+    }
+  }
+};
 
 beforeAll(async () => {
   key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
@@ -420,8 +435,10 @@ describe("revoking a token whose authority ended", () => {
     expect(await minted(), name).toEqual([expect.objectContaining({ token: got.body.token, live: true })]);
     await end(r);
     await alarm(r.id);
-    expect(await minted(), name).toEqual([expect.objectContaining({ token: got.body.token, live: false })]);
-    expect(await tokens(r.id), name).toEqual([]);
+    await eventually(r.id, async () => {
+      expect(await minted(), name).toEqual([expect.objectContaining({ token: got.body.token, live: false })]);
+      expect(await tokens(r.id), name).toEqual([]);
+    });
   };
 
   it("when the grant is taken back", () => endsWith("revoked", async (r) => must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) })));
@@ -436,11 +453,17 @@ describe("revoking a token whose authority ended", () => {
   }));
   it("when ownership moves", () => endsWith("transferred", async (r) => must(OWNER, "POST", `/v1/workspaces/${r.id}/owner/transfer`, { to: ADMIN.id, policy_version: await version(r.id) }, { claims: { target_member: { person: ADMIN.id, orgs: { [ORG]: 1 } } } })));
   it("when the owner leaves the organization, which leaves every grant stale", () => endsWith("owner left", async (r) => {
+    // The departure finds the room through the listing the room's alarm writes. Written here, so it doesn't wait on that.
+    await BINDINGS.DB.prepare("INSERT OR REPLACE INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, ?, 'owner', 'Engineering', 0, 1)").bind(r.id, OWNER.id, ORG).run();
     await must({ ...OWNER, departure: { person: OWNER.id, org: ORG, left_at: Date.now() } }, "POST", "/v1/org-departures", {});
     // The person's own alarm takes a departure to their rooms.
+    // It may already be running on its own, so it's run until the room has heard.
     const person = BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(OWNER.id));
-    await runInDurableObject(person, (_: any, state: any) => void state.storage.sql.exec("UPDATE org_departure SET next_sweep_at = 0"));
-    await runDurableObjectAlarm(person);
+    for (let n = 0; n < 30 && (await inRoom(r.id, (sql) => sql.exec("SELECT owner_left_at AS t FROM workspace").one().t)) === null; n++) {
+      await runInDurableObject(person, (_: any, state: any) => void state.storage.sql.exec("UPDATE org_departure SET next_sweep_at = 0"));
+      await runDurableObjectAlarm(person);
+      await new Promise((x) => setTimeout(x, 100));
+    }
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT owner_left_at AS t FROM workspace").one().t)).not.toBeNull();
   }));
   it("when the room is archived", () => endsWith("archived", async (r) => must(OWNER, "POST", `/v1/workspaces/${r.id}/archive`, { policy_version: await version(r.id) })));
@@ -551,8 +574,10 @@ describe("the review's findings (M5 step 6)", () => {
     // The agent never asks again. When the grant lapses, the alarm takes the token back.
     await inRoom(r.id, (sql) => sql.exec("UPDATE provider_grant SET expires_at = ? WHERE id = ?", Date.now() - 1, grant));
     await alarm(r.id);
-    expect(await minted()).toEqual([expect.objectContaining({ token: got.body.token, live: false })]);
-    expect(await tokens(r.id)).toEqual([]);
+    await eventually(r.id, async () => {
+      expect(await minted()).toEqual([expect.objectContaining({ token: got.body.token, live: false })]);
+      expect(await tokens(r.id)).toEqual([]);
+    });
   });
 
   it("opens a held token with the previous key while rotating, and seals new ones with the current key (M2)", async () => {
@@ -592,8 +617,10 @@ describe("the review's findings (M5 step 6)", () => {
     await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) });
     await setKeys(r.id, NEW_KEY, null);
     await alarm(r.id);
-    expect(await tokens(r.id)).toEqual([]);
-    expect(await events(r.id, "repo_token.unrevocable")).toHaveLength(1);
+    await eventually(r.id, async () => {
+      expect(await tokens(r.id)).toEqual([]);
+      expect(await events(r.id, "repo_token.unrevocable")).toHaveLength(1);
+    });
     // With no key set at all, a row waits instead: that's configuration missing, not a key gone.
     const s = await room();
     expect((await access(AGENT, s.id, s.task)).status).toBe(200);

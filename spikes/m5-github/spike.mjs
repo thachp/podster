@@ -5,6 +5,7 @@
 //   M5_ORG=podster-spike M5_PROVISION_APP_ID=1 M5_MERGE_APP_ID=2 node spike.mjs
 //   ... node spike.mjs --allow-public   also try rules on a public repository
 //   ... node spike.mjs --cleanup        delete this spike's repositories and exit
+//   ... node spike.mjs --cleanup --public-only   delete only its public ones
 //
 // Tokens and keys are never printed or written. Results hold status codes and
 // GitHub's own error messages only.
@@ -129,6 +130,7 @@ async function run({ args, org, apps, stamp, results, broad }) {
       const repos = list.json.repositories ?? [];
       for (const repo of repos) {
         if (repo.owner.login.toLowerCase() !== org.toLowerCase() || !repo.name.startsWith(PREFIX)) continue;
+        if (args.has("--public-only") && repo.private) continue;
         const del = await gh(provisionAll, "DELETE", `/repos/${org}/${repo.name}`);
         console.log(`delete ${repo.name}: ${del.status}`);
       }

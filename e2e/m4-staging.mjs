@@ -31,6 +31,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AuthAgent, linkedA2aToken, McpAgent, ok, Person, sleep, Target } from "./lib.mjs";
+import { RoomPublisher } from "./room-publisher.mjs";
 import { JsonStream } from "./tail-stream.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -156,8 +157,11 @@ const claim = (agent, handle, role, extra = {}) => agent.call("claim_public_open
 
 // ---- rooms ----
 
-/** Every room this run made public, with its owner, so the end can make each private again. */
-const published = new Map();
+/**
+ * Every room this run made public, and making each private again when it ends or is stopped (room-publisher.mjs). The
+ * publish PUT has 30 seconds, inside clean-up's 60-second wait for publishes in flight.
+ */
+const publisher = new RoomPublisher({ putTimeoutMs: 30_000, stopWaitMs: 60_000, sleep });
 /** IDs and handles only this run made, to find its own events in the tails. */
 const runIds = new Set();
 
@@ -188,25 +192,16 @@ async function publicRoom(owner, name, { openings = [{ title: "Surveyor", respon
   ok((await within(40, async () => (await page(handle)).status === 200)) !== null, `${name}'s public page wasn't served within 40 seconds`);
   return { id, handle, roles };
 }
-/** Set once clean-up starts: nothing more is published, and a publish already on its way is waited for, then undone. */
-let stopping = false;
-const publishing = new Set();
 async function publish(owner, id) {
-  ok(!stopping, "the run is stopping, so nothing more is published");
-  const { view_hash } = await owner.must("GET", `/v1/workspaces/${id}/visibility`);
-  const request = owner.dash("PUT", `/v1/workspaces/${id}/visibility`, { visibility: "public", view_hash });
-  publishing.add(request);
-  const done = await request.finally(() => publishing.delete(request));
-  // Recorded whatever happens next, so clean-up makes it private even if it landed while stopping.
-  if (done.ok) published.set(id, owner);
+  const done = await publisher.publish(owner, id);
   ok(done.ok, `publishing answered ${done.status} ${done.code ?? ""}`);
   runIds.add(done.body.public_handle);
   return done.body.public_handle;
 }
 async function unpublish(owner, id, extra = {}) {
-  const done = await owner.must("PUT", `/v1/workspaces/${id}/visibility`, { visibility: "private", ...extra });
-  published.delete(id);
-  return done;
+  const done = await publisher.unpublish(owner, id, extra);
+  ok(done.ok, `making it private answered ${done.status} ${done.code ?? ""}`);
+  return done.body;
 }
 /** Every handle Explore lists for a person, following its cursor. Explore must answer. */
 async function allExplore(who) {
@@ -340,18 +335,10 @@ const appLogged = (tail) => tail.stream.values.map((value) => JSON.stringify([va
 let cleaned = null;
 function cleanUp() {
   cleaned ??= (async () => {
-    stopping = true;
     stopTails();
-    // A publish already sent may land after this starts: wait for it, bounded, so its room is in the list below.
-    await Promise.race([Promise.allSettled([...publishing]), sleep(60_000)]);
-    let left = 0;
-    const count = published.size;
-    for (const [id, roomOwner] of published) {
-      const done = await roomOwner.dash("PUT", `/v1/workspaces/${id}/visibility`, { visibility: "private" }).catch(() => null);
-      if (done?.ok) published.delete(id);
-      else left += 1;
-    }
-    console.log(`\n${count - left} rooms made private again${left ? `, ${left} couldn't be` : ""}`);
+    // Waits for publishes in flight, then sweeps twice, so a publish landing during the first sweep is undone too.
+    const { madePrivate, left } = await publisher.stop();
+    console.log(`\n${madePrivate} rooms made private again${left ? `, ${left} couldn't be` : ""}`);
     if (left) results.push({ status: "fail", title: "rooms left public" });
     await signOutAll();
   })();

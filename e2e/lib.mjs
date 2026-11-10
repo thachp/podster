@@ -69,10 +69,11 @@ export class Target {
   }
 
   /** A limit that's reached waits it out, as a real client would. No run should need this for long. */
-  async fetch(url, init = {}) {
+  async fetch(url, { retry = true, ...init } = {}) {
     for (let attempt = 0; ; attempt++) {
       const response = await fetch(url, { redirect: "manual", ...init, signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
-      if (response.status !== 429 || attempt >= 2) return response;
+      // `retry: false` returns a refusal as it is, for a caller that can't wait out the limit.
+      if (response.status !== 429 || attempt >= 2 || !retry) return response;
       const wait = Math.min(Number(response.headers.get("retry-after")) || 60, 70);
       console.log(`     (rate limited, waiting ${wait}s)`);
       await sleep(wait * 1000);
@@ -139,7 +140,8 @@ export class Person {
   }
 
   /** A dashboard call: `/api` + path, with this person's session, from our own origin. */
-  async dash(method, path, body, { idempotencyKey, org, headers = {} } = {}) {
+  /** `timeoutMs`, when given, bounds this one request, its 429 waits included: it isn't retried, and it's aborted after that. */
+  async dash(method, path, body, { idempotencyKey, org, headers = {}, timeoutMs } = {}) {
     const hasBody = !["GET", "HEAD"].includes(method);
     const res = await this.target.http(`/api${path}`, {
       method,
@@ -151,6 +153,7 @@ export class Person {
         ...headers,
       },
       body: hasBody ? JSON.stringify(body ?? {}) : undefined,
+      ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs), retry: false } : {}),
     });
     const text = await res.text();
     let parsed = null;

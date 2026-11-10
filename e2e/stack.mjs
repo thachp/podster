@@ -82,7 +82,36 @@ export function prepareStack({ skipBuild = false, apiVars = {} } = {}) {
   return { gateway, apiConfig, persist, privateKey, kid };
 }
 
-/** Starts a Worker's `wrangler dev` in its own process group, so it can be stopped with all its children. */
+/** Whether any process is left in the group `pid` leads. One that has ended but hasn't been collected still counts. */
+export function groupAlive(pid) {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    // ESRCH means the group is empty. Anything else, such as EPERM, means something is there.
+    return error.code !== "ESRCH";
+  }
+}
+
+/**
+ * Waits until nothing is left in the group `pid` leads, and says whether that happened within `timeout`. `wrangler dev` is
+ * three layers: the launcher this spawns, the real wrangler under it, and the runtimes under that, one of which answers on
+ * the port while another holds the SQLite files. They get the signal together and end in no fixed order, so the launcher's
+ * exit and a closed port say nothing about the one with the files open. The group being empty does.
+ */
+export async function groupGone(pid, timeout = 30_000) {
+  const deadline = Date.now() + timeout;
+  while (groupAlive(pid)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((wait) => setTimeout(wait, 20));
+  }
+  return true;
+}
+
+/**
+ * Starts a Worker's `wrangler dev` in its own process group, so it can be stopped with all its children. `gone` waits for
+ * every one of them to end, which is when nothing has the files under `--persist-to` open.
+ */
 export function startWrangler({ cwd, command = wrangler, args, env = {}, logLevel = "warn" }) {
   const log = [];
   const stack = spawn(command, ["dev", ...args, "--ip", "127.0.0.1", "--show-interactive-dev-session=false", "--log-level", logLevel], { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true, env: { ...process.env, ...quiet, ...env } });
@@ -99,7 +128,7 @@ export function startWrangler({ cwd, command = wrangler, args, env = {}, logLeve
   };
   process.on("exit", stop);
   for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => process.exit(130));
-  return { stack, log, stop };
+  return { stack, log, stop, gone: (timeout) => groupGone(stack.pid, timeout) };
 }
 
 export function startGateway({ gateway: cwd, apiConfig, persist, vars, port, inspectorPort, gatewayConfig = join(cwd, "wrangler.jsonc"), extraArgs = [], env = {}, logLevel }) {

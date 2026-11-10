@@ -2664,6 +2664,9 @@ pub struct Workspace {
     provision_not_before: std::cell::Cell<i64>,
     /// Whether nothing is held from a failed migration, so a request needn't look. A restart looks again.
     held_clear: std::cell::Cell<bool>,
+    /// Test builds only: one alarm at a time, as the platform runs them. See `alarm`.
+    #[cfg(feature = "failpoints")]
+    test_alarm_turn: futures_util::lock::Mutex<()>,
 }
 
 type HeldDenials = std::collections::HashMap<DenialKey, HeldDenial>;
@@ -4718,6 +4721,8 @@ impl DurableObject for Workspace {
             scan_send_retry_at: std::cell::Cell::new(0),
             provision_not_before: std::cell::Cell::new(0),
             held_clear: std::cell::Cell::new(false),
+            #[cfg(feature = "failpoints")]
+            test_alarm_turn: futures_util::lock::Mutex::new(()),
         }
     }
 
@@ -4756,6 +4761,11 @@ impl DurableObject for Workspace {
     }
 
     async fn alarm(&self) -> Result<Response> {
+        // The platform never runs two alarms of one object at once, and the provisioning job counts on that: it reads
+        // an attempt with no recorded outcome as a run that died. The test pool's `runDurableObjectAlarm` calls this
+        // handler directly, beside a run the runtime started itself. In test builds a direct call waits its turn.
+        #[cfg(feature = "failpoints")]
+        let _turn = self.test_alarm_turn.lock().await;
         let denials = self.flush_denials();
         if let Err(error) = &denials {
             console_error!("couldn't record denials: {:?}", error.code());

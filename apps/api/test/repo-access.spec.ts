@@ -1,6 +1,7 @@
 import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { alarmPass } from "./alarm.ts";
 
 // M5 step 6: `get_repo_access`, an agent's short-lived token for the room's repository, against the fake GitHub. Links
 // and a task's link to the repository are written straight into the room, as step 5b's tests do: no command marks a
@@ -80,13 +81,13 @@ const setKeys = (id: string, current: string | null, previous: string | null) =>
   sql.exec("DELETE FROM test_repo_token_keys");
   sql.exec("INSERT INTO test_repo_token_keys (current, previous) VALUES (?, ?)", current, previous);
 });
-/** Runs the room's alarm, as the platform would. */
+/** Runs the room's alarm, as the platform would: each run whole, and after any the runtime had under way. */
 const alarm = async (id: string, times = 2) => {
-  for (let n = 0; n < times; n++) await runDurableObjectAlarm(stub(id));
+  for (let n = 0; n < times; n++) await alarmPass(stub(id));
 };
 /**
- * Retries a check until it holds, running the room's alarm between tries. The test runtime also runs alarms on its own as
- * they come due, and while one is running `runDurableObjectAlarm` returns at once, so a check straight after can race it.
+ * Retries a check until it holds, running the room's alarm between tries, for what reaches the room from another object
+ * in that object's own time: a departure, or a disconnect.
  */
 const eventually = async (id: string, check: () => Promise<void>) => {
   for (let n = 0; ; n++) {
@@ -98,6 +99,24 @@ const eventually = async (id: string, check: () => Promise<void>) => {
       await new Promise((x) => setTimeout(x, 100));
     }
   }
+};
+
+/**
+ * The owner leaves the organization, and room `id` has heard by the time this returns. The person's own alarm takes a
+ * departure to their rooms, and the runtime may already be running it, so it's run until the room has heard.
+ */
+const ownerLeaves = async (id: string) => {
+  // The departure finds the room through the listing the room's alarm writes. Written here, so it doesn't wait on that.
+  await BINDINGS.DB.prepare("INSERT OR REPLACE INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, ?, 'owner', 'Engineering', 0, 1)").bind(id, OWNER.id, ORG).run();
+  await must({ ...OWNER, departure: { person: OWNER.id, org: ORG, left_at: Date.now() } }, "POST", "/v1/org-departures", {});
+  const person = BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(OWNER.id));
+  const heard = () => inRoom(id, (sql) => sql.exec("SELECT owner_left_at AS t FROM workspace").one().t as number | null);
+  for (let n = 0; n < 30 && (await heard()) === null; n++) {
+    await runInDurableObject(person, (_: any, state: any) => void state.storage.sql.exec("UPDATE org_departure SET next_sweep_at = 0"));
+    await runDurableObjectAlarm(person);
+    await new Promise((x) => setTimeout(x, 100));
+  }
+  expect(await heard()).not.toBeNull();
 };
 
 beforeAll(async () => {
@@ -242,8 +261,10 @@ describe("refusing", () => {
 
   it("refuses a grant whose giver no longer holds the delegation, from current authority, not the list's state", async () => {
     const r = await room();
-    // The owner leaves the organization. The room hasn't been told, so the grant list still says live.
-    await must({ ...OWNER, departure: { person: OWNER.id, org: ORG, left_at: Date.now() } }, "POST", "/v1/org-departures", {});
+    // The owner leaves the organization. The room's own record is put back to what it was before it heard, so the grant
+    // list still says live. That's done once the room has heard, and it takes a departure only once, so the person's
+    // alarm can't write it again behind this.
+    await ownerLeaves(r.id);
     await inRoom(r.id, (sql) => sql.exec("UPDATE workspace SET owner_left_at = NULL"));
     expect((await api(ADMIN, "GET", `/v1/workspaces/${r.id}/repository/grants`)).body.grants?.[0]?.state ?? "live").toBe("live");
     await refusedWith(await access(AGENT, r.id, r.task), 403, "grant_stale");
@@ -453,20 +474,7 @@ describe("revoking a token whose authority ended", () => {
     return must(AGENT, "POST", `/v1/workspaces/${r.id}/tasks/${r.task}/release`, { version: (t.task ?? t).version, reason: "Can't do it" });
   }));
   it("when ownership moves", () => endsWith("transferred", async (r) => must(OWNER, "POST", `/v1/workspaces/${r.id}/owner/transfer`, { to: ADMIN.id, policy_version: await version(r.id) }, { claims: { target_member: { person: ADMIN.id, orgs: { [ORG]: 1 } } } })));
-  it("when the owner leaves the organization, which leaves every grant stale", () => endsWith("owner left", async (r) => {
-    // The departure finds the room through the listing the room's alarm writes. Written here, so it doesn't wait on that.
-    await BINDINGS.DB.prepare("INSERT OR REPLACE INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, ?, 'owner', 'Engineering', 0, 1)").bind(r.id, OWNER.id, ORG).run();
-    await must({ ...OWNER, departure: { person: OWNER.id, org: ORG, left_at: Date.now() } }, "POST", "/v1/org-departures", {});
-    // The person's own alarm takes a departure to their rooms.
-    // It may already be running on its own, so it's run until the room has heard.
-    const person = BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(OWNER.id));
-    for (let n = 0; n < 30 && (await inRoom(r.id, (sql) => sql.exec("SELECT owner_left_at AS t FROM workspace").one().t)) === null; n++) {
-      await runInDurableObject(person, (_: any, state: any) => void state.storage.sql.exec("UPDATE org_departure SET next_sweep_at = 0"));
-      await runDurableObjectAlarm(person);
-      await new Promise((x) => setTimeout(x, 100));
-    }
-    expect(await inRoom(r.id, (sql) => sql.exec("SELECT owner_left_at AS t FROM workspace").one().t)).not.toBeNull();
-  }));
+  it("when the owner leaves the organization, which leaves every grant stale", () => endsWith("owner left", (r) => ownerLeaves(r.id)));
   it("when the room is archived", () => endsWith("archived", async (r) => must(OWNER, "POST", `/v1/workspaces/${r.id}/archive`, { policy_version: await version(r.id) })));
   it("when the link stops allowing work, seen by the alarm alone", () => endsWith("degraded", (r) => inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET status = 'degraded'"))));
   it("when the agent is disconnected", async () => {
@@ -573,7 +581,10 @@ describe("the review's findings (M5 step 6)", () => {
       if (alarmAt === null) await new Promise((x) => setTimeout(x, 50));
     }
     expect(alarmAt).not.toBeNull();
-    expect(alarmAt!).toBeLessThanOrEqual(expires);
+    // The room sets its alarm as a wait from a clock it read a moment earlier, so the time kept trails the expiry by
+    // however long that moment was. Seconds of allowance still tell the grant's expiry from the token's, an hour on.
+    expect(alarmAt!).toBeLessThanOrEqual(expires + 5_000);
+    expect(got.body.expires_at - expires).toBeGreaterThan(30 * 60_000);
     // The agent never asks again. When the grant lapses, the alarm takes the token back.
     await inRoom(r.id, (sql) => sql.exec("UPDATE provider_grant SET expires_at = ? WHERE id = ?", Date.now() - 1, grant));
     await alarm(r.id);
@@ -617,8 +628,10 @@ describe("the review's findings (M5 step 6)", () => {
   it("records and drops a token to revoke that neither key opens, in the alarm (M2)", async () => {
     const r = await room();
     expect((await access(AGENT, r.id, r.task)).status).toBe(200);
-    await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) });
+    // The keys change before the grant goes. Taking the grant back sets the room's alarm, and the runtime may run it
+    // before this test's own run. Whichever run comes first then meets the keys as the test means them.
     await setKeys(r.id, NEW_KEY, null);
+    await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) });
     await alarm(r.id);
     await eventually(r.id, async () => {
       expect(await tokens(r.id)).toEqual([]);
@@ -627,8 +640,8 @@ describe("the review's findings (M5 step 6)", () => {
     // With no key set at all, a row waits instead: that's configuration missing, not a key gone.
     const s = await room();
     expect((await access(AGENT, s.id, s.task)).status).toBe(200);
-    await must(OWNER, "DELETE", `/v1/workspaces/${s.id}/repository/grants/${s.grant}`, { policy_version: await version(s.id) });
     await setKeys(s.id, null, null);
+    await must(OWNER, "DELETE", `/v1/workspaces/${s.id}/repository/grants/${s.grant}`, { policy_version: await version(s.id) });
     await alarm(s.id);
     expect((await tokens(s.id)).map((t) => t.state)).toEqual(["revoke"]);
     expect(await events(s.id, "repo_token.unrevocable")).toEqual([]);

@@ -1,6 +1,7 @@
-import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { alarmPass } from "./alarm.ts";
 
 // M5 step 5: a provider's webhook delivery, from the API's one route for it to the room. The gateway has verified GitHub's
 // signature by the time anything arrives here, and says so with an assertion that names no one. A delivery is a nudge: it
@@ -304,7 +305,7 @@ describe("a delivery as a nudge", () => {
     expect((await change(id) as any).nudged_at).toBeGreaterThan(5);
     // The alarm clears old ones too, with no delivery arriving.
     await inRoom(id, (sql) => sql.exec("UPDATE provider_delivery SET expires_at = 1"));
-    await runDurableObjectAlarm(stub(id));
+    await alarmPass(stub(id));
     expect(await deliveries(id)).toEqual([]);
   });
 
@@ -376,7 +377,7 @@ async function indexed(id: string) {
   const policy = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
   expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/name`, { name: "Engineering two", policy_version: policy })).status).toBe(200);
   for (let i = 0; i < 40; i++) {
-    await runDurableObjectAlarm(stub(id));
+    await alarmPass(stub(id));
     const at = await inRoom(id, (sql) => sql.exec("SELECT indexed_at FROM repo_link").one().indexed_at as number | null);
     if (at !== null) return at;
     await new Promise((r) => setTimeout(r, 50));

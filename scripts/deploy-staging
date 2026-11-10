@@ -192,8 +192,12 @@ if [ "$web" = true ]; then
     const wrong = [];
     if (config.name !== "podster-web-staging") wrong.push(`its name is ${config.name}`);
     if (config.workers_dev !== false) wrong.push(`workers_dev is ${config.workers_dev}`);
+    if (config.route !== undefined) wrong.push(`it has a route key, ${JSON.stringify(config.route)}, beside routes`);
     const routes = (config.routes ?? []).map((route) => route.pattern ?? route).join(",");
     if (routes !== "app-staging.podster.dev") wrong.push(`its routes are ${routes || "none"}`);
+    const vars = config.vars ?? {};
+    if (vars.GATEWAY_URL !== "https://gateway-staging.podster.dev") wrong.push(`its GATEWAY_URL is ${vars.GATEWAY_URL}`);
+    if (vars.APP_URL !== "https://app-staging.podster.dev") wrong.push(`its APP_URL is ${vars.APP_URL}`);
     const services = config.services ?? [];
     if (services.length === 0) wrong.push("it binds no service");
     for (const { binding, service } of services) {

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Checks every refusal of scripts/merge-gate, with a stand-in gh and no network. Most cases give the stand-in what
-# `gh ... --jq` would print. The last section gives it gh's real JSON, captured from merged pull request #252 into
-# scripts/test/fixtures, and runs the script's own jq expressions over it, so it needs `jq`.
+# `gh ... --jq` would print. The last section gives it gh's real JSON, captured read-only into scripts/test/fixtures
+# (from merged pull request #252, docs pull request #243 and the repository's code scanning setup), and runs the
+# script's own jq expressions over it, so it needs `jq`.
 #
 #   scripts/test/merge-gate-selftest
 set -euo pipefail
@@ -49,19 +50,19 @@ next() { # the fixture's next line each time, repeating its last
   sed -n "${n}p" "$fix/$1"
 }
 case "$*" in
-  "pr view "*" --json state,isDraft,baseRefName,headRefName,headRefOid "*) answer pull ;;
+  "pr view "*" --json state,isDraft,isCrossRepository,baseRefName,headRefName,headRefOid "*) answer pull ;;
   "pr view "*" --json headRefOid,statusCheckRollup "*) answer checks ;;
+  "pr view "*" --json changedFiles,files "*) answer files ;;
   "pr view "*" --json mergeStateStatus "*) next merge-state ;;
   "pr view "*" --json state,mergeCommit "*) answer merged ;;
   "api repos/{owner}/{repo}/code-scanning/alerts?ref=refs/pull/"*"/merge&state=open "*) answer alerts-merge ;;
   "api repos/{owner}/{repo}/code-scanning/alerts?ref=refs/pull/"*"/head&state=open "*) answer alerts-head ;;
-  "api repos/{owner}/{repo}/code-scanning/analyses?ref=refs/pull/"*"/merge&per_page=100 "*) answer analyses-merge ;;
-  "api repos/{owner}/{repo}/code-scanning/analyses?ref=refs/pull/"*"/head&per_page=100 "*) answer analyses-head ;;
+  "api repos/{owner}/{repo}/code-scanning/default-setup "*) answer languages ;;
+  "api repos/{owner}/{repo}/code-scanning/analyses?ref=refs/pull/"*"/head&per_page=100 "*) answer analyses ;;
   "api repos/{owner}/{repo}/contents/.github/workflows/ci.yml?ref=main -H Accept: application/vnd.github.raw") answer workflow ;;
   "pr merge "*) answer merge-result ;;
   "run list --workflow ci.yml --branch main --event push --commit "*) next main-run ;;
   "run list --workflow ci.yml --commit "*" --event pull_request --limit 100 "*) answer pr-runs ;;
-  "run view "*" --json jobs "*".steps[]"*) if [ -f "$fix/jobs.json" ]; then json jobs; else answer steps; fi ;;
   "run view "*" --json jobs "*) answer jobs ;;
   "run view "*" --log-failed") answer log ;;
   "run rerun "*) answer rerun-result ;;
@@ -70,49 +71,57 @@ esac
 EOF
 
 jobs="rust migrations contracts api web scanner gateway e2e"
+languages="actions javascript-typescript python rust"
 set_check() { # set_check NAME STATUS CONCLUSION: changes every check of that name
   awk -F '\t' -v OFS='\t' -v name="$1" -v status="$2" -v conclusion="$3" '$1 == name { $2 = status; $3 = conclusion } { print }' "$fix/checks" > "$fix/checks.new"
   mv "$fix/checks.new" "$fix/checks"
 }
 drop_check() { awk -F '\t' -v name="$1" '$1 != name' "$fix/checks" > "$fix/checks.new"; mv "$fix/checks.new" "$fix/checks"; }
-on_branch() { printf 'OPEN\tfalse\tmain\t%s\t%s\n' "$1" "$sha" > "$fix/pull"; }
+pull() { printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" > "$fix/pull"; } # STATE DRAFT FORK BASE BRANCH HEAD
+on_branch() { pull OPEN false false main "$1" "$sha"; }
+skip_jobs() { local job; for job in $jobs; do set_check "$job" COMPLETED SKIPPED; done; }
+docs_branch() { # docs_branch FILE...: a docs/ branch, CI skipped, changing those files
+  on_branch docs/thing
+  skip_jobs
+  { echo "$#"; printf '%s\n' "$@"; } > "$fix/files"
+}
+alarm="test/kernel.spec.ts > inbox > the alarm follows whichever recipient is due first, not the one waiting longest"
+api_log() { # api_log FILES-FAILED TESTS-FAILED FAIL-LINE...
+  local files=$1 tests=$2 line
+  shift 2
+  : > "$fix/log"
+  for line in ${1+"$@"}; do printf 'api\tRun npm test\t2026-11-09T19:10:30.6977475Z  FAIL  %s\n' "$line" >> "$fix/log"; done
+  printf 'api\tRun npm test\t2026-11-09T19:10:30.6989484Z  Test Files  %s failed | 18 passed (19)\n' "$files" >> "$fix/log"
+  printf 'api\tRun npm test\t2026-11-09T19:10:30.6991018Z       Tests  %s failed | 813 passed (814)\n' "$tests" >> "$fix/log"
+}
 
-# A pull request the gate passes, whose merge then goes green on main, and a head run with the web flake.
+# A pull request the gate passes, whose merge then goes green on main, and a head run with the api flake.
 healthy() {
   rm -f "$fix"/*
   : > "$fix/calls"
   on_branch feat/thing
   echo "$sha" > "$fix/checks"
-  local name
-  for name in $jobs "Analyze (actions)" "Analyze (javascript-typescript)" "Analyze (python)" "Analyze (rust)"; do
-    printf '%s\tCOMPLETED\tSUCCESS\n' "$name" >> "$fix/checks"
+  local name language
+  for name in $jobs; do printf '%s\tCOMPLETED\tSUCCESS\n' "$name" >> "$fix/checks"; done
+  : > "$fix/analyses"
+  for language in $languages; do
+    printf 'Analyze (%s)\tCOMPLETED\tSUCCESS\n' "$language" >> "$fix/checks"
+    echo "/language:$language" >> "$fix/analyses"
   done
   printf 'CodeQL\tCOMPLETED\tNEUTRAL\n' >> "$fix/checks"
+  printf '%s\n' $languages > "$fix/languages"
   echo 0 > "$fix/alerts-merge"
   echo 0 > "$fix/alerts-head"
-  echo 0 > "$fix/analyses-merge"
-  echo 4 > "$fix/analyses-head"
   cp "$workflow" "$fix/workflow"
   printf 'UNKNOWN\nUNKNOWN\nCLEAN\n' > "$fix/merge-state"
   : > "$fix/merge-result"
   echo "$merged" > "$fix/merged"
   printf '\n900\tin_progress\tnone\thttps://github.invalid/runs/900\n900\tcompleted\tsuccess\thttps://github.invalid/runs/900\n' > "$fix/main-run"
   printf '555\tcompleted\tfailure\t1\n' > "$fix/pr-runs"
-  echo web > "$fix/jobs"
-  echo "Run node run-a11y.mjs --skip-web-build" > "$fix/steps"
-  printf 'web\tRun node run-a11y.mjs --skip-web-build\t2026-11-09T23:30:16.1257336Z FAIL run: database is locked\n' > "$fix/log"
+  echo api > "$fix/jobs"
+  api_log 1 1 "$alarm"
   : > "$fix/rerun-result"
 }
-api_log() { # api_log FILES-FAILED TESTS-FAILED FAIL-LINE...
-  local files=$1 tests=$2 line
-  shift 2
-  echo api > "$fix/jobs"
-  : > "$fix/log"
-  for line in ${1+"$@"}; do printf 'api\tRun npm test\t2026-11-09T19:10:30.6977475Z  FAIL  %s\n' "$line" >> "$fix/log"; done
-  printf 'api\tRun npm test\t2026-11-09T19:10:30.6989484Z  Test Files  %s failed | 18 passed (19)\n' "$files" >> "$fix/log"
-  printf 'api\tRun npm test\t2026-11-09T19:10:30.6991018Z       Tests  %s failed | 813 passed (814)\n' "$tests" >> "$fix/log"
-}
-alarm="test/kernel.spec.ts > inbox > the alarm follows whichever recipient is due first, not the one waiting longest"
 changes='gh pr merge|gh run rerun'
 
 # --- usage ---
@@ -128,6 +137,7 @@ check "a pull request that isn't a number is refused, exit 2" run 2 "$gate" feat
 check "--merge with --rerun-known-flake is refused, exit 2" run 2 "$gate" 77 "$sha" --merge --rerun-known-flake
 check "an unknown option is refused, exit 2" run 2 "$gate" 77 "$sha" --squash
 check "--help exits 0" run 0 "$gate" --help
+check "  and says whose alerts it reads" said "It never reads main's alerts"
 check "none of those asked gh anything" test ! -s "$fix/calls"
 
 # --- the gate ---
@@ -137,6 +147,9 @@ check "  and the report merges and reruns nothing" never_called "$changes"
 check "  and it waited through UNKNOWN twice" test "$(grep -c '^sleep 6$' "$fix/calls")" -eq 2
 check "  and CodeQL's NEUTRAL was accepted with no open alert" said 'ok +check CodeQL: NEUTRAL'
 check "  and it read ci.yml on main" said 'ok +ci.yml on main has the jobs'
+check "  and it found an analysis for each of the four languages" test "$(grep -c '^ok      code scanning analysed this head for ' "$tmp/out")" -eq 4
+check "  and it didn't ask which files changed" never_called 'changedFiles'
+check "  and it never asked about main's alerts" never_called 'alerts\?ref=refs/heads|alerts\?state|alerts --'
 
 refused() { # refused TITLE WHAT-IT-SAYS: the caller changed the fixtures; both the report and --merge must refuse
   local title=$1 says=$2
@@ -147,18 +160,44 @@ refused() { # refused TITLE WHAT-IT-SAYS: the caller changed the fixtures; both 
   check "  and merges and reruns nothing" never_called "$changes"
   healthy
 }
+# The same, for what stops it at once: one question to gh, no wait, and no word about the checks.
+at_once() { # at_once TITLE WHAT-IT-SAYS
+  local flag
+  for flag in "" --merge --rerun-known-flake; do
+    : > "$fix/calls"
+    check "$1${flag:+, with $flag}: refused at once, exit 1" run 1 "$gate" 77 "$sha" $flag
+    check "  and says why, once" test "$(grep -c -E "^REFUSE  $2" "$tmp/out")" -eq 1
+    check "  after asking gh one thing, and waiting for nothing" test "$(wc -l < "$fix/calls" | tr -d ' ')" -eq 1
+    check "  with nothing about checks, alerts or the merge state" test "$(grep -c -E 'head moved|check |alert|merge state' "$tmp/out")" -eq 0
+  done
+  healthy
+}
 
-printf 'OPEN\tfalse\tmain\tfeat/thing\t%s\n' "$other" > "$fix/pull"
-refused "a head that isn't the given sha" "its head is $other"
+pull OPEN false false main feat/thing "$other"
+at_once "a head that isn't the given sha" "its head is $other, not the given $sha"
 
-printf 'MERGED\tfalse\tmain\tfeat/thing\t%s\n' "$sha" > "$fix/pull"
-refused "a pull request that isn't open" 'it is MERGED'
+pull MERGED false false main feat/thing "$sha"
+at_once "a pull request already merged" 'it is MERGED, not open'
 
-printf 'OPEN\ttrue\tmain\tfeat/thing\t%s\n' "$sha" > "$fix/pull"
-refused "a draft" 'it is a draft'
+pull CLOSED false false main feat/thing "$sha"
+at_once "a closed pull request" 'it is CLOSED, not open'
 
-printf 'OPEN\tfalse\tfeat/base\tfeat/thing\t%s\n' "$sha" > "$fix/pull"
-refused "a pull request into another branch" 'targets feat/base'
+pull OPEN true false main feat/thing "$sha"
+at_once "a draft" 'it is a draft'
+
+pull OPEN false true main feat/thing "$sha"
+at_once "a pull request from a fork" 'it comes from a fork'
+
+pull OPEN false true main docs/thing "$sha"
+at_once "a docs/ pull request from a fork" 'it comes from a fork'
+
+pull OPEN false false feat/base feat/thing "$sha"
+at_once "a pull request into another branch" 'it targets feat/base'
+
+pull MERGED false false main feat/thing "$other"
+check "a merged pull request at another sha is refused, exit 1" run 1 "$gate" 77 "$sha"
+check "  with one line for each" said 'refused, 2 problem'
+healthy
 
 echo gh-fails > "$fix/pull"
 refused "a pull request gh can't read" 'could not read pull request'
@@ -184,6 +223,16 @@ refused "a NEUTRAL check that isn't CodeQL" 'check rust: NEUTRAL'
 printf 'extra\tCOMPLETED\tFAILURE\n' >> "$fix/checks"
 refused "a failed check that ci.yml doesn't own" 'check extra: FAILURE'
 
+printf 'web\tCOMPLETED\tFAILURE\n' >> "$fix/checks"
+refused "a check name that reports twice, one copy failed" 'check web: FAILURE'
+
+printf 'web\tCOMPLETED\tFAILURE\n' > "$fix/checks.new"; sed 1d "$fix/checks" >> "$fix/checks.new"
+{ echo "$sha"; cat "$fix/checks.new"; } > "$fix/checks"; rm "$fix/checks.new"
+refused "a check name that reports twice, the failed copy first" 'check web: FAILURE'
+
+printf 'e2e\tIN_PROGRESS\tNONE\n' >> "$fix/checks"
+refused "a check name that reports twice, one copy still running" 'check e2e is IN_PROGRESS'
+
 # --- checks that must be there ---
 for job in $jobs; do
   drop_check "$job"
@@ -199,52 +248,96 @@ healthy
 set_check contracts COMPLETED SKIPPED
 refused "a skipped job on a branch that isn't docs/" "ci.yml's contracts was SKIPPED"
 
-for job in $jobs; do set_check "$job" COMPLETED SKIPPED; done
+skip_jobs
 refused "every job skipped on a branch that isn't docs/" "ci.yml's e2e was SKIPPED"
 
-on_branch docs-in-name/thing
-for job in $jobs; do set_check "$job" COMPLETED SKIPPED; done
+skip_jobs; on_branch docs-in-name/thing
 refused "every job skipped on a branch that only looks like docs/" "ci.yml's rust was SKIPPED"
 
-on_branch docs/thing
-for job in $jobs; do set_check "$job" COMPLETED SKIPPED; done
-check "a docs/ branch with every job skipped passes, exit 0" run 0 "$gate" 77 "$sha"
+# --- the docs/ allowance ---
+docs_branch docs/spec/PRODUCT.md README.md apps/web/README.md
+check "a docs/ branch changing only documentation, with every job skipped, passes: exit 0" run 0 "$gate" 77 "$sha"
+check "  and says why the skips are allowed" said 'ok +this docs/ branch changes only Markdown files and files under docs/'
+healthy
+
+docs_branch docs/mockups/board.html docs/spec/diagram.png
+check "files under docs/ that aren't Markdown count as documentation: exit 0" run 0 "$gate" 77 "$sha"
+healthy
+
+for path in e2e/kit-report.json apps/api/src/lib.rs .github/workflows/ci.yml scripts/merge-gate src/docs/handler.ts docsx/page.ts notes.md.sh CLAUDE.mdx; do
+  docs_branch docs/spec/PRODUCT.md "$path"
+  refused "a docs/ branch that also changes $path, with its jobs skipped" "ci.yml's rust was SKIPPED"
+done
+
+docs_branch docs/spec/PRODUCT.md apps/api/src/lib.rs
+check "  and the gate names the file" run 1 "$gate" 77 "$sha"
+check "  that isn't documentation" said "changes files that aren't documentation \(apps/api/src/lib.rs\)"
 healthy
 
 on_branch docs/thing
-for job in $jobs; do set_check "$job" COMPLETED SKIPPED; done
-drop_check gateway
+printf '2\ndocs/spec/PRODUCT.md\napps/api/src/lib.rs\n' > "$fix/files"
+check "a docs/ branch that changes code, with every job passed, passes: exit 0" run 0 "$gate" 77 "$sha"
+healthy
+
+docs_branch docs/a.md docs/b.md
+sed '1s/.*/140/' "$fix/files" > "$fix/files.new" && mv "$fix/files.new" "$fix/files"
+refused "a docs/ branch changing more files than gh lists" "ci.yml's rust was SKIPPED"
+
+docs_branch docs/a.md; echo gh-fails > "$fix/files"
+refused "a docs/ branch whose files can't be read" 'could not read the files this docs/ branch changes'
+
+docs_branch docs/a.md; echo 0 > "$fix/files"
+refused "a docs/ branch that lists no file" 'could not read the files this docs/ branch changes'
+
+docs_branch docs/a.md; drop_check gateway
 refused "a docs/ branch with a job missing" "ci.yml's gateway is not among the checks"
 
-on_branch docs/thing
-for job in $jobs; do set_check "$job" COMPLETED SKIPPED; done
-set_check "Analyze (python)" COMPLETED FAILURE
+docs_branch docs/a.md; set_check "Analyze (python)" COMPLETED FAILURE
 refused "a docs/ branch whose code scanning failed" 'check Analyze \(python\): FAILURE'
 
-on_branch docs/thing
-for job in $jobs; do set_check "$job" COMPLETED SKIPPED; done
-drop_check CodeQL
+docs_branch docs/a.md; drop_check CodeQL
 refused "a docs/ branch with no CodeQL check" 'CodeQL is not among the checks'
 
-for name in "Analyze (actions)" "Analyze (javascript-typescript)" "Analyze (python)" "Analyze (rust)" CodeQL; do
-  drop_check "$name"
-  refused "a pull request with no $name check" "${name%% *}.* is not among the checks"
-  set_check "$name" COMPLETED SKIPPED
-  refused "a skipped $name check" "${name%% *}.* was SKIPPED"
-done
-
-sed 's/^  gateway:$/  edge:/' "$workflow" > "$fix/workflow"
-refused "a job renamed in ci.yml on main" "ci.yml on main has the jobs 'rust migrations contracts api web scanner edge e2e'"
-
-sed 's/^  rust:$/  lint:\
-    runs-on: ubuntu-latest\
-  rust:/' "$workflow" > "$fix/workflow"
-refused "a job added to ci.yml on main" "ci.yml on main has the jobs 'lint rust "
-
-echo gh-fails > "$fix/workflow"
-refused "a ci.yml that can't be read" "has the jobs 'unreadable'"
+docs_branch docs/a.md; grep -v rust "$fix/analyses" > "$fix/analyses.new"; mv "$fix/analyses.new" "$fix/analyses"
+refused "a docs/ branch with a language not analysed" 'no analysis of this head for rust'
 
 # --- code scanning ---
+for language in $languages; do
+  drop_check "Analyze ($language)"
+  refused "a pull request with no Analyze ($language) check" "Analyze \($language\) is not among the checks"
+  set_check "Analyze ($language)" COMPLETED SKIPPED
+  refused "a skipped Analyze ($language) check" "Analyze \($language\) was SKIPPED"
+  grep -v -x "/language:$language" "$fix/analyses" > "$fix/analyses.new"; mv "$fix/analyses.new" "$fix/analyses"
+  refused "a head with three of four languages analysed, and not $language" "no analysis of this head for $language,"
+done
+drop_check CodeQL
+refused "a pull request with no CodeQL check" 'CodeQL is not among the checks'
+set_check CodeQL COMPLETED SKIPPED
+refused "a skipped CodeQL check" 'CodeQL was SKIPPED'
+
+: > "$fix/analyses"
+check "a head code scanning never analysed is refused, though its alert list is empty: exit 1" run 1 "$gate" 77 "$sha"
+check "  once for each language" test "$(grep -c 'REFUSE  code scanning has no analysis of this head for ' "$tmp/out")" -eq 4
+healthy
+
+echo "/language:rust" > "$fix/analyses"
+refused "a head analysed for one language of four" 'no analysis of this head for python'
+
+echo gh-fails > "$fix/analyses"
+refused "analyses that can't be read" "could not read code scanning's analyses"
+
+echo gh-fails > "$fix/languages"
+refused "a code scanning setup that can't be read" 'could not read which languages'
+
+: > "$fix/languages"
+refused "a code scanning setup with no language" 'could not read which languages'
+
+echo go >> "$fix/languages"
+refused "a language added to code scanning that this head has no analysis for" 'no analysis of this head for go'
+
+echo go >> "$fix/languages"; echo "/language:go" >> "$fix/analyses"
+refused "  and, once analysed, no Analyze check for" 'Analyze \(go\) is not among the checks'
+
 echo 2 > "$fix/alerts-merge"
 refused "an open alert on the merge ref" 'code scanning has 2 or more open alerts for refs/pull/77/merge'
 
@@ -262,15 +355,17 @@ refused "alerts that can't be read" 'could not read code scanning alerts for ref
 echo '{"message":"no analysis found"}' > "$fix/alerts-head"
 refused "an alert answer that isn't a count" 'could not read code scanning alerts for refs/pull/77/head'
 
-echo 0 > "$fix/analyses-head"
-refused "a head code scanning never analysed, though its alert list is empty" 'no analysis of this head'
+# --- ci.yml on main ---
+sed 's/^  gateway:$/  edge:/' "$workflow" > "$fix/workflow"
+refused "a job renamed in ci.yml on main" "ci.yml on main has the jobs 'rust migrations contracts api web scanner edge e2e'"
 
-echo gh-fails > "$fix/analyses-head"
-refused "analyses that can't be read" "could not read code scanning's analyses"
+sed 's/^  rust:$/  lint:\
+    runs-on: ubuntu-latest\
+  rust:/' "$workflow" > "$fix/workflow"
+refused "a job added to ci.yml on main" "ci.yml on main has the jobs 'lint rust "
 
-echo 0 > "$fix/analyses-head"; echo 4 > "$fix/analyses-merge"
-check "analyses filed under the merge ref count too, exit 0" run 0 "$gate" 77 "$sha"
-healthy
+echo gh-fails > "$fix/workflow"
+refused "a ci.yml that can't be read" "has the jobs 'unreadable'"
 
 echo "$sha" > "$fix/checks"
 refused "a pull request with no checks" 'no check has reported'
@@ -325,19 +420,13 @@ check "--merge whose merge commit can't be read exits 4" run 4 "$gate" 77 "$sha"
 healthy
 
 # --- --rerun-known-flake ---
-check "the web flake is rerun, exit 0" run 0 "$gate" 77 "$sha" --rerun-known-flake
+check "the api alarm flake is rerun, exit 0" run 0 "$gate" 77 "$sha" --rerun-known-flake
 check "  failed jobs only" called '^gh run rerun 555 --failed$'
 check "  once" test "$(grep -c '^gh run rerun' "$fix/calls")" -eq 1
 check "  and nothing is merged" never_called 'gh pr merge'
 check "  and the gate's checks are not what decides it" never_called 'statusCheckRollup'
 healthy
 
-api_log 1 1 "$alarm"
-check "the api alarm flake is rerun, exit 0" run 0 "$gate" 77 "$sha" --rerun-known-flake
-check "  failed jobs only" called '^gh run rerun 555 --failed$'
-healthy
-
-echo api > "$fix/jobs"
 printf 'api\tRun npm test\t2026-11-09T19:10:30Z \033[41m\033[1m FAIL \033[22m\033[49m %s\n' "$alarm" > "$fix/log"
 printf 'api\tRun npm test\t2026-11-09T19:10:31Z \033[2m Test Files \033[22m \033[1m\033[31m1 failed\033[39m\033[22m | 18 passed (19)\n' >> "$fix/log"
 printf 'api\tRun npm test\t2026-11-09T19:10:31Z \033[2m      Tests \033[22m \033[1m\033[31m1 failed\033[39m\033[22m | 813 passed (814)\n' >> "$fix/log"
@@ -350,9 +439,6 @@ no_rerun() { # no_rerun TITLE WHAT-IT-SAYS
   check "  and nothing was rerun or merged" never_called "$changes"
   healthy
 }
-
-printf 'OPEN\tfalse\tmain\tfeat/thing\t%s\n' "$other" > "$fix/pull"
-no_rerun "a head that isn't the given sha" "its head is $other"
 
 : > "$fix/pr-runs"
 no_rerun "a sha with no ci.yml run" 'there is no ci.yml run'
@@ -384,29 +470,14 @@ no_rerun "a failed run with no failed job" 'no failed job'
 echo gateway > "$fix/jobs"
 no_rerun "a failed gateway job" 'the failed job is gateway'
 
-echo rust > "$fix/jobs"
-no_rerun "a failed rust job, though its log says database is locked" 'the failed job is rust'
-
-printf 'web\tRun npm test\t2026-11-09T23:30:16Z  FAIL  test/page.spec.tsx > renders\n' > "$fix/log"
-no_rerun "a web accessibility failure without the database line" 'without the line'
-
-printf 'web\tRun node run-a11y.mjs --skip-web-build\t2026-11-09T23:30:16Z FAIL axe: the page says "database is locked" in its text\n' > "$fix/log"
-no_rerun "a web failure with the words but not the line" 'without the line'
-
-printf 'web\tRun node run-a11y.mjs --skip-web-build\t2026-11-09T23:30:16Z FAIL run: database is locked out of the room\n' > "$fix/log"
-no_rerun "a web failure whose line only starts that way" 'without the line'
-
-printf 'web\tRun node run-a11y.mjs --skip-web-build\t2026-11-09T23:30:16Z warning: sqlite said database is locked\n' > "$fix/log"
-no_rerun "a web failure whose line only ends that way" 'without the line'
-
-echo "Run npm test" > "$fix/steps"
-no_rerun "a web failure at another step, though the log has the line" 'not the accessibility run alone: Run npm test'
-
-printf 'Run npm test\nRun node run-a11y.mjs --skip-web-build\n' > "$fix/steps"
-no_rerun "a web failure at two steps" 'not the accessibility run alone'
-
-: > "$fix/steps"
-no_rerun "a web failure with no failed step" 'not the accessibility run alone: none'
+# The allowance this used to have. #254 fixed the cause, so it is a failure like any other.
+echo web > "$fix/jobs"
+printf 'web\tRun node run-a11y.mjs --skip-web-build\t2026-11-09T23:30:16.1257336Z FAIL run: database is locked\n' > "$fix/log"
+no_rerun "a failed web job, with \"FAIL run: database is locked\" from its accessibility run" 'the failed job is web, which is never rerun'
+echo web > "$fix/jobs"
+check "  and its log isn't even read" run 1 "$gate" 77 "$sha" --rerun-known-flake
+check "  nor its steps" never_called 'log-failed|steps'
+healthy
 
 echo gh-fails > "$fix/log"
 no_rerun "a failed log gh can't read" 'could not read the failed log'
@@ -436,7 +507,6 @@ api_log 1 1 "$alarm"
 printf 'api\tRun npm test\t2026-11-09T19:10:30Z  FAIL  test/claims.spec.ts > a public claim > takes the last place\n' >> "$fix/log"
 no_rerun "an api log that names a second failing test" 'does not name exactly one failing test'
 
-echo api > "$fix/jobs"
 printf 'api\tRun cargo install worker-build\t2026-11-09T19:10:30Z error: could not compile\n' > "$fix/log"
 no_rerun "an api job that failed before its tests" 'not with exactly one failed test file'
 
@@ -445,78 +515,119 @@ check "a rerun GitHub doesn't accept is refused, exit 1" run 1 "$gate" 77 "$sha"
 check "  and it isn't tried twice" test "$(grep -c '^gh run rerun' "$fix/calls")" -eq 1
 
 # --- gh's real JSON, through the script's own jq ---
-# Captured read-only from #252 after it merged, so as captured it is MERGED with an UNKNOWN merge state.
+# #252 was captured after it merged, so as captured it is MERGED with an UNKNOWN merge state.
 real_head=$(jq -r .headRefOid "$captured/pull.json")
 real_merge=$(jq -r .mergeCommit.oid "$captured/merged.json")
 real() { # the captured answers, as they were
   healthy
-  rm -f "$fix/pull" "$fix/checks" "$fix/merge-state" "$fix/merged" "$fix/main-run" "$fix/pr-runs" "$fix/jobs" "$fix/steps"
-  rm -f "$fix/alerts-merge" "$fix/alerts-head" "$fix/analyses-merge" "$fix/analyses-head"
+  rm -f "$fix/pull" "$fix/checks" "$fix/merge-state" "$fix/merged" "$fix/main-run" "$fix/pr-runs" "$fix/jobs"
+  rm -f "$fix/alerts-merge" "$fix/alerts-head" "$fix/analyses" "$fix/languages"
   local name
-  for name in pull checks merge-state merged main-run pr-runs jobs; do cp "$captured/$name.json" "$fix/$name.json"; done
+  for name in pull checks merge-state merged main-run pr-runs jobs analyses; do cp "$captured/$name.json" "$fix/$name.json"; done
   cp "$captured/alerts.json" "$fix/alerts-merge.json"
   cp "$captured/alerts.json" "$fix/alerts-head.json"
-  echo '[]' > "$fix/analyses-merge.json"
-  cp "$captured/analyses.json" "$fix/analyses-head.json"
+  cp "$captured/default-setup.json" "$fix/languages.json"
+  cp "$captured/docs-files.json" "$fix/files.json"
 }
 edit() { jq "$2" "$fix/$1.json" > "$fix/$1.new" && mv "$fix/$1.new" "$fix/$1.json"; } # edit KEY JQ
-still_open() { edit pull '.state = "OPEN"'; edit merge-state '.mergeStateStatus = "CLEAN"'; }
+still_open() { real; edit pull '.state = "OPEN"'; edit merge-state '.mergeStateStatus = "CLEAN"'; }
 
 check "the self-test has jq" test -x "$(command -v jq)"
 real
-check "#252 as captured, merged, is refused: exit 1" run 1 "$gate" 252 "$real_head"
-check "  for being merged and for its merge state, and nothing else" said 'refused, 2 problem'
+check "#252 as captured, merged, is refused at once: exit 1" run 1 "$gate" 252 "$real_head"
+check "  for being merged, and nothing else" said 'refused, 1 problem'
 check "  with its branch and head read from the JSON" said "^pull request #252 from fix/m5-grants-followups at $real_head\$"
-check "  and each of its 13 checks read as passing" test "$(grep -c '^ok      check .*: SUCCESS$' "$tmp/out")" -eq 13
-check "  and its analyses counted at this head" said 'ok +code scanning analysed this head \(4 analyses\)'
+check "  after one question to gh" test "$(wc -l < "$fix/calls" | tr -d ' ')" -eq 1
 
-real; still_open
+still_open
 check "the same pull request, open and CLEAN, passes: exit 0" run 0 "$gate" 252 "$real_head"
+check "  with each of its 13 checks read as passing" test "$(grep -c '^ok      check .*: SUCCESS$' "$tmp/out")" -eq 13
+check "  and four languages read from the setup's six names" test "$(grep -c '^ok      code scanning analysed this head for ' "$tmp/out")" -eq 4
+check "  javascript-typescript among them, as one" said '^ok      code scanning analysed this head for javascript-typescript$'
 
-real; still_open
-check "  and merges, then reads main's run from the JSON: exit 0" run 0 "$gate" 252 "$real_head" --merge
+still_open
+check "  and it merges, then reads main's run from the JSON: exit 0" run 0 "$gate" 252 "$real_head" --merge
 check "  for the captured merge commit" said "ci.yml on main for $real_merge: success"
 
-real; still_open
-edit analyses-head '[.[] | .commit_sha = "ffffffffffffffffffffffffffffffffffffffff"]'
-check "analyses of an earlier head don't count: exit 1" run 1 "$gate" 252 "$real_head"
-check "  and says so" said 'REFUSE .*no analysis of this head'
+still_open; edit pull '.isCrossRepository = true'
+check "the same pull request from a fork is refused at once: exit 1" run 1 "$gate" 252 "$real_head" --merge
+check "  and says so" said 'REFUSE +it comes from a fork'
+check "  and nothing is merged" never_called 'gh pr merge'
 
-real; still_open
-edit alerts-head '[{"number": 7, "state": "open"}]'
+still_open; edit analyses '[.[] | .commit_sha = "ffffffffffffffffffffffffffffffffffffffff"]'
+check "analyses of an earlier head don't count: exit 1" run 1 "$gate" 252 "$real_head"
+check "  for any of the four languages" test "$(grep -c 'REFUSE  code scanning has no analysis of this head for ' "$tmp/out")" -eq 4
+
+still_open; edit analyses '[.[] | select(.category != "/language:rust")]'
+check "three of the four categories at this head is refused: exit 1" run 1 "$gate" 252 "$real_head"
+check "  for the missing one alone" said 'refused, 1 problem'
+check "  by name" said 'REFUSE +code scanning has no analysis of this head for rust'
+
+still_open; edit analyses '[.[] | select(.category == "/language:rust") | ., .]'
+check "one category analysed twice isn't four: exit 1" run 1 "$gate" 252 "$real_head"
+check "  three are missing" said 'refused, 3 problem'
+
+still_open; edit languages '.state = "not-configured"'
+check "a default setup that isn't configured is refused: exit 1" run 1 "$gate" 252 "$real_head"
+check "  and says so" said 'REFUSE +could not read which languages'
+
+still_open; edit alerts-head '[{"number": 7, "state": "open"}]'
 check "a JSON alert on the head ref is refused: exit 1" run 1 "$gate" 252 "$real_head"
 
-real; still_open
-edit alerts-merge '{"message": "Not Found"}'
+still_open; edit alerts-merge '{"message": "Not Found"}'
 check "an alert answer that isn't a list is refused: exit 1" run 1 "$gate" 252 "$real_head"
 
-real; still_open
-edit checks 'del(.statusCheckRollup[] | select(.workflowName == "CI"))'
+still_open; edit checks 'del(.statusCheckRollup[] | select(.workflowName == "CI"))'
 check "the JSON with ci.yml's checks taken out is refused: exit 1" run 1 "$gate" 252 "$real_head"
 check "  for all eight jobs" said 'refused, 8 problem'
 
-real; still_open
-edit checks '(.statusCheckRollup[] | select(.name == "web")) |= (.status = "IN_PROGRESS" | .conclusion = "")'
+still_open; edit checks '(.statusCheckRollup[] | select(.name == "web")) |= (.status = "IN_PROGRESS" | .conclusion = "")'
 check "the JSON with web still running is refused: exit 1" run 1 "$gate" 252 "$real_head"
 check "  and says so" said 'REFUSE +check web is IN_PROGRESS'
 
-fail_web_step() { # the captured run, with one step of its web job failed
-  edit pr-runs '.[0].conclusion = "failure"'
-  edit jobs "(.jobs[] | select(.name == \"web\")) |= (.conclusion = \"failure\" | (.steps[] | select(.name == \"$1\")).conclusion = \"failure\")"
-}
-real; still_open; fail_web_step "Run node run-a11y.mjs --skip-web-build"
-check "the captured run, with web's accessibility step failed, is rerun: exit 0" run 0 "$gate" 252 "$real_head" --rerun-known-flake
+still_open; edit checks '.statusCheckRollup += [(.statusCheckRollup[] | select(.name == "web")) | .conclusion = "FAILURE"]'
+check "the JSON with a second, failed copy of web is refused: exit 1" run 1 "$gate" 252 "$real_head"
+check "  with the passing copy still read" said 'ok +check web: SUCCESS'
+check "  and the failed one refused" said 'REFUSE +check web: FAILURE'
+
+for state in FAILURE ERROR; do
+  still_open; edit checks ".statusCheckRollup += [{\"__typename\": \"StatusContext\", \"context\": \"license/cla\", \"state\": \"$state\", \"targetUrl\": \"https://example.invalid\"}]"
+  check "the JSON with a commit status of $state is refused: exit 1" run 1 "$gate" 252 "$real_head"
+  check "  and says so" said "REFUSE +check license/cla: $state"
+done
+still_open; edit checks '.statusCheckRollup += [{"__typename": "StatusContext", "context": "license/cla", "state": "PENDING"}]'
+check "the JSON with a pending commit status is refused: exit 1" run 1 "$gate" 252 "$real_head"
+check "  and says so" said 'REFUSE +check license/cla is PENDING'
+still_open; edit checks '.statusCheckRollup += [{"__typename": "StatusContext", "context": "license/cla", "state": "SUCCESS"}]'
+check "the JSON with a passing commit status passes: exit 0" run 0 "$gate" 252 "$real_head"
+
+# #243 was a docs/ pull request whose jobs were skipped, and one of its five files was e2e/kit-report-staging-2026-11-10.json.
+as_docs() { still_open; edit pull '.headRefName = "docs/m3-kit-staging"'; edit checks '(.statusCheckRollup[] | select(.workflowName == "CI")).conclusion = "SKIPPED"'; }
+as_docs
+check "a docs/ branch with #243's real files, one of them not documentation, is refused: exit 1" run 1 "$gate" 252 "$real_head"
+check "  and names the file" said "aren't documentation \(e2e/kit-report-staging-2026-11-10.json\)"
+check "  for all eight skipped jobs" said 'refused, 8 problem'
+
+as_docs; edit files '.files |= map(select(.path | startswith("docs/"))) | .changedFiles = 4'
+check "the same branch with only its four docs/ files passes: exit 0" run 0 "$gate" 252 "$real_head"
+
+as_docs; edit files '.files |= map(select(.path | startswith("docs/")))'
+check "the same four files listed of five changed is refused: exit 1" run 1 "$gate" 252 "$real_head"
+
+fail_job() { edit pr-runs '.[0].conclusion = "failure"'; edit jobs "(.jobs[] | select(.name == \"$1\")).conclusion = \"failure\""; }
+still_open; fail_job api
+check "the captured run, with its api job failed on the alarm test, is rerun: exit 0" run 0 "$gate" 252 "$real_head" --rerun-known-flake
 check "  by its real run id" called "^gh run rerun $(jq -r '.[0].databaseId' "$captured/pr-runs.json") --failed\$"
 
-real; still_open; fail_web_step "Run npm test"
-check "the captured run, with another web step failed, is not: exit 1" run 1 "$gate" 252 "$real_head" --rerun-known-flake
-check "  and says which step" said 'not the accessibility run alone: Run npm test'
+still_open; fail_job web
+check "the captured run, with its web job failed, is not: exit 1" run 1 "$gate" 252 "$real_head" --rerun-known-flake
+check "  and says web is never rerun" said 'the failed job is web, which is never rerun'
 
-real; still_open
+still_open
 check "the captured run as it was, a success, is not rerun: exit 1" run 1 "$gate" 252 "$real_head" --rerun-known-flake
 check "  and says why" said 'conclusion is success'
 
-real; still_open; fail_web_step "Run node run-a11y.mjs --skip-web-build"
+still_open; fail_job api
 edit pr-runs '. + [.[0] | .databaseId = 1 | .attempt = 2]'
 check "the captured run, with an earlier run of the same sha, is not: exit 1" run 1 "$gate" 252 "$real_head" --rerun-known-flake
 check "  and nothing was rerun" never_called 'gh run rerun'
@@ -526,11 +637,14 @@ listed=$(sed -n 's/^CI_JOBS="\(.*\)"$/\1/p' "$gate")
 in_workflow=$(awk '/^jobs:/ { jobs = 1; next } jobs && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { sub(/:.*/, ""); sub(/^  /, ""); printf "%s%s", sep, $0; sep = " " }' "$workflow")
 check "the script's required jobs are exactly ci.yml's jobs" test -n "$listed" -a "$listed" = "$in_workflow"
 check "  all eight of them" test "$(echo $listed | wc -w | tr -d ' ')" -eq 8
-check "the web step it names is a step of ci.yml" grep -q -F -- "- run: $(sed -n 's/^WEB_FLAKE_STEP="Run \(.*\)"$/\1/p' "$gate")" "$workflow"
 flake=$(sed -n 's/^API_FLAKE_TEST="test\/kernel.spec.ts > inbox > \(.*\)"$/\1/p' "$gate")
 kernel="$scripts/../apps/api/test/kernel.spec.ts"
 check "the alarm test it names is one test of kernel.spec.ts" test -n "$flake" -a "$(grep -c -F "  it(\"$flake\"," "$kernel")" -eq 1
 check "  inside its inbox suite" test "$(awk '/^describe\(/ { suite = $0 } /the alarm follows whichever recipient is due first/ { print suite }' "$kernel")" = 'describe("inbox", () => {'
+check "  and the script says to delete it once its cause is fixed" grep -q 'DELETE THIS, and the api case below, once the cause' "$gate"
+check "the script has one flake allowance, and none for web" test "$(grep -c -E '^[A-Z_]*FLAKE[A-Z_]*=' "$gate")$(grep -c 'WEB_FLAKE' "$gate")" = 10
+check "it never accepts an analysis of the merge ref" test "$(grep -c 'analyses?ref=refs/pull/$pr/merge' "$gate")" -eq 0
+check "it names no language itself" test "$(grep -c -E 'Analyze \((actions|python|rust|javascript)' "$gate")" -eq 0
 check "the script has no squash, rebase, admin or auto merge, branch update or alert change" \
   test "$(grep -c -E -- '--(squash|rebase|admin|auto)\b|update-branch|-X +(PATCH|POST|PUT|DELETE)|--method|-f state=' "$gate")" -eq 0
 check "it merges in one place and reruns in one place" \

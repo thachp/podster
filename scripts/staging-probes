@@ -23,7 +23,7 @@ Sends five signed-out requests to staging and prints PASS or FAIL for each probe
 
   me        GET  gateway /api/v1/me is 401
   a2a       POST gateway /a2a and /a2a/, a well-formed A2A call with no credential, are both
-            401 with the same body
+            401 with the same body, which isn't empty
   webhook   POST gateway /webhooks/github with no signature is 404, the answer while the
             webhook secret is unset (the script says what to change when the owner sets it)
   public    GET  app /p/pub_0000000000000000000000 as HTML is 404, with
@@ -76,6 +76,8 @@ cp "$work/body" "$work/a2a-body"
 request POST "$GATEWAY/a2a/" "${a2a_call[@]}"
 if [ "$first" != "$A2A_SIGNED_OUT_STATUS" ] || [ "$STATUS" != "$A2A_SIGNED_OUT_STATUS" ]; then
   fail a2a "/a2a is $first and /a2a/ is $STATUS, wanted $A2A_SIGNED_OUT_STATUS from both"
+elif [ ! -s "$work/a2a-body" ] || [ ! -s "$work/body" ]; then
+  fail a2a "/a2a and /a2a/ are both $first, with an empty body, which says nothing about them being the same"
 elif ! cmp -s "$work/a2a-body" "$work/body"; then
   fail a2a "/a2a and /a2a/ are both $first, with different bodies"
 else

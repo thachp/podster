@@ -101,6 +101,18 @@ function fnv1a64(text: string): string {
 export const isA2aPath = (url: URL) => url.pathname === A2A_PATH;
 
 /**
+ * `/a2a/` is `/a2a`, for clients that join the card's interface URL with a slash, as the A2A compatibility kit's does (decision
+ * 190). Only that one path: the request is rewritten before anything else sees it, so every check, limit, credential and
+ * answer is `/a2a`'s. No other path is normalized.
+ */
+export function aliasA2aPath(request: Request): Request {
+  const url = new URL(request.url);
+  if (url.pathname !== `${A2A_PATH}/`) return request;
+  url.pathname = A2A_PATH;
+  return new Request(url.href, request);
+}
+
+/**
  * Everything that comes before authentication. It answers a refusal, or the body, read once, for `answerA2a`. The version
  * check needs no credential and reveals nothing, so a client on the wrong version hears so before it signs in.
  */

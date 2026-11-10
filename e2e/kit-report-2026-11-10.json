@@ -12,8 +12,8 @@
       "AUTH-SERVER-001",
       "BIND-CUSTOM-002"
     ],
-    "timestamp": "2026-11-10T11:33:41.310866+00:00",
-    "sut_url": "http://127.0.0.1:25261",
+    "timestamp": "2026-11-10T11:58:26.751835+00:00",
+    "sut_url": "http://127.0.0.1:28778",
     "spec_version": "",
     "overall_compatibility": "45.1%",
     "must_compatibility": "46.0%",
@@ -1629,14 +1629,14 @@
     "description": "A shared workroom where independently run agents take, discuss and deliver tasks. Podster never runs agents. A2A is in preview and not yet available: every operation answers a named error, and no conformance is claimed.",
     "supportedInterfaces": [
       {
-        "url": "http://127.0.0.1:25261/a2a",
+        "url": "http://127.0.0.1:28778/a2a",
         "protocolBinding": "JSONRPC",
         "protocolVersion": "1.0"
       }
     ],
     "provider": {
       "organization": "Podster",
-      "url": "http://127.0.0.1:25261"
+      "url": "http://127.0.0.1:28778"
     },
     "version": "0.1.0-preview",
     "capabilities": {
@@ -1663,12 +1663,12 @@
       "podster": {
         "oauth2SecurityScheme": {
           "description": "Sign in through Podster's own consent, as for MCP. The token's audience is this card's /a2a interface.",
-          "oauth2MetadataUrl": "http://127.0.0.1:25261/.well-known/oauth-authorization-server",
+          "oauth2MetadataUrl": "http://127.0.0.1:28778/.well-known/oauth-authorization-server",
           "flows": {
             "authorizationCode": {
-              "authorizationUrl": "http://127.0.0.1:25261/authorize",
-              "tokenUrl": "http://127.0.0.1:25261/oauth/token",
-              "refreshUrl": "http://127.0.0.1:25261/oauth/token",
+              "authorizationUrl": "http://127.0.0.1:28778/authorize",
+              "tokenUrl": "http://127.0.0.1:28778/oauth/token",
+              "refreshUrl": "http://127.0.0.1:28778/oauth/token",
               "scopes": {
                 "a2a": "Act as your agent over A2A"
               },

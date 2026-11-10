@@ -38,6 +38,8 @@ The card at `/.well-known/agent-card.json` has a strong `ETag` from its own byte
 
 A request whose `Content-Type` isn't `application/json` or `application/a2a+json` gets HTTP 415 with a JSON-RPC error body, since the body isn't read: `{ "jsonrpc": "2.0", "id": null, "error": { "code": -32005, … } }`, `ContentTypeNotSupportedError`.
 
+`/a2a/` is served exactly as `/a2a` ([decision 190](PRODUCT.md#decisions-needed)), for clients that join the card's interface URL with a slash. Every check, limit, credential and answer is the same, refusals included. No other path is aliased.
+
 The checks run in this order: method, content type, body size, `A2A-Version`, then the token. So a request on the wrong version is refused before it needs a token. Once a request with `A2A-Version: 1.0` and a valid token gets that far, a malformed body gets the JSON-RPC error the SDK's transport gives, and a method this table doesn't name gets `-32601` "Method not found". Every answer carries `A2A-Version: 1.0`, and a request's `id` is echoed only when it's a string, a number or null.
 
 A request's `tenant` is never used for authority. Who is calling comes only from the token, and step 8's reads must keep it that way.
@@ -141,7 +143,7 @@ Following [decision 121](PRODUCT.md#decisions-needed):
   - a `COMPLETED` with no artifacts reads the last agent message from history;
   - an agent's accept submits a response held for its offer.
 
-  With that, the offer, the held reply, the accept that submits it, and a change request in the same thread as a second submission all work against LangGraph. A held response waits for an accept by the agent itself over MCP or A2A. No one else can accept for it.
+  With that, the offer, the held reply, the accept that submits it, and a change request in the same thread as a second submission all work against LangGraph. A held response waits for an accept by the agent itself over MCP or A2A. No one else can accept for it, so an agent that only has an endpoint needs its operator to run an MCP or A2A client as it to accept ([decision 191](PRODUCT.md#decisions-needed)).
 - **Outbound on a deployment** ran on staging against Podster's own test A2A server ([e2e/a2a-test-server](../../e2e/a2a-test-server/README.md)), which isn't an independent implementation. It passed 26 of 26 on 2026-11-09. It covered:
   - the signed offer;
   - `WORKING` then `COMPLETED`;
@@ -171,4 +173,4 @@ Following [decision 121](PRODUCT.md#decisions-needed):
 
 **Not tested by this run:** `AUTH-SCOPE-*`, `AUTH-SERVER-001`, `DM-MSG-002`, `DM-PART-001`, `DM-SERIAL-001` to `004`, `DM-STATUS-001`, `DM-TASK-001`, `DM-TASK-002`, `VER-CLIENT-*` and `VER-SERVER-001`. The kit has no automated test for them over JSON-RPC here. No claim rests on them.
 
-**Not from Podster's side:** the kit's client posts to the card's interface URL with `/` appended, `/a2a/`, and Podster serves `/a2a` exactly. The run's proxy mapped that one path. Whether Podster should accept `/a2a/` is open in `docs/m3-plan.md`.
+The kit's client posts to the card's interface URL with `/` appended, `/a2a/`. Podster serves that as `/a2a` (decision 190), and the run's proxy passed paths through unchanged.

@@ -9,7 +9,7 @@
 // The kit's client sends no credentials, and Podster's /a2a needs an agent's OAuth token. So this starts the real gateway and
 // API, signs a person up, connects one agent with tasks offered to it, takes the agent's /a2a token through the same consent
 // as any client, and puts a small proxy in front of the gateway on 127.0.0.1. The proxy adds that bearer to each request and
-// points the agent card's interface URLs at itself. It also maps the kit's /a2a/ to /a2a, since its client adds a slash. It
+// points the agent card's interface URLs at itself. It
 // changes nothing else, and Podster's own checks are untouched. The kit
 // runs over JSON-RPC only, the one binding Podster serves.
 //
@@ -106,10 +106,8 @@ try {
     const headers = new Headers();
     for (const [name, value] of Object.entries(req.headers)) if (!["host", "connection", "content-length", "authorization"].includes(name)) headers.set(name, String(value));
     headers.set("authorization", `Bearer ${token}`);
-    // The kit's client joins the card's interface URL with "/", so it posts to /a2a/. Podster serves /a2a exactly. Only that
-    // one path is mapped, and the finding is recorded in docs/m3-plan.md.
-    const path = req.url === "/a2a/" ? "/a2a" : req.url;
-    const upstream = await fetch(`${base}${path}`, { method: req.method, headers, body: ["GET", "HEAD"].includes(req.method) ? undefined : Buffer.concat(chunks), redirect: "manual" });
+    // The kit's client posts to /a2a/, which Podster serves as /a2a (decision 190), so the path goes through unchanged.
+    const upstream = await fetch(`${base}${req.url}`, { method: req.method, headers, body: ["GET", "HEAD"].includes(req.method) ? undefined : Buffer.concat(chunks), redirect: "manual" });
     let body = Buffer.from(await upstream.arrayBuffer());
     if (req.url.includes("agent-card.json")) body = Buffer.from(body.toString("utf8").replaceAll(base, proxyBase));
     const out = {};

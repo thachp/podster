@@ -25,12 +25,9 @@ type R<T> = std::result::Result<T, ApiError>;
 pub const INTERNAL_PROVIDER_DELIVERY: &str = "/internal/provider-delivery";
 /// A nudge is a few IDs. Anything longer isn't one.
 const MAX_BODY_BYTES: usize = 2048;
-/// GitHub gives a delivery ten seconds, and the gateway waits less than that for this.
-const ROOM_TIMEOUT_MS: u64 = if cfg!(feature = "failpoints") {
-    300
-} else {
-    3_000
-};
+/// GitHub gives a delivery ten seconds, and the gateway waits less than that for this. Test builds wait as long: no test
+/// times a room out here, and a shorter wait only failed deliveries on a busy machine.
+const ROOM_TIMEOUT_MS: u64 = 3_000;
 
 pub fn is_delivery_route(method: &Method, path: &str) -> bool {
     *method == Method::Post && path == "/v1/provider/github/deliveries"

@@ -2,7 +2,7 @@
 
 **Status, 2026-11-10 UTC: run once on private repositories. The merge boundary is not yet tested**, because the Free plan refused the ruleset. See [results](#results-2026-11-10). This spike answers the ten [risks to test](../../docs/m5-plan.md#risks-to-test) in the M5 plan against a test GitHub organization. Nothing builds on this folder. Its results go into ADR 0009.
 
-Every permission below is from memory of GitHub's documentation and is unverified. Finding the least set that works is part of the spike, so expect this list to change.
+The permissions below worked for the calls the first run made. Whether each is the least that works isn't checked.
 
 ## Owner setup
 
@@ -104,7 +104,7 @@ The architect runs this once the owner's setup is done. It needs Node 22 or late
 M5_ORG=<org> M5_PROVISION_APP_ID=<id> M5_MERGE_APP_ID=<id> node spike.mjs
 ```
 
-It refuses an organization whose name doesn't contain `spike`, `test` or `sandbox`, unless `M5_CONFIRM_ORG` repeats the name exactly. The owner pointed the spike at `podsterx`, so its runs set that. It creates two private repositories named `m5-spike-<time>-a` and `-b`, and every merge result records whether a ruleset was active on that repository. It writes status codes and GitHub's messages to `results/`, and never prints or stores a token. `--allow-public` repeats the rule and merge checks on a public repository if the private one refuses a ruleset, which a Free organization may do. `--cleanup` deletes the spike's repositories.
+It refuses an organization whose name has no hyphen-separated part that is `spike`, `test` or `sandbox`, unless `M5_CONFIRM_ORG` repeats the name exactly. The owner pointed the spike at `podsterx`, so its runs set that. It creates two private repositories named `m5-spike-<time>-a` and `-b`, and every merge result records whether a ruleset was active on that repository. It writes status codes and GitHub's messages to `results/`, and never prints or stores a token. `--allow-public` repeats the rule and merge checks on a public repository if the private one refuses a ruleset, which a Free organization may do. `--cleanup` deletes the spike's repositories.
 
 ```bash
 node --test spike.test.mjs
@@ -119,12 +119,12 @@ One run against `podsterx` (Free plan), with the provisioning App (ID 5693929) a
 | Risk | Question | What GitHub did |
 | --- | --- | --- |
 | 1 | Can the App create a repository in the organization? | Yes. `201` for a private repository, with repository Administration write and no organization permission. |
-| 2 | Is a new repository under the installation at once? | Yes. A token scoped to it was minted on the first try, under a second after creation. It expires after one hour. |
+| 2 | Is a new repository under the installation at once? | Yes on this run. A token scoped to it was minted on the first try, under a second after creation. It expires after one hour. |
 | 3 | Can a token be limited to one repository and fewer permissions? | Yes. The token held contents and pull requests write plus metadata read. It got `404` on the other repository, `403` on repository settings and on creating a ruleset. Asking for a permission the App lacks returned `422`. |
 | 4 | Can the agent's token merge to the default branch? | **Yes, when no rule is active.** On a private repository with no ruleset, the token committed straight to the default branch and merged its own pull request. With a rule active: **not tested.** |
 | 5 | Do rulesets apply to private repositories on the Free plan? | **No.** `403`: "Upgrade to GitHub Pro or make this repository public to enable this feature." |
-| 6 | Does merge refuse a head that differs from the given `sha`? | Yes. `409` "Head branch was modified" after a new push. Merging with the new head's `sha` returned `200`. The base had moved by then and the merge still went through. |
-| 7 | What can be revoked? | One token. `DELETE /installation/token` returned `204`, the token got `401` on the next request, and another token from the same installation kept working. |
+| 6 | Does merge refuse a head that differs from the given `sha`? | Yes, with no ruleset active. `409` "Head branch was modified" after a new push. Merging with the new head's `sha` returned `200`. The base had moved by then and the merge still went through. |
+| 7 | What can be revoked? | A single token can be. `DELETE /installation/token` returned `204`, the token got `401` on the next request, and another token from the same installation kept working. Suspending or uninstalling the installation wasn't tested. |
 | 8 | Webhooks | Not run. |
 | 9 | Rate limits | 5,000 requests an hour for the installation, REST and GraphQL each. Whether that fits the polling design isn't worked out. |
 | 10 | Can the agent push a workflow? | No. `403` without the Workflows permission. Whether a workflow that is already in the repository can be abused wasn't tested. |

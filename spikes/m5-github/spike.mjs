@@ -32,6 +32,12 @@ export function looksLikeTestOrg(name) {
   return /^[A-Za-z0-9-]+$/.test(s) && /(^|-)(spike|test|sandbox)(-|$)/i.test(s);
 }
 
+// An organization that doesn't look like a test one runs only if the owner repeats its name exactly.
+export function orgAllowed(org, confirm) {
+  if (looksLikeTestOrg(org)) return true;
+  return typeof org === "string" && /^[A-Za-z0-9-]+$/.test(org) && confirm === org;
+}
+
 async function gh(token, method, path, body) {
   const res = await fetch(`${API}${path}`, {
     method,
@@ -68,10 +74,8 @@ async function main() {
   if (!org || !apps.provision.id || !apps.merge.id) {
     throw new Error("Set M5_ORG, M5_PROVISION_APP_ID and M5_MERGE_APP_ID.");
   }
-  // The owner can name an organization that doesn't look like a test one, by repeating it exactly.
-  const confirmed = /^[A-Za-z0-9-]+$/.test(org) && process.env.M5_CONFIRM_ORG === org;
-  if (!looksLikeTestOrg(org) && !confirmed) {
-    throw new Error(`Refusing to run: "${org}" isn't a plain name with spike, test or sandbox in it.`);
+  if (!orgAllowed(org, process.env.M5_CONFIRM_ORG)) {
+    throw new Error(`Refusing to run: "${org}" isn't a plain name with spike, test or sandbox in it. The owner can allow it by setting M5_CONFIRM_ORG to the same name.`);
   }
 
   const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);

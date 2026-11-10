@@ -749,12 +749,12 @@ paths:
     get:
       operationId: listRepositoryGrants
       tags: [queries]
-      summary: "The grants on the room's repository that aren't revoked (M5 step 5b, ADR 0009, proposed), for a person: a human owner or admin sees every one, anyone else in the room their own. `state` is `live`, `expired`, or `stale` when its giver no longer holds the repository's delegation, and is for showing: a grant is checked again at every use. An agent gets `not_allowed`"
+      summary: "The grants on the room's repository that aren't revoked (M5 step 5b, ADR 0009, proposed), for a person: a human owner or admin sees every one, anyone else in the room their own. `state` is `live`, `expired`, or `stale` when its giver no longer holds the repository's delegation. It's display only and authorizes nothing: it can say `live` before the room learns its giver left, and a grant is checked again, from current authority, at every use. An agent gets `not_allowed`"
       responses: { "200": { description: The grants, content: { application/json: { schema: { $ref: "#/components/schemas/RepoGrantList" } } } }, default: { $ref: "#/components/responses/Error" } }
     post:
       operationId: grantRepositoryAction
       tags: [commands]
-      summary: "Give a participant one action, `push` or `merge`, on the room's repository (M5 step 5b, ADR 0009, proposed). Only the room's owner, as a person whose owner authority holds: an admin has room authority and not the repository's delegation, `no_provider_delegation`. The participant must be in the room, `grantee_not_participant`, and not there through a public claim, `grantee_public`. A room with no linked repository answers `repo_not_linked`; a degraded or suspended one still takes a grant, which nothing uses until it's ready. `expires_at` must be in the future. Granting the same again changes nothing; a new expiry, or a grant over an expired row or an earlier owner's, revokes that row and adds one. Audited, and tells the participant. A grant authorizes nothing by itself: it's checked again at every use. An agent gets `not_allowed`"
+      summary: "Give a participant one action, `push` or `merge`, on the room's repository (M5 step 5b, ADR 0009, proposed). Only the room's owner, as a person whose owner authority holds: an admin has room authority and not the repository's delegation, `no_provider_delegation`. The participant must be in the room, `grantee_not_participant`, and not there through a public claim, `grantee_public`. A room with no linked repository answers `repo_not_linked`; a degraded or suspended one still takes a grant, which nothing uses until it's ready. `expires_at` is optional; when given, it must be after now and at most one year ahead, or the request is `invalid_argument`. Granting the same again changes nothing; a new expiry, or a grant over an expired row or an earlier owner's, revokes that row and adds one. Audited, and tells the participant. A grant authorizes nothing by itself: it's checked again at every use. An agent gets `not_allowed`"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version, principal_id, action], additionalProperties: false, properties: { policy_version: { type: integer }, principal_id: { type: string }, action: { type: string, enum: [push, merge] }, expires_at: { type: [integer, "null"] } } } } } }
       responses: { "200": { description: The grant, content: { application/json: { schema: { $ref: "#/components/schemas/RepoGrant" } } } }, default: { $ref: "#/components/responses/Error" } }
@@ -1042,9 +1042,9 @@ components:
         action: { type: string, enum: [push, merge] }
         delegated_by: { type: string }
         created_at: { type: integer }
-        expires_at: { type: [integer, "null"] }
+        expires_at: { type: [integer, "null"], description: "Milliseconds since the epoch. Null for no expiry; otherwise after the grant was given and at most one year after" }
         revoked_at: { type: [integer, "null"] }
-        state: { type: string, enum: [live, expired, stale, revoked] }
+        state: { type: string, enum: [live, expired, stale, revoked], description: "Display only. It authorizes nothing, and every use of a grant checks it again from current authority" }
     RepoGrantList:
       type: object
       additionalProperties: false

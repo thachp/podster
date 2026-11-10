@@ -100,6 +100,9 @@ const footprint = (id: string) => inRoom(id, (sql) => ({
   audit: sql.exec("SELECT count(*) AS n FROM audit_event").one().n,
   version: sql.exec("SELECT policy_version AS v FROM workspace").one().v,
 }));
+const holdOutbox = (id: string) => inRoom(id, (sql) => void sql.exec("CREATE TABLE test_hold_outbox (x)"));
+/** Who a grant's revocation was sent to, read while delivery is held. */
+const toldOfRevocation = (id: string) => inRoom(id, (sql) => sql.exec("SELECT o.recipient_principal_id AS r FROM outbox o JOIN event e ON e.id = o.event_id WHERE e.type = 'repo_grant.revoked' ORDER BY o.recipient_principal_id").toArray().map((row: any) => row.r) as string[]);
 const flush = (id: string) => runInDurableObject(stub(id), (instance: any) => instance.alarm());
 
 describe("giving a grant", () => {
@@ -211,6 +214,26 @@ describe("giving a grant", () => {
     expect([longest.status, longest.body.state]).toEqual([200, "live"]);
     const soonest = await give(id, AGENT.id, "merge", { expires_at: Date.now() + 1_000 });
     expect([soonest.status, soonest.body.state]).toEqual([200, "live"]);
+  });
+
+  it("refuses an expiry at the instant of now, and takes one exactly a year ahead and no later", async () => {
+    const id = await room();
+    const YEAR = 365 * 24 * 60 * 60 * 1000;
+    // The room reads the same clock as the test, held still, so `now` is exact.
+    const now = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(now);
+      const at = async (expires_at: number, action = "push") => api(OWNER, "POST", grants(id), { policy_version: await version(id), principal_id: AGENT.id, action, expires_at });
+      expect((await at(now)).code).toBe("invalid_argument");
+      expect((await at(now + YEAR + 1)).code).toBe("invalid_argument");
+      const yearAhead = await at(now + YEAR);
+      expect([yearAhead.status, yearAhead.body.expires_at]).toEqual([200, now + YEAR]);
+      const justAfter = await at(now + 1, "merge");
+      expect([justAfter.status, justAfter.body.expires_at]).toEqual([200, now + 1]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("answers a retry with its stored answer, refuses a key reused for another request, and doesn't replay to a former owner", async () => {
@@ -481,13 +504,27 @@ describe("ownership moving and coming back", () => {
     expect(again.body.id).not.toBe(forAgent.id);
   });
 
-  it("recovering it for someone else ends every grant too, whoever gave it", async () => {
+  it("recovering it for someone else ends every grant too, and the displaced former owner is told only of losing the room", async () => {
     const id = await room();
     await give(id, AGENT.id, "push");
     await give(id, MEMBER.id, "merge");
+    await give(id, OWNER.id, "merge");
     await inRoom(id, (sql) => sql.exec("UPDATE workspace SET owner_left_at = ?", Date.now()));
+    await holdOutbox(id);
     expect((await recover(id, ADMIN)).status).toBe(200);
     expect((await grantRows(id)).every((g) => g.revoked_at !== null)).toBe(true);
+    // Every revocation is recorded; the holders still here are told, and the former owner isn't.
+    expect((await events(id, "repo_grant.revoked")).map((e) => e.subject_id)).toEqual([AGENT.id, MEMBER.id, OWNER.id]);
+    expect(await toldOfRevocation(id)).toEqual([AGENT.id, MEMBER.id].sort());
+  });
+
+  it("recovering it for the same person tells them their grants ended", async () => {
+    const id = await room();
+    await give(id, OWNER.id, "merge");
+    await inRoom(id, (sql) => sql.exec("UPDATE workspace SET owner_left_at = ?", Date.now()));
+    await holdOutbox(id);
+    expect((await recover(id, OWNER)).status).toBe(200);
+    expect(await toldOfRevocation(id)).toEqual([OWNER.id]);
   });
 
   it("handing the room away and back leaves none of the first owner's grants live", async () => {
@@ -512,6 +549,19 @@ describe("a cascade commits with its command or not at all", () => {
     expect(await footprint(id)).toEqual(before);
     expect((await grantRows(id)).find((g) => g.id === given.id)?.revoked_at).toBeNull();
     expect(await inRoom(id, (sql) => sql.exec("SELECT revoked_at FROM member WHERE principal_id = ?", AGENT.id).one().revoked_at)).toBeNull();
+  });
+
+  it("a recovery that fails leaves the grants and the owner as they were", async () => {
+    const id = await room();
+    await give(id, AGENT.id, "push");
+    await give(id, OWNER.id, "merge");
+    await inRoom(id, (sql) => sql.exec("UPDATE workspace SET owner_left_at = ?", Date.now()));
+    const before = await footprint(id);
+    const failed = await api(ORG_ADMIN, "POST", `/v1/workspaces/${id}/owner/recover`, { to: ADMIN.id, expected_owner: OWNER.id }, { fail: true, claims: { target_member: { person: ADMIN.id, orgs: { [ORG]: 1 } } } });
+    expect(failed.status).toBe(500);
+    expect(await footprint(id)).toEqual(before);
+    expect((await grantRows(id)).every((g) => g.revoked_at === null)).toBe(true);
+    expect(await inRoom(id, (sql) => sql.exec("SELECT owner_person_id FROM workspace").one().owner_person_id)).toBe(OWNER.id);
   });
 
   it("a transfer that fails leaves the grants and the owner as they were", async () => {

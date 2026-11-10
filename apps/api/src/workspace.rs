@@ -2025,6 +2025,7 @@ fn handle_transfer_owner(
         &caller.id,
         kind_name(caller),
         Some(&to),
+        None,
         now,
     )?;
     exec(
@@ -2092,7 +2093,9 @@ fn apply_recovery(
     let joined = joined_org(target_member, &to, &org)?;
     set_owner(sql, &to, joined)?;
     // Rejoining never restores earlier authority, so recovery ends every grant, even when it names the former owner again.
-    repositories::end_grants_after_owner_change(sql, actor, "person", None, now)?;
+    // A former owner recovery displaces is told only that, as a removed participant is.
+    let displaced = (to != former).then_some(former.as_str());
+    repositories::end_grants_after_owner_change(sql, actor, "person", None, displaced, now)?;
     if to != former {
         queue_index(sql, &former, &org, None, now)?;
     }

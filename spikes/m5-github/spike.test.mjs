@@ -2,7 +2,24 @@
 import assert from "node:assert/strict";
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import { test } from "node:test";
-import { appJwt, looksLikeTestOrg, orgAllowed } from "./spike.mjs";
+import { appJwt, looksLikeTestOrg, orgAllowed, restrictionRuleset } from "./spike.mjs";
+
+test("a restriction ruleset names the merge App as the only bypass actor and targets the default branch", () => {
+  const full = restrictionRuleset({ name: "x", statusAppId: 7, pullRequest: true, update: true, bypassAppId: 7 });
+  assert.deepEqual(full.rules.map((r) => r.type), ["pull_request", "required_status_checks", "update"]);
+  assert.deepEqual(full.bypass_actors, [{ actor_id: 7, actor_type: "Integration", bypass_mode: "always" }]);
+  assert.deepEqual(full.conditions.ref_name.include, ["~DEFAULT_BRANCH"]);
+  assert.equal(full.enforcement, "active");
+  assert.equal(full.rules[1].parameters.required_status_checks[0].integration_id, 7);
+  assert.deepEqual(full.rules[2].parameters, { update_allows_fetch_and_merge: false });
+
+  const reviewOnly = restrictionRuleset({ name: "y", statusAppId: 7, pullRequest: true });
+  assert.deepEqual(reviewOnly.rules.map((r) => r.type), ["pull_request", "required_status_checks"]);
+  assert.deepEqual(reviewOnly.bypass_actors, []);
+
+  const noStatus = restrictionRuleset({ name: "z", pullRequest: true, update: true, bypassAppId: 7 });
+  assert.deepEqual(noStatus.rules.map((r) => r.type), ["pull_request", "update"]);
+});
 
 test("the App JWT verifies with the key's public half and carries the App ID", () => {
   const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });

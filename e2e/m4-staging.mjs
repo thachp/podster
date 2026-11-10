@@ -274,10 +274,11 @@ async function within(seconds, done, stepMs = 1000) {
   }
   return null;
 }
-// The public view is cached for 30 seconds (decision 150), so a change shows within that.
+// The public view is cached for 30 seconds (decision 150), so a change shows within that. This is the gateway's
+// PUBLIC_VIEW_SECONDS (apps/gateway/src/public/reads.ts), written again here since the scripts import nothing from the apps.
 const CACHE_SECONDS = 30;
-// How long after a change every cached copy is surely gone: the cache's 30 seconds and a margin.
-const CACHE_CLEAR_SECONDS = CACHE_SECONDS + 10;
+// The bound a check holds the cache to: its 30 seconds, and the time one poll and its answer take.
+const CACHE_BOUND_SECONDS = CACHE_SECONDS + 2.5;
 // What a browser's navigation sends. Cloudflare's edge rewrites HTML only for a request that takes HTML, so the checks on the
 // page's own bytes ask as a browser does, or an edge rewrite would go unseen.
 const AS_BROWSER = { accept: "text/html" };
@@ -494,7 +495,7 @@ try {
       ["a room's internal ID", live.id],
       ["a malformed handle", "pub_not-a-handle"],
     ];
-    await within(CACHE_CLEAR_SECONDS, async () => (await pageText(privateRoom.handle)).status === 404 && (await pageText(republished.handle)).status === 404, 2000);
+    await within(CACHE_SECONDS + 10, async () => (await pageText(privateRoom.handle)).status === 404 && (await pageText(republished.handle)).status === 404, 2000);
     const seen = [];
     for (const [label, handle] of cases) {
       const started = Date.now();
@@ -510,32 +511,41 @@ try {
   // ---- M4-03: going private ----
   await step("M4-03 the owner makes a public room private", async () => {
     const room = await publicRoom(owner, `${RUN} going private`);
+    // The page as it was served while public, before the claim and after it: the only views a cache can hold a copy of.
+    const whilePublic = [(await pageText(room.handle)).body];
     const claimant = pool[1];
     const claimed = await claim(claimant, room.handle, room.roles[0]);
     check(claimed.ok, "a public participant joins first", claimed.code);
     check((await allExplore(owner)).includes(room.handle), "it's in Explore while public");
+    whilePublic.push((await pageText(room.handle)).body);
     await unpublish(owner, room.id);
     const unpublishedAt = Date.now();
+    // Straight after, the page is either not-found already or a cached copy of the view from before (ADR 0008), nothing else.
+    const atOnce = await pageText(room.handle);
+    if (atOnce.status === 404) note("straight after the unpublish", "the page is already not-found");
+    else if (atOnce.status === 200 && whilePublic.includes(atOnce.body)) note("straight after the unpublish", "a cached copy of the view from before it is served, as the 30-second cache allows");
+    else record("fail", "straight after the unpublish, the page is not-found or a cached copy of the view from before", `HTTP ${atOnce.status}, ${atOnce.body.length} characters, matching no view from before`);
     // Two connections, each every 2 seconds and a second apart, which stays inside the per-client limit.
     const [a, b] = await Promise.all([0, 1].map(async (n) => {
       await sleep(n * 1000);
       return within(CACHE_SECONDS + 15, async () => (await pageText(room.handle, { headers: { connection: "close" } })).status === 404, 2000);
     }));
-    check(a !== null && a <= CACHE_SECONDS + 2.5 && b !== null && b <= CACHE_SECONDS + 2.5, "the page is not-found from two connections within the 30-second cache", `${a}s and ${b}s, polled every 2 seconds`);
+    check(a !== null && a <= CACHE_BOUND_SECONDS && b !== null && b <= CACHE_BOUND_SECONDS, "the page is not-found from two connections within the 30-second cache", `${a}s and ${b}s, polled every 2 seconds`);
     check(!(await allExplore(owner)).includes(room.handle), "it leaves Explore");
     const still = await claimant.call("get_workspace", { workspace_id: room.id });
     check(still.ok, "the public participant keeps its access", still.code);
     const again = await publish(owner, room.id);
     check(again !== room.handle, "republishing gives a new handle");
-    // A cached copy of the old handle's view may be served for 30 seconds after the unpublish (ADR 0008), and one answer of
-    // not-found doesn't show every copy is gone, so this waits the window out, as M4-02 does, and then reads several times.
-    await sleep(Math.max(0, unpublishedAt + CACHE_CLEAR_SECONDS * 1000 - Date.now()));
+    // A cached copy of the old handle's view may be served for at most 30 seconds after the unpublish (ADR 0008), and one
+    // answer of not-found doesn't show every copy is gone. So this waits only that bound out, and then reads several times: a
+    // copy that outlives it fails.
+    await sleep(Math.max(0, unpublishedAt + CACHE_BOUND_SECONDS * 1000 - Date.now()));
     const old = [];
     for (let n = 0; n < 5; n++) {
       old.push((await pageText(room.handle, { headers: { connection: "close" } })).status);
       await sleep(1000);
     }
-    check(old.every((status) => status === 404), `and the old one stays not-found, ${CACHE_CLEAR_SECONDS} seconds after the unpublish`, `HTTP ${old.join(", ")} on 5 reads`);
+    check(old.every((status) => status === 404), `and the old one stays not-found, from ${CACHE_BOUND_SECONDS} seconds after the unpublish`, `HTTP ${old.join(", ")} on 5 reads`);
   });
 
   // ---- M4-04: one of 20 takes the last place ----
@@ -675,12 +685,13 @@ try {
     const flood = async (headers = () => ({})) => {
       for (let n = 1; n <= 400; n++) {
         const res = await rawPage(room.handle, { headers: headers() });
-        await res.arrayBuffer();
-        if (res.status === 429) return { n, res };
+        const body = await res.text();
+        if (res.status === 429) return { n, res, body };
       }
       return null;
     };
-    const limited = await flood();
+    const limited = await flood(() => AS_BROWSER);
+    if (limited) check(!/<script/i.test(limited.body), "a 429, asked for as a browser does, has no script element", `${limited.body.length} characters`);
     if (limited) check(publicHeadersOk(limited.res.headers) && strictCsp(limited.res.headers) && limited.res.headers.get("retry-after") === "60", "a 429 carries them, and Retry-After", `first refused at request ${limited.n}`);
     else record("fail", "one client is refused past the limit", "no 429 in 400 requests");
     owed("other clients keep working while one is limited", "one machine is one client; the web app's tests check the limit is keyed per client");
@@ -688,10 +699,10 @@ try {
     // A forged address can't dodge it: Cloudflare's edge sets cf-connecting-ip itself.
     if (!isLocal) {
       // Either the edge refuses the request before the app sees it, or the app still counts the real client and limits it.
-      // The edge's refusal is a 403 saying exactly "error code: 1000", with none of the app's own public headers, so a 403
-      // from the app itself isn't taken for it. Any other answer is named, by status only.
+      // The edge's refusal is a 403 saying exactly "error code: 1000", marked as Cloudflare's own by its server or cf-ray
+      // header, with none of the app's own public headers, so a 403 from the app itself isn't taken for it. Any other answer is named, by status only.
       const forged = () => rawPage(room.handle, { headers: { "cf-connecting-ip": `198.51.100.${Math.floor(Math.random() * 250) + 1}` } });
-      const edgeRefused = (res, body) => res.status === 403 && /^error code: 1000\n?$/.test(body) && !res.headers.has("content-security-policy") && !res.headers.has("x-robots-tag");
+      const edgeRefused = (res, body) => res.status === 403 && /^error code: 1000\n?$/.test(body) && !res.headers.has("content-security-policy") && !res.headers.has("x-robots-tag") && (res.headers.get("server") === "cloudflare" || res.headers.has("cf-ray"));
       let outcome = null;
       for (let n = 1; n <= 400 && !outcome; n++) {
         const res = await forged();

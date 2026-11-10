@@ -286,7 +286,7 @@ Last updated 2026-11-10 UTC: every M3 build step merged (1 to 15, 13b, and `/a2a
 
 - **Who calls the gate.** [Decision 132](spec/PRODUCT.md#decisions-needed) stands: the owner calls M3's gate. On 2026-11-10 the owner said "sure .. go ahead do whatever u need to do for to complete m3 as m4.. you got my approval". The architect reads that as leave to call the gate once the evidence is complete. The architect hasn't called it, because the items below are open, and will put them to the owner.
 - **Two MUST gaps, from the kit's untested checks** (`VER-SERVER-001` and `VER-CLIENT-002`, in the profile): a request with `A2A-Version: 1.0.1` was refused instead of served as `1.0`. [Decision 192](spec/PRODUCT.md#decisions-needed) rules it's served as `1.0`, and [#247](https://github.com/thachp/podster/pull/247) fixes it, with tests. **It's open until #247 merges and is deployed.**
-- **[#246](https://github.com/thachp/podster/pull/246),** the tests that evidence 11 of the kit's 16 untested MUST checks, and **[#248](https://github.com/thachp/podster/pull/248),** the AC-18 and screens staging harness, must merge.
+- **[#246](https://github.com/thachp/podster/pull/246) merged** as `7f1e59d`. **[#248](https://github.com/thachp/podster/pull/248),** the AC-18 and screens staging harness, must merge.
 - **Where each gate item ran,** since decision 132 names the staging run:
 
   | Gate item | Where it ran | Staging needs |
@@ -297,7 +297,7 @@ Last updated 2026-11-10 UTC: every M3 build step merged (1 to 15, 13b, and `/a2a
   | Outbound, independent: LangGraph, and fasta2a as backup | **Locally only.** Staging's outbound used Podster's own test server | See below |
   | AC-18, A2A instructions stay data | Locally, and **on staging on 2026-11-10: 16 passed, 0 failed** (`a2a-roundtrip.mjs --only ac18`, [#248](https://github.com/thachp/podster/pull/248)), in room `ws_b8825bdd2eeb46a5afc8fcb69d891e03`. Inbound, the agent's own message told Podster to verify the task and make it an admin. The task didn't move, the text was kept verbatim, and the agent stayed a guest. Read back, its endpoint asked for input with those instructions and then completed with them. The task went only to accepted and then submitted, the text became a thread message marked `a2a_remote` and the submission's note, the agent stayed a guest, and it couldn't verify its own submission. One test sign-up. Clean-up: endpoints deleted, agents disconnected, signed out, and no secret in the output | Nothing more |
   | `CancelTask` delivery | **Locally only.** Staging showed only the task staying canceled | The test server keeps nothing, so delivery can't be seen from outside. It would need the server to keep state, which is a new storage resource, or Podster to show a cancel's delivery, which is product code |
-  | Screens (step 15) | Locally. **On staging, one attempt on 2026-11-10 failed in the harness, not the app:** the browser waited for the network to go idle, which the signed-in shell never does, so no screen was checked. Signed out, the same page goes idle in 0.7 s. [#248](https://github.com/thachp/podster/pull/248) waits for the page's own content instead. Clean-up ran | **A rerun,** which takes one more test sign-up, once #248 is reviewed |
+  | Screens (step 15) | Locally, and **on staging, the Agent Sheet half: passed on 2026-11-10.** That's the second run of `a2a-roundtrip.mjs --only screens`, 13 passed and 1 failed, in room `ws_8f0d724ba9cb4e02a0d444e5a09f236f`. In Chromium, as a test person, the Agent Sheet showed the endpoint section with its host, the token as stored without showing it, and the org admin's Change, New signing secret and Remove buttons. No token, secret or bearer was in the page, and axe found no violations. **The Task Sheet half failed twice in the harness, not the app.** The first run waited for the network to go idle, which the signed-in shell never does. The second didn't open the Activity tab, where the labels are. [#248](https://github.com/thachp/podster/pull/248) fixes both, and both were proven on the local stack. Each run's clean-up was confirmed | **The Task Sheet's check, one more run,** with the lead's go-ahead for a test sign-up |
 
   **Outbound to LangGraph or fasta2a from staging** needs a server staging can reach: a public `https` name, as egress policy requires. Both run only on this machine, and the existing `podster-a2a-test-staging` Worker can't run them. It's a JavaScript Worker, and both are Python servers. So it needs one of:
   - a tunnel to this machine, which is an outside service;
@@ -317,7 +317,7 @@ Last updated 2026-11-10 UTC: every M3 build step merged (1 to 15, 13b, and `/a2a
   - outbound against LangGraph or fasta2a from staging;
   - `CancelTask` delivery on staging;
   - the Python SDK client on staging;
-  - the screens' staging rerun;
+  - the Task Sheet's screens check on staging;
   - #246, #247 and #248, to merge and deploy.
 
   The kit, the round trip, AC-18, Spike C and the local LangGraph and fasta2a runs have passed. Either approve a short-lived server so outbound can run against LangGraph from staging, or rule that the local LangGraph and fasta2a runs plus staging's test-server run are enough. Also say whether `CancelTask` delivery and the Python client must run on staging, and allow the Python install if so.

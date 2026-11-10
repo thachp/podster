@@ -476,13 +476,15 @@ describe("revoking a token whose authority ended", () => {
     await must(OWNER, "POST", `/v1/workspaces/${r.id}/members`, { principal_id: agent.id, kind: "agent", org_id: ORG, role: "member", policy_version: await version(r.id) });
     await must(OWNER, "POST", `/v1/workspaces/${r.id}/repository/grants`, { policy_version: await version(r.id), principal_id: agent.id, action: "push" });
     const task = await newTask(r.id, agent);
-    const got = (await access(agent, r.id, task)).body;
+    const issued = await access(agent, r.id, task);
+    expect(issued.status, issued.text).toBe(200);
+    const got = issued.body;
     await must(orgAdmin, "POST", `/v1/agents/${agent.id}/disconnect`, {});
     // The disconnect reaches the room through the agent's fence, which may take a moment.
-    for (let n = 0; n < 40 && (await tokens(r.id)).some((t) => t.state === "held"); n++) await new Promise((x) => setTimeout(x, 50));
-    await alarm(r.id);
-    expect(await minted()).toEqual([expect.objectContaining({ token: got.token, live: false })]);
-    expect(await tokens(r.id)).toEqual([]);
+    await eventually(r.id, async () => {
+      expect(await minted()).toEqual([expect.objectContaining({ token: got.token, live: false })]);
+      expect(await tokens(r.id)).toEqual([]);
+    });
   });
   it("when it expires, which the alarm drops", async () => {
     const r = await room();

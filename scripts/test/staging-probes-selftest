@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Checks that each staging probe can fail, with a stand-in curl and no network.
+#
+#   scripts/test/staging-probes-selftest
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+probes="$scripts/staging-probes"
+stub_curl
+
+healthy_staging
+check "a healthy staging passes, exit 0" run 0 "$probes"
+check "it prints one PASS line per probe" test "$(grep -c '^PASS ' "$tmp/out")" -eq 4
+check "it makes exactly five requests" test "$(wc -l < "$fix/calls" | tr -d ' ')" -eq 5
+check "every request goes to a staging host" test "$(grep -c -E ' https://(gateway|app)-staging\.podster\.dev/[^ ]*$' "$fix/calls")" -eq 5
+check "no request carries a cookie or a credential" never_called 'cookie|authorization|--user|--location|--netrc| -[ubcLn] '
+check "the public page is asked for as HTML" called 'Accept: text/html .*https://app-staging.podster.dev/p/pub_0000000000000000000000$'
+
+refuses() { # refuses TITLE PROBE: the fixtures were changed by the caller
+  check "$1, exit 1" run 1 "$probes"
+  check "  and the $2 probe says FAIL" said "^FAIL $2: "
+  healthy_staging
+}
+
+echo 200 > "$fix/me.status"
+refuses "/api/v1/me answering 200 is refused" me
+
+echo 404 > "$fix/a2a-slash.status"
+refuses "/a2a and /a2a/ with different statuses are refused" a2a
+
+echo '{"error":"not_found"}' > "$fix/a2a-slash.body"
+refuses "/a2a and /a2a/ with different bodies are refused" a2a
+
+echo unreachable > "$fix/a2a.status"; echo unreachable > "$fix/a2a-slash.status"
+refuses "/a2a and /a2a/ both unreachable are refused, though identical" a2a
+
+echo 500 > "$fix/webhook.status"
+refuses "an unsigned webhook answered with 500 is refused" webhook
+
+echo 202 > "$fix/webhook.status"
+refuses "an unsigned webhook that is accepted is refused" webhook
+
+echo 200 > "$fix/public.status"
+refuses "an unknown public page answering 200 is refused" public
+
+printf 'HTTP/2 404\r\ncache-control: no-store\r\n\r\n' > "$fix/public.headers"
+refuses "a public 404 without no-transform is refused" public
+
+printf 'HTTP/2 404\r\ncontent-type: text/html\r\n\r\n' > "$fix/public.headers"
+refuses "a public 404 with no Cache-Control is refused" public
+
+echo '<!doctype html><SCRIPT src="/x.js"></SCRIPT>' > "$fix/public.body"
+refuses "a public 404 with a script is refused" public
+
+echo unreachable > "$fix/me.status"
+refuses "a host nothing answers on is refused" me
+
+check "an argument is refused, exit 2" run 2 "$probes" https://example.com
+check "  and nothing was requested" test ! -s "$fix/calls"
+check "--help exits 0" run 0 "$probes" --help
+check "  and nothing was requested" test ! -s "$fix/calls"
+check "the script names no host but the two staging ones" test "$(grep -o -E 'https?://[A-Za-z0-9.-]+' "$probes" | sort -u | tr '\n' ' ')" = "https://app-staging.podster.dev https://gateway-staging.podster.dev "
+
+finish staging-probes

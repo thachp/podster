@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# Checks every refusal of scripts/deploy-staging, in a scratch repository with stand-ins for npm, npx (wrangler),
+# worker-build and curl. Git is real and local. Nothing reaches the network or Cloudflare.
+#
+#   scripts/test/deploy-staging-selftest
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+stub_curl
+
+stub worker-build <<'EOF'
+#!/usr/bin/env bash
+cat "$(dirname "$0")/../fix/worker-build-version"
+EOF
+
+stub npm <<'EOF'
+#!/usr/bin/env bash
+fix="$(dirname "$0")/../fix"
+echo "npm $* [in $(basename "$PWD")] CI=${CI:-} CLOUDFLARE_ENV=${CLOUDFLARE_ENV:-}" >> "$fix/calls"
+if [ "$*" = "run build" ]; then
+  [ -f "$fix/web-build-fails" ] && exit 1
+  mkdir -p dist/server
+  cat "$fix/web-config" > dist/server/wrangler.json
+fi
+EOF
+
+# wrangler, as `npx wrangler ...`. A database's pending list is $fix/pending-<database> until a migration is applied
+# to it, then $fix/pending-after-<database>.
+stub npx <<'EOF'
+#!/usr/bin/env bash
+fix="$(dirname "$0")/../fix"
+app=$(basename "$PWD")
+echo "npx $* [in $app] CI=${CI:-} account=${CLOUDFLARE_ACCOUNT_ID:-} CLOUDFLARE_ENV=${CLOUDFLARE_ENV:-}" >> "$fix/calls"
+case "$*" in
+  "wrangler d1 migrations list "*" --remote --env staging")
+    list="$fix/pending-$5"
+    [ -f "$fix/applied-$5" ] && list="$fix/pending-after-$5"
+    [ "$(cat "$list")" = wrangler-fails ] && exit 1
+    cat "$list"
+    ;;
+  "wrangler d1 migrations apply "*" --remote --env staging")
+    [ -f "$fix/apply-fails" ] && exit 1
+    touch "$fix/applied-$5"
+    echo "applied"
+    ;;
+  "wrangler deploy --env staging" | "wrangler deploy --config dist/server/wrangler.json")
+    [ -f "$fix/deploy-fails-$app" ] && exit 1
+    echo "Uploaded podster-$app-staging"
+    cat "$fix/version-$app"
+    ;;
+  *) echo "stand-in wrangler: unexpected: $*" >&2; exit 97 ;;
+esac
+EOF
+
+none="No migrations to apply!"
+table() { # table NAME...: wrangler's list of pending migrations
+  local name
+  echo "Migrations to be applied:"
+  echo "┌──────────────────────────┐"
+  echo "│ Name                     │"
+  for name in "$@"; do echo "├──────────────────────────┤"; echo "│ $name │"; done
+  echo "└──────────────────────────┘"
+}
+
+account=0123456789abcdef0123456789abcdef
+origin="$tmp/origin.git"
+work="$tmp/work"
+quiet() { "$@" > /dev/null 2>&1; }
+commit() { git -C "$1" -c user.name=selftest -c user.email=selftest@example.invalid commit --quiet -m "$2"; }
+
+# A fresh origin and a checkout detached at its main, with a staging that has nothing pending and answers well.
+fresh() {
+  rm -rf "$origin" "$work" "$tmp/seed"
+  rm -f "$fix"/*
+  healthy_staging
+  mkdir -p "$tmp/seed/scripts" "$tmp/seed/apps/api/migrations" "$tmp/seed/apps/gateway/migrations" "$tmp/seed/apps/web"
+  cp "$scripts/deploy-staging" "$scripts/staging-probes" "$tmp/seed/scripts/"
+  echo "-- seven" > "$tmp/seed/apps/api/migrations/0007_repo_room_index.sql"
+  echo "-- eight" > "$tmp/seed/apps/api/migrations/0008_next.sql"
+  echo "-- five" > "$tmp/seed/apps/gateway/migrations/0005_org_departure.sql"
+  echo "{}" > "$tmp/seed/apps/web/package.json"
+  printf 'node_modules\ndist\n' > "$tmp/seed/.gitignore"
+  quiet git -C "$tmp/seed" init -b main
+  git -C "$tmp/seed" add -A
+  commit "$tmp/seed" seed
+  quiet git clone --bare "$tmp/seed" "$origin"
+  quiet git clone "$origin" "$work"
+  quiet git -C "$work" checkout --detach origin/main
+
+  echo 0.8.7 > "$fix/worker-build-version"
+  echo "$none" > "$fix/pending-podster-api-staging"
+  echo "$none" > "$fix/pending-podster-gateway-staging"
+  echo "$none" > "$fix/pending-after-podster-api-staging"
+  echo "$none" > "$fix/pending-after-podster-gateway-staging"
+  echo "Current Version ID: 5cb57391-a010-4425-afb4-091fa2644f67" > "$fix/version-api"
+  echo "Current Version ID: cd068ed1-3873-43c6-b066-be36c66c7eff" > "$fix/version-gateway"
+  echo "Current Version ID: 11111111-2222-4333-8444-555555555555" > "$fix/version-web"
+  echo '{"name":"podster-web-staging","routes":[{"pattern":"app-staging.podster.dev","custom_domain":true}]}' > "$fix/web-config"
+}
+deploy() { # deploy EXPECTED-EXIT [ARG...]
+  local expected=$1
+  shift
+  CLOUDFLARE_ACCOUNT_ID=$account run "$expected" "$work/scripts/deploy-staging" "$@"
+}
+changed_staging='migrations apply|wrangler deploy'
+refused() { # refused TITLE WHAT-IT-SAYS [ARG...]: the caller set the scene
+  local title=$1 says=$2
+  shift 2
+  check "$title is refused, exit 1" deploy 1 "$@"
+  check "  and says why" said "REFUSE .*$says"
+  check "  and nothing was applied or deployed" never_called "$changed_staging"
+  fresh
+}
+order() { grep -n -E -- "$1" "$fix/calls" | head -1 | cut -d: -f1; }
+before() { [ "$(order "$1")" -lt "$(order "$2")" ]; }
+
+# --- the plain deploy ---
+fresh
+check "main's tip, clean, with nothing pending, deploys: exit 0" deploy 0
+check "  npm ci runs in the API and the gateway" test "$(grep -c -E '^npm ci \[in (api|gateway)\]' "$fix/calls")" -eq 2
+check "  both databases are listed" test "$(grep -c 'migrations list' "$fix/calls")" -eq 2
+check "  nothing is applied" never_called 'migrations apply'
+check "  the API deploys before the gateway" before 'wrangler deploy --env staging \[in api\]' 'wrangler deploy --env staging \[in gateway\]'
+check "  every wrangler call has CI=true and the account ID" test "$(grep -c '^npx ' "$fix/calls")" -eq "$(grep -c "^npx .* CI=true account=$account " "$fix/calls")"
+check "  every wrangler call names staging" test "$(grep -c '^npx ' "$fix/calls")" -eq "$(grep -c '^npx .* --env staging \[' "$fix/calls")"
+check "  the web app isn't built or deployed" never_called 'run build|\[in web\]'
+check "  each Worker's version ID is recorded" said '^version podster-api-staging 5cb57391-a010-4425-afb4-091fa2644f67$'
+check "  the gateway's too" said '^version podster-gateway-staging cd068ed1-3873-43c6-b066-be36c66c7eff$'
+check "  the probes run after the deploys, one line each" test "$(grep -c '^PASS ' "$tmp/out")" -eq 4
+check "  no secret or variable is set" never_called 'secret|--var|versions'
+fresh
+
+# --- the checkout ---
+check "with no account ID it is refused, exit 1" run 1 env -u CLOUDFLARE_ACCOUNT_ID "$work/scripts/deploy-staging"
+check "  and nothing ran" test ! -s "$fix/calls"
+check "with an account ID that isn't one it is refused, exit 1" run 1 env CLOUDFLARE_ACCOUNT_ID=podster "$work/scripts/deploy-staging"
+check "  and nothing ran" test ! -s "$fix/calls"
+check "with CLOUDFLARE_ENV naming another environment it is refused, exit 1" run 1 env CLOUDFLARE_ACCOUNT_ID=$account CLOUDFLARE_ENV=live "$work/scripts/deploy-staging"
+check "  and nothing ran" test ! -s "$fix/calls"
+
+echo 0.8.6 > "$fix/worker-build-version"
+refused "another worker-build" 'worker-build is'
+
+quiet git -C "$work" checkout main
+refused "a checkout on a branch, even at main's tip" 'is on branch main'
+
+echo "-- nine" > "$tmp/seed/apps/api/migrations/0009_later.sql"
+git -C "$tmp/seed" add -A && commit "$tmp/seed" later && quiet git -C "$tmp/seed" push "$origin" main
+refused "a checkout behind origin/main, found by fetching" 'origin/main is at'
+
+echo "-- local" > "$work/apps/api/migrations/0009_local.sql"
+git -C "$work" add -A && commit "$work" local
+refused "a checkout ahead of origin/main" 'origin/main is at'
+
+echo scratch > "$work/pr-body.md"
+refused "an untracked file" 'changed or untracked'
+
+echo "-- edited" >> "$work/apps/api/migrations/0007_repo_room_index.sql"
+refused "a changed file" 'changed or untracked'
+
+git -C "$work" remote set-url origin "$tmp/nowhere.git"
+refused "an origin that can't be fetched" 'could not fetch origin'
+
+# --- migrations ---
+table 0007_repo_room_index.sql > "$fix/pending-podster-api-staging"
+refused "a pending migration that isn't named" 'migrations are pending: 0007_repo_room_index.sql'
+
+table 0007_repo_room_index.sql > "$fix/pending-podster-api-staging"
+refused "a pending migration, with another one named" 'must match exactly' --apply-migrations 0008_next.sql
+
+table 0007_repo_room_index.sql > "$fix/pending-podster-api-staging"
+refused "a pending migration, with it and one more named" 'must match exactly' --apply-migrations 0007_repo_room_index.sql 0008_next.sql
+
+table 0007_repo_room_index.sql 0008_next.sql > "$fix/pending-podster-api-staging"
+refused "two pending migrations, with one named" 'must match exactly' --apply-migrations 0007_repo_room_index.sql
+
+table 0007_repo_room_index.sql > "$fix/pending-podster-api-staging"
+table 0005_org_departure.sql > "$fix/pending-podster-gateway-staging"
+refused "a pending migration on each database, with only the API's named" 'must match exactly' --apply-migrations 0007_repo_room_index.sql
+
+refused "a named migration when none is pending" 'no migration is pending' --apply-migrations 0007_repo_room_index.sql
+
+echo wrangler-fails > "$fix/pending-podster-gateway-staging"
+refused "a list wrangler can't give" "could not read podster-gateway-staging"
+
+echo "Something this script has never seen" > "$fix/pending-podster-api-staging"
+refused "a list this doesn't recognise, which isn't taken for none" "could not read podster-api-staging"
+
+table 0042_unknown.sql > "$fix/pending-podster-api-staging"
+refused "a pending migration that isn't a file in this checkout" "could not read podster-api-staging" --apply-migrations 0042_unknown.sql
+
+echo "-- same" > "$tmp/seed/apps/gateway/migrations/0007_repo_room_index.sql"
+git -C "$tmp/seed" add -A && commit "$tmp/seed" same && quiet git -C "$tmp/seed" push "$origin" main
+quiet git -C "$work" fetch origin && quiet git -C "$work" checkout --detach origin/main
+table 0007_repo_room_index.sql > "$fix/pending-podster-api-staging"
+table 0007_repo_room_index.sql > "$fix/pending-podster-gateway-staging"
+refused "one file name pending on both databases" 'same file name' --apply-migrations 0007_repo_room_index.sql
+
+table 0007_repo_room_index.sql > "$fix/pending-podster-api-staging"
+table 0005_org_departure.sql > "$fix/pending-podster-gateway-staging"
+check "exactly the pending set, named, is applied and deployed: exit 0" deploy 0 --apply-migrations 0005_org_departure.sql 0007_repo_room_index.sql
+check "  each database's migrations are applied once" test "$(grep -c 'migrations apply' "$fix/calls")" -eq 2
+check "  before anything deploys" before 'migrations apply podster-gateway-staging' 'wrangler deploy'
+check "  and listed again after, four lists in all" test "$(grep -c 'migrations list' "$fix/calls")" -eq 4
+check "  and the second listing comes before the deploy" test "$(grep -n 'migrations list' "$fix/calls" | tail -1 | cut -d: -f1)" -lt "$(order 'wrangler deploy')"
+fresh
+
+table 0007_repo_room_index.sql > "$fix/pending-podster-api-staging"
+check "only the database with a pending migration is applied to: exit 0" deploy 0 --apply-migrations 0007_repo_room_index.sql
+check "  the API's, and not the gateway's" test "$(grep -c 'migrations apply' "$fix/calls")$(grep -c 'migrations apply podster-api-staging' "$fix/calls")" = 11
+fresh
+
+table 0007_repo_room_index.sql > "$fix/pending-podster-api-staging"
+table 0007_repo_room_index.sql > "$fix/pending-after-podster-api-staging"
+check "a migration still pending after applying stops it, exit 3" deploy 3 --apply-migrations 0007_repo_room_index.sql
+check "  and nothing deploys" never_called 'wrangler deploy'
+fresh
+
+table 0007_repo_room_index.sql > "$fix/pending-podster-api-staging"
+touch "$fix/apply-fails"
+check "a failed apply stops it, exit 3" deploy 3 --apply-migrations 0007_repo_room_index.sql
+check "  and nothing deploys" never_called 'wrangler deploy'
+fresh
+
+# --- deploys ---
+touch "$fix/deploy-fails-api"
+check "a failed API deploy stops it, exit 3" deploy 3
+check "  and the gateway isn't deployed" never_called '\[in gateway\] .*deploy|deploy .*\[in gateway\]'
+check "  and the probes don't run" never_called '^curl '
+fresh
+
+echo "Deployed, but with no version line" > "$fix/version-gateway"
+check "a deploy that prints no version ID stops it, exit 3" deploy 3
+check "  and says which Worker" said 'STOPPED podster-gateway-staging deployed, but its output has no version ID'
+fresh
+
+echo 200 > "$fix/me.status"
+check "a failed probe after deploying exits 4" deploy 4
+check "  and its line says FAIL" said '^FAIL me: '
+check "  and the other probes still report" test "$(grep -c '^PASS ' "$tmp/out")" -eq 3
+fresh
+
+# --- the web app ---
+check "--web builds for staging and deploys what the build wrote: exit 0" deploy 0 --web
+check "  npm ci runs in the web app too" called '^npm ci \[in web\]'
+check "  the build has CLOUDFLARE_ENV=staging" called '^npm run build \[in web\] CI=true CLOUDFLARE_ENV=staging$'
+check "  and nothing else has CLOUDFLARE_ENV" test "$(grep -c 'CLOUDFLARE_ENV=staging' "$fix/calls")" -eq 1
+check "  the order is API, gateway, web" before 'deploy --env staging \[in gateway\]' 'deploy --config dist/server/wrangler.json \[in web\]'
+check "  the web app's version ID is recorded" said '^version podster-web-staging 11111111-2222-4333-8444-555555555555$'
+fresh
+
+echo '{"name":"podster-web","routes":[{"pattern":"app.podster.dev","custom_domain":true}]}' > "$fix/web-config"
+check "--web with a build that isn't staging's stops it, exit 3" deploy 3 --web
+check "  and the web app isn't deployed" never_called 'deploy --config'
+fresh
+
+echo '{"name":"podster-web"}' > "$fix/web-config"
+check "--web with a build that has no route stops it, exit 3" deploy 3 --web
+check "  and the web app isn't deployed" never_called 'deploy --config'
+fresh
+
+touch "$fix/web-build-fails"
+check "--web with a failed build stops it, exit 3" deploy 3 --web
+check "  and the web app isn't deployed" never_called 'deploy --config'
+fresh
+
+# --- usage, and what the script can't do at all ---
+check "an unknown option is refused, exit 2" deploy 2 --env
+check "a stray argument is refused, exit 2" deploy 2 0007_repo_room_index.sql
+check "--apply-migrations with no name is refused, exit 2" deploy 2 --apply-migrations
+check "--apply-migrations with a path is refused, exit 2" deploy 2 --apply-migrations apps/api/migrations/0007_repo_room_index.sql
+check "--apply-migrations with a word that isn't a file name is refused, exit 2" deploy 2 --apply-migrations all
+check "--help exits 0" deploy 0 --help
+check "none of those ran anything" test ! -s "$fix/calls"
+
+script="$scripts/deploy-staging"
+check "the script never says 'production'" test "$(grep -c -i 'production' "$script")" -eq 0
+check "the only environment it names is staging" test "$(grep -o -E -- '--env[ =]+[^ )"]+|CLOUDFLARE_ENV=[A-Za-z]+' "$script" | sort -u | tr '\n' ' ')" = "--env staging CLOUDFLARE_ENV=staging "
+check "it has no command that sets a secret or a variable" test "$(grep -c -E 'wrangler[^|]* (secret|versions)|--var' "$script")" -eq 0
+check "every deploy it runs is staging's, or the staging build's file" \
+  test "$(grep -c -E 'npx wrangler deploy' "$script")" -eq "$(grep -c -E 'npx wrangler deploy (--env staging|--config dist/server/wrangler\.json)\)' "$script")"
+
+finish deploy-staging

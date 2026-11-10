@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+# Checks every refusal of scripts/merge-gate, with a stand-in gh and no network. The stand-in answers what
+# `gh ... --jq` would print, so this covers the script's decisions and not its jq expressions.
+#
+#   scripts/test/merge-gate-selftest
+set -euo pipefail
+. "$(dirname "$0")/lib.sh"
+gate="$scripts/merge-gate"
+sha=0123456789abcdef0123456789abcdef01234567
+other=ffffffffffffffffffffffffffffffffffffffff
+merged=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+t=$'\t'
+
+stub sleep <<'EOF'
+#!/usr/bin/env bash
+echo "sleep $*" >> "$(dirname "$0")/../fix/calls"
+EOF
+
+stub gh <<'EOF'
+#!/usr/bin/env bash
+fix="$(dirname "$0")/../fix"
+echo "gh $*" >> "$fix/calls"
+fails() { echo "gh: HTTP 500" >&2; exit 1; }
+answer() { # the whole fixture
+  [ -f "$fix/$1" ] || { echo "stand-in gh: no fixture $1" >&2; exit 97; }
+  [ "$(cat "$fix/$1")" = gh-fails ] && fails
+  cat "$fix/$1"
+}
+next() { # the fixture's next line each time, repeating its last
+  local n=0 total
+  [ -f "$fix/$1.n" ] && n=$(cat "$fix/$1.n")
+  n=$((n + 1))
+  echo "$n" > "$fix/$1.n"
+  total=$(wc -l < "$fix/$1" | tr -d ' ')
+  [ "$n" -gt "$total" ] && n=$total
+  sed -n "${n}p" "$fix/$1"
+}
+case "$*" in
+  "pr view 77 --json state,isDraft,baseRefName,headRefOid "*) answer pull ;;
+  "pr view 77 --json headRefOid,statusCheckRollup "*) answer checks ;;
+  "pr view 77 --json mergeStateStatus "*) next merge-state ;;
+  "pr view 77 --json state,mergeCommit "*) answer merged ;;
+  "api repos/{owner}/{repo}/code-scanning/alerts?ref=refs/pull/77/merge&state=open "*) answer alerts ;;
+  "pr merge "*) answer merge-result ;;
+  "run list --workflow ci.yml --branch main --event push --commit "*) next main-run ;;
+  "run list --workflow ci.yml --commit "*" --event pull_request "*) answer pr-run ;;
+  "run view 555 --json jobs "*) answer jobs ;;
+  "run view 555 --log-failed") answer log ;;
+  "run rerun "*) answer rerun-result ;;
+  *) echo "stand-in gh: unexpected: gh $*" >&2; exit 97 ;;
+esac
+EOF
+
+# A pull request the gate passes, whose merge then goes green on main, and a head run with the web flake.
+healthy() {
+  rm -f "$fix"/*
+  : > "$fix/calls"
+  printf 'OPEN\tfalse\tmain\t%s\n' "$sha" > "$fix/pull"
+  printf '%s\nrust\tCOMPLETED\tSUCCESS\nscanner\tCOMPLETED\tSKIPPED\nAnalyze (actions)\tCOMPLETED\tSUCCESS\nCodeQL\tCOMPLETED\tNEUTRAL\n' "$sha" > "$fix/checks"
+  echo 0 > "$fix/alerts"
+  printf 'UNKNOWN\nUNKNOWN\nCLEAN\n' > "$fix/merge-state"
+  : > "$fix/merge-result"
+  echo "$merged" > "$fix/merged"
+  printf '\n900\tin_progress\tnone\thttps://github.invalid/runs/900\n900\tcompleted\tsuccess\thttps://github.invalid/runs/900\n' > "$fix/main-run"
+  printf '555\tcompleted\tfailure\t1\n' > "$fix/pr-run"
+  echo web > "$fix/jobs"
+  printf 'web\tRun node run-a11y.mjs --skip-web-build\t2026-11-09T23:30:16.1257336Z FAIL run: database is locked\n' > "$fix/log"
+  : > "$fix/rerun-result"
+}
+api_log() { # api_log FILES-FAILED TESTS-FAILED FAIL-LINE...
+  local files=$1 tests=$2 line
+  shift 2
+  echo api > "$fix/jobs"
+  : > "$fix/log"
+  for line in "$@"; do printf 'api\tRun npm test\t2026-11-09T19:10:30.6977475Z  FAIL  %s\n' "$line" >> "$fix/log"; done
+  printf 'api\tRun npm test\t2026-11-09T19:10:30.6989484Z  Test Files  %s failed | 18 passed (19)\n' "$files" >> "$fix/log"
+  printf 'api\tRun npm test\t2026-11-09T19:10:30.6991018Z       Tests  %s failed | 813 passed (814)\n' "$tests" >> "$fix/log"
+}
+alarm="test/kernel.spec.ts > inbox > the alarm follows whichever recipient is due first, not the one waiting longest"
+changes='gh pr merge|gh run rerun'
+
+# --- usage ---
+healthy
+check "no arguments is refused, exit 2" run 2 "$gate"
+check "an abbreviated sha is refused, exit 2" run 2 "$gate" 77 0123456
+check "  and says to give the full sha" said 'not a full sha'
+check "a 39-character sha is refused, exit 2" run 2 "$gate" 77 "${sha%?}"
+check "an abbreviated sha is refused with --merge too, exit 2" run 2 "$gate" 77 0123456789ab --merge
+check "an upper-case sha is refused, exit 2" run 2 "$gate" 77 0123456789ABCDEF0123456789ABCDEF01234567
+check "a branch name for a sha is refused, exit 2" run 2 "$gate" 77 main
+check "a pull request that isn't a number is refused, exit 2" run 2 "$gate" feat/x "$sha"
+check "--merge with --rerun-known-flake is refused, exit 2" run 2 "$gate" 77 "$sha" --merge --rerun-known-flake
+check "an unknown option is refused, exit 2" run 2 "$gate" 77 "$sha" --squash
+check "--help exits 0" run 0 "$gate" --help
+check "none of those asked gh anything" test ! -s "$fix/calls"
+
+# --- the gate ---
+healthy
+check "a clean pull request passes the report, exit 0" run 0 "$gate" 77 "$sha"
+check "  and the report merges and reruns nothing" never_called "$changes"
+check "  and it waited through UNKNOWN twice" test "$(grep -c '^sleep 6$' "$fix/calls")" -eq 2
+check "  and CodeQL's NEUTRAL was accepted with no open alert" said 'ok +check CodeQL: NEUTRAL'
+
+refused() { # refused TITLE WHAT-IT-SAYS: the caller changed the fixtures; both the report and --merge must refuse
+  local title=$1 says=$2
+  check "$title: the report refuses, exit 1" run 1 "$gate" 77 "$sha"
+  check "  and says why" said "REFUSE .*$says"
+  rm -f "$fix"/*.n
+  check "$title: --merge refuses, exit 1" run 1 "$gate" 77 "$sha" --merge
+  check "  and merges and reruns nothing" never_called "$changes"
+  healthy
+}
+
+printf 'OPEN\tfalse\tmain\t%s\n' "$other" > "$fix/pull"
+refused "a head that isn't the given sha" "its head is $other"
+
+printf 'MERGED\tfalse\tmain\t%s\n' "$sha" > "$fix/pull"
+refused "a pull request that isn't open" 'it is MERGED'
+
+printf 'OPEN\ttrue\tmain\t%s\n' "$sha" > "$fix/pull"
+refused "a draft" 'it is a draft'
+
+printf 'OPEN\tfalse\tfeat/base\t%s\n' "$sha" > "$fix/pull"
+refused "a pull request into another branch" 'targets feat/base'
+
+echo gh-fails > "$fix/pull"
+refused "a pull request gh can't read" 'could not read pull request'
+
+printf '%s\nrust\tCOMPLETED\tSUCCESS\nweb\tIN_PROGRESS\tNONE\n' "$sha" > "$fix/checks"
+refused "a check still running" 'check web is IN_PROGRESS'
+
+printf '%s\nrust\tCOMPLETED\tSUCCESS\nlicense/cla\tPENDING\tPENDING\n' "$sha" > "$fix/checks"
+refused "a status still pending" 'check license/cla is PENDING'
+
+printf '%s\nrust\tCOMPLETED\tSUCCESS\napi\tCOMPLETED\tFAILURE\n' "$sha" > "$fix/checks"
+refused "a failed check" 'check api: FAILURE'
+
+printf '%s\nrust\tCOMPLETED\tSUCCESS\ne2e\tCOMPLETED\tCANCELLED\n' "$sha" > "$fix/checks"
+refused "a cancelled check" 'check e2e: CANCELLED'
+
+printf '%s\nrust\tCOMPLETED\tSUCCESS\nweb\tCOMPLETED\tTIMED_OUT\n' "$sha" > "$fix/checks"
+refused "a timed-out check" 'check web: TIMED_OUT'
+
+printf '%s\nrust\tCOMPLETED\tNEUTRAL\nCodeQL\tCOMPLETED\tNEUTRAL\n' "$sha" > "$fix/checks"
+refused "a NEUTRAL check that isn't CodeQL" 'check rust: NEUTRAL'
+
+echo 2 > "$fix/alerts"
+refused "an open code scanning alert" 'code scanning has 2'
+echo 2 > "$fix/alerts"
+check "CodeQL's NEUTRAL isn't accepted while an alert is open" run 1 "$gate" 77 "$sha"
+check "  and says so" said 'REFUSE +check CodeQL: NEUTRAL'
+healthy
+
+echo gh-fails > "$fix/alerts"
+refused "code scanning that can't be read" 'could not read code scanning alerts'
+
+echo "$sha" > "$fix/checks"
+refused "a pull request with no checks" 'no check has reported'
+
+echo gh-fails > "$fix/checks"
+refused "checks that can't be read" 'could not read the checks'
+
+printf '%s\nrust\tCOMPLETED\tSUCCESS\n' "$other" > "$fix/checks"
+refused "a head that moves while the checks are read" 'the head moved'
+
+for state in BEHIND DIRTY UNSTABLE BLOCKED HAS_HOOKS DRAFT; do
+  echo "$state" > "$fix/merge-state"
+  refused "a merge state of $state" "merge state is $state"
+done
+
+echo UNKNOWN > "$fix/merge-state"
+refused "a merge state that stays UNKNOWN" 'merge state is UNKNOWN'
+echo UNKNOWN > "$fix/merge-state"
+check "a merge state that stays UNKNOWN is asked for ten times, then refused" run 1 "$gate" 77 "$sha"
+check "  ten times and no more" test "$(grep -c 'json mergeStateStatus' "$fix/calls")" -eq 10
+healthy
+
+# --- --merge ---
+check "--merge on a clean pull request merges and reports main's CI, exit 0" run 0 "$gate" 77 "$sha" --merge
+check "  with a merge commit, pinned to the given sha" called "^gh pr merge 77 --merge --match-head-commit $sha\$"
+check "  exactly once" test "$(grep -c '^gh pr merge' "$fix/calls")" -eq 1
+check "  never squashed, rebased, forced or queued" never_called 'squash|rebase|--admin|--auto'
+check "  and it waited for the run on the merge commit" called "^gh run list --workflow ci.yml --branch main --event push --commit $merged "
+check "  and reports success" said "ci.yml on main for $merged: success"
+check "  and reruns nothing" never_called 'gh run rerun'
+healthy
+
+printf '900\tcompleted\tfailure\thttps://github.invalid/runs/900\n' > "$fix/main-run"
+check "--merge whose CI on main fails exits 3" run 3 "$gate" 77 "$sha" --merge
+check "  and reports the failure" said "ci.yml on main for $merged: failure"
+check "  and reruns nothing" never_called 'gh run rerun'
+healthy
+
+printf '900\tin_progress\tnone\thttps://github.invalid/runs/900\n' > "$fix/main-run"
+check "--merge whose CI on main never finishes exits 4" run 4 "$gate" 77 "$sha" --merge
+check "  after asking 90 times" test "$(grep -c '^gh run list' "$fix/calls")" -eq 90
+healthy
+
+echo gh-fails > "$fix/merge-result"
+check "--merge that GitHub doesn't accept is refused, exit 1" run 1 "$gate" 77 "$sha" --merge
+check "  and it doesn't try another way" test "$(grep -c '^gh pr merge' "$fix/calls")" -eq 1
+healthy
+
+: > "$fix/merged"
+check "--merge whose merge commit can't be read exits 4" run 4 "$gate" 77 "$sha" --merge
+healthy
+
+# --- --rerun-known-flake ---
+check "the web flake is rerun, exit 0" run 0 "$gate" 77 "$sha" --rerun-known-flake
+check "  failed jobs only" called '^gh run rerun 555 --failed$'
+check "  once" test "$(grep -c '^gh run rerun' "$fix/calls")" -eq 1
+check "  and nothing is merged" never_called 'gh pr merge'
+check "  and the gate's checks are not what decides it" never_called 'statusCheckRollup'
+healthy
+
+api_log 1 1 "$alarm"
+check "the api alarm flake is rerun, exit 0" run 0 "$gate" 77 "$sha" --rerun-known-flake
+check "  failed jobs only" called '^gh run rerun 555 --failed$'
+healthy
+
+echo api > "$fix/jobs"
+printf 'api\tRun npm test\t2026-11-09T19:10:30Z \033[41m\033[1m FAIL \033[22m\033[49m %s\n' "$alarm" > "$fix/log"
+printf 'api\tRun npm test\t2026-11-09T19:10:31Z \033[2m Test Files \033[22m \033[1m\033[31m1 failed\033[39m\033[22m | 18 passed (19)\n' >> "$fix/log"
+printf 'api\tRun npm test\t2026-11-09T19:10:31Z \033[2m      Tests \033[22m \033[1m\033[31m1 failed\033[39m\033[22m | 813 passed (814)\n' >> "$fix/log"
+check "the api alarm flake is recognised in a coloured log, exit 0" run 0 "$gate" 77 "$sha" --rerun-known-flake
+healthy
+
+no_rerun() { # no_rerun TITLE WHAT-IT-SAYS
+  check "$1 is not rerun, exit 1" run 1 "$gate" 77 "$sha" --rerun-known-flake
+  check "  and says why" said "REFUSE .*$2"
+  check "  and nothing was rerun or merged" never_called "$changes"
+  healthy
+}
+
+printf 'OPEN\tfalse\tmain\t%s\n' "$other" > "$fix/pull"
+no_rerun "a head that isn't the given sha" "its head is $other"
+
+: > "$fix/pr-run"
+no_rerun "a sha with no ci.yml run" 'there is no ci.yml run'
+
+printf '555\tin_progress\tnone\t1\n' > "$fix/pr-run"
+no_rerun "a run still in progress" 'the run is still in_progress'
+
+printf '555\tcompleted\tsuccess\t1\n' > "$fix/pr-run"
+no_rerun "a run that succeeded" 'conclusion is success'
+
+printf '555\tcompleted\tcancelled\t1\n' > "$fix/pr-run"
+no_rerun "a cancelled run" 'conclusion is cancelled'
+
+printf '555\tcompleted\tfailure\t2\n' > "$fix/pr-run"
+no_rerun "a run already rerun once" 'attempt 2'
+
+printf 'web\napi\n' > "$fix/jobs"
+no_rerun "a run with two failed jobs" 'more than one job'
+
+: > "$fix/jobs"
+no_rerun "a failed run with no failed job" 'no failed job'
+
+echo gateway > "$fix/jobs"
+no_rerun "a failed gateway job" 'the failed job is gateway'
+
+echo rust > "$fix/jobs"
+no_rerun "a failed rust job, though its log says database is locked" 'the failed job is rust'
+
+printf 'web\tRun npm test\t2026-11-09T23:30:16Z  FAIL  test/page.spec.tsx > renders\n' > "$fix/log"
+no_rerun "a web failure without \"database is locked\"" 'no "database is locked"'
+
+echo gh-fails > "$fix/log"
+no_rerun "a failed log gh can't read" 'could not read the failed log'
+
+api_log 1 1 "test/kernel.spec.ts > inbox > delivers an offer once"
+no_rerun "an api failure in another kernel.spec.ts test" 'not the alarm test'
+
+api_log 1 1 "test/held-access.spec.ts > a room whose alarm fails > sends nothing"
+no_rerun "an api failure in another file, though its name says alarm" 'not in kernel.spec.ts'
+
+api_log 1 2 "$alarm" "test/kernel.spec.ts > inbox > delivers an offer once"
+no_rerun "the alarm test failing with a second test" 'not with exactly one failed test'
+
+api_log 2 2 "$alarm" "test/claims.spec.ts > a public claim > takes the last place"
+no_rerun "the alarm test failing with another file" 'not with exactly one failed test file'
+
+api_log 1 1
+no_rerun "an api failure that names no failing test" 'does not name exactly one failing test'
+
+api_log 1 1 "$alarm"
+printf 'api\tRun npm test\t2026-11-09T19:10:30Z  FAIL  test/claims.spec.ts > a public claim > takes the last place\n' >> "$fix/log"
+no_rerun "an api log that names a second failing test" 'does not name exactly one failing test'
+
+echo api > "$fix/jobs"
+printf 'api\tRun cargo install worker-build\t2026-11-09T19:10:30Z error: could not compile\n' > "$fix/log"
+no_rerun "an api job that failed before its tests" 'not with exactly one failed test file'
+
+echo gh-fails > "$fix/rerun-result"
+check "a rerun GitHub doesn't accept is refused, exit 1" run 1 "$gate" 77 "$sha" --rerun-known-flake
+check "  and it isn't tried twice" test "$(grep -c '^gh run rerun' "$fix/calls")" -eq 1
+
+# --- what the script can't do at all ---
+check "the script has no squash, rebase, admin or auto merge, branch update or alert change" \
+  test "$(grep -c -E -- '--(squash|rebase|admin|auto)\b|update-branch|-X +(PATCH|POST|PUT|DELETE)|--method|-f state=' "$gate")" -eq 0
+check "it merges in one place and reruns in one place" \
+  test "$(grep -c -E '^ *gh (pr merge|run rerun) ' "$gate")" -eq 2
+
+finish merge-gate

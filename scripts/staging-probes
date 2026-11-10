@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# The signed-out probes of staging: what anyone on the internet gets with no credential. One line per probe.
+set -euo pipefail
+
+# The only two hosts this script can reach. `request` refuses anything else.
+GATEWAY="https://gateway-staging.podster.dev"
+APP="https://app-staging.podster.dev"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/staging-probes
+
+Sends five signed-out requests to staging and prints PASS or FAIL for each probe:
+
+  me        GET  gateway /api/v1/me is 401
+  a2a       POST gateway /a2a and /a2a/ answer with the same status and body
+  webhook   POST gateway /webhooks/github with no signature is refused with a 4xx
+  public    GET  app /p/pub_0000000000000000000000 as HTML is 404, with
+            Cache-Control "no-store, no-transform" and no <script in the body
+
+It takes no arguments, sends no cookie or credential, follows no redirect, and reaches only
+gateway-staging.podster.dev and app-staging.podster.dev.
+
+Exit codes: 0 every probe passed, 1 a probe failed, 2 wrong usage.
+EOF
+}
+
+case "${1:-}" in
+  -h | --help) usage; exit 0 ;;
+  "") ;;
+  *) echo "staging-probes: takes no arguments, got '$1'" >&2; usage >&2; exit 2 ;;
+esac
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+failed=0
+pass() { echo "PASS $1: $2"; }
+fail() { echo "FAIL $1: $2"; failed=1; }
+
+# request METHOD URL [ACCEPT]: sets STATUS, and leaves the answer in $work/body and $work/headers. A request that
+# gets no answer has STATUS 000, which no probe accepts.
+request() {
+  local method=$1 url=$2 accept=${3:-}
+  case "$url" in
+    "$GATEWAY"/* | "$APP"/*) ;;
+    *) echo "staging-probes: refusing to request $url" >&2; exit 1 ;;
+  esac
+  : > "$work/body"
+  : > "$work/headers"
+  local args=(-q -sS --proto "=https" --max-time 30 -X "$method" -o "$work/body" -D "$work/headers" -w "%{http_code}")
+  if [ "$method" = POST ]; then args+=(-H "Content-Length: 0"); fi
+  if [ -n "$accept" ]; then args+=(-H "Accept: $accept"); fi
+  # An empty environment, so no proxy, netrc or config of the caller's applies.
+  STATUS=$(env -i PATH="$PATH" curl "${args[@]}" "$url") || STATUS=000
+  case "$STATUS" in [0-9][0-9][0-9]) ;; *) STATUS=000 ;; esac
+}
+
+request GET "$GATEWAY/api/v1/me"
+if [ "$STATUS" = 401 ]; then pass me "signed out, /api/v1/me is 401"; else fail me "/api/v1/me is $STATUS, wanted 401"; fi
+
+request POST "$GATEWAY/a2a"
+first=$STATUS
+cp "$work/body" "$work/a2a-body"
+request POST "$GATEWAY/a2a/"
+if [ "$first" = 000 ] || [ "$STATUS" = 000 ]; then
+  fail a2a "no answer from /a2a ($first) or /a2a/ ($STATUS)"
+elif [ "$first" != "$STATUS" ]; then
+  fail a2a "/a2a is $first and /a2a/ is $STATUS"
+elif ! cmp -s "$work/a2a-body" "$work/body"; then
+  fail a2a "/a2a and /a2a/ are both $first, with different bodies"
+else
+  pass a2a "/a2a and /a2a/ both answer $first with the same body"
+fi
+
+request POST "$GATEWAY/webhooks/github"
+case "$STATUS" in
+  4[0-9][0-9]) pass webhook "an unsigned delivery is refused with $STATUS" ;;
+  *) fail webhook "an unsigned delivery got $STATUS, wanted a 4xx" ;;
+esac
+
+request GET "$APP/p/pub_0000000000000000000000" "text/html"
+cache=$(tr -d '\r' < "$work/headers" | grep -i '^cache-control:' | sed 's/^[^:]*:[[:space:]]*//' || true)
+if [ "$STATUS" != 404 ]; then
+  fail public "an unknown public page is $STATUS, wanted 404"
+elif [ "$cache" != "no-store, no-transform" ]; then
+  fail public "Cache-Control is '$cache', wanted 'no-store, no-transform'"
+elif grep -qi '<script' "$work/body"; then
+  fail public "the 404 page's body has a <script"
+else
+  pass public "an unknown public page is 404, no-store, no-transform, with no script"
+fi
+
+if [ "$failed" -ne 0 ]; then echo "staging probes FAILED"; exit 1; fi
+echo "staging probes passed"

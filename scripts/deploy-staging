@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# The one way to deploy to staging: main's current tip, migrations first and only the ones named, the API then the
+# gateway (then the web app), and the signed-out probes after. The steps are docs/staging.md's.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/deploy-staging [--web] [--apply-migrations <exact-file-name>...]
+
+Deploys the API, then the gateway, to staging, and with --web the web app after them. Then it runs
+scripts/staging-probes. It deploys to staging only, and never sets a secret or a variable.
+
+It refuses, before changing anything, unless:
+
+  - CLOUDFLARE_ACCOUNT_ID is set (docs/staging.md keeps the ID out of this repo)
+  - worker-build is 0.8.7
+  - the checkout is detached at origin/main's tip after a fetch, with nothing changed or untracked
+  - no D1 migration is pending on podster-api-staging or podster-gateway-staging, or
+    --apply-migrations names exactly the pending set, by file name, such as
+    --apply-migrations 0007_repo_room_index.sql. It then applies them first and lists again.
+
+It sets CI=true, so wrangler asks nothing, and runs `npm ci` in each app it deploys.
+
+Exit codes: 0 deployed and every probe passed; 1 refused, nothing on staging changed; 2 wrong usage;
+3 stopped after it began changing staging (the output says where); 4 deployed, but a probe failed.
+EOF
+}
+
+web=false
+named=()
+taking_names=false
+for arg in "$@"; do
+  case "$arg" in
+    -h | --help) usage; exit 0 ;;
+    --web) web=true; taking_names=false ;;
+    --apply-migrations) taking_names=true ;;
+    -*) echo "deploy-staging: unknown option $arg" >&2; usage >&2; exit 2 ;;
+    *)
+      if [ "$taking_names" != true ]; then echo "deploy-staging: unexpected argument $arg" >&2; usage >&2; exit 2; fi
+      if ! [[ "$arg" =~ ^[0-9A-Za-z_][0-9A-Za-z_.-]*\.sql$ ]]; then
+        echo "deploy-staging: '$arg' is not a migration's file name, such as 0007_repo_room_index.sql" >&2
+        exit 2
+      fi
+      named+=("$arg")
+      ;;
+  esac
+done
+if [[ " $* " == *" --apply-migrations "* ]] && [ "${#named[@]}" -eq 0 ]; then
+  echo "deploy-staging: --apply-migrations needs the file names of the pending migrations" >&2
+  exit 2
+fi
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+refuse() { echo "REFUSE  $*"; echo "deploy-staging: refused, nothing on staging changed"; exit 1; }
+stop() { echo "STOPPED $*"; echo "deploy-staging: stopped part-way. Staging may have changed; read the output above."; exit 3; }
+step() { echo; echo "== $*"; }
+
+# --- what must hold before anything runs ---
+if ! [[ "${CLOUDFLARE_ACCOUNT_ID:-}" =~ ^[0-9a-f]{32}$ ]]; then
+  refuse "CLOUDFLARE_ACCOUNT_ID isn't set to an account ID. Export the account that holds podster.dev."
+fi
+if [ -n "${CLOUDFLARE_ENV:-}" ] && [ "$CLOUDFLARE_ENV" != staging ]; then
+  refuse "CLOUDFLARE_ENV is '$CLOUDFLARE_ENV'. This script deploys to staging only."
+fi
+builder=$(worker-build --version 2>/dev/null || true)
+if [ "$builder" != 0.8.7 ] && [ "$builder" != "worker-build 0.8.7" ]; then
+  refuse "worker-build is '${builder:-missing}', not 0.8.7. Run: cargo install worker-build --version 0.8.7 --locked"
+fi
+git fetch --quiet origin || refuse "could not fetch origin"
+if git symbolic-ref -q HEAD > /dev/null; then
+  refuse "the checkout is on branch $(git symbolic-ref --short HEAD). Detach at main's tip: git checkout --detach origin/main"
+fi
+here=$(git rev-parse HEAD)
+tip=$(git rev-parse --verify --quiet origin/main) || refuse "origin/main doesn't exist"
+if [ "$here" != "$tip" ]; then refuse "the checkout is at $here, and origin/main is at $tip"; fi
+if [ -n "$(git status --porcelain)" ]; then refuse "the checkout has changed or untracked files"; fi
+echo "deploying $here, origin/main's tip, to staging"
+
+export CLOUDFLARE_ACCOUNT_ID
+export CI=true
+unset CLOUDFLARE_ENV
+
+apps="api gateway"
+if [ "$web" = true ]; then apps="$apps web"; fi
+for app in $apps; do
+  step "npm ci in apps/$app"
+  (cd "apps/$app" && npm ci) || refuse "npm ci failed in apps/$app"
+done
+
+# --- migrations ---
+# pending APP DATABASE: prints the file names wrangler lists as not yet applied, one per line.
+pending() {
+  local app=$1 database=$2 out names name
+  out=$(cd "apps/$app" && npx wrangler d1 migrations list "$database" --remote --env staging) || return 1
+  names=$(printf '%s\n' "$out" | grep -o -E '[0-9A-Za-z_][0-9A-Za-z_.-]*\.sql' | sort -u || true)
+  if [ -z "$names" ]; then
+    # Only wrangler's own words count as "none": output this doesn't recognise isn't taken for an empty list.
+    printf '%s\n' "$out" | grep -q "No migrations to apply" || return 1
+    return 0
+  fi
+  for name in $names; do
+    [ -f "apps/$app/migrations/$name" ] || return 1
+  done
+  printf '%s\n' "$names"
+}
+
+step "listing D1 migrations"
+pending_api=$(pending api podster-api-staging) || refuse "could not read podster-api-staging's pending migrations"
+pending_gateway=$(pending gateway podster-gateway-staging) || refuse "could not read podster-gateway-staging's pending migrations"
+all_pending=$(printf '%s\n%s\n' "$pending_api" "$pending_gateway" | grep . | sort || true)
+all_named=$(printf '%s\n' ${named[@]+"${named[@]}"} | grep . | sort -u || true)
+echo "pending: ${all_pending:-none}" | tr '\n' ' '; echo
+if [ -n "$(printf '%s\n' "$all_pending" | uniq -d)" ]; then
+  refuse "the API and the gateway each have a pending migration with the same file name, which --apply-migrations can't tell apart"
+fi
+if [ -z "$all_pending" ] && [ -n "$all_named" ]; then
+  refuse "--apply-migrations names $(echo $all_named), and no migration is pending"
+fi
+if [ -n "$all_pending" ] && [ -z "$all_named" ]; then
+  refuse "migrations are pending: $(echo $all_pending). Name exactly these with --apply-migrations"
+fi
+if [ "$all_pending" != "$all_named" ]; then
+  refuse "--apply-migrations names $(echo $all_named), and the pending set is $(echo $all_pending). They must match exactly"
+fi
+
+apply() { # apply APP DATABASE
+  step "applying migrations to $2"
+  (cd "apps/$1" && npx wrangler d1 migrations apply "$2" --remote --env staging) || stop "applying migrations to $2 failed"
+}
+if [ -n "$all_pending" ]; then
+  if [ -n "$pending_api" ]; then apply api podster-api-staging; fi
+  if [ -n "$pending_gateway" ]; then apply gateway podster-gateway-staging; fi
+  step "listing D1 migrations again"
+  left_api=$(pending api podster-api-staging) || stop "could not read podster-api-staging's migrations after applying"
+  left_gateway=$(pending gateway podster-gateway-staging) || stop "could not read podster-gateway-staging's migrations after applying"
+  if [ -n "$left_api$left_gateway" ]; then stop "still pending after applying: $(echo $left_api $left_gateway)"; fi
+  echo "pending: none"
+fi
+
+# --- deploys: the API first, then the gateway, then the web app ---
+versions=""
+record() { # record WORKER OUTPUT-FILE
+  local version
+  version=$(sed -n 's/^Current Version ID:[[:space:]]*//p' "$2" | tail -1 | tr -d '\r')
+  if ! [[ "$version" =~ ^[0-9a-f-]{36}$ ]]; then stop "$1 deployed, but its output has no version ID"; fi
+  versions="$versions$1 $version"$'\n'
+}
+log=$(mktemp)
+trap 'rm -f "$log"' EXIT
+
+for app in api gateway; do
+  step "deploying the $app"
+  (cd "apps/$app" && npx wrangler deploy --env staging) | tee "$log" || stop "deploying the $app failed"
+  record "podster-$app-staging" "$log"
+done
+
+if [ "$web" = true ]; then
+  step "building the web app for staging"
+  rm -rf apps/web/dist
+  (cd apps/web && CLOUDFLARE_ENV=staging npm run build) || stop "building the web app failed. The API and gateway are deployed"
+  built=apps/web/dist/server/wrangler.json
+  [ -f "$built" ] || stop "the build wrote no $built. The API and gateway are deployed"
+  # The file the build writes carries no environment name, so check it is staging's before deploying it.
+  routes=$(node --input-type=commonjs -e '
+    const config = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    process.stdout.write((config.routes ?? []).map((route) => route.pattern ?? route).join(","));
+  ' "$built") || stop "could not read $built. The API and gateway are deployed"
+  if [ "$routes" != app-staging.podster.dev ]; then
+    stop "$built routes to '${routes:-nothing}', not app-staging.podster.dev alone, so it wasn't deployed. The API and gateway are deployed"
+  fi
+  step "deploying the web app"
+  (cd apps/web && npx wrangler deploy --config dist/server/wrangler.json) | tee "$log" || stop "deploying the web app failed"
+  record podster-web-staging "$log"
+fi
+
+step "deployed $here"
+printf '%s' "$versions" | while read -r worker version; do echo "version $worker $version"; done
+
+step "signed-out probes"
+if ! "$root/scripts/staging-probes"; then
+  echo "deploy-staging: deployed, but a probe FAILED"
+  exit 4
+fi
+echo "deploy-staging: deployed $here, and every probe passed"

@@ -196,6 +196,10 @@ jobs:
       # Third-party test tools (the A2A kit, fasta2a, LangGraph) get an allow-listed environment, never a secret of ours.
       - run: node child-env-selftest.mjs
         working-directory: e2e
+      # The scripts agents merge, deploy and probe with: every refusal, with stand-ins for gh, wrangler and curl.
+      - run: scripts/test/merge-gate-selftest
+      - run: scripts/test/deploy-staging-selftest
+      - run: scripts/test/staging-probes-selftest
       - run: node run-local.mjs
         working-directory: e2e
       # Staging's setup and the test sign-up, with nothing remote.

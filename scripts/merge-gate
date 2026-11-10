@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# The one way to merge a pull request: at a reviewed full sha, with every check done and green, no open code scanning
+# alert and a clean merge state. It refuses otherwise, and never fixes what it finds.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/merge-gate <pr-number> <full-40-char-head-sha> [--merge | --rerun-known-flake]
+
+With no flag it only reports. It passes when ALL of these hold, and prints each one:
+
+  - the pull request is open, not a draft, and targets main
+  - its head is exactly the given sha (40 lowercase hex characters, never abbreviated)
+  - every check has completed as SUCCESS or SKIPPED (NEUTRAL only for the check named "CodeQL")
+  - code scanning has no open alert for refs/pull/<n>/merge
+  - mergeStateStatus is CLEAN (it waits while UNKNOWN, up to a minute; anything else fails)
+
+--merge              After the gate passes, runs `gh pr merge <n> --merge --match-head-commit <sha>`
+                     (a merge commit), then waits for ci.yml on the merge commit on main and reports
+                     its conclusion.
+--rerun-known-flake  Skips the gate. Reruns the failed jobs of the head's ci.yml run, once, and only
+                     when the run is on its first attempt and its only failed job is
+                       web, with "database is locked" in its failed log, or
+                       api, with the alarm test in kernel.spec.ts as its only failing test.
+                     Anything else it refuses, and says why.
+
+It never dismisses an alert, resolves a conflict, updates a branch or reruns anything else.
+
+Exit codes: 0 passed (and, with --merge, main's CI succeeded); 1 refused; 2 wrong usage;
+3 merged, but main's CI did not succeed; 4 merged, but main's CI did not finish in time.
+EOF
+}
+
+mode=report
+positional=()
+for arg in "$@"; do
+  case "$arg" in
+    -h | --help) usage; exit 0 ;;
+    --merge | --rerun-known-flake)
+      if [ "$mode" != report ]; then echo "merge-gate: give one of --merge and --rerun-known-flake, once" >&2; exit 2; fi
+      mode=${arg#--}
+      ;;
+    -*) echo "merge-gate: unknown option $arg" >&2; usage >&2; exit 2 ;;
+    *) positional+=("$arg") ;;
+  esac
+done
+if [ "${#positional[@]}" -ne 2 ]; then usage >&2; exit 2; fi
+pr=${positional[0]}
+sha=${positional[1]}
+if ! [[ "$pr" =~ ^[1-9][0-9]*$ ]]; then echo "merge-gate: '$pr' is not a pull request number" >&2; exit 2; fi
+if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "merge-gate: '$sha' is not a full sha. Give all 40 lowercase hex characters of the reviewed head." >&2
+  exit 2
+fi
+
+problems=0
+ok() { echo "ok      $*"; }
+bad() { echo "REFUSE  $*"; problems=$((problems + 1)); }
+refuse() { echo "REFUSE  $*"; echo "merge-gate: refused"; exit 1; }
+tab=$'\t'
+
+# The pull request itself, and its head. Both modes need these.
+pull=$(gh pr view "$pr" --json state,isDraft,baseRefName,headRefOid \
+  --jq '[.state, (.isDraft | tostring), .baseRefName, .headRefOid] | @tsv') || refuse "could not read pull request #$pr"
+IFS=$tab read -r state draft base head <<< "$pull"
+echo "pull request #$pr at $head"
+if [ "$state" = OPEN ]; then ok "it is open"; else bad "it is $state, not open"; fi
+if [ "$draft" = false ]; then ok "it is not a draft"; else bad "it is a draft"; fi
+if [ "$base" = main ]; then ok "it targets main"; else bad "it targets $base, not main"; fi
+if [ "$head" = "$sha" ]; then ok "its head is the given sha"; else bad "its head is $head, not the given $sha"; fi
+
+rerun_known_flake() {
+  if [ "$problems" -ne 0 ]; then echo "merge-gate: refused, nothing was rerun"; exit 1; fi
+  local run id status conclusion attempt jobs job
+  run=$(gh run list --workflow ci.yml --commit "$sha" --event pull_request --limit 1 \
+    --json databaseId,status,conclusion,attempt \
+    --jq '.[] | [(.databaseId | tostring), .status, (if (.conclusion // "") == "" then "none" else .conclusion end), (.attempt | tostring)] | @tsv') \
+    || refuse "could not list ci.yml runs for $sha"
+  if [ -z "$run" ]; then refuse "there is no ci.yml run for $sha"; fi
+  IFS=$tab read -r id status conclusion attempt <<< "$run"
+  echo "ci.yml run $id: $status, $conclusion, attempt $attempt"
+  if [ "$status" != completed ]; then refuse "the run is still $status"; fi
+  if [ "$conclusion" != failure ]; then refuse "the run's conclusion is $conclusion, not failure"; fi
+  if [ "$attempt" != 1 ]; then refuse "the run is on attempt $attempt. A known flake is rerun once, and this one has been"; fi
+
+  jobs=$(gh run view "$id" --json jobs \
+    --jq '.jobs[] | select(.conclusion != "success" and .conclusion != "skipped") | .name') \
+    || refuse "could not read the run's jobs"
+  if [ -z "$jobs" ]; then refuse "the run has no failed job"; fi
+  if [ "$(printf '%s\n' "$jobs" | wc -l | tr -d ' ')" -ne 1 ]; then
+    refuse "more than one job did not pass: $(printf '%s' "$jobs" | tr '\n' ' ')"
+  fi
+  job=$jobs
+
+  # Not local: the trap runs after this function has returned.
+  log=$(mktemp)
+  trap 'rm -f "$log"' EXIT
+  gh run view "$id" --log-failed > "$log" || refuse "could not read the failed log"
+  # Colour codes would hide the words this looks for.
+  sed -i.raw $'s/\x1b\\[[0-9;]*m//g' "$log" && rm -f "$log.raw"
+
+  case "$job" in
+    web)
+      grep -q "database is locked" "$log" || refuse "web failed, and its log has no \"database is locked\""
+      ok "the only failed job is web, with \"database is locked\" in its log"
+      ;;
+    api)
+      local failing
+      failing=$(sed -n 's/^.* FAIL  *\([^ ].* > .*\)$/\1/p' "$log" | sort -u)
+      grep -q -E 'Test Files +1 failed' "$log" || refuse "api failed, and not with exactly one failed test file"
+      grep -q -E 'Tests +1 failed' "$log" || refuse "api failed, and not with exactly one failed test"
+      if [ "$(printf '%s\n' "$failing" | grep -c .)" -ne 1 ]; then refuse "api failed, and its log does not name exactly one failing test"; fi
+      case "$failing" in
+        "test/kernel.spec.ts > "*) ;;
+        *) refuse "api's failing test is not in kernel.spec.ts: $failing" ;;
+      esac
+      printf '%s\n' "${failing#test/kernel.spec.ts > }" | grep -q -i alarm \
+        || refuse "api's failing test is not the alarm test: $failing"
+      ok "the only failed job is api, and its only failing test is $failing"
+      ;;
+    *) refuse "the failed job is $job, which has no known flake" ;;
+  esac
+
+  gh run rerun "$id" --failed || refuse "the rerun was not accepted"
+  echo "merge-gate: reran the failed job of run $id once. Run the gate again when it finishes."
+}
+
+if [ "$mode" = rerun-known-flake ]; then
+  rerun_known_flake
+  exit 0
+fi
+
+# Code scanning. An answer that isn't a list, or no answer, counts as not clean.
+alerts=$(gh api "repos/{owner}/{repo}/code-scanning/alerts?ref=refs/pull/$pr/merge&state=open" \
+  --jq 'if type == "array" then length else error("not a list") end') || alerts=unknown
+case "$alerts" in
+  0) ok "code scanning has no open alert" ;;
+  unknown | "") bad "could not read code scanning alerts" ;;
+  *) bad "code scanning has $alerts or more open alerts" ;;
+esac
+
+# Checks, read together with the head they belong to.
+rollup=$(gh pr view "$pr" --json headRefOid,statusCheckRollup --jq '
+  .headRefOid,
+  (.statusCheckRollup[] |
+    if .__typename == "StatusContext"
+    then [.context, (if .state == "PENDING" or .state == "EXPECTED" then "PENDING" else "COMPLETED" end), .state]
+    else [.name, .status, (if (.conclusion // "") == "" then "NONE" else .conclusion end)]
+    end | @tsv)') || rollup=
+checked_head=$(printf '%s\n' "$rollup" | sed -n 1p)
+checks=$(printf '%s\n' "$rollup" | sed 1d)
+if [ -z "$rollup" ]; then
+  bad "could not read the checks"
+elif [ "$checked_head" != "$sha" ]; then
+  bad "the head moved to $checked_head while reading the checks"
+elif [ -z "$checks" ]; then
+  bad "no check has reported"
+else
+  while IFS=$tab read -r name status conclusion; do
+    if [ "$status" != COMPLETED ]; then
+      bad "check $name is $status"
+    elif [ "$conclusion" = SUCCESS ] || [ "$conclusion" = SKIPPED ]; then
+      ok "check $name: $conclusion"
+    elif [ "$conclusion" = NEUTRAL ] && [ "$name" = CodeQL ] && [ "$alerts" = 0 ]; then
+      ok "check CodeQL: NEUTRAL, with no open alert"
+    else
+      bad "check $name: $conclusion"
+    fi
+  done <<< "$checks"
+fi
+
+# GitHub works the merge state out after a push, so UNKNOWN is waited on, for a minute at most.
+tries=0
+while :; do
+  merge_state=$(gh pr view "$pr" --json mergeStateStatus --jq .mergeStateStatus) || merge_state=UNREADABLE
+  tries=$((tries + 1))
+  if [ "$merge_state" != UNKNOWN ] || [ "$tries" -ge 10 ]; then break; fi
+  echo "        merge state is UNKNOWN, asking again ($tries of 10)"
+  sleep 6
+done
+if [ "$merge_state" = CLEAN ]; then ok "merge state is CLEAN"; else bad "merge state is $merge_state, not CLEAN"; fi
+
+if [ "$problems" -ne 0 ]; then
+  echo "merge-gate: refused, $problems problem(s). Nothing was merged."
+  exit 1
+fi
+if [ "$mode" = report ]; then
+  echo "merge-gate: passed at $sha. Nothing was merged; add --merge to merge."
+  exit 0
+fi
+
+echo "merging #$pr with a merge commit, only if its head is still $sha"
+gh pr merge "$pr" --merge --match-head-commit "$sha" || refuse "the merge was not accepted"
+
+merged=
+tries=0
+while [ "$tries" -lt 10 ]; do
+  merged=$(gh pr view "$pr" --json state,mergeCommit --jq 'select(.state == "MERGED") | .mergeCommit.oid // ""') || merged=
+  if [[ "$merged" =~ ^[0-9a-f]{40}$ ]]; then break; fi
+  merged=
+  tries=$((tries + 1))
+  sleep 6
+done
+if [ -z "$merged" ]; then echo "merge-gate: merged, but the merge commit could not be read. Check main's CI yourself."; exit 4; fi
+echo "merged as $merged. Waiting for ci.yml on main."
+
+# The web job alone may take 25 minutes. This asks every 30 seconds for 45.
+tries=0
+while [ "$tries" -lt 90 ]; do
+  run=$(gh run list --workflow ci.yml --branch main --event push --commit "$merged" --limit 1 \
+    --json databaseId,status,conclusion,url \
+    --jq '.[] | [(.databaseId | tostring), .status, (if (.conclusion // "") == "" then "none" else .conclusion end), .url] | @tsv') || run=
+  if [ -n "$run" ]; then
+    IFS=$tab read -r id status conclusion url <<< "$run"
+    if [ "$status" = completed ]; then
+      echo "ci.yml on main for $merged: $conclusion ($url)"
+      if [ "$conclusion" = success ]; then echo "merge-gate: merged, and main's CI succeeded"; exit 0; fi
+      echo "merge-gate: merged, and main's CI did NOT succeed. Nothing was rerun."
+      exit 3
+    fi
+  fi
+  tries=$((tries + 1))
+  sleep 30
+done
+echo "merge-gate: merged as $merged, but ci.yml on main did not finish in 45 minutes"
+exit 4

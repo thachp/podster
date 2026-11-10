@@ -56,11 +56,12 @@ The architect proposes the gate call, for the owner to review.
 | --- | --- | --- |
 | 1 | **ADR 0009 and the spike.** The ADR settles everything the architecture leaves "open for the ADR". The spike ran against `podsterx` and then `podsterdev`, and answers the [risks](#risks-to-test). | **Drafted, 2026-11-10.** [ADR 0009](adr/0009-managed-repositories.md) is a proposal: it settles or leaves open each item by name, and it proposes the merge path from the spike's [merge-restriction run](../spikes/m5-github/README.md#results-merge-restriction). [The spike ran](../spikes/m5-github/README.md#results-2026-11-10) against `podsterx` and answered every risk except webhooks (risk 8). Its [three-Apps run](../spikes/m5-github/README.md#results-three-apps) was on `podsterdev`. The spike's code stays in `spikes/` and nothing builds on it. |
 | 2 | **Contracts and migration:** `repo_link`, `provider_grant`, `task_change` and a provisioning request, with `get_repo_access`, `get_task_release_status` and `merge_task` in `capabilities.yaml` and their routes in `openapi.yaml`. The room's Durable Object owns all four as state, because grants are authority. D1 gets at most a projection for lists, which never authorizes. | One contract and migration PR at a time. **Built, 2026-11-10, in part,** and checked locally only: the room's five tables and the person-only repository read. **The three capabilities and their routes aren't in it.** `get_repo_access` ships with step 6, `merge_task` with step 7 and `get_task_release_status` with step 8, each as its own contract change with its code. [What was built and what wasn't](#step-2-what-was-built) is below. |
-| 3 | **Decisions in `crates/core` and `crates/policy`:** grant checks, `commit_sha` required on `submit_task` and `verify_task` for a linked task, `commit_changed`, and merge as its own state. Pure, with no I/O. | AC-31 is decided here, and AC-17's rule that approval alone never merges. |
+| 3 | **Decisions in `crates/core` and `crates/policy`:** grant checks, `commit_sha` required on `submit_task` and `verify_task` for a linked task, `commit_changed`, and merge as its own state. Pure, with no I/O. | AC-31 is decided here, and AC-17's rule that approval alone never merges. **Built, 2026-11-10,** as pure decisions with their tests, checked locally only. Nothing calls them yet. **Granting is the room owner's alone:** an admin has room authority and not the repository's delegation. **Revoking** is the owner's, an organization admin's, or the holder's for their own. [What was built, the architect's rulings and what later steps own](#step-3-what-was-built) is below. |
 | 4 | **Provisioning:** room setup records a request; a job creates the repository, sets its protections and records the verified repository ID. Pending, ready, failed and uncertain states for the request, and ready, degraded and suspended for the link. An unknown outcome is a failed setup: nothing is adopted by name, and a retry uses a new server-generated name. | A failed setup blocks coding tasks in that room, not other work. |
 | 5 | **Webhooks:** the gateway verifies GitHub's signature and passes a normalized observation to the room's Durable Object, which records it with its observation time. A job polls when state looks stale. | A new public route on the gateway. It authenticates the sender and decides nothing. |
+| 5b | **Grant and revoke commands:** the routes in `apps/api` that give and take back a `push` or `merge` grant on the room's repository, with their contract entries. They call step 3's decisions, and the removal and ownership commands call its two revocation decisions. | **Ruled by the architect on 2026-11-10:** its own step, before step 6, since step 6 can't issue a token without a grant. Person-facing only, with no agent tool. A contract PR, so it merges one at a time with the others. |
 | 6 | **`get_repo_access`:** the private Rust API mints a token for one repository after rechecking the task and its run, the fixed deadline and budget, the agent's assignment and connection, room access, the exact repository and installation, the grant and the provider permissions. Renewal runs the same checks. | Tokens never reach events, logs, D1 or the gateway's storage. The room's Durable Object holds each one sealed for at most its hour, for revocation only, as ADR 0009 proposes. AC-27. This step adds the capability and its route to the contract. **Open ruling for this step:** whether `get_repo_access` takes an idempotency key. A stored answer would hold the token, which must rest nowhere but the sealed copy, and no key leaves a retry to the one-live-token rule. |
-| 7 | **`merge_task`:** the job rechecks authority, re-reads the pull request's base, head repository and head commit and refuses on any difference from the reviewed values, marks the reviewed commit, merges with its `sha` as a merge commit, confirms the default branch contains it, and records success or failure. A changed commit leads to a follow-up task, as decision 25 proposes. | Under ADR 0009's two rulesets, only the merge App can update the default branch. A retry reads the pull request's merged state, since a second merge call answers `200`. This step adds the capability and its route to the contract. **It must deliberately revisit AC-17's assertion in `e2e/journey.mjs`,** which fails today if any tool an agent sees is named for merge or deploy. A merge tool will exist from this step on. The property to keep is that approval alone never merges, and only an authorized `merge_task` does. That change gets a deeper review. |
+| 7 | **`merge_task`:** the job rechecks authority, re-reads the pull request's base, head repository and head commit and refuses on any difference from the reviewed values, marks the reviewed commit, merges with its `sha` as a merge commit, confirms the default branch contains it, and records success or failure. A changed commit leads to a follow-up task, as decision 25 proposes. | Under ADR 0009's two rulesets, only the merge App can update the default branch. A retry reads the pull request's merged state, since a second merge call answers `200`. This step adds the capability and its route to the contract. **It must deliberately revisit AC-17's assertion in `e2e/journey.mjs`,** which fails today if any tool an agent sees is named for merge or deploy. A merge tool will exist from this step on. The property to keep is that approval alone never merges, and only an authorized `merge_task` does. That change gets a deeper review. **Order of checks:** the route must run policy's `authorize_merge`, which hides a task the caller can't see, before core's `check_merge_authority`, because core answers `task_not_linked` and `repo_not_ready` before it looks at the grant. The same holds for step 6 with `authorize_repo_access` and `decide_access`. |
 | 8 | **`get_task_release_status`:** checks and merge state, each with its own observation time. | Reports that no release exists; M6 adds releases. This step adds the capability and its route to the contract. |
 | 9 | **Screens**, in two PRs: (a) the Git option in room setup and the repository's state; (b) grants in Manage access and a task's change and merge state. | Unavailable grants show as unavailable, never silently provisioned. |
 | 10 | **Staging run and security review,** then the gate call. | A script against staging with test people, in `podsterdev`. |
@@ -91,6 +92,77 @@ The architect proposes the gate call, for the owner to review.
 - **A D1 projection.** ADR 0009 allows a lookup from a repository ID to its room, to route a webhook. Step 5 adds it if it needs it. Nothing reads D1 for repositories today.
 
 **Checked:** the workspace's Rust tests, the API's and the gateway's suites, the contract check and the local journey, all locally. Nothing ran against a deployment, so no acceptance test counts as passed.
+
+### Step 3: what was built
+
+Pure decisions in `crates/core` and `crates/policy`, with no I/O, no clock and no randomness. No route, migration or contract changed, so nothing calls them yet.
+
+**Built:**
+
+- **Grants** (`core::repo_grants`, `policy::repositories`).
+  - **Giving** a grant is the room owner's alone. It needs room authority, which a human owner or admin has, and the repository's delegation, which only the owner holds, as a person whose owner authority still holds. So an admin gets `no_provider_delegation` (AC-10), and someone with a delegation who doesn't administer the room gets `not_allowed` (AC-11).
+  - **Taking one back** follows ruling C below: the room's owner, a person who administers the room's organization, or the holder for their own.
+  - A grant goes to a current participant, person or agent. It may carry an expiry, which must be in the future.
+  - Granting again after an expiry, with a new expiry, or over a row an earlier owner gave, revokes the old row and adds one in the same transaction, since step 2's index counts an expired row as the principal's one grant. Granting the same thing again changes nothing.
+  - A grant counts only while it's live, held by that principal, for exactly that action on exactly the room's own repository, and given by whoever holds the delegation now: `grant_required`, `grant_expired` or `grant_stale` otherwise (AC-05, ruling B).
+  - Two decisions name the grants to revoke: every grant a removed participant holds, and, when ownership moves, every grant the new owner didn't give. The commands that call them are in `apps/api` and aren't changed here.
+  - Someone in the room through a public claim uses no grant, checked at every use and not only when granting: `public_participant`.
+- **Commit pinning** (`core::decide`). On a linked task, `submit_task` and `verify_task` take only a full commit ID. Approval fails with `commit_changed` when its commit isn't the submission's or the observed head has moved (AC-31, M5-08). Approval is one event and asks for no merge (AC-17).
+- **Merge** (`core::repo_merge`).
+  - Asking for a merge needs a requester who is still in the room and connected, a ready repository, a requester not controlled by the submitter's person (`self_merge`, ruling A), a `merge` grant that counts, and the approved submission with its commit. Who is asking and the grant are checked before the task's review, so an approved task without the grant is refused like any other (AC-17, M5-10).
+  - The same check runs again in the job. A requester removed from the room since asking fails the merge with `access_revoked`, though their grant row survives.
+  - The merge state moves `not_requested` or `failed` to `requested`, and `requested` to `succeeded` or `failed`.
+  - **Success is bound to an observation.** Only the authority check makes the proof the job's step decision needs, and only that step decision makes the proof the move to `succeeded` needs, for that same task. So no success is recorded without a recheck and a read of GitHub behind it.
+  - The job's next step comes from a fresh read of the pull request. Any difference in base branch, head repository or head commit fails the merge with nothing marked. A moved base still merges and is reported. Success is read only from the pull request's merged state and the default branch holding the reviewed commit, never from the merge call's answer.
+  - A changed head is `merge.failed` with `commit_changed` (M5-09), and asking again is then refused: the way on is a follow-up task (decision 25). Other failures can be asked for again.
+  - A merge GitHub shows that Podster didn't ask for, or of a commit nobody approved, gets its own reason code. The approved commit is read from the task itself, never handed in.
+- **An agent's token** (`core::repo_access`): the pure part of `get_repo_access`. It checks the agent, its room access and connection, its assignment, the linked and accepted task, the ready repository, the deadline, the budget and a `push` grant that counts. A refusal means nothing is asked of GitHub (M5-05). A renewal is the same decision (M5-07, AC-27).
+  - The room's held token is returned until 5 minutes before it expires, and only under the grant row it was minted for. After a re-grant a new one is minted. So an agent has one live token for a task.
+  - The deadline is one of three: a time, explicitly none, or unknown. Unknown refuses, `deadline_unknown`. The budget is the same, `budget_unknown`.
+  - GitHub's answer must name exactly the one repository and the three permissions asked for.
+- **Setup rules** (`core::repositories`): only a ready link lets coding work go on, and a failed, uncertain, pending, degraded or suspended one answers `repo_not_ready` with its reason. A task with no linked repository is never blocked (M5-15). A retry resumes on a repository whose ID Podster holds, and otherwise needs a new, valid name that no earlier attempt sent (M5-03). A repository's name is validated as ADR 0009 says.
+- **Visibility** (`policy::repositories`): the room's repository is seen by a person who sees the whole room, a grant by a human owner or admin and by its holder, and a task's change by whoever sees the task.
+
+**Order of checks, for steps 6 and 7.** A route runs the policy function, `authorize_repo_access` or `authorize_merge`, before the core decision. Policy answers `task_not_found` to a caller who can't see the task. The core decisions answer `task_not_linked` and `repo_not_ready` before they look at a grant, so run alone they'd tell such a caller something about the task.
+
+**Rulings, proposed by the architect on 2026-11-10.** They aren't in `PRODUCT.md` yet.
+
+- **A. The submitter rule compares controlling people, not IDs.** A person controls themselves, and an agent is controlled by the person who owns it. A merger's controlling person must differ from the submitter's. So the submitting agent's owner, and any other agent of that owner, are refused with `self_merge`, as the submitter is. This is what M5-10's "a reviewer can't merge their own work" means: a reviewer may merge what they approved only with a merge grant and only if a different person controls them. Someone whose controlling person the room can't name is refused.
+- **B. A grant rests on its giver.** It counts at use only if whoever gave it, the row's `delegated_by`, is still the current delegation holder and that holder's authority still holds. A room whose ownership moves has no usable grants until the new owner grants again, and the old rows are revoked.
+- **C. Who takes a grant back.** The room's owner may revoke any grant. A person who administers the room's organization may revoke any grant, so one can be pulled when the owner has left. A grant's holder may drop their own. Nobody else, and an agent never revokes another principal's grant.
+- **D. Removing a participant revokes their grants.** Someone who comes back holds nothing until they're granted again.
+
+**Choices made where the specs were open,** each the reading closest to ADR 0009:
+
+1. The delegation is the current room owner's alone. No spec lets an owner pass it on, so an admin can't grant.
+2. A grant can be given while the link is degraded or suspended, since nothing uses it until the link is ready. With no link it's refused, `repo_not_linked`.
+3. `get_repo_access` is for agents only, and only for the task's assignee while the task is accepted.
+4. A held token is replaced 5 minutes before its expiry. ADR 0009 says "near expiry" and gives no number.
+5. `merge_task` doesn't consult the last observed head. The job's own read decides, so a moved head is a recorded `merge.failed`, as M5-09 asks, and never a refused request.
+6. After a `commit_changed` failure, `merge_task` on that task is refused for good, even if the branch is later put back.
+7. A merged pull request counts as success only once the default branch is seen to hold the reviewed commit. Until then the job reads again.
+8. `grantee_public`, when granting, isn't counted as a refusal of authority: the giver has the authority and named the wrong grantee. `public_participant`, at use, is.
+
+**Left as a named refusal, because no spec decides it:**
+
+- **A grant to someone in the room through a public claim** is refused, `grantee_public`, and such a participant uses none, `public_participant`. AC-24 says a claim brings no repository authority, and nothing says whether an explicit grant may.
+
+**Gaps, passed to the steps that need them:**
+
+- **The deadline and the budget.** No spec says what a task's fixed deadline is on the server or where a budget is kept, and RUNNER.md lists server-trusted deadlines as unresolved. Step 6 must rule on both, and must pass "explicitly none" on purpose: until it does, the honest input is unknown, which refuses every token.
+- **Who controls an agent.** Ruling A needs the owning person of each agent, read by the room. Steps 5b and 7 must supply it from the agent's `Principal`.
+- **How many times the merge job reads again** before giving up isn't decided here. Step 7 owns the cap.
+
+**Not built, and left to the step named:**
+
+- **Step 4:** the command that records a request, the organization's provisioning delegation, the provisioning job and its creation-answer handling, generating a retry's name, and whether a blocked coding task can still be created or accepted.
+- **Step 5b:** the commands that give and take back a grant, with their routes and contract entries. Also calling the two revocation decisions from the removal and ownership commands in `apps/api`.
+- **Step 6:** the capability and route, reading the inputs from the room and the agent's `Principal`, minting, sealing, the alarm, revocation on a refusal, and the idempotency ruling.
+- **Step 7:** the capability and route, recording `task_change` and its pull request, the outbox job that calls GitHub, the events, and AC-17's assertion in `e2e/journey.mjs`.
+- **Step 8:** the status read.
+- **Steps 5 and 7:** recording an observed merge with its reason code.
+
+**Checked:** the workspace's formatting, lints and Rust tests, and the API's suite, locally. Nothing ran against a deployment, so no acceptance test counts as passed.
 
 Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security-sensitive: a provisioning credential, a new public route, token issuing and merge. Each gets the deeper review the owner has already agreed for security-sensitive steps; anything deeper than that is asked first.
 
@@ -128,7 +200,7 @@ Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security
 | M5-07 | After the agent is revoked, the task ends or the deadline passes, renewal is denied. What the already-issued token can still do, and for how long, is measured and written down. |
 | M5-08 | A submission records its commit. After the branch advances, approval fails with `commit_changed`. |
 | M5-09 | `merge_task` merges the reviewed commit. With a changed head it records `merge.failed` with `commit_changed`, and the task stays completed. |
-| M5-10 | An approved task without a separate merge grant can't be merged, and a reviewer can't merge their own work. |
+| M5-10 | An approved task without a separate merge grant can't be merged, and a reviewer can't merge their own work. That means controlling people: nobody merges work whose submitter answers to the same person they do, so a reviewer merges only with the grant and only if a different person controls them ([ruling A](#step-3-what-was-built)). |
 | M5-11 | A webhook with a bad signature is refused. A lost webhook is repaired by polling. |
 | M5-12 | Checks and merge are reported separately, each with its time, including a failed check and a failed merge. With Actions off, which is proposed and not currently true, the failed check is a test status posted by a test App or token. |
 | M5-13 | Logs from every Worker during the run hold IDs and reason codes only: no token, no repository content. |

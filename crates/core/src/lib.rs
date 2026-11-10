@@ -13,6 +13,9 @@ pub mod expected_outputs;
 pub mod files;
 pub mod public_claims;
 pub mod removal;
+pub mod repo_access;
+pub mod repo_grants;
+pub mod repo_merge;
 pub mod repositories;
 pub mod submission_files;
 
@@ -778,7 +781,7 @@ pub fn decide(
                 return Err(CoreError::InvalidArgument("artifacts"));
             }
             require_reference(&commit_sha, "commit_sha")?;
-            if task.has_linked_repository && commit_sha.is_none() {
+            if task.has_linked_repository && !repositories::names_commit(&commit_sha) {
                 return Err(CoreError::InvalidArgument("commit_sha"));
             }
             if let (Some(head), Some(sha)) = (&observed.head_sha, &commit_sha) {
@@ -842,7 +845,7 @@ pub fn decide(
                 }
             }
             if task.has_linked_repository {
-                if commit_sha.is_none() {
+                if !repositories::names_commit(&commit_sha) {
                     return Err(CoreError::InvalidArgument("commit_sha"));
                 }
                 if commit_sha != task.submission_commit {

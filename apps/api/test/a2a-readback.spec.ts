@@ -830,3 +830,26 @@ describe("a server that answers once done (decision 174)", () => {
     expect((await held(room, attempt.id))[0]).toMatchObject({ note: null });
   });
 });
+
+describe("as an A2A client (VER-CLIENT-001 and 002)", () => {
+  it("sends A2A-Version 1.0, Major.Minor with no patch, on every request: the send, each read, the history follow-up and the cancel", async () => {
+    // One offer read to COMPLETED with no artifacts, so the history follow-up goes out too.
+    const a = await sentOffer();
+    await must(a.agent, "POST", `/v1/workspaces/${a.room}/tasks/${a.task.id}/accept`, { version: a.task.version });
+    await script(a.remote, [task(a.remote, "TASK_STATE_WORKING"), task(a.remote, "TASK_STATE_COMPLETED"), { ...task(a.remote, "TASK_STATE_COMPLETED"), history: [] }]);
+    await readOnce(a.room, a.attempt.id);
+    await readOnce(a.room, a.attempt.id);
+    // Another canceled while the remote works, so CancelTask goes out.
+    const b = await sentOffer();
+    await script(b.remote, [task(b.remote, "TASK_STATE_WORKING")]);
+    await readOnce(b.room, b.attempt.id);
+    const now = await taskRow(b.room, b.task.id);
+    await must(LEAD, "POST", `/v1/workspaces/${b.room}/tasks/${b.task.id}/cancel`, { version: now.version, reason: "Done." });
+    await fireAlarm(b.room);
+    await SELF.fetch("https://api.internal/test/consume-a2a", { method: "POST", body: JSON.stringify({ ws: b.room, attempt: b.attempt.id, agent: b.agent.id, kind: "cancel" }) });
+    const sent = [...(await sentTo(a.url)), ...(await sentTo(b.url))];
+    const calls = sent.map((r) => { const body = JSON.parse(r.body); return body.params?.historyLength === 1 ? "GetTask:history" : body.method; });
+    expect(calls).toEqual(["SendMessage", "GetTask", "GetTask", "GetTask:history", "SendMessage", "GetTask", "CancelTask"]);
+    expect(sent.map((r) => r.a2aVersion)).toEqual(sent.map(() => "1.0"));
+  });
+});

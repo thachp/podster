@@ -687,3 +687,49 @@ describe("the review's findings (M5 step 6)", () => {
   });
 });
 
+describe("the re-review's lows (M5 step 6 follow-up)", () => {
+  it("keeps a row the current key can't open waiting while the previous secret is set but malformed (a)", async () => {
+    const r = await room();
+    const first = (await access(AGENT, r.id, r.task)).body.token;
+    await setKeys(r.id, NEW_KEY, "not-a-key");
+    // At a request: refused for now, and the row is kept.
+    const asked = await access(AGENT, r.id, r.task);
+    expect([asked.status, asked.code]).toEqual([503, "repo_access_unavailable"]);
+    expect((await tokens(r.id)).map((t) => t.state)).toEqual(["held"]);
+    // In the alarm: a row to revoke waits and is retried, never dropped as unrevocable.
+    await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) });
+    await alarm(r.id);
+    const [row] = await inRoom(r.id, (sql) => sql.exec("SELECT state, revoke_attempts FROM repo_token").toArray() as any[]);
+    expect(row.state).toBe("revoke");
+    expect(await events(r.id, "repo_token.unrevocable")).toEqual([]);
+    // Once the previous secret is fixed, the token is revoked.
+    await setKeys(r.id, NEW_KEY, OLD_KEY);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_token SET revoke_next_at = 0"));
+    await eventually(r.id, async () => expect(await minted()).toEqual([expect.objectContaining({ token: first, live: false })]));
+    // With no previous secret at all, the same row would have been recorded and dropped: see the M2 tests above.
+  });
+
+  it("refuses to mint when the agent App is the provisioning App or the merge App, end to end (b)", async () => {
+    for (const [name, id] of [["GITHUB_PROVISION_APP_ID", GH.provisionAppId], ["GITHUB_MERGE_APP_ID", GH.mergeAppId]] as const) {
+      const r = await room();
+      await inRoom(r.id, (sql) => {
+        sql.exec("CREATE TABLE test_github_vars (name TEXT, value TEXT)");
+        sql.exec("INSERT INTO test_github_vars (name, value) VALUES ('GITHUB_AGENT_APP_ID', ?)", String(id));
+      });
+      const refused = await access(AGENT, r.id, r.task);
+      expect([refused.status, refused.code], name).toEqual([503, "repo_access_unavailable"]);
+      expect(await minted(), name).toEqual([]);
+      // Its own installation, the provisioning one, is refused the same way.
+      await inRoom(r.id, (sql) => {
+        sql.exec("DELETE FROM test_github_vars");
+        sql.exec("INSERT INTO test_github_vars (name, value) VALUES ('GITHUB_AGENT_INSTALLATION_ID', ?)", String(GH.installationId));
+      });
+      expect((await access(AGENT, r.id, r.task)).code, name).toBe("repo_access_unavailable");
+      // And with the table empty, the same room mints: the refusal was the configuration's.
+      await inRoom(r.id, (sql) => sql.exec("DELETE FROM test_github_vars"));
+      expect((await access(AGENT, r.id, r.task)).status, name).toBe(200);
+      await freshRepo();
+    }
+  });
+});
+

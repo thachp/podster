@@ -57,6 +57,14 @@ fn number(env: &Env, name: &str) -> Option<i64> {
         .filter(|n| *n > 0)
 }
 
+/// A variable's or secret's value by name, or `None`.
+pub fn lookup(env: &Env, name: &str) -> Option<String> {
+    env.var(name)
+        .ok()
+        .map(|v| v.to_string())
+        .or_else(|| secret(env, name))
+}
+
 /// A secret's value, or `None`.
 fn secret(env: &Env, name: &str) -> Option<String> {
     env.secret(name).ok().map(|v| v.to_string())
@@ -600,21 +608,31 @@ impl AgentConfig {
     /// App, not provisioning's installation, and not signed with provisioning's key. The caller says only that tokens
     /// aren't configured.
     pub fn from_env(env: &Env) -> Option<AgentConfig> {
-        let key_pem = secret(env, "GITHUB_AGENT_APP_KEY")?;
+        AgentConfig::from_lookup(&|name: &str| lookup(env, name))
+    }
+
+    /// The same, from any source of the Worker's variables and secrets by name.
+    pub fn from_lookup(get: &dyn Fn(&str) -> Option<String>) -> Option<AgentConfig> {
+        let number = |name: &str| {
+            get(name)
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|n| *n > 0)
+        };
+        let key_pem = get("GITHUB_AGENT_APP_KEY")?;
         pkcs8_from_pem(&key_pem).is_some().then_some(())?;
         let config = AgentConfig {
-            app_id: number(env, "GITHUB_AGENT_APP_ID")?,
-            installation_id: number(env, "GITHUB_AGENT_INSTALLATION_ID")?,
+            app_id: number("GITHUB_AGENT_APP_ID")?,
+            installation_id: number("GITHUB_AGENT_INSTALLATION_ID")?,
             key_pem,
         };
         let distinct = app_is_distinct(
             (config.app_id, config.installation_id),
             &[
-                number(env, "GITHUB_PROVISION_APP_ID"),
-                number(env, "GITHUB_MERGE_APP_ID"),
+                number("GITHUB_PROVISION_APP_ID"),
+                number("GITHUB_MERGE_APP_ID"),
             ],
-            &[number(env, "GITHUB_PROVISION_INSTALLATION_ID")],
-        ) && secret(env, "GITHUB_PROVISION_APP_KEY").as_deref()
+            &[number("GITHUB_PROVISION_INSTALLATION_ID")],
+        ) && get("GITHUB_PROVISION_APP_KEY").as_deref()
             != Some(config.key_pem.as_str());
         if !distinct {
             console_error!("repo_token.app_not_distinct");

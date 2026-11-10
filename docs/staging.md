@@ -287,7 +287,9 @@ cd apps/api && npx wrangler secret put REPO_TOKEN_KEY --env staging
 cd apps/api && npx wrangler secret delete REPO_TOKEN_KEY_PREVIOUS --env staging
 ```
 
-A sealed token that opens with neither key is recorded as `repo_token.unrevocable`, by its row's ID only, and dropped. The agent gets a new token at its next call. The old one can't be revoked and lives out its hour.
+A sealed token that opens with neither key is recorded as `repo_token.unrevocable`, by its row's ID only, and dropped. The agent gets a new token at its next call. The old one can't be revoked and lives out its hour. If `REPO_TOKEN_KEY_PREVIOUS` is set but isn't 64 hex characters, nothing is dropped: those rows wait, the log says `key_invalid`, and they're revoked once it's fixed.
+
+**Switching managed repositories off** doesn't wake the rooms. Each room revokes its tokens at its next alarm, within the hour. Keep `REPO_TOKEN_KEY` and the agent-token App's ID, installation ID and key set for at least 65 minutes after setting `MANAGED_REPOSITORIES` to anything but `true`, or the tokens still out can't be revoked.
 
 ## Operators
 

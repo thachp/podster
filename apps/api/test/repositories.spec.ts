@@ -84,11 +84,14 @@ describe("the managed repositories migration", () => {
     const { id, task } = await room();
     const newest = await schemaVersion(id);
     // Back to the release before this one: the tables are gone, and the migration is due. Step 5's migration and step
-    // 4's came after it and change three of these tables, so they're undone with it and run again behind it.
+    // 4's came after it and change three of these tables, so they're undone with it and run again behind it, and so is
+    // step 6's, which comes after them all.
     await inRoom(id, (sql) => {
+      sql.exec("DROP TABLE repo_token_mint");
+      sql.exec("DROP TABLE repo_token");
       sql.exec("DROP TABLE provider_delivery");
       for (const table of [...TABLES].reverse()) sql.exec(`DROP TABLE ${table}`);
-      sql.exec("UPDATE schema_version SET version = version - 3");
+      sql.exec("UPDATE schema_version SET version = version - 4");
     });
     expect(await inRoom(id, (sql) => sql.exec("SELECT name FROM sqlite_master WHERE name LIKE 'repo_%' OR name IN ('provider_grant', 'task_change')").toArray())).toEqual([]);
     // A read migrates the room.
@@ -113,7 +116,7 @@ describe("the managed repositories migration", () => {
 
   it("gives a new room the same tables, empty", async () => {
     const { id } = await room();
-    expect(await inRoom(id, (sql) => sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND (name LIKE 'repo_%' OR name IN ('provider_grant', 'task_change')) ORDER BY name").toArray().map((t: any) => t.name))).toEqual([...TABLES].sort());
+    expect(await inRoom(id, (sql) => sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND (name LIKE 'repo_%' OR name IN ('provider_grant', 'task_change')) ORDER BY name").toArray().map((t: any) => t.name))).toEqual([...TABLES, "repo_token", "repo_token_mint"].sort());
     expect((await footprint(id)).rows).toEqual([0, 0, 0, 0, 0]);
   });
 
@@ -183,7 +186,7 @@ describe("the room's repository read", () => {
 });
 
 describe("the routes later steps build", () => {
-  it("don't exist yet, so nothing can ask for a token, a merge or a status", async () => {
+  it("don't exist yet, so nothing can ask for a merge or a status, and a token only with the switch on (step 6)", async () => {
     const { id, task } = await room();
     await link(id);
     for (const [method, tail] of [["POST", "repo-access"], ["POST", "merge"], ["GET", "release-status"]] as const) {
@@ -191,6 +194,7 @@ describe("the routes later steps build", () => {
       expect([answer.status, answer.code], tail).toEqual([404, "not_found"]);
     }
     const contract: { path: string; operation: string }[] = JSON.parse(BINDINGS.TEST_API_ROUTES);
-    expect(contract.filter((r) => /merge|repo-access|release-status|deploy/i.test(r.path + r.operation))).toEqual([]);
+    expect(contract.filter((r) => /merge|release-status|deploy/i.test(r.path + r.operation))).toEqual([]);
+    expect(contract.filter((r) => /repo-access/i.test(r.path)).map((r) => r.operation)).toEqual(["getRepoAccess"]);
   });
 });

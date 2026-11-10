@@ -393,7 +393,11 @@ describe("a room from before this", () => {
       // The newer migrations come off first, newest first: submitted files' flag, expected outputs, removal, input assets linked
       // to tasks, then files on submissions.
       // M4 step 8's public claims, the newest migration, then step 6's discovery outbox, step 5's room visibility, step 13b's change requests, step 13's read-back and step 12's A2A attempts.
-      // M5 step 4's retry columns, the newest migration, go with the request table below, then M5 step 5's webhook deliveries come off, then M5 step 2's managed repositories, then M4 step 10's operator suspension.
+      // M5 step 6's agent tokens, the newest migration, come off first.
+      sql.exec("DROP TABLE repo_token_mint");
+      sql.exec("DROP TABLE repo_token");
+      sql.exec("UPDATE schema_version SET version = version - 1");
+      // M5 step 4's retry columns go with the request table below, then M5 step 5's webhook deliveries come off, then M5 step 2's managed repositories, then M4 step 10's operator suspension.
       sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE provider_delivery");
       sql.exec("UPDATE schema_version SET version = version - 1");

@@ -796,6 +796,14 @@ paths:
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [policy_version], additionalProperties: false, properties: { policy_version: { type: integer } } } } } }
       responses: { "200": { description: The grant, content: { application/json: { schema: { $ref: "#/components/schemas/RepoGrant" } } } }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/tasks/{t}/repo-access:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
+    post:
+      operationId: getRepoAccess
+      tags: [commands]
+      summary: "A short-lived token for the room's one repository, for the agent a task is assigned to (M5 step 6, ADR 0009, proposed). Exists only while managed repositories are switched on: otherwise `not_found` (404), as for any route that doesn't exist. The body is empty or `{}`, and any field is `invalid_argument`: the repository is the room's link, and the organization, installation and permissions are configuration. Checked at every call, renewals included: the task must be visible, `task_not_found` (404); assigned to the caller, an agent, `not_allowed` (403); linked to the repository, `task_not_linked` (409); in a room whose repository is ready, `repo_not_ready` (409); and accepted, `task_not_active` (409). The caller must hold a live `push` grant from whoever holds the repository's delegation now, `grant_required`, `grant_expired` or `grant_stale` (403); not be in the room through a public claim, `public_participant` (403); and act for a person still in the organization they linked it from, `controller_departed` (403). If a standing can't be read, `standing_unknown` (503), and nothing is minted. Answers `{ token, expires_at, repository, clone_url, permissions, authority_ends_at }`: the token reaches only that repository with contents and pull requests `write` and metadata `read`, and lives at most an hour. `authority_ends_at` is null: a task has no server-side deadline yet. No idempotency key, and none is kept: one live token per agent and task, so asking again returns the same token until 5 minutes before `expires_at`, then a new one, and the old one is revoked. A call while another is minting gets `repo_access_busy` (409). Limits, proposed: 10 mints an hour per agent and 60 per room, `rate_limited` (429). `repo_access_unavailable` (503) when the App or the sealing key isn't configured, `provider_unavailable` (502) when GitHub didn't answer, and `provider_mismatch` (502) when what it minted isn't exactly what was asked for, which is revoked. The token is revoked early when the grant, the agent's place, the task or the link ends. It's never in an event, a log, D1, the outbox or an error"
+      requestBody: { required: false, content: { application/json: { schema: { type: object, additionalProperties: false, maxProperties: 0 } } } }
+      responses: { "200": { description: The token, content: { application/json: { schema: { $ref: "#/components/schemas/RepoAccess" } } } }, default: { $ref: "#/components/responses/Error" } }
   /v1/provider/github/deliveries:
     post:
       operationId: receiveGithubDelivery
@@ -1083,6 +1091,17 @@ components:
         expires_at: { type: [integer, "null"], description: "Milliseconds since the epoch. Null for no expiry; otherwise after the grant was given and at most one year after" }
         revoked_at: { type: [integer, "null"] }
         state: { type: string, enum: [live, expired, stale, revoked], description: "Display only. It authorizes nothing, and every use of a grant checks it again from current authority" }
+    RepoAccess:
+      type: object
+      additionalProperties: false
+      required: [token, expires_at, repository, clone_url, permissions, authority_ends_at]
+      properties:
+        token: { type: string, description: "The installation token. Shown only in this answer, never stored where it can be read." }
+        expires_at: { type: integer, description: "Milliseconds. At most an hour after it was minted." }
+        repository: { type: string, description: "The repository's full name, as GitHub reported it at setup." }
+        clone_url: { type: string }
+        permissions: { type: object, additionalProperties: false, required: [contents, metadata, pull_requests], properties: { contents: { const: write }, metadata: { const: read }, pull_requests: { const: write } } }
+        authority_ends_at: { type: ["integer", "null"], description: "When the task's authority ends. Null: a task has no server-side deadline yet." }
     RepoGrantList:
       type: object
       additionalProperties: false

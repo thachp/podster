@@ -60,6 +60,7 @@ fn passing<'a>(task: &'a Task, grant: &'a Grant<'a>) -> AccessCheck<'a> {
         caller_is_agent: true,
         in_room: true,
         connected: true,
+        controller_holds: true,
         request: Some(RequestState::Ready),
         link: Some(LinkStatus::Ready),
         link_repo_id: Some(REPO),
@@ -153,6 +154,15 @@ fn every_missing_piece_refuses_by_name() {
             },
             R::AgentDisconnected,
             "agent_disconnected",
+        ),
+        (
+            "acting for a person who has left",
+            AccessCheck {
+                controller_holds: false,
+                ..base
+            },
+            R::ControllerDeparted,
+            "controller_departed",
         ),
         (
             "another agent's task",

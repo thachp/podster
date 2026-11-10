@@ -7,6 +7,9 @@
 // uses. `--rehearse-same-person` gives it one person's cookie twice, which it has to refuse. `--rehearse-test-people`
 // runs staging's setup with nothing remote: the worker sees staging's URLs and `APP_URL`, and rehearse-fetch.mjs sends the
 // journey's requests for staging here, so the driver and the test sign-up meet with their real gates on.
+//
+// After the journey, which runs with managed repositories off in both Workers as every deployment has them, a second
+// throwaway stack runs with them on in both, for repo-access-check.mjs (M5 step 6). `--skip-managed` leaves that out.
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -14,7 +17,7 @@ import { request as httpsRequest } from "node:https";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { localCertificate } from "./local-cert.mjs";
-import { freePort, prepareStack, startGateway } from "./stack.mjs";
+import { freePort, groupGone, prepareStack, startGateway } from "./stack.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -23,7 +26,8 @@ const skipBuild = flags.includes("--skip-build");
 const rehearse = flags.includes("--rehearse-cookies");
 const samePerson = flags.includes("--rehearse-same-person");
 const testPeople = flags.includes("--rehearse-test-people");
-const passOn = flags.filter((f) => !["--skip-build", "--rehearse-cookies", "--rehearse-same-person", "--rehearse-test-people"].includes(f));
+const skipManaged = flags.includes("--skip-managed");
+const passOn = flags.filter((f) => !["--skip-build", "--rehearse-cookies", "--rehearse-same-person", "--rehearse-test-people", "--skip-managed"].includes(f));
 
 const { gateway, apiConfig, persist, privateKey, kid } = prepareStack({ skipBuild });
 
@@ -50,10 +54,10 @@ if (testPeople) {
   Object.assign(vars, { BASE_URL: `https://${STAGING_HOST}`, APP_URL: "https://app-staging.podster.dev", ENABLE_E2E_SIGNUP: "true", E2E_SIGNUP_SECRET: signupSecret });
 }
 
-const { stack, log, stop } = startGateway({ gateway, apiConfig, persist, vars, port, extraArgs: testPeople ? ["--local-upstream", STAGING_HOST, "--local-protocol", "https", "--https-key-path", tls.key, "--https-cert-path", tls.cert] : [], inspectorPort: await freePort() });
+let { stack, log, stop } = startGateway({ gateway, apiConfig, persist, vars, port, extraArgs: testPeople ? ["--local-upstream", STAGING_HOST, "--local-protocol", "https", "--https-key-path", tls.key, "--https-cert-path", tls.cert] : [], inspectorPort: await freePort() });
 
 /** Whether the HTTPS stack answers at all, with its certificate checked against the one made above. */
-function answersOverTls() {
+function answersOverTls(base) {
   return new Promise((done) => {
     const request = httpsRequest(`${base}/api/auth/ok`, { ca: tls.ca, timeout: 30_000 }, (response) => {
       response.resume();
@@ -65,19 +69,19 @@ function answersOverTls() {
   });
 }
 
-async function waitForStack() {
+async function waitForStack(base) {
   const deadline = Date.now() + 120_000;
   let cookie;
   // Nobody can sign up on this stack without using up the test sign-up's limit, and any answer means it's listening.
   while (testPeople && Date.now() < deadline && stack.exitCode === null) {
-    if (await answersOverTls()) return;
+    if (await answersOverTls(base)) return;
     await new Promise((done) => setTimeout(done, 500));
   }
   while (Date.now() < deadline) {
     if (stack.exitCode !== null) break;
     try {
       // A signed-in /v1/me is the first request that crosses the service binding to the API.
-      cookie ||= await signUp();
+      cookie ||= await signUp(base);
       const me = await fetch(`${base}/api/v1/me`, { headers: { cookie }, signal: AbortSignal.timeout(30_000) });
       if (me.status === 200) return;
     } catch {
@@ -89,8 +93,8 @@ async function waitForStack() {
   throw new Error("the local stack didn't come up");
 }
 
-async function signUp() {
-  const res = await fetch(`${base}/api/auth/sign-up/email`, { signal: AbortSignal.timeout(30_000), method: "POST", headers: { "content-type": "application/json", origin: base }, body: JSON.stringify({ email: `${randomBytes(8).toString("hex")}@example.test`, password: randomBytes(16).toString("hex"), name: "Rehearsal" }) });
+async function signUp(at = base) {
+  const res = await fetch(`${at}/api/auth/sign-up/email`, { signal: AbortSignal.timeout(30_000), method: "POST", headers: { "content-type": "application/json", origin: at }, body: JSON.stringify({ email: `${randomBytes(8).toString("hex")}@example.test`, password: randomBytes(16).toString("hex"), name: "Rehearsal" }) });
   return res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
 }
 
@@ -103,7 +107,7 @@ function child(script, args, env = {}, nodeArgs = []) {
 
 let code = 1;
 try {
-  await waitForStack();
+  await waitForStack(base);
   console.log(`local stack is up at ${base}\n`);
   if (testPeople) {
     const redirect = ["--import", join(here, "rehearse-fetch.mjs")];
@@ -131,6 +135,24 @@ try {
   const agreeSelfTest = await child("agree-selftest.mjs", []);
   code = journey || probe || selfTest || agreeSelfTest;
   if (code !== 0) console.error(`\n--- last of the stack's log ---\n${log.join("").slice(-4000)}`);
+  if (code === 0 && !skipManaged) {
+    // A second stack, from empty, with managed repositories on in both Workers. The build is the one above. Until its
+    // check passes, the run counts as failed, so a stack that never comes up can't pass.
+    code = 1;
+    stop();
+    // The first stack shares the local state folder, so it has to be gone before that's emptied for the second.
+    if (!(await groupGone(stack.pid))) throw new Error("the first local stack didn't stop");
+    const on = prepareStack({ skipBuild: true, apiVars: { MANAGED_REPOSITORIES: "true" } });
+    const onPort = await freePort();
+    const onBase = `http://localhost:${onPort}`;
+    // Its own assertion key pair too, which prepareStack just made: the API checks against the new public half.
+    const onVars = { ...vars, ASSERTION_SIGNING_JWK: JSON.stringify({ ...on.privateKey.export({ format: "jwk" }), kid: on.kid }), BASE_URL: onBase, MANAGED_REPOSITORIES: "true" };
+    ({ stack, log, stop } = startGateway({ ...on, vars: onVars, port: onPort, inspectorPort: await freePort() }));
+    await waitForStack(onBase);
+    console.log(`\nlocal stack with managed repositories on is up at ${onBase}\n`);
+    code = await child("repo-access-check.mjs", ["--base-url", onBase]);
+    if (code !== 0) console.error(`\n--- last of the stack's log ---\n${log.join("").slice(-4000)}`);
+  }
 } catch (error) {
   console.error(error);
 } finally {

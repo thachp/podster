@@ -1,6 +1,6 @@
 # M5 plan
 
-**Status, 2026-11-09 UTC: Proposed. Nothing here is approved or built.** The architect drafted this plan from the specs. Its [questions](#questions-for-the-architect) carry the architect's proposed answers, which aren't recorded as decisions in `PRODUCT.md` yet. Items marked **owner's yes** create an account or a cloud resource, cost money, set a secret, or are legal text, so the architect can't settle them alone. No ADR exists for M5 yet; step 1 writes it.
+**Status, 2026-11-10 UTC: Proposed. Nothing here is approved or built.** Step 1 is drafted: [ADR 0009](adr/0009-managed-repositories.md) is written as a proposal, not accepted, and [the spike has run](../spikes/m5-github/README.md#results-2026-11-10) twice against the test organization, without webhooks. The ADR lists [where the spike disagrees with this plan](adr/0009-managed-repositories.md#where-the-specs-and-the-spike-disagree); the rest of this plan isn't rewritten to match until the ADR is accepted. The architect drafted this plan from the specs. Its [questions](#questions-for-the-architect) carry the architect's proposed answers, which aren't recorded as decisions in `PRODUCT.md` yet. Items marked **owner's yes** create an account or a cloud resource, cost money, set a secret, or are legal text, so the architect can't settle them alone.
 
 It covers [M5 Managed repositories](spec/PRODUCT.md#product-direction-and-delivery-scope): a GitHub App, a repository linked to a room, review bound to a commit, and merge. Its gate is [expanded criterion 7](spec/PRODUCT.md#expanded-workroom-acceptance-criteria) for repositories. It starts from the [managed repositories design](spec/ARCHITECTURE.md#managed-repositories-and-merge-m5), which is itself proposed, and from decisions 10, 18 and 25, which are proposals too. Decision 10 leaves agent access to the M5 ADR.
 
@@ -54,7 +54,7 @@ The architect proposes the gate call, for the owner to review.
 
 | Step | What | Notes |
 | --- | --- | --- |
-| 1 | **ADR 0009 and the spike.** The ADR settles everything the architecture leaves "open for the ADR". The spike runs against a test organization and answers the [risks](#risks-to-test). | Needs the owner first: see [what needs the owner's yes](#what-needs-the-owners-yes). The spike's code stays in `spikes/` and nothing builds on it. |
+| 1 | **ADR 0009 and the spike.** The ADR settles everything the architecture leaves "open for the ADR". The spike runs against a test organization and answers the [risks](#risks-to-test). | **Drafted, 2026-11-10.** [ADR 0009](adr/0009-managed-repositories.md) is a proposal: it settles or leaves open each item by name, and its merge path waits on one more spike run. [The spike ran](../spikes/m5-github/README.md#results-2026-11-10) against `podsterx` and answered every risk except webhooks (risk 8). The spike's code stays in `spikes/` and nothing builds on it. |
 | 2 | **Contracts and migration:** `repo_link`, `provider_grant`, `task_change` and a provisioning request, with `get_repo_access`, `get_task_release_status` and `merge_task` in `capabilities.yaml` and their routes in `openapi.yaml`. The room's Durable Object owns all four as state, because grants are authority. D1 gets at most a projection for lists, which never authorizes. | One contract and migration PR at a time. |
 | 3 | **Decisions in `crates/core` and `crates/policy`:** grant checks, `commit_sha` required on `submit_task` and `verify_task` for a linked task, `commit_changed`, and merge as its own state. Pure, with no I/O. | AC-31 is decided here, and AC-17's rule that approval alone never merges. |
 | 4 | **Provisioning:** room setup records a request; a job creates the repository, sets its protections and records the verified repository ID. Pending, ready, failed and uncertain states, with reconciliation before any retry. | A failed setup blocks coding tasks in that room, not other work. |
@@ -69,7 +69,7 @@ Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security
 
 ## What needs the owner's yes
 
-- **A GitHub organization for managed repositories,** and a second one for tests. Creating an account is the owner's. Its ownership and legal terms are open, and may need a lawyer.
+- **A GitHub organization for managed repositories,** and a second one for tests. **Answered by the owner on 2026-11-10:** the test organization is `podsterx`, and the real managed organization is `podsterdev`. Tests and spikes never run against `podsterdev`. The real organization's ownership and legal terms are still open, and may need a lawyer.
 - **The GitHub Apps:** one that provisions and issues agent tokens, and a separate merge App if the spike confirms the split. The owner creates and installs them, or approves the architect doing it in a named session.
 - **Secrets:** each App's private key and the webhook secret. The owner sets them with `wrangler secret put`; the architect gives the exact command.
 - **Money:** a GitHub plan, if private repositories need one for branch rules. See [cloud resources](#cloud-resources).
@@ -81,7 +81,7 @@ Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security
 
 **The proposal needs resources outside Cloudflare, which no earlier milestone did.**
 
-- **GitHub:** two organizations and up to two Apps, as above. **Possibly billed.** GitHub's free plan for organizations is believed to offer branch protection and rulesets on public repositories only, so private managed repositories with protected branches would need a paid plan, charged per seat. This isn't verified; the spike checks it on the test organization before anything is bought.
+- **GitHub:** two organizations and up to two Apps, as above. **Possibly billed.** The spike found that the Free plan refuses a ruleset on a private repository, so private managed repositories with protected branches need a paid plan. Nothing has been bought. [ADR 0009](adr/0009-managed-repositories.md#visibility-and-the-plan) proposes public repositories as the working assumption until the owner decides.
 - **Cloudflare:** no new billed resource is proposed. Step 2 adds Durable Object state through the room's own forward-only migrations, and at most a projection table in the API's existing D1 database. Step 5 adds a route to the existing gateway Worker. Provisioning and merge jobs use the existing outbox; a dedicated queue is only proposed if the spike shows the outbox can't carry them, and that would need the owner's yes.
 - **Secrets:** each App's private key on the private API Worker only, and the webhook secret on the gateway. The owner sets them.
 
@@ -164,6 +164,6 @@ The spike at step 1 answers these on the test organization, before any feature c
 ## How far this was checked
 
 - Written from `PRODUCT.md`, `ARCHITECTURE.md`, `ACCESS-CONTROL.md` and `RUNNER.md` as they stand on `main` at `17563d1`.
-- **Nothing about GitHub's behavior here is verified.** Every claim about tokens, merges, branch rules and plans is from the specs or from memory, and the spike exists to check it.
+- **This plan's own claims about GitHub were written before the spike** and aren't corrected here. What GitHub was seen to do is in [the spike's results](../spikes/m5-github/README.md#results-2026-11-10), and [ADR 0009](adr/0009-managed-repositories.md#not-verified) lists what's still unverified.
 - No code, contract, migration or cloud resource was created or changed.
 - The Runner sections of the specs that lean on M5 are proposals and weren't reconciled with this plan. [#227](https://github.com/thachp/podster/pull/227), open now, proposes Runner as an A2A server and may change what M7 needs from M5.

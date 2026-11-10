@@ -522,7 +522,7 @@ The [GitHub merge API](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-
 
 A completed task is terminal, so changed code cannot be re-reviewed on it. Retry `merge_task` for failures unrelated to the commit. For `commit_changed`, the requester or lead creates a follow-up task (`follow_up_of`) with its own submission and review.
 
-**Open for the ADR:** provisioning request/state contract, organization/installation selection, naming/visibility, initialized base and protection readiness, unknown-outcome recovery, separate App permissions, how commits attribute individual agents, ownership and legal terms for the managed organization, deletion, and export or transfer.
+**Open for the ADR:** provisioning request/state contract, organization/installation selection, naming/visibility, initialized base and protection readiness, unknown-outcome recovery, separate App permissions, how commits attribute individual agents, ownership and legal terms for the managed organization, deletion, and export or transfer. [ADR 0009](../adr/0009-managed-repositories.md) proposes answers. It isn't accepted, and this section isn't changed to match it yet.
 
 ### Release and deployment (M6)
 

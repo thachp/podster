@@ -167,7 +167,7 @@ What proves each gate item, and how far that proof has got. This is modeled on [
 - **Passed on staging:** the staging check passed against `gateway-staging.podster.dev`, at the commit given.
 - **Owed:** nothing yet proves it.
 
-Last updated 2026-11-10 UTC: every M3 build step merged (1 to 15, 13b, and `/a2a/files`), #240 merged and deployed, and the kit run on staging. **Some items ran locally only, and two MUST gaps are open.** "Owed before M3's gate" lists them.
+Last updated 2026-11-10 UTC: every M3 build step merged (1 to 15, 13b, and `/a2a/files`), #240 merged and deployed, and the kit run on staging. Decision 192 was deployed, and AC-18 and the screens ran on staging. **Three items are owed to the owner, and one question.** "Owed before M3's gate" lists them.
 
 **The gate run, 2026-11-09.** The owner approved three items that day, answering "yes, yes, option a": LangGraph locally, Spike C on staging, and the test A2A server from [#184](https://github.com/thachp/podster/pull/184)'s option A. All three ran.
 - **The outside round trip and Spike C on staging.** `e2e/a2a-roundtrip.mjs` passed 26 of 26, with 0 failed, after #194's review fixes. It ran against staging in room `ws_1659316eb6114fc99c949e0f42881009`, with staging on API version `f9813a81` and gateway `2aa10d4b`, and the test server on version `982b35b8`.

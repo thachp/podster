@@ -157,7 +157,16 @@ async function main() {
     await run({ args, org, apps, stamp, results, broad });
   } finally {
     // Tokens live for an hour unless revoked. The merge-restriction and three-Apps modes add their scoped tokens here.
-    for (const token of broad) await gh(token, "DELETE", "/installation/token").catch(() => {});
+    // Each revocation's status is recorded, never the token. null means the call itself failed.
+    const statuses = [];
+    for (const token of broad) {
+      statuses.push(await gh(token, "DELETE", "/installation/token").then((r) => r.status, () => null));
+    }
+    if (broad.length > 0) {
+      const revoked = { risk: 0, name: "tokens revoked at the end", minted: broad.length, statuses };
+      results.push(revoked);
+      console.log(`[risk 0] ${revoked.name}: ${JSON.stringify({ minted: revoked.minted, statuses })}`);
+    }
     if (results.length > 0) finish(results, stamp);
   }
 }
@@ -580,6 +589,9 @@ async function threeApps({ org, apps, stamp, record, revoke }) {
     if (r.status === 201) ids.push(r.json.id);
     if (r.status !== 201 || r.json?.enforcement !== "active") active = false;
   }
+  // `rulesets_active` and `required_status_on_head` in the records below are labels this
+  // script sets from its own earlier calls (both creates answered 201 and active; the
+  // merge App's status call ran or didn't). Neither is read back from GitHub per record.
   const note = { rulesets_active: active };
 
   // 5. The readiness read-back: list, then each ruleset by ID, with one token.

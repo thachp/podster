@@ -116,7 +116,7 @@ It refuses an organization whose name has no hyphen-separated part that is `spik
 M5_ORG=<org> M5_CONFIRM_ORG=<org> M5_KEY_DIR=<dir> M5_PROVISION_APP_ID=<id> M5_AGENT_APP_ID=<id> M5_MERGE_APP_ID=<id> node spike.mjs --three-apps
 ```
 
-It creates one public repository named `m5-spike-<time>-three`, which gets the two rulesets, and one private repository named `-other` that no token is scoped to. Every token it mints is revoked when it ends. Run `--cleanup` afterwards.
+It creates one public repository named `m5-spike-<time>-three`, which gets the two rulesets, and one private repository named `-other` that no token is scoped to. When it ends it calls the revoke endpoint for every token it minted, and since the run below it records each call's status. Run `--cleanup` afterwards.
 
 ```bash
 node --test spike.test.mjs
@@ -192,7 +192,11 @@ Each merge attempt read the pull request before and after: it was unmerged befor
 
 ## Results, three Apps
 
-One run of `--three-apps` on 2026-11-10 UTC against **`podsterdev`** (Free plan, created that day, empty before the run), the organization the owner named that day in place of `podsterx`. **Every row was seen once.** It ran on one public repository with the two rulesets of variant (c) above, plus one private repository, with no ruleset, that no token was scoped to. Both were deleted afterwards by `--cleanup` (`204` each, in a results file), and `gh api orgs/podsterdev/repos` then listed no repository.
+One run of `--three-apps` on 2026-11-10 UTC against **`podsterdev`** (Free plan, created that day, empty before the run), the organization the owner named that day. **Every row was seen once.** The owner's words were "podsterx no longer exist.. the organization is now https://github.com/organizations/podsterdev/settings/apps you can create the app there". The public test repository was created on the architect's reading of the owner's earlier words that day, "i'm okay with having public repo.. this will be an MIT project", together with that instruction to use this organization. A throwaway spike repository isn't the owner's approval of public managed repositories on staging, which still waits on the owner.
+
+**What the results file doesn't hold.** The run called the revoke endpoint for each of its five tokens at the end, but didn't record the answers, so "revoked" isn't shown for that run; the script records each status from now on, and that change hasn't run against GitHub. `rulesets_active` and `required_status_on_head` in the results are labels the script set from its own earlier calls, not values read back with each attempt. The read-backs in table 5 are the only reads of the rules.
+
+It ran on one public repository with the two rulesets of variant (c) above, plus one private repository, with no ruleset, that no token was scoped to. Both were deleted afterwards by `--cleanup` (`204` each, in a results file), and `gh api orgs/podsterdev/repos` then listed no repository.
 
 The three Apps, each private, with webhooks off and installed on all repositories. The permissions are what GitHub reported for each installation:
 
@@ -219,7 +223,7 @@ Administration alone was enough for all four. No permission needs adding for the
 
 | Attempt | Scoped token | Full installation token |
 | --- | --- | --- |
-| Mint a token for the new repository | `201` on the first try, straight after the repository was created. Granted contents write, pull requests write, metadata read. Expires after one hour | minted before the repository existed, and it reached it |
+| Mint a token for the new repository | `201` on the first try. About ten other calls came between creating the repository and this one, and the gap wasn't measured. Granted contents write, pull requests write, metadata read. Expires after one hour | minted before the repository existed, and it reached it |
 | Ask for a token with Administration | `422` "The permissions requested are not granted to this installation." | |
 | Create a task branch, commit to it, open a pull request | `201`, `201`, `201` | not tried |
 | Merge the pull request before the merge App's status | `405` "Required status check "podster/review" is expected." "Cannot update this protected ref." | not tried |
@@ -240,7 +244,7 @@ Administration alone was enough for all four. No permission needs adding for the
 
 | Attempt | What GitHub did |
 | --- | --- |
-| Mint a token scoped to the new repository | `201` on the first try |
+| Mint a token scoped to the new repository | `201` on the first try, one call after the agent App's |
 | Merge the pull request before any status (an unmarked commit) | `405` "Required status check "podster/review" is expected." Unmerged before and after |
 | Set `podster/review` on the head | `201` |
 | **Merge the marked pull request** | **`200` "Pull Request successfully merged".** Unmerged before, merged after |
@@ -272,11 +276,11 @@ Each merge attempt in the three tables read the pull request before and after: i
 
 **What this means.**
 
-- **The three-App split held on everything tried, once.** A repository the provisioning App created was under the other two installations on the first try. The agent App's token was refused every administrative call, scoped or not, and the agent App couldn't be given Administration at all (`422`). In the earlier runs that boundary rested on Podster cutting the token down; here it rests on the App's own permissions.
-- **The merge path held with three Apps** as it did with two: the agent App was refused the merge of a marked commit, by the merge call, a contents-API commit and a ref update, and the merge App merged it. The merge App was refused an unmarked commit and every administrative call.
+- **The three-App split held on everything tried, once.** A repository the provisioning App created was under the other two installations on the first try, about ten calls after it was created. The agent App's token was refused every administrative call, scoped or not, and the agent App couldn't be given Administration at all (`422`). In the earlier runs that boundary rested on Podster cutting the token down; here it rests on the App's own permissions.
+- **The merge path held with three Apps** as it did with two: the agent App was refused the merge of a marked commit, by the merge call, a contents-API commit and a ref update, and the merge App merged it. The merge App was refused an unmarked commit and each of the six administrative calls in its table. Setting a status isn't one of those: it holds that permission and its status call returned `201`.
 - **The provisioning App can't write code.** With no Contents and no Pull requests it was refused every commit, branch, pull request, status and merge tried.
 - **No App needs a permission added** for what was tried. One thing the provisioning App can't do: read the organization's Actions setting. ADR 0009 asks that readiness confirm Actions are off. The repository's own setting was readable with Administration; the organization's wasn't. Whether the repository's `enabled` reflects an organization-wide switch-off wasn't tried, because Actions weren't switched off.
-- **Actions were on** in `podsterdev`'s new repository. ADR 0009 proposes they stay off, which is the owner's setting to change. This run didn't change it.
+- **Actions were on** in `podsterdev`'s new repository, so "Actions are off" isn't currently true anywhere. ADR 0009 now proposes that the provisioning App switches them off on each repository it creates and reads the setting back. That wasn't tried, and this run changed no setting.
 - **The agent App's full installation token reaches every repository in the organization** with contents and pull requests write. It's the token Podster holds, never an agent's. It wasn't tried on the other repository here.
 
 **Not tried.** `git push` over HTTPS with any token; the `squash` and `rebase` merge methods; a private repository with rulesets (needs a paid plan); whether the provisioning App can change visibility or archive; disabling Actions on a repository with the provisioning App's token, and reading the setting back after; the agent App's full token doing the agent's ordinary work, or reading or writing the other repository; tags and releases; workflows; a marker for orphan repositories (risk 12); webhooks; whether any App would work with less than it holds; organization owners and anyone else with admin rights; and a second run. The provisioning App's token was the only one that created or deleted anything administrative, and nothing checked what a leaked provisioning key can do beyond what the earlier runs saw.

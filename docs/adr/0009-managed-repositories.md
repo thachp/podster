@@ -16,8 +16,9 @@ Every claim carries one of these labels, in a section's heading line or beside t
 ## What the owner has said
 
 - **Owner, 2026-11-10, verbatim:** "podsterx no longer exist.. the organization is now https://github.com/organizations/podsterdev/settings/apps you can create the app there".
-  - **This replaces what the owner said earlier the same day:** that the test GitHub organization was `podsterx`, the real managed organization was `podsterdev`, and tests and spikes never ran against `podsterdev`. That rule no longer stands.
-  - **The architect's reading:** `podsterdev` is the one organization. Podster has no production deployment, so `podsterdev` serves staging now, and the spike's three-Apps run was on it.
+  - **Earlier the same day the owner had said** that the test GitHub organization was `podsterx`, the real managed organization was `podsterdev`, and tests and spikes never ran against `podsterdev`.
+  - **The architect's reading, not the owner's words:** the new sentence replaces the earlier one, so the rule that tests never run against `podsterdev` no longer stands. `podsterdev` is the one organization. Podster has no production deployment, so `podsterdev` serves staging now, and the spike's three-Apps run was on it.
+  - **The owner said "the app". The architect created three,** each installed on all repositories, as this ADR proposes.
 - **Owner, 2026-11-10, verbatim:** "i'm okay with having public repo.. this will be an MIT project".
   - **The architect's reading, unconfirmed:** managed repositories may be public, and Podster's own code will carry an MIT license. The architect has asked the owner which of these was meant. Until the owner answers, this ADR treats public managed repositories as a working assumption and nothing more. It doesn't read the sentence as licensing what rooms put in their repositories.
 
@@ -50,9 +51,10 @@ A repository's identity is GitHub's repository ID, recorded when Podster creates
 ### Organizations and installations
 
 - **Proposed:** the organization and each App's installation come from the private API Worker's configuration: the organization's ID and login, each App's ID and its installation ID. Nothing a client, task or webhook sends selects them (M5-04). The API compares the owner ID in GitHub's answers with the configured one before recording anything.
-- **Owner, 2026-11-10:** the organization is `podsterdev`, by [the owner's sentence above](#what-the-owner-has-said). It was created that day, on the Free plan, and was empty.
-- **Proposed:** staging is configured with `podsterdev`. Podster has no production deployment, so nothing else uses it.
-- **Done on 2026-11-10:** the architect created three Apps in `podsterdev`, in the owner's browser on the owner's say: `podster-staging-provision` (App ID 5695065), `podster-staging-agent` (5695079) and `podster-staging-merge` (5695088). Each is private, has webhooks off, is installed on all repositories and holds the permissions in the table below. Their keys are on the owner's machine. None is a secret on any Worker yet; setting those is the owner's.
+- **Owner, 2026-11-10:** the organization is `podsterdev`, by [the owner's sentence above](#what-the-owner-has-said).
+- **Observed by the architect through GitHub's API, 2026-11-10:** `podsterdev` was created that day, is on the Free plan, and was empty.
+- **Proposed, on the architect's reading:** staging is configured with `podsterdev`. Podster has no production deployment, so nothing else uses it.
+- **Done on 2026-11-10:** the owner said "you can create the app there", and the architect created three Apps in `podsterdev`, in the owner's browser, as this ADR proposes: `podster-staging-provision` (App ID 5695065), `podster-staging-agent` (5695079) and `podster-staging-merge` (5695088). Each is private, has webhooks off, is installed on all repositories and holds the permissions in the table below. Their keys are on the owner's machine. None is a secret on any Worker yet; setting those is the owner's.
 - **Open, and the architect's to settle before any production deployment:** whether staging and production share `podsterdev`, or get separate organizations, or separate Apps in one organization. Sharing would put test repositories beside real ones, under the same App keys and the same rate limits. Nothing is decided, and nothing needs deciding while only staging exists.
 - **`podsterx`:** the owner said it no longer exists. Its state wasn't confirmed: GitHub's API still showed it, and the spike's two Apps, when the architect checked just after. Nothing has touched it since. The earlier proposal here, to keep `podsterx` for staging and tests and delete the spike's two Apps and their keys from it, is moot if the organization is gone. Those two Apps held permissions the real ones shouldn't, and they aren't used again.
 
@@ -77,7 +79,7 @@ A repository's identity is GitHub's repository ID, recorded when Podster creates
 - **Installations.** A repository the provisioning App created was under the other two installations at once: each minted a token scoped to it on the first try.
 - **The agent-token App has no administrative reach.** Its token, both cut down to the one repository and as the full installation token, got `403` editing repository settings, creating, editing and deleting a ruleset, creating a repository in the organization, deleting the repository and setting a commit status. Asking that App for a token with Administration returned `422`. The cut-down token got `404` reading and writing another, private repository.
 - **The agent-token App can do its work and can't merge.** The cut-down token created a branch, committed and opened a pull request (`201` each). It was refused the merge before the merge App's status (`405`). After the status, it and the full token were each refused the merge (`405`), a commit to the default branch (`409`) and a ref update (`422`).
-- **The merge App** was refused an unmarked commit (`405`), merged the marked one (`200`), and got `403` on every administrative call above.
+- **The merge App** was refused an unmarked commit (`405`), merged the marked one (`200`), and got `403` on each administrative call above except setting a status, which is its job (`201`).
 - **The provisioning App can't write code.** It got `403` on a commit to the default branch and to a task branch, creating a branch, opening a pull request, moving the default branch's ref, merging and setting a status.
 
 **Still unverified:** whether any App would work with less than it holds, and which App's token does the polling reads. `git push` wasn't tried with any of the three.
@@ -118,7 +120,7 @@ The specs propose private by default, chosen at setup and independent of the roo
   - the repository exists under the configured organization's ID, and its ID is recorded;
   - the default branch has an initial commit;
   - both rulesets are present on the default branch with enforcement `active`: the review ruleset with no bypass actor, and the update ruleset whose bypass list is exactly the merge App;
-  - Actions are disabled;
+  - Actions are disabled on the repository, which is **proposed and not currently true**: see [Actions and workflows](#actions-and-workflows);
   - all three installations cover the repository. **Verified, once, for three:** each of the other two Apps minted a token for a new repository on the first try. The gap wasn't measured.
 - **Uncertain** is a creation call that timed out or lost its answer, so Podster has no repository ID. **Proposed:** it's treated as a failed setup. Coding tasks stay blocked, and a retry uses a new name that the server generates, never the same one. A repository the lost call did create stays where it is, unlinked, and is listed for the operators. Podster never deletes one on its own initiative.
   - **Left open, unverified, and a spike item:** adopting such an orphan by a marker Podster wrote into it at creation. Until that's tried and approved, nothing is adopted.
@@ -127,7 +129,7 @@ The specs propose private by default, chosen at setup and independent of the roo
 - **Drift.** **Proposed:** the same read-back runs on a schedule and again before each merge. If anything differs, the link becomes `degraded`, token issuing and merge stop for that repository, and the room's owner and the operators see it. Podster doesn't put the rules back by itself.
 - **Verified, once, on a public repository in `podsterdev`:** the provisioning App's token read both rulesets back with `GET`, each `active` on the default branch, with the status pinned to the merge App, an empty bypass list on the review ruleset and the merge App alone on the update ruleset. The read gave the same answer after every refused attempt in that run. The agent's and the merge App's tokens could read the rules too, but their answers carried no bypass list. So the read-back uses the provisioning App's token.
 - **Verified, once:** the provisioning App's token read the repository's Actions setting (`200`), and Actions were **on**. It got `403` reading the organization's Actions setting, since no App here holds an organization permission.
-- **Open:** how readiness confirms Actions are off. Either the repository's own setting is enough, which wasn't tried with Actions switched off, or the provisioning App needs the organization's Administration read permission, which this ADR has so far ruled out. Adding it would be the owner's yes.
+- **Proposed, not tried, and a spike item:** the provisioning App switches Actions off on each repository it creates, with its repository Administration permission, and reads that repository's setting back before the link is ready, failing closed. Reading the organization's setting isn't needed for that. **GitHub's documentation, untested:** an App would need the organization's Administration read permission to read the organization's setting.
 - **Unverified:** the same reads on a private repository.
 
 ### Grants and who can merge
@@ -236,13 +238,14 @@ The marked commit lets the agent's token merge nothing, on the paths tried, so w
 - **A cap on reads per repository,** proposed: at most 60 an hour for one repository, from deliveries and polling together, so one busy or attacked repository can't spend the shared budget. Reads over the cap are dropped and the next poll catches up. A merge job's own reads aren't capped.
 - **Polling** repairs a lost delivery. **Proposed:** only tasks with a change that's submitted or approved and not yet merged are polled, backing off from 1 minute to 1 hour as decision 117 does for A2A, and ending when the change merges, closes or its task ends.
 - **Verified:** 5,000 requests an hour for an installation. One installation serves every room, so that budget is shared. Whether it fits isn't worked out, and it has to be before step 5.
-- **Checks with Actions off.** **Proposed:** M5 reports commit statuses and check runs from any source, each with its observation time. Nothing in a managed repository produces one while Actions are off, so M5-12 is exercised on staging with a test status posted by a test App or token. Reading check runs and statuses with an App's token is **unverified**.
+- **Checks with Actions off.** **Proposed:** M5 reports commit statuses and check runs from any source, each with its observation time. Nothing in a managed repository would produce one with Actions off, which is proposed and not currently true, so M5-12 is exercised on staging with a test status posted by a test App or token. Reading check runs and statuses with an App's token is **unverified**.
 
 ### Actions and workflows
 
 - **Verified, once:** an agent's token without the Workflows permission got `403` pushing a workflow file.
-- **Proposed:** Actions stay disabled for the managed organization until a later decision. It's an organization setting, which no App here can change, so the owner sets it. Provisioning reads it back, and a repository isn't ready unless it's off. No App gets the Workflows permission.
-- **Verified, once:** Actions were on in a new repository in `podsterdev` on 2026-11-10, so the owner's setting hasn't been made. How provisioning reads it back is [open](#provisioning).
+- **Verified, once:** Actions were on in a new repository in `podsterdev` on 2026-11-10. So "Actions are off" isn't currently true anywhere.
+- **Proposed, not currently true, and not tried:** Actions are off in every managed repository until a later decision. The provisioning App switches them off on each repository it creates, a repository setting, with its Administration permission. It reads the setting back, and a repository isn't ready unless it's off. A spike item. No App gets the Workflows permission.
+- **Separate and optional:** switching Actions off for the whole organization. Only the owner can make that setting. That no App here can change it is untested; none holds an organization permission.
 - **Unverified:** whether a workflow already in a repository can be abused, and whether disabling Actions also stops workflows on pull requests from forks. M6 will need its own decision before anything runs.
 
 ### Public repositories, forks and takedown
@@ -286,7 +289,7 @@ The marked commit lets the agent's token merge nothing, on the paths tried, so w
 | Installation access to a new repository | Architecture | Verified, once, for three Apps, and on both earlier runs for two |
 | Provisioning request and state contract | Architecture | Proposed |
 | Naming and visibility | Architecture, plan questions 3 and 11 | Name proposed. Public as a working assumption; private needs the owner's yes for a paid plan |
-| Initialized base and protection readiness | Architecture | Proposed: both rulesets, the bypass list and Actions read back, failing closed, on a schedule and before each merge. The ruleset read-back is verified, once, with the provisioning App's token. How Actions being off is confirmed is open |
+| Initialized base and protection readiness | Architecture | Proposed: both rulesets, the bypass list and Actions read back, failing closed, on a schedule and before each merge. The ruleset read-back is verified, once, with the provisioning App's token. Switching Actions off per repository and reading that back is proposed and not tried |
 | Unknown-outcome recovery; provisioning failure | Architecture | Proposed: an unknown outcome is a failed setup, never adopted by name. Adopting an orphan by a marker is left open |
 | How agents get repository access (scope, issue, renew, revoke) | Decision 10 | Proposed, with the token held sealed for revocation. The secret is the owner's |
 | Commit pinning and a moved head | Architecture | Kept. Strict policy off in M5; "require up to date" left open |
@@ -297,7 +300,7 @@ The marked commit lets the agent's token merge nothing, on the paths tried, so w
 | Checks with Actions off | Criterion 7, M5-12 | Proposed: statuses and check runs from any source |
 | Where state lives | Plan step 2 | Kept |
 | Key rotation and compromise | Plan's threat model | Proposed. Runbook owed |
-| Actions and workflows | Plan's threat model | Proposed: disabled |
+| Actions and workflows | Plan's threat model | Proposed: disabled on each repository by the provisioning App. Not currently true, and not tried |
 | Public repositories, takedown, pull requests from forks | Plan's threat model, architecture | Proposed. Needs the owner's yes before use |
 | Ownership and legal terms of the organization | Architecture | Left open, for the owner |
 | Deletion | Architecture, plan question 10 | Proposed: none in M5 |
@@ -325,23 +328,23 @@ The M5 plan is updated with this ADR where it says so below. The specs aren't, u
 - **Every merge goes through `merge_task`** on the paths tried, and Podster still records any merge it didn't make.
 - **Podster holds a bearer token** for up to an hour, sealed, which it never did before.
 - **Each installation's rate limit is shared** by every room.
-- **No checks run** in a managed repository while Actions are off, so M5's check reporting is shown with a test status.
+- **No checks would run** in a managed repository with Actions off, so M5's check reporting is shown with a test status. Actions being off is proposed and not currently true.
 - **A leaked provisioning key is the worst case,** and no split softens it. Three Apps keep that key out of the token-issuing path.
 - **The private API Worker holds every key.** Its compromise is the compromise of all three Apps.
 - **An unknown creation outcome can leave an orphan repository** that only the owner removes.
-- **`podsterdev` holds staging's repositories** through M5. Everything M5 proves from here is proved there, and test repositories would sit beside real ones if production later shares it.
+- **Proposed: `podsterdev` holds staging's repositories** through M5. Everything M5 proves from here would be proved there, and test repositories would sit beside real ones if production later shares it.
 
 ## What needs the owner's yes
 
 - **Confirming the scope of "i'm okay with having public repo.. this will be an MIT project":** whether managed repositories may be public, and what the MIT license covers.
 - **Public managed repositories on staging.** takedown.md's staging exception of 2026-11-10 covers `PUBLIC_ROOMS`, not repositories.
 - **A paid GitHub plan** for private managed repositories. It costs money.
-- **The three Apps' secrets.** The Apps exist in `podsterdev` since 2026-11-10, created by the architect on the owner's say. Setting each private key on the private API Worker, and the webhook secret, is the owner's.
-- **Any change to an App's permissions,** such as an organization permission for the provisioning App so it can read the Actions setting.
+- **The three Apps' secrets.** The Apps exist in `podsterdev` since 2026-11-10, created by the architect after the owner said "you can create the app there". Setting each private key on the private API Worker, and the webhook secret, is the owner's.
+- **Any change to an App's permissions.** None is proposed.
 - **The token-sealing secret:** a 64-hex key on the private API Worker only, as `A2A_TOKEN_KEY` is.
 - **Legal terms and ownership of `podsterdev`,** and of what's pushed to its repositories. Possibly a lawyer.
 - **The takedown contact,** which is still a placeholder, and extending takedown.md to repositories, before any public managed repository exists outside staging.
-- **Disabling Actions** in `podsterdev`, where they were on in a new repository on 2026-11-10, and keeping the organization free of other members.
+- **Disabling Actions for the whole of `podsterdev`,** which is optional beside the per-repository proposal, and keeping the organization free of other members.
 
 Not the owner's, and listed so it isn't lost: **the architect** must settle, before any production deployment, whether staging and production share `podsterdev` or get separate organizations or Apps.
 
@@ -362,7 +365,7 @@ Not the owner's, and listed so it isn't lost: **the architect** must settle, bef
 - **Tags and releases** with an agent's token.
 - **Whether any App would work with less than it holds,** and read access for checks and statuses.
 - **Three Apps together, beyond the one run:** it was seen once, on one public repository, with the `merge` method and no `git push`. The agent-token App's full installation token wasn't tried on the agent's ordinary work or on a second repository.
-- **Confirming Actions are off:** the repository's setting was read with Actions on, and the organization's setting couldn't be read. Reading rulesets and bypass lists back on a private repository.
+- **Switching Actions off on a repository with the provisioning App's token, and reading that back.** A spike item. The repository's setting was read once, with Actions on, and the organization's setting couldn't be read. Reading rulesets and bypass lists back on a private repository.
 - **Adopting an orphan repository by a marker** after a lost creation answer. A spike item.
 - **Classic branch protection** on a private repository on the Free plan.
 - **How long GitHub may redeliver a webhook.**

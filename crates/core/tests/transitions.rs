@@ -394,6 +394,7 @@ fn submit_needs_content_and_respects_limits() {
 
 #[test]
 fn linked_repositories_pin_the_reviewed_commit() {
+    let (abc, def) = (&*"ab".repeat(20), &*"de".repeat(20));
     let linked = Task {
         has_linked_repository: true,
         ..task(Accepted)
@@ -409,14 +410,14 @@ fn linked_repositories_pin_the_reviewed_commit() {
         CoreError::InvalidArgument("commit_sha")
     );
     let moved = Observed {
-        head_sha: Some("def".into()),
+        head_sha: Some(def.into()),
         ..Observed::default()
     };
     assert_eq!(
-        decide(&linked, "asg", submit(Some("abc")), &moved).unwrap_err(),
+        decide(&linked, "asg", submit(Some(abc)), &moved).unwrap_err(),
         CoreError::CommitChanged
     );
-    let submitted = decide(&linked, "asg", submit(Some("abc")), &Observed::default())
+    let submitted = decide(&linked, "asg", submit(Some(abc)), &Observed::default())
         .unwrap()
         .task;
 
@@ -429,20 +430,20 @@ fn linked_repositories_pin_the_reviewed_commit() {
         CoreError::InvalidArgument("commit_sha")
     );
     assert_eq!(
-        decide(&submitted, "rev", verify(Some("def")), &Observed::default()).unwrap_err(),
+        decide(&submitted, "rev", verify(Some(def)), &Observed::default()).unwrap_err(),
         CoreError::CommitChanged
     );
     assert_eq!(
-        decide(&submitted, "rev", verify(Some("abc")), &moved).unwrap_err(),
+        decide(&submitted, "rev", verify(Some(abc)), &moved).unwrap_err(),
         CoreError::CommitChanged
     );
     assert_eq!(
         decide(
             &submitted,
             "rev",
-            verify(Some("abc")),
+            verify(Some(abc)),
             &Observed {
-                head_sha: Some("abc".into()),
+                head_sha: Some(abc.into()),
                 ..Observed::default()
             }
         )

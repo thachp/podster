@@ -9,6 +9,7 @@ pub mod files;
 pub mod moderation;
 pub mod outputs;
 pub mod public;
+pub mod repositories;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrincipalKind {
@@ -459,6 +460,10 @@ pub fn is_authority_refusal(action: &str, code: &str) -> bool {
         | "workspace_not_found"
         | "task_not_found"
         | "self_sign_off"
+        | "self_merge"
+        | "no_provider_delegation"
+        | "grant_required"
+        | "grant_expired"
         | "invitation_required"
         | "invitation_not_found" => true,
         "not_found" => matches!(action, "member.withdraw" | "member.owner_consent"),

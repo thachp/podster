@@ -1,11 +1,16 @@
-// Decision 142: the A2A compatibility kit (a2aproject/a2a-tck) against Podster's inbound A2A, on the local stack.
+// Decision 142: the A2A compatibility kit (a2aproject/a2a-tck) against Podster's inbound A2A, on the local stack or staging.
 //
 //   node run-a2a-kit.mjs --kit <a2a-tck checkout with its .venv> [--skip-build] [--level must]
+//   PODSTER_E2E_SIGNUP_SECRET=… node run-a2a-kit.mjs --kit <checkout> --staging
+//
+// On staging, a test person comes from staging's test sign-up, and the run's agents are disconnected and the person signed
+// out at the end. The kit only reads and sends to the tasks this run made, through the proxy below.
 //
 // The kit's client sends no credentials, and Podster's /a2a needs an agent's OAuth token. So this starts the real gateway and
 // API, signs a person up, connects one agent with tasks offered to it, takes the agent's /a2a token through the same consent
 // as any client, and puts a small proxy in front of the gateway on 127.0.0.1. The proxy adds that bearer to each request and
-// points the agent card's interface URLs at itself. It changes nothing else, and Podster's own checks are untouched. The kit
+// points the agent card's interface URLs at itself. It also maps the kit's /a2a/ to /a2a, since its client adds a slash. It
+// changes nothing else, and Podster's own checks are untouched. The kit
 // runs over JSON-RPC only, the one binding Podster serves.
 //
 // Results are in the kit's reports/ folder. Profile exceptions (decision 141) are in docs/spec/A2A-PROFILE.md.
@@ -28,26 +33,45 @@ if (!kit) {
   process.exit(2);
 }
 
-const { gateway, apiConfig, persist, privateKey, kid } = prepareStack({ skipBuild: process.argv.includes("--skip-build"), apiVars: { A2A_TOKEN_KEY: randomBytes(32).toString("hex") } });
-const port = await freePort();
-const base = `http://localhost:${port}`;
-const vars = { AUTH_SECRET: randomBytes(32).toString("base64"), ASSERTION_SIGNING_JWK: JSON.stringify({ ...privateKey.export({ format: "jwk" }), kid }), BASE_URL: base, ENABLE_PASSWORD_SIGNIN: "true" };
-const { stack, log, stop } = startGateway({ gateway, apiConfig, persist, vars, port, inspectorPort: await freePort() });
-const deadline = Date.now() + 120_000;
-for (;;) {
-  const up = await fetch(`${base}/.well-known/agent-card.json`).catch(() => null);
-  if (up?.status === 200) break;
-  if (Date.now() > deadline || stack.exitCode !== null) {
-    console.error(log.join("").slice(-3000));
-    stop();
-    process.exit(1);
+const STAGING = "https://gateway-staging.podster.dev";
+const staging = process.argv.includes("--staging");
+let base = STAGING;
+let stop = () => {};
+let cookie;
+if (staging) {
+  if (!process.env.PODSTER_E2E_SIGNUP_SECRET) {
+    console.error("A staging run needs PODSTER_E2E_SIGNUP_SECRET for staging's test sign-up.");
+    process.exit(2);
   }
-  await new Promise((done) => setTimeout(done, 500));
+} else {
+  const { gateway, apiConfig, persist, privateKey, kid } = prepareStack({ skipBuild: process.argv.includes("--skip-build"), apiVars: { A2A_TOKEN_KEY: randomBytes(32).toString("hex") } });
+  const port = await freePort();
+  base = `http://localhost:${port}`;
+  const vars = { AUTH_SECRET: randomBytes(32).toString("base64"), ASSERTION_SIGNING_JWK: JSON.stringify({ ...privateKey.export({ format: "jwk" }), kid }), BASE_URL: base, ENABLE_PASSWORD_SIGNIN: "true" };
+  const started = startGateway({ gateway, apiConfig, persist, vars, port, inspectorPort: await freePort() });
+  stop = started.stop;
+  const deadline = Date.now() + 120_000;
+  for (;;) {
+    const up = await fetch(`${base}/.well-known/agent-card.json`).catch(() => null);
+    if (up?.status === 200) break;
+    if (Date.now() > deadline || started.stack.exitCode !== null) {
+      console.error(started.log.join("").slice(-3000));
+      stop();
+      process.exit(1);
+    }
+    await new Promise((done) => setTimeout(done, 500));
+  }
 }
 
 // One agent with something to read: tasks offered to it, in a room it's a member of.
-const target = new Target(base, { pollMs: 150 });
-const owner = await Person.signUp(target, "Kit owner");
+const target = new Target(base, { pollMs: staging ? 1000 : 150 });
+let owner;
+if (staging) {
+  cookie = await Person.testSessionCookie(target, "Kit owner", process.env.PODSTER_E2E_SIGNUP_SECRET);
+  owner = await Person.fromCookie(target, "Kit owner", cookie);
+} else {
+  owner = await Person.signUp(target, "Kit owner");
+}
 const room = await owner.createRoom("A2A kit");
 const lead = await McpAgent.connect(target, owner, "Kit lead");
 const agent = await McpAgent.connect(target, owner, "Kit agent");
@@ -75,7 +99,10 @@ async function forward(req, res) {
   const headers = new Headers();
   for (const [name, value] of Object.entries(req.headers)) if (!["host", "connection", "content-length", "authorization"].includes(name)) headers.set(name, String(value));
   headers.set("authorization", `Bearer ${token}`);
-  const upstream = await fetch(`${base}${req.url}`, { method: req.method, headers, body: ["GET", "HEAD"].includes(req.method) ? undefined : Buffer.concat(chunks), redirect: "manual" });
+  // The kit's client joins the card's interface URL with "/", so it posts to /a2a/. Podster serves /a2a exactly. Only that
+  // one path is mapped, and the finding is recorded in docs/m3-plan.md.
+  const path = req.url === "/a2a/" ? "/a2a" : req.url;
+  const upstream = await fetch(`${base}${path}`, { method: req.method, headers, body: ["GET", "HEAD"].includes(req.method) ? undefined : Buffer.concat(chunks), redirect: "manual" });
   let body = Buffer.from(await upstream.arrayBuffer());
   if (req.url.includes("agent-card.json")) body = Buffer.from(body.toString("utf8").replaceAll(base, proxyBase));
   const out = {};
@@ -93,6 +120,10 @@ const code = await new Promise((done) => {
   proc.on("exit", (status) => done(status ?? 1));
 });
 proxy.close();
+if (staging) {
+  for (const a of [lead, agent]) await owner.dash("POST", `/agents/${a.id}/disconnect`).catch(() => null);
+  await target.http("/api/auth/sign-out", { method: "POST", headers: { cookie, origin: base, "content-type": "application/json" }, body: "{}" }).catch(() => null);
+}
 stop();
 console.log(`\nThe kit exited ${code}. Its report is in ${join(kit, "reports")}.`);
 process.exit(code);

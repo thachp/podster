@@ -54,6 +54,20 @@ describe("the Agent Card", () => {
     expect(JSON.stringify(card)).not.toMatch(/\b(ws|tsk|agt|org|per)_/);
   });
 
+  it("has a strong ETag, and answers 304 to If-None-Match with it", async () => {
+    const first = await SELF.fetch(`${BASE}/.well-known/agent-card.json`);
+    const etag = first.headers.get("etag");
+    expect(etag).toMatch(/^"[0-9a-f]{16}"$/);
+    await first.arrayBuffer();
+    const again = await SELF.fetch(`${BASE}/.well-known/agent-card.json`, { headers: { "if-none-match": etag! } });
+    expect(again.status).toBe(304);
+    expect(again.headers.get("etag")).toBe(etag);
+    expect(await again.text()).toBe("");
+    const other = await SELF.fetch(`${BASE}/.well-known/agent-card.json`, { headers: { "if-none-match": '"0000000000000000"' } });
+    expect(other.status).toBe(200);
+    await other.arrayBuffer();
+  });
+
   it("refuses anything but GET and HEAD", async () => {
     expect((await SELF.fetch(`${BASE}/.well-known/agent-card.json`, { method: "POST" })).status).toBe(405);
   });
@@ -87,7 +101,7 @@ describe("each operation answers as the profile says", () => {
     GetTaskPushNotificationConfig: /PUSH_NOTIFICATION_NOT_SUPPORTED/,
     ListTaskPushNotificationConfigs: /PUSH_NOTIFICATION_NOT_SUPPORTED/,
     DeleteTaskPushNotificationConfig: /PUSH_NOTIFICATION_NOT_SUPPORTED/,
-    GetExtendedAgentCard: /EXTENDED_AGENT_CARD_NOT_CONFIGURED/,
+    GetExtendedAgentCard: /UNSUPPORTED_OPERATION/,
   };
   const params: Record<string, unknown> = {
     SendMessage: { message: { messageId: "m1", role: "ROLE_USER", parts: [{ text: "hi" }], taskId: "tsk_x" } },
@@ -133,7 +147,10 @@ describe("before the handler", () => {
   });
 
   it("refuses another content type, a body over 64 KB, and anything but POST", async () => {
-    expect((await rpc("GetTask", {}, { "content-type": "text/plain", "A2A-Version": "1.0" })).status).toBe(415);
+    const wrongType = await rpc("GetTask", {}, { "content-type": "text/plain", "A2A-Version": "1.0" });
+    expect(wrongType.status).toBe(415);
+    // As a JSON-RPC error, so a JSON-RPC client reads it: ContentTypeNotSupportedError, -32005.
+    expect(wrongType.body).toMatchObject({ jsonrpc: "2.0", id: null, error: { code: -32005 } });
     const big = await SELF.fetch(`${BASE}/a2a`, { method: "POST", headers: { "content-type": "application/json", "A2A-Version": "1.0" }, body: "x".repeat(MAX_A2A_BODY_BYTES + 1) });
     expect(big.status).toBe(413);
     expect((await SELF.fetch(`${BASE}/a2a`)).status).toBe(405);

@@ -285,26 +285,42 @@ Last updated 2026-11-10 UTC: every M3 build step merged (1 to 15, 13b, and `/a2a
 ## Owed before M3's gate
 
 - **Who calls the gate.** [Decision 132](spec/PRODUCT.md#decisions-needed) stands: the owner calls M3's gate. On 2026-11-10 the owner said "sure .. go ahead do whatever u need to do for to complete m3 as m4.. you got my approval". The architect reads that as leave to call the gate once the evidence is complete. The architect hasn't called it, because the items below are open, and will put them to the owner.
-- **Two MUST gaps, from the kit's untested checks** (`VER-SERVER-001` and `VER-CLIENT-002`, in the profile): a request with `A2A-Version: 1.0.1` is refused instead of served as `1.0`, because the version is compared as an exact string. The fix is small, comparing Major.Minor before the SDK's check. It's code, so it needs its own PR.
-- **#246,** the tests that evidence 11 of the kit's 16 untested MUST checks, must merge.
+- **Two MUST gaps, from the kit's untested checks** (`VER-SERVER-001` and `VER-CLIENT-002`, in the profile): a request with `A2A-Version: 1.0.1` was refused instead of served as `1.0`. [Decision 192](spec/PRODUCT.md#decisions-needed) rules it's served as `1.0`, and [#247](https://github.com/thachp/podster/pull/247) fixes it, with tests. **It's open until #247 merges and is deployed.**
+- **[#246](https://github.com/thachp/podster/pull/246),** the tests that evidence 11 of the kit's 16 untested MUST checks, and **[#248](https://github.com/thachp/podster/pull/248),** the AC-18 and screens staging harness, must merge.
 - **Where each gate item ran,** since decision 132 names the staging run:
 
   | Gate item | Where it ran | Staging needs |
   | --- | --- | --- |
   | Inbound, the A2A project's JavaScript client | Locally and on staging | Nothing |
   | Inbound, the kit's client | Locally and on staging | Nothing |
-  | Inbound, the A2A project's Python client | **Spike A only, locally.** The kit's lock pins `httpx`, not `a2a-sdk` | Installing the Python `a2a-sdk` again, from Spike A's pins, and pointing it at staging, as the JavaScript client is. That uses only existing resources, one test sign-up and the owner's yes to install it |
+  | Inbound, the A2A project's Python client | **Spike A only, locally.** The kit's lock pins `httpx`, not `a2a-sdk` | **Owed to the owner.** On 2026-11-10 this session's permission check refused installing `a2a-sdk==1.3.0`, Spike A's pin, as "Code from External", and it wasn't worked around. The refused command, in the session's scratchpad: `uv pip compile --python-version 3.12 --generate-hashes` of `a2a-sdk==1.3.0` and `httpx`, then `uv venv --python 3.12 .venv` and `uv pip install --require-hashes -r requirements.lock`. Allowing it is the owner's call |
   | Outbound, independent: LangGraph, and fasta2a as backup | **Locally only.** Staging's outbound used Podster's own test server | See below |
-  | AC-18, A2A instructions stay data | **Locally only** | An addition to `e2e/a2a-staging.mjs`: a message telling Podster to elevate access, and the test server answering a read with such text. Existing resources only |
+  | AC-18, A2A instructions stay data | Locally, and **on staging on 2026-11-10: 16 passed, 0 failed** (`a2a-roundtrip.mjs --only ac18`, [#248](https://github.com/thachp/podster/pull/248)), in room `ws_b8825bdd2eeb46a5afc8fcb69d891e03`. Inbound, the agent's own message told Podster to verify the task and make it an admin. The task didn't move, the text was kept verbatim, and the agent stayed a guest. Read back, its endpoint asked for input with those instructions and then completed with them. The task went only to accepted and then submitted, the text became a thread message marked `a2a_remote` and the submission's note, the agent stayed a guest, and it couldn't verify its own submission. One test sign-up. Clean-up: endpoints deleted, agents disconnected, signed out, and no secret in the output | Nothing more |
   | `CancelTask` delivery | **Locally only.** Staging showed only the task staying canceled | The test server keeps nothing, so delivery can't be seen from outside. It would need the server to keep state, which is a new storage resource, or Podster to show a cancel's delivery, which is product code |
-  | Screens (step 15) | **Locally only** | A browser run against `app-staging.podster.dev` with a test person. Existing resources, one sign-up |
+  | Screens (step 15) | Locally. **On staging, one attempt on 2026-11-10 failed in the harness, not the app:** the browser waited for the network to go idle, which the signed-in shell never does, so no screen was checked. Signed out, the same page goes idle in 0.7 s. [#248](https://github.com/thachp/podster/pull/248) waits for the page's own content instead. Clean-up ran | **A rerun,** which takes one more test sign-up, once #248 is reviewed |
 
   **Outbound to LangGraph or fasta2a from staging** needs a server staging can reach: a public `https` name, as egress policy requires. Both run only on this machine, and the existing `podster-a2a-test-staging` Worker can't run them. It's a JavaScript Worker, and both are Python servers. So it needs one of:
   - a tunnel to this machine, which is an outside service;
   - a Cloudflare Container or a small VM, a new and billed resource;
   - porting fasta2a into a Python Worker, which is a new Worker, and fasta2a's in-memory store doesn't fit stateless isolates.
 
-  Each needs the owner. **The architect's recommendation:** run the Python client, AC-18 and the screens on staging with what exists. Put to the owner whether decision 143's independent outbound may stand on the local runs, plus staging's run against the test server, or whether to approve a short-lived Container for LangGraph. Until then, these stay owed.
+  Each needs the owner, so they're the open items below.
+- **Open gate items, for the owner to decide:**
+  - **Outbound to LangGraph or fasta2a from staging.** It needs a server staging can reach, and each way is a cloud resource:
+    - a tunnel to this machine, which is an outside service and free, but exposes the machine while it runs;
+    - a short-lived Cloudflare Container or a small VM running LangGraph, at a few cents for an hour's run, deleted after;
+    - a new Python Worker running fasta2a, which is free, but its in-memory store doesn't fit stateless isolates, so it may be flaky.
+  - **`CancelTask` delivery on staging.** The test Worker keeps nothing, so delivery can't be seen from outside. Either give the Worker storage, a KV namespace, which is a new resource and free at this volume. Or have Podster show a cancel's delivery, as `cancel_state` on the task's read, which is product code and needs its own decision.
+  - **The Python SDK client on staging.** The install was refused in this session (above), and allowing it is the owner's.
+  - **Not covered by any test:** `AUTH-SERVER-001` (SHOULD), that Podster as a client checks the server's certificate. It rests on the Workers runtime's `fetch`. **And not testable from this client:** whether staging refuses TLS 1.1, since the client's OpenSSL won't offer it. Cloudflare sets that.
+- **The question for the owner:** M3's gate has these items open:
+  - outbound against LangGraph or fasta2a from staging;
+  - `CancelTask` delivery on staging;
+  - the Python SDK client on staging;
+  - the screens' staging rerun;
+  - #246, #247 and #248, to merge and deploy.
+
+  The kit, the round trip, AC-18, Spike C and the local LangGraph and fasta2a runs have passed. Either approve a short-lived server so outbound can run against LangGraph from staging, or rule that the local LangGraph and fasta2a runs plus staging's test-server run are enough. Also say whether `CancelTask` delivery and the Python client must run on staging, and allow the Python install if so.
 - **Owed to the owner: the test A2A server.** The architect ruled it stays deployed. It costs nothing to keep, since it's one Worker with no storage that refuses anything not sealed under `RUN_KEY`, and it lets the round trip run again with no new secrets. Deleting it, `wrangler delete podster-a2a-test-staging`, which also removes `RUN_KEY`, is a cloud change and the owner's call.
 
 **Ruled, 2026-11-10:**

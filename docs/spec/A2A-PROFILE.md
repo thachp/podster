@@ -8,7 +8,7 @@ What Podster's A2A surface supports. The design is [ADR 0007](../adr/0007-a2a.md
 
 | | |
 | --- | --- |
-| Version | A2A 1.0 only ([decision 109](PRODUCT.md#decisions-needed)). A request without `A2A-Version` is read as 0.3, as spec 3.6.2 says, and refused with `VersionNotSupportedError`. A patch of 1.0, such as `1.0.1`, is served as 1.0, since patch numbers never count in negotiation ([decision 192](PRODUCT.md#decisions-needed)). Major and minor are read strictly, digits only, and anything else is refused |
+| Version | A2A 1.0 only ([decision 109](PRODUCT.md#decisions-needed)). A request without `A2A-Version` is read as 0.3, as spec 3.6.2 says, and refused with `VersionNotSupportedError`. A patch of 1.0, such as `1.0.1`, is served as 1.0, since patch numbers never count in negotiation ([decision 192](PRODUCT.md#decisions-needed)). Major and minor are read strictly, digits only, and anything else is refused. **A refused `A2A-Version` is echoed, JSON-encoded, in the error message.** That's the A2A SDK's own refusal, and the header is bounded, so the architect ruled on 2026-11-10 to keep it |
 | Binding | JSON-RPC only ([decision 108](PRODUCT.md#decisions-needed)), at `POST /a2a` on the gateway |
 | Agent Card | `GET /.well-known/agent-card.json`. It describes Podster only, and never lists a room, task or agent ([decision 110](PRODUCT.md#decisions-needed)) |
 | Streaming, push notifications, extended card | All off ([decision 110](PRODUCT.md#decisions-needed)) |

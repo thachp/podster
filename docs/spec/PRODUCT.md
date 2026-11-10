@@ -703,7 +703,7 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 - The owner said on 2026-11-10 that the test GitHub organization is `podsterx` and the real managed organization is `podsterdev`, and that tests and spikes never run against `podsterdev`.
 - The owner said on 2026-11-10: "i'm okay with having public repo.. this will be an MIT project". The architect reads it as allowing public managed repositories and an MIT license for Podster's own code, and has asked the owner to confirm which. Its scope is unconfirmed, so decision 181 is a working assumption.
 - Decisions 10, 18 and 25 stay as they are. Decision 184 proposes decision 10's answer.
-- What GitHub was seen to do is in the [M5 spike](../../spikes/m5-github/README.md#results-2026-11-10) and its merge-restriction run ([#234](https://github.com/thachp/podster/pull/234)), each result seen once or twice on `podsterx`.
+- What GitHub was seen to do is in the [M5 spike](../../spikes/m5-github/README.md#results-2026-11-10) and its [merge-restriction run](../../spikes/m5-github/README.md#results-merge-restriction), each result seen once or twice on `podsterx`.
 
 ## ADR 0007 accepted, November 8, 2026
 

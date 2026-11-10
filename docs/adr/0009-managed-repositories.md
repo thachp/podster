@@ -1,6 +1,6 @@
 # ADR 0009: Managed repositories and merge
 
-**Status:** **Proposed** by the architect on 2026-11-10 UTC. Not approved, and nothing here is built. It answers what the [M5 plan](../m5-plan.md) and the [architecture](../spec/ARCHITECTURE.md#managed-repositories-and-merge-m5) leave open for this ADR, using the [M5 spike](../../spikes/m5-github/README.md#results-2026-11-10)'s results. It also uses the spike's [merge-restriction run](https://github.com/thachp/podster/pull/234), whose results are in [#234](https://github.com/thachp/podster/pull/234) and not on `main` yet. Its choices are recorded as proposals in [decisions 179 to 189](../spec/PRODUCT.md#m5-proposals-november-10-2026). Items under [what needs the owner's yes](#what-needs-the-owners-yes) aren't the architect's to settle.
+**Status:** **Proposed** by the architect on 2026-11-10 UTC. Not approved, and nothing here is built. It answers what the [M5 plan](../m5-plan.md) and the [architecture](../spec/ARCHITECTURE.md#managed-repositories-and-merge-m5) leave open for this ADR, using the [M5 spike](../../spikes/m5-github/README.md#results-2026-11-10)'s results. It also uses the spike's [merge-restriction run](../../spikes/m5-github/README.md#results-merge-restriction). Its choices are recorded as proposals in [decisions 179 to 189](../spec/PRODUCT.md#m5-proposals-november-10-2026). Items under [what needs the owner's yes](#what-needs-the-owners-yes) aren't the architect's to settle.
 
 ## How to read this
 
@@ -35,7 +35,7 @@ The specs proposed a design before anything was tried on GitHub. The spike then 
 1. **Verified:** on the Free plan, GitHub refuses a ruleset on a private repository (`403`, "Upgrade to GitHub Pro or make this repository public"). Without a ruleset, a token with contents write committed straight to the default branch and merged freely. Classic branch protection wasn't tried, so this ADR claims only that rulesets, the mechanism it relies on, aren't available there.
 2. **Verified, on the two paths tried, once each:** with a ruleset on a public repository, a required status pinned to the merge App kept unmarked commits off the default branch. A status from the other App didn't count.
 3. **Verified, once:** the rule gates the commit, not who merges. After the merge App marked a commit, the agent's own token merged it (`200`). So `merge_task` isn't the only path to a merge under that rule.
-4. **Verified, once each, in the [merge-restriction run](https://github.com/thachp/podster/pull/234):** with a second rule that restricts updates to the default branch and names the merge App as its only bypass actor, the agent's token was refused on the three paths tried, even with the status on the head, and the merge App merged.
+4. **Verified, once each, in the [merge-restriction run](../../spikes/m5-github/README.md#results-merge-restriction):** with a second rule that restricts updates to the default branch and names the merge App as its only bypass actor, the agent's token was refused on the three paths tried, even with the status on the head, and the merge App merged.
 
 ## Decision
 
@@ -66,7 +66,7 @@ A repository's identity is GitHub's repository ID, recorded when Podster creates
 
 - **The merge App is separate** because the required status and the update bypass both rest on its identity. **Verified:** a status from another App was refused (`405`), and the merge App needed no extra permission to be a bypass actor.
 - **The agent-token App is separate from provisioning** so that a mistake in the token-issuing path, or a leak of that App's key, can't touch the rules. A token can't hold a permission its App lacks (**verified:** asking for one returned `422`), and this App has no Administration to give.
-- **Verified, with the spike's single provisioning App:** its token created rulesets naming a bypass actor (`201`), and deleted rulesets and repositories (`204`). An agent's cut-down token from that same App got `403` on settings and rulesets. So the boundary held in the spike by scoping alone, and three Apps make it hold by the App's own permissions.
+- **Verified, with the spike's single provisioning App:** its token created rulesets naming a bypass actor (`201`), and deleted rulesets and repositories (`204`; the repository deletes were seen on the console and aren't in a results file). An agent's cut-down token from that same App got `403` on settings and rulesets. So the boundary held in the spike by scoping alone, and three Apps make it hold by the App's own permissions.
 
 **Unverified, and a spike item:** that a repository created by one App is at once under the other two installations, that a token from an App without Administration behaves as the spike's scoped token did, and the least permissions each App needs. Which App's token does the polling reads is to settle with that.
 
@@ -159,19 +159,20 @@ This answers [decision 10](../spec/PRODUCT.md#decisions-needed), as a proposal.
 
 ### The merge path
 
-**Proposed: on the paths tried, only the merge App's token can update the default branch, and only with a commit the merge App marked.** GitHub's rules know nothing of a review. Whether a commit was reviewed, and by whom, is decided in Podster's Rust before the merge App marks anything. Two rulesets on the default branch, both created by the provisioning App at setup, as the [merge-restriction run](https://github.com/thachp/podster/pull/234)'s variant (c):
+**Proposed: on the paths tried, only the merge App's token can update the default branch, and only with a commit the merge App marked.** GitHub's rules know nothing of a review. Whether a commit was reviewed, and by whom, is decided in Podster's Rust before the merge App marks anything. Two rulesets on the default branch, both created by the provisioning App at setup, as the [merge-restriction run](../../spikes/m5-github/README.md#results-merge-restriction)'s variant (c):
 
 | Ruleset | Rules | Bypass | What it does |
 | --- | --- | --- | --- |
 | Review | `pull_request`, and `required_status_checks` for `podster/review` pinned to the merge App | No bypass actor | Held the agent's token and the merge App's token to a pull request whose head the merge App marked |
 | Update | `update` | The merge App only (`Integration`, `always`) | Refused the agent's token on every update tried |
 
-**Verified, once each, on a public repository on the Free plan:**
+**Verified, once each, on a public repository on the Free plan, with the `merge` method only:**
 
 - The agent's token, with the status already on the head, was refused merging the pull request (`405`), committing straight to the default branch through the contents API (`409`), and moving the branch's ref to the pull request's head (`422`).
 - The merge App merged that same pull request (`200`).
 - The merge App itself was refused merging a pull request whose head had no status (`405`), and committing straight to the default branch (`409`). So a bug in Podster's merge job can't put an unmarked commit on the default branch on these paths.
 - Only those two tokens were tried. Organization owners, anyone else with admin rights, and `git push` weren't.
+- **Limits of that run.** Its three variants ran in turn on one repository, so they aren't independent: each variant's rulesets were deleted before the next (`204`), and the run didn't list the rulesets to confirm none was left. It also had no control: the case without the update rule, where the agent's token merged a marked commit, is from an earlier run on another repository, also seen once.
 - Bypass is per ruleset, not per rule. With one ruleset holding all three rules, the merge App bypassed the status and pull request rules too. That's why there are two.
 
 **What this gives, and what it doesn't.**
@@ -349,7 +350,7 @@ The M5 plan is updated with this ADR where it says so below. The specs aren't, u
 - **Adopting an orphan repository by a marker** after a lost creation answer. A spike item.
 - **Classic branch protection** on a private repository on the Free plan.
 - **How long GitHub may redeliver a webhook.**
-- **Everything the spike saw was seen once or twice,** on one Free organization, on one day. The two-ruleset result was seen once.
+- **Everything the spike saw was seen once or twice,** on one Free organization, on one day. The two-ruleset result was seen once, after two other variants on the same repository, with no check that their rulesets were gone and no control in the same run.
 
 ## Cloud resources this needs
 

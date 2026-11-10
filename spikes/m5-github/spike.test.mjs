@@ -15,10 +15,10 @@ test("the App JWT verifies with the key's public half and carries the App ID", (
 });
 
 test("only organizations that look like test ones are accepted", () => {
-  for (const ok of ["podster-spike", "podster-test", "test-podster", "podster_sandbox", "spike"]) {
+  for (const ok of ["podster-spike", "podster-test", "test-podster", "podster-sandbox", "spike"]) {
     assert.ok(looksLikeTestOrg(ok), ok);
   }
-  for (const bad of ["podster", "podster-rooms", "contest", "testimony", "", undefined]) {
+  for (const bad of ["podster", "podster-rooms", "contest", "testimony", "podster_test", "test/../podster", "", undefined]) {
     assert.ok(!looksLikeTestOrg(bad), String(bad));
   }
 });

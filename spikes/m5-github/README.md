@@ -34,11 +34,13 @@ Repository permissions:
 | Administration | Read and write |
 | Contents | Read and write |
 | Pull requests | Read and write |
-| Commit statuses | Read-only |
-| Checks | Read-only |
+| Commit statuses | Read and write |
+| Actions | Read-only |
 | Metadata | Read-only (GitHub sets this) |
 
 Leave everything else at **No access**, including **Workflows** and all organization and account permissions.
+
+Commit statuses write is here for the spike only: it lets the script check that a status from the wrong App doesn't satisfy a rule pinned to the merge App. The real provisioning App wouldn't hold it.
 
 After **Create GitHub App**:
 
@@ -55,7 +57,6 @@ The same steps, with the name `podster-spike-merge` and these repository permiss
 | Contents | Read and write |
 | Pull requests | Read and write |
 | Commit statuses | Read and write |
-| Checks | Read and write |
 | Metadata | Read-only |
 
 No Administration. Note its App ID, generate its key, and install it on **All repositories** too.
@@ -103,7 +104,7 @@ The architect runs this once the owner's setup is done. It needs Node 22 or late
 M5_ORG=<org> M5_PROVISION_APP_ID=<id> M5_MERGE_APP_ID=<id> node spike.mjs
 ```
 
-It refuses an organization whose name doesn't contain `spike`, `test` or `sandbox`. It creates two private repositories named `m5-spike-<time>-a` and `-b`, writes status codes and GitHub's messages to `results/`, and never prints or stores a token. `--allow-public` also tries rules on a public repository if the private one refuses them. `--cleanup` deletes the spike's repositories.
+It refuses an organization whose name doesn't contain `spike`, `test` or `sandbox`. It creates two private repositories named `m5-spike-<time>-a` and `-b`, and every merge result records whether a ruleset was active on that repository. It writes status codes and GitHub's messages to `results/`, and never prints or stores a token. `--allow-public` repeats the rule and merge checks on a public repository if the private one refuses a ruleset, which a Free organization may do. `--cleanup` deletes the spike's repositories.
 
 ```bash
 node --test spike.test.mjs

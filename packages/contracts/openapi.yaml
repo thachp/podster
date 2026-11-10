@@ -744,6 +744,35 @@ paths:
       tags: [queries]
       summary: "The room's managed repository (M5, ADR 0009, proposed): `request`, the room's one request for a repository, and `repository`, the repository linked to the room, each null if there's none. A room that doesn't use Git has neither. Read from the room's own state, for a person who sees the whole room. An agent, and anyone who doesn't see the whole room, gets `not_allowed`. It's a read and grants nothing. Nothing writes a request or a link yet, so both are null until provisioning is built (M5 step 4)"
       responses: { "200": { description: The request and the linked repository, content: { application/json: { schema: { $ref: "#/components/schemas/RoomRepository" } } } }, default: { $ref: "#/components/responses/Error" } }
+    post:
+      operationId: requestRepository
+      tags: [commands]
+      summary: "Ask for the room's managed repository (M5 step 4, ADR 0009, proposed): `{ name, visibility }`, by the room's owner, as a person. Never an agent. Refused with `not_delegated` (403) unless the room's organization holds the provisioning delegation, which a Podster operator gives (AC-10), and then nothing reaches the provider. `private` gets `private_unavailable` (409): on the organization's plan a private repository can't carry the rules, so it's never quietly made public. A room has one request: a second gets `repo_request_exists` (409). The organization, the App and its installation come from the server's configuration, and any other field is refused. Records the request as `pending` and answers as the read does. A job then creates the repository, switches Actions off, adds the two rulesets, reads everything back, and only then links the repository by the ID in the provider's own answer and marks the request `ready`. Otherwise the request ends `failed` or `uncertain` with a reason code, which blocks coding tasks in the room and nothing else. Audited, and tells the room's managers."
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false, required: [name, visibility], properties: { name: { type: string, pattern: "^[a-z0-9][a-z0-9-]{0,63}$", description: "Lower-case letters, digits and hyphens, starting with a letter or a digit, at most 64 bytes." }, visibility: { type: string, enum: [public, private], description: "Independent of the room's visibility. `private` is unavailable for now." } } } } } }
+      responses: { "200": { description: The request and the linked repository, content: { application/json: { schema: { $ref: "#/components/schemas/RoomRepository" } } } }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/repository/retry:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    post:
+      operationId: retryRepositorySetup
+      tags: [commands]
+      summary: "Retry a setup that ended `failed` or `uncertain` (M5 step 4), `{}`, by the room's owner, with the same delegation check as the request. With a repository ID held from the provider's own answer, setup resumes on that repository and no second one is made. Without one, the next creation call goes out under a name the server makes from the chosen name and six hex digits, never a name an earlier call sent, so nothing is ever adopted by its name, and whatever an earlier call may have made stays where it is. Setup only adds what's missing: a rule that's present and wrong is never repaired, and fails again. `repo_request_not_found` (404), `setup_in_progress` (409), `already_ready` (409). Answers as the read does"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false } } } }
+      responses: { "200": { description: The request and the linked repository, content: { application/json: { schema: { $ref: "#/components/schemas/RoomRepository" } } } }, default: { $ref: "#/components/responses/Error" } }
+  /v1/orgs/{org}/provisioning-delegation:
+    parameters: [{ name: org, in: path, required: true, schema: { type: string } }]
+    get:
+      operationId: getProvisioningDelegation
+      tags: [queries]
+      summary: "Whether an organization holds the provisioning delegation for managed repositories (M5 step 4, AC-10), for a Podster operator or an admin of that organization. Held in the organization's own object in the API. Without it, nobody in the organization can ask for a room's repository."
+      responses: { "200": { description: The delegation, content: { application/json: { schema: { $ref: "#/components/schemas/ProvisioningDelegation" } } } }, default: { $ref: "#/components/responses/Error" } }
+    put:
+      operationId: setProvisioningDelegation
+      tags: [commands]
+      summary: "Give an organization the provisioning delegation or take it back, `{ granted }`, by a Podster operator only. For a managed repository Podster's platform is the resource owner, so an organization's own admins can't give it to themselves. Every change is kept with who made it. Taking it back stops new requests and any job that hasn't called the provider yet. It doesn't touch a repository already linked. Setting the same value again changes nothing but the time."
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false, required: [granted], properties: { granted: { type: boolean } } } } } }
+      responses: { "200": { description: The delegation, content: { application/json: { schema: { $ref: "#/components/schemas/ProvisioningDelegation" } } } }, default: { $ref: "#/components/responses/Error" } }
   /v1/provider/github/deliveries:
     post:
       operationId: receiveGithubDelivery
@@ -988,7 +1017,7 @@ components:
         state: { type: string, enum: [pending, ready, failed, uncertain] }
         name: { type: string, pattern: "^[a-z0-9][a-z0-9-]{0,63}$", description: "The name chosen at setup: lower-case letters, digits and hyphens, at most 64 characters. For display. It never identifies a repository." }
         visibility: { type: string, enum: [public, private], description: "Chosen at setup. It never follows the room's visibility." }
-        reason: { type: [string, "null"], description: "A reason code while `failed` or `uncertain`, such as `name_taken`. Never the provider's message text." }
+        reason: { type: [string, "null"], description: "A reason code while `failed` or `uncertain`. Never the provider's message text. Before any call: `provisioning_not_configured`, `not_delegated`, `delegation_unavailable`, `room_archived`, `requester_not_owner`. From the creation call: `name_taken`, `provider_refused`, `wrong_owner`, and `creation_outcome_unknown` for `uncertain`. From setup and the read-back: `read_back_failed`, `setup_call_failed`, `wrong_repository`, `visibility_differs`, `archived`, `no_initial_commit`, `actions_enabled`, `actions_unreadable`, `ruleset_missing`, `ruleset_inactive`, `ruleset_differs`, `bypass_differs`, `unexpected_ruleset`. Also `authority_lost` and `internal_error`." }
         requested_by: { type: string }
         requested_at: { type: integer, description: "Milliseconds, as every time here." }
         updated_at: { type: integer }
@@ -1009,6 +1038,15 @@ components:
         created_at: { type: integer }
         verified_at: { type: [integer, "null"], description: "When Podster last read the repository's rules and settings back from the provider and found them as readiness needs." }
         updated_at: { type: integer }
+    ProvisioningDelegation:
+      type: object
+      additionalProperties: false
+      required: [provider, granted, set_by, set_at]
+      properties:
+        provider: { type: string, enum: [github] }
+        granted: { type: boolean }
+        set_by: { type: [string, "null"], description: "The operator who last set it, or null if nobody has." }
+        set_at: { type: [integer, "null"] }
     RoomRepository:
       type: object
       additionalProperties: false
@@ -1028,5 +1066,5 @@ components:
           properties:
             code:
               type: string
-              enum: [plan_conflict, dependency_cycle, relationship_exists, relationship_not_found, role_not_found, role_full, already_claimed, lead_exists, invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, workspace_archived, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox, too_many_artifacts, duplicate_file, file_not_found, file_not_ready, file_removed, file_changed, files_not_checked, too_many_outputs, output_in_use, output_not_found, invalid_endpoint_url, token_storage_unavailable, public_claims_not_allowed, public_rooms_disabled, room_suspended, person_review_required, public_claims_paused, public_claims_suspended]
+              enum: [plan_conflict, dependency_cycle, relationship_exists, relationship_not_found, role_not_found, role_full, already_claimed, lead_exists, invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, workspace_archived, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox, too_many_artifacts, duplicate_file, file_not_found, file_not_ready, file_removed, file_changed, files_not_checked, too_many_outputs, output_in_use, output_not_found, invalid_endpoint_url, token_storage_unavailable, public_claims_not_allowed, public_rooms_disabled, room_suspended, person_review_required, public_claims_paused, public_claims_suspended, not_delegated, private_unavailable, repo_request_exists, repo_request_not_found, setup_in_progress, already_ready, name_reused]
             message: { type: string }

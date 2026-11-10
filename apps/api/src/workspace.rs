@@ -84,6 +84,7 @@ mod objects;
 mod outputs;
 mod plan;
 mod planned;
+mod provisioning;
 mod public;
 mod public_claims;
 mod removal;
@@ -3429,6 +3430,7 @@ impl Workspace {
         if !rows(&sql, "SELECT seq FROM index_outbox LIMIT 1", vec![])?.is_empty()
             || (migrated && visibility::public_index_due(&sql)?)
             || (migrated && repositories::index_due(&sql)?)
+            || (migrated && provisioning::due(&sql)?)
         {
             due = Some(now + if index_failed { 5000 } else { 50 });
         }
@@ -3785,6 +3787,9 @@ impl Workspace {
         }
         if req.path() == repositories::INTERNAL_PROVIDER_DELIVERY {
             return self.provider_delivery(req).await;
+        }
+        if req.path() == repositories::INTERNAL_LINK_HOLDS {
+            return self.answer_link_holds(req).await;
         }
         if req.path() == public::INTERNAL_PUBLIC_PAGE
             || req.path() == public::INTERNAL_EXPLORE_ENTRY
@@ -4373,6 +4378,44 @@ impl Workspace {
                     visibility::handle_set_visibility(sql, who, &body, public_rooms, now)
                 },
             ),
+            // The room's repository (M5 step 4). The organization's delegation is asked first, outside the transaction, and
+            // counts for nothing unless the caller is the room's owner. A stored answer goes only to the owner.
+            (Method::Post, ["repository"]) => {
+                let delegated = self.org_delegated().await == Some(true);
+                self.command_checked(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    |sql: &SqlStorage, who: &Participant| {
+                        provisioning::may_request(sql, &who.caller)
+                    },
+                    move |sql, who, now| provisioning::request(sql, who, &body, delegated, now),
+                )
+            }
+            (Method::Post, ["repository", "retry"]) => {
+                let delegated = self.org_delegated().await == Some(true);
+                let suffix: String = uuid::Uuid::new_v4()
+                    .simple()
+                    .to_string()
+                    .chars()
+                    .take(6)
+                    .collect();
+                self.command_checked(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    |sql: &SqlStorage, who: &Participant| {
+                        provisioning::may_request(sql, &who.caller)
+                    },
+                    move |sql, who, now| {
+                        provisioning::retry(sql, who, &body, delegated, &suffix, now)
+                    },
+                )
+            }
             // A stored answer is replayed only to a caller who may still manage the room.
             (Method::Put, ["public-claims"]) => self.command_checked(
                 &identity,
@@ -4591,7 +4634,12 @@ impl DurableObject for Workspace {
                 error.code().unwrap_or("internal_error")
             );
         }
-        let repo_index = self.repository_upkeep(&sql).await;
+        // A pending request for the room's repository. It always leaves the request ready, failed or uncertain.
+        let provisioned = self.provision().await;
+        if let Err(error) = &provisioned {
+            console_error!("provisioning failed: {:?}", error.code());
+        }
+        let repo_index = self.repository_upkeep(&sql).await.and(provisioned);
         // A stuck scan fails closed here, and this failing holds up nothing else.
         if let Err(error) = self.expire_scans() {
             console_error!("couldn't end overdue scans: {:?}", error.code());

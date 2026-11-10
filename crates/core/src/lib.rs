@@ -12,6 +12,7 @@ pub mod baseline;
 pub mod expected_outputs;
 pub mod files;
 pub mod provider_deliveries;
+pub mod provisioning;
 pub mod public_claims;
 pub mod removal;
 pub mod repo_access;

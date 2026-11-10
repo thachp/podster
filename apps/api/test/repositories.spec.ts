@@ -176,8 +176,9 @@ describe("the room's repository read", () => {
     const outside = await api(STRANGER, "GET", `/v1/workspaces/${id}/repository`);
     expect([outside.status, outside.code]).toEqual([404, "workspace_not_found"]);
     expect(outside.text).not.toContain("podsterx");
-    // It's a read: no other method is a route.
-    for (const method of ["POST", "PUT", "DELETE"]) expect((await api(OWNER, method, `/v1/workspaces/${id}/repository`, {})).code, method).toBe("not_found");
+    // Step 4 made POST the owner's request for a repository, which an empty body isn't. No other method is a route.
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/repository`, {})).code).toBe("invalid_argument");
+    for (const method of ["PUT", "DELETE"]) expect((await api(OWNER, method, `/v1/workspaces/${id}/repository`, {})).code, method).toBe("not_found");
   });
 });
 

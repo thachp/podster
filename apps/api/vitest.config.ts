@@ -2,6 +2,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
+import { FAKE_APP_KEY_PEM, FAKE_GITHUB, fakeGithub } from "./test/fake-github.ts";
 
 // A throwaway key per run. Tests sign as the gateway, and the Worker verifies with the public half.
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -43,6 +44,10 @@ function a2aAnswer(path: string, body: string) {
 }
 
 async function fakeHook(request: Request) {
+  // GitHub, for provisioning (M5 step 4): a fake, so nothing ever reaches the real one. Its calls carry tokens, so they
+  // stay out of the hook log.
+  const github = await fakeGithub(request);
+  if (github) return github;
   const url = new URL(request.url);
   if (url.hostname === "hook-log.example.com") return new Response(JSON.stringify(hookRequests));
   if (url.hostname === "a2a-script.example.com") {
@@ -120,6 +125,14 @@ export default defineConfig({
           // A test value only. The real key is the owner's to set (decision 122).
           A2A_TOKEN_KEY: "0f".repeat(32),
           EXPLORE_CURSOR_KEY: "a5".repeat(32),
+          // Provisioning's configuration (M5 step 4), pointing at the fake. The real values and the key are the owner's to set.
+          GITHUB_ORG_LOGIN: FAKE_GITHUB.orgLogin,
+          GITHUB_ORG_ID: String(FAKE_GITHUB.orgId),
+          GITHUB_PROVISION_APP_ID: String(FAKE_GITHUB.provisionAppId),
+          GITHUB_PROVISION_INSTALLATION_ID: String(FAKE_GITHUB.installationId),
+          GITHUB_MERGE_APP_ID: String(FAKE_GITHUB.mergeAppId),
+          GITHUB_PROVISION_APP_KEY: FAKE_APP_KEY_PEM,
+          TEST_FAKE_GITHUB: JSON.stringify(FAKE_GITHUB),
           // Set only by e2e/run-langgraph-check.mjs. Empty, a2a-langgraph.spec.ts skips.
           TEST_LANGGRAPH_ASSISTANT: process.env.PODSTER_LANGGRAPH_URL ? (process.env.PODSTER_LANGGRAPH_ASSISTANT ?? "") : "",
           // Set only by e2e/run-fasta2a-check.mjs: the agent's run time in seconds. Empty, a2a-fasta2a.spec.ts skips.

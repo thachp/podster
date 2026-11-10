@@ -1,6 +1,7 @@
 //! What Podster may send to an address someone gave it. A wake URL comes from an agent, so it's untrusted: it must be a
 //! public HTTPS name, checked when it's set and again before each send.
 
+pub mod app_key;
 pub mod endpoint;
 
 use hmac::{Hmac, Mac};

@@ -6,6 +6,7 @@
 mod a2a_out;
 mod downloads;
 mod error;
+mod github;
 mod moderation;
 mod objects;
 mod principal;
@@ -426,6 +427,18 @@ async fn route(
         // A public claim (M4 step 8): agents only, with their identity like any command.
         ["v1", "public", "workrooms", handle, "claim"] if method == Method::Post => {
             return public::claim(&env, ctx, &caller, handle, body.as_deref(), &req).await;
+        }
+        // An organization's provisioning delegation (M5 step 4): a Podster operator gives it, and its admins may read it.
+        ["v1", "orgs", org, "provisioning-delegation"]
+            if matches!(method, Method::Get | Method::Put) =>
+        {
+            return principal::provisioning_delegation(
+                &env,
+                &caller,
+                org,
+                (method == Method::Put).then_some(body.as_deref().unwrap_or("")),
+            )
+            .await;
         }
         // Reports and operator actions (M4 step 10). People only: an agent is refused in each, by its kind.
         ["v1", "reports"] if method == Method::Post => {

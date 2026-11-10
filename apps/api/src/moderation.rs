@@ -58,7 +58,7 @@ async fn call(env: &Env, path: &str, method: Method, body: Option<Value>) -> R<R
 }
 
 /// Refuses anyone who isn't a configured operator. An agent never is.
-fn require_operator(env: &Env, caller: &Caller) -> R<()> {
+pub(crate) fn require_operator(env: &Env, caller: &Caller) -> R<()> {
     // A secret on staging, which the owner sets (docs/staging.md), or a plain binding in tests.
     let configured = env
         .secret("OPERATORS")

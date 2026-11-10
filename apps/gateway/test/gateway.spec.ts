@@ -1475,6 +1475,16 @@ describe("rate limits", () => {
     const tool = capabilitiesFor({ MANAGED_REPOSITORIES: "true" }).find((c) => c.name === "get_repo_access")!;
     expect([tool.kind, tool.method, tool.idempotent, Object.keys(tool.fields ?? {})]).toEqual(["command", "POST", true, ["workspace_id", "task_id"]]);
     expect(toApiCall(tool, { workspace_id: "w", task_id: "t", repository_id: 1, installation_id: 2, permissions: { administration: "write" } })).toEqual({ method: "POST", path: "/v1/workspaces/w/tasks/t/repo-access", body: "{}", idempotencyKey: undefined });
+    // A task's pull request (M5 step 7a) adds one field to submit_task and no capability. Off, the field isn't offered or passed on.
+    const submit = (env: { MANAGED_REPOSITORIES?: string }) => capabilitiesFor(env).find((c) => c.name === "submit_task")!;
+    for (const value of [undefined, "", "TRUE", "yes"]) expect(Object.keys(submit({ MANAGED_REPOSITORIES: value }).fields ?? {}), String(value)).not.toContain("pr_number");
+    expect(Object.keys(submit({ MANAGED_REPOSITORIES: "true" }).fields ?? {})).toContain("pr_number");
+    const args = { workspace_id: "w", task_id: "t", version: 2, note: "n", commit_sha: "a".repeat(40), pr_number: 7, idempotency_key: "k" };
+    expect(JSON.parse(toApiCall(submit({}), args).body!)).toEqual({ version: 2, note: "n", commit_sha: "a".repeat(40) });
+    expect(JSON.parse(toApiCall(submit({ MANAGED_REPOSITORIES: "true" }), args).body!)).toEqual({ version: 2, note: "n", commit_sha: "a".repeat(40), pr_number: 7 });
+    for (const env of [{}, { MANAGED_REPOSITORIES: "true" }]) {
+      for (const c of capabilitiesFor(env)) if (c.name !== "submit_task") expect(c).toBe(CAPABILITIES.find((x) => x.name === c.name));
+    }
   });
 
   it("has managed repositories switched on nowhere in the Worker's configuration (M5 step 6)", () => {

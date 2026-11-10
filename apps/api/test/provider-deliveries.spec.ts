@@ -424,6 +424,13 @@ describe("the delivery migration", () => {
     // Back to the release before this one. Step 4's migration came after it, so that's undone too and runs again behind it.
     await inRoom(id, (sql) => {
       // M5 step 6's agent tokens, the newest migration, come off first.
+      // M5 step 7a's read bookkeeping, the newest migration, comes off first.
+      sql.exec("DROP TABLE repo_read");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merged_by_id");
+      sql.exec("ALTER TABLE task_change DROP COLUMN unchanged_reads");
+      sql.exec("ALTER TABLE task_change DROP COLUMN read_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN observed_base_sha");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE repo_token_mint");
       sql.exec("DROP TABLE repo_token");
       sql.exec("UPDATE schema_version SET version = version - 1");
@@ -442,7 +449,7 @@ describe("the delivery migration", () => {
     expect((await deliver({ delivery_id: deliveryId(), event: "pull_request", repository_id: repo, pull_requests: [7], head_sha: HEAD })).status).toBe(202);
     expect(await version()).toBe(newest);
     expect(await columns("provider_delivery")).toEqual(["delivery_id", "body_sha256", "received_at", "expires_at"]);
-    expect((await columns("task_change")).at(-1)).toBe("nudged_at");
+    expect(await columns("task_change")).toContain("nudged_at");
     expect((await columns("repo_link")).at(-1)).toBe("indexed_at");
     // The link and the change are as they were, and the delivery that migrated it was taken.
     const kept = await change(id) as any;

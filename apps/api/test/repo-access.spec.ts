@@ -137,7 +137,8 @@ async function room(options: { switchedOn?: boolean; grant?: boolean; accept?: b
 
 async function newTask(id: string, assignee: Who, options: { accept?: boolean; linked?: boolean } = {}) {
   const made = await must(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Code", instructions: "Change the code", assignee: assignee.id });
-  if (options.linked !== false) await inRoom(id, (sql) => sql.exec("UPDATE task SET has_linked_repository = 1 WHERE id = ?", made.id));
+  // A task made in a room with a ready repository is linked (M5 step 7a). The flag is written either way, for a room with the switch off.
+  await inRoom(id, (sql) => sql.exec("UPDATE task SET has_linked_repository = ? WHERE id = ?", options.linked !== false ? 1 : 0, made.id));
   if (options.accept === false) return made.id as string;
   await must(assignee, "POST", `/v1/workspaces/${id}/tasks/${made.id}/accept`, { version: made.version });
   return made.id as string;

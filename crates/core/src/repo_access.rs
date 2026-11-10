@@ -52,6 +52,13 @@ impl TokenPermissions {
         metadata: Level::Read,
     };
 
+    /// The server's own read of a pull request (M5 step 7a): the same App, and nothing it can write with.
+    pub const READER: TokenPermissions = TokenPermissions {
+        contents: Level::Read,
+        pull_requests: Level::Read,
+        metadata: Level::Read,
+    };
+
     /// The permissions as GitHub names them, to ask for and to compare its answer with.
     pub fn pairs(self) -> [(&'static str, &'static str); 3] {
         [

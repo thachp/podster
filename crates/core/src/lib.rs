@@ -20,6 +20,7 @@ pub mod repo_grants;
 pub mod repo_merge;
 pub mod repositories;
 pub mod submission_files;
+pub mod task_change;
 
 pub const MAX_ARTIFACTS: usize = 10;
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;

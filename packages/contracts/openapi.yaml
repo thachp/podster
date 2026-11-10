@@ -884,6 +884,7 @@ components:
             properties:
               task: { $ref: "#/components/schemas/Task" }
               expected_output: { type: [object, "null"], description: "The expected output this task works toward, as `id`, `title` and `removed`, or null.", properties: { id: { type: string }, title: { type: string }, removed: { type: boolean } } }
+              change: { $ref: "#/components/schemas/TaskChange" }
               submissions: { type: array, items: { type: object } }
               artifacts: { type: array, items: { type: object } }
               files: { type: array, items: { type: object } }
@@ -1038,6 +1039,30 @@ components:
         files: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/SubmissionFile" } }
         note: { type: string }
         commit_sha: { type: string, description: Required when the task has a linked repository. }
+        pr_number: { type: integer, minimum: 1, description: "The task's pull request, by its number in the room's repository (M5 step 7a, ADR 0009, proposed). Read only while managed repositories are switched on, and then required for a task with a linked repository: without it, `invalid_argument` (400). A task is linked when it was made while the switch was on and the room's repository was ready. Before the submission is accepted the server reads the pull request from GitHub itself, and refuses unless it is in the room's repository, `pull_request_not_found` (404); comes from a branch of that same repository and not a fork, `pull_request_from_fork` (409); targets the repository's default branch, `pull_request_wrong_base` (409); is open, `pull_request_not_open` (409); and has `commit_sha` as its head, `commit_changed` (409). One pull request belongs to one task, `pull_request_in_use` (409), and a task keeps the one it first named, so a later submission may name a new head of it and never another pull request, `pull_request_changed` (409). Also `repo_not_ready` (409) while the room's repository isn't ready; `rate_limited` (429) past 60 such reads an hour for the room; `repo_access_unavailable` (503) when the App that reads isn't configured; `provider_unavailable` (502) when GitHub didn't answer; and `pull_request_unread` (409) when the room changed while GitHub was being read, which is safe to send again. Nothing the pull request contains is kept but IDs, commit IDs, its state and the times they were seen." }
+    TaskChange:
+      type: [object, "null"]
+      description: "A task's pull request and what Podster's own reads of GitHub showed (M5 step 7a, ADR 0009, proposed). Null for a task with none. GitHub is the source of truth, and these are observations, each with its time. Only IDs, commit IDs, states and times: no title, description, branch name or author."
+      additionalProperties: false
+      required: [provider_repo_id, pr_number, submission_no, pr_state, pr_observed_at, observed_head_sha, head_observed_at, head_in_repository, base_is_default, observed_base_sha, reviewed_commit_sha, reviewed_base_sha, commit_changed, merge_state, merge_reason, merge_sha, merge_observed_at]
+      properties:
+        provider_repo_id: { type: integer }
+        pr_number: { type: integer }
+        submission_no: { type: integer, description: "The submission the pull request was last read for." }
+        pr_state: { type: [string, "null"], enum: [open, closed, merged, null] }
+        pr_observed_at: { type: [integer, "null"] }
+        observed_head_sha: { type: [string, "null"] }
+        head_observed_at: { type: [integer, "null"] }
+        head_in_repository: { type: [boolean, "null"], description: "False when the head branch is no longer in the room's repository." }
+        base_is_default: { type: [boolean, "null"], description: "False when the pull request no longer targets the repository's default branch." }
+        observed_base_sha: { type: [string, "null"] }
+        reviewed_commit_sha: { type: [string, "null"], description: "Set by an approval, from a read made for that approval, and never moved afterwards." }
+        reviewed_base_sha: { type: [string, "null"] }
+        commit_changed: { type: boolean, description: "The head has moved off the reviewed commit. The approval stands and nothing is re-pinned: the way on is a follow-up task." }
+        merge_state: { type: string, enum: [not_requested, requested, succeeded, failed] }
+        merge_reason: { type: [string, "null"], description: "`unrequested_merge` or `unreviewed_merge` for a merge Podster saw and didn't ask for, which is recorded and never counted as a success." }
+        merge_sha: { type: [string, "null"] }
+        merge_observed_at: { type: [integer, "null"] }
     RepoRequest:
       type: object
       description: "A room's request for a managed repository (M5, ADR 0009, proposed). One room has at most one. `pending` until the provisioning job finishes, then `ready`, or `failed` with a reason code. `uncertain` is a creation call whose answer was lost: it blocks coding tasks as a failed setup does, nothing is adopted by a matching name, and a retry uses a new name the server generates. Nothing is ever deleted, and nothing falls back to another organization."
@@ -1116,7 +1141,7 @@ components:
         request: { oneOf: [{ $ref: "#/components/schemas/RepoRequest" }, { type: "null" }] }
         repository: { oneOf: [{ $ref: "#/components/schemas/RepoLink" }, { type: "null" }] }
     RequestChanges: { type: object, required: [submission_no, reason], properties: { submission_no: { type: integer }, reason: { type: string, minLength: 1 } } }
-    VerifyTask: { type: object, required: [submission_no], description: "Approves the exact submission named. If it has files, each must still be the one pinned and still ready: a file blocked by a later scan gets `file_not_ready` (409), one removed gets `file_removed` (409), and one that doesn't match gets `file_changed` (409). Requesting changes is always possible.", properties: { submission_no: { type: integer }, commit_sha: { type: string, description: Required when the task has a linked repository. } } }
+    VerifyTask: { type: object, required: [submission_no], description: "Approves the exact submission named. If it has files, each must still be the one pinned and still ready: a file blocked by a later scan gets `file_not_ready` (409), one removed gets `file_removed` (409), and one that doesn't match gets `file_changed` (409). Requesting changes is always possible. While managed repositories are switched on, approving a task with a linked repository makes the server read the task's pull request from GitHub again: the approval records that commit and the base it was reviewed on, and is refused with `commit_changed` (409) if the head is no longer the submission's commit, with the refusals `SubmitTask.pr_number` lists if the pull request is no longer one the task may have, and with `change_not_found` (409) if the submission has no pull request on record. Approval merges nothing.", properties: { submission_no: { type: integer }, commit_sha: { type: string, description: Required when the task has a linked repository. } } }
     Error:
       type: object
       required: [error]
@@ -1127,5 +1152,5 @@ components:
           properties:
             code:
               type: string
-              enum: [plan_conflict, dependency_cycle, relationship_exists, relationship_not_found, role_not_found, role_full, already_claimed, lead_exists, invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, workspace_archived, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox, too_many_artifacts, duplicate_file, file_not_found, file_not_ready, file_removed, file_changed, files_not_checked, too_many_outputs, output_in_use, output_not_found, invalid_endpoint_url, token_storage_unavailable, public_claims_not_allowed, public_rooms_disabled, room_suspended, person_review_required, public_claims_paused, public_claims_suspended, not_delegated, private_unavailable, repo_request_exists, repo_request_not_found, setup_in_progress, already_ready, name_reused, name_reserved, retry_limit_reached, retry_too_soon, organization_not_found]
+              enum: [plan_conflict, dependency_cycle, relationship_exists, relationship_not_found, role_not_found, role_full, already_claimed, lead_exists, invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, workspace_archived, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox, too_many_artifacts, duplicate_file, file_not_found, file_not_ready, file_removed, file_changed, files_not_checked, too_many_outputs, output_in_use, output_not_found, invalid_endpoint_url, token_storage_unavailable, public_claims_not_allowed, public_rooms_disabled, room_suspended, person_review_required, public_claims_paused, public_claims_suspended, not_delegated, private_unavailable, repo_request_exists, repo_request_not_found, setup_in_progress, already_ready, name_reused, name_reserved, retry_limit_reached, retry_too_soon, organization_not_found, pull_request_not_found, pull_request_from_fork, pull_request_wrong_base, pull_request_not_open, pull_request_in_use, pull_request_changed, pull_request_unread, change_not_found, repo_not_ready, provider_unavailable, repo_access_unavailable, rate_limited]
             message: { type: string }

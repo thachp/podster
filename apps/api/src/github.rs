@@ -185,6 +185,58 @@ async fn sign_rs256(pkcs8: &[u8], input: &str) -> std::result::Result<String, Fa
     Ok(base64url(&Uint8Array::new(&signature).to_vec()))
 }
 
+/// One request, with a timeout and no redirects. Answers the status and the body as JSON, null if it had none.
+async fn call(
+    method: Method,
+    path: &str,
+    bearer: &str,
+    body: Option<Value>,
+) -> std::result::Result<(u16, Value), Failure> {
+    let controller = AbortController::default();
+    let signal = controller.signal();
+    let url = format!("{API}{path}");
+    let bearer = bearer.to_string();
+    let attempt = async move {
+        let headers = Headers::new();
+        headers.set("accept", "application/vnd.github+json")?;
+        headers.set("x-github-api-version", "2022-11-28")?;
+        headers.set("user-agent", USER_AGENT)?;
+        headers.set("authorization", &format!("Bearer {bearer}"))?;
+        let mut init = RequestInit::new();
+        init.with_method(method)
+            .with_headers(headers)
+            .with_redirect(RequestRedirect::Manual);
+        if let Some(body) = body {
+            init.with_body(Some(body.to_string().into()));
+        }
+        let mut response = Fetch::Request(Request::new_with_init(&url, &init)?)
+            .send_with_signal(&signal)
+            .await?;
+        let status = response.status_code();
+        let bytes = response.bytes().await?;
+        let parsed = if bytes.is_empty() || bytes.len() > MAX_ANSWER_BYTES {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        };
+        Ok::<_, Error>((status, parsed))
+    };
+    let timeout = Delay::from(Duration::from_millis(CALL_TIMEOUT_MS));
+    let answer = match select(Box::pin(attempt), timeout).await {
+        Either::Left((Ok(answer), _)) => Ok(answer),
+        Either::Left((Err(_), _)) | Either::Right(_) => Err(Failure::Unreachable),
+    };
+    controller.abort();
+    answer
+}
+
+/// A fresh App JWT for `app_id`, signed with its key, to trade for an installation token.
+async fn app_jwt(app_id: i64, key_pem: &str) -> std::result::Result<String, Failure> {
+    let pkcs8 = pkcs8_from_pem(key_pem).ok_or(Failure::Unreachable)?;
+    let input = app_jwt_signing_input(app_id, (Date::now().as_millis() / 1000) as i64);
+    Ok(format!("{input}.{}", sign_rs256(&pkcs8, &input).await?))
+}
+
 fn id(value: &Value) -> Option<i64> {
     value.as_i64().filter(|n| *n > 0)
 }
@@ -280,51 +332,13 @@ impl GitHubApp {
         bearer: &str,
         body: Option<Value>,
     ) -> std::result::Result<(u16, Value), Failure> {
-        let controller = AbortController::default();
-        let signal = controller.signal();
-        let url = format!("{API}{path}");
-        let bearer = bearer.to_string();
-        let attempt = async move {
-            let headers = Headers::new();
-            headers.set("accept", "application/vnd.github+json")?;
-            headers.set("x-github-api-version", "2022-11-28")?;
-            headers.set("user-agent", USER_AGENT)?;
-            headers.set("authorization", &format!("Bearer {bearer}"))?;
-            let mut init = RequestInit::new();
-            init.with_method(method)
-                .with_headers(headers)
-                .with_redirect(RequestRedirect::Manual);
-            if let Some(body) = body {
-                init.with_body(Some(body.to_string().into()));
-            }
-            let mut response = Fetch::Request(Request::new_with_init(&url, &init)?)
-                .send_with_signal(&signal)
-                .await?;
-            let status = response.status_code();
-            let bytes = response.bytes().await?;
-            let parsed = if bytes.is_empty() || bytes.len() > MAX_ANSWER_BYTES {
-                Value::Null
-            } else {
-                serde_json::from_slice(&bytes).unwrap_or(Value::Null)
-            };
-            Ok::<_, Error>((status, parsed))
-        };
-        let timeout = Delay::from(Duration::from_millis(CALL_TIMEOUT_MS));
-        let answer = match select(Box::pin(attempt), timeout).await {
-            Either::Left((Ok(answer), _)) => Ok(answer),
-            Either::Left((Err(_), _)) | Either::Right(_) => Err(Failure::Unreachable),
-        };
-        controller.abort();
-        answer
+        call(method, path, bearer, body).await
     }
 
     /// Mints an installation token from a fresh App JWT: for one repository, or, with `None`, for the whole
     /// installation, which only the creation call needs.
     async fn mint(&self, repo_id: Option<i64>) -> std::result::Result<String, Failure> {
-        let pkcs8 = pkcs8_from_pem(&self.config.key_pem).ok_or(Failure::Unreachable)?;
-        let input =
-            app_jwt_signing_input(self.config.app_id, (Date::now().as_millis() / 1000) as i64);
-        let jwt = format!("{input}.{}", sign_rs256(&pkcs8, &input).await?);
+        let jwt = app_jwt(self.config.app_id, &self.config.key_pem).await?;
         let path = format!(
             "/app/installations/{}/access_tokens",
             self.config.installation_id
@@ -535,5 +549,146 @@ impl Provider for GitHubApp {
             }
         }
         self.unrevoked.get()
+    }
+}
+
+/// The agent-token App's configuration (M5 step 6, ADR 0009's second App). It can push branches and open pull requests,
+/// and nothing else: no administration, no workflows, no statuses. Its App ID and installation ID are variables and its
+/// key is a secret, all set by the owner, and none of them comes from a request.
+pub struct AgentConfig {
+    app_id: i64,
+    installation_id: i64,
+    key_pem: String,
+}
+
+impl AgentConfig {
+    /// `None` unless all three are set and well-formed. The caller says only that tokens aren't configured.
+    pub fn from_env(env: &Env) -> Option<AgentConfig> {
+        let number = |name: &str| {
+            env.var(name)
+                .ok()
+                .and_then(|v| v.to_string().parse::<i64>().ok())
+                .filter(|n| *n > 0)
+        };
+        let key_pem = env.secret("GITHUB_AGENT_APP_KEY").ok()?.to_string();
+        pkcs8_from_pem(&key_pem).is_some().then_some(())?;
+        Some(AgentConfig {
+            app_id: number("GITHUB_AGENT_APP_ID")?,
+            installation_id: number("GITHUB_AGENT_INSTALLATION_ID")?,
+            key_pem,
+        })
+    }
+}
+
+/// What GitHub says it minted. The token goes to the room to be sealed and to the agent, and nowhere else.
+pub struct Minted {
+    pub token: String,
+    /// Milliseconds.
+    pub expires_at: i64,
+    /// The repositories the answer says the token reaches. Empty if it named none.
+    pub repo_ids: Vec<i64>,
+    /// The permissions the answer says the token carries, as GitHub names them.
+    pub permissions: Vec<(String, String)>,
+}
+
+/// How a revocation went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Revoked {
+    /// GitHub took it back, or no longer accepts it: `204`, or `401` for a token already revoked or expired.
+    Gone,
+    /// Anything else. The token may still be live, so the room tries again.
+    Failed,
+}
+
+/// The provider, as an agent's repository token needs it: mint one for one repository, and take one back.
+pub(crate) trait TokenIssuer {
+    /// Asks for a token on this one repository with these permissions only. A token that came back but can't be read
+    /// whole is revoked here before the failure is returned, so it never stays live unheld.
+    async fn mint_agent_token(
+        &self,
+        repo_id: i64,
+        permissions: &[(&str, &str)],
+    ) -> std::result::Result<Minted, Failure>;
+    async fn revoke_token(&self, token: &str) -> Revoked;
+}
+
+pub struct AgentTokens {
+    config: AgentConfig,
+}
+
+impl AgentTokens {
+    pub fn new(config: AgentConfig) -> AgentTokens {
+        AgentTokens { config }
+    }
+}
+
+/// GitHub's ISO 8601 time, in milliseconds. `None` unless it's a time the runtime reads.
+fn parse_time(value: &Value) -> Option<i64> {
+    let millis = js_sys::Date::parse(value.as_str()?);
+    millis.is_finite().then_some(millis as i64)
+}
+
+impl TokenIssuer for AgentTokens {
+    async fn mint_agent_token(
+        &self,
+        repo_id: i64,
+        permissions: &[(&str, &str)],
+    ) -> std::result::Result<Minted, Failure> {
+        let jwt = app_jwt(self.config.app_id, &self.config.key_pem).await?;
+        let path = format!(
+            "/app/installations/{}/access_tokens",
+            self.config.installation_id
+        );
+        let wanted: serde_json::Map<String, Value> = permissions
+            .iter()
+            .map(|(name, level)| ((*name).to_string(), Value::from(*level)))
+            .collect();
+        let body = json!({ "repository_ids": [repo_id], "permissions": wanted });
+        let (status, answer) = call(Method::Post, &path, &jwt, Some(body)).await?;
+        if status != 201 {
+            return Err(Failure::Status(status));
+        }
+        let Some(token) = answer["token"]
+            .as_str()
+            .filter(|token| !token.is_empty() && token.len() <= 512 && token.is_ascii())
+            .map(str::to_string)
+        else {
+            return Err(Failure::Unreadable);
+        };
+        let Some(expires_at) = parse_time(&answer["expires_at"]) else {
+            self.revoke_token(&token).await;
+            return Err(Failure::Unreadable);
+        };
+        let repo_ids = answer["repositories"]
+            .as_array()
+            .map(|repos| {
+                repos
+                    .iter()
+                    .map(|r| r["id"].as_i64().unwrap_or(0))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let permissions = answer["permissions"]
+            .as_object()
+            .map(|granted| {
+                granted
+                    .iter()
+                    .map(|(name, level)| (name.clone(), level.as_str().unwrap_or("").to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Minted {
+            token,
+            expires_at,
+            repo_ids,
+            permissions,
+        })
+    }
+
+    async fn revoke_token(&self, token: &str) -> Revoked {
+        match call(Method::Delete, "/installation/token", token, None).await {
+            Ok((204 | 401, _)) => Revoked::Gone,
+            _ => Revoked::Failed,
+        }
     }
 }

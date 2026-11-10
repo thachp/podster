@@ -9,7 +9,7 @@ import { APIError } from "better-auth/api";
 import { calculateJwkThumbprint, decodeJwt, type JWK } from "jose";
 import { handleOrgPeople, retryDepartures } from "./organizations";
 import { mintAssertion, type Identity } from "./assertion";
-import { CAPABILITIES, InvalidArguments, jsonSchema, toApiCall, zodShape, type ApiCall, type Capability } from "./capabilities";
+import { CAPABILITIES, capabilitiesFor, InvalidArguments, jsonSchema, toApiCall, zodShape, type ApiCall, type Capability } from "./capabilities";
 import { EMAIL_LINK_ROUTE, EMAIL_LINK_SECONDS, EMAIL_VERIFY_ROUTE, emailSignInEnabled, handleEmailLink, handleEmailVerify, linkMustNotReach, linkTokenHash, sendSignInLink, type EmailBinding } from "./email-sign-in";
 import { handleTestSignUp, isTestEmail, TEST_ID_PREFIX, TEST_SESSION_SECONDS, TEST_SIGNUP_ROUTE } from "./test-people";
 import { handleA2aDownload, handleAgentDownload, isFilePath, serveFile } from "./downloads";
@@ -53,6 +53,8 @@ export interface Env {
   ENABLE_PASSWORD_SIGNIN?: string;
   /** Staging's test sign-up, set only in env.staging. See test-people.ts. */
   ENABLE_E2E_SIGNUP?: string;
+  /** Lists the managed-repository tools when exactly "true" (M5 step 6). Unset everywhere: the owner switches it on. */
+  MANAGED_REPOSITORIES?: string;
   E2E_SIGNUP_SECRET?: string;
   /** GitHub's webhook secret, on the gateway only (M5 step 5). Unset, the webhook route refuses everything. See github-webhook.ts. */
   GITHUB_WEBHOOK_SECRET?: string;
@@ -381,9 +383,9 @@ export function createAuth(env: Env, { testPeople = false } = {}) {
         absoluteLifetime: 0,
         // Claiming is an explicit action on a signed-in session, so an older session is fine.
         freshSessionWindow: 0,
-        capabilities: CAPABILITIES.map((c) => ({ name: c.name, description: c.description, input: jsonSchema(c) as any, approvalStrength: "session" as const })),
+        capabilities: capabilitiesFor(env).map((c) => ({ name: c.name, description: c.description, input: jsonSchema(c) as any, approvalStrength: "session" as const })),
         onExecute: async ({ ctx, capability, arguments: args, agentSession }) => {
-          const definition = CAPABILITIES.find((c) => c.name === capability);
+          const definition = capabilitiesFor(env).find((c) => c.name === capability);
           if (!definition) throw new APIError("BAD_REQUEST", { message: "unknown_capability" });
           // A download reaches here only once the plugin has checked the agent's get_asset_link grant, as for any call of it.
           const download = ctx.request ? DOWNLOADS.get(ctx.request) : undefined;
@@ -1240,7 +1242,7 @@ const mcpHandler = {
     // One batch would run up to 100 calls for one count. The protocol's clients send single messages.
     if (Array.isArray(await new Response(body).json().catch(() => null))) return json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "batch requests aren't supported" } }, 400);
     const server = new McpServer({ name: "podster", version: "0.0.0" });
-    for (const capability of CAPABILITIES) {
+    for (const capability of capabilitiesFor(env)) {
       server.registerTool(capability.name, { description: capability.description, inputSchema: zodShape(capability) as any }, async (args: Record<string, unknown>) => {
         const fail = (code: string) => ({ isError: true, content: [{ type: "text" as const, text: code }] });
         try {

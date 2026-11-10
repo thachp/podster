@@ -483,7 +483,7 @@ fn linked_repo(sql: &SqlStorage) -> R<Option<(String, i64)>> {
 }
 
 /// A refusal from the policy, as the API answers it.
-fn denied(denial: RepoDenial) -> ApiError {
+pub(super) fn denied(denial: RepoDenial) -> ApiError {
     match denial {
         RepoDenial::Grant(refusal) => refused(refusal),
         RepoDenial::Hidden => ApiError::task_not_found(),
@@ -537,6 +537,8 @@ fn end_grant(
         "UPDATE provider_grant SET revoked_at = ?, revoked_by = ? WHERE id = ? AND revoked_at IS NULL",
         vec![now.into(), actor.into(), grant.id.as_str().into()],
     )?;
+    // A token minted under it loses its authority now, and the room's alarm takes it back (M5 step 6).
+    store::mark_stale_repo_tokens(sql, now)?;
     audit_as(
         sql,
         actor,

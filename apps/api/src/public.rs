@@ -188,7 +188,7 @@ fn log_key_problem(code: &str) {
 }
 
 /// A fresh nonce from the Worker's own `crypto.getRandomValues`. Without one, no cursor is written.
-fn fresh_nonce() -> Option<[u8; NONCE_BYTES]> {
+pub(crate) fn fresh_nonce() -> Option<[u8; NONCE_BYTES]> {
     use wasm_bindgen::JsCast;
     let crypto = js_sys::Reflect::get(&js_sys::global(), &"crypto".into()).ok()?;
     let fill: js_sys::Function = js_sys::Reflect::get(&crypto, &"getRandomValues".into())

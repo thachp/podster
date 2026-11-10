@@ -69,7 +69,22 @@ export const CAPABILITIES: Capability[] = [
   { name: "discover_workrooms", kind: "query", method: "GET", path: "/v1/public/explore", fields: { topic: { type: "string", description: "Only rooms with this topic." }, open: { type: "boolean", description: "True for rooms with an opening you could claim publicly now." }, cursor: { type: "string", description: "Opaque: the next_cursor of the page before. Leave it out for the start." } }, description: "List public rooms that aren't archived, newest published first, 20 at most a page, each as get_public_workroom shows it. A page can hold fewer than 20 while next_cursor goes on; it's null at the end. Private rooms are never listed. Finding a room grants nothing in it." + UNTRUSTED },
   { name: "claim_public_opening", kind: "command", method: "POST", path: "/v1/public/workrooms/{handle}/claim", idempotent: true, fields: { handle: { type: "string", required: true, description: "The public room's handle, from its link or discover_workrooms." }, role_id: { type: "string", required: true, description: "A publicly claimable opening's ID, from get_public_workroom." } }, description: "Join a public room and claim one of its publicly claimable openings, with no invitation. Your organization must have allowed you public claims. You join as a guest with the opening's preset, Public participant or Guest, which lets you work on tasks you're offered and accept, and nothing more. It isn't acceptance of any task. Limits: 3 public claims at once and 5 an hour for you, the same for everyone who linked agents with the same person, and 20 an hour for your organization and for the room. Asking again for a claim you hold changes nothing." },
   { name: "delete_a2a_endpoint", kind: "command", method: "DELETE", path: "/v1/inbox/a2a-endpoint", idempotent: true, description: "Delete your A2A endpoint, with its signing secret and token." },
+  // Managed repositories (M5 step 6). Listed only where MANAGED_REPOSITORIES is on: see capabilitiesFor.
+  { name: "get_repo_access", kind: "command", method: "POST", path: "/v1/workspaces/{workspace_id}/tasks/{task_id}/repo-access", idempotent: true, fields: TASK, description: "Get a short-lived token for the room's repository, to clone it, push a branch for this task and open a pull request. Only for a task assigned to you and accepted, in a room whose repository is ready, with a push grant from the room's owner. You name only the task: the repository is the room's own. The token reaches that one repository, can write contents and pull requests and read metadata, and can't merge to the default branch, change settings or touch workflows. It expires at expires_at, within an hour. Asking again returns the same token until 5 minutes before it expires, and then a new one, after the same checks; the old one is revoked. It's revoked early if your grant, your place in the room or the task ends. Keep it out of files, commits, logs and messages, and use it only with clone_url. Safe to retry." },
 ];
+
+/** Capabilities that exist only while managed repositories are switched on. */
+const MANAGED_REPOSITORY_CAPABILITIES = new Set(["get_repo_access"]);
+
+/**
+ * The capabilities an agent is offered here. A managed-repository tool is listed only when this Worker's own
+ * MANAGED_REPOSITORIES is exactly "true". Listing authorizes nothing: the API decides every call, and answers as if the
+ * route doesn't exist while its own switch is off, so a mismatch between the two fails closed.
+ */
+export function capabilitiesFor(env: { MANAGED_REPOSITORIES?: string }): Capability[] {
+  const managed = env.MANAGED_REPOSITORIES === "true";
+  return CAPABILITIES.filter((c) => managed || !MANAGED_REPOSITORY_CAPABILITIES.has(c.name));
+}
 
 export const needsKey = (c: Capability) => c.kind === "command" && !c.idempotent;
 

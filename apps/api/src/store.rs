@@ -237,6 +237,14 @@ ALTER TABLE repo_request ADD COLUMN runs INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE repo_request ADD COLUMN retry_after INTEGER;
 ALTER TABLE repo_request ADD COLUMN job_failures INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE repo_request ADD COLUMN job_not_before INTEGER;
+", "
+CREATE TABLE repo_token (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, task_id TEXT NOT NULL, grant_id TEXT NOT NULL, provider_repo_id INTEGER NOT NULL,
+  state TEXT NOT NULL, lease_until INTEGER, sealed TEXT, expires_at INTEGER, created_at INTEGER NOT NULL, issued_at INTEGER,
+  revoke_attempts INTEGER NOT NULL DEFAULT 0, revoke_next_at INTEGER);
+CREATE UNIQUE INDEX repo_token_held ON repo_token (agent_id, task_id) WHERE state = 'held';
+CREATE UNIQUE INDEX repo_token_minting ON repo_token (agent_id, task_id) WHERE state = 'minting';
+CREATE TABLE repo_token_mint (at INTEGER NOT NULL, agent_id TEXT NOT NULL);
+CREATE INDEX repo_token_mint_at ON repo_token_mint (at);
 "];
 
 pub fn int(value: &Value) -> i64 {
@@ -708,7 +716,8 @@ pub fn record_decision(
         exec(sql, "UPDATE a2a_attempt SET cancel_state = 'due', reading_ended = 1, read_ended_reason = 'task_canceled', updated_at = ?
           WHERE task_id = ? AND state = 'sent' AND remote_task_id IS NOT NULL AND reading_ended = 0", vec![now.into(), decision.task.id.as_str().into()])?;
     }
-    Ok(())
+    // A task that ended or went to someone else takes its agent's repository token with it (M5 step 6).
+    mark_stale_repo_tokens(sql, now)
 }
 
 /// Records one A2A offer attempt and its outbox row, which is the attempt itself while `queued` is 0. The ID is also the
@@ -783,4 +792,27 @@ pub fn transaction_sync(state: &State, f: impl FnOnce() -> R<()> + 'static) -> R
             .take()
             .unwrap_or_else(|| ApiError::internal(&format!("{e:?}")))),
     }
+}
+
+/// Marks every agent repository token the room holds whose authority has ended, so the room's alarm revokes it (M5 step 6).
+/// Runs inside the transaction of whatever ended it: a grant revoked or left without its giver, the agent removed or
+/// disconnected, the task ended or given to someone else, the link no longer ready, or the room archived. It reads only
+/// current state, never a list's display field, and touches no token: a sealed copy stays sealed. Cheap, since a room
+/// holds at most one token per agent and task.
+pub fn mark_stale_repo_tokens(sql: &SqlStorage, now: i64) -> R<()> {
+    exec(
+        sql,
+        "UPDATE repo_token SET state = 'revoke', revoke_next_at = ?1 WHERE state = 'held' AND (
+           expires_at <= ?1
+           OR NOT EXISTS (SELECT 1 FROM task t WHERE t.id = repo_token.task_id AND t.status = 'accepted' AND t.assignee_id = repo_token.agent_id
+             AND t.has_linked_repository = 1)
+           OR NOT EXISTS (SELECT 1 FROM member m WHERE m.principal_id = repo_token.agent_id AND m.revoked_at IS NULL
+             AND NOT (m.joined_via IS 'public' AND m.role = 'guest'))
+           OR NOT EXISTS (SELECT 1 FROM provider_grant g WHERE g.id = repo_token.grant_id AND g.principal_id = repo_token.agent_id
+             AND g.action = 'push' AND g.revoked_at IS NULL AND (g.expires_at IS NULL OR g.expires_at > ?1)
+             AND g.provider_repo_id = repo_token.provider_repo_id
+             AND g.delegated_by = (SELECT owner_person_id FROM workspace WHERE owner_left_at IS NULL AND status != 'archived'))
+           OR NOT EXISTS (SELECT 1 FROM repo_link l WHERE l.provider_repo_id = repo_token.provider_repo_id AND l.status = 'ready'))",
+        vec![now.into()],
+    )
 }

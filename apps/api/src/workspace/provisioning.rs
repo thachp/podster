@@ -370,7 +370,10 @@ fn failed(reason: &'static str, status: u16) -> Ended {
 }
 
 impl Workspace {
-    fn in_transaction<T: 'static>(&self, work: impl FnOnce(&SqlStorage) -> R<T> + 'static) -> R<T> {
+    pub(super) fn in_transaction<T: 'static>(
+        &self,
+        work: impl FnOnce(&SqlStorage) -> R<T> + 'static,
+    ) -> R<T> {
         let sql = self.state.storage().sql();
         let out: Rc<RefCell<Option<T>>> = Rc::new(RefCell::new(None));
         let slot = out.clone();

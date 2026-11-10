@@ -562,9 +562,10 @@ describe("what a grant shows and logs", () => {
     expect(logged).not.toContain("podsterx/engineering");
   });
 
-  it("adds no route an agent could reach for a token, a merge or a release", async () => {
+  it("adds no route an agent could reach for a merge or a release, and the token route is step 6's alone", async () => {
     const contract: { path: string; method: string; operation: string }[] = JSON.parse(BINDINGS.TEST_API_ROUTES);
     expect(contract.filter((r) => r.path.includes("/repository/grants")).map((r) => r.operation).sort()).toEqual(["grantRepositoryAction", "listRepositoryGrants", "revokeRepositoryGrant"]);
-    expect(contract.filter((r) => /merge|repo-access|release-status|deploy/i.test(r.path + r.operation))).toEqual([]);
+    expect(contract.filter((r) => /merge|release-status|deploy/i.test(r.path + r.operation))).toEqual([]);
+    expect(contract.filter((r) => /repo-access/i.test(r.path)).map((r) => r.operation)).toEqual(["getRepoAccess"]);
   });
 });

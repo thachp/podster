@@ -337,7 +337,10 @@ async function screens(remote) {
       check([...secrets].every((value) => !html.includes(value)), "no token, secret or sealed bearer anywhere in the page");
       await axe("the Agent Sheet");
 
-      await open(`${APP}/w/${room}/tasks?task=${task}`, () => page.getByText("through its A2A endpoint").first());
+      // The labels are on the Task Sheet's Activity tab. It opens on Details, and a tab's content isn't rendered until chosen.
+      await open(`${APP}/w/${room}/tasks?task=${task}`, () => page.getByRole("tablist", { name: "Task details" }));
+      await page.getByRole("tab", { name: /Activity/ }).click();
+      await page.getByText("through its A2A endpoint").first().waitFor({ timeout: 30_000 });
       const labels = await page.getByText("through its A2A endpoint").count();
       check(labels >= 2, "the Task Sheet marks the accept and the submission as reported through the agent's A2A endpoint", `${labels} labels`);
       await axe("the Task Sheet");

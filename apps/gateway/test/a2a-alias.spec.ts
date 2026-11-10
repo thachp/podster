@@ -65,13 +65,38 @@ describe("/a2a/ answers exactly as /a2a", () => {
     expect(slash).toEqual(exact);
   });
 
-  it("aliases no other path", async () => {
-    for (const path of ["/a2a//", "/a2a/x", "/A2A/", "/a2a/?x=1"]) {
+  const ctx = { waitUntil() {}, passThroughOnException() {} } as never;
+  const withEnv = (extra: object, base = BASE) => (path: string, init: RequestInit) => worker.fetch(new Request(`${base}${path}`, init), { ...e, ...extra } as never, ctx);
+
+  it("over the agent's account rate limit, after authentication", async () => {
+    const refuse: RateLimit = { limit: async () => ({ success: false }) };
+    const { exact, slash } = await both(() => ({ method: "POST", headers: headers(a2a), body: rpc("GetTask", { id: "tsk_x" }) }), withEnv({ RL_ACCOUNT: refuse }));
+    expect(exact.status).toBe(429);
+    expect(slash).toEqual(exact);
+  });
+
+  it("on the application host, where A2A isn't served", async () => {
+    const app = "https://app.test";
+    const { exact, slash } = await both(() => ({ method: "POST", headers: headers(a2a), body: rpc("GetTask", { id: "tsk_x" }) }), withEnv({ APP_URL: app }, app));
+    expect(exact.status).toBe(404);
+    expect(slash).toEqual(exact);
+  });
+
+  it("for a CORS preflight", async () => {
+    const { exact, slash } = await both(() => ({ method: "OPTIONS", headers: { origin: "https://client.example", "access-control-request-method": "POST", "access-control-request-headers": "authorization, content-type" } }));
+    expect(slash).toEqual(exact);
+  });
+
+  it("aliases no other path: each near miss is a plain 404", async () => {
+    for (const path of ["/a2a//", "/a2a/x", "/A2A/", "/a2a/a2a"]) {
       const res = await SELF.fetch(`${BASE}${path}`, { method: "POST", headers: headers(a2a), body: rpc("GetTask", { id: "tsk_x" }) });
       const text = await res.text();
-      // `/a2a/?x=1` is the same path with a query, which is `/a2a`'s too. Everything else isn't A2A at all.
-      if (path === "/a2a/?x=1") expect(res.status, path).toBe(200);
-      else expect(text, path).not.toContain('"jsonrpc"');
+      expect(res.status, path).toBe(404);
+      expect(text, path).not.toContain('"jsonrpc"');
     }
+    // The same path with a query is `/a2a`'s too.
+    const query = await SELF.fetch(`${BASE}/a2a/?x=1`, { method: "POST", headers: headers(a2a), body: rpc("GetTask", { id: "tsk_" + "0".repeat(32) }) });
+    expect(query.status).toBe(200);
+    await query.arrayBuffer();
   });
 });

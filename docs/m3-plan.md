@@ -236,6 +236,9 @@ Last updated 2026-11-09 UTC, with every M3 build step merged (1 to 15, 13b, and 
   - **`JSONRPC-SSE-002`, a MUST:** a request with the wrong `Content-Type` got Podster's REST-style 415 body, whose error code is a string. It's still 415, now as a JSON-RPC `ContentTypeNotSupportedError`, -32005, with a null id.
   - **`CARD-CACHE-002`, a SHOULD:** the card had no ETag. It now has a strong one from its own bytes, and `If-None-Match` gets 304.
 - **What the kit found, and the architect ruled:** the kit's client joins the card's interface URL with `/`, so it posts to `/a2a/`, which answered a REST-style 404 and failed 14 more checks. [Decision 190](spec/PRODUCT.md#decisions-needed) serves `/a2a/` exactly as `/a2a`, as an alias for that one path. The final run went through the proxy with no path mapping and gave the same results.
+- **Accepted, from the review of #240:**
+  - `/a2a/.` and `/a2a/%2e` also reach `/a2a`, because the URL parser normalizes them to `/a2a/` before the alias sees them. They get exactly `/a2a`'s checks, like the alias itself.
+  - The repository's own vitest runs, which the LangGraph and fasta2a runners start, inherit the full environment, since they run only this repository's tests. Only the third-party programs get the allow-listed one.
 - **How the kit ran, and what's not like its own setup:**
   - its `pyproject.toml` requires Python 3.15, and the newest 3.15 available here, 3.15.0a7, couldn't run it: `markupsafe`'s binary failed to load, and `anyio` then needed a `sentinel` builtin that alpha 7 lacks. So it ran on Python 3.13.3, with the exact versions its `uv.lock` pins and its code unchanged;
   - **it hasn't run on staging.** `e2e/run-a2a-kit.mjs --staging` is ready, but staging's test sign-up is off, as it should be between runs, and turning it on means setting `E2E_SIGNUP_SECRET`, which is the owner's.

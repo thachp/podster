@@ -145,6 +145,31 @@ pub struct PublicAssertion {
     _iss: String,
 }
 
+/// The gateway's assertion for one provider webhook delivery whose signature it has verified (M5 step 5, ADR 0009, which
+/// is proposed). It names no person, agent or organization, so it carries nothing to authorize: it says only that the
+/// gateway checked the provider's signature on this delivery, and binds the exact body the gateway passed on. Only
+/// [`verify_provider_delivery`] accepts it. [`verify`] and [`verify_room_page_caller`] refuse it, because
+/// `provider_delivery` isn't a [`Kind`].
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderDelivery {
+    kind: String,
+    /// Which provider signed the delivery. Today only `github`.
+    pub provider: String,
+    /// The provider's delivery ID, as the gateway read it.
+    pub delivery: String,
+    /// Lowercase hex SHA-256 of the body the gateway sent with this assertion.
+    pub body_sha256: String,
+    pub jti: String,
+    pub iat: i64,
+    pub exp: i64,
+    // Checked before this is read. Named so `deny_unknown_fields` lets them through.
+    #[serde(rename = "aud")]
+    _aud: String,
+    #[serde(rename = "iss")]
+    _iss: String,
+}
+
 /// Who may be reading a public room's page: nobody signed in, or someone who is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RoomPageCaller {
@@ -259,4 +284,31 @@ pub fn verify_room_page_caller(
     }
     check_lifetime(public.iat, public.exp, now)?;
     Ok(RoomPageCaller::Public(public))
+}
+
+/// For the provider delivery route alone: the assertion with exactly `kind`, `provider`, `delivery`, `body_sha256`, `jti`,
+/// `iat`, `exp`, `aud` and `iss`, and nothing else. An identity or a public assertion is refused here, as malformed.
+pub fn verify_provider_delivery(
+    token: &str,
+    keys: &KeySet,
+    now: i64,
+) -> Result<ProviderDelivery, AssertionError> {
+    let claims = verified_claims(token, keys)?;
+    let delivery: ProviderDelivery =
+        serde_json::from_slice(&claims).map_err(|_| AssertionError::Malformed)?;
+    let is_digest = delivery.body_sha256.len() == 64
+        && delivery
+            .body_sha256
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if delivery.kind != "provider_delivery"
+        || delivery.provider.is_empty()
+        || delivery.delivery.is_empty()
+        || delivery.jti.is_empty()
+        || !is_digest
+    {
+        return Err(AssertionError::Malformed);
+    }
+    check_lifetime(delivery.iat, delivery.exp, now)?;
+    Ok(delivery)
 }

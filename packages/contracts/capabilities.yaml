@@ -140,3 +140,7 @@ person_only:
 transfer_only:
   - putUploadBytes
   - downloadFile
+# Not a call a person or an agent makes at all: the gateway sends it for a provider, after verifying the provider's signature on a webhook
+# delivery, with an assertion that names no one. It is never a capability or a tool.
+provider_only:
+  - receiveGithubDelivery

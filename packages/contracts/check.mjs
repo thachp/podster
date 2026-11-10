@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 
 const api = parse(readFileSync(new URL("openapi.yaml", import.meta.url), "utf8"));
-const { capabilities, person_only: personOnly = [], transfer_only: transferOnly = [] } = parse(readFileSync(new URL("capabilities.yaml", import.meta.url), "utf8"));
+const { capabilities, person_only: personOnly = [], transfer_only: transferOnly = [], provider_only: providerOnly = [] } = parse(readFileSync(new URL("capabilities.yaml", import.meta.url), "utf8"));
 
 const operations = new Map();
 for (const [path, item] of Object.entries(api.paths)) {
@@ -34,7 +34,15 @@ for (const id of transferOnly) {
   if (!operations.has(id)) problems.push(`${id}: transfer_only operation doesn't exist`);
   if (covered.has(id) || personOnly.includes(id)) problems.push(`${id}: transfer_only but also listed elsewhere`);
 }
-for (const id of operations.keys()) if (!covered.has(id) && !personOnly.includes(id) && !transferOnly.includes(id)) problems.push(`${id}: operation with no capability`);
+for (const id of providerOnly) {
+  if (!operations.has(id)) problems.push(`${id}: provider_only operation doesn't exist`);
+  if (covered.has(id) || personOnly.includes(id) || transferOnly.includes(id)) problems.push(`${id}: provider_only but also listed elsewhere`);
+  // A provider's delivery carries its own assertion, never an identity's, and its delivery ID stands in for an idempotency key.
+  if (!operations.get(id)?.op.security?.some((s) => "providerDelivery" in s)) problems.push(`${id}: provider_only without the delivery assertion`);
+}
+for (const id of operations.keys()) if (!covered.has(id) && !personOnly.includes(id) && !transferOnly.includes(id) && !providerOnly.includes(id)) problems.push(`${id}: operation with no capability`);
+// Only a provider_only operation takes the delivery assertion.
+for (const [id, { op }] of operations) if (op.security?.some((s) => "providerDelivery" in s) && !providerOnly.includes(id)) problems.push(`${id}: takes the delivery assertion but isn't provider_only`);
 
 // The gateway's own dashboard routes for an organization's people. They never reach the API, so they aren't capabilities.
 const organizations = parse(readFileSync(new URL("organizations.yaml", import.meta.url), "utf8"));

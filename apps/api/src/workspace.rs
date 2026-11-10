@@ -3428,6 +3428,7 @@ impl Workspace {
         let mut due: Option<i64> = None;
         if !rows(&sql, "SELECT seq FROM index_outbox LIMIT 1", vec![])?.is_empty()
             || (migrated && visibility::public_index_due(&sql)?)
+            || (migrated && repositories::index_due(&sql)?)
         {
             due = Some(now + if index_failed { 5000 } else { 50 });
         }
@@ -3494,6 +3495,14 @@ impl Workspace {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
         if let Some(next) = removal::next_due(&sql, now, self.sweep_failures.get())? {
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
+        // The oldest webhook delivery ID, when it's time to forget it.
+        if let Some(next) = migrated
+            .then(|| repositories::next_delivery_expiry(&sql, now))
+            .transpose()?
+            .flatten()
+        {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
         let Some(due) = due else {
@@ -3773,6 +3782,9 @@ impl Workspace {
     async fn dispatch(&self, mut req: Request) -> R<Value> {
         if req.path() == moderation::INTERNAL_SUSPENSION {
             return self.operator_suspension(req).await;
+        }
+        if req.path() == repositories::INTERNAL_PROVIDER_DELIVERY {
+            return self.provider_delivery(req).await;
         }
         if req.path() == public::INTERNAL_PUBLIC_PAGE
             || req.path() == public::INTERNAL_EXPLORE_ENTRY
@@ -4579,6 +4591,7 @@ impl DurableObject for Workspace {
                 error.code().unwrap_or("internal_error")
             );
         }
+        let repo_index = self.repository_upkeep(&sql).await;
         // A stuck scan fails closed here, and this failing holds up nothing else.
         if let Err(error) = self.expire_scans() {
             console_error!("couldn't end overdue scans: {:?}", error.code());
@@ -4596,7 +4609,10 @@ impl DurableObject for Workspace {
             console_error!("outbox drain failed: {:?}", error);
         }
         if let Err(error) = self
-            .arm(index.is_err() || public_index.is_err(), outbox.is_err())
+            .arm(
+                index.is_err() || public_index.is_err() || repo_index.is_err(),
+                outbox.is_err(),
+            )
             .await
         {
             console_error!("couldn't schedule delivery: {:?}", error);

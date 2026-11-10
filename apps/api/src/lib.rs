@@ -9,6 +9,7 @@ mod error;
 mod moderation;
 mod objects;
 mod principal;
+mod provider;
 mod public;
 mod store;
 mod wake;
@@ -349,6 +350,11 @@ async fn route(
             let handle = handle.to_string();
             return public::room_page(req, env, &handle).await;
         }
+    }
+
+    // A provider's webhook delivery names no one, so it has its own assertion, taken on this one route (M5 step 5).
+    if provider::is_delivery_route(&req.method(), &path) {
+        return provider::delivery(req, env).await;
     }
 
     let token = req

@@ -146,3 +146,52 @@ describe("CancelTask", () => {
     expect(still).toBe("submitted");
   });
 });
+
+/**
+ * The A2A 1.0 data model, as the compatibility kit names it but has no automated test for over JSON-RPC: DM-TASK-001 and 002,
+ * DM-STATUS-001, DM-MSG-002, DM-PART-001 and DM-SERIAL-001 to 004. Checked on every task GetTask and ListTasks answer here.
+ */
+describe("the data model on the wire", () => {
+  const STATES = ["TASK_STATE_SUBMITTED", "TASK_STATE_WORKING", "TASK_STATE_INPUT_REQUIRED", "TASK_STATE_AUTH_REQUIRED", "TASK_STATE_COMPLETED", "TASK_STATE_FAILED", "TASK_STATE_CANCELED", "TASK_STATE_REJECTED"];
+  const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+  /** Every key outside `metadata`, which holds the caller's and Podster's own namespaced keys, as the spec allows. */
+  function keys(value: unknown, out: string[] = []): string[] {
+    if (Array.isArray(value)) value.forEach((v) => keys(v, out));
+    else if (value && typeof value === "object") {
+      for (const [k, v] of Object.entries(value)) {
+        out.push(k);
+        if (k !== "metadata") keys(v, out);
+      }
+    }
+    return out;
+  }
+  function checkTask(task: any) {
+    // DM-TASK-001, DM-STATUS-001: id and a status with its state. DM-TASK-002: a defined state.
+    expect(typeof task.id).toBe("string");
+    expect(task.id.length).toBeGreaterThan(0);
+    expect(STATES).toContain(task.status?.state);
+    // DM-SERIAL-003: timestamps are ISO 8601 in UTC, with Z and no other offset.
+    if (task.status.timestamp !== undefined) expect(task.status.timestamp).toMatch(ISO_UTC);
+    for (const message of task.history ?? []) {
+      // DM-MSG-002: a defined role. DM-SERIAL-004: a message's required fields, and at least one part.
+      expect(["ROLE_USER", "ROLE_AGENT"]).toContain(message.role);
+      expect(typeof message.messageId).toBe("string");
+      expect(message.parts.length).toBeGreaterThan(0);
+      // DM-PART-001: exactly one kind of content in each part.
+      for (const part of message.parts) expect(["text", "raw", "url", "data"].filter((k) => k in part)).toHaveLength(1);
+    }
+    // DM-SERIAL-001: camelCase field names, never snake_case. DM-SERIAL-002: enums as their SCREAMING_SNAKE_CASE names.
+    expect(keys(task).filter((k) => k.includes("_"))).toEqual([]);
+  }
+
+  it("every task GetTask and ListTasks answer is a well-formed A2A 1.0 task", async () => {
+    const got = (await a2a("GetTask", { id: id(room, offered) }, guest.a2a)).body.result;
+    checkTask(got);
+    expect(got.history.length).toBeGreaterThan(0);
+    // So the timestamp check above isn't empty: a task Podster answers has one.
+    expect(got.status.timestamp).toMatch(ISO_UTC);
+    const listed = (await a2a("ListTasks", { includeArtifacts: true, historyLength: 10 }, lead.a2a)).body.result;
+    expect(listed.tasks.length).toBeGreaterThan(1);
+    listed.tasks.forEach(checkTask);
+  });
+});

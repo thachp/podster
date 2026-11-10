@@ -284,26 +284,26 @@ Last updated 2026-11-10 UTC: every M3 build step merged (1 to 15, 13b, and `/a2a
 
 ## Owed before M3's gate
 
-- **Who calls the gate.** [Decision 132](spec/PRODUCT.md#decisions-needed) stands: the owner calls M3's gate. On 2026-11-10 the owner said "sure .. go ahead do whatever u need to do for to complete m3 as m4.. you got my approval". The architect reads that as leave to call the gate once the evidence is complete. The architect hasn't called it, because the items below are open, and will put them to the owner.
+- **Who calls the gate.** On 2026-11-10, in the lead session, the owner said "sure .. go ahead do whatever u need to do for to complete m3 as m4.. you got my approval". [Decision 132](spec/PRODUCT.md#decisions-needed) stands: the owner calls M3's gate. The architect hasn't called it, and puts the open items below to the owner.
 - **The two MUST gaps from the kit's untested checks are closed** (`VER-SERVER-001` and `VER-CLIENT-002`). [Decision 192](spec/PRODUCT.md#decisions-needed) and [#247](https://github.com/thachp/podster/pull/247), merged as `4769455`, serve `A2A-Version: 1.0.1` as `1.0`. It was deployed to staging as gateway `427510d8`. Signed out, `1.0.1` got the same 401 and body as `1.0`, and `1.1` and `2.0` were refused as before. [#250](https://github.com/thachp/podster/pull/250) adds more refusal tests.
 - **Merged for the gate:**
   - [#240](https://github.com/thachp/podster/pull/240): the kit, fasta2a and the kit's fixes;
   - [#246](https://github.com/thachp/podster/pull/246), as `7f1e59d`: tests for the kit's untested checks;
   - [#247](https://github.com/thachp/podster/pull/247), as `4769455`: decision 192.
 
-  Under review: [#248](https://github.com/thachp/podster/pull/248), the AC-18 and screens harness, and [#250](https://github.com/thachp/podster/pull/250), more version-refusal tests.
+  Also merged: [#248](https://github.com/thachp/podster/pull/248), as `37c3d9e`, the AC-18 and screens harness; and [#250](https://github.com/thachp/podster/pull/250), as `47db019`, more version-refusal tests.
 - **Every gate item, where it ran and its evidence,** since decision 132 names the staging run:
 
   | Gate item | Locally | On staging |
   | --- | --- | --- |
   | The profile is published, with the kit's exceptions | `docs/spec/A2A-PROFILE.md` | Not applicable |
   | Inbound: the A2A project's JavaScript client | `run-a2a-staging.mjs`, 53 passed, 0 failed, 1 skipped | `a2a-staging.mjs`, 59 of 59 at `0794706` |
-  | Inbound: the compatibility kit's client | 29 MUST pass, 8 decision-115 exceptions, and all 16 untested MUST checks evidenced (see the profile) | The same, requirement for requirement, after #240's deploy. Report SHA-256 `3bb1f0ba…` |
+  | Inbound: the compatibility kit's client | The kit: 29 MUST pass, of which 26 test Podster and 3 only the kit's own constants. 8 decision-115 failures, and the rest listed exceptions. **Podster's own tests evidence the 16 MUST checks the kit didn't test** (see the profile) | **The kit's run only:** the same result for each requirement it tested, after #240's deploy. Report SHA-256 `3bb1f0ba…`. Of the 16 it didn't test, only the two version checks have staging evidence, from signed-out probes of gateway `427510d8`. The other 14 rest on local tests |
   | Inbound: the A2A project's Python client | Spike A only | **Owed to the owner:** the install was refused (below) |
   | Outbound, independent: LangGraph, and fasta2a as backup | LangGraph 4 of 4 with decision 174, and fasta2a 3 of 3 | **Owed to the owner:** needs a server staging can reach (below). Staging's outbound ran against Podster's own test server |
   | Outbound behavior: offers, read-back, files, change requests, Spike C | The API specs | `a2a-roundtrip.mjs`, 26 of 26 after #194's review fixes, and 26 of 26 again after decision 174's deploy |
   | AC-12: refused credentials | Gateway specs | `a2a-staging.mjs` at `0794706`, and the signed-out probes of `/a2a` and `/a2a/` on 2026-11-10 |
-  | AC-18: instructions stay data | `a2a-messages.spec.ts`, `a2a-readback.spec.ts` | `a2a-roundtrip.mjs --only ac18`, **16 of 16** on 2026-11-10, in room `ws_b8825bdd…` |
+  | AC-18: instructions stay data | `a2a-messages.spec.ts`, `a2a-readback.spec.ts` | `a2a-roundtrip.mjs --only ac18`, **16 of 16** on 2026-11-10, in room `ws_b8825bdd2eeb46a5afc8fcb69d891e03` |
   | AC-24: a remote completion only submits or holds | `a2a-readback.spec.ts` | The round trip: accept then submit as the agent, never verify |
   | Criterion 4: one history, no duplicates | The specs | The inbound retries in `a2a-staging.mjs` |
   | Step 11: endpoint registration | `a2a-endpoint.spec.ts` | `a2a-staging.mjs` |
@@ -336,7 +336,11 @@ Last updated 2026-11-10 UTC: every M3 build step merged (1 to 15, 13b, and `/a2a
   - `CancelTask` delivery on staging;
   - the Python SDK client on staging.
 
-  Everything else has run on staging and passed: the kit, the round trip, AC-18, Spike C, the screens and decision 192. LangGraph and fasta2a passed locally. Either approve a short-lived server so outbound can run against LangGraph from staging, or rule that the local LangGraph and fasta2a runs plus staging's test-server run are enough. Also say whether `CancelTask` delivery must be shown on staging, and if so by which option, and whether to allow the Python client's install in the M3 session.
+  What ran on staging:
+  - **The kit.** Of its 115 MUST checks, 29 passed, of which 26 test Podster and 3 only the kit's own constants. 8 failed, all from decision 115: Podster doesn't create tasks over A2A. The rest are listed exceptions in the profile. The 16 MUST checks the kit didn't test are evidenced by Podster's own tests, locally, and the two version checks also by staging probes.
+  - **The rest passed:** the round trip, AC-18, Spike C, the screens and decision 192.
+
+  LangGraph and fasta2a passed locally. Either approve a short-lived server so outbound can run against LangGraph from staging, or rule that the local LangGraph and fasta2a runs plus staging's test-server run are enough. Also say whether `CancelTask` delivery must be shown on staging, and if so by which option, and whether to allow the Python client's install in the M3 session.
 - **Owed to the owner: the test A2A server.** The architect ruled it stays deployed. It costs nothing to keep, since it's one Worker with no storage that refuses anything not sealed under `RUN_KEY`, and it lets the round trip run again with no new secrets. Deleting it, `wrangler delete podster-a2a-test-staging`, which also removes `RUN_KEY`, is a cloud change and the owner's call.
 
 **Ruled, 2026-11-10:**

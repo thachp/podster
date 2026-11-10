@@ -109,6 +109,17 @@ export async function groupGone(pid, timeout = 30_000) {
 }
 
 /**
+ * Stops a started stack, waits for every process under it to end, and only then runs `write`. A stack that hasn't ended
+ * within `timeout` throws, and `write` doesn't run: writing under a live runtime could corrupt a room's files or be
+ * overwritten. This is the one way to write into a stack's files.
+ */
+export async function whenStopped(started, write, timeout = 30_000) {
+  started.stop();
+  if (!(await started.gone(timeout))) throw new Error(`the Workers' processes were still running ${timeout / 1000} seconds after being stopped, so nothing was written`);
+  return write();
+}
+
+/**
  * Starts a Worker's `wrangler dev` in its own process group, so it can be stopped with all its children. `gone` waits for
  * every one of them to end, which is when nothing has the files under `--persist-to` open.
  */

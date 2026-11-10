@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseJsonc } from "./jsonc.mjs";
 import { writeFileStates } from "./asset-fixture.mjs";
-import { freePort, local, prepareStack, repo, run, startGateway, startWrangler } from "./stack.mjs";
+import { freePort, local, prepareStack, repo, run, startGateway, startWrangler, whenStopped } from "./stack.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const skipBuild = process.argv.includes("--skip-build");
@@ -80,13 +80,11 @@ try {
     proc.on("message", async (message) => {
       if (message?.type !== "set-file-states") return;
       try {
-        backend.stop();
         // The runtime that holds the room's files isn't the process that answers on the port, and it can outlive both that
         // and wrangler's launcher. A room writes from an alarm a moment after its last command, so a runtime still running
         // then has the file locked. Only every process of the old stack having ended says the files are closed.
         // Writing under a live runtime could corrupt the room or be overwritten, so one that won't end stops the run.
-        if (!(await backend.gone())) throw new Error("the Workers' processes were still running 30 seconds after being stopped, so the file states weren't written");
-        await writeFileStates(persist, message.changes);
+        await whenStopped(backend, () => writeFileStates(persist, message.changes));
         backend = await startBackend();
         await waitForStack();
         proc.send({ type: "set-file-states:done" });

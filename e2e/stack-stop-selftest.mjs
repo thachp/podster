@@ -5,7 +5,7 @@
 //   node stack-stop-selftest.mjs
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { groupAlive, groupGone } from "./stack.mjs";
+import { groupAlive, groupGone, whenStopped } from "./stack.mjs";
 
 let failed = 0;
 const check = (passed, title, detail) => {
@@ -57,18 +57,50 @@ function launch(lingerMs) {
   check(await groupGone(proc.pid, 10_000), "and is gone once killed");
 }
 
-// The wait is only worth anything if the accessibility run makes it: it has to stop the Workers, wait for every process
-// to end, and only then write. `backend.gone` is `groupGone` on the stack's process group.
+// `whenStopped` is the one way to write into a stack's files: stop, wait for every process, then write.
 {
-  const stack = readFileSync(new URL("./stack.mjs", import.meta.url), "utf8");
-  const run = readFileSync(new URL("./run-a11y.mjs", import.meta.url), "utf8");
+  const order = [];
+  const stack = { stop: () => order.push("stop"), gone: async (timeout) => (order.push(`gone ${timeout}`), true) };
+  const result = await whenStopped(stack, () => (order.push("write"), "written"), 1234);
+  check(order.join(", ") === "stop, gone 1234, write" && result === "written", "it stops, waits for the stack to be gone, then writes, in that order", order.join(", "));
+}
+{
+  const order = [];
+  const stack = { stop: () => order.push("stop"), gone: async () => (order.push("gone"), false) };
+  let error;
+  await whenStopped(stack, () => order.push("write")).catch((caught) => (error = caught));
+  check(error instanceof Error && order.join(", ") === "stop, gone", "a stack that isn't gone throws, and nothing is written", `${order.join(", ")}; ${error?.message}`);
+}
+{
+  // With real processes: the write sees nothing left of a group whose child outlives its launcher.
+  const { proc, ready } = launch(1_000);
+  await within(30_000, ready, "the child starting");
+  const stack = { stop: () => process.kill(-proc.pid, "SIGTERM"), gone: (timeout) => groupGone(proc.pid, timeout) };
+  let aliveAtWrite;
+  await whenStopped(stack, () => (aliveAtWrite = groupAlive(proc.pid)));
+  check(aliveAtWrite === false, "by the time it writes, every process of the stack has ended");
+}
+{
+  const { proc, ready } = launch(60_000);
+  await within(30_000, ready, "the child starting");
+  const stack = { stop: () => process.kill(-proc.pid, "SIGTERM"), gone: (timeout) => groupGone(proc.pid, timeout) };
+  let wrote = false;
+  const error = await whenStopped(stack, () => (wrote = true), 300).then(() => null, (caught) => caught);
+  check(error instanceof Error && !wrote, "a real stack that won't end throws, and nothing is written");
+  process.kill(-proc.pid, "SIGKILL");
+  await groupGone(proc.pid, 10_000);
+}
+
+// And the accessibility run writes that way and no other. Comments are taken out first, so only code can satisfy this.
+{
+  const code = (file) => readFileSync(new URL(file, import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "").replace(/\s\/\/ .*$/gm, "");
+  const stack = code("./stack.mjs");
+  const run = code("./run-a11y.mjs");
   check(/gone: \(timeout\) => groupGone\(stack\.pid, timeout\)/.test(stack), "a started stack's `gone` is groupGone on its own process group");
-  const stop = run.indexOf("backend.stop();");
-  const wait = run.indexOf("if (!(await backend.gone())) throw");
-  const write = run.indexOf("await writeFileStates(");
-  check(stop !== -1 && wait !== -1 && write !== -1, "run-a11y.mjs stops the Workers, waits for them to be gone, and writes the file states", `at ${stop}, ${wait}, ${write}`);
-  check(stop < wait && wait < write, "in that order, and a stack that isn't gone throws before the write", `at ${stop}, ${wait}, ${write}`);
-  check(run.split("writeFileStates(").length === 2, "and that is the only place it writes them");
+  const writes = run.split("writeFileStates(").length - 1;
+  check(writes === 1 && run.includes("await whenStopped(backend, () => writeFileStates(persist, message.changes));"), "run-a11y.mjs writes file states in one place, through whenStopped on the backend", `${writes} call(s)`);
+  check(/^import \{[^}]*\bwhenStopped\b[^}]*\} from "\.\/stack\.mjs";$/m.test(run), "and that whenStopped is this one, from stack.mjs");
+  check(!/\bfunction whenStopped\b|\bwhenStopped\s*=/.test(run), "not one of its own");
 }
 
 console.log(failed === 0 ? "\nthe stack's stop wait: all checks passed" : `\nthe stack's stop wait: ${failed} failed`);

@@ -14,7 +14,8 @@ With no flag it only reports. It passes when ALL of these hold, and prints each 
     If any of those fails it stops there, before reading anything else.
   - every check has completed as SUCCESS or SKIPPED (NEUTRAL only for the check named "CodeQL")
   - every job of ci.yml is among the checks and succeeded. They may be SKIPPED only on a docs/
-    branch whose every changed file is a Markdown file or under docs/
+    branch whose every changed file, and the old path of every renamed one, is under docs/, or
+    is a Markdown file other than CLAUDE.md and outside .claude/ and .github/
   - code scanning has an analysis of this exact head for every language its default setup lists,
     and the "Analyze (<language>)" check of each, and "CodeQL", are there and weren't skipped
   - ci.yml on main still has exactly the jobs this script expects
@@ -170,11 +171,13 @@ languages=$(gh api "repos/{owner}/{repo}/code-scanning/default-setup" --jq '
   if .state != "configured" then error("default setup is not configured") else . end
   | .languages as $all
   | [$all[] | select(. as $one | any($all[]; . != $one and (split("-") | index($one) != null)) | not)]
-  | unique | .[]') || languages=
+  | unique | .[]' 2>&1) || { setup_error=$languages; languages=; }
 analysed=$(gh api "repos/{owner}/{repo}/code-scanning/analyses?ref=refs/pull/$pr/head&per_page=100" --jq "
   if type == \"array\" then [.[] | select(.commit_sha == \"$sha\") | .category] | unique | .[] else error(\"not a list\") end") \
   || analysed=unreadable
-if [ -z "$languages" ]; then
+if [ -z "$languages" ] && printf '%s' "${setup_error:-}" | grep -q 'HTTP 403'; then
+  bad "could not read which languages code scanning analyses: GitHub answered 403. The token needs permission to read the code scanning default setup, which for a fine-grained token is Administration: read"
+elif [ -z "$languages" ]; then
   bad "could not read which languages code scanning analyses"
 elif [ "$analysed" = unreadable ]; then
   bad "could not read code scanning's analyses"
@@ -199,22 +202,44 @@ else
 fi
 
 # CI skips its jobs for a docs/ branch by the branch's name alone. The gate lets them be skipped only if the files
-# agree: every changed file a Markdown file or under docs/. Otherwise the jobs must have run, whatever the name.
+# agree. Otherwise the jobs must have run, whatever the name.
+#
+# What counts as documentation: anything under docs/, and a Markdown file anywhere else, except agent instructions
+# and anything beside workflows. CLAUDE.md, .claude/ and .github/ always take the full path.
+is_docs() {
+  case "$1" in
+    docs/*) return 0 ;;
+    CLAUDE.md | */CLAUDE.md | .claude/* | */.claude/* | .github/* | */.github/*) return 1 ;;
+    *.md) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 may_skip=false
 if [[ "$branch" == docs/* ]]; then
-  changed=$(gh pr view "$pr" --json changedFiles,files --jq '(.changedFiles | tostring), (.files[].path)') || changed=
-  count=$(printf '%s\n' "$changed" | sed -n 1p)
-  paths=$(printf '%s\n' "$changed" | sed 1d)
-  outside=$(printf '%s\n' "$paths" | grep -v -E '^docs/|\.md$' || true)
-  if [ -z "$changed" ] || [ -z "$paths" ]; then
+  # The REST list, because it alone gives a renamed file's old path. Without it, code moved under docs/ would read as
+  # a docs/ file, and leave its own folder with CI skipped.
+  count=$(gh api "repos/{owner}/{repo}/pulls/$pr" --jq '.changed_files | tostring') || count=
+  files=$(gh api "repos/{owner}/{repo}/pulls/$pr/files?per_page=100" --paginate \
+    --jq '.[] | [.status, .filename, (.previous_filename // "")] | @tsv') || files=
+  outside=""
+  while IFS=$tab read -r status path previous; do
+    [ -n "$status" ] || continue
+    case "$status" in
+      added | modified | removed | renamed) ;;
+      *) outside="$outside, $path ($status)"; continue ;;
+    esac
+    if ! is_docs "$path"; then outside="$outside, $path"; fi
+    if [ "$status" = renamed ] && ! is_docs "$previous"; then outside="$outside, ${previous:-an unnamed file} (renamed to $path)"; fi
+  done <<< "$files"
+  if ! [[ "$count" =~ ^[1-9][0-9]*$ ]] || [ -z "$files" ]; then
     bad "could not read the files this docs/ branch changes"
-  elif [ "$count" != "$(printf '%s\n' "$paths" | wc -l | tr -d ' ')" ]; then
-    echo "        this docs/ branch changes $count files, more than can be listed, so ci.yml's jobs must have run"
+  elif [ "$count" != "$(printf '%s\n' "$files" | wc -l | tr -d ' ')" ]; then
+    echo "        this docs/ branch changes $count files, and not all of them could be listed, so ci.yml's jobs must have run"
   elif [ -n "$outside" ]; then
-    echo "        this docs/ branch changes files that aren't documentation ($(echo $outside)), so ci.yml's jobs must have run"
+    echo "        this docs/ branch changes files that aren't documentation (${outside#, }), so ci.yml's jobs must have run"
   else
     may_skip=true
-    ok "this docs/ branch changes only Markdown files and files under docs/, so ci.yml's jobs may be skipped"
+    ok "this docs/ branch changes only documentation, so ci.yml's jobs may be skipped"
   fi
 fi
 

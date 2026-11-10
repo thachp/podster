@@ -37,6 +37,7 @@ answer() { # the whole fixture
   if [ -f "$fix/$1.json" ]; then json "$1"; return; fi
   [ -f "$fix/$1" ] || { echo "stand-in gh: no fixture $1" >&2; exit 97; }
   [ "$(cat "$fix/$1")" = gh-fails ] && { echo "gh: HTTP 500" >&2; exit 1; }
+  [ "$(cat "$fix/$1")" = gh-403 ] && { echo "gh: Resource not accessible by personal access token (HTTP 403)" >&2; exit 1; }
   cat "$fix/$1"
 }
 next() { # the fixture's next line each time, repeating its last
@@ -52,7 +53,8 @@ next() { # the fixture's next line each time, repeating its last
 case "$*" in
   "pr view "*" --json state,isDraft,isCrossRepository,baseRefName,headRefName,headRefOid "*) answer pull ;;
   "pr view "*" --json headRefOid,statusCheckRollup "*) answer checks ;;
-  "pr view "*" --json changedFiles,files "*) answer files ;;
+  "api repos/{owner}/{repo}/pulls/"*"/files?per_page=100 --paginate --jq "*) answer files ;;
+  "api repos/{owner}/{repo}/pulls/"*" --jq .changed_files | tostring") answer changed ;;
   "pr view "*" --json mergeStateStatus "*) next merge-state ;;
   "pr view "*" --json state,mergeCommit "*) answer merged ;;
   "api repos/{owner}/{repo}/code-scanning/alerts?ref=refs/pull/"*"/merge&state=open "*) answer alerts-merge ;;
@@ -80,11 +82,23 @@ drop_check() { awk -F '\t' -v name="$1" '$1 != name' "$fix/checks" > "$fix/check
 pull() { printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" > "$fix/pull"; } # STATE DRAFT FORK BASE BRANCH HEAD
 on_branch() { pull OPEN false false main "$1" "$sha"; }
 skip_jobs() { local job; for job in $jobs; do set_check "$job" COMPLETED SKIPPED; done; }
-docs_branch() { # docs_branch FILE...: a docs/ branch, CI skipped, changing those files
+changes() { # changes "STATUS PATH [OLD-PATH]"...: what the pull request changes
+  local change
+  echo "$#" > "$fix/changed"
+  : > "$fix/files"
+  for change in "$@"; do
+    set -- $change
+    printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}" >> "$fix/files"
+  done
+}
+docs_branch() { # docs_branch FILE...: a docs/ branch, CI skipped, modifying those files
   on_branch docs/thing
   skip_jobs
-  { echo "$#"; printf '%s\n' "$@"; } > "$fix/files"
+  local path list=()
+  for path in "$@"; do list+=("modified $path"); done
+  changes "${list[@]}"
 }
+docs_changes() { on_branch docs/thing; skip_jobs; changes "$@"; } # the same, with each change spelled out
 alarm="test/kernel.spec.ts > inbox > the alarm follows whichever recipient is due first, not the one waiting longest"
 api_log() { # api_log FILES-FAILED TESTS-FAILED FAIL-LINE...
   local files=$1 tests=$2 line
@@ -148,7 +162,7 @@ check "  and it waited through UNKNOWN twice" test "$(grep -c '^sleep 6$' "$fix/
 check "  and CodeQL's NEUTRAL was accepted with no open alert" said 'ok +check CodeQL: NEUTRAL'
 check "  and it read ci.yml on main" said 'ok +ci.yml on main has the jobs'
 check "  and it found an analysis for each of the four languages" test "$(grep -c '^ok      code scanning analysed this head for ' "$tmp/out")" -eq 4
-check "  and it didn't ask which files changed" never_called 'changedFiles'
+check "  and it didn't ask which files changed" never_called 'pulls/'
 check "  and it never asked about main's alerts" never_called 'alerts\?ref=refs/heads|alerts\?state|alerts --'
 
 refused() { # refused TITLE WHAT-IT-SAYS: the caller changed the fixtures; both the report and --merge must refuse
@@ -257,17 +271,63 @@ refused "every job skipped on a branch that only looks like docs/" "ci.yml's rus
 # --- the docs/ allowance ---
 docs_branch docs/spec/PRODUCT.md README.md apps/web/README.md
 check "a docs/ branch changing only documentation, with every job skipped, passes: exit 0" run 0 "$gate" 77 "$sha"
-check "  and says why the skips are allowed" said 'ok +this docs/ branch changes only Markdown files and files under docs/'
+check "  and says why the skips are allowed" said 'ok +this docs/ branch changes only documentation'
+check "  and it read the list that has old paths, every page of it" called '^gh api repos/\{owner\}/\{repo\}/pulls/77/files\?per_page=100 --paginate '
 healthy
 
 docs_branch docs/mockups/board.html docs/spec/diagram.png
 check "files under docs/ that aren't Markdown count as documentation: exit 0" run 0 "$gate" 77 "$sha"
 healthy
 
-for path in e2e/kit-report.json apps/api/src/lib.rs .github/workflows/ci.yml scripts/merge-gate src/docs/handler.ts docsx/page.ts notes.md.sh CLAUDE.mdx; do
+for path in e2e/kit-report.json apps/api/src/lib.rs .github/workflows/ci.yml scripts/merge-gate src/docs/handler.ts docsx/page.ts notes.md.sh CLAUDE.mdx \
+  CLAUDE.md apps/web/CLAUDE.md .claude/agents/reviewer.md .claude/skills/pr/SKILL.md .github/pull_request_template.md .github/ISSUE_TEMPLATE/bug.md apps/web/.github/notes.md; do
   docs_branch docs/spec/PRODUCT.md "$path"
   refused "a docs/ branch that also changes $path, with its jobs skipped" "ci.yml's rust was SKIPPED"
 done
+
+docs_branch README.md apps/web/README.md docs/CLAUDE.md docs/.github/notes.md e2e/claude.md
+check "other Markdown, and anything at all under docs/, still counts: exit 0" run 0 "$gate" 77 "$sha"
+healthy
+
+# A rename shows only its new path unless the old one is asked for.
+docs_changes "modified docs/a.md" "renamed docs/x.rs apps/api/src/x.rs"
+refused "a docs/ branch that renames a file out of apps/ into docs/" "ci.yml's rust was SKIPPED"
+docs_changes "modified docs/a.md" "renamed docs/x.rs apps/api/src/x.rs"
+check "  and the gate names where it came from" run 1 "$gate" 77 "$sha"
+check "  as well as where it went" said "aren't documentation \(apps/api/src/x.rs \(renamed to docs/x.rs\)\)"
+healthy
+
+docs_changes "renamed docs/agents.md CLAUDE.md"
+refused "a docs/ branch that renames CLAUDE.md into docs/" "ci.yml's rust was SKIPPED"
+
+docs_changes "renamed apps/api/src/x.rs docs/x.rs"
+refused "a docs/ branch that renames a file out of docs/" "ci.yml's rust was SKIPPED"
+
+docs_changes "renamed docs/x.rs"
+refused "a rename whose old path is missing" "ci.yml's rust was SKIPPED"
+
+docs_changes "renamed docs/spec/NEW.md docs/spec/OLD.md" "renamed GUIDE.md README.md"
+check "a rename within documentation passes: exit 0" run 0 "$gate" 77 "$sha"
+healthy
+
+docs_changes "modified docs/a.md" "copied docs/x.rs apps/api/src/x.rs"
+refused "a docs/ branch with a copy of a file from apps/" "ci.yml's rust was SKIPPED"
+docs_changes "copied docs/b.md docs/a.md"
+check "  and a copy is refused even within docs/" run 1 "$gate" 77 "$sha"
+check "  by its status" said "aren't documentation \(docs/b.md \(copied\)\)"
+healthy
+
+for status in changed unchanged; do
+  docs_changes "$status docs/a.md"
+  refused "a docs/ branch with a file whose status is $status" "ci.yml's rust was SKIPPED"
+done
+
+docs_changes "modified docs/a.md" "removed apps/api/src/lib.rs"
+refused "a docs/ branch that deletes a file outside docs/" "ci.yml's rust was SKIPPED"
+
+docs_changes "removed docs/old.md" "added docs/new.md" "removed NOTES.md"
+check "adding and deleting documentation passes: exit 0" run 0 "$gate" 77 "$sha"
+healthy
 
 docs_branch docs/spec/PRODUCT.md apps/api/src/lib.rs
 check "  and the gate names the file" run 1 "$gate" 77 "$sha"
@@ -275,18 +335,23 @@ check "  that isn't documentation" said "changes files that aren't documentation
 healthy
 
 on_branch docs/thing
-printf '2\ndocs/spec/PRODUCT.md\napps/api/src/lib.rs\n' > "$fix/files"
+changes "modified docs/spec/PRODUCT.md" "renamed docs/x.rs apps/api/src/x.rs"
 check "a docs/ branch that changes code, with every job passed, passes: exit 0" run 0 "$gate" 77 "$sha"
 healthy
 
-docs_branch docs/a.md docs/b.md
-sed '1s/.*/140/' "$fix/files" > "$fix/files.new" && mv "$fix/files.new" "$fix/files"
-refused "a docs/ branch changing more files than gh lists" "ci.yml's rust was SKIPPED"
+docs_branch docs/a.md docs/b.md; echo 3001 > "$fix/changed"
+refused "a docs/ branch changing more files than GitHub lists" "ci.yml's rust was SKIPPED"
+
+docs_branch docs/a.md docs/b.md; echo 1 > "$fix/changed"
+refused "a docs/ branch listing more files than it says it changes" "ci.yml's rust was SKIPPED"
+
+docs_branch docs/a.md; echo gh-fails > "$fix/changed"
+refused "a docs/ branch whose file count can't be read" 'could not read the files this docs/ branch changes'
 
 docs_branch docs/a.md; echo gh-fails > "$fix/files"
 refused "a docs/ branch whose files can't be read" 'could not read the files this docs/ branch changes'
 
-docs_branch docs/a.md; echo 0 > "$fix/files"
+docs_branch docs/a.md; : > "$fix/files"; echo 0 > "$fix/changed"
 refused "a docs/ branch that lists no file" 'could not read the files this docs/ branch changes'
 
 docs_branch docs/a.md; drop_check gateway
@@ -327,7 +392,10 @@ echo gh-fails > "$fix/analyses"
 refused "analyses that can't be read" "could not read code scanning's analyses"
 
 echo gh-fails > "$fix/languages"
-refused "a code scanning setup that can't be read" 'could not read which languages'
+refused "a code scanning setup that can't be read" 'could not read which languages code scanning analyses$'
+
+echo gh-403 > "$fix/languages"
+refused "a code scanning setup the token may not read" 'GitHub answered 403. The token needs permission to read the code scanning default setup, which for a fine-grained token is Administration: read'
 
 : > "$fix/languages"
 refused "a code scanning setup with no language" 'could not read which languages'
@@ -528,6 +596,7 @@ real() { # the captured answers, as they were
   cp "$captured/alerts.json" "$fix/alerts-head.json"
   cp "$captured/default-setup.json" "$fix/languages.json"
   cp "$captured/docs-files.json" "$fix/files.json"
+  cp "$captured/docs-pull.json" "$fix/changed.json"
 }
 edit() { jq "$2" "$fix/$1.json" > "$fix/$1.new" && mv "$fix/$1.new" "$fix/$1.json"; } # edit KEY JQ
 still_open() { real; edit pull '.state = "OPEN"'; edit merge-state '.mergeStateStatus = "CLEAN"'; }
@@ -608,11 +677,29 @@ check "a docs/ branch with #243's real files, one of them not documentation, is 
 check "  and names the file" said "aren't documentation \(e2e/kit-report-staging-2026-11-10.json\)"
 check "  for all eight skipped jobs" said 'refused, 8 problem'
 
-as_docs; edit files '.files |= map(select(.path | startswith("docs/"))) | .changedFiles = 4'
+as_docs; edit files 'map(select(.filename | startswith("docs/")))'; edit changed '.changed_files = 4'
 check "the same branch with only its four docs/ files passes: exit 0" run 0 "$gate" 252 "$real_head"
 
-as_docs; edit files '.files |= map(select(.path | startswith("docs/")))'
+as_docs; edit files 'map(select(.filename | startswith("docs/")))'
 check "the same four files listed of five changed is refused: exit 1" run 1 "$gate" 252 "$real_head"
+
+# GitHub's own shape for a rename, a copy and a deletion.
+as_docs; edit files '.[4] |= (.status = "renamed" | .filename = "docs/kit-report.json" | .previous_filename = "e2e/kit-report.json")'
+check "the JSON with its fifth file renamed from e2e/ into docs/ is refused: exit 1" run 1 "$gate" 252 "$real_head"
+check "  and names the old path" said "aren't documentation \(e2e/kit-report.json \(renamed to docs/kit-report.json\)\)"
+
+as_docs; edit files '.[4] |= (.status = "renamed" | .filename = "docs/kit-report.json" | .previous_filename = "docs/old-report.json")'
+check "the same rename from inside docs/ passes: exit 0" run 0 "$gate" 252 "$real_head"
+
+as_docs; edit files '.[4] |= (.status = "copied" | .filename = "docs/kit-report.json" | .previous_filename = "e2e/kit-report.json")'
+check "the JSON with a copy from e2e/ is refused: exit 1" run 1 "$gate" 252 "$real_head"
+
+as_docs; edit files '.[4] |= (.status = "removed" | .filename = "apps/api/src/lib.rs")'
+check "the JSON with a deletion outside docs/ is refused: exit 1" run 1 "$gate" 252 "$real_head"
+
+as_docs; edit files '.[4] |= (.status = "modified" | .filename = "CLAUDE.md")'
+check "the JSON with CLAUDE.md changed is refused: exit 1" run 1 "$gate" 252 "$real_head"
+check "  and names it" said "aren't documentation \(CLAUDE.md\)"
 
 fail_job() { edit pr-runs '.[0].conclusion = "failure"'; edit jobs "(.jobs[] | select(.name == \"$1\")).conclusion = \"failure\""; }
 still_open; fail_job api

@@ -7,13 +7,13 @@
 // uses. `--rehearse-same-person` gives it one person's cookie twice, which it has to refuse. `--rehearse-test-people`
 // runs staging's setup with nothing remote: the worker sees staging's URLs and `APP_URL`, and rehearse-fetch.mjs sends the
 // journey's requests for staging here, so the driver and the test sign-up meet with their real gates on.
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { request as httpsRequest } from "node:https";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { localCertificate } from "./local-cert.mjs";
 import { freePort, prepareStack, startGateway } from "./stack.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -30,17 +30,9 @@ const { gateway, apiConfig, persist, privateKey, kid } = prepareStack({ skipBuil
 const port = await freePort();
 // A worker only sees staging's HTTPS URLs if the local stack is on HTTPS too.
 const base = `${testPeople ? "https" : "http"}://localhost:${port}`;
-// Its certificate is made here, for this run and these two names, and is the one thing this run and the journey trust
-// beyond the usual. Certificate checking stays on everywhere, so nothing else self-signed is accepted.
+// Its certificate is made for this run, and is the one thing this run and the journey trust beyond the usual.
+// Certificate checking stays on everywhere. What the certificate is, in local-cert.mjs.
 const tls = testPeople ? localCertificate() : undefined;
-function localCertificate() {
-  const dir = mkdtempSync(join(tmpdir(), "podster-e2e-tls-"));
-  process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
-  const key = join(dir, "key.pem");
-  const cert = join(dir, "cert.pem");
-  execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1", "-keyout", key, "-out", cert], { stdio: "ignore" });
-  return { key, cert, ca: readFileSync(cert) };
-}
 // These reach only the gateway, and die with this run.
 const vars = {
   AUTH_SECRET: randomBytes(32).toString("base64"),

@@ -5,6 +5,7 @@
 //   M5_ORG=podster-spike M5_PROVISION_APP_ID=1 M5_MERGE_APP_ID=2 node spike.mjs
 //   ... node spike.mjs --allow-public   also try rules on a public repository
 //   ... node spike.mjs --cleanup        delete this spike's repositories and exit
+//   ... node spike.mjs --cleanup --public-only   delete only its public ones
 //
 // Tokens and keys are never printed or written. Results hold status codes and
 // GitHub's own error messages only.
@@ -18,6 +19,7 @@ import { fileURLToPath } from "node:url";
 const API = "https://api.github.com";
 const PREFIX = "m5-spike-";
 const STATUS_CONTEXT = "podster/review";
+const KNOWN_ARGS = ["--allow-public", "--cleanup", "--public-only"];
 
 export function appJwt(appId, pem, now = Math.floor(Date.now() / 1000)) {
   const enc = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -30,6 +32,12 @@ export function appJwt(appId, pem, now = Math.floor(Date.now() / 1000)) {
 export function looksLikeTestOrg(name) {
   const s = name ?? "";
   return /^[A-Za-z0-9-]+$/.test(s) && /(^|-)(spike|test|sandbox)(-|$)/i.test(s);
+}
+
+// An organization that doesn't look like a test one runs only if the owner repeats its name exactly.
+export function orgAllowed(org, confirm) {
+  if (looksLikeTestOrg(org)) return true;
+  return typeof org === "string" && /^[A-Za-z0-9-]+$/.test(org) && confirm === org;
 }
 
 async function gh(token, method, path, body) {
@@ -59,6 +67,8 @@ const b64 = (s) => Buffer.from(s).toString("base64");
 
 async function main() {
   const args = new Set(process.argv.slice(2));
+  const unknown = [...args].filter((x) => !KNOWN_ARGS.includes(x));
+  if (unknown.length > 0) throw new Error(`Unknown argument: ${unknown.join(", ")}`);
   const org = process.env.M5_ORG;
   const keyDir = process.env.M5_KEY_DIR ?? join(homedir(), ".podster", "m5-spike");
   const apps = {
@@ -68,8 +78,8 @@ async function main() {
   if (!org || !apps.provision.id || !apps.merge.id) {
     throw new Error("Set M5_ORG, M5_PROVISION_APP_ID and M5_MERGE_APP_ID.");
   }
-  if (!looksLikeTestOrg(org)) {
-    throw new Error(`Refusing to run: "${org}" isn't a plain name with spike, test or sandbox in it.`);
+  if (!orgAllowed(org, process.env.M5_CONFIRM_ORG)) {
+    throw new Error(`Refusing to run: "${org}" isn't a plain name with spike, test or sandbox in it. The owner can allow it by setting M5_CONFIRM_ORG to the same name.`);
   }
 
   const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
@@ -123,6 +133,7 @@ async function run({ args, org, apps, stamp, results, broad }) {
       const repos = list.json.repositories ?? [];
       for (const repo of repos) {
         if (repo.owner.login.toLowerCase() !== org.toLowerCase() || !repo.name.startsWith(PREFIX)) continue;
+        if (args.has("--public-only") && repo.private !== false) continue;
         const del = await gh(provisionAll, "DELETE", `/repos/${org}/${repo.name}`);
         console.log(`delete ${repo.name}: ${del.status}`);
       }

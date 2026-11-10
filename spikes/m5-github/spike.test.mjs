@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import { test } from "node:test";
-import { appJwt, looksLikeTestOrg } from "./spike.mjs";
+import { appJwt, looksLikeTestOrg, orgAllowed } from "./spike.mjs";
 
 test("the App JWT verifies with the key's public half and carries the App ID", () => {
   const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -20,5 +20,13 @@ test("only organizations that look like test ones are accepted", () => {
   }
   for (const bad of ["podster", "podster-rooms", "contest", "testimony", "podster_test", "test/../podster", "", undefined]) {
     assert.ok(!looksLikeTestOrg(bad), String(bad));
+  }
+});
+
+test("another organization runs only when the owner repeats its name exactly", () => {
+  assert.ok(orgAllowed("podster-spike", undefined));
+  assert.ok(orgAllowed("podsterx", "podsterx"));
+  for (const [org, confirm] of [["podsterx", undefined], ["podsterx", ""], ["podsterx", "Podsterx"], ["podster", "podsterx"], [undefined, undefined], ["", ""], ["a/b", "a/b"]]) {
+    assert.ok(!orgAllowed(org, confirm), `${org} ${confirm}`);
   }
 });

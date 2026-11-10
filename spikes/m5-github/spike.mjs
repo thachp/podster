@@ -8,6 +8,9 @@
 //   ... node spike.mjs --cleanup --public-only   delete only its public ones
 //   ... node spike.mjs --merge-restriction        only test, on a public repository,
 //                                                 whether a rule can restrict who merges
+//   ... M5_AGENT_APP_ID=3 node spike.mjs --three-apps   only test ADR 0009's three-App
+//                                                 split, on a public repository (plus one
+//                                                 private repository to probe reach)
 //
 // Tokens and keys are never printed or written. Results hold status codes and
 // GitHub's own error messages only.
@@ -21,7 +24,8 @@ import { fileURLToPath } from "node:url";
 const API = "https://api.github.com";
 const PREFIX = "m5-spike-";
 const STATUS_CONTEXT = "podster/review";
-const KNOWN_ARGS = ["--allow-public", "--cleanup", "--public-only", "--merge-restriction"];
+const KNOWN_ARGS = ["--allow-public", "--cleanup", "--public-only", "--merge-restriction", "--three-apps"];
+const ALONE = ["--merge-restriction", "--three-apps"];
 
 export function appJwt(appId, pem, now = Math.floor(Date.now() / 1000)) {
   const enc = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -64,14 +68,38 @@ export function restrictionRuleset({ name, statusAppId = null, pullRequest = fal
   };
 }
 
-// Returns why these arguments can't run, or null. The merge-restriction mode runs
-// alone, so a flag it would ignore is refused instead.
+// What the three-Apps mode expects to read back: exactly two active rulesets on the
+// default branch, the review one with no bypass actor and the update one whose bypass
+// list is exactly the merge App. Anything missing, extra or unreadable is false.
+// Takes rulesets as GET /repos/{owner}/{repo}/rulesets/{id} returns them.
+export function rulesetsAsExpected(rulesets, mergeAppId) {
+  if (!Array.isArray(rulesets) || rulesets.length !== 2) return false;
+  const types = (r) => (Array.isArray(r?.rules) ? r.rules.map((x) => x.type).sort().join(",") : "");
+  const common = (r) =>
+    r?.enforcement === "active" &&
+    r?.target === "branch" &&
+    JSON.stringify(r?.conditions?.ref_name?.include) === '["~DEFAULT_BRANCH"]' &&
+    JSON.stringify(r?.conditions?.ref_name?.exclude) === "[]" &&
+    Array.isArray(r?.bypass_actors);
+  const review = rulesets.find((r) => types(r) === "pull_request,required_status_checks");
+  const update = rulesets.find((r) => types(r) === "update");
+  if (!review || !update || !common(review) || !common(update)) return false;
+  const checks = review.rules.find((x) => x.type === "required_status_checks")?.parameters?.required_status_checks;
+  if (!Array.isArray(checks) || checks.length !== 1 || checks[0].context !== STATUS_CONTEXT || checks[0].integration_id !== mergeAppId) return false;
+  if (review.bypass_actors.length !== 0 || update.bypass_actors.length !== 1) return false;
+  const b = update.bypass_actors[0];
+  return b.actor_id === mergeAppId && b.actor_type === "Integration" && b.bypass_mode === "always";
+}
+
+// Returns why these arguments can't run, or null. The merge-restriction and
+// three-Apps modes each run alone, so a flag they would ignore is refused instead.
 export function argsProblem(list) {
   const unknown = list.filter((x) => !KNOWN_ARGS.includes(x));
   if (unknown.length > 0) return `Unknown argument: ${unknown.join(", ")}`;
-  if (list.includes("--merge-restriction")) {
-    const clash = list.filter((x) => ["--allow-public", "--public-only", "--cleanup"].includes(x));
-    if (clash.length > 0) return `--merge-restriction runs alone; it can't be combined with ${clash.join(", ")}`;
+  for (const mode of ALONE) {
+    if (!list.includes(mode)) continue;
+    const clash = list.filter((x) => x !== mode);
+    if (clash.length > 0) return `${mode} runs alone; it can't be combined with ${clash.join(", ")}`;
   }
   return null;
 }
@@ -114,6 +142,10 @@ async function main() {
   if (!org || !apps.provision.id || !apps.merge.id) {
     throw new Error("Set M5_ORG, M5_PROVISION_APP_ID and M5_MERGE_APP_ID.");
   }
+  if (args.has("--three-apps")) {
+    if (!process.env.M5_AGENT_APP_ID) throw new Error("--three-apps also needs M5_AGENT_APP_ID.");
+    apps.agent = { id: process.env.M5_AGENT_APP_ID, pem: join(keyDir, "agent.pem") };
+  }
   if (!orgAllowed(org, process.env.M5_CONFIRM_ORG)) {
     throw new Error(`Refusing to run: "${org}" isn't a plain name with spike, test or sandbox in it. The owner can allow it by setting M5_CONFIRM_ORG to the same name.`);
   }
@@ -124,7 +156,7 @@ async function main() {
   try {
     await run({ args, org, apps, stamp, results, broad });
   } finally {
-    // Tokens live for an hour unless revoked. The merge-restriction mode adds its scoped agent token here.
+    // Tokens live for an hour unless revoked. The merge-restriction and three-Apps modes add their scoped tokens here.
     for (const token of broad) await gh(token, "DELETE", "/installation/token").catch(() => {});
     if (results.length > 0) finish(results, stamp);
   }
@@ -180,6 +212,11 @@ async function run({ args, org, apps, stamp, results, broad }) {
 
   if (args.has("--merge-restriction")) {
     await mergeRestriction({ org, apps, stamp, record, revoke: broad });
+    return;
+  }
+
+  if (args.has("--three-apps")) {
+    await threeApps({ org, apps, stamp, record, revoke: broad });
     return;
   }
 
@@ -485,6 +522,199 @@ async function restrictionProbes({ v, at, branch, agentToken, mergeAll, record, 
     if (pr2.number) await merge("merge App merges a pull request with no status on its head", mergeAll, pr2, { required_status_on_head: false });
   }
   rec("merge App commits straight to the default branch", await commitFile(mergeAll, branch, `direct-merge-app-${v.key}.txt`));
+}
+
+// ADR 0009's three Apps: provisioning (Administration only), agent token (Contents
+// and Pull requests) and merge (Contents, Pull requests, Commit statuses). One public
+// repository with variant (c)'s two rulesets, and one private repository that no token
+// is scoped to, to probe reach. Probes that would damage the test if they succeeded
+// (ruleset and repository deletes) run last.
+async function threeApps({ org, apps, stamp, record, revoke }) {
+  const RISK = "three-apps";
+  const P = apps.provision.all;
+  const AF = apps.agent.all;
+  const mergeAppId = apps.merge.githubAppId;
+  const rec = (name, r, extra = {}) =>
+    record(RISK, name, { status: r.status, message: r.message, errors: r.status >= 400 ? r.json?.errors : undefined, ...extra });
+  const slug = (who) => who.replace(/'s/g, "").replace(/[^a-z]+/gi, "-").toLowerCase();
+
+  // 1. The provisioning App creates the repository and both rulesets.
+  const name = `${PREFIX}${stamp}-three`;
+  let made = await gh(P, "POST", `/orgs/${org}/repos`, { name, private: false, auto_init: true });
+  rec("provisioning App creates a public repository with auto_init", made);
+  const autoInit = made.status === 201;
+  if (!autoInit) {
+    made = await gh(P, "POST", `/orgs/${org}/repos`, { name, private: false, auto_init: false });
+    rec("provisioning App creates a public repository without auto_init", made);
+    if (made.status !== 201) return;
+  }
+  const at = `/repos/${org}/${name}`;
+  const repoId = made.json.id;
+  const branch = made.json.default_branch;
+  const otherName = `${PREFIX}${stamp}-other`;
+  const otherMade = await gh(P, "POST", `/orgs/${org}/repos`, { name: otherName, private: true, auto_init: true });
+  rec("provisioning App creates a private repository that no token is scoped to", otherMade);
+  const other = otherMade.status === 201 ? `/repos/${org}/${otherName}` : null;
+
+  if (!autoInit) {
+    const first = await gh(AF, "PUT", `${at}/contents/README.md`, { message: "spike: first commit", content: b64("spike\n") });
+    rec("agent App's full token makes the first commit, since auto_init was refused", first);
+  }
+  const head0 = await gh(P, "GET", `${at}/git/ref/heads/${branch}`);
+  rec("provisioning App reads the default branch's head (the initial commit exists)", head0, { has_commit: Boolean(head0.json?.object?.sha) });
+
+  const bodies = [
+    restrictionRuleset({ name: "podster-review", statusAppId: mergeAppId, pullRequest: true }),
+    restrictionRuleset({ name: "podster-update", update: true, bypassAppId: mergeAppId }),
+  ];
+  const ids = [];
+  let active = true;
+  for (const body of bodies) {
+    const r = await gh(P, "POST", `${at}/rulesets`, body);
+    rec(`provisioning App creates ruleset ${body.name}`, r, {
+      enforcement: r.json?.enforcement,
+      rule_types: body.rules.map((x) => x.type),
+      bypass_actors_sent: body.bypass_actors,
+      bypass_actors_returned: r.json?.bypass_actors,
+    });
+    if (r.status === 201) ids.push(r.json.id);
+    if (r.status !== 201 || r.json?.enforcement !== "active") active = false;
+  }
+  const note = { rulesets_active: active };
+
+  // 5. The readiness read-back: list, then each ruleset by ID, with one token.
+  const readBack = async (label, token) => {
+    const list = await gh(token, "GET", `${at}/rulesets`);
+    const full = [];
+    const seen = [];
+    for (const id of ids) {
+      const r = await gh(token, "GET", `${at}/rulesets/${id}`);
+      if (r.status === 200) full.push(r.json);
+      seen.push({
+        status: r.status,
+        message: r.message,
+        name: r.json?.name,
+        enforcement: r.json?.enforcement,
+        include: r.json?.conditions?.ref_name?.include,
+        rule_types: r.json?.rules?.map((x) => x.type),
+        required_status_checks: r.json?.rules?.find((x) => x.type === "required_status_checks")?.parameters?.required_status_checks,
+        bypass_actors: r.json?.bypass_actors,
+        current_user_can_bypass: r.json?.current_user_can_bypass,
+      });
+    }
+    record(RISK, label, {
+      status: list.status,
+      message: list.message,
+      listed: Array.isArray(list.json) ? list.json.map((x) => ({ name: x.name, enforcement: x.enforcement })) : null,
+      rulesets: seen,
+      as_expected: rulesetsAsExpected(full, mergeAppId),
+    });
+  };
+  await readBack("read-back with the provisioning App's token, straight after creation", P);
+  const effective = await gh(P, "GET", `${at}/rules/branches/${branch}`);
+  rec("provisioning App reads the rules in effect on the default branch", effective, { rule_types: Array.isArray(effective.json) ? effective.json.map((x) => x.type) : null });
+  const repoActions = await gh(P, "GET", `${at}/actions/permissions`);
+  rec("provisioning App reads the repository's Actions setting", repoActions, { enabled: repoActions.json?.enabled });
+  const orgActions = await gh(P, "GET", `/orgs/${org}/actions/permissions`);
+  rec("provisioning App reads the organization's Actions setting", orgActions, { enabled_repositories: orgActions.json?.enabled_repositories });
+
+  // Risk 11: is the new repository at once under the other two installations?
+  const mintFor = async (app, scope) => {
+    let t = null;
+    let tries = 0;
+    const t0 = Date.now();
+    for (; tries < 15 && !t?.token; tries++) {
+      if (tries > 0) await sleep(2000);
+      t = await app.token(scope);
+    }
+    if (t.token) revoke.push(t.token);
+    return { t, extra: { tries, seconds_until_minted: Math.round((Date.now() - t0) / 1000), granted: t.granted, expires_at: t.expires_at } };
+  };
+  const agentMint = await mintFor(apps.agent, { repository_ids: [repoId], permissions: { contents: "write", pull_requests: "write" } });
+  rec("agent App mints a token scoped to the new repository (contents, pull requests)", agentMint.t, agentMint.extra);
+  const mergeMint = await mintFor(apps.merge, { repository_ids: [repoId] });
+  rec("merge App mints a token scoped to the new repository", mergeMint.t, mergeMint.extra);
+  const A = agentMint.t.token;
+  const M = mergeMint.t.token;
+  if (!A || !M) return;
+  const wider = await apps.agent.token({ repository_ids: [repoId], permissions: { administration: "write" } });
+  if (wider.token) revoke.push(wider.token);
+  rec("agent App is asked for a token with Administration, which it doesn't hold", wider, { token_returned: Boolean(wider.token) });
+
+  await readBack("read-back with the agent's scoped token", A);
+  await readBack("read-back with the merge App's token", M);
+
+  const commitFile = async (token, onBranch, path) => {
+    const r = await gh(token, "PUT", `${at}/contents/${path}`, { message: `spike: ${path}`, content: b64(`${path}\n`), branch: onBranch });
+    return { status: r.status, message: r.message, json: r.json, sha: r.json?.commit?.sha };
+  };
+  const merged = async (number) => (await gh(M, "GET", `${at}/pulls/${number}`)).json?.merged ?? null;
+  const tryMerge = async (label, token, pr, extra = {}) => {
+    const before = await merged(pr.number);
+    const r = await gh(token, "PUT", `${at}/pulls/${pr.number}/merge`, { merge_method: "merge", sha: pr.sha });
+    rec(label, r, { merged_before: before, merged_after: await merged(pr.number), ...note, ...extra });
+  };
+  const setStatus = (token, sha) => gh(token, "POST", `${at}/statuses/${sha}`, { state: "success", context: STATUS_CONTEXT });
+
+  // 2. The agent's scoped token does its own work.
+  const ref = await gh(A, "POST", `${at}/git/refs`, { ref: "refs/heads/task-1", sha: head0.json?.object?.sha });
+  rec("agent's scoped token creates a task branch", ref);
+  const c1 = await commitFile(A, "task-1", "task-1.txt");
+  rec("agent's scoped token commits to the task branch", c1);
+  const prRes = await gh(A, "POST", `${at}/pulls`, { title: "task-1", head: "task-1", base: branch });
+  rec("agent's scoped token opens a pull request", prRes);
+  const pr = { number: prRes.json?.number, sha: c1.sha };
+  if (!pr.number || !pr.sha) return;
+
+  // Before the merge App's status.
+  const unmarked = { required_status_on_head: false };
+  await tryMerge("agent's scoped token merges before the merge App's status", A, pr, unmarked);
+  await tryMerge("merge App merges an unmarked commit", M, pr, unmarked);
+  rec("agent's scoped token sets the required status", await setStatus(A, pr.sha), note);
+  rec("agent App's full token sets the required status", await setStatus(AF, pr.sha), note);
+  rec("provisioning App sets the required status", await setStatus(P, pr.sha), note);
+  rec("merge App sets the required status on the head", await setStatus(M, pr.sha), note);
+  await sleep(3000);
+
+  // After it: the agent App (scoped, then full) and the provisioning App try every path.
+  const marked = { required_status_on_head: true };
+  for (const [who, token] of [["agent's scoped token", A], ["agent App's full token", AF], ["provisioning App", P]]) {
+    rec(`${who} commits straight to the default branch`, await commitFile(token, branch, `direct-${slug(who)}.txt`), { ...note, ...marked });
+    const ff = await gh(token, "PATCH", `${at}/git/refs/heads/${branch}`, { sha: pr.sha, force: false });
+    rec(`${who} moves the default branch ref to the marked head (fast-forward)`, ff, { ...note, ...marked, merged_after: await merged(pr.number) });
+    await tryMerge(`${who} merges the marked pull request`, token, pr, marked);
+  }
+  // 4. Can the provisioning App push code anywhere?
+  rec("provisioning App commits to the task branch", await commitFile(P, "task-1", "from-provisioning.txt"), note);
+  const pRef = await gh(P, "POST", `${at}/git/refs`, { ref: "refs/heads/from-provisioning", sha: head0.json?.object?.sha });
+  rec("provisioning App creates a branch", pRef, note);
+  const pPr = await gh(P, "POST", `${at}/pulls`, { title: "from-provisioning", head: "task-1", base: branch });
+  rec("provisioning App opens a pull request", pPr, note);
+
+  // 3. The merge App merges the commit it marked.
+  await tryMerge("merge App merges the marked pull request", M, pr, marked);
+  rec("merge App commits straight to the default branch", await commitFile(M, branch, "direct-merge-app.txt"), note);
+
+  // Reach and administration. Nothing here should succeed for the agent or merge Apps.
+  if (other) {
+    rec("agent's scoped token reads the other (private) repository", await gh(A, "GET", other));
+    const w = await gh(A, "PUT", `${other}/contents/reach.txt`, { message: "spike: reach", content: b64("reach\n") });
+    rec("agent's scoped token commits to the other (private) repository", w);
+  }
+  const others = [["agent's scoped token", A], ["agent App's full token", AF], ["merge App", M]];
+  for (const [who, token] of others) {
+    rec(`${who} edits repository settings`, await gh(token, "PATCH", at, { description: "spike" }));
+    rec(`${who} creates a ruleset`, await gh(token, "POST", `${at}/rulesets`, restrictionRuleset({ name: `made-by-${slug(who)}`, pullRequest: true })));
+    if (ids[1]) rec(`${who} edits the update ruleset`, await gh(token, "PUT", `${at}/rulesets/${ids[1]}`, bodies[1]));
+    // If this were allowed, the repository would carry the prefix, so --cleanup removes it.
+    rec(`${who} creates a repository in the organization`, await gh(token, "POST", `/orgs/${org}/repos`, { name: `${PREFIX}${stamp}-made-by-${slug(who)}`, private: true }));
+  }
+  for (const [who, token] of others) {
+    if (ids[0]) rec(`${who} deletes the review ruleset`, await gh(token, "DELETE", `${at}/rulesets/${ids[0]}`));
+  }
+  await readBack("read-back with the provisioning App's token, after every attempt above", P);
+  for (const [who, token] of others) rec(`${who} deletes the repository`, await gh(token, "DELETE", at));
+  rec("the repository still exists afterwards (read with the provisioning App's token)", await gh(P, "GET", at));
 }
 
 function finish(results, stamp) {

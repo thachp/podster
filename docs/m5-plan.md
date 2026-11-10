@@ -65,7 +65,7 @@ The architect proposes the gate call, for the owner to review.
 | 9 | **Screens**, in two PRs: (a) the Git option in room setup and the repository's state; (b) grants in Manage access and a task's change and merge state. | Unavailable grants show as unavailable, never silently provisioned. |
 | 10 | **Staging run and security review,** then the gate call. | A script against staging with test people, in `podsterdev`. |
 
-Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security-sensitive: a provisioning credential, a new public route, token issuing and merge. Each gets the deeper review the owner has already agreed for security-sensitive steps; anything deeper than that is asked first.
+Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security-sensitive: a provisioning credential, a new public route, token issuing and merge. The lead has a standing instruction to give security-sensitive steps a deeper review; anything deeper than that is asked first.
 
 ## What needs the owner's yes
 

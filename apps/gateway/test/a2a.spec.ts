@@ -3,6 +3,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { AgentCard } from "@a2a-js/sdk";
 import { ClientFactory, ClientFactoryOptions, JsonRpcTransportFactory } from "@a2a-js/sdk/client";
 import { A2A_METHODS, MAX_A2A_BODY_BYTES } from "../src/a2a/profile";
+import { requestedVersion } from "../src/a2a";
 import { A2A, connect, setUpSchemas, signUp } from "./oauth-helpers";
 
 const BASE = "https://gateway.test";
@@ -159,6 +160,51 @@ describe("before the handler", () => {
       const { body } = await rpc("GetTask", { id: "tsk_x" }, headers);
       expect(reason(body)).toMatch(/VERSION_NOT_SUPPORTED/);
     }
+  });
+
+  it("serves a patch of 1.0 as 1.0, and refuses everything else as before (decision 192)", async () => {
+    const asked = async (version: string) => {
+      const { body } = await rpc("GetTask", { id: "tsk_" + "0".repeat(32) }, { "content-type": "application/json", "A2A-Version": version });
+      return reason(body) ?? "";
+    };
+    // A patch never counts in negotiation (spec 3.6): each reaches the handler, which finds no such task.
+    for (const version of ["1.0", "1.0.0", "1.0.1", "1.0.999"]) expect(await asked(version), version).toMatch(/TASK_NOT_FOUND/);
+    // Another minor or major, half a version, an extra part, a prefix, a suffix, nothing, and an overlong value.
+    for (const version of ["1.1", "2.0", "1", "1.0.", "1.0.1.1", "v1.0", "1.0-beta", "", "1.0." + "1".repeat(200), "01.0", "1.00", "1.0.01"]) {
+      expect(await asked(version), JSON.stringify(version.slice(0, 20))).toMatch(/VERSION_NOT_SUPPORTED/);
+    }
+    // Spaces around a value aren't part of it: HTTP strips them before the gateway sees the header, as it did before.
+    // A repeated header arrives as one list, "1.0, 1.0", which isn't a version.
+    const headers = new Headers([["content-type", "application/json"], ["A2A-Version", "1.0"], ["A2A-Version", "1.0"], ["authorization", `Bearer ${token}`]]);
+    const repeated = await SELF.fetch(`${BASE}/a2a`, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "GetTask", params: { id: "tsk_x" } }) });
+    expect(reason(await repeated.json())).toMatch(/VERSION_NOT_SUPPORTED/);
+  });
+
+  it("refuses each non-version exactly as it refuses 2.0, apart from the value it names", async () => {
+    // The SDK's refusal names the version asked for, so that value is replaced before the bodies are compared.
+    const refusal = async (headers: Headers, asked: string) => {
+      const res = await SELF.fetch(`${BASE}/a2a`, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "GetTask", params: { id: "tsk_x" } }) });
+      const text = await res.text();
+      // Only where the message quotes it, as '<value>', so nothing else in the body is touched.
+      return { status: res.status, body: text.split(`'${JSON.stringify(asked).slice(1, -1)}'`).join("'<asked>'") };
+    };
+    const one = (version: string) => new Headers([["content-type", "application/json"], ["A2A-Version", version], ["authorization", `Bearer ${token}`]]);
+    const baseline = await refusal(one("2.0"), "2.0");
+    expect(baseline.status).toBe(200);
+    expect(reason(JSON.parse(baseline.body))).toMatch(/VERSION_NOT_SUPPORTED/);
+    for (const version of ["1.1", ".1.0", "1.0+build", "1.0-beta", "v1.0", "1.0.1.1", "1.0." + "1".repeat(200)]) {
+      expect(await refusal(one(version), version), version.slice(0, 20)).toEqual(baseline);
+    }
+    // A repeated header, one of them 2.0, arrives as "1.0, 2.0": not a version, and refused the same way.
+    const repeated = new Headers([["content-type", "application/json"], ["A2A-Version", "1.0"], ["A2A-Version", "2.0"], ["authorization", `Bearer ${token}`]]);
+    expect(await refusal(repeated, "1.0, 2.0")).toEqual(baseline);
+  });
+
+  it("reads only digits as a version, and bounds them", () => {
+    expect(requestedVersion(null)).toBe("0.3");
+    expect(requestedVersion("1.0.42")).toBe("1.0");
+    expect(requestedVersion("999.999.999999")).toBe("999.999");
+    for (const raw of ["1.0.1234567", "１.０", "1.0\n", "1.*", "1.x", "1.0,1.0", "^1.0", ">=1.0", ".1.0", "1.0+build", "1.0, 2.0"]) expect(requestedVersion(raw), raw).toBe(raw);
   });
 
   it("refuses another content type, a body over 64 KB, and anything but POST", async () => {

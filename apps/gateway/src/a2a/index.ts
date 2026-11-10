@@ -100,6 +100,23 @@ function fnv1a64(text: string): string {
 
 export const isA2aPath = (url: URL) => url.pathname === A2A_PATH;
 
+/** A version header longer than this is never a version: `999.999.999999`. */
+const MAX_VERSION_LENGTH = 14;
+/** `major.minor`, with an optional `.patch`: digits only, no leading zeros, bounded. Nothing else is read as a version. */
+const VERSION = /^(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})(?:\.(0|[1-9]\d{0,5}))?$/;
+
+/**
+ * The version a request asks for, as negotiation reads it (decision 192). Patch numbers never count (spec 3.6), so `1.0.7` asks
+ * for `1.0`. A missing header is 0.3 (spec 3.6.2). Anything that isn't exactly a version, such as a range, a prefix, a
+ * suffix, a list from a repeated header, or an overlong value, is passed on as it is, and the check refuses it as before.
+ */
+export function requestedVersion(header: string | null): string {
+  if (header === null) return "0.3";
+  if (header.length > MAX_VERSION_LENGTH) return header;
+  const match = VERSION.exec(header);
+  return match ? `${match[1]}.${match[2]}` : header;
+}
+
 /**
  * `/a2a/` is `/a2a`, for clients that join the card's interface URL with a slash, as the A2A compatibility kit's does (decision
  * 190). Only that one path: the request is rewritten before anything else sees it, so every check, limit, credential and
@@ -126,8 +143,9 @@ export async function checkA2aRequest(request: Request, baseUrl: string): Promis
   const text = await boundedText(request);
   if (text === null) return httpError("payload_too_large", 413);
   try {
-    // Decision 109: only 1.0. A missing header is read as 0.3 (spec 3.6.2), so it's refused too.
-    validateVersion(request.headers.get(A2A_VERSION_HEADER) ?? "0.3", await new PodsterA2AHandler(baseUrl).getAgentCard(), A2A_BINDING);
+    // Decision 109: only 1.0. A patch of it, such as 1.0.1, is 1.0, since patches never count (decision 192, spec 3.6). A
+    // missing header is read as 0.3 (spec 3.6.2), so it's refused too, as is anything that isn't strictly a version.
+    validateVersion(requestedVersion(request.headers.get(A2A_VERSION_HEADER)), await new PodsterA2AHandler(baseUrl).getAgentCard(), A2A_BINDING);
   } catch (error) {
     return rpcError(envelope(text).id, error instanceof VersionNotSupportedError ? error : new VersionNotSupportedError("Only A2A 1.0 is supported."));
   }

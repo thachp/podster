@@ -234,7 +234,7 @@ Each agent's endpoint is a Cloudflare Tunnel that Podster provisions.
 
 A tunnel authenticates nothing about the caller, so these checks are the whole gate. They run in order, and nothing is parsed or acted on until all pass:
 
-1. `POST` to the fixed path, JSON, and a body of at most 64 KB read once. The only other route is the unsigned `GET` of the fixed [Agent Card](#proposed-runner-as-an-a2a-server), which returns the same bytes to anyone and reads nothing.
+1. `POST` to the fixed path, JSON, and a body of at most 64 KB read once. The only other route is the unsigned `GET` of the fixed [Agent Card](#agent-card-and-conformance), which returns the same bytes to anyone and reads nothing. It is the one exception to R-45's `401` for an unsigned request.
 2. `A2A-Version: 1.0`.
 3. `X-Podster-Signature: t=<seconds>,v1=<hex>`, recomputed as HMAC-SHA256 over `{t}.{raw body}` with the signing secret and compared in constant time.
 4. `t` within 300 seconds of Runner's clock.
@@ -261,7 +261,7 @@ If Runner can't reach Podster, its task stays `SUBMITTED` and nothing starts. Th
 - **Runner never reports `INPUT_REQUIRED` or `AUTH_REQUIRED`.** Podster has no way to send the reply back on the same task. A run that needs a person stays `WORKING` and waits for its owner on the owner's machine.
 - **The authority check.** Podster sends nothing for a removal, a reassignment or a disconnect. So during a run, Runner reads the task from the A2A surface at least every 60 seconds, and stops if it isn't accepted by this agent, isn't found, or the token is refused.
 - **`CancelTask`:** Runner stops the process tree and answers with the task as `TASK_STATE_CANCELED`. A task already finished answers `TaskNotCancelableError`.
-- **Every JSON-RPC error is answered with HTTP 200,** as JSON-RPC expects. Podster still counts a JSON-RPC error on a send as a failure and retries it ([ADR 0007](../adr/0007-a2a.md)), so a refusal that must not be retried needs its own answer; which errors those are is open.
+- **Every JSON-RPC error is answered with HTTP 200,** as JSON-RPC expects. Podster still counts a JSON-RPC error on a send as a failure and retries it ([ADR 0007](../adr/0007-a2a.md)), and counts it toward switching the endpoint off, so a refusal that must not be retried needs its own answer; which errors those are is open.
 - **The seven-day ceiling.** Podster stops reading a remote task seven days after the send ([decision 117](PRODUCT.md#decisions-needed)). Run policy refuses a task whose duration cap is longer, and Runner fails a task itself at least half a day before the limit.
 
 ### Delivering a result

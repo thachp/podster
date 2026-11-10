@@ -1,6 +1,6 @@
 # M5 plan
 
-**Status, 2026-11-10 UTC: Proposed. Nothing here is approved or built.** Step 1 is drafted: [ADR 0009](adr/0009-managed-repositories.md) is written as a proposal, not accepted, and [the spike has run](../spikes/m5-github/README.md#results-2026-11-10) twice against the test organization, without webhooks. The spike's merge-restriction run is in [#234](https://github.com/thachp/podster/pull/234). The ADR's choices are proposals, recorded as [decisions 179 to 189](spec/PRODUCT.md#m5-proposals-november-10-2026). The gate, M5-06, M5-12, the threat model, steps 6 and 7 and questions 2, 3, 6 and 11 below are reworded to match the ADR, and the ADR lists [where the spike disagreed with this plan](adr/0009-managed-repositories.md#where-the-specs-and-the-spike-disagree). The architect drafted this plan from the specs. Its [questions](#questions-for-the-architect) carry the architect's proposed answers, which aren't recorded as decisions in `PRODUCT.md` yet. Items marked **owner's yes** create an account or a cloud resource, cost money, set a secret, or are legal text, so the architect can't settle them alone.
+**Status, 2026-11-10 UTC: Proposed. Nothing here is approved or built.** Step 1 is drafted: [ADR 0009](adr/0009-managed-repositories.md) is written as a proposal, not accepted, and [the spike has run](../spikes/m5-github/README.md#results-2026-11-10) twice against the test organization, without webhooks. The spike's merge-restriction run is in [#234](https://github.com/thachp/podster/pull/234). The ADR's choices are proposals, recorded as [decisions 179 to 189](spec/PRODUCT.md#m5-proposals-november-10-2026). The gate, M5-03, M5-06, M5-12, the threat model, steps 4, 6 and 7 and questions 2, 3, 6, 7 and 11 below are reworded to match the ADR, and the ADR lists [where the spike disagreed with this plan](adr/0009-managed-repositories.md#where-the-specs-and-the-spike-disagree). The architect drafted this plan from the specs. Its [questions](#questions-for-the-architect) carry the architect's proposed answers, which aren't recorded as decisions in `PRODUCT.md` yet. Items marked **owner's yes** create an account or a cloud resource, cost money, set a secret, or are legal text, so the architect can't settle them alone.
 
 It covers [M5 Managed repositories](spec/PRODUCT.md#product-direction-and-delivery-scope): a GitHub App, a repository linked to a room, review bound to a commit, and merge. Its gate is [expanded criterion 7](spec/PRODUCT.md#expanded-workroom-acceptance-criteria) for repositories. It starts from the [managed repositories design](spec/ARCHITECTURE.md#managed-repositories-and-merge-m5), which is itself proposed, and from decisions 10, 18 and 25, which are proposals too. Decision 10 leaves agent access to the M5 ADR.
 
@@ -54,13 +54,13 @@ The architect proposes the gate call, for the owner to review.
 
 | Step | What | Notes |
 | --- | --- | --- |
-| 1 | **ADR 0009 and the spike.** The ADR settles everything the architecture leaves "open for the ADR". The spike runs against a test organization and answers the [risks](#risks-to-test). | **Drafted, 2026-11-10.** [ADR 0009](adr/0009-managed-repositories.md) is a proposal: it settles or leaves open each item by name, and its merge path waits on one more spike run. [The spike ran](../spikes/m5-github/README.md#results-2026-11-10) against `podsterx` and answered every risk except webhooks (risk 8). The spike's code stays in `spikes/` and nothing builds on it. |
+| 1 | **ADR 0009 and the spike.** The ADR settles everything the architecture leaves "open for the ADR". The spike runs against a test organization and answers the [risks](#risks-to-test). | **Drafted, 2026-11-10.** [ADR 0009](adr/0009-managed-repositories.md) is a proposal: it settles or leaves open each item by name, and it proposes the merge path from the spike's merge-restriction run ([#234](https://github.com/thachp/podster/pull/234)). [The spike ran](../spikes/m5-github/README.md#results-2026-11-10) against `podsterx` and answered every risk except webhooks (risk 8). The spike's code stays in `spikes/` and nothing builds on it. |
 | 2 | **Contracts and migration:** `repo_link`, `provider_grant`, `task_change` and a provisioning request, with `get_repo_access`, `get_task_release_status` and `merge_task` in `capabilities.yaml` and their routes in `openapi.yaml`. The room's Durable Object owns all four as state, because grants are authority. D1 gets at most a projection for lists, which never authorizes. | One contract and migration PR at a time. |
 | 3 | **Decisions in `crates/core` and `crates/policy`:** grant checks, `commit_sha` required on `submit_task` and `verify_task` for a linked task, `commit_changed`, and merge as its own state. Pure, with no I/O. | AC-31 is decided here, and AC-17's rule that approval alone never merges. |
-| 4 | **Provisioning:** room setup records a request; a job creates the repository, sets its protections and records the verified repository ID. Pending, ready, failed and uncertain states, with reconciliation before any retry. | A failed setup blocks coding tasks in that room, not other work. |
+| 4 | **Provisioning:** room setup records a request; a job creates the repository, sets its protections and records the verified repository ID. Pending, ready, failed and uncertain states for the request, and ready, degraded and suspended for the link. An unknown outcome is a failed setup: nothing is adopted by name, and a retry uses a new server-generated name. | A failed setup blocks coding tasks in that room, not other work. |
 | 5 | **Webhooks:** the gateway verifies GitHub's signature and passes a normalized observation to the room's Durable Object, which records it with its observation time. A job polls when state looks stale. | A new public route on the gateway. It authenticates the sender and decides nothing. |
 | 6 | **`get_repo_access`:** the private Rust API mints a token for one repository after rechecking the task and its run, the fixed deadline and budget, the agent's assignment and connection, room access, the exact repository and installation, the grant and the provider permissions. Renewal runs the same checks. | Tokens never reach events, logs, D1 or the gateway's storage. The room's Durable Object holds each one sealed for at most its hour, for revocation only, as ADR 0009 proposes. AC-27. |
-| 7 | **`merge_task`:** the job rechecks authority, marks the reviewed commit, merges with its `sha` as a merge commit, and records success or failure. A changed commit leads to a follow-up task, as decision 25 proposes. | Under ADR 0009's two rulesets, only the merge App can update the default branch. A retry reads the pull request's merged state, since a second merge call answers `200`. |
+| 7 | **`merge_task`:** the job rechecks authority, re-reads the pull request's base, head repository and head commit and refuses on any difference from the reviewed values, marks the reviewed commit, merges with its `sha` as a merge commit, confirms the default branch contains it, and records success or failure. A changed commit leads to a follow-up task, as decision 25 proposes. | Under ADR 0009's two rulesets, only the merge App can update the default branch. A retry reads the pull request's merged state, since a second merge call answers `200`. |
 | 8 | **`get_task_release_status`:** checks and merge state, each with its own observation time. | Reports that no release exists; M6 adds releases. |
 | 9 | **Screens**, in two PRs: (a) the Git option in room setup and the repository's state; (b) grants in Manage access and a task's change and merge state. | Unavailable grants show as unavailable, never silently provisioned. |
 | 10 | **Staging run and security review,** then the gate call. | A script against staging with test people and a test organization. |
@@ -70,8 +70,9 @@ Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security
 ## What needs the owner's yes
 
 - **A GitHub organization for managed repositories,** and a second one for tests. **Answered by the owner on 2026-11-10:** the test organization is `podsterx`, and the real managed organization is `podsterdev`. Tests and spikes never run against `podsterdev`. The real organization's ownership and legal terms are still open, and may need a lawyer.
-- **The GitHub Apps:** one that provisions and issues agent tokens, and a separate merge App if the spike confirms the split. The owner creates and installs them, or approves the architect doing it in a named session.
-- **Secrets:** each App's private key and the webhook secret. The owner sets them with `wrangler secret put`; the architect gives the exact command.
+- **The GitHub Apps:** three, as ADR 0009 proposes: one that provisions, one that issues agent tokens, and one that merges. The owner creates and installs them, or approves the architect doing it in a named session. The spike's two Apps and their keys are deleted from `podsterx` before any staging managed repository exists there.
+- **Public managed repositories on staging.** takedown.md's staging exception covers `PUBLIC_ROOMS`, not repositories.
+- **Secrets:** each App's private key, the webhook secret and the token-sealing key. The owner sets them with `wrangler secret put`; the architect gives the exact command.
 - **Money:** a GitHub plan, if private repositories need one for branch rules. See [cloud resources](#cloud-resources).
 - **Any looser alternative** in the questions below.
 - **Each deeper security pass** beyond the ones already agreed for security-sensitive steps.
@@ -81,9 +82,9 @@ Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security
 
 **The proposal needs resources outside Cloudflare, which no earlier milestone did.**
 
-- **GitHub:** two organizations and up to two Apps, as above. **Possibly billed.** The spike found that the Free plan refuses a ruleset on a private repository, so private managed repositories with protected branches need a paid plan. Nothing has been bought. [ADR 0009](adr/0009-managed-repositories.md#visibility-and-the-plan) proposes public repositories as the working assumption until the owner decides.
+- **GitHub:** two organizations and three Apps in each one that's used, as above. **Possibly billed.** The spike found that the Free plan refuses a ruleset on a private repository, so private managed repositories with protected branches need a paid plan. Nothing has been bought. [ADR 0009](adr/0009-managed-repositories.md#visibility-and-the-plan) proposes public repositories as the working assumption until the owner decides.
 - **Cloudflare:** no new billed resource is proposed. Step 2 adds Durable Object state through the room's own forward-only migrations, and at most a projection table in the API's existing D1 database. Step 5 adds a route to the existing gateway Worker. Provisioning and merge jobs use the existing outbox; a dedicated queue is only proposed if the spike shows the outbox can't carry them, and that would need the owner's yes.
-- **Secrets:** each App's private key on the private API Worker only, and the webhook secret on the gateway. The owner sets them.
+- **Secrets:** each App's private key and the token-sealing key on the private API Worker only, and the webhook secret on the gateway. The owner sets them.
 
 ## Acceptance tests
 
@@ -93,7 +94,7 @@ Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security
 | --- | --- |
 | M5-01 | Setting up a Git-enabled room creates one repository in the configured organization, with the chosen name and visibility, and the room records GitHub's repository ID. A room without Git creates none. |
 | M5-02 | A repository's visibility is what was chosen at setup, whatever the room's visibility is. |
-| M5-03 | A timeout during creation leaves the request uncertain. Reconciliation finds the repository by its recorded identity, never by a matching name, and no second repository is made. |
+| M5-03 | A timeout during creation leaves the request uncertain, which blocks coding tasks like a failed setup. No repository is adopted by a matching name. A retry uses a new server-generated name, and nothing is deleted. When GitHub's answer did arrive, the repository is known by its recorded ID and no second one is made. |
 | M5-04 | A client-supplied organization or installation is ignored or refused. |
 | M5-05 | `get_repo_access` without a grant is denied and no token is requested from GitHub. |
 | M5-06 | A token from `get_repo_access` can push a task branch and open a pull request. It can't merge to the default branch, even a commit the merge App has marked, by the merge call, a commit through the API, a ref update or `git push`. It can't reach another repository, change settings or rules, add or change a workflow, or set the required status. |
@@ -114,7 +115,7 @@ Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security
 
 | Threat | Proposed mitigation |
 | --- | --- |
-| An agent merges unreviewed code with its push token | Two rulesets on the default branch: a required status that only the merge App can set, for the exact reviewed commit, with no bypass; and an update restriction that only the merge App bypasses. Seen once each on the paths the spike tried; `git push` wasn't tried. |
+| An agent merges unreviewed code with its push token | Two rulesets on the default branch: a required status that only the merge App can set, on the exact commit it marks, with no bypass; and an update restriction that only the merge App bypasses. Whether a commit was reviewed is checked in Rust before the mark, after the job re-reads the pull request. Seen once each on the paths the spike tried; `git push` wasn't tried. |
 | A token is used after its authority ends | One-hour tokens, every issuance rechecked, each token held sealed so it can be revoked on the events that end authority, and any residual lifetime disclosed. |
 | A token reaches a log, an event or another agent | Minted and returned by the private Rust API only; held sealed in the room's Durable Object for at most an hour, for revocation, and nowhere else; the log check in M5-13. |
 | A client steers provisioning to another organization | Organization and installation come from trusted configuration only. |
@@ -125,7 +126,7 @@ Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security
 | A room admin grants access they don't hold | Policy checks the granter's delegation for that repository and action (AC-10, AC-11). |
 | A stale job acts after revocation | Each job rechecks current authority before its external call (AC-13, AC-27). |
 | Repository content is treated as instructions | Agent content is data. Podster stores commit IDs, check names and states, not content. |
-| The managed organization is compromised or its App key leaks | Least permissions per App, the split between provisioning and merge, and a rotation procedure. Owed in the ADR. |
+| The managed organization is compromised or its App key leaks | Least permissions per App; three Apps, so the provisioning key is never in the token-issuing path; rules read back on a schedule and before each merge; and the rotation and response in [ADR 0009](adr/0009-managed-repositories.md#key-rotation-and-compromise). A leaked provisioning key can still remove rules and delete repositories, and the private API Worker holds every key. The runbook is owed before the gate. |
 
 ## Questions for the architect
 
@@ -134,12 +135,12 @@ Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security
 | # | Question | Proposed | Alternative |
 | --- | --- | --- | --- |
 | 1 | Which repositories does M5 manage? | Only ones the server creates in the dedicated organization. | Linking an existing repository under its real owner's delegation. Later, with its own design. |
-| 2 | One App or two? | Two: one provisions and issues agent tokens, one merges. The spike supports it: the status pin and the update bypass both rest on the merge App's own identity. | One App with branch rules alone. Owner's yes, because a push token may then merge. |
+| 2 | One App or two? | Three, as ADR 0009 proposes: one provisions, one issues agent tokens, one merges. The status pin and the update bypass rest on the merge App's own identity, and the token-issuing App holds no Administration. Unverified as a set; the spike used two. | Two, with provisioning and agent tokens in one App, as the spike ran. One App with branch rules alone needs the owner's yes, because a push token may then merge. |
 | 3 | Default repository visibility | Public while the organization is on the Free plan, confirmed explicitly at setup, as ADR 0009's working assumption. | Private, which needs a paid plan and the owner's yes. Following the room's visibility isn't proposed. |
 | 4 | Who can merge? | A person or agent with an explicit merge grant on that repository, and only after approval. Never the submitter, which is a new rule beyond AC-17. | Any approver. Owner's yes. |
 | 5 | Token lifetime and renewal | One hour, renewed on demand with a full recheck and no fresh approval, as the architecture proposes. | Shorter tokens through a broker. Decided with M7. |
 | 6 | Merge method | Merge commits, the only method the spike ran, which keep the reviewed commit in the default branch's history. | Squash, once it has been tried against the rules. |
-| 7 | How commits attribute an agent | The App authors the merge; the agent's ID goes in a trailer. Settled in the ADR. | A machine account per agent. Not proposed. |
+| 7 | How commits attribute an agent | Left open by ADR 0009. For now Podster's own records carry attribution and the merge commit carries no Podster ID, since a trailer in a public repository would publish one. | The App authors the merge with the agent's ID in a trailer. A machine account per agent isn't proposed. |
 | 8 | A changed commit after approval | A follow-up task with its own review, as decision 25 proposes. | Re-review on the same task. Not proposed: the architecture makes a completed task terminal. |
 | 9 | Where provider jobs run | The existing outbox, with a recheck before each external call. | A dedicated queue. Owner's yes, as a new resource. |
 | 10 | Deletion, export and transfer of a repository | Not built in M5. A removed room leaves its repository in place, archived, until the ADR's policy is approved. | Deleting with the room. Owner's yes; it destroys work. |
@@ -160,6 +161,12 @@ The spike at step 1 answers these on the test organization, before any feature c
 8. Which webhooks arrive for checks and merges, how late, and what does a redelivery look like?
 9. Do GitHub's rate limits fit the polling the design needs?
 10. Can a workflow pushed on a task branch run, and can its token merge, set the required status or bypass a rule? Which organization settings stop that?
+
+Added by ADR 0009, not run yet:
+
+11. With three Apps, is a repository that the provisioning App creates at once under the other two installations, and does a token from an App with no Administration behave as the spike's scoped token did?
+12. After a lost creation answer, can an orphan repository be recognized by a marker Podster wrote at creation, without trusting its name?
+13. Can an App's token read back rulesets, their bypass lists and the organization's Actions setting, and with which permissions?
 
 ## How far this was checked
 

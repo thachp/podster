@@ -28,16 +28,17 @@ subjectAltName = DNS:localhost,IP:127.0.0.1
 
 /**
  * Makes the key and certificate in a new temporary folder, and returns their paths, the certificate's bytes as `ca`, and
- * `remove`. The folder is removed when the process exits, and on SIGINT or SIGTERM, which then end the process.
+ * `remove`. The folder is removed when the process exits, and on SIGINT or SIGTERM, which then end the process with
+ * the status a shell gives for that signal: 130 or 143.
  */
 export function localCertificate({ openssl = "openssl" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "podster-e2e-tls-"));
   const remove = () => rmSync(dir, { recursive: true, force: true });
   process.on("exit", remove);
-  for (const signal of ["SIGINT", "SIGTERM"]) {
+  for (const [signal, status] of [["SIGINT", 130], ["SIGTERM", 143]]) {
     process.on(signal, () => {
       remove();
-      process.exit(130);
+      process.exit(status);
     });
   }
   const key = join(dir, "key.pem");

@@ -280,12 +280,13 @@ check "files under docs/ that aren't Markdown count as documentation: exit 0" ru
 healthy
 
 for path in e2e/kit-report.json apps/api/src/lib.rs .github/workflows/ci.yml scripts/merge-gate src/docs/handler.ts docsx/page.ts notes.md.sh CLAUDE.mdx \
-  CLAUDE.md apps/web/CLAUDE.md .claude/agents/reviewer.md .claude/skills/pr/SKILL.md .github/pull_request_template.md .github/ISSUE_TEMPLATE/bug.md apps/web/.github/notes.md; do
+  CLAUDE.md apps/web/CLAUDE.md .claude/agents/reviewer.md .claude/skills/pr/SKILL.md .github/pull_request_template.md .github/ISSUE_TEMPLATE/bug.md apps/web/.github/notes.md \
+  claude.md Claude.md e2e/claude.md .Claude/x.md .CLAUDE/agents/x.md .GitHub/x.md .GITHUB/workflows/notes.md apps/web/.Github/notes.md Docs/handler.ts DOCS/x.rs; do
   docs_branch docs/spec/PRODUCT.md "$path"
   refused "a docs/ branch that also changes $path, with its jobs skipped" "ci.yml's rust was SKIPPED"
 done
 
-docs_branch README.md apps/web/README.md docs/CLAUDE.md docs/.github/notes.md e2e/claude.md
+docs_branch README.md apps/web/README.md docs/CLAUDE.md docs/.github/notes.md e2e/claudette.md notes/github.md
 check "other Markdown, and anything at all under docs/, still counts: exit 0" run 0 "$gate" 77 "$sha"
 healthy
 
@@ -299,6 +300,9 @@ healthy
 
 docs_changes "renamed docs/agents.md CLAUDE.md"
 refused "a docs/ branch that renames CLAUDE.md into docs/" "ci.yml's rust was SKIPPED"
+
+docs_changes "renamed docs/agents.md claude.MD"
+refused "a docs/ branch that renames claude.MD into docs/" "ci.yml's rust was SKIPPED"
 
 docs_changes "renamed apps/api/src/x.rs docs/x.rs"
 refused "a docs/ branch that renames a file out of docs/" "ci.yml's rust was SKIPPED"

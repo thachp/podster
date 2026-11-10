@@ -206,10 +206,13 @@ fi
 #
 # What counts as documentation: anything under docs/, and a Markdown file anywhere else, except agent instructions
 # and anything beside workflows. CLAUDE.md, .claude/ and .github/ always take the full path.
+# The exceptions are matched in lower case: on a checkout that ignores case, claude.md and .GitHub/ are those files.
 is_docs() {
+  case "$1" in docs/*) return 0 ;; esac
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    claude.md | */claude.md | .claude/* | */.claude/* | .github/* | */.github/*) return 1 ;;
+  esac
   case "$1" in
-    docs/*) return 0 ;;
-    CLAUDE.md | */CLAUDE.md | .claude/* | */.claude/* | .github/* | */.github/*) return 1 ;;
     *.md) return 0 ;;
     *) return 1 ;;
   esac

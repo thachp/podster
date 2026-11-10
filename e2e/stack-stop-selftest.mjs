@@ -5,7 +5,8 @@
 //   node stack-stop-selftest.mjs
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { groupAlive, groupGone, whenStopped } from "./stack.mjs";
+import { setFileStatesWhileStopped } from "./asset-fixture.mjs";
+import { groupAlive, groupGone } from "./stack.mjs";
 
 let failed = 0;
 const check = (passed, title, detail) => {
@@ -57,19 +58,31 @@ function launch(lingerMs) {
   check(await groupGone(proc.pid, 10_000), "and is gone once killed");
 }
 
-// `whenStopped` is the one way to write into a stack's files: stop, wait for every process, then write.
+// `setFileStatesWhileStopped` is the one way file states are written: stop, wait for every process, then write.
 {
   const order = [];
   const stack = { stop: () => order.push("stop"), gone: async (timeout) => (order.push(`gone ${timeout}`), true) };
-  const result = await whenStopped(stack, () => (order.push("write"), "written"), 1234);
-  check(order.join(", ") === "stop, gone 1234, write" && result === "written", "it stops, waits for the stack to be gone, then writes, in that order", order.join(", "));
+  const write = async (persist, changes) => (order.push(`write ${persist} ${changes}`), "written");
+  const result = await setFileStatesWhileStopped(stack, "folder", "changes", { timeout: 1234, write });
+  check(order.join(", ") === "stop, gone 1234, write folder changes" && result === "written", "it stops, waits for the stack to be gone, then writes what it was given, in that order", order.join(", "));
+}
+{
+  const order = [];
+  let release;
+  const stack = { stop: () => order.push("stop"), gone: () => new Promise((done) => (release = () => (order.push("gone"), done(true)))) };
+  const pending = setFileStatesWhileStopped(stack, "folder", [], { write: async () => order.push("write") });
+  await new Promise((later) => setTimeout(later, 200));
+  check(order.join(", ") === "stop", "while the stack isn't yet gone, it has stopped it and written nothing", order.join(", "));
+  release();
+  await pending;
+  check(order.join(", ") === "stop, gone, write", "and it writes as soon as the stack is gone", order.join(", "));
 }
 {
   const order = [];
   const stack = { stop: () => order.push("stop"), gone: async () => (order.push("gone"), false) };
   let error;
-  await whenStopped(stack, () => order.push("write")).catch((caught) => (error = caught));
-  check(error instanceof Error && order.join(", ") === "stop, gone", "a stack that isn't gone throws, and nothing is written", `${order.join(", ")}; ${error?.message}`);
+  await setFileStatesWhileStopped(stack, "folder", [], { write: async () => order.push("write") }).catch((caught) => (error = caught));
+  check(error instanceof Error && order.join(", ") === "stop, gone", "a stack that isn't gone in time throws, and nothing is written", `${order.join(", ")}; ${error?.message}`);
 }
 {
   // With real processes: the write sees nothing left of a group whose child outlives its launcher.
@@ -77,30 +90,32 @@ function launch(lingerMs) {
   await within(30_000, ready, "the child starting");
   const stack = { stop: () => process.kill(-proc.pid, "SIGTERM"), gone: (timeout) => groupGone(proc.pid, timeout) };
   let aliveAtWrite;
-  await whenStopped(stack, () => (aliveAtWrite = groupAlive(proc.pid)));
-  check(aliveAtWrite === false, "by the time it writes, every process of the stack has ended");
+  await setFileStatesWhileStopped(stack, "folder", [], { write: async () => (aliveAtWrite = groupAlive(proc.pid)) });
+  check(aliveAtWrite === false, "by the time it writes, every process of a real stack has ended");
 }
 {
   const { proc, ready } = launch(60_000);
   await within(30_000, ready, "the child starting");
   const stack = { stop: () => process.kill(-proc.pid, "SIGTERM"), gone: (timeout) => groupGone(proc.pid, timeout) };
   let wrote = false;
-  const error = await whenStopped(stack, () => (wrote = true), 300).then(() => null, (caught) => caught);
+  const error = await setFileStatesWhileStopped(stack, "folder", [], { timeout: 300, write: async () => (wrote = true) }).then(() => null, (caught) => caught);
   check(error instanceof Error && !wrote, "a real stack that won't end throws, and nothing is written");
   process.kill(-proc.pid, "SIGKILL");
   await groupGone(proc.pid, 10_000);
 }
 
-// And the accessibility run writes that way and no other. Comments are taken out first, so only code can satisfy this.
+// The order is the function's, tested above. What is left to read from source is that the accessibility run can reach
+// the writer no other way: the writer isn't exported, and the run imports the one function and calls it.
 {
-  const code = (file) => readFileSync(new URL(file, import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "").replace(/\s\/\/ .*$/gm, "");
-  const stack = code("./stack.mjs");
-  const run = code("./run-a11y.mjs");
-  check(/gone: \(timeout\) => groupGone\(stack\.pid, timeout\)/.test(stack), "a started stack's `gone` is groupGone on its own process group");
-  const writes = run.split("writeFileStates(").length - 1;
-  check(writes === 1 && run.includes("await whenStopped(backend, () => writeFileStates(persist, message.changes));"), "run-a11y.mjs writes file states in one place, through whenStopped on the backend", `${writes} call(s)`);
-  check(/^import \{[^}]*\bwhenStopped\b[^}]*\} from "\.\/stack\.mjs";$/m.test(run), "and that whenStopped is this one, from stack.mjs");
-  check(!/\bfunction whenStopped\b|\bwhenStopped\s*=/.test(run), "not one of its own");
+  const read = (file) => readFileSync(new URL(file, import.meta.url), "utf8");
+  const fixture = await import("./asset-fixture.mjs");
+  check(typeof fixture.setFileStatesWhileStopped === "function" && !("writeFileStates" in fixture), "asset-fixture.mjs exports setFileStatesWhileStopped, and not the writer itself", Object.keys(fixture).join(", "));
+  check(/gone: \(timeout\) => groupGone\(stack\.pid, timeout\)/.test(read("./stack.mjs")), "a started stack's `gone` is groupGone on its own process group");
+  const run = read("./run-a11y.mjs");
+  const imports = run.match(/^import .* from "\.\/asset-fixture\.mjs";$/gm) ?? [];
+  check(imports.length === 1 && imports[0] === 'import { setFileStatesWhileStopped } from "./asset-fixture.mjs";', "run-a11y.mjs imports that one function from it, by its own name", imports.join(" | "));
+  check(!/writeFileStates|import\(|node:sqlite|DatabaseSync/.test(run), "and has no other way to the writer or to the files: no writeFileStates, dynamic import or SQLite of its own");
+  check(/await setFileStatesWhileStopped\(backend, persist, message\.changes\);/.test(run), "and calls it on the backend it started");
 }
 
 console.log(failed === 0 ? "\nthe stack's stop wait: all checks passed" : `\nthe stack's stop wait: ${failed} failed`);

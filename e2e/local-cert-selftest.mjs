@@ -61,18 +61,25 @@ check(untrusted === "DEPTH_ZERO_SELF_SIGNED_CERT", "a client not given it refuse
   server.close();
 }
 
-// The point of CA:FALSE: a certificate for another name, signed with this run's key, is refused by a client that trusts
-// this run's certificate.
+// The point of CA:FALSE: a certificate for the same names, signed with this run's key, is refused by a client that
+// trusts this run's certificate. The same certificate signed by a real authority is accepted, so the refusal is for who
+// signed it and not for how it was made.
 {
-  const otherKey = join(made.dir, "other-key.pem");
-  const request = join(made.dir, "other.csr");
-  const other = join(made.dir, "other.pem");
-  const names = join(made.dir, "other.ext");
-  writeFileSync(names, "subjectAltName = DNS:localhost,IP:127.0.0.1\n");
-  execFileSync("openssl", ["req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-keyout", otherKey, "-out", request], { stdio: "ignore" });
-  execFileSync("openssl", ["x509", "-req", "-in", request, "-CA", made.cert, "-CAkey", made.key, "-CAcreateserial", "-days", "2", "-extfile", names, "-out", other], { stdio: "ignore" });
-  const answer = await ask(readFileSync(otherKey), readFileSync(other), "localhost", { ca: made.ca });
-  check(typeof answer === "string" && answer !== "timeout", "a certificate signed with this run's key is refused, so the key can't vouch for another", String(answer));
+  const file = (name) => join(made.dir, name);
+  writeFileSync(file("names.ext"), "subjectAltName = DNS:localhost,IP:127.0.0.1\n");
+  writeFileSync(file("authority.cnf"), "[req]\ndistinguished_name = subject\nx509_extensions = authority\nprompt = no\n[subject]\nCN = a test authority\n[authority]\nbasicConstraints = critical,CA:TRUE\nkeyUsage = critical,keyCertSign\n");
+  const openssl = (...args) => execFileSync("openssl", args, { stdio: "ignore" });
+  openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2", "-config", file("authority.cnf"), "-keyout", file("authority-key.pem"), "-out", file("authority.pem"));
+  openssl("req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=localhost", "-keyout", file("other-key.pem"), "-out", file("other.csr"));
+  const signedBy = (cert, key, out) => openssl("x509", "-req", "-in", file("other.csr"), "-CA", cert, "-CAkey", key, "-CAcreateserial", "-days", "2", "-extfile", file("names.ext"), "-out", file(out));
+  signedBy(file("authority.pem"), file("authority-key.pem"), "by-authority.pem");
+  signedBy(made.cert, made.key, "by-run.pem");
+  const otherKey = readFileSync(file("other-key.pem"));
+  const byAuthority = await ask(otherKey, readFileSync(file("by-authority.pem")), "localhost", { ca: readFileSync(file("authority.pem")) });
+  check(byAuthority === 200, "a certificate signed by a real authority is trusted by a client given that authority", String(byAuthority));
+  const byRun = await ask(otherKey, readFileSync(file("by-run.pem")), "localhost", { ca: made.ca });
+  // What Node reports when the signer it was given isn't allowed to sign certificates.
+  check(byRun === "UNSPECIFIED" || byRun === "INVALID_CA", "the same certificate signed with this run's key fails verification, so the key can't vouch for another", String(byRun));
 }
 
 check(existsSync(made.key), "the key is there while the run needs it");
@@ -80,7 +87,7 @@ made.remove();
 check(!existsSync(made.dir), "and is gone, with its folder, once removed");
 
 // A signal removes it too. A child makes one, says where, and waits to be told to stop.
-for (const signal of ["SIGINT", "SIGTERM"]) {
+for (const [signal, status] of [["SIGINT", 130], ["SIGTERM", 143]]) {
   const script = `import { localCertificate } from "./local-cert.mjs"; console.log(localCertificate().dir); setInterval(() => {}, 1000);`;
   const proc = execFile(process.execPath, ["--input-type=module", "-e", script], { cwd: new URL(".", import.meta.url), encoding: "utf8" });
   const dir = await new Promise((done, fail) => {
@@ -91,7 +98,8 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
   const ended = new Promise((done) => proc.once("exit", done));
   proc.kill(signal);
   const code = await ended;
-  check(there && !existsSync(dir), `${signal} removes the key and its folder`, `exit ${code}`);
+  check(there && !existsSync(dir), `${signal} removes the key and its folder`);
+  check(code === status, `and ends the run with ${status}`, `exit ${code}`);
 }
 
 // No openssl, or one that fails, says so plainly, passes on what it said, and leaves nothing behind.

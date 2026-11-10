@@ -72,6 +72,35 @@ fn label(room: &str, repo: i64, grant: &str, agent: &str, task: &str) -> String 
     format!("repo-token:{room}:{repo}:{grant}:{agent}:{task}")
 }
 
+/// The agent-token App's configuration. Test builds can override one room's variables by a table only a test can make,
+/// so a test can show a misconfiguration refused end to end.
+fn agent_config(env: &Env, sql: &SqlStorage) -> Option<AgentConfig> {
+    #[cfg(feature = "failpoints")]
+    if let Some(found) = rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_github_vars'",
+        vec![],
+    )
+    .ok()
+    .filter(|found| !found.is_empty())
+    .and_then(|_| rows(sql, "SELECT name, value FROM test_github_vars", vec![]).ok())
+    {
+        let overrides: std::collections::HashMap<String, String> = found
+            .iter()
+            .filter_map(|r| Some((text(&r["name"])?, text(&r["value"])?)))
+            .collect();
+        return AgentConfig::from_lookup(&|name: &str| {
+            overrides
+                .get(name)
+                .cloned()
+                .or_else(|| crate::github::lookup(env, name))
+        });
+    }
+    #[cfg(not(feature = "failpoints"))]
+    let _ = sql;
+    AgentConfig::from_env(env)
+}
+
 /// The label a stored row's token was sealed under.
 fn row_label(room: &str, row: &Value) -> String {
     label(
@@ -126,6 +155,9 @@ pub(super) const PREVIOUS_KEY_SECRET: &str = "REPO_TOKEN_KEY_PREVIOUS";
 struct Keys {
     current: Option<Vec<u8>>,
     previous: Option<Vec<u8>>,
+    /// The previous secret is set but isn't a well-formed key. Rows it might have sealed then wait, and are never
+    /// dropped as unrevocable: a typo while rotating mustn't lose the tokens it was meant to keep revocable.
+    previous_invalid: bool,
 }
 
 /// Which key opened a sealed token. The log may say which, and nothing more about a key.
@@ -136,6 +168,12 @@ enum Opened {
 }
 
 impl Keys {
+    /// Whether a row neither key opens may be recorded as unrevocable and dropped: only when a current key is set and
+    /// no previous secret is set but unreadable. Otherwise the row waits, since a key is missing, not gone.
+    fn may_drop(&self) -> bool {
+        self.current.is_some() && !self.previous_invalid
+    }
+
     /// Opens a sealed token with the current key, then the previous one. `None` if neither opens it.
     fn open(&self, label: &str, sealed: &str) -> Option<(String, Opened)> {
         let try_with = |key: &Option<Vec<u8>>| {
@@ -148,8 +186,12 @@ impl Keys {
     }
 }
 
-fn parse_secret(env: &Env, name: &str) -> Option<Vec<u8>> {
-    let secret = env.secret(name).ok()?.to_string();
+/// A secret's key, and whether the secret is set at all. One that's set and not a 64-hex key is logged as
+/// `key_invalid`, naming which key and nothing else.
+fn parse_secret(env: &Env, name: &str) -> (Option<Vec<u8>>, bool) {
+    let Some(secret) = env.secret(name).ok().map(|s| s.to_string()) else {
+        return (None, false);
+    };
     let key = parse_key(&secret);
     if key.is_none() {
         console_error!(
@@ -157,7 +199,7 @@ fn parse_secret(env: &Env, name: &str) -> Option<Vec<u8>> {
             json!({ "event": "repo_token.key_invalid", "key": if name == KEY_SECRET { "current" } else { "previous" } })
         );
     }
-    key
+    (key, true)
 }
 
 /// The sealing keys, if set and well-formed. Test builds can give one room its own pair, or none, by a table only a
@@ -181,16 +223,20 @@ fn keys(env: &Env, sql: &SqlStorage) -> Keys {
     }) {
         let row = found.first();
         let pick = |name: &str| row.and_then(|r| r[name].as_str()).and_then(parse_key);
+        let previous_set = row.is_some_and(|r| r["previous"].is_string());
         return Keys {
             current: pick("current"),
             previous: pick("previous"),
+            previous_invalid: previous_set && pick("previous").is_none(),
         };
     }
     #[cfg(not(feature = "failpoints"))]
     let _ = sql;
+    let (previous, previous_set) = parse_secret(env, PREVIOUS_KEY_SECRET);
     Keys {
-        current: parse_secret(env, KEY_SECRET),
-        previous: parse_secret(env, PREVIOUS_KEY_SECRET),
+        current: parse_secret(env, KEY_SECRET).0,
+        previous_invalid: previous_set && previous.is_none(),
+        previous,
     }
 }
 
@@ -479,7 +525,7 @@ impl Workspace {
         }
         let standing = self.standing(identity, who).await?;
         let now = now_ms();
-        let config = AgentConfig::from_env(&self.env);
+        let config = agent_config(&self.env, &sql);
         let keys = keys(&self.env, &sql);
         let room = identity.workspace_id.clone();
         let agent = who.caller.id.clone();
@@ -494,7 +540,7 @@ impl Workspace {
                 abandon_leases(sql, now)?;
                 // A held token that opens with neither key, as after a rotation without the previous key, can't be
                 // returned or revoked. It's recorded and dropped, so the agent gets a new one rather than an error.
-                if keys.current.is_some() {
+                if keys.may_drop() {
                     let held = rows(sql, "SELECT id, agent_id, task_id, grant_id, provider_repo_id, sealed FROM repo_token WHERE agent_id = ? AND task_id = ? AND state = 'held'", vec![who.caller.id.as_str().into(), task.as_str().into()])?;
                     if let Some(row) = held.first() {
                         if keys.open(&row_label(&room, row), row["sealed"].as_str().unwrap_or_default()).is_none() {
@@ -520,7 +566,7 @@ impl Workspace {
                                 }
                                 Outcome::Reuse { token, expires_at }
                             }
-                            // Only when no current key is set: one that is set and doesn't open it dropped the row above.
+                            // No current key is set, or the previous secret is set and unreadable: the row waits.
                             None => Outcome::Refused(unavailable()),
                         })
                     }
@@ -849,7 +895,7 @@ impl Workspace {
             .first()
             .and_then(|r| text(&r["id"]))
             .unwrap_or_default();
-        let issuer = AgentConfig::from_env(&self.env).map(AgentTokens::new);
+        let issuer = agent_config(&self.env, &sql).map(AgentTokens::new);
         let keys = keys(&self.env, &sql);
         let (mut revoked, mut failed, mut unrevocable) = (0, 0, 0);
         for row in &due {
@@ -867,9 +913,9 @@ impl Workspace {
                     }
                     Some(token)
                 }
-                // With a current key set, a row neither key opens never will: it's recorded and dropped. With none
-                // set, it waits, since that's configuration missing, not a key gone.
-                None if keys.current.is_some() => {
+                // With a current key set and no unreadable previous secret, a row neither key opens never will: it's
+                // recorded and dropped. Otherwise it waits and is retried, since a key is missing or mistyped, not gone.
+                None if keys.may_drop() => {
                     let row = row.clone();
                     self.in_transaction(move |sql| drop_unopenable(sql, &row, now))?;
                     unrevocable += 1;
@@ -905,7 +951,7 @@ impl Workspace {
         }
         console_log!(
             "{}",
-            json!({ "event": "repo_token.revocations", "ws": room, "revoked": revoked, "failed": failed, "unrevocable": unrevocable })
+            json!({ "event": "repo_token.revocations", "ws": room, "revoked": revoked, "failed": failed, "unrevocable": unrevocable, "key_invalid": keys.previous_invalid })
         );
         Ok(())
     }

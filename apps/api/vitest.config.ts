@@ -52,7 +52,8 @@ async function fakeHook(request: Request) {
   }
   const body = await request.text();
   hookRequests.push({ host: url.hostname, path: url.pathname, signature: request.headers.get("x-podster-signature"), agent: request.headers.get("user-agent"), authorization: request.headers.get("authorization"), a2aVersion: request.headers.get("a2a-version"), body });
-  if (url.hostname === "langgraph.example.com") return langgraph(request, url, body);
+  if (url.hostname === "langgraph.example.com") return independent(process.env.PODSTER_LANGGRAPH_URL, request, url, body);
+  if (url.hostname === "fasta2a.example.com") return independent(process.env.PODSTER_FASTA2A_URL, request, url, body);
   if (url.pathname.startsWith("/hang")) await new Promise((resolve) => setTimeout(resolve, 5000));
   if (url.pathname.startsWith("/fail")) return new Response("no", { status: 500 });
   if (url.pathname.startsWith("/redirect")) return new Response(null, { status: 302, headers: { location: "https://elsewhere.example.com/" } });
@@ -60,12 +61,12 @@ async function fakeHook(request: Request) {
   return new Response("ok");
 }
 
-// LangGraph's A2A server, when a2a-langgraph.spec.ts runs against one (decision 143). The API sends to the made-up public name
-// langgraph.example.com, which passes egress policy as any agent's endpoint would, and only this test runtime forwards it to
-// the local server named by PODSTER_LANGGRAPH_URL. Podster's own egress rules are unchanged.
-async function langgraph(request: Request, url: URL, body: string) {
-  const base = process.env.PODSTER_LANGGRAPH_URL;
-  if (!base || !/^http:\/\/127\.0\.0\.1:\d+$/.test(base)) return new Response("no LangGraph server for this run", { status: 502 });
+// An independent A2A server, when a2a-langgraph.spec.ts or a2a-fasta2a.spec.ts runs against one (decision 143). The API sends
+// to a made-up public name, langgraph.example.com or fasta2a.example.com, which passes egress policy as any agent's endpoint
+// would, and only this test runtime forwards it to the local server named by PODSTER_LANGGRAPH_URL or PODSTER_FASTA2A_URL.
+// Podster's own egress rules are unchanged.
+async function independent(base: string | undefined, request: Request, url: URL, body: string) {
+  if (!base || !/^http:\/\/127\.0\.0\.1:\d+$/.test(base)) return new Response("no independent A2A server for this run", { status: 502 });
   const headers: Record<string, string> = {};
   for (const name of ["content-type", "a2a-version", "x-podster-signature", "authorization", "user-agent"]) {
     const value = request.headers.get(name);
@@ -121,6 +122,8 @@ export default defineConfig({
           EXPLORE_CURSOR_KEY: "a5".repeat(32),
           // Set only by e2e/run-langgraph-check.mjs. Empty, a2a-langgraph.spec.ts skips.
           TEST_LANGGRAPH_ASSISTANT: process.env.PODSTER_LANGGRAPH_URL ? (process.env.PODSTER_LANGGRAPH_ASSISTANT ?? "") : "",
+          // Set only by e2e/run-fasta2a-check.mjs: the agent's run time in seconds. Empty, a2a-fasta2a.spec.ts skips.
+          TEST_FASTA2A_RUN_SECONDS: process.env.PODSTER_FASTA2A_URL ? (process.env.PODSTER_FASTA2A_RUN_SECONDS ?? "") : "",
           TEST_WRANGLER: readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8"),
           TEST_D1_SCHEMA: ["0001_membership_index.sql", "0002_room_status.sql", "0003_membership_by_org.sql", "0004_ownerless_rooms.sql", "0005_public_workroom_index.sql", "0006_public_explore_order.sql"].map((name) => readFileSync(new URL(`./migrations/${name}`, import.meta.url), "utf8")).join("\n").replace(/--.*$/gm, ""),
           TEST_SIGNING_JWK: JSON.stringify(privateKey.export({ format: "jwk" })),

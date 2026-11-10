@@ -1,11 +1,16 @@
-// Decision 142: the A2A compatibility kit (a2aproject/a2a-tck) against Podster's inbound A2A, on the local stack.
+// Decision 142: the A2A compatibility kit (a2aproject/a2a-tck) against Podster's inbound A2A, on the local stack or staging.
 //
 //   node run-a2a-kit.mjs --kit <a2a-tck checkout with its .venv> [--skip-build] [--level must]
+//   PODSTER_E2E_SIGNUP_SECRET=… node run-a2a-kit.mjs --kit <checkout> --staging
+//
+// On staging, a test person comes from staging's test sign-up, and the run's agents are disconnected and the person signed
+// out at the end. The kit only reads and sends to the tasks this run made, through the proxy below.
 //
 // The kit's client sends no credentials, and Podster's /a2a needs an agent's OAuth token. So this starts the real gateway and
 // API, signs a person up, connects one agent with tasks offered to it, takes the agent's /a2a token through the same consent
 // as any client, and puts a small proxy in front of the gateway on 127.0.0.1. The proxy adds that bearer to each request and
-// points the agent card's interface URLs at itself. It changes nothing else, and Podster's own checks are untouched. The kit
+// points the agent card's interface URLs at itself. It
+// changes nothing else, and Podster's own checks are untouched. The kit
 // runs over JSON-RPC only, the one binding Podster serves.
 //
 // Results are in the kit's reports/ folder. Profile exceptions (decision 141) are in docs/spec/A2A-PROFILE.md.
@@ -14,6 +19,7 @@ import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { childEnv } from "./child-env.mjs";
 import { linkedA2aToken, McpAgent, Person, Target } from "./lib.mjs";
 import { freePort, prepareStack, startGateway } from "./stack.mjs";
 
@@ -28,71 +34,104 @@ if (!kit) {
   process.exit(2);
 }
 
-const { gateway, apiConfig, persist, privateKey, kid } = prepareStack({ skipBuild: process.argv.includes("--skip-build"), apiVars: { A2A_TOKEN_KEY: randomBytes(32).toString("hex") } });
-const port = await freePort();
-const base = `http://localhost:${port}`;
-const vars = { AUTH_SECRET: randomBytes(32).toString("base64"), ASSERTION_SIGNING_JWK: JSON.stringify({ ...privateKey.export({ format: "jwk" }), kid }), BASE_URL: base, ENABLE_PASSWORD_SIGNIN: "true" };
-const { stack, log, stop } = startGateway({ gateway, apiConfig, persist, vars, port, inspectorPort: await freePort() });
-const deadline = Date.now() + 120_000;
-for (;;) {
-  const up = await fetch(`${base}/.well-known/agent-card.json`).catch(() => null);
-  if (up?.status === 200) break;
-  if (Date.now() > deadline || stack.exitCode !== null) {
-    console.error(log.join("").slice(-3000));
-    stop();
-    process.exit(1);
+const STAGING = "https://gateway-staging.podster.dev";
+const staging = process.argv.includes("--staging");
+let base = STAGING;
+let stop = () => {};
+let cookie;
+if (staging) {
+  if (!process.env.PODSTER_E2E_SIGNUP_SECRET) {
+    console.error("A staging run needs PODSTER_E2E_SIGNUP_SECRET for staging's test sign-up.");
+    process.exit(2);
   }
-  await new Promise((done) => setTimeout(done, 500));
+} else {
+  const { gateway, apiConfig, persist, privateKey, kid } = prepareStack({ skipBuild: process.argv.includes("--skip-build"), apiVars: { A2A_TOKEN_KEY: randomBytes(32).toString("hex") } });
+  const port = await freePort();
+  base = `http://localhost:${port}`;
+  const vars = { AUTH_SECRET: randomBytes(32).toString("base64"), ASSERTION_SIGNING_JWK: JSON.stringify({ ...privateKey.export({ format: "jwk" }), kid }), BASE_URL: base, ENABLE_PASSWORD_SIGNIN: "true" };
+  const started = startGateway({ gateway, apiConfig, persist, vars, port, inspectorPort: await freePort() });
+  stop = started.stop;
+  const deadline = Date.now() + 120_000;
+  for (;;) {
+    const up = await fetch(`${base}/.well-known/agent-card.json`).catch(() => null);
+    if (up?.status === 200) break;
+    if (Date.now() > deadline || started.stack.exitCode !== null) {
+      console.error(started.log.join("").slice(-3000));
+      stop();
+      process.exit(1);
+    }
+    await new Promise((done) => setTimeout(done, 500));
+  }
 }
 
 // One agent with something to read: tasks offered to it, in a room it's a member of.
-const target = new Target(base, { pollMs: 150 });
-const owner = await Person.signUp(target, "Kit owner");
-const room = await owner.createRoom("A2A kit");
-const lead = await McpAgent.connect(target, owner, "Kit lead");
-const agent = await McpAgent.connect(target, owner, "Kit agent");
-await owner.addAgent(room, lead, "member");
-await owner.addAgent(room, agent, "member");
-for (const title of ["Kit task one", "Kit task two", "Kit task three"]) {
-  await lead.must("create_task", { workspace_id: room, title, instructions: "For the compatibility kit.", assignee: agent.id });
+const target = new Target(base, { pollMs: staging ? 1000 : 150 });
+let owner;
+if (staging) {
+  cookie = await Person.testSessionCookie(target, "Kit owner", process.env.PODSTER_E2E_SIGNUP_SECRET);
+  owner = await Person.fromCookie(target, "Kit owner", cookie);
+} else {
+  owner = await Person.signUp(target, "Kit owner");
 }
-const token = await linkedA2aToken(target, owner, agent);
-
-const proxyPort = await freePort();
-const proxyBase = `http://127.0.0.1:${proxyPort}`;
-const proxy = createServer(async (req, res) => {
-  try {
-    await forward(req, res);
-  } catch {
-    if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
-    res.end(JSON.stringify({ error: "proxy_upstream_failed" }));
+// On staging, whatever happens, the run's agents are disconnected and the test person signed out.
+const connected = [];
+let code = 1;
+try {
+  const room = await owner.createRoom("A2A kit");
+  const lead = await McpAgent.connect(target, owner, "Kit lead");
+  connected.push(lead);
+  const agent = await McpAgent.connect(target, owner, "Kit agent");
+  connected.push(agent);
+  await owner.addAgent(room, lead, "member");
+  await owner.addAgent(room, agent, "member");
+  for (const title of ["Kit task one", "Kit task two", "Kit task three"]) {
+    await lead.must("create_task", { workspace_id: room, title, instructions: "For the compatibility kit.", assignee: agent.id });
   }
-});
-/** One request to the gateway, with the agent's bearer, and the card's URLs pointed at the proxy. */
-async function forward(req, res) {
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  const headers = new Headers();
-  for (const [name, value] of Object.entries(req.headers)) if (!["host", "connection", "content-length", "authorization"].includes(name)) headers.set(name, String(value));
-  headers.set("authorization", `Bearer ${token}`);
-  const upstream = await fetch(`${base}${req.url}`, { method: req.method, headers, body: ["GET", "HEAD"].includes(req.method) ? undefined : Buffer.concat(chunks), redirect: "manual" });
-  let body = Buffer.from(await upstream.arrayBuffer());
-  if (req.url.includes("agent-card.json")) body = Buffer.from(body.toString("utf8").replaceAll(base, proxyBase));
-  const out = {};
-  upstream.headers.forEach((value, name) => {
-    if (!["content-length", "content-encoding", "transfer-encoding"].includes(name)) out[name] = value;
-  });
-  res.writeHead(upstream.status, out).end(body);
-}
-await new Promise((done) => proxy.listen(proxyPort, "127.0.0.1", done));
-console.log(`Podster at ${base}, the kit's proxy at ${proxyBase}, room ${room}, agent ${agent.id}.`);
+  const token = await linkedA2aToken(target, owner, agent);
 
-const args = ["run_tck.py", "--sut-host", proxyBase, "--transport", "jsonrpc", ...(option("--level") ? ["--level", option("--level")] : [])];
-const code = await new Promise((done) => {
-  const proc = spawn(join(kit, ".venv/bin/python"), args, { cwd: kit, stdio: "inherit" });
-  proc.on("exit", (status) => done(status ?? 1));
-});
-proxy.close();
-stop();
+  const proxyPort = await freePort();
+  const proxyBase = `http://127.0.0.1:${proxyPort}`;
+  const proxy = createServer(async (req, res) => {
+    try {
+      await forward(req, res);
+    } catch {
+      if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "proxy_upstream_failed" }));
+    }
+  });
+  /** One request to the gateway, with the agent's bearer, and the card's URLs pointed at the proxy. */
+  async function forward(req, res) {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(req.headers)) if (!["host", "connection", "content-length", "authorization"].includes(name)) headers.set(name, String(value));
+    headers.set("authorization", `Bearer ${token}`);
+    // The kit's client posts to /a2a/, which Podster serves as /a2a (decision 190), so the path goes through unchanged.
+    const upstream = await fetch(`${base}${req.url}`, { method: req.method, headers, body: ["GET", "HEAD"].includes(req.method) ? undefined : Buffer.concat(chunks), redirect: "manual" });
+    let body = Buffer.from(await upstream.arrayBuffer());
+    if (req.url.includes("agent-card.json")) body = Buffer.from(body.toString("utf8").replaceAll(base, proxyBase));
+    const out = {};
+    upstream.headers.forEach((value, name) => {
+      if (!["content-length", "content-encoding", "transfer-encoding"].includes(name)) out[name] = value;
+    });
+    res.writeHead(upstream.status, out).end(body);
+  }
+  await new Promise((done) => proxy.listen(proxyPort, "127.0.0.1", done));
+  console.log(`Podster at ${base}, the kit's proxy at ${proxyBase}, room ${room}, agent ${agent.id}.`);
+
+  const args = ["run_tck.py", "--sut-host", proxyBase, "--transport", "jsonrpc", ...(option("--level") ? ["--level", option("--level")] : [])];
+  code = await new Promise((done) => {
+    // Third-party code: an allow-listed environment, so it never sees the sign-up secret or any other of ours.
+    const proc = spawn(join(kit, ".venv/bin/python"), args, { cwd: kit, stdio: "inherit", env: childEnv() });
+    proc.on("exit", (status) => done(status ?? 1));
+  });
+  proxy.close();
+} finally {
+  if (staging) {
+    for (const a of connected) await owner.dash("POST", `/agents/${a.id}/disconnect`).catch(() => null);
+    await target.http("/api/auth/sign-out", { method: "POST", headers: { cookie, origin: base, "content-type": "application/json" }, body: "{}" }).catch(() => null);
+  }
+  stop();
+}
 console.log(`\nThe kit exited ${code}. Its report is in ${join(kit, "reports")}.`);
 process.exit(code);

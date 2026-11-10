@@ -1,6 +1,6 @@
 import { A2A_VERSION_HEADER } from "@a2a-js/sdk";
 import { defaultServerCallContextBuilder, JsonRpcTransportHandler, validateVersion, type User } from "@a2a-js/sdk/server";
-import { toJsonRpcError, UnsupportedOperationError, VersionNotSupportedError } from "@a2a-js/sdk/errors";
+import { ContentTypeNotSupportedError, toJsonRpcError, UnsupportedOperationError, VersionNotSupportedError } from "@a2a-js/sdk/errors";
 import { agentCard } from "./card";
 import { Task } from "@a2a-js/sdk";
 import { guarded, PodsterA2AHandler } from "./handler";
@@ -68,10 +68,49 @@ function envelope(text: string): { id: unknown; method: unknown } {
 export function handleA2aCard(request: Request, url: URL, baseUrl: string): Response | null {
   if (url.pathname !== CARD_PATH) return null;
   if (request.method !== "GET" && request.method !== "HEAD") return httpError("method_not_allowed", 405, { allow: "GET, HEAD" });
-  return json(agentCard(baseUrl), 200, { "cache-control": "public, max-age=300" });
+  const { body, etag } = cardFor(baseUrl);
+  const headers = { "content-type": "application/json", "cache-control": "public, max-age=300", etag, ...VERSION_HEADERS };
+  // Compared weakly: Cloudflare may weaken an ETag when it compresses, and a client then sends it back as `W/"…"`.
+  const match = request.headers.get("if-none-match");
+  if (match && match.split(",").some((tag) => tag.trim().replace(/^W\//, "") === etag || tag.trim() === "*")) return new Response(null, { status: 304, headers });
+  return new Response(request.method === "HEAD" ? null : body, { status: 200, headers });
+}
+
+/** The card's body and a strong validator from its own bytes (A2A's CARD-CACHE-002 SHOULD), made once per base URL. */
+const cards = new Map<string, { body: string; etag: string }>();
+function cardFor(baseUrl: string) {
+  let card = cards.get(baseUrl);
+  if (!card) {
+    const body = JSON.stringify(agentCard(baseUrl));
+    card = { body, etag: `"${fnv1a64(body)}"` };
+    cards.set(baseUrl, card);
+  }
+  return card;
+}
+
+/** 64-bit FNV-1a over the UTF-16 code units, as 16 hex digits. Only for telling one card body from another. */
+function fnv1a64(text: string): string {
+  let hash = 0xcbf29ce484222325n;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= BigInt(text.charCodeAt(i));
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return hash.toString(16).padStart(16, "0");
 }
 
 export const isA2aPath = (url: URL) => url.pathname === A2A_PATH;
+
+/**
+ * `/a2a/` is `/a2a`, for clients that join the card's interface URL with a slash, as the A2A compatibility kit's does (decision
+ * 190). Only that one path: the request is rewritten before anything else sees it, so every check, limit, credential and
+ * answer is `/a2a`'s. No other path is normalized.
+ */
+export function aliasA2aPath(request: Request): Request {
+  const url = new URL(request.url);
+  if (url.pathname !== `${A2A_PATH}/`) return request;
+  url.pathname = A2A_PATH;
+  return new Request(url.href, request);
+}
 
 /**
  * Everything that comes before authentication. It answers a refusal, or the body, read once, for `answerA2a`. The version
@@ -80,7 +119,10 @@ export const isA2aPath = (url: URL) => url.pathname === A2A_PATH;
 export async function checkA2aRequest(request: Request, baseUrl: string): Promise<Response | { text: string }> {
   if (request.method !== "POST") return httpError("method_not_allowed", 405, { allow: "POST" });
   const type = request.headers.get("content-type") ?? "";
-  if (!/^application\/(a2a\+)?json\s*(;|$)/i.test(type)) return httpError("unsupported_media_type", 415);
+  // Still 415, but as a JSON-RPC error, so a JSON-RPC client reads it as one. The body isn't read, so the id is null.
+  if (!/^application\/(a2a\+)?json\s*(;|$)/i.test(type)) {
+    return json({ jsonrpc: "2.0", id: null, error: toJsonRpcError(new ContentTypeNotSupportedError("Send application/json.")) }, 415);
+  }
   const text = await boundedText(request);
   if (text === null) return httpError("payload_too_large", 413);
   try {

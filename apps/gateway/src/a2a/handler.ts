@@ -1,7 +1,7 @@
 import { AgentCard } from "@a2a-js/sdk";
 import type { A2ARequestHandler } from "@a2a-js/sdk/server";
 import type { CancelTaskRequest, GetTaskRequest, ListTasksRequest, SendMessageRequest } from "@a2a-js/sdk";
-import { A2AError, ExtendedAgentCardNotConfiguredError, PushNotificationNotSupportedError, TaskNotCancelableError, UnsupportedOperationError } from "@a2a-js/sdk/errors";
+import { A2AError, PushNotificationNotSupportedError, TaskNotCancelableError, UnsupportedOperationError } from "@a2a-js/sdk/errors";
 import { agentCard } from "./card";
 import { sendMessage } from "./messages";
 import { listTasks, readTask, UpstreamError, type ApiReads, type ReadNotes } from "./reads";
@@ -47,8 +47,10 @@ export class PodsterA2AHandler implements A2ARequestHandler {
     return AgentCard.fromJSON(agentCard(this.baseUrl));
   }
 
+  // The card declares no extended card, so spec 3.3.4 calls for UnsupportedOperationError, not "not configured", which is for
+  // an agent that declares one and hasn't set it up. The compatibility kit's CORE-CAP-003 checks this.
   async getAuthenticatedExtendedAgentCard(): Promise<never> {
-    throw new ExtendedAgentCardNotConfiguredError("Podster has no extended card.");
+    throw new UnsupportedOperationError("Podster has no extended card.");
   }
 
   async sendMessage(params: SendMessageRequest) {

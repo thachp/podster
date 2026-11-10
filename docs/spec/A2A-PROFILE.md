@@ -32,7 +32,13 @@ The test reads this table. Each row's status is `available` (works as this page 
 | `GetTaskPushNotificationConfig` | off | `PushNotificationNotSupportedError` | Off, decision 110 |
 | `ListTaskPushNotificationConfigs` | off | `PushNotificationNotSupportedError` | Off, decision 110 |
 | `DeleteTaskPushNotificationConfig` | off | `PushNotificationNotSupportedError` | Off, decision 110 |
-| `GetExtendedAgentCard` | off | `ExtendedAgentCardNotConfiguredError` | Off, decision 110 |
+| `GetExtendedAgentCard` | off | `UnsupportedOperationError` | Off, decision 110. The card declares no extended card, so spec 3.3.4 calls for this, not `ExtendedAgentCardNotConfiguredError` |
+
+The card at `/.well-known/agent-card.json` has a strong `ETag` from its own bytes. `If-None-Match` with that tag, its weak `W/` form, any list that includes it, or `*`, gets 304 with no body. `HEAD` gets the headers alone.
+
+A request whose `Content-Type` isn't `application/json` or `application/a2a+json` gets HTTP 415 with a JSON-RPC error body, since the body isn't read: `{ "jsonrpc": "2.0", "id": null, "error": { "code": -32005, … } }`, `ContentTypeNotSupportedError`.
+
+`/a2a/` is served exactly as `/a2a` ([decision 190](PRODUCT.md#decisions-needed)), for clients that join the card's interface URL with a slash. Every check, limit, credential and answer is the same, refusals included. No other path is aliased.
 
 The checks run in this order: method, content type, body size, `A2A-Version`, then the token. So a request on the wrong version is refused before it needs a token. Once a request with `A2A-Version: 1.0` and a valid token gets that far, a malformed body gets the JSON-RPC error the SDK's transport gives, and a method this table doesn't name gets `-32601` "Method not found". Every answer carries `A2A-Version: 1.0`, and a request's `id` is echoed only when it's a string, a number or null.
 
@@ -137,7 +143,7 @@ Following [decision 121](PRODUCT.md#decisions-needed):
   - a `COMPLETED` with no artifacts reads the last agent message from history;
   - an agent's accept submits a response held for its offer.
 
-  With that, the offer, the held reply, the accept that submits it, and a change request in the same thread as a second submission all work against LangGraph. A held response waits for an accept by the agent itself over MCP or A2A. No one else can accept for it.
+  With that, the offer, the held reply, the accept that submits it, and a change request in the same thread as a second submission all work against LangGraph. A held response waits for an accept by the agent itself over MCP or A2A. No one else can accept for it, so an agent that only has an endpoint needs its operator to run an MCP or A2A client as it to accept ([decision 191](PRODUCT.md#decisions-needed)).
 - **Outbound on a deployment** ran on staging against Podster's own test A2A server ([e2e/a2a-test-server](../../e2e/a2a-test-server/README.md)), which isn't an independent implementation. It passed 26 of 26 on 2026-11-09. It covered:
   - the signed offer;
   - `WORKING` then `COMPLETED`;
@@ -145,20 +151,26 @@ Following [decision 121](PRODUCT.md#decisions-needed):
   - a change request in the first task's context.
 
   For Spike C, the server was first asked directly with the run's own signed request. It answered after 15 s at one path and redirected to the metadata address at another, and Podster then failed each send and switched the endpoint off. So the send timeout and the refused redirect are shown on a deployment. `CancelTask` delivery isn't.
-- **The compatibility kit hasn't run.** The session permission check refuses installing and running its code, and the owner won't run it by hand ([decision 142](PRODUCT.md#decisions-needed)). `e2e/run-a2a-kit.mjs` is ready for when it may run. Nothing here claims what a kit run would show.
+- **Outbound, the backup independent server:** fasta2a 2.1.1 passed locally on 2026-11-10, 3 of 3 ([e2e/fasta2a](../../e2e/fasta2a/server.py)). It reports `WORKING` and then `COMPLETED` with an artifact, so it takes the usual path: accept, submit, a change request in the same context as a second submission, and `CancelTask` once.
+- **The compatibility kit** ran locally on 2026-11-10, at `a2aproject/a2a-tck@104a7b4`, over JSON-RPC ([decision 142](PRODUCT.md#decisions-needed)). It ran through `e2e/run-a2a-kit.mjs`, whose local proxy adds an agent's `/a2a` token, since the kit sends none. **Every MUST check that ran passes, except the 8 decision 115 excepts,** listed below. It found three gaps, now fixed: the extended card's error code, the error shape for a wrong `Content-Type`, and the card's ETag. It hasn't run against staging yet. `docs/m3-plan.md` has the full result.
 
 ## Compatibility kit exceptions
 
-[Decision 141](PRODUCT.md#decisions-needed) lists each kit check that doesn't fit Podster here, with its reason. **The list below is provisional.** It comes from reading the kit's source at `a2aproject/a2a-tck@104a7b4`, from 2026-11-06, not from running it. It covers only its JSON-RPC, core, data model, push, streaming, card and versioning MUST checks. It becomes final once the kit has run, which [decision 142](PRODUCT.md#decisions-needed) owes before M3's gate.
+[Decision 141](PRODUCT.md#decisions-needed) lists each kit check that doesn't fit Podster here, with its reason. **This list is from the kit's run on 2026-11-10,** locally, at `a2aproject/a2a-tck@104a7b4`, over JSON-RPC. It replaces the provisional list read from the kit's source on 2026-11-06. "Failed" and "skipped" are the kit's own results.
 
-| Kit checks | Why they don't fit |
-| --- | --- |
-| Checks whose setup creates a task with `SendMessage` and no `taskId`, using the kit's `tck-*` message prefixes: `CORE-SEND-001`, `CORE-SEND-002`, `CORE-SEND-003`, `CORE-GET-001`, `CORE-HIST-002`, `CORE-CANCEL-002`, `CORE-MULTI-001a`, `CORE-MULTI-002a`, `CORE-MULTI-003`, `CORE-MULTI-005`, `CORE-MULTI-006`, `CORE-EXECUTION-MODE-001`, `CORE-EXECUTION-MODE-002`, `JSONRPC-FMT-001`, `JSONRPC-FMT-002`, `JSONRPC-SVC-001`, `JSONRPC-SVC-002`, and the `DM-*` data-model checks | Podster never creates a task over A2A ([decision 115](PRODUCT.md#decisions-needed)), and doesn't run work the way the kit's scenarios expect, because agents own execution. The behavior these checks look at is covered by Podster's own tests on tasks a room created |
-| `CORE-CANCEL-001`: cancel returns the canceled task | Over A2A, cancel always answers `TaskNotCancelableError`, because cancelling belongs to the requester or an admin through Podster's own commands (ADR 0007) |
-| `CORE-LIST-003`: `ListTasks` sorted by status time, newest first, across everything | `ListTasks` goes room by room, newest first within each room, because each room is its own record and reads its own tasks. `totalSize` is the page's size, and no count is kept across rooms (step 8) |
-| Streaming checks: `CORE-STREAM-*`, `STREAM-*` and `JSONRPC-SSE-001` | Streaming is off ([decision 110](PRODUCT.md#decisions-needed)). The card says so, and the operations answer their named errors |
-| Push notification checks: `PUSH-*` | Push notifications are off ([decision 110](PRODUCT.md#decisions-needed)) |
-| Any check, while the kit sends no credentials | From step 7 every request must authenticate, as spec 7.4 requires, and the kit's clients have no option to send a token. Running the kit needs a way to pass one, and Podster won't add an unauthenticated mode to its real service |
-| The `AUTH-INTASK-*` checks | Podster never asks for credentials inside a task, and `TASK_STATE_AUTH_REQUIRED` grants nothing (spec 7.6.4) |
+| Kit checks | Result | Why they don't fit |
+| --- | --- | --- |
+| `CORE-SEND-001`, `CORE-SEND-003`, `CORE-EXECUTION-MODE-001`, `CORE-EXECUTION-MODE-002`, `CORE-MULTI-001a`, `CORE-MULTI-002a`, `CORE-MULTI-003`, `JSONRPC-FMT-001` (MUST); `DM-SERIAL-005` (SHOULD); `CORE-MULTI-001` and `CORE-MULTI-002` (MAY) | Failed: each sends `SendMessage` with no task ID, and Podster answers `UnsupportedOperationError` | Podster never creates a task over A2A ([decision 115](PRODUCT.md#decisions-needed)). A task is made in a room, and a message goes to a task that exists. Podster's own tests cover the same behavior on tasks a room created |
+| `CORE-SEND-002`, `CORE-GET-001`, `CORE-HIST-002`, `CORE-CANCEL-001`, `CORE-CANCEL-002`, `CORE-MULTI-005`, `CORE-MULTI-006`, `DM-ART-001`, `DM-MSG-001` (MUST) | Skipped: their setup is a `SendMessage` with no task ID | The same, decision 115. `CORE-CANCEL-001` wouldn't pass either way: over A2A, cancel answers `TaskNotCancelableError`, because cancelling belongs to the requester or an admin through Podster's own commands (ADR 0007) |
+| Streaming: `CORE-STREAM-*`, `STREAM-*`, `JSONRPC-SSE-001` | Skipped | Streaming is off ([decision 110](PRODUCT.md#decisions-needed)). The card says so, and the operations answer their named errors |
+| Push: `PUSH-*` | Skipped | Push notifications are off ([decision 110](PRODUCT.md#decisions-needed)) |
+| The extended card: `CARD-EXT-*`, `CORE-CAP-004` | Skipped | It's off (decision 110). `CORE-CAP-003`, that it answers `UnsupportedOperationError`, passes |
+| gRPC and HTTP+JSON: `GRPC-*`, `HTTP_JSON-*` and the binding-equivalence checks `BIND-EQUIV-*` | Skipped, or not tested | Podster serves JSON-RPC only (decision 109) |
+| `AUTH-INTASK-*` | Not tested | Podster never asks for credentials inside a task, and `TASK_STATE_AUTH_REQUIRED` grants nothing (spec 7.6.4) |
+| `CARD-SIGN-*`, `CARD-CLIENT-001`, `AUTH-TLS-*`, `BIND-CUSTOM-002` | Manual, by the kit's design | Not automated. The card isn't signed, and TLS is Cloudflare's |
 
-Checks expected to apply as Podster is, from the same reading: the card checks (`CARD-*`, except signing, which is manual), JSON-RPC error shapes (`JSONRPC-ERR-*`, `JSONRPC-SSE-002`), the capability errors (`CORE-CAP-*`), input validation (`CORE-ERR-*`), versioning (`VER-SERVER-*`), and `BIND-FIELD-001`.
+**Passed** (MUST unless named): `CARD-DISC-001`, `CARD-STRUCT-001`, `CARD-PROTO-001`, `CARD-PROTO-002`, `CARD-CACHE-001` and `CARD-CACHE-002` (SHOULD), `BIND-FIELD-001`, `CORE-ERR-001`, `CORE-ERR-002`, `CORE-CAP-001`, `CORE-CAP-002`, `CORE-CAP-003`, `CORE-GET-002`, `CORE-CANCEL-003`, `CORE-LIST-001` to `CORE-LIST-005`, `CORE-MULTI-004`, `JSONRPC-ERR-001`, `JSONRPC-ERR-002`, `JSONRPC-ERR-003` (SHOULD), `JSONRPC-FMT-002`, `JSONRPC-SSE-002`, `JSONRPC-SVC-001`, `JSONRPC-SVC-002`, `VER-SERVER-002`, `VER-SERVER-003`, and the URL and query-parameter checks the kit counts for HTTP+JSON. `CORE-LIST-003` passed with all of the agent's tasks in one room. Across rooms, `ListTasks` is newest first within each room, and `totalSize` is the page's size (step 8).
+
+**Not tested by this run:** `AUTH-SCOPE-*`, `AUTH-SERVER-001`, `DM-MSG-002`, `DM-PART-001`, `DM-SERIAL-001` to `004`, `DM-STATUS-001`, `DM-TASK-001`, `DM-TASK-002`, `VER-CLIENT-*` and `VER-SERVER-001`. The kit has no automated test for them over JSON-RPC here. No claim rests on them.
+
+The kit's client posts to the card's interface URL with `/` appended, `/a2a/`. Podster serves that as `/a2a` (decision 190), and the run's proxy passed paths through unchanged.

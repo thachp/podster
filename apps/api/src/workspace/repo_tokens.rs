@@ -29,7 +29,7 @@
 //! `store::mark_stale_repo_tokens`. The alarm revokes marked tokens with `DELETE /installation/token`, retrying with
 //! backoff until the token would have expired anyway, and removes the rows. A failed revoke never holds up the cascade.
 use super::*;
-use crate::github::{AgentConfig, AgentTokens, Minted, Revoked, TokenIssuer};
+use crate::github::{AgentConfig, AgentTokens, Failure, Minted, Revoked, TokenIssuer};
 use podster_core::repo_access::{
     decide_access, minted_token_matches, AccessCheck, AccessRefusal, Budget, Deadline, HeldToken,
     TokenPermissions, TokenPlan,
@@ -38,6 +38,7 @@ use podster_core::repo_grants::Grant;
 use podster_core::repositories::{GrantAction, LinkStatus, RequestState};
 use podster_egress::endpoint::{open_labeled, parse_key, seal_labeled};
 use podster_policy::repositories::{authorize_repo_access, delegation_holder, GrantStanding};
+use std::time::Duration;
 
 /// The Worker secret holding the sealing key, 64 hex characters. The owner sets it. Unset, nothing is minted.
 pub(super) const KEY_SECRET: &str = "REPO_TOKEN_KEY";
@@ -71,23 +72,152 @@ fn label(room: &str, repo: i64, grant: &str, agent: &str, task: &str) -> String 
     format!("repo-token:{room}:{repo}:{grant}:{agent}:{task}")
 }
 
-/// The sealing key, if it's set and well-formed. Its value is never logged. Test builds can make one room see it
-/// unset, by a table only a test can make, as a deployment before the owner sets it would.
-fn key(env: &Env, sql: &SqlStorage) -> Option<Vec<u8>> {
+/// The label a stored row's token was sealed under.
+fn row_label(room: &str, row: &Value) -> String {
+    label(
+        room,
+        int(&row["provider_repo_id"]),
+        row["grant_id"].as_str().unwrap_or_default(),
+        row["agent_id"].as_str().unwrap_or_default(),
+        row["task_id"].as_str().unwrap_or_default(),
+    )
+}
+
+/// Turns each lease whose time is over into a `mint_unknown` record: the call that took it never came back, so a token
+/// may have been minted that nobody holds and nothing can revoke. It stays, with an event of IDs, until any such token
+/// would have expired: an hour after the lease ended.
+fn abandon_leases(sql: &SqlStorage, now: i64) -> R<()> {
+    for row in rows(
+        sql,
+        "SELECT id, agent_id, task_id FROM repo_token WHERE state = 'minting' AND lease_until <= ?",
+        vec![now.into()],
+    )? {
+        record_unknown(sql, &row, now)?;
+    }
+    Ok(())
+}
+
+fn record_unknown(sql: &SqlStorage, row: &Value, now: i64) -> R<()> {
+    let id = text(&row["id"]).unwrap_or_default();
+    exec(sql, "UPDATE repo_token SET state = 'mint_unknown', expires_at = ?, lease_until = NULL WHERE id = ? AND state = 'minting'", vec![(now + LONGEST_LIFE_MS).into(), id.as_str().into()])?;
+    store::record_event_about(
+        sql,
+        "repo_token.mint_unknown",
+        &text(&row["agent_id"]).unwrap_or_default(),
+        Some(&id),
+        text(&row["task_id"]).as_deref(),
+        &Transition::NONE,
+        Vec::<String>::new(),
+        now,
+    )?;
+    console_error!(
+        "{}",
+        json!({ "event": "repo_token.mint_unknown", "row": id })
+    );
+    Ok(())
+}
+
+/// The previous sealing key, set only while rotating: tried to open a sealed token when the current key can't, never
+/// to seal. The owner removes it at least 65 minutes after rotating, when every token sealed under it has expired.
+pub(super) const PREVIOUS_KEY_SECRET: &str = "REPO_TOKEN_KEY_PREVIOUS";
+
+/// The sealing keys. `current` seals and opens; `previous` only opens. Their values are never logged.
+#[derive(Clone)]
+struct Keys {
+    current: Option<Vec<u8>>,
+    previous: Option<Vec<u8>>,
+}
+
+/// Which key opened a sealed token. The log may say which, and nothing more about a key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Opened {
+    Current,
+    Previous,
+}
+
+impl Keys {
+    /// Opens a sealed token with the current key, then the previous one. `None` if neither opens it.
+    fn open(&self, label: &str, sealed: &str) -> Option<(String, Opened)> {
+        let try_with = |key: &Option<Vec<u8>>| {
+            key.as_ref()
+                .and_then(|key| open_labeled(key, label, sealed).ok())
+        };
+        try_with(&self.current)
+            .map(|token| (token, Opened::Current))
+            .or_else(|| try_with(&self.previous).map(|token| (token, Opened::Previous)))
+    }
+}
+
+fn parse_secret(env: &Env, name: &str) -> Option<Vec<u8>> {
+    let secret = env.secret(name).ok()?.to_string();
+    let key = parse_key(&secret);
+    if key.is_none() {
+        console_error!(
+            "{}",
+            json!({ "event": "repo_token.key_invalid", "key": if name == KEY_SECRET { "current" } else { "previous" } })
+        );
+    }
+    key
+}
+
+/// The sealing keys, if set and well-formed. Test builds can give one room its own pair, or none, by a table only a
+/// test can make, as a deployment before the owner sets them, or while rotating, would have.
+fn keys(env: &Env, sql: &SqlStorage) -> Keys {
     #[cfg(feature = "failpoints")]
-    if rows(sql, "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_repo_token_key_unset'", vec![])
-        .map_or(true, |found| !found.is_empty())
-    {
-        return None;
+    if let Some(found) = rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_repo_token_keys'",
+        vec![],
+    )
+    .ok()
+    .filter(|found| !found.is_empty())
+    .and_then(|_| {
+        rows(
+            sql,
+            "SELECT current, previous FROM test_repo_token_keys",
+            vec![],
+        )
+        .ok()
+    }) {
+        let row = found.first();
+        let pick = |name: &str| row.and_then(|r| r[name].as_str()).and_then(parse_key);
+        return Keys {
+            current: pick("current"),
+            previous: pick("previous"),
+        };
     }
     #[cfg(not(feature = "failpoints"))]
     let _ = sql;
-    let secret = env.secret(KEY_SECRET).ok()?.to_string();
-    let key = parse_key(&secret);
-    if key.is_none() {
-        console_error!("repo_token.key_invalid");
+    Keys {
+        current: parse_secret(env, KEY_SECRET),
+        previous: parse_secret(env, PREVIOUS_KEY_SECRET),
     }
-    key
+}
+
+/// Records that a sealed token opens with neither key, and drops its row: it can't be revoked or returned, so it
+/// mustn't sit there as if it were held. It lives out at most its hour. The event and the log carry the row's ID only.
+fn drop_unopenable(sql: &SqlStorage, row: &Value, now: i64) -> R<()> {
+    let id = text(&row["id"]).unwrap_or_default();
+    exec(
+        sql,
+        "DELETE FROM repo_token WHERE id = ?",
+        vec![id.as_str().into()],
+    )?;
+    store::record_event_about(
+        sql,
+        "repo_token.unrevocable",
+        &text(&row["agent_id"]).unwrap_or_default(),
+        Some(&id),
+        text(&row["task_id"]).as_deref(),
+        &Transition::NONE,
+        Vec::<String>::new(),
+        now,
+    )?;
+    console_error!(
+        "{}",
+        json!({ "event": "repo_token.unrevocable", "row": id })
+    );
+    Ok(())
 }
 
 /// A refusal from the decision, as the API answers it. Every code is fixed, and none carries a token.
@@ -119,8 +249,7 @@ enum Outcome {
     Refused(ApiError),
     /// Return the held token: its sealed copy, with what opens it.
     Reuse {
-        sealed: String,
-        label: String,
+        token: String,
         expires_at: i64,
     },
     Mint(Lease),
@@ -154,11 +283,14 @@ struct Inputs {
     public: bool,
 }
 
-fn read_inputs(sql: &SqlStorage, agent: &str, task_id: &str) -> R<Option<Inputs>> {
+fn read_inputs(sql: &SqlStorage, agent: &str, task_id: &str, now: i64) -> R<Option<Inputs>> {
     let Some(task) = load_task(sql, task_id)? else {
         return Ok(None);
     };
-    let grant = rows(sql, "SELECT id, delegated_by, provider_repo_id, expires_at, revoked_at FROM provider_grant WHERE principal_id = ? AND action = 'push' AND revoked_at IS NULL", vec![agent.into()])?
+    // A live grant on the room's own repository first, then any other live one, then the newest: so an expired row
+    // beside a live one never decides.
+    let grant = rows(sql, "SELECT id, delegated_by, provider_repo_id, expires_at, revoked_at FROM provider_grant WHERE principal_id = ?1 AND action = 'push' AND revoked_at IS NULL
+      ORDER BY (expires_at IS NULL OR expires_at > ?2) AND provider_repo_id IS (SELECT provider_repo_id FROM repo_link) DESC, (expires_at IS NULL OR expires_at > ?2) DESC, created_at DESC, id DESC", vec![agent.into(), now.into()])?
         .first()
         .and_then(|g| {
             Some(PushGrant {
@@ -211,7 +343,7 @@ fn decide_now(
     now: i64,
 ) -> R<std::result::Result<(Inputs, podster_core::repo_access::Access), ApiError>> {
     let caller = &who.caller;
-    let Some(inputs) = read_inputs(sql, &caller.id, task_id)? else {
+    let Some(inputs) = read_inputs(sql, &caller.id, task_id, now)? else {
         return Ok(Err(ApiError::task_not_found()));
     };
     let grant = inputs.grant.as_ref().map(|g| Grant {
@@ -348,19 +480,28 @@ impl Workspace {
         let standing = self.standing(identity, who).await?;
         let now = now_ms();
         let config = AgentConfig::from_env(&self.env);
-        let key = key(&self.env, &sql);
+        let keys = keys(&self.env, &sql);
         let room = identity.workspace_id.clone();
         let agent = who.caller.id.clone();
         let task = task_id.to_string();
-        let ready = config.is_some() && key.is_some();
-        let opener = key.clone();
+        let ready = config.is_some() && keys.current.is_some();
         let outcome = self.in_transaction({
-            let (identity, task, room) = (identity.clone(), task.clone(), room.clone());
+            let (identity, task, room, keys) = (identity.clone(), task.clone(), room.clone(), keys.clone());
             move |sql| {
                 let who = resolve_caller(sql, &identity)?;
                 command_guard(sql)?;
-                // A lease left by a call that never came back is over once its time is.
-                exec(sql, "DELETE FROM repo_token WHERE state = 'minting' AND lease_until <= ?", vec![now.into()])?;
+                // A lease left by a call that never came back is over once its time is, and kept as a record.
+                abandon_leases(sql, now)?;
+                // A held token that opens with neither key, as after a rotation without the previous key, can't be
+                // returned or revoked. It's recorded and dropped, so the agent gets a new one rather than an error.
+                if keys.current.is_some() {
+                    let held = rows(sql, "SELECT id, agent_id, task_id, grant_id, provider_repo_id, sealed FROM repo_token WHERE agent_id = ? AND task_id = ? AND state = 'held'", vec![who.caller.id.as_str().into(), task.as_str().into()])?;
+                    if let Some(row) = held.first() {
+                        if keys.open(&row_label(&room, row), row["sealed"].as_str().unwrap_or_default()).is_none() {
+                            drop_unopenable(sql, row, now)?;
+                        }
+                    }
+                }
                 let (inputs, access) = match decide_now(sql, &who, &task, standing, now)? {
                     Ok(allowed) => allowed,
                     Err(error) => {
@@ -371,10 +512,16 @@ impl Workspace {
                 match access.token {
                     TokenPlan::ReuseHeld => {
                         let (sealed, expires_at, grant) = inputs.held.ok_or_else(|| ApiError::internal("no held token"))?;
-                        Ok(Outcome::Reuse {
-                            label: label(&room, access.repo_id, &grant, &who.caller.id, &task),
-                            sealed,
-                            expires_at,
+                        let label = label(&room, access.repo_id, &grant, &who.caller.id, &task);
+                        Ok(match keys.open(&label, &sealed) {
+                            Some((token, opened)) => {
+                                if opened == Opened::Previous {
+                                    console_log!("{}", json!({ "event": "repo_token.opened", "key": "previous", "ws": room, "task": task }));
+                                }
+                                Outcome::Reuse { token, expires_at }
+                            }
+                            // Only when no current key is set: one that is set and doesn't open it dropped the row above.
+                            None => Outcome::Refused(unavailable()),
                         })
                     }
                     TokenPlan::Mint { .. } => {
@@ -405,18 +552,10 @@ impl Workspace {
         })?;
         let lease = match outcome {
             Outcome::Refused(error) => return Err(error),
-            Outcome::Reuse {
-                sealed,
-                label,
-                expires_at,
-            } => {
-                let key = opener.ok_or_else(unavailable)?;
-                let token = open_labeled(&key, &label, &sealed).map_err(|_| unavailable())?;
-                return answer(&sql, token, expires_at);
-            }
+            Outcome::Reuse { token, expires_at } => return answer(&sql, token, expires_at),
             Outcome::Mint(lease) => lease,
         };
-        let (Some(config), Some(key)) = (config, key) else {
+        let (Some(config), Some(key)) = (config, keys.current.clone()) else {
             return Err(unavailable());
         };
         let issuer = AgentTokens::new(config);
@@ -426,7 +565,12 @@ impl Workspace {
         {
             Ok(minted) => minted,
             Err(failure) => {
-                self.drop_lease(&lease.id);
+                // A refusal from GitHub minted nothing. No answer, or one that couldn't be read, may have: that lease is
+                // kept as a record of a token that may be live and can't be revoked, for at most its hour.
+                match failure {
+                    Failure::Status(_) => self.drop_lease(&lease.id),
+                    Failure::Unreachable | Failure::Unreadable => self.lease_unknown(&lease.id),
+                }
                 console_error!(
                     "{}",
                     json!({ "event": "repo_token.mint_failed", "ws": room, "task": task, "agent": agent, "status": failure.status() })
@@ -479,8 +623,15 @@ impl Workspace {
             let expires_at = minted.expires_at;
             move |sql| {
                 let now = now_ms();
-                let who = resolve_caller(sql, &identity)?;
-                command_guard(sql)?;
+                // Authority that ended while the token was minted is refused as itself, and the token is revoked.
+                let who = match resolve_caller(sql, &identity).and_then(|who| command_guard(sql).map(|()| who)) {
+                    Ok(who) => who,
+                    Err(error) => {
+                        exec(sql, "DELETE FROM repo_token WHERE id = ?", vec![lease.id.as_str().into()])?;
+                        end_held(sql, &identity.id, &task, now)?;
+                        return Ok(Err(error));
+                    }
+                };
                 let ours = rows(sql, "SELECT 1 FROM repo_token WHERE id = ? AND state = 'minting'", vec![lease.id.as_str().into()])?;
                 if ours.is_empty() {
                     return Ok(Err(busy()));
@@ -515,6 +666,23 @@ impl Workspace {
         });
         match committed {
             Ok(Ok(())) => {
+                // The room must wake when this token's authority can next end on its own: its expiry or its grant's,
+                // whichever comes first. That's armed before the token leaves, so a token never outlasts its grant
+                // unwatched. The runtime holds the answer until the alarm is stored. If it can't be set, the token goes.
+                if let Err(error) = self.arm_token_wake(&sql).await {
+                    console_error!(
+                        "{}",
+                        json!({ "event": "repo_token.wake_failed", "ws": room, "task": task, "agent": agent, "code": error.code().unwrap_or("internal_error") })
+                    );
+                    let _ = exec(
+                        &sql,
+                        "DELETE FROM repo_token WHERE id = ?",
+                        vec![lease.id.as_str().into()],
+                    );
+                    self.dispose(&issuer, &key, &room, &lease, &agent, &task, minted)
+                        .await;
+                    return Err(unavailable());
+                }
                 console_log!(
                     "{}",
                     json!({ "event": "repo_token.issued", "ws": room, "task": task, "agent": agent, "grant": lease.grant })
@@ -575,6 +743,40 @@ impl Workspace {
         })
     }
 
+    /// Keeps a lease whose mint may have happened as a `mint_unknown` record, with its event.
+    fn lease_unknown(&self, id: &str) {
+        let id = id.to_string();
+        let done = self.in_transaction(move |sql| {
+            let found = rows(
+                sql,
+                "SELECT id, agent_id, task_id FROM repo_token WHERE id = ? AND state = 'minting'",
+                vec![id.as_str().into()],
+            )?;
+            match found.first() {
+                Some(row) => record_unknown(sql, row, now_ms()),
+                None => Ok(()),
+            }
+        });
+        // If even that can't be written, the lease ends on its own and the alarm records it then.
+        let _ = done;
+    }
+
+    /// Brings the room's alarm forward to when a token's authority next ends on its own, if that's sooner than it's set.
+    async fn arm_token_wake(&self, sql: &SqlStorage) -> R<()> {
+        let Some(due) = next_due(sql)? else {
+            return Ok(());
+        };
+        let now = now_ms();
+        let current = self.state.storage().get_alarm().await?;
+        if current.is_none_or(|at| at > due) {
+            self.state
+                .storage()
+                .set_alarm(Duration::from_millis((due - now).max(1) as u64))
+                .await?;
+        }
+        Ok(())
+    }
+
     fn drop_lease(&self, id: &str) {
         let sql = self.state.storage().sql();
         let _ = exec(
@@ -628,10 +830,16 @@ impl Workspace {
             return Ok(());
         }
         let now = now_ms();
+        // Switching managed repositories off takes back every token the room holds: a kill switch kills.
+        let switched_off = !provisioning::enabled(&self.env, &sql)?;
         self.in_transaction(move |sql| {
             store::mark_stale_repo_tokens(sql, now)?;
-            // An expired token is dead whatever its state, and a lease past its time is abandoned.
-            exec(sql, "DELETE FROM repo_token WHERE expires_at <= ? OR (state = 'minting' AND lease_until <= ?)", vec![now.into(), now.into()])
+            if switched_off {
+                exec(sql, "UPDATE repo_token SET state = 'revoke', revoke_next_at = ? WHERE state = 'held'", vec![now.into()])?;
+            }
+            abandon_leases(sql, now)?;
+            // An expired token is dead whatever its state, and so is the record of one that may have been minted.
+            exec(sql, "DELETE FROM repo_token WHERE expires_at <= ?", vec![now.into()])
         })?;
         let due = rows(&sql, "SELECT id, agent_id, task_id, grant_id, provider_repo_id, sealed, revoke_attempts, expires_at FROM repo_token WHERE state = 'revoke' AND revoke_next_at <= ? ORDER BY revoke_next_at LIMIT ?", vec![now.into(), REVOKES_PER_ALARM.into()])?;
         if due.is_empty() {
@@ -642,23 +850,33 @@ impl Workspace {
             .and_then(|r| text(&r["id"]))
             .unwrap_or_default();
         let issuer = AgentConfig::from_env(&self.env).map(AgentTokens::new);
-        let key = key(&self.env, &sql);
-        let (mut revoked, mut failed) = (0, 0);
+        let keys = keys(&self.env, &sql);
+        let (mut revoked, mut failed, mut unrevocable) = (0, 0, 0);
         for row in &due {
             let id = text(&row["id"]).unwrap_or_default();
-            let token = key
-                .as_ref()
-                .zip(text(&row["sealed"]))
-                .and_then(|(key, sealed)| {
-                    let label = label(
-                        &room,
-                        int(&row["provider_repo_id"]),
-                        &text(&row["grant_id"]).unwrap_or_default(),
-                        &text(&row["agent_id"]).unwrap_or_default(),
-                        &text(&row["task_id"]).unwrap_or_default(),
-                    );
-                    open_labeled(key, &label, &sealed).ok()
-                });
+            let token = match keys.open(
+                &row_label(&room, row),
+                row["sealed"].as_str().unwrap_or_default(),
+            ) {
+                Some((token, opened)) => {
+                    if opened == Opened::Previous {
+                        console_log!(
+                            "{}",
+                            json!({ "event": "repo_token.opened", "key": "previous", "row": id })
+                        );
+                    }
+                    Some(token)
+                }
+                // With a current key set, a row neither key opens never will: it's recorded and dropped. With none
+                // set, it waits, since that's configuration missing, not a key gone.
+                None if keys.current.is_some() => {
+                    let row = row.clone();
+                    self.in_transaction(move |sql| drop_unopenable(sql, &row, now))?;
+                    unrevocable += 1;
+                    continue;
+                }
+                None => None,
+            };
             let outcome = match (&issuer, token) {
                 (Some(issuer), Some(token)) => issuer.revoke_token(&token).await,
                 _ => Revoked::Failed,
@@ -687,17 +905,20 @@ impl Workspace {
         }
         console_log!(
             "{}",
-            json!({ "event": "repo_token.revocations", "ws": room, "revoked": revoked, "failed": failed })
+            json!({ "event": "repo_token.revocations", "ws": room, "revoked": revoked, "failed": failed, "unrevocable": unrevocable })
         );
         Ok(())
     }
 }
 
-/// When the alarm should next come for tokens: a revocation due, a held token's expiry, or a lease's end.
+/// When the alarm should next come for tokens: a revocation due, a lease's end, the end of a record of a token that
+/// may have been minted, or a held token's expiry or its grant's, whichever is sooner. A grant that lapses before its
+/// token does wakes the room then, so the token is revoked when its authority ends.
 pub(super) fn next_due(sql: &SqlStorage) -> R<Option<i64>> {
     Ok(rows(
         sql,
-        "SELECT min(CASE state WHEN 'revoke' THEN min(revoke_next_at, expires_at) WHEN 'held' THEN expires_at ELSE lease_until END) AS due FROM repo_token",
+        "SELECT min(CASE t.state WHEN 'revoke' THEN min(t.revoke_next_at, t.expires_at) WHEN 'held' THEN min(t.expires_at, COALESCE(g.expires_at, t.expires_at))
+           WHEN 'minting' THEN t.lease_until ELSE t.expires_at END) AS due FROM repo_token t LEFT JOIN provider_grant g ON g.id = t.grant_id",
         vec![],
     )?
     .first()

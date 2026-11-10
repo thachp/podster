@@ -580,7 +580,7 @@ describe("the provisioning job", () => {
     expect(BINDINGS.TEST_WRANGLER).not.toContain("MANAGED_REPOSITORIES");
     // Nor is any of provisioning's configuration, or a key.
     // The agent-token App and the sealing key for its tokens (M5 step 6) are the owner's to set too.
-    for (const name of ["GITHUB_ORG_LOGIN", "GITHUB_ORG_ID", "GITHUB_PROVISION_APP_ID", "GITHUB_PROVISION_INSTALLATION_ID", "GITHUB_MERGE_APP_ID", "GITHUB_PROVISION_APP_KEY", "GITHUB_AGENT_APP_ID", "GITHUB_AGENT_INSTALLATION_ID", "GITHUB_AGENT_APP_KEY", "REPO_TOKEN_KEY"]) expect(BINDINGS.TEST_WRANGLER, name).not.toContain(name);
+    for (const name of ["GITHUB_ORG_LOGIN", "GITHUB_ORG_ID", "GITHUB_PROVISION_APP_ID", "GITHUB_PROVISION_INSTALLATION_ID", "GITHUB_MERGE_APP_ID", "GITHUB_PROVISION_APP_KEY", "GITHUB_AGENT_APP_ID", "GITHUB_AGENT_INSTALLATION_ID", "GITHUB_AGENT_APP_KEY", "REPO_TOKEN_KEY", "REPO_TOKEN_KEY_PREVIOUS"]) expect(BINDINGS.TEST_WRANGLER, name).not.toContain(name);
     expect(BINDINGS.MANAGED_REPOSITORIES).toBeUndefined();
   });
 

@@ -71,6 +71,15 @@ const version = async (id: string) => (await api(OWNER, "GET", `/v1/workspaces/$
 const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
 const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(stub(id), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
 const tokens = (id: string) => inRoom(id, (sql) => sql.exec("SELECT agent_id, task_id, grant_id, provider_repo_id, state, sealed, expires_at FROM repo_token ORDER BY created_at").toArray() as any[]);
+const events = (id: string, type: string) => inRoom(id, (sql) => sql.exec("SELECT actor_id, subject_id, task_id FROM event WHERE type = ?", type).toArray() as any[]);
+const OLD_KEY = "3c".repeat(32);
+const NEW_KEY = "5d".repeat(32);
+/** The room's sealing keys from here on, as the Worker's two secrets would give them. Null is unset. */
+const setKeys = (id: string, current: string | null, previous: string | null) => inRoom(id, (sql) => {
+  sql.exec("CREATE TABLE IF NOT EXISTS test_repo_token_keys (current TEXT, previous TEXT)");
+  sql.exec("DELETE FROM test_repo_token_keys");
+  sql.exec("INSERT INTO test_repo_token_keys (current, previous) VALUES (?, ?)", current, previous);
+});
 /** Runs the room's alarm, as the platform would. */
 const alarm = async (id: string, times = 2) => {
   for (let n = 0; n < times; n++) await runDurableObjectAlarm(stub(id));
@@ -308,7 +317,7 @@ describe("refusing", () => {
 
   it("refuses before minting when the sealing key is unset", async () => {
     const r = await room();
-    await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_repo_token_key_unset (x INTEGER)"));
+    await setKeys(r.id, null, null);
     await refusedWith(await access(AGENT, r.id, r.task), 503, "repo_access_unavailable");
     expect(await tokens(r.id)).toEqual([]);
   });
@@ -376,10 +385,15 @@ describe("what GitHub answers", () => {
     const r = await room();
     const res = await access(AGENT, r.id, r.task);
     expect([res.status, res.code]).toEqual([502, "provider_unavailable"]);
-    expect(await tokens(r.id)).toEqual([]);
+    // The lease stays as a record of a token that may be live, with no token in it, until any such token has expired.
+    expect((await tokens(r.id)).map((t) => [t.state, t.sealed])).toEqual([["mint_unknown", null]]);
+    expect(await events(r.id, "repo_token.mint_unknown")).toHaveLength(1);
+    // It holds nothing up: the agent can ask again.
+    await script({ mode: "ok" });
+    expect((await access(AGENT, r.id, r.task)).status).toBe(200);
     // The acknowledged gap: a token whose answer never arrived is unknown to the room, and lives out its hour.
     await new Promise((resolve) => setTimeout(resolve, 1600));
-    expect((await minted()).map((t) => t.live)).toEqual([true]);
+    expect((await minted())[0].live).toBe(true);
   });
 
   it("revokes the minted token when the commit fails, and keeps no trace of it", async () => {
@@ -516,3 +530,130 @@ describe("where a token may be", () => {
     expect(mine).toEqual(expect.arrayContaining(["repo_token.issued", "repo_token.commit_failed", "repo_token.mismatch", "repo_token.revocations"]));
   });
 });
+
+describe("the review's findings (M5 step 6)", () => {
+  it("wakes at a grant's expiry when it's sooner than its token's, and revokes the token then (M1)", async () => {
+    const r = await room({ grant: false });
+    const expires = Date.now() + 60_000;
+    const grant = (await must(OWNER, "POST", `/v1/workspaces/${r.id}/repository/grants`, { policy_version: await version(r.id), principal_id: AGENT.id, action: "push", expires_at: expires })).id;
+    const got = await access(AGENT, r.id, r.task);
+    expect(got.status, got.text).toBe(200);
+    expect(got.body.expires_at).toBeGreaterThan(expires);
+    // The alarm was set before the token was answered, for the grant's expiry, not the token's.
+    // The runtime runs alarms as they come due, and one may be running, so read it once none is.
+    let alarmAt: number | null = null;
+    for (let n = 0; n < 40 && alarmAt === null; n++) {
+      alarmAt = await runInDurableObject(stub(r.id), (_: any, state: any) => state.storage.getAlarm());
+      if (alarmAt === null) await new Promise((x) => setTimeout(x, 50));
+    }
+    expect(alarmAt).not.toBeNull();
+    expect(alarmAt!).toBeLessThanOrEqual(expires);
+    // The agent never asks again. When the grant lapses, the alarm takes the token back.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE provider_grant SET expires_at = ? WHERE id = ?", Date.now() - 1, grant));
+    await alarm(r.id);
+    expect(await minted()).toEqual([expect.objectContaining({ token: got.body.token, live: false })]);
+    expect(await tokens(r.id)).toEqual([]);
+  });
+
+  it("opens a held token with the previous key while rotating, and seals new ones with the current key (M2)", async () => {
+    const r = await room();
+    const first = (await access(AGENT, r.id, r.task)).body.token;
+    await setKeys(r.id, NEW_KEY, OLD_KEY);
+    expect((await access(AGENT, r.id, r.task)).body.token).toBe(first);
+    // A renewal is sealed with the new key, so it still opens once the previous one is gone.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_token SET expires_at = ?", Date.now() + 60_000));
+    const renewed = (await access(AGENT, r.id, r.task)).body.token;
+    expect(renewed).not.toBe(first);
+    // The old token, marked for revocation and sealed under the old key, is revoked while the previous key is set.
+    await alarm(r.id);
+    expect(await minted()).toEqual([expect.objectContaining({ token: first, live: false }), expect.objectContaining({ token: renewed, live: true })]);
+    // Once the previous key is removed, the renewal still opens: it was sealed with the current one.
+    await setKeys(r.id, NEW_KEY, null);
+    expect((await access(AGENT, r.id, r.task)).body.token).toBe(renewed);
+  });
+
+  it("records and drops a held token neither key opens, and mints anew rather than refusing (M2)", async () => {
+    const r = await room();
+    const first = (await access(AGENT, r.id, r.task)).body.token;
+    const [row] = await inRoom(r.id, (sql) => sql.exec("SELECT id FROM repo_token").toArray() as any[]);
+    await setKeys(r.id, NEW_KEY, null);
+    const next = await access(AGENT, r.id, r.task);
+    expect(next.status, next.text).toBe(200);
+    expect(next.body.token).not.toBe(first);
+    expect(await events(r.id, "repo_token.unrevocable")).toEqual([{ actor_id: AGENT.id, subject_id: row.id, task_id: r.task }]);
+    // Nothing could revoke it, so it lives out its hour, and the record says so.
+    expect((await minted()).find((t) => t.token === first)?.live).toBe(true);
+    expect((await tokens(r.id)).map((t) => t.state)).toEqual(["held"]);
+  });
+
+  it("records and drops a token to revoke that neither key opens, in the alarm (M2)", async () => {
+    const r = await room();
+    expect((await access(AGENT, r.id, r.task)).status).toBe(200);
+    await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) });
+    await setKeys(r.id, NEW_KEY, null);
+    await alarm(r.id);
+    expect(await tokens(r.id)).toEqual([]);
+    expect(await events(r.id, "repo_token.unrevocable")).toHaveLength(1);
+    // With no key set at all, a row waits instead: that's configuration missing, not a key gone.
+    const s = await room();
+    expect((await access(AGENT, s.id, s.task)).status).toBe(200);
+    await must(OWNER, "DELETE", `/v1/workspaces/${s.id}/repository/grants/${s.grant}`, { policy_version: await version(s.id) });
+    await setKeys(s.id, null, null);
+    await alarm(s.id);
+    expect((await tokens(s.id)).map((t) => t.state)).toEqual(["revoke"]);
+    expect(await events(s.id, "repo_token.unrevocable")).toEqual([]);
+  });
+
+  it("takes every held token back when the switch is turned off (L1)", async () => {
+    const r = await room();
+    const got = (await access(AGENT, r.id, r.task)).body.token;
+    await inRoom(r.id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
+    await alarm(r.id);
+    expect(await minted()).toEqual([expect.objectContaining({ token: got, live: false })]);
+    expect(await tokens(r.id)).toEqual([]);
+  });
+
+  it("answers the proper refusal when authority ends while the token is minted, and revokes it (L3)", async () => {
+    for (const [name, code] of [["archived", "workspace_archived"], ["removed", "access_revoked"]] as const) {
+      await freshRepo();
+      await script({ mode: "slow" });
+      const r = await room();
+      const v = await version(r.id);
+      const asked = access(AGENT, r.id, r.task);
+      await new Promise((x) => setTimeout(x, 60));
+      const ended = await (name === "archived" ? api(OWNER, "POST", `/v1/workspaces/${r.id}/archive`, { policy_version: v }) : api(OWNER, "DELETE", `/v1/workspaces/${r.id}/members/${AGENT.id}`, { policy_version: v }));
+      expect(ended.status, `${name}: ${ended.text}`).toBe(200);
+      const res = await asked;
+      expect(res.code, name).toBe(code);
+      expect(res.status, name).not.toBe(500);
+      expect(await minted(), name).toEqual([expect.objectContaining({ live: false })]);
+      expect(await tokens(r.id), name).toEqual([]);
+    }
+  });
+
+  it("uses the live grant when an expired one sits beside it (L4)", async () => {
+    const r = await room();
+    // Newer than the live grant, on an earlier repository, and expired.
+    await inRoom(r.id, (sql) => sql.exec("INSERT INTO provider_grant (id, principal_id, provider, provider_repo_id, action, delegated_by, created_at, expires_at) VALUES ('pgr_old', ?, 'github', ?, 'push', ?, ?, ?)", AGENT.id, REPO_ID + 1, OWNER.id, Date.now() + 1000, Date.now() - 1));
+    const got = await access(AGENT, r.id, r.task);
+    expect(got.status, got.text).toBe(200);
+    expect((await tokens(r.id))[0].grant_id).toBe(r.grant);
+  });
+
+  it("keeps a lease a Worker never came back from as a record of a token that may be live, for its hour (L5)", async () => {
+    const r = await room();
+    await inRoom(r.id, (sql) => sql.exec("INSERT INTO repo_token (id, agent_id, task_id, grant_id, provider_repo_id, state, lease_until, created_at) VALUES ('rtk_lost', ?, ?, ?, ?, 'minting', ?, ?)", AGENT.id, r.task, r.grant, REPO_ID, Date.now() - 1, Date.now() - 30_001));
+    await alarm(r.id);
+    const [row] = await inRoom(r.id, (sql) => sql.exec("SELECT state, sealed, expires_at FROM repo_token WHERE id = 'rtk_lost'").toArray() as any[]);
+    expect(row.state).toBe("mint_unknown");
+    expect(row.sealed).toBeNull();
+    expect(row.expires_at).toBeGreaterThan(Date.now() + 59 * 60_000);
+    expect(await events(r.id, "repo_token.mint_unknown")).toEqual([{ actor_id: AGENT.id, subject_id: "rtk_lost", task_id: r.task }]);
+    // It doesn't block a new token, and it's gone once any token it stands for would have expired.
+    expect((await access(AGENT, r.id, r.task)).status).toBe(200);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_token SET expires_at = ? WHERE id = 'rtk_lost'", Date.now() - 1));
+    await alarm(r.id);
+    expect((await tokens(r.id)).map((t) => t.state)).toEqual(["held"]);
+  });
+});
+

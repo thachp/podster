@@ -151,6 +151,18 @@ pub fn app_jwt_signing_input(app_id: i64, now: i64) -> String {
     )
 }
 
+/// Whether each GitHub App role has an App of its own (M5 step 6). `own` is this role's App ID and installation ID;
+/// `others` are the other roles' that are configured. A role whose App or installation is another role's is refused, so
+/// a misconfiguration can never have, say, an agent's token signed with the key of the App that administers
+/// repositories. A role that isn't configured has nothing to collide with.
+pub fn app_is_distinct(
+    own: (i64, i64),
+    others: &[Option<i64>],
+    other_installations: &[Option<i64>],
+) -> bool {
+    !others.contains(&Some(own.0)) && !other_installations.contains(&Some(own.1))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
@@ -283,5 +295,17 @@ mod tests {
             base64url(br#"{"iat":1799999940,"exp":1800000540,"iss":"5695065"}"#)
         );
         assert!(!input.contains('=') && !input.contains('+') && !input.contains('/'));
+    }
+
+    #[test]
+    fn each_app_role_needs_an_app_of_its_own() {
+        // Agent tokens: App 2 on installation 20, beside provisioning (1, 10) and merging (3).
+        assert!(app_is_distinct((2, 20), &[Some(1), Some(3)], &[Some(10)]));
+        // The same App as provisioning or merging, or provisioning's installation, is refused.
+        assert!(!app_is_distinct((1, 20), &[Some(1), Some(3)], &[Some(10)]));
+        assert!(!app_is_distinct((3, 20), &[Some(1), Some(3)], &[Some(10)]));
+        assert!(!app_is_distinct((2, 10), &[Some(1), Some(3)], &[Some(10)]));
+        // Another role that isn't configured collides with nothing.
+        assert!(app_is_distinct((2, 20), &[None, None], &[None]));
     }
 }

@@ -19,7 +19,7 @@ use podster_core::provisioning::{
     classify_creation, Bypass, Creation, Observed, Ruleset, SetupStep, DEFAULT_BRANCH_REF,
     STATUS_CONTEXT,
 };
-use podster_egress::app_key::{app_jwt_signing_input, base64url, pkcs8_from_pem};
+use podster_egress::app_key::{app_is_distinct, app_jwt_signing_input, base64url, pkcs8_from_pem};
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::time::Duration;
@@ -42,6 +42,19 @@ pub const REVIEW_RULESET_NAME: &str = "podster-review";
 pub const UPDATE_RULESET_NAME: &str = "podster-update";
 
 /// Where provisioning happens and as whom. All of it is the Worker's configuration, set by the owner.
+/// A positive number from a variable, or `None`.
+fn number(env: &Env, name: &str) -> Option<i64> {
+    env.var(name)
+        .ok()
+        .and_then(|v| v.to_string().parse::<i64>().ok())
+        .filter(|n| *n > 0)
+}
+
+/// A secret's value, or `None`.
+fn secret(env: &Env, name: &str) -> Option<String> {
+    env.secret(name).ok().map(|v| v.to_string())
+}
+
 pub struct Config {
     org_login: String,
     pub org_id: i64,
@@ -55,12 +68,7 @@ impl Config {
     /// `None` unless every variable and the key are set and well-formed. The caller says only that provisioning isn't
     /// configured, never which part.
     pub fn from_env(env: &Env) -> Option<Config> {
-        let number = |name: &str| {
-            env.var(name)
-                .ok()
-                .and_then(|v| v.to_string().parse::<i64>().ok())
-                .filter(|n| *n > 0)
-        };
+        let number = |name: &str| number(env, name);
         let org_login = env.var("GITHUB_ORG_LOGIN").ok()?.to_string();
         let plain = !org_login.is_empty()
             && org_login.len() <= 39
@@ -69,14 +77,22 @@ impl Config {
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-');
         let key_pem = env.secret("GITHUB_PROVISION_APP_KEY").ok()?.to_string();
         (plain && pkcs8_from_pem(&key_pem).is_some()).then_some(())?;
-        Some(Config {
+        let config = Config {
             org_login,
             org_id: number("GITHUB_ORG_ID")?,
             app_id: number("GITHUB_PROVISION_APP_ID")?,
             installation_id: number("GITHUB_PROVISION_INSTALLATION_ID")?,
             merge_app_id: number("GITHUB_MERGE_APP_ID")?,
             key_pem,
-        })
+        };
+        // Three roles, three Apps: provisioning shares its App, installation and key with neither other role.
+        let distinct = app_is_distinct(
+            (config.app_id, config.installation_id),
+            &[Some(config.merge_app_id), number("GITHUB_AGENT_APP_ID")],
+            &[number("GITHUB_AGENT_INSTALLATION_ID")],
+        ) && secret(env, "GITHUB_AGENT_APP_KEY").as_deref()
+            != Some(config.key_pem.as_str());
+        distinct.then_some(config)
     }
 }
 
@@ -562,21 +578,30 @@ pub struct AgentConfig {
 }
 
 impl AgentConfig {
-    /// `None` unless all three are set and well-formed. The caller says only that tokens aren't configured.
+    /// `None` unless all three are set and well-formed, and the App is its own: not the provisioning App or the merge
+    /// App, not provisioning's installation, and not signed with provisioning's key. The caller says only that tokens
+    /// aren't configured.
     pub fn from_env(env: &Env) -> Option<AgentConfig> {
-        let number = |name: &str| {
-            env.var(name)
-                .ok()
-                .and_then(|v| v.to_string().parse::<i64>().ok())
-                .filter(|n| *n > 0)
-        };
-        let key_pem = env.secret("GITHUB_AGENT_APP_KEY").ok()?.to_string();
+        let key_pem = secret(env, "GITHUB_AGENT_APP_KEY")?;
         pkcs8_from_pem(&key_pem).is_some().then_some(())?;
-        Some(AgentConfig {
-            app_id: number("GITHUB_AGENT_APP_ID")?,
-            installation_id: number("GITHUB_AGENT_INSTALLATION_ID")?,
+        let config = AgentConfig {
+            app_id: number(env, "GITHUB_AGENT_APP_ID")?,
+            installation_id: number(env, "GITHUB_AGENT_INSTALLATION_ID")?,
             key_pem,
-        })
+        };
+        let distinct = app_is_distinct(
+            (config.app_id, config.installation_id),
+            &[
+                number(env, "GITHUB_PROVISION_APP_ID"),
+                number(env, "GITHUB_MERGE_APP_ID"),
+            ],
+            &[number(env, "GITHUB_PROVISION_INSTALLATION_ID")],
+        ) && secret(env, "GITHUB_PROVISION_APP_KEY").as_deref()
+            != Some(config.key_pem.as_str());
+        if !distinct {
+            console_error!("repo_token.app_not_distinct");
+        }
+        distinct.then_some(config)
     }
 }
 

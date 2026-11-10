@@ -393,7 +393,12 @@ describe("a room from before this", () => {
       // The newer migrations come off first, newest first: submitted files' flag, expected outputs, removal, input assets linked
       // to tasks, then files on submissions.
       // M4 step 8's public claims, the newest migration, then step 6's discovery outbox, step 5's room visibility, step 13b's change requests, step 13's read-back and step 12's A2A attempts.
-      // M4 step 10's operator suspension, the newest migration, comes off first.
+      // M5 step 2's managed repositories, the newest migration, come off first, then M4 step 10's operator suspension.
+      sql.exec("DROP TABLE task_change");
+      sql.exec("DROP TABLE provider_grant");
+      sql.exec("DROP TABLE repo_link");
+      sql.exec("DROP TABLE repo_request");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("ALTER TABLE workspace DROP COLUMN suspension_reason");
       sql.exec("ALTER TABLE workspace DROP COLUMN suspended_at");
       sql.exec("UPDATE schema_version SET version = version - 1");

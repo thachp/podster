@@ -1,6 +1,6 @@
 # M5 plan
 
-**Status, 2026-11-10 UTC: Proposed. Nothing here is approved or built.** Step 1 is drafted: [ADR 0009](adr/0009-managed-repositories.md) is written as a proposal, not accepted, and [the spike has run](../spikes/m5-github/README.md#results-2026-11-10) twice against the test organization, without webhooks. The spike's merge-restriction run is in [its own results](../spikes/m5-github/README.md#results-merge-restriction). The ADR's choices are proposals, recorded as [decisions 179 to 189](spec/PRODUCT.md#m5-proposals-november-10-2026). The gate, M5-03, M5-06, M5-12, the threat model, steps 4, 6 and 7 and questions 2, 3, 6, 7 and 11 below are reworded to match the ADR, and the ADR lists [where the spike disagreed with this plan](adr/0009-managed-repositories.md#where-the-specs-and-the-spike-disagree). The architect drafted this plan from the specs. Its [questions](#questions-for-the-architect) carry the architect's proposed answers, which aren't recorded as decisions in `PRODUCT.md` yet. Items marked **owner's yes** create an account or a cloud resource, cost money, set a secret, or are legal text, so the architect can't settle them alone.
+**Status, 2026-11-10 UTC: Proposed, and implementation has started.** The owner told the architect on 2026-11-10 to start M5's implementation. That isn't an approval of this plan's proposals or of ADR 0009, which stays proposed, and nothing under [what needs the owner's yes](#what-needs-the-owners-yes) is answered by it. Step 2 is built, as its row in the [build order](#build-order) says: contracts and the room's state only, with every new task route refusing and no call to GitHub. Step 1 is drafted: [ADR 0009](adr/0009-managed-repositories.md) is written as a proposal, not accepted, and [the spike has run](../spikes/m5-github/README.md#results-2026-11-10) twice against the test organization, without webhooks. The spike's merge-restriction run is in [its own results](../spikes/m5-github/README.md#results-merge-restriction). The ADR's choices are proposals, recorded as [decisions 179 to 189](spec/PRODUCT.md#m5-proposals-november-10-2026). The gate, M5-03, M5-06, M5-12, the threat model, steps 4, 6 and 7 and questions 2, 3, 6, 7 and 11 below are reworded to match the ADR, and the ADR lists [where the spike disagreed with this plan](adr/0009-managed-repositories.md#where-the-specs-and-the-spike-disagree). The architect drafted this plan from the specs. Its [questions](#questions-for-the-architect) carry the architect's proposed answers, which aren't recorded as decisions in `PRODUCT.md` yet. Items marked **owner's yes** create an account or a cloud resource, cost money, set a secret, or are legal text, so the architect can't settle them alone.
 
 It covers [M5 Managed repositories](spec/PRODUCT.md#product-direction-and-delivery-scope): a GitHub App, a repository linked to a room, review bound to a commit, and merge. Its gate is [expanded criterion 7](spec/PRODUCT.md#expanded-workroom-acceptance-criteria) for repositories. It starts from the [managed repositories design](spec/ARCHITECTURE.md#managed-repositories-and-merge-m5), which is itself proposed, and from decisions 10, 18 and 25, which are proposals too. Decision 10 leaves agent access to the M5 ADR.
 
@@ -55,7 +55,7 @@ The architect proposes the gate call, for the owner to review.
 | Step | What | Notes |
 | --- | --- | --- |
 | 1 | **ADR 0009 and the spike.** The ADR settles everything the architecture leaves "open for the ADR". The spike runs against a test organization and answers the [risks](#risks-to-test). | **Drafted, 2026-11-10.** [ADR 0009](adr/0009-managed-repositories.md) is a proposal: it settles or leaves open each item by name, and it proposes the merge path from the spike's [merge-restriction run](../spikes/m5-github/README.md#results-merge-restriction). [The spike ran](../spikes/m5-github/README.md#results-2026-11-10) against `podsterx` and answered every risk except webhooks (risk 8). The spike's code stays in `spikes/` and nothing builds on it. |
-| 2 | **Contracts and migration:** `repo_link`, `provider_grant`, `task_change` and a provisioning request, with `get_repo_access`, `get_task_release_status` and `merge_task` in `capabilities.yaml` and their routes in `openapi.yaml`. The room's Durable Object owns all four as state, because grants are authority. D1 gets at most a projection for lists, which never authorizes. | One contract and migration PR at a time. |
+| 2 | **Contracts and migration:** `repo_link`, `provider_grant`, `task_change` and a provisioning request, with `get_repo_access`, `get_task_release_status` and `merge_task` in `capabilities.yaml` and their routes in `openapi.yaml`. The room's Durable Object owns all four as state, because grants are authority. D1 gets at most a projection for lists, which never authorizes. | One contract and migration PR at a time. **Built, 2026-11-10,** and checked locally only. [What was built and what wasn't](#step-2-what-was-built) is below. |
 | 3 | **Decisions in `crates/core` and `crates/policy`:** grant checks, `commit_sha` required on `submit_task` and `verify_task` for a linked task, `commit_changed`, and merge as its own state. Pure, with no I/O. | AC-31 is decided here, and AC-17's rule that approval alone never merges. |
 | 4 | **Provisioning:** room setup records a request; a job creates the repository, sets its protections and records the verified repository ID. Pending, ready, failed and uncertain states for the request, and ready, degraded and suspended for the link. An unknown outcome is a failed setup: nothing is adopted by name, and a retry uses a new server-generated name. | A failed setup blocks coding tasks in that room, not other work. |
 | 5 | **Webhooks:** the gateway verifies GitHub's signature and passes a normalized observation to the room's Durable Object, which records it with its observation time. A job polls when state looks stale. | A new public route on the gateway. It authenticates the sender and decides nothing. |
@@ -64,6 +64,31 @@ The architect proposes the gate call, for the owner to review.
 | 8 | **`get_task_release_status`:** checks and merge state, each with its own observation time. | Reports that no release exists; M6 adds releases. |
 | 9 | **Screens**, in two PRs: (a) the Git option in room setup and the repository's state; (b) grants in Manage access and a task's change and merge state. | Unavailable grants show as unavailable, never silently provisioned. |
 | 10 | **Staging run and security review,** then the gate call. | A script against staging with test people and a test organization. |
+
+### Step 2: what was built
+
+**Built:**
+
+- **The room's state.** One forward-only migration of the room's Durable Object adds four tables, all empty until a later step writes them:
+  - `repo_request`: the room's one request, with its state (`pending`, `ready`, `failed`, `uncertain`), the chosen name and visibility, a reason code, and the repository ID once GitHub has answered.
+  - `repo_link`: the room's one repository, with GitHub's repository ID and the organization's ID, the default branch, its status (`ready`, `degraded`, `suspended`) and when its rules were last read back.
+  - `provider_grant`: one row for each principal, repository and action (`push` or `merge`), with who delegated it and when it expires or was revoked. A principal holds at most one live grant for an action.
+  - `task_change`: one row for each task, with its pull request number, the reviewed commit, the observed head, checks and merge state, each with its own observation time.
+- **The contract.** `get_repo_access`, `merge_task` and `get_task_release_status` are capabilities with routes, and `GET /v1/workspaces/{ws}/repository` reads the room's request and repository. `packages/contracts/check.mjs` now fails if any of the four takes an organization, installation, repository or pull request in its path or body, or if the states drift from the ones above.
+- **The read.** `GET repository` answers from the room's own tables, for someone who sees the whole room. It authorizes nothing.
+- **The three task routes refuse.** Each checks that the caller can see the task, then the request's shape, and then answers `repo_not_ready` while the room has no ready repository, which is every room for now. A room with a ready link, which only a test can make, answers `managed_repositories_unavailable`. None writes anything or calls GitHub.
+- **In `crates/core`,** the names of those states, the rule that only a ready link allows a token or a merge, and what counts as a full commit ID. Nothing else.
+
+**Not built, and left to the step named:**
+
+- Any call to GitHub, any token, any merge, any provisioning job, the webhook route and every screen: steps 4 to 9.
+- **A way to ask for a repository.** The contract has the request's state and no command that records one. Step 4 adds it with its code. Step 9(a) needs that command's shape before it can build the Git option.
+- **Grant checks, the submitter rule and commit pinning for a linked task:** step 3. No route reads or writes a grant yet.
+- **A pull request number on `submit_task`.** ADR 0009 has the assigned agent name the pull request there. `SubmitTask` is unchanged, and the step that records a `task_change` adds it.
+- **Storage for sealed tokens and for accepted webhook deliveries.** Each comes with the step that uses it, 6 and 5, as earlier milestones added storage with the code that used it.
+- **A D1 projection.** ADR 0009 allows a lookup from a repository ID to its room, to route a webhook. Step 5 adds it if it needs it. Nothing reads D1 for repositories today.
+
+**Checked:** the workspace's Rust tests, the API's and the gateway's suites and the contract check, all locally. Nothing ran against a deployment, so no acceptance test counts as passed.
 
 Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security-sensitive: a provisioning credential, a new public route, token issuing and merge. Each gets the deeper review the owner has already agreed for security-sensitive steps; anything deeper than that is asked first.
 
@@ -172,5 +197,5 @@ Added by ADR 0009, not run yet:
 
 - Written from `PRODUCT.md`, `ARCHITECTURE.md`, `ACCESS-CONTROL.md` and `RUNNER.md` as they stand on `main` at `17563d1`.
 - **This plan's own claims about GitHub were written before the spike** and aren't corrected here. What GitHub was seen to do is in [the spike's results](../spikes/m5-github/README.md#results-2026-11-10), and [ADR 0009](adr/0009-managed-repositories.md#not-verified) lists what's still unverified.
-- No code, contract, migration or cloud resource was created or changed.
+- When this plan was written, no code, contract, migration or cloud resource had been created or changed. Step 2 has since added contracts, a room migration and refusing routes, and still no cloud resource.
 - The Runner sections of the specs that lean on M5 are proposals and weren't reconciled with this plan. [#227](https://github.com/thachp/podster/pull/227), open now, proposes Runner as an A2A server and may change what M7 needs from M5.

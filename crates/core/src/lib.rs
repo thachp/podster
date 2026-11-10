@@ -13,6 +13,7 @@ pub mod expected_outputs;
 pub mod files;
 pub mod public_claims;
 pub mod removal;
+pub mod repositories;
 pub mod submission_files;
 
 pub const MAX_ARTIFACTS: usize = 10;

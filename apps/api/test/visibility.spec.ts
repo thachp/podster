@@ -384,7 +384,12 @@ describe("the discovery index (step 6)", () => {
     // Back to before this migration, with the room already public and nothing in D1.
     await inRoom(id, (sql) => {
       // Step 8's public claims came after, so they come off first.
-      // M4 step 10's operator suspension, the newest migration, comes off first.
+      // M5 step 2's managed repositories, the newest migration, come off first, then M4 step 10's operator suspension.
+      sql.exec("DROP TABLE task_change");
+      sql.exec("DROP TABLE provider_grant");
+      sql.exec("DROP TABLE repo_link");
+      sql.exec("DROP TABLE repo_request");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("ALTER TABLE workspace DROP COLUMN suspension_reason");
       sql.exec("ALTER TABLE workspace DROP COLUMN suspended_at");
       sql.exec("UPDATE schema_version SET version = version - 1");
@@ -406,7 +411,12 @@ describe("the discovery index (step 6)", () => {
     const quiet = await room();
     await inRoom(quiet, (sql) => {
       // Step 8's public claims came after, so they come off first.
-      // M4 step 10's operator suspension, the newest migration, comes off first.
+      // M5 step 2's managed repositories, the newest migration, come off first, then M4 step 10's operator suspension.
+      sql.exec("DROP TABLE task_change");
+      sql.exec("DROP TABLE provider_grant");
+      sql.exec("DROP TABLE repo_link");
+      sql.exec("DROP TABLE repo_request");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("ALTER TABLE workspace DROP COLUMN suspension_reason");
       sql.exec("ALTER TABLE workspace DROP COLUMN suspended_at");
       sql.exec("UPDATE schema_version SET version = version - 1");

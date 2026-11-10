@@ -211,6 +211,19 @@ CREATE INDEX role_claim_public ON role_claim (claimed_at) WHERE public = 1;
 ", "
 ALTER TABLE workspace ADD COLUMN suspended_at INTEGER;
 ALTER TABLE workspace ADD COLUMN suspension_reason TEXT;
+", "
+CREATE TABLE repo_request (id TEXT PRIMARY KEY, singleton INTEGER NOT NULL DEFAULT 1 UNIQUE CHECK (singleton = 1), state TEXT NOT NULL, name TEXT NOT NULL, visibility TEXT NOT NULL,
+  attempt INTEGER NOT NULL DEFAULT 0, provider_name TEXT, provider_repo_id INTEGER, reason TEXT, requested_by TEXT NOT NULL, requested_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE repo_link (id TEXT PRIMARY KEY, singleton INTEGER NOT NULL DEFAULT 1 UNIQUE CHECK (singleton = 1), request_id TEXT NOT NULL, provider TEXT NOT NULL, provider_repo_id INTEGER NOT NULL UNIQUE,
+  provider_org_id INTEGER NOT NULL, full_name TEXT NOT NULL, visibility TEXT NOT NULL, default_branch TEXT NOT NULL, status TEXT NOT NULL, status_reason TEXT, created_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL, verified_at INTEGER, updated_at INTEGER NOT NULL);
+CREATE TABLE provider_grant (id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, provider TEXT NOT NULL, provider_repo_id INTEGER NOT NULL, action TEXT NOT NULL, delegated_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL, expires_at INTEGER, revoked_at INTEGER, revoked_by TEXT);
+CREATE UNIQUE INDEX provider_grant_live ON provider_grant (principal_id, provider_repo_id, action) WHERE revoked_at IS NULL;
+CREATE TABLE task_change (task_id TEXT PRIMARY KEY, provider_repo_id INTEGER NOT NULL, pr_number INTEGER NOT NULL, submission_no INTEGER NOT NULL, reviewed_commit_sha TEXT,
+  observed_head_sha TEXT, head_observed_at INTEGER, checks_state TEXT, checks_json TEXT, checks_observed_at INTEGER, merge_state TEXT NOT NULL DEFAULT 'not_requested', merge_reason TEXT,
+  merge_sha TEXT, merge_requested_by TEXT, merge_requested_at INTEGER, merge_observed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE UNIQUE INDEX task_change_pr ON task_change (provider_repo_id, pr_number);
 "];
 
 pub fn int(value: &Value) -> i64 {

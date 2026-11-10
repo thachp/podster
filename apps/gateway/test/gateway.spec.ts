@@ -2270,6 +2270,21 @@ describe("capability mapping", () => {
     for (const c of CAPABILITIES) expect(c.kind, c.name).toBe(contract[c.name].kind);
   });
 
+  it("sends the managed repository capabilities a room and a task, and never a repository, installation or pull request (M5-04)", () => {
+    const of = (name: string) => CAPABILITIES.find((c) => c.name === name)!;
+    const smuggled = { workspace_id: "w", task_id: "t", organization: "podsterdev", installation_id: 1, repository_id: 2, provider_repo_id: 2, pr_number: 7, permissions: { administration: "write" } };
+    // No key: the answer will carry a token, which an idempotency record must never hold.
+    const access = toApiCall(of("get_repo_access"), smuggled);
+    expect(access).toEqual({ method: "POST", path: "/v1/workspaces/w/tasks/t/repo-access", body: "{}", idempotencyKey: undefined });
+    expect(Object.keys(of("get_repo_access").fields!).sort()).toEqual(["task_id", "workspace_id"]);
+    const merge = toApiCall(of("merge_task"), { ...smuggled, submission_no: 2, commit_sha: "a1".repeat(20), idempotency_key: "k" });
+    expect(merge.path).toBe("/v1/workspaces/w/tasks/t/merge");
+    expect(JSON.parse(merge.body!)).toEqual({ submission_no: 2, commit_sha: "a1".repeat(20) });
+    expect(merge.idempotencyKey).toBe("k");
+    expect(() => toApiCall(of("merge_task"), { workspace_id: "w", task_id: "t", submission_no: 2, commit_sha: "a1".repeat(20) })).toThrow(InvalidArguments);
+    expect(toApiCall(of("get_task_release_status"), smuggled)).toEqual({ method: "GET", path: "/v1/workspaces/w/tasks/t/release-status" });
+  });
+
   it("encodes path values and drops anything the capability doesn't define", () => {
     const task = CAPABILITIES.find((c) => c.name === "accept_task")!;
     const mapped = toApiCall(task, { workspace_id: "../../internal/init", task_id: "a/b?c", version: 1, idempotency_key: "k", org: "evil", role: "admin", actor: "x" });

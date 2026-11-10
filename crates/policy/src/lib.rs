@@ -402,6 +402,8 @@ pub fn denied_change_name(method: &str, route: &[&str]) -> Option<&'static str> 
         ("POST", ["tasks", _, "request-changes"]) => "task.request_changes",
         ("POST", ["tasks", _, "verify"]) => "task.verify",
         ("POST", ["tasks", _, "cancel"]) => "task.cancel",
+        ("POST", ["tasks", _, "merge"]) => "task.merge",
+        ("POST", ["tasks", _, "repo-access"]) => "task.repo_access",
         ("POST", ["tasks", _, "assign"]) => "task.assign",
         ("POST", ["tasks", _, "update"]) => "task.update",
         ("POST", ["tasks", _, "set-reviewer"]) => "task.set_reviewer",

@@ -8,8 +8,9 @@
 
 /// How long an accepted delivery ID is kept, so a replay inside that time is refused. Proposed: 7 days.
 pub const DELIVERY_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
-/// The most delivery IDs one room holds. At the read cap a repository's useful nudges in the retention time come to about
-/// this many, and past it a new delivery is dropped: polling catches up, and stored rows stay bounded.
+/// The most deliveries one room remembers. At the read cap a repository's useful nudges in the retention time come to
+/// about this many. Past it a delivery still nudges and just isn't remembered, so stored rows stay bounded and no nudge is
+/// lost: its replay then costs at most one more read, which the read cap bounds.
 pub const MAX_DELIVERIES_HELD: i64 = 10_000;
 /// Reads of the provider for one repository in any hour, from nudges and polling together. Proposed: 60. A merge job's own
 /// reads aren't counted.
@@ -59,11 +60,22 @@ pub fn is_delivery_id(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// Whether this is a SHA-256 as written in hex: 64 lower-case digits.
+pub fn is_body_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// A nudge: IDs and commit SHAs only. No title, body, branch name, URL or state, so nothing a provider's user typed gets
 /// past the gateway, and nothing in it can be taken for what the provider's state is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Nudge {
     pub delivery_id: String,
+    /// SHA-256 of the raw body the provider signed. The provider's signature covers the body and not the delivery ID, so
+    /// one captured delivery could be sent again under any number of new IDs. The same body is the same delivery.
+    pub body_sha256: String,
     pub event: EventKind,
     pub repository_id: i64,
     pub pull_requests: Vec<i64>,
@@ -73,6 +85,7 @@ pub struct Nudge {
 /// Whether a nudge is well-formed. It must name a repository, and a pull request or a commit, or there's nothing to look up.
 pub fn is_well_formed(nudge: &Nudge) -> bool {
     is_delivery_id(&nudge.delivery_id)
+        && is_body_digest(&nudge.body_sha256)
         && nudge.repository_id > 0
         && nudge.pull_requests.len() <= MAX_PULL_REQUESTS
         && nudge.pull_requests.iter().all(|n| *n > 0)
@@ -87,16 +100,17 @@ pub fn is_well_formed(nudge: &Nudge) -> bool {
 /// the lookup that routed the delivery here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NudgeOutcome {
-    /// The room has no linked repository, or a different one. Nothing is kept, not even the delivery ID.
+    /// The room has no linked repository, or a different one. Nothing is kept.
     NotThisRoom,
-    /// This delivery ID was accepted before. Nothing changes.
+    /// This delivery ID, or this exact body, was taken before. Nothing changes.
     Replayed,
-    /// The room already holds as many delivery IDs as it keeps. Dropped, and polling catches up.
-    Full,
-    /// Accepted once, and it names no pull request or commit of a task here. Dropped.
+    /// It names no pull request or commit of a task here. Nothing is kept, so deliveries about other things can't fill the room.
     UnknownChange,
-    /// Accepted once, and a task's change is marked as due a read.
+    /// A task's change is marked as due a read, and the delivery is remembered.
     Nudged,
+    /// A task's change is marked as due a read, and the room already remembers as many deliveries as it keeps, so this one
+    /// isn't remembered. A nudge is never refused for want of room.
+    NudgedUnrecorded,
 }
 
 impl NudgeOutcome {
@@ -104,29 +118,40 @@ impl NudgeOutcome {
         match self {
             NudgeOutcome::NotThisRoom => "not_this_room",
             NudgeOutcome::Replayed => "replayed",
-            NudgeOutcome::Full => "full",
             NudgeOutcome::UnknownChange => "unknown_change",
             NudgeOutcome::Nudged => "nudged",
+            NudgeOutcome::NudgedUnrecorded => "nudged_unrecorded",
         }
     }
 }
 
-/// The first three outcomes, decided before anything is written. `None` means the delivery is new and is to be recorded,
-/// and whether it names a known change is looked up next.
-pub fn admit(
-    linked_repository: Option<i64>,
-    observed_repository: i64,
-    seen_before: bool,
-    held: i64,
-) -> Option<NudgeOutcome> {
-    if linked_repository != Some(observed_repository) {
-        Some(NudgeOutcome::NotThisRoom)
-    } else if seen_before {
-        Some(NudgeOutcome::Replayed)
-    } else if held >= MAX_DELIVERIES_HELD {
-        Some(NudgeOutcome::Full)
+/// What the room's rows say about one delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Arrival {
+    /// The repository the room is linked to, if any.
+    pub linked_repository: Option<i64>,
+    /// The repository the delivery is about.
+    pub observed_repository: i64,
+    /// Whether the room remembers this delivery ID or this exact body.
+    pub seen_before: bool,
+    /// Whether it names a pull request or a commit of a task's change here.
+    pub names_known_change: bool,
+    /// How many deliveries the room remembers now.
+    pub held: i64,
+}
+
+/// What to do with a delivery. Only `Nudged` writes a row for it, and only it and `NudgedUnrecorded` mark a change.
+pub fn decide(arrival: &Arrival) -> NudgeOutcome {
+    if arrival.linked_repository != Some(arrival.observed_repository) {
+        NudgeOutcome::NotThisRoom
+    } else if arrival.seen_before {
+        NudgeOutcome::Replayed
+    } else if !arrival.names_known_change {
+        NudgeOutcome::UnknownChange
+    } else if arrival.held >= MAX_DELIVERIES_HELD {
+        NudgeOutcome::NudgedUnrecorded
     } else {
-        None
+        NudgeOutcome::Nudged
     }
 }
 
@@ -187,6 +212,7 @@ mod tests {
     fn nudge() -> Nudge {
         Nudge {
             delivery_id: "72d3162e-cc78-11e3-81ab-4c9367dc0958".to_string(),
+            body_sha256: "5e".repeat(32),
             event: EventKind::PullRequest,
             repository_id: 987_654_321,
             pull_requests: vec![7],
@@ -282,26 +308,100 @@ mod tests {
     }
 
     #[test]
-    fn the_rooms_own_link_decides_before_anything_is_kept() {
+    fn the_rooms_own_link_decides_first_and_a_nudge_is_never_lost_for_want_of_room() {
+        let known = Arrival {
+            linked_repository: Some(5),
+            observed_repository: 5,
+            seen_before: false,
+            names_known_change: true,
+            held: 0,
+        };
+        assert_eq!(decide(&known), NudgeOutcome::Nudged);
         // No link, or another repository: nothing else is even looked at.
-        assert_eq!(admit(None, 5, false, 0), Some(NudgeOutcome::NotThisRoom));
-        assert_eq!(admit(Some(6), 5, false, 0), Some(NudgeOutcome::NotThisRoom));
+        for linked in [None, Some(6)] {
+            for seen_before in [false, true] {
+                let other = Arrival {
+                    linked_repository: linked,
+                    seen_before,
+                    held: MAX_DELIVERIES_HELD,
+                    ..known
+                };
+                assert_eq!(decide(&other), NudgeOutcome::NotThisRoom);
+            }
+        }
+        // A replay is a replay, full or not, known change or not.
         assert_eq!(
-            admit(Some(6), 5, true, MAX_DELIVERIES_HELD),
-            Some(NudgeOutcome::NotThisRoom)
-        );
-        // A replay is a replay even when the room is full.
-        assert_eq!(admit(Some(5), 5, true, 0), Some(NudgeOutcome::Replayed));
-        assert_eq!(
-            admit(Some(5), 5, true, MAX_DELIVERIES_HELD),
-            Some(NudgeOutcome::Replayed)
+            decide(&Arrival {
+                seen_before: true,
+                ..known
+            }),
+            NudgeOutcome::Replayed
         );
         assert_eq!(
-            admit(Some(5), 5, false, MAX_DELIVERIES_HELD),
-            Some(NudgeOutcome::Full)
+            decide(&Arrival {
+                seen_before: true,
+                names_known_change: false,
+                held: MAX_DELIVERIES_HELD,
+                ..known
+            }),
+            NudgeOutcome::Replayed
         );
-        assert_eq!(admit(Some(5), 5, false, MAX_DELIVERIES_HELD - 1), None);
-        assert_eq!(admit(Some(5), 5, false, 0), None);
+        // About nothing here: dropped, full or not.
+        assert_eq!(
+            decide(&Arrival {
+                names_known_change: false,
+                ..known
+            }),
+            NudgeOutcome::UnknownChange
+        );
+        assert_eq!(
+            decide(&Arrival {
+                names_known_change: false,
+                held: MAX_DELIVERIES_HELD,
+                ..known
+            }),
+            NudgeOutcome::UnknownChange
+        );
+        // Full: it still nudges, and isn't remembered.
+        assert_eq!(
+            decide(&Arrival {
+                held: MAX_DELIVERIES_HELD - 1,
+                ..known
+            }),
+            NudgeOutcome::Nudged
+        );
+        assert_eq!(
+            decide(&Arrival {
+                held: MAX_DELIVERIES_HELD,
+                ..known
+            }),
+            NudgeOutcome::NudgedUnrecorded
+        );
+        assert_eq!(
+            decide(&Arrival {
+                held: MAX_DELIVERIES_HELD + 9,
+                ..known
+            }),
+            NudgeOutcome::NudgedUnrecorded
+        );
+    }
+
+    #[test]
+    fn a_body_digest_is_64_lower_case_hex_digits() {
+        assert!(is_body_digest(&"0f".repeat(32)));
+        for bad in [
+            "",
+            &"0F".repeat(32),
+            &"0f".repeat(31),
+            &"0g".repeat(32),
+            &"0f".repeat(33),
+        ] {
+            assert!(!is_body_digest(bad), "{bad}");
+        }
+        assert!(!is_well_formed(&Nudge {
+            body_sha256: "x".to_string(),
+            ..nudge()
+        }));
     }
 
     #[test]

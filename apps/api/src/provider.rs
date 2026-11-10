@@ -41,6 +41,7 @@ pub fn is_delivery_route(method: &Method, path: &str) -> bool {
 #[serde(deny_unknown_fields)]
 struct Sent {
     delivery_id: String,
+    body_sha256: String,
     event: String,
     repository_id: i64,
     #[serde(default)]
@@ -77,6 +78,7 @@ pub async fn delivery(mut req: Request, env: Env) -> R<Response> {
     let event = EventKind::from_name(&sent.event).ok_or_else(ApiError::invalid_argument)?;
     let nudge = Nudge {
         delivery_id: sent.delivery_id,
+        body_sha256: sent.body_sha256,
         event,
         repository_id: sent.repository_id,
         pull_requests: sent.pull_requests,
@@ -110,6 +112,7 @@ pub async fn delivery(mut req: Request, env: Env) -> R<Response> {
         .get_stub()?;
     let message = json!({
         "delivery_id": nudge.delivery_id,
+        "body_sha256": nudge.body_sha256,
         "event": nudge.event.name(),
         "repository_id": nudge.repository_id,
         "pull_requests": nudge.pull_requests,

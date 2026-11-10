@@ -227,8 +227,9 @@ CREATE TABLE task_change (task_id TEXT PRIMARY KEY, provider_repo_id INTEGER NOT
   head_repo_id INTEGER, base_ref TEXT, reviewed_base_sha TEXT, merge_base_sha TEXT, pr_state TEXT, pr_observed_at INTEGER);
 CREATE UNIQUE INDEX task_change_pr ON task_change (provider_repo_id, pr_number);
 ", "
-CREATE TABLE provider_delivery (delivery_id TEXT PRIMARY KEY, received_at INTEGER NOT NULL, expires_at INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE provider_delivery (delivery_id TEXT PRIMARY KEY, body_sha256 TEXT NOT NULL, received_at INTEGER NOT NULL, expires_at INTEGER NOT NULL) WITHOUT ROWID;
 CREATE INDEX provider_delivery_expiry ON provider_delivery (expires_at);
+CREATE INDEX provider_delivery_body ON provider_delivery (body_sha256);
 ALTER TABLE task_change ADD COLUMN nudged_at INTEGER;
 ALTER TABLE repo_link ADD COLUMN indexed_at INTEGER;
 "];

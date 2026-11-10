@@ -5,8 +5,9 @@
  * - **Who sent it:** `X-Hub-Signature-256` is an HMAC-SHA256 of the raw body under `GITHUB_WEBHOOK_SECRET`, compared in
  *   constant time by `crypto.subtle.verify`. With no usable secret the route refuses everything, as a path that isn't there.
  * - **What goes on:** the delivery ID, the event's kind, GitHub's repository ID, pull request numbers and one commit SHA.
- *   No title, body, branch name, URL, login or state: a delivery is a nudge, and what Podster records comes from its own
- *   read of GitHub, never from here. The payload is read once, for those fields, and dropped.
+ *   With them goes the SHA-256 of the raw body: GitHub's signature covers the body and not the delivery ID, so the room
+ *   treats the same body as the same delivery. No title, body, branch name, URL, login or state: a delivery is a nudge,
+ *   and what Podster records comes from its own read of GitHub, never from here. The payload is read once and dropped.
  * - **How:** over the service binding, with an assertion that names no one and binds the exact body sent. The API finds
  *   the room and the room checks the repository against its own link.
  *
@@ -15,8 +16,11 @@
 import { mintProviderDelivery } from "./assertion";
 
 export const GITHUB_WEBHOOK_PATH = "/webhooks/github";
-/** GitHub caps a payload at 25 MB. The events used here are far smaller, and a bigger body is refused unread. */
-export const MAX_WEBHOOK_BYTES = 1024 * 1024;
+/**
+ * GitHub caps a payload at 25 MB. The events used here are far smaller, and a bigger body is refused without reading past
+ * the limit. That delivery's nudge is lost, and the room's polling is what notices the change.
+ */
+export const MAX_WEBHOOK_BYTES = 256 * 1024;
 /** A shorter secret doesn't count as one. */
 const MIN_SECRET_LENGTH = 32;
 /** GitHub gives a delivery ten seconds. */
@@ -30,7 +34,7 @@ const MAX_PULL_REQUESTS = 10;
 
 type WebhookEnv = { API: Fetcher; ASSERTION_SIGNING_JWK: string; GITHUB_WEBHOOK_SECRET?: string };
 /** What the API is sent, and all it's sent. */
-export type Nudge = { delivery_id: string; event: string; repository_id: number; pull_requests: number[]; head_sha?: string };
+export type Nudge = { delivery_id: string; body_sha256: string; event: string; repository_id: number; pull_requests: number[]; head_sha?: string };
 
 const answer = (body: unknown, status: number) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "x-content-type-options": "nosniff", "cache-control": "no-store" } });
 const refuse = (code: string, status: number) => answer({ error: { code, message: code } }, status);
@@ -75,7 +79,7 @@ export async function signedBy(secret: string, signatureHex: string, body: Uint8
  * The IDs and the commit a delivery is about, or null if it names no repository, or nothing to look up. Each field is
  * taken by name and checked for its type, so nothing else in the payload can come along.
  */
-export function normalize(deliveryId: string, event: string, payload: unknown): Nudge | null {
+export function normalize(deliveryId: string, bodySha256: string, event: string, payload: unknown): Nudge | null {
   if (!payload || typeof payload !== "object") return null;
   const p = payload as Record<string, any>;
   const repository = id(p.repository?.id);
@@ -97,7 +101,7 @@ export function normalize(deliveryId: string, event: string, payload: unknown): 
   }
   const pullRequests = [...new Set(numbers.map(id).filter((n): n is number => n !== null))].slice(0, MAX_PULL_REQUESTS);
   if (pullRequests.length === 0 && !sha) return null;
-  return { delivery_id: deliveryId, event, repository_id: repository, pull_requests: pullRequests, ...(sha ? { head_sha: sha } : {}) };
+  return { delivery_id: deliveryId, body_sha256: bodySha256, event, repository_id: repository, pull_requests: pullRequests, ...(sha ? { head_sha: sha } : {}) };
 }
 
 const log = (delivery: string, outcome: string) => console.log(JSON.stringify({ at: "github.webhook", delivery, outcome }));
@@ -134,7 +138,7 @@ export async function handleGithubWebhook(request: Request, url: URL, env: Webho
     log(delivery, "invalid_payload");
     return refuse("invalid_payload", 400);
   }
-  const nudge = normalize(delivery, event, payload);
+  const nudge = normalize(delivery, hex(new Uint8Array(await crypto.subtle.digest("SHA-256", body))), event, payload);
   if (!nudge) {
     log(delivery, "invalid_payload");
     return refuse("invalid_payload", 400);

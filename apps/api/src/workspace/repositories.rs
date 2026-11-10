@@ -8,7 +8,7 @@
 //! Step 5 adds the room's side of a provider's webhook delivery: `nudge`, and the room's one row in the routing lookup.
 use super::*;
 use podster_core::provider_deliveries::{
-    admit, is_well_formed, EventKind, Nudge, NudgeOutcome, DELIVERY_RETENTION_MS,
+    decide, is_well_formed, Arrival, EventKind, Nudge, NudgeOutcome, DELIVERY_RETENTION_MS,
 };
 
 /// `GET repository`: the room's request for a repository and its linked repository, each null if there's none. For
@@ -39,18 +39,24 @@ pub(super) fn read(sql: &SqlStorage, who: &Participant) -> R<Value> {
 /// gateway's assertion for it.
 pub(super) const INTERNAL_PROVIDER_DELIVERY: &str = crate::provider::INTERNAL_PROVIDER_DELIVERY;
 
-/// One webhook delivery, as a nudge (M5 step 5). `{ delivery_id, event, repository_id, pull_requests, head_sha }`, in the
-/// caller's transaction.
+/// One webhook delivery, as a nudge (M5 step 5). `{ delivery_id, body_sha256, event, repository_id, pull_requests,
+/// head_sha }`, in the caller's transaction.
 ///
-/// The room's own link decides whose repository this is, never the lookup that routed it here. A delivery ID is accepted
-/// once: its row is the record that it arrived, and a second arrival changes nothing. A delivery that names a pull request
-/// or a commit of a task's change marks that change as nudged, with the time, and that's all it does. It records no head,
-/// check, merge or pull request state, because a delivery's word for those is never taken: what the room knows about a
-/// change comes from Podster's own read of the provider, which steps 6 to 8 build, and `nudged_at` is what tells them a
-/// read is due. No event is written and nobody is told, since nothing a participant sees has changed.
+/// The room's own link decides whose repository this is, never the lookup that routed it here. A delivery is taken once:
+/// by its ID, and by the hash of the body the provider signed, since the signature doesn't cover the ID and one captured
+/// body could come again under any number of new ones. A delivery that names a pull request or a commit of a task's change
+/// marks that change as nudged, with the time, and that's all it does. One about anything else leaves nothing behind. It
+/// records no head, check, merge or pull request state, because a delivery's word for those is never taken: what the room
+/// knows about a change comes from Podster's own read of the provider, which steps 6 to 8 build, and `nudged_at` is what
+/// tells them a read is due.
+///
+/// This is bookkeeping, not a command (ruled by the architect, 2026-11-10): a mark that a read is due, which no
+/// participant sees, like `indexed_at`. So it writes no event, outbox row or idempotency record. The read that follows is
+/// a command, and commits what it observed with its event and outbox.
 pub(super) fn nudge(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     let delivery = Nudge {
         delivery_id: body["delivery_id"].as_str().unwrap_or_default().to_string(),
+        body_sha256: body["body_sha256"].as_str().unwrap_or_default().to_string(),
         event: body["event"]
             .as_str()
             .and_then(EventKind::from_name)
@@ -65,7 +71,6 @@ pub(super) fn nudge(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     if !is_well_formed(&delivery) {
         return Err(ApiError::invalid_argument());
     }
-    let answer = |outcome: NudgeOutcome| Ok(json!({ "outcome": outcome.code() }));
     let linked = rows(
         sql,
         "SELECT provider_repo_id FROM repo_link WHERE provider = 'github'",
@@ -73,32 +78,23 @@ pub(super) fn nudge(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     )?
     .first()
     .map(|link| int(&link["provider_repo_id"]));
-    // Old IDs go first, so they don't count against what the room holds. Only for the room's own repository: a delivery
+    // Old ones go first, so they don't count against what the room holds. Only for the room's own repository: a delivery
     // for any other writes nothing at all.
     if linked == Some(delivery.repository_id) {
         prune_deliveries(sql, now)?;
     }
-    let seen = !rows(
+    let seen_before = !rows(
         sql,
-        "SELECT 1 AS seen FROM provider_delivery WHERE delivery_id = ?",
-        vec![delivery.delivery_id.as_str().into()],
+        "SELECT 1 AS seen FROM provider_delivery WHERE delivery_id = ? OR body_sha256 = ? LIMIT 1",
+        vec![
+            delivery.delivery_id.as_str().into(),
+            delivery.body_sha256.as_str().into(),
+        ],
     )?
     .is_empty();
     let held = rows(sql, "SELECT count(*) AS n FROM provider_delivery", vec![])?
         .first()
         .map_or(0, |row| int(&row["n"]));
-    if let Some(outcome) = admit(linked, delivery.repository_id, seen, held) {
-        return answer(outcome);
-    }
-    exec(
-        sql,
-        "INSERT INTO provider_delivery (delivery_id, received_at, expires_at) VALUES (?, ?, ?)",
-        vec![
-            delivery.delivery_id.as_str().into(),
-            now.into(),
-            (now + DELIVERY_RETENTION_MS).into(),
-        ],
-    )?;
     // By pull request number, or by a commit the room already holds for a change. Both only pick which change to read again.
     let mut known: Vec<String> = vec![];
     for number in &delivery.pull_requests {
@@ -123,17 +119,38 @@ pub(super) fn nudge(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
             .filter_map(|row| text(&row["task_id"])),
         );
     }
-    if known.is_empty() {
-        return answer(NudgeOutcome::UnknownChange);
-    }
-    for task in &known {
+    let outcome = decide(&Arrival {
+        linked_repository: linked,
+        observed_repository: delivery.repository_id,
+        seen_before,
+        names_known_change: !known.is_empty(),
+        held,
+    });
+    if outcome == NudgeOutcome::Nudged {
         exec(
             sql,
-            "UPDATE task_change SET nudged_at = ? WHERE task_id = ?",
-            vec![now.into(), task.as_str().into()],
+            "INSERT INTO provider_delivery (delivery_id, body_sha256, received_at, expires_at) VALUES (?, ?, ?, ?)",
+            vec![
+                delivery.delivery_id.as_str().into(),
+                delivery.body_sha256.as_str().into(),
+                now.into(),
+                (now + DELIVERY_RETENTION_MS).into(),
+            ],
         )?;
     }
-    answer(NudgeOutcome::Nudged)
+    if matches!(
+        outcome,
+        NudgeOutcome::Nudged | NudgeOutcome::NudgedUnrecorded
+    ) {
+        for task in &known {
+            exec(
+                sql,
+                "UPDATE task_change SET nudged_at = ? WHERE task_id = ?",
+                vec![now.into(), task.as_str().into()],
+            )?;
+        }
+    }
+    Ok(json!({ "outcome": outcome.code() }))
 }
 
 /// Forgets delivery IDs past their time. A replay after that costs one nudge and changes nothing else.

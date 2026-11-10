@@ -38,6 +38,9 @@ async function sign(body: string, secret = SECRET) {
   return `sha256=${[...mac].map((b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
 
+const sha256 = async (text: string) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))].map((b) => b.toString(16).padStart(2, "0")).join("");
+const DIGEST = "5e".repeat(32);
+
 type Options = { secret?: string | undefined; event?: string | null; delivery?: string | null; signature?: string | null; method?: string; path?: string; api?: (r: Request) => Promise<Response>; headers?: Record<string, string> };
 /** One delivery to the handler, with a fake API that records what it's sent. */
 async function deliver(payload: unknown, options: Options & { noSecret?: boolean; raw?: BodyInit } = {}) {
@@ -107,6 +110,38 @@ describe("the webhook route", () => {
     expect((await deliver(text, { signature: good })).status).toBe(202);
   });
 
+  it("refuses a delivery that carries two signatures, even when one of them is right", async () => {
+    const text = JSON.stringify(pullRequest());
+    const good = await sign(text);
+    for (const pair of [[good, good], [good, `sha256=${"0".repeat(64)}`], [`sha256=${"0".repeat(64)}`, good]]) {
+      const headers = new Headers({ "content-type": "application/json", "x-github-event": "pull_request", "x-github-delivery": DELIVERY });
+      for (const value of pair) headers.append("x-hub-signature-256", value);
+      const seen: Request[] = [];
+      const request = new Request(`${BASE}${GITHUB_WEBHOOK_PATH}`, { method: "POST", headers, body: text });
+      const response = await handleGithubWebhook(request, new URL(request.url), { API: { fetch: async (r: Request) => { seen.push(r); return new Response("{}", { status: 202 }); } } as unknown as Fetcher, ASSERTION_SIGNING_JWK: e.ASSERTION_SIGNING_JWK, GITHUB_WEBHOOK_SECRET: SECRET });
+      expect(response?.status, pair.join(" + ").slice(0, 40)).toBe(401);
+      expect(seen).toEqual([]);
+    }
+  });
+
+  it("takes only a JSON body: a form-encoded delivery is refused, signed or not", async () => {
+    // GitHub can be set to send `payload=<json>` as a form. The App must be set to JSON, and this is what the other setting gets.
+    const form = `payload=${encodeURIComponent(JSON.stringify(pullRequest()))}`;
+    const { status, code, seen } = await deliver(form, { headers: { "content-type": "application/x-www-form-urlencoded" } });
+    expect([status, code]).toEqual([400, "invalid_payload"]);
+    expect(seen).toEqual([]);
+    // The content type itself decides nothing: JSON under a form's label is read as the JSON it is.
+    expect((await deliver(pullRequest(), { headers: { "content-type": "application/x-www-form-urlencoded" } })).status).toBe(202);
+  });
+
+  it("passes a delivery ID on exactly as it came, upper case and all", async () => {
+    const mixed = "72D3162E-cc78-11E3-81ab-4C9367DC0958";
+    const { status, seen } = await deliver(pullRequest(), { delivery: mixed });
+    expect(status).toBe(202);
+    expect(JSON.parse(seen[0].text).delivery_id).toBe(mixed);
+    expect(decodeJwt(seen[0].headers.get("x-podster-assertion")!).delivery).toBe(mixed);
+  });
+
   it("only takes POST", async () => {
     for (const method of ["GET", "PUT", "DELETE", "PATCH"]) {
       const { status, code, seen } = await deliver(pullRequest(), { method });
@@ -166,13 +201,17 @@ describe("the webhook route", () => {
     expect(seen).toHaveLength(1);
     const [call] = seen;
     expect([call.method, call.url]).toEqual(["POST", "https://api.internal/v1/provider/github/deliveries"]);
-    expect(JSON.parse(call.text)).toEqual({ delivery_id: DELIVERY, event: "pull_request", repository_id: REPO, pull_requests: [7], head_sha: HEAD });
+    // The hash is of the raw body GitHub signed, so the same body is known again under any delivery ID.
+    expect(JSON.parse(call.text)).toEqual({ delivery_id: DELIVERY, body_sha256: await sha256(JSON.stringify(pullRequest())), event: "pull_request", repository_id: REPO, pull_requests: [7], head_sha: HEAD });
+    const other = await deliver(pullRequest(), { delivery: "another-id" });
+    expect(JSON.parse(other.seen[0].text).body_sha256).toBe(JSON.parse(call.text).body_sha256);
+    expect(JSON.parse((await deliver(pullRequest({ number: 8 }))).seen[0].text).body_sha256).not.toBe(JSON.parse(call.text).body_sha256);
     for (const typed of [...TYPED, "main", "open", "synchronize"]) expect(call.text).not.toContain(typed);
     // Only the assertion and a content type go with it: no GitHub header, and no signature to replay.
     expect([...call.headers.keys()].sort()).toEqual(["content-type", "x-podster-assertion"]);
     // The assertion names no one, and is for exactly this body.
     const claims = decodeJwt(call.headers.get("x-podster-assertion")!);
-    const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(call.text)))].map((b) => b.toString(16).padStart(2, "0")).join("");
+    const digest = await sha256(call.text);
     expect(Object.keys(claims).sort()).toEqual(["aud", "body_sha256", "delivery", "exp", "iat", "iss", "jti", "kind", "provider"]);
     expect(claims).toMatchObject({ kind: "provider_delivery", provider: "github", delivery: DELIVERY, body_sha256: digest, iss: "podster-gateway", aud: "podster-api" });
     expect((claims.exp as number) - (claims.iat as number)).toBe(60);
@@ -217,10 +256,10 @@ describe("the webhook route", () => {
 
 describe("what a delivery is about", () => {
   it("takes a pull request's number and head commit", () => {
-    expect(normalize("d1", "pull_request", pullRequest())).toEqual({ delivery_id: "d1", event: "pull_request", repository_id: REPO, pull_requests: [7], head_sha: HEAD });
+    expect(normalize("d1", DIGEST, "pull_request", pullRequest())).toEqual({ delivery_id: "d1", body_sha256: DIGEST, event: "pull_request", repository_id: REPO, pull_requests: [7], head_sha: HEAD });
     // The top-level number stands in when the pull request's own is missing, and a head that isn't a full commit ID is left out.
-    expect(normalize("d1", "pull_request", { number: 9, pull_request: { head: { sha: "main" } }, repository: { id: REPO } })).toEqual({ delivery_id: "d1", event: "pull_request", repository_id: REPO, pull_requests: [9] });
-    expect(normalize("d1", "pull_request", { pull_request: { number: -1 }, repository: { id: REPO } })).toBeNull();
+    expect(normalize("d1", DIGEST, "pull_request", { number: 9, pull_request: { head: { sha: "main" } }, repository: { id: REPO } })).toEqual({ delivery_id: "d1", body_sha256: DIGEST, event: "pull_request", repository_id: REPO, pull_requests: [9] });
+    expect(normalize("d1", DIGEST, "pull_request", { pull_request: { number: -1 }, repository: { id: REPO } })).toBeNull();
   });
 
   it("takes a check run's commit, and only pull requests into this repository", () => {
@@ -231,26 +270,26 @@ describe("what a delivery is about", () => {
       { number: "9", base: { repo: { id: REPO } } },
       null,
     ] }, repository: { id: REPO } };
-    const nudge = normalize("d2", "check_run", run);
-    expect(nudge).toEqual({ delivery_id: "d2", event: "check_run", repository_id: REPO, pull_requests: [7], head_sha: HEAD });
+    const nudge = normalize("d2", DIGEST, "check_run", run);
+    expect(nudge).toEqual({ delivery_id: "d2", body_sha256: DIGEST, event: "check_run", repository_id: REPO, pull_requests: [7], head_sha: HEAD });
     expect(JSON.stringify(nudge)).not.toMatch(/secret|failure|completed/);
     // No more than ten numbers go on.
     const many = { check_run: { head_sha: HEAD, pull_requests: Array.from({ length: 40 }, (_, i) => ({ number: i + 1, base: { repo: { id: REPO } } })) }, repository: { id: REPO } };
-    expect(normalize("d2", "check_run", many)?.pull_requests).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-    expect(normalize("d2", "check_run", { check_run: { head_sha: HEAD }, repository: { id: REPO } })).toEqual({ delivery_id: "d2", event: "check_run", repository_id: REPO, pull_requests: [], head_sha: HEAD });
+    expect(normalize("d2", DIGEST, "check_run", many)?.pull_requests).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(normalize("d2", DIGEST, "check_run", { check_run: { head_sha: HEAD }, repository: { id: REPO } })).toEqual({ delivery_id: "d2", body_sha256: DIGEST, event: "check_run", repository_id: REPO, pull_requests: [], head_sha: HEAD });
   });
 
   it("takes a status's commit and not its state", () => {
-    const nudge = normalize("d3", "status", { sha: HEAD, state: "success", context: "podster/review", description: "secret body text", target_url: "https://example.test/x", branches: [{ name: "feature/secret-branch" }], repository: { id: REPO } });
-    expect(nudge).toEqual({ delivery_id: "d3", event: "status", repository_id: REPO, pull_requests: [], head_sha: HEAD });
-    expect(normalize("d3", "status", { sha: "abc", repository: { id: REPO } })).toBeNull();
+    const nudge = normalize("d3", DIGEST, "status", { sha: HEAD, state: "success", context: "podster/review", description: "secret body text", target_url: "https://example.test/x", branches: [{ name: "feature/secret-branch" }], repository: { id: REPO } });
+    expect(nudge).toEqual({ delivery_id: "d3", body_sha256: DIGEST, event: "status", repository_id: REPO, pull_requests: [], head_sha: HEAD });
+    expect(normalize("d3", DIGEST, "status", { sha: "abc", repository: { id: REPO } })).toBeNull();
   });
 
   it("is null for anything else", () => {
     for (const payload of [null, undefined, 7, "x", [], {}, { repository: {} }, { repository: { id: 0 } }, { repository: { id: 1.5 } }, { repository: { id: Number.MAX_SAFE_INTEGER + 2 } }]) {
-      expect(normalize("d", "pull_request", payload)).toBeNull();
+      expect(normalize("d", DIGEST, "pull_request", payload)).toBeNull();
     }
-    expect(normalize("d", "push", pullRequest())).toBeNull();
+    expect(normalize("d", DIGEST, "push", pullRequest())).toBeNull();
   });
 });
 
@@ -278,6 +317,18 @@ describe("through the whole gateway, to the real API", () => {
     expect((await post(pullRequest(), { env: { GITHUB_WEBHOOK_SECRET: undefined } })).status).toBe(404);
     // The test configuration, like every deployment today, sets no secret.
     expect(e.GITHUB_WEBHOOK_SECRET).toBeUndefined();
+  });
+
+  it("sits behind the per-client rate limit, like every other route", async () => {
+    let asked = 0;
+    const closed = { limit: async () => { asked += 1; return { success: false }; } };
+    const limited = await post(pullRequest(), { env: { RL_GENERAL: closed } });
+    expect(limited.status).toBe(429);
+    expect(asked).toBe(1);
+    // Signed or not, and before the signature is looked at.
+    expect((await post(pullRequest(), { env: { RL_GENERAL: closed }, signature: null })).status).toBe(429);
+    const open = { limit: async () => ({ success: true }) };
+    expect((await post(pullRequest(), { env: { RL_GENERAL: open } })).status).toBe(202);
   });
 
   it("isn't served on the application host", async () => {

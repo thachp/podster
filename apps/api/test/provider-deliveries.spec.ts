@@ -35,7 +35,9 @@ async function api(who: Who, method: string, path: string, body?: unknown) {
   return { status: res.status, body: parsed, code: parsed?.error?.code };
 }
 
-type Nudge = { delivery_id: string; event: string; repository_id: number; pull_requests?: number[]; head_sha?: string | null; [extra: string]: unknown };
+type Nudge = { delivery_id: string; body_sha256?: string; event: string; repository_id: number; pull_requests?: number[]; head_sha?: string | null; [extra: string]: unknown };
+/** A body hash no other delivery has, as two different payloads would give. */
+const bodyHash = () => (crypto.randomUUID() + crypto.randomUUID()).replaceAll("-", "");
 const deliveryId = () => crypto.randomUUID();
 let repoCounter = 500_000_000;
 /** A repository ID no other test uses, so one test's routing row never points at another's room. */
@@ -43,7 +45,7 @@ const newRepo = () => ++repoCounter;
 
 /** Sends what the gateway would: the nudge, and an assertion for exactly that body. `claims` and `assertion` let a test lie. */
 async function deliver(nudge: Nudge | string, options: { claims?: object; assertion?: string | null; method?: string } = {}) {
-  const text = typeof nudge === "string" ? nudge : JSON.stringify(nudge);
+  const text = typeof nudge === "string" ? nudge : JSON.stringify({ body_sha256: bodyHash(), ...nudge });
   const delivery = typeof nudge === "string" ? "d-raw" : nudge.delivery_id;
   const assertion = options.assertion === undefined
     ? await signed({ kind: "provider_delivery", provider: "github", delivery, body_sha256: await sha256(text), ...(options.claims ?? {}) }).sign(key)
@@ -87,7 +89,7 @@ async function room(repo?: number, options: { routed?: boolean; change?: boolean
 }
 
 const change = (id: string) => inRoom(id, (sql) => sql.exec("SELECT * FROM task_change").toArray()[0] ?? null);
-const deliveries = (id: string) => inRoom(id, (sql) => sql.exec("SELECT delivery_id, received_at, expires_at FROM provider_delivery ORDER BY received_at, delivery_id").toArray() as { delivery_id: string; received_at: number; expires_at: number }[]);
+const deliveries = (id: string) => inRoom(id, (sql) => sql.exec("SELECT delivery_id, body_sha256, received_at, expires_at FROM provider_delivery ORDER BY received_at, delivery_id").toArray() as { delivery_id: string; body_sha256: string; received_at: number; expires_at: number }[]);
 /** Everything a command would have left behind. A nudge leaves none of it. The outbox empties on its own, and holds nothing without an event. */
 const footprint = (id: string) => inRoom(id, (sql) => ({
   events: sql.exec("SELECT count(*) AS n FROM event").one().n,
@@ -98,7 +100,7 @@ const UNTOUCHED = { observed_head_sha: null, head_observed_at: null, checks_stat
 
 describe("the delivery route's assertion", () => {
   it("takes only the gateway's delivery assertion, for exactly the body sent", async () => {
-    const nudge = { delivery_id: deliveryId(), event: "pull_request", repository_id: newRepo(), pull_requests: [7], head_sha: HEAD };
+    const nudge = { delivery_id: deliveryId(), body_sha256: bodyHash(), event: "pull_request", repository_id: newRepo(), pull_requests: [7], head_sha: HEAD };
     expect(await deliver(nudge)).toEqual({ status: 202, body: { accepted: true }, code: undefined });
     // No assertion, an identity's, the public page's, one signed by another key, and one that has expired.
     const other = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]) as CryptoKeyPair;
@@ -135,10 +137,10 @@ describe("the delivery route's assertion", () => {
   });
 
   it("refuses a body that isn't a nudge, even with an assertion for it", async () => {
-    const good = { delivery_id: "d-shape", event: "pull_request", repository_id: newRepo(), pull_requests: [7], head_sha: HEAD };
+    const good = { delivery_id: "d-shape", body_sha256: bodyHash(), event: "pull_request", repository_id: newRepo(), pull_requests: [7], head_sha: HEAD };
     const bad: (object | string)[] = [
       "not json", "[]", "{}",
-      // Anything beyond the five fields: a title can't ride along.
+      // Anything beyond the six fields: a title can't ride along.
       { ...good, title: "Add the parser" }, { ...good, base_ref: "main" }, { ...good, state: "success" }, { ...good, merged: true },
       { ...good, event: "push" }, { ...good, event: "ping" }, { ...good, event: "" },
       { ...good, repository_id: 0 }, { ...good, repository_id: -5 }, { ...good, repository_id: "5" }, { ...good, repository_id: 1.5 },
@@ -146,6 +148,7 @@ describe("the delivery route's assertion", () => {
       { ...good, head_sha: "main" }, { ...good, head_sha: HEAD.toUpperCase() }, { ...good, head_sha: HEAD.slice(1) },
       { ...good, pull_requests: [], head_sha: null },
       { ...good, delivery_id: "has spaces" }, { ...good, delivery_id: "x".repeat(65) },
+      { ...good, body_sha256: "5E".repeat(32) }, { ...good, body_sha256: "5e".repeat(31) }, { ...good, body_sha256: undefined }, { ...good, body_sha256: 5 },
     ];
     for (const body of bad) {
       const text = typeof body === "string" ? body : JSON.stringify(body);
@@ -167,8 +170,9 @@ describe("a delivery as a nudge", () => {
     const { id, task } = await room(repo);
     const before = await footprint(id);
     const first = deliveryId();
+    const hash = bodyHash();
     const started = Date.now();
-    expect(await deliver({ delivery_id: first, event: "pull_request", repository_id: repo, pull_requests: [7], head_sha: HEAD })).toEqual({ status: 202, body: { accepted: true }, code: undefined });
+    expect(await deliver({ delivery_id: first, body_sha256: hash, event: "pull_request", repository_id: repo, pull_requests: [7], head_sha: HEAD })).toEqual({ status: 202, body: { accepted: true }, code: undefined });
     const nudged = await change(id) as any;
     expect(nudged.task_id).toBe(task);
     expect(nudged.nudged_at).toBeGreaterThanOrEqual(started);
@@ -177,7 +181,7 @@ describe("a delivery as a nudge", () => {
     expect(nudged).toMatchObject(UNTOUCHED);
     // The delivery ID is kept for seven days.
     const [kept] = await deliveries(id);
-    expect(kept.delivery_id).toBe(first);
+    expect([kept.delivery_id, kept.body_sha256]).toEqual([first, hash]);
     expect(kept.expires_at - kept.received_at).toBe(7 * DAY);
     // No event, nobody told, no stored answer, no audit entry: nothing a participant sees has changed.
     expect(await footprint(id)).toEqual(before);
@@ -185,22 +189,29 @@ describe("a delivery as a nudge", () => {
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}/tasks/${task}`)).body.task).toMatchObject({ id: task, status: "offered" });
   });
 
-  it("changes nothing when a delivery ID comes again", async () => {
+  it("changes nothing when a delivery ID comes again, or the same body under a new ID", async () => {
     const repo = newRepo();
     const { id } = await room(repo);
     const again = deliveryId();
-    const nudge = { delivery_id: again, event: "pull_request", repository_id: repo, pull_requests: [7], head_sha: HEAD };
+    const hash = bodyHash();
+    const nudge = { delivery_id: again, body_sha256: hash, event: "pull_request", repository_id: repo, pull_requests: [7], head_sha: HEAD };
     expect((await deliver(nudge)).status).toBe(202);
     // As if a read had happened since, and the mark were older.
     await inRoom(id, (sql) => sql.exec("UPDATE task_change SET nudged_at = 5"));
     const kept = await deliveries(id);
-    for (const replay of [nudge, { ...nudge, pull_requests: [7, 8] }, { delivery_id: again, event: "status", repository_id: repo, head_sha: REVIEWED }]) {
-      expect(await deliver(replay)).toEqual({ status: 202, body: { accepted: true }, code: undefined });
-    }
+    const replays = [
+      nudge,
+      // The same ID with other contents.
+      { ...nudge, body_sha256: bodyHash(), pull_requests: [7, 8] },
+      { delivery_id: again, body_sha256: bodyHash(), event: "status", repository_id: repo, head_sha: REVIEWED },
+      // The signature doesn't cover the ID, so a captured body can come back under any number of new ones. It's the same delivery.
+      { ...nudge, delivery_id: deliveryId() }, { ...nudge, delivery_id: deliveryId() }, { ...nudge, delivery_id: deliveryId() },
+    ];
+    for (const replay of replays) expect(await deliver(replay)).toEqual({ status: 202, body: { accepted: true }, code: undefined });
     expect((await change(id) as any).nudged_at).toBe(5);
     expect(await deliveries(id)).toEqual(kept);
-    // A new delivery ID about the same change is a new nudge.
-    expect((await deliver({ ...nudge, delivery_id: deliveryId() })).status).toBe(202);
+    // A new delivery, with its own ID and body, about the same change is a new nudge.
+    expect((await deliver({ ...nudge, delivery_id: deliveryId(), body_sha256: bodyHash() })).status).toBe(202);
     expect((await change(id) as any).nudged_at).toBeGreaterThan(5);
     expect(await deliveries(id)).toHaveLength(2);
   });
@@ -229,24 +240,33 @@ describe("a delivery as a nudge", () => {
     expect(await runInDurableObject(stub("ws_pd_never_made"), (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_cf%' ESCAPE '\\'").one().n)).toBe(0);
   });
 
-  it("accepts a delivery about a pull request or commit the room doesn't know, once, and marks nothing", async () => {
+  it("keeps nothing of a delivery about a pull request or commit the room doesn't know", async () => {
     const repo = newRepo();
     const { id } = await room(repo);
+    const sent: Nudge[] = [];
     for (const unknown of [
       { event: "pull_request", pull_requests: [8], head_sha: HEAD },
       { event: "check_run", pull_requests: [], head_sha: HEAD },
       { event: "status", head_sha: "d4".repeat(20) },
     ]) {
-      expect((await deliver({ delivery_id: deliveryId(), repository_id: repo, ...unknown })).status).toBe(202);
+      const nudge = { delivery_id: deliveryId(), body_sha256: bodyHash(), repository_id: repo, ...unknown };
+      sent.push(nudge);
+      expect((await deliver(nudge)).status).toBe(202);
     }
     expect((await change(id) as any).nudged_at).toBeNull();
-    expect(await deliveries(id)).toHaveLength(3);
+    // Not even its ID: a busy repository's checks and statuses for other commits can't fill the room.
+    expect(await deliveries(id)).toEqual([]);
+    // So when the room later holds that commit for a change, the same delivery coming again does nudge, once.
+    await inRoom(id, (sql) => sql.exec("UPDATE task_change SET observed_head_sha = ?", HEAD));
+    expect((await deliver(sent[1])).status).toBe(202);
+    expect((await change(id) as any).nudged_at).toBeGreaterThan(0);
+    expect((await deliveries(id)).map((d) => d.delivery_id)).toEqual([sent[1].delivery_id]);
     // A room whose repository has no change on any task yet is the same.
     const fresh = newRepo();
     const empty = await room(fresh, { change: false });
     expect((await deliver({ delivery_id: deliveryId(), event: "pull_request", repository_id: fresh, pull_requests: [7], head_sha: HEAD })).status).toBe(202);
     expect(await change(empty.id)).toBeNull();
-    expect(await deliveries(empty.id)).toHaveLength(1);
+    expect(await deliveries(empty.id)).toEqual([]);
   });
 
   it("finds a change by a commit the room already holds for it, when the delivery names no pull request", async () => {
@@ -263,38 +283,63 @@ describe("a delivery as a nudge", () => {
     expect(nudged.observed_head_sha).toBe(HEAD);
   });
 
-  it("forgets a delivery ID after seven days, and holds no more than ten thousand", async () => {
+  it("forgets a delivery after seven days", async () => {
     const repo = newRepo();
     const { id } = await room(repo);
     const old = deliveryId();
-    const nudge = { delivery_id: old, event: "pull_request", repository_id: repo, pull_requests: [7], head_sha: HEAD };
+    const nudge = { delivery_id: old, body_sha256: bodyHash(), event: "pull_request", repository_id: repo, pull_requests: [7], head_sha: HEAD };
     expect((await deliver(nudge)).status).toBe(202);
-    // Seven days on. The next delivery clears it, and the same ID is then new again: it costs one nudge and changes nothing else.
-    await inRoom(id, (sql) => sql.exec("UPDATE provider_delivery SET received_at = received_at - ?, expires_at = expires_at - ?", 7 * DAY, 7 * DAY));
+    // One second short of seven days, it's still a replay.
+    await inRoom(id, (sql) => sql.exec("UPDATE provider_delivery SET received_at = received_at - ?, expires_at = expires_at - ?", 7 * DAY - 60_000, 7 * DAY - 60_000));
     await inRoom(id, (sql) => sql.exec("UPDATE task_change SET nudged_at = 5"));
+    expect((await deliver(nudge)).status).toBe(202);
+    expect((await change(id) as any).nudged_at).toBe(5);
+    // Seven days on. The next delivery clears it, and the same one is then new again: it costs one nudge and changes nothing else.
+    await inRoom(id, (sql) => sql.exec("UPDATE provider_delivery SET received_at = received_at - 60000, expires_at = expires_at - 60000"));
     expect((await deliver(nudge)).status).toBe(202);
     const held = await deliveries(id);
     expect(held.map((d) => d.delivery_id)).toEqual([old]);
     expect(held[0].received_at).toBeGreaterThan(Date.now() - 60_000);
+    expect(held[0].expires_at - held[0].received_at).toBe(7 * DAY);
     expect((await change(id) as any).nudged_at).toBeGreaterThan(5);
     // The alarm clears old ones too, with no delivery arriving.
     await inRoom(id, (sql) => sql.exec("UPDATE provider_delivery SET expires_at = 1"));
     await runDurableObjectAlarm(stub(id));
     expect(await deliveries(id)).toEqual([]);
+  });
 
-    // Full: a new delivery is dropped, and one already held is still a replay.
+  it("still nudges when it remembers as many deliveries as it keeps, and just doesn't remember that one", async () => {
+    const repo = newRepo();
+    const { id } = await room(repo);
+    const count = () => inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM provider_delivery").one().n as number);
     await inRoom(id, (sql) => {
-      sql.exec("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10000) INSERT INTO provider_delivery (delivery_id, received_at, expires_at) SELECT 'held-' || i, ?, ? FROM n", Date.now(), Date.now() + 7 * DAY);
+      sql.exec("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10000) INSERT INTO provider_delivery (delivery_id, body_sha256, received_at, expires_at) SELECT 'held-' || i, printf('%064x', i), ?, ? FROM n", Date.now(), Date.now() + 7 * DAY);
       sql.exec("UPDATE task_change SET nudged_at = 5");
     });
-    expect((await deliver({ ...nudge, delivery_id: deliveryId() })).status).toBe(202);
-    expect((await deliver({ ...nudge, delivery_id: "held-1" })).status).toBe(202);
-    expect((await change(id) as any).nudged_at).toBe(5);
-    expect(await inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM provider_delivery").one().n)).toBe(10000);
-    // One fewer, and there's room for one.
-    await inRoom(id, (sql) => sql.exec("DELETE FROM provider_delivery WHERE delivery_id = 'held-2'"));
-    expect((await deliver({ ...nudge, delivery_id: deliveryId() })).status).toBe(202);
+    const nudge = { delivery_id: deliveryId(), body_sha256: bodyHash(), event: "pull_request", repository_id: repo, pull_requests: [7], head_sha: HEAD };
+    // Full: the change is marked all the same. A nudge is never lost for want of room.
+    expect((await deliver(nudge)).status).toBe(202);
     expect((await change(id) as any).nudged_at).toBeGreaterThan(5);
+    expect(await count()).toBe(10000);
+    // It wasn't remembered, so it nudges again if it comes again. That costs at most one more read.
+    await inRoom(id, (sql) => sql.exec("UPDATE task_change SET nudged_at = 5"));
+    expect((await deliver(nudge)).status).toBe(202);
+    expect((await change(id) as any).nudged_at).toBeGreaterThan(5);
+    // One the room does remember is still a replay, by its ID or by its body.
+    await inRoom(id, (sql) => sql.exec("UPDATE task_change SET nudged_at = 5"));
+    expect((await deliver({ ...nudge, delivery_id: "held-1", body_sha256: bodyHash() })).status).toBe(202);
+    expect((await deliver({ ...nudge, delivery_id: deliveryId(), body_sha256: "0".repeat(63) + "2" })).status).toBe(202);
+    expect((await change(id) as any).nudged_at).toBe(5);
+    // And one about nothing here is dropped as ever.
+    expect((await deliver({ ...nudge, delivery_id: deliveryId(), body_sha256: bodyHash(), pull_requests: [99], head_sha: "d4".repeat(20) })).status).toBe(202);
+    expect((await change(id) as any).nudged_at).toBe(5);
+    expect(await count()).toBe(10000);
+    // One fewer, and the next is remembered.
+    await inRoom(id, (sql) => sql.exec("DELETE FROM provider_delivery WHERE delivery_id = 'held-3'"));
+    const next = deliveryId();
+    expect((await deliver({ ...nudge, delivery_id: next, body_sha256: bodyHash() })).status).toBe(202);
+    expect(await count()).toBe(10000);
+    expect(await inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM provider_delivery WHERE delivery_id = ?", next).one().n)).toBe(1);
   });
 
   it("logs the delivery ID, the room's ID and a fixed code", async () => {
@@ -304,13 +349,13 @@ describe("a delivery as a nudge", () => {
     const { id } = await room(repo);
     lines.length = 0;
     const first = deliveryId();
-    const nudge = { delivery_id: first, event: "pull_request", repository_id: repo, pull_requests: [7], head_sha: HEAD };
+    const nudge = { delivery_id: first, body_sha256: bodyHash(), event: "pull_request", repository_id: repo, pull_requests: [7], head_sha: HEAD };
     await deliver(nudge);
     await deliver(nudge);
     const unknown = deliveryId();
-    await deliver({ ...nudge, delivery_id: unknown, pull_requests: [9], head_sha: "e5".repeat(20) });
+    await deliver({ ...nudge, delivery_id: unknown, body_sha256: bodyHash(), pull_requests: [9], head_sha: "e5".repeat(20) });
     const nowhere = deliveryId();
-    await deliver({ ...nudge, delivery_id: nowhere, repository_id: newRepo() });
+    await deliver({ ...nudge, delivery_id: nowhere, body_sha256: bodyHash(), repository_id: newRepo() });
     await deliver({ ...nudge, title: "SECRET-TITLE", delivery_id: deliveryId() });
     await deliver(nudge, { assertion: "SECRET-TITLE" });
     const logged = lines.filter((line) => line.includes("provider.delivery")).map((line) => JSON.parse(line));
@@ -321,7 +366,7 @@ describe("a delivery as a nudge", () => {
       { at: "provider.delivery", delivery: nowhere, outcome: "no_room" },
     ]);
     // Nothing else these requests logged says more: no commit, no repository name, no body.
-    for (const line of lines) for (const text of ["SECRET-TITLE", HEAD, "e5".repeat(20), "podsterdev", "Add the parser"]) expect(line).not.toContain(text);
+    for (const line of lines) for (const text of ["SECRET-TITLE", HEAD, "e5".repeat(20), "podsterdev", "Add the parser", nudge.body_sha256]) expect(line).not.toContain(text);
   });
 });
 
@@ -387,14 +432,15 @@ describe("the delivery migration", () => {
     // A delivery migrates the room, as any request does.
     expect((await deliver({ delivery_id: deliveryId(), event: "pull_request", repository_id: repo, pull_requests: [7], head_sha: HEAD })).status).toBe(202);
     expect(await version()).toBe(newest);
-    expect(await columns("provider_delivery")).toEqual(["delivery_id", "received_at", "expires_at"]);
+    expect(await columns("provider_delivery")).toEqual(["delivery_id", "body_sha256", "received_at", "expires_at"]);
     expect((await columns("task_change")).at(-1)).toBe("nudged_at");
     expect((await columns("repo_link")).at(-1)).toBe("indexed_at");
     // The link and the change are as they were, and the delivery that migrated it was taken.
     const kept = await change(id) as any;
     expect(kept).toMatchObject({ task_id: task, provider_repo_id: repo, pr_number: 7, reviewed_commit_sha: REVIEWED });
     expect(kept.nudged_at).toBeGreaterThan(0);
-    expect(await inRoom(id, (sql) => sql.exec("SELECT provider_repo_id, status, indexed_at FROM repo_link").one())).toEqual({ provider_repo_id: repo, status: "ready", indexed_at: null });
+    // The new column starts empty, and the room's alarm may already have written its routing row and filled it in.
+    expect(await inRoom(id, (sql) => sql.exec("SELECT provider_repo_id, status FROM repo_link").one())).toEqual({ provider_repo_id: repo, status: "ready" });
     // It doesn't run twice.
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
     expect(await version()).toBe(newest);

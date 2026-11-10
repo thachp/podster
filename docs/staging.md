@@ -29,7 +29,7 @@ Run every `wrangler` command from the app folder named in its step, so it uses t
 
 ## First deploy
 
-This has been done once for staging, so it's kept here for rebuilding it, and as the outline for production. To ship a change, apply any new migrations, then run `npx wrangler deploy --env staging` from the app that changed, with the API first if both did.
+This has been done once for staging, so it's kept here for rebuilding it, and as the outline for production. To ship a change, apply any new migrations, then run `npx wrangler deploy --env staging` from the app that changed, with the API first if both did. Migrations always go first: for example, the API's webhook delivery route (M5 step 5) reads `repo_room_index`, so `0007_repo_room_index.sql` must be applied to `podster-api-staging` before that API is deployed, or the route fails closed.
 
 ### 1. Register the GitHub OAuth app
 

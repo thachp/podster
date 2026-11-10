@@ -59,7 +59,7 @@ The architect proposes the gate call, for the owner to review.
 | 3 | **Decisions in `crates/core` and `crates/policy`:** grant checks, `commit_sha` required on `submit_task` and `verify_task` for a linked task, `commit_changed`, and merge as its own state. Pure, with no I/O. | AC-31 is decided here, and AC-17's rule that approval alone never merges. **Built, 2026-11-10,** as pure decisions with their tests, checked locally only. Nothing calls them yet. **Granting is the room owner's alone:** an admin has room authority and not the repository's delegation. **Revoking** is the owner's, an organization admin's, or the holder's for their own. [What was built, the architect's rulings and what later steps own](#step-3-what-was-built) is below. |
 | 4 | **Provisioning:** room setup records a request; a job creates the repository, sets its protections and records the verified repository ID. Pending, ready, failed and uncertain states for the request, and ready, degraded and suspended for the link. An unknown outcome is a failed setup: nothing is adopted by name, and a retry uses a new server-generated name. | A failed setup blocks coding tasks in that room, not other work. **Owed here, from step 5's review:** provisioning owns `repo_room_index`. It writes a room's row when the link is made, repairs a row that's lost or held by another room, and removes the row when a link ends. Step 5 only writes the row once, from the room's alarm, and a room that loses to an existing row is marked and never retries, so a dead room's row can block its successor's webhooks until this step fixes it. The lookup never authorizes, so what's lost is nudges, and polling still observes state. |
 | 5 | **Webhooks:** the gateway verifies GitHub's signature and passes a normalized observation to the room's Durable Object, which records it with its observation time. A job polls when state looks stale. | A new public route on the gateway. It authenticates the sender and decides nothing. **Built, 2026-11-10, in part,** and checked locally only: the route, the signature check, the nudge and the routing lookup. **The job that polls isn't built,** because it reads GitHub, and no step before 6 holds a token to read with. Only the decision of when a change is stale and the hourly read cap are built, as pure functions nothing calls yet. It adds a room migration and a D1 migration. **A delivery passes only IDs, the event's kind and one commit onward, and writes only `nudged_at`.** The head, checks and merge state are read from GitHub by steps 6 to 8; the brief for this step listed more fields, and the narrower reading was ruled right. **Ruled by the architect, 2026-11-10:** recording a nudge is bookkeeping, not a command, so it needs no event, outbox row or idempotency record. The later read that records what GitHub says is a command, and commits state, event and outbox together. [What was built and what wasn't](#step-5-what-was-built) is below. |
-| 5b | **Grant and revoke commands:** the routes in `apps/api` that give and take back a `push` or `merge` grant on the room's repository, with their contract entries. They call step 3's decisions, and the removal and ownership commands call its two revocation decisions. | **Ruled by the architect on 2026-11-10:** its own step, before step 6, since step 6 can't issue a token without a grant. Person-facing only, with no agent tool. A contract PR, so it merges one at a time with the others. |
+| 5b | **Grant and revoke commands:** the routes in `apps/api` that give and take back a `push` or `merge` grant on the room's repository, with their contract entries. They call step 3's decisions, and the removal and ownership commands call its two revocation decisions. | **Ruled by the architect on 2026-11-10:** its own step, before step 6, since step 6 can't issue a token without a grant. Person-facing only, with no agent tool. A contract PR, so it merges one at a time with the others. **Built, 2026-11-10,** and checked locally only: give, take back and list grants, and both cascades. [What was built and the judgment calls](#step-5b-what-was-built) are below. |
 | 6 | **`get_repo_access`:** the private Rust API mints a token for one repository after rechecking the task and its run, the fixed deadline and budget, the agent's assignment and connection, room access, the exact repository and installation, the grant and the provider permissions. Renewal runs the same checks. | Tokens never reach events, logs, D1 or the gateway's storage. The room's Durable Object holds each one sealed for at most its hour, for revocation only, as ADR 0009 proposes. AC-27. This step adds the capability and its route to the contract. **Open ruling for this step:** whether `get_repo_access` takes an idempotency key. A stored answer would hold the token, which must rest nowhere but the sealed copy, and no key leaves a retry to the one-live-token rule. |
 | 7 | **`merge_task`:** the job rechecks authority, re-reads the pull request's base, head repository and head commit and refuses on any difference from the reviewed values, marks the reviewed commit, merges with its `sha` as a merge commit, confirms the default branch contains it, and records success or failure. A changed commit leads to a follow-up task, as decision 25 proposes. | Under ADR 0009's two rulesets, only the merge App can update the default branch. A retry reads the pull request's merged state, since a second merge call answers `200`. This step adds the capability and its route to the contract. **It must deliberately revisit AC-17's assertion in `e2e/journey.mjs`,** which fails today if any tool an agent sees is named for merge or deploy. A merge tool will exist from this step on. The property to keep is that approval alone never merges, and only an authorized `merge_task` does. That change gets a deeper review. **Order of checks:** the route must run policy's `authorize_merge`, which hides a task the caller can't see, before core's `check_merge_authority`, because core answers `task_not_linked` and `repo_not_ready` before it looks at the grant. The same holds for step 6 with `authorize_repo_access` and `decide_access`. |
 | 8 | **`get_task_release_status`:** checks and merge state, each with its own observation time. | Reports that no release exists; M6 adds releases. This step adds the capability and its route to the contract. |
@@ -204,6 +204,46 @@ Pure decisions in `crates/core` and `crates/policy`, with no I/O, no clock and n
 **Checked:** locally only, as the PR lists. Nothing ran against a deployment, so M5-11 and M5-16 don't count as passed.
 
 Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security-sensitive: a provisioning credential, a new public route, token issuing and merge. Each gets the deeper review the owner has already agreed for security-sensitive steps; anything deeper than that is asked first.
+
+### Step 5b: what was built
+
+Three person-only routes on the room's Durable Object, the two cascades, and their contract entries. No migration: step 2's `provider_grant` holds everything.
+
+**Built:**
+
+- **`POST /v1/workspaces/{ws}/repository/grants`, `grantRepositoryAction`:** `{ policy_version, principal_id, action, expires_at? }`.
+  - Only the room's owner, as a person whose owner authority holds. An admin gets `no_provider_delegation`, and anyone else in the room `not_allowed`.
+  - The grantee must be a current participant, `grantee_not_participant`, and not a public participant, `grantee_public`.
+  - With no link it answers `repo_not_linked`. A degraded or suspended link still takes a grant.
+  - Granting the same again changes nothing. A new expiry, an expired row or an earlier owner's row is revoked and replaced in the same transaction.
+  - Audited as `repo_grant.given`, which moves the policy version, and the participant is told.
+- **`DELETE /v1/workspaces/{ws}/repository/grants/{grant}`, `revokeRepositoryGrant`:** `{ policy_version }`.
+  - Allowed for the owner, a person in the room who administers its organization, or the holder for their own.
+  - A grant the caller may not see answers `grant_not_found`, as a missing one does. A second revocation changes nothing.
+  - Works in an archived room. Audited as `repo_grant.revoked`, and the holder is told.
+- **`GET /v1/workspaces/{ws}/repository/grants`, `listRepositoryGrants`:** the grants that aren't revoked.
+  - A human owner or admin sees all of them, and anyone else their own (`sees_grant`).
+  - `state` is `live`, `expired` or `stale`. It's for showing, and authorizes nothing.
+- **Cascades (rulings B and D).** Each runs in the command's own transaction, with an audit entry and an event for every row.
+  - Every removal runs through `remove_member`, including an agent's withdrawal and global disconnect, so each one ends the participant's grants (`member_removed`). The removed participant is told only of the removal.
+  - Handing the room over, and recovering it, end every grant the new owner didn't give (`owner_changed`). Recovery also ends what the former owner held, since they have no place in the room afterwards.
+- **Two policy additions**, since no decision covered them:
+  - `denied_change_name` names the two commands, so refusals are kept as denials.
+  - `can_see_event` shows a grant's events only to a human owner or admin, the holder and whoever acted, as `sees_grant` does for the list. A member who sees the whole room doesn't learn who holds a grant.
+
+**Judgment calls:**
+
+- **Agents call none of these, even to revoke their own grant.** That needs the owner or an organization's admin until an agent route exists.
+- **An organization's admin revokes only from inside the room.** One outside it recovers the room instead, which ends the former owner's grants. Meanwhile none of them counts, since the delegation holder is gone.
+- **Both commands take `policy_version`,** as every access change here does. Each audit entry moves it.
+- **The list is its own route, not part of the repository read.** That read is for people who see the whole room, and a grant's holder sees their own without that.
+- **`state` in the list takes the delegation holder from the room's record:** the owner, unless the room records that they left. A command takes it from the caller's resolved authority instead.
+- **An owner leaving their organization revokes no rows.** Ownership hasn't moved, and `check_grant` already refuses such grants as `grant_stale` until recovery ends them.
+- **A replay of a stored grant answer goes only to someone who may still grant.** A revocation's answer replays like any other command's.
+
+**Not built, and left to the steps named:** using a grant (tokens, step 6; merges, step 7), and the screens for grants (step 9(b)).
+
+**Checked:** the workspace's Rust tests, the API's and the gateway's suites, the contract check and the local journey, all locally. Nothing ran against a deployment.
 
 ## What needs the owner's yes
 

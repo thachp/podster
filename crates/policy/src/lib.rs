@@ -445,6 +445,8 @@ pub fn denied_change_name(method: &str, route: &[&str]) -> Option<&'static str> 
         ("POST", ["unarchive"]) => "room.unarchive",
         ("POST", ["owner", "transfer"]) => "owner.transfer",
         ("POST", ["owner", "recover"]) => "owner.recover",
+        ("POST", ["repository", "grants"]) => "repo_grant.give",
+        ("DELETE", ["repository", "grants", _]) => "repo_grant.revoke",
         _ => return None,
     })
 }
@@ -735,6 +737,10 @@ pub const TASK_PLAN_CHANGED: &str = "task.plan_changed";
 /// only about itself: someone else's would show who else is in the room.
 pub const NOTICES_ABOUT_SUBJECT: [&str; 3] = ["member.added", "role.invited", "role.claim_ended"];
 
+/// A repository grant's events. They follow who may see the grant, `repositories::sees_grant`, and not the member list: a
+/// human owner or admin, the grant's holder, and whoever gave or took it back.
+pub const REPO_GRANT_EVENTS: [&str; 2] = ["repo_grant.given", "repo_grant.revoked"];
+
 /// Whether this caller gets those notices. The ruling is about agents, so a limited person doesn't, for now.
 pub fn sees_notices_about_itself(caller: &Caller) -> bool {
     caller.kind == PrincipalKind::Agent
@@ -752,6 +758,9 @@ pub fn can_see_event(
 ) -> bool {
     if caller.role == Role::None {
         return false;
+    }
+    if task.is_none() && REPO_GRANT_EVENTS.contains(&kind) {
+        return is_human_admin(caller) || actor == caller.id || subject == Some(caller.id.as_str());
     }
     match task {
         Some(_) if kind == TASK_PLAN_CHANGED => sees_whole_room(caller),

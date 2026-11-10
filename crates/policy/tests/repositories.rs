@@ -703,3 +703,59 @@ fn denials_have_stable_names_and_count_as_refusals_of_authority() {
         assert!(!is_authority_refusal("task.merge", code), "{code}");
     }
 }
+
+#[test]
+fn a_grant_change_has_a_fixed_name_when_refused() {
+    assert_eq!(
+        denied_change_name("POST", &["repository", "grants"]),
+        Some("repo_grant.give")
+    );
+    assert_eq!(
+        denied_change_name("DELETE", &["repository", "grants", "pgr_1"]),
+        Some("repo_grant.revoke")
+    );
+    // Reading grants isn't a change.
+    assert_eq!(denied_change_name("GET", &["repository", "grants"]), None);
+    assert_eq!(
+        denied_change_name("POST", &["repository", "grants", "pgr_1"]),
+        None
+    );
+}
+
+#[test]
+fn a_grants_events_follow_who_may_see_the_grant() {
+    for kind in REPO_GRANT_EVENTS {
+        // A human owner or admin, the holder and whoever acted see it.
+        for who in [
+            caller("own", Person, Role::Owner),
+            caller("adm", Person, Role::Admin),
+            caller("holder", Agent, Role::Guest),
+            caller("giver", Person, Role::Member),
+        ] {
+            assert!(
+                can_see_event(&who, kind, "giver", None, Some("holder")),
+                "{kind} {}",
+                who.id
+            );
+        }
+        // Someone who sees the whole room doesn't learn who holds a grant, nor does an agent stored as an admin.
+        for who in [
+            caller("mem", Agent, Role::Member),
+            caller("mem", Person, Role::Member),
+            caller("agt", Agent, Role::Admin),
+        ] {
+            assert!(
+                !can_see_event(&who, kind, "giver", None, Some("holder")),
+                "{kind} {}",
+                who.id
+            );
+        }
+        assert!(!can_see_event(
+            &caller("holder", Agent, Role::None),
+            kind,
+            "giver",
+            None,
+            Some("holder")
+        ));
+    }
+}

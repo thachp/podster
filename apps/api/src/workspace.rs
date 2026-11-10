@@ -1646,6 +1646,7 @@ fn remove_member(
     )?;
     roles::withdraw_role_invites(sql, principal)?;
     exec(sql, "UPDATE member SET revoked_at = ?, revocation_reason = ?, owner_consented_at = NULL WHERE principal_id = ?", vec![now.into(), reason.into(), principal.into()])?;
+    repositories::end_grants_of_removed(sql, &actor.id, actor_kind, principal, now)?;
     apply_departure_rules(sql, actor, principal, now)?;
     objects::drop_uploads_of(sql, &actor.id, actor_kind, principal, now)?;
     end_invitations_of(sql, &actor.id, actor_kind, principal, reason, now)?;
@@ -2019,6 +2020,7 @@ fn handle_transfer_owner(
         .and_then(|room| room["owner_since"].as_i64())
         .unwrap_or(now);
     set_owner(sql, &to, joined)?;
+    repositories::end_grants_after_owner_change(sql, &caller.id, kind_name(caller), &to, now)?;
     exec(
         sql,
         "INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at) VALUES (?, 'person', ?, 'admin', ?, ?)",
@@ -2083,6 +2085,11 @@ fn apply_recovery(
     }
     let joined = joined_org(target_member, &to, &org)?;
     set_owner(sql, &to, joined)?;
+    repositories::end_grants_after_owner_change(sql, actor, "person", &to, now)?;
+    if to != former {
+        // The former owner has no place here now, so what they held ends too.
+        repositories::end_grants_of_removed(sql, actor, "person", &former, now)?;
+    }
     if to != former {
         queue_index(sql, &former, &org, None, now)?;
     }
@@ -3956,6 +3963,8 @@ impl Workspace {
                 // An archived public room stays readable (decision 152), so it can still be made private. Publishing one is
                 // refused by `podster_policy::public::decide_publish`.
                 | (Method::Put, ["visibility"])
+                // Taking a repository grant back only lessens authority, as a removal does.
+                | (Method::Delete, ["repository", "grants", _])
                 | (
                     Method::Delete,
                     ["members" | "organizations" | "invitations", _]
@@ -3988,6 +3997,7 @@ impl Workspace {
                 ["tasks", id] => queries::get_task(&sql, &who, id, false),
                 ["tasks", id, "messages"] => queries::list_messages(&sql, &who, id, &url),
                 ["repository"] => repositories::read(&sql, &who),
+                ["repository", "grants"] => repositories::read_grants(&sql, &who),
                 ["events"] => queries::list_events(&sql, &who.caller, &url),
                 ["audit"] => queries::list_audit(&sql, &who.caller, &url),
                 _ => Err(ApiError::not_found()),
@@ -4501,6 +4511,36 @@ impl Workspace {
                 test_fail,
                 move |sql, who, now| handle_revoke_member(sql, &who.caller, &target, &body, now),
             ),
+            // A stored grant is replayed only to someone who may still give one.
+            (Method::Post, ["repository", "grants"]) => self.command_checked(
+                &identity,
+                key,
+                hash,
+                stops_when_archived,
+                test_fail,
+                |_: &SqlStorage, who: &Participant| repositories::may_still_grant(&who.caller),
+                move |sql, who, now| repositories::handle_grant(sql, &who.caller, &body, now),
+            ),
+            (Method::Delete, ["repository", "grants", grant]) => {
+                let (grant, admin_orgs) = ((*grant).to_string(), identity.admin_orgs.clone());
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| {
+                        repositories::handle_revoke(
+                            sql,
+                            &who.caller,
+                            &admin_orgs,
+                            &grant,
+                            &body,
+                            now,
+                        )
+                    },
+                )
+            }
             _ => Err(ApiError::not_found()),
         }
     }

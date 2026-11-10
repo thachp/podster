@@ -32,12 +32,17 @@ async function api(who: Who, method: string, path: string, body?: unknown, optio
   return { status: res.status, body: parsed, code: parsed?.error?.code as string | undefined, text };
 }
 
-type Call = { method: string; path: string; body: any; auth: string };
+type Call = { method: string; path: string; body: any; auth: string; scope?: "all" | number[] };
 const fake = async (path: string, body?: unknown) => (await fetch(`https://github-fake.example.com${path}`, { method: "POST", body: JSON.stringify(body ?? {}) })).json() as Promise<any>;
-const github = async () => (await fake("/state")) as { calls: Call[]; repos: any[] };
+const github = async () => (await fake("/state")) as { calls: Call[]; repos: any[]; liveTokens: ("all" | number[])[] };
+const TOKENS = "/access_tokens";
+const REVOKE = "/installation/token";
+const tokenCall = (c: Call) => c.path.endsWith(TOKENS) || c.path === REVOKE;
+/** Anything that would delete or edit at GitHub. A token revoking itself isn't one. */
+const destructive = (seen: Call[]) => seen.filter((c) => (c.method === "DELETE" || c.method === "PATCH") && c.path !== REVOKE);
 const calls = async () => (await github()).calls.map((c) => `${c.method} ${c.path}`);
 /** Calls that change something at GitHub. */
-const writes = async () => (await github()).calls.filter((c) => c.method !== "GET" && !c.path.endsWith("/access_tokens"));
+const writes = async () => (await github()).calls.filter((c) => c.method !== "GET" && !tokenCall(c));
 
 beforeAll(async () => {
   key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
@@ -52,12 +57,30 @@ const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(stub(i
 const delegate = (org: string, granted = true, by: Who = OPERATOR) => api(by, "PUT", `/v1/orgs/${org}/provisioning-delegation`, { granted });
 
 let orgs = 0;
-/** A room in an organization of its own, whose owner is `owner`. `delegated` gives the organization the delegation. `script` resets the fake. */
-async function room(options: { delegated?: boolean; script?: object } = {}) {
+/**
+ * Waits until the API knows the organization has a room. In a deployment the organization's own object records each room
+ * as it's made. Test builds skip that record, since tests share organizations, so here it's the listing the room's alarm writes.
+ */
+async function known(org: string, id: string) {
+  for (let i = 0; i < 80; i++) {
+    if (await BINDINGS.DB.prepare("SELECT 1 FROM membership_index WHERE org_id = ? LIMIT 1").bind(org).first()) return;
+    await runDurableObjectAlarm(stub(id));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("the organization never showed in the listing");
+}
+/**
+ * A room in an organization of its own, whose owner is `owner`. `delegated` gives the organization the delegation.
+ * `script` resets the fake. Managed repositories are switched on for this room alone, unless `switchedOn` is false: the
+ * Worker's variable is unset here, as in every deployment.
+ */
+async function room(options: { delegated?: boolean; script?: object; switchedOn?: boolean } = {}) {
   await fake("/reset", options.script ?? {});
   const org = `org_pv_${++orgs}_${crypto.randomUUID().slice(0, 8)}`;
   const owner: Who = { id: `per_pv_owner_${orgs}`, kind: "person", org, adminOrgs: [org] };
   const id: string = (await api(owner, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+  if (options.switchedOn !== false) await inRoom(id, (sql) => sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)"));
+  await known(org, id);
   if (options.delegated !== false) expect((await delegate(org)).status).toBe(200);
   return { id, org, owner };
 }
@@ -73,7 +96,11 @@ async function memberAgent(r: { id: string; org: string; owner: Who }) {
 }
 const ask = (r: { id: string; owner: Who }, body: unknown = { name: "engineering", visibility: "public" }, options: { key?: string | null; who?: Who } = {}) =>
   api(options.who ?? r.owner, "POST", `/v1/workspaces/${r.id}/repository`, body, options);
-const retry = (r: { id: string; owner: Who }, who?: Who) => api(who ?? r.owner, "POST", `/v1/workspaces/${r.id}/repository/retry`, {});
+/** A retry, as if the wait since the last run were over. `soon` leaves the wait as the room set it. */
+const retry = async (r: { id: string; owner: Who }, who?: Who, soon = false) => {
+  if (!soon) await inRoom(r.id, (sql) => sql.exec("UPDATE repo_request SET retry_after = NULL"));
+  return api(who ?? r.owner, "POST", `/v1/workspaces/${r.id}/repository/retry`, {});
+};
 const read = async (r: { id: string; owner: Who }) => (await api(r.owner, "GET", `/v1/workspaces/${r.id}/repository`)).body as { request: any; repository: any };
 /** Lets the room's alarm run the job until the request is no longer pending. */
 async function settled(r: { id: string; owner: Who }) {
@@ -93,6 +120,13 @@ describe("the organization's provisioning delegation", () => {
   it("is given and taken back by a Podster operator, and nobody else", async () => {
     const org = `org_pv_d_${crypto.randomUUID().slice(0, 8)}`;
     const admin: Who = { id: "per_pv_d_admin", kind: "person", org, adminOrgs: [org] };
+    // An organization the API has never seen a room of can't be delegated to, by anyone.
+    const unknown = await api(OPERATOR, "PUT", `/v1/orgs/${org}/provisioning-delegation`, { granted: true });
+    expect([unknown.status, unknown.code]).toEqual([404, "organization_not_found"]);
+    expect((await api(OPERATOR, "PUT", `/v1/orgs/${org}/provisioning-delegation`, { granted: false })).code).toBe("organization_not_found");
+    const made = await api(admin, "POST", "/v1/workspaces", { name: "Engineering" });
+    expect(made.status).toBe(200);
+    await known(org, made.body.id);
     const member: Who = { id: "per_pv_d_member", kind: "person", org, adminOrgs: [] };
     const path = `/v1/orgs/${org}/provisioning-delegation`;
     // Nobody has given it.
@@ -119,6 +153,12 @@ describe("the organization's provisioning delegation", () => {
     const log = await runInDurableObject(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(org)), (_: any, state: any) => state.storage.sql.exec("SELECT provider, granted, set_by FROM org_provider_delegation_log ORDER BY seq").toArray());
     expect(log).toEqual([{ provider: "github", granted: 1, set_by: OPERATOR.id }, { provider: "github", granted: 0, set_by: OPERATOR.id }]);
     expect((await api(OPERATOR, "GET", "/v1/orgs/has%20space/provisioning-delegation")).status).toBe(404);
+    // And in the operators' own record, beside their other actions.
+    const actions = await runInDurableObject(BINDINGS.MODERATION.get(BINDINGS.MODERATION.idFromName("moderation")), (_: any, state: any) => state.storage.sql.exec("SELECT operator, subject_kind, action, outcome FROM operator_action WHERE subject = ? ORDER BY seq", org).toArray());
+    expect(actions).toEqual([
+      { operator: OPERATOR.id, subject_kind: "organization", action: "provisioning_delegation.granted", outcome: "done" },
+      { operator: OPERATOR.id, subject_kind: "organization", action: "provisioning_delegation.revoked", outcome: "done" },
+    ]);
   });
 });
 
@@ -157,6 +197,11 @@ describe("asking for the room's repository", () => {
     }
     for (const name of ["", ".github", "Engineering", "has space", "a/b", "-lead", "x".repeat(65), "café", 5, null]) {
       expect((await ask(r, { name, visibility: "public" })).code, String(name)).toBe("invalid_argument");
+    }
+    // Names that would read as Podster's own in the organization every room shares.
+    for (const name of ["podster", "podsterdev", "security", "admin", "api", "www", "docs", "status", "support", "billing", "legal", "abuse", "podster-api", "podster-"]) {
+      const reserved = await ask(r, { name, visibility: "public" });
+      expect([reserved.status, reserved.code], name).toEqual([409, "name_reserved"]);
     }
     for (const visibility of ["", "internal", "PUBLIC", null, true]) expect((await ask(r, { name: "engineering", visibility })).code).toBe("invalid_argument");
     expect((await ask(r, { name: "engineering" })).code).toBe("invalid_argument");
@@ -209,14 +254,22 @@ describe("the provisioning job", () => {
     const id = made.id;
     const readBack = [`GET /repositories/${id}`, `GET /repositories/${id}/branches/main`, `GET /repositories/${id}/actions/permissions`, `GET /repositories/${id}/rulesets`];
     const two = made.rulesets.map((x: any) => `GET /repositories/${id}/rulesets/${x.id}`);
+    const mint = `POST /app/installations/${GH.installationId}/access_tokens`;
     expect(seen.map((c) => `${c.method} ${c.path}`)).toEqual([
-      `POST /app/installations/${GH.installationId}/access_tokens`,
-      `POST /orgs/${GH.orgLogin}/repos`,
-      ...readBack,
+      // The installation's own token, for the creation call alone, and revoked as soon as it's answered.
+      mint, `POST /orgs/${GH.orgLogin}/repos`, `DELETE ${REVOKE}`,
+      // A token for this one repository, for everything after, revoked when the job ends.
+      mint, ...readBack,
       `PUT /repositories/${id}/actions/permissions`, `POST /repositories/${id}/rulesets`, `POST /repositories/${id}/rulesets`,
       ...readBack, ...two,
+      `DELETE ${REVOKE}`,
     ]);
-    expect(seen.map((c) => c.auth)).toEqual(["app", ...seen.slice(1).map(() => "token")]);
+    expect(seen.map((c) => c.auth)).toEqual(seen.map((c) => (c.path.endsWith(TOKENS) ? "app" : "token")));
+    expect(seen[0].body).toBeNull();
+    expect(seen[3].body).toEqual({ repository_ids: [id] });
+    expect(seen.slice(1, 3).map((c) => c.scope)).toEqual(["all", "all"]);
+    expect(seen.slice(4).map((c) => c.scope)).toEqual(seen.slice(4).map(() => [id]));
+    expect((await github()).liveTokens).toEqual([]);
     expect(seen[1].body).toEqual({ name: "engineering", private: false, auto_init: true });
     // The repository as setup left it: Actions off, and exactly the two rulesets of ADR 0009.
     expect(made.actionsEnabled).toBe(false);
@@ -282,6 +335,8 @@ describe("the provisioning job", () => {
     const archived = await room();
     await pending(archived.id, archived.owner.id);
     await inRoom(archived.id, (sql) => sql.exec("UPDATE workspace SET status = 'archived'"));
+    // Any command arms the room's alarm, refused or not.
+    await api(archived.owner, "PUT", `/v1/workspaces/${archived.id}/name`, { name: "Engineering two", policy_version: 1 });
     await runDurableObjectAlarm(stub(archived.id));
     for (let i = 0; i < 40 && (await rowsOf(archived.id, "repo_request"))[0].state === "pending"; i++) { await runDurableObjectAlarm(stub(archived.id)); await new Promise((x) => setTimeout(x, 50)); }
     expect((await rowsOf(archived.id, "repo_request"))[0]).toMatchObject({ state: "failed", reason: "room_archived" });
@@ -316,7 +371,7 @@ describe("the provisioning job", () => {
       expect(ready.repository.provider_repo_id).toBe(linked.id);
       expect(orphans).not.toContain(linked.id);
       for (const orphan of orphans) expect(seen.some((c) => c.path.includes(`/repositories/${orphan}`)), mode).toBe(false);
-      expect(seen.filter((c) => c.method === "DELETE" || c.method === "PATCH")).toEqual([]);
+      expect(destructive(seen)).toEqual([]);
       expect(seen.find((c) => c.path.endsWith("/repos"))?.body.name).toBe(attempts[1].provider_name);
       expect(repos.filter((x) => orphans.includes(x.id)).every((x) => x.rulesets.length === 0 && x.actionsEnabled)).toBe(true);
     }
@@ -367,11 +422,17 @@ describe("the provisioning job", () => {
     expect((await settled(forbidden)).request).toMatchObject({ state: "failed", reason: "provider_refused" });
     expect((await github()).repos).toEqual([]);
 
-    // No token, no creation call: nothing can have been made.
+    // No token, no creation call: nothing can have been made, and the name wasn't sent, so it isn't burned.
     const noToken = await room({ script: { token: 401 } });
     await ask(noToken);
-    expect((await settled(noToken)).request).toMatchObject({ state: "failed", reason: "provider_refused" });
+    expect((await settled(noToken)).request).toMatchObject({ state: "failed", reason: "token_refused" });
     expect(await calls()).toEqual([`POST /app/installations/${GH.installationId}/access_tokens`]);
+    expect((await rowsOf(noToken.id, "repo_request_attempt")).map((a) => [a.attempt, a.provider_name, a.outcome])).toEqual([[1, "engineering", "not_sent"]]);
+    await fake("/script", { token: 201 });
+    await retry(noToken);
+    expect((await settled(noToken)).request.state).toBe("ready");
+    expect((await rowsOf(noToken.id, "repo_request_attempt")).map((a) => [a.attempt, a.provider_name, a.outcome])).toEqual([[1, "engineering", "not_sent"], [2, "engineering", "created"]]);
+    expect((await github()).repos.map((x) => x.name)).toEqual(["engineering"]);
 
     // A repository that comes back under another owner isn't Podster's, and its ID isn't kept.
     const elsewhere = await room({ script: { create: ["wrong_owner"] } });
@@ -447,7 +508,7 @@ describe("the provisioning job", () => {
     // Every call went to the configured organization or to a repository it made, and none deleted or edited anything.
     const { calls: seen } = await github();
     expect(seen.filter((c) => c.path.startsWith("/orgs/")).map((c) => c.path)).toEqual([`/orgs/${GH.orgLogin}/repos`]);
-    expect(seen.filter((c) => c.method === "DELETE" || c.method === "PATCH")).toEqual([]);
+    expect(destructive(seen)).toEqual([]);
     // An agent can't ask, retry or read, whatever state setup is in.
     expect((await retry(r, inside)).status).toBe(403);
     expect((await api(inside, "GET", `/v1/workspaces/${r.id}/repository`)).status).toBe(403);
@@ -464,12 +525,166 @@ describe("the provisioning job", () => {
     await delegate(r.org, false);
     expect((await retry(r)).code).toBe("not_delegated");
     await delegate(r.org, true);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_request SET retry_after = NULL"));
     const again = await api(r.owner, "POST", `/v1/workspaces/${r.id}/repository/retry`, {}, { key: "pv-retry" });
     expect(again.body.request.state).toBe("pending");
     // A repeat of the same retry is the same answer, and doesn't move the attempt on twice.
     expect((await api(r.owner, "POST", `/v1/workspaces/${r.id}/repository/retry`, {}, { key: "pv-retry" })).body).toEqual(again.body);
     expect((await rowsOf(r.id, "repo_request"))[0].attempt).toBe(2);
     expect((await settled(r)).request.state).toBe("ready");
+  });
+
+  it("is off unless the switch is on, for the commands and for the job", async () => {
+    // The Worker's variable is unset in the test runtime, as in every deployment. A room no test switched on is off.
+    const r = await room({ switchedOn: false });
+    const off = await ask(r);
+    expect([off.status, off.code]).toEqual([404, "not_found"]);
+    expect(await rowsOf(r.id, "repo_request")).toEqual([]);
+    // Still for the owner alone: nobody else learns the switch's state from the answer.
+    expect((await ask(r, undefined, { who: STRANGER })).status).toBe(404);
+    // A request recorded while it was on doesn't run once it's off, and can't be retried.
+    await inRoom(r.id, (sql) => sql.exec("INSERT INTO repo_request (id, state, name, visibility, attempt, provider_name, requested_by, requested_at, updated_at) VALUES ('rr_t', 'pending', 'engineering', 'public', 1, 'engineering', ?, 1, 1)", r.owner.id));
+    expect((await api(r.owner, "PUT", `/v1/workspaces/${r.id}/name`, { name: "Engineering two", policy_version: (await api(r.owner, "GET", `/v1/workspaces/${r.id}`)).body.policy_version })).status).toBe(200);
+    expect((await settled(r)).request).toMatchObject({ state: "failed", reason: "managed_repositories_off" });
+    expect((await retry(r)).status).toBe(404);
+    expect((await github()).calls).toEqual([]);
+    expect(await rowsOf(r.id, "repo_request_attempt")).toEqual([]);
+  });
+
+  it("is set nowhere in the Worker's configuration", () => {
+    // This reads the configuration file. A variable set on the deployed Worker by hand wouldn't show here.
+    const config = JSON.parse(BINDINGS.TEST_WRANGLER.replace(/^\s*\/\/.*$/gm, ""));
+    expect(config.vars?.MANAGED_REPOSITORIES).toBeUndefined();
+    for (const [name, environment] of Object.entries<any>(config.env)) expect(environment.vars?.MANAGED_REPOSITORIES, name).toBeUndefined();
+    expect(BINDINGS.TEST_WRANGLER).not.toContain("MANAGED_REPOSITORIES");
+    // Nor is any of provisioning's configuration, or a key.
+    for (const name of ["GITHUB_ORG_LOGIN", "GITHUB_ORG_ID", "GITHUB_PROVISION_APP_ID", "GITHUB_PROVISION_INSTALLATION_ID", "GITHUB_MERGE_APP_ID", "GITHUB_PROVISION_APP_KEY"]) expect(BINDINGS.TEST_WRANGLER, name).not.toContain(name);
+    expect(BINDINGS.MANAGED_REPOSITORIES).toBeUndefined();
+  });
+
+  it("holds no token once it's done, however it ends, and never uses the installation's own token past the creation call", async () => {
+    const endings: [string, object, string][] = [
+      ["creation refused", { create: ["forbidden"] }, "provider_refused"],
+      ["creation's answer lost", { create: ["lost"] }, "creation_outcome_unknown"],
+      ["the read-back failed", { readRepo: 500 }, "read_back_failed"],
+      ["a setup call was refused", { ruleset: "forbidden" }, "setup_call_failed"],
+      ["the read-back wasn't right", { ruleset: "inactive" }, "ruleset_inactive"],
+    ];
+    for (const [what, script, reason] of endings) {
+      const r = await room({ script });
+      await ask(r);
+      expect((await settled(r)).request.reason, what).toBe(reason);
+      const { calls: seen, liveTokens } = await github();
+      expect(liveTokens, what).toEqual([]);
+      // The broad token made one call, the creation, and was revoked straight after it.
+      const broad = seen.filter((c) => c.scope === "all").map((c) => `${c.method} ${c.path}`);
+      expect(broad, what).toEqual([`POST /orgs/${GH.orgLogin}/repos`, `DELETE ${REVOKE}`]);
+      // As many revocations as tokens.
+      expect(seen.filter((c) => c.path === REVOKE).length, what).toBe(seen.filter((c) => c.path.endsWith(TOKENS)).length);
+    }
+    // A retry on a held repository never mints the broad token at all.
+    const held = await room({ script: { readRepo: 500 } });
+    await ask(held);
+    await settled(held);
+    await fake("/script", { readRepo: null });
+    await fake("/forget-calls");
+    await retry(held);
+    expect((await settled(held)).request.state).toBe("ready");
+    const after = await github();
+    expect(after.calls.filter((c) => c.scope === "all")).toEqual([]);
+    expect(after.calls.find((c) => c.path.endsWith(TOKENS))?.body).toEqual({ repository_ids: [after.repos[0].id] });
+    expect(after.liveTokens).toEqual([]);
+  });
+
+  it("finishes all the same when a token can't be revoked, and says so by ID", async () => {
+    const lines: string[] = [];
+    for (const level of ["log", "error"] as const) vi.spyOn(console, level).mockImplementation((...args: unknown[]) => void lines.push(args.map(String).join(" ")));
+    const r = await room({ script: { revoke: 500 } });
+    await ask(r);
+    expect((await settled(r)).request.state).toBe("ready");
+    const said = lines.filter((line) => line.includes("provision.token_not_revoked")).map((line) => JSON.parse(line));
+    expect(said).toEqual([{ at: "provision.token_not_revoked", room: r.id, request: expect.stringMatching(/^rr_/) }]);
+    // What's left alive is the narrowed token and the broad one, each of which was asked to go.
+    expect((await github()).calls.filter((c) => c.path === REVOKE)).toHaveLength(2);
+    for (const line of lines) expect(line).not.toContain("ghs_fake_");
+  });
+
+  it("ends uncertain, never failed, when anything goes wrong after the creation call and before its outcome is on record", async () => {
+    const r = await room();
+    // The room can't record that the call created something: as if it broke between GitHub's 201 and its own write.
+    await inRoom(r.id, (sql) => sql.exec("CREATE TRIGGER lose_created BEFORE UPDATE ON repo_request_attempt WHEN NEW.outcome = 'created' BEGIN SELECT RAISE(ABORT, 'lost'); END"));
+    await ask(r);
+    const ended = await settled(r);
+    // A repository exists at GitHub, and the room holds no ID for it. That is unknown, not failed.
+    expect(ended.request).toMatchObject({ state: "uncertain", reason: "creation_outcome_unknown" });
+    expect(ended.repository).toBeNull();
+    expect((await rowsOf(r.id, "repo_request"))[0].provider_repo_id).toBeNull();
+    // The attempt keeps the name an operator would look for.
+    expect((await rowsOf(r.id, "repo_request_attempt")).map((a) => [a.attempt, a.provider_name, a.outcome])).toEqual([[1, "engineering", "uncertain"]]);
+    const { repos, liveTokens } = await github();
+    expect(repos.map((x) => x.name)).toEqual(["engineering"]);
+    expect(liveTokens).toEqual([]);
+    // A retry goes out under a new name, and the orphan is left alone.
+    await inRoom(r.id, (sql) => sql.exec("DROP TRIGGER lose_created"));
+    await retry(r);
+    const ready = await settled(r);
+    expect(ready.request.state).toBe("ready");
+    expect(ready.repository.provider_repo_id).not.toBe(repos[0].id);
+  });
+
+  it("leaves a request it can't even end alone for a while, and never sends the creation call again", async () => {
+    const r = await room();
+    // Nothing about the attempt can be written at all, so the job can't record how it ended.
+    await inRoom(r.id, (sql) => sql.exec("CREATE TRIGGER stuck BEFORE UPDATE ON repo_request_attempt BEGIN SELECT RAISE(ABORT, 'stuck'); END"));
+    await ask(r);
+    for (let i = 0; i < 12; i++) { await runDurableObjectAlarm(stub(r.id)); await new Promise((x) => setTimeout(x, 50)); }
+    const first = (await github()).calls.length;
+    expect((await github()).calls.filter((c) => c.path.endsWith("/repos"))).toHaveLength(1);
+    expect((await read(r)).request.state).toBe("pending");
+    // The alarm comes back, and the job stays away: nothing more goes to GitHub inside the wait.
+    for (let i = 0; i < 12; i++) { await runDurableObjectAlarm(stub(r.id)); await new Promise((x) => setTimeout(x, 50)); }
+    expect((await github()).calls.length).toBe(first);
+    expect((await rowsOf(r.id, "repo_request"))[0].runs).toBe(1);
+    // Let it end, so it isn't still pending when the next test resets the fake.
+    await inRoom(r.id, (sql) => { sql.exec("DROP TRIGGER stuck"); sql.exec("UPDATE repo_request SET state = 'uncertain', reason = 'creation_outcome_unknown'"); });
+  });
+
+  it("makes a retry wait, longer each time, and takes no more after the fifth run", async () => {
+    const r = await room({ script: { create: ["forbidden"] } });
+    await ask(r);
+    const before = Date.now();
+    await settled(r);
+    const [first] = await rowsOf(r.id, "repo_request");
+    expect(first.runs).toBe(1);
+    // A minute after the first run.
+    expect(first.retry_after).toBeGreaterThanOrEqual(before + 60_000);
+    expect(first.retry_after).toBeLessThanOrEqual(Date.now() + 60_000);
+    const soon = await retry(r, undefined, true);
+    expect([soon.status, soon.code]).toEqual([429, "retry_too_soon"]);
+    expect((await rowsOf(r.id, "repo_request"))[0].state).toBe("failed");
+    // Once the wait is over the retry is taken, and the next wait is twice as long.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_request SET retry_after = ?", Date.now() - 1));
+    expect((await retry(r, undefined, true)).status).toBe(200);
+    const again = Date.now();
+    await settled(r);
+    const [second] = await rowsOf(r.id, "repo_request");
+    expect(second.runs).toBe(2);
+    expect(second.retry_after).toBeGreaterThanOrEqual(again + 120_000);
+    // Three more runs, and that's all a room gets.
+    for (let run = 3; run <= 5; run++) {
+      expect((await retry(r)).status, String(run)).toBe(200);
+      await settled(r);
+      expect((await rowsOf(r.id, "repo_request"))[0].runs).toBe(run);
+    }
+    const over = await retry(r);
+    expect([over.status, over.code]).toEqual([409, "retry_limit_reached"]);
+    // Waiting doesn't help, and nothing went to GitHub for the refused retry.
+    await fake("/forget-calls");
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_request SET retry_after = 0"));
+    expect((await retry(r, undefined, true)).code).toBe("retry_limit_reached");
+    await runDurableObjectAlarm(stub(r.id));
+    expect((await github()).calls).toEqual([]);
+    expect((await rowsOf(r.id, "repo_request_attempt")).map((a) => a.attempt)).toEqual([1, 2, 3, 4, 5]);
   });
 
   it("takes a routing row from a room that says the repository isn't its own, and leaves one whose room says it is", async () => {

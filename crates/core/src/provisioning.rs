@@ -13,6 +13,93 @@ pub const DEFAULT_BRANCH_REF: &str = "~DEFAULT_BRANCH";
 /// How many hex digits the server adds to a name on a retry.
 pub const RETRY_SUFFIX_DIGITS: usize = 6;
 
+/// How many times setup may run for one room's request: the first run and four retries. Past that a retry is refused
+/// until an operator resets it, which isn't built yet.
+pub const MAX_SETUP_RUNS: i64 = 5;
+/// The wait before a retry is taken: a minute after the first run, doubling, up to an hour.
+pub const RETRY_WAIT_MIN_MS: i64 = 60 * 1000;
+pub const RETRY_WAIT_MAX_MS: i64 = 60 * 60 * 1000;
+/// When the job itself can't finish, the alarm comes back for it after 5 seconds, doubling, up to 5 minutes.
+pub const JOB_BACKOFF_MIN_MS: i64 = 5 * 1000;
+pub const JOB_BACKOFF_MAX_MS: i64 = 5 * 60 * 1000;
+
+/// Names nobody may ask for in an organization every room shares: ones that would read as Podster's own, or as the
+/// organization's own pages. Proposed, and listed in the M5 plan.
+pub const RESERVED_NAMES: [&str; 12] = [
+    "podster",
+    "podsterdev",
+    "security",
+    "admin",
+    "api",
+    "www",
+    "docs",
+    "status",
+    "support",
+    "billing",
+    "legal",
+    "abuse",
+];
+/// A name starting with this would read as one of Podster's own repositories.
+pub const RESERVED_PREFIX: &str = "podster-";
+
+/// Whether a name is held back, whatever its case. A name starting with a dot is too, though `valid_repo_name` already
+/// refuses those.
+pub fn reserved_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with('.')
+        || lower.starts_with(RESERVED_PREFIX)
+        || RESERVED_NAMES.contains(&lower.as_str())
+}
+
+/// How long after run number `runs` ended a retry must wait.
+pub fn retry_wait_ms(runs: i64) -> i64 {
+    let doublings = (runs - 1).clamp(0, 16) as u32;
+    RETRY_WAIT_MIN_MS
+        .checked_shl(doublings)
+        .map_or(RETRY_WAIT_MAX_MS, |wait| {
+            wait.clamp(RETRY_WAIT_MIN_MS, RETRY_WAIT_MAX_MS)
+        })
+}
+
+/// Why a retry isn't taken yet, or any more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryHeld {
+    /// `retry_limit_reached`: setup has run as often as it may.
+    LimitReached,
+    /// `retry_too_soon`: the wait since the last run isn't over.
+    TooSoon,
+}
+
+impl RetryHeld {
+    pub fn code(self) -> &'static str {
+        match self {
+            RetryHeld::LimitReached => "retry_limit_reached",
+            RetryHeld::TooSoon => "retry_too_soon",
+        }
+    }
+}
+
+/// Whether a retry may be taken now: `runs` is how often setup has run, and `retry_after` when the last run said the
+/// next may start. The limit is checked first, since no wait ends it.
+pub fn retry_allowed(runs: i64, retry_after: Option<i64>, now: i64) -> Result<(), RetryHeld> {
+    if runs >= MAX_SETUP_RUNS {
+        Err(RetryHeld::LimitReached)
+    } else if retry_after.is_some_and(|after| now < after) {
+        Err(RetryHeld::TooSoon)
+    } else {
+        Ok(())
+    }
+}
+
+/// How long the alarm stays away after the job failed to finish `failures` times in a row.
+pub fn job_backoff_ms(failures: u32) -> i64 {
+    JOB_BACKOFF_MIN_MS
+        .checked_shl(failures.saturating_sub(1).min(16))
+        .map_or(JOB_BACKOFF_MAX_MS, |wait| {
+            wait.clamp(JOB_BACKOFF_MIN_MS, JOB_BACKOFF_MAX_MS)
+        })
+}
+
 /// How a creation call ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Creation {
@@ -320,6 +407,82 @@ mod tests {
             actions_enabled: Some(false),
             rulesets: vec![review(), update()],
         }
+    }
+
+    #[test]
+    fn names_that_would_read_as_podsters_own_are_held_back_whatever_their_case() {
+        for name in RESERVED_NAMES {
+            assert!(reserved_name(name), "{name}");
+            assert!(reserved_name(&name.to_ascii_uppercase()), "{name}");
+        }
+        for name in [
+            "podster-api",
+            "Podster-Web",
+            "PODSTER-",
+            ".github",
+            ".well-known",
+            "Admin",
+            "WWW",
+        ] {
+            assert!(reserved_name(name), "{name}");
+        }
+        for name in [
+            "engineering",
+            "podsters",
+            "my-podster",
+            "apis",
+            "administer",
+            "docs-site",
+            "security-review",
+            "a",
+        ] {
+            assert!(!reserved_name(name), "{name}");
+        }
+        // Every reserved name is otherwise one a repository could have, so the list is what refuses it.
+        for name in RESERVED_NAMES {
+            assert!(crate::repositories::valid_repo_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_retry_waits_longer_each_time_and_stops_at_the_fifth_run() {
+        assert_eq!(retry_wait_ms(1), 60_000);
+        assert_eq!(retry_wait_ms(2), 120_000);
+        assert_eq!(retry_wait_ms(4), 480_000);
+        assert_eq!(retry_wait_ms(7), RETRY_WAIT_MAX_MS);
+        assert_eq!(retry_wait_ms(0), 60_000);
+        assert_eq!(retry_wait_ms(i64::MAX), RETRY_WAIT_MAX_MS);
+        assert_eq!(retry_allowed(1, None, 0), Ok(()));
+        assert_eq!(retry_allowed(1, Some(1_000), 999), Err(RetryHeld::TooSoon));
+        assert_eq!(retry_allowed(1, Some(1_000), 1_000), Ok(()));
+        assert_eq!(
+            retry_allowed(MAX_SETUP_RUNS - 1, Some(1_000), 2_000),
+            Ok(())
+        );
+        // At the limit no wait helps, and the limit is what's said.
+        assert_eq!(
+            retry_allowed(MAX_SETUP_RUNS, None, i64::MAX),
+            Err(RetryHeld::LimitReached)
+        );
+        assert_eq!(
+            retry_allowed(MAX_SETUP_RUNS, Some(1_000), 0),
+            Err(RetryHeld::LimitReached)
+        );
+        assert_eq!(
+            retry_allowed(MAX_SETUP_RUNS + 3, Some(1_000), 2_000),
+            Err(RetryHeld::LimitReached)
+        );
+        assert_ne!(RetryHeld::LimitReached.code(), RetryHeld::TooSoon.code());
+    }
+
+    #[test]
+    fn a_job_that_cant_finish_is_left_alone_for_longer_each_time() {
+        assert_eq!(job_backoff_ms(0), 5_000);
+        assert_eq!(job_backoff_ms(1), 5_000);
+        assert_eq!(job_backoff_ms(2), 10_000);
+        assert_eq!(job_backoff_ms(6), 160_000);
+        assert_eq!(job_backoff_ms(7), JOB_BACKOFF_MAX_MS);
+        assert_eq!(job_backoff_ms(u32::MAX), JOB_BACKOFF_MAX_MS);
     }
 
     #[test]

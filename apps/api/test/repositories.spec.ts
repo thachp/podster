@@ -83,18 +83,18 @@ describe("the managed repositories migration", () => {
   it("adds the five tables to a room made before it, keeps what the room held, and does nothing the second time", async () => {
     const { id, task } = await room();
     const newest = await schemaVersion(id);
-    // Back to the release before this one: the tables are gone, and the migration is due. Step 5's migration came after
-    // it and changes two of these tables, so it's undone with it and runs again behind it.
+    // Back to the release before this one: the tables are gone, and the migration is due. Step 5's migration and step
+    // 4's came after it and change three of these tables, so they're undone with it and run again behind it.
     await inRoom(id, (sql) => {
       sql.exec("DROP TABLE provider_delivery");
       for (const table of [...TABLES].reverse()) sql.exec(`DROP TABLE ${table}`);
-      sql.exec("UPDATE schema_version SET version = version - 2");
+      sql.exec("UPDATE schema_version SET version = version - 3");
     });
     expect(await inRoom(id, (sql) => sql.exec("SELECT name FROM sqlite_master WHERE name LIKE 'repo_%' OR name IN ('provider_grant', 'task_change')").toArray())).toEqual([]);
     // A read migrates the room.
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
     expect(await schemaVersion(id)).toBe(newest);
-    expect(await columns(id, "repo_request")).toEqual(["id", "singleton", "state", "name", "visibility", "attempt", "provider_name", "provider_repo_id", "reason", "requested_by", "requested_at", "updated_at"]);
+    expect(await columns(id, "repo_request")).toEqual(["id", "singleton", "state", "name", "visibility", "attempt", "provider_name", "provider_repo_id", "reason", "requested_by", "requested_at", "updated_at", "runs", "retry_after"]);
     expect(await columns(id, "repo_request_attempt")).toEqual(["request_id", "attempt", "provider_name", "outcome", "at"]);
     expect(await columns(id, "repo_link")).toEqual(["id", "singleton", "request_id", "provider", "provider_repo_id", "provider_org_id", "full_name", "visibility", "default_branch", "status", "status_reason", "created_by", "created_at", "verified_at", "updated_at", "indexed_at"]);
     expect(await columns(id, "provider_grant")).toEqual(["id", "principal_id", "provider", "provider_repo_id", "action", "delegated_by", "created_at", "expires_at", "revoked_at", "revoked_by"]);
@@ -176,9 +176,9 @@ describe("the room's repository read", () => {
     const outside = await api(STRANGER, "GET", `/v1/workspaces/${id}/repository`);
     expect([outside.status, outside.code]).toEqual([404, "workspace_not_found"]);
     expect(outside.text).not.toContain("podsterx");
-    // Step 4 made POST the owner's request for a repository, which an empty body isn't. No other method is a route.
-    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/repository`, {})).code).toBe("invalid_argument");
-    for (const method of ["PUT", "DELETE"]) expect((await api(OWNER, method, `/v1/workspaces/${id}/repository`, {})).code, method).toBe("not_found");
+    // It's a read. Step 4 made POST the owner's request for a repository, and while managed repositories are switched
+    // off, as they are here and everywhere, that route isn't there either.
+    for (const method of ["POST", "PUT", "DELETE"]) expect((await api(OWNER, method, `/v1/workspaces/${id}/repository`, {})).code, method).toBe("not_found");
   });
 });
 

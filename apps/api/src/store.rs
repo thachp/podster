@@ -232,6 +232,9 @@ CREATE INDEX provider_delivery_expiry ON provider_delivery (expires_at);
 CREATE INDEX provider_delivery_body ON provider_delivery (body_sha256);
 ALTER TABLE task_change ADD COLUMN nudged_at INTEGER;
 ALTER TABLE repo_link ADD COLUMN indexed_at INTEGER;
+", "
+ALTER TABLE repo_request ADD COLUMN runs INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE repo_request ADD COLUMN retry_after INTEGER;
 "];
 
 pub fn int(value: &Value) -> i64 {

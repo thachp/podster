@@ -29,11 +29,14 @@ type Script = {
   actionsRead?: number;
   readRepo?: number;
   nextId?: number;
+  /** A status for revoking a token, if not 204. The token then stays live. */
+  revoke?: number;
 };
-type Call = { method: string; path: string; body: unknown; auth: "app" | "token" | "bad" | "none" };
+/** `scope` is what the call's token could reach: the whole installation, or these repositories. */
+type Call = { method: string; path: string; body: unknown; auth: "app" | "token" | "bad" | "none"; scope?: "all" | number[] };
 
 let repos = new Map<number, Repo>();
-let tokens = new Set<string>();
+let tokens = new Map<string, "all" | number[]>();
 let calls: Call[] = [];
 let script: Script = {};
 let nextId = 9000;
@@ -67,7 +70,7 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
     if (url.pathname === "/reset") {
       script = (await request.json()) as Script;
       repos = new Map();
-      tokens = new Set();
+      tokens = new Map();
       calls = [];
       creations = 0;
       nextId = script.nextId ?? nextId + 1000;
@@ -87,7 +90,7 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
       calls = [];
       return json({ ok: true });
     }
-    return json({ calls, repos: [...repos.values()] });
+    return json({ calls, repos: [...repos.values()], liveTokens: [...tokens.values()] });
   }
   if (url.hostname !== "api.github.com") return null;
 
@@ -97,7 +100,8 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
   const path = url.pathname;
   const tokenRoute = path.match(/^\/app\/installations\/(\d+)\/access_tokens$/);
   const auth: Call["auth"] = !bearer ? "none" : tokenRoute ? (appJwtValid(bearer, tokenRoute[1]) ? "app" : "bad") : tokens.has(bearer) ? "token" : "bad";
-  calls.push({ method: request.method, path, body, auth });
+  const scope = tokens.get(bearer);
+  calls.push({ method: request.method, path, body, auth, ...(scope ? { scope } : {}) });
   const versioned = request.headers.get("x-github-api-version") === "2022-11-28" && request.headers.get("accept") === "application/vnd.github+json" && !!request.headers.get("user-agent");
   if (!versioned) return json({ message: "missing headers" }, 400);
 
@@ -105,16 +109,27 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
     if (request.method !== "POST" || auth !== "app") return json({ message: "Bad credentials" }, 401);
     if (script.token && script.token !== 201) return json({ message: "SECRET-PROVIDER-TEXT" }, script.token);
     const token = `ghs_fake_${crypto.randomUUID().replaceAll("-", "")}`;
-    tokens.add(token);
+    // Narrowed to the repositories asked for, as GitHub does, or good for the whole installation.
+    const wanted = Array.isArray(body?.repository_ids) ? (body.repository_ids as number[]) : null;
+    if (wanted && wanted.some((id) => !repos.has(id))) return json({ message: "no such repository" }, 422);
+    tokens.set(token, wanted ?? "all");
     return json({ token, expires_at: new Date(Date.now() + 3_600_000).toISOString() }, 201);
   }
-  if (auth !== "token") return json({ message: "Bad credentials" }, 401);
-  // Nothing Podster does deletes anything. A test fails if one of these is ever seen.
+  if (auth !== "token" || !scope) return json({ message: "Bad credentials" }, 401);
+  // A token revokes itself, and is refused from then on.
+  if (path === "/installation/token" && request.method === "DELETE") {
+    if (script.revoke && script.revoke !== 204) return json({ message: "no" }, script.revoke);
+    tokens.delete(bearer);
+    return json(null, 204);
+  }
+  // Nothing else Podster does deletes anything. A test fails if one of these is ever seen.
   if (request.method === "DELETE" || request.method === "PATCH") return json({ message: "not here" }, 405);
 
   const creating = path.match(/^\/orgs\/([^/]+)\/repos$/);
   if (creating && request.method === "POST") {
     if (creating[1] !== FAKE_GITHUB.orgLogin) return json({ message: "Not Found" }, 404);
+    // A token narrowed to repositories can't make one.
+    if (scope !== "all") return json({ message: "Resource not accessible by integration" }, 403);
     const modes = script.create ?? ["ok"];
     const mode = modes[Math.min(creations, modes.length - 1)];
     creations += 1;
@@ -133,6 +148,8 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
   const scoped = path.match(/^\/repositories\/(\d+)(\/.*)?$/);
   const repo = scoped ? repos.get(Number(scoped[1])) : undefined;
   if (!scoped || !repo) return json({ message: "Not Found" }, 404);
+  // A narrowed token sees only its own repositories.
+  if (scope !== "all" && !scope.includes(repo.id)) return json({ message: "Not Found" }, 404);
   const rest = scoped[2] ?? "";
   if (rest === "" && request.method === "GET") return script.readRepo ? json({ message: "SECRET-PROVIDER-TEXT" }, script.readRepo) : json(repoView(repo));
   if (rest === `/branches/${repo.defaultBranch}` && request.method === "GET") return repo.hasCommit ? json({ name: repo.defaultBranch, commit: { sha: "c0".repeat(20) } }) : json({ message: "Branch not found" }, 404);

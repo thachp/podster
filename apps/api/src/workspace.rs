@@ -2593,6 +2593,10 @@ pub struct Workspace {
     /// Scan sends that failed in a row, and when the room may send again. A restart forgets both.
     scan_send_failures: std::cell::Cell<u32>,
     scan_send_retry_at: std::cell::Cell<i64>,
+    /// Times in a row the provisioning job couldn't even end its request, and when the alarm may come for it again. A
+    /// restart forgets both.
+    provision_failures: std::cell::Cell<u32>,
+    provision_not_before: std::cell::Cell<i64>,
     /// Whether nothing is held from a failed migration, so a request needn't look. A restart looks again.
     held_clear: std::cell::Cell<bool>,
 }
@@ -3430,7 +3434,6 @@ impl Workspace {
         if !rows(&sql, "SELECT seq FROM index_outbox LIMIT 1", vec![])?.is_empty()
             || (migrated && visibility::public_index_due(&sql)?)
             || (migrated && repositories::index_due(&sql)?)
-            || (migrated && provisioning::due(&sql)?)
         {
             due = Some(now + if index_failed { 5000 } else { 50 });
         }
@@ -3497,6 +3500,14 @@ impl Workspace {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
         if let Some(next) = removal::next_due(&sql, now, self.sweep_failures.get())? {
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
+        // A pending request for the room's repository, not before the wait a job that couldn't finish left.
+        if let Some(next) = migrated
+            .then(|| self.provisioning_due_at(&sql, now))
+            .transpose()?
+            .flatten()
+        {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
         // The oldest webhook delivery ID, when it's time to forget it.
@@ -4382,6 +4393,7 @@ impl Workspace {
             // counts for nothing unless the caller is the room's owner. A stored answer goes only to the owner.
             (Method::Post, ["repository"]) => {
                 let delegated = self.org_delegated().await == Some(true);
+                let switched_on = provisioning::enabled(&self.env, &sql)?;
                 self.command_checked(
                     &identity,
                     key,
@@ -4391,11 +4403,14 @@ impl Workspace {
                     |sql: &SqlStorage, who: &Participant| {
                         provisioning::may_request(sql, &who.caller)
                     },
-                    move |sql, who, now| provisioning::request(sql, who, &body, delegated, now),
+                    move |sql, who, now| {
+                        provisioning::request(sql, who, &body, switched_on, delegated, now)
+                    },
                 )
             }
             (Method::Post, ["repository", "retry"]) => {
                 let delegated = self.org_delegated().await == Some(true);
+                let switched_on = provisioning::enabled(&self.env, &sql)?;
                 let suffix: String = uuid::Uuid::new_v4()
                     .simple()
                     .to_string()
@@ -4412,7 +4427,7 @@ impl Workspace {
                         provisioning::may_request(sql, &who.caller)
                     },
                     move |sql, who, now| {
-                        provisioning::retry(sql, who, &body, delegated, &suffix, now)
+                        provisioning::retry(sql, who, &body, switched_on, delegated, &suffix, now)
                     },
                 )
             }
@@ -4560,6 +4575,8 @@ impl DurableObject for Workspace {
             sweep_failures: std::cell::Cell::new(0),
             scan_send_failures: std::cell::Cell::new(0),
             scan_send_retry_at: std::cell::Cell::new(0),
+            provision_failures: std::cell::Cell::new(0),
+            provision_not_before: std::cell::Cell::new(0),
             held_clear: std::cell::Cell::new(false),
         }
     }
@@ -4639,7 +4656,8 @@ impl DurableObject for Workspace {
         if let Err(error) = &provisioned {
             console_error!("provisioning failed: {:?}", error.code());
         }
-        let repo_index = self.repository_upkeep(&sql).await.and(provisioned);
+        // The job keeps its own wait, so its failure doesn't bring the alarm back in five seconds.
+        let repo_index = self.repository_upkeep(&sql).await;
         // A stuck scan fails closed here, and this failing holds up nothing else.
         if let Err(error) = self.expire_scans() {
             console_error!("couldn't end overdue scans: {:?}", error.code());

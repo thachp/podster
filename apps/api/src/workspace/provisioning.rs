@@ -9,17 +9,49 @@
 //!   linked, and the request made `ready`, only after everything readiness needs was read back and judged by
 //!   `podster_core::provisioning`. Anything else leaves the request `failed` or `uncertain` with a reason code.
 //!
+//! Managed repositories have a switch of their own, the Worker variable `MANAGED_REPOSITORIES`, off unless it is exactly
+//! `true`. Both commands and the job check it. Setting an App's key isn't the owner's yes to public repositories under
+//! Podster's organization. This variable is.
+//!
 //! The organization, the App and its installation come from the Worker's configuration, never from a caller. A
 //! repository is known by the ID in the provider's answer to this room's own creation call, never by a name. Nothing here
 //! deletes a repository or falls back to another organization. Logs and events carry IDs, reason codes and HTTP statuses.
 use super::*;
 use crate::github::{Config, CreateAnswer, GitHubApp, Provider};
-use podster_core::provisioning::{missing_steps, retry_name, verify_ready, Expected};
+use podster_core::provisioning::{
+    job_backoff_ms, missing_steps, reserved_name, retry_allowed, retry_name, retry_wait_ms,
+    verify_ready, Expected,
+};
 use podster_core::repositories::{
     decide_retry, valid_repo_name, RepoVisibility, RequestState, RetryPlan, RetryRefusal,
 };
 
 const PROVIDER: &str = "github";
+const SWITCH_VAR: &str = "MANAGED_REPOSITORIES";
+/// The attempt outcomes that say a creation call may have gone out under the attempt's name.
+const NOT_SENT: &str = "not_sent";
+const STARTED: &str = "started";
+
+/// Whether managed repositories are switched on for this deployment. Test builds can switch them on for one room, by a
+/// table only a test can make, so every other test runs with them off, as every deployment does today.
+pub(super) fn enabled(env: &Env, sql: &SqlStorage) -> R<bool> {
+    let set = env
+        .var(SWITCH_VAR)
+        .is_ok_and(|value| value.to_string() == "true");
+    #[cfg(feature = "failpoints")]
+    if !rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_managed_repositories_on'",
+        vec![],
+    )?
+    .is_empty()
+    {
+        return Ok(true);
+    }
+    #[cfg(not(feature = "failpoints"))]
+    let _ = sql;
+    Ok(set)
+}
 
 fn refuse<T>(status: u16, code: &'static str) -> R<T> {
     Err(ApiError::api(status, code))
@@ -37,7 +69,7 @@ pub(super) fn may_request(sql: &SqlStorage, caller: &Caller) -> R<()> {
 fn request_row(sql: &SqlStorage) -> R<Option<Value>> {
     Ok(rows(
         sql,
-        "SELECT id, state, name, visibility, attempt, provider_name, provider_repo_id, reason, requested_by FROM repo_request",
+        "SELECT id, state, name, visibility, attempt, provider_name, provider_repo_id, reason, requested_by, runs, retry_after FROM repo_request",
         vec![],
     )?
     .into_iter()
@@ -45,7 +77,7 @@ fn request_row(sql: &SqlStorage) -> R<Option<Value>> {
 }
 
 /// Whether a request is waiting for the job.
-pub(super) fn due(sql: &SqlStorage) -> R<bool> {
+fn due(sql: &SqlStorage) -> R<bool> {
     Ok(request_row(sql)?
         .is_some_and(|request| request["state"].as_str() == Some(RequestState::Pending.name())))
 }
@@ -56,10 +88,15 @@ pub(super) fn request(
     sql: &SqlStorage,
     who: &Participant,
     body: &Value,
+    switched_on: bool,
     delegated: bool,
     now: i64,
 ) -> R<Value> {
     may_request(sql, &who.caller)?;
+    // Switched off, the route isn't there, for the owner as for anyone.
+    if !switched_on {
+        return Err(ApiError::not_found());
+    }
     let fields = body.as_object().ok_or_else(ApiError::invalid_argument)?;
     if fields.keys().any(|k| k != "name" && k != "visibility") {
         return Err(ApiError::invalid_argument());
@@ -72,6 +109,10 @@ pub(super) fn request(
         .as_str()
         .and_then(RepoVisibility::from_name)
         .ok_or_else(ApiError::invalid_argument)?;
+    // Names that would read as Podster's own in the organization every room shares.
+    if reserved_name(name) {
+        return refuse(409, "name_reserved");
+    }
     // On the organization's plan a private repository can't carry the rules, so it's unavailable, never quietly made public.
     if visibility != RepoVisibility::Public {
         return refuse(409, "private_unavailable");
@@ -125,11 +166,15 @@ pub(super) fn retry(
     sql: &SqlStorage,
     who: &Participant,
     body: &Value,
+    switched_on: bool,
     delegated: bool,
     suffix: &str,
     now: i64,
 ) -> R<Value> {
     may_request(sql, &who.caller)?;
+    if !switched_on {
+        return Err(ApiError::not_found());
+    }
     if !body.as_object().is_some_and(|fields| fields.is_empty()) {
         return Err(ApiError::invalid_argument());
     }
@@ -148,14 +193,22 @@ pub(super) fn retry(
         .as_ref()
         .and_then(|r| text(&r["id"]))
         .unwrap_or_default();
-    let sent: Vec<String> = rows(
+    // Every name a creation call may have carried. An attempt that never got a token sent nothing, so its name isn't one.
+    let attempts = rows(
         sql,
-        "SELECT provider_name FROM repo_request_attempt WHERE request_id = ?",
+        "SELECT attempt, provider_name, outcome FROM repo_request_attempt WHERE request_id = ?",
         vec![id.as_str().into()],
-    )?
-    .iter()
-    .filter_map(|attempt| text(&attempt["provider_name"]))
-    .collect();
+    )?;
+    let sent: Vec<String> = attempts
+        .iter()
+        .filter(|attempt| attempt["outcome"].as_str() != Some(NOT_SENT))
+        .filter_map(|attempt| text(&attempt["provider_name"]))
+        .collect();
+    let number = request.as_ref().map_or(0, |r| int(&r["attempt"]));
+    // An attempt already on record keeps its number, so the next call gets a new one.
+    let recorded = attempts
+        .iter()
+        .any(|attempt| int(&attempt["attempt"]) == number);
     let current = request.as_ref().and_then(|r| text(&r["provider_name"]));
     // A name no call has carried yet is still the one to send. Otherwise the server makes a new one.
     let never_sent = current.as_ref().is_some_and(|name| !sent.contains(name));
@@ -168,6 +221,22 @@ pub(super) fn retry(
             .and_then(|chosen| retry_name(chosen, suffix))
     };
     let attempted: Vec<&str> = sent.iter().map(String::as_str).collect();
+    // The limit and the wait come after the state, so a request that's ready or under way says that first.
+    let held = request.as_ref().and_then(|r| {
+        matches!(state, Some(RequestState::Failed | RequestState::Uncertain))
+            .then(|| retry_allowed(int(&r["runs"]), r["retry_after"].as_i64(), now).err())
+            .flatten()
+    });
+    if let Some(held) = held {
+        return refuse(
+            if held.code() == "retry_too_soon" {
+                429
+            } else {
+                409
+            },
+            held.code(),
+        );
+    }
     let plan = match decide_retry(state, holds_repo_id, &attempted, new_name.as_deref()) {
         Ok(plan) => plan,
         Err(refusal) => {
@@ -193,7 +262,7 @@ pub(super) fn retry(
             vec![
                 RequestState::Pending.name().into(),
                 new_name.unwrap_or_default().as_str().into(),
-                i64::from(!never_sent).into(),
+                i64::from(recorded).into(),
                 now.into(),
                 id.as_str().into(),
             ],
@@ -220,8 +289,12 @@ pub(super) fn retry(
     repositories::read(sql, who)
 }
 
-/// Ends the job's turn: the request leaves `pending` with a reason code, and the room's managers are told. Only if it's
-/// still the pending request the job started on.
+/// Ends the job's turn: the request leaves `pending` with a reason code and the time a retry may next be taken, and the
+/// room's managers are told. Only if it's still the pending request the job started on.
+///
+/// If this attempt's row still says `started`, a creation call may have gone out and nobody recorded how it ended, so a
+/// repository may exist. Whatever the job thought went wrong, the request then ends `uncertain`, and the attempt keeps the
+/// name an operator would look for.
 fn finish(
     sql: &SqlStorage,
     request_id: &str,
@@ -231,18 +304,33 @@ fn finish(
 ) -> R<()> {
     let pending = rows(
         sql,
-        "SELECT requested_by FROM repo_request WHERE id = ? AND state = ?",
+        "SELECT requested_by, attempt, runs FROM repo_request WHERE id = ? AND state = ?",
         vec![request_id.into(), RequestState::Pending.name().into()],
     )?;
-    let Some(requester) = pending.first().and_then(|r| text(&r["requested_by"])) else {
+    let Some(request) = pending.first() else {
         return Ok(());
+    };
+    let requester = text(&request["requested_by"]).unwrap_or_default();
+    let attempt = int(&request["attempt"]);
+    let unrecorded = !rows(
+        sql,
+        "SELECT 1 AS open FROM repo_request_attempt WHERE request_id = ? AND attempt = ? AND outcome = ?",
+        vec![request_id.into(), attempt.into(), STARTED.into()],
+    )?
+    .is_empty();
+    let (state, reason) = if unrecorded {
+        set_attempt(sql, request_id, attempt, "uncertain", now)?;
+        (RequestState::Uncertain, "creation_outcome_unknown")
+    } else {
+        (state, reason)
     };
     exec(
         sql,
-        "UPDATE repo_request SET state = ?, reason = ?, updated_at = ? WHERE id = ?",
+        "UPDATE repo_request SET state = ?, reason = ?, retry_after = ?, updated_at = ? WHERE id = ?",
         vec![
             state.name().into(),
             reason.into(),
+            (now + retry_wait_ms(int(&request["runs"]))).into(),
             now.into(),
             request_id.into(),
         ],
@@ -313,10 +401,20 @@ impl Workspace {
             .map(|held| held["granted"].as_bool() == Some(true))
     }
 
-    /// The alarm's part: runs the job for a pending request, and makes sure it never stays pending behind an error.
+    /// When the alarm should next come for a pending request, if there is one: at once, or after the wait a job that
+    /// couldn't finish left behind.
+    pub(super) fn provisioning_due_at(&self, sql: &SqlStorage, now: i64) -> R<Option<i64>> {
+        Ok(due(sql)?.then(|| (now + 50).max(self.provision_not_before.get())))
+    }
+
+    /// The alarm's part: runs the job for a pending request, and makes sure it never stays pending behind an error. If
+    /// even ending the request fails, the alarm stays away for longer each time, so a room that can't write doesn't spin.
     pub(super) async fn provision(&self) -> R<()> {
         let sql = self.state.storage().sql();
         if !store::is_initialized(&sql)? || store::needs_migration(&sql)? {
+            return Ok(());
+        }
+        if now_ms() < self.provision_not_before.get() {
             return Ok(());
         }
         let Some(request) = request_row(&sql)?
@@ -328,6 +426,7 @@ impl Workspace {
         let room = objects::room_id(&sql)?;
         let ended = match self.run_provisioning(&request, &request_id).await {
             Ok(None) => {
+                self.provision_failures.set(0);
                 console_log!(
                     "{}",
                     json!({ "at": "provision", "room": room, "request": request_id, "outcome": "ready" })
@@ -337,21 +436,55 @@ impl Workspace {
             Ok(Some(ended)) => ended,
             Err(error) => failed(error.code().unwrap_or("internal_error"), 0),
         };
-        console_log!(
-            "{}",
-            json!({ "at": "provision", "room": room, "request": request_id, "outcome": ended.state.name(), "reason": ended.reason, "status": ended.status })
-        );
-        self.in_transaction(move |sql| {
-            finish(sql, &request_id, ended.state, ended.reason, now_ms())
-        })
+        let id = request_id.clone();
+        let finished = self.in_transaction(move |sql| {
+            finish(sql, &id, ended.state, ended.reason, now_ms())?;
+            Ok(rows(
+                sql,
+                "SELECT state, reason FROM repo_request WHERE id = ?",
+                vec![id.as_str().into()],
+            )?
+            .into_iter()
+            .next())
+        });
+        match finished {
+            Ok(now) => {
+                self.provision_failures.set(0);
+                // What the request ended as, which is `uncertain` if a creation call's outcome was never recorded.
+                let state = now
+                    .as_ref()
+                    .and_then(|r| text(&r["state"]))
+                    .unwrap_or_default();
+                let reason = now
+                    .as_ref()
+                    .and_then(|r| text(&r["reason"]))
+                    .unwrap_or_default();
+                console_log!(
+                    "{}",
+                    json!({ "at": "provision", "room": room, "request": request_id, "outcome": state, "reason": reason, "status": ended.status })
+                );
+                Ok(())
+            }
+            Err(error) => {
+                let failures = self.provision_failures.get().saturating_add(1);
+                self.provision_failures.set(failures);
+                self.provision_not_before
+                    .set(now_ms() + job_backoff_ms(failures));
+                Err(error)
+            }
+        }
     }
 
-    /// One run. `Ok(None)` means the repository is linked and ready. Every other way out names how the request ends.
+    /// One run, with the provider's tokens revoked on every way out.
     async fn run_provisioning(&self, request: &Value, request_id: &str) -> R<Option<Ended>> {
+        let sql = self.state.storage().sql();
+        if !enabled(&self.env, &sql)? {
+            return Ok(Some(failed("managed_repositories_off", 0)));
+        }
         // Test builds only: a room holding this table stands for a deployment whose key the owner hasn't set yet.
         #[cfg(feature = "failpoints")]
         if !rows(
-            &self.state.storage().sql(),
+            &sql,
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_no_provisioning_key'",
             vec![],
         )?
@@ -359,10 +492,31 @@ impl Workspace {
         {
             return Ok(Some(failed("provisioning_not_configured", 0)));
         }
-        // Authority first, from current state: the configuration, the delegation, the room and the person who asked.
         let Some(config) = Config::from_env(&self.env) else {
             return Ok(Some(failed("provisioning_not_configured", 0)));
         };
+        let provider = GitHubApp::new(config);
+        let outcome = self.provision_with(&provider, request, request_id).await;
+        let unrevoked = provider.release().await;
+        if unrevoked > 0 {
+            // The token lives out its hour. It was narrowed to this one repository.
+            console_error!(
+                "{}",
+                json!({ "at": "provision.token_not_revoked", "room": objects::room_id(&sql)?, "request": request_id })
+            );
+        }
+        outcome
+    }
+
+    /// `Ok(None)` means the repository is linked and ready. Every other way out names how the request ends.
+    async fn provision_with(
+        &self,
+        provider: &GitHubApp,
+        request: &Value,
+        request_id: &str,
+    ) -> R<Option<Ended>> {
+        let config = provider.config();
+        // Authority first, from current state: the delegation, the room and the person who asked.
         match self.org_delegated().await {
             Some(true) => {}
             Some(false) => return Ok(Some(failed("not_delegated", 0))),
@@ -378,6 +532,12 @@ impl Workspace {
         // out, the attempt is on record before it does. So a job that dies mid-call leaves a row that says a call may
         // have gone out.
         let begun: Option<&'static str> = self.in_transaction(move |sql| {
+            // This run counts, whatever becomes of it.
+            exec(
+                sql,
+                "UPDATE repo_request SET runs = runs + 1 WHERE id = ?",
+                vec![id.as_str().into()],
+            )?;
             if room_archived(sql)? {
                 return Ok(Some("room_archived"));
             }
@@ -398,8 +558,8 @@ impl Workspace {
             }
             exec(
                 sql,
-                "INSERT INTO repo_request_attempt (request_id, attempt, provider_name, outcome, at) VALUES (?, ?, ?, 'started', ?)",
-                vec![id.as_str().into(), attempt.into(), name.as_str().into(), now_ms().into()],
+                "INSERT INTO repo_request_attempt (request_id, attempt, provider_name, outcome, at) VALUES (?, ?, ?, ?, ?)",
+                vec![id.as_str().into(), attempt.into(), name.as_str().into(), STARTED.into(), now_ms().into()],
             )?;
             Ok(None)
         })?;
@@ -416,8 +576,6 @@ impl Workspace {
             }));
         }
 
-        let provider = GitHubApp::new(config);
-        let config = provider.config();
         let repo_id = match held {
             Some(repo_id) => repo_id,
             None => {
@@ -435,6 +593,10 @@ impl Workspace {
                     }
                     CreateAnswer::Refused(status) => {
                         ("refused", Some(failed("provider_refused", status)), None)
+                    }
+                    // No token, so no call: the name wasn't sent, and a retry may send it.
+                    CreateAnswer::NotSent(status) => {
+                        (NOT_SENT, Some(failed("token_refused", status)), None)
                     }
                     CreateAnswer::Unknown => (
                         "uncertain",
@@ -493,6 +655,13 @@ impl Workspace {
         };
         if let Err(not_ready) = verify_ready(&expected, &observed) {
             return Ok(Some(failed(not_ready.code(), 0)));
+        }
+        // The delegation once more, as late as it can be asked: the organization's object answers outside this room's
+        // transaction, so this is the last word before the link is written.
+        match self.org_delegated().await {
+            Some(true) => {}
+            Some(false) => return Ok(Some(failed("not_delegated", 0))),
+            None => return Ok(Some(failed("delegation_unavailable", 0))),
         }
 
         let id = request_id.to_string();

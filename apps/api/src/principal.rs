@@ -913,12 +913,28 @@ pub async fn provisioning_delegation(
         .and_then(|fields| fields.get("granted"))
         .and_then(Value::as_bool)
         .ok_or_else(ApiError::invalid_argument)?;
-    let change = json!({ "provider": "github", "granted": granted, "by": caller.id });
+    let change = json!({ "provider": "github", "granted": granted, "by": caller.id, "org": org });
     let mut response = internal(env, org, "/internal/org-delegation-set", &change).await?;
-    if response.status_code() != 200 {
-        return Err(ApiError::internal("couldn't set the delegation"));
+    match response.status_code() {
+        200 => {}
+        // The organization's own object has never held a room for it.
+        404 => return Err(ApiError::api(404, "organization_not_found")),
+        _ => return Err(ApiError::internal("couldn't set the delegation")),
     }
     let answer: Value = response.json().await?;
+    // In the operators' own record too, beside their other actions. The organization's object already holds the change.
+    crate::moderation::record_operator_action(
+        env,
+        &caller.id,
+        "organization",
+        org,
+        if granted {
+            "provisioning_delegation.granted"
+        } else {
+            "provisioning_delegation.revoked"
+        },
+    )
+    .await;
     console_log!(
         "{}",
         json!({ "at": "org.delegation_set", "org": org, "provider": "github", "granted": granted, "by": caller.id })
@@ -1371,6 +1387,28 @@ impl Principal {
                 let provider = body["provider"].as_str().unwrap_or_default().to_string();
                 exec(&sql, ORG_DELEGATION_SCHEMA, vec![])?;
                 if path == "/internal/org-delegation-set" {
+                    // An organization the API has never seen a room of isn't one to delegate to. This object records
+                    // each room as it's made. Rooms from before it kept that record are in the listing, which here
+                    // only says whether the organization is known.
+                    exec(&sql, ORG_ROOMS_SCHEMA, vec![])?;
+                    let mut known =
+                        !rows(&sql, "SELECT workspace_id FROM org_room LIMIT 1", vec![])?
+                            .is_empty();
+                    if !known {
+                        known = self
+                            .env
+                            .d1("DB")?
+                            .prepare(
+                                "SELECT 1 AS known FROM membership_index WHERE org_id = ? LIMIT 1",
+                            )
+                            .bind(&[body["org"].as_str().unwrap_or_default().into()])?
+                            .first::<Value>(None)
+                            .await?
+                            .is_some();
+                    }
+                    if !known {
+                        return Err(ApiError::api(404, "organization_not_found"));
+                    }
                     let granted = body["granted"]
                         .as_bool()
                         .ok_or_else(ApiError::invalid_argument)?;

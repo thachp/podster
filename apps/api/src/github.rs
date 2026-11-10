@@ -8,6 +8,9 @@
 //!   the Worker's configuration, and a repository is addressed by the numeric ID from GitHub's own answer, never by a name.
 //! - **Tokens and the key stay here.** They are never returned, logged, stored or put in an error. A failure carries an
 //!   HTTP status or a fixed word, and none of GitHub's text.
+//! - **A token is as narrow and as short-lived as its work.** The installation's own token, which can administer every
+//!   repository, is minted for the creation call alone and revoked as soon as that call ends. Setup and the read-back use
+//!   a second token, narrowed to the one repository, revoked when the job ends, on every way out.
 //! - **Unverified against GitHub:** addressing a repository as `/repositories/{id}`, switching Actions off per repository
 //!   and reading that back. The spike made its calls by name and never switched Actions off. Both are owed before staging.
 use futures_util::future::{select, Either};
@@ -108,6 +111,8 @@ pub enum CreateAnswer {
     Created(Created),
     NameTaken,
     Refused(u16),
+    /// No token could be had, so no creation call went out and the name was never sent.
+    NotSent(u16),
     /// Nobody knows whether a repository was made.
     Unknown,
 }
@@ -126,12 +131,14 @@ pub(crate) trait Provider {
     async fn read_back(&self, repo_id: i64) -> std::result::Result<(Observed, Described), Failure>;
     /// Adds one missing piece of setup. It never changes or removes anything that's there.
     async fn apply(&self, repo_id: i64, step: SetupStep) -> std::result::Result<(), Failure>;
+    /// Revokes every token still held. Answers how many couldn't be revoked, which then live out their hour.
+    async fn release(&self) -> u32;
 }
 
 pub struct GitHubApp {
     config: Config,
-    /// The installation token, for this job only. Never leaves this struct.
-    token: RefCell<Option<String>>,
+    /// The token narrowed to one repository, for this job only, with that repository's ID. Never leaves this struct.
+    scoped: RefCell<Option<(i64, String)>>,
 }
 
 fn js<T>(result: std::result::Result<T, JsValue>) -> std::result::Result<T, Failure> {
@@ -253,7 +260,7 @@ impl GitHubApp {
     pub fn new(config: Config) -> GitHubApp {
         GitHubApp {
             config,
-            token: RefCell::new(None),
+            scoped: RefCell::new(None),
         }
     }
 
@@ -307,11 +314,9 @@ impl GitHubApp {
         answer
     }
 
-    /// The installation token, minted once for this job from a fresh App JWT.
-    async fn token(&self) -> std::result::Result<String, Failure> {
-        if let Some(token) = self.token.borrow().as_ref() {
-            return Ok(token.clone());
-        }
+    /// Mints an installation token from a fresh App JWT: for one repository, or, with `None`, for the whole
+    /// installation, which only the creation call needs.
+    async fn mint(&self, repo_id: Option<i64>) -> std::result::Result<String, Failure> {
         let pkcs8 = pkcs8_from_pem(&self.config.key_pem).ok_or(Failure::Unreachable)?;
         let input =
             app_jwt_signing_input(self.config.app_id, (Date::now().as_millis() / 1000) as i64);
@@ -320,21 +325,43 @@ impl GitHubApp {
             "/app/installations/{}/access_tokens",
             self.config.installation_id
         );
-        let (status, body) = self.send(Method::Post, &path, &jwt, None).await?;
+        let narrowed = repo_id.map(|id| json!({ "repository_ids": [id] }));
+        let (status, body) = self.send(Method::Post, &path, &jwt, narrowed).await?;
         if status != 201 {
             return Err(Failure::Status(status));
         }
-        let token = body["token"]
+        Ok(body["token"]
             .as_str()
             .filter(|token| !token.is_empty() && token.len() <= 512 && token.is_ascii())
             .ok_or(Failure::Unreadable)?
-            .to_string();
-        *self.token.borrow_mut() = Some(token.clone());
+            .to_string())
+    }
+
+    /// Revokes a token. Whether it worked is all that comes back.
+    async fn revoke(&self, token: &str) -> bool {
+        matches!(
+            self.send(Method::Delete, "/installation/token", token, None)
+                .await,
+            Ok((204, _))
+        )
+    }
+
+    /// The token for one repository, minted on first use and kept until `release`.
+    async fn token_for(&self, repo_id: i64) -> std::result::Result<String, Failure> {
+        if let Some((held, token)) = self.scoped.borrow().as_ref() {
+            if *held == repo_id {
+                return Ok(token.clone());
+            }
+        }
+        // One job is about one repository. A token for another is revoked before a new one is held.
+        self.release().await;
+        let token = self.mint(Some(repo_id)).await?;
+        *self.scoped.borrow_mut() = Some((repo_id, token.clone()));
         Ok(token)
     }
 
-    async fn get(&self, path: &str) -> std::result::Result<(u16, Value), Failure> {
-        let token = self.token().await?;
+    async fn get(&self, repo_id: i64, path: &str) -> std::result::Result<(u16, Value), Failure> {
+        let token = self.token_for(repo_id).await?;
         self.send(Method::Get, path, &token, None).await
     }
 
@@ -367,14 +394,17 @@ impl GitHubApp {
 
 impl Provider for GitHubApp {
     async fn create_repository(&self, name: &str, public: bool) -> CreateAnswer {
-        // Without a token no creation call goes out, so nothing can have been made.
-        let token = match self.token().await {
+        // Without a token no creation call goes out, so nothing can have been made and the name was never sent.
+        let token = match self.mint(None).await {
             Ok(token) => token,
-            Err(failure) => return CreateAnswer::Refused(failure.status()),
+            Err(failure) => return CreateAnswer::NotSent(failure.status()),
         };
         let path = format!("/orgs/{}/repos", self.config.org_login);
         let body = json!({ "name": name, "private": !public, "auto_init": true });
-        let (status, answer) = match self.send(Method::Post, &path, &token, Some(body)).await {
+        let sent = self.send(Method::Post, &path, &token, Some(body)).await;
+        // The broad token has done the one thing it was for, however that went.
+        self.revoke(&token).await;
+        let (status, answer) = match sent {
             Ok(answer) => answer,
             Err(_) => return CreateAnswer::Unknown,
         };
@@ -395,7 +425,7 @@ impl Provider for GitHubApp {
 
     async fn read_back(&self, repo_id: i64) -> std::result::Result<(Observed, Described), Failure> {
         let base = format!("/repositories/{repo_id}");
-        let (status, repo) = self.get(&base).await?;
+        let (status, repo) = self.get(repo_id, &base).await?;
         if status != 200 {
             return Err(Failure::Status(status));
         }
@@ -409,7 +439,10 @@ impl Provider for GitHubApp {
             .ok_or(Failure::Unreadable)?;
         // The default branch has a commit if the branch can be read and names one.
         let (status, branch) = self
-            .get(&format!("{base}/branches/{}", described.default_branch))
+            .get(
+                repo_id,
+                &format!("{base}/branches/{}", described.default_branch),
+            )
             .await?;
         let default_branch_has_commit = match status {
             200 => branch["commit"]["sha"]
@@ -418,11 +451,15 @@ impl Provider for GitHubApp {
             404 => false,
             other => return Err(Failure::Status(other)),
         };
-        let (status, actions) = self.get(&format!("{base}/actions/permissions")).await?;
+        let (status, actions) = self
+            .get(repo_id, &format!("{base}/actions/permissions"))
+            .await?;
         let actions_enabled = (status == 200)
             .then(|| actions["enabled"].as_bool())
             .flatten();
-        let (status, listed) = self.get(&format!("{base}/rulesets?per_page=100")).await?;
+        let (status, listed) = self
+            .get(repo_id, &format!("{base}/rulesets?per_page=100"))
+            .await?;
         if status != 200 {
             return Err(Failure::Status(status));
         }
@@ -430,7 +467,9 @@ impl Provider for GitHubApp {
         let mut rulesets = vec![];
         for entry in listed.iter().take(MAX_RULESETS_READ) {
             let ruleset_id = id(&entry["id"]).ok_or(Failure::Unreadable)?;
-            let (status, detail) = self.get(&format!("{base}/rulesets/{ruleset_id}")).await?;
+            let (status, detail) = self
+                .get(repo_id, &format!("{base}/rulesets/{ruleset_id}"))
+                .await?;
             if status != 200 {
                 return Err(Failure::Status(status));
             }
@@ -451,7 +490,7 @@ impl Provider for GitHubApp {
     }
 
     async fn apply(&self, repo_id: i64, step: SetupStep) -> std::result::Result<(), Failure> {
-        let token = self.token().await?;
+        let token = self.token_for(repo_id).await?;
         let base = format!("/repositories/{repo_id}");
         let (method, path, body, expected) = match step {
             SetupStep::DisableActions => (
@@ -478,6 +517,14 @@ impl Provider for GitHubApp {
             Ok(())
         } else {
             Err(Failure::Status(status))
+        }
+    }
+
+    async fn release(&self) -> u32 {
+        let held = self.scoped.borrow_mut().take();
+        match held {
+            Some((_, token)) => u32::from(!self.revoke(&token).await),
+            None => 0,
         }
     }
 }

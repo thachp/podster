@@ -464,6 +464,8 @@ pub fn is_authority_refusal(action: &str, code: &str) -> bool {
         | "no_provider_delegation"
         | "grant_required"
         | "grant_expired"
+        | "grant_stale"
+        | "public_participant"
         | "invitation_required"
         | "invitation_not_found" => true,
         "not_found" => matches!(action, "member.withdraw" | "member.owner_consent"),

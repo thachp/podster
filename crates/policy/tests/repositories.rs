@@ -6,6 +6,7 @@
 )]
 
 use podster_core::repo_grants::{Grant, GrantRefusal};
+use podster_core::repo_merge::Actor;
 use podster_core::repositories::GrantAction;
 use podster_core::{decide_create, NewTask, Task};
 use podster_policy::repositories::*;
@@ -44,14 +45,35 @@ fn caller(id: &str, kind: PrincipalKind, role: Role) -> Caller {
     }
 }
 
-fn grant(action: GrantAction) -> Grant {
+/// A grant to `principal`, given by the room's owner.
+fn grant(principal: &'static str, action: GrantAction) -> Grant<'static> {
     Grant {
+        id: "g1",
+        principal,
         provider_repo_id: REPO,
         action,
+        delegated_by: "owner",
         expires_at: None,
         revoked_at: None,
     }
 }
+
+/// A caller's standing with this grant, while the owner who gave it still holds the delegation.
+fn standing<'a>(grant: Option<&'a Grant<'a>>) -> GrantStanding<'a> {
+    GrantStanding {
+        grant,
+        link_repo_id: REPO,
+        delegation_holder: Some("owner"),
+        through_public_claim: false,
+        now: NOW,
+    }
+}
+
+/// The submitting agent, owned by the person `p-sub`.
+const SUBMITTER: Actor<'static> = Actor {
+    id: "asg",
+    person: Some("p-sub"),
+};
 
 const PARTIES: [&str; 4] = ["req", "asg", "rev", "stranger"];
 
@@ -63,16 +85,22 @@ fn sees(kind: PrincipalKind, role: Role, party: &str) -> bool {
 }
 
 #[test]
-fn only_the_rooms_owner_as_a_person_holds_the_repositorys_delegation() {
+fn only_the_rooms_owner_as_a_person_with_authority_holds_the_delegation() {
     for kind in [Person, Agent] {
         for role in Role::ALL {
-            assert_eq!(
-                holds_repository_delegation(kind, role),
-                kind == Person && role == Role::Owner,
-                "{kind:?} {role:?}"
-            );
+            for authority in [false, true] {
+                assert_eq!(
+                    holds_repository_delegation(kind, role, authority),
+                    kind == Person && role == Role::Owner && authority,
+                    "{kind:?} {role:?} {authority}"
+                );
+            }
         }
     }
+    assert_eq!(delegation_holder("owner", Person, true), Some("owner"));
+    // An owner who left, or rejoined under a newer membership, holds nothing, and neither does an agent stored as one.
+    assert_eq!(delegation_holder("owner", Person, false), None);
+    assert_eq!(delegation_holder("owner", Agent, true), None);
 }
 
 /// AC-10 and AC-11: a grant needs room authority and the repository's delegation, and neither stands in for the other.
@@ -95,7 +123,7 @@ fn ac_10_ac_11_granting_needs_room_authority_and_the_delegation_both() {
                     Ok(())
                 };
                 assert_eq!(
-                    authorize_grant_change(&caller("me", kind, role), holds_delegation),
+                    authorize_grant(&caller("me", kind, role), holds_delegation),
                     expected,
                     "{kind:?} {role:?} {holds_delegation}"
                 );
@@ -104,30 +132,124 @@ fn ac_10_ac_11_granting_needs_room_authority_and_the_delegation_both() {
         }
     }
     assert_eq!(checked, 2 * 5 * 2);
-    // As the room wires it, the delegation is the owner's: an admin is refused and the owner allowed.
-    for (role, expected) in [
-        (Role::Owner, Ok(())),
-        (Role::Admin, Err(RepoDenial::NoProviderDelegation)),
-        (Role::Member, Err(RepoDenial::NotAllowed)),
-        (Role::Guest, Err(RepoDenial::NotAllowed)),
+    // As the room wires it, the delegation is the owner's: only the owner grants, and an admin is refused.
+    for (role, authority, expected) in [
+        (Role::Owner, true, Ok(())),
+        (Role::Owner, false, Err(RepoDenial::NoProviderDelegation)),
+        (Role::Admin, true, Err(RepoDenial::NoProviderDelegation)),
+        (Role::Member, true, Err(RepoDenial::NotAllowed)),
+        (Role::Guest, true, Err(RepoDenial::NotAllowed)),
     ] {
         let who = caller("me", Person, role);
         assert_eq!(
-            authorize_grant_change(&who, holds_repository_delegation(who.kind, who.role)),
+            authorize_grant(
+                &who,
+                holds_repository_delegation(who.kind, who.role, authority)
+            ),
             expected,
-            "{role:?}"
+            "{role:?} {authority}"
         );
     }
     // An agent stored as the owner holds neither side.
     let agent_owner = caller("me", Agent, Role::Owner);
     assert!(!holds_repository_delegation(
         agent_owner.kind,
-        agent_owner.role
+        agent_owner.role,
+        true
     ));
     assert_eq!(
-        authorize_grant_change(&agent_owner, true),
+        authorize_grant(&agent_owner, true),
         Err(RepoDenial::NotAllowed)
     );
+}
+
+/// Who takes a grant back: the room's owner, a person who administers the room's organization, and the holder their
+/// own. Nobody else, and an agent never another's.
+#[test]
+fn a_grant_is_taken_back_by_the_owner_an_organization_admin_or_its_holder() {
+    let mut checked = 0;
+    for kind in [Person, Agent] {
+        for role in Role::ALL {
+            for own in [false, true] {
+                for holds_delegation in [false, true] {
+                    for org_admin in [false, true] {
+                        let grantee = if own { "me" } else { "other" };
+                        let person = kind == Person;
+                        let expected = if own {
+                            // Their own, whoever they are, still in the room or not.
+                            Ok(())
+                        } else if person && org_admin {
+                            // With or without a place in the room, so a grant can be pulled when the owner has left.
+                            Ok(())
+                        } else if role == Role::None {
+                            Err(RepoDenial::NotParticipant)
+                        } else if person && role == Role::Owner && holds_delegation {
+                            Ok(())
+                        } else {
+                            Err(RepoDenial::NotAllowed)
+                        };
+                        assert_eq!(
+                            authorize_revoke(
+                                &caller("me", kind, role),
+                                grantee,
+                                holds_delegation,
+                                org_admin
+                            ),
+                            expected,
+                            "{kind:?} {role:?} own={own} delegation={holds_delegation} org_admin={org_admin}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 2 * 5 * 2 * 2 * 2);
+
+    // Each rule, by name.
+    let owner = caller("owner", Person, Role::Owner);
+    assert_eq!(authorize_revoke(&owner, "agent", true, false), Ok(()));
+    // An owner whose authority no longer holds isn't the room's owner for this.
+    assert_eq!(
+        authorize_revoke(&owner, "agent", false, false),
+        Err(RepoDenial::NotAllowed)
+    );
+    let org_admin_outside = caller("org-admin", Person, Role::None);
+    assert_eq!(
+        authorize_revoke(&org_admin_outside, "agent", false, true),
+        Ok(())
+    );
+    let holder = caller("agent", Agent, Role::Guest);
+    assert_eq!(authorize_revoke(&holder, "agent", false, false), Ok(()));
+    // A room admin, a member, a guest and whoever is in the room otherwise: nobody else.
+    for role in [Role::Admin, Role::Member, Role::Guest] {
+        assert_eq!(
+            authorize_revoke(&caller("me", Person, role), "agent", false, false),
+            Err(RepoDenial::NotAllowed),
+            "{role:?}"
+        );
+        // A delegation flag on someone who isn't the owner changes nothing.
+        assert_eq!(
+            authorize_revoke(&caller("me", Person, role), "agent", true, false),
+            Err(RepoDenial::NotAllowed),
+            "{role:?}"
+        );
+    }
+    // An agent never takes back another principal's grant, whatever is stored for it or claimed about it.
+    for role in Role::ALL {
+        for (holds_delegation, org_admin) in [(true, true), (true, false), (false, true)] {
+            assert!(
+                authorize_revoke(
+                    &caller("bot", Agent, role),
+                    "agent",
+                    holds_delegation,
+                    org_admin
+                )
+                .is_err(),
+                "{role:?}"
+            );
+        }
+    }
 }
 
 /// AC-24: a public claim brings no repository authority, and nobody outside the room is given any.
@@ -149,14 +271,70 @@ fn a_grant_goes_only_to_a_participant_who_isnt_there_through_a_public_claim() {
     }
 }
 
+/// AC-24, at use: someone in the room through a public claim uses no grant, even a row given before that was so.
+#[test]
+fn a_public_claim_holder_uses_no_grant() {
+    let task = task();
+    let push = grant("asg", GrantAction::Push);
+    let agent = caller("asg", Agent, Role::Guest);
+    assert_eq!(
+        authorize_repo_access(&agent, &task, &standing(Some(&push))),
+        Ok(())
+    );
+    let public = GrantStanding {
+        through_public_claim: true,
+        ..standing(Some(&push))
+    };
+    assert_eq!(
+        authorize_repo_access(&agent, &task, &public),
+        Err(RepoDenial::PublicParticipant)
+    );
+
+    let merge = grant("rev", GrantAction::Merge);
+    let reviewer = caller("rev", Agent, Role::Guest);
+    assert_eq!(
+        authorize_merge(
+            &reviewer,
+            Some("p-rev"),
+            &task,
+            &SUBMITTER,
+            &standing(Some(&merge))
+        ),
+        Ok(())
+    );
+    let public = GrantStanding {
+        through_public_claim: true,
+        ..standing(Some(&merge))
+    };
+    assert_eq!(
+        authorize_merge(&reviewer, Some("p-rev"), &task, &SUBMITTER, &public),
+        Err(RepoDenial::PublicParticipant)
+    );
+    // With no grant at all the answer is the same, so it says nothing about what rows exist.
+    let public_no_grant = GrantStanding {
+        through_public_claim: true,
+        ..standing(None)
+    };
+    assert_eq!(
+        authorize_merge(
+            &reviewer,
+            Some("p-rev"),
+            &task,
+            &SUBMITTER,
+            &public_no_grant
+        ),
+        Err(RepoDenial::PublicParticipant)
+    );
+}
+
 #[test]
 fn only_the_assigned_agent_with_a_push_grant_asks_for_a_token() {
     let task = task();
-    let push = grant(GrantAction::Push);
     let mut checked = 0;
     for kind in [Person, Agent] {
         for role in Role::ALL {
             for party in PARTIES {
+                let push = grant(party, GrantAction::Push);
                 for held in [None, Some(&push)] {
                     let expected = if role == Role::None {
                         Err(RepoDenial::NotParticipant)
@@ -170,7 +348,7 @@ fn only_the_assigned_agent_with_a_push_grant_asks_for_a_token() {
                         Ok(())
                     };
                     assert_eq!(
-                        authorize_repo_access(&caller(party, kind, role), &task, held, REPO, NOW),
+                        authorize_repo_access(&caller(party, kind, role), &task, &standing(held)),
                         expected,
                         "{kind:?} {role:?} {party} {held:?}"
                     );
@@ -181,7 +359,8 @@ fn only_the_assigned_agent_with_a_push_grant_asks_for_a_token() {
     }
     assert_eq!(checked, 2 * 5 * 4 * 2);
     let agent = caller("asg", Agent, Role::Guest);
-    let merge = grant(GrantAction::Merge);
+    let push = grant("asg", GrantAction::Push);
+    let merge = grant("asg", GrantAction::Merge);
     let expired = Grant {
         expires_at: Some(NOW),
         ..push
@@ -190,6 +369,7 @@ fn only_the_assigned_agent_with_a_push_grant_asks_for_a_token() {
         provider_repo_id: REPO + 1,
         ..push
     };
+    let someone_elses = grant("other", GrantAction::Push);
     for (name, held, refusal) in [
         ("a merge grant", &merge, GrantRefusal::GrantRequired),
         ("an expired grant", &expired, GrantRefusal::GrantExpired),
@@ -198,25 +378,42 @@ fn only_the_assigned_agent_with_a_push_grant_asks_for_a_token() {
             &elsewhere,
             GrantRefusal::GrantRequired,
         ),
+        (
+            "someone else's grant",
+            &someone_elses,
+            GrantRefusal::GrantRequired,
+        ),
     ] {
         assert_eq!(
-            authorize_repo_access(&agent, &task, Some(held), REPO, NOW),
+            authorize_repo_access(&agent, &task, &standing(Some(held))),
             Err(RepoDenial::Grant(refusal)),
             "{name}"
         );
     }
+    // A grant whose giver no longer holds the delegation doesn't count.
+    for holder in [Some("new-owner"), None] {
+        let stale = GrantStanding {
+            delegation_holder: holder,
+            ..standing(Some(&push))
+        };
+        assert_eq!(
+            authorize_repo_access(&agent, &task, &stale),
+            Err(RepoDenial::Grant(GrantRefusal::GrantStale)),
+            "{holder:?}"
+        );
+    }
 }
 
-/// AC-17, M5-10 and decision 186: a merge needs its own grant, whatever the caller's role or place on the task, and the
-/// submitter never merges.
+/// AC-17, M5-10 and decision 186: a merge needs its own grant, whatever the caller's role or place on the task, and
+/// nobody controlled by the submitter's person merges.
 #[test]
 fn ac_17_only_a_merge_grant_lets_someone_who_didnt_submit_ask_for_a_merge() {
     let task = task();
-    let merge = grant(GrantAction::Merge);
     let mut checked = 0;
     for kind in [Person, Agent] {
         for role in Role::ALL {
             for party in PARTIES {
+                let merge = grant(party, GrantAction::Merge);
                 for held in [None, Some(&merge)] {
                     let expected = if role == Role::None {
                         Err(RepoDenial::NotParticipant)
@@ -230,7 +427,13 @@ fn ac_17_only_a_merge_grant_lets_someone_who_didnt_submit_ask_for_a_merge() {
                         Ok(())
                     };
                     assert_eq!(
-                        authorize_merge(&caller(party, kind, role), &task, "asg", held, REPO, NOW),
+                        authorize_merge(
+                            &caller(party, kind, role),
+                            Some("p-caller"),
+                            &task,
+                            &SUBMITTER,
+                            &standing(held)
+                        ),
                         expected,
                         "{kind:?} {role:?} {party} {held:?}"
                     );
@@ -242,19 +445,6 @@ fn ac_17_only_a_merge_grant_lets_someone_who_didnt_submit_ask_for_a_merge() {
     assert_eq!(checked, 2 * 5 * 4 * 2);
 
     // The reviewer, the requester, an admin and the owner are each refused without the grant, and a push grant isn't one.
-    let push = grant(GrantAction::Push);
-    let expired = Grant {
-        expires_at: Some(NOW - 1),
-        ..merge
-    };
-    let revoked = Grant {
-        revoked_at: Some(NOW - 1),
-        ..merge
-    };
-    let elsewhere = Grant {
-        provider_repo_id: REPO + 1,
-        ..merge
-    };
     for who in [
         caller("rev", Person, Role::Member),
         caller("req", Person, Role::Member),
@@ -262,6 +452,27 @@ fn ac_17_only_a_merge_grant_lets_someone_who_didnt_submit_ask_for_a_merge() {
         caller("owner", Person, Role::Owner),
         caller("rev", Agent, Role::Guest),
     ] {
+        let id: &'static str = match who.id.as_str() {
+            "rev" => "rev",
+            "req" => "req",
+            "admin" => "admin",
+            _ => "owner",
+        };
+        let merge = grant(id, GrantAction::Merge);
+        let push = grant(id, GrantAction::Push);
+        let expired = Grant {
+            expires_at: Some(NOW - 1),
+            ..merge
+        };
+        let revoked = Grant {
+            revoked_at: Some(NOW - 1),
+            ..merge
+        };
+        let elsewhere = Grant {
+            provider_repo_id: REPO + 1,
+            ..merge
+        };
+        let someone_elses = grant("other", GrantAction::Merge);
         for (name, held, refusal) in [
             ("nothing", None, GrantRefusal::GrantRequired),
             ("a push grant", Some(&push), GrantRefusal::GrantRequired),
@@ -280,35 +491,117 @@ fn ac_17_only_a_merge_grant_lets_someone_who_didnt_submit_ask_for_a_merge() {
                 Some(&elsewhere),
                 GrantRefusal::GrantRequired,
             ),
+            (
+                "someone else's grant",
+                Some(&someone_elses),
+                GrantRefusal::GrantRequired,
+            ),
         ] {
             assert_eq!(
-                authorize_merge(&who, &task, "asg", held, REPO, NOW),
+                authorize_merge(&who, Some(id), &task, &SUBMITTER, &standing(held)),
                 Err(RepoDenial::Grant(refusal)),
-                "{} {:?} with {name}",
-                who.id,
+                "{id} {:?} with {name}",
                 who.role
             );
         }
         assert_eq!(
-            authorize_merge(&who, &task, "asg", Some(&merge), REPO, NOW),
+            authorize_merge(&who, Some(id), &task, &SUBMITTER, &standing(Some(&merge))),
             Ok(())
         );
+        // A grant from an owner who no longer holds the delegation doesn't count.
+        let stale = GrantStanding {
+            delegation_holder: Some("new-owner"),
+            ..standing(Some(&merge))
+        };
+        assert_eq!(
+            authorize_merge(&who, Some(id), &task, &SUBMITTER, &stale),
+            Err(RepoDenial::Grant(GrantRefusal::GrantStale))
+        );
     }
+}
 
-    // Whoever the submission's row names as its submitter is refused, with the grant, and so is the task's assignee.
-    let owner = caller("owner", Person, Role::Owner);
-    assert_eq!(
-        authorize_merge(&owner, &task, "owner", Some(&merge), REPO, NOW),
-        Err(RepoDenial::SelfMerge)
-    );
+/// The submitter rule compares controlling people: the submitting agent's owner and that owner's other agents are
+/// refused with the grant in hand, and a reviewer merges only if a different person controls them (M5-10).
+#[test]
+fn m5_10_a_merger_controlled_by_the_submitters_person_is_refused() {
+    let task = task();
+    for (name, who, person, expected) in [
+        (
+            "the person who owns the submitting agent",
+            caller("p-sub", Person, Role::Owner),
+            Some("p-sub"),
+            Err(RepoDenial::SelfMerge),
+        ),
+        (
+            "another agent of that owner",
+            caller("sibling", Agent, Role::Member),
+            Some("p-sub"),
+            Err(RepoDenial::SelfMerge),
+        ),
+        (
+            "the reviewer, an agent of that owner",
+            caller("rev", Agent, Role::Guest),
+            Some("p-sub"),
+            Err(RepoDenial::SelfMerge),
+        ),
+        (
+            "the reviewer, whose owner the room can't name",
+            caller("rev", Agent, Role::Guest),
+            None,
+            Err(RepoDenial::SelfMerge),
+        ),
+        (
+            "the submitting agent, claiming another person",
+            caller("asg", Agent, Role::Member),
+            Some("p-other"),
+            Err(RepoDenial::SelfMerge),
+        ),
+        (
+            "the reviewer, a different person",
+            caller("rev", Person, Role::Member),
+            Some("rev"),
+            Ok(()),
+        ),
+        (
+            "the reviewer, an agent of another person",
+            caller("rev", Agent, Role::Guest),
+            Some("p-rev"),
+            Ok(()),
+        ),
+        (
+            "another person's agent",
+            caller("merger", Agent, Role::Member),
+            Some("p-merger"),
+            Ok(()),
+        ),
+    ] {
+        let id: &'static str = match who.id.as_str() {
+            "p-sub" => "p-sub",
+            "sibling" => "sibling",
+            "rev" => "rev",
+            "asg" => "asg",
+            _ => "merger",
+        };
+        let merge = grant(id, GrantAction::Merge);
+        assert_eq!(
+            authorize_merge(&who, person, &task, &SUBMITTER, &standing(Some(&merge))),
+            expected,
+            "{name}"
+        );
+    }
+    // A submitter whose controlling person the room can't name is the same as anyone.
+    let unknown_submitter = Actor {
+        id: "asg",
+        person: None,
+    };
+    let merge = grant("rev", GrantAction::Merge);
     assert_eq!(
         authorize_merge(
-            &caller("asg", Agent, Role::Member),
+            &caller("rev", Person, Role::Member),
+            Some("rev"),
             &task,
-            "someone",
-            Some(&merge),
-            REPO,
-            NOW
+            &unknown_submitter,
+            &standing(Some(&merge))
         ),
         Err(RepoDenial::SelfMerge)
     );
@@ -367,6 +660,7 @@ fn denials_have_stable_names_and_count_as_refusals_of_authority() {
         (RepoDenial::NoProviderDelegation, "no_provider_delegation"),
         (RepoDenial::GranteeNotParticipant, "grantee_not_participant"),
         (RepoDenial::GranteePublic, "grantee_public"),
+        (RepoDenial::PublicParticipant, "public_participant"),
         (RepoDenial::SelfMerge, "self_merge"),
         (
             RepoDenial::Grant(GrantRefusal::GrantRequired),
@@ -376,26 +670,34 @@ fn denials_have_stable_names_and_count_as_refusals_of_authority() {
             RepoDenial::Grant(GrantRefusal::GrantExpired),
             "grant_expired",
         ),
+        (RepoDenial::Grant(GrantRefusal::GrantStale), "grant_stale"),
     ] {
         assert_eq!(denial.code(), code);
     }
+    // The caller lacked the authority for the change.
     for code in [
         "self_merge",
         "no_provider_delegation",
         "grant_required",
         "grant_expired",
+        "grant_stale",
+        "public_participant",
+        "access_revoked",
+        "agent_disconnected",
         "not_allowed",
         "task_not_found",
     ] {
         assert!(is_authority_refusal("task.merge", code), "{code}");
     }
-    // Naming the wrong grantee, a state that doesn't allow it or a changed commit isn't a lack of authority.
+    // The caller has the authority and the request is wrong: naming a grantee who can't hold a grant, a state that
+    // doesn't allow it, or a changed commit.
     for code in [
         "grantee_not_participant",
         "grantee_public",
         "repo_not_ready",
         "commit_changed",
         "not_approved",
+        "deadline_unknown",
         "invalid_argument",
     ] {
         assert!(!is_authority_refusal("task.merge", code), "{code}");

@@ -64,40 +64,68 @@ fn approved() -> Task {
         .task
 }
 
-fn grant(action: GrantAction) -> Grant {
+/// A grant to `principal`, given by the room's owner.
+fn grant_to(principal: &'static str, action: GrantAction) -> Grant<'static> {
     Grant {
+        id: "g1",
+        principal,
         provider_repo_id: REPO,
         action,
+        delegated_by: "owner",
         expires_at: None,
         revoked_at: None,
     }
 }
 
-/// A merge that passes: someone with a live merge grant, who isn't the submitter, names the approved submission and its
-/// commit, in a room whose repository is ready.
-fn passing<'a>(task: &'a Task, grant: &'a Grant) -> MergeAuthority<'a> {
+fn grant(action: GrantAction) -> Grant<'static> {
+    grant_to("merger", action)
+}
+
+/// A principal and the person who controls it.
+fn actor(id: &'static str, person: &'static str) -> Actor<'static> {
+    Actor {
+        id,
+        person: Some(person),
+    }
+}
+
+/// The submitting agent, owned by the person `p-sub`.
+const SUBMITTER: Actor<'static> = Actor {
+    id: "asg",
+    person: Some("p-sub"),
+};
+
+/// A merge that passes: someone in the room with a merge grant from the current owner, controlled by a different person
+/// from the submitter, names the approved submission and its commit, in a room whose repository is ready.
+fn passing<'a>(task: &'a Task, grant: &'a Grant<'a>) -> MergeAuthority<'a> {
     MergeAuthority {
         task,
         request: Some(RequestState::Ready),
         link: Some(LinkStatus::Ready),
         link_repo_id: Some(REPO),
-        requester: "merger",
+        requester: actor("merger", "p-merger"),
+        requester_in_room: true,
         requester_connected: true,
-        submitter: "asg",
+        submitter: SUBMITTER,
         grant: Some(grant),
+        delegation_holder: Some("owner"),
         submission_no: 1,
         commit_sha: ABC,
         now: NOW,
     }
 }
 
+/// The proof of a passing recheck for the approved task.
+fn authorized() -> MergeAuthorized {
+    let (task, merge) = (approved(), grant(GrantAction::Merge));
+    check_merge_authority(&passing(&task, &merge)).unwrap()
+}
+
 fn change(merge_state: MergeState, merge_reason: Option<&'static str>) -> Change<'static> {
     Change {
-        provider_repo_id: REPO,
-        submission_no: 1,
-        reviewed_commit_sha: Some(ABC),
         merge_state,
         merge_reason,
+        ..FRESH
     }
 }
 
@@ -112,13 +140,18 @@ const FRESH: Change<'static> = Change {
 #[test]
 fn a_granted_merger_who_isnt_the_submitter_asks_for_the_approved_commit() {
     let (task, grant) = (approved(), grant(GrantAction::Merge));
-    assert_eq!(check_merge_authority(&passing(&task, &grant)), Ok(()));
+    let proof = check_merge_authority(&passing(&task, &grant)).unwrap();
+    assert_eq!(
+        (proof.task_id(), proof.repo_id(), proof.commit_sha()),
+        ("t", REPO, ABC)
+    );
     assert_eq!(
         decide_merge_request(&passing(&task, &grant), Some(&FRESH)),
         Ok(MergeState::Requested)
     );
     // Asking changes nothing about the task: it stays completed, and the decision returns only the merge's state.
     assert_eq!(task.status, TaskStatus::Completed);
+    assert_eq!(approved_commit(&task), Some(ABC));
 }
 
 #[test]
@@ -148,8 +181,27 @@ fn every_missing_piece_of_authority_refuses_by_name() {
         provider_repo_id: REPO + 1,
         ..merge
     };
+    let someone_elses = grant_to("rev", GrantAction::Merge);
     use MergeRefusal as R;
     for (name, authority, refusal, code) in [
+        (
+            "removed from the room",
+            MergeAuthority {
+                requester_in_room: false,
+                ..base
+            },
+            R::AccessRevoked,
+            "access_revoked",
+        ),
+        (
+            "a disconnected agent",
+            MergeAuthority {
+                requester_connected: false,
+                ..base
+            },
+            R::AgentDisconnected,
+            "agent_disconnected",
+        ),
         (
             "a task with no repository",
             MergeAuthority {
@@ -197,18 +249,9 @@ fn every_missing_piece_of_authority_refuses_by_name() {
             "repo_not_ready",
         ),
         (
-            "a disconnected agent",
-            MergeAuthority {
-                requester_connected: false,
-                ..base
-            },
-            R::AgentDisconnected,
-            "agent_disconnected",
-        ),
-        (
             "the submitter",
             MergeAuthority {
-                requester: "asg",
+                requester: SUBMITTER,
                 ..base
             },
             R::SelfMerge,
@@ -254,6 +297,15 @@ fn every_missing_piece_of_authority_refuses_by_name() {
             "a grant on another repository",
             MergeAuthority {
                 grant: Some(&elsewhere),
+                ..base
+            },
+            R::Grant(GrantRefusal::GrantRequired),
+            "grant_required",
+        ),
+        (
+            "someone else's grant",
+            MergeAuthority {
+                grant: Some(&someone_elses),
                 ..base
             },
             R::Grant(GrantRefusal::GrantRequired),
@@ -324,18 +376,96 @@ fn every_missing_piece_of_authority_refuses_by_name() {
     }
 }
 
+/// A requester who was removed from the room keeps no merge authority, though their grant row survives: when asking,
+/// and at the job's recheck of a merge they asked for while still in the room.
+#[test]
+fn a_removed_requester_with_a_surviving_grant_is_refused_at_the_request_and_at_the_recheck() {
+    let (task, merge) = (approved(), grant(GrantAction::Merge));
+    assert!(merge.is_live(NOW));
+    let removed = MergeAuthority {
+        requester_in_room: false,
+        ..passing(&task, &merge)
+    };
+    // At the request, whatever state the change is in.
+    for held in [FRESH, change(MergeState::Failed, Some("provider_refused"))] {
+        assert_eq!(
+            decide_merge_request(&removed, Some(&held)),
+            Err(MergeRefusal::AccessRevoked)
+        );
+    }
+    // At the job's recheck: no proof is made, so no step can be decided, and the merge fails under the refusal's name.
+    let refusal = check_merge_authority(&removed).unwrap_err();
+    assert_eq!(refusal, MergeRefusal::AccessRevoked);
+    assert_eq!(
+        MergeFailure::AuthorityLost(refusal).code(),
+        "access_revoked"
+    );
+    assert!(!MergeFailure::AuthorityLost(refusal).needs_follow_up());
+    // It comes before anything about the task or the grant.
+    let removed_and_more = MergeAuthority {
+        grant: None,
+        link: Some(LinkStatus::Suspended),
+        submission_no: 9,
+        ..removed
+    };
+    assert_eq!(
+        check_merge_authority(&removed_and_more),
+        Err(MergeRefusal::AccessRevoked)
+    );
+}
+
+/// A merge grant given by an owner who no longer holds the delegation doesn't count, at the request or at the recheck.
+#[test]
+fn a_grant_whose_giver_lost_ownership_merges_nothing() {
+    let (task, merge) = (approved(), grant(GrantAction::Merge));
+    for holder in [Some("new-owner"), None] {
+        let stale = MergeAuthority {
+            delegation_holder: holder,
+            ..passing(&task, &merge)
+        };
+        assert_eq!(
+            decide_merge_request(&stale, Some(&FRESH)),
+            Err(MergeRefusal::Grant(GrantRefusal::GrantStale)),
+            "{holder:?}"
+        );
+        assert_eq!(
+            check_merge_authority(&stale),
+            Err(MergeRefusal::Grant(GrantRefusal::GrantStale)),
+            "{holder:?}"
+        );
+    }
+    assert_eq!(
+        MergeRefusal::Grant(GrantRefusal::GrantStale).code(),
+        "grant_stale"
+    );
+    // Once the new owner grants again, it counts.
+    let regranted = Grant {
+        id: "g2",
+        delegated_by: "new-owner",
+        ..merge
+    };
+    let under_new_owner = MergeAuthority {
+        delegation_holder: Some("new-owner"),
+        ..passing(&task, &regranted)
+    };
+    assert_eq!(
+        decide_merge_request(&under_new_owner, Some(&FRESH)),
+        Ok(MergeState::Requested)
+    );
+}
+
 /// AC-17 and M5-10: approval carries no merge. Whoever approved, asked for or administers the task is refused without a
 /// separate merge grant, and the refusal is the same whether or not the task was approved.
 #[test]
 fn ac_17_an_approved_task_without_a_merge_grant_cant_be_merged() {
     let done = approved();
     let waiting = submitted();
-    let push = grant(GrantAction::Push);
     for task in [&done, &waiting] {
         for who in ["rev", "req", "owner", "merger"] {
+            let push = grant_to(who, GrantAction::Push);
             for held in [None, Some(&push)] {
                 let authority = MergeAuthority {
-                    requester: who,
+                    requester: actor(who, who),
                     grant: held,
                     ..passing(task, &push)
                 };
@@ -350,46 +480,115 @@ fn ac_17_an_approved_task_without_a_merge_grant_cant_be_merged() {
     }
 }
 
-/// M5-10 and decision 186: whoever submitted the work never merges it, even holding a merge grant.
+/// M5-10 and decision 186: nobody merges work whose submitter answers to the same person they do, even holding a merge
+/// grant. The rule compares controlling people, not IDs.
 #[test]
-fn m5_10_the_submitter_never_merges_their_own_work() {
+fn m5_10_nobody_controlled_by_the_submitters_person_merges_the_work() {
     let task = approved();
+    for (name, requester, expected) in [
+        ("the submitting agent itself", SUBMITTER, false),
+        // The submitter's row says one thing and the room another: the same ID is the same actor.
+        (
+            "the same agent under another person",
+            actor("asg", "p-other"),
+            false,
+        ),
+        (
+            "the person who owns the submitting agent",
+            actor("p-sub", "p-sub"),
+            false,
+        ),
+        (
+            "another agent of that owner",
+            actor("sibling", "p-sub"),
+            false,
+        ),
+        (
+            "an agent whose owner the room can't name",
+            Actor {
+                id: "orphan",
+                person: None,
+            },
+            false,
+        ),
+        ("another person", actor("p-merger", "p-merger"), true),
+        ("another person's agent", actor("merger", "p-merger"), true),
+        // M5-10: a reviewer may merge what they approved, with the grant, if a different person controls them.
+        (
+            "the reviewer, a different person",
+            actor("rev", "rev"),
+            true,
+        ),
+        (
+            "the reviewer, an agent of another person",
+            actor("rev", "p-rev"),
+            true,
+        ),
+        (
+            "the reviewer, an agent of the submitter's owner",
+            actor("rev", "p-sub"),
+            false,
+        ),
+    ] {
+        let merge = grant_to(requester.id, GrantAction::Merge);
+        let authority = MergeAuthority {
+            requester,
+            ..passing(&task, &merge)
+        };
+        let got = decide_merge_request(&authority, Some(&FRESH));
+        if expected {
+            assert_eq!(got, Ok(MergeState::Requested), "{name}");
+        } else {
+            assert_eq!(got, Err(MergeRefusal::SelfMerge), "{name}");
+            assert_eq!(
+                check_merge_authority(&authority),
+                Err(MergeRefusal::SelfMerge),
+                "{name}, at the recheck"
+            );
+        }
+    }
+    // A submitter whose controlling person is unknown is the same as anyone, so nothing merges until the room can say.
     let merge = grant(GrantAction::Merge);
-    let as_submitter = MergeAuthority {
-        requester: "asg",
+    let unknown_submitter = MergeAuthority {
+        submitter: Actor {
+            id: "asg",
+            person: None,
+        },
         ..passing(&task, &merge)
     };
     assert_eq!(
-        decide_merge_request(&as_submitter, Some(&FRESH)),
+        check_merge_authority(&unknown_submitter),
         Err(MergeRefusal::SelfMerge)
     );
-    // The submission's own row names the submitter, and the task's assignee is refused too, whichever the room read.
+    // The task's assignee is refused too, whatever the submission's row names as its submitter.
+    let asg_grant = grant_to("asg", GrantAction::Merge);
     let row_says_other = MergeAuthority {
-        requester: "asg",
-        submitter: "someone",
-        ..passing(&task, &merge)
+        requester: actor("asg", "p-asg"),
+        submitter: actor("someone", "p-someone"),
+        ..passing(&task, &asg_grant)
     };
     assert_eq!(
         check_merge_authority(&row_says_other),
         Err(MergeRefusal::SelfMerge)
     );
-    let submitted_by_merger = MergeAuthority {
-        submitter: "merger",
-        ..passing(&task, &merge)
-    };
-    assert_eq!(
-        check_merge_authority(&submitted_by_merger),
-        Err(MergeRefusal::SelfMerge)
-    );
-    // The reviewer may merge what they approved, with the grant: they didn't submit it.
-    let reviewer = MergeAuthority {
-        requester: "rev",
-        ..passing(&task, &merge)
-    };
-    assert_eq!(
-        decide_merge_request(&reviewer, Some(&FRESH)),
-        Ok(MergeState::Requested)
-    );
+}
+
+#[test]
+fn the_same_controller_is_decided_by_person_and_fails_closed() {
+    let unknown = |id| Actor { id, person: None };
+    for (a, b, same) in [
+        (actor("a", "p1"), actor("a", "p1"), true),
+        (actor("a", "p1"), actor("b", "p1"), true),
+        (actor("p1", "p1"), actor("b", "p1"), true),
+        (actor("a", "p1"), actor("a", "p2"), true),
+        (actor("a", "p1"), actor("b", "p2"), false),
+        (unknown("a"), actor("b", "p2"), true),
+        (actor("a", "p1"), unknown("b"), true),
+        (unknown("a"), unknown("b"), true),
+    ] {
+        assert_eq!(same_controller(&a, &b), same, "{a:?} {b:?}");
+        assert_eq!(same_controller(&b, &a), same, "{b:?} {a:?}");
+    }
 }
 
 #[test]
@@ -408,10 +607,6 @@ fn a_merge_is_asked_for_once_and_again_only_after_a_failure_that_wasnt_the_commi
         reviewed_commit_sha: Some(DEF),
         ..FRESH
     };
-    let unrecorded = Change {
-        reviewed_commit_sha: None,
-        ..FRESH
-    };
     for (name, held, expected) in [
         ("no pull request", None, Err(MergeRefusal::ChangeNotFound)),
         (
@@ -428,11 +623,6 @@ fn a_merge_is_asked_for_once_and_again_only_after_a_failure_that_wasnt_the_commi
             "a change reviewed at another commit",
             Some(other_commit),
             Err(MergeRefusal::CommitChanged),
-        ),
-        (
-            "a change with no reviewed commit recorded",
-            Some(unrecorded),
-            Ok(MergeState::Requested),
         ),
         ("never asked", Some(FRESH), Ok(MergeState::Requested)),
         (
@@ -481,36 +671,43 @@ fn a_merge_is_asked_for_once_and_again_only_after_a_failure_that_wasnt_the_commi
     assert_eq!(MergeRefusal::AlreadyMerged.code(), "already_merged");
 }
 
+/// A change whose own reviewed commit was never written is bound by the task's approved submission alone, and by
+/// nothing looser: the request still has to name that commit.
 #[test]
-fn the_merge_state_moves_only_along_its_three_events() {
-    use MergeEvent as E;
-    use MergeState as S;
-    for from in [S::NotRequested, S::Requested, S::Succeeded, S::Failed] {
-        for event in [E::Requested, E::Succeeded, E::Failed] {
-            let expected = match (from, event) {
-                (S::NotRequested, E::Requested) => Some(S::Requested),
-                (S::Failed, E::Requested) => Some(S::Requested),
-                (S::Requested, E::Succeeded) => Some(S::Succeeded),
-                (S::Requested, E::Failed) => Some(S::Failed),
-                _ => None,
-            };
-            assert_eq!(
-                merge_transition(from, event),
-                expected,
-                "{from:?} {event:?}"
-            );
-        }
-    }
-    assert_eq!(E::Requested.name(), "merge.requested");
-    assert_eq!(E::Succeeded.name(), "merge.succeeded");
-    assert_eq!(E::Failed.name(), "merge.failed");
+fn a_change_with_no_reviewed_commit_is_bound_by_the_tasks_approved_submission() {
+    let (task, merge) = (approved(), grant(GrantAction::Merge));
+    let unrecorded = Change {
+        reviewed_commit_sha: None,
+        ..FRESH
+    };
+    assert_eq!(
+        decide_merge_request(&passing(&task, &merge), Some(&unrecorded)),
+        Ok(MergeState::Requested)
+    );
+    let naming_another = MergeAuthority {
+        commit_sha: DEF,
+        ..passing(&task, &merge)
+    };
+    assert_eq!(
+        decide_merge_request(&naming_another, Some(&unrecorded)),
+        Err(MergeRefusal::CommitChanged)
+    );
+    // A task whose approved submission recorded no commit has nothing a merge can name.
+    let no_commit = Task {
+        submission_commit: None,
+        ..approved()
+    };
+    assert_eq!(approved_commit(&no_commit), None);
+    assert_eq!(
+        decide_merge_request(&passing(&no_commit, &merge), Some(&unrecorded)),
+        Err(MergeRefusal::CommitChanged)
+    );
+    assert_eq!(approved_commit(&submitted()), None);
 }
 
-const REVIEWED: Reviewed<'static> = Reviewed {
-    commit_sha: ABC,
-    base_sha: Some(BASE),
-    repo_id: REPO,
+const REVIEWED: ReviewedBase<'static> = ReviewedBase {
     default_branch: "main",
+    base_sha: Some(BASE),
 };
 
 /// The pull request as it was reviewed: open, into the default branch, from the linked repository, at the reviewed commit.
@@ -523,12 +720,87 @@ const AS_REVIEWED: PullObservation<'static> = PullObservation {
     default_branch_has_reviewed: None,
 };
 
+const MERGED: PullObservation<'static> = PullObservation {
+    state: PullState::Merged,
+    default_branch_has_reviewed: Some(true),
+    ..AS_REVIEWED
+};
+
+/// The only way to a proof of an observed merge: a rechecked authority and a read that shows it.
+fn observed_merge(authorized: &MergeAuthorized) -> MergeObserved {
+    match decide_merge_step(authorized, &REVIEWED, &MERGED, None) {
+        MergeStep::Succeeded(seen) => seen,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn the_merge_state_moves_only_along_its_three_events() {
+    use MergeState as S;
+    let seen = observed_merge(&authorized());
+    assert_eq!((seen.task_id(), seen.commit_sha()), ("t", ABC));
+    let events = [
+        MergeEvent::Requested,
+        MergeEvent::Succeeded(seen),
+        MergeEvent::Failed,
+    ];
+    for from in [S::NotRequested, S::Requested, S::Succeeded, S::Failed] {
+        for event in &events {
+            let expected = match (from, event) {
+                (S::NotRequested | S::Failed, MergeEvent::Requested) => Some(S::Requested),
+                (S::Requested, MergeEvent::Succeeded(_)) => Some(S::Succeeded),
+                (S::Requested, MergeEvent::Failed) => Some(S::Failed),
+                _ => None,
+            };
+            assert_eq!(
+                merge_transition("t", from, event),
+                expected,
+                "{from:?} {event:?}"
+            );
+        }
+    }
+    assert_eq!(events[0].name(), "merge.requested");
+    assert_eq!(events[1].name(), "merge.succeeded");
+    assert_eq!(events[2].name(), "merge.failed");
+}
+
+/// Success is bound to an observation of the same task. One made for another task moves nothing.
+#[test]
+fn a_merge_succeeds_only_on_an_observation_of_its_own_task() {
+    let seen = MergeEvent::Succeeded(observed_merge(&authorized()));
+    assert_eq!(
+        merge_transition("t", MergeState::Requested, &seen),
+        Some(MergeState::Succeeded)
+    );
+    assert_eq!(
+        merge_transition("another-task", MergeState::Requested, &seen),
+        None
+    );
+    // The proof names what the recheck authorized, so a proof for another task's commit can't be made from this one.
+    let other_task = Task {
+        id: "t2".into(),
+        ..approved()
+    };
+    let merge = grant(GrantAction::Merge);
+    let other = check_merge_authority(&passing(&other_task, &merge)).unwrap();
+    let other_seen = MergeEvent::Succeeded(observed_merge(&other));
+    assert_eq!(
+        merge_transition("t", MergeState::Requested, &other_seen),
+        None
+    );
+    assert_eq!(
+        merge_transition("t2", MergeState::Requested, &other_seen),
+        Some(MergeState::Succeeded)
+    );
+}
+
 #[test]
 fn the_job_marks_and_merges_only_the_pull_request_it_reviewed() {
+    let authorized = authorized();
     assert_eq!(
-        decide_merge_step(&REVIEWED, &AS_REVIEWED, None),
+        decide_merge_step(&authorized, &REVIEWED, &AS_REVIEWED, None),
         MergeStep::MarkAndMerge {
-            sha: ABC,
+            sha: ABC.into(),
             base_moved: Some(false)
         }
     );
@@ -588,7 +860,7 @@ fn the_job_marks_and_merges_only_the_pull_request_it_reviewed() {
             Some(MergeCall::Unknown),
         ] {
             assert_eq!(
-                decide_merge_step(&REVIEWED, &observed, call),
+                decide_merge_step(&authorized, &REVIEWED, &observed, call),
                 MergeStep::Failed(failure),
                 "{name} {call:?}"
             );
@@ -596,31 +868,46 @@ fn the_job_marks_and_merges_only_the_pull_request_it_reviewed() {
         assert_eq!(failure.code(), code, "{name}");
     }
     // Every difference is checked on a merged pull request too, so a merge of another commit never reads as success.
-    let merged_elsewhere = PullObservation {
-        state: PullState::Merged,
-        head_sha: DEF,
-        default_branch_has_reviewed: Some(true),
-        ..AS_REVIEWED
-    };
-    assert_eq!(
-        decide_merge_step(&REVIEWED, &merged_elsewhere, None),
-        MergeStep::Failed(MergeFailure::CommitChanged)
-    );
+    for observed in [
+        PullObservation {
+            head_sha: DEF,
+            ..MERGED
+        },
+        PullObservation {
+            base_ref: "release",
+            ..MERGED
+        },
+        PullObservation {
+            head_repo_id: Some(REPO + 1),
+            ..MERGED
+        },
+    ] {
+        assert!(matches!(
+            decide_merge_step(&authorized, &REVIEWED, &observed, None),
+            MergeStep::Failed(_)
+        ));
+    }
 }
 
 /// M5-09: with a changed head the merge fails with `commit_changed`. The step touches no task, so it stays completed,
 /// and the way on is a follow-up task.
 #[test]
 fn m5_09_a_changed_head_fails_the_merge_and_calls_for_a_follow_up() {
+    let authorized = authorized();
     let moved = PullObservation {
         head_sha: DEF,
         ..AS_REVIEWED
     };
-    let step = decide_merge_step(&REVIEWED, &moved, None);
+    let step = decide_merge_step(&authorized, &REVIEWED, &moved, None);
     assert_eq!(step, MergeStep::Failed(MergeFailure::CommitChanged));
     // GitHub's own refusal of a head that moved between the read and the call is the same failure.
     assert_eq!(
-        decide_merge_step(&REVIEWED, &AS_REVIEWED, Some(MergeCall::HeadModified)),
+        decide_merge_step(
+            &authorized,
+            &REVIEWED,
+            &AS_REVIEWED,
+            Some(MergeCall::HeadModified)
+        ),
         MergeStep::Failed(MergeFailure::CommitChanged)
     );
     assert!(MergeFailure::CommitChanged.needs_follow_up());
@@ -635,7 +922,7 @@ fn m5_09_a_changed_head_fails_the_merge_and_calls_for_a_follow_up() {
         assert!(!other.needs_follow_up(), "{other:?}");
     }
     assert_eq!(
-        merge_transition(MergeState::Requested, MergeEvent::Failed),
+        merge_transition("t", MergeState::Requested, &MergeEvent::Failed),
         Some(MergeState::Failed)
     );
     // And asking again is refused, as the request's own table shows.
@@ -655,25 +942,26 @@ fn m5_09_a_changed_head_fails_the_merge_and_calls_for_a_follow_up() {
 
 #[test]
 fn a_moved_base_still_merges_and_is_reported() {
+    let authorized = authorized();
     let moved_base = PullObservation {
         base_sha: MOVED_BASE,
         ..AS_REVIEWED
     };
     assert_eq!(
-        decide_merge_step(&REVIEWED, &moved_base, None),
+        decide_merge_step(&authorized, &REVIEWED, &moved_base, None),
         MergeStep::MarkAndMerge {
-            sha: ABC,
+            sha: ABC.into(),
             base_moved: Some(true)
         }
     );
-    let no_base_kept = Reviewed {
+    let no_base_kept = ReviewedBase {
         base_sha: None,
         ..REVIEWED
     };
     assert_eq!(
-        decide_merge_step(&no_base_kept, &moved_base, None),
+        decide_merge_step(&authorized, &no_base_kept, &moved_base, None),
         MergeStep::MarkAndMerge {
-            sha: ABC,
+            sha: ABC.into(),
             base_moved: None
         }
     );
@@ -682,10 +970,10 @@ fn a_moved_base_still_merges_and_is_reported() {
 /// A second merge call answers `200`, so success is read from the pull request and never from the call.
 #[test]
 fn success_comes_only_from_the_pull_requests_own_state() {
+    let authorized = authorized();
     let merged = |contains| PullObservation {
-        state: PullState::Merged,
         default_branch_has_reviewed: contains,
-        ..AS_REVIEWED
+        ..MERGED
     };
     let calls = [
         None,
@@ -697,45 +985,52 @@ fn success_comes_only_from_the_pull_requests_own_state() {
     for call in calls {
         // Merged, and the default branch is seen to contain the reviewed commit. A retried job finds this first and
         // never calls again.
-        assert_eq!(
-            decide_merge_step(&REVIEWED, &merged(Some(true)), call),
-            MergeStep::Succeeded,
-            "{call:?}"
+        let step = decide_merge_step(&authorized, &REVIEWED, &merged(Some(true)), call);
+        assert!(
+            matches!(&step, MergeStep::Succeeded(seen) if seen.task_id() == "t" && seen.commit_sha() == ABC),
+            "{call:?} {step:?}"
         );
         // Merged, but the default branch wasn't read, or doesn't show the commit: not yet a success.
         for contains in [None, Some(false)] {
             assert_eq!(
-                decide_merge_step(&REVIEWED, &merged(contains), call),
+                decide_merge_step(&authorized, &REVIEWED, &merged(contains), call),
                 MergeStep::ReadAgain,
                 "{call:?} {contains:?}"
             );
         }
     }
     // GitHub said yes and the pull request still reads as open: nothing is recorded, and nothing is called twice in a run.
-    assert_eq!(
-        decide_merge_step(&REVIEWED, &AS_REVIEWED, Some(MergeCall::Accepted)),
-        MergeStep::ReadAgain
-    );
     // A lost answer is the same. The next run starts from a fresh read.
-    assert_eq!(
-        decide_merge_step(&REVIEWED, &AS_REVIEWED, Some(MergeCall::Unknown)),
-        MergeStep::ReadAgain
-    );
+    for call in [MergeCall::Accepted, MergeCall::Unknown] {
+        assert_eq!(
+            decide_merge_step(&authorized, &REVIEWED, &AS_REVIEWED, Some(call)),
+            MergeStep::ReadAgain,
+            "{call:?}"
+        );
+    }
     // A claim that the default branch has the commit means nothing while the pull request is open.
     let open_but_contained = PullObservation {
         default_branch_has_reviewed: Some(true),
         ..AS_REVIEWED
     };
-    assert_eq!(
-        decide_merge_step(&REVIEWED, &open_but_contained, Some(MergeCall::Accepted)),
-        MergeStep::ReadAgain
-    );
+    for call in [None, Some(MergeCall::Accepted)] {
+        assert!(!matches!(
+            decide_merge_step(&authorized, &REVIEWED, &open_but_contained, call),
+            MergeStep::Succeeded(_)
+        ));
+    }
 }
 
 #[test]
 fn a_refusal_by_github_is_a_failure_with_its_status() {
+    let authorized = authorized();
     for status in [403, 405, 422] {
-        let step = decide_merge_step(&REVIEWED, &AS_REVIEWED, Some(MergeCall::Refused(status)));
+        let step = decide_merge_step(
+            &authorized,
+            &REVIEWED,
+            &AS_REVIEWED,
+            Some(MergeCall::Refused(status)),
+        );
         assert_eq!(
             step,
             MergeStep::Failed(MergeFailure::ProviderRefused(status))
@@ -748,7 +1043,7 @@ fn a_refusal_by_github_is_a_failure_with_its_status() {
 }
 
 /// The job rechecks authority before its external call, and a requester who lost it since asking fails the merge under
-/// that refusal's own name (AC-13, AC-27).
+/// that refusal's own name (AC-13, AC-27). With no proof from the recheck, no step can be decided at all.
 #[test]
 fn the_jobs_recheck_fails_the_merge_when_authority_is_gone() {
     let (task, merge) = (approved(), grant(GrantAction::Merge));
@@ -758,12 +1053,28 @@ fn the_jobs_recheck_fails_the_merge_when_authority_is_gone() {
     };
     for (name, authority, code) in [
         (
+            "the requester was removed from the room",
+            MergeAuthority {
+                requester_in_room: false,
+                ..passing(&task, &merge)
+            },
+            "access_revoked",
+        ),
+        (
             "the grant was revoked",
             MergeAuthority {
                 grant: Some(&revoked),
                 ..passing(&task, &merge)
             },
             "grant_required",
+        ),
+        (
+            "the room's ownership moved",
+            MergeAuthority {
+                delegation_holder: Some("new-owner"),
+                ..passing(&task, &merge)
+            },
+            "grant_stale",
         ),
         (
             "the agent was disconnected",
@@ -787,60 +1098,76 @@ fn the_jobs_recheck_fails_the_merge_when_authority_is_gone() {
     }
 }
 
+/// The approved commit comes from the task itself, so a caller can't pass off another commit as reviewed.
 #[test]
 fn a_merge_podster_didnt_make_is_named_for_what_it_was() {
     use MergeState as S;
-    for (name, state, merged, reviewed, expected, reason) in [
+    let done = approved();
+    let waiting = submitted();
+    let no_commit = Task {
+        submission_commit: None,
+        ..approved()
+    };
+    for (name, task, state, merged, expected, reason) in [
         (
             "the merge Podster asked for",
+            &done,
             S::Requested,
             ABC,
-            Some(ABC),
             ObservedMerge::Requested,
             None,
         ),
         (
             "seen again after it was recorded",
+            &done,
             S::Succeeded,
             ABC,
-            Some(ABC),
             ObservedMerge::Requested,
             None,
         ),
         (
             "the reviewed commit, never asked for",
+            &done,
             S::NotRequested,
             ABC,
-            Some(ABC),
             ObservedMerge::Unrequested,
             Some("unrequested_merge"),
         ),
         (
             "the reviewed commit, after a failed merge",
+            &done,
             S::Failed,
             ABC,
-            Some(ABC),
             ObservedMerge::Unrequested,
             Some("unrequested_merge"),
         ),
         (
             "another commit, while a merge was asked for",
+            &done,
             S::Requested,
             DEF,
-            Some(ABC),
+            ObservedMerge::Unreviewed,
+            Some("unreviewed_merge"),
+        ),
+        // The submission's commit, on a task nobody approved yet.
+        (
+            "a commit still in review",
+            &waiting,
+            S::NotRequested,
+            ABC,
             ObservedMerge::Unreviewed,
             Some("unreviewed_merge"),
         ),
         (
-            "a commit nobody approved",
-            S::NotRequested,
+            "an approved task that recorded no commit",
+            &no_commit,
+            S::Requested,
             ABC,
-            None,
             ObservedMerge::Unreviewed,
             Some("unreviewed_merge"),
         ),
     ] {
-        let got = classify_observed_merge(state, merged, reviewed);
+        let got = classify_observed_merge(task, state, merged);
         assert_eq!(got, expected, "{name}");
         assert_eq!(got.reason(), reason, "{name}");
     }

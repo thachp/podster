@@ -5,10 +5,14 @@
 //! same checks, so it never widens a token and never extends a task (AC-27). Nothing here comes from the caller but the
 //! task it names: the repository is the room's link, and the organization and installations are configuration.
 //!
+//! **Run `podster_policy::repositories::authorize_repo_access` first.** It decides whether the caller may know the task
+//! exists. This answers `task_not_linked` and `repo_not_ready` before it looks at the grant, so run alone it would tell
+//! a caller who can't see the task something about it.
+//!
 //! When this refuses and the room still holds a token for the agent and task, that token's authority has ended, and the
 //! room tries to revoke it.
 
-use crate::repo_grants::{check_grant, Grant, GrantRefusal};
+use crate::repo_grants::{check_grant, Grant, GrantRefusal, GrantUse};
 use crate::repositories::{coding_work_allowed, GrantAction, LinkStatus, RequestState};
 use crate::{Task, TaskStatus};
 
@@ -76,8 +80,32 @@ pub fn minted_token_matches(
 
 /// A token the room already holds, sealed, for this agent and task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HeldToken {
+pub struct HeldToken<'a> {
     pub expires_at: i64,
+    /// The grant row it was minted under.
+    pub grant_id: &'a str,
+}
+
+/// When a task's authority to run ends. The room must say which of the three it is: a state it can't read is `Unknown`,
+/// and refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Deadline {
+    /// Fixed when it was set. A renewal never moves it.
+    At(i64),
+    /// The task was explicitly given no deadline.
+    NoDeadline,
+    /// Nothing says whether there's a deadline.
+    Unknown,
+}
+
+/// What's left of a task's budget, with the same three states and the same rule for the unknown one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Budget {
+    Remaining,
+    Exhausted,
+    /// The task was explicitly given no budget.
+    NoBudget,
+    Unknown,
 }
 
 /// Everything a token request is checked against, read at the time of the request.
@@ -96,12 +124,12 @@ pub struct AccessCheck<'a> {
     /// The room's linked repository, when it has one.
     pub link_repo_id: Option<i64>,
     /// The caller's `push` grant row that isn't revoked, if any.
-    pub grant: Option<&'a Grant>,
-    /// When the task's authority to run ends, fixed when it was set. A renewal never moves it. `None` is a task with no
-    /// deadline.
-    pub deadline: Option<i64>,
-    pub budget_exhausted: bool,
-    pub held: Option<HeldToken>,
+    pub grant: Option<&'a Grant<'a>>,
+    /// Who holds the repository's delegation now: see [`GrantUse::delegation_holder`].
+    pub delegation_holder: Option<&'a str>,
+    pub deadline: Deadline,
+    pub budget: Budget,
+    pub held: Option<HeldToken<'a>>,
     pub now: i64,
 }
 
@@ -121,9 +149,13 @@ pub enum AccessRefusal {
     TaskNotActive,
     /// `deadline_passed`
     DeadlinePassed,
+    /// `deadline_unknown`: the room can't say whether the task has a deadline, so nothing is issued.
+    DeadlineUnknown,
     /// `budget_exhausted`
     BudgetExhausted,
-    /// `grant_required` or `grant_expired`
+    /// `budget_unknown`
+    BudgetUnknown,
+    /// `grant_required`, `grant_expired` or `grant_stale`
     Grant(GrantRefusal),
 }
 
@@ -137,7 +169,9 @@ impl AccessRefusal {
             AccessRefusal::RepoNotReady => "repo_not_ready",
             AccessRefusal::TaskNotActive => "task_not_active",
             AccessRefusal::DeadlinePassed => "deadline_passed",
+            AccessRefusal::DeadlineUnknown => "deadline_unknown",
             AccessRefusal::BudgetExhausted => "budget_exhausted",
+            AccessRefusal::BudgetUnknown => "budget_unknown",
             AccessRefusal::Grant(refusal) => refusal.code(),
         }
     }
@@ -148,8 +182,8 @@ impl AccessRefusal {
 pub enum TokenPlan {
     /// Return the token the room holds. Nothing is asked of GitHub.
     ReuseHeld,
-    /// Ask GitHub for one. `replace_held` says the room holds one at or near its expiry, which goes when the new one is
-    /// kept, so the agent still has one.
+    /// Ask GitHub for one. `replace_held` says the room holds one that can't be returned: it's at or near its expiry, or
+    /// it was minted under another grant. It goes when the new one is kept, so the agent still has one.
     Mint { replace_held: bool },
 }
 
@@ -160,10 +194,12 @@ pub struct Access {
     pub permissions: TokenPermissions,
     pub token: TokenPlan,
     /// When the task's authority ends, which the answer gives beside the token's own expiry. A token can outlive it.
+    /// `None` is a task explicitly given no deadline.
     pub authority_ends_at: Option<i64>,
 }
 
-/// Decides a token request, and every renewal the same way.
+/// Decides a token request, and every renewal the same way. The caller must have passed
+/// `podster_policy::repositories::authorize_repo_access` first: see the module's note on the order of refusals.
 pub fn decide_access(check: &AccessCheck) -> Result<Access, AccessRefusal> {
     if !check.caller_is_agent {
         return Err(AccessRefusal::NotAllowed);
@@ -185,16 +221,31 @@ pub fn decide_access(check: &AccessCheck) -> Result<Access, AccessRefusal> {
     if check.task.status != TaskStatus::Accepted {
         return Err(AccessRefusal::TaskNotActive);
     }
-    if check.deadline.is_some_and(|at| check.now >= at) {
-        return Err(AccessRefusal::DeadlinePassed);
+    let authority_ends_at = match check.deadline {
+        Deadline::Unknown => return Err(AccessRefusal::DeadlineUnknown),
+        Deadline::At(at) if check.now >= at => return Err(AccessRefusal::DeadlinePassed),
+        Deadline::At(at) => Some(at),
+        Deadline::NoDeadline => None,
+    };
+    match check.budget {
+        Budget::Unknown => return Err(AccessRefusal::BudgetUnknown),
+        Budget::Exhausted => return Err(AccessRefusal::BudgetExhausted),
+        Budget::Remaining | Budget::NoBudget => {}
     }
-    if check.budget_exhausted {
-        return Err(AccessRefusal::BudgetExhausted);
-    }
-    check_grant(check.grant, GrantAction::Push, repo_id, check.now)
-        .map_err(AccessRefusal::Grant)?;
+    let usage = GrantUse {
+        principal: check.caller,
+        action: GrantAction::Push,
+        link_repo_id: repo_id,
+        delegation_holder: check.delegation_holder,
+        now: check.now,
+    };
+    check_grant(check.grant, &usage).map_err(AccessRefusal::Grant)?;
+    let grant_id = check.grant.map(|g| g.id);
     let token = match check.held {
-        Some(held) if held.expires_at.saturating_sub(check.now) > TOKEN_RENEW_BEFORE_MS => {
+        Some(held)
+            if Some(held.grant_id) == grant_id
+                && held.expires_at.saturating_sub(check.now) > TOKEN_RENEW_BEFORE_MS =>
+        {
             TokenPlan::ReuseHeld
         }
         held => TokenPlan::Mint {
@@ -205,6 +256,6 @@ pub fn decide_access(check: &AccessCheck) -> Result<Access, AccessRefusal> {
         repo_id,
         permissions: TokenPermissions::AGENT,
         token,
-        authority_ends_at: check.deadline,
+        authority_ends_at,
     })
 }

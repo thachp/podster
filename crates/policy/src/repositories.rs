@@ -6,18 +6,25 @@
 //!
 //! | Action | Who |
 //! | --- | --- |
-//! | Give or take back a `push` or `merge` grant | A human owner or admin, who also holds the repository's delegation. Neither side alone is enough (AC-10, AC-11). The delegation is the room owner's, for that repository only |
+//! | Give a `push` or `merge` grant | The room's owner, as a person, whose authority holds: the one who has both room authority and the repository's delegation. Neither side alone is enough (AC-10, AC-11), so an admin can't |
+//! | Take a grant back | The room's owner; a person who administers the room's organization, so a grant can be pulled when the owner has left; and the grant's holder, for their own. Nobody else, and an agent never takes back another's |
 //! | Receive a grant | A current participant, person or agent, who isn't there through a public claim |
-//! | Ask for a repository token | The agent the task is assigned to, with a live `push` grant |
-//! | Ask for a merge | A person or agent who can see the task, holds a live `merge` grant and didn't submit the work |
+//! | Ask for a repository token | The agent the task is assigned to, not there through a public claim, with a `push` grant that counts |
+//! | Ask for a merge | A person or agent who can see the task, isn't there through a public claim, holds a `merge` grant that counts, and isn't controlled by the person who controls the submitter |
 //! | See the room's repository and its state | A person who sees the whole room |
 //! | See who holds grants | A human owner or admin, and each participant their own |
 //! | See a task's change and merge state | Whoever can see the task |
 //!
+//! A grant counts only while it's live and its giver still holds the delegation: see `repo_grants::check_grant`.
 //! Reviewing a task carries no grant, and neither does a role, a work-role title, an A2A message or a public claim
 //! (AC-17, AC-24).
+//!
+//! **Order.** A route runs the function here before the decision in `podster_core`. These answer `task_not_found` to a
+//! caller who can't see the task. The core decisions answer `task_not_linked` and `repo_not_ready` before they look at
+//! a grant, so run alone they'd tell such a caller something about the task.
 
-use podster_core::repo_grants::{check_grant, Grant, GrantRefusal};
+use podster_core::repo_grants::{check_grant, Grant, GrantRefusal, GrantUse};
+use podster_core::repo_merge::{same_controller, Actor};
 use podster_core::repositories::GrantAction;
 use podster_core::Task;
 
@@ -36,12 +43,15 @@ pub enum RepoDenial {
     NoProviderDelegation,
     /// `grantee_not_participant`: a grant can't be given to someone who isn't in the room.
     GranteeNotParticipant,
-    /// `grantee_public`: someone in the room through a public claim. No spec says they can hold a grant, so it's refused
-    /// until one does.
+    /// `grantee_public`: a grant can't be given to someone in the room through a public claim. No spec says they can
+    /// hold one, so it's refused until one does. The giver has the authority, and named the wrong grantee.
     GranteePublic,
-    /// `self_merge`: whoever submitted the work never merges it.
+    /// `public_participant`: the caller is in the room through a public claim, and uses no grant, even one given before
+    /// that was so.
+    PublicParticipant,
+    /// `self_merge`: nobody merges work that the person controlling them also controls the submitter of.
     SelfMerge,
-    /// `grant_required` or `grant_expired`
+    /// `grant_required`, `grant_expired` or `grant_stale`
     Grant(GrantRefusal),
 }
 
@@ -54,6 +64,7 @@ impl RepoDenial {
             RepoDenial::NoProviderDelegation => "no_provider_delegation",
             RepoDenial::GranteeNotParticipant => "grantee_not_participant",
             RepoDenial::GranteePublic => "grantee_public",
+            RepoDenial::PublicParticipant => "public_participant",
             RepoDenial::SelfMerge => "self_merge",
             RepoDenial::Grant(refusal) => refusal.code(),
         }
@@ -62,18 +73,31 @@ impl RepoDenial {
 
 /// Whether someone holds the delegation for the room's repository. Podster's platform owns a managed repository and
 /// delegates to the room's owner, for that repository only (decision 18). So it's the person who is the room's owner
-/// now. An agent stored as an owner holds nothing, as everywhere else, and an admin doesn't hold it by being an admin.
-///
-/// The room must also check the owner's authority still holds, with `owner_authority_holds`, before it passes this on.
-pub fn holds_repository_delegation(kind: PrincipalKind, role: Role) -> bool {
-    kind == PrincipalKind::Person && role == Role::Owner
+/// now, with their owner authority still holding, which the room reads with `owner_authority_holds`. An agent stored as
+/// an owner holds nothing, as everywhere else, and an admin doesn't hold it by being an admin.
+pub fn holds_repository_delegation(
+    kind: PrincipalKind,
+    role: Role,
+    owner_authority_holds: bool,
+) -> bool {
+    kind == PrincipalKind::Person && role == Role::Owner && owner_authority_holds
 }
 
-/// Who may give or take back a grant on the room's repository. Both sides are needed: authority to configure the room,
-/// which is a human owner or admin, and the repository's delegation. `holds_delegation` is its own input so neither can
-/// stand in for the other: an admin without the delegation is refused (AC-10), and so is someone who holds a delegation
-/// and doesn't administer the room (AC-11).
-pub fn authorize_grant_change(caller: &Caller, holds_delegation: bool) -> Result<(), RepoDenial> {
+/// Who holds the delegation now, for `GrantUse::delegation_holder`: the room's recorded owner if they hold it, and
+/// nobody otherwise. A grant counts at use only if this is who gave it.
+pub fn delegation_holder(
+    owner_id: &str,
+    owner_kind: PrincipalKind,
+    owner_authority_holds: bool,
+) -> Option<&str> {
+    holds_repository_delegation(owner_kind, Role::Owner, owner_authority_holds).then_some(owner_id)
+}
+
+/// Who may give a grant on the room's repository. Both sides are needed: authority to configure the room, which is a
+/// human owner or admin, and the repository's delegation. `holds_delegation` is its own input so neither can stand in
+/// for the other: an admin without the delegation is refused (AC-10), and so is someone who holds a delegation and
+/// doesn't administer the room (AC-11). As the room wires it, with [`holds_repository_delegation`], only the owner passes.
+pub fn authorize_grant(caller: &Caller, holds_delegation: bool) -> Result<(), RepoDenial> {
     if caller.role == Role::None {
         return Err(RepoDenial::NotParticipant);
     }
@@ -84,6 +108,37 @@ pub fn authorize_grant_change(caller: &Caller, holds_delegation: bool) -> Result
         return Err(RepoDenial::NoProviderDelegation);
     }
     Ok(())
+}
+
+/// Who may take a grant back:
+///
+/// - its holder, their own, whoever they are and whether or not they're still in the room;
+/// - the room's owner, any grant, by the delegation they hold;
+/// - a person who administers the room's organization, any grant, with or without a place in the room, so a grant can
+///   be pulled when the owner has left.
+///
+/// Nobody else: not a room admin, a member, the reviewer or whoever gave the grant, once they no longer hold the
+/// delegation. An agent never takes back another principal's grant, whatever role is stored for it.
+pub fn authorize_revoke(
+    caller: &Caller,
+    grantee: &str,
+    holds_delegation: bool,
+    administers_room_org: bool,
+) -> Result<(), RepoDenial> {
+    if caller.id == grantee {
+        return Ok(());
+    }
+    let person = caller.kind == PrincipalKind::Person;
+    if person && administers_room_org {
+        return Ok(());
+    }
+    if caller.role == Role::None {
+        return Err(RepoDenial::NotParticipant);
+    }
+    if person && caller.role == Role::Owner && holds_delegation {
+        return Ok(());
+    }
+    Err(RepoDenial::NotAllowed)
 }
 
 /// Who a grant may be given to: a current participant of the room, person or agent. `through_public_claim` says they're
@@ -98,15 +153,45 @@ pub fn may_receive_grant(role: Role, through_public_claim: bool) -> Result<(), R
     Ok(())
 }
 
-/// Who may ask for a repository token for a task: the agent it's assigned to, holding a live `push` grant on the room's
-/// repository. A person never gets one, and neither does an agent that can't see the task. `link_repo_id` is the room's
-/// own link. The task's state, its deadline and the repository's readiness are `repo_access::decide_access`.
+/// What a caller's grant is checked against at use, read from the room's current state.
+#[derive(Clone, Copy, Debug)]
+pub struct GrantStanding<'a> {
+    /// The caller's grant row for the action that isn't revoked, if any.
+    pub grant: Option<&'a Grant<'a>>,
+    /// The room's own linked repository.
+    pub link_repo_id: i64,
+    /// Who holds the repository's delegation now, from [`delegation_holder`].
+    pub delegation_holder: Option<&'a str>,
+    /// The caller is in the room only through a public claim, now. Checked at every use, not only when granting.
+    pub through_public_claim: bool,
+    pub now: i64,
+}
+
+fn check_standing(
+    caller: &Caller,
+    action: GrantAction,
+    standing: &GrantStanding,
+) -> Result<(), RepoDenial> {
+    if standing.through_public_claim {
+        return Err(RepoDenial::PublicParticipant);
+    }
+    let usage = GrantUse {
+        principal: &caller.id,
+        action,
+        link_repo_id: standing.link_repo_id,
+        delegation_holder: standing.delegation_holder,
+        now: standing.now,
+    };
+    check_grant(standing.grant, &usage).map_err(RepoDenial::Grant)
+}
+
+/// Who may ask for a repository token for a task: the agent it's assigned to, holding a `push` grant that counts on the
+/// room's repository. A person never gets one, and neither does an agent that can't see the task. The task's state, its
+/// deadline and the repository's readiness are `repo_access::decide_access`, which runs after this.
 pub fn authorize_repo_access(
     caller: &Caller,
     task: &Task,
-    grant: Option<&Grant>,
-    link_repo_id: i64,
-    now: i64,
+    standing: &GrantStanding,
 ) -> Result<(), RepoDenial> {
     if caller.role == Role::None {
         return Err(RepoDenial::NotParticipant);
@@ -117,20 +202,26 @@ pub fn authorize_repo_access(
     if caller.kind != PrincipalKind::Agent || task.assignee.as_deref() != Some(caller.id.as_str()) {
         return Err(RepoDenial::NotAllowed);
     }
-    check_grant(grant, GrantAction::Push, link_repo_id, now).map_err(RepoDenial::Grant)
+    check_standing(caller, GrantAction::Push, standing)
 }
 
-/// Who may ask for a merge of a task's approved work: a person or agent who can see the task, didn't submit the work
-/// and holds a live `merge` grant on the room's repository (decision 186). Being the reviewer, the requester, an admin
-/// or the owner isn't enough without the grant, and approval carries none (AC-17). `submitter` is who made the approved
-/// submission. The review itself and the commit are `repo_merge::check_merge_authority`.
+/// Who may ask for a merge of a task's approved work: a person or agent who can see the task, holds a `merge` grant
+/// that counts on the room's repository, and isn't controlled by the person who controls the submitter (decision 186).
+///
+/// `caller_person` is the person who controls the caller: a person is their own, and an agent's is the person who owns
+/// it. `submitter` is who made the approved submission, with theirs. The submitter, the submitting agent's owner and
+/// that owner's other agents are all refused, and so is anyone whose controlling person the room can't name. That is
+/// what "a reviewer can't merge their own work" means (M5-10): a reviewer may merge what they approved only with the
+/// grant and only if a different person controls them.
+///
+/// Being the reviewer, the requester, an admin or the owner isn't enough without the grant, and approval carries none
+/// (AC-17). The review itself and the commit are `repo_merge::check_merge_authority`, which runs after this.
 pub fn authorize_merge(
     caller: &Caller,
+    caller_person: Option<&str>,
     task: &Task,
-    submitter: &str,
-    grant: Option<&Grant>,
-    link_repo_id: i64,
-    now: i64,
+    submitter: &Actor,
+    standing: &GrantStanding,
 ) -> Result<(), RepoDenial> {
     if caller.role == Role::None {
         return Err(RepoDenial::NotParticipant);
@@ -138,10 +229,14 @@ pub fn authorize_merge(
     if !can_see_task(caller, task) {
         return Err(RepoDenial::Hidden);
     }
-    if caller.id == submitter || task.assignee.as_deref() == Some(caller.id.as_str()) {
+    let me = Actor {
+        id: &caller.id,
+        person: caller_person,
+    };
+    if same_controller(&me, submitter) || task.assignee.as_deref() == Some(caller.id.as_str()) {
         return Err(RepoDenial::SelfMerge);
     }
-    check_grant(grant, GrantAction::Merge, link_repo_id, now).map_err(RepoDenial::Grant)
+    check_standing(caller, GrantAction::Merge, standing)
 }
 
 /// Who sees the room's repository, its request and its state: a person who sees the whole room, as the read that M5

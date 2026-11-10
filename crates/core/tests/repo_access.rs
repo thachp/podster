@@ -39,8 +39,11 @@ fn task(status: TaskStatus) -> Task {
     }
 }
 
-fn push(expires_at: Option<i64>, revoked_at: Option<i64>) -> Grant {
+fn push(expires_at: Option<i64>, revoked_at: Option<i64>) -> Grant<'static> {
     Grant {
+        id: "g1",
+        principal: "agent",
+        delegated_by: "owner",
         provider_repo_id: REPO,
         action: GrantAction::Push,
         expires_at,
@@ -50,7 +53,7 @@ fn push(expires_at: Option<i64>, revoked_at: Option<i64>) -> Grant {
 
 /// A request that passes every check: the assigned, connected agent of an accepted task in a room whose repository is
 /// ready, holding a live push grant, before its deadline.
-fn passing<'a>(task: &'a Task, grant: &'a Grant) -> AccessCheck<'a> {
+fn passing<'a>(task: &'a Task, grant: &'a Grant<'a>) -> AccessCheck<'a> {
     AccessCheck {
         task,
         caller: "agent",
@@ -61,8 +64,9 @@ fn passing<'a>(task: &'a Task, grant: &'a Grant) -> AccessCheck<'a> {
         link: Some(LinkStatus::Ready),
         link_repo_id: Some(REPO),
         grant: Some(grant),
-        deadline: Some(NOW + HOUR),
-        budget_exhausted: false,
+        delegation_holder: Some("owner"),
+        deadline: Deadline::At(NOW + HOUR),
+        budget: Budget::Remaining,
         held: None,
         now: NOW,
     }
@@ -92,7 +96,7 @@ fn the_assigned_agent_with_a_push_grant_gets_one_repository_and_the_least_it_nee
     );
     // A task with no deadline says so, and gets a token.
     let open_ended = AccessCheck {
-        deadline: None,
+        deadline: Deadline::NoDeadline,
         ..passing(&task, &grant)
     };
     assert_eq!(decide_access(&open_ended).unwrap().authority_ends_at, None);
@@ -180,7 +184,7 @@ fn every_missing_piece_refuses_by_name() {
         (
             "the deadline is now",
             AccessCheck {
-                deadline: Some(NOW),
+                deadline: Deadline::At(NOW),
                 ..base
             },
             R::DeadlinePassed,
@@ -189,7 +193,7 @@ fn every_missing_piece_refuses_by_name() {
         (
             "the deadline passed",
             AccessCheck {
-                deadline: Some(NOW - HOUR),
+                deadline: Deadline::At(NOW - HOUR),
                 ..base
             },
             R::DeadlinePassed,
@@ -198,7 +202,7 @@ fn every_missing_piece_refuses_by_name() {
         (
             "no budget left",
             AccessCheck {
-                budget_exhausted: true,
+                budget: Budget::Exhausted,
                 ..base
             },
             R::BudgetExhausted,
@@ -311,6 +315,7 @@ fn m5_05_no_grant_means_no_token_plan_at_all() {
         None,
         Some(HeldToken {
             expires_at: NOW + HOUR,
+            grant_id: "g1",
         }),
     ] {
         let check = AccessCheck {
@@ -334,6 +339,7 @@ fn m5_07_a_renewal_runs_every_check_again() {
     let live = push(None, None);
     let held = Some(HeldToken {
         expires_at: NOW + 50 * MINUTE,
+        grant_id: "g1",
     });
     let renewing = AccessCheck {
         held,
@@ -421,7 +427,7 @@ fn m5_07_a_renewal_runs_every_check_again() {
         (
             "the deadline passed",
             AccessCheck {
-                deadline: Some(NOW - 1),
+                deadline: Deadline::At(NOW - 1),
                 ..renewing
             },
             AccessRefusal::DeadlinePassed,
@@ -429,7 +435,7 @@ fn m5_07_a_renewal_runs_every_check_again() {
         (
             "the budget ran out",
             AccessCheck {
-                budget_exhausted: true,
+                budget: Budget::Exhausted,
                 ..renewing
             },
             AccessRefusal::BudgetExhausted,
@@ -455,6 +461,7 @@ fn a_renewal_never_moves_the_deadline_or_widens_the_token() {
         now: NOW + 55 * MINUTE,
         held: Some(HeldToken {
             expires_at: NOW + HOUR,
+            grant_id: "g1",
         }),
         ..passing(&task, &grant)
     };
@@ -496,12 +503,152 @@ fn an_agent_has_one_live_token_for_a_task() {
         let check = AccessCheck {
             held: Some(HeldToken {
                 expires_at: NOW + expires_in,
+                grant_id: "g1",
             }),
             ..passing(&task, &grant)
         };
         assert_eq!(decide_access(&check).unwrap().token, expected, "{name}");
     }
     assert_eq!(TOKEN_RENEW_BEFORE_MS, 5 * MINUTE);
+}
+
+/// A held token is returned only under the grant it was minted for. After a re-grant the row is a new one, so a new
+/// token is minted and the old one goes, however long it has left.
+#[test]
+fn a_token_minted_under_an_earlier_grant_isnt_reused_after_a_re_grant() {
+    let task = task(TaskStatus::Accepted);
+    let first = push(None, None);
+    let regranted = Grant {
+        id: "g2",
+        ..push(None, None)
+    };
+    let held = Some(HeldToken {
+        expires_at: NOW + 50 * MINUTE,
+        grant_id: "g1",
+    });
+    let same_grant = AccessCheck {
+        held,
+        ..passing(&task, &first)
+    };
+    assert_eq!(
+        decide_access(&same_grant).unwrap().token,
+        TokenPlan::ReuseHeld
+    );
+    let after_regrant = AccessCheck {
+        held,
+        ..passing(&task, &regranted)
+    };
+    assert_eq!(
+        decide_access(&after_regrant).unwrap().token,
+        TokenPlan::Mint { replace_held: true }
+    );
+}
+
+/// A room that can't say whether a task has a deadline, or a budget, issues nothing. Having none is a different answer,
+/// and has to be said.
+#[test]
+fn an_unknown_deadline_or_budget_refuses() {
+    let (task, grant) = (task(TaskStatus::Accepted), push(None, None));
+    let base = passing(&task, &grant);
+    for (name, deadline, budget, expected) in [
+        (
+            "a deadline ahead, budget left",
+            Deadline::At(NOW + 1),
+            Budget::Remaining,
+            Ok(Some(NOW + 1)),
+        ),
+        (
+            "explicitly no deadline",
+            Deadline::NoDeadline,
+            Budget::Remaining,
+            Ok(None),
+        ),
+        (
+            "explicitly no budget",
+            Deadline::At(NOW + 1),
+            Budget::NoBudget,
+            Ok(Some(NOW + 1)),
+        ),
+        (
+            "neither set",
+            Deadline::NoDeadline,
+            Budget::NoBudget,
+            Ok(None),
+        ),
+        (
+            "an unknown deadline",
+            Deadline::Unknown,
+            Budget::Remaining,
+            Err(AccessRefusal::DeadlineUnknown),
+        ),
+        (
+            "an unknown deadline, no budget",
+            Deadline::Unknown,
+            Budget::NoBudget,
+            Err(AccessRefusal::DeadlineUnknown),
+        ),
+        (
+            "an unknown budget",
+            Deadline::At(NOW + 1),
+            Budget::Unknown,
+            Err(AccessRefusal::BudgetUnknown),
+        ),
+        (
+            "an unknown budget, no deadline",
+            Deadline::NoDeadline,
+            Budget::Unknown,
+            Err(AccessRefusal::BudgetUnknown),
+        ),
+        (
+            "a passed deadline, unknown budget",
+            Deadline::At(NOW),
+            Budget::Unknown,
+            Err(AccessRefusal::DeadlinePassed),
+        ),
+    ] {
+        let check = AccessCheck {
+            deadline,
+            budget,
+            // A held token changes nothing: an unknown still refuses a renewal.
+            held: Some(HeldToken {
+                expires_at: NOW + HOUR,
+                grant_id: "g1",
+            }),
+            ..base
+        };
+        assert_eq!(
+            decide_access(&check).map(|access| access.authority_ends_at),
+            expected,
+            "{name}"
+        );
+    }
+    assert_eq!(AccessRefusal::DeadlineUnknown.code(), "deadline_unknown");
+    assert_eq!(AccessRefusal::BudgetUnknown.code(), "budget_unknown");
+}
+
+/// A push grant whose giver no longer holds the delegation gets no token, held or new.
+#[test]
+fn a_grant_from_a_former_owner_gets_no_token() {
+    let (task, grant) = (task(TaskStatus::Accepted), push(None, None));
+    for holder in [Some("new-owner"), None] {
+        let check = AccessCheck {
+            delegation_holder: holder,
+            held: Some(HeldToken {
+                expires_at: NOW + HOUR,
+                grant_id: "g1",
+            }),
+            ..passing(&task, &grant)
+        };
+        assert_eq!(
+            decide_access(&check),
+            Err(AccessRefusal::Grant(GrantRefusal::GrantStale)),
+            "{holder:?}"
+        );
+    }
+    assert_eq!(
+        AccessRefusal::Grant(GrantRefusal::GrantStale).code(),
+        "grant_stale"
+    );
 }
 
 #[test]

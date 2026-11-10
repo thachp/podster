@@ -1,33 +1,61 @@
 //! Merge as its own state: asking for one, what the merge job does next, and how it ends (ADR 0009, which is proposed). No I/O.
 //!
 //! Approval and merge are two events, never one state. Approving a task completes it and merges nothing (AC-17). A merge
-//! is asked for separately, by someone who holds a live `merge` grant and didn't submit the work, and it names the
-//! approved submission and its commit.
+//! is asked for separately, by someone who holds a `merge` grant that counts and isn't controlled by the person who
+//! controls the submitter, and it names the approved submission and its commit.
 //!
 //! GitHub's rules know nothing of a review, so what was reviewed is decided here, before the merge App marks anything.
 //! The job reads the pull request itself each time and takes nothing from an earlier read, because an agent's token can
 //! edit a pull request. Success is only ever read from the pull request's own state: a second merge call answers `200`.
 //!
-//! Who may ask at all, by role and visibility, is `podster_policy::repositories`.
+//! Two proof values keep that order. [`check_merge_authority`] alone makes a [`MergeAuthorized`], which
+//! [`decide_merge_step`] needs. [`decide_merge_step`] alone makes a [`MergeObserved`], which the move to `succeeded`
+//! needs. So no success is recorded without the recheck of authority and a read of GitHub behind it.
+//!
+//! **Run `podster_policy::repositories::authorize_merge` first.** It decides whether the caller may know the task
+//! exists. [`check_merge_authority`] answers `task_not_linked` and `repo_not_ready` before it looks at the grant, so run
+//! alone it would tell a caller who can't see the task something about it.
 
-use crate::repo_grants::{check_grant, Grant, GrantRefusal};
+use crate::repo_grants::{check_grant, Grant, GrantRefusal, GrantUse};
 use crate::repositories::{
     coding_work_allowed, valid_commit_sha, GrantAction, LinkStatus, MergeState, RequestState,
 };
 use crate::{Task, TaskStatus};
 
+/// Someone acting on a task, with the person who controls them: a person is their own, and an agent's is the person who
+/// owns it. `None` when the room can't say who that is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Actor<'a> {
+    pub id: &'a str,
+    pub person: Option<&'a str>,
+}
+
+/// Whether two actors answer to the same person, or can't be shown not to. The same principal does, and so do an agent
+/// and its owner, and two agents of one owner. An actor whose controlling person is unknown counts as the same as
+/// anyone, so the rule fails closed.
+pub fn same_controller(a: &Actor, b: &Actor) -> bool {
+    a.id == b.id
+        || match (a.person, b.person) {
+            (Some(one), Some(other)) => one == other,
+            _ => true,
+        }
+}
+
 /// Why a merge wasn't asked for, or why the job's recheck of authority stopped it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MergeRefusal {
+    /// `access_revoked`: whoever asked is no longer in the room.
+    AccessRevoked,
+    /// `agent_disconnected`: an agent asked, and its connection no longer holds.
+    AgentDisconnected,
     /// `task_not_linked`: the task has no linked repository.
     TaskNotLinked,
     /// `repo_not_ready`
     RepoNotReady,
-    /// `agent_disconnected`: an agent asked, and its connection no longer holds.
-    AgentDisconnected,
-    /// `self_merge`: whoever submitted the work never merges it, with a grant or without.
+    /// `self_merge`: nobody merges work that the person controlling them also controls the submitter of, with a grant or
+    /// without.
     SelfMerge,
-    /// `grant_required` or `grant_expired`
+    /// `grant_required`, `grant_expired` or `grant_stale`
     Grant(GrantRefusal),
     /// `invalid_argument`: the commit isn't a full commit ID.
     InvalidCommit,
@@ -49,9 +77,10 @@ pub enum MergeRefusal {
 impl MergeRefusal {
     pub fn code(self) -> &'static str {
         match self {
+            MergeRefusal::AccessRevoked => "access_revoked",
+            MergeRefusal::AgentDisconnected => "agent_disconnected",
             MergeRefusal::TaskNotLinked => "task_not_linked",
             MergeRefusal::RepoNotReady => "repo_not_ready",
-            MergeRefusal::AgentDisconnected => "agent_disconnected",
             MergeRefusal::SelfMerge => "self_merge",
             MergeRefusal::Grant(refusal) => refusal.code(),
             MergeRefusal::InvalidCommit => "invalid_argument",
@@ -75,34 +104,90 @@ pub struct MergeAuthority<'a> {
     /// The room's linked repository, when it has one. Never a caller's selector.
     pub link_repo_id: Option<i64>,
     /// Who asked for the merge.
-    pub requester: &'a str,
+    pub requester: Actor<'a>,
+    /// The requester is a current participant of the room, and hasn't been removed or left since asking.
+    pub requester_in_room: bool,
     /// For an agent, whether its connection holds now. Always true for a person.
     pub requester_connected: bool,
     /// Who made the submission that was approved, from the submission's own row.
-    pub submitter: &'a str,
+    pub submitter: Actor<'a>,
     /// The requester's `merge` grant row that isn't revoked, if any.
-    pub grant: Option<&'a Grant>,
+    pub grant: Option<&'a Grant<'a>>,
+    /// Who holds the repository's delegation now: see [`GrantUse::delegation_holder`].
+    pub delegation_holder: Option<&'a str>,
     /// The submission and commit the request names.
     pub submission_no: u32,
     pub commit_sha: &'a str,
     pub now: i64,
 }
 
-/// Checks the authority for a merge. Authority comes first and the task's state after, so a caller with no grant learns
-/// nothing about the review: an approved task without a separate merge grant is refused as any other is (AC-17, M5-10).
-pub fn check_merge_authority(a: &MergeAuthority) -> Result<(), MergeRefusal> {
+/// The approved submission's commit: the one a merge may name. `None` unless the task is completed with an approved
+/// submission that recorded a commit.
+pub fn approved_commit(task: &Task) -> Option<&str> {
+    task.approved_submission_no
+        .filter(|_| task.status == TaskStatus::Completed)
+        .and(task.submission_commit.as_deref())
+}
+
+/// Proof that [`check_merge_authority`] passed for one task's reviewed commit on the room's repository. Its fields are
+/// private, so nothing else can make one, and the merge job can't decide a step without it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeAuthorized {
+    task_id: String,
+    repo_id: i64,
+    commit_sha: String,
+}
+
+impl MergeAuthorized {
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+
+    /// The room's linked repository.
+    pub fn repo_id(&self) -> i64 {
+        self.repo_id
+    }
+
+    /// The approved submission's commit.
+    pub fn commit_sha(&self) -> &str {
+        &self.commit_sha
+    }
+}
+
+/// Checks the authority for a merge. Who is asking comes first, then the grant, and the task's review last, so a caller
+/// with no grant learns nothing about the review: an approved task without a separate merge grant is refused as any
+/// other is (AC-17, M5-10).
+///
+/// The caller must have passed `podster_policy::repositories::authorize_merge` first, since `task_not_linked` and
+/// `repo_not_ready` are answered here before the grant is looked at.
+///
+/// The submitter rule compares controlling people, not IDs: the submitting agent's owner and that owner's other agents
+/// are refused as the submitter is. A reviewer may merge what they approved only if a different person controls them.
+pub fn check_merge_authority(a: &MergeAuthority) -> Result<MergeAuthorized, MergeRefusal> {
+    if !a.requester_in_room {
+        return Err(MergeRefusal::AccessRevoked);
+    }
+    if !a.requester_connected {
+        return Err(MergeRefusal::AgentDisconnected);
+    }
     if !a.task.has_linked_repository {
         return Err(MergeRefusal::TaskNotLinked);
     }
     coding_work_allowed(a.request, a.link).map_err(|_| MergeRefusal::RepoNotReady)?;
     let repo_id = a.link_repo_id.ok_or(MergeRefusal::RepoNotReady)?;
-    if !a.requester_connected {
-        return Err(MergeRefusal::AgentDisconnected);
-    }
-    if a.requester == a.submitter || a.task.assignee.as_deref() == Some(a.requester) {
+    if same_controller(&a.requester, &a.submitter)
+        || a.task.assignee.as_deref() == Some(a.requester.id)
+    {
         return Err(MergeRefusal::SelfMerge);
     }
-    check_grant(a.grant, GrantAction::Merge, repo_id, a.now).map_err(MergeRefusal::Grant)?;
+    let usage = GrantUse {
+        principal: a.requester.id,
+        action: GrantAction::Merge,
+        link_repo_id: repo_id,
+        delegation_holder: a.delegation_holder,
+        now: a.now,
+    };
+    check_grant(a.grant, &usage).map_err(MergeRefusal::Grant)?;
     if !valid_commit_sha(a.commit_sha) {
         return Err(MergeRefusal::InvalidCommit);
     }
@@ -114,10 +199,14 @@ pub fn check_merge_authority(a: &MergeAuthority) -> Result<(), MergeRefusal> {
     if approved != a.submission_no {
         return Err(MergeRefusal::SubmissionMismatch);
     }
-    if a.task.submission_commit.as_deref() != Some(a.commit_sha) {
+    if approved_commit(a.task) != Some(a.commit_sha) {
         return Err(MergeRefusal::CommitChanged);
     }
-    Ok(())
+    Ok(MergeAuthorized {
+        task_id: a.task.id.clone(),
+        repo_id,
+        commit_sha: a.commit_sha.to_string(),
+    })
 }
 
 /// A task's `task_change` row, as far as asking for a merge needs it.
@@ -138,63 +227,87 @@ pub struct Change<'a> {
 /// a head that has moved ends as a recorded `merge.failed` with `commit_changed` (M5-09), with the task still completed.
 /// A merge that failed for any other reason may be asked for again. One that failed with `commit_changed` may not: the
 /// reviewed commit can't change on a completed task, so the changed code goes to a follow-up task.
+///
+/// The change's own reviewed commit may be missing, when no step has written it yet. The commit is then bound by the
+/// task's approved submission alone, which [`check_merge_authority`] has already compared.
 pub fn decide_merge_request(
     authority: &MergeAuthority,
     change: Option<&Change>,
 ) -> Result<MergeState, MergeRefusal> {
-    check_merge_authority(authority)?;
+    let authorized = check_merge_authority(authority)?;
     let change = change
-        .filter(|c| Some(c.provider_repo_id) == authority.link_repo_id)
+        .filter(|c| c.provider_repo_id == authorized.repo_id)
         .ok_or(MergeRefusal::ChangeNotFound)?;
     if change.submission_no != authority.submission_no {
         return Err(MergeRefusal::SubmissionMismatch);
     }
     if change
         .reviewed_commit_sha
-        .is_some_and(|sha| sha != authority.commit_sha)
+        .is_some_and(|sha| sha != authorized.commit_sha)
     {
         return Err(MergeRefusal::CommitChanged);
     }
-    if change.merge_state == MergeState::Failed
-        && change.merge_reason == Some(MergeFailure::CommitChanged.code())
-    {
-        return Err(MergeRefusal::CommitChanged);
-    }
-    merge_transition(change.merge_state, MergeEvent::Requested).ok_or(match change.merge_state {
-        MergeState::Succeeded => MergeRefusal::AlreadyMerged,
-        MergeState::NotRequested | MergeState::Requested | MergeState::Failed => {
-            MergeRefusal::AlreadyRequested
+    match change.merge_state {
+        MergeState::Failed if change.merge_reason == Some(MergeFailure::CommitChanged.code()) => {
+            Err(MergeRefusal::CommitChanged)
         }
-    })
+        MergeState::NotRequested | MergeState::Failed => Ok(MergeState::Requested),
+        MergeState::Requested => Err(MergeRefusal::AlreadyRequested),
+        MergeState::Succeeded => Err(MergeRefusal::AlreadyMerged),
+    }
+}
+
+/// Proof that the task's pull request was read as merged at the reviewed commit, with the default branch holding it,
+/// under an authority that had just been rechecked. Only [`decide_merge_step`] makes one, and a merge can't move to
+/// `succeeded` without it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeObserved {
+    task_id: String,
+    commit_sha: String,
+}
+
+impl MergeObserved {
+    pub fn task_id(&self) -> &str {
+        &self.task_id
+    }
+
+    /// The commit that merged, which is the approved submission's.
+    pub fn commit_sha(&self) -> &str {
+        &self.commit_sha
+    }
 }
 
 /// The three events of a merge.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MergeEvent {
     Requested,
-    Succeeded,
+    /// Carries the observation it rests on.
+    Succeeded(MergeObserved),
     Failed,
 }
 
 impl MergeEvent {
     /// The event name in the API and inbox.
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             MergeEvent::Requested => "merge.requested",
-            MergeEvent::Succeeded => "merge.succeeded",
+            MergeEvent::Succeeded(_) => "merge.succeeded",
             MergeEvent::Failed => "merge.failed",
         }
     }
 }
 
-/// Where an event takes a change's merge state, or `None` when it can't happen from there. A merge is asked for from
-/// `not_requested`, or again from `failed`. Only a requested merge succeeds or fails, and nothing leaves `succeeded`.
-pub fn merge_transition(from: MergeState, event: MergeEvent) -> Option<MergeState> {
+/// Where an event takes the merge state of `task_id`'s change, or `None` when it can't happen from there. A merge is
+/// asked for from `not_requested`, or again from `failed`. Only a requested merge succeeds or fails, and nothing leaves
+/// `succeeded`. Success needs an observation of this same task: one made for another task moves nothing.
+pub fn merge_transition(task_id: &str, from: MergeState, event: &MergeEvent) -> Option<MergeState> {
     match (from, event) {
         (MergeState::NotRequested | MergeState::Failed, MergeEvent::Requested) => {
             Some(MergeState::Requested)
         }
-        (MergeState::Requested, MergeEvent::Succeeded) => Some(MergeState::Succeeded),
+        (MergeState::Requested, MergeEvent::Succeeded(seen)) if seen.task_id == task_id => {
+            Some(MergeState::Succeeded)
+        }
         (MergeState::Requested, MergeEvent::Failed) => Some(MergeState::Failed),
         _ => None,
     }
@@ -259,16 +372,14 @@ pub struct PullObservation<'a> {
     pub default_branch_has_reviewed: Option<bool>,
 }
 
-/// The values the review is bound to, from the room's own rows.
+/// Where the reviewed commit was to merge, from the room's own rows. The commit and the repository themselves come
+/// from the [`MergeAuthorized`] proof.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Reviewed<'a> {
-    /// The approved submission's commit.
-    pub commit_sha: &'a str,
+pub struct ReviewedBase<'a> {
+    /// The linked repository's default branch.
+    pub default_branch: &'a str,
     /// The base the review saw, when it was recorded.
     pub base_sha: Option<&'a str>,
-    /// The linked repository and its default branch.
-    pub repo_id: i64,
-    pub default_branch: &'a str,
 }
 
 /// How GitHub answered the merge call, when this run of the job made one.
@@ -285,16 +396,16 @@ pub enum MergeCall {
 }
 
 /// What the merge job does next.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MergeStep<'a> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MergeStep {
     /// Mark this commit with the merge App's status and merge with it as `sha`, straight away. `base_moved` is recorded
     /// with the merge: `None` when no reviewed base was kept.
     MarkAndMerge {
-        sha: &'a str,
+        sha: String,
         base_moved: Option<bool>,
     },
-    /// Record `merge.succeeded`.
-    Succeeded,
+    /// Record `merge.succeeded`, with the proof that [`merge_transition`] needs.
+    Succeeded(MergeObserved),
     /// Record `merge.failed` with this reason. Nothing is marked.
     Failed(MergeFailure),
     /// Nothing certain yet: read the pull request again later. The merge stays requested, and a later run starts from
@@ -302,8 +413,9 @@ pub enum MergeStep<'a> {
     ReadAgain,
 }
 
-/// Decides the merge job's next step, after `check_merge_authority` has passed again. `call` is `None` before this run
-/// has called GitHub's merge, and its answer after.
+/// Decides the merge job's next step. It needs the proof that [`check_merge_authority`] passed again in this run, and
+/// takes the reviewed commit and the repository from that proof. `call` is `None` before this run has called GitHub's
+/// merge, and its answer after.
 ///
 /// - A pull request that reads as merged succeeds only if its head is the reviewed commit, its base is the default
 ///   branch and the default branch is seen to contain that commit. A retried job therefore finds its earlier merge here
@@ -312,28 +424,32 @@ pub enum MergeStep<'a> {
 ///   be the reviewed commit. Any difference fails the merge.
 /// - A moved base doesn't fail a merge in M5. It's reported, to be recorded.
 /// - After a call, GitHub's answer alone never succeeds: only the pull request's own state does.
-pub fn decide_merge_step<'a>(
-    reviewed: &Reviewed<'a>,
+pub fn decide_merge_step(
+    authorized: &MergeAuthorized,
+    reviewed: &ReviewedBase,
     observed: &PullObservation,
     call: Option<MergeCall>,
-) -> MergeStep<'a> {
+) -> MergeStep {
     if observed.base_ref != reviewed.default_branch {
         return MergeStep::Failed(MergeFailure::BaseChanged);
     }
-    if observed.head_repo_id != Some(reviewed.repo_id) {
+    if observed.head_repo_id != Some(authorized.repo_id) {
         return MergeStep::Failed(MergeFailure::HeadRepoChanged);
     }
-    if observed.head_sha != reviewed.commit_sha {
+    if observed.head_sha != authorized.commit_sha {
         return MergeStep::Failed(MergeFailure::CommitChanged);
     }
     match (observed.state, call) {
         (PullState::Merged, _) if observed.default_branch_has_reviewed == Some(true) => {
-            MergeStep::Succeeded
+            MergeStep::Succeeded(MergeObserved {
+                task_id: authorized.task_id.clone(),
+                commit_sha: authorized.commit_sha.clone(),
+            })
         }
         (PullState::Merged, _) => MergeStep::ReadAgain,
         (PullState::Closed, _) => MergeStep::Failed(MergeFailure::PullClosed),
         (PullState::Open, None) => MergeStep::MarkAndMerge {
-            sha: reviewed.commit_sha,
+            sha: authorized.commit_sha.clone(),
             base_moved: reviewed.base_sha.map(|base| base != observed.base_sha),
         },
         (PullState::Open, Some(MergeCall::HeadModified)) => {
@@ -368,14 +484,18 @@ impl ObservedMerge {
     }
 }
 
-/// Classifies a merge GitHub shows. GitHub is the source of truth for what merged, so every one is recorded, and
-/// Podster reverts none. `reviewed_commit_sha` is the approved submission's commit, or `None` if nothing was approved.
+/// Classifies a merge GitHub shows on a task's pull request. GitHub is the source of truth for what merged, so every
+/// one is recorded, and Podster reverts none. The approved commit is read from the task itself, through
+/// [`approved_commit`], never handed in: a task that isn't completed, or whose approved submission recorded no commit,
+/// has none, and any merge on it is unreviewed.
+///
+/// This names a merge. It never moves a merge to `succeeded`, which only [`MergeObserved`] does.
 pub fn classify_observed_merge(
+    task: &Task,
     merge_state: MergeState,
     merged_head_sha: &str,
-    reviewed_commit_sha: Option<&str>,
 ) -> ObservedMerge {
-    if reviewed_commit_sha != Some(merged_head_sha) {
+    if approved_commit(task) != Some(merged_head_sha) {
         return ObservedMerge::Unreviewed;
     }
     match merge_state {

@@ -1,6 +1,7 @@
-import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { alarmPass, alarmQuiet } from "./alarm.ts";
 
 // M5 step 7a: a task's pull request. Linking it at submission, pinning the commit at review, and recording what Podster's
 // own reads of GitHub show, against the fake GitHub. A room's link is written straight into the room, as step 6's tests
@@ -67,11 +68,11 @@ const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(stub(i
 const change = (id: string, task: string) => inRoom(id, (sql) => (sql.exec("SELECT * FROM task_change WHERE task_id = ?", task).toArray()[0] ?? null) as any);
 const events = (id: string, prefix = "task_change.") => inRoom(id, (sql) => sql.exec("SELECT type, actor_id, task_id, reason FROM event WHERE type LIKE ? ORDER BY seq", `${prefix}%`).toArray() as any[]);
 const taskRow = (id: string, task: string) => inRoom(id, (sql) => sql.exec("SELECT status, version, has_linked_repository, approved_submission_no FROM task WHERE id = ?", task).one() as any);
-/** Runs the room's alarm, as the platform would. */
+/** Whole runs of the room's alarm, one at a time, each ended when this returns (see `alarm.ts`). */
 const alarm = async (id: string, times = 1) => {
-  for (let n = 0; n < times; n++) await runDurableObjectAlarm(stub(id));
+  for (let n = 0; n < times; n++) await alarmPass(stub(id));
 };
-/** Retries a check until it holds, running the alarm between tries: the test runtime also runs alarms on its own. */
+/** Retries a check until it holds, running the alarm between tries. */
 const eventually = async (id: string, check: () => Promise<void>) => {
   for (let n = 0; ; n++) {
     try {
@@ -79,15 +80,14 @@ const eventually = async (id: string, check: () => Promise<void>) => {
     } catch (error) {
       if (n >= 30) throw error;
       await alarm(id);
-      await new Promise((x) => setTimeout(x, 100));
+      await new Promise((x) => setTimeout(x, 50));
     }
   }
 };
-/** Lets any alarm the runtime started on its own finish, so what follows isn't racing it. */
-const settle = async (id: string) => {
-  await alarm(id);
-  await new Promise((x) => setTimeout(x, 50));
-};
+/** One run of the alarm, so whatever was due before a test's next step has been done. */
+const settle = (id: string) => alarm(id);
+/** Every room a test made, quieted after it so none of its alarms reaches a later test. */
+const made: string[] = [];
 
 beforeAll(async () => {
   key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
@@ -103,11 +103,15 @@ beforeEach(async () => {
   await fake({});
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(async () => {
+  vi.restoreAllMocks();
+  for (const id of made.splice(0)) await alarmQuiet(stub(id));
+});
 
 /** A room, by default with managed repositories on and a ready link, and one pull request, number 7, open on `main`. */
 async function room(options: { switchedOn?: boolean; link?: boolean } = {}) {
   const id: string = (await must(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).id;
+  made.push(id);
   await must(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: ADMIN.id, kind: "person", org_id: ORG, role: "admin", policy_version: await version(id) }, { claims: { target_member: { person: ADMIN.id, orgs: { [ORG]: 1 } } } });
   for (const [who, role] of [[AGENT, "member"], [OTHER, "member"], [PUBLIC, "guest"]] as const) {
     await must(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: "agent", org_id: ORG, role, policy_version: await version(id) });
@@ -147,11 +151,8 @@ async function approved() {
   expect(done.status, done.text).toBe(200);
   return r;
 }
-/** Marks the change as named by a delivery, as step 5's nudge does, and sets the alarm, as any write to the room does. */
-const nudge = (id: string) => runInDurableObject(stub(id), async (_: any, state: any) => {
-  state.storage.sql.exec("UPDATE task_change SET nudged_at = ?", Date.now() + 1);
-  await state.storage.setAlarm(Date.now());
-});
+/** Marks the change as named by a delivery, as step 5's nudge does. */
+const nudge = (id: string) => inRoom(id, (sql) => void sql.exec("UPDATE task_change SET nudged_at = ?", Date.now() + 1));
 
 describe("linking a pull request at submission", () => {
   it("links a task made in a room with a ready repository, reads the pull request with a read-only token for that one repository, and revokes it", async () => {

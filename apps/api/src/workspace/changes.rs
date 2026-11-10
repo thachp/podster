@@ -545,12 +545,14 @@ fn watches(sql: &SqlStorage, now: i64) -> R<Vec<Watch>> {
         }
         let kind = stale(&watch, now);
         // After failed reads the change waits out its backoff, whatever a delivery says in the meantime.
+        // Each due time is built from a stored time, the last read or the delivery, never from this call's clock plus a
+        // wait, so the alarm set from it doesn't drift later with every pass.
         let due = if failures > 0 {
             read_at.unwrap_or(now) + read_retry_wait_ms(failures)
-        } else if kind.is_some() {
-            now
+        } else if kind == Some(Stale::Nudged) {
+            nudged_at.unwrap_or(now).min(now)
         } else {
-            read_at.unwrap_or(now) + poll_wait_ms(unchanged_reads)
+            read_at.map_or(now, |read| read + poll_wait_ms(unchanged_reads))
         };
         out.push(Watch {
             task_id: text(&row["task_id"]).unwrap_or_default(),

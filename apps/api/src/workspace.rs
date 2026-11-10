@@ -88,6 +88,7 @@ mod provisioning;
 mod public;
 mod public_claims;
 mod removal;
+mod repo_tokens;
 mod repositories;
 mod roles;
 mod submission_files;
@@ -1648,6 +1649,7 @@ fn remove_member(
     roles::withdraw_role_invites(sql, principal)?;
     exec(sql, "UPDATE member SET revoked_at = ?, revocation_reason = ?, owner_consented_at = NULL WHERE principal_id = ?", vec![now.into(), reason.into(), principal.into()])?;
     repositories::end_grants_of_removed(sql, &actor.id, actor_kind, principal, now)?;
+    store::mark_stale_repo_tokens(sql, now)?;
     apply_departure_rules(sql, actor, principal, now)?;
     objects::drop_uploads_of(sql, &actor.id, actor_kind, principal, now)?;
     end_invitations_of(sql, &actor.id, actor_kind, principal, reason, now)?;
@@ -1929,6 +1931,7 @@ fn handle_set_room_status(
         ));
     }
     exec(sql, "UPDATE workspace SET status = ?", vec![status.into()])?;
+    store::mark_stale_repo_tokens(sql, now)?;
     requeue_listing(sql, now)?;
     let kind = if status == ARCHIVED {
         "workspace.archived"
@@ -3526,6 +3529,14 @@ impl Workspace {
         if let Some(next) = removal::next_due(&sql, now, self.sweep_failures.get())? {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
+        if let Some(next) = migrated
+            .then(|| repo_tokens::next_due(&sql))
+            .transpose()?
+            .flatten()
+        {
+            let next = next.max(now + 10);
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
         // A pending request for the room's repository, not before the wait a job that couldn't finish left.
         if let Some(next) = migrated
             .then(|| self.provisioning_due_at(&sql, now))
@@ -4037,6 +4048,15 @@ impl Workspace {
             };
         }
 
+        // An agent's repository token (M5 step 6). No idempotency key, and its own switch decides whether it exists.
+        if let (Method::Post, ["tasks", task, "repo-access"]) = (&method, tail) {
+            let raw = req.text().await?;
+            let test_fail =
+                cfg!(feature = "failpoints") && req.headers().get("x-test-fail")?.is_some();
+            return self
+                .repo_access(&identity, &who, task, &raw, test_fail)
+                .await;
+        }
         let key = req.headers().get("idempotency-key")?;
         let raw = req.text().await?;
         let body: Value = if raw.trim().is_empty() {
@@ -4724,6 +4744,10 @@ impl DurableObject for Workspace {
         }
         // The job keeps its own wait, so its failure doesn't bring the alarm back in five seconds.
         let repo_index = self.repository_upkeep(&sql).await;
+        // Agent repository tokens whose authority ended are taken back. Each keeps its own backoff.
+        if let Err(error) = self.repo_token_upkeep().await {
+            console_error!("repo token upkeep failed: {:?}", error.code());
+        }
         // A stuck scan fails closed here, and this failing holds up nothing else.
         if let Err(error) = self.expire_scans() {
             console_error!("couldn't end overdue scans: {:?}", error.code());
@@ -4864,6 +4888,8 @@ fn departure_effect(sql: &SqlStorage, body: &Value, now: i64) -> R<()> {
                 "UPDATE workspace SET owner_left_at = MAX(COALESCE(owner_left_at, 0), ?)",
                 vec![left_at.into()],
             )?;
+            // Every grant rested on the owner's delegation, so tokens minted under one lose their authority.
+            store::mark_stale_repo_tokens(sql, now)?;
             apply_departure_rules(sql, &actor, &person, now)?;
             objects::drop_uploads_of(sql, &actor.id, "person", &person, now)?;
             queue_index(sql, &person, &org, Some("owner"), now)?;

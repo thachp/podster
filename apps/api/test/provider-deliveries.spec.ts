@@ -423,6 +423,10 @@ describe("the delivery migration", () => {
     const newest = await version();
     // Back to the release before this one. Step 4's migration came after it, so that's undone too and runs again behind it.
     await inRoom(id, (sql) => {
+      // M5 step 6's agent tokens, the newest migration, come off first.
+      sql.exec("DROP TABLE repo_token_mint");
+      sql.exec("DROP TABLE repo_token");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("ALTER TABLE repo_request DROP COLUMN job_not_before");
       sql.exec("ALTER TABLE repo_request DROP COLUMN job_failures");
       sql.exec("ALTER TABLE repo_request DROP COLUMN retry_after");

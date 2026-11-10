@@ -119,6 +119,9 @@ pub struct AccessCheck<'a> {
     pub in_room: bool,
     /// The agent's connection holds: its `Principal` is active and not disconnected.
     pub connected: bool,
+    /// The person who linked the agent's credential is still in the organization they linked it from, since then. An
+    /// agent acts for that person, so once they've left it gets nothing new, as their other authority ends (M5 step 6).
+    pub controller_holds: bool,
     pub request: Option<RequestState>,
     pub link: Option<LinkStatus>,
     /// The room's linked repository, when it has one.
@@ -141,6 +144,8 @@ pub enum AccessRefusal {
     AccessRevoked,
     /// `agent_disconnected`
     AgentDisconnected,
+    /// `controller_departed`: the person the agent acts for has left, or the room can't name them.
+    ControllerDeparted,
     /// `task_not_linked`: the task has no linked repository.
     TaskNotLinked,
     /// `repo_not_ready`
@@ -165,6 +170,7 @@ impl AccessRefusal {
             AccessRefusal::NotAllowed => "not_allowed",
             AccessRefusal::AccessRevoked => "access_revoked",
             AccessRefusal::AgentDisconnected => "agent_disconnected",
+            AccessRefusal::ControllerDeparted => "controller_departed",
             AccessRefusal::TaskNotLinked => "task_not_linked",
             AccessRefusal::RepoNotReady => "repo_not_ready",
             AccessRefusal::TaskNotActive => "task_not_active",
@@ -209,6 +215,9 @@ pub fn decide_access(check: &AccessCheck) -> Result<Access, AccessRefusal> {
     }
     if !check.connected {
         return Err(AccessRefusal::AgentDisconnected);
+    }
+    if !check.controller_holds {
+        return Err(AccessRefusal::ControllerDeparted);
     }
     if check.task.assignee.as_deref() != Some(check.caller) {
         return Err(AccessRefusal::NotAllowed);

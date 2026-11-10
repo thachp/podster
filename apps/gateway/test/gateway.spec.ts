@@ -6,7 +6,7 @@ import { getMigrations } from "better-auth/db/migration";
 import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
-import { CAPABILITIES, InvalidArguments, toApiCall } from "../src/capabilities";
+import { CAPABILITIES, capabilitiesFor, InvalidArguments, toApiCall } from "../src/capabilities";
 import { decodeJwt, importJWK, SignJWT } from "jose";
 import { mintAssertion } from "../src/assertion";
 import worker, { resolveAgent, cleanUp, clientKey, sensitiveRoute, type RateLimit, safeNext, allowedPassthrough, spentToken, forMcp, linkOnce, callApi, claimHost, codeMatchesLiveApproval, createAuth, handleConnection, isPublicAuthRoute, type Env } from "../src/index";
@@ -42,7 +42,7 @@ async function registerAgent(previous?: { host: any; keypair: any }): Promise<Ag
   const host = previous?.host ?? (await generateKeypair());
   const keypair = previous?.keypair ?? (await generateKeypair());
   const jwt = await signHostJWT({ hostKeypair: host, audience: BASE, agentPublicKey: keypair.publicKey, hostName: "test-host" } as never);
-  const res = await post("/api/auth/agent/register", { name: "agent", mode: "delegated", capabilities: CAPABILITIES.map((c) => c.name), preferred_method: "device_authorization" }, { authorization: `Bearer ${jwt}` });
+  const res = await post("/api/auth/agent/register", { name: "agent", mode: "delegated", capabilities: capabilitiesFor(e).map((c) => c.name), preferred_method: "device_authorization" }, { authorization: `Bearer ${jwt}` });
   const registered = await res.json<any>();
   return { host, keypair, pluginId: registered.agent_id, userCode: registered.approval?.user_code, registered };
 }
@@ -1451,6 +1451,38 @@ describe("rate limits", () => {
     // The limit comes first, so a batch counts and gets refused as limited.
     const account = limiter(() => true);
     expect((await send("/mcp", { method: "POST", headers: { authorization: `Bearer ${agent.token}`, "content-type": "application/json" }, body: JSON.stringify([call_(4)]) }, { RL_ACCOUNT: account.fake })).status).toBe(429);
+  });
+
+  it("lists the repository tool only while managed repositories are on, exactly, and listing authorizes nothing (M5 step 6)", async () => {
+    const owner = await signUp();
+    const agent = await mcpAgent(owner);
+    const headers = { authorization: `Bearer ${agent.token}`, "content-type": "application/json", accept: "application/json, text/event-stream" };
+    const tools = async (env: object) => {
+      const res = await send("/mcp", { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) }, env);
+      expect(res.status).toBe(200);
+      return ((await res.json<any>()).result.tools as { name: string }[]).map((t) => t.name);
+    };
+    // Off by default, and anything but exactly "true" is off.
+    for (const value of [undefined, "", "1", "TRUE", "true ", "yes"]) expect(await tools({ MANAGED_REPOSITORIES: value }), String(value)).not.toContain("get_repo_access");
+    expect(await tools({ MANAGED_REPOSITORIES: "true" })).toContain("get_repo_access");
+    // Off, calling it by name is an unknown tool, and nothing reaches the API.
+    const off = await send("/mcp", { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "get_repo_access", arguments: { workspace_id: "w", task_id: "t" } } }) });
+    const refused = await off.json<any>();
+    expect(refused.result?.isError ?? Boolean(refused.error)).toBe(true);
+    expect(JSON.stringify(refused)).toContain("get_repo_access");
+    // Nothing else is ever gated, and the gated tool is a retry-safe command that names only the task.
+    expect(capabilitiesFor({}).map((c) => c.name)).toEqual(CAPABILITIES.map((c) => c.name).filter((n) => n !== "get_repo_access"));
+    const tool = capabilitiesFor({ MANAGED_REPOSITORIES: "true" }).find((c) => c.name === "get_repo_access")!;
+    expect([tool.kind, tool.method, tool.idempotent, Object.keys(tool.fields ?? {})]).toEqual(["command", "POST", true, ["workspace_id", "task_id"]]);
+    expect(toApiCall(tool, { workspace_id: "w", task_id: "t", repository_id: 1, installation_id: 2, permissions: { administration: "write" } })).toEqual({ method: "POST", path: "/v1/workspaces/w/tasks/t/repo-access", body: "{}", idempotencyKey: undefined });
+  });
+
+  it("has managed repositories switched on nowhere in the Worker's configuration (M5 step 6)", () => {
+    const config = JSON.parse(e.TEST_WRANGLER.replace(/^\s*\/\/.*$/gm, ""));
+    expect(config.vars?.MANAGED_REPOSITORIES).toBeUndefined();
+    for (const [name, environment] of Object.entries<any>(config.env ?? {})) expect(environment.vars?.MANAGED_REPOSITORIES, name).toBeUndefined();
+    expect(e.TEST_WRANGLER).not.toContain("MANAGED_REPOSITORIES");
+    expect((e as any).MANAGED_REPOSITORIES).toBeUndefined();
   });
 
   it("caps MCP bodies at the size the SDK allows, even with no declared length", async () => {

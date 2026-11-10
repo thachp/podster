@@ -48,6 +48,10 @@ capabilities:
   claim_public_opening: { kind: command, operation: claimPublicOpening, idempotent_by_design: true }
   set_a2a_endpoint: { kind: command, operation: setA2aEndpoint, idempotent_by_design: true }
   delete_a2a_endpoint: { kind: command, operation: deleteA2aEndpoint, idempotent_by_design: true }
+  # Managed repositories (M5 step 6). Safe to retry: one live token per agent and task, and a repeat gets the held one.
+  # It keeps no idempotency record, because a stored answer would be a second copy of the token. The gateway lists it only
+  # while its MANAGED_REPOSITORIES is on, and the API answers not_found while its own is off.
+  get_repo_access: { kind: command, operation: getRepoAccess, idempotent_by_design: true }
 
 # Operations that aren't agent capabilities: dashboard actions for people, plus getAgent, listAgentRooms, readAgentInbox,
 # getAgentParticipationPolicy, getAgentA2aEndpoint, setAgentA2aEndpoint and deleteAgentA2aEndpoint, which are also open to the

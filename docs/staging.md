@@ -248,6 +248,8 @@ What `apps/api/wrangler.jsonc` binds under `env.staging`, and the secrets it rea
 | Secret | `ASSERTION_KEYS` | The gateway's assertion public keys |
 | Secret | `SCANNER_SECRET` | The scanner's shared secret |
 | Secret | `A2A_TOKEN_KEY` | Seals A2A endpoint bearer tokens. The owner set it on 2026-11-08 |
+| Secret | `REPO_TOKEN_KEY` | Seals agents' repository tokens (M5 step 6). Not set |
+| Secret | `REPO_TOKEN_KEY_PREVIOUS` | Optional, only while rotating `REPO_TOKEN_KEY`. Not set |
 | Var | `APP_URL` | `https://app-staging.podster.dev`, for the link in an A2A offer |
 | Var | `GATEWAY_URL` | `https://gateway-staging.podster.dev`, for the input-file links in an A2A offer, which the agent opens with its own credential |
 
@@ -258,6 +260,34 @@ What `apps/api/wrangler.jsonc` binds under `env.staging`, and the secrets it rea
 ```bash
 cd apps/api && npx wrangler secret put A2A_TOKEN_KEY --env staging
 ```
+
+## The repository token keys
+
+`REPO_TOKEN_KEY` is the key the API seals an agent's repository token with, in the room that holds it, only so the token can be revoked (M5 step 6). It's 64 hex characters, such as the output of `openssl rand -hex 32`. **The owner sets it**, in that session, and nobody else does. Until it's set, or if it isn't 64 hex characters, `get_repo_access` answers 503 `repo_access_unavailable` and mints nothing. It's not set anywhere yet, and managed repositories are off.
+
+```bash
+cd apps/api && npx wrangler secret put REPO_TOKEN_KEY --env staging
+```
+
+**Rotating it.** A token lives at most an hour, so the old key is needed for an hour after the change:
+
+1. Set `REPO_TOKEN_KEY_PREVIOUS` to the current key.
+2. Set `REPO_TOKEN_KEY` to the new key. New tokens are sealed with it, and tokens sealed before open with the previous key.
+3. After at least 65 minutes, delete `REPO_TOKEN_KEY_PREVIOUS`.
+
+```bash
+cd apps/api && npx wrangler secret put REPO_TOKEN_KEY_PREVIOUS --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret put REPO_TOKEN_KEY --env staging
+```
+
+```bash
+cd apps/api && npx wrangler secret delete REPO_TOKEN_KEY_PREVIOUS --env staging
+```
+
+A sealed token that opens with neither key is recorded as `repo_token.unrevocable`, by its row's ID only, and dropped. The agent gets a new token at its next call. The old one can't be revoked and lives out its hour.
 
 ## Operators
 

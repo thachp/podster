@@ -3975,9 +3975,6 @@ impl Workspace {
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
                 ["tasks", id] => queries::get_task(&sql, &who, id, false),
                 ["tasks", id, "messages"] => queries::list_messages(&sql, &who, id, &url),
-                ["tasks", id, "release-status"] => {
-                    repositories::refuse_task_route(&sql, &who, id, &[], &json!({}))
-                }
                 ["repository"] => repositories::read(&sql, &who),
                 ["events"] => queries::list_events(&sql, &who.caller, &url),
                 ["audit"] => queries::list_audit(&sql, &who.caller, &url),
@@ -4018,28 +4015,6 @@ impl Workspace {
                 test_fail,
                 move |sql, who, now| handle_send_message(sql, who, &target, &body, now),
             ),
-            // M5 step 2: both refuse, and neither reaches a provider. `merge_task` is an ordinary keyed command.
-            (Method::Post, ["tasks", _, "merge"]) => self.command(
-                &identity,
-                key,
-                hash,
-                stops_when_archived,
-                test_fail,
-                move |sql, who, _| {
-                    repositories::refuse_task_route(
-                        sql,
-                        who,
-                        &target,
-                        repositories::MERGE_FIELDS,
-                        &body,
-                    )
-                },
-            ),
-            // `get_repo_access` takes no key: its answer will carry a token, which must never rest in an idempotency record.
-            (Method::Post, ["tasks", task, "repo-access"]) => {
-                command_guard(&sql)?;
-                repositories::refuse_task_route(&sql, &who, task, &[], &body)
-            }
             (Method::Post, ["tasks", _, _]) => {
                 let accept = verb == "accept";
                 let task_id = target.clone();

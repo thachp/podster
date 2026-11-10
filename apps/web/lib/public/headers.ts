@@ -14,7 +14,9 @@ export const PUBLIC_CSP = [
 export const PUBLIC_HEADERS: [string, string][] = [
   ["Content-Security-Policy", PUBLIC_CSP],
   ["X-Robots-Tag", "noindex, nofollow"],
-  ["Cache-Control", "no-store"],
+  // `no-transform` asks the edge in front of this app to leave the body as it is. Without it, Cloudflare Web Analytics adds
+  // its own script element to an HTML answer, which this page must not have and which makes it differ between viewers.
+  ["Cache-Control", "no-store, no-transform"],
   ["X-Frame-Options", "DENY"],
   ["X-Content-Type-Options", "nosniff"],
   ["Referrer-Policy", "same-origin"],

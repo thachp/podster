@@ -39,7 +39,6 @@ fn only_a_ready_link_lets_a_token_be_issued_or_a_merge_run() {
     // No link at all, or a stored status this code can't read.
     assert!(!link_allows_work(None));
     assert!(!link_allows_work(LinkStatus::from_name("unknown")));
-    assert_eq!(REPO_NOT_READY, "repo_not_ready");
 }
 
 #[test]

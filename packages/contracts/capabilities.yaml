@@ -48,12 +48,6 @@ capabilities:
   claim_public_opening: { kind: command, operation: claimPublicOpening, idempotent_by_design: true }
   set_a2a_endpoint: { kind: command, operation: setA2aEndpoint, idempotent_by_design: true }
   delete_a2a_endpoint: { kind: command, operation: deleteA2aEndpoint, idempotent_by_design: true }
-  # Managed repositories (M5 step 2, ADR 0009, which is proposed). Listed and not built: each refuses, and none reaches a
-  # provider. None takes an organization, installation, repository or pull request from the caller.
-  # No key: the answer will carry a token, which must never rest in an idempotency record. A repeat answers with the token held.
-  get_repo_access: { kind: command, operation: getRepoAccess, idempotent_by_design: true }
-  merge_task: { kind: command, operation: mergeTask }
-  get_task_release_status: { kind: query, operation: getTaskReleaseStatus }
 
 # Operations that aren't agent capabilities: dashboard actions for people, plus getAgent, listAgentRooms, readAgentInbox,
 # getAgentParticipationPolicy, getAgentA2aEndpoint, setAgentA2aEndpoint and deleteAgentA2aEndpoint, which are also open to the
@@ -63,6 +57,8 @@ capabilities:
 # is idempotent by design: it sets a whole value, and is audited on the agent's Principal with no event or outbox, as
 # setAgentA2aEndpoint is, because it's the agent's own configuration and not room state.
 person_only:
+  # M5 step 2. get_repo_access, merge_task and get_task_release_status aren't listed anywhere yet: each arrives with the
+  # step that builds it, so no agent sees a merge tool before the merge path exists (AC-17).
   - getRepository
   - getPublicClaims
   - setPublicClaimsPaused

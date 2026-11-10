@@ -2,8 +2,8 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
 
-// M5 step 2: the room's state for managed repositories, and the three task routes, which are listed and refuse. Nothing
-// here reaches a provider, and no token exists. Rows are written straight into the room where a test needs one, because
+// M5 step 2: the room's state for managed repositories, and the person-only read of it. Nothing here reaches a provider,
+// no token exists, and no token, merge or status route exists either. Rows are written straight into the room where a test needs one, because
 // nothing in the API can make one yet.
 
 const BINDINGS = env as any;
@@ -67,13 +67,6 @@ const link = (id: string, status = "ready") => inRoom(id, (sql) => {
   sql.exec("DELETE FROM repo_link");
   sql.exec("INSERT INTO repo_link (id, request_id, provider, provider_repo_id, provider_org_id, full_name, visibility, default_branch, status, created_by, created_at, verified_at, updated_at) VALUES ('rl_1', 'rr_1', 'github', ?, 4242, 'podsterx/engineering', 'public', 'main', ?, ?, 1000, 2000, 2000)", REPO_ID, status, OWNER.id);
 });
-
-/** The three task routes, each as its own call. */
-const ROUTES = [
-  { name: "get_repo_access", call: (who: Who, id: string, task: string, body: unknown = {}) => api(who, "POST", `/v1/workspaces/${id}/tasks/${task}/repo-access`, body, { key: null }) },
-  { name: "merge_task", call: (who: Who, id: string, task: string, body: unknown = { submission_no: 1, commit_sha: COMMIT }) => api(who, "POST", `/v1/workspaces/${id}/tasks/${task}/merge`, body) },
-  { name: "get_task_release_status", call: (who: Who, id: string, task: string) => api(who, "GET", `/v1/workspaces/${id}/tasks/${task}/release-status`) },
-];
 
 /** Everything a command could have left behind. The outbox empties on its own, and holds nothing without an event. */
 const footprint = (id: string) => inRoom(id, (sql) => ({
@@ -186,99 +179,15 @@ describe("the room's repository read", () => {
   });
 });
 
-describe("get_repo_access, merge_task and get_task_release_status, listed and not built", () => {
-  it("refuse with repo_not_ready in a room with no ready repository, and write nothing", async () => {
-    const { id, task } = await room();
-    const before = await footprint(id);
-    for (const route of ROUTES) {
-      for (const who of [OWNER, MEMBER, ASSIGNEE]) {
-        const answer = await route.call(who, id, task);
-        expect([answer.status, answer.code], `${route.name} as ${who.id}`).toEqual([409, "repo_not_ready"]);
-        expect(answer.body).toEqual({ error: { code: "repo_not_ready", message: "repo_not_ready" } });
-      }
-    }
-    // A link that isn't ready, or whose status can't be read, is no better than none.
-    for (const status of ["degraded", "suspended", "pending", "READY", ""]) {
-      await link(id, status);
-      for (const route of ROUTES) expect((await route.call(ASSIGNEE, id, task)).code, `${route.name} with ${status}`).toBe("repo_not_ready");
-    }
-    await inRoom(id, (sql) => sql.exec("DELETE FROM repo_link"));
-    expect(await footprint(id)).toEqual(before);
-  });
-
-  it("still refuse in a room whose repository is ready, with no token, no merge and nothing written", async () => {
+describe("the routes later steps build", () => {
+  it("don't exist yet, so nothing can ask for a token, a merge or a status", async () => {
     const { id, task } = await room();
     await link(id);
-    const before = await footprint(id);
-    for (const route of ROUTES) {
-      const answer = await route.call(ASSIGNEE, id, task);
-      expect([answer.status, answer.code], route.name).toEqual([501, "managed_repositories_unavailable"]);
-      expect(answer.body).toEqual({ error: { code: "managed_repositories_unavailable", message: "managed_repositories_unavailable" } });
+    for (const [method, tail] of [["POST", "repo-access"], ["POST", "merge"], ["GET", "release-status"]] as const) {
+      const answer = await api(OWNER, method, `/v1/workspaces/${id}/tasks/${task}/${tail}`, { submission_no: 1, commit_sha: COMMIT });
+      expect([answer.status, answer.code], tail).toEqual([404, "not_found"]);
     }
-    expect(await footprint(id)).toEqual(before);
-    // A refused merge stores no answer, so the same key is refused again once the link changes, by the room's state then.
-    const first = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks/${task}/merge`, { submission_no: 1, commit_sha: COMMIT }, { key: "rp-merge-retry" });
-    expect(first.code).toBe("managed_repositories_unavailable");
-    await link(id, "suspended");
-    const again = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks/${task}/merge`, { submission_no: 1, commit_sha: COMMIT }, { key: "rp-merge-retry" });
-    expect(again.code).toBe("repo_not_ready");
-  });
-
-  it("answer someone who can't see the task as for a task that doesn't exist, whatever the repository's state", async () => {
-    const { id, task } = await room();
-    const answers: string[] = [];
-    for (const status of [null, "ready", "degraded"]) {
-      if (status) await link(id, status);
-      for (const route of ROUTES) {
-        // A guest who isn't on the task, a task that doesn't exist, and someone outside the room.
-        const hidden = await route.call(GUEST, id, task);
-        const missing = await route.call(GUEST, id, "tsk_nope");
-        expect([hidden.status, hidden.code], `${route.name} hidden, ${status}`).toEqual([404, "task_not_found"]);
-        expect(hidden.body, `${route.name} hidden against missing, ${status}`).toEqual(missing.body);
-        const outside = await route.call(STRANGER, id, task);
-        expect([outside.status, outside.code], `${route.name} outside, ${status}`).toEqual([404, "workspace_not_found"]);
-        answers.push(hidden.text, outside.text);
-      }
-    }
-    // One answer each, the same in every state, and none names the repository.
-    expect(new Set(answers).size).toBe(2);
-    for (const text of answers) expect(text).not.toMatch(/podsterx|repo_|987654321/);
-    // A hidden task answers the same whatever the body holds, so its shape can't be probed either.
-    const probing = await ROUTES[1].call(GUEST, id, task, { repository_id: 1 });
-    expect(probing.code).toBe("task_not_found");
-  });
-
-  it("take no organization, installation, repository or pull request from the caller (M5-04)", async () => {
-    const { id, task } = await room();
-    await link(id);
-    const selectors = [{ organization: "podsterdev" }, { org_id: 1 }, { installation_id: 1 }, { repository_id: 1 }, { provider_repo_id: 1 }, { repo: "podsterdev/other" }, { full_name: "podsterdev/other" }, { pr_number: 7 }, { pull_request: 7 }, { permissions: { administration: "write" } }];
-    for (const extra of selectors) {
-      const access = await ROUTES[0].call(ASSIGNEE, id, task, extra);
-      expect([access.status, access.code], `get_repo_access ${JSON.stringify(extra)}`).toEqual([400, "invalid_argument"]);
-      const merge = await ROUTES[1].call(OWNER, id, task, { submission_no: 1, commit_sha: COMMIT, ...extra });
-      expect([merge.status, merge.code], `merge_task ${JSON.stringify(extra)}`).toEqual([400, "invalid_argument"]);
-    }
-    // A merge names its submission and a full commit ID, and nothing looser.
-    for (const body of [{}, { submission_no: 1 }, { commit_sha: COMMIT }, { submission_no: 0, commit_sha: COMMIT }, { submission_no: "1", commit_sha: COMMIT }, { submission_no: 1, commit_sha: "main" }, { submission_no: 1, commit_sha: "a1b2c3d" }, { submission_no: 1, commit_sha: COMMIT.toUpperCase() }]) {
-      expect((await ROUTES[1].call(OWNER, id, task, body)).code, JSON.stringify(body)).toBe("invalid_argument");
-    }
-    expect((await ROUTES[1].call(OWNER, id, task, { submission_no: 1, commit_sha: "0f".repeat(32) })).code).toBe("managed_repositories_unavailable");
-    // The path holds a room and a task and nothing else.
-    for (const path of [`/tasks/${task}/repo-access/1`, `/tasks/${task}/merge/7`, `/repository/1`, `/repositories`]) {
-      expect((await api(OWNER, "POST", `/v1/workspaces/${id}${path}`, {})).code, path).toBe("not_found");
-    }
-    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/tasks/${task}/release-status/7`)).code).toBe("not_found");
-  });
-
-  it("keep merge_task a keyed command, get_repo_access keyless, and both closed in an archived room", async () => {
-    const { id, task } = await room();
-    const unkeyed = await api(OWNER, "POST", `/v1/workspaces/${id}/tasks/${task}/merge`, { submission_no: 1, commit_sha: COMMIT }, { key: null });
-    expect([unkeyed.status, unkeyed.code]).toEqual([400, "idempotency_key_required"]);
-    expect((await ROUTES[0].call(ASSIGNEE, id, task)).code).toBe("repo_not_ready");
-    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/archive`, { policy_version: await version(id) })).status).toBe(200);
-    for (const route of ROUTES.slice(0, 2)) expect((await route.call(OWNER, id, task)).code, route.name).toBe("workspace_archived");
-    // An archived room still reads.
-    expect((await ROUTES[2].call(OWNER, id, task)).code).toBe("repo_not_ready");
-    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).status).toBe(200);
+    const contract: { path: string; operation: string }[] = JSON.parse(BINDINGS.TEST_API_ROUTES);
+    expect(contract.filter((r) => /merge|repo-access|release-status|deploy/i.test(r.path + r.operation))).toEqual([]);
   });
 });

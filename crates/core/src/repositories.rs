@@ -1,7 +1,7 @@
 //! Managed repositories: the states a room keeps for M5 (ADR 0009, which is proposed). No I/O.
 //!
 //! M5 step 2 adds only the names of those states and the one rule every later step leans on: a repository lets a token be
-//! issued or a merge run only while its link is `ready`. Grant checks, commit pinning and merge decisions are step 3's.
+//! issued or a merge run only while its link is `ready`. Nothing calls that rule yet, since no route issues or merges. Grant checks, commit pinning and merge decisions are step 3's.
 //!
 //! A repository is known by the provider's repository ID, never by its name. Nothing here takes an organization, an
 //! installation, a repository or a pull request from a caller: those come from the room's own rows and from configuration.
@@ -148,9 +148,6 @@ impl MergeState {
         .find(|s| s.name() == name)
     }
 }
-
-/// The refusal for repository work in a room with no ready repository.
-pub const REPO_NOT_READY: &str = "repo_not_ready";
 
 /// Whether a token may be issued or a merge run. Only a `ready` link allows either: no link, a degraded one and a
 /// suspended one all refuse, and so does a status this code can't read, which the caller passes as `None`.

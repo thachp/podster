@@ -143,7 +143,8 @@ export async function checkA2aRequest(request: Request, baseUrl: string): Promis
   const text = await boundedText(request);
   if (text === null) return httpError("payload_too_large", 413);
   try {
-    // Decision 109: only 1.0. A missing header is read as 0.3 (spec 3.6.2), so it's refused too.
+    // Decision 109: only 1.0. A patch of it, such as 1.0.1, is 1.0, since patches never count (decision 192, spec 3.6). A
+    // missing header is read as 0.3 (spec 3.6.2), so it's refused too, as is anything that isn't strictly a version.
     validateVersion(requestedVersion(request.headers.get(A2A_VERSION_HEADER)), await new PodsterA2AHandler(baseUrl).getAgentCard(), A2A_BINDING);
   } catch (error) {
     return rpcError(envelope(text).id, error instanceof VersionNotSupportedError ? error : new VersionNotSupportedError("Only A2A 1.0 is supported."));

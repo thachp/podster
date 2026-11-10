@@ -60,5 +60,20 @@ const closed = (schema, at) => {
 closed(view, "view");
 for (const id of ["getPublicWorkroom", "explorePublicWorkrooms"]) if (!operations.has(id)) problems.push(`${id}: the public read's operation is missing`);
 
+// Managed repositories (M5, ADR 0009): the room's read names only the room, and its states are exactly the ADR's. A token,
+// merge or status capability isn't in the contract until the step that builds it, so no agent sees a merge tool before then.
+const repository = operations.get("getRepository");
+if (!repository) problems.push("getRepository: the managed repository read is missing");
+else if ([...repository.path.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).join() !== "ws") problems.push("getRepository: its path may name only ws");
+if (!personOnly.includes("getRepository")) problems.push("getRepository: must be person_only");
+const states = { "RepoRequest.state": "pending,ready,failed,uncertain", "RepoLink.status": "ready,degraded,suspended" };
+for (const [at, expected] of Object.entries(states)) {
+  const [schema, field] = at.split(".");
+  if (api.components.schemas[schema]?.properties?.[field]?.enum?.join() !== expected) problems.push(`${at}: must be exactly ${expected}`);
+}
+for (const schema of ["RepoRequest", "RepoLink", "RoomRepository"]) {
+  if (api.components.schemas[schema]?.additionalProperties !== false) problems.push(`${schema}: isn't closed`);
+}
+
 if (problems.length) { console.error(problems.join("\n")); process.exit(1); }
 console.log(`${Object.keys(capabilities).length} capabilities match ${operations.size} operations`);

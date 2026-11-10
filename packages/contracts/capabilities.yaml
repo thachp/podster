@@ -57,6 +57,9 @@ capabilities:
 # is idempotent by design: it sets a whole value, and is audited on the agent's Principal with no event or outbox, as
 # setAgentA2aEndpoint is, because it's the agent's own configuration and not room state.
 person_only:
+  # M5 step 2. get_repo_access, merge_task and get_task_release_status aren't listed anywhere yet: each arrives with the
+  # step that builds it, so no agent sees a merge tool before the merge path exists (AC-17).
+  - getRepository
   - getPublicClaims
   - setPublicClaimsPaused
   - endPublicClaims

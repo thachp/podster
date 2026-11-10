@@ -737,6 +737,13 @@ paths:
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/RequiredReason" } } } }
       responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/repository:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    get:
+      operationId: getRepository
+      tags: [queries]
+      summary: "The room's managed repository (M5, ADR 0009, proposed): `request`, the room's one request for a repository, and `repository`, the repository linked to the room, each null if there's none. A room that doesn't use Git has neither. Read from the room's own state, for a person who sees the whole room. An agent, and anyone who doesn't see the whole room, gets `not_allowed`. It's a read and grants nothing. Nothing writes a request or a link yet, so both are null until provisioning is built (M5 step 4)"
+      responses: { "200": { description: The request and the linked repository, content: { application/json: { schema: { $ref: "#/components/schemas/RoomRepository" } } } }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/tasks/{t}/messages:
     parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
     get:
@@ -948,6 +955,44 @@ components:
         files: { type: array, maxItems: 10, items: { $ref: "#/components/schemas/SubmissionFile" } }
         note: { type: string }
         commit_sha: { type: string, description: Required when the task has a linked repository. }
+    RepoRequest:
+      type: object
+      description: "A room's request for a managed repository (M5, ADR 0009, proposed). One room has at most one. `pending` until the provisioning job finishes, then `ready`, or `failed` with a reason code. `uncertain` is a creation call whose answer was lost: it blocks coding tasks as a failed setup does, nothing is adopted by a matching name, and a retry uses a new name the server generates. Nothing is ever deleted, and nothing falls back to another organization."
+      additionalProperties: false
+      required: [id, state, name, visibility, reason, requested_by, requested_at, updated_at]
+      properties:
+        id: { type: string }
+        state: { type: string, enum: [pending, ready, failed, uncertain] }
+        name: { type: string, pattern: "^[a-z0-9][a-z0-9-]{0,63}$", description: "The name chosen at setup: lower-case letters, digits and hyphens, at most 64 characters. For display. It never identifies a repository." }
+        visibility: { type: string, enum: [public, private], description: "Chosen at setup. It never follows the room's visibility." }
+        reason: { type: [string, "null"], description: "A reason code while `failed` or `uncertain`, such as `name_taken`. Never the provider's message text." }
+        requested_by: { type: string }
+        requested_at: { type: integer, description: "Milliseconds, as every time here." }
+        updated_at: { type: integer }
+    RepoLink:
+      type: object
+      description: "The repository linked to a room (M5, ADR 0009, proposed). Its identity is `provider_repo_id`, recorded from the provider's answer to Podster's own creation call. Only `ready` will let a token be issued or a merge run, once those exist. `degraded` means a read-back found its rules or settings differ from what readiness needs, and `suspended` is an operator's takedown."
+      additionalProperties: false
+      required: [id, provider, provider_repo_id, full_name, visibility, default_branch, status, status_reason, created_at, verified_at, updated_at]
+      properties:
+        id: { type: string }
+        provider: { type: string, enum: [github] }
+        provider_repo_id: { type: integer, description: "The provider's own ID for the repository. A name never identifies one." }
+        full_name: { type: string, description: "For display only." }
+        visibility: { type: string, enum: [public, private] }
+        default_branch: { type: string }
+        status: { type: string, enum: [ready, degraded, suspended] }
+        status_reason: { type: [string, "null"], description: "A reason code while `degraded` or `suspended`." }
+        created_at: { type: integer }
+        verified_at: { type: [integer, "null"], description: "When Podster last read the repository's rules and settings back from the provider and found them as readiness needs." }
+        updated_at: { type: integer }
+    RoomRepository:
+      type: object
+      additionalProperties: false
+      required: [request, repository]
+      properties:
+        request: { oneOf: [{ $ref: "#/components/schemas/RepoRequest" }, { type: "null" }] }
+        repository: { oneOf: [{ $ref: "#/components/schemas/RepoLink" }, { type: "null" }] }
     RequestChanges: { type: object, required: [submission_no, reason], properties: { submission_no: { type: integer }, reason: { type: string, minLength: 1 } } }
     VerifyTask: { type: object, required: [submission_no], description: "Approves the exact submission named. If it has files, each must still be the one pinned and still ready: a file blocked by a later scan gets `file_not_ready` (409), one removed gets `file_removed` (409), and one that doesn't match gets `file_changed` (409). Requesting changes is always possible.", properties: { submission_no: { type: integer }, commit_sha: { type: string, description: Required when the task has a linked repository. } } }
     Error:

@@ -87,6 +87,7 @@ mod planned;
 mod public;
 mod public_claims;
 mod removal;
+mod repositories;
 mod roles;
 mod submission_files;
 mod visibility;
@@ -3974,6 +3975,7 @@ impl Workspace {
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
                 ["tasks", id] => queries::get_task(&sql, &who, id, false),
                 ["tasks", id, "messages"] => queries::list_messages(&sql, &who, id, &url),
+                ["repository"] => repositories::read(&sql, &who),
                 ["events"] => queries::list_events(&sql, &who.caller, &url),
                 ["audit"] => queries::list_audit(&sql, &who.caller, &url),
                 _ => Err(ApiError::not_found()),

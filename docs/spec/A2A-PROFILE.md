@@ -8,7 +8,7 @@ What Podster's A2A surface supports. The design is [ADR 0007](../adr/0007-a2a.md
 
 | | |
 | --- | --- |
-| Version | A2A 1.0 only ([decision 109](PRODUCT.md#decisions-needed)). A request without `A2A-Version` is read as 0.3, as spec 3.6.2 says, and refused with `VersionNotSupportedError`. A patch of 1.0, such as `1.0.1`, is served as 1.0, since patch numbers never count in negotiation ([decision 192](PRODUCT.md#decisions-needed)). Major and minor are read strictly, digits only, and anything else is refused |
+| Version | A2A 1.0 only ([decision 109](PRODUCT.md#decisions-needed)). A request without `A2A-Version` is read as 0.3, as spec 3.6.2 says, and refused with `VersionNotSupportedError`. A patch of 1.0, such as `1.0.1`, is served as 1.0, since patch numbers never count in negotiation ([decision 192](PRODUCT.md#decisions-needed)). Major and minor are read strictly, digits only, and anything else is refused. **A refused `A2A-Version` is echoed, JSON-encoded, in the error message.** That's the A2A SDK's own refusal, and the header is bounded, so the architect ruled on 2026-11-10 to keep it |
 | Binding | JSON-RPC only ([decision 108](PRODUCT.md#decisions-needed)), at `POST /a2a` on the gateway |
 | Agent Card | `GET /.well-known/agent-card.json`. It describes Podster only, and never lists a room, task or agent ([decision 110](PRODUCT.md#decisions-needed)) |
 | Streaming, push notifications, extended card | All off ([decision 110](PRODUCT.md#decisions-needed)) |
@@ -152,11 +152,11 @@ Following [decision 121](PRODUCT.md#decisions-needed):
 
   For Spike C, the server was first asked directly with the run's own signed request. It answered after 15 s at one path and redirected to the metadata address at another, and Podster then failed each send and switched the endpoint off. So the send timeout and the refused redirect are shown on a deployment. `CancelTask` delivery isn't.
 - **Outbound, the backup independent server:** fasta2a 2.1.1 passed locally on 2026-11-10, 3 of 3 ([e2e/fasta2a](../../e2e/fasta2a/server.py)). It reports `WORKING` and then `COMPLETED` with an artifact, so it takes the usual path: accept, submit, a change request in the same context as a second submission, and `CancelTask` once.
-- **The compatibility kit** ran locally on 2026-11-10, at `a2aproject/a2a-tck@104a7b4`, over JSON-RPC ([decision 142](PRODUCT.md#decisions-needed)). It ran through `e2e/run-a2a-kit.mjs`, whose local proxy adds an agent's `/a2a` token, since the kit sends none. **Every MUST check that ran passes, except the 8 decision 115 excepts,** listed below. It found three gaps, now fixed: the extended card's error code, the error shape for a wrong `Content-Type`, and the card's ETag. It hasn't run against staging yet. `docs/m3-plan.md` has the full result.
+- **The compatibility kit** ran locally on 2026-11-10, at `a2aproject/a2a-tck@104a7b4`, over JSON-RPC ([decision 142](PRODUCT.md#decisions-needed)). It ran through `e2e/run-a2a-kit.mjs`, whose local proxy adds an agent's `/a2a` token, since the kit sends none. **Every MUST check that ran passes, except the 8 decision 115 excepts,** listed below. Podster's own tests evidence all 16 MUST checks it didn't test. Two of them were gaps, on patch versions, until #247 closed them (decision 192). It found three gaps, now fixed: the extended card's error code, the error shape for a wrong `Content-Type`, and the card's ETag. **It ran against staging on 2026-11-10 with the same result,** after those fixes were deployed. `docs/m3-plan.md` has the full result.
 
 ## Compatibility kit exceptions
 
-[Decision 141](PRODUCT.md#decisions-needed) lists each kit check that doesn't fit Podster here, with its reason. **This list is from the kit's run on 2026-11-10,** locally, at `a2aproject/a2a-tck@104a7b4`, over JSON-RPC. It replaces the provisional list read from the kit's source on 2026-11-06. "Failed" and "skipped" are the kit's own results.
+[Decision 141](PRODUCT.md#decisions-needed) lists each kit check that doesn't fit Podster here, with its reason. **This list is from the kit's runs on 2026-11-10,** locally and then against staging, at `a2aproject/a2a-tck@104a7b4`, over JSON-RPC. Both gave the same result for every requirement. It replaces the provisional list read from the kit's source on 2026-11-06. "Failed" and "skipped" are the kit's own results.
 
 | Kit checks | Result | Why they don't fit |
 | --- | --- | --- |
@@ -167,10 +167,56 @@ Following [decision 121](PRODUCT.md#decisions-needed):
 | The extended card: `CARD-EXT-*`, `CORE-CAP-004` | Skipped | It's off (decision 110). `CORE-CAP-003`, that it answers `UnsupportedOperationError`, passes |
 | gRPC and HTTP+JSON: `GRPC-*`, `HTTP_JSON-*` and the binding-equivalence checks `BIND-EQUIV-*` | Skipped, or not tested | Podster serves JSON-RPC only (decision 109) |
 | `AUTH-INTASK-*` | Not tested | Podster never asks for credentials inside a task, and `TASK_STATE_AUTH_REQUIRED` grants nothing (spec 7.6.4) |
-| `CARD-SIGN-*`, `CARD-CLIENT-001`, `AUTH-TLS-*`, `BIND-CUSTOM-002` | Manual, by the kit's design | Not automated. The card isn't signed, and TLS is Cloudflare's |
 
 **Passed** (MUST unless named): `CARD-DISC-001`, `CARD-STRUCT-001`, `CARD-PROTO-001`, `CARD-PROTO-002`, `CARD-CACHE-001` and `CARD-CACHE-002` (SHOULD), `BIND-FIELD-001`, `CORE-ERR-001`, `CORE-ERR-002`, `CORE-CAP-001`, `CORE-CAP-002`, `CORE-CAP-003`, `CORE-GET-002`, `CORE-CANCEL-003`, `CORE-LIST-001` to `CORE-LIST-005`, `CORE-MULTI-004`, `JSONRPC-ERR-001`, `JSONRPC-ERR-002`, `JSONRPC-ERR-003` (SHOULD), `JSONRPC-FMT-002`, `JSONRPC-SSE-002`, `JSONRPC-SVC-001`, `JSONRPC-SVC-002`, `VER-SERVER-002`, `VER-SERVER-003`, and the URL and query-parameter checks the kit counts for HTTP+JSON. `CORE-LIST-003` passed with all of the agent's tasks in one room. Across rooms, `ListTasks` is newest first within each room, and `totalSize` is the page's size (step 8).
 
-**Not tested by this run:** `AUTH-SCOPE-*`, `AUTH-SERVER-001`, `DM-MSG-002`, `DM-PART-001`, `DM-SERIAL-001` to `004`, `DM-STATUS-001`, `DM-TASK-001`, `DM-TASK-002`, `VER-CLIENT-*` and `VER-SERVER-001`. The kit has no automated test for them over JSON-RPC here. No claim rests on them.
+### The MUST checks the kit didn't test
+
+The kit names 16 MUST checks that it has no automated test for over JSON-RPC, so its runs say nothing about them. Each is accounted for here from Podster's own tests, as decision 125 requires. **All 16 have evidence, and none is an exception.** Two were gaps until decision 192. #246 merged as `7f1e59d`. **What #246's tests don't cover,** from its review:
+- they read only `SUBMITTED` and `WORKING` tasks;
+- artifacts are always `[]` there, so an artifact's own required fields aren't checked;
+- they cover tasks from GetTask and ListTasks, not tasks returned by SendMessage or the lifecycle methods;
+- the outbound header test doesn't send a change request or a retry, which use the same `rpc()`. The sources are the A2A 1.0 specification's sections, as the kit cites them. `a2a.spec.ts`, `a2a-reads.spec.ts`, `a2a-lifecycle.spec.ts`, `a2a-messages.spec.ts`, `a2a-files.spec.ts`, `a2a-alias.spec.ts` and `oauth-split.spec.ts` are in `apps/gateway/test/`. `a2a-readback.spec.ts` and `a2a-outbound.spec.ts` are in `apps/api/test/`. #246 added the tests marked with it.
+
+| ID | What it requires | Evidence, or the gap | Source |
+| --- | --- | --- | --- |
+| `AUTH-SCOPE-001` | Authorization checks on every operation | Rust decides every read and command from current state. `a2a-reads.spec.ts` › "answers a hidden task, a room the caller isn't in, and a malformed ID exactly as a missing task". `a2a-lifecycle.spec.ts` › "can't be used to act on someone else's behalf: a lead can't accept the guest's offer". `a2a-messages.spec.ts` › "a hidden task, a missing one and a malformed ID, all alike" | Spec 13.1 |
+| `AUTH-SCOPE-002` | Results scoped to what the caller may see | `a2a-reads.spec.ts` › "lists only what each room lets the caller see, across their rooms", and "narrows to one task by contextId, and a context the caller can't see is an empty list". On staging, `e2e/a2a-staging.mjs`'s "the guest lists only its own task" (59 of 59 at `0794706`) | Spec 13.1 |
+| `AUTH-SCOPE-003` | Never reveal a resource the caller can't access | `a2a.spec.ts` › "answers a task that exists nowhere exactly as any other, so nothing is revealed". `a2a-reads.spec.ts`'s hidden-equals-missing test above. `a2a-files.spec.ts` › "answers a file the agent can't see as it answers one that doesn't exist". On staging, `a2a-staging.mjs`'s "a hidden task answers as a missing one" | Spec 3.3.2 |
+| `AUTH-SERVER-002` | Authenticate every request | `a2a.spec.ts` › "refuses a request with no token after those checks, with a challenge naming /a2a's metadata". `oauth-split.spec.ts` › "an /mcp token reaches /mcp, and is refused at /a2a". `a2a-files.spec.ts` › "refuses an /mcp token, a legacy token with no audience, an Agent Auth-shaped JWT, junk and none, all as no credential". `a2a-alias.spec.ts`, the same on `/a2a/`. On staging, a signed-out `POST` to `/a2a` and `/a2a/` got the same 401 on 2026-11-10 | Spec 7.4 |
+| `DM-TASK-001` | A task has `id` and `status` | `a2a-reads.spec.ts` › "every task GetTask and ListTasks answer is a well-formed A2A 1.0 task" ([#246](https://github.com/thachp/podster/pull/246)) | Spec 4.1.1 |
+| `DM-TASK-002` | A task's state is a defined one | The same test, and "reads a task the caller is on…" and "shows submitted as WORKING…" | Spec 4.1.3 |
+| `DM-MSG-002` | A message's role is user or agent | The same data-model test, and "reads a task the caller is on, with Podster's status, the thread's roles and one task per context" | Spec 4.1.5 |
+| `DM-PART-001` | Each part holds exactly one kind of content | The same data-model test ([#246](https://github.com/thachp/podster/pull/246)) | Spec 4.1.6 |
+| `DM-STATUS-001` | A status holds a valid state | The same data-model test ([#246](https://github.com/thachp/podster/pull/246)) | Spec 4.1.2 |
+| `DM-SERIAL-001` | JSON field names are camelCase | The same data-model test, for every key outside `metadata` ([#246](https://github.com/thachp/podster/pull/246)). And `a2a.spec.ts`'s card test, which reads it with the SDK's own `AgentCard.fromJSON` | Spec 5.5 |
+| `DM-SERIAL-002` | Enums as their ProtoJSON names | The same data-model test (states and roles are `TASK_STATE_*` and `ROLE_*`) | Spec 5.5 |
+| `DM-SERIAL-003` | Timestamps are ISO 8601 in UTC, with `Z` | The same data-model test: GetTask's `status.timestamp` must be present and match it ([#246](https://github.com/thachp/podster/pull/246)) | Spec 5.6.1 |
+| `DM-SERIAL-004` | Required fields are present, and required arrays aren't empty | The same data-model test, for a task's `id` and `status`, and a message's `messageId`, `role` and at least one part ([#246](https://github.com/thachp/podster/pull/246)) | Spec 5.7 |
+| `VER-CLIENT-001` | A client sends `A2A-Version` on every request | Podster is a client when it sends offers. `a2a-readback.spec.ts` › "as an A2A client (VER-CLIENT-001 and 002)" ([#246](https://github.com/thachp/podster/pull/246)): the send, each read, the history follow-up and the cancel all carry `A2A-Version: 1.0`. `a2a-outbound.spec.ts` › "sends SendMessage once, with returnImmediately…" checks the send's | Spec 3.6.1 |
+| `VER-CLIENT-002` | Patch versions never count in version negotiation | **Met.** As a client, Podster sends `1.0` with no patch (`a2a-readback.spec.ts` › "as an A2A client (VER-CLIENT-001 and 002)"), and its card says `1.0`. As a server, it serves a patch of 1.0 as 1.0, and ignores the patch number. Before decision 192 it refused `1.0.1`, because the SDK's `validateVersion` compared the header as an exact string. Fixed by [decision 192](PRODUCT.md#decisions-needed) in [#247](https://github.com/thachp/podster/pull/247), merged as `4769455`. Tested by `a2a.spec.ts` › "serves a patch of 1.0 as 1.0, and refuses everything else as before (decision 192)". On staging, gateway `427510d8`, signed out at 13:39 UTC on 2026-11-10, `A2A-Version: 1.0.1` got the same 401 and body as `1.0`, and `1.1` and `2.0` were refused as before | Spec 3.6 |
+| `VER-SERVER-001` | Process a request with the semantics of its Major.Minor | **Met.** A request is served with the semantics of its Major.Minor: `1.0.x` is served as 1.0, the only version Podster serves (decision 109), and anything else is refused. Before decision 192 a patch was refused. Fixed by [decision 192](PRODUCT.md#decisions-needed) in [#247](https://github.com/thachp/podster/pull/247), merged as `4769455`. Tested by `a2a.spec.ts` › "serves a patch of 1.0 as 1.0, and refuses everything else as before (decision 192)". On staging, gateway `427510d8`, signed out at 13:39 UTC on 2026-11-10, `A2A-Version: 1.0.1` got the same 401 and body as `1.0`, and `1.1` and `2.0` were refused as before | Spec 3.6.2 |
+
+### Decision 125's tally
+
+Each of the kit's 115 MUST checks has exactly one entry, from the staging report (`e2e/kit-report-staging-2026-11-10.json`), with none left without evidence or a reason:
+
+| | Count | Which |
+| --- | --- | --- |
+| **Evidenced against Podster** | **44** | 26 the kit passed against Podster, 16 by Podster's own tests (the table above), and 2 of the manual checks: `AUTH-TLS-001` and `CARD-CLIENT-001` |
+| Pass, but test only the kit's own constants | 3 | `HTTP_JSON-QP-001`, `HTTP_JSON-URL-001` and `HTTP_JSON-URL-002` |
+| **Listed exceptions, with reasons** | **68** | 8 that failed and 9 that were skipped on decision 115. 12 streaming. 10 push. 3 extended card. 21 gRPC, HTTP+JSON, `BIND-EQUIV-*` and `AUTH-INTASK-*`. 5 not applicable: the four `CARD-SIGN-*` checks and `BIND-CUSTOM-002` |
+| With neither | 0 | |
+
+### The checks the kit marks for manual verification
+
+| ID | Level | What was checked, and how | Result |
+| --- | --- | --- | --- |
+| `AUTH-TLS-001`, encrypted communication | MUST | A signed-out TLS connection from Node to `gateway-staging.podster.dev` and `app-staging.podster.dev`, 2026-11-10 at 12:56 UTC. Then a plain-HTTP `POST /a2a` | **Met on staging.** Both negotiated TLS 1.3 with `TLS_AES_256_GCM_SHA384`, and their certificates validated: Google Trust Services WE1, for `podster.dev` with each host named, valid to 2027-02-02 and 2027-02-03. Plain HTTP got 400, from the gateway's insecure-request check. There's no production to check |
+| `AUTH-TLS-002`, modern TLS | SHOULD | The same connection, then with TLS 1.2 only, then with TLS 1.1 only | TLS 1.3 by default. TLS 1.2 is also accepted, with `ECDHE-ECDSA-AES128-GCM-SHA256`. **Whether TLS 1.1 is refused isn't known:** the client's own OpenSSL refused to offer it, so the server was never asked. Cloudflare sets this, not Podster |
+| `AUTH-SERVER-001`, clients check the server's certificate | SHOULD | Not tested directly. Podster's outbound requests go through the Workers runtime's `fetch`, which validates certificates, and only to `https` names (`crates/egress`) | **Not checked by a test** |
+| `CARD-SIGN-001` to `004`, card signing | MUST, if the card is signed | The card has no `signatures` field (`a2a.spec.ts`'s card test reads every field) | **Don't apply as Podster is:** the spec makes signing a card optional, and these rules govern a signed one. No decision records "unsigned" yet. One should, before any signing work |
+| `CARD-CLIENT-001`, a client sends the chosen interface's tenant | MUST | Podster never reads a remote agent's card, because the endpoint URL is registered directly (decision 119). Its requests never set `tenant`: `a2a-outbound.spec.ts` checks the send's exact body | **Met,** since no tenant is chosen and none is sent. Not checked against a remote card that names a tenant |
+| `BIND-CUSTOM-002`, a breaking custom-binding change gets a new URI | MUST | Podster has no custom binding. It serves JSON-RPC only (decision 109), and the lifecycle extension is an extension with its own versioned URI, `…/lifecycle/v1` | **Doesn't apply:** no custom binding |
 
 The kit's client posts to the card's interface URL with `/` appended, `/a2a/`. Podster serves that as `/a2a` (decision 190), and the run's proxy passed paths through unchanged.

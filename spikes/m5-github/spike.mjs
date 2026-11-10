@@ -68,7 +68,9 @@ async function main() {
   if (!org || !apps.provision.id || !apps.merge.id) {
     throw new Error("Set M5_ORG, M5_PROVISION_APP_ID and M5_MERGE_APP_ID.");
   }
-  if (!looksLikeTestOrg(org)) {
+  // The owner can name an organization that doesn't look like a test one, by repeating it exactly.
+  const confirmed = /^[A-Za-z0-9-]+$/.test(org) && process.env.M5_CONFIRM_ORG === org;
+  if (!looksLikeTestOrg(org) && !confirmed) {
     throw new Error(`Refusing to run: "${org}" isn't a plain name with spike, test or sandbox in it.`);
   }
 

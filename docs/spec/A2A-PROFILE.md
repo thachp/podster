@@ -152,11 +152,11 @@ Following [decision 121](PRODUCT.md#decisions-needed):
 
   For Spike C, the server was first asked directly with the run's own signed request. It answered after 15 s at one path and redirected to the metadata address at another, and Podster then failed each send and switched the endpoint off. So the send timeout and the refused redirect are shown on a deployment. `CancelTask` delivery isn't.
 - **Outbound, the backup independent server:** fasta2a 2.1.1 passed locally on 2026-11-10, 3 of 3 ([e2e/fasta2a](../../e2e/fasta2a/server.py)). It reports `WORKING` and then `COMPLETED` with an artifact, so it takes the usual path: accept, submit, a change request in the same context as a second submission, and `CancelTask` once.
-- **The compatibility kit** ran locally on 2026-11-10, at `a2aproject/a2a-tck@104a7b4`, over JSON-RPC ([decision 142](PRODUCT.md#decisions-needed)). It ran through `e2e/run-a2a-kit.mjs`, whose local proxy adds an agent's `/a2a` token, since the kit sends none. **Every MUST check that ran passes, except the 8 decision 115 excepts,** listed below. It found three gaps, now fixed: the extended card's error code, the error shape for a wrong `Content-Type`, and the card's ETag. It hasn't run against staging yet. `docs/m3-plan.md` has the full result.
+- **The compatibility kit** ran locally on 2026-11-10, at `a2aproject/a2a-tck@104a7b4`, over JSON-RPC ([decision 142](PRODUCT.md#decisions-needed)). It ran through `e2e/run-a2a-kit.mjs`, whose local proxy adds an agent's `/a2a` token, since the kit sends none. **Every MUST check that ran passes, except the 8 decision 115 excepts,** listed below. It found three gaps, now fixed: the extended card's error code, the error shape for a wrong `Content-Type`, and the card's ETag. **It ran against staging on 2026-11-10 with the same result,** after those fixes were deployed. `docs/m3-plan.md` has the full result.
 
 ## Compatibility kit exceptions
 
-[Decision 141](PRODUCT.md#decisions-needed) lists each kit check that doesn't fit Podster here, with its reason. **This list is from the kit's run on 2026-11-10,** locally, at `a2aproject/a2a-tck@104a7b4`, over JSON-RPC. It replaces the provisional list read from the kit's source on 2026-11-06. "Failed" and "skipped" are the kit's own results.
+[Decision 141](PRODUCT.md#decisions-needed) lists each kit check that doesn't fit Podster here, with its reason. **This list is from the kit's runs on 2026-11-10,** locally and then against staging, at `a2aproject/a2a-tck@104a7b4`, over JSON-RPC. Both gave the same result for every requirement. It replaces the provisional list read from the kit's source on 2026-11-06. "Failed" and "skipped" are the kit's own results.
 
 | Kit checks | Result | Why they don't fit |
 | --- | --- | --- |

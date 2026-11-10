@@ -128,8 +128,9 @@ rerun_known_flake() {
   log=$(mktemp)
   trap 'rm -f "$log"' EXIT
   gh run view "$id" --log-failed > "$log" || refuse "could not read the failed log"
-  # Colour codes would hide the words this looks for.
-  sed -i.raw $'s/\x1b\\[[0-9;]*m//g' "$log" && rm -f "$log.raw"
+  # Colour codes would hide the words this looks for. gh prints the escape character as the two characters "^[", so
+  # both spellings are taken out.
+  sed -i.raw -e $'s/\x1b\\[[0-9;]*m//g' -e 's/\^\[\[[0-9;]*m//g' "$log" && rm -f "$log.raw"
 
   failing=$(sed -n 's/^.* FAIL  *\([^ ].* > .*\)$/\1/p' "$log" | sort -u)
   grep -q -E 'Test Files +1 failed' "$log" || refuse "api failed, and not with exactly one failed test file"

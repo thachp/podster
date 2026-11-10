@@ -505,12 +505,28 @@ printf 'api\tRun npm test\t2026-11-09T19:10:31Z \033[2m      Tests \033[22m \033
 check "the api alarm flake is recognised in a coloured log, exit 0" run 0 "$gate" 77 "$sha" --rerun-known-flake
 healthy
 
+# gh's own spelling of those colours: a caret and a bracket where the escape character was.
+printf 'api\tRun npm test\t2026-11-10T22:10:30Z ^[[41m^[[1m FAIL ^[[22m^[[49m test/kernel.spec.ts^[[2m > ^[[22minbox^[[2m > ^[[22m%s\n' "${alarm#test/kernel.spec.ts > inbox > }" > "$fix/log"
+printf 'api\tRun npm test\t2026-11-10T22:10:31Z ^[[2m Test Files ^[[22m ^[[1m^[[31m1 failed^[[39m^[[22m^[[2m | ^[[22m^[[1m^[[32m24 passed^[[39m^[[22m^[[90m (25)^[[39m\n' >> "$fix/log"
+printf 'api\tRun npm test\t2026-11-10T22:10:31Z ^[[2m      Tests ^[[22m ^[[1m^[[31m1 failed^[[39m^[[22m^[[2m | ^[[22m^[[1m^[[32m973 passed^[[39m^[[22m^[[90m (974)^[[39m\n' >> "$fix/log"
+check "the api alarm flake is recognised in a log as gh prints it, exit 0" run 0 "$gate" 77 "$sha" --rerun-known-flake
+healthy
+
 no_rerun() { # no_rerun TITLE WHAT-IT-SAYS
   check "$1 is not rerun, exit 1" run 1 "$gate" 77 "$sha" --rerun-known-flake
   check "  and says why" said "REFUSE .*$2"
   check "  and nothing was rerun or merged" never_called "$changes"
   healthy
 }
+
+# A real one: this script's own pull request, whose api job failed two tests that aren't the flake.
+cp "$captured/api-failed.log" "$fix/log"
+no_rerun "a real failed api log, with two other tests failed" 'not with exactly one failed test file'
+check "  and that fixture is in gh's spelling, with no escape character" test "$(grep -c '\^\[\[' "$captured/api-failed.log")" -gt 0 -a "$(grep -c "$(printf '\033')" "$captured/api-failed.log")" -eq 0
+
+# The same log with one of the two taken out, to show the names are read through gh's colours.
+grep -v 'repo-access.spec.ts' "$captured/api-failed.log" | sed -e 's/2 failed/1 failed/' > "$fix/log"
+no_rerun "the real log with one failing test left, which isn't the alarm test" 'not the known alarm flake: test/provider-deliveries.spec.ts > a delivery as a nudge > marks the change'
 
 : > "$fix/pr-runs"
 no_rerun "a sha with no ci.yml run" 'there is no ci.yml run'

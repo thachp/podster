@@ -807,18 +807,23 @@ pub(super) fn end_grants_of_removed(
 /// former owner named again starts with nothing. A transfer passes the new owner. The one before it already ended what
 /// earlier owners gave, so a transfer away and back leaves none of the first owner's grants. `check_grant` refuses
 /// these at use anyway; this makes the rows say so.
+///
+/// `displaced` is a former owner who loses their place here, as recovery for someone else makes them. They're told only of
+/// that, so they aren't told of the grants they held ending, as a removed participant isn't.
 pub(super) fn end_grants_after_owner_change(
     sql: &SqlStorage,
     actor: &str,
     actor_kind: &str,
     new_owner: Option<&str>,
+    displaced: Option<&str>,
     now: i64,
 ) -> R<()> {
     let live = grant_rows(sql, "revoked_at IS NULL", vec![])?;
     let grants: Vec<Grant> = live.iter().map(GrantRow::grant).collect();
     let ended = grants_ended_by_ownership_change(&grants, new_owner);
     for grant in live.iter().filter(|g| ended.contains(&g.id.as_str())) {
-        end_grant(sql, actor, actor_kind, grant, "owner_changed", true, now)?;
+        let tell = displaced != Some(grant.principal.as_str());
+        end_grant(sql, actor, actor_kind, grant, "owner_changed", tell, now)?;
     }
     Ok(())
 }

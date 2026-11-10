@@ -34,6 +34,10 @@ The test reads this table. Each row's status is `available` (works as this page 
 | `DeleteTaskPushNotificationConfig` | off | `PushNotificationNotSupportedError` | Off, decision 110 |
 | `GetExtendedAgentCard` | off | `UnsupportedOperationError` | Off, decision 110. The card declares no extended card, so spec 3.3.4 calls for this, not `ExtendedAgentCardNotConfiguredError` |
 
+The card at `/.well-known/agent-card.json` has a strong `ETag` from its own bytes. `If-None-Match` with that tag, its weak `W/` form, any list that includes it, or `*`, gets 304 with no body. `HEAD` gets the headers alone.
+
+A request whose `Content-Type` isn't `application/json` or `application/a2a+json` gets HTTP 415 with a JSON-RPC error body, since the body isn't read: `{ "jsonrpc": "2.0", "id": null, "error": { "code": -32005, … } }`, `ContentTypeNotSupportedError`.
+
 The checks run in this order: method, content type, body size, `A2A-Version`, then the token. So a request on the wrong version is refused before it needs a token. Once a request with `A2A-Version: 1.0` and a valid token gets that far, a malformed body gets the JSON-RPC error the SDK's transport gives, and a method this table doesn't name gets `-32601` "Method not found". Every answer carries `A2A-Version: 1.0`, and a request's `id` is echoed only when it's a string, a number or null.
 
 A request's `tenant` is never used for authority. Who is calling comes only from the token, and step 8's reads must keep it that way.

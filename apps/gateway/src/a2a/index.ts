@@ -68,13 +68,24 @@ function envelope(text: string): { id: unknown; method: unknown } {
 export function handleA2aCard(request: Request, url: URL, baseUrl: string): Response | null {
   if (url.pathname !== CARD_PATH) return null;
   if (request.method !== "GET" && request.method !== "HEAD") return httpError("method_not_allowed", 405, { allow: "GET, HEAD" });
-  const body = JSON.stringify(agentCard(baseUrl));
-  // A strong validator from the card's own bytes (A2A's CARD-CACHE-002 SHOULD), so a cache can revalidate it.
-  const etag = `"${fnv1a64(body)}"`;
+  const { body, etag } = cardFor(baseUrl);
   const headers = { "content-type": "application/json", "cache-control": "public, max-age=300", etag, ...VERSION_HEADERS };
+  // Compared weakly: Cloudflare may weaken an ETag when it compresses, and a client then sends it back as `W/"…"`.
   const match = request.headers.get("if-none-match");
-  if (match && match.split(",").some((tag) => tag.trim() === etag || tag.trim() === "*")) return new Response(null, { status: 304, headers });
+  if (match && match.split(",").some((tag) => tag.trim().replace(/^W\//, "") === etag || tag.trim() === "*")) return new Response(null, { status: 304, headers });
   return new Response(request.method === "HEAD" ? null : body, { status: 200, headers });
+}
+
+/** The card's body and a strong validator from its own bytes (A2A's CARD-CACHE-002 SHOULD), made once per base URL. */
+const cards = new Map<string, { body: string; etag: string }>();
+function cardFor(baseUrl: string) {
+  let card = cards.get(baseUrl);
+  if (!card) {
+    const body = JSON.stringify(agentCard(baseUrl));
+    card = { body, etag: `"${fnv1a64(body)}"` };
+    cards.set(baseUrl, card);
+  }
+  return card;
 }
 
 /** 64-bit FNV-1a over the UTF-16 code units, as 16 hex digits. Only for telling one card body from another. */

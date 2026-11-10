@@ -19,6 +19,7 @@ import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { childEnv } from "./child-env.mjs";
 import { linkedA2aToken, McpAgent, Person, Target } from "./lib.mjs";
 import { freePort, prepareStack, startGateway } from "./stack.mjs";
 
@@ -72,58 +73,67 @@ if (staging) {
 } else {
   owner = await Person.signUp(target, "Kit owner");
 }
-const room = await owner.createRoom("A2A kit");
-const lead = await McpAgent.connect(target, owner, "Kit lead");
-const agent = await McpAgent.connect(target, owner, "Kit agent");
-await owner.addAgent(room, lead, "member");
-await owner.addAgent(room, agent, "member");
-for (const title of ["Kit task one", "Kit task two", "Kit task three"]) {
-  await lead.must("create_task", { workspace_id: room, title, instructions: "For the compatibility kit.", assignee: agent.id });
-}
-const token = await linkedA2aToken(target, owner, agent);
-
-const proxyPort = await freePort();
-const proxyBase = `http://127.0.0.1:${proxyPort}`;
-const proxy = createServer(async (req, res) => {
-  try {
-    await forward(req, res);
-  } catch {
-    if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
-    res.end(JSON.stringify({ error: "proxy_upstream_failed" }));
+// On staging, whatever happens, the run's agents are disconnected and the test person signed out.
+const connected = [];
+let code = 1;
+try {
+  const room = await owner.createRoom("A2A kit");
+  const lead = await McpAgent.connect(target, owner, "Kit lead");
+  connected.push(lead);
+  const agent = await McpAgent.connect(target, owner, "Kit agent");
+  connected.push(agent);
+  await owner.addAgent(room, lead, "member");
+  await owner.addAgent(room, agent, "member");
+  for (const title of ["Kit task one", "Kit task two", "Kit task three"]) {
+    await lead.must("create_task", { workspace_id: room, title, instructions: "For the compatibility kit.", assignee: agent.id });
   }
-});
-/** One request to the gateway, with the agent's bearer, and the card's URLs pointed at the proxy. */
-async function forward(req, res) {
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  const headers = new Headers();
-  for (const [name, value] of Object.entries(req.headers)) if (!["host", "connection", "content-length", "authorization"].includes(name)) headers.set(name, String(value));
-  headers.set("authorization", `Bearer ${token}`);
-  // The kit's client joins the card's interface URL with "/", so it posts to /a2a/. Podster serves /a2a exactly. Only that
-  // one path is mapped, and the finding is recorded in docs/m3-plan.md.
-  const path = req.url === "/a2a/" ? "/a2a" : req.url;
-  const upstream = await fetch(`${base}${path}`, { method: req.method, headers, body: ["GET", "HEAD"].includes(req.method) ? undefined : Buffer.concat(chunks), redirect: "manual" });
-  let body = Buffer.from(await upstream.arrayBuffer());
-  if (req.url.includes("agent-card.json")) body = Buffer.from(body.toString("utf8").replaceAll(base, proxyBase));
-  const out = {};
-  upstream.headers.forEach((value, name) => {
-    if (!["content-length", "content-encoding", "transfer-encoding"].includes(name)) out[name] = value;
-  });
-  res.writeHead(upstream.status, out).end(body);
-}
-await new Promise((done) => proxy.listen(proxyPort, "127.0.0.1", done));
-console.log(`Podster at ${base}, the kit's proxy at ${proxyBase}, room ${room}, agent ${agent.id}.`);
+  const token = await linkedA2aToken(target, owner, agent);
 
-const args = ["run_tck.py", "--sut-host", proxyBase, "--transport", "jsonrpc", ...(option("--level") ? ["--level", option("--level")] : [])];
-const code = await new Promise((done) => {
-  const proc = spawn(join(kit, ".venv/bin/python"), args, { cwd: kit, stdio: "inherit" });
-  proc.on("exit", (status) => done(status ?? 1));
-});
-proxy.close();
-if (staging) {
-  for (const a of [lead, agent]) await owner.dash("POST", `/agents/${a.id}/disconnect`).catch(() => null);
-  await target.http("/api/auth/sign-out", { method: "POST", headers: { cookie, origin: base, "content-type": "application/json" }, body: "{}" }).catch(() => null);
+  const proxyPort = await freePort();
+  const proxyBase = `http://127.0.0.1:${proxyPort}`;
+  const proxy = createServer(async (req, res) => {
+    try {
+      await forward(req, res);
+    } catch {
+      if (!res.headersSent) res.writeHead(502, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "proxy_upstream_failed" }));
+    }
+  });
+  /** One request to the gateway, with the agent's bearer, and the card's URLs pointed at the proxy. */
+  async function forward(req, res) {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(req.headers)) if (!["host", "connection", "content-length", "authorization"].includes(name)) headers.set(name, String(value));
+    headers.set("authorization", `Bearer ${token}`);
+    // The kit's client joins the card's interface URL with "/", so it posts to /a2a/. Podster serves /a2a exactly. Only that
+    // one path is mapped, and the finding is recorded in docs/m3-plan.md.
+    const path = req.url === "/a2a/" ? "/a2a" : req.url;
+    const upstream = await fetch(`${base}${path}`, { method: req.method, headers, body: ["GET", "HEAD"].includes(req.method) ? undefined : Buffer.concat(chunks), redirect: "manual" });
+    let body = Buffer.from(await upstream.arrayBuffer());
+    if (req.url.includes("agent-card.json")) body = Buffer.from(body.toString("utf8").replaceAll(base, proxyBase));
+    const out = {};
+    upstream.headers.forEach((value, name) => {
+      if (!["content-length", "content-encoding", "transfer-encoding"].includes(name)) out[name] = value;
+    });
+    res.writeHead(upstream.status, out).end(body);
+  }
+  await new Promise((done) => proxy.listen(proxyPort, "127.0.0.1", done));
+  console.log(`Podster at ${base}, the kit's proxy at ${proxyBase}, room ${room}, agent ${agent.id}.`);
+
+  const args = ["run_tck.py", "--sut-host", proxyBase, "--transport", "jsonrpc", ...(option("--level") ? ["--level", option("--level")] : [])];
+  code = await new Promise((done) => {
+    // Third-party code: an allow-listed environment, so it never sees the sign-up secret or any other of ours.
+    const proc = spawn(join(kit, ".venv/bin/python"), args, { cwd: kit, stdio: "inherit", env: childEnv() });
+    proc.on("exit", (status) => done(status ?? 1));
+  });
+  proxy.close();
+} finally {
+  if (staging) {
+    for (const a of connected) await owner.dash("POST", `/agents/${a.id}/disconnect`).catch(() => null);
+    await target.http("/api/auth/sign-out", { method: "POST", headers: { cookie, origin: base, "content-type": "application/json" }, body: "{}" }).catch(() => null);
+  }
+  stop();
 }
-stop();
 console.log(`\nThe kit exited ${code}. Its report is in ${join(kit, "reports")}.`);
 process.exit(code);

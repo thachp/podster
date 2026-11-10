@@ -9,6 +9,7 @@
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { childEnv } from "./child-env.mjs";
 import { freePort } from "./stack.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -24,7 +25,7 @@ const server = spawn(cli, ["dev", "--no-browser", "--no-reload", "--host", "127.
   cwd: join(here, "langgraph"),
   stdio: ["ignore", "pipe", "pipe"],
   detached: true,
-  env: { ...process.env, LANGGRAPH_CLI_NO_ANALYTICS: "1", LANGSMITH_TRACING: "false" },
+  env: childEnv({ LANGGRAPH_CLI_NO_ANALYTICS: "1", LANGSMITH_TRACING: "false" }),
 });
 const log = [];
 server.stdout.on("data", (chunk) => log.push(String(chunk)));

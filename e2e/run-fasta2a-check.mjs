@@ -7,6 +7,7 @@
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { childEnv } from "./child-env.mjs";
 import { freePort } from "./stack.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -23,7 +24,7 @@ const server = spawn(python, ["-m", "uvicorn", "server:app", "--host", "127.0.0.
   cwd: join(here, "fasta2a"),
   stdio: ["ignore", "pipe", "pipe"],
   detached: true,
-  env: { ...process.env, RUN_SECONDS },
+  env: childEnv({ RUN_SECONDS }),
 });
 const log = [];
 server.stdout.on("data", (chunk) => log.push(String(chunk)));

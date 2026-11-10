@@ -66,6 +66,21 @@ describe("the Agent Card", () => {
     const other = await SELF.fetch(`${BASE}/.well-known/agent-card.json`, { headers: { "if-none-match": '"0000000000000000"' } });
     expect(other.status).toBe(200);
     await other.arrayBuffer();
+    // Several tags, one of them this card's, weakened as Cloudflare may do on compression; and `*`.
+    for (const header of [`"0000000000000000", W/${etag}`, "*"]) {
+      const matched = await SELF.fetch(`${BASE}/.well-known/agent-card.json`, { headers: { "if-none-match": header } });
+      expect(matched.status, header).toBe(304);
+      await matched.arrayBuffer();
+    }
+  });
+
+  it("answers HEAD with the same ETag and no body", async () => {
+    const get = await SELF.fetch(`${BASE}/.well-known/agent-card.json`);
+    await get.arrayBuffer();
+    const head = await SELF.fetch(`${BASE}/.well-known/agent-card.json`, { method: "HEAD" });
+    expect(head.status).toBe(200);
+    expect(head.headers.get("etag")).toBe(get.headers.get("etag"));
+    expect(await head.text()).toBe("");
   });
 
   it("refuses anything but GET and HEAD", async () => {

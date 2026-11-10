@@ -67,9 +67,12 @@ fi
 # ci.yml's jobs. A pull request must have every one as a check. The gate also reads ci.yml on main and refuses if this
 # list isn't its jobs, so a renamed or added job can't pass unnoticed, and the self-test pins it to the workflow file.
 CI_JOBS="rust migrations contracts api web scanner gateway e2e"
-# The one known flake. Anything else that fails is a failure. DELETE THIS, and the api case below, once the cause of
-# this test's flake is fixed. There was a second allowance, for "database is locked" in the web job's accessibility
-# run. #254 fixed its cause, so that failing again means the fix didn't hold, and is looked into, never rerun.
+# The one known flake. Anything else that fails is a failure. Its likely cause is now known: the test runtime runs a
+# room's alarm on its own, and `runDurableObjectAlarm` calls `alarm()` directly, so two runs overlap. #259 fixed that
+# for the tests that use the helpers in apps/api/test/alarm.ts. DELETE THIS, and the api case below, when
+# kernel.spec.ts is moved onto those helpers. There was a second allowance, for "database is locked" in the web job's
+# accessibility run. #254 fixed its cause, so that failing again means the fix didn't hold, and is looked into, never
+# rerun.
 API_FLAKE_TEST="test/kernel.spec.ts > inbox > the alarm follows whichever recipient is due first, not the one waiting longest"
 
 problems=0

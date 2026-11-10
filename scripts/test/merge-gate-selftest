@@ -748,7 +748,8 @@ flake=$(sed -n 's/^API_FLAKE_TEST="test\/kernel.spec.ts > inbox > \(.*\)"$/\1/p'
 kernel="$scripts/../apps/api/test/kernel.spec.ts"
 check "the alarm test it names is one test of kernel.spec.ts" test -n "$flake" -a "$(grep -c -F "  it(\"$flake\"," "$kernel")" -eq 1
 check "  inside its inbox suite" test "$(awk '/^describe\(/ { suite = $0 } /the alarm follows whichever recipient is due first/ { print suite }' "$kernel")" = 'describe("inbox", () => {'
-check "  and the script says to delete it once its cause is fixed" grep -q 'DELETE THIS, and the api case below, once the cause' "$gate"
+check "  and the script says when to delete it" grep -q 'DELETE THIS, and the api case below, when$' "$gate"
+check "  which is when kernel.spec.ts uses the alarm helpers, which exist" test -f "$scripts/../apps/api/test/alarm.ts" -a "$(grep -c 'kernel.spec.ts is moved onto those helpers' "$gate")" -eq 1
 check "the script has one flake allowance, and none for web" test "$(grep -c -E '^[A-Z_]*FLAKE[A-Z_]*=' "$gate")$(grep -c 'WEB_FLAKE' "$gate")" = 10
 check "it never accepts an analysis of the merge ref" test "$(grep -c 'analyses?ref=refs/pull/$pr/merge' "$gate")" -eq 0
 check "it names no language itself" test "$(grep -c -E 'Analyze \((actions|python|rust|javascript)' "$gate")" -eq 0

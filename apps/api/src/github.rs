@@ -131,7 +131,8 @@ pub(crate) trait Provider {
     async fn read_back(&self, repo_id: i64) -> std::result::Result<(Observed, Described), Failure>;
     /// Adds one missing piece of setup. It never changes or removes anything that's there.
     async fn apply(&self, repo_id: i64, step: SetupStep) -> std::result::Result<(), Failure>;
-    /// Revokes every token still held. Answers how many couldn't be revoked, which then live out their hour.
+    /// Revokes every token still held. Answers how many couldn't be revoked in this job, whenever their work ended:
+    /// those live out their hour.
     async fn release(&self) -> u32;
 }
 
@@ -139,6 +140,8 @@ pub struct GitHubApp {
     config: Config,
     /// The token narrowed to one repository, for this job only, with that repository's ID. Never leaves this struct.
     scoped: RefCell<Option<(i64, String)>>,
+    /// Tokens that couldn't be revoked when their work ended, the broad one included. `release` reports them.
+    unrevoked: std::cell::Cell<u32>,
 }
 
 fn js<T>(result: std::result::Result<T, JsValue>) -> std::result::Result<T, Failure> {
@@ -261,6 +264,7 @@ impl GitHubApp {
         GitHubApp {
             config,
             scoped: RefCell::new(None),
+            unrevoked: std::cell::Cell::new(0),
         }
     }
 
@@ -402,8 +406,11 @@ impl Provider for GitHubApp {
         let path = format!("/orgs/{}/repos", self.config.org_login);
         let body = json!({ "name": name, "private": !public, "auto_init": true });
         let sent = self.send(Method::Post, &path, &token, Some(body)).await;
-        // The broad token has done the one thing it was for, however that went.
-        self.revoke(&token).await;
+        // The broad token has done the one thing it was for, however that went. If it can't be revoked it lives out its
+        // hour with authority over every repository, so that is counted and reported, never dropped.
+        if !self.revoke(&token).await {
+            self.unrevoked.set(self.unrevoked.get().saturating_add(1));
+        }
         let (status, answer) = match sent {
             Ok(answer) => answer,
             Err(_) => return CreateAnswer::Unknown,
@@ -522,9 +529,11 @@ impl Provider for GitHubApp {
 
     async fn release(&self) -> u32 {
         let held = self.scoped.borrow_mut().take();
-        match held {
-            Some((_, token)) => u32::from(!self.revoke(&token).await),
-            None => 0,
+        if let Some((_, token)) = held {
+            if !self.revoke(&token).await {
+                self.unrevoked.set(self.unrevoked.get().saturating_add(1));
+            }
         }
+        self.unrevoked.get()
     }
 }

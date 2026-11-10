@@ -20,7 +20,7 @@ use super::*;
 use crate::github::{Config, CreateAnswer, GitHubApp, Provider};
 use podster_core::provisioning::{
     job_backoff_ms, missing_steps, reserved_name, retry_allowed, retry_name, retry_wait_ms,
-    verify_ready, Expected,
+    verify_ready, Expected, MAX_SETUP_RUNS,
 };
 use podster_core::repositories::{
     decide_retry, valid_repo_name, RepoVisibility, RequestState, RetryPlan, RetryRefusal,
@@ -69,17 +69,11 @@ pub(super) fn may_request(sql: &SqlStorage, caller: &Caller) -> R<()> {
 fn request_row(sql: &SqlStorage) -> R<Option<Value>> {
     Ok(rows(
         sql,
-        "SELECT id, state, name, visibility, attempt, provider_name, provider_repo_id, reason, requested_by, runs, retry_after FROM repo_request",
+        "SELECT id, state, name, visibility, attempt, provider_name, provider_repo_id, reason, requested_by, runs, retry_after, job_not_before FROM repo_request",
         vec![],
     )?
     .into_iter()
     .next())
-}
-
-/// Whether a request is waiting for the job.
-fn due(sql: &SqlStorage) -> R<bool> {
-    Ok(request_row(sql)?
-        .is_some_and(|request| request["state"].as_str() == Some(RequestState::Pending.name())))
 }
 
 /// `POST repository { name, visibility }`: records the room's one request for a repository. `delegated` is what the
@@ -326,7 +320,7 @@ fn finish(
     };
     exec(
         sql,
-        "UPDATE repo_request SET state = ?, reason = ?, retry_after = ?, updated_at = ? WHERE id = ?",
+        "UPDATE repo_request SET state = ?, reason = ?, retry_after = ?, job_failures = 0, job_not_before = NULL, updated_at = ? WHERE id = ?",
         vec![
             state.name().into(),
             reason.into(),
@@ -404,7 +398,18 @@ impl Workspace {
     /// When the alarm should next come for a pending request, if there is one: at once, or after the wait a job that
     /// couldn't finish left behind.
     pub(super) fn provisioning_due_at(&self, sql: &SqlStorage, now: i64) -> R<Option<i64>> {
-        Ok(due(sql)?.then(|| (now + 50).max(self.provision_not_before.get())))
+        Ok(request_row(sql)?
+            .filter(|r| r["state"].as_str() == Some(RequestState::Pending.name()))
+            .map(|r| self.not_before(&r).max(now + 50)))
+    }
+
+    /// When the job may next run for this request. The wait is kept in the room, so a restart doesn't forget it. The
+    /// copy in memory only stands in when even that couldn't be written.
+    fn not_before(&self, request: &Value) -> i64 {
+        request["job_not_before"]
+            .as_i64()
+            .unwrap_or(0)
+            .max(self.provision_not_before.get())
     }
 
     /// The alarm's part: runs the job for a pending request, and makes sure it never stays pending behind an error. If
@@ -414,19 +419,19 @@ impl Workspace {
         if !store::is_initialized(&sql)? || store::needs_migration(&sql)? {
             return Ok(());
         }
-        if now_ms() < self.provision_not_before.get() {
-            return Ok(());
-        }
         let Some(request) = request_row(&sql)?
             .filter(|r| r["state"].as_str() == Some(RequestState::Pending.name()))
         else {
             return Ok(());
         };
+        if now_ms() < self.not_before(&request) {
+            return Ok(());
+        }
         let request_id = text(&request["id"]).unwrap_or_default();
         let room = objects::room_id(&sql)?;
-        let ended = match self.run_provisioning(&request, &request_id).await {
+        let ended = match self.run_provisioning(&request, &request_id, &room).await {
             Ok(None) => {
-                self.provision_failures.set(0);
+                self.provision_not_before.set(0);
                 console_log!(
                     "{}",
                     json!({ "at": "provision", "room": room, "request": request_id, "outcome": "ready" })
@@ -449,7 +454,7 @@ impl Workspace {
         });
         match finished {
             Ok(now) => {
-                self.provision_failures.set(0);
+                self.provision_not_before.set(0);
                 // What the request ended as, which is `uncertain` if a creation call's outcome was never recorded.
                 let state = now
                     .as_ref()
@@ -466,17 +471,45 @@ impl Workspace {
                 Ok(())
             }
             Err(error) => {
-                let failures = self.provision_failures.get().saturating_add(1);
-                self.provision_failures.set(failures);
-                self.provision_not_before
-                    .set(now_ms() + job_backoff_ms(failures));
+                // The request couldn't be ended, so it's still pending. The wait before the job comes back is written to
+                // the room, in a transaction that touches nothing else, so it outlives a restart.
+                let id = request_id.clone();
+                let stored = self.in_transaction(move |sql| {
+                    let failures = rows(
+                        sql,
+                        "SELECT job_failures FROM repo_request WHERE id = ?",
+                        vec![id.as_str().into()],
+                    )?
+                    .first()
+                    .map_or(0, |r| int(&r["job_failures"]))
+                        + 1;
+                    exec(
+                        sql,
+                        "UPDATE repo_request SET job_failures = ?, job_not_before = ? WHERE id = ?",
+                        vec![
+                            failures.into(),
+                            (now_ms() + job_backoff_ms(failures.clamp(1, 64) as u32)).into(),
+                            id.as_str().into(),
+                        ],
+                    )
+                });
+                if stored.is_err() {
+                    // Not even that could be written. Until a restart, memory holds the longest wait there is.
+                    self.provision_not_before
+                        .set(now_ms() + job_backoff_ms(u32::MAX));
+                }
                 Err(error)
             }
         }
     }
 
     /// One run, with the provider's tokens revoked on every way out.
-    async fn run_provisioning(&self, request: &Value, request_id: &str) -> R<Option<Ended>> {
+    async fn run_provisioning(
+        &self,
+        request: &Value,
+        request_id: &str,
+        room: &str,
+    ) -> R<Option<Ended>> {
         let sql = self.state.storage().sql();
         if !enabled(&self.env, &sql)? {
             return Ok(Some(failed("managed_repositories_off", 0)));
@@ -499,10 +532,11 @@ impl Workspace {
         let outcome = self.provision_with(&provider, request, request_id).await;
         let unrevoked = provider.release().await;
         if unrevoked > 0 {
-            // The token lives out its hour. It was narrowed to this one repository.
+            // Each lives out its hour: the one narrowed to this repository, or the installation's own. IDs and a count
+            // only, and nothing here can change how the job ended.
             console_error!(
                 "{}",
-                json!({ "at": "provision.token_not_revoked", "room": objects::room_id(&sql)?, "request": request_id })
+                json!({ "at": "provision.token_not_revoked", "room": room, "request": request_id, "count": unrevoked })
             );
         }
         outcome
@@ -532,6 +566,18 @@ impl Workspace {
         // out, the attempt is on record before it does. So a job that dies mid-call leaves a row that says a call may
         // have gone out.
         let begun: Option<&'static str> = self.in_transaction(move |sql| {
+            // The job holds itself to the limit too. A request can come back here without a retry, when the room
+            // couldn't write how the last run ended, and then nothing more goes to the provider.
+            let runs = rows(
+                sql,
+                "SELECT runs FROM repo_request WHERE id = ?",
+                vec![id.as_str().into()],
+            )?
+            .first()
+            .map_or(0, |r| int(&r["runs"]));
+            if runs >= MAX_SETUP_RUNS {
+                return Ok(Some("retry_limit_reached"));
+            }
             // This run counts, whatever becomes of it.
             exec(
                 sql,
@@ -699,7 +745,7 @@ impl Workspace {
             )?;
             exec(
                 sql,
-                "UPDATE repo_request SET state = ?, reason = NULL, updated_at = ? WHERE id = ?",
+                "UPDATE repo_request SET state = ?, reason = NULL, job_failures = 0, job_not_before = NULL, updated_at = ? WHERE id = ?",
                 vec![RequestState::Ready.name().into(), now.into(), id.as_str().into()],
             )?;
             audit_as(

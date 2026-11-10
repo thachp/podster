@@ -162,6 +162,27 @@ describe("the organization's provisioning delegation", () => {
   });
 });
 
+describe("an organization the API knows", () => {
+  it("is one whose own object recorded a room, as a deployment does, with no wait for the listing", async () => {
+    // Test builds skip the organization's room record for every organization but ones named like this, because tests
+    // share organizations. This one takes the path a deployment takes: the room is recorded as it's made.
+    const org = `org_limit_pv_${crypto.randomUUID().slice(0, 8)}`;
+    const admin: Who = { id: "per_pv_limit_admin", kind: "person", org, adminOrgs: [org] };
+    const path = `/v1/orgs/${org}/provisioning-delegation`;
+    const principal = BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(org));
+    // No room yet: unknown.
+    expect((await api(OPERATOR, "PUT", path, { granted: true })).code).toBe("organization_not_found");
+    const made = await api(admin, "POST", "/v1/workspaces", { name: "Engineering" });
+    expect(made.status, made.text).toBe(200);
+    // Known at once, from the organization's own object. The listing is taken out of the picture, so it can't be what answers.
+    await BINDINGS.DB.prepare("DELETE FROM membership_index WHERE org_id = ?").bind(org).run();
+    expect(await runInDurableObject(principal, (_: any, state: any) => state.storage.sql.exec("SELECT workspace_id FROM org_room").toArray())).toEqual([{ workspace_id: made.body.id }]);
+    const given = await api(OPERATOR, "PUT", path, { granted: true });
+    expect(given.status, given.text).toBe(200);
+    expect(given.body).toMatchObject({ granted: true, set_by: OPERATOR.id });
+  });
+});
+
 describe("asking for the room's repository", () => {
   it("is refused without the organization's delegation, and no request reaches GitHub (M5-14, AC-10)", async () => {
     const r = await room({ delegated: false });
@@ -603,9 +624,18 @@ describe("the provisioning job", () => {
     await ask(r);
     expect((await settled(r)).request.state).toBe("ready");
     const said = lines.filter((line) => line.includes("provision.token_not_revoked")).map((line) => JSON.parse(line));
-    expect(said).toEqual([{ at: "provision.token_not_revoked", room: r.id, request: expect.stringMatching(/^rr_/) }]);
-    // What's left alive is the narrowed token and the broad one, each of which was asked to go.
-    expect((await github()).calls.filter((c) => c.path === REVOKE)).toHaveLength(2);
+    // Both are counted: the installation's own token, which could still administer every repository, and the narrowed one.
+    expect(said).toEqual([{ at: "provision.token_not_revoked", room: r.id, request: expect.stringMatching(/^rr_/), count: 2 }]);
+    const after = await github();
+    expect(after.calls.filter((c) => c.path === REVOKE)).toHaveLength(2);
+    expect(after.liveTokens).toHaveLength(2);
+    expect(after.liveTokens).toContain("all");
+    // A job that never gets past the creation call reports the broad token just the same.
+    lines.length = 0;
+    const refused = await room({ script: { revoke: 500, create: ["forbidden"] } });
+    await ask(refused);
+    expect((await settled(refused)).request.reason).toBe("provider_refused");
+    expect(lines.filter((line) => line.includes("provision.token_not_revoked")).map((line) => JSON.parse(line))).toEqual([{ at: "provision.token_not_revoked", room: refused.id, request: expect.stringMatching(/^rr_/), count: 1 }]);
     for (const line of lines) expect(line).not.toContain("ghs_fake_");
   });
 
@@ -632,21 +662,54 @@ describe("the provisioning job", () => {
     expect(ready.repository.provider_repo_id).not.toBe(repos[0].id);
   });
 
-  it("leaves a request it can't even end alone for a while, and never sends the creation call again", async () => {
+  it("leaves a request it can't even end alone for a while, keeps that wait in the room, and never sends the creation call again", async () => {
     const r = await room();
     // Nothing about the attempt can be written at all, so the job can't record how it ended.
     await inRoom(r.id, (sql) => sql.exec("CREATE TRIGGER stuck BEFORE UPDATE ON repo_request_attempt BEGIN SELECT RAISE(ABORT, 'stuck'); END"));
+    const before = Date.now();
     await ask(r);
-    for (let i = 0; i < 12; i++) { await runDurableObjectAlarm(stub(r.id)); await new Promise((x) => setTimeout(x, 50)); }
-    const first = (await github()).calls.length;
+    const waiting = async () => { for (let i = 0; i < 12; i++) { await runDurableObjectAlarm(stub(r.id)); await new Promise((x) => setTimeout(x, 50)); } return (await rowsOf(r.id, "repo_request"))[0]; };
+    const first = await waiting();
+    expect(first).toMatchObject({ state: "pending", runs: 1, job_failures: 1 });
+    // The wait is a column in the room, not a number in memory, so a restart doesn't forget it. Five seconds at first.
+    expect(first.job_not_before).toBeGreaterThanOrEqual(before + 5_000);
+    expect(first.job_not_before).toBeLessThanOrEqual(Date.now() + 5_000);
+    const sent = (await github()).calls.length;
     expect((await github()).calls.filter((c) => c.path.endsWith("/repos"))).toHaveLength(1);
-    expect((await read(r)).request.state).toBe("pending");
     // The alarm comes back, and the job stays away: nothing more goes to GitHub inside the wait.
-    for (let i = 0; i < 12; i++) { await runDurableObjectAlarm(stub(r.id)); await new Promise((x) => setTimeout(x, 50)); }
-    expect((await github()).calls.length).toBe(first);
-    expect((await rowsOf(r.id, "repo_request"))[0].runs).toBe(1);
-    // Let it end, so it isn't still pending when the next test resets the fake.
-    await inRoom(r.id, (sql) => { sql.exec("DROP TRIGGER stuck"); sql.exec("UPDATE repo_request SET state = 'uncertain', reason = 'creation_outcome_unknown'"); });
+    expect(await waiting()).toMatchObject({ runs: 1, job_failures: 1, job_not_before: first.job_not_before });
+    expect((await github()).calls.length).toBe(sent);
+    // The wait over, as a restarted room would read it from the column. The job runs, sees an attempt whose call may have
+    // gone out, sends nothing, still can't end the request, and waits twice as long.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_request SET job_not_before = 1"));
+    const again = Date.now();
+    const second = await waiting();
+    expect(second).toMatchObject({ state: "pending", runs: 2, job_failures: 2 });
+    expect(second.job_not_before).toBeGreaterThanOrEqual(again + 10_000);
+    expect((await github()).calls.filter((c) => c.path.endsWith("/repos"))).toHaveLength(1);
+    // And it holds itself to the run limit with no retry to refuse: at five runs it goes to GitHub for nothing at all.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_request SET runs = 5, job_not_before = 1"));
+    await fake("/forget-calls");
+    const capped = await waiting();
+    expect(capped.runs).toBe(5);
+    expect((await github()).calls).toEqual([]);
+    // Once the room can write again, that's how the request ends, and the wait is cleared.
+    await inRoom(r.id, (sql) => { sql.exec("DROP TRIGGER stuck"); sql.exec("UPDATE repo_request SET job_not_before = 1"); });
+    const ended = await settled(r);
+    expect(ended.request.state).toBe("uncertain");
+    expect((await rowsOf(r.id, "repo_request"))[0]).toMatchObject({ runs: 5, job_failures: 0, job_not_before: null });
+    expect((await github()).calls).toEqual([]);
+  });
+
+  it("holds a held repository to the run limit in the job itself", async () => {
+    // A request that is pending at the limit with a repository ID held, as after a run whose ending couldn't be written.
+    const r = await room();
+    await inRoom(r.id, (sql) => sql.exec("INSERT INTO repo_request (id, state, name, visibility, attempt, provider_name, provider_repo_id, requested_by, requested_at, updated_at, runs) VALUES ('rr_t', 'pending', 'engineering', 'public', 1, 'engineering', 9001, ?, 1, 1, 5)", r.owner.id));
+    expect((await api(r.owner, "PUT", `/v1/workspaces/${r.id}/name`, { name: "Engineering two", policy_version: (await api(r.owner, "GET", `/v1/workspaces/${r.id}`)).body.policy_version })).status).toBe(200);
+    expect((await settled(r)).request).toMatchObject({ state: "failed", reason: "retry_limit_reached" });
+    expect((await github()).calls).toEqual([]);
+    expect((await rowsOf(r.id, "repo_request"))[0].runs).toBe(5);
+    expect((await retry(r)).code).toBe("retry_limit_reached");
   });
 
   it("makes a retry wait, longer each time, and takes no more after the fifth run", async () => {

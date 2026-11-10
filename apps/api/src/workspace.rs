@@ -2615,9 +2615,8 @@ pub struct Workspace {
     /// Scan sends that failed in a row, and when the room may send again. A restart forgets both.
     scan_send_failures: std::cell::Cell<u32>,
     scan_send_retry_at: std::cell::Cell<i64>,
-    /// Times in a row the provisioning job couldn't even end its request, and when the alarm may come for it again. A
-    /// restart forgets both.
-    provision_failures: std::cell::Cell<u32>,
+    /// When the provisioning job may next run, for the one case the room couldn't write that down. The wait itself is
+    /// kept in `repo_request`, so a restart doesn't forget it.
     provision_not_before: std::cell::Cell<i64>,
     /// Whether nothing is held from a failed migration, so a request needn't look. A restart looks again.
     held_clear: std::cell::Cell<bool>,
@@ -4640,7 +4639,6 @@ impl DurableObject for Workspace {
             sweep_failures: std::cell::Cell::new(0),
             scan_send_failures: std::cell::Cell::new(0),
             scan_send_retry_at: std::cell::Cell::new(0),
-            provision_failures: std::cell::Cell::new(0),
             provision_not_before: std::cell::Cell::new(0),
             held_clear: std::cell::Cell::new(false),
         }

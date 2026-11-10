@@ -15,7 +15,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { freePort, prepareStack, startGateway } from "./stack.mjs";
+import { freePort, groupGone, prepareStack, startGateway } from "./stack.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -124,7 +124,7 @@ try {
     code = 1;
     stop();
     // The first stack shares the local state folder, so it has to be gone before that's emptied for the second.
-    await new Promise((done) => (stack.exitCode !== null || stack.signalCode !== null ? done() : (stack.once("exit", done), setTimeout(done, 30_000))));
+    if (!(await groupGone(stack.pid))) throw new Error("the first local stack didn't stop");
     const on = prepareStack({ skipBuild: true, apiVars: { MANAGED_REPOSITORIES: "true" } });
     const onPort = await freePort();
     const onBase = `http://localhost:${onPort}`;

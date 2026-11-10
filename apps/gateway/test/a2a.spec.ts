@@ -180,11 +180,31 @@ describe("before the handler", () => {
     expect(reason(await repeated.json())).toMatch(/VERSION_NOT_SUPPORTED/);
   });
 
+  it("refuses each non-version exactly as it refuses 2.0, apart from the value it names", async () => {
+    // The SDK's refusal names the version asked for, so that value is replaced before the bodies are compared.
+    const refusal = async (headers: Headers, asked: string) => {
+      const res = await SELF.fetch(`${BASE}/a2a`, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "GetTask", params: { id: "tsk_x" } }) });
+      const text = await res.text();
+      // Only where the message quotes it, as '<value>', so nothing else in the body is touched.
+      return { status: res.status, body: text.split(`'${JSON.stringify(asked).slice(1, -1)}'`).join("'<asked>'") };
+    };
+    const one = (version: string) => new Headers([["content-type", "application/json"], ["A2A-Version", version], ["authorization", `Bearer ${token}`]]);
+    const baseline = await refusal(one("2.0"), "2.0");
+    expect(baseline.status).toBe(200);
+    expect(reason(JSON.parse(baseline.body))).toMatch(/VERSION_NOT_SUPPORTED/);
+    for (const version of ["1.1", ".1.0", "1.0+build", "1.0-beta", "v1.0", "1.0.1.1", "1.0." + "1".repeat(200)]) {
+      expect(await refusal(one(version), version), version.slice(0, 20)).toEqual(baseline);
+    }
+    // A repeated header, one of them 2.0, arrives as "1.0, 2.0": not a version, and refused the same way.
+    const repeated = new Headers([["content-type", "application/json"], ["A2A-Version", "1.0"], ["A2A-Version", "2.0"], ["authorization", `Bearer ${token}`]]);
+    expect(await refusal(repeated, "1.0, 2.0")).toEqual(baseline);
+  });
+
   it("reads only digits as a version, and bounds them", () => {
     expect(requestedVersion(null)).toBe("0.3");
     expect(requestedVersion("1.0.42")).toBe("1.0");
     expect(requestedVersion("999.999.999999")).toBe("999.999");
-    for (const raw of ["1.0.1234567", "１.０", "1.0\n", "1.*", "1.x", "1.0,1.0", "^1.0", ">=1.0"]) expect(requestedVersion(raw), raw).toBe(raw);
+    for (const raw of ["1.0.1234567", "１.０", "1.0\n", "1.*", "1.x", "1.0,1.0", "^1.0", ">=1.0", ".1.0", "1.0+build", "1.0, 2.0"]) expect(requestedVersion(raw), raw).toBe(raw);
   });
 
   it("refuses another content type, a body over 64 KB, and anything but POST", async () => {

@@ -388,6 +388,7 @@ describe("the discovery index (step 6)", () => {
       sql.exec("DROP TABLE task_change");
       sql.exec("DROP TABLE provider_grant");
       sql.exec("DROP TABLE repo_link");
+      sql.exec("DROP TABLE repo_request_attempt");
       sql.exec("DROP TABLE repo_request");
       sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("ALTER TABLE workspace DROP COLUMN suspension_reason");
@@ -415,6 +416,7 @@ describe("the discovery index (step 6)", () => {
       sql.exec("DROP TABLE task_change");
       sql.exec("DROP TABLE provider_grant");
       sql.exec("DROP TABLE repo_link");
+      sql.exec("DROP TABLE repo_request_attempt");
       sql.exec("DROP TABLE repo_request");
       sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("ALTER TABLE workspace DROP COLUMN suspension_reason");

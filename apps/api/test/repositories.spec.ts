@@ -58,7 +58,7 @@ async function room() {
   return { id, task: task.body.id as string };
 }
 
-const TABLES = ["repo_request", "repo_link", "provider_grant", "task_change"];
+const TABLES = ["repo_request", "repo_request_attempt", "repo_link", "provider_grant", "task_change"];
 const COMMIT = "a1".repeat(20);
 const REPO_ID = 987654321;
 
@@ -87,7 +87,7 @@ describe("the managed repositories migration", () => {
   const columns = (id: string, table: string) => inRoom(id, (sql) => sql.exec(`SELECT name FROM pragma_table_info('${table}') ORDER BY cid`).toArray().map((c: any) => c.name));
   const schemaVersion = (id: string) => inRoom(id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
 
-  it("adds the four tables to a room made before it, keeps what the room held, and does nothing the second time", async () => {
+  it("adds the five tables to a room made before it, keeps what the room held, and does nothing the second time", async () => {
     const { id, task } = await room();
     const newest = await schemaVersion(id);
     // Back to the release before this one: the tables are gone, and the migration is due.
@@ -95,16 +95,17 @@ describe("the managed repositories migration", () => {
       for (const table of [...TABLES].reverse()) sql.exec(`DROP TABLE ${table}`);
       sql.exec("UPDATE schema_version SET version = version - 1");
     });
-    expect(await inRoom(id, (sql) => sql.exec("SELECT name FROM sqlite_master WHERE name IN ('repo_request', 'repo_link', 'provider_grant', 'task_change')").toArray())).toEqual([]);
+    expect(await inRoom(id, (sql) => sql.exec("SELECT name FROM sqlite_master WHERE name LIKE 'repo_%' OR name IN ('provider_grant', 'task_change')").toArray())).toEqual([]);
     // A read migrates the room.
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
     expect(await schemaVersion(id)).toBe(newest);
     expect(await columns(id, "repo_request")).toEqual(["id", "singleton", "state", "name", "visibility", "attempt", "provider_name", "provider_repo_id", "reason", "requested_by", "requested_at", "updated_at"]);
+    expect(await columns(id, "repo_request_attempt")).toEqual(["request_id", "attempt", "provider_name", "outcome", "at"]);
     expect(await columns(id, "repo_link")).toEqual(["id", "singleton", "request_id", "provider", "provider_repo_id", "provider_org_id", "full_name", "visibility", "default_branch", "status", "status_reason", "created_by", "created_at", "verified_at", "updated_at"]);
     expect(await columns(id, "provider_grant")).toEqual(["id", "principal_id", "provider", "provider_repo_id", "action", "delegated_by", "created_at", "expires_at", "revoked_at", "revoked_by"]);
-    expect(await columns(id, "task_change")).toEqual(["task_id", "provider_repo_id", "pr_number", "submission_no", "reviewed_commit_sha", "observed_head_sha", "head_observed_at", "checks_state", "checks_json", "checks_observed_at", "merge_state", "merge_reason", "merge_sha", "merge_requested_by", "merge_requested_at", "merge_observed_at", "created_at", "updated_at"]);
+    expect(await columns(id, "task_change")).toEqual(["task_id", "provider_repo_id", "pr_number", "submission_no", "reviewed_commit_sha", "observed_head_sha", "head_observed_at", "checks_state", "checks_json", "checks_observed_at", "merge_state", "merge_reason", "merge_sha", "merge_requested_by", "merge_requested_at", "merge_observed_at", "created_at", "updated_at", "head_repo_id", "base_ref", "reviewed_base_sha", "merge_base_sha", "pr_state", "pr_observed_at"]);
     // Nothing is made up for a room that never asked for a repository, and what it held is as it was.
-    expect((await footprint(id)).rows).toEqual([0, 0, 0, 0]);
+    expect((await footprint(id)).rows).toEqual([0, 0, 0, 0, 0]);
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}/tasks/${task}`)).body.task).toMatchObject({ id: task, title: "Add the parser", assignee: ASSIGNEE.id });
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toEqual({ request: null, repository: null });
     // A migrated room doesn't migrate again: a row written since is still there after reads and a write.
@@ -112,13 +113,13 @@ describe("the managed repositories migration", () => {
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
     expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/name`, { name: "Engineering two", policy_version: await version(id) })).status).toBe(200);
     expect(await schemaVersion(id)).toBe(newest);
-    expect((await footprint(id)).rows).toEqual([0, 1, 0, 0]);
+    expect((await footprint(id)).rows).toEqual([0, 0, 1, 0, 0]);
   });
 
   it("gives a new room the same tables, empty", async () => {
     const { id } = await room();
-    expect(await inRoom(id, (sql) => sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('repo_request', 'repo_link', 'provider_grant', 'task_change') ORDER BY name").toArray().map((t: any) => t.name))).toEqual([...TABLES].sort());
-    expect((await footprint(id)).rows).toEqual([0, 0, 0, 0]);
+    expect(await inRoom(id, (sql) => sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND (name LIKE 'repo_%' OR name IN ('provider_grant', 'task_change')) ORDER BY name").toArray().map((t: any) => t.name))).toEqual([...TABLES].sort());
+    expect((await footprint(id)).rows).toEqual([0, 0, 0, 0, 0]);
   });
 
   it("holds one request and one repository a room, one live grant per action, and one change per pull request", async () => {
@@ -129,6 +130,12 @@ describe("the managed repositories migration", () => {
     const request = "INSERT INTO repo_request (id, state, name, visibility, requested_by, requested_at, updated_at) VALUES (?, 'pending', 'engineering', 'public', 'per_x', 1, 1)";
     expect(await refused(request, "rr_1")).toBe(false);
     expect(await refused(request, "rr_2")).toBe(true);
+    // Each creation call keeps its own name, so a retry under a new one doesn't lose the earlier, possibly orphaned, name.
+    const attempt = "INSERT INTO repo_request_attempt (request_id, attempt, provider_name, outcome, at) VALUES ('rr_1', ?, ?, 'uncertain', 1)";
+    expect(await refused(attempt, 1, "engineering")).toBe(false);
+    expect(await refused(attempt, 2, "engineering-7f3a")).toBe(false);
+    expect(await refused(attempt, 2, "engineering-9c1d")).toBe(true);
+    expect(await inRoom(id, (sql) => sql.exec("SELECT provider_name FROM repo_request_attempt ORDER BY attempt").toArray().map((a: any) => a.provider_name))).toEqual(["engineering", "engineering-7f3a"]);
     await link(id);
     expect(await refused("INSERT INTO repo_link (id, request_id, provider, provider_repo_id, provider_org_id, full_name, visibility, default_branch, status, created_by, created_at, updated_at) VALUES ('rl_2', 'rr_1', 'github', 5, 4242, 'podsterx/other', 'public', 'main', 'ready', 'per_x', 1, 1)")).toBe(true);
     const grant = "INSERT INTO provider_grant (id, principal_id, provider, provider_repo_id, action, delegated_by, created_at, revoked_at) VALUES (?, ?, 'github', ?, ?, 'per_x', 1, ?)";
@@ -143,17 +150,17 @@ describe("the managed repositories migration", () => {
     expect(await refused(change, task, REPO_ID, 7)).toBe(false);
     expect(await refused(change, task, REPO_ID, 8)).toBe(true);
     expect(await refused(change, "tsk_other", REPO_ID, 7)).toBe(true);
-    expect(await inRoom(id, (sql) => sql.exec("SELECT merge_state FROM task_change").one().merge_state)).toBe("not_requested");
+    expect(await inRoom(id, (sql) => sql.exec("SELECT merge_state, checks_state, pr_state, head_repo_id, base_ref, reviewed_base_sha, merge_base_sha, pr_observed_at FROM task_change").one())).toEqual({ merge_state: "not_requested", checks_state: null, pr_state: null, head_repo_id: null, base_ref: null, reviewed_base_sha: null, merge_base_sha: null, pr_observed_at: null });
   });
 });
 
 describe("the room's repository read", () => {
-  it("answers from the room's own state, for those who see the whole room", async () => {
+  it("answers a person who sees the whole room from the room's own state", async () => {
     const { id } = await room();
-    for (const who of [OWNER, MEMBER]) expect((await api(who, "GET", `/v1/workspaces/${id}/repository`)).body, who.id).toEqual({ request: null, repository: null });
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toEqual({ request: null, repository: null });
     await inRoom(id, (sql) => sql.exec("INSERT INTO repo_request (id, state, name, visibility, attempt, provider_name, reason, requested_by, requested_at, updated_at) VALUES ('rr_1', 'failed', 'engineering', 'public', 2, 'engineering-7f3a', 'name_taken', ?, 1000, 1500)", OWNER.id));
     await link(id, "degraded");
-    const read = await api(MEMBER, "GET", `/v1/workspaces/${id}/repository`);
+    const read = await api(OWNER, "GET", `/v1/workspaces/${id}/repository`);
     expect(read.status, read.text).toBe(200);
     // Exactly the contract's fields: the organization's ID, the name sent to the provider and the attempt count stay in the room.
     expect(read.body).toEqual({
@@ -165,7 +172,8 @@ describe("the room's repository read", () => {
   it("tells nobody else anything", async () => {
     const { id } = await room();
     await link(id);
-    for (const who of [ASSIGNEE, GUEST]) {
+    // It's person-only: an agent is refused even when it sees the whole room, as a member does.
+    for (const who of [MEMBER, ASSIGNEE, GUEST]) {
       const read = await api(who, "GET", `/v1/workspaces/${id}/repository`);
       expect([read.status, read.code], who.id).toEqual([403, "not_allowed"]);
       expect(read.text).not.toContain("podsterx");
@@ -204,7 +212,7 @@ describe("get_repo_access, merge_task and get_task_release_status, listed and no
     const before = await footprint(id);
     for (const route of ROUTES) {
       const answer = await route.call(ASSIGNEE, id, task);
-      expect([answer.status, answer.code], route.name).toEqual([503, "managed_repositories_unavailable"]);
+      expect([answer.status, answer.code], route.name).toEqual([501, "managed_repositories_unavailable"]);
       expect(answer.body).toEqual({ error: { code: "managed_repositories_unavailable", message: "managed_repositories_unavailable" } });
     }
     expect(await footprint(id)).toEqual(before);

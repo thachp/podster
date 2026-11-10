@@ -1,6 +1,6 @@
 //! Managed repositories: the room's state for M5 (ADR 0009, which is proposed), as far as step 2 goes.
 //!
-//! The room owns four tables: `repo_request`, `repo_link`, `provider_grant` and `task_change`. Nothing writes them yet.
+//! The room owns five tables: `repo_request` and its `repo_request_attempt`s, `repo_link`, `provider_grant` and `task_change`. Nothing writes them yet.
 //! Provisioning is step 4, tokens step 6, merge step 7 and the status read step 8, so this module only reads the request
 //! and the link, and refuses the three task routes. No call to GitHub is made from here, and no token exists.
 //!
@@ -21,9 +21,10 @@ fn link_status(sql: &SqlStorage) -> R<Option<LinkStatus>> {
 }
 
 /// `GET repository`: the room's request for a repository and its linked repository, each null if there's none. For
-/// someone who sees the whole room. It's a read of current state and authorizes nothing.
+/// a person who sees the whole room, never an agent: the contract lists it as person-only, and an agent learns of the
+/// repository through `get_repo_access`. It's a read of current state and authorizes nothing.
 pub(super) fn read(sql: &SqlStorage, who: &Participant) -> R<Value> {
-    if !sees_whole_room(&who.caller) {
+    if who.caller.kind != PrincipalKind::Person || !sees_whole_room(&who.caller) {
         return Err(ApiError::not_allowed());
     }
     let request = rows(sql, "SELECT id, state, name, visibility, reason, requested_by, requested_at, updated_at FROM repo_request", vec![])?
@@ -75,5 +76,5 @@ pub(super) fn refuse_task_route(
     if !link_allows_work(link_status(sql)?) {
         return Err(ApiError::api(409, REPO_NOT_READY));
     }
-    Err(ApiError::api(503, NOT_BUILT))
+    Err(ApiError::api(501, NOT_BUILT))
 }

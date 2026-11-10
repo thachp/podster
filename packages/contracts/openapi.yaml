@@ -742,14 +742,14 @@ paths:
     get:
       operationId: getRepository
       tags: [queries]
-      summary: "The room's managed repository (M5, ADR 0009, proposed): `request`, the room's one request for a repository, and `repository`, the repository linked to the room, each null if there's none. A room that doesn't use Git has neither. Read from the room's own state, for someone who sees the whole room, or `not_allowed`. It's a read and grants nothing: `get_repo_access` and `merge_task` check the link themselves. Nothing writes a request or a link yet, so both are null until provisioning is built (M5 step 4)"
+      summary: "The room's managed repository (M5, ADR 0009, proposed): `request`, the room's one request for a repository, and `repository`, the repository linked to the room, each null if there's none. A room that doesn't use Git has neither. Read from the room's own state, for a person who sees the whole room. An agent, and anyone who doesn't see the whole room, gets `not_allowed`. It's a read and grants nothing: `get_repo_access` and `merge_task` check the link themselves. Nothing writes a request or a link yet, so both are null until provisioning is built (M5 step 4)"
       responses: { "200": { description: The request and the linked repository, content: { application/json: { schema: { $ref: "#/components/schemas/RoomRepository" } } } }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/tasks/{t}/repo-access:
     parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
     post:
       operationId: getRepoAccess
       tags: [commands]
-      summary: "A short-lived token for the room's repository, for the agent assigned to this task (M5 step 6, decision 184, proposed). Nothing in the path or body names an organization, an installation, a repository or a pull request: the repository is the room's link, the pull request is the task's recorded change, and the organization and installations are the API's configuration (ADR 0009). The body is empty, and any field in it is `invalid_argument`. It takes no idempotency key and is safe to retry: the answer carries a token, which must never rest in an idempotency record, and a repeated call answers with the token already held. Once built, every call rechecks the task and its run, its deadline, the agent's assignment and connection, room access, the `push` grant and the link, and a denied call sends nothing to the provider. **Listed and not built (M5 step 2).** For now it checks that the caller can see the task, then the request's shape, then answers `repo_not_ready` (409) while the room has no `ready` repository, which is every room until provisioning exists, and `managed_repositories_unavailable` (503) otherwise. It writes nothing and calls no provider. Other refusals: `task_not_found` (404) for a task the caller can't see or that doesn't exist, `workspace_archived` (409), `workspace_not_found` (404)"
+      summary: "A short-lived token for the room's repository, for the agent assigned to this task (M5 step 6, decision 184, proposed). Nothing in the path or body names an organization, an installation, a repository or a pull request: the repository is the room's link, the pull request is the task's recorded change, and the organization and installations are the API's configuration (ADR 0009). The body is empty, and any field in it is `invalid_argument`. It takes no idempotency key and is safe to retry: the answer carries a token, which must never rest in an idempotency record, and a repeated call answers with the token already held. Once built, every call rechecks the task and its run, its deadline, the agent's assignment and connection, room access, the `push` grant and the link, and a denied call sends nothing to the provider. **Listed and not built (M5 step 2).** For now it checks that the caller can see the task, then the request's shape, then answers `repo_not_ready` (409) while the room has no `ready` repository, which is every room until provisioning exists, and `managed_repositories_unavailable` (501, so a client doesn't retry) otherwise. It writes nothing and calls no provider. Other refusals: `task_not_found` (404) for a task the caller can't see or that doesn't exist, `workspace_archived` (409), `workspace_not_found` (404)"
       requestBody: { required: false, content: { application/json: { schema: { type: object, additionalProperties: false, properties: {} } } } }
       responses: { "200": { description: The token and when it and the task's authority end, content: { application/json: { schema: { $ref: "#/components/schemas/RepoAccess" } } } }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/tasks/{t}/merge:
@@ -757,7 +757,7 @@ paths:
     post:
       operationId: mergeTask
       tags: [commands]
-      summary: "Ask for the merge of an approved submission's exact commit (M5 step 7, decisions 183, 185 and 186, proposed). Merge is its own step and its own grant: approval alone never merges (AC-17), and the submitter can't ask for the merge of their own work. Nothing in the path or body names an organization, an installation, a repository or a pull request: the repository is the room's link, the pull request is the task's recorded change, and the organization and installations are the API's configuration (ADR 0009). The caller names the submission and its commit, and a commit that isn't the approved submission's is `commit_changed` (409). Once built, it records `merge.requested`, and a job that rechecks authority merges that commit and records `merge.succeeded` or `merge.failed`. A failed merge leaves the task completed. **Listed and not built (M5 step 2).** For now it checks that the caller can see the task, then the request's shape, then answers `repo_not_ready` (409) while the room has no `ready` repository, which is every room until provisioning exists, and `managed_repositories_unavailable` (503) otherwise. It writes nothing and calls no provider. Other refusals: `invalid_argument` (400) for any other field, a missing one, or a commit that isn't a full ID, `task_not_found` (404) for a task the caller can't see or that doesn't exist, `workspace_archived` (409), `workspace_not_found` (404)"
+      summary: "Ask for the merge of an approved submission's exact commit (M5 step 7, decisions 183, 185 and 186, proposed). Merge is its own step and its own grant: approval alone never merges (AC-17), and the submitter can't ask for the merge of their own work. Nothing in the path or body names an organization, an installation, a repository or a pull request: the repository is the room's link, the pull request is the task's recorded change, and the organization and installations are the API's configuration (ADR 0009). The caller names the submission and its commit, and a commit that isn't the approved submission's is `commit_changed` (409). Once built, it records `merge.requested`, and a job that rechecks authority merges that commit and records `merge.succeeded` or `merge.failed`. A failed merge leaves the task completed. **Listed and not built (M5 step 2).** For now it checks that the caller can see the task, then the request's shape, then answers `repo_not_ready` (409) while the room has no `ready` repository, which is every room until provisioning exists, and `managed_repositories_unavailable` (501, so a client doesn't retry) otherwise. It writes nothing and calls no provider. Other refusals: `invalid_argument` (400) for any other field, a missing one, or a commit that isn't a full ID, `task_not_found` (404) for a task the caller can't see or that doesn't exist, `workspace_archived` (409), `workspace_not_found` (404)"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/MergeTask" } } } }
       responses: { "200": { description: The task's change after the request, content: { application/json: { schema: { $ref: "#/components/schemas/TaskChange" } } } }, default: { $ref: "#/components/responses/Error" } }
@@ -766,7 +766,7 @@ paths:
     get:
       operationId: getTaskReleaseStatus
       tags: [queries]
-      summary: "A task's checks and merge, reported separately, each with the time Podster observed it, failure included (M5 step 8, expanded criterion 7, proposed). The provider stays the source of truth, so every value is what Podster last read and when. `release` is always null in M5: releases are M6's. It's a read and grants nothing. **Listed and not built (M5 step 2).** For now it checks that the caller can see the task, then the request's shape, then answers `repo_not_ready` (409) while the room has no `ready` repository, which is every room until provisioning exists, and `managed_repositories_unavailable` (503) otherwise. It writes nothing and calls no provider. Other refusals: `task_not_found` (404) for a task the caller can't see or that doesn't exist, `workspace_not_found` (404)"
+      summary: "A task's checks and merge, reported separately, each with the time Podster observed it, failure included (M5 step 8, expanded criterion 7, proposed). The provider stays the source of truth, so every value is what Podster last read and when. `release` is always null in M5: releases are M6's. It's a read and grants nothing. **Listed and not built (M5 step 2).** For now it checks that the caller can see the task, then the request's shape, then answers `repo_not_ready` (409) while the room has no `ready` repository, which is every room until provisioning exists, and `managed_repositories_unavailable` (501, so a client doesn't retry) otherwise. It writes nothing and calls no provider. Other refusals: `task_not_found` (404) for a task the caller can't see or that doesn't exist, `workspace_not_found` (404)"
       responses: { "200": { description: The task's change and release, content: { application/json: { schema: { $ref: "#/components/schemas/TaskReleaseStatus" } } } }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/tasks/{t}/messages:
     parameters: [{ $ref: "#/components/parameters/ws" }, { $ref: "#/components/parameters/t" }]
@@ -1034,25 +1034,43 @@ components:
         revoked_at: { type: [integer, "null"] }
     TaskChange:
       type: object
-      description: "A task's change in the room's repository (M5, proposed): its pull request, the commit that was reviewed, and what Podster last observed. `head`, `checks` and `merge` each carry their own observation time, since webhooks can be late or lost. Branch names, titles, commit messages and check output are never here."
+      description: "A task's change in the room's repository (M5, proposed): its pull request, the commit that was reviewed, and what Podster last observed. `pull_request`, `head`, `checks` and `merge` each carry their own observation time, since webhooks can be late or lost, and each is null until Podster has read it. Task branch names, titles, commit messages and check output are never here."
       additionalProperties: false
-      required: [task_id, submission_no, pr_number, reviewed_commit_sha, head, checks, merge]
+      required: [task_id, submission_no, pr_number, reviewed_commit_sha, pull_request, base, head, checks, merge]
       properties:
         task_id: { type: string }
         submission_no: { type: integer, description: "The submission that named this change." }
         pr_number: { type: integer, description: "Recorded by the room when the assigned agent's submission names it and Podster's own read shows its head is in the linked repository. A request never selects it." }
         reviewed_commit_sha: { type: [string, "null"], description: "The approved submission's commit, the only one a merge may name. Null until a submission is approved." }
+        pull_request:
+          type: object
+          additionalProperties: false
+          required: [state, observed_at]
+          properties:
+            state: { type: [string, "null"], enum: [open, closed, merged, null], description: "Null until observed. Polling ends once it's `closed` or `merged`." }
+            observed_at: { type: [integer, "null"] }
+        base:
+          type: object
+          additionalProperties: false
+          required: [ref, reviewed_sha, merge_sha]
+          properties:
+            ref: { type: [string, "null"], description: "The branch the pull request targets, as last observed. A merge is refused unless it's the repository's default branch." }
+            reviewed_sha: { type: [string, "null"], description: "The base's commit when the submission was approved." }
+            merge_sha: { type: [string, "null"], description: "The base's commit Podster observed at the merge. If it differs from `reviewed_sha`, the base had moved." }
         head:
           type: object
           additionalProperties: false
-          required: [sha, observed_at]
-          properties: { sha: { type: [string, "null"] }, observed_at: { type: [integer, "null"] } }
+          required: [sha, repo_id, observed_at]
+          properties:
+            sha: { type: [string, "null"] }
+            repo_id: { type: [integer, "null"], description: "The provider's ID of the repository the head is in, as last observed. A merge is refused unless it's the linked repository, so a fork's pull request is never a task's change." }
+            observed_at: { type: [integer, "null"] }
         checks:
           type: object
           additionalProperties: false
           required: [state, observed_at]
           properties:
-            state: { type: string, enum: [none, pending, passed, failed], description: "`none` when the provider reports no check or status for the head." }
+            state: { type: [string, "null"], enum: [none, pending, passed, failed, null], description: "Null until Podster has read them. `none` when the provider reports no check or status for the head." }
             observed_at: { type: [integer, "null"] }
         merge:
           type: object

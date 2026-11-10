@@ -233,6 +233,7 @@ describe("the room's sweep", () => {
       state.storage.sql.exec("DROP TABLE task_change");
       state.storage.sql.exec("DROP TABLE provider_grant");
       state.storage.sql.exec("DROP TABLE repo_link");
+      state.storage.sql.exec("DROP TABLE repo_request_attempt");
       state.storage.sql.exec("DROP TABLE repo_request");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN suspension_reason");
@@ -387,6 +388,7 @@ describe("the room's sweep", () => {
       state.storage.sql.exec("DROP TABLE task_change");
       state.storage.sql.exec("DROP TABLE provider_grant");
       state.storage.sql.exec("DROP TABLE repo_link");
+      state.storage.sql.exec("DROP TABLE repo_request_attempt");
       state.storage.sql.exec("DROP TABLE repo_request");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN suspension_reason");
@@ -687,6 +689,7 @@ describe("removal by the rules, review fixes", () => {
       state.storage.sql.exec("DROP TABLE task_change");
       state.storage.sql.exec("DROP TABLE provider_grant");
       state.storage.sql.exec("DROP TABLE repo_link");
+      state.storage.sql.exec("DROP TABLE repo_request_attempt");
       state.storage.sql.exec("DROP TABLE repo_request");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("ALTER TABLE workspace DROP COLUMN suspension_reason");

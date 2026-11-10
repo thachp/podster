@@ -54,7 +54,7 @@ The architect proposes the gate call, for the owner to review.
 
 | Step | What | Notes |
 | --- | --- | --- |
-| 1 | **ADR 0009 and the spike.** The ADR settles everything the architecture leaves "open for the ADR". The spike runs against a test organization and answers the [risks](#risks-to-test). | **Drafted, 2026-11-10.** [ADR 0009](adr/0009-managed-repositories.md) is a proposal: it settles or leaves open each item by name, and it proposes the merge path from the spike's [merge-restriction run](../spikes/m5-github/README.md#results-merge-restriction). [The spike ran](../spikes/m5-github/README.md#results-2026-11-10) against `podsterx` and answered every risk except webhooks (risk 8). The spike's code stays in `spikes/` and nothing builds on it. |
+| 1 | **ADR 0009 and the spike.** The ADR settles everything the architecture leaves "open for the ADR". The spike ran against `podsterx` and then `podsterdev`, and answers the [risks](#risks-to-test). | **Drafted, 2026-11-10.** [ADR 0009](adr/0009-managed-repositories.md) is a proposal: it settles or leaves open each item by name, and it proposes the merge path from the spike's [merge-restriction run](../spikes/m5-github/README.md#results-merge-restriction). [The spike ran](../spikes/m5-github/README.md#results-2026-11-10) against `podsterx` and answered every risk except webhooks (risk 8). Its [three-Apps run](../spikes/m5-github/README.md#results-three-apps) was on `podsterdev`. The spike's code stays in `spikes/` and nothing builds on it. |
 | 2 | **Contracts and migration:** `repo_link`, `provider_grant`, `task_change` and a provisioning request, with `get_repo_access`, `get_task_release_status` and `merge_task` in `capabilities.yaml` and their routes in `openapi.yaml`. The room's Durable Object owns all four as state, because grants are authority. D1 gets at most a projection for lists, which never authorizes. | One contract and migration PR at a time. |
 | 3 | **Decisions in `crates/core` and `crates/policy`:** grant checks, `commit_sha` required on `submit_task` and `verify_task` for a linked task, `commit_changed`, and merge as its own state. Pure, with no I/O. | AC-31 is decided here, and AC-17's rule that approval alone never merges. |
 | 4 | **Provisioning:** room setup records a request; a job creates the repository, sets its protections and records the verified repository ID. Pending, ready, failed and uncertain states for the request, and ready, degraded and suspended for the link. An unknown outcome is a failed setup: nothing is adopted by name, and a retry uses a new server-generated name. | A failed setup blocks coding tasks in that room, not other work. |
@@ -63,14 +63,14 @@ The architect proposes the gate call, for the owner to review.
 | 7 | **`merge_task`:** the job rechecks authority, re-reads the pull request's base, head repository and head commit and refuses on any difference from the reviewed values, marks the reviewed commit, merges with its `sha` as a merge commit, confirms the default branch contains it, and records success or failure. A changed commit leads to a follow-up task, as decision 25 proposes. | Under ADR 0009's two rulesets, only the merge App can update the default branch. A retry reads the pull request's merged state, since a second merge call answers `200`. |
 | 8 | **`get_task_release_status`:** checks and merge state, each with its own observation time. | Reports that no release exists; M6 adds releases. |
 | 9 | **Screens**, in two PRs: (a) the Git option in room setup and the repository's state; (b) grants in Manage access and a task's change and merge state. | Unavailable grants show as unavailable, never silently provisioned. |
-| 10 | **Staging run and security review,** then the gate call. | A script against staging with test people and a test organization. |
+| 10 | **Staging run and security review,** then the gate call. | A script against staging with test people, in `podsterdev`. |
 
 Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security-sensitive: a provisioning credential, a new public route, token issuing and merge. Each gets the deeper review the owner has already agreed for security-sensitive steps; anything deeper than that is asked first.
 
 ## What needs the owner's yes
 
-- **A GitHub organization for managed repositories,** and a second one for tests. **Answered by the owner on 2026-11-10:** the test organization is `podsterx`, and the real managed organization is `podsterdev`. Tests and spikes never run against `podsterdev`. The real organization's ownership and legal terms are still open, and may need a lawyer.
-- **The GitHub Apps:** three, as ADR 0009 proposes: one that provisions, one that issues agent tokens, and one that merges. The owner creates and installs them, or approves the architect doing it in a named session. The spike's two Apps and their keys are deleted from `podsterx` before any staging managed repository exists there.
+- **A GitHub organization for managed repositories.** **Answered by the owner on 2026-11-10:** "podsterx no longer exist.. the organization is now https://github.com/organizations/podsterdev/settings/apps you can create the app there". Earlier the same day the owner had said that `podsterx` was for tests and tests never ran against `podsterdev`. **The architect's reading, not the owner's words:** the new sentence replaces that one, and with no production deployment, `podsterdev` serves staging. Its ownership and legal terms are still open, and may need a lawyer. **Open, and the architect's, not the owner's:** before any production deployment, whether staging and production share `podsterdev` or get separate organizations or Apps.
+- **The GitHub Apps:** three, as ADR 0009 proposes: one that provisions, one that issues agent tokens, and one that merges. **Done on 2026-11-10:** the owner said "you can create the app there", and the architect created and installed three in `podsterdev`, in the owner's browser. Any change to their permissions is the owner's yes. The spike's two Apps on `podsterx` aren't used again; that organization's state was unconfirmed after the owner said it no longer exists.
 - **Public managed repositories on staging.** takedown.md's staging exception covers `PUBLIC_ROOMS`, not repositories.
 - **Secrets:** each App's private key, the webhook secret and the token-sealing key. The owner sets them with `wrangler secret put`; the architect gives the exact command.
 - **Money:** a GitHub plan, if private repositories need one for branch rules. See [cloud resources](#cloud-resources).
@@ -82,13 +82,13 @@ Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security
 
 **The proposal needs resources outside Cloudflare, which no earlier milestone did.**
 
-- **GitHub:** two organizations and three Apps in each one that's used, as above. **Possibly billed.** The spike found that the Free plan refuses a ruleset on a private repository, so private managed repositories with protected branches need a paid plan. Nothing has been bought. [ADR 0009](adr/0009-managed-repositories.md#visibility-and-the-plan) proposes public repositories as the working assumption until the owner decides.
+- **GitHub:** one organization, `podsterdev`, and its three Apps, as above. **Possibly billed.** The spike found that the Free plan refuses a ruleset on a private repository, so private managed repositories with protected branches need a paid plan. Nothing has been bought. [ADR 0009](adr/0009-managed-repositories.md#visibility-and-the-plan) proposes public repositories as the working assumption until the owner decides.
 - **Cloudflare:** no new billed resource is proposed. Step 2 adds Durable Object state through the room's own forward-only migrations, and at most a projection table in the API's existing D1 database. Step 5 adds a route to the existing gateway Worker. Provisioning and merge jobs use the existing outbox; a dedicated queue is only proposed if the spike shows the outbox can't carry them, and that would need the owner's yes.
 - **Secrets:** each App's private key and the token-sealing key on the private API Worker only, and the webhook secret on the gateway. The owner sets them.
 
 ## Acceptance tests
 
-**Proposed.** Each runs from a script against staging, with test people and the test organization. The owner won't run checks by hand, so a check that can't run that way is recorded as a gap.
+**Proposed.** Each runs from a script against staging, with test people and staging's organization, `podsterdev`. The owner won't run checks by hand, so a check that can't run that way is recorded as a gap.
 
 | Test | What it shows |
 | --- | --- |
@@ -103,7 +103,7 @@ Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security
 | M5-09 | `merge_task` merges the reviewed commit. With a changed head it records `merge.failed` with `commit_changed`, and the task stays completed. |
 | M5-10 | An approved task without a separate merge grant can't be merged, and a reviewer can't merge their own work. |
 | M5-11 | A webhook with a bad signature is refused. A lost webhook is repaired by polling. |
-| M5-12 | Checks and merge are reported separately, each with its time, including a failed check and a failed merge. Actions are off, so the failed check is a test status posted by a test App or token. |
+| M5-12 | Checks and merge are reported separately, each with its time, including a failed check and a failed merge. With Actions off, which is proposed and not currently true, the failed check is a test status posted by a test App or token. |
 | M5-13 | Logs from every Worker during the run hold IDs and reason codes only: no token, no repository content. |
 | M5-14 | Setting up a Git-enabled room without the organization's provisioning delegation is denied, and no request reaches GitHub (AC-10). |
 | M5-15 | A failed setup blocks coding tasks in that room and nothing else. It never falls back to another organization and never deletes a repository. |
@@ -121,7 +121,7 @@ Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security
 | A client steers provisioning to another organization | Organization and installation come from trusted configuration only. |
 | A repository with a matching name is adopted | Ownership is the recorded GitHub repository ID, never a name. |
 | A forged or replayed webhook changes state | Signature check at the gateway, and each delivery ID accepted once. Rust checks the observed repository ID against the room's link. Observations are records, and GitHub stays the source of truth for merge and checks. |
-| An agent pushes a workflow that runs with the repository's own token and merges or sets the required status | The agent's token can't write workflows, which the spike saw once, and Actions stay off in the managed organization until a later decision. A workflow already in a repository wasn't tested. |
+| An agent pushes a workflow that runs with the repository's own token and merges or sets the required status | The agent's token can't write workflows, which the spike saw once, and ADR 0009 proposes that the provisioning App switches Actions off on each repository it creates and reads that back. That is proposed and not currently true: Actions were on in a new repository in `podsterdev`, and switching them off wasn't tried. A workflow already in a repository wasn't tested. |
 | A public repository publishes agent content under Podster's organization | ADR 0009 proposes public as the working assumption, said plainly and confirmed at setup, because the Free plan has no branch rules for private repositories. It also proposes that pull requests from forks are never task changes, and an operator takedown. Public repositories exist on staging only, until the owner confirms the public scope, takedown.md covers repositories and its contact is real. |
 | A room admin grants access they don't hold | Policy checks the granter's delegation for that repository and action (AC-10, AC-11). |
 | A stale job acts after revocation | Each job rechecks current authority before its external call (AC-13, AC-27). |
@@ -135,7 +135,7 @@ Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security
 | # | Question | Proposed | Alternative |
 | --- | --- | --- | --- |
 | 1 | Which repositories does M5 manage? | Only ones the server creates in the dedicated organization. | Linking an existing repository under its real owner's delegation. Later, with its own design. |
-| 2 | One App or two? | Three, as ADR 0009 proposes: one provisions, one issues agent tokens, one merges. The status pin and the update bypass rest on the merge App's own identity, and the token-issuing App holds no Administration. Unverified as a set; the spike used two. | Two, with provisioning and agent tokens in one App, as the spike ran. One App with branch rules alone needs the owner's yes, because a push token may then merge. |
+| 2 | One App or two? | Three, as ADR 0009 proposes: one provisions, one issues agent tokens, one merges. The status pin and the update bypass rest on the merge App's own identity, and the token-issuing App holds no Administration. Verified as a set, once, on `podsterdev`, on the calls [the spike's three-Apps run](../spikes/m5-github/README.md#results-three-apps) made. | Two, with provisioning and agent tokens in one App, as the spike ran. One App with branch rules alone needs the owner's yes, because a push token may then merge. |
 | 3 | Default repository visibility | Public while the organization is on the Free plan, confirmed explicitly at setup, as ADR 0009's working assumption. | Private, which needs a paid plan and the owner's yes. Following the room's visibility isn't proposed. |
 | 4 | Who can merge? | A person or agent with an explicit merge grant on that repository, and only after approval. Never the submitter, which is a new rule beyond AC-17. | Any approver. Owner's yes. |
 | 5 | Token lifetime and renewal | One hour, renewed on demand with a full recheck and no fresh approval, as the architecture proposes. | Shorter tokens through a broker. Decided with M7. |
@@ -149,7 +149,7 @@ Steps 3, 5 and 9(a) can run side by side after step 2. Steps 4 to 7 are security
 
 ## Risks to test
 
-The spike at step 1 answers these on the test organization, before any feature code:
+The spike at step 1 answers these before any feature code. Risks 1 to 10 ran on `podsterx`, the test organization at the time:
 
 1. Can an App token create a repository in an organization, and with which permissions?
 2. Does a newly created repository fall under the App's installation at once, so a token can be scoped to it?
@@ -162,11 +162,11 @@ The spike at step 1 answers these on the test organization, before any feature c
 9. Do GitHub's rate limits fit the polling the design needs?
 10. Can a workflow pushed on a task branch run, and can its token merge, set the required status or bypass a rule? Which organization settings stop that?
 
-Added by ADR 0009, not run yet:
+Added by ADR 0009. Risks 11 and 13 ran once on 2026-11-10, on a public repository in `podsterdev`; the answers are in [the spike's three-Apps results](../spikes/m5-github/README.md#results-three-apps):
 
-11. With three Apps, is a repository that the provisioning App creates at once under the other two installations, and does a token from an App with no Administration behave as the spike's scoped token did?
-12. After a lost creation answer, can an orphan repository be recognized by a marker Podster wrote at creation, without trusting its name?
-13. Can an App's token read back rulesets, their bypass lists and the organization's Actions setting, and with which permissions?
+11. With three Apps, is a repository that the provisioning App creates at once under the other two installations, and does a token from an App with no Administration behave as the spike's scoped token did? **Seen once: yes to both.** Each of the other two Apps minted a token for the new repository on the first try. The agent-token App's token, cut down or not, was refused every administrative call and the merge of a marked commit. `git push` wasn't tried.
+12. After a lost creation answer, can an orphan repository be recognized by a marker Podster wrote at creation, without trusting its name? **Not run.**
+13. Can an App's token read back rulesets, their bypass lists and the organization's Actions setting, and with which permissions? **Seen once, in part.** The provisioning App's token, with Administration, read both rulesets and their bypass lists. The other two Apps' tokens read the rules without the bypass lists. The provisioning App read the repository's Actions setting, which was on, and got `403` on the organization's, since it holds no organization permission. ADR 0009 proposes that the provisioning App switches Actions off per repository and reads that back, which wasn't tried.
 
 ## How far this was checked
 

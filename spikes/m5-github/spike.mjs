@@ -6,6 +6,8 @@
 //   ... node spike.mjs --allow-public   also try rules on a public repository
 //   ... node spike.mjs --cleanup        delete this spike's repositories and exit
 //   ... node spike.mjs --cleanup --public-only   delete only its public ones
+//   ... node spike.mjs --merge-restriction        only test, on a public repository,
+//                                                 whether a rule can restrict who merges
 //
 // Tokens and keys are never printed or written. Results hold status codes and
 // GitHub's own error messages only.
@@ -19,7 +21,7 @@ import { fileURLToPath } from "node:url";
 const API = "https://api.github.com";
 const PREFIX = "m5-spike-";
 const STATUS_CONTEXT = "podster/review";
-const KNOWN_ARGS = ["--allow-public", "--cleanup", "--public-only"];
+const KNOWN_ARGS = ["--allow-public", "--cleanup", "--public-only", "--merge-restriction"];
 
 export function appJwt(appId, pem, now = Math.floor(Date.now() / 1000)) {
   const enc = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -38,6 +40,40 @@ export function looksLikeTestOrg(name) {
 export function orgAllowed(org, confirm) {
   if (looksLikeTestOrg(org)) return true;
   return typeof org === "string" && /^[A-Za-z0-9-]+$/.test(org) && confirm === org;
+}
+
+// A ruleset on the default branch for the merge-restriction mode. Body shape per
+// https://docs.github.com/en/rest/repos/rules?apiVersion=2022-11-28#create-a-repository-ruleset
+// `bypassAppId` names a GitHub App that may bypass every rule in this ruleset.
+export function restrictionRuleset({ name, statusAppId = null, pullRequest = false, update = false, bypassAppId = null }) {
+  const rules = [];
+  if (pullRequest) {
+    rules.push({ type: "pull_request", parameters: { required_approving_review_count: 0, dismiss_stale_reviews_on_push: false, require_code_owner_review: false, require_last_push_approval: false, required_review_thread_resolution: false } });
+  }
+  if (statusAppId !== null) {
+    rules.push({ type: "required_status_checks", parameters: { strict_required_status_checks_policy: false, required_status_checks: [{ context: STATUS_CONTEXT, integration_id: statusAppId }] } });
+  }
+  if (update) rules.push({ type: "update", parameters: { update_allows_fetch_and_merge: false } });
+  return {
+    name,
+    target: "branch",
+    enforcement: "active",
+    conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } },
+    bypass_actors: bypassAppId === null ? [] : [{ actor_id: bypassAppId, actor_type: "Integration", bypass_mode: "always" }],
+    rules,
+  };
+}
+
+// Returns why these arguments can't run, or null. The merge-restriction mode runs
+// alone, so a flag it would ignore is refused instead.
+export function argsProblem(list) {
+  const unknown = list.filter((x) => !KNOWN_ARGS.includes(x));
+  if (unknown.length > 0) return `Unknown argument: ${unknown.join(", ")}`;
+  if (list.includes("--merge-restriction")) {
+    const clash = list.filter((x) => ["--allow-public", "--public-only", "--cleanup"].includes(x));
+    if (clash.length > 0) return `--merge-restriction runs alone; it can't be combined with ${clash.join(", ")}`;
+  }
+  return null;
 }
 
 async function gh(token, method, path, body) {
@@ -67,8 +103,8 @@ const b64 = (s) => Buffer.from(s).toString("base64");
 
 async function main() {
   const args = new Set(process.argv.slice(2));
-  const unknown = [...args].filter((x) => !KNOWN_ARGS.includes(x));
-  if (unknown.length > 0) throw new Error(`Unknown argument: ${unknown.join(", ")}`);
+  const problem = argsProblem([...args]);
+  if (problem) throw new Error(problem);
   const org = process.env.M5_ORG;
   const keyDir = process.env.M5_KEY_DIR ?? join(homedir(), ".podster", "m5-spike");
   const apps = {
@@ -88,7 +124,7 @@ async function main() {
   try {
     await run({ args, org, apps, stamp, results, broad });
   } finally {
-    // Broad tokens live for an hour unless revoked.
+    // Tokens live for an hour unless revoked. The merge-restriction mode adds its scoped agent token here.
     for (const token of broad) await gh(token, "DELETE", "/installation/token").catch(() => {});
     if (results.length > 0) finish(results, stamp);
   }
@@ -135,10 +171,15 @@ async function run({ args, org, apps, stamp, results, broad }) {
         if (repo.owner.login.toLowerCase() !== org.toLowerCase() || !repo.name.startsWith(PREFIX)) continue;
         if (args.has("--public-only") && repo.private !== false) continue;
         const del = await gh(provisionAll, "DELETE", `/repos/${org}/${repo.name}`);
-        console.log(`delete ${repo.name}: ${del.status}`);
+        record(0, `cleanup: delete ${repo.name}`, { status: del.status, message: del.message, repository: repo.private === false ? "public" : "private" });
       }
       if (repos.length < 100) break;
     }
+    return;
+  }
+
+  if (args.has("--merge-restriction")) {
+    await mergeRestriction({ org, apps, stamp, record, revoke: broad });
     return;
   }
 
@@ -305,6 +346,145 @@ async function run({ args, org, apps, stamp, results, broad }) {
   }
 
   record(8, "webhooks", { status: null, message: "Not run: the Apps have webhooks off." });
+}
+
+// Can a ruleset restrict WHO updates the default branch, so that only the merge App
+// merges even after the required status exists? One public repository, three
+// variants in turn; each variant's rulesets are deleted before the next.
+async function mergeRestriction({ org, apps, stamp, record, revoke }) {
+  const RISK = "merge-restriction";
+  const provisionAll = apps.provision.all;
+  const mergeAll = apps.merge.all;
+  const mergeAppId = apps.merge.githubAppId;
+  const name = `${PREFIX}${stamp}-restrict`;
+  const made = await gh(provisionAll, "POST", `/orgs/${org}/repos`, { name, private: false, auto_init: true });
+  record(RISK, "create public repository", { status: made.status, message: made.message });
+  if (made.status !== 201) return;
+  const at = `/repos/${org}/${name}`;
+  const branch = made.json.default_branch;
+
+  let agent = null;
+  for (let i = 0; i < 15 && !agent?.token; i++) {
+    agent = await apps.provision.token({ repository_ids: [made.json.id], permissions: { contents: "write", pull_requests: "write" } });
+    if (!agent.token) await sleep(2000);
+  }
+  record(RISK, "scoped agent token for the repository", { status: agent.status, message: agent.message, granted: agent.granted });
+  if (!agent.token) return;
+  revoke.push(agent.token);
+
+  // The variants share one repository, so each starts and ends with a check that
+  // no ruleset is left from the one before.
+  const rulesetsNow = async (label) => {
+    const r = await gh(provisionAll, "GET", `${at}/rulesets`);
+    const names = Array.isArray(r.json) ? r.json.map((x) => x.name) : null;
+    record(RISK, label, { status: r.status, message: r.message, count: names?.length ?? null, names });
+    return names;
+  };
+
+  const variants = [
+    {
+      key: "a",
+      about: "one ruleset: pull_request + required status + update, merge App bypasses",
+      status: true,
+      rulesets: [restrictionRuleset({ name: "podster-a", statusAppId: mergeAppId, pullRequest: true, update: true, bypassAppId: mergeAppId })],
+    },
+    {
+      key: "b",
+      about: "one ruleset: pull_request + update, no status rule, merge App bypasses",
+      status: false,
+      rulesets: [restrictionRuleset({ name: "podster-b", pullRequest: true, update: true, bypassAppId: mergeAppId })],
+    },
+    {
+      key: "c",
+      about: "two rulesets: pull_request + required status with no bypass; update alone, merge App bypasses",
+      status: true,
+      rulesets: [
+        restrictionRuleset({ name: "podster-c-review", statusAppId: mergeAppId, pullRequest: true }),
+        restrictionRuleset({ name: "podster-c-update", update: true, bypassAppId: mergeAppId }),
+      ],
+    },
+  ];
+
+  for (const v of variants) {
+    const before = await rulesetsNow(`${v.key}: rulesets on the repository before this variant`);
+    if (before === null || before.length > 0) {
+      record(RISK, `${v.key}: skipped`, { status: null, message: "Rulesets from an earlier variant are still there, or couldn't be listed." });
+      continue;
+    }
+    const ids = [];
+    let active = true;
+    for (const body of v.rulesets) {
+      const r = await gh(provisionAll, "POST", `${at}/rulesets`, body);
+      record(RISK, `${v.key}: create ruleset ${body.name}`, {
+        status: r.status,
+        message: r.message,
+        errors: r.status === 201 ? undefined : r.json?.errors,
+        enforcement: r.json?.enforcement,
+        rule_types: body.rules.map((x) => x.type),
+        bypass_actors_sent: body.bypass_actors,
+        bypass_actors_returned: r.json?.bypass_actors,
+        variant: v.about,
+      });
+      if (r.status === 201) ids.push(r.json.id);
+      if (r.status !== 201 || r.json?.enforcement !== "active") active = false;
+    }
+    try {
+      if (active) await restrictionProbes({ v, at, branch, agentToken: agent.token, mergeAll, record, RISK });
+    } finally {
+      for (const id of ids) {
+        const del = await gh(provisionAll, "DELETE", `${at}/rulesets/${id}`);
+        record(RISK, `${v.key}: delete ruleset ${id}`, { status: del.status, message: del.message });
+      }
+      await rulesetsNow(`${v.key}: rulesets on the repository after its deletes`);
+    }
+  }
+}
+
+async function restrictionProbes({ v, at, branch, agentToken, mergeAll, record, RISK }) {
+  const note = { repository: "public", ruleset_active: true, variant: v.about };
+  const rec = (name, r, extra = {}) => record(RISK, `${v.key}: ${name}`, { status: r.status, message: r.message, ...note, ...extra });
+  const commitFile = async (token, onBranch, path) => {
+    const r = await gh(token, "PUT", `${at}/contents/${path}`, { message: `spike: ${path}`, content: b64(`${path}\n`), branch: onBranch });
+    return { status: r.status, message: r.message, sha: r.json?.commit?.sha };
+  };
+  const openPr = async (task) => {
+    const head = (await gh(agentToken, "GET", `${at}/git/ref/heads/${branch}`)).json?.object?.sha;
+    const ref = await gh(agentToken, "POST", `${at}/git/refs`, { ref: `refs/heads/${task}`, sha: head });
+    const c = await commitFile(agentToken, task, `${task}.txt`);
+    const pr = await gh(agentToken, "POST", `${at}/pulls`, { title: task, head: task, base: branch });
+    rec(`agent opens pull request ${task}`, pr, { branch_status: ref.status, commit_status: c.status });
+    return { number: pr.json?.number, sha: c.sha };
+  };
+  // A merge call on an already merged pull request answers 200 again, so every
+  // attempt records whether the pull request was merged before and after it.
+  const merged = async (number) => (await gh(mergeAll, "GET", `${at}/pulls/${number}`)).json?.merged ?? null;
+  const merge = async (label, token, pr, extra = {}) => {
+    const before = await merged(pr.number);
+    const r = await gh(token, "PUT", `${at}/pulls/${pr.number}/merge`, { merge_method: "merge", sha: pr.sha });
+    rec(label, r, { merged_before: before, merged_after: await merged(pr.number), ...extra });
+  };
+
+  rec("agent commits straight to the default branch", await commitFile(agentToken, branch, `direct-agent-${v.key}.txt`));
+
+  const pr1 = await openPr(`task-${v.key}1`);
+  if (!pr1.number) return;
+  if (v.status) {
+    const st = await gh(mergeAll, "POST", `${at}/statuses/${pr1.sha}`, { state: "success", context: STATUS_CONTEXT });
+    rec("merge App sets the required status on the head", st);
+    await sleep(3000);
+  }
+  const statusNote = { required_status_on_head: v.status ? true : "no status rule" };
+  const ff = await gh(agentToken, "PATCH", `${at}/git/refs/heads/${branch}`, { sha: pr1.sha, force: false });
+  rec("agent moves the default branch ref to the head (fast-forward)", ff, { ...statusNote, merged_after: await merged(pr1.number) });
+  await merge("agent merges the pull request", agentToken, pr1, statusNote);
+  await merge("merge App merges the pull request", mergeAll, pr1, statusNote);
+
+  if (v.status) {
+    // Does the merge App's bypass also cover the status rule in the same ruleset?
+    const pr2 = await openPr(`task-${v.key}2`);
+    if (pr2.number) await merge("merge App merges a pull request with no status on its head", mergeAll, pr2, { required_status_on_head: false });
+  }
+  rec("merge App commits straight to the default branch", await commitFile(mergeAll, branch, `direct-merge-app-${v.key}.txt`));
 }
 
 function finish(results, stamp) {

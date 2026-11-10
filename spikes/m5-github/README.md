@@ -1,6 +1,6 @@
 # M5 spike: GitHub App tokens, branch rules and merge
 
-**Status, 2026-11-10 UTC: run twice, once with the merge checks repeated on a public repository.** Webhooks aren't run. See [results](#results-2026-11-10). This spike answers the ten [risks to test](../../docs/m5-plan.md#risks-to-test) in the M5 plan against a test GitHub organization. Nothing builds on this folder. Its results go into ADR 0009.
+**Status, 2026-11-10 UTC: run twice, once with the merge checks repeated on a public repository, plus one run of the merge-restriction mode.** Webhooks aren't run. See [results](#results-2026-11-10) and [results, merge restriction](#results-merge-restriction). This spike answers the ten [risks to test](../../docs/m5-plan.md#risks-to-test) in the M5 plan against a test GitHub organization. Nothing builds on this folder. Its results go into ADR 0009.
 
 The permissions below worked for the calls the first run made. Whether each is the least that works isn't checked.
 
@@ -104,13 +104,13 @@ The architect runs this once the owner's setup is done. It needs Node 22 or late
 M5_ORG=<org> M5_PROVISION_APP_ID=<id> M5_MERGE_APP_ID=<id> node spike.mjs
 ```
 
-It refuses an organization whose name has no hyphen-separated part that is `spike`, `test` or `sandbox`, unless `M5_CONFIRM_ORG` repeats the name exactly. The owner pointed the spike at `podsterx`, so its runs set that. It creates two private repositories named `m5-spike-<time>-a` and `-b`, and every merge result records whether a ruleset was active on that repository. It writes status codes and GitHub's messages to `results/`, and never prints or stores a token. `--allow-public` repeats the rule and merge checks on a public repository if the private one refuses a ruleset, which a Free organization may do. `--cleanup` deletes the spike's repositories, and `--cleanup --public-only` deletes only its public ones.
+It refuses an organization whose name has no hyphen-separated part that is `spike`, `test` or `sandbox`, unless `M5_CONFIRM_ORG` repeats the name exactly. The owner pointed the spike at `podsterx`, so its runs set that. It creates two private repositories named `m5-spike-<time>-a` and `-b`, and every merge result records whether a ruleset was active on that repository. It writes status codes and GitHub's messages to `results/`, and never prints or stores a token. `--allow-public` repeats the rule and merge checks on a public repository if the private one refuses a ruleset, which a Free organization may do. `--merge-restriction` runs only the check of whether a ruleset can restrict who merges: it creates one public repository named `m5-spike-<time>-restrict` and skips everything else. It refuses to be combined with the other flags, and its scoped agent token is revoked when it ends. `--cleanup` deletes the spike's repositories, and `--cleanup --public-only` deletes only its public ones.
 
 ```bash
 node --test spike.test.mjs
 ```
 
-The test is offline: it checks the App JWT and the organization-name guard.
+The test is offline: it checks the App JWT, the organization-name guard and the ruleset bodies the merge-restriction mode sends.
 
 ## Results, 2026-11-10
 
@@ -135,6 +135,51 @@ Also seen: the agent's token got `403` setting a commit status, and a second mer
 
 - Without a ruleset, a token with contents write is a merge token. The boundary depends on rules, and on the Free plan rules need a public repository. Private managed repositories need a paid plan.
 - A status pinned to the merge App stopped unreviewed code on the paths tried: only the commit that App marked reached the default branch, and a new push needed a new status.
-- The rule gates the commit, not who merges. After the merge App marks a commit, the agent's token can merge it itself. So Podster can't assume `merge_task` is the only path to a merge. ADR 0009 has to choose. Three candidates so far: the merge App sets the status only at the moment it merges, which still leaves a short window between the two calls (the spike waited three seconds); a merge by the agent of the exact reviewed commit is accepted and observed; or a rule restricts who may merge, which is untested.
+- The rule gates the commit, not who merges. After the merge App marks a commit, the agent's token can merge it itself. So Podster can't assume `merge_task` is the only path to a merge. ADR 0009 has to choose. Three candidates so far: the merge App sets the status only at the moment it merges, which still leaves a short window between the two calls (the spike waited three seconds); a merge by the agent of the exact reviewed commit is accepted and observed; or a rule restricts who may merge, which the [merge-restriction run](#results-merge-restriction) tested afterwards.
 
-**What's left.** Webhooks; whether rules behave the same on a private repository under a paid plan; whether a ruleset can restrict who merges; workflows already in a repository; and whether 5,000 requests an hour fits the polling design.
+**What's left.** Webhooks; whether rules behave the same on a private repository under a paid plan; `git push` over HTTPS and the squash and rebase merge methods against the update restriction; workflows already in a repository; and whether 5,000 requests an hour fits the polling design.
+
+## Results, merge restriction
+
+One run of `--merge-restriction` on 2026-11-10 against `podsterx` (Free plan), on one public repository that was deleted afterwards. The delete's `204` and the organization then listing 0 public repositories were seen on the console and aren't in a results file; `--cleanup` records its deletes from now on. **Every row was observed once.** The agent's token was scoped to that repository with contents and pull requests write, issued by the provisioning App. Three variants ran in turn on the same repository, so they aren't independent: each variant's rulesets were deleted before the next and every delete returned `204`, but the run made no `GET /rulesets` check that none was left, in particular between (b) and (c). The script now lists the rulesets before and after each variant and skips a variant that doesn't start clean; that check hasn't run against GitHub. All rulesets targeted `~DEFAULT_BRANCH` with enforcement `active`. The `update` rule was sent with `update_allows_fetch_and_merge: false`, and the bypass actor was `{ "actor_id": 5693945, "actor_type": "Integration", "bypass_mode": "always" }`, the merge App.
+
+- **(a)** one ruleset: `pull_request` + `required_status_checks` (pinned to the merge App) + `update`, merge App bypasses.
+- **(b)** one ruleset: `pull_request` + `update`, no status rule, merge App bypasses.
+- **(c)** two rulesets: `pull_request` + `required_status_checks` with no bypass actor; and `update` alone, merge App bypasses.
+
+GitHub's messages all began "Repository rule violations found"; the table gives the lines after it.
+
+| Attempt | (a) | (b) | (c) |
+| --- | --- | --- | --- |
+| Create the ruleset(s) with the provisioning App's token | `201`, bypass actor echoed back | `201`, bypass actor echoed back | `201` and `201` |
+| Agent commits straight to the default branch (contents API) | `409` "Changes must be made through a pull request." "Required status check "podster/review" is expected." "Cannot update this protected ref." | `409` "Changes must be made through a pull request." "Cannot update this protected ref." | `409`, the same three lines as (a) |
+| Agent moves the default branch ref to the pull request's head (`PATCH git/refs`, fast-forward), status present where required | `422` "Cannot update this protected ref." | `422` "Cannot update this protected ref." | `422` "Cannot update this protected ref." |
+| **Agent merges the pull request, status present where required** | **`405` "Cannot update this protected ref."** | **`405` "Cannot update this protected ref."** | **`405` "Cannot update this protected ref."** |
+| **Merge App merges the same pull request** | **`200` "Pull Request successfully merged"** | **`200` "Pull Request successfully merged"** | **`200` "Pull Request successfully merged"** |
+| Merge App merges a second pull request with no status on its head | `200` "Pull Request successfully merged" | not run (no status rule) | `405` "Required status check "podster/review" is expected." |
+| Merge App commits straight to the default branch (contents API) | `201` | `201` | `409` "Changes must be made through a pull request." "Required status check "podster/review" is expected." |
+
+Each merge attempt read the pull request before and after: it was unmerged before every attempt in the table, still unmerged after each refusal, and merged after each `200`.
+
+**No control in this run.** No variant here had the `pull_request` and status rules without the `update` rule. The comparison is risk 4 in the [table above](#results-2026-11-10): on a public repository with `pull_request` + the pinned status only, the agent's token merged with `200` once the merge App had set the status. That was a different repository and an earlier run, also seen once.
+
+**The three things asked.**
+
+- **Does the restriction work?** On the paths tried, once each, yes. With an `update` rule and the merge App as the bypass actor, the agent's token was refused at the merge even with the merge App's status on the head, and the merge App's token merged the same pull request.
+- **Does the App need an extra permission to bypass?** None was added. The merge App held contents, pull requests and commit statuses write plus metadata read, and no Administration. Being named in `bypass_actors` was enough. Creating the ruleset used the provisioning App's Administration write; whether a lesser permission can create one wasn't tried.
+- **Does `bypass_actors` work on the Free plan?** Yes on a public repository: every create returned `201` with enforcement `active`. Private repositories on Free refuse any ruleset (risk 5), so this wasn't tried there.
+
+**What it means for the three ADR candidates.**
+
+- The third candidate, a rule that restricts who merges, held where it was tried. With the `update` rule and the merge App as bypass actor, the agent's token was refused the merge of a commit the merge App had marked. Each refusal was seen once, with the `merge` method only; the same token was also refused a contents-API commit and a ref update. Against the earlier run, where that merge returned `200`, this is the difference the `update` rule made, with the limits in the paragraph on the control above.
+- Bypass is per ruleset, not per rule. In (a) the merge App bypassed the status and pull request rules too: it merged a head with no status and committed straight to the default branch. With the rules split as in (c), the merge App was refused both.
+- (c) binds the merge App only to "the status exists on the head", and the merge App sets that status itself. So (c) doesn't stop the merge App from marking a commit and then merging it. Whether a merge is allowed is still decided in Podster's Rust; GitHub's rule doesn't replace that check.
+- (b) shows the agent was refused without any status rule.
+
+**Not tried.** `git push` over HTTPS with either token; the `squash` and `rebase` merge methods; the `creation` rule, which doesn't bear on an existing default branch; bypass modes `pull_request` and `exempt`; a private repository on a paid plan; organization-level rulesets; an agent token that also holds other permissions; and whether anyone else with bypass or admin rights (organization owners weren't named as bypass actors here) is held by the rule. Rulesets were created by the provisioning App, so an agent token can't change them (`403`, risk 3), but anything holding Administration write can.
+
+**Sources checked before coding** (REST API version `2022-11-28`):
+
+- [REST API endpoints for rules: create a repository ruleset](https://docs.github.com/en/rest/repos/rules?apiVersion=2022-11-28#create-a-repository-ruleset) for the `bypass_actors` shape (`actor_id`, `actor_type`, `bypass_mode`). The run used `Integration` and `always` only. The page was read through a fetch tool that summarizes it, which listed the other `actor_type` values as `OrganizationAdmin`, `RepositoryRole`, `Team`, `DeployKey` and `User`, and the other `bypass_mode` values as `pull_request` and `exempt`; `User` and `exempt` in particular weren't checked against the page itself or tried. Also used for the rule types, including `update` with its required `update_allows_fetch_and_merge` and `creation` with no parameters.
+- [Available rules for rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets) for what "Restrict updates" and "Restrict creations" mean: only those with bypass permission may push to or create matching refs.
+- [Creating rulesets for a repository](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository) and [About rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets) for GitHub Apps as bypass actors. Neither page states an extra permission the App must hold; the run above is the evidence that none was needed.

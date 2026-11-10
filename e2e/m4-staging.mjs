@@ -31,6 +31,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AuthAgent, linkedA2aToken, McpAgent, ok, Person, sleep, Target } from "./lib.mjs";
+import { RoomPublisher } from "./room-publisher.mjs";
 import { JsonStream } from "./tail-stream.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -156,8 +157,11 @@ const claim = (agent, handle, role, extra = {}) => agent.call("claim_public_open
 
 // ---- rooms ----
 
-/** Every room this run made public, with its owner, so the end can make each private again. */
-const published = new Map();
+/**
+ * Every room this run made public, and making each private again when it ends or is stopped (room-publisher.mjs). The
+ * publish PUT has 30 seconds, inside clean-up's 60-second wait for publishes in flight.
+ */
+const publisher = new RoomPublisher({ putTimeoutMs: 30_000, stopWaitMs: 60_000, sleep });
 /** IDs and handles only this run made, to find its own events in the tails. */
 const runIds = new Set();
 
@@ -189,17 +193,15 @@ async function publicRoom(owner, name, { openings = [{ title: "Surveyor", respon
   return { id, handle, roles };
 }
 async function publish(owner, id) {
-  const { view_hash } = await owner.must("GET", `/v1/workspaces/${id}/visibility`);
-  const done = await owner.dash("PUT", `/v1/workspaces/${id}/visibility`, { visibility: "public", view_hash });
+  const done = await publisher.publish(owner, id);
   ok(done.ok, `publishing answered ${done.status} ${done.code ?? ""}`);
-  published.set(id, owner);
   runIds.add(done.body.public_handle);
   return done.body.public_handle;
 }
 async function unpublish(owner, id, extra = {}) {
-  const done = await owner.must("PUT", `/v1/workspaces/${id}/visibility`, { visibility: "private", ...extra });
-  published.delete(id);
-  return done;
+  const done = await publisher.unpublish(owner, id, extra);
+  ok(done.ok, `making it private answered ${done.status} ${done.code ?? ""}`);
+  return done.body;
 }
 /** Every handle Explore lists for a person, following its cursor. Explore must answer. */
 async function allExplore(who) {
@@ -301,7 +303,11 @@ function stopTails() {
 /** Every event a tail has seen, as text, to search. */
 const tailText = (tail) => tail.stream.values.map((value) => JSON.stringify(value));
 /** Why a tail can't be trusted now: wrangler failed to start or has exited (its exit code only), or its stream overflowed. */
-const tailProblem = (tail) => tail.error ?? (tail.proc?.exitCode !== null && tail.proc?.exitCode !== undefined ? `wrangler exited with code ${tail.proc.exitCode}` : tail.stream.error);
+const tailProblem = (tail) =>
+  tail.error ??
+  (tail.proc?.exitCode !== null && tail.proc?.exitCode !== undefined ? `wrangler exited with code ${tail.proc.exitCode}` : null) ??
+  (tail.proc?.signalCode ? `wrangler was stopped by ${tail.proc.signalCode}` : null) ??
+  tail.stream.error;
 /**
  * Sends requests of the run's own with a fresh marker in their paths until every tail holds an event naming it, bounded.
  * Used to show the tails are connected at the start, and still alive at the end. Wrangler's banner text isn't relied on,
@@ -330,14 +336,9 @@ let cleaned = null;
 function cleanUp() {
   cleaned ??= (async () => {
     stopTails();
-    let left = 0;
-    const count = published.size;
-    for (const [id, roomOwner] of published) {
-      const done = await roomOwner.dash("PUT", `/v1/workspaces/${id}/visibility`, { visibility: "private" }).catch(() => null);
-      if (done?.ok) published.delete(id);
-      else left += 1;
-    }
-    console.log(`\n${count - left} rooms made private again${left ? `, ${left} couldn't be` : ""}`);
+    // Waits for publishes in flight, then sweeps twice, so a publish landing during the first sweep is undone too.
+    const { madePrivate, left } = await publisher.stop();
+    console.log(`\n${madePrivate} rooms made private again${left ? `, ${left} couldn't be` : ""}`);
     if (left) results.push({ status: "fail", title: "rooms left public" });
     await signOutAll();
   })();
@@ -806,7 +807,9 @@ try {
     stopTails();
     for (const tail of tails) {
       const ours = tailText(tail).filter((text) => [...runIds].some((id) => text.includes(id))).length;
-      check(!tail.error && ours > 0, `the ${tail.app}'s tail holds this run's own requests`, tail.error ?? `${tail.stream.values.length} events, ${ours} of this run's`);
+      // Stopped by the run just now, so a signal isn't a problem here; an error, or an overflow in the last moments, is.
+      const problem = tail.error ?? tail.stream.error;
+      check(!problem && ours > 0, `the ${tail.app}'s tail holds this run's own requests`, problem ?? `${tail.stream.values.length} events, ${ours} of this run's`);
     }
     const logged = tails.map(appLogged).join("\n");
     check(!canaryPattern.test(logged), "no canary in what the apps logged");

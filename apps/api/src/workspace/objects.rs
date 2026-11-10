@@ -532,7 +532,8 @@ pub(super) fn take_scan_turns(sql: &SqlStorage, now: i64) -> R<Vec<QueuedScan>> 
 /// How long a queued scan may go without a verdict before it's sent once more. Long, since a room can't tell a send that
 /// never arrived from one waiting behind others, and a duplicate is scanned in full.
 pub(super) const SCAN_RESEND_AFTER_MS: i64 = 30 * 60 * 1000;
-/// The room's key-value storage marks a scan already sent once more, so it's never sent a third time.
+/// The room's key-value storage marks a scan already sent once more, so as a rule it isn't sent a third time. A crash between
+/// the send and the mark, or a mark that keeps failing, can send it again, once each backoff period.
 const SCAN_RESENT_PREFIX: &str = "scan_resent:";
 
 /// Queued scans with no verdict after `SCAN_RESEND_AFTER_MS`, oldest first, up to the room's share.
@@ -684,7 +685,11 @@ impl Workspace {
         if let Err(error) = taken {
             // A pass that can't even take its turns rests like a failed send, or the alarm would come straight back.
             console_error!("couldn't take scan turns: {:?}", error.code());
-            self.scan_send_failed(&room_id(&sql).unwrap_or_default(), now);
+            self.scan_send_failed(
+                &room_id(&sql).unwrap_or_default(),
+                now,
+                "upload.scan_turns_not_taken",
+            );
             return;
         }
         let turns = out.take();
@@ -704,7 +709,7 @@ impl Workspace {
                     console_error!("couldn't give back a scan turn: {:?}", error.code());
                 }
             }
-            self.scan_send_failed(&room, now);
+            self.scan_send_failed(&room, now, "upload.scan_not_queued");
             return;
         }
         // A turn held a while with no verdict may never have reached the queue, as when the room was evicted between taking
@@ -724,13 +729,13 @@ impl Workspace {
                 continue;
             }
             if !self.send_scan(&room, &turn).await {
-                self.scan_send_failed(&room, now);
+                self.scan_send_failed(&room, now, "upload.scan_not_queued");
                 return;
             }
             if self.state.storage().put(&marker, now).await.is_err() {
                 // Sent, but with nothing to say so, the re-send would look pending again: rest first, as after a failure.
                 console_error!("scan.resend_mark_failed");
-                self.scan_send_failed(&room, now);
+                self.scan_send_failed(&room, now, "upload.scan_not_queued");
                 return;
             }
         }
@@ -776,7 +781,7 @@ impl Workspace {
                 continue;
             };
             let id = key.trim_start_matches(SCAN_RESENT_PREFIX);
-            // Only a file known to have settled loses its mark: a lookup that fails keeps it, so it's never sent a third time.
+            // Only a file known to have settled loses its mark: a lookup that fails keeps it, so that doesn't cause a third send.
             let settled = matches!(
                 rows(
                     sql,
@@ -815,14 +820,14 @@ impl Workspace {
     }
 
     /// Backs off after a failed send: 5 seconds, doubling to 5 minutes. A restart forgets it, as it forgets sweep failures.
-    fn scan_send_failed(&self, room: &str, now: i64) {
+    fn scan_send_failed(&self, room: &str, now: i64, code: &str) {
         let failures = self.scan_send_failures.get().saturating_add(1);
         self.scan_send_failures.set(failures);
         let wait = scan_send_backoff_ms(failures);
         self.scan_send_retry_at.set(now + wait);
         console_error!(
             "{}",
-            json!({ "at": "upload.scan_not_queued", "room": room, "failures": failures })
+            json!({ "at": code, "room": room, "failures": failures })
         );
     }
 

@@ -149,7 +149,11 @@ Proposed: this table describes the proposed revision. Until it's decided, every 
 | Exfiltration through results | Injected text asks for private code in a note, artifact, progress message or failure reason, which goes to the requester through an allowed channel | Separate sources per room; explicit output scope and destination, with owner review by default for external/public outputs and fixed-status progress/failure text until sharing is permitted. Redaction and network allowlists alone do not prevent source-code disclosure |
 | Stolen or overbroad GitHub token | Unauthorized repository writes or merge attempts | Repository-scoped permissions, protected credential delivery, short lifetime/revocation and independently enforced merge restrictions; see the proposed GitHub design below |
 | Task tampering with Runner itself | Task code edits run policy or forges approvals | Runner's policy, approvals and state are outside the task sandbox, and run under a separate OS user or container where possible |
-| Exposed inbound endpoint (later extension) | Remote attack surface | Absent from the proof of concept and off by default thereafter; see [Optional inbound A2A](#optional-inbound-a2a) |
+| Exposed inbound endpoint (later extension) | Remote attack surface | Absent from the proof of concept and off by default thereafter; see [Optional inbound A2A](#optional-inbound-a2a) and the proposed [A2A server mode](#proposed-runner-as-an-a2a-server) |
+| Stolen connection string in A2A server mode (proposed) | Whoever holds the tunnel token and signing secret can stand in for the owner's Runner and receive its offers | Proposed and unreviewed: keep it in the OS keychain, show it once, and let the owner revoke the tunnel and rotate the secret from Podster. Owed to M7's security review |
+| Tunnel provider sees traffic (proposed) | Cloudflare terminates TLS, so offer text and links pass through it in clear | Not mitigated by the proposal. Disclose it to the owner before the mode is switched on; payload encryption is open for M7's security review |
+| `cloudflared` on the owner's machine (proposed) | A third-party binary with network access runs beside Runner | Proposed and unreviewed: a pinned, verified release, run with no access to the workspace or credentials. Owed to M7's security review |
+| Long-lived refresh token (proposed, decision 178) | A stolen token signs Runner in to the A2A surface until revoked | Waits on the owner with decision 178. If approved: keychain storage, rotation on use, and revocation with the agent's connection |
 
 ## Protocol and authorization boundaries
 
@@ -161,7 +165,7 @@ Prompt text, cards, messages and artifacts are untrusted input; none can expand 
 
 **Later extension, outside the proof of concept; not implemented.** Inbound A2A stays **off by default**. After a separately reviewed implementation, an owner could explicitly opt in to get faster pickup. In this proposal it is **nudge-only**: polling stays on as the fallback, because the inbox is the source of truth. Runner doesn't act as a full A2A task server under the [A2A adapter](ARCHITECTURE.md#a2a-adapter)'s state mapping; that would need its own design, which [Runner as an A2A server](#proposed-runner-as-an-a2a-server) now proposes.
 
-- **Reachability:** Podster's A2A calls follow the wake egress policy: HTTPS, public DNS name and no private address ranges. A local-only bind cannot receive them. It requires a directly reachable address or an explicitly authorized tunnel. Cloudflare Tunnel is an initial candidate for this later extension, not an implemented integration or a proof-of-concept requirement. Keep the transport replaceable so a self-hosted relay could be evaluated later without changing Runner's identity, authorization or inbox contract. Either transport must pass the same security and delivery checks; this note does not authorize installing a tunnel or provisioning resources. A tunnel is transport, not permission.
+- **Reachability:** Podster's A2A calls follow the wake egress policy: HTTPS, public DNS name and no private address ranges. A local-only bind cannot receive them. It requires a directly reachable address or an explicitly authorized tunnel. Cloudflare Tunnel is an initial candidate for this later extension, not an implemented integration or a proof-of-concept requirement. [Proposed decision 176](PRODUCT.md#decisions-needed) picks it as the transport for the proposed A2A server mode, still unbuilt. Keep the transport replaceable so a self-hosted relay could be evaluated later without changing Runner's identity, authorization or inbox contract. Either transport must pass the same security and delivery checks; this note does not authorize installing a tunnel or provisioning resources. A tunnel is transport, not permission.
 - **Caller:** Podster's gateway delivers through its outbox. Runner verifies that request, then treats it only as a nudge: it fetches the task over its outbound connection and applies run policy as usual. An inbound request alone never starts a CLI. Peer agents have no direct path to Runner.
 - **Registration:** the agent owner authorizes the endpoint and Agent Card. Verify current ownership, permitted organization and endpoint control before activating it. Validate the card schema, endpoint scheme and redirects, and protect retrieval against SSRF, DNS rebinding and private-network access. Don't automatically trust advertised URLs or instructions, and put sensitive capability metadata behind access control.
 - **Limits:** require TLS, authenticated requests, bounded payloads, rate limits and shutdown controls. Never expose a shell, credential store, arbitrary filesystem or Podster's private Rust API through the endpoint.
@@ -169,7 +173,7 @@ Prompt text, cards, messages and artifacts are untrusted input; none can expand 
 
 ## Proposed: Runner as an A2A server
 
-**Proposed November 9, 2026. Not decided, not built, and nothing here is approved.** This is a second mode beside the polling proof of concept, which stays as decided. It's the fuller design that [Optional inbound A2A](#optional-inbound-a2a) said a Runner acting as an A2A task server would need. It covers only the wire contract between Podster and Runner. Run policy, isolation, adapters, the local clone and GitHub access are unchanged and apply in full.
+**Proposed November 9, 2026. Not decided, not built, and nothing here is approved.** By [decision 26](PRODUCT.md#decisions-needed), nothing in this mode is published until M7's gates pass, including the security review, which must cover the inbound endpoint and the tunnel. This is a second mode beside the polling proof of concept, which stays as decided. It's the fuller design that [Optional inbound A2A](#optional-inbound-a2a) said a Runner acting as an A2A task server would need. It covers only the wire contract between Podster and Runner. Run policy, isolation, adapters, the local clone and GitHub access are unchanged and apply in full.
 
 The choices were worked out one at a time in [the wayfinder map](https://github.com/thachp/podster/issues/207), whose tickets hold the reasoning. The architect made them under the owner's delegation of November 8, as [proposed decisions 175 to 178](PRODUCT.md#decisions-needed). Four things [wait on the owner](#what-waits-on-the-owner).
 
@@ -230,7 +234,7 @@ Each agent's endpoint is a Cloudflare Tunnel that Podster provisions.
 
 A tunnel authenticates nothing about the caller, so these checks are the whole gate. They run in order, and nothing is parsed or acted on until all pass:
 
-1. `POST` to the fixed path, JSON, and a body of at most 64 KB read once.
+1. `POST` to the fixed path, JSON, and a body of at most 64 KB read once. The only other route is the unsigned `GET` of the fixed [Agent Card](#proposed-runner-as-an-a2a-server), which returns the same bytes to anyone and reads nothing.
 2. `A2A-Version: 1.0`.
 3. `X-Podster-Signature: t=<seconds>,v1=<hex>`, recomputed as HMAC-SHA256 over `{t}.{raw body}` with the signing secret and compared in constant time.
 4. `t` within 300 seconds of Runner's clock.
@@ -257,7 +261,7 @@ If Runner can't reach Podster, its task stays `SUBMITTED` and nothing starts. Th
 - **Runner never reports `INPUT_REQUIRED` or `AUTH_REQUIRED`.** Podster has no way to send the reply back on the same task. A run that needs a person stays `WORKING` and waits for its owner on the owner's machine.
 - **The authority check.** Podster sends nothing for a removal, a reassignment or a disconnect. So during a run, Runner reads the task from the A2A surface at least every 60 seconds, and stops if it isn't accepted by this agent, isn't found, or the token is refused.
 - **`CancelTask`:** Runner stops the process tree and answers with the task as `TASK_STATE_CANCELED`. A task already finished answers `TaskNotCancelableError`.
-- **Every JSON-RPC error is answered with HTTP 200,** because Podster retries any other status.
+- **Every JSON-RPC error is answered with HTTP 200,** as JSON-RPC expects. Podster still counts a JSON-RPC error on a send as a failure and retries it ([ADR 0007](../adr/0007-a2a.md)), so a refusal that must not be retried needs its own answer; which errors those are is open.
 - **The seven-day ceiling.** Podster stops reading a remote task seven days after the send ([decision 117](PRODUCT.md#decisions-needed)). Run policy refuses a task whose duration cap is longer, and Runner fails a task itself at least half a day before the limit.
 
 ### Delivering a result

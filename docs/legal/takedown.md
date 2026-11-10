@@ -18,7 +18,8 @@ Reports aren't built yet, and there's no way to report from a signed-out page.
 For anyone who can't or won't sign in, including rights holders and authorities:
 
 - **Contact:** `[takedown contact address: for the owner to set up. Setting up a new mailbox or sender is a cloud change that needs the owner.]`
-- **A real contact must be filled in before `PUBLIC_ROOMS` is switched on anywhere,** staging included. Until then this stays a placeholder.
+- **A real contact must be filled in before `PUBLIC_ROOMS` is switched on anywhere but staging.** Until then this stays a placeholder.
+- **Staging is the one exception, made by the owner.** On 2026-11-10 the owner told the architect to switch `PUBLIC_ROOMS` on for staging while this contact was still a placeholder, so M4's acceptance run could happen. The architect had held the switch on this rule and asked first. Until a contact exists, nobody outside the project can report a staging room without signing in.
 - Include the public link, what the problem is, and how to reach you.
 - `[What a copyright notice must contain, and the counter-notice process: for a lawyer.]`
 - `[Expected response time: for the owner. Don't promise one until someone is staffing the contact.]`

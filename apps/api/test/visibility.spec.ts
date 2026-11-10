@@ -242,8 +242,15 @@ describe("publicly claimable openings", () => {
 });
 
 describe("the switch", () => {
-  it("is set nowhere in the Worker's configuration", () => {
-    expect(BINDINGS.TEST_WRANGLER).not.toContain("PUBLIC_ROOMS");
+  // This reads the configuration file. A variable set on the deployed Worker by hand wouldn't show here.
+  it("is set for staging only in the Worker's configuration", () => {
+    const config = JSON.parse(BINDINGS.TEST_WRANGLER.replace(/^\s*\/\/.*$/gm, ""));
+    expect(config.vars?.PUBLIC_ROOMS).toBeUndefined();
+    expect(Object.keys(config.env)).toContain("staging");
+    for (const [name, environment] of Object.entries<any>(config.env)) {
+      expect(environment.vars?.PUBLIC_ROOMS, name).toBe(name === "staging" ? "true" : undefined);
+    }
+    expect(BINDINGS.TEST_WRANGLER.match(/"PUBLIC_ROOMS"/g)).toHaveLength(1);
   });
 });
 

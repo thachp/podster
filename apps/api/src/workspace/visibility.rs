@@ -2,8 +2,9 @@
 //! `podster_policy::public` (ADR 0008, decisions 146 to 155 and 159). Nothing here is reachable without signing in: the
 //! public read comes in step 7.
 //!
-//! **`PUBLIC_ROOMS`** is off unless the Worker's variable says `true`. It's set nowhere in `wrangler.jsonc`, so it's off in
-//! every environment until the owner switches it on. While it's off, publishing is refused and going private still works.
+//! **`PUBLIC_ROOMS`** is off unless the Worker's variable says `true`. `wrangler.jsonc` sets it for staging only, where the
+//! owner switched it on on 2026-11-10, so it's off everywhere else. While it's off, publishing is refused and going private
+//! still works.
 use super::*;
 use podster_policy::public::{
     content_hash, decide_set_visibility, parse_topic, public_content, public_handle_from, utc_day,

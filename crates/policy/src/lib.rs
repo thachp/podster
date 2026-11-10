@@ -471,6 +471,8 @@ pub fn is_authority_refusal(action: &str, code: &str) -> bool {
         | "invitation_required"
         | "invitation_not_found" => true,
         "not_found" => matches!(action, "member.withdraw" | "member.owner_consent"),
+        // Someone naming a grant they may not see is told it isn't there, and that's still a refusal of authority.
+        "grant_not_found" => action == "repo_grant.revoke",
         _ => false,
     }
 }

@@ -759,3 +759,24 @@ fn a_grants_events_follow_who_may_see_the_grant() {
         ));
     }
 }
+
+#[test]
+fn naming_a_grant_one_may_not_see_counts_as_a_refusal_only_for_taking_one_back() {
+    assert!(is_authority_refusal("repo_grant.revoke", "grant_not_found"));
+    assert!(!is_authority_refusal("repo_grant.give", "grant_not_found"));
+    assert!(!is_authority_refusal("member.revoke", "grant_not_found"));
+}
+
+#[test]
+fn only_a_human_owner_or_admin_sees_every_grant() {
+    assert!(sees_every_grant(&caller("o", Person, Role::Owner)));
+    assert!(sees_every_grant(&caller("a", Person, Role::Admin)));
+    for who in [
+        caller("m", Person, Role::Member),
+        caller("g", Person, Role::Guest),
+        caller("x", Agent, Role::Admin),
+        caller("n", Person, Role::None),
+    ] {
+        assert!(!sees_every_grant(&who), "{}", who.id);
+    }
+}

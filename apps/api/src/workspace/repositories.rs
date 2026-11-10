@@ -307,6 +307,9 @@ impl Workspace {
 // grant authorizes nothing here: tokens and merges are steps 6 and 7, and they check the grant again at every use. Logs
 // carry nothing from these, and audit entries and events carry IDs and fixed codes only.
 
+/// How far ahead a grant's expiry may be: one year (ruled by the architect, 2026-11-10).
+const MAX_GRANT_LIFETIME_MS: i64 = 365 * 24 * 60 * 60 * 1000;
+
 const GRANT_COLUMNS: &str =
     "id, principal_id, provider_repo_id, action, delegated_by, created_at, expires_at, revoked_at";
 
@@ -351,7 +354,9 @@ impl GrantRow {
     }
 
     /// The grant as the API answers it. `state` is for showing, from the room's current rows: `live`, `expired`,
-    /// `stale` when its giver no longer holds the delegation, or `revoked`. It authorizes nothing.
+    /// `stale` when its giver no longer holds the delegation, or `revoked`. It authorizes nothing, and it can say `live`
+    /// for a grant that's already stale, when its giver has left their organization and the room hasn't been told yet.
+    /// Step 6 and step 7 never read it: each runs `check_grant` with the delegation holder from current authority.
     fn json(&self, holder: Option<&str>, now: i64) -> Value {
         let state = if self.revoked_at.is_some() {
             "revoked"
@@ -383,7 +388,8 @@ fn grant_rows(sql: &SqlStorage, filter: &str, bindings: Vec<V>) -> R<Vec<GrantRo
 }
 
 /// Who holds the repository's delegation, as the room records it: its owner, unless the room records that they left.
-/// For showing a grant's state. A command that relies on the delegation takes it from the caller's own resolved authority.
+/// For showing a grant's state only. It lags an owner's departure that hasn't reached the room, so nothing that
+/// authorizes may use it: a command takes the delegation from resolved authority, through `owner_authority_holds`.
 fn recorded_holder(sql: &SqlStorage) -> R<Option<String>> {
     Ok(rows(
         sql,
@@ -508,9 +514,15 @@ pub(super) fn handle_grant(sql: &SqlStorage, caller: &Caller, body: &Value, now:
         .as_str()
         .and_then(GrantAction::from_name)
         .ok_or_else(ApiError::invalid_argument)?;
+    // An expiry is optional. When given, it's after now and at most a year ahead; `decide_grant` checks the first again.
     let expires_at = match &body["expires_at"] {
         Value::Null => None,
-        value => Some(value.as_i64().ok_or_else(ApiError::invalid_argument)?),
+        value => Some(
+            value
+                .as_i64()
+                .filter(|at| *at > now && *at <= now.saturating_add(MAX_GRANT_LIFETIME_MS))
+                .ok_or_else(ApiError::invalid_argument)?,
+        ),
     };
     let role = participant(sql, &principal)?.map_or(Role::None, |(_, role)| parse_role(&role));
     may_receive_grant(
@@ -620,22 +632,7 @@ pub(super) fn handle_revoke(
     body: &Value,
     now: i64,
 ) -> R<Value> {
-    if caller.kind != PrincipalKind::Person {
-        return Err(ApiError::not_allowed());
-    }
-    let org_admin = administers_room_org(sql, caller, admin_orgs)?;
-    let grant = grant_rows(sql, "id = ?", vec![grant_id.into()])?
-        .into_iter()
-        .next()
-        .filter(|g| org_admin || sees_grant(caller, &g.principal))
-        .ok_or_else(|| refused(GrantRefusal::GrantNotFound))?;
-    authorize_revoke(
-        caller,
-        &grant.principal,
-        caller_holds_delegation(caller),
-        org_admin,
-    )
-    .map_err(denied)?;
+    let grant = revocable(sql, caller, admin_orgs, grant_id)?;
     require_policy_version(sql, body)?;
     let fields = body.as_object().ok_or_else(ApiError::invalid_argument)?;
     if fields.keys().any(|k| k != "policy_version") {
@@ -660,6 +657,43 @@ pub(super) fn handle_revoke(
         .first()
         .ok_or_else(|| refused(GrantRefusal::GrantNotFound))?;
     Ok(after.json(recorded_holder(sql)?.as_deref(), now))
+}
+
+/// Whether a stored answer to taking a grant back may be replayed: only to someone who may still take that grant back.
+pub(super) fn may_still_revoke(
+    sql: &SqlStorage,
+    caller: &Caller,
+    admin_orgs: &[String],
+    grant_id: &str,
+) -> R<()> {
+    revocable(sql, caller, admin_orgs, grant_id).map(|_| ())
+}
+
+/// The grant the caller names, if they may take it back. Someone who may not see it, an agent apart, gets
+/// `grant_not_found` whether or not it exists, so the answer says nothing about other people's grants.
+fn revocable(
+    sql: &SqlStorage,
+    caller: &Caller,
+    admin_orgs: &[String],
+    grant_id: &str,
+) -> R<GrantRow> {
+    if caller.kind != PrincipalKind::Person {
+        return Err(ApiError::not_allowed());
+    }
+    let org_admin = administers_room_org(sql, caller, admin_orgs)?;
+    let grant = grant_rows(sql, "id = ?", vec![grant_id.into()])?
+        .into_iter()
+        .next()
+        .filter(|g| org_admin || sees_grant(caller, &g.principal))
+        .ok_or_else(|| refused(GrantRefusal::GrantNotFound))?;
+    authorize_revoke(
+        caller,
+        &grant.principal,
+        caller_holds_delegation(caller),
+        org_admin,
+    )
+    .map_err(denied)?;
+    Ok(grant)
 }
 
 /// `GET repository/grants`: the grants that aren't revoked, for a person. A human owner or admin sees every one, and
@@ -698,17 +732,20 @@ pub(super) fn end_grants_of_removed(
 }
 
 /// Ruling B: when the room's ownership moves, every grant the new owner didn't give ends, in the transfer's transaction.
-/// `check_grant` already refuses them at use; this makes the rows say so.
+/// `new_owner` is `None` to end every grant, which recovery does: rejoining never restores earlier authority, so a
+/// former owner named again starts with nothing. A transfer passes the new owner. The one before it already ended what
+/// earlier owners gave, so a transfer away and back leaves none of the first owner's grants. `check_grant` refuses
+/// these at use anyway; this makes the rows say so.
 pub(super) fn end_grants_after_owner_change(
     sql: &SqlStorage,
     actor: &str,
     actor_kind: &str,
-    new_owner: &str,
+    new_owner: Option<&str>,
     now: i64,
 ) -> R<()> {
     let live = grant_rows(sql, "revoked_at IS NULL", vec![])?;
     let grants: Vec<Grant> = live.iter().map(GrantRow::grant).collect();
-    let ended = grants_ended_by_ownership_change(&grants, Some(new_owner));
+    let ended = grants_ended_by_ownership_change(&grants, new_owner);
     for grant in live.iter().filter(|g| ended.contains(&g.id.as_str())) {
         end_grant(sql, actor, actor_kind, grant, "owner_changed", true, now)?;
     }

@@ -32,12 +32,13 @@ async function assertion(who: Who, claims: object = {}) {
 }
 
 let counter = 0;
-async function api(who: Who, method: string, path: string, body?: unknown, options: { key?: string | null; claims?: object } = {}) {
+async function api(who: Who, method: string, path: string, body?: unknown, options: { key?: string | null; claims?: object; fail?: boolean } = {}) {
   const b = body as any;
   // The gateway states this when its directory says the person being added belongs to the organization.
   const claims = options.claims ?? (method === "POST" && /\/members$/.test(path) && b?.kind === "person" ? { target_member: { person: b.principal_id, orgs: { [ORG]: 1 } } } : {});
   const headers: Record<string, string> = { "x-podster-assertion": await assertion(who, claims), "content-type": "application/json" };
   if (method !== "GET" && options.key !== null) headers["idempotency-key"] = options.key ?? `rg-key-${++counter}`;
+  if (options.fail) headers["x-test-fail"] = "1";
   const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: method === "GET" ? undefined : JSON.stringify(body ?? {}) });
   const text = await res.text();
   const parsed = text ? JSON.parse(text) : null;
@@ -195,6 +196,23 @@ describe("giving a grant", () => {
     expect(await footprint(id)).toEqual(before);
   });
 
+  it("takes an expiry after now and at most a year ahead", async () => {
+    const id = await room();
+    const YEAR = 365 * 24 * 60 * 60 * 1000;
+    for (const expires_at of [Date.now() + YEAR + 60_000, 2 ** 53 + 2, Number.MAX_SAFE_INTEGER, Date.now() - 1, 0, -1, 1.5]) {
+      const refused = await give(id, AGENT.id, "push", { expires_at });
+      expect([refused.status, refused.code], String(expires_at)).toEqual([400, "invalid_argument"]);
+    }
+    // A value too large for a 64-bit integer is refused too.
+    const huge = await SELF.fetch(`https://api.internal${grants(id)}`, { method: "POST", headers: { "x-podster-assertion": await assertion(OWNER), "content-type": "application/json", "idempotency-key": "rg-huge" }, body: `{"policy_version":${await version(id)},"principal_id":"${AGENT.id}","action":"push","expires_at":99999999999999999999999}` });
+    expect(huge.status).toBe(400);
+    expect((await grantRows(id)).length).toBe(0);
+    const longest = await give(id, AGENT.id, "push", { expires_at: Date.now() + YEAR - 1_000 });
+    expect([longest.status, longest.body.state]).toEqual([200, "live"]);
+    const soonest = await give(id, AGENT.id, "merge", { expires_at: Date.now() + 1_000 });
+    expect([soonest.status, soonest.body.state]).toEqual([200, "live"]);
+  });
+
   it("answers a retry with its stored answer, refuses a key reused for another request, and doesn't replay to a former owner", async () => {
     const id = await room();
     const body = { policy_version: await version(id), principal_id: AGENT.id, action: "push" };
@@ -304,6 +322,31 @@ describe("taking a grant back", () => {
     await flush(id);
     const denials = (await api(OWNER, "GET", `/v1/workspaces/${id}/denials`)).body.denials as any[];
     expect(denials.filter((d) => d.action === "repo_grant.revoke" && d.code === "not_allowed").map((d) => d.actor_id).sort()).toEqual([ADMIN.id, AGENT.id, OTHER_AGENT.id].sort());
+  });
+
+  it("answers someone who may not see a grant the same whether or not it exists, and keeps the refusal", async () => {
+    const id = await room();
+    const given = (await give(id, MEMBER.id, "push")).body;
+    const real = await take(id, given.id, GUEST);
+    const missing = await take(id, "pgr_ffffffffffffffffffffffffffffffff", GUEST);
+    expect([real.status, real.text]).toEqual([missing.status, missing.text]);
+    expect([real.status, real.code]).toEqual([404, "grant_not_found"]);
+    await flush(id);
+    const denials = (await api(OWNER, "GET", `/v1/workspaces/${id}/denials`)).body.denials as any[];
+    expect(denials.filter((d) => d.action === "repo_grant.revoke").map((d) => [d.actor_id, d.code, d.count])).toEqual([[GUEST.id, "grant_not_found", 2]]);
+  });
+
+  it("replays a stored revocation only to someone who may still take that grant back", async () => {
+    const id = await room();
+    const given = (await give(id, AGENT.id, "push")).body;
+    const body = { policy_version: await version(id) };
+    const first = await api(ORG_ADMIN, "DELETE", `${grants(id)}/${given.id}`, body, { key: "rg-org-take" });
+    expect(first.body.state).toBe("revoked");
+    // Still an organization's admin: the stored answer.
+    expect((await api(ORG_ADMIN, "DELETE", `${grants(id)}/${given.id}`, body, { key: "rg-org-take" })).body).toEqual(first.body);
+    // No longer one, and still in the room as a member: refused, as if the grant weren't there.
+    const demoted = await api(ORG_ADMIN, "DELETE", `${grants(id)}/${given.id}`, body, { key: "rg-org-take", claims: { admin_orgs: [] } });
+    expect([demoted.status, demoted.code]).toEqual([404, "grant_not_found"]);
   });
 
   it("works in an archived room, needs a current form, and answers a retry with its stored answer", async () => {
@@ -419,6 +462,70 @@ describe("what ends grants", () => {
   });
 });
 
+describe("ownership moving and coming back", () => {
+  const recover = (id: string, to: Who) => api(ORG_ADMIN, "POST", `/v1/workspaces/${id}/owner/recover`, { to: to.id, expected_owner: OWNER.id }, { claims: { target_member: { person: to.id, orgs: { [ORG]: 1 } } } });
+  const transfer = (id: string, from: Who, to: Who) => version(id).then((v) => api(from, "POST", `/v1/workspaces/${id}/owner/transfer`, { to: to.id, policy_version: v }, { claims: { target_member: { person: to.id, orgs: { [ORG]: 1 } } } }));
+
+  it("recovering a room for the owner who left ends every grant, so rejoining restores none", async () => {
+    const id = await room();
+    const forAgent = (await give(id, AGENT.id, "push")).body;
+    const forOwner = (await give(id, OWNER.id, "merge")).body;
+    await inRoom(id, (sql) => sql.exec("UPDATE workspace SET owner_left_at = ?", Date.now()));
+    const recovered = await recover(id, OWNER);
+    expect(recovered.status, recovered.text).toBe(200);
+    expect((await grantRows(id)).map((g) => [g.id, g.revoked_at !== null])).toEqual([[forAgent.id, true], [forOwner.id, true]]);
+    expect((await api(OWNER, "GET", grants(id))).body.grants).toEqual([]);
+    // They grant again, as anyone new would.
+    const again = await give(id, AGENT.id, "push");
+    expect([again.status, again.body.state]).toEqual([200, "live"]);
+    expect(again.body.id).not.toBe(forAgent.id);
+  });
+
+  it("recovering it for someone else ends every grant too, whoever gave it", async () => {
+    const id = await room();
+    await give(id, AGENT.id, "push");
+    await give(id, MEMBER.id, "merge");
+    await inRoom(id, (sql) => sql.exec("UPDATE workspace SET owner_left_at = ?", Date.now()));
+    expect((await recover(id, ADMIN)).status).toBe(200);
+    expect((await grantRows(id)).every((g) => g.revoked_at !== null)).toBe(true);
+  });
+
+  it("handing the room away and back leaves none of the first owner's grants live", async () => {
+    const id = await room();
+    const first = (await give(id, AGENT.id, "push")).body;
+    expect((await transfer(id, OWNER, ADMIN)).status).toBe(200);
+    const second = (await give(id, MEMBER.id, "merge", {}, ADMIN)).body;
+    const back = await transfer(id, ADMIN, OWNER);
+    expect(back.status, back.text).toBe(200);
+    expect((await grantRows(id)).map((g) => [g.id, g.delegated_by, g.revoked_at !== null])).toEqual([[first.id, OWNER.id, true], [second.id, ADMIN.id, true]]);
+    expect((await api(OWNER, "GET", grants(id))).body.grants).toEqual([]);
+  });
+});
+
+describe("a cascade commits with its command or not at all", () => {
+  it("a removal that fails leaves the grants as they were", async () => {
+    const id = await room();
+    const given = (await give(id, AGENT.id, "push")).body;
+    const before = await footprint(id);
+    const failed = await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${AGENT.id}`, { policy_version: await version(id) }, { fail: true });
+    expect(failed.status).toBe(500);
+    expect(await footprint(id)).toEqual(before);
+    expect((await grantRows(id)).find((g) => g.id === given.id)?.revoked_at).toBeNull();
+    expect(await inRoom(id, (sql) => sql.exec("SELECT revoked_at FROM member WHERE principal_id = ?", AGENT.id).one().revoked_at)).toBeNull();
+  });
+
+  it("a transfer that fails leaves the grants and the owner as they were", async () => {
+    const id = await room();
+    await give(id, AGENT.id, "push");
+    const before = await footprint(id);
+    const failed = await api(OWNER, "POST", `/v1/workspaces/${id}/owner/transfer`, { to: ADMIN.id, policy_version: await version(id) }, { fail: true, claims: { target_member: { person: ADMIN.id, orgs: { [ORG]: 1 } } } });
+    expect(failed.status).toBe(500);
+    expect(await footprint(id)).toEqual(before);
+    expect((await grantRows(id)).every((g) => g.revoked_at === null)).toBe(true);
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.owner).toBe(OWNER.id);
+  });
+});
+
 describe("what a grant shows and logs", () => {
   it("shows its events to a human owner or admin and its holder, not to everyone who sees the room", async () => {
     const id = await room();
@@ -430,6 +537,11 @@ describe("what a grant shows and logs", () => {
     // A member who sees the whole room doesn't learn who holds a grant.
     expect(await seen(OTHER_AGENT)).toEqual([]);
     expect(await seen(MEMBER)).toEqual([]);
+    // A guest who holds a grant sees its events too, given and taken back.
+    const toGuest = (await give(id, GUEST.id, "merge")).body;
+    await take(id, toGuest.id);
+    expect(await seen(GUEST)).toEqual([GUEST.id, GUEST.id]);
+    expect(await seen(OWNER)).toEqual([AGENT.id, GUEST.id, GUEST.id]);
   });
 
   it("logs no request content", async () => {

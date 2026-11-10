@@ -248,7 +248,12 @@ pub fn sees_repository(caller: &Caller) -> bool {
 /// Who sees a grant on the room's repository: a human owner or admin sees every one, in Manage access, and each
 /// participant sees their own.
 pub fn sees_grant(caller: &Caller, grantee: &str) -> bool {
-    caller.role != Role::None && (is_human_admin(caller) || caller.id == grantee)
+    sees_every_grant(caller) || (caller.role != Role::None && caller.id == grantee)
+}
+
+/// Who sees every grant on the room's repository, and every grant's events: a human owner or admin.
+pub fn sees_every_grant(caller: &Caller) -> bool {
+    caller.role != Role::None && is_human_admin(caller)
 }
 
 /// Who sees a task's change: its pull request number, commits, checks and merge state, and the merge events. Whoever

@@ -265,7 +265,7 @@ cd apps/api && npx wrangler secret put OPERATORS --env staging
 
 ## M4's staging run
 
-`e2e/m4-staging.mjs` runs M4's acceptance tests, M4-01 to M4-17. It needs public rooms on, which is **the owner's call at the gate**, and stops at once with exit code 3 while they're off, before making anything public.
+`e2e/m4-staging.mjs` runs M4's acceptance tests, M4-01 to M4-17. It needs public rooms on, which is **the owner's call at the gate**, and stops at once with exit code 3 while they're off, before making anything public. The owner made that call for staging on 2026-11-10: `PUBLIC_ROOMS` is `true` under `env.staging` in `apps/api/wrangler.jsonc` and nowhere else.
 
 - **People:** a full run takes 23 sign-ins from the test sign-up: 22 new test people and the test operator. The sign-up allows 6 a minute and 40 a day across every run, so the script waits out the minute's limit itself, and only one full run fits in 24 hours.
 - **The operator:** M4-14 signs in staging's one fixed test operator, the same person every run. **Before the first full run**, get its ID with `--operator-id`, which signs it in, prints the ID (`per_e2e_…`) and stops, at the cost of one sign-in. **The owner adds that ID to the API's `OPERATORS` once.** Until then M4-14 fails.

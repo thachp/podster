@@ -104,7 +104,7 @@ The gateway only translates. Rust decides what is public, from the room's curren
 
 The architect can rule on the questions. These can't be settled without the owner, because they loosen the security stance, change cloud configuration, name people with new authority, or are legal text:
 
-- **Switching `PUBLIC_ROOMS` on in staging** at step 14. It's the first unauthenticated read surface. Until then, the flag stays off everywhere and public reads answer not-found.
+- **Switching `PUBLIC_ROOMS` on in staging** at step 14. It's the first unauthenticated read surface. Until then, the flag stays off everywhere and public reads answer not-found. **The owner said yes on 2026-11-10**, with the takedown contact still a placeholder; the flag is set for staging only.
 - **Legal text** at step 3: terms, acceptable use, the takedown contact and decision 59's export answer. It's the owner's to approve, and it may need a lawyer.
 - **Naming operators** at step 10. An operator can suspend any room's public surface and any agent's public claims. The staging list is person IDs in the API's configuration.
 - **Each deeper security pass,** asked before it runs, as `CLAUDE.md` says.

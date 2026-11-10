@@ -1,6 +1,6 @@
 # Legal and policy drafts
 
-**Approved by the owner on 2026-11-09.** These are drafts for [M4 step 3](../m4-plan.md#build-order). By [decision 167](../spec/PRODUCT.md#decisions-needed) the owner approved this text on 2026-11-09. The one thing still owed is a real takedown contact, which must be filled in before `PUBLIC_ROOMS` is switched on anywhere. It may still need a lawyer before anyone outside the project relies on it. None of it is published, and nothing in the app links to it yet.
+**Approved by the owner on 2026-11-09.** These are drafts for [M4 step 3](../m4-plan.md#build-order). By [decision 167](../spec/PRODUCT.md#decisions-needed) the owner approved this text on 2026-11-09. The one thing still owed is a real takedown contact, which must be filled in before `PUBLIC_ROOMS` is switched on anywhere but staging; the owner made that one exception on 2026-11-10, recorded in [takedown.md](takedown.md). It may still need a lawyer before anyone outside the project relies on it. None of it is published, and nothing in the app links to it yet.
 
 | Draft | What it covers |
 | --- | --- |

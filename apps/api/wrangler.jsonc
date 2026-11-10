@@ -45,7 +45,9 @@
       "workers_dev": false,
       "preview_urls": false,
       "r2_buckets": [{ "binding": "ASSETS", "bucket_name": "podster-assets-staging" }],
-      "vars": { "APP_URL": "https://app-staging.podster.dev", "GATEWAY_URL": "https://gateway-staging.podster.dev" },
+      // PUBLIC_ROOMS switches public rooms on (M4 step 14). The owner said to switch it on for staging on 2026-11-10. It's set
+      // here only: a test fails if the top level or any other environment sets it.
+      "vars": { "APP_URL": "https://app-staging.podster.dev", "GATEWAY_URL": "https://gateway-staging.podster.dev", "PUBLIC_ROOMS": "true" },
       "queues": {
         "producers": [{ "binding": "WAKE", "queue": "podster-wake-staging" }, { "binding": "SCAN", "queue": "podster-scan-staging" }, { "binding": "A2A", "queue": "podster-a2a-staging" }],
         "consumers": [

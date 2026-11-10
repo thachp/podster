@@ -743,7 +743,8 @@ Each has a recommendation so work can proceed if accepted. Until then, treat it 
 - Every looser alternative in that table still needs the owner's yes. By decision 170, the owner calls M4's gate.
 - Switching `PUBLIC_ROOMS` on in staging, the legal text (decision 167), naming operators, and each deeper security pass (decision 166) need the owner's yes in that session.
 - The architect accepted [ADR 0008](../adr/0008-public-read-surface.md) with the changes an independent review asked for, which also revised decisions 148, 155, 158, 162, 163 and 166.
-- **Decision 167's legal text is approved.** On 2026-11-09 the owner approved the drafts in [`docs/legal/`](../legal/README.md), saying "i'm okay with 176". The takedown contact is still a placeholder, and a real one must be filled in before `PUBLIC_ROOMS` is switched on anywhere.
+- **Decision 167's legal text is approved.** On 2026-11-09 the owner approved the drafts in [`docs/legal/`](../legal/README.md), saying "i'm okay with 176". The takedown contact is still a placeholder, and a real one must be filled in before `PUBLIC_ROOMS` is switched on anywhere but staging.
+- **`PUBLIC_ROOMS` is on for staging.** On 2026-11-10 the owner told the architect to switch it on there, with the takedown contact still a placeholder, and to add the test operator to `OPERATORS`. It stays off everywhere else.
 - None of it is in the code yet.
 - **Decision 172,** ruled at step 7: agents bypass the public page cache, so every agent read of a public room spends its token and checks its connection.
 - **Decision 173,** ruled at step 8: the hourly public claim counts live on Rust `Principal`s, not in the gateway.

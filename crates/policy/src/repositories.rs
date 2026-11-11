@@ -6,7 +6,7 @@
 //!
 //! | Action | Who |
 //! | --- | --- |
-//! | Ask for the room's repository, or retry its setup | A person who is the room's owner or a room admin, whose authority holds. Never an agent (AC-10) |
+//! | Ask for the room's repository, or retry its setup | A person who is the room's owner or a room admin, whose authority holds, and whom the deployment's list of requesters allows, if it has one. Never an agent (AC-10) |
 //! | Give a `push` or `merge` grant | The same: a person who is the room's owner or a room admin, whose authority holds. Never an agent, whatever role is stored for it, and nobody without that room role (AC-10, AC-11) |
 //! | Take a grant back | The room's owner or a room admin, as a person; a person who administers the room's organization, so a grant can be pulled when the owner has left; and the grant's holder, for their own. Nobody else, and an agent never takes back another's |
 //! | Receive a grant | A current participant, person or agent, who isn't there through a public claim |
@@ -26,6 +26,7 @@
 //! caller who can't see the task. The core decisions answer `task_not_linked` and `repo_not_ready` before they look at
 //! a grant, so run alone they'd tell such a caller something about the task.
 
+use podster_core::provisioning::RepositoryRequesters;
 use podster_core::repo_grants::{check_grant, Grant, GrantRefusal, GrantUse};
 use podster_core::repo_merge::{same_controller, Actor};
 use podster_core::repositories::GrantAction;
@@ -50,6 +51,9 @@ pub enum RepoDenial {
     /// `public_participant`: the caller is in the room through a public claim, and uses no grant, even one given before
     /// that was so.
     PublicParticipant,
+    /// `repository_requests_closed`: this deployment lets only the people it names ask for a room's repository, and
+    /// the caller, who otherwise could, isn't one. It says nothing of who is.
+    RequestsClosed,
     /// `self_merge`: nobody merges work that the person controlling them also controls the submitter of.
     SelfMerge,
     /// `grant_required`, `grant_expired` or `grant_stale`
@@ -65,6 +69,7 @@ impl RepoDenial {
             RepoDenial::GranteeNotParticipant => "grantee_not_participant",
             RepoDenial::GranteePublic => "grantee_public",
             RepoDenial::PublicParticipant => "public_participant",
+            RepoDenial::RequestsClosed => "repository_requests_closed",
             RepoDenial::SelfMerge => "self_merge",
             RepoDenial::Grant(refusal) => refusal.code(),
         }
@@ -103,6 +108,26 @@ pub fn authorize_repository_admin(caller: &Caller) -> Result<(), RepoDenial> {
     }
     if !holds_repository_delegation(caller.kind, caller.role, true) {
         return Err(RepoDenial::NotAllowed);
+    }
+    Ok(())
+}
+
+/// Who may ask for the room's repository, or retry its setup: whoever [`authorize_repository_admin`] lets, and whom
+/// the deployment's own list of requesters lets as well. The room's rule comes first, so only a person who could
+/// otherwise ask learns that requests are closed to them, and nobody learns who is listed. `requesters` is the
+/// Worker's setting, read by `RepositoryRequesters::parse`, and the caller's ID is the verified one.
+/// `deployment_operators` is the people the Worker's own configuration names as Podster operators, the list
+/// `moderation::parse_operators` reads; it counts only where the setting holds the `operators` entry. An agent is
+/// refused by the room's rule before either is read, so one whose ID is somehow among the operators gets nothing.
+/// It bears on asking and retrying alone: a grant, a token, a merge and a read never come here.
+pub fn authorize_repository_request(
+    caller: &Caller,
+    requesters: &RepositoryRequesters,
+    deployment_operators: &[&str],
+) -> Result<(), RepoDenial> {
+    authorize_repository_admin(caller)?;
+    if !requesters.allows(&caller.id, deployment_operators) {
+        return Err(RepoDenial::RequestsClosed);
     }
     Ok(())
 }

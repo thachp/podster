@@ -87,14 +87,24 @@ pub(crate) async fn record_operator_action(
     }
 }
 
+/// The deployment's operators as configured, for `parse_operators`: a secret on staging, which the owner sets
+/// (docs/staging.md), or a plain binding in tests, read from the binding named `OPERATORS`. Empty when it's unset,
+/// and empty when what's bound isn't a string, so either names nobody.
+pub(crate) fn configured_operators(env: &Env) -> String {
+    operators_under(env, "OPERATORS")
+}
+
+/// The operators configured under a binding's name: its text, or nothing if it's absent or isn't a string.
+pub(crate) fn operators_under(env: &Env, name: &str) -> String {
+    match crate::setting(env, name) {
+        crate::Setting::Text(configured) => configured,
+        crate::Setting::Absent | crate::Setting::Unreadable => String::new(),
+    }
+}
+
 /// Refuses anyone who isn't a configured operator. An agent never is.
 pub(crate) fn require_operator(env: &Env, caller: &Caller) -> R<()> {
-    // A secret on staging, which the owner sets (docs/staging.md), or a plain binding in tests.
-    let configured = env
-        .secret("OPERATORS")
-        .map(|v| v.to_string())
-        .or_else(|_| env.var("OPERATORS").map(|v| v.to_string()))
-        .unwrap_or_default();
+    let configured = configured_operators(env);
     if is_operator(&caller.kind, &caller.id, &parse_operators(&configured)) {
         Ok(())
     } else {

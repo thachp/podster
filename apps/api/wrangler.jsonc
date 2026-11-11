@@ -48,18 +48,24 @@
       // PUBLIC_ROOMS switches public rooms on (M4 step 14). The owner said to switch it on for staging on 2026-11-10. It's set
       // here only: a test fails if the top level or any other environment sets it.
       // MANAGED_REPOSITORIES switches managed repositories on (M5, ADR 0009): a room owner's request then creates a public
-      // repository in the organization named here. It is set nowhere, so they are off everywhere. The owner had it
-      // switched on for staging on 2026-11-11, and the architect took it out again that day as an interim tightening:
-      // staging's sign-in is open to anyone, and since decision 194 no operator approves who may ask (docs/staging.md).
-      // It goes back once only named people and test people can ask for a repository on staging. The rest stay: the
-      // organization and the three Apps' IDs and installation IDs, none of them secret, which the rooms still need to
-      // revoke the tokens that are out. Each App's private key and the token-sealing key are secrets the owner sets
-      // (docs/staging.md), and are set nowhere here. A test fails if the switch is set anywhere, or if the top level or
-      // any other environment sets one of the rest.
+      // repository in the organization named here. The owner said "let's unblock m5 staging" on 2026-11-11. The
+      // architect took it out again that day, because staging's sign-in is open to anyone and since decision 194 no
+      // operator approves who may ask, and put it back with REPOSITORY_REQUESTERS beside it.
+      // REPOSITORY_REQUESTERS names who this deployment lets ask for a room's repository or retry its setup (ADR 0009,
+      // docs/staging.md): entries separated by commas. operators stands for the people the OPERATORS secret names, read
+      // server-side, and test-people for people made by the test sign-up; a person's ID may be listed too, and staging
+      // lists none, so no person's ID is committed here. Set but empty, malformed or holding an unknown word, it lets
+      // nobody. Unset, it lets everyone the room's own rule lets, which staging must never be while its sign-in is
+      // open: a test fails if the switch is on here without it.
+      // The rest say where and as whom: the organization and the three Apps' IDs and installation IDs, none of them
+      // secret. Each App's private key and the token-sealing key are secrets the owner sets (docs/staging.md), and are
+      // set nowhere here. All of it is for staging only: a test fails if the top level or any other environment sets one.
       "vars": {
         "APP_URL": "https://app-staging.podster.dev",
         "GATEWAY_URL": "https://gateway-staging.podster.dev",
         "PUBLIC_ROOMS": "true",
+        "MANAGED_REPOSITORIES": "true",
+        "REPOSITORY_REQUESTERS": "operators,test-people",
         "GITHUB_ORG_LOGIN": "podsterdev",
         "GITHUB_ORG_ID": "354820586",
         "GITHUB_PROVISION_APP_ID": "5695065",

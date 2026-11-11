@@ -139,6 +139,17 @@ export function repositoryOrgProblem(fullName) {
 }
 
 /**
+ * Why one of the run's people can't ask for the room's repository, or null. Staging names who may ask in the API's
+ * REPOSITORY_REQUESTERS, and the run's people are in it through its `test-people` entry alone: each is made by the test
+ * sign-up, so their ID starts `per_e2e_`. `mayRequest` is what the room's repository read said to that person.
+ */
+export function requesterProblem(personId, mayRequest) {
+  if (typeof personId !== "string" || !/^per_e2e_[A-Za-z0-9]+$/.test(personId)) return `${JSON.stringify(personId)} isn't a test person's ID, so staging's list of repository requesters can't hold them as one`;
+  if (mayRequest !== true) return `staging told ${personId} they may not ask for a repository (may_request: ${JSON.stringify(mayRequest)}). The API's REPOSITORY_REQUESTERS must hold the entry test-people, exactly, with every other entry well formed`;
+  return null;
+}
+
+/**
  * The grants a run gave that must not outlive it: each is noted when given and settled once the run has seen it
  * ended, expired or taken back. Whatever is left is what clean-up takes back, so a wait that timed out leaves no live grant.
  */

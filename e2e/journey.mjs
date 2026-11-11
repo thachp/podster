@@ -7,8 +7,8 @@
 // It exits 1 on a failure. A gap is something the product doesn't do yet: it's reported and doesn't fail the run, and
 // `--strict` makes it fail. It writes results/<host>-<time>.json, which holds IDs and outcomes, never cookies or tokens.
 //
-// `--managed-repositories-on` says the deployment has MANAGED_REPOSITORIES switched on. Staging had it on for part of
-// 2026-11-11 and has it off again, so a staging run takes no flag until docs/staging.md says it is back on.
+// `--managed-repositories-on` says the deployment has MANAGED_REPOSITORIES switched on. Staging's configuration has it
+// on, after a pause for part of 2026-11-11; a staging run takes the flag only once that configuration is deployed.
 // The switch can't be read from outside and is never guessed: without the flag AC-17 and M1-CLAIM want no tool named for
 // a merge or a deploy, and with it they want exactly `merge_task` and its refusal. Each case fails on the other's answer.
 import { disagreements } from "./agree.mjs";

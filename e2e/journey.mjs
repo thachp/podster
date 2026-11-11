@@ -6,6 +6,10 @@
 //
 // It exits 1 on a failure. A gap is something the product doesn't do yet: it's reported and doesn't fail the run, and
 // `--strict` makes it fail. It writes results/<host>-<time>.json, which holds IDs and outcomes, never cookies or tokens.
+//
+// `--managed-repositories-on` says the deployment has MANAGED_REPOSITORIES switched on, as staging has since 2026-11-11.
+// The switch can't be read from outside and is never guessed: without the flag AC-17 and M1-CLAIM want no tool named for
+// a merge or a deploy, and with it they want exactly `merge_task` and its refusal. Each case fails on the other's answer.
 import { disagreements } from "./agree.mjs";
 import { generateKeypair, signAgentJWT } from "@auth/agent";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -20,6 +24,15 @@ const base = option("--base-url") ?? process.env.PODSTER_E2E_BASE_URL;
 const strict = args.includes("--strict");
 const keepSessions = args.includes("--keep-sessions");
 const signOutOnly = args.includes("--sign-out-only");
+const managedOn = args.includes("--managed-repositories-on");
+// Every tool an agent sees that is named for a merge or a deploy. No agent-visible tool lets an agent merge on its own
+// authority: with the switch on the one such tool is `merge_task`, which needs a separate grant (AC-17, decision 186).
+const MERGE_TOOLS = managedOn ? ["merge_task"] : [];
+const mergeTools = (tools) => tools.filter((t) => /merge|deploy/.test(t)).sort();
+// What `merge_task` answers an agent that holds no merge grant, in a room with no repository, for a task it can see.
+// No change is on record there, so nobody is named as the submitter, and the API refuses every requester as possibly
+// controlled by the same person. `grant_required`, in a room that has a repository, is merge-check.mjs's M5-S7iii.
+const MERGE_REFUSAL = "self_merge";
 
 if (!base) {
   console.error("Pass --base-url, or set PODSTER_E2E_BASE_URL.");
@@ -754,7 +767,13 @@ async function acceptance() {
     for (const who of [guest, lead]) refused(await who.call("verify_task", { ...where, submission_no: submitted.submission_no, idempotency_key: key() }), "not_allowed", `${who.label} verifying`);
     eq((await reviewer.must("verify_task", { ...where, submission_no: submitted.submission_no })).status, "completed", "the reviewer's approval");
     const tools = await lead.tools();
-    ok(!tools.some((t) => /merge|deploy/.test(t)), "a merge or deploy tool is exposed");
+    eq(mergeTools(tools), MERGE_TOOLS, managedOn ? "the merge and deploy tools, with managed repositories on" : "the merge and deploy tools");
+    // Approval gave nobody a merge: the reviewer who approved and the requester are each refused.
+    if (managedOn) {
+      for (const who of [reviewer, lead]) {
+        refused(await who.call("merge_task", { ...where, submission_no: submitted.submission_no, commit_sha: "a".repeat(40), idempotency_key: key() }), MERGE_REFUSAL, `${who.label} merging approved work with no grant`);
+      }
+    }
   });
 
   await check("AC-22", "audit history can't be edited or deleted, and only the room's people can read it", async () => {
@@ -1010,12 +1029,15 @@ async function criteria() {
     const at = { ...inRoom(), task_id: theirs.id };
     const taken = await spare.must("accept_task", { ...at, version: theirs.version });
     const sent = await spare.must("submit_task", { ...at, version: taken.version, note: "Done", artifacts: [{ uri: "https://example.com/m1", label: "Work" }] });
-    const accessTools = /member|invit|revoke|disconnect|withdraw|admin|grant|scope|merge|deploy|archive/;
+    const accessTools = /member|invit|revoke|disconnect|withdraw|admin|grant|scope|archive/;
     for (const holder of [lead, writer]) {
       refused(await holder.call("verify_task", { ...at, submission_no: sent.submission_no, idempotency_key: key() }), "not_allowed", `${holder.label} approving`);
       refused(await holder.call("request_changes", { ...at, submission_no: sent.submission_no, reason: "No", idempotency_key: key() }), "not_allowed", `${holder.label} sending it back`);
       const tools = await holder.tools();
       ok(tools.includes("claim_role") && !tools.some((tool) => accessTools.test(tool)), `${holder.label} has an access tool: ${tools.join(", ")}`);
+      // A claim carries no merge either. Merge and deploy tools are held to the exact list, apart from the pattern above.
+      eq(mergeTools(tools), MERGE_TOOLS, `${holder.label}'s merge and deploy tools`);
+      if (managedOn) refused(await holder.call("merge_task", { ...at, submission_no: sent.submission_no, commit_sha: "a".repeat(40), idempotency_key: key() }), MERGE_REFUSAL, `${holder.label} merging with no grant`);
     }
     const members = (await personA.must("GET", `/v1/workspaces/${room}`)).members;
     // What each preset's role is, and never an admin's.

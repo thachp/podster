@@ -110,7 +110,11 @@ jobs:
         working-directory: apps/gateway
       - run: npm ci
         working-directory: e2e
-      - run: npx playwright install --with-deps chromium
+      # The browser from Playwright's own host, then its system packages from apt with bounded retries. If the runner's
+      # package mirror is down, the job goes on only when the browser starts and has a font for each script the
+      # accessibility run times, and the log then has a line starting "WARNING browser-system-packages-not-installed".
+      # Why, in e2e/install-browser.mjs and docs/m0-gate.md.
+      - run: node install-browser.mjs
         working-directory: e2e
       - run: node run-a11y.mjs --skip-web-build
         working-directory: e2e
@@ -195,6 +199,9 @@ jobs:
         working-directory: e2e
       # Third-party test tools (the A2A kit, fasta2a, LangGraph) get an allow-listed environment, never a secret of ours.
       - run: node child-env-selftest.mjs
+        working-directory: e2e
+      # The web job's browser install: when it retries, when it goes on without apt's packages, and when it stops.
+      - run: node install-browser-selftest.mjs
         working-directory: e2e
       # The accessibility run writes into the Workers' files once they've stopped, so "stopped" has to mean every process.
       - run: node stack-stop-selftest.mjs

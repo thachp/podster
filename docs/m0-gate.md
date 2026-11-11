@@ -281,6 +281,13 @@ Write pass or fail for each step.
 
 [e2e/run-a11y.mjs](../e2e/run-a11y.mjs) starts the gateway, the API and the dashboard's production build, and [e2e/a11y.mjs](../e2e/a11y.mjs) drives them in Chromium. It runs in the `web` CI job. These are local results, on empty local databases seeded by the run itself, and they ran three times in a row with the same result before this was written.
 
+**The browser in CI (2026-11-11).** The `web` job installs Chromium with [e2e/install-browser.mjs](../e2e/install-browser.mjs), not `npx playwright install --with-deps`. On 2026-11-11 the runners' Ubuntu mirror stopped resolving, apt waited ten minutes and failed the job before any check ran, on `main` and every open PR. On GitHub's Ubuntu 24.04 image the libraries Chromium needs are already installed, and apt only adds fonts. The script downloads the browser from Playwright's own host, tries the system packages three times at 90 seconds each, then starts the browser once with [e2e/browser-launch-check.mjs](../e2e/browser-launch-check.mjs).
+
+- If the packages installed, nothing else changes.
+- If they didn't and the browser can't start, the job fails with the browser's error.
+- If they didn't and the browser has no font for Arabic, Thai or Hebrew, the job fails and names the script. The checks on unbroken scripts bound how long the main thread is blocked laying that text out. Text with no font is drawn as boxes and never shaped, so those checks would pass having measured nothing.
+- Otherwise the job goes on, and its log has one line starting `WARNING browser-system-packages-not-installed`, also shown as a warning on the run's page. It means that run used the runner image's own libraries and fonts. Every check ran, but text may have been drawn in other fonts than usual, so a timing or layout result from that run that differs from other runs should be read with that in mind.
+
 | Check | Result |
 | --- | --- |
 | axe with WCAG 2.0, 2.1 and 2.2 A and AA rules, including contrast, on 33 screens and states, each in light and dark | 66 runs, no violations, after the fixes below |

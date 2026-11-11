@@ -4,6 +4,8 @@
 import { childEnv } from "./child-env.mjs";
 
 export const STAGING = "https://gateway-staging.podster.dev";
+/** The one GitHub organization this run may make repositories in. Pinned here, so a changed file can't point it elsewhere. */
+export const STAGING_ORG = "podsterdev";
 export const STATUS_CONTEXT = "podster/review";
 export const DEFAULT_BRANCH_REF = "~DEFAULT_BRANCH";
 /** The merge App's name on staging (docs/staging.md). A status it sets is created by `<name>[bot]`. */
@@ -15,20 +17,20 @@ export const MERGE_APP_SLUG = "podster-staging-merge";
  */
 export const SIGN_UPS = [
   { who: "the room's owner", why: "owns the room and its repository, gives grants, reviews, and controls the submitting agent" },
-  { who: "a second person", why: "controls the merging agent, an agent with no grant, a guest and a public claimant" },
-  { who: "the fixed test operator", why: "gives the owner's organization the provisioning delegation; not spent when PODSTER_E2E_OPERATOR_COOKIE is set" },
+  { who: "a second person", why: "is the room's admin, who asks for the repository and gives the push grant, and controls the merging agent, an agent with no grant, a guest and a public claimant" },
 ];
 
 /** Every check, in the order it runs. A result for an ID that isn't here is a bug in the script. */
 export const PLAN = [
   ["M5-00", "managed repositories are switched on, and a room that hasn't asked has no repository"],
-  ["M5-14", "without the organization's delegation the owner's request is refused 403 not_delegated, and nothing is recorded"],
+  ["M5-14", "no operator approves first: an organization nobody set a delegation for holds it, and the room's owner and admin are told so"],
   ["M5-04", "a request naming an organization is refused 400 invalid_argument"],
-  ["M5-01", "the owner's request is recorded as pending and becomes a ready repository, with GitHub's ID recorded"],
+  ["M5-01", "a room admin's request, a person who isn't the owner, is recorded as pending and becomes a ready repository, with GitHub's ID recorded"],
   ["M5-02", "the repository is public and under podsterdev on GitHub, while the room is private"],
   ["M5-01b", "GitHub shows exactly the two rulesets of ADR 0009 on the default branch, both active"],
+  ["M5-A1", "an agent can't be made a room admin (400 invalid_argument), and has no tool to ask for a repository or give a grant"],
   ["M5-05", "an agent with no grant is refused grant_required, with no token in the answer"],
-  ["M5-G2", "the owner's push grant is given and listed as live"],
+  ["M5-G2", "the room admin's push grant is given, recorded as theirs and listed as live"],
   ["M5-06a", "the agent gets a token for the room's repository only, and asking again gives the same one"],
   ["M5-06b", "the token pushes a task branch with git over HTTPS and opens a pull request"],
   ["M5-06c", "git push to the default branch with the token is refused by GitHub, and the branch doesn't move"],
@@ -66,7 +68,8 @@ export const USAGE = `node m5-staging.mjs --base-url ${STAGING} [--dry-run]
                  It defaults to apps/api/wrangler.jsonc.
 
   PODSTER_E2E_SIGNUP_SECRET     staging's test sign-up secret. Needed.
-  PODSTER_E2E_OPERATOR_COOKIE   an operator's session, instead of the fixed test operator. Optional.`;
+
+  It makes repositories in ${STAGING_ORG} and nowhere else: a configuration naming another organization is refused.`;
 
 /** The arguments, or why they're refused. Nothing is guessed: an unknown flag or a missing value is an error. */
 export function parseArgs(argv, env = {}) {
@@ -125,7 +128,35 @@ export function stagingConfig(vars = {}) {
   if (!org || !/^[A-Za-z0-9-]+$/.test(org) || !Number.isInteger(orgId) || orgId <= 0 || !Number.isInteger(mergeAppId) || mergeAppId <= 0) {
     return { error: "the API's wrangler file doesn't name staging's GitHub organization, its ID and the merge App's ID" };
   }
+  // The organization is pinned in code. A file that names another one is refused, whatever else it holds.
+  if (org !== STAGING_ORG) return { error: `the API's wrangler file names ${org} as staging's GitHub organization, and this run makes repositories in ${STAGING_ORG} only` };
   return { org, orgId, mergeAppId };
+}
+
+/** Why a repository's full name isn't one under the pinned organization, or null. What staging answers is checked too. */
+export function repositoryOrgProblem(fullName) {
+  return typeof fullName === "string" && /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(fullName) && fullName.split("/")[0] === STAGING_ORG ? null : `staging linked ${JSON.stringify(fullName)}, which isn't a repository under ${STAGING_ORG}`;
+}
+
+/**
+ * The grants a run gave that must not outlive it: each is noted when given and settled once the run has seen it
+ * ended, expired or taken back. Whatever is left is what clean-up takes back, so a wait that timed out leaves no live grant.
+ */
+export class GrantLedger {
+  #open = new Map();
+
+  note(id, what) {
+    if (typeof id === "string" && id) this.#open.set(id, what);
+  }
+
+  settle(id) {
+    this.#open.delete(id);
+  }
+
+  /** The grants still to take back, oldest first, each with what it was. */
+  left() {
+    return [...this.#open].map(([id, what]) => ({ id, what }));
+  }
 }
 
 /** Results by ID, printed as they come. Exit code 0 only when nothing failed. */

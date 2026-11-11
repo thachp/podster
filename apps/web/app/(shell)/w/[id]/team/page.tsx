@@ -44,7 +44,9 @@ export default async function Team({ params }: { params: Promise<{ id: string }>
   const featureOn = repository.kind === "on" || repositoryRefused;
   const grants = grantsResult === null ? ({ kind: "off" } as const) : availability(grantsResult);
   const linked = repository.kind === "on" ? repository.data.repository !== null : null;
-  const isOwner = identity.data.id === room.owner && typeof room.owner_left_at !== "number";
+  // The room's owner and its admins run its repository. Only what to offer: Rust decides every request. An owner the
+  // room records as having left their organization is offered nothing.
+  const runsRepository = canManage && (identity.data.id !== room.owner || typeof room.owner_left_at !== "number");
   const names = { ...people, ...Object.fromEntries(agentRows.map((agent) => [agent.id, agent.name])) };
   const team = (
     <TeamScreen
@@ -76,7 +78,7 @@ export default async function Team({ params }: { params: Promise<{ id: string }>
           roomId={id}
           grants={grants.data.grants}
           linked={linked}
-          isOwner={isOwner}
+          runsRepository={runsRepository}
           isOrgAdmin={roomOrg !== null && identity.data.admin_orgs.includes(roomOrg)}
           viewerId={identity.data.id}
           policyVersion={canManage ? room.policy_version : null}

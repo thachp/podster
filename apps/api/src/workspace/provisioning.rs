@@ -1,9 +1,11 @@
 //! Provisioning the room's managed repository (M5 step 4, ADR 0009, which is proposed).
 //!
-//! - **Two person commands**, for the room's owner: ask for the repository, and retry a setup that failed or whose
-//!   outcome is unknown. Each needs the organization's provisioning delegation as well, which the organization's own
-//!   `Principal` holds and a Podster operator gives (AC-10). Each commits its state, audit entry, event and stored answer
-//!   in one transaction, and calls nothing outside.
+//! - **Two person commands**, for a person who is the room's owner or a room admin (the owner's decision of 2026-11-11,
+//!   "Owner and admins"): ask for the repository, and retry a setup that failed or whose outcome is unknown. Each needs
+//!   the organization's provisioning delegation as well, which the organization's own `Principal` holds. Every
+//!   organization holds it unless a Podster operator took it back ("No gate, with limits"), and a request is counted
+//!   against a daily cap for the organization and for the person asking. Each commits its state, audit entry, event and
+//!   stored answer in one transaction, and calls nothing outside.
 //! - **One job**, run by the room's alarm while a request is `pending`. It rechecks authority, then talks to the provider
 //!   through `crate::github::Provider`, and commits each thing it learns in a transaction of its own. The repository is
 //!   linked, and the request made `ready`, only after everything readiness needs was read back and judged by
@@ -20,11 +22,12 @@ use super::*;
 use crate::github::{Config, CreateAnswer, GitHubApp, Provider};
 use podster_core::provisioning::{
     job_backoff_ms, missing_steps, reserved_name, retry_allowed, retry_name, retry_wait_ms,
-    verify_ready, Expected, MAX_SETUP_RUNS,
+    verify_ready, Expected, RequestLimitReached, MAX_SETUP_RUNS,
 };
 use podster_core::repositories::{
     decide_retry, valid_repo_name, RepoVisibility, RequestState, RetryPlan, RetryRefusal,
 };
+use podster_policy::repositories::authorize_repository_admin;
 
 const PROVIDER: &str = "github";
 const SWITCH_VAR: &str = "MANAGED_REPOSITORIES";
@@ -74,46 +77,19 @@ fn refuse<T>(status: u16, code: &'static str) -> R<T> {
     Err(ApiError::api(status, code))
 }
 
-/// The room's owner by current standing: a person the room resolved as its owner, whose owner authority holds. The
-/// stored owner alone isn't enough, since an owner who left the organization is still recorded as one until recovery.
-pub(super) fn is_current_owner(caller: &Caller) -> bool {
-    caller.kind == PrincipalKind::Person && caller.role == Role::Owner
+/// Whether the caller runs the room's repository: a person the room resolved as its owner or as a room admin.
+/// `resolve_caller` gives a role only while it stands, so one who left their organization has none here.
+pub(super) fn runs_repository(caller: &Caller) -> bool {
+    authorize_repository_admin(caller).is_ok()
 }
 
-/// Only the room's owner, as a person, asks for or retries the room's repository.
+/// Only a person who is the room's owner or a room admin asks for or retries the room's repository.
 pub(super) fn may_request(caller: &Caller) -> R<()> {
-    if is_current_owner(caller) {
-        Ok(())
-    } else {
-        Err(ApiError::not_allowed())
-    }
+    authorize_repository_admin(caller).map_err(repositories::denied)
 }
 
-fn request_row(sql: &SqlStorage) -> R<Option<Value>> {
-    Ok(rows(
-        sql,
-        "SELECT id, state, name, visibility, attempt, provider_name, provider_repo_id, reason, requested_by, runs, retry_after, job_not_before FROM repo_request",
-        vec![],
-    )?
-    .into_iter()
-    .next())
-}
-
-/// `POST repository { name, visibility }`: records the room's one request for a repository. `delegated` is what the
-/// organization's `Principal` said just before this transaction, and the job asks again before it calls the provider.
-pub(super) fn request(
-    sql: &SqlStorage,
-    who: &Participant,
-    body: &Value,
-    switched_on: bool,
-    delegated: bool,
-    now: i64,
-) -> R<Value> {
-    may_request(&who.caller)?;
-    // Switched off, the route isn't there, for the owner as for anyone.
-    if !switched_on {
-        return Err(ApiError::not_found());
-    }
+/// A request's two fields, checked: the chosen name and visibility. Nothing else is accepted.
+fn requested(body: &Value) -> R<(&str, RepoVisibility)> {
     let fields = body.as_object().ok_or_else(ApiError::invalid_argument)?;
     if fields.keys().any(|k| k != "name" && k != "visibility") {
         return Err(ApiError::invalid_argument());
@@ -134,11 +110,77 @@ pub(super) fn request(
     if visibility != RepoVisibility::Public {
         return refuse(409, "private_unavailable");
     }
+    Ok((name, visibility))
+}
+
+/// Whether a request, as far as the room alone can tell, would be recorded if the organization holds the delegation
+/// and the caps allow it: so the room knows whether to have it counted. `Ok(false)` when the room already has its one
+/// request, which the command then answers for itself.
+pub(super) fn worth_counting(sql: &SqlStorage, who: &Participant, body: &Value) -> R<bool> {
+    may_request(&who.caller)?;
+    requested(body)?;
+    Ok(request_row(sql)?.is_none())
+}
+
+fn request_row(sql: &SqlStorage) -> R<Option<Value>> {
+    Ok(rows(
+        sql,
+        "SELECT id, state, name, visibility, attempt, provider_name, provider_repo_id, reason, requested_by, runs, retry_after, job_not_before FROM repo_request",
+        vec![],
+    )?
+    .into_iter()
+    .next())
+}
+
+/// For whom this call got "held" from both counts, before the command's transaction: which person, in which
+/// organization. Never taken from the request.
+#[derive(Clone, Debug)]
+pub(super) struct Counted {
+    pub(super) person: String,
+    pub(super) org: String,
+}
+
+/// `delegation_unavailable`: the organization's answer and the caps' counts aren't in hand for this caller, as the room
+/// resolves them now. Nothing was recorded, and asking again is safe.
+const NOT_COUNTED: &str = "delegation_unavailable";
+
+/// The organization the room is in now.
+fn room_org(sql: &SqlStorage) -> R<Option<String>> {
+    Ok(rows(sql, "SELECT owner_org_id FROM workspace", vec![])?
+        .first()
+        .and_then(|room| text(&room["owner_org_id"])))
+}
+
+/// `POST repository { name, visibility }`: records the room's one request for a repository. `delegated` is what the
+/// organization's `Principal` said just before this transaction, and the job asks again before it calls the provider.
+/// `counted` says for whom that same call got "held" from both daily counts. A request is recorded only if that is
+/// exactly the caller this transaction resolved, in the organization the room is in now: someone who came to hold
+/// authority, or a room that changed hands, between the count and here records nothing, and asks again.
+pub(super) fn request(
+    sql: &SqlStorage,
+    who: &Participant,
+    body: &Value,
+    switched_on: bool,
+    delegated: bool,
+    counted: Option<&Counted>,
+    now: i64,
+) -> R<Value> {
+    may_request(&who.caller)?;
+    // Switched off, the route isn't there, for the owner as for anyone.
+    if !switched_on {
+        return Err(ApiError::not_found());
+    }
+    let (name, visibility) = requested(body)?;
     if !delegated {
         return refuse(403, "not_delegated");
     }
     if request_row(sql)?.is_some() {
         return refuse(409, "repo_request_exists");
+    }
+    // Last, and in this transaction: both caps were asked for this caller and this organization, by this very call.
+    let org = room_org(sql)?;
+    if !counted.is_some_and(|c| c.person == who.caller.id && Some(&c.org) == org.as_ref()) {
+        return refuse(503, NOT_COUNTED);
     }
     let id = format!("rr_{}", uuid::Uuid::new_v4().simple());
     exec(
@@ -432,6 +474,97 @@ impl Workspace {
             .map(|held| held["granted"].as_bool() == Some(true))
     }
 
+    /// Before a request for the room's repository is recorded: asks the room's organization whether it holds the
+    /// delegation and, in that same transaction of the organization's, has the room hold a place in its daily count; then
+    /// the same in the asker's own object. Returns whether the organization holds the delegation, and for whom both
+    /// places are held. The command's transaction records a request only if this call got "held" from both for the
+    /// caller it resolves and the organization the room is in then: what this decides, outside the transaction, is only
+    /// whether to ask. A request the room would refuse anyway, or one for a room that already has its request, asks
+    /// nothing: so a replay, and asking again, count once. At either cap it's refused here, by name.
+    ///
+    /// **Nothing is ever given back.** A place is the room's, one per room in each object, stamped when it was last
+    /// asked for. A call that fails after it leaves the room counted until the stamp ages out, in the organization's
+    /// object and, if it got that far, the person's. So the counts can only be too high.
+    pub(super) async fn count_repository_request(
+        &self,
+        identity: &Identity,
+        body: &Value,
+    ) -> R<(bool, Option<Counted>)> {
+        let sql = self.state.storage().sql();
+        // Whoever the command would refuse costs no count. The command refuses them itself, in its transaction.
+        let Ok(who) = resolve_caller(&sql, identity) else {
+            return Ok((false, None));
+        };
+        if !matches!(worth_counting(&sql, &who, body), Ok(true)) {
+            let delegated = self.org_delegated().await == Some(true);
+            // A test holds this call here, after it decided not to count, to change the room before its transaction.
+            #[cfg(feature = "failpoints")]
+            self.test_hold(&sql, "test_hold_uncounted").await;
+            return Ok((delegated, None));
+        }
+        #[cfg(feature = "failpoints")]
+        if rows(
+            &sql,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_delegation_unreadable'",
+            vec![],
+        )
+        .is_ok_and(|found| !found.is_empty())
+        {
+            return Ok((false, None));
+        }
+        let room = objects::room_id(&sql)?;
+        let Some(org) = room_org(&sql)? else {
+            return Ok((false, None));
+        };
+        let person = who.caller.id.clone();
+        let limit = || ApiError::api(429, RequestLimitReached.code());
+        // The organization first. One that can't answer is one that didn't say yes, as it was before the caps.
+        let Ok(said) = principal::reserve_repo_request(&self.env, &org, &room, true).await else {
+            return Ok((false, None));
+        };
+        if !said.granted {
+            return Ok((false, None));
+        }
+        if !said.held {
+            return Err(limit());
+        }
+        // Then the person: one person can make any number of organizations, so the same cap holds for whoever asks, in
+        // their own object. If it refuses or can't answer, the organization's place for this room stays where it is.
+        match principal::reserve_repo_request(&self.env, &person, &room, false).await {
+            Ok(theirs) if theirs.held => {
+                // A test holds this call here, counted against both caps, to change the room before its transaction.
+                #[cfg(feature = "failpoints")]
+                self.test_hold(&sql, "test_hold_counted").await;
+                Ok((true, Some(Counted { person, org })))
+            }
+            Ok(_) => Err(limit()),
+            Err(_) => Err(ApiError::api(503, NOT_COUNTED)),
+        }
+    }
+
+    /// For a test: waits, if the room has a table of that name, until the test lets go, at the fake's gate for the
+    /// number in that table. So a test can change the room between this call's look and its transaction.
+    #[cfg(feature = "failpoints")]
+    async fn test_hold(&self, sql: &SqlStorage, table: &str) {
+        let gate = rows(
+            sql,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            vec![table.into()],
+        )
+        .ok()
+        .filter(|found| !found.is_empty())
+        .and_then(|_| rows(sql, &format!("SELECT gate FROM {table}"), vec![]).ok())
+        .and_then(|held| held.first().map(|row| int(&row["gate"])));
+        if let Some(gate) = gate {
+            if let Ok(request) = Request::new(
+                &format!("https://github-fake.example.com/hold?repo={gate}"),
+                Method::Get,
+            ) {
+                let _ = Fetch::Request(request).send().await;
+            }
+        }
+    }
+
     /// When the alarm should next come for a pending request, if there is one: at once, or after the wait a job that
     /// couldn't finish left behind.
     pub(super) fn provisioning_due_at(&self, sql: &SqlStorage, now: i64) -> R<Option<i64>> {
@@ -624,8 +757,9 @@ impl Workspace {
             if room_archived(sql)? {
                 return Ok(Some("room_archived"));
             }
-            if !is_owner(sql, &asker)? {
-                return Ok(Some("requester_not_owner"));
+            // Whoever asked must still be a person the room records as its owner or an admin.
+            if !repositories::still_runs_repository(sql, &asker)? {
+                return Ok(Some("requester_lost_authority"));
             }
             if held.is_some() {
                 return Ok(None);
@@ -765,7 +899,7 @@ impl Workspace {
             if still.is_empty()
                 || !rows(sql, "SELECT id FROM repo_link", vec![])?.is_empty()
                 || room_archived(sql)?
-                || !is_owner(sql, &requester)?
+                || !repositories::still_runs_repository(sql, &requester)?
             {
                 return Ok(false);
             }

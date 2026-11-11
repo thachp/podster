@@ -134,7 +134,7 @@ describe("the managed repositories migration", () => {
     // Nothing is made up for a room that never asked for a repository, and what it held is as it was.
     expect((await footprint(id)).rows).toEqual([0, 0, 0, 0, 0]);
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}/tasks/${task}`)).body.task).toMatchObject({ id: task, title: "Add the parser", assignee: ASSIGNEE.id });
-    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toEqual({ request: null, repository: null, delegated: false });
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toEqual({ request: null, repository: null, delegated: true });
     // A migrated room doesn't migrate again: a row written since is still there after reads and a write.
     await link(id);
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
@@ -184,7 +184,7 @@ describe("the managed repositories migration", () => {
 describe("the room's repository read", () => {
   it("answers a person who sees the whole room from the room's own state", async () => {
     const { id } = await room();
-    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toEqual({ request: null, repository: null, delegated: false });
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toEqual({ request: null, repository: null, delegated: true });
     await inRoom(id, (sql) => sql.exec("INSERT INTO repo_request (id, state, name, visibility, attempt, provider_name, reason, requested_by, requested_at, updated_at) VALUES ('rr_1', 'failed', 'engineering', 'public', 2, 'engineering-7f3a', 'name_taken', ?, 1000, 1500)", OWNER.id));
     await link(id, "degraded");
     const read = await api(OWNER, "GET", `/v1/workspaces/${id}/repository`);
@@ -194,7 +194,7 @@ describe("the room's repository read", () => {
     expect(read.body).toEqual({
       request: { id: "rr_1", state: "failed", name: "engineering", visibility: "public", reason: "name_taken", requested_by: OWNER.id, requested_at: 1000, updated_at: 1500, attempts_left: 5 },
       repository: { id: "rl_1", provider: "github", provider_repo_id: REPO_ID, full_name: "podsterx/engineering", visibility: "public", default_branch: "main", status: "degraded", status_reason: null, created_at: 1000, verified_at: 2000, updated_at: 2000 },
-      delegated: false,
+      delegated: true,
     });
   });
 
@@ -309,12 +309,19 @@ describe("while managed repositories are switched off", () => {
 });
 
 describe("what the read says to whom", () => {
-  it("gives `delegated` to the room's owner alone, absent and not false for anyone else", async () => {
+  it("gives `delegated` to the room's owner and admins, true until an operator takes it back, and absent for anyone else", async () => {
     const { id } = await room();
     const admin = orgAdmin("org_rp");
+    const member: Who = { id: "per_rp_plain_member", kind: "person", org: "org_rp" };
     await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: admin.id, kind: "person", org_id: "org_rp", role: "admin", policy_version: await version(id) }, { claims: { target_member: { person: admin.id, orgs: { org_rp: 1 } } } });
-    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toHaveProperty("delegated", false);
-    const theirs = await api(admin, "GET", `/v1/workspaces/${id}/repository`);
+    await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: member.id, kind: "person", org_id: "org_rp", role: "member", policy_version: await version(id) }, { claims: { target_member: { person: member.id, orgs: { org_rp: 1 } } } });
+    // No record for the organization: it holds the delegation, and the owner and an admin are both told so.
+    for (const who of [OWNER, admin]) {
+      const read = await api(who, "GET", `/v1/workspaces/${id}/repository`);
+      expect([read.status, read.body], who.id).toEqual([200, { request: null, repository: null, delegated: true }]);
+    }
+    // A person who sees the whole room and doesn't run its repository is told nothing about the delegation.
+    const theirs = await api(member, "GET", `/v1/workspaces/${id}/repository`);
     expect(theirs.status, theirs.text).toBe(200);
     expect(theirs.body).toEqual({ request: null, repository: null });
     expect(theirs.text).not.toContain("delegated");
@@ -327,29 +334,27 @@ describe("what the read says to whom", () => {
     expect(read.status, read.text).toBe(200);
     expect(read.body).toEqual({ request: null, repository: null });
     await inRoom(id, (sql) => sql.exec("DROP TABLE test_delegation_unreadable"));
-    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toHaveProperty("delegated", false);
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toHaveProperty("delegated", true);
   });
 
-  it("goes by current standing: a recorded owner who left the organization is told nothing and asks as anyone else", async () => {
+  it("goes by current standing: a recorded owner who left the organization has only what their member row gives", async () => {
     const { id } = await room();
-    const admin = orgAdmin("org_rp");
-    await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: admin.id, kind: "person", org_id: "org_rp", role: "admin", policy_version: await version(id) }, { claims: { target_member: { person: admin.id, orgs: { org_rp: 1 } } } });
-    // The room has heard its owner left the organization, and still records them as owner until recovery. They also
-    // hold a member row, so the room resolves them as the admin that row says, not as its owner.
-    await inRoom(id, (sql) => {
-      sql.exec("UPDATE workspace SET owner_left_at = ?", Date.now());
-      sql.exec("INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at) VALUES (?, 'person', 'org_rp', 'admin', ?, 0)", OWNER.id, OWNER.id);
-    });
-    const read = await api(OWNER, "GET", `/v1/workspaces/${id}/repository`);
-    expect(read.status, read.text).toBe(200);
-    expect(read.body).not.toHaveProperty("delegated");
-    // Asking answers exactly as it does for another admin who isn't the owner.
-    const body = { name: "engineering", visibility: "public" };
-    const theirs = await api(OWNER, "POST", `/v1/workspaces/${id}/repository`, body);
-    const anothers = await api(admin, "POST", `/v1/workspaces/${id}/repository`, body);
-    expect([theirs.status, theirs.body]).toEqual([anothers.status, anothers.body]);
-    expect(theirs.code).toBe("not_allowed");
-    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/repository/retry`, {})).code).toBe("not_allowed");
+    // The room has heard its owner left the organization, and still records them as owner until recovery. With no
+    // member row they have no place in the room at all.
+    await inRoom(id, (sql) => void sql.exec("UPDATE workspace SET owner_left_at = ?", Date.now()));
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).status).toBe(404);
+    expect((await api(OWNER, "POST", `/v1/workspaces/${id}/repository`, { name: "engineering", visibility: "public" })).status).toBe(404);
+    // As a plain member by their own row, they can't ask, and nothing they read says `delegated`.
+    await inRoom(id, (sql) => void sql.exec("INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at) VALUES (?, 'person', 'org_rp', 'member', ?, 0)", OWNER.id, OWNER.id));
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).text).not.toContain("delegated");
+    const asked = await api(OWNER, "POST", `/v1/workspaces/${id}/repository`, { name: "engineering", visibility: "public" });
+    expect([asked.status, asked.code]).toEqual([403, "not_allowed"]);
+    // A member row whose role began before their current membership of the organization gives nothing either: a role
+    // ends when its holder leaves, and rejoining doesn't restore it.
+    await inRoom(id, (sql) => void sql.exec("UPDATE member SET role = 'admin' WHERE principal_id = ?", OWNER.id));
+    const rejoined = await api(OWNER, "POST", `/v1/workspaces/${id}/repository`, { name: "engineering", visibility: "public" }, { claims: { org_since: { org_rp: 5 } } });
+    expect(rejoined.status).toBe(404);
+    expect(await inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM repo_request").one().n)).toBe(0);
   });
 
   it("counts attempts left from the room's runs, down to 0 at the cap and never below", async () => {

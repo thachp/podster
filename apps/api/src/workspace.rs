@@ -1223,6 +1223,8 @@ fn handle_change_role(
             principal.into(),
         ],
     )?;
+    // Someone who is no longer an admin gave grants that no longer count.
+    repositories::end_grants_of_former_givers(sql, &caller.id, "person", now)?;
     objects::drop_uploads_no_longer_allowed(sql, &caller.id, "person", principal, now)?;
     let org = rows(
         sql,
@@ -1393,6 +1395,8 @@ fn handle_change_access(
             principal.into(),
         ],
     )?;
+    // Someone who is no longer an admin gave grants that no longer count.
+    repositories::end_grants_of_former_givers(sql, &caller.id, "person", now)?;
     objects::drop_uploads_no_longer_allowed(sql, &caller.id, "person", principal, now)?;
     if role != prior_role {
         queue_index(sql, principal, &org, Some(&role), now)?;
@@ -1686,6 +1690,8 @@ fn remove_member(
     roles::withdraw_role_invites(sql, principal)?;
     exec(sql, "UPDATE member SET revoked_at = ?, revocation_reason = ?, owner_consented_at = NULL WHERE principal_id = ?", vec![now.into(), reason.into(), principal.into()])?;
     repositories::end_grants_of_removed(sql, &actor.id, actor_kind, principal, now)?;
+    // And what they gave, if they were an admin, no longer counts.
+    repositories::end_grants_of_former_givers(sql, &actor.id, actor_kind, now)?;
     store::mark_stale_repo_tokens(sql, now)?;
     apply_departure_rules(sql, actor, principal, now)?;
     objects::drop_uploads_of(sql, &actor.id, actor_kind, principal, now)?;
@@ -4146,9 +4152,9 @@ impl Workspace {
             }
             if let ["repository"] = tail {
                 let mut read = repositories::read(&sql, &who)?;
-                // Display only, and for the room's owner alone, by current standing: the request command asks the
-                // organization again. Unknown isn't false, so a record that can't be read leaves the field out.
-                if provisioning::is_current_owner(&who.caller) {
+                // Display only, and for the room's owner and admins alone, by current standing: the request command asks
+                // the organization again. Unknown isn't false, so a record that can't be read leaves the field out.
+                if provisioning::runs_repository(&who.caller) {
                     if let Some(delegated) = self.org_delegated().await {
                         read["delegated"] = json!(delegated);
                     }
@@ -4257,12 +4263,12 @@ impl Workspace {
             // does the rest. With managed repositories off this arm isn't taken, so the request goes on as any task
             // verb that doesn't exist does, and answers exactly as one.
             (Method::Post, ["tasks", _, "merge"]) if switched_on => {
-                let owner_holds = self
-                    .owner_holds()
+                let giver = self
+                    .merge_giver(&identity.id, &target)
                     .await
                     .ok_or_else(|| ApiError::api(503, "standing_unknown"))?;
                 let asked = merges::Asked {
-                    owner_holds,
+                    giver,
                     caller_person: changes::controller_of(&identity),
                     configured: self.merge_config(&sql).is_some(),
                 };
@@ -4633,11 +4639,18 @@ impl Workspace {
                 },
             ),
             // The room's repository (M5 step 4). The organization's delegation is asked first, outside the transaction, and
-            // counts for nothing unless the caller is the room's owner. A stored answer goes only to the owner.
+            // counts for nothing unless the caller is the room's owner or an admin. A request the room would record is
+            // counted against the organization's and the asker's daily caps in that same call, and stays counted
+            // whatever becomes of it. A stored answer goes only to someone who may still ask.
             (Method::Post, ["repository"]) => {
-                let delegated = self.org_delegated().await == Some(true);
                 let switched_on = provisioning::enabled(&self.env, &sql)?;
-                self.command_checked(
+                let (delegated, counted) = if switched_on {
+                    self.count_repository_request(&identity, &body).await?
+                } else {
+                    (false, None)
+                };
+                let counted_for = counted.clone();
+                let recorded = self.command_checked(
                     &identity,
                     key,
                     hash,
@@ -4645,9 +4658,19 @@ impl Workspace {
                     test_fail,
                     |_: &SqlStorage, who: &Participant| provisioning::may_request(&who.caller),
                     move |sql, who, now| {
-                        provisioning::request(sql, who, &body, switched_on, delegated, now)
+                        provisioning::request(
+                            sql,
+                            who,
+                            &body,
+                            switched_on,
+                            delegated,
+                            counted_for.as_ref(),
+                            now,
+                        )
                     },
-                )
+                );
+                // Nothing is given back, whatever the command came to: the room's place in each count stays.
+                recorded
             }
             (Method::Post, ["repository", "retry"]) => {
                 let delegated = self.org_delegated().await == Some(true);

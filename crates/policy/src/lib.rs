@@ -463,7 +463,6 @@ pub fn is_authority_refusal(action: &str, code: &str) -> bool {
         | "task_not_found"
         | "self_sign_off"
         | "self_merge"
-        | "no_provider_delegation"
         | "grant_required"
         | "grant_expired"
         | "grant_stale"

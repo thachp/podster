@@ -119,7 +119,7 @@ export default async function Settings({ params, searchParams }: { params: Promi
         </Section>
       ) : (
         <Section id="settings-repository" title="Repository">
-          {repository.kind === "on" ? <RepositorySection roomId={id} state={repository.data} isOwner={isOwner && typeof room.owner_left_at !== "number"} archived={isArchived(room)} /> : <ReadFailure />}
+          {repository.kind === "on" ? <RepositorySection roomId={id} state={repository.data} runsRepository={!isOwner || typeof room.owner_left_at !== "number"} archived={isArchived(room)} /> : <ReadFailure />}
         </Section>
       )}
 

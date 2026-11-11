@@ -11,7 +11,7 @@ const props = (over: Partial<GrantsProps> = {}): GrantsProps => ({
   roomId: "ws_1",
   grants: [grant(), grant({ id: "pg_2", principal_id: "per_m", action: "merge", expires_at: Date.UTC(2027, 0, 1), state: "stale" })],
   linked: true,
-  isOwner: true,
+  runsRepository: true,
   isOrgAdmin: false,
   viewerId: "per_owner",
   policyVersion: 7,
@@ -54,21 +54,21 @@ describe("the grants list", () => {
     expect(screen.getByText(/the person behind a task's submitter can't merge that task/)).toBeInTheDocument();
   });
 
-  it("offers the owner a take-back on every grant, and an admin who isn't the organization's admin none", () => {
+  it("offers the owner or an admin a take-back on every grant and the form, and someone who manages neither none", () => {
     const { unmount } = render(<RepositoryGrants {...props()} />);
     expect(screen.getAllByRole("button", { name: "Take back" })).toHaveLength(2);
     unmount();
-    render(<RepositoryGrants {...props({ isOwner: false, viewerId: "per_adm" })} />);
+    render(<RepositoryGrants {...props({ runsRepository: false, viewerId: "per_adm" })} />);
     expect(screen.queryByRole("button", { name: "Take back" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Grant" })).toBeNull();
-    expect(screen.getByText(/Only this workroom's owner can grant repository access/)).toBeInTheDocument();
+    expect(screen.getByText(/Only this workroom's owner and admins can grant repository access/)).toBeInTheDocument();
   });
 
   it("offers an organization's admin every take-back, and a holder who manages access their own", () => {
-    const { unmount } = render(<RepositoryGrants {...props({ isOwner: false, isOrgAdmin: true, viewerId: "per_adm" })} />);
+    const { unmount } = render(<RepositoryGrants {...props({ runsRepository: false, isOrgAdmin: true, viewerId: "per_adm" })} />);
     expect(screen.getAllByRole("button", { name: "Take back" })).toHaveLength(2);
     unmount();
-    render(<RepositoryGrants {...props({ isOwner: false, viewerId: "per_m" })} />);
+    render(<RepositoryGrants {...props({ runsRepository: false, viewerId: "per_m" })} />);
     const rows = screen.getAllByRole("listitem");
     expect(within(rows[0]!).queryByRole("button", { name: "Take back" })).toBeNull();
     expect(within(rows[1]!).getByRole("button", { name: "Take back" })).toBeInTheDocument();
@@ -87,7 +87,7 @@ describe("the grants list", () => {
   });
 
   it("shows a holder without the room's version their grant, and no take-back the API couldn't take", () => {
-    render(<RepositoryGrants {...props({ isOwner: false, viewerId: "agt_1", policyVersion: null, linked: null, grants: [grant()] })} />);
+    render(<RepositoryGrants {...props({ runsRepository: false, viewerId: "agt_1", policyVersion: null, linked: null, grants: [grant()] })} />);
     expect(screen.getByText("You · Push")).toBeInTheDocument();
     expect(screen.queryByRole("button")).toBeNull();
   });
@@ -144,7 +144,7 @@ describe("giving a grant", () => {
     const archived = render(<RepositoryGrants {...props({ archived: true })} />);
     expect(screen.queryByRole("button", { name: "Grant" })).toBeNull();
     archived.unmount();
-    render(<RepositoryGrants {...props({ isOwner: false })} />);
+    render(<RepositoryGrants {...props({ runsRepository: false })} />);
     expect(screen.queryByRole("button", { name: "Grant" })).toBeNull();
   });
 

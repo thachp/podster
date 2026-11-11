@@ -120,7 +120,7 @@ pub struct MergeAuthority<'a> {
     pub submitter: Actor<'a>,
     /// The requester's `merge` grant row that isn't revoked, if any.
     pub grant: Option<&'a Grant<'a>>,
-    /// Who holds the repository's delegation now: see [`GrantUse::delegation_holder`].
+    /// The grant's giver, if they still hold authority over the room's repository: see [`GrantUse::delegation_holder`].
     pub delegation_holder: Option<&'a str>,
     /// The submission and commit the request names.
     pub submission_no: u32,

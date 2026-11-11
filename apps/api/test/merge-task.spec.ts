@@ -1359,3 +1359,105 @@ describe("the review's findings (M5 step 7b)", () => {
     expect(await change(first.id, first.task)).toMatchObject({ merge_state: "requested", merge_called_at: null, merge_step: "marked" });
   });
 });
+
+describe("a room admin's grant (the owner's decision of 2026-11-11: owner and admins)", () => {
+  /** An approved task whose merge grant `MERGER` holds from the room's admin, not its owner. */
+  const grantedByAdmin = async () => {
+    await fresh();
+    const r = await approved();
+    // Giving it again replaces the owner's row with the admin's own.
+    const given = await must(ADMIN, "POST", `/v1/workspaces/${r.id}/repository/grants`, { policy_version: await version(r.id), principal_id: MERGER.id, action: "merge" });
+    expect(given.delegated_by).toBe(ADMIN.id);
+    return { ...r, grant: given.id as string };
+  };
+
+  it("merges the reviewed commit under an admin's grant, exactly as under the owner's", async () => {
+    const r = await grantedByAdmin();
+    expect((await merge(MERGER, r.id, r.task)).status).toBe(200);
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED, merge_requested_by: MERGER.id });
+    expect(await merges()).toHaveLength(1);
+  });
+
+  it("never lets an admin merge their own agent's work, or have another of their agents do it, by granting it themselves (M5-10)", async () => {
+    await fresh();
+    const r = await approved();
+    // The person who controls the submitting agent is made an admin, and gives themselves and their other agent the grant.
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE member SET role = 'admin' WHERE principal_id = ?", LINKER.id));
+    for (const who of [LINKER, SIBLING, AGENT]) {
+      const given = await must(LINKER, "POST", `/v1/workspaces/${r.id}/repository/grants`, { policy_version: await version(r.id), principal_id: who.id, action: "merge" });
+      expect([given.delegated_by, given.state], who.id).toEqual([LINKER.id, "live"]);
+      const got = await merge(who, r.id, r.task);
+      expect([got.status, got.code], who.id).toEqual([403, "self_merge"]);
+    }
+    expect((await change(r.id, r.task)).merge_state).toBe("not_requested");
+    expect((await github()).calls).toEqual([]);
+  });
+
+  it("ends the merge, marking nothing, when the admin who gave the grant is no longer one by the time the job runs", async () => {
+    for (const [what, lose, reason] of [
+      // The role changed underneath, with nothing run to end the grant: the job decides from the room's own rows.
+      ["demoted underneath", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE member SET role = 'member' WHERE principal_id = ?", ADMIN.id)), "grant_stale"],
+      // Demoted by the owner: the grant ends in that same change.
+      ["demoted", async (r: any) => void (await must(OWNER, "POST", `/v1/workspaces/${r.id}/members/${ADMIN.id}/role`, { role: "member", policy_version: await version(r.id) }, { claims: { target_member: { person: ADMIN.id, orgs: { [ORG]: 1 } } } })), "grant_required"],
+      ["removed", async (r: any) => void (await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/members/${ADMIN.id}`, { policy_version: await version(r.id) })), "grant_required"],
+    ] as const) {
+      const r = await grantedByAdmin();
+      expect((await merge(MERGER, r.id, r.task)).status, what).toBe(200);
+      await lose(r);
+      await pass(r.id);
+      expect(await change(r.id, r.task), what).toMatchObject({ merge_state: "failed", merge_reason: reason, merge_marked_at: null, merge_called_at: null });
+      expect((await github()).calls, what).toEqual([]);
+    }
+    // Refused when asked for, too, once the giver is no longer an admin.
+    const r = await grantedByAdmin();
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE member SET role = 'member' WHERE principal_id = ?", ADMIN.id));
+    const got = await merge(MERGER, r.id, r.task);
+    expect([got.status, got.code]).toEqual([403, "grant_stale"]);
+  });
+
+  it("ends the merge when the admin who gave the grant left the organization and the room hasn't heard, at the request and in the job", async () => {
+    /** An approved task whose merge grant a newly added admin gave, who then leaves their organization unheard by the room. */
+    const givenThenLeft = async (requestFirst: boolean) => {
+      await fresh();
+      const r = await approved();
+      const admin: Who = { id: `per_mt_leaver_${nextRepo}`, kind: "person", org: ORG };
+      await must(OWNER, "POST", `/v1/workspaces/${r.id}/members`, { principal_id: admin.id, kind: "person", org_id: ORG, role: "admin", policy_version: await version(r.id) }, { claims: { target_member: { person: admin.id, orgs: { [ORG]: 1 } } } });
+      const given = await must(admin, "POST", `/v1/workspaces/${r.id}/repository/grants`, { policy_version: await version(r.id), principal_id: MERGER.id, action: "merge" });
+      expect(given.delegated_by).toBe(admin.id);
+      if (requestFirst) expect((await merge(MERGER, r.id, r.task)).status).toBe(200);
+      // The listing is emptied first, so the departure can't find the room: its rows still say admin, and live.
+      await alarmQuiet(stub(r.id));
+      await BINDINGS.DB.prepare("DELETE FROM membership_index WHERE principal_id = ?").bind(admin.id).run();
+      await must(admin, "POST", "/v1/org-departures", {}, { claims: { departure: { person: admin.id, org: ORG, left_at: Date.now() } } });
+      expect((await api(OWNER, "GET", `/v1/workspaces/${r.id}/repository/grants`)).body.grants.find((g: any) => g.id === given.id)?.state).toBe("live");
+      return r;
+    };
+    // Asked for after they left: refused, from their own record.
+    const late = await givenThenLeft(false);
+    const got = await merge(MERGER, late.id, late.task);
+    expect([got.status, got.code]).toEqual([403, "grant_stale"]);
+    expect((await change(late.id, late.task)).merge_state).toBe("not_requested");
+    // Asked for before they left: the job asks again, and ends the merge with nothing marked or called.
+    const r = await givenThenLeft(true);
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "failed", merge_reason: "grant_stale", merge_marked_at: null, merge_called_at: null });
+    expect((await github()).calls).toEqual([]);
+    expect(await merges()).toEqual([]);
+  });
+
+  it("waits, counted, when the admin's record can't be read, and merges nothing on an unknown", async () => {
+    await fresh();
+    const r = await approved();
+    const admin: Who = { id: `per_unavailable_mt_admin_${nextRepo}`, kind: "person", org: ORG };
+    await must(OWNER, "POST", `/v1/workspaces/${r.id}/members`, { principal_id: admin.id, kind: "person", org_id: ORG, role: "admin", policy_version: await version(r.id) }, { claims: { target_member: { person: admin.id, orgs: { [ORG]: 1 } } } });
+    await must(admin, "POST", `/v1/workspaces/${r.id}/repository/grants`, { policy_version: await version(r.id), principal_id: MERGER.id, action: "merge" });
+    const got = await merge(MERGER, r.id, r.task);
+    expect([got.status, got.code]).toEqual([503, "standing_unknown"]);
+    // A request already on record waits, with the pass counted.
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE task_change SET merge_state = 'requested', merge_requested_by = ?, merge_requester_person = ?, merge_step = 'requested'", MERGER.id, MERGER.id));
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "requested", merge_attempts: 1, merge_marked_at: null, merge_called_at: null });
+    expect((await github()).calls).toEqual([]);
+  });
+});

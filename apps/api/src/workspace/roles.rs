@@ -605,7 +605,9 @@ fn set_access(
     } else {
         "person"
     };
-    super::objects::drop_uploads_no_longer_allowed(sql, by, by_kind, principal, now)
+    super::objects::drop_uploads_no_longer_allowed(sql, by, by_kind, principal, now)?;
+    // Someone who is no longer an admin gave grants that no longer count.
+    super::repositories::end_grants_of_former_givers(sql, by, by_kind, now)
 }
 
 /// Ends someone's active claim, if they have one, and works out what they keep. If nobody touched their grant while they

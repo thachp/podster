@@ -871,7 +871,47 @@ CREATE TABLE IF NOT EXISTS org_provider_delegation (provider TEXT PRIMARY KEY, g
 CREATE TABLE IF NOT EXISTS org_provider_delegation_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, granted INTEGER NOT NULL, set_by TEXT NOT NULL, set_at INTEGER NOT NULL);
 ";
 
+/// The rooms this object has counted a request for a repository in: for an organization, its rooms; for a person, the
+/// rooms they asked in. One row per room, stamped with when it was last counted, and never given back: a request that
+/// fails after it was counted leaves its room counted until the stamp ages out of the window. So a count can only be too
+/// high, never too low. A room has one request in its life, so rooms counted in the window is what the cap is on.
+const REPO_REQUESTS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS repo_request_room (workspace_id TEXT PRIMARY KEY, at INTEGER NOT NULL);
+";
+
+/// What an organization's object, or a person's, said to a room about to record a request for a repository.
+pub struct RepoRequestReserved {
+    /// The organization holds the provisioning delegation. Always `true` from a person's object, which holds none.
+    pub granted: bool,
+    /// The room holds a place in this object's count, stamped now.
+    pub held: bool,
+}
+
+/// Counts a room's request for a repository against the cap of the organization or the person named by `holder`, and,
+/// with `delegation`, reads the organization's delegation in the same transaction. Nothing is counted when the
+/// delegation was taken back or the cap is reached. A room that already holds a place keeps it, stamped again with now.
+/// There is nothing to give back: a place stays until it ages out.
+pub async fn reserve_repo_request(
+    env: &Env,
+    holder: &str,
+    workspace: &str,
+    delegation: bool,
+) -> R<RepoRequestReserved> {
+    let body = json!({ "provider": "github", "workspace": workspace, "delegation": delegation });
+    let mut response = internal(env, holder, "/internal/repo-request-reserve", &body).await?;
+    if response.status_code() != 200 {
+        return Err(ApiError::internal("couldn't count the request"));
+    }
+    let answer: Value = response.json().await?;
+    Ok(RepoRequestReserved {
+        granted: answer["granted"].as_bool() == Some(true),
+        held: answer["held"].as_bool() == Some(true),
+    })
+}
+
 /// Whether an organization holds the provisioning delegation for a provider: `{ provider, granted, set_by, set_at }`.
+/// Every organization holds it unless a Podster operator took it back (the owner's decision of 2026-11-11, "No gate,
+/// with limits"), so an organization with no record holds it.
 pub async fn org_delegation(env: &Env, org: &str, provider: &str) -> R<Value> {
     let body = json!({ "provider": provider });
     let mut response = internal(env, org, "/internal/org-delegation", &body).await?;
@@ -882,8 +922,8 @@ pub async fn org_delegation(env: &Env, org: &str, provider: &str) -> R<Value> {
 }
 
 /// `GET` or `PUT /v1/orgs/{org}/provisioning-delegation`. Reading is for a Podster operator or an admin of that
-/// organization. Setting, `{ granted }`, is for a Podster operator alone: an organization can't give itself authority
-/// over Podster's GitHub organization. An agent is refused in both.
+/// organization. Setting, `{ granted }`, is for a Podster operator alone, and matters only to take the delegation back
+/// from an organization or to restore it: an organization holds it until then. An agent is refused in both.
 pub async fn provisioning_delegation(
     env: &Env,
     caller: &Caller,
@@ -1432,10 +1472,94 @@ impl Principal {
                     Some(row) => {
                         json!({ "provider": provider, "granted": int(&row["granted"]) != 0, "set_by": row["set_by"], "set_at": row["set_at"] })
                     }
+                    // No record: held, as every organization is until an operator takes it back.
                     None => {
-                        json!({ "provider": provider, "granted": false, "set_by": null, "set_at": null })
+                        json!({ "provider": provider, "granted": podster_core::provisioning::organization_delegated(None), "set_by": null, "set_at": null })
                     }
                 });
+            }
+            "/internal/repo-request-reserve" => {
+                let body: Value = req.json().await?;
+                let workspace = body["workspace"].as_str().unwrap_or_default().to_string();
+                let provider = body["provider"].as_str().unwrap_or_default().to_string();
+                let delegation = body["delegation"].as_bool() == Some(true);
+                // Tests can't otherwise make a person's own count fail to answer.
+                #[cfg(feature = "failpoints")]
+                if !delegation
+                    && self
+                        .state
+                        .id()
+                        .name()
+                        .is_some_and(|name| name.starts_with("per_unavailable_"))
+                {
+                    return Err(ApiError::api(503, "unavailable"));
+                }
+                if workspace.is_empty() {
+                    return Err(ApiError::invalid_argument());
+                }
+                let state = self.state.storage().sql();
+                let answer = Rc::new(RefCell::new((false, false)));
+                let slot = answer.clone();
+                // The delegation, the count and the room's place in one transaction, by this object's own clock: so
+                // two rooms asking at once can't both take the last place.
+                transaction_sync(&self.state, move || {
+                    let granted = if delegation {
+                        exec(&state, ORG_DELEGATION_SCHEMA, vec![])?;
+                        let recorded = rows(
+                            &state,
+                            "SELECT granted FROM org_provider_delegation WHERE provider = ?",
+                            vec![provider.as_str().into()],
+                        )?
+                        .first()
+                        .map(|row| int(&row["granted"]) != 0);
+                        podster_core::provisioning::organization_delegated(recorded)
+                    } else {
+                        true
+                    };
+                    if !granted {
+                        return Ok(());
+                    }
+                    let now = now_ms();
+                    exec(&state, REPO_REQUESTS_SCHEMA, vec![])?;
+                    // Places that left the window count for nothing, this room's own included: it's then asked as new.
+                    exec(
+                        &state,
+                        "DELETE FROM repo_request_room WHERE at <= ?",
+                        vec![
+                            (now - podster_core::provisioning::REPOSITORY_REQUEST_WINDOW_MS).into(),
+                        ],
+                    )?;
+                    let holds = !rows(
+                        &state,
+                        "SELECT 1 FROM repo_request_room WHERE workspace_id = ?",
+                        vec![workspace.as_str().into()],
+                    )?
+                    .is_empty();
+                    let others: Vec<i64> = rows(
+                        &state,
+                        "SELECT at FROM repo_request_room WHERE workspace_id != ?",
+                        vec![workspace.as_str().into()],
+                    )?
+                    .iter()
+                    .map(|row| int(&row["at"]))
+                    .collect();
+                    let held =
+                        podster_core::provisioning::repository_place_held(holds, &others, now);
+                    if held {
+                        // Insert if absent, otherwise stamp again: a place left by an earlier attempt must not age out
+                        // just after a later attempt records.
+                        exec(
+                            &state,
+                            "INSERT INTO repo_request_room (workspace_id, at) VALUES (?1, ?2)
+                               ON CONFLICT (workspace_id) DO UPDATE SET at = excluded.at",
+                            vec![workspace.as_str().into(), now.into()],
+                        )?;
+                    }
+                    *slot.borrow_mut() = (true, held);
+                    Ok(())
+                })?;
+                let (granted, held) = *answer.borrow();
+                return Ok(json!({ "granted": granted, "held": held }));
             }
             "/internal/org-room-release" => {
                 let body: Value = req.json().await?;

@@ -94,6 +94,10 @@ const give = async (id: string, principal: string, action: string, extra: object
 const take = async (id: string, grant: string, who: Who = OWNER, options: { key?: string | null; claims?: object } = {}) =>
   api(who, "DELETE", `${grants(id)}/${grant}`, { policy_version: await version(id) }, options);
 
+/** Changes a person's role in the room. */
+const setRole = async (id: string, who: Who, role: string, by: Who = OWNER) =>
+  api(by, "POST", `/v1/workspaces/${id}/members/${who.id}/role`, { role, policy_version: await version(id) }, { claims: { target_member: { person: who.id, orgs: { [ORG]: 1 } } } });
+
 const grantRows = (id: string) => inRoom(id, (sql) => sql.exec("SELECT id, principal_id, provider, provider_repo_id, action, delegated_by, expires_at, revoked_at, revoked_by FROM provider_grant ORDER BY created_at, id").toArray() as any[]);
 const audits = async (id: string, action: string) => (await inRoom(id, (sql) => sql.exec("SELECT actor_id, target_id, prior_json, new_json FROM audit_event WHERE action = ? ORDER BY seq", action).toArray() as any[]))
   .map((a) => ({ ...a, prior_json: a.prior_json && JSON.parse(a.prior_json), new_json: a.new_json && JSON.parse(a.new_json) }));
@@ -126,10 +130,9 @@ describe("giving a grant", () => {
     expect((await grantRows(id)).map((g) => [g.principal_id, g.action])).toEqual([[AGENT.id, "push"], [AGENT.id, "merge"], [MEMBER.id, "merge"]]);
   });
 
-  it("is the owner's alone: an admin lacks the delegation, and nobody else in the room has the authority", async () => {
+  it("is for the owner and a room admin, as people: nobody else in the room has the authority (AC-10, AC-11)", async () => {
     const id = await room();
     const before = await footprint(id);
-    expect([(await give(id, AGENT.id, "push", {}, ADMIN)).status, (await give(id, AGENT.id, "push", {}, ADMIN)).code]).toEqual([403, "no_provider_delegation"]);
     for (const who of [ORG_ADMIN, MEMBER, GUEST, AGENT]) {
       const refused = await give(id, AGENT.id, "push", {}, who);
       expect([refused.status, refused.code], who.id).toEqual([403, "not_allowed"]);
@@ -144,10 +147,24 @@ describe("giving a grant", () => {
     await flush(id);
     const denials = (await api(OWNER, "GET", `/v1/workspaces/${id}/denials`)).body.denials as any[];
     expect(denials.filter((d) => d.action === "repo_grant.give").map((d) => [d.actor_id, d.code]).sort()).toEqual([
-      [ADMIN.id, "no_provider_delegation"], [AGENT.id, "not_allowed"], [GUEST.id, "not_allowed"], [MEMBER.id, "not_allowed"], [ORG_ADMIN.id, "not_allowed"],
+      [AGENT.id, "not_allowed"], [GUEST.id, "not_allowed"], [MEMBER.id, "not_allowed"], [ORG_ADMIN.id, "not_allowed"],
       // Outsiders are counted together, as for every other change.
       ["outsider", "workspace_not_found"], ["outsider", "workspace_not_found"],
     ].sort());
+    // A room admin gives one exactly as the owner does, and it's theirs on record (the owner's decision of 2026-11-11).
+    const given = await give(id, AGENT.id, "push", {}, ADMIN);
+    expect([given.status, given.body.delegated_by, given.body.state]).toEqual([200, ADMIN.id, "live"]);
+    expect(await audits(id, "repo_grant.given")).toEqual([{ actor_id: ADMIN.id, target_id: given.body.id, prior_json: null, new_json: { principal: AGENT.id, action: "push", expires_at: null } }]);
+    // A participant there through a public claim gives nothing and takes nothing back (AC-10, AC-24).
+    const byPublic = await give(id, AGENT.id, "merge", {}, PUBLIC_AGENT);
+    expect([byPublic.status, byPublic.code]).toEqual([403, "not_allowed"]);
+    const takenByPublic = await take(id, given.body.id, PUBLIC_AGENT);
+    expect([takenByPublic.status, takenByPublic.code]).toEqual([403, "not_allowed"]);
+    // An agent stored as an admin is still an agent: it gives nothing.
+    await inRoom(id, (sql) => void sql.exec("UPDATE member SET role = 'admin' WHERE principal_id = ?", OTHER_AGENT.id));
+    const byAgent = await give(id, AGENT.id, "merge", {}, OTHER_AGENT);
+    expect([byAgent.status, byAgent.code]).toEqual([403, "not_allowed"]);
+    expect((await grantRows(id)).map((g) => [g.principal_id, g.action, g.delegated_by])).toEqual([[AGENT.id, "push", ADMIN.id]]);
   });
 
   it("goes only to a current participant who isn't there through a public claim", async () => {
@@ -256,8 +273,13 @@ describe("giving a grant", () => {
     // Handing the room over ends what the former owner may do, stored answers included.
     const handed = await api(OWNER, "POST", `/v1/workspaces/${id}/owner/transfer`, { to: ADMIN.id, policy_version: await version(id) }, { claims: { target_member: { person: ADMIN.id, orgs: { [ORG]: 1 } } } });
     expect(handed.status, handed.text).toBe(200);
+    // The former owner is an admin now, so may still give a grant and still gets the stored answer.
     const replay = await api(OWNER, "POST", grants(id), body, { key: "rg-replay" });
-    expect([replay.status, replay.code]).toEqual([403, "no_provider_delegation"]);
+    expect(replay.status, replay.text).toBe(200);
+    // Once they're neither the owner nor an admin, the stored answer isn't theirs to replay.
+    expect((await setRole(id, OWNER, "member", ADMIN)).status).toBe(200);
+    const after = await api(OWNER, "POST", grants(id), body, { key: "rg-replay" });
+    expect([after.status, after.code]).toEqual([403, "not_allowed"]);
   });
 
   it("changes nothing when given again, and replaces a row with a new expiry, an expired row or an earlier owner's", async () => {
@@ -330,8 +352,7 @@ describe("taking a grant back", () => {
     const id = await room();
     const given = (await give(id, MEMBER.id, "push")).body;
     const before = await footprint(id);
-    // A room admin sees the grant, and may not take it back without administering the organization.
-    expect([(await take(id, given.id, ADMIN)).status, (await take(id, given.id, ADMIN)).code]).toEqual([403, "not_allowed"]);
+    // A person who is a plain member sees only their own grants, so another's answers as a missing one.
     // Someone who can't see it learns nothing about it.
     for (const who of [GUEST]) expect([(await take(id, given.id, who)).status, (await take(id, given.id, who)).code], who.id).toEqual([404, "grant_not_found"]);
     // An agent has no route, even for a grant of its own.
@@ -348,7 +369,10 @@ describe("taking a grant back", () => {
     expect(before.grants).toBe(1);
     await flush(id);
     const denials = (await api(OWNER, "GET", `/v1/workspaces/${id}/denials`)).body.denials as any[];
-    expect(denials.filter((d) => d.action === "repo_grant.revoke" && d.code === "not_allowed").map((d) => d.actor_id).sort()).toEqual([ADMIN.id, AGENT.id, OTHER_AGENT.id].sort());
+    expect(denials.filter((d) => d.action === "repo_grant.revoke" && d.code === "not_allowed").map((d) => d.actor_id).sort()).toEqual([AGENT.id, OTHER_AGENT.id].sort());
+    // A room admin takes any grant back, as the owner does.
+    const taken = await take(id, given.id, ADMIN);
+    expect([taken.status, taken.body.state]).toEqual([200, "revoked"]);
   });
 
   it("answers someone who may not see a grant the same whether or not it exists, and keeps the refusal", async () => {
@@ -519,10 +543,47 @@ describe("what ends grants", () => {
     expect((await audits(id, "repo_grant.revoked")).map((a) => [a.target_id, a.prior_json.reason])).toEqual([[push.id, "owner_changed"], [merge.id, "owner_changed"]]);
     expect(await events(id, "repo_grant.revoked")).toEqual([{ actor_id: OWNER.id, subject_id: AGENT.id }, { actor_id: OWNER.id, subject_id: MEMBER.id }]);
     expect((await api(ADMIN, "GET", grants(id))).body.grants).toEqual([]);
-    // The former owner is an admin now, and gives nothing.
-    expect((await give(id, AGENT.id, "push", {}, OWNER)).code).toBe("no_provider_delegation");
+    // The former owner is an admin now, and gives a new grant as any admin does. What they gave as owner stays ended.
+    const theirs = await give(id, MEMBER.id, "merge", {}, OWNER);
+    expect([theirs.status, theirs.body.delegated_by, theirs.body.state]).toEqual([200, OWNER.id, "live"]);
     const again = await give(id, AGENT.id, "push", {}, ADMIN);
     expect([again.status, again.body.delegated_by, again.body.state]).toEqual([200, ADMIN.id, "live"]);
+  });
+
+  it("an admin's grants end when they stop being an admin, and making them one again restores nothing", async () => {
+    const id = await room();
+    const byOwner = (await give(id, MEMBER.id, "merge")).body;
+    const push = (await give(id, AGENT.id, "push", {}, ADMIN)).body;
+    const merge = (await give(id, GUEST.id, "merge", {}, ADMIN)).body;
+    expect((await api(OWNER, "GET", grants(id))).body.grants.map((g: any) => [g.id, g.state])).toEqual([[byOwner.id, "live"], [push.id, "live"], [merge.id, "live"]]);
+    // Demoted: what they gave ends in that same change, and the owner's grant is untouched.
+    expect((await setRole(id, ADMIN, "member")).status).toBe(200);
+    expect((await grantRows(id)).map((g) => [g.id, g.revoked_at !== null, g.revoked_by])).toEqual([[byOwner.id, false, null], [push.id, true, OWNER.id], [merge.id, true, OWNER.id]]);
+    expect((await audits(id, "repo_grant.revoked")).map((a) => [a.target_id, a.prior_json.reason])).toEqual([[push.id, "giver_lost_authority"], [merge.id, "giver_lost_authority"]]);
+    expect(await events(id, "repo_grant.revoked")).toEqual([{ actor_id: OWNER.id, subject_id: AGENT.id }, { actor_id: OWNER.id, subject_id: GUEST.id }]);
+    // As a member they give nothing, and take back nobody else's.
+    expect((await give(id, AGENT.id, "push", {}, ADMIN)).code).toBe("not_allowed");
+    expect((await take(id, byOwner.id, ADMIN)).code).toBe("grant_not_found");
+    // An admin again: nothing they gave before came back, and they give anew.
+    expect((await setRole(id, ADMIN, "admin")).status).toBe(200);
+    expect((await api(OWNER, "GET", grants(id))).body.grants.map((g: any) => g.id)).toEqual([byOwner.id]);
+    const anew = await give(id, AGENT.id, "push", {}, ADMIN);
+    expect([anew.status, anew.body.state]).toEqual([200, "live"]);
+    // Removed from the room: what they gave ends with them.
+    const removed = await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${ADMIN.id}`, { policy_version: await version(id) });
+    expect(removed.status, removed.text).toBe(200);
+    expect((await grantRows(id)).filter((g) => g.revoked_at === null).map((g) => g.id)).toEqual([byOwner.id]);
+    expect((await audits(id, "repo_grant.revoked")).map((a) => a.prior_json.reason)).toEqual(["giver_lost_authority", "giver_lost_authority", "giver_lost_authority"]);
+  });
+
+  it("shows a grant as stale when its giver is no longer an admin by the room's rows, whatever else is recorded", async () => {
+    const id = await room();
+    const push = (await give(id, AGENT.id, "push", {}, ADMIN)).body;
+    // The role changed underneath, with nothing run to end the grant: the read says stale from the room's own rows.
+    await inRoom(id, (sql) => void sql.exec("UPDATE member SET role = 'member' WHERE principal_id = ?", ADMIN.id));
+    expect((await api(OWNER, "GET", grants(id))).body.grants.map((g: any) => [g.id, g.state])).toEqual([[push.id, "stale"]]);
+    await inRoom(id, (sql) => void sql.exec("UPDATE member SET role = 'admin', kind = 'agent' WHERE principal_id = ?", ADMIN.id));
+    expect((await api(OWNER, "GET", grants(id))).body.grants.map((g: any) => [g.id, g.state])).toEqual([[push.id, "stale"]]);
   });
 
   it("recovering a room whose owner left ends the former owner's grants and any they held", async () => {

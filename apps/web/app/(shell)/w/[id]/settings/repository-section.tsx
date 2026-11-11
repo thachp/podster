@@ -50,9 +50,9 @@ function Warning({ name }: { name?: string }) {
 /**
  * The room's managed repository in Workroom Settings (M5 step 9(a), ADR 0009). Shown only while the server answers the
  * repository read, so with managed repositories switched off nothing here renders. Everything is the server's state; the
- * owner's controls are offered from it as a hint, and Rust decides every request.
+ * owner's and admins' controls are offered from it as a hint, and Rust decides every request.
  */
-export function RepositorySection({ roomId, state, isOwner, archived }: { roomId: string; state: RoomRepository; isOwner: boolean; archived: boolean }) {
+export function RepositorySection({ roomId, state, runsRepository, archived }: { roomId: string; state: RoomRepository; runsRepository: boolean; archived: boolean }) {
   const commands = useCommands(null);
   const { send, clear, retrying } = commands;
   const ids = { name: useId(), problem: useId(), hint: useId() };
@@ -64,9 +64,9 @@ export function RepositorySection({ roomId, state, isOwner, archived }: { roomId
   const { request, repository } = state;
   const problem = nameProblem(name);
   const busy = retrying;
-  // Display only: present for the owner when the API could read it. The request command checks the delegation again.
+  // Display only: present for the owner and admins when the API could read it. The request command checks the delegation again.
   const delegated = state.delegated;
-  const mayAsk = isOwner && !archived && !request && !repository;
+  const mayAsk = runsRepository && !archived && !request && !repository;
   const fullName = repository ? visibleText(repository.full_name) : null;
   const url = repository ? repositoryUrl(repository.full_name) : null;
 
@@ -125,7 +125,7 @@ export function RepositorySection({ roomId, state, isOwner, archived }: { roomId
         </dl>
       ) : null}
 
-      {isOwner && retryOffered(state) && !archived ? (
+      {runsRepository && retryOffered(state) && !archived ? (
         <div className="space-y-1">
           <p id={ids.hint} className="text-sm text-muted-foreground">
             {request?.attempts_left === 1 ? "1 attempt left." : `${request?.attempts_left} attempts left.`} A retry may be refused as too soon: setup waits a minute after a run, doubling up to an hour.
@@ -133,18 +133,18 @@ export function RepositorySection({ roomId, state, isOwner, archived }: { roomId
           <ConfirmAction label="Retry setup" describedBy={ids.hint} disabled={busy} title="Retry setting up this workroom's repository?" description={<Warning />} confirm="Retry setup" action={retry} focusAfter={after} />
         </div>
       ) : null}
-      {isOwner && request && !repository && (request.state === "failed" || request.state === "uncertain") && request.attempts_left === 0 ? (
+      {runsRepository && request && !repository && (request.state === "failed" || request.state === "uncertain") && request.attempts_left === 0 ? (
         <p className="text-sm text-muted-foreground">Setup has run as many times as a workroom is allowed. A Podster operator can reset it.</p>
       ) : null}
 
       {mayAsk && delegated === false ? (
         <p role="note" className="rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">
-          This workroom&apos;s organization doesn&apos;t hold the delegation for managed repositories, so a repository can&apos;t be created here. A Podster operator gives it.
+          A Podster operator has taken managed repositories away from this workroom&apos;s organization, so a repository can&apos;t be created here. Only an operator can restore it.
         </p>
       ) : null}
       {mayAsk && delegated !== false ? (
         <div className="space-y-2">
-          {delegated === undefined ? <p className="text-sm text-muted-foreground">We couldn&apos;t check whether this workroom&apos;s organization holds the delegation a Podster operator gives. Asking may be refused.</p> : null}
+          {delegated === undefined ? <p className="text-sm text-muted-foreground">We couldn&apos;t check whether managed repositories are still available to this workroom&apos;s organization. Asking may be refused.</p> : null}
           <div className="space-y-1">
             <label htmlFor={ids.name} className="text-sm font-medium">
               Repository name
@@ -172,10 +172,10 @@ export function RepositorySection({ roomId, state, isOwner, archived }: { roomId
           <ConfirmAction label="Create a repository" disabled={busy || problem !== null} title="Create a public repository for this workroom?" description={<Warning name={name} />} confirm="Create public repository" action={create} focusAfter={after} />
         </div>
       ) : null}
-      {isOwner && archived && !request && !repository ? <p className="text-sm text-muted-foreground">This workroom is archived, so a repository can&apos;t be created for it.</p> : null}
-      {!isOwner && !request && !repository ? <p className="text-sm text-muted-foreground">Only this workroom&apos;s owner can create its repository.</p> : null}
+      {runsRepository && archived && !request && !repository ? <p className="text-sm text-muted-foreground">This workroom is archived, so a repository can&apos;t be created for it.</p> : null}
+      {!runsRepository && !request && !repository ? <p className="text-sm text-muted-foreground">Only this workroom&apos;s owner and admins can create its repository.</p> : null}
 
-      <p className="text-sm text-muted-foreground">Creating a repository grants nobody access to it. The owner grants push or merge to each participant on Team, and Podster never deletes a repository.</p>
+      <p className="text-sm text-muted-foreground">Creating a repository grants nobody access to it. The owner and admins grant push or merge to each participant on Team, and Podster never deletes a repository.</p>
     </div>
   );
 }

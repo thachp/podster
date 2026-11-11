@@ -133,14 +133,15 @@ pub struct GrantUse<'a> {
     pub action: GrantAction,
     /// The room's own linked repository.
     pub link_repo_id: i64,
-    /// Who holds the repository's delegation now, with their authority holding: the room's owner. `None` when nobody
-    /// does, such as a room whose owner left.
+    /// The grant's giver, if they're still a person who is the room's owner or a room admin with that authority
+    /// holding, as `podster_policy::repositories::delegation_holder` decides from the room's current rows. `None` when
+    /// they aren't, such as an owner who left or an admin who was demoted or removed.
     pub delegation_holder: Option<&'a str>,
     pub now: i64,
 }
 
 /// Whether a principal holds a grant that counts: theirs, for exactly this action on exactly this repository, not
-/// revoked, not expired, and given by whoever holds the delegation now. Run it on every use, from the room's current
+/// revoked, not expired, and given by someone who is still the room's owner or a room admin. Run it on every use, from the room's current
 /// rows: for each token and each renewal, when a merge is asked for, and again in the merge job before its external
 /// call. A grant for another repository or another action is no grant at all (AC-05, AC-10).
 pub fn check_grant(grant: Option<&Grant>, usage: &GrantUse) -> Result<(), GrantRefusal> {

@@ -4,12 +4,12 @@
 //
 //   node merge-check.mjs --base-url http://localhost:8787 --github http://127.0.0.1:9999
 //
-// The repository is provisioned for real, through the fake: an operator gives the organization the delegation, the
+// The repository is provisioned for real, through the fake. No operator approves the organization first: it holds the
+// delegation by default (the owner's decision of 2026-11-11). The
 // room's owner asks for the repository, and the room's job creates and protects it. Then the four things AC-17 exists
 // for, and four things GitHub's rules refused in the spike, as the fake holds to them, each with its exact answer: approval merges nothing; a merge-grant holder who is the submitter, or controlled by
 // the same person, is refused `self_merge`; a participant with no merge grant is refused `grant_required`; and an
 // authorized holder's merge_task leads to exactly one merge call, for the reviewed commit, which the task records.
-// PODSTER_E2E_OPERATOR_COOKIE is the session of the person named in the stack's OPERATORS.
 import { eq, key, McpAgent, ok, Person, refused, Report, Target } from "./lib.mjs";
 
 const arg = (name) => {
@@ -17,8 +17,8 @@ const arg = (name) => {
   return at > 0 ? process.argv[at + 1] : undefined;
 };
 const [base, github] = [arg("--base-url"), arg("--github")];
-if (!base || !/^http:\/\/localhost:\d+$/.test(base) || !github || !/^http:\/\/127\.0\.0\.1:\d+$/.test(github) || !process.env.PODSTER_E2E_OPERATOR_COOKIE) {
-  console.error("Give --base-url http://localhost:<port>, --github http://127.0.0.1:<port> and PODSTER_E2E_OPERATOR_COOKIE. This check is for a local stack only.");
+if (!base || !/^http:\/\/localhost:\d+$/.test(base) || !github || !/^http:\/\/127\.0\.0\.1:\d+$/.test(github)) {
+  console.error("Give --base-url http://localhost:<port> and --github http://127.0.0.1:<port>. This check is for a local stack only.");
   process.exit(2);
 }
 const target = new Target(base, { pollMs: 500 });
@@ -37,7 +37,6 @@ const until = async (read, done, label, timeoutMs = 60_000) => {
   }
 };
 
-const operator = await Person.fromCookie(target, "Operator", process.env.PODSTER_E2E_OPERATOR_COOKIE);
 const owner = await Person.signUp(target, "Merge owner");
 const other = await Person.signUp(target, "Another person");
 const room = await owner.createRoom(`e2e merge ${new Date().toISOString().slice(0, 19)}`);
@@ -57,9 +56,7 @@ const grantNow = async (principal) => owner.must("POST", `/v1/workspaces/${room}
 const ask = (agent) => agent.call("merge_task", { ...where(), submission_no: 1, commit_sha: HEAD, idempotency_key: key() });
 const merges = async () => (await fake(`merge-calls?repo=${repo}`)).calls.filter((call) => call.method === "PUT");
 
-await check("M5-S7-setup", "an operator delegates, the owner asks, and the room's job creates and protects the repository through the fake", async () => {
-  const delegated = await operator.dash("PUT", `/v1/orgs/${owner.org}/provisioning-delegation`, { granted: true });
-  ok(delegated.ok, `the delegation: HTTP ${delegated.status} ${delegated.code ?? ""}`);
+await check("M5-S7-setup", "with no operator's approval, the owner asks, and the room's job creates and protects the repository through the fake", async () => {
   await owner.must("POST", `/v1/workspaces/${room}/repository`, { name: `e2e-merge-${key().slice(0, 8).toLowerCase()}`, visibility: "public" });
   const ready = await until(async () => (await owner.must("GET", `/v1/workspaces/${room}/repository`)), (read) => read.repository?.status === "ready" || read.request?.state === "failed", "the repository");
   eq(ready.repository?.status, "ready", `the repository's state (request: ${JSON.stringify(ready.request)})`);

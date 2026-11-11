@@ -94,6 +94,16 @@ describe("workroom settings' repository section", () => {
     expect(screen.getByLabelText("Repository name")).toBeInTheDocument();
   });
 
+  it("offers an admin who isn't the owner the same form", async () => {
+    state.me = "per_admin";
+    (state.room as { members: unknown[] }).members = [member("per_admin", "person", "admin")];
+    state.repository = { ok: true, data: { request: null, repository: null, delegated: true } };
+    await show();
+    expect(screen.getByLabelText("Repository name")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create a repository" })).toBeInTheDocument();
+    expect(screen.queryByText(/Only this workroom's owner and admins can create its repository/)).toBeNull();
+  });
+
   it("offers a recorded owner who left the organization nothing to ask with", async () => {
     state.repository = { ok: true, data: { request: null, repository: null } };
     (state.room as { owner_left_at: number }).owner_left_at = 1;

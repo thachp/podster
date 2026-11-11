@@ -22,7 +22,7 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-const show = (state: RoomRepository, { isOwner = true, archived = false } = {}) => render(<RepositorySection roomId="ws_1" state={state} isOwner={isOwner} archived={archived} />);
+const show = (state: RoomRepository, { runsRepository = true, archived = false } = {}) => render(<RepositorySection roomId="ws_1" state={state} runsRepository={runsRepository} archived={archived} />);
 
 describe("the switch, as the server says it", () => {
   it("reads only a missing route's answer as off; anything else that isn't an answer is a failure", () => {
@@ -33,18 +33,18 @@ describe("the switch, as the server says it", () => {
 });
 
 describe("each state, in words", () => {
-  it("none requested: the owner is offered the form, and someone else is told only the owner can", () => {
+  it("none requested: whoever runs the repository, the owner or an admin, is offered the form", () => {
     show({ request: null, repository: null, delegated: true });
     expect(screen.getByText("None")).toBeInTheDocument();
     expect(screen.getByLabelText("Repository name")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create a repository" })).toBeDisabled();
   });
 
-  it("an admin who isn't the owner sees state only", () => {
-    show({ request: null, repository: null }, { isOwner: false });
+  it("someone who doesn't run the repository sees state only, and is told the owner and admins can", () => {
+    show({ request: null, repository: null }, { runsRepository: false });
     expect(screen.queryByLabelText("Repository name")).toBeNull();
     expect(screen.queryByRole("button")).toBeNull();
-    expect(screen.getByText("Only this workroom's owner can create its repository.")).toBeInTheDocument();
+    expect(screen.getByText("Only this workroom's owner and admins can create its repository.")).toBeInTheDocument();
   });
 
   it("setting up", () => {
@@ -77,7 +77,7 @@ describe("each state, in words", () => {
   });
 
   it("uncertain: says honestly a repository may or may not exist, and that an operator can check", () => {
-    show({ request: request({ state: "uncertain", reason: "creation_outcome_unknown" }), repository: null }, { isOwner: false });
+    show({ request: request({ state: "uncertain", reason: "creation_outcome_unknown" }), repository: null }, { runsRepository: false });
     expect(screen.getByText("Outcome unknown")).toBeInTheDocument();
     expect(screen.getByText(/may or may not have been created/)).toBeInTheDocument();
     expect(screen.getByText(/A Podster operator can check/)).toBeInTheDocument();
@@ -94,16 +94,16 @@ describe("each state, in words", () => {
     expect(screen.getByText(/coding tasks are blocked/)).toBeInTheDocument();
   });
 
-  it("says plainly when the organization lacks the delegation, instead of a button that will be refused", () => {
+  it("says plainly when an operator took managed repositories away from the organization, instead of a button that will be refused", () => {
     show({ request: null, repository: null, delegated: false });
-    expect(screen.getByRole("note")).toHaveTextContent("doesn't hold the delegation for managed repositories");
-    expect(screen.getByRole("note")).toHaveTextContent("A Podster operator gives it.");
+    expect(screen.getByRole("note")).toHaveTextContent("A Podster operator has taken managed repositories away from this workroom's organization");
+    expect(screen.getByRole("note")).toHaveTextContent("Only an operator can restore it.");
     expect(screen.queryByRole("button", { name: "Create a repository" })).toBeNull();
   });
 
   it("says it couldn't check when the delegation is unknown, and still lets the owner ask", () => {
     show({ request: null, repository: null });
-    expect(screen.getByText(/couldn't check whether this workroom's organization holds the delegation/)).toBeInTheDocument();
+    expect(screen.getByText(/couldn't check whether managed repositories are still available to this workroom's organization/)).toBeInTheDocument();
     expect(screen.getByLabelText("Repository name")).toBeInTheDocument();
   });
 
@@ -199,17 +199,17 @@ describe("what's rendered inertly", () => {
 describe("every code as a sentence", () => {
   it("names every refusal for asking, retrying, granting and taking back", () => {
     const generic = explainRepositoryRefusal("something_new");
-    for (const code of ["name_reserved", "not_delegated", "private_unavailable", "repo_request_exists", "retry_limit_reached", "retry_too_soon", "repo_request_not_found", "setup_in_progress", "already_ready", "not_allowed", "not_found", "workspace_archived", "rate_limited", "invalid_argument"]) {
+    for (const code of ["name_reserved", "not_delegated", "repository_request_limit", "delegation_unavailable", "private_unavailable", "repo_request_exists", "retry_limit_reached", "retry_too_soon", "repo_request_not_found", "setup_in_progress", "already_ready", "not_allowed", "not_found", "workspace_archived", "rate_limited", "invalid_argument"]) {
       const text = explainRepositoryRefusal(code);
       expect(text, code).not.toBe(generic);
       expect(text, code).toMatch(/\.$/);
     }
     const genericGrant = explainGrantRefusal("something_new");
-    for (const code of ["no_provider_delegation", "grantee_not_participant", "grantee_public", "repo_not_linked", "grant_not_found", "invalid_argument", "not_allowed", "not_found", "workspace_archived"]) expect(explainGrantRefusal(code), code).not.toBe(genericGrant);
+    for (const code of ["grantee_not_participant", "grantee_public", "repo_not_linked", "grant_not_found", "invalid_argument", "not_allowed", "not_found", "workspace_archived"]) expect(explainGrantRefusal(code), code).not.toBe(genericGrant);
   });
 
   it("turns every reason code the contract lists into its own sentence", () => {
-    const codes = ["managed_repositories_off", "provisioning_not_configured", "token_refused", "not_delegated", "delegation_unavailable", "room_archived", "requester_not_owner", "name_taken", "provider_refused", "wrong_owner", "creation_outcome_unknown", "read_back_failed", "setup_call_failed", "wrong_repository", "visibility_differs", "archived", "no_initial_commit", "actions_enabled", "actions_unreadable", "ruleset_missing", "ruleset_inactive", "ruleset_differs", "bypass_differs", "unexpected_ruleset", "authority_lost", "internal_error"];
+    const codes = ["managed_repositories_off", "provisioning_not_configured", "token_refused", "not_delegated", "delegation_unavailable", "room_archived", "requester_not_owner", "requester_lost_authority", "name_taken", "provider_refused", "wrong_owner", "creation_outcome_unknown", "read_back_failed", "setup_call_failed", "wrong_repository", "visibility_differs", "archived", "no_initial_commit", "actions_enabled", "actions_unreadable", "ruleset_missing", "ruleset_inactive", "ruleset_differs", "bypass_differs", "unexpected_ruleset", "authority_lost", "internal_error"];
     const sentences = codes.map(reasonSentence);
     expect(new Set(sentences).size).toBe(codes.length);
     // None falls back to the code itself.

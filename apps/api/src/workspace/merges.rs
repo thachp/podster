@@ -45,7 +45,7 @@ use podster_core::repo_merge::{
 };
 use podster_core::repositories::{GrantAction, LinkStatus, MergeState, RequestState};
 use podster_core::task_change::{pull_state_name, PullSeen};
-use podster_policy::repositories::{authorize_merge, delegation_holder, GrantStanding};
+use podster_policy::repositories::{authorize_merge, GrantStanding};
 
 const HOUR_MS: i64 = 60 * 60 * 1000;
 /// How many merges one alarm works on. The rest wait for the next alarm.
@@ -70,8 +70,8 @@ fn refused(refusal: MergeRefusal) -> ApiError {
 
 /// What the route learned before the command's transaction. None of it comes from the request's body.
 pub(super) struct Asked {
-    /// The room's owner still holds their owner authority in the room's organization.
-    pub(super) owner_holds: bool,
+    /// Whether the giver of the caller's `merge` grant still holds the authority they gave it under.
+    pub(super) giver: repositories::GiverRead,
     /// The person who controls the caller: a person is their own, and an agent's is whoever linked its credential.
     pub(super) caller_person: Option<String>,
     /// The merge App is configured. Without it nothing is recorded.
@@ -92,7 +92,6 @@ struct Inputs {
     task: Task,
     change: Option<Value>,
     grant: Option<MergeGrant>,
-    owner: Option<String>,
     request: Option<RequestState>,
     /// The link's status, repository ID, default branch and whether it's public.
     link: Option<(Option<LinkStatus>, i64, String, bool)>,
@@ -122,9 +121,6 @@ fn read_inputs(sql: &SqlStorage, requester: &str, task_id: &str, now: i64) -> R<
                 revoked_at: g["revoked_at"].as_i64(),
             })
         });
-    let owner = rows(sql, "SELECT owner_person_id FROM workspace", vec![])?
-        .first()
-        .and_then(|w| text(&w["owner_person_id"]));
     let request = rows(sql, "SELECT state FROM repo_request", vec![])?
         .first()
         .and_then(|r| r["state"].as_str().and_then(RequestState::from_name));
@@ -146,7 +142,6 @@ fn read_inputs(sql: &SqlStorage, requester: &str, task_id: &str, now: i64) -> R<
         task,
         change,
         grant,
-        owner,
         request,
         link,
     }))
@@ -210,10 +205,13 @@ pub(super) fn request(
         return Err(ApiError::task_not_found());
     };
     let grant = inputs.grant(&caller.id);
-    let holder = inputs
-        .owner
-        .as_deref()
-        .and_then(|owner| delegation_holder(owner, PrincipalKind::Person, asked.owner_holds));
+    // The giver's standing, from the room's rows in this transaction and what their `Principal` said. If the giver
+    // isn't the one that was asked about, nothing is decided on the answer.
+    let holder = match &grant {
+        Some(g) => repositories::standing_giver(sql, g.delegated_by, &asked.giver)?
+            .map_err(|_| ApiError::api(503, "standing_unknown"))?,
+        None => None,
+    };
     let link_repo_id = inputs.link.as_ref().map(|(_, id, _, _)| *id);
     let (submitter_id, submitter_person) = inputs.submitter();
     let submitter = Actor {
@@ -430,7 +428,7 @@ fn target(sql: &SqlStorage, task_id: &str) -> R<Option<Target>> {
 fn authority(
     sql: &SqlStorage,
     task_id: &str,
-    owner_holds: bool,
+    giver: &repositories::GiverRead,
     now: i64,
 ) -> R<Option<std::result::Result<MergeAuthorized, MergeFailure>>> {
     let asked = rows(
@@ -462,10 +460,13 @@ fn authority(
         return Ok(None);
     };
     let grant = inputs.grant(&requester_id);
-    let holder = inputs
-        .owner
-        .as_deref()
-        .and_then(|owner| delegation_holder(owner, PrincipalKind::Person, owner_holds));
+    // The giver's standing, from the room's rows in this transaction and what their `Principal` said. If the giver
+    // isn't the one that was asked about, nothing is decided on the answer: the caller waits and asks again.
+    let holder = match &grant {
+        Some(g) => repositories::standing_giver(sql, g.delegated_by, giver)?
+            .map_err(|_| standing_unknown())?,
+        None => None,
+    };
     let (submitter_id, submitter_person) = inputs.submitter();
     let reviewed = inputs.standing().reviewed_commit_sha.map(str::to_string);
     let in_room = participant(sql, &requester_id)?.is_some();
@@ -497,6 +498,13 @@ fn authority(
     Ok(Some(decided.map_err(MergeFailure::AuthorityLost)))
 }
 
+/// The giver's standing couldn't be decided: their `Principal` couldn't say, or the grant's giver isn't the one asked about.
+fn standing_unknown() -> ApiError {
+    ApiError::api(503, STANDING_UNKNOWN)
+}
+
+const STANDING_UNKNOWN: &str = "standing_unknown";
+
 /// A pass that may go on to GitHub.
 struct Pass {
     authorized: MergeAuthorized,
@@ -509,7 +517,7 @@ struct Pass {
 enum Begun {
     /// Nothing to do: the merge isn't asked for any more, or it ended here.
     Nothing,
-    /// Counted, and nothing more this time: the owner's standing couldn't be read.
+    /// Counted, and nothing more this time: the standing of the grant's giver couldn't be read.
     Wait,
     /// The merge is to end with this failure, and a merge call is on record: GitHub is read first, and what it shows
     /// is what's recorded.
@@ -517,13 +525,13 @@ enum Begun {
     Go(Box<Pass>),
 }
 
-/// Counts the pass and decides authority again, in one transaction. `owner_holds` is `None` when the owner's
-/// `Principal` couldn't say.
+/// Counts the pass and decides authority again, in one transaction. `giver` is `None` when the `Principal` of the
+/// grant's giver couldn't say.
 fn begin(
     sql: &SqlStorage,
     room: &str,
     task_id: &str,
-    owner_holds: Option<bool>,
+    giver: Option<repositories::GiverRead>,
     now: i64,
 ) -> R<Begun> {
     let asked = rows(
@@ -562,10 +570,15 @@ fn begin(
     if last {
         return end(MergeFailure::AttemptsExhausted);
     }
-    let Some(owner_holds) = owner_holds else {
+    let Some(giver) = giver else {
         return Ok(Begun::Wait);
     };
-    match authority(sql, task_id, owner_holds, now)? {
+    let decided = match authority(sql, task_id, &giver, now) {
+        // The giver changed since they were asked about: counted, and asked again next time.
+        Err(error) if error.code() == Some(STANDING_UNKNOWN) => return Ok(Begun::Wait),
+        decided => decided?,
+    };
+    match decided {
         None => Ok(Begun::Nothing),
         Some(Err(failure)) => end(failure),
         Some(Ok(authorized)) => match target {
@@ -595,13 +608,13 @@ fn intend(
     sql: &SqlStorage,
     task_id: &str,
     pass: &Pass,
-    owner_holds: bool,
+    giver: &repositories::GiverRead,
     step: &'static str,
     set: &str,
     base_sha: &str,
     now: i64,
 ) -> R<Intent> {
-    match authority(sql, task_id, owner_holds, now)? {
+    match authority(sql, task_id, giver, now)? {
         None => Ok(Intent::Gone),
         Some(Err(failure)) => Ok(Intent::Lost(failure)),
         // The same commit this pass read the pull request for, and no other.
@@ -1120,26 +1133,34 @@ impl Workspace {
         Ok(())
     }
 
-    /// Whether the room's owner still holds their authority, from their `Principal`. `None` if it can't say.
-    pub(super) async fn owner_holds(&self) -> Option<bool> {
+    /// Whether whoever gave `requester` their `merge` grant still holds the authority they gave it under, from that
+    /// person's `Principal`. `None` if it can't say. The giver is read from the same rows the decision reads.
+    pub(super) async fn merge_giver(
+        &self,
+        requester: &str,
+        task_id: &str,
+    ) -> Option<repositories::GiverRead> {
         let sql = self.state.storage().sql();
-        let room = rows(
+        let giver = read_inputs(&sql, requester, task_id, now_ms())
+            .ok()?
+            .and_then(|inputs| inputs.grant)
+            .map(|grant| grant.delegated_by);
+        self.giver_read(giver.as_deref()).await
+    }
+
+    /// [`Workspace::merge_giver`] for whoever asked for the task's merge.
+    async fn requester_giver(&self, task_id: &str) -> Option<repositories::GiverRead> {
+        let sql = self.state.storage().sql();
+        let requester = rows(
             &sql,
-            "SELECT owner_person_id, owner_org_id, owner_left_at, owner_since FROM workspace",
-            vec![],
+            "SELECT merge_requested_by FROM task_change WHERE task_id = ?",
+            vec![task_id.into()],
         )
-        .ok()?;
-        let room = room.first()?;
-        match (text(&room["owner_person_id"]), text(&room["owner_org_id"])) {
-            (Some(owner), Some(org)) if room["owner_left_at"].is_null() => {
-                let since = room["owner_since"].as_i64().unwrap_or(0);
-                principal::departed_since(&self.env, &owner, &org, since)
-                    .await
-                    .ok()
-                    .map(|departed| !departed)
-            }
-            _ => Some(false),
-        }
+        .ok()?
+        .first()
+        .and_then(|row| text(&row["merge_requested_by"]))
+        .unwrap_or_default();
+        self.merge_giver(&requester, task_id).await
     }
 
     fn log_unrevoked<T>(&self, read: &MergeStepRead<T>, room: &str, task_id: &str) {
@@ -1323,16 +1344,16 @@ impl Workspace {
 
     /// One pass at one merge. Every way out leaves the merge either ended or due another pass, already counted.
     async fn merge_pass(&self, room: &str, task_id: &str) -> R<()> {
-        // The owner's standing is asked of their `Principal` first: a grant counts only while its giver holds the
-        // delegation. If it can't say, the pass is counted and waits.
+        // The standing of the grant's giver is asked of their `Principal` first: a grant counts only while its giver is
+        // still the room's owner or an admin. If it can't say, the pass is counted and waits.
         let state = self.state.storage().sql();
         if merge_state_of(&state, task_id)? == Some(MergeState::OutcomeUnknown) {
             return self.observe_unknown(room, task_id).await;
         }
-        let owner_holds = self.owner_holds().await;
+        let giver = self.requester_giver(task_id).await;
         let begun = self.in_transaction({
             let (room, task) = (room.to_string(), task_id.to_string());
-            move |sql| begin(sql, &room, &task, owner_holds, now_ms())
+            move |sql| begin(sql, &room, &task, giver, now_ms())
         })?;
         let pass = match begun {
             Begun::Nothing => return Ok(()),
@@ -1396,9 +1417,9 @@ impl Workspace {
         };
         // Mark: authority again and the intent, in one transaction; then the status on exactly the reviewed commit;
         // then that it was set.
-        // The owner's standing is asked again, not carried from the start of the pass: a grant counts only while its
-        // giver holds the delegation now. If it can't be read, nothing more is asked of GitHub in this pass.
-        let Some(owner_holds) = self.owner_holds().await else {
+        // The giver's standing is asked again, not carried from the start of the pass: a grant counts only while its
+        // giver holds their authority now. If it can't be read, nothing more is asked of GitHub in this pass.
+        let Some(giver) = self.requester_giver(task_id).await else {
             self.log_waiting(room, task_id, "standing", 0);
             return Ok(());
         };
@@ -1413,7 +1434,7 @@ impl Workspace {
                     sql,
                     &task,
                     &pass,
-                    owner_holds,
+                    &giver,
                     "mark",
                     "merge_marked_at = ?2",
                     &base,
@@ -1453,9 +1474,9 @@ impl Workspace {
             return Ok(());
         }
         // Merge: authority again, the intent and the base seen, in one transaction; then the call; then what GitHub shows.
-        // The owner's standing is asked again, not carried from the start of the pass: a grant counts only while its
-        // giver holds the delegation now. If it can't be read, nothing more is asked of GitHub in this pass.
-        let Some(owner_holds) = self.owner_holds().await else {
+        // The giver's standing is asked again, not carried from the start of the pass: a grant counts only while its
+        // giver holds their authority now. If it can't be read, nothing more is asked of GitHub in this pass.
+        let Some(giver) = self.requester_giver(task_id).await else {
             self.log_waiting(room, task_id, "standing", 0);
             return Ok(());
         };
@@ -1466,7 +1487,7 @@ impl Workspace {
                     sql,
                     &task,
                     &pass,
-                    owner_holds,
+                    &giver,
                     "merge",
                     "merge_called_at = ?2, merge_base_sha = ?4",
                     &base,

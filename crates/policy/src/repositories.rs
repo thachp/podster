@@ -6,8 +6,9 @@
 //!
 //! | Action | Who |
 //! | --- | --- |
-//! | Give a `push` or `merge` grant | The room's owner, as a person, whose authority holds: the one who has both room authority and the repository's delegation. Neither side alone is enough (AC-10, AC-11), so an admin can't |
-//! | Take a grant back | The room's owner; a person who administers the room's organization, so a grant can be pulled when the owner has left; and the grant's holder, for their own. Nobody else, and an agent never takes back another's |
+//! | Ask for the room's repository, or retry its setup | A person who is the room's owner or a room admin, whose authority holds. Never an agent (AC-10) |
+//! | Give a `push` or `merge` grant | The same: a person who is the room's owner or a room admin, whose authority holds. Never an agent, whatever role is stored for it, and nobody without that room role (AC-10, AC-11) |
+//! | Take a grant back | The room's owner or a room admin, as a person; a person who administers the room's organization, so a grant can be pulled when the owner has left; and the grant's holder, for their own. Nobody else, and an agent never takes back another's |
 //! | Receive a grant | A current participant, person or agent, who isn't there through a public claim |
 //! | Ask for a repository token | The agent the task is assigned to, not there through a public claim, with a `push` grant that counts |
 //! | Ask for a merge | A person or agent who can see the task, isn't there through a public claim, holds a `merge` grant that counts, and isn't controlled by the person who controls the submitter |
@@ -15,7 +16,9 @@
 //! | See who holds grants | A human owner or admin, and each participant their own |
 //! | See a task's change and merge state | Whoever can see the task |
 //!
-//! A grant counts only while it's live and its giver still holds the delegation: see `repo_grants::check_grant`.
+//! A grant counts only while it's live and its giver is still a person who is the room's owner or a room admin, with
+//! their authority holding: see [`holds_repository_delegation`] and `repo_grants::check_grant`. The owner's decision of
+//! 2026-11-11 ("Owner and admins") replaced the earlier rule that only the room's owner held the delegation.
 //! Reviewing a task carries no grant, and neither does a role, a work-role title, an A2A message or a public claim
 //! (AC-17, AC-24).
 //!
@@ -39,8 +42,6 @@ pub enum RepoDenial {
     Hidden,
     /// `not_allowed`
     NotAllowed,
-    /// `no_provider_delegation`: the caller administers the room and doesn't hold the repository's delegation.
-    NoProviderDelegation,
     /// `grantee_not_participant`: a grant can't be given to someone who isn't in the room.
     GranteeNotParticipant,
     /// `grantee_public`: a grant can't be given to someone in the room through a public claim. No spec says they can
@@ -61,7 +62,6 @@ impl RepoDenial {
             RepoDenial::NotParticipant => "not_a_participant",
             RepoDenial::Hidden => "task_not_found",
             RepoDenial::NotAllowed => "not_allowed",
-            RepoDenial::NoProviderDelegation => "no_provider_delegation",
             RepoDenial::GranteeNotParticipant => "grantee_not_participant",
             RepoDenial::GranteePublic => "grantee_public",
             RepoDenial::PublicParticipant => "public_participant",
@@ -71,58 +71,59 @@ impl RepoDenial {
     }
 }
 
-/// Whether someone holds the delegation for the room's repository. Podster's platform owns a managed repository and
-/// delegates to the room's owner, for that repository only (decision 18). So it's the person who is the room's owner
-/// now, with their owner authority still holding, which the room reads with `owner_authority_holds`. An agent stored as
-/// an owner holds nothing, as everywhere else, and an admin doesn't hold it by being an admin.
-pub fn holds_repository_delegation(
+/// Whether someone holds authority over the room's repository: to ask for it, and to give and take back its grants.
+/// Podster's platform owns a managed repository and delegates it to those who run the room, for that repository only
+/// (decision 18, as the owner changed it on 2026-11-11: "Owner and admins"). So it's a person who is the room's owner
+/// or a room admin now, with that authority still holding, which the room reads from its own current rows and the
+/// person's standing in their organization. An agent stored as an owner or admin holds nothing, as everywhere else. A
+/// participant there through a public claim is a guest by definition, so never passes.
+pub fn holds_repository_delegation(kind: PrincipalKind, role: Role, authority_holds: bool) -> bool {
+    kind == PrincipalKind::Person && matches!(role, Role::Owner | Role::Admin) && authority_holds
+}
+
+/// A grant's giver, for `GrantUse::delegation_holder`, if they still hold authority over the room's repository:
+/// `kind` and `role` are what the room records for them now, and `authority_holds` whether that role still stands.
+/// Nobody otherwise. A grant counts at use only if this is who gave it.
+pub fn delegation_holder(
+    giver_id: &str,
     kind: PrincipalKind,
     role: Role,
-    owner_authority_holds: bool,
-) -> bool {
-    kind == PrincipalKind::Person && role == Role::Owner && owner_authority_holds
-}
-
-/// Who holds the delegation now, for `GrantUse::delegation_holder`: the room's recorded owner if they hold it, and
-/// nobody otherwise. A grant counts at use only if this is who gave it.
-pub fn delegation_holder(
-    owner_id: &str,
-    owner_kind: PrincipalKind,
-    owner_authority_holds: bool,
+    authority_holds: bool,
 ) -> Option<&str> {
-    holds_repository_delegation(owner_kind, Role::Owner, owner_authority_holds).then_some(owner_id)
+    holds_repository_delegation(kind, role, authority_holds).then_some(giver_id)
 }
 
-/// Who may give a grant on the room's repository. Both sides are needed: authority to configure the room, which is a
-/// human owner or admin, and the repository's delegation. `holds_delegation` is its own input so neither can stand in
-/// for the other: an admin without the delegation is refused (AC-10), and so is someone who holds a delegation and
-/// doesn't administer the room (AC-11). As the room wires it, with [`holds_repository_delegation`], only the owner passes.
-pub fn authorize_grant(caller: &Caller, holds_delegation: bool) -> Result<(), RepoDenial> {
+/// Who may ask for the room's repository or retry its setup, and who may give a grant on it: a person who is the
+/// room's owner or a room admin. The caller's role is the one the room resolved from its current rows, which gives a
+/// role only while it stands. An agent is refused whatever role is stored for it (AC-10), and so is a person with any
+/// other role (AC-11). Nothing a client sends is read.
+pub fn authorize_repository_admin(caller: &Caller) -> Result<(), RepoDenial> {
     if caller.role == Role::None {
         return Err(RepoDenial::NotParticipant);
     }
-    if !is_human_admin(caller) {
+    if !holds_repository_delegation(caller.kind, caller.role, true) {
         return Err(RepoDenial::NotAllowed);
     }
-    if !holds_delegation {
-        return Err(RepoDenial::NoProviderDelegation);
-    }
     Ok(())
+}
+
+/// Who may give a grant on the room's repository: see [`authorize_repository_admin`].
+pub fn authorize_grant(caller: &Caller) -> Result<(), RepoDenial> {
+    authorize_repository_admin(caller)
 }
 
 /// Who may take a grant back:
 ///
 /// - its holder, their own, whoever they are and whether or not they're still in the room;
-/// - the room's owner, any grant, by the delegation they hold;
+/// - the room's owner or a room admin, as a person, any grant;
 /// - a person who administers the room's organization, any grant, with or without a place in the room, so a grant can
 ///   be pulled when the owner has left.
 ///
-/// Nobody else: not a room admin, a member, the reviewer or whoever gave the grant, once they no longer hold the
-/// delegation. An agent never takes back another principal's grant, whatever role is stored for it.
+/// Nobody else: not a member, the reviewer or whoever gave the grant, once they're no longer the owner or an admin.
+/// An agent never takes back another principal's grant, whatever role is stored for it.
 pub fn authorize_revoke(
     caller: &Caller,
     grantee: &str,
-    holds_delegation: bool,
     administers_room_org: bool,
 ) -> Result<(), RepoDenial> {
     if caller.id == grantee {
@@ -135,7 +136,7 @@ pub fn authorize_revoke(
     if caller.role == Role::None {
         return Err(RepoDenial::NotParticipant);
     }
-    if person && caller.role == Role::Owner && holds_delegation {
+    if holds_repository_delegation(caller.kind, caller.role, true) {
         return Ok(());
     }
     Err(RepoDenial::NotAllowed)
@@ -160,7 +161,7 @@ pub struct GrantStanding<'a> {
     pub grant: Option<&'a Grant<'a>>,
     /// The room's own linked repository.
     pub link_repo_id: i64,
-    /// Who holds the repository's delegation now, from [`delegation_holder`].
+    /// The grant's giver, if they still hold authority over the room's repository, from [`delegation_holder`].
     pub delegation_holder: Option<&'a str>,
     /// The caller is in the room only through a public claim, now. Checked at every use, not only when granting.
     pub through_public_claim: bool,

@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { alarmPass } from "./alarm.ts";
+import { alarmPass, alarmQuiet } from "./alarm.ts";
 
 // M5 step 6: `get_repo_access`, an agent's short-lived token for the room's repository, against the fake GitHub. Links
 // and a task's link to the repository are written straight into the room, as step 5b's tests do: no command marks a
@@ -290,6 +290,47 @@ describe("refusing", () => {
     await refusedWith(await access(AGENT, moved.id, moved.task), 403, "grant_stale");
   });
 
+  it("counts an admin's grant only while they're still an admin whose authority holds, from current state", async () => {
+    /** A room where a newly added person, an admin, gave the agent its push grant. */
+    const givenByAdmin = async (admin: string) => {
+      const r = await room({ grant: false });
+      const who: Who = { id: admin, kind: "person", org: ORG };
+      await must(OWNER, "POST", `/v1/workspaces/${r.id}/members`, { principal_id: admin, kind: "person", org_id: ORG, role: "admin", policy_version: await version(r.id) }, { claims: { target_member: { person: admin, orgs: { [ORG]: 1 } } } });
+      const grant = await must(who, "POST", `/v1/workspaces/${r.id}/repository/grants`, { policy_version: await version(r.id), principal_id: AGENT.id, action: "push" });
+      expect(grant.delegated_by).toBe(admin);
+      return { ...r, admin: who };
+    };
+    const fresh = () => `per_ra_giver_${++counter}`;
+    // Demoted underneath, with nothing run to end the grant: refused at use from the room's own rows.
+    const demoted = await givenByAdmin(fresh());
+    await inRoom(demoted.id, (sql) => void sql.exec("UPDATE member SET role = 'member' WHERE principal_id = ?", demoted.admin.id));
+    await refusedWith(await access(AGENT, demoted.id, demoted.task), 403, "grant_stale");
+    // Stored as an admin and as an agent: an agent gives nothing that counts.
+    const agentKind = await givenByAdmin(fresh());
+    await inRoom(agentKind.id, (sql) => void sql.exec("UPDATE member SET kind = 'agent' WHERE principal_id = ?", agentKind.admin.id));
+    await refusedWith(await access(AGENT, agentKind.id, agentKind.task), 403, "grant_stale");
+    // Their place in the room revoked underneath.
+    const gone = await givenByAdmin(fresh());
+    await inRoom(gone.id, (sql) => void sql.exec("UPDATE member SET revoked_at = 1 WHERE principal_id = ?", gone.admin.id));
+    await refusedWith(await access(AGENT, gone.id, gone.task), 403, "grant_stale");
+    // They left the organization and the room hasn't heard: its rows still say admin and the list says live, and the
+    // person's own record refuses the grant. The listing is emptied first, so the departure can't find the room.
+    const left = await givenByAdmin(fresh());
+    await alarmQuiet(stub(left.id));
+    await BINDINGS.DB.prepare("DELETE FROM membership_index WHERE principal_id = ?").bind(left.admin.id).run();
+    await must({ ...left.admin, departure: { person: left.admin.id, org: ORG, left_at: Date.now() } }, "POST", "/v1/org-departures", {});
+    expect((await api(OWNER, "GET", `/v1/workspaces/${left.id}/repository/grants`)).body.grants.map((g: any) => g.state)).toEqual(["live"]);
+    await refusedWith(await access(AGENT, left.id, left.task), 403, "grant_stale");
+    // Their record can't be read: nothing is minted on an unknown.
+    const unknown = await givenByAdmin(`per_unavailable_ra_giver_${++counter}`);
+    await refusedWith(await access(AGENT, unknown.id, unknown.task), 503, "standing_unknown");
+    // An admin whose authority holds: the token is minted under their grant.
+    const held = await givenByAdmin(fresh());
+    const got = await access(AGENT, held.id, held.task);
+    expect(got.status, got.text).toBe(200);
+    expect((await tokens(held.id)).map((t) => t.state)).toEqual(["held"]);
+  });
+
   it("refuses an agent acting for a person who has left, or for nobody, and refuses when that can't be read", async () => {
     const r = await room();
     const linker = `per_ra_linker_${++counter}`;
@@ -484,6 +525,28 @@ describe("revoking a token whose authority ended", () => {
       expect(await tokens(r.id), name).toEqual([]);
     });
   };
+
+  /** The same, for a token minted under a grant the room's admin gave, not its owner. */
+  const adminsEndsWith = async (name: string, end: (r: Awaited<ReturnType<typeof room>>) => Promise<unknown>) => {
+    const r = await room({ grant: false });
+    const given = await must(ADMIN, "POST", `/v1/workspaces/${r.id}/repository/grants`, { policy_version: await version(r.id), principal_id: AGENT.id, action: "push" });
+    expect(given.delegated_by, name).toBe(ADMIN.id);
+    const got = await access(AGENT, r.id, r.task);
+    expect(got.status, `${name}: ${got.text}`).toBe(200);
+    // An alarm with nothing ended leaves an admin's token alone, as it leaves the owner's.
+    await alarm(r.id);
+    expect(await minted(), name).toEqual([expect.objectContaining({ token: got.body.token, live: true })]);
+    expect((await tokens(r.id)).map((t) => t.state), name).toEqual(["held"]);
+    await end(r);
+    await alarm(r.id);
+    await eventually(r.id, async () => {
+      expect(await minted(), name).toEqual([expect.objectContaining({ token: got.body.token, live: false })]);
+      expect(await tokens(r.id), name).toEqual([]);
+    });
+  };
+  it("when the admin who gave the grant is demoted", () => adminsEndsWith("demoted", async (r) => must(OWNER, "POST", `/v1/workspaces/${r.id}/members/${ADMIN.id}/role`, { role: "member", policy_version: await version(r.id) }, { claims: { target_member: { person: ADMIN.id, orgs: { [ORG]: 1 } } } })));
+  it("when the admin who gave the grant is removed", () => adminsEndsWith("removed", async (r) => must(OWNER, "DELETE", `/v1/workspaces/${r.id}/members/${ADMIN.id}`, { policy_version: await version(r.id) })));
+  it("when the admin who gave the grant is one no more by the room's rows, seen by the alarm alone", () => adminsEndsWith("role changed underneath", (r) => inRoom(r.id, (sql) => void sql.exec("UPDATE member SET role = 'member' WHERE principal_id = ?", ADMIN.id))));
 
   it("when the grant is taken back", () => endsWith("revoked", async (r) => must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) })));
   it("when the agent is removed", () => endsWith("removed", async (r) => must(OWNER, "DELETE", `/v1/workspaces/${r.id}/members/${AGENT.id}`, { policy_version: await version(r.id) })));

@@ -1,8 +1,9 @@
-// Shows error-codes.mjs sees every way a code is made, and says so when it can't, on small sources held in memory.
+// Shows error-codes.mjs finds the ways a code is made that it claims to, and says so when it can't, on small sources
+// held in memory. The shapes it still misses are listed in its header.
 //
 //   node error-codes.test.mjs
 import assert from "node:assert/strict";
-import { collectErrorCodes, compareWithEnum } from "./error-codes.mjs";
+import { collectErrorCodes, compareExcluded, compareWithEnum } from "./error-codes.mjs";
 
 let failed = 0;
 const check = (name, fn) => {
@@ -28,7 +29,7 @@ check("a same-file constant is followed, a non-numeric status doesn't hide the c
   assert.deepEqual(found.problems, []);
 });
 
-check("a code it can't read is a problem, never silently missed", () => {
+check("a code it can't read is a problem", () => {
   for (const arg of ["code", "other::GONE", "format!(\"x_{}\", n)", "row.code"]) {
     const found = collectErrorCodes(rust(`fn f(n: u8) -> ApiError { let code = pick(); ApiError::api(403, ${arg}) }`));
     assert.equal(found.problems.length, 1, arg);
@@ -115,6 +116,91 @@ check("the enum must equal what's collected: missing, unanswered and wrongly int
     "Error.code: lists listed_but_unanswered, which nothing in the API or the gateway answers",
     "Error.code: missing answered, which apps/api/src/x.rs answers",
     "INTERNAL_ONLY: gone_internal isn't answered anywhere any more, so take it off the list",
+  ]);
+});
+
+const files = (lang, entries) => ({ rust: lang === "rust" ? entries : [], gateway: lang === "ts" ? entries : [] });
+
+check("M1: a Rust wrapper is followed through a receiver, a module path and super::, and a private one stays in its module", () => {
+  const found = collectErrorCodes(files("rust", [
+    { path: "apps/api/src/room.rs", text: `struct Room;\nimpl Room {\n    fn refuse(&self, code: &'static str) -> ApiError { ApiError::api(400, code) }\n    fn a(&self) -> ApiError { self.refuse("via_self") }\n    fn b(&mut self) -> ApiError { Self::refuse(self, "via_self_path") }\n}` },
+    { path: "apps/api/src/helpers.rs", text: `pub fn helper(code: &'static str) -> ApiError { ApiError::api(400, code) }` },
+    { path: "apps/api/src/caller.rs", text: `fn c() -> ApiError { helpers::helper("via_module") }\nfn d() -> ApiError { crate::helpers::helper("via_crate") }` },
+    { path: "apps/api/src/workspace.rs", text: `fn parent_only(code: &'static str) -> ApiError { ApiError::explained(409, code, "x") }` },
+    { path: "apps/api/src/workspace/child.rs", text: `use super::parent_only;\nfn e() -> ApiError { super::parent_only("via_super") }\nfn f() -> ApiError { parent_only("via_use") }` },
+    { path: "apps/api/src/elsewhere.rs", text: `fn parent_only(n: u8) -> u8 { n }\nfn g() -> u8 { parent_only("not_visible_here") }` },
+  ]));
+  assert.deepEqual(codes(found), ["via_crate", "via_module", "via_self", "via_self_path", "via_super", "via_use"]);
+  assert.deepEqual(found.problems, []);
+});
+
+check("M1: an argument it can't read through a method wrapper is a problem", () => {
+  const found = collectErrorCodes(rust(`struct Room;\nimpl Room {\n    fn refuse(&self, code: &'static str) -> ApiError { ApiError::api(400, code) }\n    fn a(&self, picked: &'static str) -> ApiError { self.refuse(picked.trim()) }\n}`));
+  assert.match(found.problems.join("\n"), /can't tell the error code picked\.trim\(\)/);
+});
+
+check("M2: gateway error objects with code anywhere, over lines, quoted, built first, or after a spread", () => {
+  const found = collectErrorCodes(gateway([
+    `export function a() { return json({ error: { message: "m", code: "second_key" } }); }`,
+    `export function b() {\n  return json({\n    error: {\n      message: "m",\n      code: "many_lines",\n    },\n  });\n}`,
+    `export function c() { return json({ "error": { "message": "m", "code": "quoted_key" } }); }`,
+    `export function d() { const error = { message: "m", code: "built_first" }; return json({ error }); }`,
+    `export function e(base: object) { return json({ error: { ...base, code: "after_spread" } }); }`,
+    `function fail(code: string) { const error = { message: code, code }; return json({ error }, 400); }`,
+    `export function f() { return fail("built_in_wrapper"); }`,
+  ].join("\n")));
+  assert.deepEqual(codes(found), ["after_spread", "built_first", "built_in_wrapper", "many_lines", "quoted_key", "second_key"]);
+  assert.deepEqual(found.problems, []);
+});
+
+check("M2: an error object whose code comes only from a spread is a problem", () => {
+  const found = collectErrorCodes(gateway(`export function a(base: { code: string }) { return json({ error: { ...base, message: "m" } }); }`));
+  assert.match(found.problems.join("\n"), /can't tell the error code \.\.\.base/);
+});
+
+check("M3: x.code() counts only when x's type is known and its code() is marked errors", () => {
+  const marked = `enum Lim { A }\nimpl Lim {\n    // codes: errors\n    pub fn code(self) -> &'static str { "limit_code" }\n}\nenum Why { A }\nimpl Why {\n    // codes: reasons\n    pub fn code(self) -> &'static str { "a_reason" }\n}\nfn decide() -> Result<(), Lim> { Ok(()) }\n`;
+  const untyped = collectErrorCodes(rust(`${marked}fn f(r: R) -> ApiError { let x = r.pick(); ApiError::api(409, x.code()) }`));
+  assert.match(untyped.problems.join("\n"), /can't tell which type's code\(\) x\.code\(\) calls/);
+  const reasons = collectErrorCodes(rust(`${marked}fn f(why: Why) -> ApiError { ApiError::api(409, why.code()) }`));
+  assert.match(reasons.problems.join("\n"), /why\.code\(\) is an error code, but Why::code\(\) is marked reasons/);
+  const unmarked = collectErrorCodes(rust(`${marked}fn f() -> ApiError { ApiError::api(409, Other::A.code()) }`));
+  assert.match(unmarked.problems.join("\n"), /Other has no code\(\) marked/);
+  for (const ok of [
+    `fn f(lim: &Lim) -> ApiError { ApiError::api(409, lim.code()) }`,
+    `fn f() -> ApiError { if let Err(held) = decide() { return ApiError::api(429, held.code()); } ApiError::api(500, Lim::A.code()) }`,
+    `fn f() -> ApiError { match decide() { Ok(()) => ApiError::api(500, Lim::A.code()), Err(r) => ApiError::api(429, r.code()) } }`,
+    `fn f() -> Result<(), ApiError> { decide().map_err(|r| ApiError::api(429, r.code())) }`,
+    `fn f(r: R) -> ApiError {\n    let x = r.pick();\n    // error-codes: type Lim\n    ApiError::api(409, x.code())\n}`,
+  ]) assert.deepEqual(collectErrorCodes(rust(`${marked}${ok}`)).problems, [], ok);
+});
+
+check("M3: a comment naming the type wins over a shadowed binding", () => {
+  const found = collectErrorCodes(rust(`enum Lim { A }\nimpl Lim {\n    // codes: errors\n    pub fn code(self) -> &'static str { "limit_code" }\n}\nfn f(refusal: Outer) -> ApiError {\n    match refusal {\n        Outer::Inner(refusal) => {\n            // error-codes: type Lim\n            ApiError::api(409, refusal.code())\n        }\n    }\n}`));
+  assert.deepEqual(found.problems, []);
+});
+
+check("M4: a code() marker must be on the line directly above it", () => {
+  const found = collectErrorCodes(rust(`enum E { A }\nimpl E {\n    // codes: errors\n    /// Its code.\n    pub fn code(self) -> &'static str { "far_marker" }\n}`));
+  assert.match(found.problems.join("\n"), /on the line directly above it/);
+  assert.deepEqual(codes(found), []);
+});
+
+check("excluded surfaces: a stale one, one with no error left, and codes not pinned are each named", () => {
+  const surfaces = {
+    "apps/gateway/src/hook.ts": { why: "x", codes: ["pinned_gone", "webhook_only"] },
+    "apps/gateway/src/quiet.ts": { why: "x", codes: [] },
+    "apps/gateway/src/gone.ts": { why: "x", codes: [] },
+  };
+  const found = collectErrorCodes(files("ts", [
+    { path: "apps/gateway/src/hook.ts", text: `function refuse(code: string) { return json({ error: { code } }, 400); }\nexport function a() { return refuse("webhook_only"); }\nexport function b() { return refuse("new_hook_code"); }` },
+    { path: "apps/gateway/src/quiet.ts", text: `export const ok = () => json({ ok: true });` },
+  ]), surfaces);
+  assert.deepEqual(compareExcluded(surfaces, found).sort(), [
+    "EXCLUDED_SURFACES: apps/gateway/src/gone.ts doesn't exist any more, so take it off the list",
+    "EXCLUDED_SURFACES: apps/gateway/src/hook.ts answers new_hook_code, which isn't pinned for it",
+    "EXCLUDED_SURFACES: apps/gateway/src/hook.ts is pinned to pinned_gone, which it doesn't answer any more",
+    "EXCLUDED_SURFACES: apps/gateway/src/quiet.ts makes no error any more, so take it off the list",
   ]);
 });
 

@@ -236,8 +236,10 @@ fn refusal(refusal: VisibilityRefusal) -> ApiError {
             }
             PublishRefusal::Archived => ApiError::workspace_archived(),
             PublishRefusal::Disabled | PublishRefusal::Suspended => {
+                // error-codes: type PublishRefusal
                 ApiError::api(403, refusal.code())
             }
+            // error-codes: type PublishRefusal
             PublishRefusal::PersonReviewOff => ApiError::api(409, refusal.code()),
         },
     }

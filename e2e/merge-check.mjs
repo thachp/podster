@@ -115,6 +115,15 @@ await check("M5-S7iv", "an authorized holder's merge_task leads to exactly one m
   // Asking again merges nothing more.
   refused(await ask(robot), "already_merged", "asking again");
   eq((await merges()).length, 1, "merge calls after asking again");
+  // The agent that asked reads how it went from the release status (M5 step 8), which fetches nothing. Checks weren't
+  // read here, and that's said as unobserved, apart from the merge. No release exists.
+  const status = await robot.must("get_task_release_status", where(), false);
+  eq([status.merge.state, status.merge.reason, status.merge.sha, status.merge.requested_by], ["succeeded", null, done.merge_sha, robot.id], "the release status's merge");
+  ok(typeof status.merge.observed_at === "number", "the merge has no observation time");
+  eq(status.checks, { state: null, counts: null, observed_at: null }, "the release status's checks");
+  eq(status.release, { exists: false }, "the release");
+  // Another agent in the room, shown neither the change nor having asked, is refused.
+  refused(await sibling.call("get_task_release_status", where()), "not_allowed", "another agent reading the release status");
 });
 
 // What GitHub's two rulesets refused in the spike, as the fake holds to them, each shown through Podster with one exact

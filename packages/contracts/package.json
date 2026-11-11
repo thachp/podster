@@ -1,2 +1,12 @@
-{ "name": "@podster/contracts", "private": true, "license": "MIT", "type": "module",
-  "scripts": { "test": "node check.mjs" }, "devDependencies": { "yaml": "2.8.1" } }
+{
+  "name": "@podster/contracts",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "node check.mjs && node error-codes.test.mjs"
+  },
+  "devDependencies": {
+    "yaml": "2.8.1"
+  }
+}

@@ -85,6 +85,7 @@ pub enum LinkRefusal {
 }
 
 impl LinkRefusal {
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             LinkRefusal::NotFound => "pull_request_not_found",

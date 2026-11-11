@@ -551,6 +551,7 @@ pub enum PublishRefusal {
 }
 
 impl PublishRefusal {
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             PublishRefusal::Disabled => "public_rooms_disabled",
@@ -717,6 +718,7 @@ pub enum PublicClaimRefusal {
 }
 
 impl PublicClaimRefusal {
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             PublicClaimRefusal::RoomHidden => "workspace_not_found",
@@ -804,6 +806,7 @@ pub fn public_handle_from(random: [u8; 16]) -> String {
 pub struct UnknownTopic;
 
 impl UnknownTopic {
+    // codes: errors
     pub fn code(self) -> &'static str {
         "invalid_argument"
     }
@@ -827,6 +830,7 @@ pub enum OpeningSettingRefusal {
 }
 
 impl OpeningSettingRefusal {
+    // codes: errors
     pub fn code(self) -> &'static str {
         "invalid_argument"
     }

@@ -58,6 +58,7 @@ pub enum OutputRefusal {
 }
 
 impl OutputRefusal {
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             OutputRefusal::RoomArchived => "workspace_archived",

@@ -298,6 +298,7 @@ pub enum CoreError {
 }
 
 impl CoreError {
+    // codes: errors
     pub fn code(&self) -> &'static str {
         match self {
             CoreError::InvalidTransition => "invalid_transition",

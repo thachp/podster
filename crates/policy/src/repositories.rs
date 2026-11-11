@@ -91,6 +91,7 @@ impl RepoDenial {
         }
     }
 
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             RepoDenial::NotParticipant => "not_a_participant",

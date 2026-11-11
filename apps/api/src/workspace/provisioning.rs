@@ -459,6 +459,7 @@ pub(super) fn retry(
             .flatten()
     });
     if let Some(held) = held {
+        // error-codes: type RetryHeld
         return refuse(
             if held.code() == "retry_too_soon" {
                 429

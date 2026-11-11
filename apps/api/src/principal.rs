@@ -755,6 +755,7 @@ pub async fn register_room(
         let body: Value = response.json().await.unwrap_or(Value::Null);
         for code in [PUBLIC_CLAIMS_NOT_ALLOWED, PUBLIC_CLAIMS_SUSPENDED] {
             if body["error"]["code"].as_str() == Some(code) {
+                // error-codes: public_claims_not_allowed, public_claims_suspended
                 return Err(ApiError::api(403, code));
             }
         }

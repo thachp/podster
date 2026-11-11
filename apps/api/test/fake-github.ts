@@ -206,6 +206,12 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
     if (url.pathname === "/agent-gate") {
       return json({ waiting: gates.get(Number(url.searchParams.get("repo")))?.length ?? 0 });
     }
+    // A caller that waits here until a test releases the gate of that number, as a gated mint does.
+    if (url.pathname === "/hold") {
+      const id = Number(url.searchParams.get("repo"));
+      await new Promise<void>((open) => gates.set(id, [...(gates.get(id) ?? []), open]));
+      return json({ held: true });
+    }
     if (url.pathname === "/agent-release") {
       const { id } = (await request.json()) as { id: number };
       for (const open of gates.get(id)?.splice(0) ?? []) open();

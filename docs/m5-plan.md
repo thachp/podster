@@ -103,7 +103,7 @@ Pure decisions in `crates/core` and `crates/policy`, with no I/O, no clock and n
 **Built:**
 
 - **Grants** (`core::repo_grants`, `policy::repositories`).
-  - **Giving** a grant is the room owner's alone. It needs room authority, which a human owner or admin has, and the repository's delegation, which only the owner holds, as a person whose owner authority still holds. So an admin gets `no_provider_delegation` (AC-10), and someone with a delegation who doesn't administer the room gets `not_allowed` (AC-11).
+  - *Superseded on 2026-11-11 by [decision 194](spec/PRODUCT.md#decisions-needed): a person who is the room's owner or a room admin gives a grant, and `no_provider_delegation` is gone ([below](#self-serve-repositories-what-was-built)).* **Giving** a grant is the room owner's alone. It needs room authority, which a human owner or admin has, and the repository's delegation, which only the owner holds, as a person whose owner authority still holds. So an admin gets `no_provider_delegation` (AC-10), and someone with a delegation who doesn't administer the room gets `not_allowed` (AC-11).
   - **Taking one back** follows ruling C below: the room's owner, a person who administers the room's organization, or the holder for their own.
   - A grant goes to a current participant, person or agent. It may carry an expiry, which must be in the future.
   - Granting again after an expiry, with a new expiry, or over a row an earlier owner gave, revokes the old row and adds one in the same transaction, since step 2's index counts an expired row as the principal's one grant. Granting the same thing again changes nothing.
@@ -294,7 +294,7 @@ Three person-only routes on the room's Durable Object, the two cascades, and the
 **Built:**
 
 - **`POST /v1/workspaces/{ws}/repository/grants`, `grantRepositoryAction`:** `{ policy_version, principal_id, action, expires_at? }`.
-  - Only the room's owner, as a person whose owner authority holds. An admin gets `no_provider_delegation`, and anyone else in the room `not_allowed`.
+  - *Superseded on 2026-11-11 by [decision 194](spec/PRODUCT.md#decisions-needed): the room's owner or a room admin, as a person; anyone else in the room `not_allowed` ([below](#self-serve-repositories-what-was-built)).* Only the room's owner, as a person whose owner authority holds. An admin gets `no_provider_delegation`, and anyone else in the room `not_allowed`.
   - The grantee must be a current participant, `grantee_not_participant`, and not a public participant, `grantee_public`.
   - With no link it answers `repo_not_linked`. A degraded or suspended link still takes a grant.
   - Granting the same again changes nothing. A new expiry, an expired row or an earlier owner's row is revoked and replaced in the same transaction.
@@ -654,7 +654,13 @@ Three person-only routes on the room's Durable Object, the two cascades, and the
   - **Unchanged:** a transfer or recovery of ownership still ends every grant the new owner didn't give, including an admin's.
 - **Unchanged and still tested:** `self_merge` (an admin who controls the submitting agent can grant themselves or their other agent a merge and still can't merge that work), `grantee_public`, expiry, take-back, what the release status and a task's change show to whom, and `delegated` in the room's repository read, now for the owner and admins and still left out when unknown.
 - **The setup job** ends a pending request `requester_lost_authority` when whoever asked is no longer the room's owner or an admin. `requester_not_owner` stays in rows from before.
-- **An operator's take-back** refuses new requests and retries `not_delegated`, counts nothing, and stops a job that hasn't linked its repository. A linked repository keeps its grants, tokens and merges (ADR 0009).
+- **What follows from "Owner and admins" and "No gate, with limits", stated plainly:**
+  - **In a room whose owner has left, its admins can still ask for the repository and give grants.** Before 2026-11-11 nobody could until ownership was recovered.
+  - **An admin who grants a principal an action the owner already granted them replaces the owner's row with their own.** That grant then ends if that admin is demoted or removed, though the owner gave it first.
+  - **An operator's take-back stops new requests and retries of setup, and a setup job that hasn't linked its repository yet (`not_delegated`), and nothing else.** Nothing is counted for a refused request. Repositories already linked, their tokens, grants and merges keep working. **Ruled by the architect, 2026-11-11; for the owner to review:** the owner's words were only that an operator "can take the ability away from an organization".
+  - **There is no cap across sign-ups.** The cap is 5 accepted requests for one person in a rolling 24 hours, so N sign-ups get 5N. Nothing holds people acting together, or one person with many accounts. Owed to M7's security review.
+  - **A request is recorded only if the call that made it counted it against both caps** for the caller the room resolves in its transaction. Someone made an admin while their call is under way records nothing and asks again (`delegation_unavailable`). Each count is the caller's own claim, so one caller giving theirs back never frees a room another caller counted.
+
 - **The rehearsal:** `e2e/repo-admin-check.mjs`, run by `e2e/run-local.mjs` on the switched-on stack: AC-10 and AC-11 under the new rule, the cap and the take-back, each refusal one exact code. `e2e/merge-check.mjs` no longer has an operator delegate first. `e2e/journey.mjs` had no AC-10 or AC-11 check and is unchanged.
 - **The staging script,** `e2e/m5-staging.mjs`, follows the rule: no operator and 2 sign-ups, the room's admin asks for the repository and gives the push grant, and an agent can't be made an admin. It also pins `podsterdev` in code, and takes back M5-G3's short merge grant if its expiry was never seen ([step 10](#step-10-the-staging-script)). It hasn't run against staging.
 

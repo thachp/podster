@@ -142,6 +142,12 @@ The specs propose private by default, chosen at setup and independent of the roo
 **Spec and the plan's question 4; kept.**
 
 - Creating a linked repository delegates to those who run the room, for that repository only: a person who is its owner or a room admin ([decision 194](../spec/PRODUCT.md#decisions-needed), 2026-11-11; before it, the room's owner alone). An agent or reviewer needs an explicit `provider_grant` for that repository and action, from one of them, and it counts only while its giver still is one (AC-10, AC-11). An admin's grants end in the change that demotes or removes them, and making them an admin again restores nothing.
+- **What follows from "Owner and admins" and "No gate, with limits", stated plainly:**
+  - **In a room whose owner has left, its admins can still ask for the repository and give grants.** Before 2026-11-11 nobody could until ownership was recovered.
+  - **An admin who grants a principal an action the owner already granted them replaces the owner's row with their own.** That grant then ends if that admin is demoted or removed, though the owner gave it first.
+  - **An operator's take-back stops new requests and retries of setup, and a setup job that hasn't linked its repository yet (`not_delegated`), and nothing else.** Nothing is counted for a refused request. Repositories already linked, their tokens, grants and merges keep working. **Ruled by the architect, 2026-11-11; for the owner to review:** the owner's words were only that an operator "can take the ability away from an organization".
+  - **There is no cap across sign-ups.** The cap is 5 accepted requests for one person in a rolling 24 hours, so N sign-ups get 5N. Nothing holds people acting together, or one person with many accounts. Owed to M7's security review.
+  - **A request is recorded only if the call that made it counted it against both caps** for the caller the room resolves in its transaction. Someone made an admin while their call is under way records nothing and asks again (`delegation_unavailable`). Each count is the caller's own claim, so one caller giving theirs back never frees a room another caller counted.
 - Proposed grant actions: `push`, which covers task branches and pull requests, and `merge`.
 - `merge_task` needs an approved submission, a current `merge` grant, and a caller who isn't the submitter (AC-17 and question 4).
 - An A2A agent or a public participant gets no repository authority from its protocol or its claim (AC-24).

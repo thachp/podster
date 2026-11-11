@@ -199,7 +199,7 @@ describe("what's rendered inertly", () => {
 describe("every code as a sentence", () => {
   it("names every refusal for asking, retrying, granting and taking back", () => {
     const generic = explainRepositoryRefusal("something_new");
-    for (const code of ["name_reserved", "not_delegated", "repository_request_limit", "private_unavailable", "repo_request_exists", "retry_limit_reached", "retry_too_soon", "repo_request_not_found", "setup_in_progress", "already_ready", "not_allowed", "not_found", "workspace_archived", "rate_limited", "invalid_argument"]) {
+    for (const code of ["name_reserved", "not_delegated", "repository_request_limit", "delegation_unavailable", "private_unavailable", "repo_request_exists", "retry_limit_reached", "retry_too_soon", "repo_request_not_found", "setup_in_progress", "already_ready", "not_allowed", "not_found", "workspace_archived", "rate_limited", "invalid_argument"]) {
       const text = explainRepositoryRefusal(code);
       expect(text, code).not.toBe(generic);
       expect(text, code).toMatch(/\.$/);

@@ -112,6 +112,8 @@ export function explainRepositoryRefusal(code: string, status = 400) {
       return "That name is reserved, because it would read as Podster's own. Choose another. Nothing was created.";
     case "not_delegated":
       return "A Podster operator has taken managed repositories away from this workroom's organization. Nothing was created.";
+    case "delegation_unavailable":
+      return "Podster couldn't check this request against today's limits just now. Nothing was created. Try again.";
     case "repository_request_limit":
       return "That's the limit for today: five repository requests in 24 hours for an organization, and the same for one person. Try again tomorrow. Nothing was created.";
     case "private_unavailable":

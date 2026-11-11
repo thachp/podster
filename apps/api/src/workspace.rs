@@ -4644,8 +4644,9 @@ impl Workspace {
                 let (delegated, counted) = if switched_on {
                     self.count_repository_request(&identity, &body).await?
                 } else {
-                    (false, vec![])
+                    (false, None)
                 };
+                let counted_for = counted.clone();
                 let recorded = self.command_checked(
                     &identity,
                     key,
@@ -4654,11 +4655,20 @@ impl Workspace {
                     test_fail,
                     |_: &SqlStorage, who: &Participant| provisioning::may_request(&who.caller),
                     move |sql, who, now| {
-                        provisioning::request(sql, who, &body, switched_on, delegated, now)
+                        provisioning::request(
+                            sql,
+                            who,
+                            &body,
+                            switched_on,
+                            delegated,
+                            counted_for.as_ref(),
+                            now,
+                        )
                     },
                 );
-                if recorded.is_err() {
-                    self.uncount_repository_request(&counted).await;
+                // A command that recorded nothing gives this caller's places back, and nobody else's.
+                if let (Err(_), Some(counted)) = (&recorded, &counted) {
+                    self.uncount_repository_request(counted).await;
                 }
                 recorded
             }

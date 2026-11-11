@@ -1416,6 +1416,36 @@ describe("a room admin's grant (the owner's decision of 2026-11-11: owner and ad
     expect([got.status, got.code]).toEqual([403, "grant_stale"]);
   });
 
+  it("ends the merge when the admin who gave the grant left the organization and the room hasn't heard, at the request and in the job", async () => {
+    /** An approved task whose merge grant a newly added admin gave, who then leaves their organization unheard by the room. */
+    const givenThenLeft = async (requestFirst: boolean) => {
+      await fresh();
+      const r = await approved();
+      const admin: Who = { id: `per_mt_leaver_${nextRepo}`, kind: "person", org: ORG };
+      await must(OWNER, "POST", `/v1/workspaces/${r.id}/members`, { principal_id: admin.id, kind: "person", org_id: ORG, role: "admin", policy_version: await version(r.id) }, { claims: { target_member: { person: admin.id, orgs: { [ORG]: 1 } } } });
+      const given = await must(admin, "POST", `/v1/workspaces/${r.id}/repository/grants`, { policy_version: await version(r.id), principal_id: MERGER.id, action: "merge" });
+      expect(given.delegated_by).toBe(admin.id);
+      if (requestFirst) expect((await merge(MERGER, r.id, r.task)).status).toBe(200);
+      // The listing is emptied first, so the departure can't find the room: its rows still say admin, and live.
+      await alarmQuiet(stub(r.id));
+      await BINDINGS.DB.prepare("DELETE FROM membership_index WHERE principal_id = ?").bind(admin.id).run();
+      await must(admin, "POST", "/v1/org-departures", {}, { claims: { departure: { person: admin.id, org: ORG, left_at: Date.now() } } });
+      expect((await api(OWNER, "GET", `/v1/workspaces/${r.id}/repository/grants`)).body.grants.find((g: any) => g.id === given.id)?.state).toBe("live");
+      return r;
+    };
+    // Asked for after they left: refused, from their own record.
+    const late = await givenThenLeft(false);
+    const got = await merge(MERGER, late.id, late.task);
+    expect([got.status, got.code]).toEqual([403, "grant_stale"]);
+    expect((await change(late.id, late.task)).merge_state).toBe("not_requested");
+    // Asked for before they left: the job asks again, and ends the merge with nothing marked or called.
+    const r = await givenThenLeft(true);
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "failed", merge_reason: "grant_stale", merge_marked_at: null, merge_called_at: null });
+    expect((await github()).calls).toEqual([]);
+    expect(await merges()).toEqual([]);
+  });
+
   it("waits, counted, when the admin's record can't be read, and merges nothing on an unknown", async () => {
     await fresh();
     const r = await approved();

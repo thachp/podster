@@ -871,10 +871,11 @@ CREATE TABLE IF NOT EXISTS org_provider_delegation (provider TEXT PRIMARY KEY, g
 CREATE TABLE IF NOT EXISTS org_provider_delegation_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, granted INTEGER NOT NULL, set_by TEXT NOT NULL, set_at INTEGER NOT NULL);
 ";
 
-/// The requests for a repository this object counted as accepted, one row per room: for an organization, its rooms'; for a
-/// person, the rooms they asked in. A room has one request in its life, so it's counted once however often it's asked.
+/// The requests for a repository this object counted as accepted: for an organization, its rooms'; for a person, the
+/// rooms they asked in. A room has one request in its life, so it counts once however many rows it has. Each row is one
+/// caller's claim on the room's place, so giving one caller's back never frees a place another caller took.
 const REPO_REQUESTS_SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS repo_request_accepted (workspace_id TEXT PRIMARY KEY, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS repo_request_claim (workspace_id TEXT NOT NULL, claimant TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (workspace_id, claimant));
 ";
 
 /// What an organization's object, or a person's, said to a room about to record a request for a repository.
@@ -887,14 +888,16 @@ pub struct RepoRequestReserved {
 
 /// Counts a room's request for a repository against the cap of the organization or the person named by `holder`, and,
 /// with `delegation`, reads the organization's delegation in the same call. Nothing is counted when the delegation was
-/// taken back or the cap is reached. A room already counted is allowed again and not counted twice.
+/// taken back or the cap is reached. A room already counted is allowed again and not counted twice. `claimant` is the
+/// person asking: the place is theirs to give back, and nobody else's.
 pub async fn reserve_repo_request(
     env: &Env,
     holder: &str,
     workspace: &str,
+    claimant: &str,
     delegation: bool,
 ) -> R<RepoRequestReserved> {
-    let body = json!({ "provider": "github", "workspace": workspace, "delegation": delegation });
+    let body = json!({ "provider": "github", "workspace": workspace, "claimant": claimant, "delegation": delegation });
     let mut response = internal(env, holder, "/internal/repo-request-reserve", &body).await?;
     if response.status_code() != 200 {
         return Err(ApiError::internal("couldn't count the request"));
@@ -906,9 +909,15 @@ pub async fn reserve_repo_request(
     })
 }
 
-/// Gives back a place taken by [`reserve_repo_request`] for a request the room then didn't record.
-pub async fn release_repo_request(env: &Env, holder: &str, workspace: &str) -> R<()> {
-    let body = json!({ "workspace": workspace });
+/// Gives back the place `claimant` took with [`reserve_repo_request`], for a request the room then didn't record. A
+/// place another caller took for the same room stays.
+pub async fn release_repo_request(
+    env: &Env,
+    holder: &str,
+    workspace: &str,
+    claimant: &str,
+) -> R<()> {
+    let body = json!({ "workspace": workspace, "claimant": claimant });
     internal(env, holder, "/internal/repo-request-release", &body).await?;
     Ok(())
 }
@@ -1482,6 +1491,7 @@ impl Principal {
             "/internal/repo-request-reserve" => {
                 let body: Value = req.json().await?;
                 let workspace = body["workspace"].as_str().unwrap_or_default().to_string();
+                let claimant = body["claimant"].as_str().unwrap_or_default().to_string();
                 let provider = body["provider"].as_str().unwrap_or_default().to_string();
                 let granted = if body["delegation"].as_bool() == Some(true) {
                     exec(&sql, ORG_DELEGATION_SCHEMA, vec![])?;
@@ -1509,32 +1519,46 @@ impl Principal {
                     // Rows that left the window count for nothing, and a room asks at most once, so they're dropped.
                     exec(
                         &state,
-                        "DELETE FROM repo_request_accepted WHERE at <= ?",
+                        "DELETE FROM repo_request_claim WHERE at <= ?",
                         vec![
                             (now - podster_core::provisioning::REPOSITORY_REQUEST_WINDOW_MS).into(),
                         ],
                     )?;
-                    let counted = !rows(
+                    let claimed = !rows(
                         &state,
-                        "SELECT 1 FROM repo_request_accepted WHERE workspace_id = ?",
-                        vec![workspace.as_str().into()],
+                        "SELECT 1 FROM repo_request_claim WHERE workspace_id = ? AND claimant = ?",
+                        vec![workspace.as_str().into(), claimant.as_str().into()],
                     )?
                     .is_empty();
-                    if counted {
+                    if claimed {
                         *slot.borrow_mut() = true;
                         return Ok(());
                     }
-                    let others: Vec<i64> =
-                        rows(&state, "SELECT at FROM repo_request_accepted", vec![])?
-                            .iter()
-                            .map(|row| int(&row["at"]))
-                            .collect();
-                    if podster_core::provisioning::repository_request_allowed(&others, now).is_ok()
+                    // A room another caller already holds a place for is counted already: this caller's claim adds
+                    // no room to the count, so the cap isn't asked again.
+                    let room_counted = !rows(
+                        &state,
+                        "SELECT 1 FROM repo_request_claim WHERE workspace_id = ?",
+                        vec![workspace.as_str().into()],
+                    )?
+                    .is_empty();
+                    // Every other room once, at its latest claim.
+                    let others: Vec<i64> = rows(
+                        &state,
+                        "SELECT max(at) AS at FROM repo_request_claim WHERE workspace_id != ? GROUP BY workspace_id",
+                        vec![workspace.as_str().into()],
+                    )?
+                    .iter()
+                    .map(|row| int(&row["at"]))
+                    .collect();
+                    if room_counted
+                        || podster_core::provisioning::repository_request_allowed(&others, now)
+                            .is_ok()
                     {
                         exec(
                             &state,
-                            "INSERT INTO repo_request_accepted (workspace_id, at) VALUES (?, ?)",
-                            vec![workspace.as_str().into(), now.into()],
+                            "INSERT INTO repo_request_claim (workspace_id, claimant, at) VALUES (?, ?, ?)",
+                            vec![workspace.as_str().into(), claimant.as_str().into(), now.into()],
                         )?;
                         *slot.borrow_mut() = true;
                     }
@@ -1546,10 +1570,14 @@ impl Principal {
             "/internal/repo-request-release" => {
                 let body: Value = req.json().await?;
                 exec(&sql, REPO_REQUESTS_SCHEMA, vec![])?;
+                // Only this caller's own claim: a place another caller took for the same room is theirs.
                 exec(
                     &sql,
-                    "DELETE FROM repo_request_accepted WHERE workspace_id = ?",
-                    vec![body["workspace"].as_str().unwrap_or_default().into()],
+                    "DELETE FROM repo_request_claim WHERE workspace_id = ? AND claimant = ?",
+                    vec![
+                        body["workspace"].as_str().unwrap_or_default().into(),
+                        body["claimant"].as_str().unwrap_or_default().into(),
+                    ],
                 )?;
                 return Ok(json!({ "released": true }));
             }

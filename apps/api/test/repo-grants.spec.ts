@@ -155,6 +155,11 @@ describe("giving a grant", () => {
     const given = await give(id, AGENT.id, "push", {}, ADMIN);
     expect([given.status, given.body.delegated_by, given.body.state]).toEqual([200, ADMIN.id, "live"]);
     expect(await audits(id, "repo_grant.given")).toEqual([{ actor_id: ADMIN.id, target_id: given.body.id, prior_json: null, new_json: { principal: AGENT.id, action: "push", expires_at: null } }]);
+    // A participant there through a public claim gives nothing and takes nothing back (AC-10, AC-24).
+    const byPublic = await give(id, AGENT.id, "merge", {}, PUBLIC_AGENT);
+    expect([byPublic.status, byPublic.code]).toEqual([403, "not_allowed"]);
+    const takenByPublic = await take(id, given.body.id, PUBLIC_AGENT);
+    expect([takenByPublic.status, takenByPublic.code]).toEqual([403, "not_allowed"]);
     // An agent stored as an admin is still an agent: it gives nothing.
     await inRoom(id, (sql) => void sql.exec("UPDATE member SET role = 'admin' WHERE principal_id = ?", OTHER_AGENT.id));
     const byAgent = await give(id, AGENT.id, "merge", {}, OTHER_AGENT);

@@ -104,12 +104,18 @@ async function roomOf(owner: Who) {
 }
 /** The rooms whose request an organization's object, or a person's, has counted. */
 const counted = (holder: string) => runInDurableObject(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(holder)), (_: any, state: any) => {
-  state.storage.sql.exec("CREATE TABLE IF NOT EXISTS repo_request_accepted (workspace_id TEXT PRIMARY KEY, at INTEGER NOT NULL)");
-  return state.storage.sql.exec("SELECT workspace_id FROM repo_request_accepted ORDER BY at, workspace_id").toArray().map((row: any) => row.workspace_id as string);
+  state.storage.sql.exec("CREATE TABLE IF NOT EXISTS repo_request_claim (workspace_id TEXT NOT NULL, claimant TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (workspace_id, claimant))");
+  return state.storage.sql.exec("SELECT workspace_id, min(at) AS at FROM repo_request_claim GROUP BY workspace_id ORDER BY at, workspace_id").toArray().map((row: any) => row.workspace_id as string);
 }) as Promise<string[]>;
 /** Makes one counted request `ms` older, as if it had been accepted that much earlier. */
 const age = (holder: string, room: string, ms: number) => runInDurableObject(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(holder)), (_: any, state: any) =>
-  void state.storage.sql.exec("UPDATE repo_request_accepted SET at = at - ? WHERE workspace_id = ?", ms, room));
+  void state.storage.sql.exec("UPDATE repo_request_claim SET at = at - ? WHERE workspace_id = ?", ms, room));
+/** Asks an organization's object, or a person's, to count a room's request for one caller, or to give that caller's place back. */
+const principalCall = async (holder: string, path: string, body: object) =>
+  (await BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(holder)).fetch(`https://principal/internal/${path}`, { method: "POST", body: JSON.stringify(body) })).json() as Promise<any>;
+/** How many calls wait at the fake's gate of that number, and letting them go. */
+const heldAt = async (gate: number) => ((await (await fetch(`https://github-fake.example.com/agent-gate?repo=${gate}`)).json()) as { waiting: number }).waiting;
+const letGo = (gate: number) => fetch("https://github-fake.example.com/agent-release", { method: "POST", body: JSON.stringify({ id: gate }) });
 /** An agent of the room's own organization, added to the room as a member. */
 async function memberAgent(r: { id: string; org: string; owner: Who }) {
   const agent: Who = { id: `agt_pv_${crypto.randomUUID().slice(0, 8)}`, org: r.org };
@@ -367,6 +373,81 @@ describe("asking for the room's repository", () => {
     expect(added.status, added.text).toBe(200);
     expect((await ask(rooms[5], { name: "many-5", visibility: "public" }, { who: admin })).status).toBe(200);
     expect(await counted(admin.id)).toEqual([rooms[5].id]);
+  });
+
+  it("records nothing for someone made an admin after the call looked and before its transaction: neither cap was asked for them", async () => {
+    const r = await room();
+    const policy = async () => (await api(r.owner, "GET", `/v1/workspaces/${r.id}`)).body.policy_version;
+    const late: Who = { id: `per_pv_late_${crypto.randomUUID().slice(0, 8)}`, kind: "person", org: r.org, adminOrgs: [] };
+    const target = { claims: { target_member: { person: late.id, orgs: { [r.org]: 1 } } } };
+    expect((await api(r.owner, "POST", `/v1/workspaces/${r.id}/members`, { principal_id: late.id, kind: "person", org_id: r.org, role: "member", policy_version: await policy() }, target)).status).toBe(200);
+    // As a member they're refused, and nothing is counted.
+    expect((await ask(r, undefined, { who: late })).code).toBe("not_allowed");
+    // The next call is held after it has looked, as a member, and decided there's nothing to count.
+    const gate = 900_000 + Math.floor(Math.random() * 90_000);
+    await inRoom(r.id, (sql) => { sql.exec("CREATE TABLE test_hold_uncounted (gate INTEGER)"); sql.exec("INSERT INTO test_hold_uncounted VALUES (?)", gate); });
+    const asking = ask(r, undefined, { who: late });
+    for (const deadline = Date.now() + 5_000; (await heldAt(gate)) === 0; ) {
+      if (Date.now() > deadline) throw new Error("the call never reached the gate");
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    // The owner makes them an admin while that call waits.
+    await inRoom(r.id, (sql) => void sql.exec("DROP TABLE test_hold_uncounted"));
+    expect((await api(r.owner, "POST", `/v1/workspaces/${r.id}/members/${late.id}/role`, { role: "admin", policy_version: await policy() }, target)).status).toBe(200);
+    await letGo(gate);
+    // The transaction resolves them as an admin, and refuses: this call counted nothing for them.
+    const refused = await asking;
+    expect([refused.status, refused.code]).toEqual([503, "delegation_unavailable"]);
+    expect(await rowsOf(r.id, "repo_request")).toEqual([]);
+    expect(await eventTypes(r.id)).not.toContain("repository.requested");
+    expect([await counted(r.org), await counted(late.id)]).toEqual([[], []]);
+    // Asking again, as the admin they now are, is counted against both caps and recorded.
+    expect((await ask(r, undefined, { who: late })).status).toBe(200);
+    expect([await counted(r.org), await counted(late.id)]).toEqual([[r.id], [r.id]]);
+  });
+
+  it("keeps each caller's place their own: one caller giving theirs back never frees a room another caller counted", async () => {
+    const holder = `org_pv_claims_${crypto.randomUUID().slice(0, 8)}`;
+    const reserve = (workspace: string, claimant: string) => principalCall(holder, "repo-request-reserve", { provider: "github", workspace, claimant, delegation: true });
+    const release = (workspace: string, claimant: string) => principalCall(holder, "repo-request-release", { workspace, claimant });
+    // Two admins ask for one room at once. Both are counted for it, and it's one room.
+    expect(await reserve("ws_one", "per_a")).toEqual({ granted: true, allowed: true });
+    expect(await reserve("ws_one", "per_b")).toEqual({ granted: true, allowed: true });
+    expect(await counted(holder)).toEqual(["ws_one"]);
+    // One of them is refused elsewhere and gives their place back. The other's stands, so the room is still counted.
+    await release("ws_one", "per_b");
+    expect(await counted(holder)).toEqual(["ws_one"]);
+    // Giving back a place that was never taken frees nothing either.
+    await release("ws_one", "per_stranger");
+    expect(await counted(holder)).toEqual(["ws_one"]);
+    // Four more rooms reach the cap, by rooms, not by claims.
+    for (const room of ["ws_two", "ws_three", "ws_four", "ws_five"]) expect((await reserve(room, "per_a")).allowed, room).toBe(true);
+    expect(await reserve("ws_six", "per_b")).toEqual({ granted: true, allowed: false });
+    // A room already counted takes another caller's claim at the cap, since it adds no room.
+    expect((await reserve("ws_one", "per_b")).allowed).toBe(true);
+    expect(await counted(holder)).toHaveLength(5);
+    // Only when the last claim on a room is given back is its place free.
+    await release("ws_one", "per_a");
+    expect(await counted(holder)).toHaveLength(5);
+    await release("ws_one", "per_b");
+    expect(await counted(holder)).toHaveLength(4);
+    expect((await reserve("ws_six", "per_b")).allowed).toBe(true);
+  });
+
+  it("gives a public-claim participant nothing: it can't ask for the repository or retry its setup (AC-10)", async () => {
+    const r = await room();
+    const agent = await memberAgent(r);
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE member SET role = 'guest', joined_via = 'public' WHERE principal_id = ?", agent.id));
+    const asked = await ask(r, undefined, { who: agent });
+    expect([asked.status, asked.code]).toEqual([403, "not_allowed"]);
+    await inRoom(r.id, (sql) => void sql.exec("INSERT INTO repo_request (id, state, name, visibility, attempt, provider_name, reason, requested_by, requested_at, updated_at) VALUES ('rr_p', 'failed', 'engineering', 'public', 1, 'engineering', 'name_taken', ?, 1, 1)", r.owner.id));
+    const again = await retry(r, agent);
+    expect([again.status, again.code]).toEqual([403, "not_allowed"]);
+    expect((await rowsOf(r.id, "repo_request")).map((row) => row.state)).toEqual(["failed"]);
+    expect(await counted(r.org)).toEqual([]);
+    // Whatever role is stored for it beside that, it's an agent and asks for nothing.
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE member SET role = 'admin' WHERE principal_id = ?", agent.id));
+    expect((await retry(r, agent)).code).toBe("not_allowed");
   });
 
   it("refuses new requests and retries once an operator takes the delegation back, and leaves a linked repository working (ADR 0009)", async () => {

@@ -9,6 +9,7 @@
 // A violation fails the run unless a11y-known.json lists it, with the file to fix. A listed one that's gone fails too, so
 // the list can't go stale. Results go to results/a11y-<time>.json.
 import AxeBuilder from "@axe-core/playwright";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -628,48 +629,78 @@ const chromiumOnly = (name, fn) => {
 };
 
 /**
- * Run in the page, on a dialog: every script in its messages' text, by the Unicode script of each character, with whether
- * the browser draws a sample of it with a real glyph in the text's own font, or null where a glyph can't be told from the
- * "missing" box here. Latin, inherited marks and emoji are left out; other shared characters (CJK punctuation, symbols)
- * are checked as "Common". Characters in no listed script are named by code point.
+ * Run in the page, on a dialog: every script in its messages' text, by the Unicode script of each character, with one
+ * letter of it and the font family that text is set in. Latin, inherited marks and emoji are left out; other shared
+ * characters (CJK punctuation, symbols) are reported as "Common". Characters in no listed script are named by code point.
  */
 function pageScripts(sheet) {
   const names = ["Arabic", "Hebrew", "Thai", "Syriac", "Thaana", "Cyrillic", "Greek", "Armenian", "Georgian", "Han", "Hiragana", "Katakana", "Hangul", "Devanagari", "Bengali", "Gurmukhi", "Gujarati", "Oriya", "Tamil", "Telugu", "Kannada", "Malayalam", "Sinhala", "Lao", "Tibetan", "Myanmar", "Khmer", "Mongolian", "Ethiopic"];
   const tests = names.map((name) => [name, new RegExp(`\\p{Script=${name}}`, "u")]);
-  const found = new Map();
+  const found = {};
   for (const article of sheet.querySelectorAll("article")) {
     const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
       for (const letter of node.data) {
         if (/[\p{Script=Latin}\p{Script=Inherited}\p{Extended_Pictographic}\s]/u.test(letter) || letter.codePointAt(0) < 0x80) continue;
         const name = /\p{Script=Common}/u.test(letter) ? "Common" : tests.find(([, test]) => test.test(letter))?.[0] ?? `U+${letter.codePointAt(0).toString(16).toUpperCase()}`;
-        if (!found.has(name)) found.set(name, { letter, family: getComputedStyle(node.parentElement).fontFamily });
+        if (!(name in found)) found[name] = { letter, family: getComputedStyle(node.parentElement).fontFamily };
       }
     }
   }
-  const canvas = document.createElement("canvas");
-  canvas.width = canvas.height = 64;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  const draw = (family, letter) => {
-    context.clearRect(0, 0, 64, 64);
-    context.font = `32px ${family}`;
-    context.textBaseline = "middle";
-    context.fillText(letter, 16, 32);
-    const pixels = context.getImageData(0, 0, 64, 64).data;
-    let ink = 0;
-    let hash = 0;
-    for (let i = 3; i < pixels.length; i += 4) {
-      if (pixels[i]) ink++;
-      hash = (hash * 31 + pixels[i]) | 0;
+  return found;
+}
+
+/**
+ * Whether the browser really draws each script's letter, answered by the browser itself: Chromium names the font it used
+ * for a node, and on Linux fontconfig says whether that font has the letter. A letter no font has is drawn with the
+ * "missing" box of whichever font came first, which Chromium still names, so the name alone isn't enough. Null where it
+ * can't be told: another browser, or a font fontconfig doesn't list.
+ */
+async function realGlyphs(page, samples) {
+  const out = Object.fromEntries(Object.keys(samples).map((name) => [name, null]));
+  if (browserName !== "chromium" || !Object.keys(samples).length) return out;
+  const ids = await page.evaluate((entries) => entries.map(([name, { letter, family }], i) => {
+    const span = document.createElement("span");
+    span.id = `script-probe-${i}`;
+    span.textContent = letter;
+    // In view and laid out, whatever the page skips: Chromium names fonts only for text it has laid out.
+    Object.assign(span.style, { fontFamily: family, position: "fixed", left: "0", top: "0", opacity: "0", pointerEvents: "none", contentVisibility: "visible" });
+    document.body.append(span);
+    span.getBoundingClientRect();
+    return [name, span.id, letter];
+  }), Object.entries(samples));
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send("DOM.enable");
+    await session.send("CSS.enable");
+    const { root } = await session.send("DOM.getDocument");
+    for (const [name, id, letter] of ids) {
+      const { nodeId } = await session.send("DOM.querySelector", { nodeId: root.nodeId, selector: `#${id}` });
+      // A font the page loaded itself isn't one fontconfig knows, so it can't be asked about.
+      const fonts = (await session.send("CSS.getPlatformFontsForNode", { nodeId })).fonts;
+      if (!fonts.length || fonts.some((font) => font.isCustomFont)) {
+        console.log(`     can't tell ${name}: ${fonts.length ? `a font the page loaded (${fonts.map((font) => font.familyName).join(", ")})` : "the browser named no font"}`);
+        continue;
+      }
+      const used = fonts.map((font) => font.familyName);
+      if (process.platform !== "linux") {
+        out[name] = used.length > 0 ? true : null;
+        continue;
+      }
+      const has = (family) => {
+        const listed = spawnSync("fc-list", [`${family.replaceAll(/[\\:,=-]/g, (c) => `\\${c}`)}:charset=${letter.codePointAt(0).toString(16)}`, "family"], { encoding: "utf8", env: childEnv(), timeout: 10_000 });
+        return listed.status === 0 ? listed.stdout.trim() !== "" : null;
+      };
+      const answers = used.map(has);
+      out[name] = answers.includes(true) ? true : answers.includes(null) || !used.length ? null : false;
     }
-    return `${ink}:${hash}`;
-  };
-  return Object.fromEntries([...found].map(([name, { letter, family }]) => {
-    // Two unassigned code points draw the "missing" box. If they differ, the box can't be told here.
-    const [missing, other] = [draw(family, "\u0378"), draw(family, "\u0379")];
-    const picture = draw(family, letter);
-    return [name, missing !== other ? null : picture !== missing && !picture.startsWith("0:")];
-  }));
+  } finally {
+    await session.detach().catch(() => {});
+    await page.evaluate((count) => {
+      for (let i = 0; i < count; i++) document.getElementById(`script-probe-${i}`)?.remove();
+    }, ids.length);
+  }
+  return out;
 }
 
 async function keyboardPath(name, fn) {
@@ -2077,7 +2108,7 @@ async function keyboardPaths(s) {
       ok(blocked < longest, `${label} blocked the main thread for ${blocked}ms`);
       // What's really on the page, not what the seed's source says: every script in the messages' text, and whether this
       // browser draws it with a real glyph. Text drawn as "missing" boxes is never shaped, so a timing over it means nothing.
-      const scripts = await own.getByRole("dialog").evaluate(pageScripts);
+      const scripts = await realGlyphs(own, await own.getByRole("dialog").evaluate(pageScripts));
       const named = Object.entries(scripts).map(([name, glyph]) => `${name}${glyph === null ? " (can't tell)" : glyph ? "" : " (NO GLYPH)"}`);
       console.log(`     ${label}: scripts on the page: ${named.join(", ") || "Latin only"}`);
       const boxes = Object.entries(scripts).filter(([, glyph]) => glyph === false).map(([name]) => name);

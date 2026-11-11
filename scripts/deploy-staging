@@ -116,23 +116,46 @@ done
 # --- migrations ---
 # pending APP DATABASE: prints the file names wrangler lists as not yet applied, one per line.
 pending() {
-  local app=$1 database=$2 out names name
-  out=$(cd "apps/$app" && npx wrangler d1 migrations list "$database" --remote --env staging) || return 1
+  local app=$1 database=$2 out names name status=0 errors
+  local command="npx wrangler d1 migrations list $database --remote --env staging"
+  errors=$(mktemp)
+  out=$(cd "apps/$app" && $command 2> "$errors") || status=$?
+  if [ "$status" -ne 0 ]; then
+    # Why, in full, so "couldn't read the list" is never mistaken for "migrations are pending". Anything long enough
+    # to be a credential is masked; account and database IDs are shorter and stay.
+    {
+      echo "        \`$command\`, run in apps/$app, exited with status $status. Its stderr:"
+      if [ -s "$errors" ]; then tail -n 20 "$errors" | sed -E -e 's/[A-Za-z0-9_-]{40,}/[masked]/g' -e 's/^/        | /'; else echo "        | (empty)"; fi
+      echo "        This is a failure to read the list, not a list of pending migrations. Nothing was retried."
+    } >&2
+    rm -f "$errors"
+    return 1
+  fi
+  rm -f "$errors"
   names=$(printf '%s\n' "$out" | grep -o -E '[0-9A-Za-z_][0-9A-Za-z_.-]*\.sql' | sort -u || true)
   if [ -z "$names" ]; then
     # Only wrangler's own words count as "none": output this doesn't recognise isn't taken for an empty list.
-    printf '%s\n' "$out" | grep -q "No migrations to apply" || return 1
+    if ! printf '%s\n' "$out" | grep -q "No migrations to apply"; then
+      {
+        echo "        \`$command\`, run in apps/$app, succeeded, and its output is neither a list of migrations nor \"No migrations to apply\":"
+        printf '%s\n' "$out" | head -n 10 | sed -E -e 's/[A-Za-z0-9_-]{40,}/[masked]/g' -e 's/^/        | /'
+      } >&2
+      return 1
+    fi
     return 0
   fi
   for name in $names; do
-    [ -f "apps/$app/migrations/$name" ] || return 1
+    if [ ! -f "apps/$app/migrations/$name" ]; then
+      echo "        \`$command\` lists $name as pending, and apps/$app/migrations has no such file in this checkout." >&2
+      return 1
+    fi
   done
   printf '%s\n' "$names"
 }
 
 step "listing D1 migrations"
-pending_api=$(pending api podster-api-staging) || refuse "could not read podster-api-staging's pending migrations"
-pending_gateway=$(pending gateway podster-gateway-staging) || refuse "could not read podster-gateway-staging's pending migrations"
+pending_api=$(pending api podster-api-staging) || refuse "could not read podster-api-staging's pending migrations, for the reason above. Whether any are pending isn't known"
+pending_gateway=$(pending gateway podster-gateway-staging) || refuse "could not read podster-gateway-staging's pending migrations, for the reason above. Whether any are pending isn't known"
 all_pending=$(printf '%s\n%s\n' "$pending_api" "$pending_gateway" | grep . | sort || true)
 all_named=$(printf '%s\n' ${named[@]+"${named[@]}"} | grep . | sort -u || true)
 echo "pending: ${all_pending:-none}" | tr '\n' ' '; echo

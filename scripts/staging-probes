@@ -8,6 +8,9 @@ APP="https://app-staging.podster.dev"
 
 # What the gateway answers an A2A call that carries no credential.
 A2A_SIGNED_OUT_STATUS=401
+# An OAuth refusal says what it is in its WWW-Authenticate header, and its body is usually empty. So the header is
+# what shows that both paths give the same refusal, and it has to point at this gateway's A2A resource metadata.
+A2A_CHALLENGE_RESOURCE="resource_metadata=\"$GATEWAY/.well-known/oauth-protected-resource/a2a\""
 # A well-formed A2A call, so that the missing credential is the only thing wrong with it.
 A2A_CALL='{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"tsk_00000000000000000000000000000000"}}'
 # What the gateway answers a GitHub delivery while GITHUB_WEBHOOK_SECRET is unset on staging: the path isn't there.
@@ -23,7 +26,8 @@ Sends five signed-out requests to staging and prints PASS or FAIL for each probe
 
   me        GET  gateway /api/v1/me is 401
   a2a       POST gateway /a2a and /a2a/, a well-formed A2A call with no credential, are both
-            401 with the same body, which isn't empty
+            401 with the same WWW-Authenticate challenge, which names the gateway's own A2A
+            resource metadata, and the same body (an OAuth 401's body may be empty)
   webhook   POST gateway /webhooks/github with no signature is 404, the answer while the
             webhook secret is unset (the script says what to change when the owner sets it)
   public    GET  app /p/pub_0000000000000000000000 as HTML is 404, with
@@ -49,6 +53,9 @@ failed=0
 pass() { echo "PASS $1: $2"; }
 fail() { echo "FAIL $1: $2"; failed=1; }
 
+# header NAME FILE: that header's value in a saved answer, without its line ending. Empty when it isn't there.
+header() { tr -d '\r' < "$2" | grep -i "^$1:" | sed 's/^[^:]*:[[:space:]]*//' || true; }
+
 # request METHOD URL [CURL-ARG...]: sets STATUS, and leaves the answer in $work/body and $work/headers. A request
 # that gets no answer has STATUS 000, which no probe accepts.
 request() {
@@ -72,16 +79,22 @@ if [ "$STATUS" = 401 ]; then pass me "signed out, /api/v1/me is 401"; else fail 
 a2a_call=(-H "Content-Type: application/json" -H "A2A-Version: 1.0" --data-raw "$A2A_CALL")
 request POST "$GATEWAY/a2a" "${a2a_call[@]}"
 first=$STATUS
+first_challenge=$(header www-authenticate "$work/headers")
 cp "$work/body" "$work/a2a-body"
 request POST "$GATEWAY/a2a/" "${a2a_call[@]}"
+challenge=$(header www-authenticate "$work/headers")
 if [ "$first" != "$A2A_SIGNED_OUT_STATUS" ] || [ "$STATUS" != "$A2A_SIGNED_OUT_STATUS" ]; then
   fail a2a "/a2a is $first and /a2a/ is $STATUS, wanted $A2A_SIGNED_OUT_STATUS from both"
-elif [ ! -s "$work/a2a-body" ] || [ ! -s "$work/body" ]; then
-  fail a2a "/a2a and /a2a/ are both $first, with an empty body, which says nothing about them being the same"
+elif [ -z "$first_challenge" ] || [ -z "$challenge" ]; then
+  fail a2a "/a2a and /a2a/ are both $first, and at least one has no WWW-Authenticate challenge, so nothing shows they are the same refusal"
+elif [ "$first_challenge" != "$challenge" ]; then
+  fail a2a "/a2a and /a2a/ are both $first, with different WWW-Authenticate challenges: '$first_challenge' and '$challenge'"
+elif [[ "$challenge" != *"$A2A_CHALLENGE_RESOURCE"* ]]; then
+  fail a2a "the WWW-Authenticate challenge is '$challenge', which doesn't have $A2A_CHALLENGE_RESOURCE"
 elif ! cmp -s "$work/a2a-body" "$work/body"; then
-  fail a2a "/a2a and /a2a/ are both $first, with different bodies"
+  fail a2a "/a2a and /a2a/ are both $first with the same challenge, and different bodies"
 else
-  pass a2a "with no credential, /a2a and /a2a/ both answer $first with the same body"
+  pass a2a "with no credential, /a2a and /a2a/ both answer $first with the same WWW-Authenticate challenge, for this gateway's A2A resource, and the same body"
 fi
 
 request POST "$GATEWAY/webhooks/github" -H "Content-Length: 0"
@@ -92,7 +105,7 @@ else
 fi
 
 request GET "$APP/p/pub_0000000000000000000000" -H "Accept: text/html"
-cache=$(tr -d '\r' < "$work/headers" | grep -i '^cache-control:' | sed 's/^[^:]*:[[:space:]]*//' || true)
+cache=$(header cache-control "$work/headers")
 if [ "$STATUS" != 404 ]; then
   fail public "an unknown public page is $STATUS, wanted 404"
 elif [ "$cache" != "no-store, no-transform" ]; then

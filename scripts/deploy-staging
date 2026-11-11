@@ -18,6 +18,10 @@ It refuses, before changing anything, unless:
   - CLOUDFLARE_ACCOUNT_ID is set (docs/staging.md keeps the ID out of this repo)
   - worker-build is 0.8.7
   - the checkout is detached at origin/main's tip after a fetch, with nothing changed or untracked
+  - apps/api/wrangler.jsonc's staging variables don't switch MANAGED_REPOSITORIES on without a
+    well-formed REPOSITORY_REQUESTERS beside it (scripts/requesters-rule.mjs). Unset, that list
+    means everyone, and staging's sign-in is open to anyone. Only the file is read: a variable
+    set by hand on the deployed Worker isn't seen, and the deploy overwrites it from the file
   - ci.yml's run on main for that commit has finished as success. It reruns nothing: a failed
     run is looked into, not deployed
   - no D1 migration is pending on podster-api-staging or podster-gateway-staging, or
@@ -97,6 +101,9 @@ here=$(git rev-parse HEAD)
 tip=$(git rev-parse --verify --quiet origin/main) || refuse "origin/main doesn't exist"
 if [ "$here" != "$tip" ]; then refuse "the checkout is at $here, and origin/main is at $tip"; fi
 if [ -n "$(git status --porcelain)" ]; then refuse "the checkout has changed or untracked files"; fi
+# Managed repositories on with nobody named to ask for one would open them to anyone who signs in on staging.
+requesters=$(node scripts/requesters-rule.mjs apps/api/wrangler.jsonc 2>&1) \
+  || refuse "${requesters:-scripts/requesters-rule.mjs could not check apps/api/wrangler.jsonc}"
 # Only a commit whose own CI passed on main. A run that failed, flake or not, is the caller's to look into.
 ci=$(gh run list --workflow ci.yml --branch main --event push --commit "$here" --limit 1 --json status,conclusion \
   --jq '.[] | [.status, (if (.conclusion // "") == "" then "none" else .conclusion end)] | @tsv') \

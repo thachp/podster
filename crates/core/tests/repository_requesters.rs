@@ -2,7 +2,8 @@
 //! architect on 2026-11-11 after the security review). The list is an input: nothing here reads a setting.
 
 use podster_core::provisioning::{
-    is_test_person, Configured, RepositoryRequesters, OPERATORS_ENTRY, TEST_PEOPLE_ENTRY, TEST_PERSON_PREFIX,
+    is_test_person, Configured, RepositoryRequesters, OPERATORS_ENTRY, TEST_PEOPLE_ENTRY,
+    TEST_PERSON_PREFIX,
 };
 
 const OWNER: &str = "per_owner1";
@@ -244,7 +245,14 @@ fn only_a_setting_that_is_absent_is_everyone_and_one_that_cant_be_read_as_text_i
         assert!(!unreadable.allows(person, &OPS), "{person:?}");
     }
     // A string is read as the list it is, the empty one included.
-    for value in ["", "per_owner1", "operators,test-people", "nope", "[\"operators\",\"test-people\"]", "7"] {
+    for value in [
+        "",
+        "per_owner1",
+        "operators,test-people",
+        "nope",
+        "[\"operators\",\"test-people\"]",
+        "7",
+    ] {
         assert_eq!(
             RepositoryRequesters::read(Configured::Text(value)),
             RepositoryRequesters::parse(Some(value)),
@@ -252,7 +260,15 @@ fn only_a_setting_that_is_absent_is_everyone_and_one_that_cant_be_read_as_text_i
         );
     }
     // What a list or a number would read as if something had turned it into text first: still nobody.
-    for value in ["[\"operators\",\"test-people\"]", "operators,test-people]", "7", "[object Object]", "true", "null", "undefined"] {
+    for value in [
+        "[\"operators\",\"test-people\"]",
+        "operators,test-people]",
+        "7",
+        "[object Object]",
+        "true",
+        "null",
+        "undefined",
+    ] {
         assert_eq!(
             RepositoryRequesters::read(Configured::Text(value)),
             RepositoryRequesters::nobody(),

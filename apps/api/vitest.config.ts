@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 import { FAKE_AGENT_KEY_PEM, FAKE_APP_KEY_PEM, FAKE_GITHUB, FAKE_MERGE_KEY_PEM, fakeGithub } from "./test/fake-github.ts";
+import { stagingRequestersProblem, validRequesters } from "../../scripts/requesters-rule.mjs";
 
 // A throwaway key per run. Tests sign as the gateway, and the Worker verifies with the public half.
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -186,6 +187,13 @@ export default defineConfig({
           // Set only by e2e/run-fasta2a-check.mjs: the agent's run time in seconds. Empty, a2a-fasta2a.spec.ts skips.
           TEST_FASTA2A_RUN_SECONDS: process.env.PODSTER_FASTA2A_URL ? (process.env.PODSTER_FASTA2A_RUN_SECONDS ?? "") : "",
           TEST_WRANGLER: readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8"),
+          // What scripts/deploy-staging's own rule says of that file, and of the same file with staging's list taken
+          // out: the rule is JavaScript outside this package, so it runs here and the test reads its answers.
+          TEST_REQUESTERS_RULE: JSON.stringify({
+            real: stagingRequestersProblem(readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8")),
+            withoutList: stagingRequestersProblem(readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8").replace(/^\s*"REPOSITORY_REQUESTERS":.*\n/m, "")),
+            valid: Object.fromEntries(["operators,test-people", "test-people", "per_owner1", "", "operators,", "everyone"].map((value) => [value, validRequesters(value)])),
+          }),
           TEST_D1_SCHEMA: ["0001_membership_index.sql", "0002_room_status.sql", "0003_membership_by_org.sql", "0004_ownerless_rooms.sql", "0005_public_workroom_index.sql", "0006_public_explore_order.sql", "0007_repo_room_index.sql"].map((name) => readFileSync(new URL(`./migrations/${name}`, import.meta.url), "utf8")).join("\n").replace(/--.*$/gm, ""),
           TEST_SIGNING_JWK: JSON.stringify(privateKey.export({ format: "jwk" })),
           // Every route the contract lists, for the route-list test (M4 step 7), and the public view's schema.

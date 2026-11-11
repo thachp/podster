@@ -1046,10 +1046,16 @@ describe("the provisioning job", () => {
     // the `OPERATORS` secret names and test people may ask, and no person's ID is in the file. The switch, that list, the organization and the three Apps' IDs
     // are staging's variables. The top level, which local runs and these tests use, and any other environment set none.
     const config = JSON.parse(BINDINGS.TEST_WRANGLER.replace(/^\s*\/\/.*$/gm, ""));
-    // Wherever the switch is on, the list is set, to something that isn't everyone. Unset would be everyone.
+    // Wherever the switch is on, the list is set, to something that isn't everyone. Unset would be everyone. The rule
+    // is the one scripts/deploy-staging refuses on (scripts/requesters-rule.mjs), run over this file by the test
+    // configuration: it passes the file as it is, and would refuse it with staging's list taken out.
+    const rule = JSON.parse(BINDINGS.TEST_REQUESTERS_RULE);
+    expect(rule.real).toBeNull();
+    expect(rule.withoutList).toMatch(/set no REPOSITORY_REQUESTERS/);
+    expect(rule.valid).toEqual({ "operators,test-people": true, "test-people": true, per_owner1: true, "": false, "operators,": false, everyone: false });
+    // No other scope has the switch at all, so the rule's reading of staging is the whole of it.
     for (const [environment, scope] of [["top level", config], ...Object.entries<any>(config.env)] as [string, any][]) {
-      if (scope.vars?.MANAGED_REPOSITORIES === undefined) continue;
-      expect(scope.vars.REPOSITORY_REQUESTERS, environment).toMatch(/^(operators|test-people|per_[A-Za-z0-9_-]+)(,(operators|test-people|per_[A-Za-z0-9_-]+))*$/);
+      if (environment !== "staging") expect(scope.vars?.MANAGED_REPOSITORIES, environment).toBeUndefined();
     }
     const staging: Record<string, string> = {
       MANAGED_REPOSITORIES: "true",

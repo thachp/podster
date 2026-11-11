@@ -329,6 +329,42 @@ fn the_operators_entry_admits_the_deployments_operators_and_never_an_agent() {
     );
 }
 
+/// The deploy script's own rule for a well-formed list is JavaScript (`scripts/requesters-rule.mjs`), since it can't
+/// run this Rust. Both read the same fixture, so a change to one grammar that the other doesn't follow fails here or
+/// in `scripts/test/deploy-staging-selftest`.
+#[test]
+fn the_list_is_read_as_the_deploy_scripts_rule_reads_it() {
+    use podster_core::provisioning::RepositoryRequesters;
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../scripts/test/fixtures/requesters-grammar.json"
+    ))
+    .unwrap();
+    let values = |key: &str| -> Vec<String> {
+        fixture[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect()
+    };
+    let (valid, invalid) = (values("valid"), values("invalid"));
+    assert!(valid.len() >= 5 && invalid.len() >= 5);
+    for value in &valid {
+        assert_ne!(
+            RepositoryRequesters::parse(Some(value)),
+            RepositoryRequesters::nobody(),
+            "{value:?} is well formed, and lets somebody ask"
+        );
+    }
+    for value in &invalid {
+        assert_eq!(
+            RepositoryRequesters::parse(Some(value)),
+            RepositoryRequesters::nobody(),
+            "{value:?} is malformed, and lets nobody ask"
+        );
+    }
+}
+
 /// Who takes a grant back: the room's owner or a room admin as a person, a person who administers the room's
 /// organization, and the holder their own. Nobody else, and an agent never another's.
 #[test]

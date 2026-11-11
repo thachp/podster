@@ -385,6 +385,20 @@ describe("the discovery index (step 6)", () => {
     await inRoom(id, (sql) => {
       // Step 8's public claims came after, so they come off first.
       // M5 step 6's agent tokens, the newest migration, come off first.
+      // M5 step 7a's read bookkeeping, the newest migration, comes off first.
+      sql.exec("DROP TABLE repo_read");
+      sql.exec("ALTER TABLE repo_link DROP COLUMN reads_not_before");
+      sql.exec("ALTER TABLE repo_link DROP COLUMN read_failures");
+      sql.exec("ALTER TABLE task_change DROP COLUMN pr_draft");
+      sql.exec("ALTER TABLE task_change DROP COLUMN commit_changed_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN unwatched_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN not_found_reads");
+      sql.exec("ALTER TABLE task_change DROP COLUMN read_failures");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merged_by_id");
+      sql.exec("ALTER TABLE task_change DROP COLUMN unchanged_reads");
+      sql.exec("ALTER TABLE task_change DROP COLUMN read_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN observed_base_sha");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE repo_token_mint");
       sql.exec("DROP TABLE repo_token");
       sql.exec("UPDATE schema_version SET version = version - 1");
@@ -420,6 +434,20 @@ describe("the discovery index (step 6)", () => {
     await inRoom(quiet, (sql) => {
       // Step 8's public claims came after, so they come off first.
       // M5 step 6's agent tokens, the newest migration, come off first.
+      // M5 step 7a's read bookkeeping, the newest migration, comes off first.
+      sql.exec("DROP TABLE repo_read");
+      sql.exec("ALTER TABLE repo_link DROP COLUMN reads_not_before");
+      sql.exec("ALTER TABLE repo_link DROP COLUMN read_failures");
+      sql.exec("ALTER TABLE task_change DROP COLUMN pr_draft");
+      sql.exec("ALTER TABLE task_change DROP COLUMN commit_changed_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN unwatched_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN not_found_reads");
+      sql.exec("ALTER TABLE task_change DROP COLUMN read_failures");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merged_by_id");
+      sql.exec("ALTER TABLE task_change DROP COLUMN unchanged_reads");
+      sql.exec("ALTER TABLE task_change DROP COLUMN read_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN observed_base_sha");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE repo_token_mint");
       sql.exec("DROP TABLE repo_token");
       sql.exec("UPDATE schema_version SET version = version - 1");

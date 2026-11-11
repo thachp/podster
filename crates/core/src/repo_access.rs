@@ -39,7 +39,8 @@ impl Level {
 /// The permissions a token carries. There's one set, and no request can ask for another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TokenPermissions {
-    pub contents: Level,
+    /// `None` is no access to contents at all, and the permission isn't asked for.
+    pub contents: Option<Level>,
     pub pull_requests: Level,
     pub metadata: Level,
 }
@@ -47,18 +48,29 @@ pub struct TokenPermissions {
 impl TokenPermissions {
     /// An agent's token: task branches and pull requests on one repository. No administration, statuses or workflows.
     pub const AGENT: TokenPermissions = TokenPermissions {
-        contents: Level::Write,
+        contents: Some(Level::Write),
         pull_requests: Level::Write,
         metadata: Level::Read,
     };
 
+    /// The server's own read of a pull request (M5 step 7a): the same App, with pull requests and metadata to read and
+    /// nothing else. It can't read the repository's contents, and can't write anything.
+    pub const READER: TokenPermissions = TokenPermissions {
+        contents: None,
+        pull_requests: Level::Read,
+        metadata: Level::Read,
+    };
+
     /// The permissions as GitHub names them, to ask for and to compare its answer with.
-    pub fn pairs(self) -> [(&'static str, &'static str); 3] {
-        [
-            ("contents", self.contents.name()),
-            ("metadata", self.metadata.name()),
-            ("pull_requests", self.pull_requests.name()),
-        ]
+    pub fn pairs(self) -> Vec<(&'static str, &'static str)> {
+        self.contents
+            .map(|level| ("contents", level.name()))
+            .into_iter()
+            .chain([
+                ("metadata", self.metadata.name()),
+                ("pull_requests", self.pull_requests.name()),
+            ])
+            .collect()
     }
 }
 

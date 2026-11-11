@@ -40,10 +40,22 @@ type Script = {
  * The agent-token App's side (M5 step 6), kept apart from everything above so specs running in parallel can't reset it:
  * each test registers a repository of its own, and its script and tokens are that repository's.
  * `mode` is how the answer differs from what was asked: wide (every repository), extra_permission, other_repo,
- * no_repositories, long_life (two hours), slow (answers after 200 ms), or hang (no answer in time). `revoke` is a status
- * for revoking, if not 204.
+ * no_repositories, long_life (two hours), slow (answers after 200 ms), hang (no answer in time), or gate (answers only
+ * once the test releases it through `/agent-release`, having seen it waiting through `/agent-gate`, so a test can do
+ * something while a mint is under way without sleeping). `revoke` is a status for revoking, if not 204, and `mint` one
+ * for the token request itself, if not 201.
  */
-type AgentScript = { mode?: string; revoke?: number };
+type AgentScript = { mode?: string; revoke?: number; pulls?: Record<string, Pull | null>; pullRead?: number; mint?: number };
+/** Mints held by `mode: "gate"`, by repository, until a test releases them. */
+const gates = new Map<number, (() => void)[]>();
+/**
+ * A pull request of a test's repository, for the server's own read (M5 step 7a). `head_repo` and `base_repo` default to
+ * the repository itself; `head_repo: null` is a fork that's gone. `as_number` answers with another number than asked.
+ * `padding` makes the description that many bytes long. A null entry removes the pull request.
+ */
+type Pull = { head_sha: string; base_sha: string; base_ref?: string; head_repo?: number | null; base_repo?: number; state?: "open" | "closed"; merged?: boolean; merge_commit_sha?: string; merged_by?: number; as_number?: number; padding?: number; draft?: boolean };
+/** Every read an agent-token App token made, by repository: what it asked for and what the token could do. */
+const agentReads: { repo: number; path: string; permissions: Record<string, string>; status: number }[] = [];
 type AgentToken = { token: string; repo: number[] | "all"; permissions: Record<string, string>; asked: unknown; forRepo: number };
 const agentRepos = new Map<number, AgentScript>();
 const agentTokens: AgentToken[] = [];
@@ -108,8 +120,21 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
     }
     if (url.pathname === "/agent-repo") {
       const { id, ...rest } = (await request.json()) as AgentScript & { id: number };
-      agentRepos.set(id, { ...(agentRepos.get(id) ?? {}), ...rest });
+      const before = agentRepos.get(id) ?? {};
+      agentRepos.set(id, { ...before, ...rest, pulls: { ...(before.pulls ?? {}), ...(rest.pulls ?? {}) } });
       return json({ ok: true });
+    }
+    if (url.pathname === "/agent-gate") {
+      return json({ waiting: gates.get(Number(url.searchParams.get("repo")))?.length ?? 0 });
+    }
+    if (url.pathname === "/agent-release") {
+      const { id } = (await request.json()) as { id: number };
+      for (const open of gates.get(id)?.splice(0) ?? []) open();
+      return json({ ok: true });
+    }
+    if (url.pathname === "/agent-reads") {
+      const repo = Number(url.searchParams.get("repo"));
+      return json(agentReads.filter((r) => r.repo === repo).map(({ repo: _, ...r }) => r));
     }
     if (url.pathname === "/agent-tokens") {
       const repo = Number(url.searchParams.get("repo"));
@@ -148,7 +173,7 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
     tokens.set(token, wanted ?? "all");
     return json({ token, expires_at: new Date(Date.now() + 3_600_000).toISOString() }, 201);
   }
-  if (agentLive.has(bearer) || agentTokens.some((t) => t.token === bearer)) return agentRevoke(request, path, bearer);
+  if (agentLive.has(bearer) || agentTokens.some((t) => t.token === bearer)) return agentRead(request, path, bearer) ?? agentRevoke(request, path, bearer);
   if (auth !== "token" || !scope) return json({ message: "Bad credentials" }, 401);
   // A token revokes itself, and is refused from then on.
   if (path === "/installation/token" && request.method === "DELETE") {
@@ -218,6 +243,8 @@ async function agentMint(body: any): Promise<Response> {
   const script = wanted?.length === 1 ? agentRepos.get(wanted[0]) : undefined;
   if (!wanted || !script) return json({ message: "no such repository" }, 422);
   const mode = script.mode ?? "ok";
+  if (script.mint && script.mint !== 201) return json({ message: "SECRET-PROVIDER-TEXT" }, script.mint);
+  if (mode === "gate") await new Promise<void>((open) => gates.set(wanted[0], [...(gates.get(wanted[0]) ?? []), open]));
   if (mode === "hang" || mode === "slow") await new Promise((resolve) => setTimeout(resolve, mode === "hang" ? 1500 : 200));
   const token = `ghs_fake_${crypto.randomUUID().replaceAll("-", "")}`;
   const permissions: Record<string, string> = { ...(body?.permissions ?? {}), ...(mode === "extra_permission" ? { administration: "write" } : {}) };
@@ -238,4 +265,42 @@ function agentRevoke(request: Request, path: string, bearer: string): Response {
   if (status !== 204) return json({ message: "no" }, status);
   agentLive.delete(bearer);
   return json(null, 204);
+}
+
+/**
+ * A live agent-token App token reading a pull request, as GitHub answers: only for a repository the token reaches, and
+ * only with pull requests readable. The answer carries a title, a body, branch names and an author, none of which
+ * Podster may keep or log. Null for anything that isn't such a read.
+ */
+function agentRead(request: Request, path: string, bearer: string): Response | null {
+  const asked = path.match(/^\/repositories\/(\d+)\/pulls\/(\d+)$/);
+  const held = agentTokens.find((t) => t.token === bearer);
+  if (!asked || request.method !== "GET" || !held || !agentLive.has(bearer)) return null;
+  const repo = Number(asked[1]);
+  const answer = (body: unknown, status = 200) => {
+    agentReads.push({ repo, path, permissions: held.permissions, status });
+    return json(body, status);
+  };
+  const reaches = held.repo === "all" || held.repo.includes(repo);
+  if (!reaches || !held.permissions.pull_requests) return answer({ message: "Resource not accessible by integration" }, 403);
+  const script = agentRepos.get(repo);
+  if (script?.pullRead && script.pullRead !== 200) return answer({ message: "SECRET-PROVIDER-TEXT" }, script.pullRead);
+  const pull = script?.pulls?.[asked[2]];
+  if (!pull) return answer({ message: "Not Found" }, 404);
+  const side = (id: number | null) => (id === null ? null : { id, name: "SECRET-REPO-NAME", full_name: "SECRET-OWNER/SECRET-REPO-NAME" });
+  const merged = pull.merged === true;
+  return answer({
+    number: pull.as_number ?? Number(asked[2]),
+    state: pull.state ?? (merged ? "closed" : "open"),
+    merged,
+    draft: pull.draft === true,
+    merge_commit_sha: merged ? (pull.merge_commit_sha ?? null) : null,
+    merged_by: merged && pull.merged_by ? { id: pull.merged_by, login: "SECRET-MERGER" } : null,
+    title: "SECRET-PR-TITLE",
+    body: `SECRET-PR-BODY${"x".repeat(pull.padding ?? 0)}`,
+    user: { id: 31337, login: "SECRET-AUTHOR" },
+    labels: [{ name: "SECRET-LABEL" }],
+    head: { ref: "SECRET-HEAD-BRANCH", label: "SECRET-OWNER:SECRET-HEAD-BRANCH", sha: pull.head_sha, repo: side(pull.head_repo === undefined ? repo : pull.head_repo) },
+    base: { ref: pull.base_ref ?? "main", sha: pull.base_sha, repo: side(pull.base_repo ?? repo) },
+  });
 }

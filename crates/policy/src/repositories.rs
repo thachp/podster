@@ -256,8 +256,16 @@ pub fn sees_every_grant(caller: &Caller) -> bool {
     caller.role != Role::None && is_human_admin(caller)
 }
 
-/// Who sees a task's change: its pull request number, commits, checks and merge state, and the merge events. Whoever
-/// can see the task, as it stands now.
+/// Who is shown a task's change: its pull request and what Podster observed of it (M5 step 7a). People who can see the
+/// task, and the task's own assignee and reviewer. Not another agent, and not a guest, which is what someone who joined
+/// through a public claim is, even though each may read the task. Run after the task's own read is allowed. It shows
+/// and never authorizes.
 pub fn sees_task_change(caller: &Caller, task: &Task) -> bool {
-    can_see_task(caller, task)
+    if !can_see_task(caller, task) {
+        return false;
+    }
+    let party = task.assignee.as_deref() == Some(caller.id.as_str()) || task.reviewer == caller.id;
+    party
+        || (caller.kind == PrincipalKind::Person
+            && !matches!(caller.role, Role::Guest | Role::None))
 }

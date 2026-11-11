@@ -75,6 +75,7 @@ type Identity = Verified;
 mod a2a_out;
 mod a2a_read;
 mod asset_links;
+mod changes;
 mod collaboration;
 mod cursor;
 mod downloads;
@@ -485,6 +486,20 @@ fn handle_task_command(
     body: &Value,
     now: i64,
 ) -> R<Value> {
+    let unread = changes::Context::default();
+    handle_task_command_with(sql, who, task_id, verb, body, unread, now)
+}
+
+/// The same, with what the task routes read of the task's pull request before the transaction (M5 step 7a).
+fn handle_task_command_with(
+    sql: &SqlStorage,
+    who: &Participant,
+    task_id: &str,
+    verb: &str,
+    body: &Value,
+    context: changes::Context,
+    now: i64,
+) -> R<Value> {
     let caller = &who.caller;
     let action = action_for(verb).ok_or_else(ApiError::not_found)?;
     let task = load_task(sql, task_id)?.ok_or_else(ApiError::task_not_found)?;
@@ -533,9 +548,20 @@ fn handle_task_command(
     if let Command::Verify { submission_no, .. } = &command {
         observed.approved_files = submission_files::approval(sql, &task, *submission_no)?;
     }
+    // A linked task's pull request, as Podster just read it, is checked against the room's link here. First the
+    // decision is taken once without the read, so a stale or malformed command is answered as that, `version_conflict`
+    // included, and never with anything about a pull request.
+    if context.reads_for(&task, verb) {
+        decide(&task, &caller.id, command.clone(), &observed)
+            .map_err(|e| ApiError::from_core(&e))?;
+    }
+    let pinned = changes::before_decide(sql, context, &task, verb, body, &mut observed)?;
     let decision =
         decide(&task, &caller.id, command, &observed).map_err(|e| ApiError::from_core(&e))?;
     save_task(sql, &decision.task, now)?;
+    if let Some(pinned) = pinned {
+        changes::record(sql, &caller.id, &decision.task, verb, pinned, now)?;
+    }
     if verb == "verify" {
         outputs::record_approval(sql, &decision.task, &caller.id, now)?;
     }
@@ -560,7 +586,13 @@ fn handle_task_command(
     Ok(task_json(&decision.task))
 }
 
-fn handle_create_task(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) -> R<Value> {
+fn handle_create_task(
+    sql: &SqlStorage,
+    caller: &Caller,
+    body: &Value,
+    switched_on: bool,
+    now: i64,
+) -> R<Value> {
     ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::CreateTask))?;
     let open = rows(
         sql,
@@ -579,7 +611,7 @@ fn handle_create_task(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64)
         reviewer: field(body, "reviewer")?,
         due_at: int_field(body, "due_at")?,
         follow_up_of: field(body, "follow_up_of")?,
-        has_linked_repository: false,
+        has_linked_repository: changes::links_new_tasks(sql, switched_on)?,
     };
     if let Some(assignee) = &new.assignee {
         require_participant(sql, assignee)?;
@@ -2536,13 +2568,27 @@ mod queries {
             .filter(readable)
             .map(|r| marked(r, "submitted_by", "submitted_org"))
             .collect();
+        // What Podster saw of the task's pull request is in its history only for those shown the change itself.
+        let shown_change = podster_policy::repositories::sees_task_change(&who.caller, &task);
         let history: Vec<Value> = history
             .iter()
+            .filter(|r| {
+                shown_change
+                    || !r["type"]
+                        .as_str()
+                        .is_some_and(podster_policy::is_task_change_event)
+            })
             .map(|r| marked(r, "actor_id", "actor_org"))
             .collect();
         let files = super::submission_files::for_task(sql, who, &task, oversight)?;
+        // A task's pull request is for people who see the task and for its assignee and reviewer, not everyone who may read it.
+        let change = if shown_change {
+            super::changes::of_task(sql, &task.id)?
+        } else {
+            Value::Null
+        };
         Ok(json!({
-            "task": task_json(&task), "expected_output": super::outputs::of_task(sql, &task.id, oversight)?, "submissions": submissions, "artifacts": artifacts, "files": files, "messages": messages, "history": history,
+            "task": task_json(&task), "expected_output": super::outputs::of_task(sql, &task.id, oversight)?, "change": change, "submissions": submissions, "artifacts": artifacts, "files": files, "messages": messages, "history": history,
             // Says what's limited, so empty lists and null reasons aren't read as "none exist".
             "visible": { "submissions": if view.artifacts == ArtifactView::All { "all" } else { "own" }, "conversation": view.conversation },
         }))
@@ -3548,6 +3594,14 @@ impl Workspace {
         {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
+        // A task's pull request that's due a read (M5 step 7a).
+        if let Some(next) = migrated
+            .then(|| changes::next_due(&sql, &self.env, now))
+            .transpose()?
+            .flatten()
+        {
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
         // The oldest webhook delivery ID, when it's time to forget it.
         if let Some(next) = migrated
             .then(|| repositories::next_delivery_expiry(&sql, now))
@@ -4075,6 +4129,7 @@ impl Workspace {
         let test_fail = cfg!(feature = "failpoints") && req.headers().get("x-test-fail")?.is_some();
         let target = parts.get(4).map(|s| (*s).to_string()).unwrap_or_default();
         let verb = parts.get(5).map(|s| (*s).to_string()).unwrap_or_default();
+        let switched_on = provisioning::enabled(&self.env, &sql)?;
 
         match (method, tail) {
             (Method::Post, ["tasks"]) => self.command(
@@ -4083,7 +4138,7 @@ impl Workspace {
                 hash,
                 stops_when_archived,
                 test_fail,
-                move |sql, who, now| handle_create_task(sql, &who.caller, &body, now),
+                move |sql, who, now| handle_create_task(sql, &who.caller, &body, switched_on, now),
             ),
             (Method::Post, ["tasks", _, "messages"]) => self.command(
                 &identity,
@@ -4096,13 +4151,20 @@ impl Workspace {
             (Method::Post, ["tasks", _, _]) => {
                 let accept = verb == "accept";
                 let task_id = target.clone();
+                // A linked task's pull request is read from GitHub first, and only if the command could go through.
+                let fresh = self
+                    .read_for_command(&identity, &target, &verb, &body, switched_on)
+                    .await;
+                let context = changes::Context { switched_on, fresh };
                 let task = self.command(
                     &identity,
                     key,
                     hash,
                     stops_when_archived,
                     test_fail,
-                    move |sql, who, now| handle_task_command(sql, who, &target, &verb, &body, now),
+                    move |sql, who, now| {
+                        handle_task_command_with(sql, who, &target, &verb, &body, context, now)
+                    },
                 )?;
                 // Then, on its own, a response the agent's A2A endpoint sent before the accept is submitted (decision 174).
                 // The accept's answer is the one stored for it, so a replay answers the same.
@@ -4757,6 +4819,10 @@ impl DurableObject for Workspace {
         // Agent repository tokens whose authority ended are taken back. Each keeps its own backoff.
         if let Err(error) = self.repo_token_upkeep().await {
             console_error!("repo token upkeep failed: {:?}", error.code());
+        }
+        // Pull requests whose state is stale are read again, within the read cap.
+        if let Err(error) = self.refresh_changes().await {
+            console_error!("change refresh failed: {:?}", error.code());
         }
         // A stuck scan fails closed here, and this failing holds up nothing else.
         if let Err(error) = self.expire_scans() {

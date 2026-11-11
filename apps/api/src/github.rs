@@ -19,6 +19,10 @@ use podster_core::provisioning::{
     classify_creation, Bypass, Creation, Observed, Ruleset, SetupStep, DEFAULT_BRANCH_REF,
     STATUS_CONTEXT,
 };
+use podster_core::repo_access::{minted_token_matches, TokenPermissions};
+use podster_core::repo_merge::PullState;
+use podster_core::repositories::valid_commit_sha;
+use podster_core::task_change::PullSeen;
 use podster_egress::app_key::{app_is_distinct, app_jwt_signing_input, base64url, pkcs8_from_pem};
 use serde_json::{json, Value};
 use std::cell::RefCell;
@@ -36,6 +40,11 @@ const CALL_TIMEOUT_MS: u64 = if cfg!(feature = "failpoints") {
 };
 /// No answer this job reads is anywhere near this long.
 const MAX_ANSWER_BYTES: usize = 256 * 1024;
+/// A pull request's answer carries its whole description, which its author writes and Podster never keeps. This is room
+/// for the longest GitHub allows, so a long description can't make a pull request unreadable.
+const MAX_PULL_ANSWER_BYTES: usize = 1024 * 1024;
+/// The longest base branch name read out of a pull request. A longer one is kept as no name at all.
+const MAX_BRANCH_NAME_BYTES: usize = 255;
 /// A repository Podster made has two rulesets. Reading a few more is enough to see that something else is there.
 const MAX_RULESETS_READ: usize = 5;
 pub const REVIEW_RULESET_NAME: &str = "podster-review";
@@ -216,6 +225,17 @@ async fn call(
     bearer: &str,
     body: Option<Value>,
 ) -> std::result::Result<(u16, Value), Failure> {
+    call_within(method, path, bearer, body, MAX_ANSWER_BYTES).await
+}
+
+/// The same, reading an answer of up to `max_bytes`. A longer one reads as having no body.
+async fn call_within(
+    method: Method,
+    path: &str,
+    bearer: &str,
+    body: Option<Value>,
+    max_bytes: usize,
+) -> std::result::Result<(u16, Value), Failure> {
     let controller = AbortController::default();
     let signal = controller.signal();
     let url = format!("{API}{path}");
@@ -238,7 +258,7 @@ async fn call(
             .await?;
         let status = response.status_code();
         let bytes = response.bytes().await?;
-        let parsed = if bytes.is_empty() || bytes.len() > MAX_ANSWER_BYTES {
+        let parsed = if bytes.is_empty() || bytes.len() > max_bytes {
             Value::Null
         } else {
             serde_json::from_slice(&bytes).unwrap_or(Value::Null)
@@ -732,6 +752,120 @@ impl TokenIssuer for AgentTokens {
         match call(Method::Delete, "/installation/token", token, None).await {
             Ok((204 | 401, _)) => Revoked::Gone,
             _ => Revoked::Failed,
+        }
+    }
+}
+
+/// What a read of one pull request came to.
+pub enum PullAnswer {
+    Found(PullSeen),
+    /// The repository has no pull request of that number.
+    Missing,
+}
+
+/// A read, and whether the token made for it is gone. `revoked` is false only when a token was minted and GitHub
+/// didn't confirm taking it back, so it lives out its hour: read-only, on the one repository.
+pub struct PullRead {
+    pub answer: std::result::Result<PullAnswer, Failure>,
+    /// Whether a failure came from asking for the token, before any pull request was asked about.
+    pub failed_at_mint: bool,
+    pub revoked: bool,
+}
+
+/// The provider, as the room's own read of a task's pull request needs it (M5 step 7a).
+pub(crate) trait PullReader {
+    /// Reads one pull request of one repository, by the repository's ID and the pull request's number, with a token
+    /// minted for this read alone and revoked when it ends.
+    async fn read_pull(&self, repo_id: i64, number: i64) -> PullRead;
+}
+
+/// A pull request as GitHub describes it, keeping IDs, commit IDs, the base branch, the state and the draft flag. Its title, body,
+/// head branch name, labels and author are never read out of the answer.
+fn pull_seen(answer: &Value) -> Option<PullSeen> {
+    let sha = |value: &Value| {
+        value
+            .as_str()
+            .filter(|sha| valid_commit_sha(sha))
+            .map(str::to_string)
+    };
+    let state = match (answer["state"].as_str()?, answer["merged"].as_bool()) {
+        ("open", _) => PullState::Open,
+        ("closed", Some(true)) => PullState::Merged,
+        ("closed", Some(false)) => PullState::Closed,
+        _ => return None,
+    };
+    let merged = state == PullState::Merged;
+    Some(PullSeen {
+        number: id(&answer["number"])?,
+        repo_id: id(&answer["base"]["repo"]["id"]),
+        head_repo_id: id(&answer["head"]["repo"]["id"]),
+        head_sha: sha(&answer["head"]["sha"])?,
+        // A name too long to be a branch of ours isn't the default branch. That's a pull request on the wrong base,
+        // not one that can't be read.
+        base_ref: Some(answer["base"]["ref"].as_str()?)
+            .filter(|name| !name.is_empty() && name.len() <= MAX_BRANCH_NAME_BYTES)
+            .map(str::to_string),
+        base_sha: sha(&answer["base"]["sha"])?,
+        state,
+        draft: answer["draft"].as_bool()?,
+        merge_sha: merged.then(|| sha(&answer["merge_commit_sha"])).flatten(),
+        merged_by_id: merged.then(|| id(&answer["merged_by"]["id"])).flatten(),
+    })
+}
+
+impl PullReader for AgentTokens {
+    /// **Which App reads (ruled by the architect, 2026-11-10):** the agent-token App, with a token for this one
+    /// repository that can read its pull requests and metadata, and nothing else: not its contents. Never the provisioning App, which holds Administration, and never the merge App,
+    /// which is kept for marking and merging. A token that came back wider than asked is revoked unused.
+    async fn read_pull(&self, repo_id: i64, number: i64) -> PullRead {
+        let wanted = TokenPermissions::READER.pairs();
+        let minted = match self.mint_agent_token(repo_id, &wanted).await {
+            Ok(minted) => minted,
+            Err(failure) => {
+                return PullRead {
+                    answer: Err(failure),
+                    failed_at_mint: true,
+                    revoked: true,
+                }
+            }
+        };
+        let granted: Vec<(&str, &str)> = minted
+            .permissions
+            .iter()
+            .map(|(name, level)| (name.as_str(), level.as_str()))
+            .collect();
+        let narrow = minted_token_matches(
+            repo_id,
+            &minted.repo_ids,
+            &granted,
+            TokenPermissions::READER,
+        );
+        let answer = if narrow {
+            let path = format!("/repositories/{repo_id}/pulls/{number}");
+            match call_within(
+                Method::Get,
+                &path,
+                &minted.token,
+                None,
+                MAX_PULL_ANSWER_BYTES,
+            )
+            .await
+            {
+                Ok((200, body)) => pull_seen(&body)
+                    .map(PullAnswer::Found)
+                    .ok_or(Failure::Unreadable),
+                Ok((404, _)) => Ok(PullAnswer::Missing),
+                Ok((status, _)) => Err(Failure::Status(status)),
+                Err(failure) => Err(failure),
+            }
+        } else {
+            Err(Failure::Unreadable)
+        };
+        let revoked = self.revoke_token(&minted.token).await == Revoked::Gone;
+        PullRead {
+            answer,
+            failed_at_mint: false,
+            revoked,
         }
     }
 }

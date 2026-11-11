@@ -55,7 +55,7 @@ export const CAPABILITIES: Capability[] = [
   { name: "release_task", kind: "command", method: "POST", path: "/v1/workspaces/{workspace_id}/tasks/{task_id}/release", description: "Give back a task this agent accepted.", fields: { ...TASK, ...VERSION, ...REASON } },
   { name: "send_message", kind: "command", method: "POST", path: "/v1/workspaces/{workspace_id}/tasks/{task_id}/messages", description: "Post a message to a task thread.", fields: { ...TASK, body: { type: "string", required: true } } },
   { name: "list_messages", kind: "query", method: "GET", path: "/v1/workspaces/{workspace_id}/tasks/{task_id}/messages", description: "Read a task thread, oldest first, 50 at a time. To read on, pass the id of the last message you got as after." + UNTRUSTED, fields: { ...TASK, after: { type: "string", description: "Opaque: the id of the last message returned. Leave it out for the start." } } },
-  { name: "submit_task", kind: "command", method: "POST", path: "/v1/workspaces/{workspace_id}/tasks/{task_id}/submit", description: "Submit work for review. Submitting doesn't complete the task. Files are ones you uploaded with create_upload's task_id for this task, and each must have finished scanning as ready first, so check its state with get_asset_link. Links and files together are at most 10. The reviewer approves this exact submission, and each file is pinned to its hash.", fields: { ...TASK, ...VERSION, artifacts: { type: "artifacts" }, files: { type: "files", description: "Each { id, label? }. A missing label is the file's name." }, note: { type: "string" }, commit_sha: { type: "string" } } },
+  { name: "submit_task", kind: "command", method: "POST", path: "/v1/workspaces/{workspace_id}/tasks/{task_id}/submit", description: "Submit work for review. Submitting doesn't complete the task. Files are ones you uploaded with create_upload's task_id for this task, and each must have finished scanning as ready first, so check its state with get_asset_link. Links and files together are at most 10. The reviewer approves this exact submission, and each file is pinned to its hash.", fields: { ...TASK, ...VERSION, artifacts: { type: "artifacts" }, files: { type: "files", description: "Each { id, label? }. A missing label is the file's name." }, note: { type: "string" }, commit_sha: { type: "string" }, pr_number: { type: "integer", description: "For a task with a linked repository: the number of your pull request for it, in the room's repository, from a branch of that repository to its default branch, open and not a draft, with commit_sha as its head. One pull request per task." } } },
   { name: "request_changes", kind: "command", method: "POST", path: "/v1/workspaces/{workspace_id}/tasks/{task_id}/request-changes", description: "As reviewer, send a submission back with a reason.", fields: { ...TASK, submission_no: { type: "integer", required: true }, ...REASON } },
   { name: "verify_task", kind: "command", method: "POST", path: "/v1/workspaces/{workspace_id}/tasks/{task_id}/verify", description: "As reviewer, approve one submission, which completes the task. If it has files, each must still be ready and unchanged.", fields: { ...TASK, submission_no: { type: "integer", required: true }, commit_sha: { type: "string" } } },
   { name: "cancel_task", kind: "command", method: "POST", path: "/v1/workspaces/{workspace_id}/tasks/{task_id}/cancel", description: "Cancel a task.", fields: { ...TASK, ...VERSION, ...REASON } },
@@ -75,6 +75,8 @@ export const CAPABILITIES: Capability[] = [
 
 /** Capabilities that exist only while managed repositories are switched on. */
 const MANAGED_REPOSITORY_CAPABILITIES = new Set(["get_repo_access"]);
+/** Fields of other capabilities that exist only then: a task's pull request (M5 step 7a). No capability is added. */
+const MANAGED_REPOSITORY_FIELDS: Record<string, string[]> = { submit_task: ["pr_number"] };
 
 /**
  * The capabilities an agent is offered here. A managed-repository tool is listed only when this Worker's own
@@ -83,7 +85,12 @@ const MANAGED_REPOSITORY_CAPABILITIES = new Set(["get_repo_access"]);
  */
 export function capabilitiesFor(env: { MANAGED_REPOSITORIES?: string }): Capability[] {
   const managed = env.MANAGED_REPOSITORIES === "true";
-  return CAPABILITIES.filter((c) => managed || !MANAGED_REPOSITORY_CAPABILITIES.has(c.name));
+  if (managed) return CAPABILITIES;
+  return CAPABILITIES.filter((c) => !MANAGED_REPOSITORY_CAPABILITIES.has(c.name)).map((c) => {
+    const hidden = MANAGED_REPOSITORY_FIELDS[c.name];
+    if (!hidden || !c.fields) return c;
+    return { ...c, fields: Object.fromEntries(Object.entries(c.fields).filter(([name]) => !hidden.includes(name))) };
+  });
 }
 
 export const needsKey = (c: Capability) => c.kind === "command" && !c.idempotent;

@@ -230,6 +230,20 @@ describe("the room's sweep", () => {
       // The migrations after this one come off first: submitted files' flag, then expected outputs.
       // M4 step 8's public claims, the newest migration, then step 6's discovery outbox, step 5's room visibility, step 13b's change requests, step 13's read-back and step 12's A2A attempts.
       // M5 step 6's agent tokens, the newest migration, come off first.
+      // M5 step 7a's read bookkeeping, the newest migration, comes off first.
+      state.storage.sql.exec("DROP TABLE repo_read");
+      state.storage.sql.exec("ALTER TABLE repo_link DROP COLUMN reads_not_before");
+      state.storage.sql.exec("ALTER TABLE repo_link DROP COLUMN read_failures");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN pr_draft");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN commit_changed_at");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN unwatched_at");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN not_found_reads");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN read_failures");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN merged_by_id");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN unchanged_reads");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN read_at");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN observed_base_sha");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP TABLE repo_token_mint");
       state.storage.sql.exec("DROP TABLE repo_token");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
@@ -392,6 +406,20 @@ describe("the room's sweep", () => {
       // The migrations after this one come off first: submitted files' flag, then expected outputs.
       // M4 step 8's public claims, the newest migration, then step 6's discovery outbox, step 5's room visibility, step 13b's change requests, step 13's read-back and step 12's A2A attempts.
       // M5 step 6's agent tokens, the newest migration, come off first.
+      // M5 step 7a's read bookkeeping, the newest migration, comes off first.
+      state.storage.sql.exec("DROP TABLE repo_read");
+      state.storage.sql.exec("ALTER TABLE repo_link DROP COLUMN reads_not_before");
+      state.storage.sql.exec("ALTER TABLE repo_link DROP COLUMN read_failures");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN pr_draft");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN commit_changed_at");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN unwatched_at");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN not_found_reads");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN read_failures");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN merged_by_id");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN unchanged_reads");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN read_at");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN observed_base_sha");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP TABLE repo_token_mint");
       state.storage.sql.exec("DROP TABLE repo_token");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
@@ -700,6 +728,20 @@ describe("removal by the rules, review fixes", () => {
       sql.exec("INSERT INTO submission_file (task_id, submission_no, object_id, sha256, size, label, submitted_by, submitted_org, created_at) VALUES (?, 1, ?, ?, 1, 'x', ?, ?, 456)", t.body.id, named, "0".repeat(64), MEMBER.id, MEMBER.org);
       // M4 step 8's public claims, the newest migration, then step 6's discovery outbox, step 5's room visibility, step 13b's change requests, step 13's read-back and step 12's A2A attempts.
       // M5 step 6's agent tokens, the newest migration, come off first.
+      // M5 step 7a's read bookkeeping, the newest migration, comes off first.
+      state.storage.sql.exec("DROP TABLE repo_read");
+      state.storage.sql.exec("ALTER TABLE repo_link DROP COLUMN reads_not_before");
+      state.storage.sql.exec("ALTER TABLE repo_link DROP COLUMN read_failures");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN pr_draft");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN commit_changed_at");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN unwatched_at");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN not_found_reads");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN read_failures");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN merged_by_id");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN unchanged_reads");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN read_at");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN observed_base_sha");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP TABLE repo_token_mint");
       state.storage.sql.exec("DROP TABLE repo_token");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");

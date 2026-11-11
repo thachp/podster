@@ -212,7 +212,7 @@ Each threat maps to the step that mitigates it and the test that checks it. ADR 
 
 The gate still needs, besides the rows above: M3's gate, the test operator named in `OPERATORS`, the full `e2e/m4-staging.mjs` run on staging with an operator's session and the logs taken, and the owner's yes.
 
-**2026-11-11:** M3's gate was met, by the owner's call ([decision 193](spec/PRODUCT.md#decisions-needed)). So M4's gate now waits only on M4's own staging acceptance rerun and the owner's call.
+**2026-11-11:** M3's gate was met, by the owner's call ([decision 193](spec/PRODUCT.md#decisions-needed)). So M4's gate no longer waits on M3's gate. The other items listed here still stand.
 
 ## Questions for the architect
 

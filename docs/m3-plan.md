@@ -172,7 +172,7 @@ What proves each gate item, and how far that proof has got. This is modeled on [
 Last updated 2026-11-10 UTC: every M3 build step merged (1 to 15, 13b, and `/a2a/files`), #240 merged and deployed, and the kit run on staging. Decision 192 was deployed, and AC-18 and the screens ran on staging. **Three items are owed to the owner, and one question.** "Owed before M3's gate" lists them. That was the state on 2026-11-10; the owner answered on 2026-11-11, as the next entry says.
 
 **The gate call, 2026-11-11: M3's gate is met.**
-- **Decided by the owner,** on 2026-11-11 at about 02:45 UTC, in reply to the architect's question under "Owed before M3's gate", which laid out the evidence and the open items and offered two options. The owner's reply, in full: "M3 gate: local runs are enough for LangGraph, fasta2a, cancel-task delivery and the Python client. Gate met."
+- **Decided by the owner,** on 2026-11-11, in reply to the architect's question under "Owed before M3's gate", which laid out the evidence and the open items. The owner's reply, in full: "M3 gate: local runs are enough for LangGraph, fasta2a, cancel-task delivery and the Python client. Gate met."
 - **This is the gate call** that [decision 132](spec/PRODUCT.md#decisions-needed) gives to the owner. It's recorded as [decision 193](spec/PRODUCT.md#decisions-needed).
 - **What it accepts:** that the local runs stand as the evidence for four gate items that did not run on staging. None of the four has run on staging since, and nothing here says one did:
   - **outbound to LangGraph:** ran locally only; accepted by the owner on 2026-11-11. The local run is `e2e/run-langgraph-check.mjs`, 4 of 4 with decision 174;
@@ -361,7 +361,7 @@ Last updated 2026-11-10 UTC: every M3 build step merged (1 to 15, 13b, and `/a2a
 
   LangGraph and fasta2a passed locally. Either approve a short-lived server so outbound can run against LangGraph from staging, or rule that the local LangGraph and fasta2a runs plus staging's test-server run are enough. Also say whether `CancelTask` delivery must be shown on staging, and if so by which option, and whether to allow the Python client's install in the M3 session.
 
-  **The owner's answer, 2026-11-11:** "M3 gate: local runs are enough for LangGraph, fasta2a, cancel-task delivery and the Python client. Gate met." So the local runs are enough, `CancelTask` delivery needn't be shown on staging, and the Python client's install wasn't allowed or run.
+  **The owner's answer, 2026-11-11:** "M3 gate: local runs are enough for LangGraph, fasta2a, cancel-task delivery and the Python client. Gate met." **The architect's reading, not the owner's words:** the local runs are enough, so `CancelTask` delivery needn't be shown on staging, and the Python client's install isn't needed for the gate. That install was not run.
 - **Owed to the owner: the test A2A server.** The architect ruled it stays deployed. It costs nothing to keep, since it's one Worker with no storage that refuses anything not sealed under `RUN_KEY`, and it lets the round trip run again with no new secrets. Deleting it, `wrangler delete podster-a2a-test-staging`, which also removes `RUN_KEY`, is a cloud change and the owner's call. **2026-11-11:** still deployed after the gate call.
 
 **Ruled, 2026-11-10:**

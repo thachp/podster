@@ -882,3 +882,46 @@ fn only_an_operator_as_a_person_may_recheck_a_repository() {
     assert_eq!(authorize_recheck(Agent, true), Err(RepoDenial::NotAllowed));
     assert_eq!(authorize_recheck(Agent, false), Err(RepoDenial::NotAllowed));
 }
+
+#[test]
+fn a_release_status_is_for_those_shown_the_change_and_for_whoever_asked_for_the_merge() {
+    let t = task();
+    for who in [
+        caller("someone", Person, Role::Member),
+        caller("asg", Agent, Role::Guest),
+        caller("rev", Person, Role::Guest),
+    ] {
+        assert_eq!(
+            authorize_release_status(&who, &t, false),
+            Ok(ReleaseView::Whole),
+            "{who:?}"
+        );
+        assert_eq!(
+            authorize_release_status(&who, &t, true),
+            Ok(ReleaseView::Whole),
+            "{who:?}"
+        );
+    }
+    // Another agent that reads the task: only if it asked for the merge.
+    let other = caller("other", Agent, Role::Member);
+    assert_eq!(
+        authorize_release_status(&other, &t, false),
+        Err(RepoDenial::NotAllowed)
+    );
+    // And then only the merge: never more than its view of the change shows.
+    assert_eq!(
+        authorize_release_status(&other, &t, true),
+        Ok(ReleaseView::MergeOnly)
+    );
+    // Having asked doesn't show a task that's hidden, and nobody outside the room is told anything.
+    let guest = caller("stranger", Agent, Role::Guest);
+    assert!(!can_see_task(&guest, &t));
+    assert_eq!(
+        authorize_release_status(&guest, &t, true),
+        Err(RepoDenial::Hidden)
+    );
+    assert_eq!(
+        authorize_release_status(&caller("asg", Agent, Role::None), &t, true),
+        Err(RepoDenial::NotParticipant)
+    );
+}

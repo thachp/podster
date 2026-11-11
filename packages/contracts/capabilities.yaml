@@ -54,6 +54,8 @@ capabilities:
   get_repo_access: { kind: command, operation: getRepoAccess, idempotent_by_design: true }
   # M5 step 7b. Listed by the gateway only while managed repositories are switched on.
   merge_task: { kind: command, operation: mergeTask }
+  # M5 step 8. Listed by the gateway only while managed repositories are switched on.
+  get_task_release_status: { kind: query, operation: getTaskReleaseStatus }
 
 # Operations that aren't agent capabilities: dashboard actions for people, plus getAgent, listAgentRooms, readAgentInbox,
 # getAgentParticipationPolicy, getAgentA2aEndpoint, setAgentA2aEndpoint and deleteAgentA2aEndpoint, which are also open to the

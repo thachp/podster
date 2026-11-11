@@ -36,10 +36,12 @@ use podster_core::provisioning::{
 };
 use podster_core::repo_grants::Grant;
 use podster_core::repo_merge::{
-    check_change_standing, check_merge_authority, decide_merge_request, decide_merge_step,
-    merge_attempt_allowed, merge_call, merge_request_allowed, merge_transition, Actor, Change,
-    ChangeStanding, MergeAuthority, MergeAuthorized, MergeEvent, MergeFailure, MergeObserved,
-    MergeRefusal, MergeStep, PullObservation, PullState, ReviewedBase,
+    check_change_standing, check_merge_authority, decide_landed, decide_merge_request,
+    decide_merge_step, merge_attempt_allowed, merge_call, merge_request_allowed, merge_transition,
+    requestable_state, settle_unknown_from_watch, unknown_read_allowed, unknown_read_wait_ms,
+    Actor, Change, ChangeStanding, Landed, MergeAuthority, MergeAuthorized, MergeEvent,
+    MergeFailure, MergeObserved, MergeRefusal, MergeStep, PullObservation, PullState, ReviewedBase,
+    WatchSettles,
 };
 use podster_core::repositories::{GrantAction, LinkStatus, MergeState, RequestState};
 use podster_core::task_change::{pull_state_name, PullSeen};
@@ -285,7 +287,11 @@ pub(super) fn request(
         provider_repo_id: int(&row["provider_repo_id"]),
         submission_no: u32::try_from(int(&row["submission_no"])).unwrap_or(0),
         reviewed_commit_sha: row["reviewed_commit_sha"].as_str(),
-        merge_state: inputs.merge_state(),
+        // One whose outcome the job stopped reading for may be asked for again, as core has it.
+        merge_state: requestable_state(
+            inputs.merge_state(),
+            row["merge_step"].as_str() == Some(UNKNOWN_FINAL),
+        ),
         merge_reason: merge_reason.as_deref(),
     });
     decide_merge_request(&authority, change.as_ref()).map_err(refused)?;
@@ -497,7 +503,6 @@ struct Pass {
     target: Target,
     /// A merge call was already on record when this pass began, from this request or an earlier one.
     called: bool,
-    owner_holds: bool,
 }
 
 /// How a pass begins.
@@ -568,7 +573,6 @@ fn begin(
                 authorized,
                 target,
                 called,
-                owner_holds,
             }))),
             None => Ok(Begun::Nothing),
         },
@@ -586,16 +590,18 @@ enum Intent {
 
 /// Records what the job is about to ask of GitHub, in a transaction that first decides authority again from current
 /// rows. `set` names the columns the intent writes, with `?2` the time and `?4` the base commit seen.
+#[allow(clippy::too_many_arguments)]
 fn intend(
     sql: &SqlStorage,
     task_id: &str,
     pass: &Pass,
+    owner_holds: bool,
     step: &'static str,
     set: &str,
     base_sha: &str,
     now: i64,
 ) -> R<Intent> {
-    match authority(sql, task_id, pass.owner_holds, now)? {
+    match authority(sql, task_id, owner_holds, now)? {
         None => Ok(Intent::Gone),
         Some(Err(failure)) => Ok(Intent::Lost(failure)),
         // The same commit this pass read the pull request for, and no other.
@@ -678,8 +684,8 @@ impl From<MergeFailure> for Ending {
     }
 }
 
-/// How long between reads of a merge whose outcome isn't known yet. They go on until one settles it.
-const UNKNOWN_READ_EVERY_MS: i64 = 15 * 60 * 1000;
+/// The step recorded once the job has stopped reading for a merge whose outcome isn't known.
+const UNKNOWN_FINAL: &str = "outcome_unknown_final";
 
 /// Records that a merge call went out, the merge was about to end as `pending`, and GitHub couldn't be read to see what
 /// the call did. Not an end: the job keeps reading, and the first read that works settles it, as succeeded if the call
@@ -694,21 +700,38 @@ fn finish_unknown(
     let from = merge_state_of(sql, task_id)?;
     match from.and_then(|from| merge_transition(task_id, from, &MergeEvent::OutcomeUnknown)) {
         Some(MergeState::OutcomeUnknown) => {}
-        // Already unknown: only the next read's time moves.
+        // Already unknown, and another read couldn't be made: it's counted, the next one waits longer, and past the
+        // cap, or in a room that's archived or suspended, the job stops reading. The outcome stays recorded as
+        // unknown, and a person asking for the merge again begins with a read.
         _ => {
-            return exec(
+            let reads = rows(
                 sql,
-                "UPDATE task_change SET merge_next_at = ? WHERE task_id = ? AND merge_state = 'outcome_unknown'",
-                vec![(now + UNKNOWN_READ_EVERY_MS).into(), task_id.into()],
-            )
+                "SELECT merge_attempts FROM task_change WHERE task_id = ? AND merge_state = 'outcome_unknown'",
+                vec![task_id.into()],
+            )?
+            .first()
+            .map_or(0, |row| int(&row["merge_attempts"]).clamp(0, 64) as u32)
+            .saturating_add(1);
+            if unknown_read_allowed(reads, room_open(sql)?) {
+                return exec(
+                    sql,
+                    "UPDATE task_change SET merge_attempts = ?, merge_next_at = ? WHERE task_id = ? AND merge_state = 'outcome_unknown'",
+                    vec![
+                        i64::from(reads).into(),
+                        (now + unknown_read_wait_ms(reads)).into(),
+                        task_id.into(),
+                    ],
+                );
+            }
+            return end_unknown_reads(sql, room, task_id, now);
         }
     }
     exec(
         sql,
-        "UPDATE task_change SET merge_state = 'outcome_unknown', merge_reason = ?1, merge_next_at = ?2, merge_step = 'outcome_unknown', updated_at = ?3 WHERE task_id = ?4",
+        "UPDATE task_change SET merge_state = 'outcome_unknown', merge_reason = ?1, merge_attempts = 0, merge_next_at = ?2, merge_step = 'outcome_unknown', updated_at = ?3 WHERE task_id = ?4",
         vec![
             pending.code.as_str().into(),
-            (now + UNKNOWN_READ_EVERY_MS).into(),
+            (now + unknown_read_wait_ms(0)).into(),
             now.into(),
             task_id.into(),
         ],
@@ -727,6 +750,43 @@ fn finish_unknown(
     console_log!(
         "{}",
         json!({ "event": "merge.outcome_unknown", "ws": room, "task": task_id })
+    );
+    Ok(())
+}
+
+/// Whether the room is neither archived nor suspended.
+fn room_open(sql: &SqlStorage) -> R<bool> {
+    Ok(
+        rows(sql, "SELECT status, suspended_at FROM workspace", vec![])?
+            .first()
+            .is_some_and(|room| {
+                room["status"].as_str() != Some(ARCHIVED) && room["suspended_at"].is_null()
+            }),
+    )
+}
+
+/// Stops the job reading for a merge whose outcome isn't known: no next read, the step says so, and one event. The
+/// state stays `outcome_unknown`. Nothing is claimed either way.
+fn end_unknown_reads(sql: &SqlStorage, room: &str, task_id: &str, now: i64) -> R<()> {
+    exec(
+        sql,
+        "UPDATE task_change SET merge_next_at = NULL, merge_step = ?, updated_at = ? WHERE task_id = ? AND merge_state = 'outcome_unknown' AND merge_step <> ?",
+        vec![UNKNOWN_FINAL.into(), now.into(), task_id.into(), UNKNOWN_FINAL.into()],
+    )?;
+    let requester = requester_of(sql, task_id)?;
+    store::record_event_about(
+        sql,
+        "merge.outcome_unknown_final",
+        SYSTEM,
+        Some(&requester),
+        Some(task_id),
+        &Transition::NONE,
+        told_of_outcome(sql, &requester)?,
+        now,
+    )?;
+    console_log!(
+        "{}",
+        json!({ "event": "merge.outcome_unknown_final", "ws": room, "task": task_id })
     );
     Ok(())
 }
@@ -1196,28 +1256,46 @@ impl Workspace {
             default_branch: &target.default_branch,
             base_sha: target.reviewed_base_sha.as_deref(),
         };
-        let merged = match seen.pull {
+        // The same decision the pass that made the call would take, from core, so the two can't drift.
+        let landed = match seen.pull {
             PullAnswer::Found(pull)
                 if pull.number == target.number && pull.repo_id == Some(target.repo_id) =>
             {
-                let step = decide_merge_step(
+                let decided = decide_landed(
                     &recorded,
                     &reviewed,
                     &observation(&pull, seen.default_branch_has),
                     None,
+                    seen.default_branch.as_deref(),
                 );
-                match step {
-                    MergeStep::Succeeded(proof) => Some((proof, pull)),
-                    _ => None,
-                }
+                Some((decided, pull))
             }
             _ => None,
         };
-        let (room, task) = (room.to_string(), task_id.to_string());
-        self.in_transaction(move |sql| match merged {
-            Some((proof, pull)) => finish_succeeded(sql, &room, &task, proof, &pull, now_ms()),
-            None => fail_with(sql, &room, &task, &failure, now_ms()),
-        })
+        let (room_id, task, repo_id) = (room.to_string(), task_id.to_string(), target.repo_id);
+        match landed {
+            Some((
+                Landed::Merged {
+                    proof,
+                    default_branch_differs,
+                },
+                pull,
+            )) => self.in_transaction(move |sql| {
+                let now = now_ms();
+                if default_branch_differs {
+                    degrade(sql, repo_id, DEFAULT_BRANCH_CHANGED, now)?;
+                }
+                finish_succeeded(sql, &room_id, &task, proof, &pull, now)
+            }),
+            // Merged, and the default branch couldn't be read: that's GitHub not read, so the outcome isn't known yet.
+            Some((Landed::DefaultBranchUnread, _)) => {
+                self.log_waiting(room, task_id, "default_branch", 0);
+                unknown(failure)
+            }
+            _ => {
+                self.in_transaction(move |sql| fail_with(sql, &room_id, &task, &failure, now_ms()))
+            }
+        }
     }
 
     /// A pass at a merge whose outcome isn't known: it only reads, and the read settles it.
@@ -1231,6 +1309,11 @@ impl Workspace {
         let (Some(row), Some(target)) = (pending.first(), target(&sql, task_id)?) else {
             return Ok(());
         };
+        // A room that's archived or suspended asks GitHub nothing more, reads included.
+        if !room_open(&sql)? {
+            let (room, task) = (room.to_string(), task_id.to_string());
+            return self.in_transaction(move |sql| end_unknown_reads(sql, &room, &task, now_ms()));
+        }
         let ending = Ending {
             code: text(&row["merge_reason"]).unwrap_or_else(|| "merge_outcome_unknown".to_string()),
             follow_up: false,
@@ -1313,6 +1396,12 @@ impl Workspace {
         };
         // Mark: authority again and the intent, in one transaction; then the status on exactly the reviewed commit;
         // then that it was set.
+        // The owner's standing is asked again, not carried from the start of the pass: a grant counts only while its
+        // giver holds the delegation now. If it can't be read, nothing more is asked of GitHub in this pass.
+        let Some(owner_holds) = self.owner_holds().await else {
+            self.log_waiting(room, task_id, "standing", 0);
+            return Ok(());
+        };
         let intent = self.in_transaction({
             let (task, pass, base) = (
                 task_id.to_string(),
@@ -1324,6 +1413,7 @@ impl Workspace {
                     sql,
                     &task,
                     &pass,
+                    owner_holds,
                     "mark",
                     "merge_marked_at = ?2",
                     &base,
@@ -1363,6 +1453,12 @@ impl Workspace {
             return Ok(());
         }
         // Merge: authority again, the intent and the base seen, in one transaction; then the call; then what GitHub shows.
+        // The owner's standing is asked again, not carried from the start of the pass: a grant counts only while its
+        // giver holds the delegation now. If it can't be read, nothing more is asked of GitHub in this pass.
+        let Some(owner_holds) = self.owner_holds().await else {
+            self.log_waiting(room, task_id, "standing", 0);
+            return Ok(());
+        };
         let intent = self.in_transaction({
             let (task, pass, base) = (task_id.to_string(), pass.clone_for_intent(), base_seen);
             move |sql| {
@@ -1370,6 +1466,7 @@ impl Workspace {
                     sql,
                     &task,
                     &pass,
+                    owner_holds,
                     "merge",
                     "merge_called_at = ?2, merge_base_sha = ?4",
                     &base,
@@ -1461,30 +1558,39 @@ impl Workspace {
             default_branch: &target.default_branch,
             base_sha: target.reviewed_base_sha.as_deref(),
         };
-        let default_differs = seen
-            .default_branch
-            .as_deref()
-            .is_some_and(|reported| reported != target.default_branch);
-        // Once a merge call is on record, what became of it comes first. A merge that landed is recorded as merged even
-        // if the default branch was changed between the check before the call and this read. The link is still
-        // degraded for that, so nothing more is merged until an operator has looked.
-        if (pass.called || call.is_some()) && pull.state == PullState::Merged {
-            let landed = decide_merge_step(
+        // Once a merge call is on record, what became of it comes first, by the one decision core has for it. A merge
+        // that landed is recorded as merged even if the default branch was changed between the check before the call and
+        // this read, and then the link is degraded, so nothing more is merged until an operator has looked. Without the
+        // default branch read, nothing is recorded, and the next pass reads again.
+        if pass.called || call.is_some() {
+            let landed = decide_landed(
                 &pass.authorized,
                 &reviewed,
                 &observation(&pull, seen.default_branch_has),
                 call.map(merge_call),
+                seen.default_branch.as_deref(),
             );
-            if let MergeStep::Succeeded(proof) = landed {
-                let (room, task, repo_id) = (room.to_string(), task_id.to_string(), target.repo_id);
-                self.in_transaction(move |sql| {
-                    let now = now_ms();
-                    if default_differs {
-                        degrade(sql, repo_id, DEFAULT_BRANCH_CHANGED, now)?;
-                    }
-                    finish_succeeded(sql, &room, &task, proof, &pull, now)
-                })?;
-                return Ok(None);
+            match landed {
+                Landed::Merged {
+                    proof,
+                    default_branch_differs,
+                } => {
+                    let (room, task, repo_id) =
+                        (room.to_string(), task_id.to_string(), target.repo_id);
+                    self.in_transaction(move |sql| {
+                        let now = now_ms();
+                        if default_branch_differs {
+                            degrade(sql, repo_id, DEFAULT_BRANCH_CHANGED, now)?;
+                        }
+                        finish_succeeded(sql, &room, &task, proof, &pull, now)
+                    })?;
+                    return Ok(None);
+                }
+                Landed::DefaultBranchUnread => {
+                    self.log_waiting(room, task_id, "default_branch", 0);
+                    return Ok(None);
+                }
+                Landed::No(_) => {}
             }
         }
         // The default branch GitHub reports, read with the pull request, must be the one the link holds: before the mark,
@@ -1541,7 +1647,55 @@ impl Pass {
             authorized: self.authorized.clone(),
             target: self.target.clone(),
             called: self.called,
-            owner_holds: self.owner_holds,
         }
+    }
+}
+
+/// Settles a merge whose outcome isn't known, from the ordinary watch's read of the pull request (M5 step 7a's
+/// refresh), in the watch's own transaction with its observation. For any change in `outcome_unknown`, whether the job
+/// is still reading for it or has stopped: the watch may well see the merge first, and it stops watching a merged pull
+/// request, so it settles what it sees. `core::settle_unknown_from_watch` decides: merged with the reviewed commit into
+/// the default branch is this request's success; closed unmerged, or merged at another commit, is its failure, with
+/// the reason it was about to end with. A default branch that isn't the link's degrades the link and settles nothing.
+/// Nothing more is read and no call is made for it, and the job's next read finds it settled and does nothing.
+pub(super) fn settle_from_watch(
+    sql: &SqlStorage,
+    room: &str,
+    task_id: &str,
+    pull: &PullSeen,
+    now: i64,
+) -> R<()> {
+    let held = rows(
+        sql,
+        "SELECT merge_reason FROM task_change WHERE task_id = ? AND merge_state = 'outcome_unknown'",
+        vec![task_id.into()],
+    )?;
+    let (Some(row), Some(target)) = (held.first(), target(sql, task_id)?) else {
+        return Ok(());
+    };
+    let recorded = MergeAuthorized::when_called(task_id, target.repo_id, &target.commit);
+    let reviewed = ReviewedBase {
+        default_branch: &target.default_branch,
+        base_sha: target.reviewed_base_sha.as_deref(),
+    };
+    match settle_unknown_from_watch(
+        &recorded,
+        &reviewed,
+        &observation(pull, None),
+        pull.repo_default_branch.as_deref(),
+    ) {
+        WatchSettles::Merged(proof) => finish_succeeded(sql, room, task_id, proof, pull, now),
+        WatchSettles::Failed => {
+            let ending = Ending {
+                code: text(&row["merge_reason"])
+                    .unwrap_or_else(|| "merge_outcome_unknown".to_string()),
+                follow_up: false,
+            };
+            fail_with(sql, room, task_id, &ending, now)
+        }
+        WatchSettles::DefaultBranchDiffers => {
+            degrade(sql, target.repo_id, DEFAULT_BRANCH_CHANGED, now)
+        }
+        WatchSettles::NotYet => Ok(()),
     }
 }

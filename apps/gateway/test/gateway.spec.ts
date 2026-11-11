@@ -1477,9 +1477,16 @@ describe("rate limits", () => {
       return [res.status, (await res.text()).replaceAll(name, "<tool>")];
     };
     expect(await called("merge_task")).toEqual(await called("no_such_tool"));
+    expect(await called("get_task_release_status")).toEqual(await called("no_such_tool"));
     expect((await called("merge_task"))[1]).toContain("<tool>");
     // Nothing else is ever gated, and the gated tool is a retry-safe command that names only the task.
-    expect(capabilitiesFor({}).map((c) => c.name)).toEqual(CAPABILITIES.map((c) => c.name).filter((n) => n !== "get_repo_access" && n !== "merge_task"));
+    expect(capabilitiesFor({}).map((c) => c.name)).toEqual(CAPABILITIES.map((c) => c.name).filter((n) => !["get_repo_access", "merge_task", "get_task_release_status"].includes(n)));
+    // The release status (M5 step 8) is listed the same way, and off, calling it answers exactly as a missing tool does.
+    for (const value of [undefined, "", "1", "TRUE", "true ", "yes"]) expect(await tools({ MANAGED_REPOSITORIES: value }), String(value)).not.toContain("get_task_release_status");
+    expect(await tools({ MANAGED_REPOSITORIES: "true" })).toContain("get_task_release_status");
+    const status = capabilitiesFor({ MANAGED_REPOSITORIES: "true" }).find((c) => c.name === "get_task_release_status")!;
+    expect([status.kind, status.method, Object.keys(status.fields ?? {})]).toEqual(["query", "GET", ["workspace_id", "task_id"]]);
+    expect(toApiCall(status, { workspace_id: "w", task_id: "t", pr_number: 7, refresh: true })).toEqual({ method: "GET", path: "/v1/workspaces/w/tasks/t/release-status" });
     // The merge tool (M5 step 7b) is listed the same way: only with the switch exactly on. Off, no agent is offered one (AC-17).
     for (const value of [undefined, "", "1", "TRUE", "true ", "yes"]) expect(await tools({ MANAGED_REPOSITORIES: value }), String(value)).not.toContain("merge_task");
     expect(await tools({ MANAGED_REPOSITORIES: "true" })).toContain("merge_task");

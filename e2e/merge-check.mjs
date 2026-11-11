@@ -115,6 +115,19 @@ await check("M5-S7iv", "an authorized holder's merge_task leads to exactly one m
   // Asking again merges nothing more.
   refused(await ask(robot), "already_merged", "asking again");
   eq((await merges()).length, 1, "merge calls after asking again");
+  // The agent that asked reads how it went from the release status (M5 step 8), which fetches nothing. It isn't shown
+  // the task's change, so it gets the merge alone: nothing of the pull request or its checks. No release exists.
+  const status = await robot.must("get_task_release_status", where(), false);
+  eq([status.merge.state, status.merge.reason, status.merge.sha, status.merge.requested_by], ["succeeded", null, done.merge_sha, robot.id], "the release status's merge");
+  ok(typeof status.merge.observed_at === "number", "the merge has no observation time");
+  eq([status.pull_request, status.checks], [null, null], "what the requester is shown of the change");
+  eq(status.release.exists, false, "the release");
+  // The room's owner, who is shown the change, gets all of it. Checks weren't read here, which is said as unobserved.
+  const whole = await owner.must("GET", `/v1/workspaces/${room}/tasks/${task}/release-status`);
+  eq([whole.pull_request.pr_number, whole.pull_request.pr_state, whole.merge.state], [7, "merged", "succeeded"], "the owner's release status");
+  eq([whole.checks.state, whole.checks.counts, whole.checks.observed_at, whole.checks.commit_sha], [null, null, null, null], "the owner's view of the checks");
+  // Another agent in the room, shown neither the change nor having asked, is refused.
+  refused(await sibling.call("get_task_release_status", where()), "not_allowed", "another agent reading the release status");
 });
 
 // What GitHub's two rulesets refused in the spike, as the fake holds to them, each shown through Podster with one exact

@@ -14,6 +14,7 @@ pub mod files;
 pub mod provider_deliveries;
 pub mod provisioning;
 pub mod public_claims;
+pub mod release_status;
 pub mod removal;
 pub mod repo_access;
 pub mod repo_grants;

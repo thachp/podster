@@ -34,14 +34,15 @@ const where = { workspace_id: room, task_id: made.id };
 await check("M5-S6a", "with the switch on, the agent is offered exactly get_repo_access and merge_task for a repository, and no deploy tool", async () => {
   const tools = await coder.tools();
   // Step 7b's tool is listed with the switch on, and only then: the journey and managed-off-check.mjs, with it off, find neither.
-  eq(tools.filter((t) => /repo|merge|deploy/.test(t)).sort(), ["get_repo_access", "merge_task"], "the managed-repository tools");
+  eq(tools.filter((t) => ["get_repo_access", "merge_task", "get_task_release_status"].includes(t) || /merge|deploy/.test(t)).sort(), ["get_repo_access", "get_task_release_status", "merge_task"], "the managed-repository tools");
 });
 
 await check("M5-S6b", "an agent without a grant gets a refusal and no token", async () => {
   eq(accepted.status, "accepted", "the task's status");
   const result = await coder.call("get_repo_access", where);
-  // No link can be made here, so the refusal comes before the grant is looked at.
-  refused(result, ["task_not_linked", "repo_not_ready", "grant_required"], "asking with no grant");
+  // This room has no repository, so its task isn't a linked one, and that is the one answer: it comes before the grant
+  // is looked at. The grant's own refusal is shown, exactly, in merge-check.mjs and against the fake in apps/api's tests.
+  refused(result, "task_not_linked", "asking with no grant");
   tokenless(result, "asking with no grant");
   // Asking again is refused again, the same way.
   refused(await coder.call("get_repo_access", where), result.code, "asking again");
@@ -49,7 +50,7 @@ await check("M5-S6b", "an agent without a grant gets a refusal and no token", as
 
 await check("M5-S6c", "an agent that isn't the assignee, and a person, get a refusal and no token", async () => {
   const theirs = await bystander.call("get_repo_access", where);
-  refused(theirs, ["not_allowed", "task_not_found"], "another agent's task");
+  refused(theirs, "not_allowed", "another agent's task");
   tokenless(theirs, "another agent's task");
   const person = await owner.dash("POST", `/v1/workspaces/${room}/tasks/${made.id}/repo-access`, {});
   ok(!person.ok, `a person was given an answer: HTTP ${person.status}`);

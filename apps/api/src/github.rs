@@ -869,3 +869,263 @@ impl PullReader for AgentTokens {
         }
     }
 }
+
+/// The merge App's configuration (M5 step 7b, ADR 0009's third App). It marks a reviewed commit and merges it, and is
+/// the one actor the repository's rules let update the default branch. Its App ID and installation ID are variables and
+/// its key is a secret, all set by the owner, and none of them comes from a request.
+pub struct MergeConfig(AgentConfig);
+
+impl MergeConfig {
+    /// `None` unless all three are set and well-formed, and the App is its own: not the provisioning App or the
+    /// agent-token App, not either's installation, and not signed with either's key. The caller says only that merging
+    /// isn't configured.
+    pub fn from_env(env: &Env) -> Option<MergeConfig> {
+        MergeConfig::from_lookup(&|name: &str| lookup(env, name))
+    }
+
+    /// The same, from any source of the Worker's variables and secrets by name.
+    pub fn from_lookup(get: &dyn Fn(&str) -> Option<String>) -> Option<MergeConfig> {
+        let number = |name: &str| {
+            get(name)
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|n| *n > 0)
+        };
+        let key_pem = get("GITHUB_MERGE_APP_KEY")?;
+        pkcs8_from_pem(&key_pem).is_some().then_some(())?;
+        let config = AgentConfig {
+            app_id: number("GITHUB_MERGE_APP_ID")?,
+            installation_id: number("GITHUB_MERGE_INSTALLATION_ID")?,
+            key_pem,
+        };
+        let distinct = app_is_distinct(
+            (config.app_id, config.installation_id),
+            &[
+                number("GITHUB_PROVISION_APP_ID"),
+                number("GITHUB_AGENT_APP_ID"),
+            ],
+            &[
+                number("GITHUB_PROVISION_INSTALLATION_ID"),
+                number("GITHUB_AGENT_INSTALLATION_ID"),
+            ],
+        ) && [get("GITHUB_PROVISION_APP_KEY"), get("GITHUB_AGENT_APP_KEY")]
+            .iter()
+            .all(|other| other.as_deref() != Some(config.key_pem.as_str()));
+        if !distinct {
+            console_error!("merge.app_not_distinct");
+        }
+        distinct.then_some(MergeConfig(config))
+    }
+}
+
+/// What a read of a task's pull request and of the default branch showed.
+pub struct MergeSeen {
+    pub pull: PullAnswer,
+    /// Whether the default branch contains the commit asked about. `None` if that couldn't be told.
+    pub default_branch_has: Option<bool>,
+}
+
+/// One call by the merge App, and whether the token made for it is gone.
+pub struct MergeStepRead<T> {
+    pub answer: T,
+    /// Whether a failure came from asking for the token, so nothing was sent about the repository.
+    pub failed_at_mint: bool,
+    pub revoked: bool,
+}
+
+/// The provider, as the merge job needs it (M5 step 7b). Each call mints its own token for the one repository, checks
+/// it's exactly as narrow as asked, and revokes it on every way out.
+pub(crate) trait Merger {
+    /// Sets the review status on exactly this commit, with a token that can set statuses and nothing else.
+    async fn mark(
+        &self,
+        repo_id: i64,
+        sha: &str,
+    ) -> MergeStepRead<std::result::Result<(), Failure>>;
+    /// Asks GitHub to merge the pull request as a merge commit, only if its head is still `sha`, then reads the pull
+    /// request and the default branch with the same token. The call's status is `None` when no answer came. What it
+    /// says is never taken as the outcome: the reads are.
+    async fn merge(
+        &self,
+        repo_id: i64,
+        number: i64,
+        sha: &str,
+        default_branch: &str,
+    ) -> MergeStepRead<(Option<u16>, std::result::Result<MergeSeen, Failure>)>;
+    /// Reads the pull request and whether the default branch contains `sha`, with a token that can only read.
+    async fn observe(
+        &self,
+        repo_id: i64,
+        number: i64,
+        sha: &str,
+        default_branch: &str,
+    ) -> MergeStepRead<std::result::Result<MergeSeen, Failure>>;
+}
+
+pub struct MergeApp {
+    tokens: AgentTokens,
+}
+
+impl MergeApp {
+    pub fn new(config: MergeConfig) -> MergeApp {
+        MergeApp {
+            tokens: AgentTokens::new(config.0),
+        }
+    }
+
+    /// A token for the one repository with exactly these permissions, or the failure. One that came back wider or
+    /// for another repository is revoked here and never used.
+    async fn narrow(
+        &self,
+        repo_id: i64,
+        wanted: TokenPermissions,
+    ) -> std::result::Result<String, (Failure, bool)> {
+        let minted = self
+            .tokens
+            .mint_agent_token(repo_id, &wanted.pairs())
+            .await
+            .map_err(|failure| (failure, true))?;
+        let granted: Vec<(&str, &str)> = minted
+            .permissions
+            .iter()
+            .map(|(name, level)| (name.as_str(), level.as_str()))
+            .collect();
+        if minted_token_matches(repo_id, &minted.repo_ids, &granted, wanted) {
+            return Ok(minted.token);
+        }
+        let revoked = self.tokens.revoke_token(&minted.token).await == Revoked::Gone;
+        Err((Failure::Unreadable, revoked))
+    }
+
+    /// The pull request, and whether the default branch contains `sha`, read with `token`.
+    async fn read_state(
+        token: &str,
+        repo_id: i64,
+        number: i64,
+        sha: &str,
+        default_branch: &str,
+    ) -> std::result::Result<MergeSeen, Failure> {
+        let path = format!("/repositories/{repo_id}/pulls/{number}");
+        let pull = match call_within(Method::Get, &path, token, None, MAX_PULL_ANSWER_BYTES).await?
+        {
+            (200, body) => PullAnswer::Found(pull_seen(&body).ok_or(Failure::Unreadable)?),
+            (404, _) => PullAnswer::Missing,
+            (status, _) => return Err(Failure::Status(status)),
+        };
+        // `behind` or `identical` is the default branch holding everything the commit has. Only a branch name that's
+        // plain enough to put in a path is asked about, and a commit ID is hex.
+        let plain_branch =
+            plain(&Value::from(default_branch), 255).filter(|name| !name.contains('/'));
+        let default_branch_has = match plain_branch.filter(|_| valid_commit_sha(sha)) {
+            Some(branch) => {
+                let path = format!("/repositories/{repo_id}/compare/{branch}...{sha}");
+                match call(Method::Get, &path, token, None).await? {
+                    (200, body) => match body["status"].as_str() {
+                        Some("behind" | "identical") => Some(true),
+                        Some("ahead" | "diverged") => Some(false),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+            None => None,
+        };
+        Ok(MergeSeen {
+            pull,
+            default_branch_has,
+        })
+    }
+}
+
+impl Merger for MergeApp {
+    async fn mark(
+        &self,
+        repo_id: i64,
+        sha: &str,
+    ) -> MergeStepRead<std::result::Result<(), Failure>> {
+        let token = match self.narrow(repo_id, TokenPermissions::MARKER).await {
+            Ok(token) => token,
+            Err((failure, revoked)) => {
+                return MergeStepRead {
+                    answer: Err(failure),
+                    failed_at_mint: true,
+                    revoked,
+                }
+            }
+        };
+        let answer = if valid_commit_sha(sha) {
+            let path = format!("/repositories/{repo_id}/statuses/{sha}");
+            let body = json!({ "state": "success", "context": STATUS_CONTEXT });
+            match call(Method::Post, &path, &token, Some(body)).await {
+                Ok((201, _)) => Ok(()),
+                Ok((status, _)) => Err(Failure::Status(status)),
+                Err(failure) => Err(failure),
+            }
+        } else {
+            Err(Failure::Unreadable)
+        };
+        let revoked = self.tokens.revoke_token(&token).await == Revoked::Gone;
+        MergeStepRead {
+            answer,
+            failed_at_mint: false,
+            revoked,
+        }
+    }
+
+    async fn merge(
+        &self,
+        repo_id: i64,
+        number: i64,
+        sha: &str,
+        default_branch: &str,
+    ) -> MergeStepRead<(Option<u16>, std::result::Result<MergeSeen, Failure>)> {
+        let token = match self.narrow(repo_id, TokenPermissions::MERGER).await {
+            Ok(token) => token,
+            Err((failure, revoked)) => {
+                return MergeStepRead {
+                    answer: (None, Err(failure)),
+                    failed_at_mint: true,
+                    revoked,
+                }
+            }
+        };
+        let path = format!("/repositories/{repo_id}/pulls/{number}/merge");
+        let body = json!({ "sha": sha, "merge_method": "merge" });
+        let status = call(Method::Put, &path, &token, Some(body))
+            .await
+            .ok()
+            .map(|(status, _)| status);
+        let seen = Self::read_state(&token, repo_id, number, sha, default_branch).await;
+        let revoked = self.tokens.revoke_token(&token).await == Revoked::Gone;
+        MergeStepRead {
+            answer: (status, seen),
+            failed_at_mint: false,
+            revoked,
+        }
+    }
+
+    async fn observe(
+        &self,
+        repo_id: i64,
+        number: i64,
+        sha: &str,
+        default_branch: &str,
+    ) -> MergeStepRead<std::result::Result<MergeSeen, Failure>> {
+        let token = match self.narrow(repo_id, TokenPermissions::OBSERVER).await {
+            Ok(token) => token,
+            Err((failure, revoked)) => {
+                return MergeStepRead {
+                    answer: Err(failure),
+                    failed_at_mint: true,
+                    revoked,
+                }
+            }
+        };
+        let answer = Self::read_state(&token, repo_id, number, sha, default_branch).await;
+        let revoked = self.tokens.revoke_token(&token).await == Revoked::Gone;
+        MergeStepRead {
+            answer,
+            failed_at_mint: false,
+            revoked,
+        }
+    }
+}

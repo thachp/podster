@@ -64,11 +64,12 @@ const minted = async () => (await (await fetch(`https://github-fake.example.com/
 const script = (body: { mode?: string; revoke?: number }) => fetch("https://github-fake.example.com/agent-repo", { method: "POST", body: JSON.stringify({ id: REPO_ID, ...body }) });
 /** Resolves once a mint for this test's repository is waiting at the fake's gate (`mode: "gate"`). */
 const minting = async () => {
-  for (;;) {
+  for (const deadline = Date.now() + 5_000; Date.now() < deadline; ) {
     const { waiting } = (await (await fetch(`https://github-fake.example.com/agent-gate?repo=${REPO_ID}`)).json()) as { waiting: number };
     if (waiting > 0) return;
     await new Promise((x) => setTimeout(x, 2));
   }
+  throw new Error("no mint reached the gate");
 };
 /** Lets the mint waiting at the gate answer. */
 const release = () => fetch("https://github-fake.example.com/agent-release", { method: "POST", body: JSON.stringify({ id: REPO_ID }) });

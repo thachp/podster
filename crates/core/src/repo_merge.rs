@@ -72,6 +72,11 @@ pub enum MergeRefusal {
     AlreadyRequested,
     /// `already_merged`
     AlreadyMerged,
+    /// `review_required`: the approval recorded no reviewed commit, as one made while managed repositories were off
+    /// doesn't. Nothing was read from the provider for it, so it needs a fresh review.
+    ReviewRequired,
+    /// `change_unwatched`: the task's pull request kept answering as not there, and Podster stopped reading it.
+    ChangeUnwatched,
 }
 
 impl MergeRefusal {
@@ -90,6 +95,8 @@ impl MergeRefusal {
             MergeRefusal::ChangeNotFound => "change_not_found",
             MergeRefusal::AlreadyRequested => "merge_already_requested",
             MergeRefusal::AlreadyMerged => "already_merged",
+            MergeRefusal::ReviewRequired => "review_required",
+            MergeRefusal::ChangeUnwatched => "change_unwatched",
         }
     }
 }
@@ -328,6 +335,15 @@ pub enum MergeFailure {
     ProviderRefused(u16),
     /// The job's recheck found the requester's authority gone, with that refusal's own code.
     AuthorityLost(MergeRefusal),
+    /// `pull_request_draft`: it went back to a draft after review. A draft can't be merged.
+    PullDraft,
+    /// `merged_elsewhere`: the pull request was already merged when the job first read it, before the job had asked the
+    /// provider for anything. That merge isn't this request's, whatever commit it was of.
+    MergedElsewhere,
+    /// `repo_not_ready`: the repository's protections, read back before the merge, aren't what provisioning set.
+    NotReady,
+    /// `merge_attempts_exhausted`: the job ran its last allowed pass without an outcome. A person asks again.
+    AttemptsExhausted,
 }
 
 impl MergeFailure {
@@ -339,6 +355,10 @@ impl MergeFailure {
             MergeFailure::PullClosed => "pull_request_closed",
             MergeFailure::ProviderRefused(_) => "provider_refused",
             MergeFailure::AuthorityLost(refusal) => refusal.code(),
+            MergeFailure::PullDraft => "pull_request_draft",
+            MergeFailure::MergedElsewhere => "merged_elsewhere",
+            MergeFailure::NotReady => "repo_not_ready",
+            MergeFailure::AttemptsExhausted => "merge_attempts_exhausted",
         }
     }
 
@@ -501,5 +521,63 @@ pub fn classify_observed_merge(
     match merge_state {
         MergeState::Requested | MergeState::Succeeded => ObservedMerge::Requested,
         MergeState::NotRequested | MergeState::Failed => ObservedMerge::Unrequested,
+    }
+}
+
+/// How many passes the merge job makes at one request before it gives up. Proposed.
+pub const MAX_MERGE_ATTEMPTS: u32 = 5;
+/// How many merges one room may ask for in an hour. Proposed.
+pub const MAX_MERGE_REQUESTS_PER_HOUR: u32 = 20;
+
+/// Whether another merge may be asked for, given how many were in the last hour.
+pub fn merge_request_allowed(requests_in_last_hour: u32) -> bool {
+    requests_in_last_hour < MAX_MERGE_REQUESTS_PER_HOUR
+}
+
+/// Whether the job may make another pass, having made this many.
+pub fn merge_attempt_allowed(attempts_made: u32) -> bool {
+    attempts_made < MAX_MERGE_ATTEMPTS
+}
+
+/// What the room holds of a task's change that a merge depends on beyond [`Change`]: what review recorded, and what
+/// Podster's own reads have shown since (M5 step 7a).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChangeStanding<'a> {
+    /// The commit recorded by an approval made from a read of the provider. `None` for an approval made while managed
+    /// repositories were off.
+    pub reviewed_commit_sha: Option<&'a str>,
+    /// The head has been seen off the reviewed commit, at any time since review, even if it was put back.
+    pub commit_changed: bool,
+    /// Podster is still reading the pull request.
+    pub watched: bool,
+}
+
+/// Whether the task's change still stands as reviewed, for the commit the merge names. Asked when a merge is requested
+/// and again by the job. A changed commit is never merged, even if the branch is put back (plan decision 6): the way
+/// on is a follow-up task.
+pub fn check_change_standing(
+    standing: &ChangeStanding,
+    commit_sha: &str,
+) -> Result<(), MergeRefusal> {
+    let reviewed = standing
+        .reviewed_commit_sha
+        .ok_or(MergeRefusal::ReviewRequired)?;
+    if reviewed != commit_sha || standing.commit_changed {
+        return Err(MergeRefusal::CommitChanged);
+    }
+    if !standing.watched {
+        return Err(MergeRefusal::ChangeUnwatched);
+    }
+    Ok(())
+}
+
+/// What the provider's answer to the merge call says, by its status. It never says the merge happened: only a read of
+/// the pull request and the default branch does, through [`decide_merge_step`]. No answer, or a server error, is unknown.
+pub fn merge_call(status: Option<u16>) -> MergeCall {
+    match status {
+        Some(200) => MergeCall::Accepted,
+        Some(409) => MergeCall::HeadModified,
+        None | Some(500..=599) => MergeCall::Unknown,
+        Some(other) => MergeCall::Refused(other),
     }
 }

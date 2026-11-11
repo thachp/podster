@@ -30,10 +30,12 @@ const made = await owner.must("POST", `/v1/workspaces/${room}/tasks`, { title: "
 const accepted = await coder.must("accept_task", { workspace_id: room, task_id: made.id, version: made.version });
 const where = { workspace_id: room, task_id: made.id };
 
-await check("M5-S6a", "with the switch on, the agent is offered get_repo_access, and no merge or deploy tool", async () => {
+await check("M5-S6a", "with the switch on, the agent is offered get_repo_access and merge_task, and no other merge tool and no deploy tool", async () => {
   const tools = await coder.tools();
   ok(tools.includes("get_repo_access"), `get_repo_access isn't listed: ${tools.join(", ")}`);
-  ok(!tools.some((t) => /merge|deploy/.test(t)), "a merge or deploy tool is exposed");
+  // Step 7b's tool is listed with the switch on, and only then: the journey, with it off, still finds none (AC-17).
+  ok(tools.includes("merge_task"), `merge_task isn't listed: ${tools.join(", ")}`);
+  ok(!tools.some((t) => t !== "merge_task" && /merge|deploy/.test(t)), "another merge tool, or a deploy tool, is exposed");
 });
 
 await check("M5-S6b", "an agent without a grant gets a refusal and no token", async () => {
@@ -58,6 +60,43 @@ await check("M5-S6c", "an agent that isn't the assignee, and a person, get a ref
 await check("M5-S6d", "nothing can be chosen: a field naming a repository or permission is refused", async () => {
   const res = await owner.target.http(`/api/v1/workspaces/${room}/tasks/${made.id}/repo-access`, { method: "POST", headers: { cookie: owner.cookie, origin: target.base, "content-type": "application/json" }, body: JSON.stringify({ repository_id: 1 }) });
   ok(res.status >= 400, `a body with a field was accepted: HTTP ${res.status}`);
+});
+
+// Step 7b, the property AC-17 exists for, as far as a stack with no GitHub can show it: approval merges nothing, and
+// asking for a merge is refused for the submitter, for another agent of the same person, and for the room's owner, who
+// holds no merge grant. That only an authorized merge_task merges, and merges exactly the reviewed commit, needs a
+// repository, and is shown against a fake GitHub in apps/api/test/merge-task.spec.ts.
+const COMMIT = "a".repeat(40);
+const mergeCodes = ["self_merge", "grant_required", "task_not_linked", "repo_not_ready", "not_allowed"];
+const detail = () => owner.must("GET", `/v1/workspaces/${room}/tasks/${made.id}`);
+const noMerge = async (label) => {
+  const task = await detail();
+  eq(task.task.status, "completed", `${label}: the task's status`);
+  ok(task.change == null || task.change.merge_state === "not_requested", `${label}: a merge is on record: ${JSON.stringify(task.change)}`);
+  ok(!task.history.some((event) => String(event.type).startsWith("merge.")), `${label}: a merge event is in the task's history`);
+};
+
+await check("M5-S7a", "approval alone merges nothing and asks for no merge", async () => {
+  await coder.must("submit_task", { ...where, version: accepted.version, note: "Done" });
+  await owner.must("POST", `/v1/workspaces/${room}/tasks/${made.id}/verify`, { submission_no: 1 });
+  await noMerge("after approval");
+});
+
+await check("M5-S7b", "the submitter, and another agent of the same person, are refused a merge of the approved work", async () => {
+  for (const [agent, label] of [[coder, "the submitter"], [bystander, "another agent of the same person"]]) {
+    const result = await agent.call("merge_task", { ...where, submission_no: 1, commit_sha: COMMIT, idempotency_key: key() });
+    refused(result, mergeCodes, label);
+    tokenless(result, label);
+  }
+  await noMerge("after the agents asked");
+});
+
+await check("M5-S7c", "holding the room and the review isn't holding a merge grant: the owner is refused, whatever the body names", async () => {
+  const plain = await owner.dash("POST", `/v1/workspaces/${room}/tasks/${made.id}/merge`, { submission_no: 1, commit_sha: COMMIT });
+  refused(plain, mergeCodes, "the owner asking");
+  const naming = await owner.dash("POST", `/v1/workspaces/${room}/tasks/${made.id}/merge`, { submission_no: 1, commit_sha: COMMIT, repository_id: 1, pr_number: 7, merge_method: "squash" });
+  ok(!naming.ok, `a body naming a repository was accepted: HTTP ${naming.status}`);
+  await noMerge("after the owner asked");
 });
 
 for (const agent of [coder, bystander]) await agent.close();

@@ -62,11 +62,12 @@ const pull = (number: number, patch: Partial<Pull> = {}) => fake({ pulls: { [num
 const reads = async () => (await (await fetch(`https://github-fake.example.com/agent-reads?repo=${REPO_ID}`)).json()) as { path: string; permissions: object; status: number }[];
 /** Resolves once a mint for this test's repository is waiting at the fake's gate (`mode: "gate"`). */
 const minting = async () => {
-  for (;;) {
+  for (const deadline = Date.now() + 5_000; Date.now() < deadline; ) {
     const { waiting } = (await (await fetch(`https://github-fake.example.com/agent-gate?repo=${REPO_ID}`)).json()) as { waiting: number };
     if (waiting > 0) return;
     await new Promise((x) => setTimeout(x, 2));
   }
+  throw new Error("no mint reached the gate");
 };
 /** Lets the mint waiting at the gate answer. */
 const release = () => fetch("https://github-fake.example.com/agent-release", { method: "POST", body: JSON.stringify({ id: REPO_ID }) });
@@ -766,8 +767,8 @@ describe("the refresh job", () => {
     await alarm(r.id, 2);
     expect(await refusedReads()).toBe(1);
     // The wait over and still refused: twice as long.
-    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET reads_not_before = ?", Date.now() - 1));
     const again = Date.now();
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET reads_not_before = ?", Date.now() - 1));
     await nudge(r.id);
     await eventually(r.id, async () => expect((await link()).read_failures).toBe(2));
     expect((await link()).reads_not_before).toBeGreaterThanOrEqual(again + 120_000);
@@ -803,9 +804,9 @@ describe("the refresh job", () => {
     expect(await events(r.id, "repository.read_refused")).toEqual([{ type: "repository.read_refused", actor_id: "system", task_id: null, reason: "provider_credential_failed" }]);
     expect((await must(OWNER, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`)).change.watched).toBe(true);
     // A token request that fails some other way is that change's own failed read, and the room doesn't wait.
-    await fake({ mint: 201 });
-    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET read_failures = 0, reads_not_before = NULL"));
+    // The fake's answer first, then the room's wait lifted: its own alarm may read at once.
     await fake({ mint: 500 });
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET read_failures = 0, reads_not_before = NULL"));
     await nudge(r.id);
     await eventually(r.id, async () => expect((await change(r.id, r.task)).read_failures).toBe(1));
     expect(await link()).toEqual({ read_failures: 0, reads_not_before: null });
@@ -963,6 +964,18 @@ describe("the room migration", () => {
     await settle(r.id);
     const newest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
     await inRoom(r.id, (sql) => {
+      // M5 step 7b's merge bookkeeping, the newest migration, comes off first.
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_finished_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_called_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_mark_set_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_marked_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_step");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_next_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_attempts");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_requester_person");
+      sql.exec("ALTER TABLE task_change DROP COLUMN submitter_person");
+      sql.exec("ALTER TABLE task_change DROP COLUMN submitter_id");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE repo_read");
       for (const column of ["pr_draft", "commit_changed_at", "unwatched_at", "not_found_reads", "read_failures", "merged_by_id", "unchanged_reads", "read_at", "observed_base_sha"]) sql.exec(`ALTER TABLE task_change DROP COLUMN ${column}`);
       for (const column of ["reads_not_before", "read_failures"]) sql.exec(`ALTER TABLE repo_link DROP COLUMN ${column}`);

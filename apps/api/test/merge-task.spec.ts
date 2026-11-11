@@ -1,0 +1,750 @@
+import { env, runInDurableObject, SELF } from "cloudflare:test";
+import { importJWK, SignJWT } from "jose";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { alarmPass, alarmQuiet } from "./alarm.ts";
+
+// M5 step 7b: `merge_task`. Asking for a task's reviewed commit to be merged, and the room's job that marks it and
+// merges it through the merge App, against the fake GitHub. A room's link is written straight into the room, and the
+// fake holds this test's repository as provisioning would have left it. Nothing here reaches GitHub.
+
+const BINDINGS = env as any;
+const GH = JSON.parse(BINDINGS.TEST_FAKE_GITHUB);
+let key: any;
+type Who = { id: string; kind?: "agent" | "person"; org: string; adminOrgs?: string[]; linker?: string | null };
+const ORG = "org_mt";
+const OWNER: Who = { id: "per_mt_owner", kind: "person", org: ORG, adminOrgs: [ORG] };
+const ADMIN: Who = { id: "per_mt_admin", kind: "person", org: ORG };
+/** A person in the room who holds a merge grant, and controls none of the agents. */
+const MERGER: Who = { id: "per_mt_merger", kind: "person", org: ORG };
+/** The person who linked the submitting agent and its sibling. */
+const LINKER: Who = { id: "per_mt_linker", kind: "person", org: ORG };
+const AGENT: Who = { id: "agt_mt_agent", org: ORG, linker: LINKER.id };
+const SIBLING: Who = { id: "agt_mt_sibling", org: ORG, linker: LINKER.id };
+/** An agent another person controls. */
+const ROBOT: Who = { id: "agt_mt_robot", org: ORG, linker: "per_mt_other_linker" };
+/** An agent whose credential names nobody. */
+const UNLINKED: Who = { id: "agt_mt_unlinked", org: ORG, linker: null };
+const PUBLIC: Who = { id: "agt_mt_public", org: ORG, linker: "per_mt_public_linker" };
+const OUTSIDER: Who = { id: "agt_mt_outsider", org: ORG, linker: "per_mt_x" };
+const orgAdmin: Who = { id: "per_mt_orgadmin", kind: "person", org: ORG, adminOrgs: [ORG] };
+let REPO_ID = 0;
+let nextRepo = 11_000_000 + Math.floor(Math.random() * 1_000_000) * 10;
+const HEAD = "a1".repeat(20);
+const HEAD2 = "c3".repeat(20);
+const BASE = "b2".repeat(20);
+const BASE2 = "d4".repeat(20);
+const MERGED = "9e".repeat(20);
+const MARK = { metadata: "read", statuses: "write" };
+const MERGE = { contents: "write", metadata: "read", pull_requests: "write" };
+const OBSERVE = { contents: "read", metadata: "read", pull_requests: "read" };
+
+async function assertion(who: Who, claims: object = {}) {
+  const now = Math.floor(Date.now() / 1000);
+  const isAgent = (who.kind ?? "agent") === "agent";
+  const facts = isAgent ? { gen: 1, ...(who.linker ? { linker: { person: who.linker, since: 1 } } : {}) } : { orgs: [who.org], admin_orgs: who.adminOrgs ?? [] };
+  return new SignJWT({ kind: who.kind ?? "agent", org: who.org, ...facts, ...claims })
+    .setProtectedHeader({ alg: "EdDSA", kid: "test" }).setIssuer("podster-gateway").setSubject(who.id).setAudience("podster-api")
+    .setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID()).sign(key);
+}
+
+let counter = 0;
+async function api(who: Who, method: string, path: string, body?: unknown, options: { key?: string; claims?: object } = {}) {
+  const headers: Record<string, string> = { "x-podster-assertion": await assertion(who, options.claims), "content-type": "application/json" };
+  if (method !== "GET") headers["idempotency-key"] = options.key ?? `mt-key-${++counter}`;
+  const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: method === "GET" || body === undefined ? undefined : JSON.stringify(body) });
+  const text = await res.text();
+  const parsed = text ? JSON.parse(text) : null;
+  return { status: res.status, body: parsed, code: parsed?.error?.code as string | undefined, text };
+}
+const must = async (who: Who, method: string, path: string, body?: unknown, options: { claims?: object } = {}) => {
+  const res = await api(who, method, path, body, options);
+  if (res.status !== 200) throw new Error(`${method} ${path}: ${res.status} ${res.text}`);
+  return res.body;
+};
+
+type Pull = { head_sha: string; base_sha: string; base_ref?: string; head_repo?: number | null; state?: "open" | "closed"; merged?: boolean; merge_commit_sha?: string; merged_by?: number; draft?: boolean };
+const fake = (body: object) => fetch("https://github-fake.example.com/agent-repo", { method: "POST", body: JSON.stringify({ id: REPO_ID, ...body }) });
+const pull = (number: number, patch: Partial<Pull> = {}) => fake({ pulls: { [number]: { head_sha: HEAD, base_sha: BASE, ...patch } } });
+/** This test's repository as the provisioning App reads it back, or a change to it. */
+const ready = (body: object = {}) => fetch("https://github-fake.example.com/ready-repo", { method: "POST", body: JSON.stringify({ id: REPO_ID, ...body }) });
+/** Every token the agent-token App and the merge App minted for this test's repository. */
+const minted = async () => (await (await fetch(`https://github-fake.example.com/agent-tokens?repo=${REPO_ID}`)).json()) as { token: string; live: boolean; repo: unknown; permissions: Record<string, string>; asked: any }[];
+/** What the merge App did: its calls, the statuses set, the pull requests and what the default branch holds. */
+const github = async () => (await (await fetch(`https://github-fake.example.com/merge-calls?repo=${REPO_ID}`)).json()) as { calls: { method: string; path: string; permissions: Record<string, string>; status: number; body: any }[]; statuses: { sha: string; state: string; context: string }[]; pulls: Record<string, Pull>; has: string[] };
+const merges = async () => (await github()).calls.filter((c) => c.method === "PUT");
+const marks = async () => (await github()).calls.filter((c) => c.method === "POST");
+/** The provisioning App's read-back of this test's repository: its reads, and how many of its tokens are still live. */
+const readBack = async () => (await (await fetch(`https://github-fake.example.com/ready-reads?repo=${REPO_ID}`)).json()) as { reads: { path: string; scope: number[] }[]; live: number };
+
+const version = async (id: string) => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version as number;
+const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
+const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(stub(id), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
+const change = (id: string, task: string) => inRoom(id, (sql) => (sql.exec("SELECT * FROM task_change WHERE task_id = ?", task).toArray()[0] ?? null) as any);
+const events = (id: string, prefix = "merge.") => inRoom(id, (sql) => sql.exec("SELECT type, actor_id, subject_id, task_id, reason FROM event WHERE type LIKE ? ORDER BY seq", `${prefix}%`).toArray() as any[]);
+const taskRow = (id: string, task: string) => inRoom(id, (sql) => sql.exec("SELECT status, approved_submission_no FROM task WHERE id = ?", task).one() as any);
+const link = (id: string) => inRoom(id, (sql) => sql.exec("SELECT status, status_reason FROM repo_link").one() as any);
+/** Whole runs of the room's alarm, one at a time (see `alarm.ts`). */
+const alarm = async (id: string, times = 1) => {
+  for (let n = 0; n < times; n++) await alarmPass(stub(id));
+};
+/** Makes the merge's next pass due now, as time passing would. */
+const due = (id: string) => inRoom(id, (sql) => void sql.exec("UPDATE task_change SET merge_next_at = 0 WHERE merge_state = 'requested'"));
+/** One pass of the merge job, whatever its backoff says. */
+const pass = async (id: string) => {
+  await due(id);
+  await alarm(id);
+};
+const made: string[] = [];
+
+beforeAll(async () => {
+  key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
+  for (const statement of BINDINGS.TEST_D1_SCHEMA.split(";").map((x: string) => x.trim()).filter(Boolean)) await BINDINGS.DB.prepare(statement).run();
+  for (const who of [AGENT, SIBLING, ROBOT, UNLINKED, PUBLIC, OUTSIDER]) {
+    const res = await SELF.fetch(`https://api.internal/v1/agents/${who.id}`, { method: "PUT", headers: { "x-podster-assertion": await assertion(orgAdmin) }, body: JSON.stringify({ org_id: ORG, name: who.id }) });
+    if (res.status !== 200) throw new Error(`register ${who.id}: ${res.status}`);
+  }
+});
+
+beforeEach(async () => {
+  REPO_ID = ++nextRepo;
+  await fake({});
+  await ready();
+});
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  for (const id of made.splice(0)) await alarmQuiet(stub(id));
+});
+
+const grant = async (id: string, who: Who) => (await must(OWNER, "POST", `/v1/workspaces/${id}/repository/grants`, { policy_version: await version(id), principal_id: who.id, action: "merge" })).id as string;
+
+/** A room with managed repositories on, a ready link, and its people and agents. */
+async function room(options: { switchedOn?: boolean } = {}) {
+  const id: string = (await must(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).id;
+  made.push(id);
+  for (const [who, role] of [[ADMIN, "admin"], [MERGER, "member"], [LINKER, "member"]] as const) {
+    await must(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: "person", org_id: ORG, role, policy_version: await version(id) }, { claims: { target_member: { person: who.id, orgs: { [ORG]: 1 } } } });
+  }
+  for (const [who, role] of [[AGENT, "member"], [SIBLING, "member"], [ROBOT, "member"], [UNLINKED, "member"], [PUBLIC, "guest"]] as const) {
+    await must(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: "agent", org_id: ORG, role, policy_version: await version(id) });
+  }
+  await inRoom(id, (sql) => {
+    sql.exec("UPDATE member SET joined_via = 'public' WHERE principal_id = ?", PUBLIC.id);
+    if (options.switchedOn !== false) sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)");
+    sql.exec("INSERT INTO repo_link (id, request_id, provider, provider_repo_id, provider_org_id, full_name, visibility, default_branch, status, created_by, created_at, verified_at, updated_at) VALUES ('rl_1', 'rr_1', 'github', ?, 4242, 'podster-test-org/engineering', 'public', 'main', 'ready', ?, 1000, 2000, 2000)", REPO_ID, OWNER.id);
+  });
+  await pull(7);
+  return id;
+}
+
+/** A linked task the agent submitted on pull request 7 at `HEAD`. The owner is its reviewer. */
+async function submitted(id: string, number = 7) {
+  const made = await must(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Code", instructions: "Change the code", assignee: AGENT.id });
+  const accepted = await must(AGENT, "POST", `/v1/workspaces/${id}/tasks/${made.id}/accept`, { version: made.version });
+  await must(AGENT, "POST", `/v1/workspaces/${id}/tasks/${made.id}/submit`, { version: accepted.version, note: "Done", commit_sha: HEAD, pr_number: number });
+  return made.id as string;
+}
+/** A room whose task is approved at `HEAD`, with a merge grant for `MERGER`. */
+async function approved() {
+  const id = await room();
+  const task = await submitted(id);
+  await must(OWNER, "POST", `/v1/workspaces/${id}/tasks/${task}/verify`, { submission_no: 1, commit_sha: HEAD });
+  const granted = await grant(id, MERGER);
+  // The read made for the submission and the one for the approval are done. From here on, only the merge's calls count.
+  await alarm(id);
+  return { id, task, grant: granted };
+}
+const merge = (who: Who, id: string, task: string, body: object = { submission_no: 1, commit_sha: HEAD }, options: { key?: string } = {}) => api(who, "POST", `/v1/workspaces/${id}/tasks/${task}/merge`, body, options);
+/** The same, with the merge asked for by `MERGER` and no pass of the job made yet. */
+async function requested() {
+  const r = await approved();
+  const asked = await merge(MERGER, r.id, r.task);
+  expect(asked.status, asked.text).toBe(200);
+  return r;
+}
+
+describe("asking for a merge", () => {
+  it("records the request and calls nothing, then the job marks exactly the reviewed commit and merges it (M5-09)", async () => {
+    const r = await approved();
+    const tokensBefore = (await minted()).length;
+    const asked = await merge(MERGER, r.id, r.task, undefined, { key: "mt-once" });
+    expect(asked.status, asked.text).toBe(200);
+    expect(asked.body).toEqual({ task_id: r.task, merge_state: "requested", commit_sha: HEAD, submission_no: 1, requested_at: expect.any(Number) });
+    // The command itself asked GitHub for nothing, and a replay answers the same and records nothing more.
+    expect((await minted()).length).toBe(tokensBefore);
+    expect((await github()).calls).toEqual([]);
+    expect((await readBack()).reads).toEqual([]);
+    expect((await merge(MERGER, r.id, r.task, undefined, { key: "mt-once" })).body).toEqual(asked.body);
+    expect(await events(r.id)).toEqual([{ type: "merge.requested", actor_id: MERGER.id, subject_id: null, task_id: r.task, reason: null }]);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "requested", merge_requested_by: MERGER.id, merge_requester_person: MERGER.id, merge_attempts: 0, merge_step: "requested", merge_marked_at: null, merge_called_at: null, submitter_id: AGENT.id, submitter_person: LINKER.id });
+
+    await pass(r.id);
+    const done = await change(r.id, r.task);
+    expect(done).toMatchObject({ merge_state: "succeeded", merge_reason: null, merge_sha: MERGED, merged_by_id: GH.mergeBotId, merge_base_sha: BASE, pr_state: "merged", merge_step: "succeeded", merge_attempts: 1, merge_next_at: null, merge_observed_at: null, reviewed_commit_sha: HEAD });
+    for (const at of [done.merge_marked_at, done.merge_mark_set_at, done.merge_called_at, done.merge_finished_at]) expect(at).toBeGreaterThan(0);
+    // Readiness first, with the provisioning App narrowed to this repository; then a read; the mark; the merge and its reads.
+    const back = await readBack();
+    expect(back.reads.map((read) => read.path)).toEqual([`/repositories/${REPO_ID}`, `/repositories/${REPO_ID}/branches/main`, `/repositories/${REPO_ID}/actions/permissions`, `/repositories/${REPO_ID}/rulesets?per_page=100`.replace("?per_page=100", ""), `/repositories/${REPO_ID}/rulesets/1`, `/repositories/${REPO_ID}/rulesets/2`]);
+    expect(back.reads.every((read) => JSON.stringify(read.scope) === JSON.stringify([REPO_ID]))).toBe(true);
+    const seen = await github();
+    expect(seen.calls.map((c) => [c.method, c.path, c.permissions, c.status])).toEqual([
+      ["GET", `/repositories/${REPO_ID}/compare/main...${HEAD}`, OBSERVE, 200],
+      ["POST", `/repositories/${REPO_ID}/statuses/${HEAD}`, MARK, 201],
+      ["PUT", `/repositories/${REPO_ID}/pulls/7/merge`, MERGE, 200],
+      ["GET", `/repositories/${REPO_ID}/compare/main...${HEAD}`, MERGE, 200],
+    ]);
+    expect(seen.calls[1].body).toEqual({ state: "success", context: "podster/review" });
+    expect(seen.calls[2].body).toEqual({ sha: HEAD, merge_method: "merge" });
+    expect(seen.statuses).toEqual([{ sha: HEAD, state: "success", context: "podster/review" }]);
+    expect(seen.has).toEqual([HEAD]);
+    // Every token of this pass is gone: the provisioning App's, and the merge App's three, each for this one repository.
+    expect(back.live).toBe(0);
+    const tokens = (await minted()).slice(tokensBefore);
+    expect(tokens.map((t) => [t.permissions, t.repo, t.live])).toEqual([[OBSERVE, [REPO_ID], false], [MARK, [REPO_ID], false], [MERGE, [REPO_ID], false]]);
+    // One outcome, of IDs, for the room's owner, its admin and whoever asked.
+    expect(await events(r.id)).toEqual([
+      { type: "merge.requested", actor_id: MERGER.id, subject_id: null, task_id: r.task, reason: null },
+      { type: "merge.succeeded", actor_id: "system", subject_id: MERGER.id, task_id: r.task, reason: null },
+    ]);
+    expect(await taskRow(r.id, r.task)).toEqual({ status: "completed", approved_submission_no: 1 });
+    expect((await must(OWNER, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`)).change).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED, merge_requested_by: MERGER.id, pr_state: "merged" });
+    // Done: nothing is asked of GitHub again, and it can't be asked for twice.
+    const calls = seen.calls.length;
+    await alarm(r.id, 2);
+    expect((await github()).calls.length).toBe(calls);
+    const again = await merge(MERGER, r.id, r.task);
+    expect([again.status, again.code]).toEqual([409, "already_merged"]);
+  });
+
+  it("merges nothing on approval alone, however long passes (AC-17)", async () => {
+    const r = await approved();
+    await alarm(r.id, 3);
+    expect((await github()).calls).toEqual([]);
+    expect((await readBack()).reads).toEqual([]);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "not_requested", merge_requested_by: null, pr_state: "open" });
+    expect(await events(r.id)).toEqual([]);
+  });
+
+  it("refuses the submitter, anyone its person controls, and anyone without the grant, whatever grant they hold (M5-10)", async () => {
+    const r = await approved();
+    // Holding the room or the review isn't holding the grant.
+    for (const who of [OWNER, ADMIN]) {
+      const got = await merge(who, r.id, r.task);
+      expect([got.status, got.code], who.id).toEqual([403, "grant_required"]);
+    }
+    // With a merge grant each: the submitting agent, the person who controls it, that person's other agent, and an
+    // agent whose controlling person nobody can name. All the same work, to the same person.
+    for (const who of [AGENT, LINKER, SIBLING, UNLINKED]) {
+      await grant(r.id, who);
+      const got = await merge(who, r.id, r.task);
+      expect([got.status, got.code], who.id).toEqual([403, "self_merge"]);
+    }
+    // An agent another person controls, with the grant, may.
+    await grant(r.id, ROBOT);
+    expect((await merge(ROBOT, r.id, r.task)).status).toBe(200);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_requested_by: ROBOT.id, merge_requester_person: ROBOT.linker });
+    expect((await github()).calls).toEqual([]);
+  });
+
+  it("answers a hidden room and a hidden task as missing ones, before anything else", async () => {
+    const r = await approved();
+    const outside = await merge(OUTSIDER, r.id, r.task);
+    const nowhere = await merge(OUTSIDER, `ws_${crypto.randomUUID().replaceAll("-", "")}`, r.task);
+    expect([outside.status, outside.code]).toEqual([nowhere.status, nowhere.code]);
+    expect(outside.code).toBe("workspace_not_found");
+    const hidden = await merge(PUBLIC, r.id, r.task);
+    const missing = await merge(PUBLIC, r.id, "tsk_missing");
+    expect([hidden.status, hidden.code]).toEqual([missing.status, missing.code]);
+    expect([hidden.status, hidden.code]).toEqual([404, "task_not_found"]);
+    // A malformed body tells a hidden task's caller nothing either.
+    expect((await merge(PUBLIC, r.id, r.task, {})).code).toBe("task_not_found");
+  });
+
+  it("refuses each state a merge can't start from, and records nothing", async () => {
+    const r = await approved();
+    const refused = async (expected: [number, string], body: object = { submission_no: 1, commit_sha: HEAD }, task = r.task) => {
+      const got = await merge(MERGER, r.id, task, body);
+      expect([got.status, got.code], JSON.stringify(expected)).toEqual(expected);
+    };
+    await refused([400, "invalid_argument"], {});
+    await refused([400, "invalid_argument"], { submission_no: 1 });
+    await refused([400, "invalid_argument"], { submission_no: 1, commit_sha: "a1b2c3d" });
+    await refused([409, "submission_mismatch"], { submission_no: 2, commit_sha: HEAD });
+    await refused([409, "commit_changed"], { submission_no: 1, commit_sha: HEAD2 });
+    // Submitted and not approved.
+    await pull(8);
+    const waiting = await submitted(r.id, 8);
+    await refused([409, "not_approved"], undefined, waiting);
+    // Not a linked task.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task SET has_linked_repository = 0 WHERE id = ?", r.task));
+    await refused([409, "task_not_linked"]);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task SET has_linked_repository = 1 WHERE id = ?", r.task));
+    // The repository isn't ready.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET status = 'degraded'"));
+    await refused([409, "repo_not_ready"]);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET status = 'ready'"));
+    // Approved while managed repositories were off: nothing was read, so there's no reviewed commit. It needs a fresh review.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET reviewed_commit_sha = NULL WHERE task_id = ?", r.task));
+    await refused([409, "review_required"]);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET reviewed_commit_sha = ? WHERE task_id = ?", HEAD, r.task));
+    // The head was seen off the reviewed commit at some point, and is back on it now. Still changed.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET commit_changed_at = 5 WHERE task_id = ?", r.task));
+    await refused([409, "commit_changed"]);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET commit_changed_at = NULL, unwatched_at = 5 WHERE task_id = ?", r.task));
+    await refused([409, "change_unwatched"]);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET unwatched_at = NULL WHERE task_id = ?", r.task));
+    // No change on record at all, so no submitter on record either: nobody can be shown not to be them.
+    const kept = await change(r.id, r.task);
+    await inRoom(r.id, (sql) => sql.exec("DELETE FROM task_change WHERE task_id = ?", r.task));
+    await refused([403, "self_merge"]);
+    await inRoom(r.id, (sql) => sql.exec("INSERT INTO task_change (task_id, provider_repo_id, pr_number, submission_no, reviewed_commit_sha, reviewed_base_sha, observed_head_sha, pr_state, pr_draft, pr_observed_at, read_at, created_at, updated_at, submitter_id, submitter_person) VALUES (?, ?, 7, 1, ?, ?, ?, 'open', 0, ?, ?, 1, 1, ?, ?)", r.task, REPO_ID, HEAD, BASE, HEAD, kept.pr_observed_at, kept.read_at, AGENT.id, LINKER.id));
+    // The grant has run out, or was taken back.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE provider_grant SET expires_at = ? WHERE id = ?", Date.now() - 1, r.grant));
+    await refused([403, "grant_expired"]);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE provider_grant SET expires_at = NULL WHERE id = ?", r.grant));
+    // Twenty merges were asked for in this room in the last hour.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET merge_requested_at = ? WHERE task_id = ?", Date.now(), waiting));
+    await inRoom(r.id, (sql) => { for (let n = 0; n < 19; n++) sql.exec("INSERT INTO task_change (task_id, provider_repo_id, pr_number, submission_no, merge_requested_at, created_at, updated_at) VALUES (?, ?, ?, 1, ?, 1, 1)", `tsk_cap_${n}`, REPO_ID, 100 + n, Date.now()); });
+    await refused([429, "rate_limited"]);
+    await inRoom(r.id, (sql) => sql.exec("DELETE FROM task_change WHERE task_id LIKE 'tsk_cap_%'"));
+    // The merge App isn't configured: nothing is recorded that the job could never do.
+    await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_no_merge_app (x INTEGER)"));
+    await refused([503, "merge_unavailable"]);
+    await inRoom(r.id, (sql) => sql.exec("DROP TABLE test_no_merge_app"));
+    // The merge App is the same App as the agent-token App: refused as not configured.
+    await inRoom(r.id, (sql) => { sql.exec("CREATE TABLE test_github_vars (name TEXT, value TEXT)"); sql.exec("INSERT INTO test_github_vars (name, value) VALUES ('GITHUB_MERGE_APP_ID', ?)", String(GH.agentAppId)); });
+    await refused([503, "merge_unavailable"]);
+    await inRoom(r.id, (sql) => sql.exec("DROP TABLE test_github_vars"));
+    // Through all of it nothing was recorded and GitHub was asked nothing.
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "not_requested", merge_requested_by: null });
+    expect(await events(r.id)).toEqual([]);
+    expect((await github()).calls).toEqual([]);
+    // Asked for properly, it's taken once, and not again while it's under way.
+    expect((await merge(MERGER, r.id, r.task)).status).toBe(200);
+    await refused([409, "merge_already_requested"]);
+  });
+
+  it("doesn't exist with managed repositories off", async () => {
+    const r = await approved();
+    await inRoom(r.id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
+    for (const who of [MERGER, OWNER, AGENT]) {
+      const got = await merge(who, r.id, r.task);
+      expect([got.status, got.code], who.id).toEqual([404, "not_found"]);
+    }
+    // A merge asked for before the switch went off isn't carried out while it's off.
+    await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)"));
+    expect((await merge(MERGER, r.id, r.task)).status).toBe(200);
+    await inRoom(r.id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
+    await pass(r.id);
+    expect((await github()).calls).toEqual([]);
+    expect((await change(r.id, r.task)).merge_state).toBe("requested");
+  });
+});
+
+describe("the job checks everything again", () => {
+  it("ends the merge when the requester's authority is gone by the time it runs, and marks nothing", async () => {
+    for (const [what, lose, reason] of [
+      ["grant revoked", async (r: any) => void (await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) })), "grant_required"],
+      ["grant expired", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE provider_grant SET expires_at = ? WHERE id = ?", Date.now() - 1, r.grant)), "grant_expired"],
+      ["requester removed", async (r: any) => void (await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/members/${MERGER.id}`, { policy_version: await version(r.id) })), "access_revoked"],
+      ["commit seen changed", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE task_change SET commit_changed_at = 5")), "commit_changed"],
+      ["link degraded", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE repo_link SET status = 'degraded'")), "repo_not_ready"],
+      // The owner, who gave the grant, has left the organization, and the room hasn't been told. Last, since it's the owner's own record.
+      ["grant gone stale", async (r: any) => {
+        await must(OWNER, "POST", "/v1/org-departures", {}, { claims: { departure: { person: OWNER.id, org: ORG, left_at: Date.now() } } });
+        await inRoom(r.id, (sql) => void sql.exec("UPDATE workspace SET owner_left_at = NULL"));
+      }, "grant_stale"],
+    ] as const) {
+      REPO_ID = ++nextRepo;
+      await fake({});
+      await ready();
+      const r = await requested();
+      await lose(r);
+      await pass(r.id);
+      expect(await change(r.id, r.task), what).toMatchObject({ merge_state: "failed", merge_reason: reason, merge_marked_at: null, merge_called_at: null, merge_next_at: null });
+      expect((await github()).calls, what).toEqual([]);
+      expect((await events(r.id)).at(-1), what).toEqual({ type: "merge.failed", actor_id: "system", subject_id: MERGER.id, task_id: r.task, reason });
+      expect((await taskRow(r.id, r.task)).status, what).toBe("completed");
+    }
+  });
+
+  it("reads the repository's protections back first, and degrades the link instead of merging when they aren't what was set", async () => {
+    for (const [patch, reason] of [[{ actionsEnabled: true }, "actions_enabled"], [{ rulesets: "no_update" }, "ruleset_missing"], [{ rulesets: "extra_bypass" }, "bypass_differs"], [{ rulesets: "inactive" }, "ruleset_inactive"], [{ rulesets: "extra" }, "unexpected_ruleset"], [{ archived: true }, "archived"]] as const) {
+      REPO_ID = ++nextRepo;
+      await fake({});
+      await ready();
+      const r = await requested();
+      await ready(patch);
+      await pass(r.id);
+      expect(await link(r.id), reason).toEqual({ status: "degraded", status_reason: reason });
+      expect(await change(r.id, r.task), reason).toMatchObject({ merge_state: "failed", merge_reason: "repo_not_ready", merge_marked_at: null, merge_called_at: null });
+      expect((await github()).calls, reason).toEqual([]);
+      expect((await readBack()).live, reason).toBe(0);
+      // Coding work in the room stops with it, and a merge can't be asked for again until someone has looked.
+      const again = await merge(MERGER, r.id, r.task);
+      expect([again.status, again.code], reason).toEqual([409, "repo_not_ready"]);
+    }
+  });
+
+  it("waits, counted, when the read-back can't be made, and goes on once it can", async () => {
+    const r = await requested();
+    await ready({ script: { readRepo: 500 } });
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "requested", merge_attempts: 1, merge_marked_at: null });
+    expect((await change(r.id, r.task)).merge_next_at).toBeGreaterThan(Date.now());
+    expect(await link(r.id)).toEqual({ status: "ready", status_reason: null });
+    // Not before its time.
+    await alarm(r.id, 2);
+    expect((await change(r.id, r.task)).merge_attempts).toBe(1);
+    // A read-back that can't see who may bypass the rules isn't one either.
+    await ready({ script: { hideBypass: true } });
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "failed", merge_reason: "repo_not_ready" });
+    expect((await github()).calls).toEqual([]);
+  });
+
+  it("ends the merge, marking nothing, when the pull request isn't what was reviewed any more", async () => {
+    for (const [patch, reason, sticky] of [
+      [{ head_sha: HEAD2 }, "commit_changed", true],
+      [{ base_ref: "release" }, "base_changed", false],
+      [{ head_repo: 1 }, "head_repo_changed", false],
+      [{ head_repo: null }, "head_repo_changed", false],
+      [{ state: "closed" }, "pull_request_closed", false],
+      [{ draft: true }, "pull_request_draft", false],
+      [{ merged: true, merge_commit_sha: "8d".repeat(20), merged_by: 31337 }, "merged_elsewhere", false],
+    ] as const) {
+      REPO_ID = ++nextRepo;
+      await fake({});
+      await ready();
+      const r = await requested();
+      await pull(7, patch as Partial<Pull>);
+      await pass(r.id);
+      const row = await change(r.id, r.task);
+      expect(row, reason).toMatchObject({ merge_state: "failed", merge_reason: reason, merge_marked_at: null, merge_called_at: null, reviewed_commit_sha: HEAD });
+      expect(row.commit_changed_at !== null, reason).toBe(sticky);
+      expect(await marks(), reason).toEqual([]);
+      expect(await merges(), reason).toEqual([]);
+      expect((await minted()).every((token) => !token.live), reason).toBe(true);
+      expect((await taskRow(r.id, r.task)).status, reason).toBe("completed");
+      // A changed commit can't be asked for again: the way on is a follow-up task. Other failures can.
+      await pull(7);
+      const again = await merge(MERGER, r.id, r.task);
+      expect(again.code ?? "ok", reason).toBe(sticky ? "commit_changed" : "ok");
+    }
+    // A base that moved under the same branch still merges, and the base seen at the merge is kept.
+    REPO_ID = ++nextRepo;
+    await fake({});
+    await ready();
+    const r = await requested();
+    await pull(7, { base_sha: BASE2 });
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_base_sha: BASE2, reviewed_base_sha: BASE });
+  });
+});
+
+describe("dying and coming back", () => {
+  const dies = (id: string, at: string | null) => inRoom(id, (sql) => {
+    sql.exec("CREATE TABLE IF NOT EXISTS test_merge_dies (at TEXT)");
+    sql.exec("DELETE FROM test_merge_dies");
+    if (at) sql.exec("INSERT INTO test_merge_dies (at) VALUES (?)", at);
+  });
+
+  it("before the mark: the intent is on record, nothing was set, and the next pass does everything again and merges once", async () => {
+    const r = await requested();
+    await dies(r.id, "before_mark");
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "requested", merge_step: "mark", merge_mark_set_at: null, merge_called_at: null, merge_attempts: 1 });
+    expect((await change(r.id, r.task)).merge_marked_at).toBeGreaterThan(0);
+    expect((await github()).statuses).toEqual([]);
+    await dies(r.id, null);
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_attempts: 2 });
+    expect((await github()).statuses).toHaveLength(1);
+    expect(await merges()).toHaveLength(1);
+    // The second pass read the protections and the pull request again before it marked.
+    expect((await readBack()).reads.filter((read) => read.path === `/repositories/${REPO_ID}`)).toHaveLength(2);
+  });
+
+  it("after the mark, with authority gone since: the next pass refuses, and the mark left behind merges nothing", async () => {
+    const r = await requested();
+    await dies(r.id, "after_mark");
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "requested", merge_step: "marked", merge_called_at: null });
+    expect((await github()).statuses).toEqual([{ sha: HEAD, state: "success", context: "podster/review" }]);
+    expect(await merges()).toEqual([]);
+    // The grant is taken back while the job is down.
+    await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) });
+    await dies(r.id, null);
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "failed", merge_reason: "grant_required", merge_called_at: null });
+    expect(await merges()).toEqual([]);
+    expect((await github()).pulls["7"]).toMatchObject({ head_sha: HEAD });
+    expect((await github()).pulls["7"].merged ?? false).toBe(false);
+    // The status is still on the commit, and an agent's token can't use it: the rules let only the merge App update the
+    // default branch. The fake refuses as GitHub's update rule does.
+    const push = await grantPush(r.id);
+    const token = (await must(AGENT, "POST", `/v1/workspaces/${r.id}/tasks/${push}/repo-access`, undefined)).token as string;
+    const tried = await fetch(`https://api.github.com/repositories/${REPO_ID}/pulls/7/merge`, { method: "PUT", headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", "user-agent": "test" }, body: JSON.stringify({ sha: HEAD, merge_method: "merge" }) });
+    expect(tried.status).toBe(405);
+    expect((await github()).pulls["7"].merged ?? false).toBe(false);
+  });
+
+  it("after the mark, with the head moved since: the next pass refuses, and the marked commit stays unmerged", async () => {
+    const r = await requested();
+    await dies(r.id, "after_mark");
+    await pass(r.id);
+    await pull(7, { head_sha: HEAD2 });
+    await dies(r.id, null);
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "failed", merge_reason: "commit_changed", merge_called_at: null });
+    expect((await change(r.id, r.task)).commit_changed_at).toBeGreaterThan(0);
+    expect(await merges()).toEqual([]);
+    // Only the reviewed commit was ever marked. The new head has no status.
+    expect((await github()).statuses.map((s) => s.sha)).toEqual([HEAD]);
+  });
+
+  it("after the merge call, with its answer never seen: the next pass reads first, finds it merged, and asks for no second merge", async () => {
+    const r = await requested();
+    await dies(r.id, "after_merge_call");
+    await pass(r.id);
+    const mid = await change(r.id, r.task);
+    expect(mid).toMatchObject({ merge_state: "requested", merge_step: "merge", merge_sha: null });
+    expect(mid.merge_called_at).toBeGreaterThan(0);
+    expect(await merges()).toHaveLength(1);
+    await dies(r.id, null);
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED, merge_attempts: 2 });
+    expect(await merges()).toHaveLength(1);
+    expect(await marks()).toHaveLength(1);
+    // And with the requester's authority gone in between, what its request already merged is still not counted as
+    // success by a pass that can't authorize it: the request ends as failed, and the pull request is seen as merged.
+    REPO_ID = ++nextRepo;
+    await fake({});
+    await ready();
+    const lost = await requested();
+    await dies(lost.id, "after_merge_call");
+    await pass(lost.id);
+    await must(OWNER, "DELETE", `/v1/workspaces/${lost.id}/repository/grants/${lost.grant}`, { policy_version: await version(lost.id) });
+    await dies(lost.id, null);
+    await pass(lost.id);
+    expect(await change(lost.id, lost.task)).toMatchObject({ merge_state: "failed", merge_reason: "grant_required" });
+    expect(await merges()).toHaveLength(1);
+  });
+
+  /** A second, accepted task of the agent's, with a push grant, to get an agent token with. */
+  async function grantPush(id: string) {
+    await must(OWNER, "POST", `/v1/workspaces/${id}/repository/grants`, { policy_version: await version(id), principal_id: AGENT.id, action: "push" });
+    const made = await must(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "More", instructions: "More code", assignee: AGENT.id });
+    await must(AGENT, "POST", `/v1/workspaces/${id}/tasks/${made.id}/accept`, { version: made.version });
+    return made.id as string;
+  }
+});
+
+describe("what GitHub answers to the merge", () => {
+  it("counts a merge by what it reads afterwards, not by the call's answer", async () => {
+    // The answer is lost, and the merge happened: success, in the same pass, from the read.
+    const lost = await requested();
+    await fake({ merge: "lost" });
+    await pass(lost.id);
+    expect(await change(lost.id, lost.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED });
+    expect((await merges()).map((c) => c.status)).toEqual([500]);
+
+    // GitHub answers 200, because someone else merged another head a moment before. The read shows a head that isn't the
+    // reviewed commit, so this isn't a success, whatever the call said.
+    REPO_ID = ++nextRepo;
+    await fake({});
+    await ready();
+    const other = await requested();
+    await fake({ merge: "merged_by_other" });
+    await pass(other.id);
+    expect((await merges()).map((c) => c.status)).toEqual([200]);
+    expect(await change(other.id, other.task)).toMatchObject({ merge_state: "failed", merge_reason: "commit_changed", merge_sha: null });
+    expect((await change(other.id, other.task)).commit_changed_at).toBeGreaterThan(0);
+
+    // The head moves just before the call lands: 409, and the read agrees.
+    REPO_ID = ++nextRepo;
+    await fake({});
+    await ready();
+    const moved = await requested();
+    await fake({ merge: "moved" });
+    await pass(moved.id);
+    expect((await merges()).map((c) => c.status)).toEqual([409]);
+    expect(await change(moved.id, moved.task)).toMatchObject({ merge_state: "failed", merge_reason: "commit_changed" });
+    expect((await taskRow(moved.id, moved.task)).status).toBe("completed");
+
+    // The rules refuse it: 405, failed with its reason, and it can be asked for again once that's put right.
+    REPO_ID = ++nextRepo;
+    await fake({});
+    await ready();
+    const refused = await requested();
+    await fake({ merge: "refuse" });
+    await pass(refused.id);
+    expect(await change(refused.id, refused.task)).toMatchObject({ merge_state: "failed", merge_reason: "provider_refused" });
+    await fake({ merge: "ok" });
+    expect((await merge(MERGER, refused.id, refused.task)).status).toBe(200);
+    await pass(refused.id);
+    expect(await change(refused.id, refused.task)).toMatchObject({ merge_state: "succeeded", merge_attempts: 1 });
+    expect((await merges()).map((c) => c.status)).toEqual([405, 200]);
+  });
+
+  it("reads before every retry: a failed call is made again only after the pull request is seen still open", async () => {
+    const r = await requested();
+    await fake({ merge: "error" });
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "requested", merge_step: "merge", merge_attempts: 1 });
+    expect((await merges()).map((c) => c.status)).toEqual([500]);
+    // Not before the backoff is over.
+    await alarm(r.id, 2);
+    expect(await merges()).toHaveLength(1);
+    await fake({ merge: "ok" });
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_attempts: 2 });
+    const calls = (await github()).calls.map((c) => `${c.method} ${c.status}`);
+    // First pass: read, mark, merge (500), read. Second: read, mark, merge (200), read.
+    expect(calls).toEqual(["GET 200", "POST 201", "PUT 500", "GET 200", "GET 200", "POST 201", "PUT 200", "GET 200"]);
+  });
+
+  it("waits for the merged state to be readable, and never merges twice while it does", async () => {
+    const r = await requested();
+    // The pull request reads as merged, and the default branch doesn't show the commit yet.
+    await fake({ compare: "ahead" });
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "requested", merge_step: "merge" });
+    await pass(r.id);
+    expect((await change(r.id, r.task)).merge_state).toBe("requested");
+    await fake({ compare: undefined, mode: "ok" });
+    await fetch("https://github-fake.example.com/agent-repo", { method: "POST", body: JSON.stringify({ id: REPO_ID, compare: "behind" }) });
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_attempts: 3 });
+    expect(await merges()).toHaveLength(1);
+  });
+
+  it("gives up after five passes with a reason, and a person asks again", async () => {
+    const r = await requested();
+    await fake({ status: 500 });
+    for (let n = 1; n <= 5; n++) {
+      await pass(r.id);
+      expect(await change(r.id, r.task), String(n)).toMatchObject({ merge_state: "requested", merge_attempts: n, merge_mark_set_at: null });
+    }
+    // Each wait is longer than the last.
+    expect((await change(r.id, r.task)).merge_next_at).toBeGreaterThan(Date.now() + 60_000);
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "failed", merge_reason: "merge_attempts_exhausted", merge_called_at: null });
+    expect(await marks()).toHaveLength(5);
+    expect(await merges()).toEqual([]);
+    expect((await events(r.id)).at(-1)).toMatchObject({ type: "merge.failed", reason: "merge_attempts_exhausted" });
+    await fake({ status: 201 });
+    expect((await merge(MERGER, r.id, r.task)).status).toBe(200);
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_attempts: 1 });
+  });
+
+  it("uses no token that came back wider than asked, and takes it back", async () => {
+    const r = await requested();
+    for (const mode of ["wide", "extra_permission", "other_repo"]) {
+      await fake({ mode });
+      await pass(r.id);
+      expect((await github()).calls, mode).toEqual([]);
+      expect((await minted()).every((token) => !token.live), mode).toBe(true);
+      expect((await change(r.id, r.task)).merge_state, mode).toBe("requested");
+    }
+    // The merge App's key taken away after the merge was asked for: the pass waits, counted, and asks GitHub nothing.
+    await fake({ mode: "ok" });
+    await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_no_merge_app (x INTEGER)"));
+    const before = (await change(r.id, r.task)).merge_attempts;
+    const readsBefore = (await readBack()).reads.length;
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "requested", merge_attempts: before + 1, merge_marked_at: null });
+    expect((await github()).calls).toEqual([]);
+    expect((await readBack()).reads.length).toBe(readsBefore);
+    await inRoom(r.id, (sql) => sql.exec("DROP TABLE test_no_merge_app"));
+    // The merge App's token request refused outright: the same, with nothing to take back.
+    await fake({ mode: "ok", mergeMint: 403 });
+    await pass(r.id);
+    expect((await github()).calls).toEqual([]);
+    // Five passes are all a request gets. This test has used them, so the count starts over to show the way through.
+    expect((await change(r.id, r.task)).merge_attempts).toBe(5);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET merge_attempts = 0"));
+    await fake({ mergeMint: 201 });
+    await pass(r.id);
+    expect((await change(r.id, r.task)).merge_state).toBe("succeeded");
+  });
+});
+
+describe("what's kept, logged and shown", () => {
+  it("keeps no token and nothing GitHub wrote, anywhere, and logs IDs and codes only (M5-13)", async () => {
+    const lines: string[] = [];
+    for (const level of ["log", "info", "warn", "error", "debug"] as const) vi.spyOn(console, level).mockImplementation((...args: unknown[]) => void lines.push(args.map(String).join(" ")));
+    const r = await requested();
+    const answers: string[] = [];
+    // A failed mark, a token GitHub won't take back, a lost answer, then success.
+    await fake({ status: 500 });
+    await pass(r.id);
+    await fake({ status: 201, revoke: 500, merge: "error" });
+    await pass(r.id);
+    await fake({ revoke: 204, merge: "lost" });
+    await pass(r.id);
+    expect((await change(r.id, r.task)).merge_state).toBe("succeeded");
+    answers.push(JSON.stringify(await must(OWNER, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`)));
+    answers.push(JSON.stringify(await must(OWNER, "GET", `/v1/workspaces/${r.id}/events`)));
+    answers.push((await merge(MERGER, r.id, r.task)).text);
+    const stored = await inRoom(r.id, (sql) => {
+      const tables = sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_cf%' ESCAPE '\\'").toArray().map((t: any) => t.name as string);
+      return JSON.stringify(Object.fromEntries(tables.map((table) => [table, sql.exec(`SELECT * FROM ${table}`).toArray()])));
+    });
+    const d1Tables = (await BINDINGS.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all()).results.map((t: any) => t.name);
+    const d1 = JSON.stringify(await Promise.all(d1Tables.filter((t: string) => !t.startsWith("_cf") && !t.startsWith("sqlite")).map((t: string) => BINDINGS.DB.prepare(`SELECT * FROM ${t}`).all())));
+    const tokens = (await minted()).map((token) => token.token.slice("ghs_fake_".length));
+    expect(tokens.length).toBeGreaterThanOrEqual(8);
+    for (const [where, text] of [["room", stored], ["D1", d1], ["answers", answers.join("\n")], ["logs", lines.join("\n")]] as const) {
+      expect(text, where).not.toContain("SECRET");
+      for (const token of tokens) expect(text, where).not.toContain(token);
+    }
+    const mine = lines.filter((line) => line.includes('"merge.')).map((line) => JSON.parse(line));
+    expect(mine.map((line) => line.event)).toEqual(expect.arrayContaining(["merge.waiting", "merge.token_unrevoked", "merge.succeeded"]));
+    for (const line of mine) {
+      expect(Object.keys(line).filter((name) => !["event", "ws", "task", "at", "status", "reason", "code"].includes(name))).toEqual([]);
+      expect(line.ws).toBe(r.id);
+      expect(line.task).toBe(r.task);
+    }
+  });
+
+  it("shows a merge's events to those shown the change and to whoever asked, and to no other agent", async () => {
+    const r = await approved();
+    await grant(r.id, ROBOT);
+    expect((await merge(ROBOT, r.id, r.task)).status).toBe(200);
+    await pass(r.id);
+    const seenBy = async (who: Who) => {
+      const got = await api(who, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`);
+      if (got.status !== 200) return got.status;
+      const kinds = (list: any[]) => list.filter((e) => e.type.startsWith("merge.")).map((e) => e.type);
+      return { history: kinds(got.body.history), activity: kinds((await must(who, "GET", `/v1/workspaces/${r.id}/activity?task=${r.task}`)).events) };
+    };
+    const all = ["merge.requested", "merge.succeeded"];
+    // The owner, who reviews it; an admin; the assignee; and the agent that asked, for its own request and its outcome.
+    for (const who of [OWNER, ADMIN, AGENT, ROBOT]) expect(await seenBy(who), who.id).toEqual({ history: all, activity: all });
+    // Another agent that reads the task gets none of it, and a page of its activity isn't left short by what it can't see.
+    expect(await seenBy(SIBLING)).toEqual({ history: [], activity: [] });
+    const page = (await must(SIBLING, "GET", `/v1/workspaces/${r.id}/activity?task=${r.task}&limit=2`)).events as any[];
+    expect(page).toHaveLength(2);
+    expect(page.some((e) => e.type.startsWith("merge.") || e.type.startsWith("task_change."))).toBe(false);
+    expect(await seenBy(PUBLIC)).toBe(404);
+  });
+});
+
+describe("the room migration", () => {
+  it("adds the merge bookkeeping to a room made before it, and keeps what was there", async () => {
+    const r = await approved();
+    const newest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
+    await inRoom(r.id, (sql) => {
+      for (const column of ["merge_finished_at", "merge_called_at", "merge_mark_set_at", "merge_marked_at", "merge_step", "merge_next_at", "merge_attempts", "merge_requester_person", "submitter_person", "submitter_id"]) sql.exec(`ALTER TABLE task_change DROP COLUMN ${column}`);
+      sql.exec("UPDATE schema_version SET version = version - 1");
+    });
+    await must(OWNER, "GET", `/v1/workspaces/${r.id}`);
+    expect(await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(newest);
+    expect(await change(r.id, r.task)).toMatchObject({ pr_number: 7, reviewed_commit_sha: HEAD, merge_state: "not_requested", merge_attempts: 0, merge_next_at: null, merge_step: null, merge_marked_at: null, merge_called_at: null, submitter_id: null, submitter_person: null });
+    // A change from before this step names no submitter, so nobody can be shown not to be them: every request is refused.
+    const got = await merge(MERGER, r.id, r.task);
+    expect([got.status, got.code]).toEqual([403, "self_merge"]);
+  });
+});

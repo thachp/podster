@@ -147,6 +147,19 @@ pub(super) struct Fresh {
 pub(super) struct Context {
     pub(super) switched_on: bool,
     pub(super) fresh: Option<Fresh>,
+    /// The person who controls the caller, for a submission's record: see [`controller_of`].
+    pub(super) controller: Option<String>,
+}
+
+/// The person who controls whoever sent a request: a person is their own, and an agent's is whoever linked the
+/// credential it came with. `None` for an agent whose credential names no linker. From the gateway's assertion, never
+/// from a body. Step 7b compares it between a submitter and whoever asks for the merge.
+pub(super) fn controller_of(identity: &Identity) -> Option<String> {
+    if identity.kind == "person" {
+        Some(identity.id.clone())
+    } else {
+        identity.linker.as_ref().map(|linker| linker.person.clone())
+    }
 }
 
 impl Context {
@@ -165,7 +178,9 @@ pub(super) enum Pinned {
         repo_id: i64,
         number: i64,
         default_branch: String,
-        pull: PullSeen,
+        pull: Box<PullSeen>,
+        /// The person who controls the submitter, kept with the submission.
+        controller: Option<String>,
     },
 }
 
@@ -369,6 +384,7 @@ pub(super) fn before_decide(
             .ok_or_else(|| refuse(409, "change_not_found"))?
     };
     // Only a read of this pull request in this repository counts. Anything else is as good as none.
+    let controller = context.controller;
     let Some(fresh) = context
         .fresh
         .filter(|fresh| fresh.repo_id == link.repo_id && fresh.number == number)
@@ -391,7 +407,8 @@ pub(super) fn before_decide(
         repo_id: link.repo_id,
         number,
         default_branch: link.default_branch,
-        pull,
+        pull: Box::new(pull),
+        controller,
     }))
 }
 
@@ -412,6 +429,7 @@ pub(super) fn record(
         number,
         default_branch,
         pull,
+        controller,
     } = pinned
     else {
         return Err(refuse(409, "pull_request_unread"));
@@ -441,13 +459,14 @@ pub(super) fn record(
     exec(
         sql,
         "INSERT INTO task_change (task_id, provider_repo_id, pr_number, submission_no, observed_head_sha, head_observed_at, head_repo_id, base_ref,
-             observed_base_sha, pr_state, pr_draft, pr_observed_at, read_at, created_at, updated_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?6, ?6, ?6, ?6)
+             observed_base_sha, pr_state, pr_draft, pr_observed_at, read_at, created_at, updated_at, submitter_id, submitter_person)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?6, ?6, ?6, ?6, ?11, ?12)
            ON CONFLICT (task_id) DO UPDATE SET submission_no = excluded.submission_no, observed_head_sha = excluded.observed_head_sha,
              head_observed_at = excluded.head_observed_at, head_repo_id = excluded.head_repo_id, base_ref = excluded.base_ref,
              observed_base_sha = excluded.observed_base_sha, pr_state = excluded.pr_state, pr_draft = 0, pr_observed_at = excluded.pr_observed_at,
              read_at = excluded.read_at, unchanged_reads = 0, read_failures = 0, not_found_reads = 0, unwatched_at = NULL,
-             reviewed_commit_sha = NULL, reviewed_base_sha = NULL, updated_at = excluded.updated_at",
+             reviewed_commit_sha = NULL, reviewed_base_sha = NULL, updated_at = excluded.updated_at,
+             submitter_id = excluded.submitter_id, submitter_person = excluded.submitter_person",
         vec![
             task.id.as_str().into(),
             repo_id.into(),
@@ -459,6 +478,9 @@ pub(super) fn record(
             default_branch.as_str().into(),
             pull.base_sha.as_str().into(),
             state.into(),
+            // Who submitted, and the person who controlled them then: what a merge's submitter rule compares (step 7b).
+            caller.into(),
+            controller.as_deref().map_or(V::Null, V::from),
         ],
     )?;
     if first {
@@ -497,6 +519,8 @@ pub(super) fn of_task(sql: &SqlStorage, task_id: &str) -> R<Value> {
             "watched": row["unwatched_at"].is_null(),
             "merge_state": row["merge_state"], "merge_reason": row["merge_reason"], "merge_sha": row["merge_sha"],
             "merge_observed_at": row["merge_observed_at"],
+            "merge_requested_by": row["merge_requested_by"], "merge_requested_at": row["merge_requested_at"],
+            "merge_finished_at": row["merge_finished_at"],
         })
     }))
 }
@@ -512,7 +536,7 @@ struct Watch {
 }
 
 /// Every change the job watches, with when each is due. Only for a ready repository: one that's degraded or suspended
-/// isn't read. A change the job gave up on isn't either, until a command reads it again.
+/// isn't read. A change the job gave up on isn't either, until a delivery names it or a command reads it again.
 fn watches(sql: &SqlStorage, now: i64) -> R<Vec<Watch>> {
     let found = rows(
         sql,

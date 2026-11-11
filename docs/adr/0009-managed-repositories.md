@@ -20,7 +20,9 @@ Every claim carries one of these labels, in a section's heading line or beside t
   - **The architect's reading, not the owner's words:** the new sentence replaces the earlier one, so the rule that tests never run against `podsterdev` no longer stands. `podsterdev` is the one organization. Podster has no production deployment, so `podsterdev` serves staging now, and the spike's three-Apps run was on it.
   - **The owner said "the app". The architect created three,** each installed on all repositories, as this ADR proposes.
 - **Owner, 2026-11-10, verbatim:** "i'm okay with having public repo.. this will be an MIT project".
-  - **The architect's reading, unconfirmed:** managed repositories may be public, and Podster's own code will carry an MIT license. The architect has asked the owner which of these was meant. Until the owner answers, this ADR treats public managed repositories as a working assumption and nothing more. It doesn't read the sentence as licensing what rooms put in their repositories.
+  - **The architect's reading, unconfirmed:** managed repositories may be public, and Podster's own code will carry an MIT license. The architect has asked the owner which of these was meant. Until the owner answers, this ADR treats public managed repositories as a working assumption and nothing more. It doesn't read the sentence as licensing what rooms put in their repositories. *Superseded on 2026-11-11 by the owner's reply below.*
+- **Owner, 2026-11-11, verbatim:** "okay with public repo, MIT project".
+  - **The architect's reading, told to the owner:** it confirms both. Managed repositories may be public, and Podster's own code is MIT-licensed; the `LICENSE` file at the repository's root was added on that reading. It still isn't read as licensing what rooms put in their repositories. The words don't cover switching `MANAGED_REPOSITORIES` on, setting the Apps' keys, or the takedown process for public repositories. Each still needs the owner.
 
 ## Context
 
@@ -92,7 +94,7 @@ A repository's identity is GitHub's repository ID, recorded when Podster creates
 
 The specs propose private by default, chosen at setup and independent of the room's visibility. The spike found no way to build it on the Free plan with the rules this ADR relies on.
 
-- **Proposed, as the working assumption:** managed repositories are public, so branch rules work on the Free plan. It rests on the architect's unconfirmed reading of the owner's words above.
+- **Proposed, as the working assumption:** managed repositories are public, so branch rules work on the Free plan. It rests on the architect's reading of the owner's words above, unconfirmed on 2026-11-10 and confirmed by the owner on 2026-11-11.
 - **Proposed:** while the organization is on the Free plan, the Git option in room setup creates a public repository and says so before the person confirms: the code, the repository's name, its branches and its pull requests are readable by anyone, whatever the room's visibility is. A task branch is public as soon as it's pushed, before any review. A private repository is shown as unavailable, never silently made public and never made private without rules.
 - **Proposed:** the room's visibility still decides nothing about the repository, as the specs say. A private room with a public repository is allowed only through that explicit confirmation.
 - **Owner's yes:** private managed repositories wait for a paid GitHub plan. That costs money. Whether rulesets then behave on a private repository as they did on a public one is **unverified**.
@@ -336,8 +338,8 @@ The M5 plan is updated with this ADR where it says so below. The specs aren't, u
 
 ## What needs the owner's yes
 
-- **Confirming the scope of "i'm okay with having public repo.. this will be an MIT project":** whether managed repositories may be public, and what the MIT license covers.
-- **Public managed repositories on staging.** takedown.md's staging exception of 2026-11-10 covers `PUBLIC_ROOMS`, not repositories.
+- **Confirming the scope of "i'm okay with having public repo.. this will be an MIT project".** **Confirmed by the owner on 2026-11-11:** "okay with public repo, MIT project". The architect reads it as confirming both that managed repositories may be public and that Podster's own code is MIT-licensed.
+- **Public managed repositories on staging.** That they may be public is confirmed by the owner's words of 2026-11-11 above. Still owed: the words don't switch `MANAGED_REPOSITORIES` on or set the Apps' keys, and takedown.md's staging exception of 2026-11-10 covers `PUBLIC_ROOMS`, not repositories, so the takedown process for public repositories still needs the owner.
 - **A paid GitHub plan** for private managed repositories. It costs money.
 - **The three Apps' secrets.** The Apps exist in `podsterdev` since 2026-11-10, created by the architect after the owner said "you can create the app there". Setting each private key on the private API Worker, and the webhook secret, is the owner's.
 - **Any change to an App's permissions.** None is proposed.

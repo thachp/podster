@@ -430,8 +430,10 @@ describe("what GitHub answers", () => {
     expect(await tokens(r.id)).toEqual([]);
   });
 
-  it("answers provider_unavailable when GitHub doesn't answer in time, and holds nothing", async () => {
-    await script({ mode: "hang" });
+  it("answers provider_unavailable when GitHub doesn't answer in time, and holds nothing", { timeout: 60_000 }, async () => {
+    // GitHub holds the mint until the test lets it go, which is after the room has stopped waiting: the room's own
+    // wait for a call, ten seconds, is the only clock here.
+    await script({ mode: "gate" });
     const r = await room();
     const res = await access(AGENT, r.id, r.task);
     expect([res.status, res.code]).toEqual([502, "provider_unavailable"]);
@@ -440,10 +442,13 @@ describe("what GitHub answers", () => {
     expect(await events(r.id, "repo_token.mint_unknown")).toHaveLength(1);
     // It holds nothing up: the agent can ask again.
     await script({ mode: "ok" });
-    expect((await access(AGENT, r.id, r.task)).status).toBe(200);
+    const next = await access(AGENT, r.id, r.task);
+    expect(next.status).toBe(200);
     // The acknowledged gap: a token whose answer never arrived is unknown to the room, and lives out its hour.
-    await new Promise((resolve) => setTimeout(resolve, 1600));
-    expect((await minted())[0].live).toBe(true);
+    expect((await minted()).map((t) => t.token)).toEqual([next.body.token]);
+    await release();
+    const late = (await minted()).filter((t) => t.token !== next.body.token);
+    expect(late.map((t) => t.live)).toEqual([true]);
   });
 
   it("revokes the minted token when the commit fails, and keeps no trace of it", async () => {

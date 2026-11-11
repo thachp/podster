@@ -8,6 +8,7 @@ default-members = ["crates/core", "crates/policy", "crates/assertion", "crates/e
 version = "0.0.0"
 edition = "2021"
 publish = false
+license = "MIT"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

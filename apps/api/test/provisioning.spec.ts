@@ -412,7 +412,8 @@ describe("the provisioning job", () => {
     for (const r of [undelegated, moved, archived]) expect(await rowsOf(r.id, "repo_request_attempt")).toEqual([]);
   });
 
-  it("treats an unknown creation outcome as a failed setup, adopts nothing by name, and retries under a new server-made name (M5-03)", async () => {
+  // `hang` waits out the room's own ten seconds for a call, so this test is given longer than the others.
+  it("treats an unknown creation outcome as a failed setup, adopts nothing by name, and retries under a new server-made name (M5-03)", { timeout: 90_000 }, async () => {
     for (const mode of ["lost", "hang", "error500", "no_id"]) {
       const r = await room({ script: { create: [mode, "ok"] } });
       await ask(r);

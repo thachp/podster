@@ -83,17 +83,13 @@ const taskRow = (id: string, task: string) => inRoom(id, (sql) => sql.exec("SELE
 const alarm = async (id: string, times = 1) => {
   for (let n = 0; n < times; n++) await alarmPass(stub(id));
 };
-/** Retries a check until it holds, running the alarm between tries. */
-const eventually = async (id: string, check: () => Promise<void>) => {
-  for (let n = 0; ; n++) {
-    try {
-      return await check();
-    } catch (error) {
-      if (n >= 30) throw error;
-      await alarm(id);
-      await new Promise((x) => setTimeout(x, 50));
-    }
-  }
+/**
+ * One whole run of the alarm, then the check, once. A run does everything that was due when it began, so there's nothing
+ * to wait for and nothing to try again: a check that fails here has failed.
+ */
+const afterPass = async (id: string, check: () => Promise<void>) => {
+  await alarm(id);
+  await check();
 };
 /** One run of the alarm, so whatever was due before a test's next step has been done. */
 const settle = (id: string) => alarm(id);
@@ -511,7 +507,7 @@ describe("the refresh job", () => {
     const before = (await reads()).length;
     await pull(7, { head_sha: HEAD2, base_sha: BASE2 });
     await nudge(r.id);
-    await eventually(r.id, async () => expect(await change(r.id, r.task)).toMatchObject({ observed_head_sha: HEAD2, observed_base_sha: BASE2, pr_state: "open", unchanged_reads: 0 }));
+    await afterPass(r.id, async () => expect(await change(r.id, r.task)).toMatchObject({ observed_head_sha: HEAD2, observed_base_sha: BASE2, pr_state: "open", unchanged_reads: 0 }));
     expect((await reads()).length).toBe(before + 1);
     expect((await reads()).at(-1)).toEqual({ path: `/repositories/${REPO_ID}/pulls/7`, permissions: READ_ONLY, status: 200 });
     expect((await minted()).every((token) => !token.live)).toBe(true);
@@ -533,13 +529,13 @@ describe("the refresh job", () => {
     expect((await reads()).length).toBe(before);
     // A minute on, it's read. Nothing changed, so no event, and the next wait is two minutes.
     await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?", Date.now() - 60_001));
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).unchanged_reads).toBe(1));
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).unchanged_reads).toBe(1));
     expect((await reads()).length).toBe(before + 1);
     await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?", Date.now() - 61_000));
     await alarm(r.id, 2);
     expect((await reads()).length).toBe(before + 1);
     await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?", Date.now() - 120_001));
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).unchanged_reads).toBe(2));
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).unchanged_reads).toBe(2));
     expect((await events(r.id)).map((e) => e.type)).toEqual(["task_change.linked"]);
     // The alarm is set for the next poll.
     const next = await runInDurableObject(stub(r.id), (_: any, state: any) => state.storage.getAlarm());
@@ -560,7 +556,7 @@ describe("the refresh job", () => {
     const next = (await runInDurableObject(stub(r.id), (_: any, state: any) => state.storage.getAlarm())) as number | null;
     expect(next === null || next > Date.now() + 30 * 60_000).toBe(true);
     await inRoom(r.id, (sql) => sql.exec("UPDATE repo_read SET at = ?", Date.now() - 3_600_001));
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).observed_head_sha).toBe(HEAD2));
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).observed_head_sha).toBe(HEAD2));
   });
 
   it("records a head that moved after review without un-approving or re-pinning, and tells the people who'd follow up", async () => {
@@ -568,7 +564,7 @@ describe("the refresh job", () => {
     await settle(r.id);
     await pull(7, { head_sha: HEAD2 });
     await nudge(r.id);
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).observed_head_sha).toBe(HEAD2));
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).observed_head_sha).toBe(HEAD2));
     // The approval and the reviewed commit stand.
     expect(await taskRow(r.id, r.task)).toMatchObject({ status: "completed", approved_submission_no: 1 });
     expect(await change(r.id, r.task)).toMatchObject({ reviewed_commit_sha: HEAD, reviewed_base_sha: BASE, merge_state: "not_requested", merge_reason: null });
@@ -588,17 +584,17 @@ describe("the refresh job", () => {
         after = page.at(-1).seq;
       }
     };
-    await eventually(r.id, async () => expect([await inbox(OWNER), await inbox(ADMIN)]).toEqual([1, 1]));
+    await afterPass(r.id, async () => expect([await inbox(OWNER), await inbox(ADMIN)]).toEqual([1, 1]));
     expect(await inbox(AGENT)).toBe(0);
     // It moves again: still one record that the reviewed commit was left behind.
     await pull(7, { head_sha: "e5".repeat(20) });
     await nudge(r.id);
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).observed_head_sha).toBe("e5".repeat(20)));
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).observed_head_sha).toBe("e5".repeat(20)));
     expect((await events(r.id)).filter((e) => e.type === "task_change.commit_changed")).toHaveLength(1);
     // Pushed back to the reviewed commit: it stays changed, with the time it was first seen (plan decision 6).
     await pull(7, { head_sha: HEAD });
     await nudge(r.id);
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).observed_head_sha).toBe(HEAD));
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).observed_head_sha).toBe(HEAD));
     expect((await must(OWNER, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`)).change).toMatchObject({ commit_changed: true, commit_changed_at: shown.commit_changed_at, observed_head_sha: HEAD, reviewed_commit_sha: HEAD });
     expect((await events(r.id)).filter((e) => e.type === "task_change.commit_changed")).toHaveLength(1);
   });
@@ -608,7 +604,7 @@ describe("the refresh job", () => {
     await settle(r.id);
     await pull(7, { draft: true });
     await nudge(r.id);
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).pr_draft).toBe(1));
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).pr_draft).toBe(1));
     expect(await taskRow(r.id, r.task)).toMatchObject({ status: "completed", approved_submission_no: 1 });
     expect(await change(r.id, r.task)).toMatchObject({ pr_state: "open", reviewed_commit_sha: HEAD, commit_changed_at: null });
     expect((await events(r.id)).at(-1)).toEqual({ type: "task_change.observed", actor_id: "system", task_id: r.task, reason: "draft" });
@@ -621,7 +617,7 @@ describe("the refresh job", () => {
     await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET merge_state = 'requested'"));
     await pull(7, { merged: true, merge_commit_sha: MERGE, merged_by: 31337 });
     await nudge(r.id);
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).pr_state).toBe("merged"));
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).pr_state).toBe("merged"));
     expect(await change(r.id, r.task)).toMatchObject({ merge_state: "requested", merge_reason: null, merge_sha: null, merged_by_id: null, merge_observed_at: null });
     expect((await events(r.id)).filter((e) => e.type === "task_change.merge_observed")).toEqual([]);
   });
@@ -632,7 +628,7 @@ describe("the refresh job", () => {
     await settle(r.id);
     await pull(7, { merged: true, merge_commit_sha: MERGE, merged_by: 31337 });
     await nudge(r.id);
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).pr_state).toBe("merged"));
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).pr_state).toBe("merged"));
     expect(await change(r.id, r.task)).toMatchObject({ merge_state: "not_requested", merge_reason: "unrequested_merge", merge_sha: MERGE, merged_by_id: 31337, reviewed_commit_sha: HEAD });
     expect((await change(r.id, r.task)).merge_observed_at).toBeGreaterThan(0);
     expect((await events(r.id)).slice(-2)).toEqual([
@@ -654,7 +650,7 @@ describe("the refresh job", () => {
     await settle(u.id);
     await pull(7, { merged: true, merge_commit_sha: MERGE, merged_by: 31337 });
     await nudge(u.id);
-    await eventually(u.id, async () => expect((await change(u.id, u.task)).merge_reason).toBe("unreviewed_merge"));
+    await afterPass(u.id, async () => expect((await change(u.id, u.task)).merge_reason).toBe("unreviewed_merge"));
     expect(await change(u.id, u.task)).toMatchObject({ merge_state: "not_requested", pr_state: "merged", reviewed_commit_sha: null });
     expect((await taskRow(u.id, u.task)).status).toBe("submitted");
   });
@@ -664,7 +660,7 @@ describe("the refresh job", () => {
     await settle(r.id);
     await pull(7, { state: "closed" });
     await nudge(r.id);
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).pr_state).toBe("closed"));
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).pr_state).toBe("closed"));
     const before = (await reads()).length;
     // Closed and not named again: not polled, however long ago it was read.
     await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = 1, nudged_at = 0"));
@@ -674,44 +670,63 @@ describe("the refresh job", () => {
     await pull(7, { state: "open" });
     await fake({ pullRead: 500 });
     await nudge(r.id);
-    await eventually(r.id, async () => expect((await reads()).length).toBe(before + 1));
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).read_at).toBeGreaterThan(1));
+    await afterPass(r.id, async () => expect((await reads()).length).toBe(before + 1));
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).read_at).toBeGreaterThan(1));
     expect(await change(r.id, r.task)).toMatchObject({ pr_state: "closed", read_failures: 1 });
   });
 
   it("waits longer after each failed read, a minute doubling to an hour, and starts over once one works", async () => {
     const r = await submitted();
     await settle(r.id);
+    /** What the room has stored for the change, and how many reads GitHub failed. Checked after every run of the alarm. */
+    const now = async () => {
+      const row = await change(r.id, r.task);
+      return { read_failures: row.read_failures, unchanged_reads: row.unchanged_reads, failed: (await reads()).filter((read) => read.status === 500).length };
+    };
+    /** The last read, as if it were `ms` ago. Each wait is counted from this stored time. */
+    const readAgo = (ms: number) => inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?", Date.now() - ms));
     // One unchanged read first, so the poll's own backoff is seen to survive a failure.
-    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?", Date.now() - 60_001));
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).unchanged_reads).toBe(1));
-    await settle(r.id);
+    await readAgo(60_001);
+    await alarm(r.id);
+    expect(await now()).toEqual({ read_failures: 0, unchanged_reads: 1, failed: 0 });
     await fake({ pullRead: 500 });
-    const failed = async () => (await reads()).filter((read) => read.status === 500).length;
     await nudge(r.id);
-    await eventually(r.id, async () => expect(await change(r.id, r.task)).toMatchObject({ read_failures: 1, unchanged_reads: 1 }));
-    expect(await failed()).toBe(1);
+    await alarm(r.id);
+    expect(await now()).toEqual({ read_failures: 1, unchanged_reads: 1, failed: 1 });
     // Inside the minute nothing reads it, whatever a delivery says.
     await nudge(r.id);
     await alarm(r.id, 2);
-    expect(await failed()).toBe(1);
-    // After a minute it's tried again, and then not for two.
-    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?", Date.now() - 60_001));
+    await readAgo(50_000);
     await nudge(r.id);
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).read_failures).toBe(2));
-    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?", Date.now() - 100_000));
+    await alarm(r.id);
+    expect(await now()).toEqual({ read_failures: 1, unchanged_reads: 1, failed: 1 });
+    // After a minute it's tried again, and then not for two.
+    await readAgo(60_001);
+    await nudge(r.id);
+    await alarm(r.id);
+    expect(await now()).toEqual({ read_failures: 2, unchanged_reads: 1, failed: 2 });
+    await readAgo(100_000);
     await nudge(r.id);
     await alarm(r.id, 2);
-    expect(await failed()).toBe(2);
-    // The wait never passes an hour.
-    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_failures = 40, read_at = ?", Date.now() - 3_600_001));
+    expect(await now()).toEqual({ read_failures: 2, unchanged_reads: 1, failed: 2 });
+    await readAgo(120_001);
+    await alarm(r.id);
+    expect(await now()).toEqual({ read_failures: 3, unchanged_reads: 1, failed: 3 });
+    // The wait never passes an hour: short of one nothing is read, however many reads have failed, and after one it is.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_failures = 40"));
+    await readAgo(3_500_000);
     await nudge(r.id);
-    await eventually(r.id, async () => expect(await failed()).toBe(3));
+    await alarm(r.id);
+    expect(await now()).toEqual({ read_failures: 40, unchanged_reads: 1, failed: 3 });
+    await readAgo(3_600_001);
+    await alarm(r.id);
+    expect(await now()).toEqual({ read_failures: 41, unchanged_reads: 1, failed: 4 });
     // A read that works ends the run.
     await fake({ pullRead: 200 });
-    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?", Date.now() - 3_600_001));
+    await readAgo(3_600_001);
     await nudge(r.id);
-    await eventually(r.id, async () => expect(await change(r.id, r.task)).toMatchObject({ read_failures: 0, not_found_reads: 0 }));
+    await alarm(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ read_failures: 0, not_found_reads: 0 });
   });
 
   it("stops watching a pull request that's gone after five reads in a row, and says so once", async () => {
@@ -722,7 +737,7 @@ describe("the refresh job", () => {
     for (let n = 1; n <= 5; n++) {
       await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?", Date.now() - 3_600_001));
       await nudge(r.id);
-      await eventually(r.id, async () => expect((await change(r.id, r.task)).not_found_reads).toBe(n));
+      await afterPass(r.id, async () => expect((await change(r.id, r.task)).not_found_reads).toBe(n));
       await settle(r.id);
     }
     expect(await gone()).toBe(5);
@@ -741,7 +756,7 @@ describe("the refresh job", () => {
     await fake({ pullRead: 500 });
     await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET unwatched_at = NULL, not_found_reads = 4, read_at = 1"));
     await nudge(r.id);
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).not_found_reads).toBe(0));
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).not_found_reads).toBe(0));
     expect((await change(r.id, r.task)).unwatched_at).toBeNull();
   });
 
@@ -756,7 +771,7 @@ describe("the refresh job", () => {
     await fake({ pullRead: 403 });
     const before = Date.now();
     await nudge(r.id);
-    await eventually(r.id, async () => expect((await link()).read_failures).toBe(1));
+    await afterPass(r.id, async () => expect((await link()).read_failures).toBe(1));
     await settle(r.id);
     // Both changes were due, and one read was enough to know. Neither change is marked as failing on its own.
     expect(await refusedReads()).toBe(1);
@@ -770,14 +785,14 @@ describe("the refresh job", () => {
     await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET reads_not_before = ?", Date.now() - 1));
     const again = Date.now();
     await nudge(r.id);
-    await eventually(r.id, async () => expect((await link()).read_failures).toBe(2));
+    await afterPass(r.id, async () => expect((await link()).read_failures).toBe(2));
     expect((await link()).reads_not_before).toBeGreaterThanOrEqual(again + 120_000);
     await settle(r.id);
     // Put right, the next read clears it for the room.
     await fake({ pullRead: 200 });
     await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET reads_not_before = ?", Date.now() - 1));
     await nudge(r.id);
-    await eventually(r.id, async () => expect(await link()).toEqual({ read_failures: 0, reads_not_before: null }));
+    await afterPass(r.id, async () => expect(await link()).toEqual({ read_failures: 0, reads_not_before: null }));
     // Said once for the run of refusals, with a fixed code and no task.
     expect(await events(r.id, "repository.read_refused")).toEqual([{ type: "repository.read_refused", actor_id: "system", task_id: null, reason: "provider_credential_failed" }]);
   });
@@ -795,7 +810,7 @@ describe("the refresh job", () => {
       await nudge(r.id);
       failures += 1;
       const want = failures;
-      await eventually(r.id, async () => expect((await link()).read_failures).toBe(want));
+      await afterPass(r.id, async () => expect((await link()).read_failures).toBe(want));
       await settle(r.id);
     }
     expect(await reads()).toHaveLength(2);
@@ -808,7 +823,7 @@ describe("the refresh job", () => {
     await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET read_failures = 0, reads_not_before = NULL"));
     await fake({ mint: 500 });
     await nudge(r.id);
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).read_failures).toBe(1));
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).read_failures).toBe(1));
     expect(await link()).toEqual({ read_failures: 0, reads_not_before: null });
     expect(await change(r.id, r.task)).toMatchObject({ unwatched_at: null, not_found_reads: 0 });
     // Put right, the change is read again once its own wait is over.
@@ -816,7 +831,7 @@ describe("the refresh job", () => {
     await pull(7, { head_sha: HEAD2 });
     await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?", Date.now() - 60_001));
     await nudge(r.id);
-    await eventually(r.id, async () => expect(await change(r.id, r.task)).toMatchObject({ observed_head_sha: HEAD2, read_failures: 0 }));
+    await afterPass(r.id, async () => expect(await change(r.id, r.task)).toMatchObject({ observed_head_sha: HEAD2, read_failures: 0 }));
   });
 
   it("doesn't read for a task that's back with its agent, a room whose repository isn't ready, or a room with the switch off", async () => {
@@ -845,7 +860,7 @@ describe("who is shown a task's change", () => {
     // Something observed, so the task has events about its change beyond the link.
     await pull(7, { head_sha: HEAD2 });
     await nudge(r.id);
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).commit_changed_at).toBeGreaterThan(0));
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).commit_changed_at).toBeGreaterThan(0));
     await must(OWNER, "POST", `/v1/workspaces/${r.id}/members`, { principal_id: GUEST.id, kind: "person", org_id: ORG, role: "guest", policy_version: await version(r.id) }, { claims: { target_member: { person: GUEST.id, orgs: { [ORG]: 1 } } } });
     /** What a caller gets of the change: the object, its events in the task's history, and its events in the room's activity. */
     const seenBy = async (who: Who, task = r.task) => {
@@ -914,20 +929,20 @@ describe("what's kept and logged", () => {
     // The first task's pull request moves to a branch that isn't the default, then GitHub fails, then it merges.
     await pull(7, { head_sha: HEAD2, base_ref: "SECRET-BASE-BRANCH" });
     await nudge(r.id);
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).observed_head_sha).toBe(HEAD2));
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).observed_head_sha).toBe(HEAD2));
     expect(await change(r.id, r.task)).toMatchObject({ base_ref: null });
     expect((await must(OWNER, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`)).change).toMatchObject({ base_is_default: false, head_in_repository: true });
     await fake({ pullRead: 500 });
     const failedBefore = (await reads()).filter((read) => read.status === 500).length;
     await nudge(r.id);
-    await eventually(r.id, async () => expect((await reads()).filter((read) => read.status === 500).length).toBeGreaterThan(failedBefore));
+    await afterPass(r.id, async () => expect((await reads()).filter((read) => read.status === 500).length).toBeGreaterThan(failedBefore));
     await settle(r.id);
     await fake({ pullRead: 200 });
     await pull(7, { head_sha: HEAD2, merged: true, merge_commit_sha: MERGE, merged_by: 31337 });
     // The failed reads left a wait. It's over.
     await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?", Date.now() - 3_600_001));
     await nudge(r.id);
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).pr_state).toBe("merged"));
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).pr_state).toBe("merged"));
     answers.push(JSON.stringify(await must(OWNER, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`)));
     answers.push(JSON.stringify(await must(OWNER, "GET", `/v1/workspaces/${r.id}/events`)));
 
@@ -979,6 +994,6 @@ describe("the room migration", () => {
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT read_failures, reads_not_before FROM repo_link").one())).toEqual({ read_failures: 0, reads_not_before: null });
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT name FROM pragma_table_info('repo_read')").toArray().map((c: any) => c.name))).toEqual(["at", "kind", "caller"]);
     // A change with no read on record is due one.
-    await eventually(r.id, async () => expect((await change(r.id, r.task)).observed_head_sha).toBe(HEAD2));
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).observed_head_sha).toBe(HEAD2));
   });
 });

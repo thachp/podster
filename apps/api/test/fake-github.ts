@@ -51,7 +51,11 @@ type Script = {
 type AgentScript = {
   mode?: string; revoke?: number; pulls?: Record<string, Pull | null>; pullRead?: number; mint?: number;
   /** The merge App's side (M5 step 7b). `mergeMint` is a status for its token request, if not 201, and `status` one for setting a commit status. */
-  mergeMint?: number; status?: number;
+  mergeMint?: number;
+  /** A number fails the status call. "drop" answers 201 and sets nothing. "foreign" sets it as another App's, which the review rule doesn't count. */
+  status?: number | string;
+  /** The default branch the agent-token and merge Apps are told, if not the repository's own. */
+  defaultBranch?: string;
   /** How the merge call goes: ok; lost (merges, then answers 500); error (answers 500, merges nothing); refuse (405, as the rules would); moved (the head changes first, so 409); merged_by_other (someone merges another head first, so 200). */
   merge?: string;
   /** What comparing with the default branch says, whatever is there: a status such as "ahead", or a number for a failed read. */
@@ -420,7 +424,9 @@ function mergeCall(request: Request, path: string, bearer: string, body: any): R
   const marking = path.match(/^\/repositories\/(\d+)\/statuses\/([0-9a-f]+)$/);
   const merging = path.match(/^\/repositories\/(\d+)\/pulls\/(\d+)\/merge$/);
   const comparing = path.match(/^\/repositories\/(\d+)\/compare\/([^.]+)\.\.\.([0-9a-f]+)$/);
-  const asked = marking ?? merging ?? comparing;
+  const describing = request.method === "GET" ? path.match(/^\/repositories\/(\d+)$/) : null;
+  const pushing = path.match(/^\/repositories\/(\d+)\/(contents\/.+|git\/refs\/heads\/.+)$/);
+  const asked = marking ?? merging ?? comparing ?? describing ?? pushing;
   if (!asked || !held || !agentLive.has(bearer)) return null;
   const repo = Number(asked[1]);
   const answer = (payload: unknown, status = 200) => {
@@ -431,9 +437,19 @@ function mergeCall(request: Request, path: string, bearer: string, body: any): R
   const reaches = held.repo === "all" || held.repo.includes(repo);
   if (!reaches) return denied();
   const script = agentRepos.get(repo) ?? {};
+  const defaultBranch = script.defaultBranch ?? repos.get(repo)?.defaultBranch ?? readyRepos.get(repo)?.defaultBranch ?? "main";
+  // The repository itself, for its default branch. Not counted among the calls a test lists.
+  if (describing) return json({ id: repo, default_branch: defaultBranch, description: "SECRET-DESCRIPTION" });
+  // A write straight to a branch: the update rule refuses everyone but the merge App, and Podster's merge App never asks.
+  if (pushing && request.method !== "GET") {
+    const ref = pushing[2].startsWith("git/refs/heads/");
+    return answer({ message: "Repository rule violations found" }, ref ? 422 : 409);
+  }
   if (marking && request.method === "POST") {
     if (held.app !== "merge" || held.permissions.statuses !== "write") return denied();
-    if (script.status && script.status !== 201) return answer({ message: "SECRET-PROVIDER-TEXT" }, script.status);
+    if (typeof script.status === "number" && script.status !== 201) return answer({ message: "SECRET-PROVIDER-TEXT" }, script.status);
+    // "drop": GitHub says done and the status isn't there. "foreign": it's there, set by some other App.
+    if (script.status === "drop" || script.status === "foreign") return answer({ state: body?.state, context: body?.context }, 201);
     statuses.set(repo, [...(statuses.get(repo) ?? []), { sha: marking[2], state: body?.state, context: body?.context }]);
     return answer({ state: body?.state, context: body?.context, description: "SECRET-STATUS-TEXT" }, 201);
   }

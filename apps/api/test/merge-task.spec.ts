@@ -102,7 +102,7 @@ const dies = (id: string, at: string | null) => inRoom(id, (sql) => {
   if (at) sql.exec("INSERT INTO test_merge_dies (at) VALUES (?)", at);
 });
 /** Makes the merge's next pass due now, as time passing would. */
-const due = (id: string) => inRoom(id, (sql) => void sql.exec("UPDATE task_change SET merge_next_at = 0 WHERE merge_state = 'requested'"));
+const due = (id: string) => inRoom(id, (sql) => void sql.exec("UPDATE task_change SET merge_next_at = 0 WHERE merge_state IN ('requested', 'outcome_unknown')"));
 /** One pass of the merge job, whatever its backoff says. */
 const pass = async (id: string) => {
   await inRoom(id, (sql) => {
@@ -289,6 +289,8 @@ describe("asking for a merge", () => {
     await refused([400, "invalid_argument"], {});
     await refused([400, "invalid_argument"], { submission_no: 1 });
     await refused([400, "invalid_argument"], { submission_no: 1, commit_sha: "a1b2c3d" });
+    // The contract takes two fields. Anything else, such as something that would name a pull request, is refused.
+    for (const extra of [{ pr_number: 7 }, { repository_id: 1 }, { merge_method: "squash" }, { sha: HEAD2 }]) await refused([400, "invalid_argument"], { submission_no: 1, commit_sha: HEAD, ...extra });
     await refused([409, "submission_mismatch"], { submission_no: 2, commit_sha: HEAD });
     await refused([409, "commit_changed"], { submission_no: 1, commit_sha: HEAD2 });
     // Submitted and not approved.
@@ -606,8 +608,7 @@ describe("what GitHub answers to the merge", () => {
     await fake({ merge: "ok" });
     expect((await merge(MERGER, refused.id, refused.task)).status).toBe(200);
     await pass(refused.id);
-    // The pass the first request used still counts: asking again doesn't buy a fresh five.
-    expect(await change(refused.id, refused.task)).toMatchObject({ merge_state: "succeeded", merge_attempts: 2 });
+    expect(await change(refused.id, refused.task)).toMatchObject({ merge_state: "succeeded", merge_attempts: 1 });
     expect((await merges()).map((c) => c.status)).toEqual([405, 200]);
   });
 
@@ -658,11 +659,6 @@ describe("what GitHub answers to the merge", () => {
     expect(await merges()).toEqual([]);
     expect((await events(r.id)).at(-1)).toMatchObject({ type: "merge.failed", reason: "merge_attempts_exhausted" });
     await fake({ status: 201 });
-    // Asking again inside the hour doesn't start the count over: the task has had its passes.
-    const soon = await merge(MERGER, r.id, r.task);
-    expect([soon.status, soon.code]).toEqual([429, "rate_limited"]);
-    // An hour on, it can be asked for again, with a fresh count.
-    await inRoom(r.id, (sql) => sql.exec("UPDATE merge_request SET at = at - 3600001"));
     expect((await merge(MERGER, r.id, r.task)).status).toBe(200);
     await pass(r.id);
     expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_attempts: 1 });
@@ -822,9 +818,50 @@ describe("the review's findings (M5 step 7b)", () => {
     await ready({ defaultBranch: "trunk" });
     await pass(r.id);
     expect(await link(r.id)).toEqual({ status: "degraded", status_reason: "default_branch_changed" });
-    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "failed", merge_reason: "repo_not_ready", merge_marked_at: null });
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "failed", merge_reason: "default_branch_changed", merge_marked_at: null });
     expect((await github()).calls).toEqual([]);
     expect(await events(r.id, "repository.")).toEqual([{ type: "repository.degraded", actor_id: "system", subject_id: null, task_id: null, reason: "default_branch_changed" }]);
+    // The merge App is told another default than the provisioning App: caught at its own read, before the mark.
+    await fresh();
+    const seen = await requested();
+    await fake({ defaultBranch: "trunk" });
+    await pass(seen.id);
+    expect(await link(seen.id)).toEqual({ status: "degraded", status_reason: "default_branch_changed" });
+    expect(await change(seen.id, seen.task)).toMatchObject({ merge_state: "failed", merge_reason: "default_branch_changed", merge_marked_at: null });
+    // It read, and wrote nothing.
+    expect((await github()).calls.filter((c) => c.method !== "GET")).toEqual([]);
+    // Changed after the mark, while the merge's token is on its way: the call isn't made, into either branch.
+    await fresh();
+    const late = await requested();
+    await fake({ mode: "gate" });
+    const running = pass(late.id);
+    await minting();
+    await release();
+    await minting();
+    await release();
+    await minting();
+    await fake({ mode: "ok", defaultBranch: "trunk" });
+    await release();
+    await running;
+    expect(await change(late.id, late.task)).toMatchObject({ merge_state: "failed", merge_reason: "default_branch_changed" });
+    expect(await link(late.id)).toEqual({ status: "degraded", status_reason: "default_branch_changed" });
+    expect(await merges()).toEqual([]);
+    expect((await github()).pulls["7"].merged ?? false).toBe(false);
+    // A default branch with a slash in its name is read and merged into like any other.
+    await fresh();
+    await ready({ defaultBranch: "release/v1" });
+    await fake({ defaultBranch: "release/v1" });
+    const slashed = await room();
+    await inRoom(slashed, (sql) => sql.exec("UPDATE repo_link SET default_branch = 'release/v1'"));
+    await pull(7, { base_ref: "release/v1" });
+    const task = await submitted(slashed);
+    await must(OWNER, "POST", `/v1/workspaces/${slashed}/tasks/${task}/verify`, { submission_no: 1, commit_sha: HEAD });
+    await grant(slashed, MERGER);
+    await hold(slashed);
+    expect((await merge(MERGER, slashed, task)).status).toBe(200);
+    await pass(slashed);
+    expect(await change(slashed, task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED });
+    expect((await github()).calls.filter((c) => c.method === "GET").every((c) => c.path === `/repositories/${REPO_ID}/compare/release/v1...${HEAD}`)).toBe(true);
   });
 
   it("puts a degraded link back to ready only on an operator's recheck that reads it exactly right (M1b)", async () => {
@@ -852,9 +889,14 @@ describe("the review's findings (M5 step 7b)", () => {
     expect((await link(r.id)).status).toBe("degraded");
     // Exactly right: ready again, said once, and recorded as the operator's action.
     await ready({ script: {} });
-    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "ready", reason: null });
+    const fixed = await api(OPERATOR, "POST", `/v1/moderation/repositories/${r.id}/recheck`, {}, { key: "mt-recheck" });
+    expect(fixed.body).toEqual({ status: "ready", reason: null });
     expect(await link(r.id)).toEqual({ status: "ready", status_reason: null });
+    // The same key answers the same, from the record, with no second read. A new one finds nothing to recheck.
+    const readsBefore = (await readBack()).reads.length;
+    expect((await api(OPERATOR, "POST", `/v1/moderation/repositories/${r.id}/recheck`, {}, { key: "mt-recheck" })).body).toEqual(fixed.body);
     expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "ready", reason: null });
+    expect((await readBack()).reads.length).toBe(readsBefore);
     expect((await events(r.id, "repository.")).map((e) => [e.type, e.reason])).toEqual([["repository.degraded", "bypass_differs"], ["repository.ready_again", null]]);
     expect((await readBack()).live).toBe(0);
     // And a merge can be asked for again.
@@ -865,38 +907,37 @@ describe("the review's findings (M5 step 7b)", () => {
     expect((await recheck(OPERATOR, "ws_nowhere")).status).toBe(404);
   });
 
-  it("counts every request, for the task and for the room, through the command itself (M2)", async () => {
+  it("counts every request through the command itself: ten for a task in its whole life, twenty an hour for the room (M2)", async () => {
     const r = await approved();
     await fake({ merge: "refuse" });
-    // Three requests an hour for one task, each failing: asking again doesn't loop without limit.
-    for (let n = 1; n <= 3; n++) {
-      expect((await merge(MERGER, r.id, r.task)).status, String(n)).toBe(200);
-      await pass(r.id);
-      expect(await change(r.id, r.task), String(n)).toMatchObject({ merge_state: "failed", merge_reason: "provider_refused", merge_attempts: n });
-    }
-    const fourth = await merge(MERGER, r.id, r.task);
-    expect([fourth.status, fourth.code]).toEqual([429, "rate_limited"]);
-    expect(await merges()).toHaveLength(3);
-    expect(await inRoom(r.id, (sql) => sql.exec("SELECT count(*) AS n FROM merge_request WHERE task_id = ?", r.task).one().n)).toBe(3);
-    // Twenty an hour for the room: six more tasks, three requests each, and the twenty-first request is refused.
-    let asked = 3;
-    let last = { status: 0, code: undefined as string | undefined };
-    for (let t = 0; t < 6 && asked < 21; t++) {
-      await pull(20 + t);
-      const task = await submitted(r.id, 20 + t);
+    const asked = async (task: string) => {
+      const got = await merge(MERGER, r.id, task);
+      if (got.status === 200) await pass(r.id);
+      return [got.status, got.code ?? "ok"];
+    };
+    // Ten requests for one task, each failing. Asking again never starts the count over, and no wait lifts it.
+    for (let n = 1; n <= 10; n++) expect(await asked(r.task), String(n)).toEqual([200, "ok"]);
+    expect(await asked(r.task)).toEqual([429, "merge_request_limit"]);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE merge_request SET at = at - 7200001"));
+    expect(await asked(r.task)).toEqual([429, "merge_request_limit"]);
+    expect(await merges()).toHaveLength(10);
+    // Twenty an hour for the room, whichever tasks they're for: two more tasks at ten each, and one more request.
+    const others: string[] = [];
+    for (const number of [20, 21, 22]) {
+      await pull(number);
+      const task = await submitted(r.id, number);
       await must(OWNER, "POST", `/v1/workspaces/${r.id}/tasks/${task}/verify`, { submission_no: 1, commit_sha: HEAD });
-      for (let n = 0; n < 3 && asked < 21; n++) {
-        last = await merge(MERGER, r.id, task);
-        asked += 1;
-        if (last.status === 200) await pass(r.id);
-      }
+      others.push(task);
     }
-    expect(asked).toBe(21);
-    expect([last.status, last.code]).toEqual([429, "rate_limited"]);
-    expect(await inRoom(r.id, (sql) => sql.exec("SELECT count(*) AS n FROM merge_request").one().n)).toBe(20);
-    expect(await merges()).toHaveLength(20);
+    for (const task of others.slice(0, 2)) for (let n = 1; n <= 10; n++) expect(await asked(task), `${task} ${n}`).toEqual([200, "ok"]);
+    expect(await asked(others[2])).toEqual([429, "rate_limited"]);
+    // An hour on, the room takes requests again, and the first task still doesn't.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE merge_request SET at = at - 3600001"));
+    expect(await asked(others[2])).toEqual([200, "ok"]);
+    expect(await asked(r.task)).toEqual([429, "merge_request_limit"]);
     // A refused request records nothing and counts for nothing.
-    expect((await events(r.id)).filter((e) => e.type === "merge.requested")).toHaveLength(20);
+    expect(await inRoom(r.id, (sql) => sql.exec("SELECT count(*) AS n FROM merge_request").one().n)).toBe(31);
+    expect((await events(r.id)).filter((e) => e.type === "merge.requested")).toHaveLength(31);
   });
 
   it("honours authority that ends while GitHub is answering: before the mark, and between the mark and the merge (M4)", async () => {
@@ -967,15 +1008,40 @@ describe("the review's findings (M5 step 7b)", () => {
     await pass(r.id);
     expect(await change(r.id, r.task)).toMatchObject({ merge_state: "failed", merge_reason: "grant_required", merge_sha: null });
     expect(await merges()).toEqual([]);
-    // Out of passes after a call: it reads, finds the merge, and records it. If GitHub can't be read, nothing is ended yet.
+    // Out of passes after a call, and GitHub can't be read: that isn't exhaustion and isn't failure. The outcome is
+    // recorded as unknown, said once, and the job goes on reading until it knows.
     const spent = await dieAfterCall();
     await inRoom(spent.id, (sql) => sql.exec("UPDATE task_change SET merge_attempts = 5"));
     await fake({ mergeMint: 500 });
     await pass(spent.id);
-    expect((await change(spent.id, spent.task)).merge_state).toBe("requested");
+    expect(await change(spent.id, spent.task)).toMatchObject({ merge_state: "outcome_unknown", merge_reason: "merge_attempts_exhausted", merge_finished_at: null });
+    expect((await change(spent.id, spent.task)).merge_next_at).toBeGreaterThan(Date.now() + 10 * 60_000);
+    await pass(spent.id);
+    await pass(spent.id);
+    expect((await change(spent.id, spent.task)).merge_state).toBe("outcome_unknown");
+    expect((await events(spent.id)).filter((e) => e.type === "merge.outcome_unknown")).toEqual([{ type: "merge.outcome_unknown", actor_id: "system", subject_id: MERGER.id, task_id: spent.task, reason: null }]);
+    // It can't be asked for again while nobody knows what the first call did.
+    const again = await merge(MERGER, spent.id, spent.task);
+    expect([again.status, again.code]).toEqual([409, "merge_already_requested"]);
+    expect((await must(OWNER, "GET", `/v1/workspaces/${spent.id}/tasks/${spent.task}`)).change.merge_state).toBe("outcome_unknown");
+    // Readable again: the merge the call made is recorded, with no second call.
     await fake({ mergeMint: 201 });
     await pass(spent.id);
-    expect(await change(spent.id, spent.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED });
+    expect(await change(spent.id, spent.task)).toMatchObject({ merge_state: "succeeded", merge_reason: null, merge_sha: MERGED });
+    expect(await merges()).toHaveLength(1);
+    // And one whose call didn't merge, read at last, ends with the reason it was about to end with.
+    await fresh();
+    const open = await requested();
+    await dies(open.id, "before_merge_call");
+    await pass(open.id);
+    await dies(open.id, null);
+    await must(OWNER, "DELETE", `/v1/workspaces/${open.id}/repository/grants/${open.grant}`, { policy_version: await version(open.id) });
+    await fake({ mergeMint: 500 });
+    await pass(open.id);
+    expect(await change(open.id, open.task)).toMatchObject({ merge_state: "outcome_unknown", merge_reason: "grant_required" });
+    await fake({ mergeMint: 201 });
+    await pass(open.id);
+    expect(await change(open.id, open.task)).toMatchObject({ merge_state: "failed", merge_reason: "grant_required", merge_sha: null });
   });
 
   it("keeps an earlier pass's call on record when a later pass can't get a token to call with (L6)", async () => {

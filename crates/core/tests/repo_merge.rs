@@ -1247,18 +1247,62 @@ fn the_merge_calls_answer_is_read_by_status_and_never_as_a_merge() {
 #[test]
 fn merge_caps_and_the_new_failure_codes() {
     use podster_core::repo_merge::{
-        merge_attempt_allowed, merge_request_allowed, MAX_MERGE_ATTEMPTS,
-        MAX_MERGE_REQUESTS_PER_HOUR, MAX_MERGE_REQUESTS_PER_TASK_HOUR,
+        merge_attempt_allowed, merge_request_allowed, RequestLimit, MAX_MERGE_ATTEMPTS,
+        MAX_MERGE_REQUESTS_PER_HOUR, MAX_MERGE_REQUESTS_PER_TASK,
     };
     assert!(merge_attempt_allowed(MAX_MERGE_ATTEMPTS - 1));
     assert!(!merge_attempt_allowed(MAX_MERGE_ATTEMPTS));
-    assert!(merge_request_allowed(MAX_MERGE_REQUESTS_PER_HOUR - 1, 0));
-    assert!(!merge_request_allowed(MAX_MERGE_REQUESTS_PER_HOUR, 0));
-    assert!(merge_request_allowed(
-        0,
-        MAX_MERGE_REQUESTS_PER_TASK_HOUR - 1
-    ));
-    assert!(!merge_request_allowed(0, MAX_MERGE_REQUESTS_PER_TASK_HOUR));
+    assert_eq!(
+        merge_request_allowed(MAX_MERGE_REQUESTS_PER_HOUR - 1, 0),
+        Ok(())
+    );
+    assert_eq!(
+        merge_request_allowed(MAX_MERGE_REQUESTS_PER_HOUR, 0),
+        Err(RequestLimit::Room)
+    );
+    assert_eq!(
+        merge_request_allowed(0, MAX_MERGE_REQUESTS_PER_TASK - 1),
+        Ok(())
+    );
+    assert_eq!(
+        merge_request_allowed(0, MAX_MERGE_REQUESTS_PER_TASK),
+        Err(RequestLimit::Task)
+    );
+    // The task's lifetime limit is said first, since no wait lifts it.
+    assert_eq!(
+        merge_request_allowed(MAX_MERGE_REQUESTS_PER_HOUR, MAX_MERGE_REQUESTS_PER_TASK),
+        Err(RequestLimit::Task)
+    );
+    assert_eq!(
+        [RequestLimit::Room.code(), RequestLimit::Task.code()],
+        ["rate_limited", "merge_request_limit"]
+    );
+    // An outcome that isn't known yet is settled only by a read: to succeeded with its proof, or to failed.
+    assert_eq!(
+        merge_transition("t", MergeState::Requested, &MergeEvent::OutcomeUnknown),
+        Some(MergeState::OutcomeUnknown)
+    );
+    assert_eq!(
+        merge_transition("t", MergeState::OutcomeUnknown, &MergeEvent::Failed),
+        Some(MergeState::Failed)
+    );
+    assert_eq!(
+        merge_transition("t", MergeState::OutcomeUnknown, &MergeEvent::Requested),
+        None
+    );
+    assert_eq!(
+        merge_transition("t", MergeState::Failed, &MergeEvent::OutcomeUnknown),
+        None
+    );
+    assert_eq!(MergeEvent::OutcomeUnknown.name(), "merge.outcome_unknown");
+    assert_eq!(
+        MergeState::from_name("outcome_unknown"),
+        Some(MergeState::OutcomeUnknown)
+    );
+    assert_eq!(
+        MergeFailure::DefaultBranchChanged.code(),
+        "default_branch_changed"
+    );
     // A call on record can be asked about later, and only a read of GitHub makes it a success.
     let recorded = MergeAuthorized::when_called("t", REPO, ABC);
     assert_eq!(

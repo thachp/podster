@@ -269,3 +269,14 @@ pub fn sees_task_change(caller: &Caller, task: &Task) -> bool {
         || (caller.kind == PrincipalKind::Person
             && !matches!(caller.role, Role::Guest | Role::None))
 }
+
+/// Who may ask for a degraded repository link to be rechecked (M5 step 7b): a Podster operator, as a person, and
+/// nobody in the room. Rules that drifted mean someone with admin rights touched the repository, and the room's own
+/// people may be who did. `is_operator` is the Worker's check of the verified caller against its configured operators.
+pub fn authorize_recheck(kind: PrincipalKind, is_operator: bool) -> Result<(), RepoDenial> {
+    if kind == PrincipalKind::Person && is_operator {
+        Ok(())
+    } else {
+        Err(RepoDenial::NotAllowed)
+    }
+}

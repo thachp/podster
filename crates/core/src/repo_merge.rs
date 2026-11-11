@@ -272,7 +272,8 @@ pub fn decide_merge_request(
             Err(MergeRefusal::CommitChanged)
         }
         MergeState::NotRequested | MergeState::Failed => Ok(MergeState::Requested),
-        MergeState::Requested => Err(MergeRefusal::AlreadyRequested),
+        // One whose outcome isn't known yet is still under way: the job is reading until it knows.
+        MergeState::Requested | MergeState::OutcomeUnknown => Err(MergeRefusal::AlreadyRequested),
         MergeState::Succeeded => Err(MergeRefusal::AlreadyMerged),
     }
 }
@@ -304,6 +305,8 @@ pub enum MergeEvent {
     /// Carries the observation it rests on.
     Succeeded(MergeObserved),
     Failed,
+    /// A merge call went out, the merge was about to end, and the provider couldn't be read to see what the call did.
+    OutcomeUnknown,
 }
 
 impl MergeEvent {
@@ -313,6 +316,7 @@ impl MergeEvent {
             MergeEvent::Requested => "merge.requested",
             MergeEvent::Succeeded(_) => "merge.succeeded",
             MergeEvent::Failed => "merge.failed",
+            MergeEvent::OutcomeUnknown => "merge.outcome_unknown",
         }
     }
 }
@@ -325,10 +329,15 @@ pub fn merge_transition(task_id: &str, from: MergeState, event: &MergeEvent) -> 
         (MergeState::NotRequested | MergeState::Failed, MergeEvent::Requested) => {
             Some(MergeState::Requested)
         }
-        (MergeState::Requested, MergeEvent::Succeeded(seen)) if seen.task_id == task_id => {
+        (MergeState::Requested | MergeState::OutcomeUnknown, MergeEvent::Succeeded(seen))
+            if seen.task_id == task_id =>
+        {
             Some(MergeState::Succeeded)
         }
-        (MergeState::Requested, MergeEvent::Failed) => Some(MergeState::Failed),
+        (MergeState::Requested | MergeState::OutcomeUnknown, MergeEvent::Failed) => {
+            Some(MergeState::Failed)
+        }
+        (MergeState::Requested, MergeEvent::OutcomeUnknown) => Some(MergeState::OutcomeUnknown),
         _ => None,
     }
 }
@@ -361,6 +370,9 @@ pub enum MergeFailure {
     RoomArchived,
     /// `room_suspended`: an operator suspended the room after the merge was asked for.
     RoomSuspended,
+    /// `default_branch_changed`: the repository's default branch on the provider isn't the one the room's link holds.
+    /// The rules protect whichever branch is the default now, so nothing is merged into either.
+    DefaultBranchChanged,
 }
 
 impl MergeFailure {
@@ -378,6 +390,7 @@ impl MergeFailure {
             MergeFailure::AttemptsExhausted => "merge_attempts_exhausted",
             MergeFailure::RoomArchived => "workspace_archived",
             MergeFailure::RoomSuspended => "room_suspended",
+            MergeFailure::DefaultBranchChanged => "default_branch_changed",
         }
     }
 
@@ -538,7 +551,9 @@ pub fn classify_observed_merge(
         return ObservedMerge::Unreviewed;
     }
     match merge_state {
-        MergeState::Requested | MergeState::Succeeded => ObservedMerge::Requested,
+        MergeState::Requested | MergeState::Succeeded | MergeState::OutcomeUnknown => {
+            ObservedMerge::Requested
+        }
         MergeState::NotRequested | MergeState::Failed => ObservedMerge::Unrequested,
     }
 }
@@ -547,16 +562,40 @@ pub fn classify_observed_merge(
 pub const MAX_MERGE_ATTEMPTS: u32 = 5;
 /// How many merge requests one room takes in an hour, counting every request, a repeated one included. Proposed.
 pub const MAX_MERGE_REQUESTS_PER_HOUR: u32 = 20;
-/// How many of them may be for one task. Proposed.
-pub const MAX_MERGE_REQUESTS_PER_TASK_HOUR: u32 = 3;
+/// How many merge requests one task takes in its whole life. Asking again never resets it. Proposed.
+pub const MAX_MERGE_REQUESTS_PER_TASK: u32 = 10;
 
-/// Whether another merge may be asked for, given how many requests the room and this task had in the last hour.
+/// Why a merge can't be asked for just now, by count alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestLimit {
+    /// `rate_limited`: the room has had its requests for this hour.
+    Room,
+    /// `merge_request_limit`: this task has had every merge request it will ever get.
+    Task,
+}
+
+impl RequestLimit {
+    pub fn code(self) -> &'static str {
+        match self {
+            RequestLimit::Room => "rate_limited",
+            RequestLimit::Task => "merge_request_limit",
+        }
+    }
+}
+
+/// Whether another merge may be asked for, given how many requests this task has ever had and how many the room had
+/// in the last hour. The task's own limit is said first: waiting an hour doesn't lift it.
 pub fn merge_request_allowed(
     room_requests_in_last_hour: u32,
-    task_requests_in_last_hour: u32,
-) -> bool {
-    room_requests_in_last_hour < MAX_MERGE_REQUESTS_PER_HOUR
-        && task_requests_in_last_hour < MAX_MERGE_REQUESTS_PER_TASK_HOUR
+    task_requests_ever: u32,
+) -> Result<(), RequestLimit> {
+    if task_requests_ever >= MAX_MERGE_REQUESTS_PER_TASK {
+        Err(RequestLimit::Task)
+    } else if room_requests_in_last_hour >= MAX_MERGE_REQUESTS_PER_HOUR {
+        Err(RequestLimit::Room)
+    } else {
+        Ok(())
+    }
 }
 
 /// Whether the job may make another pass, having made this many.

@@ -957,6 +957,8 @@ pub struct MergeSeen {
     pub pull: PullAnswer,
     /// Whether the default branch contains the commit asked about. `None` if that couldn't be told.
     pub default_branch_has: Option<bool>,
+    /// The repository's default branch as GitHub reports it now. `None` if that couldn't be read.
+    pub default_branch: Option<String>,
 }
 
 /// One call by the merge App, and whether the token made for it is gone.
@@ -1046,10 +1048,10 @@ impl MergeApp {
             (404, _) => PullAnswer::Missing,
             (status, _) => return Err(Failure::Status(status)),
         };
+        let reported = Self::default_branch(token, repo_id).await;
         // `behind` or `identical` is the default branch holding everything the commit has. Only a branch name that's
-        // plain enough to put in a path is asked about, and a commit ID is hex.
-        let plain_branch =
-            plain(&Value::from(default_branch), 255).filter(|name| !name.contains('/'));
+        // plain enough to put in a path is asked about, slashes included, and a commit ID is hex.
+        let plain_branch = plain(&Value::from(default_branch), 255);
         let default_branch_has = match plain_branch.filter(|_| valid_commit_sha(sha)) {
             Some(branch) => {
                 let path = format!("/repositories/{repo_id}/compare/{branch}...{sha}");
@@ -1067,7 +1069,23 @@ impl MergeApp {
         Ok(MergeSeen {
             pull,
             default_branch_has,
+            default_branch: reported,
         })
+    }
+
+    /// The repository's default branch as GitHub reports it now, or `None` if it couldn't be read.
+    async fn default_branch(token: &str, repo_id: i64) -> Option<String> {
+        match call(
+            Method::Get,
+            &format!("/repositories/{repo_id}"),
+            token,
+            None,
+        )
+        .await
+        {
+            Ok((200, repo)) => plain(&repo["default_branch"], 255),
+            _ => None,
+        }
     }
 }
 
@@ -1123,12 +1141,19 @@ impl Merger for MergeApp {
                 }
             }
         };
-        let path = format!("/repositories/{repo_id}/pulls/{number}/merge");
-        let body = json!({ "sha": sha, "merge_method": "merge" });
-        let status = call(Method::Put, &path, &token, Some(body))
-            .await
-            .ok()
-            .map(|(status, _)| status);
+        // Immediately before the call: the default branch GitHub reports must be the one the room's link holds. The
+        // rules protect whichever branch is the default now, so if it isn't, or can't be read, no merge is asked for.
+        let default_now = Self::default_branch(&token, repo_id).await;
+        let status = if default_now.as_deref() == Some(default_branch) {
+            let path = format!("/repositories/{repo_id}/pulls/{number}/merge");
+            let body = json!({ "sha": sha, "merge_method": "merge" });
+            call(Method::Put, &path, &token, Some(body))
+                .await
+                .ok()
+                .map(|(status, _)| status)
+        } else {
+            None
+        };
         let seen = Self::read_state(&token, repo_id, number, sha, default_branch).await;
         let revoked = self.tokens.revoke_token(&token).await == Revoked::Gone;
         MergeStepRead {

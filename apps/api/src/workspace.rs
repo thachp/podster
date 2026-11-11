@@ -3922,7 +3922,7 @@ impl Workspace {
             return self.operator_suspension(req).await;
         }
         if req.path() == merges::INTERNAL_REPOSITORY_RECHECK {
-            return self.operator_recheck().await;
+            return self.operator_recheck(req).await;
         }
         if req.path() == repositories::INTERNAL_PROVIDER_DELIVERY {
             return self.provider_delivery(req).await;

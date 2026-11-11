@@ -664,11 +664,28 @@ async fn lose_answer<T>(env: &Env, subject: &str, answered: R<T>) -> R<T> {
 }
 
 /// `POST /v1/moderation/repositories/{workspace}/recheck`: an operator asks a room to read its repository's protections
-/// back again (M5 step 7b). A link that was `degraded` becomes `ready` only if the read-back is exactly right: nothing
-/// recovers by itself, because rules that changed mean someone with admin rights touched the repository. Answers the
-/// link's status and, if still degraded, the reason. Operators only, and recorded as their action.
-pub async fn recheck_repository(env: &Env, caller: &Caller, workspace: &str) -> R<Response> {
-    require_operator(env, caller)?;
+/// back again (M5 step 7b). `podster_policy` decides who may ask, and `podster_core` what the read-back does: a link
+/// that was `degraded` becomes `ready` only if it is exactly right. Nothing recovers by itself, because rules that
+/// changed mean someone with admin rights touched the repository. Answers the link's status and, if still degraded, the
+/// reason. It needs an idempotency key, and is recorded as the operator's action.
+pub async fn recheck_repository(
+    env: &Env,
+    caller: &Caller,
+    workspace: &str,
+    key: Option<String>,
+) -> R<Response> {
+    let kind = if caller.kind == "person" {
+        podster_policy::PrincipalKind::Person
+    } else {
+        podster_policy::PrincipalKind::Agent
+    };
+    let operator = require_operator(env, caller).is_ok();
+    if podster_policy::repositories::authorize_recheck(kind, operator).is_err() {
+        return Err(ApiError::not_allowed());
+    }
+    let key = key
+        .filter(|key| !key.is_empty() && key.len() <= 200)
+        .ok_or_else(ApiError::idempotency_required)?;
     if !valid_id(workspace) {
         return Err(ApiError::workspace_not_found());
     }
@@ -682,7 +699,7 @@ pub async fn recheck_repository(env: &Env, caller: &Caller, workspace: &str) -> 
         "",
         Headers::new(),
         Method::Post,
-        Some("{}".to_string()),
+        Some(json!({ "operator": caller.id, "key": key }).to_string()),
     )
     .await?;
     if response.status_code() == 200 {

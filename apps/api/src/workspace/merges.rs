@@ -31,7 +31,9 @@ use crate::github::{
     Config, GitHubApp, MergeApp, MergeConfig, MergeSeen, MergeStepRead, Merger, Provider,
     PullAnswer,
 };
-use podster_core::provisioning::{job_backoff_ms, verify_ready, Expected};
+use podster_core::provisioning::{
+    decide_recheck, job_backoff_ms, verify_ready, Expected, Recheck, RecheckRead,
+};
 use podster_core::repo_grants::Grant;
 use podster_core::repo_merge::{
     check_change_standing, check_merge_authority, decide_merge_request, decide_merge_step,
@@ -238,6 +240,14 @@ pub(super) fn request(
             return Err(repositories::denied(denial));
         }
     }
+    // The contract takes these two fields and no other: nothing here can name a repository or a pull request.
+    if body.as_object().is_none_or(|fields| {
+        fields
+            .keys()
+            .any(|name| name != "submission_no" && name != "commit_sha")
+    }) {
+        return Err(ApiError::invalid_argument());
+    }
     let submission_no = body
         .get("submission_no")
         .and_then(Value::as_u64)
@@ -280,34 +290,21 @@ pub(super) fn request(
     });
     decide_merge_request(&authority, change.as_ref()).map_err(refused)?;
     check_change_standing(&inputs.standing(), commit_sha).map_err(refused)?;
-    // Every request counts, a repeated one for the same task included: for the room, and for the task. Requests older
-    // than an hour are forgotten first.
-    exec(
-        sql,
-        "DELETE FROM merge_request WHERE at <= ?",
-        vec![(now - HOUR_MS).into()],
-    )?;
+    // Every request is logged and counts: for the room this hour, and for the task for good. Asking again never
+    // resets either, and the log is kept.
     let count = |filter: &str, bindings: Vec<V>| -> R<u32> {
         Ok(rows(
             sql,
-            &format!("SELECT count(*) AS n FROM merge_request {filter}"),
+            &format!("SELECT count(*) AS n FROM merge_request WHERE {filter}"),
             bindings,
         )?
         .first()
         .map_or(0, |row| int(&row["n"]).clamp(0, i64::from(u32::MAX)) as u32))
     };
-    let for_task = count("WHERE task_id = ?", vec![task_id.into()])?;
-    // Passes already made for this task within the hour still count, so asking again doesn't buy more of them.
-    let carried = if for_task > 0 {
-        inputs
-            .change
-            .as_ref()
-            .map_or(0, |row| int(&row["merge_attempts"]).clamp(0, 64) as u32)
-    } else {
-        0
-    };
-    if !merge_request_allowed(count("", vec![])?, for_task) || !merge_attempt_allowed(carried) {
-        return Err(refuse(429, "rate_limited"));
+    let this_hour = count("at > ?", vec![(now - HOUR_MS).into()])?;
+    let for_task = count("task_id = ?", vec![task_id.into()])?;
+    if let Err(limit) = merge_request_allowed(this_hour, for_task) {
+        return Err(refuse(429, limit.code()));
     }
     // Nothing is recorded that the job could never carry out.
     if !asked.configured {
@@ -323,14 +320,13 @@ pub(super) fn request(
     exec(
         sql,
         "UPDATE task_change SET merge_state = 'requested', merge_reason = NULL, merge_requested_by = ?1, merge_requester_person = ?2,
-           merge_requested_at = ?3, merge_attempts = ?5, merge_next_at = ?3, merge_step = 'requested', merge_finished_at = NULL, updated_at = ?3
+           merge_requested_at = ?3, merge_attempts = 0, merge_next_at = ?3, merge_step = 'requested', merge_finished_at = NULL, updated_at = ?3
          WHERE task_id = ?4",
         vec![
             caller.id.as_str().into(),
             asked.caller_person.as_deref().map_or(V::Null, V::from),
             now.into(),
             task_id.into(),
-            i64::from(carried).into(),
         ],
     )?;
     let told: Vec<String> = store::room_admins(sql)?
@@ -358,7 +354,7 @@ pub(super) fn next_due(sql: &SqlStorage, env: &Env, now: i64) -> R<Option<i64>> 
     }
     Ok(rows(
         sql,
-        "SELECT min(merge_next_at) AS due FROM task_change WHERE merge_state = 'requested'",
+        "SELECT min(merge_next_at) AS due FROM task_change WHERE merge_state IN ('requested', 'outcome_unknown')",
         vec![],
     )?
     .first()
@@ -512,7 +508,7 @@ enum Begun {
     Wait,
     /// The merge is to end with this failure, and a merge call is on record: GitHub is read first, and what it shows
     /// is what's recorded.
-    Observe(Target, MergeFailure),
+    Observe(Target, Ending),
     Go(Box<Pass>),
 }
 
@@ -551,7 +547,7 @@ fn begin(
     // Once a call has gone out, nothing ends the merge without a read of what that call did.
     let end = |failure: MergeFailure| -> R<Begun> {
         match target.clone().filter(|_| called) {
-            Some(target) => Ok(Begun::Observe(target, failure)),
+            Some(target) => Ok(Begun::Observe(target, failure.into())),
             None => {
                 finish_failed(sql, room, task_id, failure, now)?;
                 Ok(Begun::Nothing)
@@ -663,13 +659,86 @@ fn finish_failed(
     failure: MergeFailure,
     now: i64,
 ) -> R<()> {
+    fail_with(sql, room, task_id, &Ending::from(failure), now)
+}
+
+/// How a merge is to end as failed: its reason code, and whether it's a changed commit, which is kept for good.
+#[derive(Clone)]
+struct Ending {
+    code: String,
+    follow_up: bool,
+}
+
+impl From<MergeFailure> for Ending {
+    fn from(failure: MergeFailure) -> Ending {
+        Ending {
+            code: failure.code().to_string(),
+            follow_up: failure.needs_follow_up(),
+        }
+    }
+}
+
+/// How long between reads of a merge whose outcome isn't known yet. They go on until one settles it.
+const UNKNOWN_READ_EVERY_MS: i64 = 15 * 60 * 1000;
+
+/// Records that a merge call went out, the merge was about to end as `pending`, and GitHub couldn't be read to see what
+/// the call did. Not an end: the job keeps reading, and the first read that works settles it, as succeeded if the call
+/// merged the reviewed commit and as failed with `pending` otherwise. Said once, with its event.
+fn finish_unknown(
+    sql: &SqlStorage,
+    room: &str,
+    task_id: &str,
+    pending: &Ending,
+    now: i64,
+) -> R<()> {
+    let from = merge_state_of(sql, task_id)?;
+    match from.and_then(|from| merge_transition(task_id, from, &MergeEvent::OutcomeUnknown)) {
+        Some(MergeState::OutcomeUnknown) => {}
+        // Already unknown: only the next read's time moves.
+        _ => {
+            return exec(
+                sql,
+                "UPDATE task_change SET merge_next_at = ? WHERE task_id = ? AND merge_state = 'outcome_unknown'",
+                vec![(now + UNKNOWN_READ_EVERY_MS).into(), task_id.into()],
+            )
+        }
+    }
+    exec(
+        sql,
+        "UPDATE task_change SET merge_state = 'outcome_unknown', merge_reason = ?1, merge_next_at = ?2, merge_step = 'outcome_unknown', updated_at = ?3 WHERE task_id = ?4",
+        vec![
+            pending.code.as_str().into(),
+            (now + UNKNOWN_READ_EVERY_MS).into(),
+            now.into(),
+            task_id.into(),
+        ],
+    )?;
+    let requester = requester_of(sql, task_id)?;
+    store::record_event_about(
+        sql,
+        MergeEvent::OutcomeUnknown.name(),
+        SYSTEM,
+        Some(&requester),
+        Some(task_id),
+        &Transition::NONE,
+        told_of_outcome(sql, &requester)?,
+        now,
+    )?;
+    console_log!(
+        "{}",
+        json!({ "event": "merge.outcome_unknown", "ws": room, "task": task_id })
+    );
+    Ok(())
+}
+
+fn fail_with(sql: &SqlStorage, room: &str, task_id: &str, ending: &Ending, now: i64) -> R<()> {
     let from = merge_state_of(sql, task_id)?;
     let Some(MergeState::Failed) =
         from.and_then(|from| merge_transition(task_id, from, &MergeEvent::Failed))
     else {
         return Ok(());
     };
-    let code = failure.code();
+    let code = ending.code.as_str();
     exec(
         sql,
         "UPDATE task_change SET merge_state = 'failed', merge_reason = ?1, merge_finished_at = ?2, merge_next_at = NULL, merge_step = 'failed',
@@ -678,7 +747,7 @@ fn finish_failed(
         vec![
             code.into(),
             now.into(),
-            flag(failure.needs_follow_up()),
+            flag(ending.follow_up),
             task_id.into(),
         ],
     )?;
@@ -765,6 +834,37 @@ fn observation<'a>(pull: &'a PullSeen, default_branch_has: Option<bool>) -> Pull
     }
 }
 
+/// Sets a ready link `degraded`, with the reason and an event for the room's owner and admins. Only for a definite
+/// difference from what provisioning set. Coding work in the room stops until an operator has rechecked it.
+fn degrade(sql: &SqlStorage, repo_id: i64, code: &'static str, now: i64) -> R<()> {
+    let was_ready = !rows(
+        sql,
+        "SELECT 1 AS ready FROM repo_link WHERE provider_repo_id = ? AND status = 'ready'",
+        vec![repo_id.into()],
+    )?
+    .is_empty();
+    if !was_ready {
+        return Ok(());
+    }
+    exec(
+        sql,
+        "UPDATE repo_link SET status = 'degraded', status_reason = ?, updated_at = ? WHERE provider_repo_id = ? AND status = 'ready'",
+        vec![code.into(), now.into(), repo_id.into()],
+    )?;
+    record_event(
+        sql,
+        "repository.degraded",
+        SYSTEM,
+        None,
+        &Transition {
+            reason: Some(code),
+            ..Transition::NONE
+        },
+        store::room_admins(sql)?,
+        now,
+    )
+}
+
 /// What a read-back of the repository's protections came to.
 pub(super) enum Readiness {
     Ready,
@@ -825,10 +925,11 @@ impl Workspace {
         }
     }
 
-    /// An operator's recheck of a degraded link (reached only from `crate::moderation`, which has checked the
-    /// operator): the same read-back, and only if it's exactly right, the link is `ready` again, with an event. Nothing
-    /// recovers by itself: a person looked, and asked.
-    pub(super) async fn operator_recheck(&self) -> R<Value> {
+    /// An operator's recheck of a degraded link, `{ operator, key }` (reached only from `crate::moderation`, which has
+    /// run policy on the verified caller). The same read-back as the merge job's, then `core::decide_recheck`: only a
+    /// degraded link read back exactly right becomes `ready`. A command: the link, its event and outbox rows and the
+    /// idempotency record commit in one transaction, and the same key answers the same again. Nothing recovers by itself.
+    pub(super) async fn operator_recheck(&self, mut req: Request) -> R<Value> {
         let sql = self.state.storage().sql();
         if !store::is_initialized(&sql)? {
             return Err(ApiError::workspace_not_found());
@@ -837,46 +938,70 @@ impl Workspace {
         if !provisioning::enabled(&self.env, &sql)? {
             return Err(ApiError::not_found());
         }
+        let body: Value =
+            serde_json::from_str(&req.text().await?).map_err(|_| ApiError::invalid_argument())?;
+        let (Some(operator), Some(key)) = (text(&body["operator"]), text(&body["key"])) else {
+            return Err(ApiError::invalid_argument());
+        };
+        let hash = format!("{:x}", Sha256::digest(b"POST repository recheck"));
+        if let Some(answer) = stored_answer(&sql, &operator, &key, &hash, now_ms())? {
+            return Ok(answer);
+        }
         let found = rows(
             &sql,
-            "SELECT provider_repo_id, default_branch, visibility, status FROM repo_link WHERE provider = 'github'",
+            "SELECT provider_repo_id, default_branch, visibility, status, status_reason FROM repo_link WHERE provider = 'github'",
             vec![],
         )?;
         let Some(link) = found.first() else {
             return Err(refuse(409, "repo_not_ready"));
         };
-        let status = text(&link["status"]).unwrap_or_default();
-        if status != LinkStatus::Degraded.name() {
-            return Ok(json!({ "status": status, "reason": Value::Null }));
-        }
+        let Some(status) = link["status"].as_str().and_then(LinkStatus::from_name) else {
+            return Err(ApiError::internal("unknown link status"));
+        };
         let repo_id = int(&link["provider_repo_id"]);
-        let room = rows(&sql, "SELECT id FROM workspace", vec![])?
-            .first()
-            .and_then(|row| text(&row["id"]))
-            .unwrap_or_default();
-        let read = self
-            .readiness(
-                repo_id,
-                link["visibility"].as_str() == Some("public"),
-                link["default_branch"].as_str().unwrap_or_default(),
-                &room,
+        // Only a degraded link is read: for any other the decision is the same whatever GitHub says.
+        let read = if status == LinkStatus::Degraded {
+            let room = rows(&sql, "SELECT id FROM workspace", vec![])?
+                .first()
+                .and_then(|row| text(&row["id"]))
+                .unwrap_or_default();
+            Some(
+                match self
+                    .readiness(
+                        repo_id,
+                        link["visibility"].as_str() == Some("public"),
+                        link["default_branch"].as_str().unwrap_or_default(),
+                        &room,
+                    )
+                    .await
+                {
+                    Readiness::Ready => RecheckRead::ExactlyRight,
+                    Readiness::Mismatch(code) => RecheckRead::Differs(code),
+                    Readiness::CouldNotRead(_) => RecheckRead::CouldNotRead,
+                },
             )
-            .await;
-        match read {
-            Readiness::CouldNotRead(_) => Err(refuse(502, "provider_unavailable")),
-            Readiness::Mismatch(code) => {
-                self.in_transaction(move |sql| {
+        } else {
+            None
+        };
+        let unchanged = json!({ "status": status.name(), "reason": link["status_reason"] });
+        self.in_transaction(move |sql| {
+            let now = now_ms();
+            // The link as it is now, in case it changed while GitHub was answering.
+            let current = rows(sql, "SELECT status FROM repo_link WHERE provider_repo_id = ?", vec![repo_id.into()])?
+                .first()
+                .and_then(|row| row["status"].as_str().and_then(LinkStatus::from_name));
+            let answer = match decide_recheck(current.unwrap_or(status), read.filter(|_| current == Some(status))) {
+                Recheck::Unchanged => unchanged,
+                Recheck::Unavailable => return Err(refuse(502, "provider_unavailable")),
+                Recheck::StillDegraded(code) => {
                     exec(
                         sql,
                         "UPDATE repo_link SET status_reason = ?, updated_at = ? WHERE provider_repo_id = ? AND status = 'degraded'",
-                        vec![code.into(), now_ms().into(), repo_id.into()],
-                    )
-                })?;
-                Ok(json!({ "status": LinkStatus::Degraded.name(), "reason": code }))
-            }
-            Readiness::Ready => {
-                self.in_transaction(move |sql| {
-                    let now = now_ms();
+                        vec![code.into(), now.into(), repo_id.into()],
+                    )?;
+                    json!({ "status": LinkStatus::Degraded.name(), "reason": code })
+                }
+                Recheck::MakeReady => {
                     exec(
                         sql,
                         "UPDATE repo_link SET status = 'ready', status_reason = NULL, verified_at = ?1, updated_at = ?1 WHERE provider_repo_id = ?2 AND status = 'degraded'",
@@ -890,11 +1015,13 @@ impl Workspace {
                         &Transition::NONE,
                         store::room_admins(sql)?,
                         now,
-                    )
-                })?;
-                Ok(json!({ "status": LinkStatus::Ready.name(), "reason": Value::Null }))
-            }
-        }
+                    )?;
+                    json!({ "status": LinkStatus::Ready.name(), "reason": Value::Null })
+                }
+            };
+            store_answer(sql, &operator, &key, &hash, &answer, now)?;
+            Ok(answer)
+        })
     }
 
     /// The merge job, run by the room's alarm: one pass at each merge that's due, a couple an alarm.
@@ -905,7 +1032,7 @@ impl Workspace {
         }
         let due: Vec<String> = rows(
             &sql,
-            "SELECT task_id FROM task_change WHERE merge_state = 'requested' AND merge_next_at <= ? ORDER BY merge_next_at LIMIT ?",
+            "SELECT task_id FROM task_change WHERE merge_state IN ('requested', 'outcome_unknown') AND merge_next_at <= ? ORDER BY merge_next_at LIMIT ?",
             vec![now_ms().into(), (MAX_MERGES_PER_ALARM as i64).into()],
         )?
         .iter()
@@ -1018,7 +1145,9 @@ impl Workspace {
         failure: MergeFailure,
     ) -> R<()> {
         if called {
-            return self.observe_then_end(room, task_id, target, failure).await;
+            return self
+                .observe_then_end(room, task_id, target, failure.into())
+                .await;
         }
         let (room, task) = (room.to_string(), task_id.to_string());
         self.in_transaction(move |sql| finish_failed(sql, &room, &task, failure, now_ms()))
@@ -1033,12 +1162,18 @@ impl Workspace {
         room: &str,
         task_id: &str,
         target: &Target,
-        failure: MergeFailure,
+        failure: Ending,
     ) -> R<()> {
         let sql = self.state.storage().sql();
+        // GitHub can't be read: the outcome isn't known. That's recorded as such, never as a failure, and the job goes
+        // on reading until it is known.
+        let unknown = |pending: Ending| -> R<()> {
+            let (room, task) = (room.to_string(), task_id.to_string());
+            self.in_transaction(move |sql| finish_unknown(sql, &room, &task, &pending, now_ms()))
+        };
         let Some(config) = self.merge_config(&sql) else {
             self.log_waiting(room, task_id, "configuration", 0);
-            return Ok(());
+            return unknown(failure);
         };
         let read = MergeApp::new(config)
             .observe(
@@ -1053,7 +1188,7 @@ impl Workspace {
             Ok(seen) => seen,
             Err(read_failure) => {
                 self.log_waiting(room, task_id, "read", read_failure.status());
-                return Ok(());
+                return unknown(failure);
             }
         };
         let recorded = MergeAuthorized::when_called(task_id, target.repo_id, &target.commit);
@@ -1081,14 +1216,36 @@ impl Workspace {
         let (room, task) = (room.to_string(), task_id.to_string());
         self.in_transaction(move |sql| match merged {
             Some((proof, pull)) => finish_succeeded(sql, &room, &task, proof, &pull, now_ms()),
-            None => finish_failed(sql, &room, &task, failure, now_ms()),
+            None => fail_with(sql, &room, &task, &failure, now_ms()),
         })
+    }
+
+    /// A pass at a merge whose outcome isn't known: it only reads, and the read settles it.
+    async fn observe_unknown(&self, room: &str, task_id: &str) -> R<()> {
+        let sql = self.state.storage().sql();
+        let pending = rows(
+            &sql,
+            "SELECT merge_reason, commit_changed_at FROM task_change WHERE task_id = ? AND merge_state = 'outcome_unknown'",
+            vec![task_id.into()],
+        )?;
+        let (Some(row), Some(target)) = (pending.first(), target(&sql, task_id)?) else {
+            return Ok(());
+        };
+        let ending = Ending {
+            code: text(&row["merge_reason"]).unwrap_or_else(|| "merge_outcome_unknown".to_string()),
+            follow_up: false,
+        };
+        self.observe_then_end(room, task_id, &target, ending).await
     }
 
     /// One pass at one merge. Every way out leaves the merge either ended or due another pass, already counted.
     async fn merge_pass(&self, room: &str, task_id: &str) -> R<()> {
         // The owner's standing is asked of their `Principal` first: a grant counts only while its giver holds the
         // delegation. If it can't say, the pass is counted and waits.
+        let state = self.state.storage().sql();
+        if merge_state_of(&state, task_id)? == Some(MergeState::OutcomeUnknown) {
+            return self.observe_unknown(room, task_id).await;
+        }
         let owner_holds = self.owner_holds().await;
         let begun = self.in_transaction({
             let (room, task) = (room.to_string(), task_id.to_string());
@@ -1100,8 +1257,8 @@ impl Workspace {
                 self.log_waiting(room, task_id, "standing", 0);
                 return Ok(());
             }
-            Begun::Observe(target, failure) => {
-                return self.observe_then_end(room, task_id, &target, failure).await
+            Begun::Observe(target, ending) => {
+                return self.observe_then_end(room, task_id, &target, ending).await
             }
             Begun::Go(pass) => pass,
         };
@@ -1125,29 +1282,13 @@ impl Workspace {
                 // Nothing is marked or merged in a repository whose rules aren't the ones Podster set, and coding
                 // work in the room stops until an operator has looked and rechecked it.
                 let repo_id = target.repo_id;
-                self.in_transaction(move |sql| {
-                    let now = now_ms();
-                    exec(
-                        sql,
-                        "UPDATE repo_link SET status = 'degraded', status_reason = ?, updated_at = ? WHERE provider_repo_id = ? AND status = 'ready'",
-                        vec![code.into(), now.into(), repo_id.into()],
-                    )?;
-                    record_event(
-                        sql,
-                        "repository.degraded",
-                        SYSTEM,
-                        None,
-                        &Transition {
-                            reason: Some(code),
-                            ..Transition::NONE
-                        },
-                        store::room_admins(sql)?,
-                        now,
-                    )
-                })?;
-                return self
-                    .end(room, task_id, target, pass.called, MergeFailure::NotReady)
-                    .await;
+                self.in_transaction(move |sql| degrade(sql, repo_id, code, now_ms()))?;
+                let failure = if code == DEFAULT_BRANCH_CHANGED {
+                    MergeFailure::DefaultBranchChanged
+                } else {
+                    MergeFailure::NotReady
+                };
+                return self.end(room, task_id, target, pass.called, failure).await;
             }
         }
         // The pull request and the default branch, as they are now.
@@ -1316,6 +1457,23 @@ impl Workspace {
             }
             PullAnswer::Missing => return finish(MergeFailure::PullClosed),
         };
+        // The default branch GitHub reports, read with the pull request, must be the one the link holds: before the mark,
+        // and again in the read that follows the merge call. A different one is a definite answer: the link is degraded
+        // and nothing is merged into either branch. One that couldn't be read settles nothing.
+        match seen.default_branch.as_deref() {
+            Some(reported) if reported == target.default_branch => {}
+            Some(_) => {
+                let repo_id = target.repo_id;
+                self.in_transaction(move |sql| {
+                    degrade(sql, repo_id, DEFAULT_BRANCH_CHANGED, now_ms())
+                })?;
+                return finish(MergeFailure::DefaultBranchChanged);
+            }
+            None => {
+                self.log_waiting(room, task_id, "default_branch", 0);
+                return Ok(None);
+            }
+        }
         // Merged before this job ever asked GitHub for a merge: someone else's, whatever commit it was of.
         if pull.state == PullState::Merged && !pass.called && call.is_none() {
             return finish(MergeFailure::MergedElsewhere);

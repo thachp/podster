@@ -1468,7 +1468,12 @@ impl Workspace {
         // Once a merge call is on record, what became of it comes first. A merge that landed is recorded as merged even
         // if the default branch was changed between the check before the call and this read. The link is still
         // degraded for that, so nothing more is merged until an operator has looked.
-        if (pass.called || call.is_some()) && pull.state == PullState::Merged {
+        // Only with the default branch read: without that comparison nothing is recorded as merged, and the next pass
+        // reads again.
+        if (pass.called || call.is_some())
+            && pull.state == PullState::Merged
+            && seen.default_branch.is_some()
+        {
             let landed = decide_merge_step(
                 &pass.authorized,
                 &reviewed,

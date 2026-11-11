@@ -17,7 +17,8 @@
 // login, and checks what the apps logged during the run (M4-16). No second terminal, and no secret on a command line.
 //
 // Exit codes: 0 when every check passed, and on staging with nothing skipped, printed as one line with the counts. 1 when any
-// check failed, or on staging when any was skipped. 3 when public rooms are off. A limit this run can't check by design is
+// check failed, or on staging when any was skipped. 2, before any request, for a wrong argument or host, a missing secret, or
+// an app with no installed wrangler to tail with. 3 when public rooms are off. A limit this run can't check by design is
 // printed "owed", doesn't fail it, and is listed as owed in docs/m4-plan.md's abuse review.
 //
 // Agents connect over MCP through the official SDK, and some over Agent Auth with the real signer. M4-17's A2A participant
@@ -31,6 +32,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AuthAgent, linkedA2aToken, McpAgent, ok, Person, sleep, Target } from "./lib.mjs";
+import { edgeRefused, missingWranglers } from "./m4-staging-lib.mjs";
 import { RoomPublisher } from "./room-publisher.mjs";
 import { JsonStream } from "./tail-stream.mjs";
 
@@ -71,6 +73,13 @@ const target = new Target(base, { pollMs: isLocal ? 150 : 1000 });
 const operatorIdOnly = args.includes("--operator-id");
 if (operatorIdOnly && isLocal) {
   console.error("--operator-id is for staging's test operator.");
+  process.exit(2);
+}
+// The tails start from each app's own installed wrangler. Checked before any request, so a checkout without them stops here
+// rather than after the room owner's sign-up.
+const uninstalled = isLocal || operatorIdOnly ? [] : missingWranglers(repo);
+if (uninstalled.length) {
+  console.error(`A staging run tails the API, the gateway and the web app with each one's own wrangler, and ${uninstalled.map((app) => `apps/${app}`).join(", ")} ${uninstalled.length === 1 ? "has" : "have"} none installed. Run \`npm ci\` in ${uninstalled.length === 1 ? "it" : "each"} first. Nothing was sent.`);
   process.exit(2);
 }
 const RUN = `M4 staging ${new Date().toISOString().slice(0, 16)}`;
@@ -699,16 +708,15 @@ try {
     // A forged address can't dodge it: Cloudflare's edge sets cf-connecting-ip itself.
     if (!isLocal) {
       // Either the edge refuses the request before the app sees it, or the app still counts the real client and limits it.
-      // The edge's refusal is a 403 saying exactly "error code: 1000", marked as Cloudflare's own by its server or cf-ray
-      // header, with none of the app's own public headers, so a 403 from the app itself isn't taken for it. Any other answer is named, by status only.
+      // The edge's refusal is Cloudflare's error 1000, as plain text or as its HTML page (m4-staging-lib.mjs says exactly
+      // what counts), with none of the app's own public headers, so a 403 from the app itself isn't taken for it. Any other answer is named, by status only.
       const forged = () => rawPage(room.handle, { headers: { "cf-connecting-ip": `198.51.100.${Math.floor(Math.random() * 250) + 1}` } });
-      const edgeRefused = (res, body) => res.status === 403 && /^error code: 1000\n?$/.test(body) && !res.headers.has("content-security-policy") && !res.headers.has("x-robots-tag") && (res.headers.get("server") === "cloudflare" || res.headers.has("cf-ray"));
       let outcome = null;
       for (let n = 1; n <= 400 && !outcome; n++) {
         const res = await forged();
         const body = await res.text();
         if (res.status === 429) outcome = { kind: "limited", n };
-        else if (edgeRefused(res, body)) outcome = { kind: "edge", n };
+        else if (edgeRefused(res.status, res.headers, body)) outcome = { kind: "edge", n };
         else if (res.status !== 200) outcome = { kind: "other", n, status: res.status };
       }
       if (outcome?.kind === "other") record("fail", "a forged cf-connecting-ip got an answer other than the page, the limit or the edge's refusal", `HTTP ${outcome.status} at request ${outcome.n}`);
@@ -717,9 +725,9 @@ try {
         let refused = 0;
         for (let n = 0; n < 5; n++) {
           const res = await forged();
-          if (edgeRefused(res, await res.text())) refused += 1;
+          if (edgeRefused(res.status, res.headers, await res.text())) refused += 1;
         }
-        check(outcome.n === 1 && refused === 5, "Cloudflare's edge refuses a forged cf-connecting-ip before the app, so it can't choose the client the limit counts", `403 error code: 1000 first at request ${outcome.n}, then on ${refused} of 5 more`);
+        check(outcome.n === 1 && refused === 5, "Cloudflare's edge refuses a forged cf-connecting-ip before the app, so it can't choose the client the limit counts", `403 error 1000 first at request ${outcome.n}, then on ${refused} of 5 more`);
       } else check(outcome?.kind === "limited", "a forged cf-connecting-ip doesn't dodge the limit", outcome ? `refused at request ${outcome.n}` : "no 429 in 400 requests");
       if (outcome?.kind === "limited") await sleep(61_000);
     } else owed("a forged cf-connecting-ip", "only Cloudflare's edge can show it overwrites the header; checked on staging");

@@ -30,6 +30,18 @@ async function api(who: Who, method: string, path: string, body?: unknown, idemp
   return { status: res.status, body: parsed, code: parsed?.error?.code };
 }
 
+/**
+ * The next time the Worker starts reading this upload's bytes: past the room's begin step and the uploader's first check. A test
+ * build tells the outbound fake (see `uploadGate` in vitest.config.ts), and the wait is a request of the test's own, so the test
+ * acts while the bytes arrive instead of sleeping and hoping. `seen` is how many times it had started before.
+ */
+const GATE = "https://upload-gate.example.com";
+async function nextReading(object: string) {
+  const seen = ((await (await fetch(`${GATE}/count/${object}`)).json()) as any).count as number;
+  return { seen, reading: fetch(`${GATE}/wait/${object}/${seen + 1}`).then(async (res) => ((await res.json()) as any).count > seen) };
+}
+const stopWaiting = async (object: string) => void (await (await fetch(`${GATE}/cancel/${object}`)).text());
+
 beforeAll(async () => {
   key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
   for (const statement of BINDINGS.TEST_D1_SCHEMA.split(";").map((x: string) => x.trim()).filter(Boolean)) await BINDINGS.DB.prepare(statement).run();
@@ -77,8 +89,19 @@ async function create(uploads: string, data: Uint8Array = TEXT, over: object = {
 const coordinator = async (who: Who, id: string) => {
   expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${who.id}/access`, { preset: "coordinator", policy_version: await version(id) })).status).toBe(200);
 };
-const put = (upload: { upload_path: string; token: string }, body?: BodyInit | null, token: string | null = upload.token) =>
-  SELF.fetch(`https://api.internal${upload.upload_path}`, { method: "PUT", headers: token ? { authorization: `Bearer ${token}` } : {}, body: body as any });
+const put = (upload: { upload_path: string; token: string }, body?: BodyInit | null, token: string | null = upload.token, limits?: string) =>
+  SELF.fetch(`https://api.internal${upload.upload_path}`, { method: "PUT", headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(limits ? { "x-test-upload-limits": limits } : {}) }, body: body as any });
+/** Starts sending, and answers once the Worker is reading the bytes, with the request still going. The request is wrapped, as
+ * returning the promise itself would make the caller's `await` wait for the whole upload. */
+async function sending(upload: { id: string; upload_path: string; token: string }, body: BodyInit, limits?: string) {
+  const { reading } = await nextReading(upload.id);
+  const going = put(upload, body, upload.token, limits);
+  const first = await Promise.race([reading, going.then(() => false)]);
+  if (!first) await stopWaiting(upload.id);
+  expect(first, "the upload was answered before its bytes were read").toBe(true);
+  return { going };
+}
+
 const answer = async (res: Response) => ({ status: res.status, body: (await res.json()) as any });
 const code = async (res: Response) => ((await res.json()) as any).error?.code;
 const row = (id: string, object: string) => runInDurableObject(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)), (_: any, state: any) => state.storage.sql.exec("SELECT * FROM stored_object WHERE id = ?", object).toArray()[0]);
@@ -106,7 +129,25 @@ const heldBody = (data: Uint8Array = TEXT) => {
   });
   return { body, release };
 };
-const underWay = () => new Promise((resolve) => setTimeout(resolve, 100));
+/**
+ * Blocks the room's input until released, and answers once the block holds. The room says so through the outbound fake, so the
+ * test hears it in a request of its own, not inside the room's.
+ */
+async function blockRoom(id: string) {
+  let unblock = () => {};
+  const blocked = new Promise<void>((resolve) => (unblock = resolve));
+  const tag = `block-${id}`;
+  const { reading } = await nextReading(tag);
+  const holding = runInDurableObject(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)), (_: any, state: any) => state.blockConcurrencyWhile(async () => {
+    await fetch(`${GATE}/receiving/${tag}`);
+    await blocked;
+  }));
+  expect(await reading).toBe(true);
+  return async () => {
+    unblock();
+    await holding;
+  };
+}
 
 describe("create_upload", () => {
   it("reserves the space, cleans the name and answers with a way to send the bytes", async () => {
@@ -354,8 +395,7 @@ describe("the bytes of an upload", () => {
         controller.close();
       },
     });
-    const first = put(upload, slow);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    const { going: first } = await sending(upload, slow);
     expect((await put(upload, TEXT)).status).toBe(200);
     const saved = await row(id, upload.id);
     release();
@@ -384,10 +424,8 @@ describe("the bytes of an upload", () => {
     };
     const older = hold();
     const newer = hold();
-    const first = put(upload, older.body);
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    const second = put(upload, newer.body);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    const { going: first } = await sending(upload, older.body);
+    const { going: second } = await sending(upload, newer.body);
     older.release();
     const late = await first;
     expect(late.status).toBe(409);
@@ -415,8 +453,7 @@ describe("the bytes of an upload", () => {
         controller.close();
       },
     });
-    const going = put(upload, slow);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    const { going } = await sending(upload, slow);
     expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/members/${MEMBER.id}/access`, { preset: "guest", policy_version: await version(id) })).status).toBe(200);
     release();
     const finished = await going;
@@ -440,8 +477,7 @@ describe("the bytes of an upload", () => {
         controller.close();
       },
     });
-    const going = put(during, slow);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    const { going } = await sending(during, slow);
     expect((await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${MEMBER.id}`, { policy_version: await version(id) })).status).toBe(200);
     release();
     const finished = await going;
@@ -502,7 +538,8 @@ describe("the bytes of an upload", () => {
     it("gives up on a sender that goes quiet, keeping nothing, and the upload can be tried again", async () => {
       const { id, uploads } = await room();
       const upload = await create(uploads);
-      const res = await put(upload, heldBody().body);
+      // Only this request's sender limit is short. The body never finishes, so running out is the only way it ends.
+      const res = await put(upload, heldBody().body, upload.token, "idle=1000");
       expect(res.status).toBe(408);
       expect(await code(res)).toBe("upload_timed_out");
       expect(await stored(id)).toEqual([]);
@@ -522,7 +559,9 @@ describe("the bytes of an upload", () => {
           }
         },
       });
-      const res = await put(upload, trickle);
+      // Only this request's total limit is short, and the idle limit is production's, so the bytes never stop for long enough to
+      // count as quiet. The 500 ms between bytes is the sender's own pace, not a wait for the Worker.
+      const res = await put(upload, trickle, upload.token, "total=2000");
       stop = true;
       expect(res.status).toBe(408);
       expect(await code(res)).toBe("upload_timed_out");
@@ -595,15 +634,12 @@ describe("the bytes of an upload", () => {
   it("answers when the room is stuck at the start, reading no bytes", async () => {
     const { id, uploads } = await room();
     const upload = await create(uploads);
-    let unblock = () => {};
-    const blocked = new Promise<void>((resolve) => (unblock = resolve));
-    const holding = runInDurableObject(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)), (_: any, state: any) => state.blockConcurrencyWhile(() => blocked));
-    await underWay();
-    const res = await put(upload, TEXT);
+    const unblock = await blockRoom(id);
+    // Only the wait for the room's begin step is short, and the room is held until after the answer.
+    const res = await put(upload, TEXT, upload.token, "begin=1000");
     expect(res.status).toBe(504);
     expect(await code(res)).toBe("room_unavailable");
-    unblock();
-    await holding;
+    await unblock();
     expect(await stored(id)).toEqual([]);
   }, 15_000);
 
@@ -619,19 +655,15 @@ describe("the bytes of an upload", () => {
     const { id, uploads } = await room();
     const upload = await create(uploads);
     const held = heldBody();
-    const going = put(upload, held.body);
-    await underWay();
-    let unblock = () => {};
-    const blocked = new Promise<void>((resolve) => (unblock = resolve));
-    const holding = runInDurableObject(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)), (_: any, state: any) => state.blockConcurrencyWhile(() => blocked));
-    await underWay();
+    // Only the wait for the room's answer after the bytes is short, and the room is held from before the bytes finish.
+    const { going } = await sending(upload, held.body, "complete=1000");
+    const unblock = await blockRoom(id);
     held.release();
     const res = await going;
     expect(res.status).toBe(504);
     expect(await code(res)).toBe("upload_outcome_unknown");
     expect((await stored(id)).length).toBe(1);
-    unblock();
-    await holding;
+    await unblock();
   }, 15_000);
 
   it("refuses bytes in a room archived before or during the upload, and keeps none", async () => {
@@ -648,8 +680,7 @@ describe("the bytes of an upload", () => {
         controller.close();
       },
     });
-    const going = put(during, slow);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    const { going } = await sending(during, slow);
     expect((await api(OWNER, "POST", `/v1/workspaces/${id}/archive`, { policy_version: await version(id) })).status).toBe(200);
     release();
     const finished = await going;
@@ -669,8 +700,7 @@ describe("the bytes of an upload", () => {
       const { id, uploads } = await room();
       const upload = await create(uploads);
       const held = heldBody();
-      const going = put(upload, held.body);
-      await underWay();
+      const { going } = await sending(upload, held.body);
       await reservationEnds(id, upload.id);
       held.release();
       expect((await going).status).toBe(200);
@@ -680,8 +710,7 @@ describe("the bytes of an upload", () => {
       const { id, uploads } = await room();
       const upload = await create(uploads);
       const held = heldBody();
-      const going = put(upload, held.body);
-      await underWay();
+      const { going } = await sending(upload, held.body);
       await reservationEnds(id, upload.id);
       // Its space came back, and someone else takes all of it.
       await inRoom(id, (sql) => sql.exec("INSERT INTO stored_object (id, name, size, sha256, state, token_hash, uploaded_by, created_at, upload_expires_at) VALUES ('full', 'x', 5000000000, 'x', 'scanning', '', 'o', 0, 0)"));
@@ -718,18 +747,23 @@ describe("the bytes of an upload", () => {
       await coordinator(who, id);
       return who;
     };
-    const freshAdmin = async (id: string) => {
-      const who: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a" };
+    /** A person whose departures, in a test build, reach none of their rooms for a day: see `per_unswept_` in principal.rs. */
+    const freshAdmin = async (id: string, prefix = "per_") => {
+      const who: Who = { id: `${prefix}${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a" };
       await addPerson(id, who, "admin");
       return who;
     };
 
-    /** Answers without the body ever finishing, which only a check before the bytes can do. */
+    /** Answers with the body held unfinished, and without the Worker ever starting to read it: only a check before the bytes can. */
     const refusedBeforeTheBytes = async (upload: any) => {
       const held = heldBody();
-      const res = await Promise.race([put(upload, held.body), new Promise<null>((resolve) => setTimeout(() => resolve(null), 2000))]);
+      const { seen, reading } = await nextReading(upload.id);
+      const res = await Promise.race([put(upload, held.body), reading.then(() => null)]);
       held.release();
-      expect(res, "it waited for the bytes").not.toBeNull();
+      await stopWaiting(upload.id);
+      expect(res, "it read the bytes").not.toBeNull();
+      expect((await nextReading(upload.id)).seen, "it read the bytes").toBe(seen);
+      await stopWaiting(upload.id);
       return res as Response;
     };
 
@@ -749,8 +783,7 @@ describe("the bytes of an upload", () => {
       const agent = await freshAgent(id);
       const upload = await create(uploads, TEXT, {}, agent);
       const held = heldBody();
-      const going = put(upload, held.body);
-      await underWay();
+      const { going } = await sending(upload, held.body);
       await holdFanOut(agent);
       held.release();
       const finished = await going;
@@ -762,18 +795,20 @@ describe("the bytes of an upload", () => {
 
     it("refuses a person who left the organization before the bytes start, or while they arrive", async () => {
       const { id, uploads } = await room();
-      const first = await freshAdmin(id);
+      const first = await freshAdmin(id, "per_unswept_");
       const before = await create(uploads, TEXT, {}, first);
       await depart(first.id, first.org, Date.now());
+      // The room hasn't heard, or it would have dropped the upload, and the answer below would be the room's 404.
+      expect((await row(id, before.id)).state).toBe("uploading");
       const res = await refusedBeforeTheBytes(before);
       expect(res.status).toBe(403);
       expect(await code(res)).toBe("access_revoked");
-      const second = await freshAdmin(id);
+      const second = await freshAdmin(id, "per_unswept_");
       const during = await create(uploads, TEXT, {}, second);
       const held = heldBody();
-      const going = put(during, held.body);
-      await underWay();
+      const { going } = await sending(during, held.body);
       await depart(second.id, second.org, Date.now());
+      expect((await row(id, during.id)).state).toBe("uploading");
       held.release();
       const finished = await going;
       expect(finished.status).toBe(403);

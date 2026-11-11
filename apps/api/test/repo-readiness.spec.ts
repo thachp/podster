@@ -66,8 +66,15 @@ const aMinuteLater = (id: string) => inRoom(id, (sql) => {
   sql.exec("UPDATE repo_link SET gone_seen_at = gone_seen_at - 61000 WHERE gone_seen_at IS NOT NULL");
   sql.exec("UPDATE repo_read SET at = at - 61000 WHERE caller = 'readiness'");
 });
-/** Makes the link last found right `ms` ago. */
-const checkedAgo = (id: string, ms: number) => inRoom(id, (sql) => void sql.exec("UPDATE repo_link SET verified_at = ?", Date.now() - ms));
+/**
+ * Makes the link last found right `ms` ago, which makes it due, with any other change the test needs in the same
+ * transaction. The room's own alarm is often due at once after setup, so a change made in a later step could land after
+ * that alarm had already read the link back: everything that decides the next read goes in together.
+ */
+const checkedAgo = (id: string, ms: number, also?: (sql: any) => void) => inRoom(id, (sql) => {
+  also?.(sql);
+  sql.exec("UPDATE repo_link SET verified_at = ?", Date.now() - ms);
+});
 /** An operator's recheck of room `id`'s link, as `crate::moderation` takes it. */
 const recheck = (who: Who, id: string) => api(who, "POST", `/v1/moderation/repositories/${id}/recheck`, {});
 const made: string[] = [];
@@ -158,8 +165,8 @@ describe("the scheduled read-back of a ready link", () => {
 
   it("finds a link exactly right, and only moves its check time on", async () => {
     const r = await room();
-    await checkedAgo(r.id, DAY + 1);
     const before = Date.now();
+    await checkedAgo(r.id, DAY + 1);
     await alarmPass(stub(r.id));
     const now = await link(r.id);
     expect(now).toMatchObject({ status: "ready", status_reason: null });
@@ -181,9 +188,10 @@ describe("the scheduled read-back of a ready link", () => {
       await fake("/agent-repo", { id: REPO_ID });
       await ready({ rulesets: "ready" });
       const r = await room();
+      // The script first, then the link made due: the room's own alarm may read it as soon as it is.
+      await ready({ script });
       const old = Date.now() - DAY - 1;
       await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET verified_at = ?", old));
-      await ready({ script });
       await alarmPass(stub(r.id));
       expect(await link(r.id), JSON.stringify(script)).toEqual({ status: "ready", status_reason: null, verified_at: old });
       expect(await tokens(r.id), JSON.stringify(script)).toEqual(["held"]);
@@ -198,8 +206,7 @@ describe("the scheduled read-back of a ready link", () => {
 
   it("waits while the repository's hourly read cap is used up", async () => {
     const r = await room();
-    await checkedAgo(r.id, DAY + 1);
-    await inRoom(r.id, (sql) => {
+    await checkedAgo(r.id, DAY + 1, (sql) => {
       for (let n = 0; n < 60; n++) sql.exec("INSERT INTO repo_read (at, kind, caller) VALUES (?, 'job', NULL)", Date.now());
     });
     await alarmPass(stub(r.id));
@@ -212,8 +219,7 @@ describe("the scheduled read-back of a ready link", () => {
 
   it("isn't due at all while provisioning isn't configured, so the alarm doesn't keep coming back", async () => {
     const r = await room();
-    await checkedAgo(r.id, DAY + 1);
-    await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_no_provisioning_key (x INTEGER)"));
+    await checkedAgo(r.id, DAY + 1, (sql) => sql.exec("CREATE TABLE test_no_provisioning_key (x INTEGER)"));
     await alarmPass(stub(r.id));
     expect((await readBack()).reads).toEqual([]);
     expect(await scheduledReads(r.id)).toBe(0);
@@ -222,8 +228,7 @@ describe("the scheduled read-back of a ready link", () => {
 
   it("reads nothing back for a link that isn't ready, or with managed repositories switched off", async () => {
     const r = await room();
-    await checkedAgo(r.id, DAY + 1);
-    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET status = 'degraded', status_reason = 'ruleset_missing'"));
+    await checkedAgo(r.id, DAY + 1, (sql) => sql.exec("UPDATE repo_link SET status = 'degraded', status_reason = 'ruleset_missing'"));
     await alarmPass(stub(r.id));
     expect((await readBack()).reads).toEqual([]);
     await expectNoAlarmSooner(stub(r.id), QUIET_MS);
@@ -239,9 +244,9 @@ describe("the scheduled read-back of a ready link", () => {
   it("degrades a link whose repository was deleted, which a read can't otherwise tell from GitHub being down (item 11)", async () => {
     const r = await room();
     await ready({ deleted: true });
-    await checkedAgo(r.id, DAY + 1);
     // The first answer that it's gone is only noted: one answer is never enough.
     const before = Date.now();
+    await checkedAgo(r.id, DAY + 1);
     await alarmPass(stub(r.id));
     expect(await link(r.id)).toMatchObject({ status: "ready", status_reason: null });
     expect(await goneSeen(r.id)).toBeGreaterThanOrEqual(before);

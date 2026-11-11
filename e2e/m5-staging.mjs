@@ -57,10 +57,10 @@ import { missingWranglers, TAILED_APPS } from "./m4-staging-lib.mjs";
 import {
   absentId, ASKPASS_SCRIPT, cloneUrlProblem, deliveryBody, isCommitSha, logHits, worstCaseSeconds, deliveryOutcomes, GrantLedger, gitEnv, lostAuthorityEnding, MERGE_APP_SLUG, mergeCommitProblems, movedHeadEnding,
   parseArgs, PLAN, releaseStatusProblems, repositoryOrgProblem, requesterProblem, reviewStatusProblems, rulesetProblems, scrub, secretProblem, SIGN_UPS, signDelivery, STAGING, STAGING_APP,
-  stagingConfig, STATUS_CONTEXT, steady, tailEnv, Tally, USAGE, WEBHOOK_PATH, WEBHOOK_SECRET_ENV, webhookSecretProblem,
+  stagingConfig, STATUS_CONTEXT, steady, Tally, USAGE, WEBHOOK_PATH, WEBHOOK_SECRET_ENV, webhookSecretProblem,
 } from "./m5-staging-lib.mjs";
 import { RoomPublisher } from "./room-publisher.mjs";
-import { JsonStream } from "./tail-stream.mjs";
+import { ACCOUNT_ENV, closeTails, downWithin, openTail, refusalLines, STAY_UP_SECONDS, tailFault as tailProblem, tailText, without } from "./m5-tails.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const parsed = parseArgs(process.argv.slice(2), process.env);
@@ -77,6 +77,15 @@ const signupSecret = process.env.PODSTER_E2E_SIGNUP_SECRET;
 /** Staging's webhook secret, only when the owner set it for this run. No file is read for it, and it's used to sign and nothing else. */
 const webhookSecret = process.env[WEBHOOK_SECRET_ENV] || undefined;
 const repoRoot = join(here, "..");
+/** `wrangler tail` for each app, each from that app's own installed wrangler, with m5-tails.mjs's environment. */
+const tails = [];
+function startTails() {
+  for (const app of TAILED_APPS) {
+    const cwd = join(repoRoot, "apps", app);
+    tails.push(openTail({ app, bin: join(cwd, "node_modules/.bin/wrangler"), cwd }));
+  }
+}
+const stopTails = () => closeTails(tails);
 const config = (() => {
   try {
     return stagingConfig(parseJsonc(readFileSync(options.apiConfig ?? join(here, "../apps/api/wrangler.jsonc"), "utf8")).env?.staging?.vars);
@@ -99,7 +108,7 @@ const signUpsNeeded = SIGN_UPS;
   for (const { who, why } of signUpsNeeded) console.log(`  - ${who}: ${why}`);
   if (!config.error) console.log(`\nGitHub: repositories are made in ${config.org} (${config.orgId}); the merge App is ${MERGE_APP_SLUG} (${config.mergeAppId}).`);
   console.log(`Waits, in seconds: setup ${options.setupWait}, merge ${options.mergeWait}, a moved head ${options.observeWait}, revocation ${options.revokeWait}.`);
-  console.log(`If every one of those and the run's other bounded waits ran to its limit, the waits alone would come to about ${Math.round(worstCaseSeconds(options) / 60)} minutes. A run that passes is expected to take about 8 to 10, which hasn't been measured.`);
+  console.log(`If every one of those and the run's other bounded waits ran to its limit, the waits alone would come to about ${Math.round(worstCaseSeconds(options) / 60)} minutes. The one run so far took 7 minutes 23 seconds.`);
   console.log(`Logs: ${options.logs ? `\`wrangler tail\` for ${TAILED_APPS.map((app) => `apps/${app}`).join(", ")}, with your wrangler login` : "not tailed (--skip-logs), so M5-13a and M5-13 will be skipped"}.`);
   console.log(`Signed webhook deliveries: ${webhookSecret ? `${WEBHOOK_SECRET_ENV} is set, so M5-16a and M5-16b will run` : `${WEBHOOK_SECRET_ENV} isn't set, so M5-16a and M5-16b will be skipped`}.`);
   if (options.dryRun) {
@@ -109,8 +118,23 @@ const signUpsNeeded = SIGN_UPS;
   }
   for (const problem of problems) console.error(`\nRefused: ${problem}.`);
   if (problems.length) process.exit(2);
+  // The log tails, before anything is sent to staging and before any sign-up: a real run and a dry run alike. Starting
+  // a tail asks Cloudflare and nobody else. One that can't start exits at once, and wrangler says why.
+  if (options.logs) {
+    startTails();
+    const down = await downWithin(tails, STAY_UP_SECONDS);
+    if (down.length) {
+      stopTails();
+      for (const line of refusalLines(down)) console.error(`\nRefused: ${line}.`);
+      console.error("\nNothing was sent to staging, and no sign-up was taken. Fix the tails, or pass --skip-logs to run without them.");
+      process.exit(2);
+    }
+    console.log(`\nThe three log tails started and stayed up for ${STAY_UP_SECONDS} s${process.env[ACCOUNT_ENV] ? `, for the account ${ACCOUNT_ENV} names` : ""}.`);
+  }
   if (options.dryRun) {
-    console.log("\nThe configuration is complete. Nothing was sent.");
+    stopTails();
+    if (options.logs) console.log("Whether events reach them isn't shown here: that takes a request to staging, and a dry run sends it none. The run itself shows it before its first sign-up.");
+    console.log("\nThe configuration is complete. Nothing was sent to staging or to GitHub.");
     process.exit(0);
   }
 }
@@ -526,47 +550,22 @@ async function deliver(body, { id = randomUUID(), secret, signature } = {}) {
 
 // ---- the Workers' logs (M5-13) ----
 
-/** `wrangler tail` for each app, started here with child-env.mjs's allow-listed environment, read as a stream of JSON values. */
-const tails = [];
-function startTails() {
-  for (const app of TAILED_APPS) {
-    const cwd = join(repoRoot, "apps", app);
-    const tail = { app, stream: new JsonStream(), error: null, proc: null };
-    tail.proc = spawn(join(cwd, "node_modules/.bin/wrangler"), ["tail", "--env", "staging", "--format", "json"], { cwd, env: tailEnv(), stdio: ["ignore", "pipe", "ignore"] });
-    tail.proc.on("error", (error) => (tail.error = error.code ?? "spawn_failed"));
-    tail.proc.stdout.setEncoding("utf8");
-    tail.proc.stdout.on("data", (chunk) => tail.stream.push(chunk));
-    tails.push(tail);
-  }
-}
-function stopTails() {
-  for (const tail of tails) if (tail.proc && tail.proc.exitCode === null && !tail.proc.signalCode) tail.proc.kill("SIGINT");
-}
-const tailText = (tail) => tail.stream.values.map((value) => JSON.stringify(value));
-/** Why a tail can't be trusted now: wrangler failed to start or has exited, or its stream overflowed. */
-const tailProblem = (tail) =>
-  tail.error ??
-  (tail.proc?.exitCode !== null && tail.proc?.exitCode !== undefined ? `wrangler exited with code ${tail.proc.exitCode}` : null) ??
-  (tail.proc?.signalCode ? `wrangler was stopped by ${tail.proc.signalCode}` : null) ??
-  tail.stream.error;
 /**
- * Sends requests of the run's own with a fresh marker in their paths until every tail holds an event naming it. The
- * marker is no ID of the run's, and the web app is asked for one public page that doesn't exist, with no credential.
- */
-/** The apps whose tails were shown connected before the first sign-up. */
-let tailsBefore = [];
-/**
- * The apps whose tail holds no marker request after `seconds`, or every app if a tail has stopped. `signedIn` adds a
- * request with the owner's session, which is what reaches the API for certain.
+ * The apps whose tail holds no marker request after `seconds`, or every app if a tail has stopped. Three requests carry
+ * the marker, since no one request shows in all three tails: a public page that doesn't exist, which the web app and
+ * the API each log; a request straight to the gateway, which it refuses itself; and, once someone has signed in, a
+ * signed-in read of a room that doesn't exist, which the gateway and the API each log. The first two carry no credential.
  */
 async function markerInTails(seconds, signedIn) {
   const marker = randomBytes(16).toString("hex");
   const deadline = Date.now() + seconds * 1000;
+  const get = (url) => fetch(url, { redirect: "manual", signal: AbortSignal.timeout(30_000) }).then((res) => res.arrayBuffer()).catch(() => null);
   for (;;) {
     if (tails.some(tailProblem)) return tails.map((tail) => tail.app);
-    await fetch(`${STAGING_APP}/p/pub_${marker}`, { redirect: "manual", signal: AbortSignal.timeout(30_000) }).then((res) => res.arrayBuffer()).catch(() => null);
+    await get(`${STAGING_APP}/p/pub_${marker}`);
+    await get(`${STAGING}/api/v1/workspaces/ws_${marker}`);
     if (signedIn) await owner.dash("GET", `/v1/workspaces/ws_${marker}`).catch(() => null);
-    const missing = tails.filter((tail) => !tailText(tail).some((text) => text.includes(marker))).map((tail) => tail.app);
+    const missing = without(tails, [marker]);
     if (missing.length === 0 || Date.now() > deadline) return missing;
     await sleep(3000);
   }
@@ -652,13 +651,18 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 
 let stopped = null;
 try {
-  // The Workers' logs, for M5-13, started before anyone signs up. A request with no credential shows which tails are
-  // connected by then; the API's may only be shown once a signed-in request can reach it.
+  // The Workers' logs, for M5-13. The tails are up already. Before anyone signs up, each must hold a request of the
+  // run's own, sent with no credential: a tail that is up and one that will never deliver look the same until then.
+  // Without that the run stops here, having spent nothing.
   if (options.logs) {
-    startTails();
     const missing = await markerInTails(60, false);
-    tailsBefore = TAILED_APPS.filter((app) => !missing.includes(app));
-    say(`     log tails connected before the first sign-up: ${tailsBefore.join(", ") || "none"}${missing.length ? `. Not yet shown connected: ${missing.join(", ")}, so lines ${missing.length === 1 ? "it" : "they"} logged before M5-13a passes could be missed` : ""}`);
+    if (missing.length) {
+      const down = tails.filter(tailProblem).map((tail) => `${tail.app}: ${tailProblem(tail)}`);
+      console.error(`\nRefused: no request of the run's own reached the log tail of ${missing.join(", ")} within 60 s${down.length ? ` (${down.join(", ")})` : ""}. Nothing but those requests was sent to staging, and no sign-up was taken. Pass --skip-logs to run without the tails.`);
+      await cleanUp();
+      process.exit(2);
+    }
+    say("     log tails: all three held a request of the run's own before the first sign-up");
   }
 
   say("\n## the room, and the switch");
@@ -695,7 +699,7 @@ try {
     if (!options.logs) throw new Skip("--skip-logs was given, so no log was tailed");
     const problem = await markerInEveryTail(120);
     ok(problem === null, problem);
-    return `connected before the first sign-up: ${tailsBefore.join(", ") || "none"}; all three now. podster-scanner isn't tailed: this run sends it nothing`;
+    return "all three were shown connected before the first sign-up, and still are. podster-scanner isn't tailed: this run sends it nothing";
   });
   choose("a repository name", name);
   // A room that never asks, and what podsterdev holds before anything is asked for: M5-01c reads both again at the end.
@@ -1760,8 +1764,7 @@ try {
     // A hit is named by the Worker, the log line's own event name and the kind of string it held: never the string.
     const hits = logHits(tails.map((tail) => ({ app: tail.app, events: tail.stream.values })), needles);
     ok(hits.length === 0, `the Workers logged what they mustn't: ${hits.map((hit) => `${hit.app}, in ${hit.event}: ${hit.kind}`).join("; ")}`);
-    const late = TAILED_APPS.filter((app) => !tailsBefore.includes(app));
-    return `${tails.map((tail) => `${tail.app} ${tail.stream.values.length} events`).join(", ")}; ${needles.filter((n) => typeof n.value === "string" && n.value.length >= 8).length} strings looked for. What this can't see: lines before a tail connected (${late.length ? `${late.join(", ")} wasn't shown connected until after the first sign-up` : "all three were connected before the first sign-up"}), whether wrangler tail dropped any event by sampling under load, which nothing here can tell, and podster-scanner, which isn't tailed`;
+    return `${tails.map((tail) => `${tail.app} ${tail.stream.values.length} events`).join(", ")}; ${needles.filter((n) => typeof n.value === "string" && n.value.length >= 8).length} strings looked for. What this can't see: lines before a tail connected (all three were shown connected before the first sign-up, so that is only what came before the run), whether wrangler tail dropped any event by sampling under load, which nothing here can tell, and podster-scanner, which isn't tailed`;
   });
 } catch (error) {
   stopped = error instanceof Stop || error instanceof Halt ? error.message : `the run broke: ${cause(error)}`;

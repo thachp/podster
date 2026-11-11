@@ -33,7 +33,7 @@ export const SIGN_UPS = [
 /** Every check, in the order it runs. A result for an ID that isn't here is a bug in the script. */
 export const PLAN = [
   ["M5-00", "managed repositories are switched on, and a room that hasn't asked has no repository"],
-  ["M5-13a", "wrangler tail is connected to the API, the gateway and the web app, shown by the run's own marker requests; the scanner, which this run never calls, isn't tailed"],
+  ["M5-13a", "wrangler tail is still connected to the API, the gateway and the web app once someone has signed in, shown by the run's own marker requests; the scanner, which this run never calls, isn't tailed"],
   ["M5-14", "no operator approves first: an organization nobody set a delegation for holds it, and the room's owner and admin are told so"],
   ["M5-04", "a request naming an organization is refused 400 invalid_argument"],
   ["M5-01", "a room admin's request, a person who isn't the owner, is recorded as pending and becomes a ready repository, with GitHub's ID recorded"],
@@ -107,10 +107,15 @@ const WAITS = { "--setup-wait-s": ["setupWait", 240], "--merge-wait-s": ["mergeW
 export const USAGE = `node m5-staging.mjs --base-url ${STAGING} [--dry-run] [--skip-logs]
     [--setup-wait-s N] [--merge-wait-s N] [--observe-wait-s N] [--revoke-wait-s N] [--api-config FILE]
 
-  --dry-run   check the configuration and print the plan. Sends nothing anywhere.
+  --dry-run   check the configuration and print the plan. Sends staging and GitHub nothing. Unless --skip-logs is given
+              it also starts the three log tails, which asks Cloudflare and nobody else, checks that each stays up
+              for ten seconds, and stops them: a tail that can't start is found without spending a sign-up.
   --skip-logs don't tail the Workers' logs. M5-13a and M5-13 are then skipped, and counted as skipped.
               Without it the run starts \`wrangler tail\` from apps/api, apps/gateway and apps/web, each with its own
-              installed wrangler and your \`wrangler login\`: run \`npm ci\` in each first.
+              installed wrangler and your \`wrangler login\`: run \`npm ci\` in each first. With more than one account
+              on that login, CLOUDFLARE_ACCOUNT_ID must name the one that holds podster.dev: it's the one name of
+              Cloudflare's a tail is given. The run refuses to start, exit 2 with nothing sent and no sign-up taken,
+              unless all three tails start and each then shows a request of the run's own.
   The waits bound, in seconds, the repository's setup (240), a merge (180), Podster noticing a moved head (420)
   and a token's revocation (180). Each is 10 to 1800.
   --api-config   the API's wrangler file, which names staging's GitHub organization and merge App.
@@ -509,7 +514,7 @@ export const isCommitSha = (value) => typeof value === "string" && /^[0-9a-f]{40
  */
 export function worstCaseSeconds(options) {
   // Five waits of a minute for the API's log line on a delivery, and nothing else for deliveries.
-  const fixed = { tails: 60 + 120 + 60, retry: 180, expiries: 90 + 90, publicRoom: 60, deliveries: 5 * 60, githubHeads: 3 * 60 };
+  const fixed = { tails: 10 + 60 + 120 + 60, retry: 180, expiries: 90 + 90, publicRoom: 60, deliveries: 5 * 60, githubHeads: 3 * 60 };
   // A moved head is waited for twice: once after review (M5-11a), once after a submission (M5-08b).
   return 3 * options.setupWait + 7 * options.mergeWait + 2 * options.observeWait + 7 * options.revokeWait + Object.values(fixed).reduce((sum, seconds) => sum + seconds, 0);
 }
@@ -566,5 +571,3 @@ export function movedHeadEnding({ refusedCode, change, mergedSecondParent, revie
   return { problem: `the merge ended ${change?.merge_state ?? "in no state"} with ${change?.merge_reason ?? "no reason"}` };
 }
 
-/** The log tails' child environment: child-env.mjs's allow-list and nothing else, so wrangler finds its own login under HOME. */
-export const tailEnv = (from = process.env) => childEnv({}, from);

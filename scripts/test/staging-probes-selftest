@@ -97,10 +97,39 @@ for status in 500 202 401 400 403; do
   echo "$status" > "$fix/webhook.status"
   refuses "an unsigned webhook answered with $status is refused" webhook
 done
-check "the webhook's status is one named constant, with what to change beside it" \
-  test "$(grep -c -E '^WEBHOOK_STATUS_WHILE_SECRET_UNSET=404$|CHANGE THIS TO 401 once the owner sets' "$probes")" -eq 2
+check "the webhook's status in each case is one named constant" \
+  test "$(grep -c -E '^WEBHOOK_STATUS_WHILE_SECRET_UNSET=404$|^WEBHOOK_STATUS_WHILE_SECRET_SET=401$' "$probes")" -eq 2
 gateway_tests="$scripts/../apps/gateway/test"
 check "  and the gateway's tests pin that answer while no secret is set" grep -q -F 'expect([status, code]).toEqual([404, "not_found"]);' "$gateway_tests/github-webhook.spec.ts"
+check "  and the answer to an unsigned delivery once one is set" grep -q -F 'toEqual([401, "invalid_signature"]);' "$gateway_tests/github-webhook.spec.ts"
+
+# Once the owner has set the webhook secret, the caller says so, and only that case's answer passes.
+secret_set() { echo 401 > "$fix/webhook.status"; echo '{"error":{"code":"invalid_signature","message":"invalid_signature"}}' > "$fix/webhook.body"; }
+refuses_set() { # refuses_set TITLE: the webhook fixtures were changed by the caller
+  check "$1, exit 1" run 1 "$probes" --webhook-secret-set
+  check "  and the webhook probe says FAIL" said "^FAIL webhook: "
+  healthy_staging
+}
+secret_set
+check "with --webhook-secret-set, an unsigned webhook refused with 401 invalid_signature passes, exit 0" run 0 "$probes" --webhook-secret-set
+check "  and says which case it checked" said '^PASS webhook: .*401 invalid_signature, as once the webhook secret is set$'
+check "  with the same five requests, and no more" test "$(wc -l < "$fix/calls" | tr -d ' ')" -eq 5
+check "  and without the flag that same answer is refused, exit 1" run 1 "$probes"
+check "  by the webhook probe, which names the flag" said '^FAIL webhook: .*got 401, wanted 404.*--webhook-secret-set'
+healthy_staging
+refuses_set "with --webhook-secret-set, the 404 of an unset secret is refused"
+for status in 500 202 400 403 200; do
+  secret_set; echo "$status" > "$fix/webhook.status"
+  refuses_set "with --webhook-secret-set, an unsigned webhook answered with $status is refused"
+done
+secret_set; echo '{"error":{"code":"unauthenticated"}}' > "$fix/webhook.body"
+refuses_set "with --webhook-secret-set, a 401 that isn't invalid_signature is refused"
+secret_set; : > "$fix/webhook.body"
+refuses_set "with --webhook-secret-set, a 401 with an empty body is refused"
+check "the flag twice is refused, exit 2" run 2 "$probes" --webhook-secret-set --webhook-secret-set
+check "  and nothing was requested" test ! -s "$fix/calls"
+check "the flag with another argument is refused, exit 2" run 2 "$probes" --webhook-secret-set https://example.com
+check "  and nothing was requested" test ! -s "$fix/calls"
 check "the A2A status is the gateway tests' answer with no credential" grep -q -F 'expect(res.status).toBe(401);' "$gateway_tests/a2a.spec.ts"
 
 echo 200 > "$fix/public.status"

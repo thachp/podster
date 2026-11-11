@@ -315,7 +315,7 @@ describe("through the whole gateway, to the real API", () => {
     expect((await post(pullRequest(), { signature: null })).status).toBe(401);
     expect((await post(pullRequest(), { signature: `sha256=${"0".repeat(64)}` })).status).toBe(401);
     expect((await post(pullRequest(), { env: { GITHUB_WEBHOOK_SECRET: undefined } })).status).toBe(404);
-    // The test configuration, like every deployment today, sets no secret.
+    // The test configuration sets no secret. On staging it's the owner's to set (docs/staging.md).
     expect(e.GITHUB_WEBHOOK_SECRET).toBeUndefined();
   });
 

@@ -47,7 +47,25 @@
       "r2_buckets": [{ "binding": "ASSETS", "bucket_name": "podster-assets-staging" }],
       // PUBLIC_ROOMS switches public rooms on (M4 step 14). The owner said to switch it on for staging on 2026-11-10. It's set
       // here only: a test fails if the top level or any other environment sets it.
-      "vars": { "APP_URL": "https://app-staging.podster.dev", "GATEWAY_URL": "https://gateway-staging.podster.dev", "PUBLIC_ROOMS": "true" },
+      // MANAGED_REPOSITORIES switches managed repositories on (M5, ADR 0009): a room owner's request then creates a public
+      // repository in the organization named here. The owner said "let's unblock m5 staging" on 2026-11-11. The rest say
+      // where and as whom: the organization and the three Apps' IDs and installation IDs, none of them secret. Each
+      // App's private key and the token-sealing key are secrets the owner sets (docs/staging.md), and are set nowhere
+      // here. All of it is for staging only: a test fails if the top level or any other environment sets one.
+      "vars": {
+        "APP_URL": "https://app-staging.podster.dev",
+        "GATEWAY_URL": "https://gateway-staging.podster.dev",
+        "PUBLIC_ROOMS": "true",
+        "MANAGED_REPOSITORIES": "true",
+        "GITHUB_ORG_LOGIN": "podsterdev",
+        "GITHUB_ORG_ID": "354820586",
+        "GITHUB_PROVISION_APP_ID": "5695065",
+        "GITHUB_PROVISION_INSTALLATION_ID": "180477080",
+        "GITHUB_AGENT_APP_ID": "5695079",
+        "GITHUB_AGENT_INSTALLATION_ID": "180477157",
+        "GITHUB_MERGE_APP_ID": "5695088",
+        "GITHUB_MERGE_INSTALLATION_ID": "180477225"
+      },
       "queues": {
         "producers": [{ "binding": "WAKE", "queue": "podster-wake-staging" }, { "binding": "SCAN", "queue": "podster-scan-staging" }, { "binding": "A2A", "queue": "podster-a2a-staging" }],
         "consumers": [

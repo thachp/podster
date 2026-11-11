@@ -29,7 +29,7 @@ Run every `wrangler` command from the app folder named in its step, so it uses t
 
 ## Shipping a change
 
-Agents deploy with `scripts/deploy-staging`, and not by hand. It takes main's tip once its CI has passed, applies only the migrations you name, deploys the API, then the gateway, then with `--web` the dashboard, and ends with the signed-out probes in `scripts/staging-probes`. `scripts/deploy-staging --help` lists what it refuses. It sets no secret or variable, and doesn't deploy the scanner.
+Agents deploy with `scripts/deploy-staging`, and not by hand. It takes main's tip once its CI has passed, applies only the migrations you name, deploys the API, then the gateway, then with `--web` the dashboard, and ends with the signed-out probes in `scripts/staging-probes`. Once the owner has set the gateway's `GITHUB_WEBHOOK_SECRET`, give either script `--webhook-secret-set`: the webhook probe then wants 401 `invalid_signature` for an unsigned delivery, and without the flag it wants the 404 of an unset secret. Each case accepts its own answer only. `scripts/deploy-staging --help` lists what it refuses. It sets no secret or variable, and doesn't deploy the scanner.
 
 The steps below are what it follows. They stay here as the reference, and for rebuilding staging.
 
@@ -248,10 +248,19 @@ What `apps/api/wrangler.jsonc` binds under `env.staging`, and the secrets it rea
 | Secret | `ASSERTION_KEYS` | The gateway's assertion public keys |
 | Secret | `SCANNER_SECRET` | The scanner's shared secret |
 | Secret | `A2A_TOKEN_KEY` | Seals A2A endpoint bearer tokens. The owner set it on 2026-11-08 |
-| Secret | `REPO_TOKEN_KEY` | Seals agents' repository tokens (M5 step 6). Not set |
+| Secret | `REPO_TOKEN_KEY` | Seals agents' repository tokens (M5 step 6). The owner's to set, as of 2026-11-11 |
 | Secret | `REPO_TOKEN_KEY_PREVIOUS` | Optional, only while rotating `REPO_TOKEN_KEY`. Not set |
+| Secret | `GITHUB_PROVISION_APP_KEY` | The private key of `podster-staging-provision`. The owner's to set, as of 2026-11-11 |
+| Secret | `GITHUB_AGENT_APP_KEY` | The private key of `podster-staging-agent`. The owner's to set, as of 2026-11-11 |
+| Secret | `GITHUB_MERGE_APP_KEY` | The private key of `podster-staging-merge`. The owner's to set, as of 2026-11-11 |
 | Var | `APP_URL` | `https://app-staging.podster.dev`, for the link in an A2A offer |
 | Var | `GATEWAY_URL` | `https://gateway-staging.podster.dev`, for the input-file links in an A2A offer, which the agent opens with its own credential |
+| Var | `PUBLIC_ROOMS` | `true`: public rooms are on for staging |
+| Var | `MANAGED_REPOSITORIES` | `true`: managed repositories are on for staging, [below](#managed-repositories-on-staging) |
+| Var | `GITHUB_ORG_LOGIN`, `GITHUB_ORG_ID` | `podsterdev`, `354820586`: the organization every managed repository is created in |
+| Var | `GITHUB_PROVISION_APP_ID`, `GITHUB_PROVISION_INSTALLATION_ID` | `5695065`, `180477080`: `podster-staging-provision`, which creates and protects repositories |
+| Var | `GITHUB_AGENT_APP_ID`, `GITHUB_AGENT_INSTALLATION_ID` | `5695079`, `180477157`: `podster-staging-agent`, which issues agents' repository tokens |
+| Var | `GITHUB_MERGE_APP_ID`, `GITHUB_MERGE_INSTALLATION_ID` | `5695088`, `180477225`: `podster-staging-merge`, which marks and merges a reviewed commit |
 
 ## The A2A token key
 
@@ -261,9 +270,36 @@ What `apps/api/wrangler.jsonc` binds under `env.staging`, and the secrets it rea
 cd apps/api && npx wrangler secret put A2A_TOKEN_KEY --env staging
 ```
 
+## Managed repositories on staging
+
+On 2026-11-11 the owner said "let's unblock m5 staging". Managed repositories (M5, [ADR 0009](adr/0009-managed-repositories.md)) are configured for staging only. Production doesn't exist, and the top level of both `wrangler.jsonc` files, which local runs and the tests use, sets none of this, so they stay off there.
+
+**What it does once deployed:** when a room's owner asks for a repository, and their organization holds the delegation an operator gives, the API creates a **public** repository in the GitHub organization `podsterdev`. Agents are then offered `get_repo_access` and `merge_task`.
+
+**Variables, set in the configuration files.** A deploy carries them:
+
+- `apps/api/wrangler.jsonc`, under `env.staging.vars`: `MANAGED_REPOSITORIES` as `true`, the organization's login and ID, and the App ID and installation ID of each of the three Apps, as the [table above](#the-apis-resources-on-staging) lists. The three Apps are `podster-staging-provision`, `podster-staging-agent` and `podster-staging-merge`, all installed in `podsterdev`. The API wants three different Apps and installations, and refuses a role whose App, installation or key is another role's.
+- `apps/gateway/wrangler.jsonc`, under its staging variables: `MANAGED_REPOSITORIES` as `true`, which lists the repository tools to agents. Listing authorizes nothing: the API decides every call.
+
+**Secrets, which the owner sets.** They are the owner's to set, as of 2026-11-11, and nobody else sets them. Nothing in this repository says whether they are set:
+
+| Worker | Secret | What it is |
+| --- | --- | --- |
+| API | `GITHUB_PROVISION_APP_KEY` | The private key of `podster-staging-provision`, as the PEM GitHub gives |
+| API | `GITHUB_AGENT_APP_KEY` | The private key of `podster-staging-agent`, as the PEM GitHub gives |
+| API | `GITHUB_MERGE_APP_KEY` | The private key of `podster-staging-merge`, as the PEM GitHub gives |
+| API | `REPO_TOKEN_KEY` | 64 hex characters, [below](#the-repository-token-keys) |
+| Gateway | `GITHUB_WEBHOOK_SECRET` | At least 32 characters, the same value as the Apps' webhook secret |
+
+Until a secret is set, its part refuses and nothing reaches GitHub for it: a repository request ends `failed` with `provisioning_not_configured`, `get_repo_access` answers 503 `repo_access_unavailable`, and `POST /webhooks/github` answers 404 like a path that isn't there. Once `GITHUB_WEBHOOK_SECRET` is set, run the probes with `--webhook-secret-set`, as [Shipping a change](#shipping-a-change) says.
+
+**Switching it off again:** set `MANAGED_REPOSITORIES` to anything but `true`, or remove it, in both files' staging variables, and deploy the API and the gateway. Keep `REPO_TOKEN_KEY` and the agent-token App's ID, installation ID and key set for at least 65 minutes afterwards, as [below](#the-repository-token-keys) says, or the tokens still out can't be revoked. Switching off deletes no repository.
+
+**Not yet true:** nothing has run against GitHub from the deployed product, and no acceptance test has passed on staging.
+
 ## The repository token keys
 
-`REPO_TOKEN_KEY` is the key the API seals an agent's repository token with, in the room that holds it, only so the token can be revoked (M5 step 6). It's 64 hex characters, such as the output of `openssl rand -hex 32`. **The owner sets it**, in that session, and nobody else does. Until it's set, or if it isn't 64 hex characters, `get_repo_access` answers 503 `repo_access_unavailable` and mints nothing. It's not set anywhere yet, and managed repositories are off.
+`REPO_TOKEN_KEY` is the key the API seals an agent's repository token with, in the room that holds it, only so the token can be revoked (M5 step 6). It's 64 hex characters, such as the output of `openssl rand -hex 32`. **The owner sets it**, in that session, and nobody else does. Until it's set, or if it isn't 64 hex characters, `get_repo_access` answers 503 `repo_access_unavailable` and mints nothing. For staging it's the owner's to set, as of 2026-11-11, with the [other four secrets](#managed-repositories-on-staging).
 
 ```bash
 cd apps/api && npx wrangler secret put REPO_TOKEN_KEY --env staging

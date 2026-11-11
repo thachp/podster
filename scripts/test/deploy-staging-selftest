@@ -371,6 +371,19 @@ check "  and says which Worker" said 'STOPPED podster-gateway-staging deployed, 
 check "  and still gives the API's version ID" said '^version podster-api-staging 5cb57391-a010-4425-afb4-091fa2644f67$'
 fresh
 
+echo 401 > "$fix/webhook.status"; echo '{"error":{"code":"invalid_signature","message":"invalid_signature"}}' > "$fix/webhook.body"
+check "once the webhook secret is set, a deploy without --webhook-secret-set ends with a failed probe, exit 4" deploy 4
+check "  and its line says FAIL" said '^FAIL webhook: '
+fresh
+echo 401 > "$fix/webhook.status"; echo '{"error":{"code":"invalid_signature","message":"invalid_signature"}}' > "$fix/webhook.body"
+check "  and with --webhook-secret-set the probes get the flag and pass, exit 0" deploy 0 --webhook-secret-set
+check "  with the webhook probe saying which case it checked" said '^PASS webhook: .*as once the webhook secret is set$'
+check "  and the flag reaches no wrangler call" never_called 'webhook-secret-set'
+fresh
+check "--webhook-secret-set while the secret is unset ends with a failed probe, exit 4" deploy 4 --webhook-secret-set
+check "  and its line says FAIL" said '^FAIL webhook: '
+fresh
+
 echo 200 > "$fix/me.status"
 check "a failed probe after deploying exits 4" deploy 4
 check "  and its line says FAIL" said '^FAIL me: '

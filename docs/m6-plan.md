@@ -30,7 +30,7 @@ Everything in this section is quoted or linked. The rest of the plan is the arch
 
 M6 is planned while three earlier gates are open. None blocks M6's planning or its spikes.
 
-- **M3's gate** isn't called. It waits on the owner's approval of fasta2a and the compatibility kit.
+- **M3's gate** isn't called. It waits on the owner's approval of fasta2a and the compatibility kit. **2026-11-11:** the owner called it met, accepting local runs for outbound to LangGraph, fasta2a, `CancelTask` delivery and the Python client ([decision 193](spec/PRODUCT.md#decisions-needed)).
 - **M4's gate** isn't called. `PUBLIC_ROOMS` is on for staging. The staging run of 2026-11-10 ended 102 passed, 3 failed, 0 skipped, 6 owed ([M4 plan](m4-plan.md#abuse-review-draft-step-14)). The fixes merged as [#236](https://github.com/thachp/podster/pull/236); the lead session reports them deployed, which this plan didn't check. A rerun is owed.
 - **M5** has built no agent-facing behaviour. [ADR 0009](adr/0009-managed-repositories.md) is on `main` as a proposal, the spike ran, and three staging GitHub Apps exist in `podsterdev`. Step 2 merged on 2026-11-10 as [#238](https://github.com/thachp/podster/pull/238): the room's state and one read of it for people, with no agent capability and no call to GitHub. `get_repo_access`, `merge_task` and `get_task_release_status` join the contract in M5's steps 6, 7 and 8.
 - **A correction to the M5 plan as it stands on `main`:** its "Where M3 and M4 stand" still says M4's staging run hasn't happened and that the test operator isn't in `OPERATORS`. The M4 plan records the run, and the lead session reports the operator set. This PR doesn't edit the M5 plan.

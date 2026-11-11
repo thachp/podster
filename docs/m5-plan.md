@@ -10,7 +10,7 @@ M5 is the first time Podster holds authority over something outside itself and h
 
 M5 starts while two earlier gates are still open. Neither blocks M5's planning or its spike, and `PRODUCT.md` already says M5 can ship later for engineering rooms.
 
-- **M3's gate** isn't called. It still waits on the owner's approval of fasta2a and the compatibility kit.
+- **M3's gate** isn't called. It still waits on the owner's approval of fasta2a and the compatibility kit. **2026-11-11:** the owner called it met, accepting local runs for outbound to LangGraph, fasta2a, `CancelTask` delivery and the Python client ([decision 193](spec/PRODUCT.md#decisions-needed)).
 - **M4's gate** isn't called. Step 14's code is merged and on staging at `17563d1`, and `EXPLORE_CURSOR_KEY` is set. The staging run hasn't happened. On 2026-11-10 the owner had `PUBLIC_ROOMS` switched on for staging; the test operator isn't in `OPERATORS` yet, and the takedown contact is a placeholder.
 
 Contract and migration PRs still merge one at a time, so M5's step 2 waits for any M3 or M4 PR that changes them.
@@ -238,7 +238,7 @@ Pure decisions in `crates/core` and `crates/policy`, with no I/O, no clock and n
 - The provisioning App's private key as the secret `GITHUB_PROVISION_APP_KEY` on the private API Worker, and later the other two Apps' keys for steps 6 and 7.
 - The five variables above, for staging: the organization's login and ID, the provisioning App's ID and installation ID, and the merge App's ID.
 - **`MANAGED_REPOSITORIES` set to `true` for staging,** in that session. This is the owner's yes to public repositories under Podster's organization; the key and the variables aren't.
-- Public managed repositories on staging, which takedown.md's staging exception doesn't cover.
+- Public managed repositories on staging. That they may be public was confirmed by the owner on 2026-11-11: "okay with public repo, MIT project". Those words don't switch `MANAGED_REPOSITORIES` on or set the Apps' keys, and takedown.md's staging exception doesn't cover repositories, so the takedown process still needs the owner.
 - An operator to give a test organization the delegation on staging.
 
 **Checked:** locally only, as the PR lists. Nothing ran against GitHub or a deployment, so M5-01 to M5-04, M5-14 and M5-15 don't count as passed.
@@ -545,7 +545,7 @@ Three person-only routes on the room's Durable Object, the two cascades, and the
 - **Step 7b's configuration, all unset everywhere:** the merge App's key as the secret `GITHUB_MERGE_APP_KEY`, with `GITHUB_MERGE_APP_ID` and `GITHUB_MERGE_INSTALLATION_ID`. With them and the switch, Podster can change a managed repository's default branch.
 - **Step 6's configuration, all unset everywhere:** `REPO_TOKEN_KEY` on the API Worker, 64 hex characters; the optional `REPO_TOKEN_KEY_PREVIOUS`, set only while rotating; the agent-token App's key as the secret `GITHUB_AGENT_APP_KEY`, with `GITHUB_AGENT_APP_ID` and `GITHUB_AGENT_INSTALLATION_ID`; and `MANAGED_REPOSITORIES` set to `true` on both Workers. See [staging.md](staging.md#the-repository-token-keys).
 - **The GitHub Apps:** three, as ADR 0009 proposes: one that provisions, one that issues agent tokens, and one that merges. **Done on 2026-11-10:** the owner said "you can create the app there", and the architect created and installed three in `podsterdev`, in the owner's browser. Any change to their permissions is the owner's yes. The spike's two Apps on `podsterx` aren't used again; that organization's state was unconfirmed after the owner said it no longer exists.
-- **Public managed repositories on staging.** takedown.md's staging exception covers `PUBLIC_ROOMS`, not repositories.
+- **Public managed repositories on staging.** **Confirmed by the owner on 2026-11-11:** "okay with public repo, MIT project", which the architect reads as confirming both that managed repositories may be public and that Podster's own code is MIT-licensed. Still owed: the words don't switch `MANAGED_REPOSITORIES` on or set the Apps' keys, and takedown.md's staging exception covers `PUBLIC_ROOMS`, not repositories, so the takedown process for public repositories still needs the owner.
 - **Secrets:** each App's private key, the webhook secret and the token-sealing key. The owner sets them with `wrangler secret put`; the architect gives the exact command.
 - **Money:** a GitHub plan, if private repositories need one for branch rules. See [cloud resources](#cloud-resources).
 - **Any looser alternative** in the questions below.
@@ -600,7 +600,7 @@ Three person-only routes on the room's Durable Object, the two cascades, and the
 | A signed body about a change the room doesn't know is sent again and again. The room keeps no memory of such a delivery, so each replay is taken as new | Accepted. Each replay costs one D1 read and one call to the room, writes nothing, and is bounded only by the gateway's per-client rate limit. Remembering them would let a busy repository fill the room's table, which is the worse of the two. |
 | A holder of the webhook secret learns which repository IDs are managed, because an unknown repository answers faster than a routed one | Accepted. The answer's body and status are the same, and only someone who can already sign deliveries can measure it. |
 | An agent pushes a workflow that runs with the repository's own token and merges or sets the required status | The agent's token can't write workflows, which the spike saw once, and ADR 0009 proposes that the provisioning App switches Actions off on each repository it creates and reads that back. That is proposed and not currently true: Actions were on in a new repository in `podsterdev`, and switching them off wasn't tried. A workflow already in a repository wasn't tested. |
-| A public repository publishes agent content under Podster's organization | ADR 0009 proposes public as the working assumption, said plainly and confirmed at setup, because the Free plan has no branch rules for private repositories. It also proposes that pull requests from forks are never task changes, and an operator takedown. Public repositories exist on staging only, until the owner confirms the public scope, takedown.md covers repositories and its contact is real. |
+| A public repository publishes agent content under Podster's organization | ADR 0009 proposes public as the working assumption, said plainly and confirmed at setup, because the Free plan has no branch rules for private repositories. It also proposes that pull requests from forks are never task changes, and an operator takedown. Public repositories exist on staging only, until takedown.md covers repositories and its contact is real. The owner confirmed the public scope on 2026-11-11: "okay with public repo, MIT project". |
 | A room admin grants access they don't hold | Policy checks the granter's delegation for that repository and action (AC-10, AC-11). |
 | A stale job acts after revocation | Each job rechecks current authority before its external call (AC-13, AC-27). |
 | Repository content is treated as instructions | Agent content is data. Podster stores commit IDs, check names and states, not content. |

@@ -1,6 +1,7 @@
 {
   "name": "@podster/scanner",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "test": "vitest run",

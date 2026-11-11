@@ -9,6 +9,7 @@
 // A violation fails the run unless a11y-known.json lists it, with the file to fix. A listed one that's gone fails too, so
 // the list can't go stale. Results go to results/a11y-<time>.json.
 import AxeBuilder from "@axe-core/playwright";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -146,6 +147,15 @@ async function seed() {
   };
   const arabicThread = await oneScript("Task with unbroken Arabic", byBytes("ع"));
   const hebrewLatinThread = await oneScript("Task with alternating directions", byBytes("אa"));
+  // The same scripts, unbroken, in bodies small enough to lay out inside the app's 50 ms step on any runner: laying out an
+  // unbroken run grows faster than its length, and at these sizes the slowest took 13 ms on a Mac throttled tenfold, where
+  // the 16 KB bodies above took 600 to 930 ms. Every body stays laid out, so tabbing back always has them to lay out again.
+  const keptBytes = (unit, bytes) => unit.repeat(Math.floor(bytes / Buffer.byteLength(unit)));
+  const keptScripts = [keptBytes("ع", 1024), keptBytes("ก", 2048), keptBytes("אa", 1024)];
+  const keptThread = await make("Task with scripts that stay laid out", { assignee: guest.id });
+  await guest.must("accept_task", { ...at(keptThread), version: keptThread.version });
+  for (let i = 0; i < 50; i++) await guest.must("send_message", { ...at(keptThread), body: keptScripts[i % keptScripts.length] });
+  const keptArabicThread = await oneScript("Task with Arabic that stays laid out", keptBytes("ع", 1024));
   // Long bodies whose results soon use up what can be applied out of view: for keeping the reader's place, and for how far ahead they format.
   const tallThread = await make("Task with tall messages", { assignee: guest.id });
   await guest.must("accept_task", { ...at(tallThread), version: tallThread.version });
@@ -313,7 +323,7 @@ async function seed() {
   await askRunner({ type: "set-file-states", changes: [{ id: removedFile.fileId, state: "ready" }] });
   await removedFile.approveThenRemove();
   // END REMOVED OUTPUT FILE FIXTURE
-  return { outputs, done, plannedRoom, viewer, narrowed, otherWorker, limitedRoom, secretTask, viewerTask, SECRET, teamOrgId: teamOrg, longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  return { outputs, done, plannedRoom, viewer, narrowed, otherWorker, limitedRoom, secretTask, viewerTask, SECRET, teamOrgId: teamOrg, longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, keptThread, keptArabicThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -618,6 +628,118 @@ const chromiumOnly = (name, fn) => {
   results.push({ keyboard: name, status: "skipped", detail: `needs Chromium, not ${browserName}` });
 };
 
+/**
+ * Run in the page, on a dialog: every script in its messages' text, by the Unicode script of each character, with one
+ * letter of it and the font family that text is set in. Latin, inherited marks and emoji are left out; other shared
+ * characters (CJK punctuation, symbols) are reported as "Common". Characters in no listed script are named by code point.
+ */
+function pageScripts(sheet) {
+  const names = ["Arabic", "Hebrew", "Thai", "Syriac", "Thaana", "Cyrillic", "Greek", "Armenian", "Georgian", "Han", "Hiragana", "Katakana", "Hangul", "Devanagari", "Bengali", "Gurmukhi", "Gujarati", "Oriya", "Tamil", "Telugu", "Kannada", "Malayalam", "Sinhala", "Lao", "Tibetan", "Myanmar", "Khmer", "Mongolian", "Ethiopic"];
+  const tests = names.map((name) => [name, new RegExp(`\\p{Script=${name}}`, "u")]);
+  const found = {};
+  for (const article of sheet.querySelectorAll("article")) {
+    const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      for (const letter of node.data) {
+        if (/[\p{Script=Latin}\p{Script=Inherited}\p{Extended_Pictographic}\s]/u.test(letter) || letter.codePointAt(0) < 0x80) continue;
+        const name = /\p{Script=Common}/u.test(letter) ? "Common" : tests.find(([, test]) => test.test(letter))?.[0] ?? `U+${letter.codePointAt(0).toString(16).toUpperCase()}`;
+        if (!(name in found)) found[name] = { letter, family: getComputedStyle(node.parentElement).fontFamily };
+      }
+    }
+  }
+  return found;
+}
+
+/**
+ * Whether the browser really draws each script's letter, answered by the browser itself: Chromium names the font it used
+ * for a node, and on Linux fontconfig says whether that font has the letter. A letter no font has is drawn with the
+ * "missing" box of whichever font came first, which Chromium still names, so the name alone isn't enough. Each answer is
+ * `{ glyph: true | false | null, why }`, where null is "can't tell" and `why` says why: another browser, a font the page
+ * loaded itself, no font named, macOS (where fontconfig isn't asked, so a named font is unconfirmed), or fontconfig
+ * missing, timing out or failing.
+ */
+async function realGlyphs(page, samples) {
+  const out = Object.fromEntries(Object.keys(samples).map((name) => [name, { glyph: null, why: `not asked in ${browserName}` }]));
+  if (browserName !== "chromium" || !Object.keys(samples).length) return out;
+  const ids = await page.evaluate((entries) => entries.map(([name, { letter, family }], i) => {
+    const span = document.createElement("span");
+    span.id = `script-probe-${i}`;
+    span.textContent = letter;
+    // In view and laid out, whatever the page skips: Chromium names fonts only for text it has laid out.
+    Object.assign(span.style, { fontFamily: family, position: "fixed", left: "0", top: "0", opacity: "0", pointerEvents: "none", contentVisibility: "visible" });
+    document.body.append(span);
+    span.getBoundingClientRect();
+    return [name, span.id, letter];
+  }), Object.entries(samples));
+  const session = await page.context().newCDPSession(page);
+  try {
+    await session.send("DOM.enable");
+    await session.send("CSS.enable");
+    const { root } = await session.send("DOM.getDocument");
+    for (const [name, id, letter] of ids) {
+      const { nodeId } = await session.send("DOM.querySelector", { nodeId: root.nodeId, selector: `#${id}` });
+      const fonts = (await session.send("CSS.getPlatformFontsForNode", { nodeId })).fonts;
+      const used = fonts.map((font) => font.familyName);
+      if (!fonts.length) {
+        out[name] = { glyph: null, why: "the browser named no font" };
+      } else if (fonts.some((font) => font.isCustomFont)) {
+        // A font the page loaded itself isn't one fontconfig knows, so it can't be asked about.
+        out[name] = { glyph: null, why: `a font the page loaded (${used.join(", ")})` };
+      } else if (process.platform !== "linux") {
+        out[name] = { glyph: null, why: `unconfirmed on ${process.platform}: the browser named ${used.join(", ")}, and fontconfig is only asked on Linux` };
+      } else {
+        const asks = used.map((family) => {
+          const listed = spawnSync("fc-list", [`${family.replaceAll(/[\\:,=-]/g, (c) => `\\${c}`)}:charset=${letter.codePointAt(0).toString(16)}`, "family"], { encoding: "utf8", env: childEnv(), timeout: 10_000 });
+          if (listed.error?.code === "ENOENT") return { answer: null, why: "fc-list isn't installed" };
+          if (listed.error?.code === "ETIMEDOUT" || listed.signal) return { answer: null, why: "fc-list timed out" };
+          if (listed.error || listed.status !== 0) return { answer: null, why: `fc-list failed (${listed.error?.message ?? `exit ${listed.status}`})` };
+          return { answer: listed.stdout.trim() !== "" };
+        });
+        const yes = asks.some((ask) => ask.answer === true);
+        const unknown = asks.find((ask) => ask.answer === null);
+        // For the log: each font the browser named, and fontconfig's word on it.
+        const said = used.map((family, i) => `${family}: ${asks[i].answer === null ? asks[i].why : asks[i].answer ? "fontconfig says it has it" : "fontconfig says it doesn't"}`).join("; ");
+        out[name] = yes ? { glyph: true, why: said } : unknown ? { glyph: null, why: unknown.why } : { glyph: false, why: `no font the browser used has it (${said})` };
+      }
+    }
+  } finally {
+    await session.detach().catch(() => {});
+    await page.evaluate((count) => {
+      for (let i = 0; i < count; i++) document.getElementById(`script-probe-${i}`)?.remove();
+    }, ids.length);
+  }
+  return out;
+}
+
+/**
+ * The browser's install path, as install-browser.mjs left it in results/browser-install.json: "packages", "fallback" or
+ * "no-packages". Null when the run didn't come through it, as locally.
+ */
+const installPath = (() => {
+  try {
+    return JSON.parse(readFileSync(join(here, "results", "browser-install.json"), "utf8")).path ?? null;
+  } catch {
+    return null;
+  }
+})();
+
+/**
+ * Judges the scripts a page showed. No glyph fails. "Can't tell" fails on the fallback path, whose whole point is to prove
+ * every script has a real font, and is a counted, named SKIP anywhere else, never a pass.
+ */
+function judgeGlyphs(label, scripts) {
+  const named = Object.entries(scripts).map(([name, { glyph, why }]) => `${name}${glyph === null ? " (can't tell)" : glyph ? "" : " (NO GLYPH)"}${why ? ` [${why}]` : ""}`);
+  console.log(`     ${label}: scripts on the page: ${named.join(", ") || "Latin only"}`);
+  const missing = Object.entries(scripts).filter(([, { glyph }]) => glyph === false);
+  ok(missing.length === 0, `${label}: ${missing.map(([name, { why }]) => `${name} (${why})`).join(", ")} drawn with no real glyph here, so this path's timings measure nothing for them`);
+  for (const [name, { glyph, why }] of Object.entries(scripts)) {
+    if (glyph !== null) continue;
+    ok(installPath !== "fallback", `${label}: can't tell whether ${name} has a real glyph (${why}), and on the fallback path every script must be shown to`);
+    console.log(`SKIP glyph not confirmed: ${name} (${label}; ${why})`);
+    results.push({ measurement: `${label}: ${name} glyph`, status: "skipped", detail: why });
+  }
+}
+
 async function keyboardPath(name, fn) {
   try {
     await mustFinish(`the keyboard path "${name}"`, KEYBOARD_PATH_MS, fn());
@@ -650,6 +772,59 @@ async function controls() {
   ok(light !== dark, `the dark theme didn't change the page's background (${light})`);
   await page.close();
   console.log(`ok   controls: axe flags low contrast, and dark changes the background from ${light} to ${dark}`);
+  await glyphControl();
+}
+
+/**
+ * Shows the glyph check can say "no glyph": U+4E000, in plane 4, where nothing is assigned, so no font should have it.
+ * On Linux, fontconfig is first asked whether any installed font lists it; if one does, this control can't show anything
+ * and fails saying so. Off Linux the check can't tell, and this is a counted SKIP, not a pass.
+ *
+ * Also records, without judging it, what the check says for U+10D4A, a Garay letter (Unicode 16). On 2026-11-11 the
+ * check called it drawn on the CI runner. The line names the font Chromium used, fontconfig's word on that font, and
+ * every font fontconfig lists with the letter, so the log shows whether the check was right.
+ */
+async function glyphControl() {
+  const page = await signedOut.newPage();
+  const hex = (codePoint) => `U+${codePoint.toString(16).toUpperCase()}`;
+  const anyFontWith = (codePoint) => {
+    if (process.platform !== "linux") return { listed: null, why: "not asked off Linux" };
+    const asked = spawnSync("fc-list", [`:charset=${codePoint.toString(16)}`, "family"], { encoding: "utf8", env: childEnv(), timeout: 10_000 });
+    if (asked.error || asked.status !== 0) return { listed: null, why: `fc-list failed (${asked.error?.message ?? `exit ${asked.status}`})` };
+    return { listed: asked.stdout.trim().split("\n").filter(Boolean) };
+  };
+  const check = async (codePoint) => {
+    await page.setContent(`<div role="dialog"><article><p>${String.fromCodePoint(codePoint)}</p></article></div>`);
+    return Object.entries(await realGlyphs(page, await page.locator('[role="dialog"]').evaluate(pageScripts)))[0] ?? [];
+  };
+  try {
+    // Informational: recorded, not judged.
+    const garay = 0x10d4a;
+    const [, seen] = await check(garay);
+    const fonts = anyFontWith(garay);
+    const listed = fonts.listed === null ? fonts.why : fonts.listed.join(" / ") || "none";
+    const said = seen ? `${seen.glyph === null ? "can't tell" : seen.glyph ? "drawn" : "no glyph"} [${seen.why ?? ""}]` : "found nothing";
+    console.log(`info controls (not judged): the glyph check says ${hex(garay)} is ${said}; fonts fontconfig lists with it: ${listed}`);
+    results.push({ measurement: `controls: ${hex(garay)} (informational)`, status: "info", detail: `${said}; listed: ${listed}` });
+
+    const control = 0x4e000;
+    const before = anyFontWith(control);
+    if (process.platform === "linux") {
+      ok(before.listed !== null, `controls: fontconfig couldn't be asked about ${hex(control)}: ${before.why}`);
+      ok(before.listed.length === 0, `controls: a font here lists ${hex(control)} (${before.listed?.join(" / ")}), so this control can't show the check saying "no glyph"`);
+    }
+    const [name, answer] = await check(control);
+    ok(name, `the glyph check found nothing in a page holding ${hex(control)}`);
+    if (answer.glyph === null) {
+      console.log(`SKIP controls: the glyph check's "no glyph" isn't shown here (${answer.why})`);
+      results.push({ measurement: "controls: glyph check says no glyph", status: "skipped", detail: answer.why });
+      return;
+    }
+    ok(answer.glyph === false, `the glyph check called ${name} drawn, though no font here lists it [${answer.why}]`);
+    console.log(`ok   controls: the glyph check says ${name} has no glyph [${answer.why}]`);
+  } finally {
+    await page.close();
+  }
 }
 
 async function keyboardPaths(s) {
@@ -1980,11 +2155,13 @@ async function keyboardPaths(s) {
   const LONGEST_BLOCK_SCRIPTS_MS = 800;
   const TAB_BACK_BLOCK_MS = 1_000;
   // Tabbing back lays out again only what stayed laid out. With few bodies kept it has nothing to measure, and passes
-  // whatever the cost would be. On 16 of 18 CI runs examined on 2026-11-11 the unbroken-scripts paths kept 3 or 4 and
-  // measured 0 ms, because the runner was slow enough that each body took longer than the app's 50 ms step; the two
-  // faster runs kept 12 to 16, and a Mac 7 and 8. Below this many, the measurement is reported as SKIP, counted apart
-  // from passes in the run's summary, and doesn't fail the run. The bound below still applies either way.
+  // whatever the cost would be. The worst-case paths below (16 KB of unbroken text a body) keep few or none on a slow
+  // runner by the app's design, so their tab-back is measured when they keep enough and is otherwise a counted SKIP,
+  // never a pass. "Unbroken Arabic" keeps none anywhere: each body takes about 90 ms to lay out on a fast Mac, over the
+  // 50 ms step. The "stay laid out" paths are the evidence for the bound: every body in them stays laid out on any runner,
+  // and one that doesn't fails the run.
   const MIN_STAYED_SCRIPTS = { sheet: 5, oversight: 6 };
+  const ALL_STAY = "all";
   const openHeavy = async (label, context, path, tab, longest = LONGEST_BLOCK_MS, idleWait = 3_000, minStayed = 0) => {
     await watchBlocks(context);
     const own = await context.newPage();
@@ -2019,6 +2196,9 @@ async function keyboardPaths(s) {
       });
       const blocked = await own.evaluate(() => Math.round(window.longestBlock));
       ok(blocked < longest, `${label} blocked the main thread for ${blocked}ms`);
+      // What's really on the page, not what the seed's source says: every script in the messages' text, and whether this
+      // browser draws it with a real glyph. Text drawn as "missing" boxes is never shaped, so a timing over it means nothing.
+      judgeGlyphs(label, await realGlyphs(own, await own.getByRole("dialog").evaluate(pageScripts)));
       // Let what's idle finish, then switch away and back: whatever stayed laid out is laid out again, all at once.
       await own.waitForTimeout(idleWait);
       const [kept, total] = await own.getByRole("dialog").evaluate((sheet) => {
@@ -2026,7 +2206,9 @@ async function keyboardPaths(s) {
         return [bodies.filter((body) => body.style.contentVisibility === "visible").length, bodies.length];
       });
       const stayed = `${kept} of ${total}`;
-      if (kept < minStayed) {
+      if (minStayed === ALL_STAY) {
+        ok(kept === total && total > 0, `${label}: only ${stayed} stayed laid out, and every body here must, so tabbing back measures them`);
+      } else if (kept < minStayed) {
         console.log(`SKIP tab-back not measured: ${stayed} stayed laid out (${label}; ${minStayed} needed for the measurement to mean anything)`);
         results.push({ measurement: `${label}: tab-back`, status: "skipped", detail: `${stayed} stayed laid out, under ${minStayed}` });
       }
@@ -2048,8 +2230,11 @@ async function keyboardPaths(s) {
   await keyboardPath("a heavy thread on oversight (50 messages)", () => openHeavy("oversight", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.heavyThread.id}`, "Thread"));
   await keyboardPath("unbroken scripts on the Task Sheet (the latest 20 messages)", () => openHeavy("the Task Sheet, unbroken scripts", contextFor(s.owner), `/w/${s.room}/tasks?task=${s.scriptThread.id}`, /^Discussion/, LONGEST_BLOCK_SCRIPTS_MS, undefined, MIN_STAYED_SCRIPTS.sheet));
   await keyboardPath("unbroken scripts on oversight (50 messages)", () => openHeavy("oversight, unbroken scripts", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.scriptThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS, undefined, MIN_STAYED_SCRIPTS.oversight));
-  await keyboardPath("unbroken Arabic on oversight (50 messages)", () => openHeavy("oversight, unbroken Arabic", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.arabicThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS));
-  await keyboardPath("alternating directions on oversight (50 messages)", () => openHeavy("oversight, alternating directions", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.hebrewLatinThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS));
+  await keyboardPath("unbroken Arabic on oversight (50 messages)", () => openHeavy("oversight, unbroken Arabic", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.arabicThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS, undefined, MIN_STAYED_SCRIPTS.oversight));
+  await keyboardPath("alternating directions on oversight (50 messages)", () => openHeavy("oversight, alternating directions", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.hebrewLatinThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS, undefined, MIN_STAYED_SCRIPTS.oversight));
+  await keyboardPath("scripts that stay laid out on the Task Sheet (the latest 20 messages)", () => openHeavy("the Task Sheet, scripts that stay laid out", contextFor(s.owner), `/w/${s.room}/tasks?task=${s.keptThread.id}`, /^Discussion/, LONGEST_BLOCK_SCRIPTS_MS, undefined, ALL_STAY));
+  await keyboardPath("scripts that stay laid out on oversight (50 messages)", () => openHeavy("oversight, scripts that stay laid out", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.keptThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS, undefined, ALL_STAY));
+  await keyboardPath("Arabic that stays laid out on oversight (50 messages)", () => openHeavy("oversight, Arabic that stays laid out", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.keptArabicThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS, undefined, ALL_STAY));
   await keyboardPath("a heavy short thread on oversight (50 messages)", () => openHeavy("oversight, short messages", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.shortThread.id}`, "Thread"));
 
   await keyboardPath("a long brief formats in a worker, under the real CSP", async () => {

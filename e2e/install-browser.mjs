@@ -20,7 +20,7 @@
 //
 // The decision is `install` below, with what it does passed in, so install-browser-selftest.mjs runs it with no network.
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -174,5 +174,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     },
   });
   console.log(`install-browser: ${code === 0 ? "done" : "failed"}${path ? ` (path: ${path})` : ""}`);
+  // For the accessibility run, which holds the fallback path to proving every script has a real glyph.
+  if (code === 0 && path) {
+    mkdirSync(join(here, "results"), { recursive: true });
+    writeFileSync(join(here, "results", "browser-install.json"), `${JSON.stringify({ path })}\n`);
+  }
   process.exit(code);
 }

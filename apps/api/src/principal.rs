@@ -1450,13 +1450,25 @@ impl Principal {
             "/internal/org-departure" => {
                 let body: Value = req.json().await?;
                 exec(&sql, DEPARTURE_SCHEMA, vec![])?;
+                // Test builds only: a person whose ID says so has their rooms swept a day from now, so a test can act while
+                // the departure is known here and no room has heard of it yet.
+                let first_sweep_at: i64 = if cfg!(feature = "failpoints")
+                    && body["person"]
+                        .as_str()
+                        .is_some_and(|p| p.starts_with("per_unswept_"))
+                {
+                    now_ms() + 24 * 60 * 60 * 1000
+                } else {
+                    0
+                };
                 // A retry of one the gateway already sent changes nothing, because rooms ignore what they've applied.
-                exec(&sql, "INSERT OR IGNORE INTO org_departure (org_id, left_at, person_id, actor_id, sweeps_left, next_sweep_at) VALUES (?, ?, ?, ?, ?, 0)", vec![
+                exec(&sql, "INSERT OR IGNORE INTO org_departure (org_id, left_at, person_id, actor_id, sweeps_left, next_sweep_at) VALUES (?, ?, ?, ?, ?, ?)", vec![
                     body["org"].as_str().unwrap_or_default().into(),
                     body["left_at"].as_i64().ok_or_else(ApiError::invalid_argument)?.into(),
                     body["person"].as_str().unwrap_or_default().into(),
                     body["actor"].as_str().unwrap_or_default().into(),
                     DEPARTURE_SWEEPS.into(),
+                    first_sweep_at.into(),
                 ])?;
                 exec(&sql, LEFT_SCHEMA, vec![])?;
                 exec(

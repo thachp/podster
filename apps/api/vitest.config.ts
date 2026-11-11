@@ -43,12 +43,40 @@ function a2aAnswer(path: string, body: string) {
   return rpc({ task: { id: `remote-${path.split("/").pop()}`, contextId: "c", status: { state: "TASK_STATE_SUBMITTED" } } });
 }
 
+// Uploads, in test builds only: the Worker calls `/receiving/<object>` each time it starts reading an upload's bytes, past the
+// room's begin step and the uploader's first check. A test reads `/count/<object>`, then waits on `/wait/<object>/<n>`, a request
+// of its own that answers once the Worker has started reading n times, so it acts while the bytes arrive instead of sleeping.
+// `/cancel/<object>` answers every wait on that object, for a test whose upload was refused before any reading.
+const uploadReadings = new Map<string, number>();
+const uploadWaits: { object: string; count: number; open: () => void }[] = [];
+async function uploadGate(url: URL) {
+  const [, step, object, wanted] = url.pathname.split("/");
+  const count = () => uploadReadings.get(object) ?? 0;
+  const answer = () => new Response(JSON.stringify({ count: count() }), { headers: { "content-type": "application/json" } });
+  const wake = (all: boolean) => {
+    for (const wait of uploadWaits.filter((w) => w.object === object && (all || w.count <= count()))) {
+      uploadWaits.splice(uploadWaits.indexOf(wait), 1);
+      wait.open();
+    }
+  };
+  if (step === "receiving") {
+    uploadReadings.set(object, count() + 1);
+    wake(false);
+  } else if (step === "wait" && count() < Number(wanted)) {
+    await new Promise<void>((open) => uploadWaits.push({ object, count: Number(wanted), open }));
+  } else if (step === "cancel") {
+    wake(true);
+  }
+  return answer();
+}
+
 async function fakeHook(request: Request) {
   // GitHub, for provisioning (M5 step 4): a fake, so nothing ever reaches the real one. Its calls carry tokens, so they
   // stay out of the hook log.
   const github = await fakeGithub(request);
   if (github) return github;
   const url = new URL(request.url);
+  if (url.hostname === "upload-gate.example.com") return uploadGate(url);
   if (url.hostname === "hook-log.example.com") return new Response(JSON.stringify(hookRequests));
   if (url.hostname === "a2a-script.example.com") {
     const { key, answers } = await request.json() as { key: string; answers: unknown[] };

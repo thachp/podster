@@ -33,7 +33,7 @@ export const SIGN_UPS = [
 /** Every check, in the order it runs. A result for an ID that isn't here is a bug in the script. */
 export const PLAN = [
   ["M5-00", "managed repositories are switched on, and a room that hasn't asked has no repository"],
-  ["M5-13a", "wrangler tail is connected to the API, the gateway and the web app, shown by the run's own marker requests"],
+  ["M5-13a", "wrangler tail is connected to the API, the gateway and the web app, shown by the run's own marker requests; the scanner, which this run never calls, isn't tailed"],
   ["M5-14", "no operator approves first: an organization nobody set a delegation for holds it, and the room's owner and admin are told so"],
   ["M5-04", "a request naming an organization is refused 400 invalid_argument"],
   ["M5-01", "a room admin's request, a person who isn't the owner, is recorded as pending and becomes a ready repository, with GitHub's ID recorded"],
@@ -73,7 +73,7 @@ export const PLAN = [
   ["M5-S2", "ground for what follows: the second room's push grant, a submitted task with a pull request, and an accepted one with a live token"],
   ["M5-07b", "asking again for a live token gives the same token with the same expiry and permissions: renewal neither extends nor widens"],
   ["M5-06f", "the token can't write another managed repository: a branch through the API and a git push are refused, and nothing appears there"],
-  ["M5-06g", "the token can't add a workflow file, force the default branch back, write or remove a ruleset, change Actions permissions or the default branch, or enable auto-merge"],
+  ["M5-06g", "the token can't add a workflow file, force the default branch back, write or remove a ruleset, or change Actions permissions or the default branch"],
   ["M5-08b", "after the branch advances, approval is refused 409 commit_changed for the submitted commit and for the new head, and nothing is approved"],
   ["AC-05a", "an admin naming the second room's grant, task or repository in their own room's routes gets what an ID that names nothing gets"],
   ["AC-05b", "the same person calling the second room's own routes gets what a room that doesn't exist gets: 404 workspace_not_found"],
@@ -81,8 +81,8 @@ export const PLAN = [
   ["AC-05d", "a submission naming another room's commit, or a pull request number only another room's repository has, is refused as a made-up one is"],
   ["AC-05e", "none of that changed anything in the second room: its grants, its task and its change read as before"],
   ["M5-11b", "a delivery signed with the wrong key, or with a malformed signature, is refused 401 invalid_signature and changes nothing"],
-  ["M5-16a", "a correctly signed delivery is taken once: sent again under the same ID, and its body again under a new ID, each answers 202 and changes nothing"],
-  ["M5-16b", "a signed delivery about this room's pull request naming the second room's repository, or one no room has, answers 202 and changes nothing here"],
+  ["M5-16a", "a correctly signed delivery is taken once: sent again under the same ID, and its body again under a new ID, each answers 202 and the API logs replayed"],
+  ["M5-16b", "a signed delivery about this room's pull request naming the second room's repository, or one no room has, answers 202, and the API logs unknown_change and no_room"],
   ["M5-09f", "a merge asked for before Podster has seen a moved head is ended by the job: merge failed commit_changed, and the task stays completed"],
   ["M5-09g", "five merges asked for at once: the first lands exactly its reviewed commit"],
   ["M5-12b", "a merge GitHub refuses is reported as failed, provider_refused, with its time, apart from the checks, for a pull request still open"],
@@ -91,12 +91,15 @@ export const PLAN = [
   ["AC-13b", "the admin who gave a merge grant demoted while its merge waits: the job ends the merge grant_required and merges nothing"],
   ["AC-13c", "the agent that asked removed from the room while its merge waits: the job ends the merge access_revoked and merges nothing"],
   ["AC-13d", "nothing brings a grant back: the stored answer to the grant sent again, and the admin made one again, leave every one ended"],
+  ["M5-07f", "a push grant that reaches its expiry: renewal is refused grant_expired, and GitHub refuses the token it backed"],
   ["M5-07c", "a canceled task's token: renewal is refused task_not_active, as for a completed task, and GitHub refuses the token it held"],
   ["M5-C3", "recorded, not judged: what the token does with a tag, a release, and another task's branch and pull request (review C-3)"],
-  ["M5-07e", "a disconnected agent gets no token, and GitHub refuses the one it held"],
+  ["M5-C1", "recorded, not judged: GitHub's rate limit as the agent's token sees it, before and after one read of Podster's (review C-1)"],
+  ["M5-C8", "recorded, not judged: the repository's settings as the agent's token is shown them (review C-8)"],
+  ["M5-07e", "a disconnected agent is refused agent_disconnected, and GitHub refuses the token it held"],
   ["M5-07d", "an agent removed from the room: renewal is refused access_revoked, and GitHub refuses the token it held"],
   ["M5-01c", "a room that never asked has no repository, and podsterdev gained exactly this run's two repositories"],
-  ["M5-13", "what the three Workers logged during the run holds no token, secret, cookie, repository name, branch name, pull request title or note of the run's"],
+  ["M5-13", "what the API, the gateway and the web app logged while their tails were connected holds no credential the run handled, and no repository name, branch name, pull request title or note of its"],
 ].map(([id, title]) => ({ id, title }));
 
 const WAITS = { "--setup-wait-s": ["setupWait", 240], "--merge-wait-s": ["mergeWait", 180], "--observe-wait-s": ["observeWait", 420], "--revoke-wait-s": ["revokeWait", 180] };
@@ -115,7 +118,8 @@ export const USAGE = `node m5-staging.mjs --base-url ${STAGING} [--dry-run] [--s
 
   PODSTER_E2E_SIGNUP_SECRET     staging's test sign-up secret. Needed.
   ${WEBHOOK_SECRET_ENV}     staging's GitHub webhook secret, for M5-16a and M5-16b only. Optional: without it
-                                those two are skipped, and counted. The script reads no file for it, and never prints,
+                                those two are skipped, and counted. They also need the log tails, since only the API's
+                                log says what became of a delivery: with --skip-logs they're skipped too. The script reads no file for it, and never prints,
                                 writes or passes it on. Set it for the one run that needs it.
 
   It makes repositories in ${STAGING_ORG} and nowhere else: a configuration naming another organization is refused.`;
@@ -457,15 +461,46 @@ export function leaks(text, needles) {
   return [...found];
 }
 
+/** How long after authority ended a merge may still land and be the job's last, already-checked call. Past it, it isn't. */
+export const LATE_MERGE_MS = 5000;
+
 /**
- * How a merge ended that the run asked for and then took the authority for away, before the job could reach it. The
- * job ends it with that authority's own code and merges nothing: `shown`. If the job had already merged it, nothing
- * was shown either way, which is a skip and not a failure. Anything else is a problem.
+ * How a merge ended that the run asked for and then took the authority for away, while it waited for the job.
+ *
+ * The job must end it with that authority's own code and merge nothing: `shown`. A merge that succeeded is judged by
+ * when, never waved through:
+ * - `lostAt` is when Podster recorded the authority ending, by its own clock, from the room's audit log.
+ * - `finishedAt` is when Podster recorded the merge finished, by the same clock. `mergedAt` is GitHub's time for the
+ *   merge, to the second, by GitHub's clock.
+ * - `held` says the run saw, after the authority had ended, that the job hadn't got to this merge yet: the merge
+ *   ahead of it in the job's order was still waiting, and so was this one.
+ *
+ * Merged before the authority ended, by either clock: the run lost the race, nothing was shown, a skip. Merged after it
+ * while the run had seen the job not yet there, or more than LATE_MERGE_MS after it: the job merged without the
+ * authority, a failure. Merged within LATE_MERGE_MS after it, with nothing seen: the job's call may already have been
+ * checked and on its way, which is the product working, so it can't be told, a skip. Without the times it's a failure.
  */
-export function lostAuthorityEnding(change, reason) {
+export function lostAuthorityEnding(change, reason, { lostAt, mergedAt, held } = {}) {
   if (change?.merge_state === "failed" && change.merge_reason === reason && (change.merge_sha ?? null) === null) return { shown: true };
-  if (change?.merge_state === "succeeded") return { shown: false, why: "the merge job had merged it before the authority ended, so this run shows nothing either way" };
-  return { problem: `the merge ended ${change?.merge_state ?? "in no state"} with ${change?.merge_reason ?? "no reason"}, not failed with ${reason}` };
+  if (change?.merge_state !== "succeeded") return { problem: `the merge ended ${change?.merge_state ?? "in no state"} with ${change?.merge_reason ?? "no reason"}, not failed with ${reason}` };
+  if (!Number.isFinite(lostAt) || !Number.isFinite(mergedAt)) return { problem: "the merge succeeded, and when the authority ended or when GitHub merged couldn't be read, so it can't be shown to have come first" };
+  const finishedAt = Number.isFinite(change.merge_finished_at) ? change.merge_finished_at : null;
+  if ((finishedAt !== null && finishedAt < lostAt) || mergedAt + 1000 <= lostAt) return { shown: false, why: `the race was lost: the merge landed ${Math.round((lostAt - mergedAt) / 100) / 10} s before the authority ended, so this run shows nothing either way` };
+  if (held === true) return { problem: `the merge succeeded ${Math.round((mergedAt - lostAt) / 100) / 10} s after the authority ended, and the job hadn't reached it when the authority ended: it merged without authority` };
+  if (mergedAt >= lostAt + LATE_MERGE_MS) return { problem: `the merge succeeded ${Math.round((mergedAt - lostAt) / 100) / 10} s after the authority ended: it merged without authority` };
+  return { shown: false, why: `it can't be told: the merge landed within ${LATE_MERGE_MS / 1000} s after the authority ended, and the run hadn't seen the job still waiting, so the job's call may have been checked before` };
+}
+
+/** Whether a value is a full commit ID, before it goes into a path. */
+export const isCommitSha = (value) => typeof value === "string" && /^[0-9a-f]{40}$/.test(value);
+
+/**
+ * The longest a run could take if every bounded wait ran to its limit, in seconds: the waits only, not the requests
+ * between them. A run that passes takes a small part of this.
+ */
+export function worstCaseSeconds(options) {
+  const fixed = { tails: 60 + 120 + 60, retry: 180, expiries: 90 + 90, publicRoom: 60, deliveries: 120 + 5 * 60, githubHeads: 3 * 60 };
+  return 3 * options.setupWait + 7 * options.mergeWait + options.observeWait + 7 * options.revokeWait + Object.values(fixed).reduce((sum, seconds) => sum + seconds, 0);
 }
 
 /**

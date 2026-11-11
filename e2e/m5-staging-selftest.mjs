@@ -13,7 +13,7 @@ import { childEnv, forbidden } from "./child-env.mjs";
 import { parseJsonc } from "./jsonc.mjs";
 import { missingWranglers } from "./m4-staging-lib.mjs";
 import {
-  absentId, ASKPASS_SCRIPT, cloneUrlProblem, CREDENTIAL_ENV, deliveryBody, deliveryOutcomes, GrantLedger, gitEnv, leaks, loggedText, lostAuthorityEnding, mergeCommitProblems, movedHeadEnding, parseArgs, PLAN,
+  absentId, ASKPASS_SCRIPT, cloneUrlProblem, CREDENTIAL_ENV, deliveryBody, deliveryOutcomes, GrantLedger, gitEnv, isCommitSha, LATE_MERGE_MS, leaks, loggedText, lostAuthorityEnding, worstCaseSeconds, mergeCommitProblems, movedHeadEnding, parseArgs, PLAN,
   releaseStatusProblems, repositoryOrgProblem, requesterProblem, reviewStatusProblems, rulesetProblems, scrub, secretProblem, SIGN_UPS, signDelivery, STAGING, STAGING_APP, STAGING_ORG, stagingConfig, stagingOnly,
   STEADY, steady, tailEnv, Tally, WEBHOOK_PATH, WEBHOOK_SECRET_ENV, webhookSecretProblem,
 } from "./m5-staging-lib.mjs";
@@ -109,9 +109,19 @@ for (const full of ["podsterx/e2e-m5-1", "podsterdev", "podsterdev/a/b", "other/
 {
   // The script notes the short grant before it waits, settles it only once it's listed expired, and takes back what's left.
   const source = readFileSync(join(here, "m5-staging.mjs"), "utf8");
-  const [given, waited, settled] = ['ledger.note(grant?.id, "watcher\'s short merge grant")', "the API listing the short grant as expired", "ledger.settle(grant.id)"].map((text) => source.indexOf(text));
-  check(given > 0 && waited > given && settled > waited, "M5-G3 notes its grant before the wait and settles it only after");
+  const [given, waited] = ['const grant = await give(watcher, "merge", { expires_at: Date.now() + 20_000 });', "the API listing the short grant as expired"].map((text) => source.indexOf(text));
+  const settled = source.indexOf("ledger.settle(grant.id)", waited);
+  check(given > 0 && waited > given && settled > waited && source.includes("const give = async (principal, action, extra = {}) => gave(await owner.must("), "M5-G3's grant is noted as it's given, before the wait, and settled only after");
   check(source.includes("for (const { id, what } of ledger.left())") && source.includes("/repository/grants/${id}`"), "clean-up takes back every grant left");
+  // Every grant the run gives goes through `gave`, directly or by `give`: no grant is asked for and left off the ledger.
+  const lines = source.split("\n");
+  const asked = lines.map((line, at) => [line, at]).filter(([line]) => /\.must\("POST", (?:grantsPath|`[^`]*\/repository\/grants`),/.test(line));
+  const noted = asked.filter(([line, at]) => line.includes("gave(await ") || (/const grant = await other\.must/.test(line) && lines[at + 1].trim().startsWith("gave(grant, ")));
+  check(asked.length === 5 && noted.length === asked.length, `each of the ${asked.length} places a grant is given notes it for clean-up, before anything is asserted about it`);
+  const cleanUp = source.slice(source.indexOf("function cleanUp()"), source.indexOf('for (const signal of ["SIGINT", "SIGTERM"])'));
+  check(cleanUp.includes("if (demoted)") && cleanUp.includes('role: "admin"') && cleanUp.includes("NOT made the first room's admin again"), "clean-up makes a demoted second person the room's admin again, and says so if it couldn't");
+  check(cleanUp.includes("grantHome.get(id)") && cleanUp.includes("Clean-up could NOT take these grants back") && cleanUp.includes('back.code === "grant_not_found"'), "clean-up takes each grant back where it was given, counts one already ended as done, and prints what it couldn't undo");
+  check(source.indexOf("if (down.ok) demoted = true;") > 0 && source.indexOf("demoted = false;", source.indexOf('check("AC-13d"')) > 0, "the demotion is marked the moment it's answered, and cleared only once the role is back");
   check(!/operator|PODSTER_E2E_OPERATOR_COOKIE/i.test(source.replace(/No operator takes part[^\n]*\n[^\n]*/, "")), "the script has no operator step and reads no operator's session");
 }
 
@@ -124,7 +134,7 @@ check(new Set(ids).size === ids.length && ids.every((id) => /^(M5|AC)-[0-9A-Z]+[
   const run = [...source.matchAll(/(?:check|lostAuthority)\("((?:M5|AC)-[0-9A-Za-z]+)"/g)].map((found) => found[1]);
   check(new Set(run).size === run.length && JSON.stringify([...run].sort()) === JSON.stringify([...ids].sort()), "the script runs each planned check once, and no other");
   // The gate's rows and access tests the extended run exists for each have a check.
-  for (const id of ["M5-03a", "M5-03b", "M5-15a", "M5-13", "M5-16a", "M5-16b", "M5-12b", "M5-08b", "M5-09f", "AC-05a", "AC-05e", "AC-13a", "AC-13b", "AC-13c", "AC-13d", "AC-16", "M5-07c", "M5-07d", "M5-07e", "M5-06f", "M5-06g", "M5-C3"]) check(ids.includes(id), `the plan has ${id}`);
+  for (const id of ["M5-07f", "M5-C1", "M5-C8", "M5-03a", "M5-03b", "M5-15a", "M5-13", "M5-16a", "M5-16b", "M5-12b", "M5-08b", "M5-09f", "AC-05a", "AC-05e", "AC-13a", "AC-13b", "AC-13c", "AC-13d", "AC-16", "M5-07c", "M5-07d", "M5-07e", "M5-06f", "M5-06g", "M5-C3"]) check(ids.includes(id), `the plan has ${id}`);
 }
 const quiet = () => new Tally(PLAN, () => {});
 {
@@ -208,11 +218,33 @@ check(absentId("tsk_aa") === null && absentId("nounderscore") === null, "an ID t
 // ---- merges the run can't force ----
 {
   const failed = (reason) => ({ merge_state: "failed", merge_reason: reason, merge_sha: null });
-  check(lostAuthorityEnding(failed("grant_required"), "grant_required").shown === true && lostAuthorityEnding(failed("access_revoked"), "access_revoked").shown === true, "a merge the job ended with the lost authority's own code is shown");
-  const first = lostAuthorityEnding({ merge_state: "succeeded", merge_sha: "a".repeat(40) }, "grant_required");
-  check(first.shown === false && !first.problem && first.why.length > 0, "a merge the job finished first shows nothing, and is a skip with its reason, not a failure");
+  check(lostAuthorityEnding(failed("grant_required"), "grant_required").shown === true && lostAuthorityEnding(failed("access_revoked"), "access_revoked", { held: true }).shown === true, "a merge the job ended with the lost authority's own code is shown");
+  // A merge that succeeded is judged by when. The authority ended at T, by Podster's clock.
+  const T = 1_800_000_000_000;
+  const merged = (finishedAt) => ({ merge_state: "succeeded", merge_sha: "a".repeat(40), merge_finished_at: finishedAt });
+  const judge = (finishedAt, mergedAt, held) => lostAuthorityEnding(merged(finishedAt), "grant_required", { lostAt: T, mergedAt, held });
+  const before = judge(T - 400, T - 2000, false);
+  check(before.shown === false && !before.problem && before.why.includes("race was lost"), "merged before the authority ended: the race was lost, a skip that says so");
+  check(judge(T - 1, T, false).shown === false && judge(undefined, T - 1000, true).shown === false, "Podster's own finish time before it, or GitHub's a full second before it, is enough to say before");
+  // The defect the check exists for: a job that never rechecks merges whenever it gets there.
+  const late = judge(T + 9000, T + 8000, false);
+  check(typeof late.problem === "string" && late.problem.includes("without authority"), `refused: merged more than ${LATE_MERGE_MS / 1000} s after the authority ended, whatever the run saw`);
+  const heldThenMerged = judge(T + 1500, T + 1000, true);
+  check(typeof heldThenMerged.problem === "string" && heldThenMerged.problem.includes("hadn't reached it"), "refused: merged after the authority ended when the run had seen the job not yet there, however soon after");
+  check(typeof judge(T + 300, T, true).problem === "string", "refused: the same within the second the authority ended");
+  const close = judge(T + 1500, T + 1000, false);
+  check(close.shown === false && !close.problem && close.why.includes("can't be told"), "merged just after, with the job not seen waiting: it can't be told, a skip that says so and not a pass");
+  check(typeof judge(T + 6000, T + LATE_MERGE_MS, false).problem === "string" && judge(T + 5500, T + LATE_MERGE_MS - 1000, false).shown === false, "the line between the two is LATE_MERGE_MS");
+  for (const [title, times] of [["no time for the authority ending", { mergedAt: T, held: true }], ["no time from GitHub", { lostAt: T, held: false }], ["no times at all", undefined]])
+    check(typeof lostAuthorityEnding(merged(T - 5), "grant_required", times).problem === "string", `refused: a merge that succeeded with ${title}`);
+  check(!("shown" in judge(T + 9000, T + 8000, true)) && [before, close].every((ending) => ending.shown === false), "no merge that succeeded is ever shown as passing");
   for (const [title, change] of [["another reason", failed("provider_refused")], ["the wrong authority's code", failed("access_revoked")], ["a failure that still names a merge commit", { ...failed("grant_required"), merge_sha: "a".repeat(40) }], ["a merge still requested", { merge_state: "requested" }], ["no change", null]])
-    check(typeof lostAuthorityEnding(change, "grant_required").problem === "string", `refused: ${title}`);
+    check(typeof lostAuthorityEnding(change, "grant_required", { lostAt: T, mergedAt: T, held: true }).problem === "string", `refused: ${title}`);
+  {
+    const source = readFileSync(join(here, "m5-staging.mjs"), "utf8");
+    check(source.includes('entry.action === "repo_grant.revoked"') && source.includes("Date.parse(pull.merged_at)") && source.includes('then.clash === "requested" && then[label] === "requested"'), "the script reads when the authority ended from the room's audit log, when GitHub merged from the pull request, and whether the job was still behind");
+    check(source.includes("lostAuthorityEnding(b.ends[label], reason, { lostAt: b.lost[label], mergedAt, held: b.held[label] })"), "and judges each of the three with all of them");
+  }
   const reviewed = "b".repeat(40);
   check(movedHeadEnding({ change: failed("commit_changed"), reviewed }).shown === true, "a merge the job ended commit_changed is shown");
   for (const [title, found] of [
@@ -223,6 +255,41 @@ check(absentId("tsk_aa") === null && absentId("nounderscore") === null, "an ID t
     ["the request refused for another reason", { refusedCode: "grant_required" }], ["the request refused with no code", { refusedCode: null }], ["another commit merged", { change: { merge_state: "succeeded", merge_sha: "c".repeat(40) }, mergedSecondParent: "d".repeat(40), reviewed }],
     ["a merge with no second parent read", { change: { merge_state: "succeeded" }, reviewed }], ["a failure for another reason", { change: failed("grant_required"), reviewed }], ["a commit_changed that names a merge commit", { change: { ...failed("commit_changed"), merge_sha: "c".repeat(40) }, reviewed }],
   ]) check(typeof movedHeadEnding(found).problem === "string", `refused: ${title}`);
+}
+
+// ---- the review's other points ----
+{
+  const source = readFileSync(join(here, "m5-staging.mjs"), "utf8");
+  const section = (id) => {
+    const from = source.indexOf(`check("${id}"`);
+    const next = source.indexOf("await check(", from + 1);
+    return source.slice(from, next > 0 ? next : undefined);
+  };
+  // The tails start before anyone signs up.
+  check(source.indexOf("startTails();") > 0 && source.indexOf("startTails();") < source.indexOf('owner = await person("Room owner")') && (source.match(/startTails\(\);/g) ?? []).length === 1, "the log tails are started once, before the first sign-up");
+  check(source.includes("log tails connected before the first sign-up") && section("M5-13a").includes("podster-scanner isn't tailed") && section("M5-13").includes("lines before a tail connected") && section("M5-13").includes("sampl"), "the output says which tails were connected first, that the scanner isn't tailed, and what a tail can miss");
+  // Every credential the run is handed is scrubbed and looked for: agents' OAuth tokens and invitation tokens too.
+  check(source.includes("secret(held.access_token);") && source.includes("secret(held.refresh_token);"), "an agent's OAuth access and refresh tokens are added to the secrets");
+  const accepts = [...source.matchAll(/\.accept\(([^,]+),/g)].map((found) => found[1]);
+  check(accepts.length === 3 && accepts.every((arg) => /^secret\(\w+\.token\)$/.test(arg)) && source.includes('{ token: secret(invited.token) }') && !/[^(]\b\w+\.token\b(?=, other\.org)/.test(source), `each of the ${accepts.length + 1} invitation tokens is added to the secrets as it's used`);
+  // Auto-merge shows nothing about the token, and says so.
+  check(!PLAN.find((entry) => entry.id === "M5-06g").title.includes("auto-merge") && section("M5-06g").includes("recorded, not shown for the token: auto-merge") && !section("M5-06g").includes("refusedHere(\"auto"), "M5-06g records auto-merge as the repository's setting refusing it, and doesn't count it for the token");
+  // The checks that judge nothing can't fail on what they probe.
+  for (const id of ["M5-C3", "M5-C1", "M5-C8"]) {
+    const body = section(id);
+    const outside = body.replace(/await recorded\(seen, [^\n]*\n(?:(?:      |        )[^\n]*\n|    \}\);\n)*/g, "");
+    check(body.includes("await recorded(seen,") && !/\b(eq|ok|refusedCode|refusedAs|refusedBy|mustGit|pullIn|taskIn)\(/.test(outside), `${id} records each step and asserts nothing about it`);
+  }
+  check(source.includes("seen.push(`${label}: not recorded (") && !section("M5-C3").includes('"victim"'), "a step that can't be made is recorded as that, and M5-C3 makes no task of its own");
+  check(section("M5-07e").includes('refusedCode(answer, "agent_disconnected"') && !section("M5-07e").includes("!answer.ok"), "M5-07e wants the one code a disconnected agent gets");
+  for (const id of ["M5-16a", "M5-16b"]) check(section(id).includes("logged();") && !section(id).includes("sleep(") && section(id).includes("await outcomeOf(") && !section(id).includes("!== null"), `${id} needs the API's log, waits on its lines and on nothing fixed, and never passes without them`);
+  check(source.includes('have(options.logs && tally.passed("M5-13a")'), "without a connected tail the two delivery checks are skipped, by name");
+  const reads = [...source.matchAll(/publicRead\(`\/repos\/\$\{repo\.full\}\/commits\/\$\{([a-zA-Z.]+)\.merge_sha\}/g)].map((found) => found[1]);
+  check(reads.length === 3 && reads.every((name) => source.includes(`ok(isCommitSha(${name}.merge_sha), `)), "a merge commit from Podster is checked to be 40 hex digits before it goes into a path to GitHub");
+  check(isCommitSha("a".repeat(40)) && !["a".repeat(39), "A".repeat(40), `${"a".repeat(40)}/../x`, "", undefined, 7].some(isCommitSha), "only 40 lower-case hex digits are a commit ID");
+  check(section("M5-07f").includes('refusedCode(answer, "grant_expired"') && section("M5-07f").includes("listed?.state === \"expired\"") && section("M5-07f").includes("refusedByGithub("), "M5-07f waits for the API to list the push grant expired, wants grant_expired, and times GitHub's refusal");
+  const base = parseArgs(["--base-url", STAGING], {}).options;
+  check(worstCaseSeconds(base) === 3 * 240 + 7 * 180 + 420 + 7 * 180 + 1260 && Math.round(worstCaseSeconds(base) / 60) === 82 && worstCaseSeconds({ ...base, mergeWait: 10 }) === worstCaseSeconds(base) - 7 * 170, "the worst case is every bounded wait at its limit, and follows the flags");
 }
 
 // ---- what git gets ----

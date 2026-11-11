@@ -148,6 +148,16 @@ describe("giving a grant", () => {
     expect(screen.queryByRole("button", { name: "Grant" })).toBeNull();
   });
 
+  it("announces the expiry's problem through a live region it's described by", async () => {
+    vi.useFakeTimers({ now: Date.UTC(2026, 10, 10, 12), toFake: ["Date"] });
+    render(<RepositoryGrants {...props({ grants: [] })} />);
+    const field = screen.getByLabelText("Expires (optional)");
+    await userEvent.type(field, "2028-01-01");
+    const message = screen.getByText("Choose a day at most a year from now.");
+    expect(message).toHaveAttribute("aria-live", "polite");
+    expect(field).toHaveAccessibleDescription("Choose a day at most a year from now.");
+  });
+
   it("shows hostile names as text", () => {
     render(<RepositoryGrants {...props({ names: { agt_1: "<b>Owner</b>‮", per_m: "Mia" } })} />);
     expect(screen.getAllByText(/<b>Owner<\/b> · Push/)).toHaveLength(1);

@@ -173,6 +173,23 @@ describe("what's rendered inertly", () => {
     expect(screen.getByText("mainevil")).toBeInTheDocument();
   });
 
+  it("shows a degraded link's reason through the same filter as its neighbours", () => {
+    show({ request: request({ state: "ready" }), repository: link({ status: "degraded", status_reason: "ruleset_\u202Ediffers\u200B" }) });
+    expect(screen.getByText("ruleset_differs")).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/[\u202E\u200B]/);
+  });
+
+  it("announces the name field's problem through a live region it's described by", async () => {
+    show({ request: null, repository: null, delegated: true });
+    const field = screen.getByLabelText("Repository name");
+    await userEvent.type(field, "Bad_Name");
+    await userEvent.tab();
+    const message = screen.getByText(/Use lower-case letters, digits and hyphens/);
+    expect(message).toHaveAttribute("aria-live", "polite");
+    expect(field).toHaveAccessibleDescription(message.textContent!);
+    expect(field).toHaveAttribute("aria-invalid", "true");
+  });
+
   it("builds a link only from an owner/name shape", () => {
     expect(repositoryUrl("podsterdev/engineering")).toBe("https://github.com/podsterdev/engineering");
     for (const bad of ["podsterdev/../x", "https://evil.example/x", "a/b/c", "podsterdev/..", "javascript:alert(1)", "evil.example/x y", "-x/y"]) expect(repositoryUrl(bad), bad).toBeNull();

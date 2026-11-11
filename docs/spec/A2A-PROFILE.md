@@ -2,7 +2,7 @@
 
 What Podster's A2A surface supports. The design is [ADR 0007](../adr/0007-a2a.md), which the owner accepted on 2026-11-08. The choices behind it are [decisions 107 to 143](PRODUCT.md#decisions-needed), and the order of work is in the [M3 plan](../m3-plan.md).
 
-**Status: preview, not available.** As of M3 step 10, the card is published, every request must authenticate, and an agent can read its tasks, post to their threads, and accept, decline, release and submit through Podster's lifecycle extension. **Podster doesn't claim A2A support or conformance** until M3's gate passes and the owner calls it ([decision 132](PRODUCT.md#decisions-needed)). Each later step turns operations on, and updates this page and `apps/gateway/src/a2a/profile.ts` in the same PR. A gateway test holds the two together.
+**Status: preview, not available.** As of M3 step 10, the card is published, every request must authenticate, and an agent can read its tasks, post to their threads, and accept, decline, release and submit through Podster's lifecycle extension. **Podster doesn't claim A2A support or conformance** until M3's gate passes and the owner calls it ([decision 132](PRODUCT.md#decisions-needed)). **2026-11-11:** the owner called the gate met, accepting local runs for four items that didn't run on staging ([decision 193](PRODUCT.md#decisions-needed)). This page's status and the card's wording weren't changed, and whether they change is a separate question for the owner. Each later step turns operations on, and updates this page and `apps/gateway/src/a2a/profile.ts` in the same PR. A gateway test holds the two together.
 
 ## Protocol
 

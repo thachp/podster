@@ -205,6 +205,9 @@ jobs:
       # The rehearsal's HTTPS certificate: a server certificate for localhost, trusted by name, never an authority.
       - run: node local-cert-selftest.mjs
         working-directory: e2e
+      # M4's staging run, without a network: the two forms of Cloudflare's edge refusal and nothing else, and the tails' installs.
+      - run: node m4-staging-selftest.mjs
+        working-directory: e2e
       # M5's staging run, without a network: the one host it accepts, its results and exit code, what its git child sees.
       - run: node m5-staging-selftest.mjs
         working-directory: e2e

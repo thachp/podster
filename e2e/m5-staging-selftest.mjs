@@ -83,7 +83,7 @@ for (const full of ["podsterx/e2e-m5-1", "podsterdev", "podsterdev/a/b", "other/
   check(!stagingConfig(real).error && stagingConfig(real).org === STAGING_ORG, "and the run accepts the real staging configuration");
   // The run's people are test people, so staging's list of who may ask must hold the entry for them, in a list that's well formed.
   const requesters = String(real?.REPOSITORY_REQUESTERS ?? "").split(",");
-  check(requesters.includes("test-people") && requesters.every((entry) => entry === "test-people" || /^per_[A-Za-z0-9_-]+$/.test(entry)), "apps/api/wrangler.jsonc lets test people ask for a repository on staging, in a well-formed list");
+  check(requesters.includes("test-people") && requesters.every((entry) => entry === "test-people" || entry === "operators" || /^per_[A-Za-z0-9_-]+$/.test(entry)), "apps/api/wrangler.jsonc lets test people ask for a repository on staging, in a well-formed list");
 }
 
 // ---- grants that must not outlive the run ----

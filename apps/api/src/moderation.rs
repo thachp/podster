@@ -87,14 +87,18 @@ pub(crate) async fn record_operator_action(
     }
 }
 
-/// Refuses anyone who isn't a configured operator. An agent never is.
-pub(crate) fn require_operator(env: &Env, caller: &Caller) -> R<()> {
-    // A secret on staging, which the owner sets (docs/staging.md), or a plain binding in tests.
-    let configured = env
-        .secret("OPERATORS")
+/// The deployment's operators as configured, for `parse_operators`: a secret on staging, which the owner sets
+/// (docs/staging.md), or a plain binding in tests. Empty when it's unset, which names nobody.
+pub(crate) fn configured_operators(env: &Env) -> String {
+    env.secret("OPERATORS")
         .map(|v| v.to_string())
         .or_else(|_| env.var("OPERATORS").map(|v| v.to_string()))
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// Refuses anyone who isn't a configured operator. An agent never is.
+pub(crate) fn require_operator(env: &Env, caller: &Caller) -> R<()> {
+    let configured = configured_operators(env);
     if is_operator(&caller.kind, &caller.id, &parse_operators(&configured)) {
         Ok(())
     } else {

@@ -27,7 +27,10 @@ use podster_core::provisioning::{
 use podster_core::repositories::{
     decide_retry, valid_repo_name, RepoVisibility, RequestState, RetryPlan, RetryRefusal,
 };
-use podster_policy::repositories::{authorize_repository_admin, authorize_repository_request};
+use podster_policy::moderation::parse_operators;
+use podster_policy::repositories::{
+    authorize_repository_admin, authorize_repository_request, RepoDenial,
+};
 
 const PROVIDER: &str = "github";
 const SWITCH_VAR: &str = "MANAGED_REPOSITORIES";
@@ -60,30 +63,68 @@ pub(super) fn enabled(env: &Env, sql: &SqlStorage) -> R<bool> {
     Ok(set)
 }
 
-/// Who this deployment lets ask for a room's repository or retry its setup, from the Worker variable
-/// `REPOSITORY_REQUESTERS`, read by `RepositoryRequesters::parse`: unset is everyone the room's own rule lets; set, it's
-/// the listed person IDs and, with `test-people`, the test sign-up's people; empty or malformed, nobody. It's the
-/// deployment's configuration, never a caller's word, and the ID it's held against is the verified caller's. Both
-/// commands and the job check it. A test build can give one room a setting of its own, by a table only a test can make.
-pub(super) fn requesters(env: &Env, sql: &SqlStorage) -> R<RepositoryRequesters> {
+/// Who this deployment lets ask for a room's repository or retry its setup: the list in the Worker variable
+/// `REPOSITORY_REQUESTERS`, and the deployment's own operators, which the list's `operators` entry stands for. Both are
+/// the deployment's configuration, never a caller's word, and the ID they're held against is the verified caller's.
+#[derive(Clone, Debug)]
+pub(super) struct Requesters {
+    list: RepositoryRequesters,
+    /// `OPERATORS` as configured, the source `moderation` reads. Empty when unset, which names nobody.
+    operators: String,
+}
+
+impl Requesters {
+    /// Whether the caller may ask or retry: the room's rule, then the list. An agent never passes the first.
+    pub(super) fn authorize(&self, caller: &Caller) -> Result<(), RepoDenial> {
+        authorize_repository_request(caller, &self.list, &parse_operators(&self.operators))
+    }
+
+    /// Whether this person may ask, as far as the list goes: for the job, about the person who asked, whose place in
+    /// the room it checks for itself.
+    fn allows(&self, person: &str) -> bool {
+        self.list.allows(person, &parse_operators(&self.operators))
+    }
+}
+
+/// Reads [`Requesters`] from the Worker's configuration. `REPOSITORY_REQUESTERS`, read by
+/// `RepositoryRequesters::parse`: unset is everyone the room's own rule lets; set, it's the listed person IDs, with
+/// `test-people` the test sign-up's people, and with `operators` the people `OPERATORS` names; empty or malformed,
+/// nobody. Both commands and the job check it. A test build can give one room a setting of its own, and take the
+/// operators away from it, by tables only a test can make.
+pub(super) fn requesters(env: &Env, sql: &SqlStorage) -> R<Requesters> {
+    let operators = crate::moderation::configured_operators(env);
     #[cfg(feature = "failpoints")]
-    if !rows(
-        sql,
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_repository_requesters'",
-        vec![],
-    )?
-    .is_empty()
     {
-        let set = rows(sql, "SELECT value FROM test_repository_requesters", vec![])?;
-        let value = set.first().and_then(|row| text(&row["value"]));
-        return Ok(RepositoryRequesters::parse(Some(
-            value.as_deref().unwrap_or_default(),
-        )));
+        let has = |table: &str| -> R<bool> {
+            Ok(!rows(
+                sql,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                vec![table.into()],
+            )?
+            .is_empty())
+        };
+        // A room holding this table stands for a deployment whose OPERATORS is unset.
+        let operators = if has("test_no_operators")? {
+            String::new()
+        } else {
+            operators.clone()
+        };
+        if has("test_repository_requesters")? {
+            let set = rows(sql, "SELECT value FROM test_repository_requesters", vec![])?;
+            let value = set.first().and_then(|row| text(&row["value"]));
+            return Ok(Requesters {
+                list: RepositoryRequesters::parse(Some(value.as_deref().unwrap_or_default())),
+                operators,
+            });
+        }
     }
     #[cfg(not(feature = "failpoints"))]
     let _ = sql;
     let set = env.var(REQUESTERS_VAR).ok().map(|value| value.to_string());
-    Ok(RepositoryRequesters::parse(set.as_deref()))
+    Ok(Requesters {
+        list: RepositoryRequesters::parse(set.as_deref()),
+        operators,
+    })
 }
 
 /// What this deployment's configuration says to a request or a retry: whether managed repositories are switched on, and
@@ -91,7 +132,7 @@ pub(super) fn requesters(env: &Env, sql: &SqlStorage) -> R<RepositoryRequesters>
 #[derive(Clone, Debug)]
 pub(super) struct Deployment {
     pub(super) switched_on: bool,
-    pub(super) requesters: RepositoryRequesters,
+    pub(super) requesters: Requesters,
 }
 
 impl Deployment {
@@ -143,8 +184,8 @@ pub(super) fn runs_repository(caller: &Caller) -> bool {
 
 /// Only a person who is the room's owner or a room admin asks for or retries the room's repository, and only one this
 /// deployment lets ask. The room's rule answers first.
-pub(super) fn may_request(caller: &Caller, requesters: &RepositoryRequesters) -> R<()> {
-    authorize_repository_request(caller, requesters).map_err(repositories::denied)
+pub(super) fn may_request(caller: &Caller, requesters: &Requesters) -> R<()> {
+    requesters.authorize(caller).map_err(repositories::denied)
 }
 
 /// A request's two fields, checked: the chosen name and visibility. Nothing else is accepted.
@@ -179,7 +220,7 @@ pub(super) fn worth_counting(
     sql: &SqlStorage,
     who: &Participant,
     body: &Value,
-    requesters: &RepositoryRequesters,
+    requesters: &Requesters,
 ) -> R<bool> {
     may_request(&who.caller, requesters)?;
     requested(body)?;

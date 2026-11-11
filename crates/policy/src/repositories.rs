@@ -115,14 +115,18 @@ pub fn authorize_repository_admin(caller: &Caller) -> Result<(), RepoDenial> {
 /// Who may ask for the room's repository, or retry its setup: whoever [`authorize_repository_admin`] lets, and whom
 /// the deployment's own list of requesters lets as well. The room's rule comes first, so only a person who could
 /// otherwise ask learns that requests are closed to them, and nobody learns who is listed. `requesters` is the
-/// Worker's setting, read by `RepositoryRequesters::parse`, and the caller's ID is the verified one. It bears on
-/// asking and retrying alone: a grant, a token, a merge and a read never come here.
+/// Worker's setting, read by `RepositoryRequesters::parse`, and the caller's ID is the verified one.
+/// `deployment_operators` is the people the Worker's own configuration names as Podster operators, the list
+/// `moderation::parse_operators` reads; it counts only where the setting holds the `operators` entry. An agent is
+/// refused by the room's rule before either is read, so one whose ID is somehow among the operators gets nothing.
+/// It bears on asking and retrying alone: a grant, a token, a merge and a read never come here.
 pub fn authorize_repository_request(
     caller: &Caller,
     requesters: &RepositoryRequesters,
+    deployment_operators: &[&str],
 ) -> Result<(), RepoDenial> {
     authorize_repository_admin(caller)?;
-    if !requesters.allows(&caller.id) {
+    if !requesters.allows(&caller.id, deployment_operators) {
         return Err(RepoDenial::RequestsClosed);
     }
     Ok(())

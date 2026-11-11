@@ -16,8 +16,8 @@ use podster_core::repo_grants::{
 };
 use podster_core::repositories::GrantAction;
 use podster_policy::repositories::{
-    authorize_grant, authorize_repository_request, authorize_revoke, delegation_holder,
-    holds_repository_delegation, may_receive_grant, sees_grant, RepoDenial,
+    authorize_grant, authorize_revoke, delegation_holder, holds_repository_delegation,
+    may_receive_grant, sees_grant, RepoDenial,
 };
 
 /// `GET repository`: the room's request for a repository and its linked repository, each null if there's none. For
@@ -30,7 +30,7 @@ use podster_policy::repositories::{
 pub(super) fn read(
     sql: &SqlStorage,
     who: &Participant,
-    requesters: &podster_core::provisioning::RepositoryRequesters,
+    requesters: &super::provisioning::Requesters,
 ) -> R<Value> {
     if who.caller.kind != PrincipalKind::Person || !sees_whole_room(&who.caller) {
         return Err(ApiError::not_allowed());
@@ -50,7 +50,7 @@ pub(super) fn read(
             "status_reason": r["status_reason"], "created_at": r["created_at"], "verified_at": r["verified_at"],
             "updated_at": r["updated_at"],
         }));
-    let may_request = authorize_repository_request(&who.caller, requesters).is_ok();
+    let may_request = requesters.authorize(&who.caller).is_ok();
     Ok(json!({ "request": request, "repository": repository, "may_request": may_request }))
 }
 

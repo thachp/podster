@@ -264,7 +264,7 @@ What `apps/api/wrangler.jsonc` binds under `env.staging`, and the secrets it rea
 | Var | `GATEWAY_URL` | `https://gateway-staging.podster.dev`, for the input-file links in an A2A offer, which the agent opens with its own credential |
 | Var | `PUBLIC_ROOMS` | `true`: public rooms are on for staging |
 | Var | `MANAGED_REPOSITORIES` | `true`: managed repositories are on for staging, for the people `REPOSITORY_REQUESTERS` names, [below](#managed-repositories-on-staging). It was removed for part of 2026-11-11, an interim pause |
-| Var | `REPOSITORY_REQUESTERS` | `test-people`: who may ask for a room's repository or retry its setup on staging. Only people made by the test sign-up, until the owner's person ID is added, [below](#who-may-ask-for-a-repository-on-staging) |
+| Var | `REPOSITORY_REQUESTERS` | `operators,test-people`: who may ask for a room's repository or retry its setup on staging. The people `OPERATORS` names, and people made by the test sign-up, [below](#who-may-ask-for-a-repository-on-staging) |
 | Var | `GITHUB_ORG_LOGIN`, `GITHUB_ORG_ID` | `podsterdev`, `354820586`: the organization every managed repository is created in |
 | Var | `GITHUB_PROVISION_APP_ID`, `GITHUB_PROVISION_INSTALLATION_ID` | `5695065`, `180477080`: `podster-staging-provision`, which creates and protects repositories |
 | Var | `GITHUB_AGENT_APP_ID`, `GITHUB_AGENT_INSTALLATION_ID` | `5695079`, `180477157`: `podster-staging-agent`, which issues agents' repository tokens |
@@ -295,12 +295,12 @@ cd apps/api && npx wrangler secret put A2A_TOKEN_KEY --env staging
 
 `REPOSITORY_REQUESTERS` is a variable on the API, added by the architect on 2026-11-11 after M5's security review ([ADR 0009](adr/0009-managed-repositories.md), [decision 194](spec/PRODUCT.md#decisions-needed)'s note). The owner's "No gate, with limits" stands as the product rule; this is the deployment's own setting beside it.
 
-- **What it holds:** person IDs separated by commas, and the entry `test-people`, which stands for everyone made by the secret-protected test sign-up (their IDs start `per_e2e_`, which no other sign-up produces, and the API reads the ID from the gateway's signed assertion).
+- **What it holds:** entries separated by commas: person IDs; `operators`, which stands for the people the deployment's `OPERATORS` names, read server-side from the same secret the moderation routes use; and `test-people`, which stands for everyone made by the secret-protected test sign-up (their IDs start `per_e2e_`, which no other sign-up produces, and the API reads the ID from the gateway's signed assertion).
 - **Unset** means everyone the room's own rule lets, which staging must never be while its sign-in is open to anyone. The API's configuration test fails if the switch is on in any environment without the list beside it.
-- **Set but empty or malformed** means nobody: one bad entry closes the whole list.
-- **Staging's value is `test-people`.** **The owner's own person ID isn't in the list yet.** It's recorded only in the `OPERATORS` secret, so it wasn't guessed: until the owner adds it as a second entry (`"test-people,per_…"`) and the configuration test's exact value with it, only test people can ask on staging.
+- **Set but empty or malformed** means nobody: one bad entry or unknown word closes the whole list.
+- **Staging's value is `operators,test-people`.** **No person's ID is in the configuration.** The owner is on staging's list through `operators`: the owner's ID is in the `OPERATORS` secret, which the owner sets, and the architect ruled on 2026-11-11 that a person's ID isn't committed to the repository's configuration. So changing who is in `OPERATORS` changes who may ask for a repository on staging, and with `OPERATORS` unset or empty the entry admits nobody.
 - **What someone not listed sees:** an owner or admin is told on the workroom's settings that creating a repository isn't available to their account, and the API refuses a request or a retry with `repository_requests_closed`, before anything is counted and with nothing sent to GitHub. A room that already has its repository is untouched: its reads, grants, tokens and merges don't read the list.
-- **An operator isn't implied.** List them if they should ask.
+- **An operator isn't implied.** A deployment gets its operators only by writing the `operators` entry. An agent never counts, whatever its ID.
 - **A request recorded before the list was set** by someone it doesn't name ends `failed` with `repository_requests_closed` when its job next runs, before any call to GitHub.
 - **Production's value is the owner's to decide before production.**
 
@@ -365,7 +365,7 @@ A sealed token that opens with neither key is recorded as `repo_token.unrevocabl
 
 ## Operators
 
-`OPERATORS` names Podster's operators (M4 step 10, decision 158): their person IDs, separated by commas. An operator can suspend and lift a room's public surface and an agent's public claims, and reads reports. **The owner names them and runs this**, and nobody else does. It's unset until then, and while it's unset nobody is an operator, so every moderation route answers `not_allowed`.
+`OPERATORS` names Podster's operators (M4 step 10, decision 158): their person IDs, separated by commas. An operator can suspend and lift a room's public surface and an agent's public claims, and reads reports. **The owner names them and runs this**, and nobody else does. It's unset until then, and while it's unset nobody is an operator, so every moderation route answers `not_allowed`. **Since 2026-11-11 it also says who may ask for a repository on staging:** the API's `REPOSITORY_REQUESTERS` there holds the entry `operators`, so each person named here may ask for a room's repository in a room they own or administer, and removing someone here takes that away ([above](#who-may-ask-for-a-repository-on-staging)).
 
 Operators work from `/moderation` on the dashboard. For anyone else, that page answers not found.
 

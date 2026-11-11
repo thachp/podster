@@ -1042,18 +1042,18 @@ describe("the provisioning job", () => {
   it("is set for staging only in the Worker's configuration, beside the list of who may ask, with no key beside it", () => {
     // This reads the configuration file. A variable set on the deployed Worker by hand wouldn't show here.
     // The owner said "let's unblock m5 staging" on 2026-11-11. The architect took the switch out again that day, since
-    // staging's sign-in is open to anyone, and put it back with `REPOSITORY_REQUESTERS`: on staging only test people may
-    // ask, until the owner's own person ID is added. The switch, that list, the organization and the three Apps' IDs
+    // staging's sign-in is open to anyone, and put it back with `REPOSITORY_REQUESTERS`: on staging only the operators
+    // the `OPERATORS` secret names and test people may ask, and no person's ID is in the file. The switch, that list, the organization and the three Apps' IDs
     // are staging's variables. The top level, which local runs and these tests use, and any other environment set none.
     const config = JSON.parse(BINDINGS.TEST_WRANGLER.replace(/^\s*\/\/.*$/gm, ""));
     // Wherever the switch is on, the list is set, to something that isn't everyone. Unset would be everyone.
     for (const [environment, scope] of [["top level", config], ...Object.entries<any>(config.env)] as [string, any][]) {
       if (scope.vars?.MANAGED_REPOSITORIES === undefined) continue;
-      expect(scope.vars.REPOSITORY_REQUESTERS, environment).toMatch(/^(test-people|per_[A-Za-z0-9_-]+)(,(test-people|per_[A-Za-z0-9_-]+))*$/);
+      expect(scope.vars.REPOSITORY_REQUESTERS, environment).toMatch(/^(operators|test-people|per_[A-Za-z0-9_-]+)(,(operators|test-people|per_[A-Za-z0-9_-]+))*$/);
     }
     const staging: Record<string, string> = {
       MANAGED_REPOSITORIES: "true",
-      REPOSITORY_REQUESTERS: "test-people",
+      REPOSITORY_REQUESTERS: "operators,test-people",
       GITHUB_ORG_LOGIN: "podsterdev",
       GITHUB_ORG_ID: "354820586",
       GITHUB_PROVISION_APP_ID: "5695065",
@@ -1428,6 +1428,64 @@ describe("a deployment's list of repository requesters", () => {
     expect(await rowsOf(fresh.id, "repo_request")).toEqual([]);
     expect(await eventTypes(r.id)).toEqual(events);
     for (const holder of [r.org, r.owner.id]) for (const id of [r.id, fresh.id]) expect(await counted(holder)).not.toContain(id);
+    expect((await github()).calls).toEqual([]);
+  });
+
+  it("takes the deployment's operators only with the entry for them, and nobody by it when no operator is configured", async () => {
+    // This runtime's OPERATORS names `per_operator_one` and `per_operator_two`, as moderation's tests use them.
+    expect(BINDINGS.OPERATORS).toBe("per_operator_one, per_operator_two");
+    await fake("/reset", {});
+    const tag = crypto.randomUUID().slice(0, 8);
+    const org = `org_pv_ops_${tag}`;
+    const operator: Who = { id: "per_operator_one", kind: "person", org, adminOrgs: [org] };
+    const r = await roomOf(operator);
+    const events = await eventTypes(r.id);
+    const other = await person(r, `per_pv_notop_${tag}`, "admin");
+    const told = async (who: Who) => (await api(who, "GET", `/v1/workspaces/${r.id}/repository`)).body.may_request;
+    // No entry: an operator isn't implied, beside test people or anyone else.
+    for (const value of ["test-people", "per_pv_someone_else", "per_pv_someone_else,test-people"]) {
+      await listed(r.id, value);
+      expect((await ask(r)).code, value).toBe("repository_requests_closed");
+      expect(await told(operator), value).toBe(false);
+    }
+    // A word that only looks like the entry closes the whole list.
+    for (const value of ["operator", "Operators", "operators,admins", "operators,"]) {
+      await listed(r.id, value);
+      expect((await ask(r)).code, value).toBe("repository_requests_closed");
+    }
+    // The entry, with no operator configured: it admits nobody.
+    await listed(r.id, "operators,test-people");
+    await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_no_operators (x INTEGER)"));
+    expect((await ask(r)).code).toBe("repository_requests_closed");
+    expect(await told(operator)).toBe(false);
+    await inRoom(r.id, (sql) => void sql.exec("DROP TABLE test_no_operators"));
+    // The entry, and a caller who isn't among the operators: refused, whatever they send.
+    const pretending = await api(other, "POST", `/v1/workspaces/${r.id}/repository`, { name: "engineering", visibility: "public", operator: true }, { claims: { operator: true, operators: [other.id] } });
+    expect([pretending.status, pretending.code]).toEqual(CLOSED);
+    expect(await told(other)).toBe(false);
+    await untouched(r, [operator.id, other.id], [...events, ...(await eventTypes(r.id)).slice(events.length)]);
+    // An agent stored as an admin gets the room's own refusal, the entry or not.
+    const agent = await memberAgent(r);
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE member SET role = 'admin' WHERE principal_id = ?", agent.id));
+    expect((await ask(r, undefined, { who: agent })).code).toBe("not_allowed");
+    // The entry, and the caller among the operators: they ask, and the repository is made.
+    expect(await told(operator)).toBe(true);
+    expect((await ask(r)).status).toBe(200);
+    expect((await rowsOf(r.id, "repo_request"))[0].requested_by).toBe(operator.id);
+    expect((await settled(r)).request.state).toBe("ready");
+  });
+
+  it("stops a request an operator made once the deployment names no operator, before anything goes to GitHub", async () => {
+    await fake("/reset", {});
+    const org = `org_pv_ops2_${crypto.randomUUID().slice(0, 8)}`;
+    const operator: Who = { id: "per_operator_two", kind: "person", org, adminOrgs: [org] };
+    const r = await roomOf(operator);
+    await listed(r.id, "operators");
+    await alarmQuiet(stub(r.id));
+    expect((await ask(r)).status).toBe(200);
+    await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_no_operators (x INTEGER)"));
+    for (let i = 0; i < 40 && (await rowsOf(r.id, "repo_request"))[0].state === "pending"; i++) await alarmPass(stub(r.id));
+    expect((await rowsOf(r.id, "repo_request"))[0]).toMatchObject({ state: "failed", reason: "repository_requests_closed" });
     expect((await github()).calls).toEqual([]);
   });
 

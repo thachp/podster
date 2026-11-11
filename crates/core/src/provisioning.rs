@@ -924,6 +924,10 @@ pub fn organization_delegated(recorded: Option<bool>) -> bool {
 /// The literal entry in a deployment's list of repository requesters that stands for every test person.
 pub const TEST_PEOPLE_ENTRY: &str = "test-people";
 
+/// The literal entry that stands for the deployment's operators: the people its own configuration names as Podster
+/// operators. A deployment gets them only by writing this entry. They're never implied.
+pub const OPERATORS_ENTRY: &str = "operators";
+
 /// What every test person's ID starts with: `per_` and the `e2e_` the gateway's secret-protected test sign-up gives
 /// its users' IDs, which no other sign-up produces. The ID is the verified caller's, from the gateway's assertion,
 /// never anything a client sends.
@@ -962,6 +966,8 @@ pub enum RepositoryRequesters {
         people: Vec<String>,
         /// Whether the list holds [`TEST_PEOPLE_ENTRY`]: every test person may ask.
         test_people: bool,
+        /// Whether the list holds [`OPERATORS_ENTRY`]: every operator the deployment names may ask.
+        operators: bool,
     },
 }
 
@@ -971,22 +977,26 @@ impl RepositoryRequesters {
         RepositoryRequesters::Only {
             people: Vec::new(),
             test_people: false,
+            operators: false,
         }
     }
 
-    /// Reads the setting. Absent is everyone. Present, it's entries separated by commas, each a person's ID or
-    /// [`TEST_PEOPLE_ENTRY`], with spaces around an entry ignored. Anything else is nobody, the whole list with it:
-    /// an empty value, an empty entry, an entry of any other shape. So a slip in the setting closes requests and
-    /// never opens them. An operator isn't implied, and neither is anyone else.
+    /// Reads the setting. Absent is everyone. Present, it's entries separated by commas, each a person's ID,
+    /// [`TEST_PEOPLE_ENTRY`] or [`OPERATORS_ENTRY`], with spaces around an entry ignored. Anything else is nobody, the
+    /// whole list with it: an empty value, an empty entry, an entry of any other shape or an unknown word. So a slip
+    /// in the setting closes requests and never opens them. An operator isn't implied, and neither is anyone else.
     pub fn parse(configured: Option<&str>) -> Self {
         let Some(configured) = configured else {
             return RepositoryRequesters::Everyone;
         };
         let mut people = Vec::new();
         let mut test_people = false;
+        let mut operators = false;
         for entry in configured.split(',').map(|entry| entry.trim_matches(' ')) {
             if entry == TEST_PEOPLE_ENTRY {
                 test_people = true;
+            } else if entry == OPERATORS_ENTRY {
+                operators = true;
             } else if person_id_entry(entry) {
                 people.push(entry.to_string());
             } else {
@@ -996,19 +1006,26 @@ impl RepositoryRequesters {
         RepositoryRequesters::Only {
             people,
             test_people,
+            operators,
         }
     }
 
-    /// Whether this person may ask, as far as the deployment's setting goes. `person_id` is the verified caller's.
-    pub fn allows(&self, person_id: &str) -> bool {
+    /// Whether this person may ask, as far as the deployment's setting goes. `person_id` is the verified caller's,
+    /// and a person's: the caller's kind is the policy's to check first. `deployment_operators` is the people the
+    /// deployment's own configuration names as operators, read by the Worker and never from a caller. It counts
+    /// only if the list holds [`OPERATORS_ENTRY`], and an empty one names nobody.
+    pub fn allows(&self, person_id: &str, deployment_operators: &[&str]) -> bool {
         match self {
             RepositoryRequesters::Everyone => true,
             RepositoryRequesters::Only {
                 people,
                 test_people,
+                operators,
             } => {
-                (*test_people && is_test_person(person_id))
-                    || people.iter().any(|listed| listed == person_id)
+                !person_id.is_empty()
+                    && ((*test_people && is_test_person(person_id))
+                        || (*operators && deployment_operators.contains(&person_id))
+                        || people.iter().any(|listed| listed == person_id))
             }
         }
     }

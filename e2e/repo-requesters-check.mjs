@@ -1,11 +1,11 @@
 // A deployment's list of who may ask for a room's repository: the API's Worker variable REPOSITORY_REQUESTERS, added on
 // 2026-11-11 after M5's security review. This checks that the variable itself is read, through the gateway and the API,
-// on a local stack with MANAGED_REPOSITORIES "true" whose REPOSITORY_REQUESTERS names exactly one person. run-local.mjs
-// starts that stack and runs this against the rehearsal's fake GitHub.
+// on a local stack with MANAGED_REPOSITORIES "true" whose REPOSITORY_REQUESTERS is `operators` and whose OPERATORS names
+// exactly one person, so that person is the only one let ask. run-local.mjs starts that stack and runs this against the rehearsal's fake GitHub.
 //
 //   PODSTER_E2E_LISTED_COOKIE=<cookie> node repo-requesters-check.mjs --base-url http://localhost:8787 --github http://127.0.0.1:9999
 //
-// PODSTER_E2E_LISTED_COOKIE is the session of the one person the variable names. Each refusal is one exact code.
+// PODSTER_E2E_LISTED_COOKIE is the session of the one person OPERATORS names. Each refusal is one exact code.
 import { eq, key, McpAgent, ok, Person, refused, Report, Target } from "./lib.mjs";
 
 const arg = (name) => (process.argv.indexOf(name) > 0 ? process.argv[process.argv.indexOf(name) + 1] : undefined);

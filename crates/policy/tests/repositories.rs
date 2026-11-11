@@ -219,7 +219,7 @@ fn a_deployments_list_narrows_who_may_ask_and_never_widens_it() {
                         Err(RepoDenial::RequestsClosed)
                     };
                     assert_eq!(
-                        authorize_repository_request(&who, &requesters),
+                        authorize_repository_request(&who, &requesters, &[]),
                         expected,
                         "{setting:?} {id} {kind:?} {role:?}"
                     );
@@ -244,10 +244,89 @@ fn a_deployments_list_narrows_who_may_ask_and_never_widens_it() {
     let listed_agent = RepositoryRequesters::parse(Some("per_listed,test-people"));
     for id in ["per_listed", TEST_PERSON] {
         assert_eq!(
-            authorize_repository_request(&caller(id, Agent, Role::Owner), &listed_agent),
+            authorize_repository_request(&caller(id, Agent, Role::Owner), &listed_agent, &[]),
             Err(RepoDenial::NotAllowed)
         );
     }
+}
+
+/// The `operators` entry: the deployment's own operators may ask, only where the setting holds the entry, and only as
+/// people who run the room.
+#[test]
+fn the_operators_entry_admits_the_deployments_operators_and_never_an_agent() {
+    use podster_core::provisioning::RepositoryRequesters;
+    use podster_policy::moderation::parse_operators;
+    const OP: &str = "per_operator_one";
+    const TEST_PERSON: &str = "per_e2e_0123456789abcdef";
+    // (the setting, the deployment's OPERATORS as configured, who may ask of an operator, a test person and another)
+    let cases: [(Option<&str>, &str, &[&str]); 9] = [
+        // The entry, and the caller among the operators.
+        (
+            Some("operators,test-people"),
+            "per_operator_one, per_operator_two",
+            &[OP, TEST_PERSON],
+        ),
+        (Some("operators"), "per_operator_one", &[OP]),
+        // The entry, and the caller not among them.
+        (
+            Some("operators,test-people"),
+            "per_operator_two",
+            &[TEST_PERSON],
+        ),
+        // The entry, and OPERATORS unset or empty: it admits nobody.
+        (Some("operators,test-people"), "", &[TEST_PERSON]),
+        (Some("operators"), "", &[]),
+        (Some("operators"), " , ", &[]),
+        // No entry: an operator isn't implied.
+        (Some("test-people"), "per_operator_one", &[TEST_PERSON]),
+        // An unknown word beside it closes the list, operators included.
+        (Some("operators,admins"), "per_operator_one", &[]),
+        // Unset: everyone the room's rule lets, whatever OPERATORS says.
+        (None, "", &[OP, TEST_PERSON, "per_other"]),
+    ];
+    let mut checked = 0;
+    for (setting, configured, allowed) in cases {
+        let requesters = RepositoryRequesters::parse(setting);
+        let operators = parse_operators(configured);
+        for id in [OP, TEST_PERSON, "per_other"] {
+            for kind in [Person, Agent] {
+                for role in Role::ALL {
+                    let runs_it = kind == Person && matches!(role, Role::Owner | Role::Admin);
+                    let expected = if role == Role::None {
+                        Err(RepoDenial::NotParticipant)
+                    } else if !runs_it {
+                        // An operator who is a member or a guest of the room, and an agent whose ID is among the
+                        // operators, get the room's own refusal.
+                        Err(RepoDenial::NotAllowed)
+                    } else if allowed.contains(&id) {
+                        Ok(())
+                    } else {
+                        Err(RepoDenial::RequestsClosed)
+                    };
+                    assert_eq!(
+                        authorize_repository_request(
+                            &caller(id, kind, role),
+                            &requesters,
+                            &operators
+                        ),
+                        expected,
+                        "{setting:?} {configured:?} {id} {kind:?} {role:?}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 9 * 3 * 2 * 5);
+    // By name: an agent stored as the room's owner, with an ID the deployment lists as an operator.
+    assert_eq!(
+        authorize_repository_request(
+            &caller(OP, Agent, Role::Owner),
+            &RepositoryRequesters::parse(Some("operators")),
+            &[OP]
+        ),
+        Err(RepoDenial::NotAllowed)
+    );
 }
 
 /// Who takes a grant back: the room's owner or a room admin as a person, a person who administers the room's

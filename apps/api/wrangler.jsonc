@@ -52,11 +52,11 @@
       // architect took it out again that day, because staging's sign-in is open to anyone and since decision 194 no
       // operator approves who may ask, and put it back with REPOSITORY_REQUESTERS beside it.
       // REPOSITORY_REQUESTERS names who this deployment lets ask for a room's repository or retry its setup (ADR 0009,
-      // docs/staging.md): person IDs separated by commas, and test-people for people made by the test sign-up. Set but
-      // empty or malformed, it lets nobody. Unset, it lets everyone the room's own rule lets, which staging must never
-      // be while its sign-in is open: a test fails if the switch is on here without it.
-      // PLACEHOLDER, FOR THE OWNER: the owner's own person ID isn't listed yet. It's recorded nowhere but the OPERATORS
-      // secret, so it wasn't guessed. Until it's added here as a second entry, only test people can ask on staging.
+      // docs/staging.md): entries separated by commas. operators stands for the people the OPERATORS secret names, read
+      // server-side, and test-people for people made by the test sign-up; a person's ID may be listed too, and staging
+      // lists none, so no person's ID is committed here. Set but empty, malformed or holding an unknown word, it lets
+      // nobody. Unset, it lets everyone the room's own rule lets, which staging must never be while its sign-in is
+      // open: a test fails if the switch is on here without it.
       // The rest say where and as whom: the organization and the three Apps' IDs and installation IDs, none of them
       // secret. Each App's private key and the token-sealing key are secrets the owner sets (docs/staging.md), and are
       // set nowhere here. All of it is for staging only: a test fails if the top level or any other environment sets one.
@@ -65,7 +65,7 @@
         "GATEWAY_URL": "https://gateway-staging.podster.dev",
         "PUBLIC_ROOMS": "true",
         "MANAGED_REPOSITORIES": "true",
-        "REPOSITORY_REQUESTERS": "test-people",
+        "REPOSITORY_REQUESTERS": "operators,test-people",
         "GITHUB_ORG_LOGIN": "podsterdev",
         "GITHUB_ORG_ID": "354820586",
         "GITHUB_PROVISION_APP_ID": "5695065",

@@ -4547,9 +4547,7 @@ impl Workspace {
                     hash,
                     stops_when_archived,
                     test_fail,
-                    |sql: &SqlStorage, who: &Participant| {
-                        provisioning::may_request(sql, &who.caller)
-                    },
+                    |_: &SqlStorage, who: &Participant| provisioning::may_request(&who.caller),
                     move |sql, who, now| {
                         provisioning::request(sql, who, &body, switched_on, delegated, now)
                     },
@@ -4570,9 +4568,7 @@ impl Workspace {
                     hash,
                     stops_when_archived,
                     test_fail,
-                    |sql: &SqlStorage, who: &Participant| {
-                        provisioning::may_request(sql, &who.caller)
-                    },
+                    |_: &SqlStorage, who: &Participant| provisioning::may_request(&who.caller),
                     move |sql, who, now| {
                         provisioning::retry(sql, who, &body, switched_on, delegated, &suffix, now)
                     },

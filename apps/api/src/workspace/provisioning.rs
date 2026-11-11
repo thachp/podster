@@ -81,7 +81,7 @@ pub(super) fn is_current_owner(caller: &Caller) -> bool {
 }
 
 /// Only the room's owner, as a person, asks for or retries the room's repository.
-pub(super) fn may_request(_sql: &SqlStorage, caller: &Caller) -> R<()> {
+pub(super) fn may_request(caller: &Caller) -> R<()> {
     if is_current_owner(caller) {
         Ok(())
     } else {
@@ -109,7 +109,7 @@ pub(super) fn request(
     delegated: bool,
     now: i64,
 ) -> R<Value> {
-    may_request(sql, &who.caller)?;
+    may_request(&who.caller)?;
     // Switched off, the route isn't there, for the owner as for anyone.
     if !switched_on {
         return Err(ApiError::not_found());
@@ -188,7 +188,7 @@ pub(super) fn retry(
     suffix: &str,
     now: i64,
 ) -> R<Value> {
-    may_request(sql, &who.caller)?;
+    may_request(&who.caller)?;
     if !switched_on {
         return Err(ApiError::not_found());
     }

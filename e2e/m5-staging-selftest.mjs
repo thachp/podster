@@ -4,7 +4,7 @@
 //
 //   node m5-staging-selftest.mjs
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,10 +12,11 @@ import { createHmac } from "node:crypto";
 import { childEnv, forbidden } from "./child-env.mjs";
 import { parseJsonc } from "./jsonc.mjs";
 import { missingWranglers } from "./m4-staging-lib.mjs";
+import { ACCOUNT_ENV, closeTails, downWithin, openTail, refusalLines, requestHolds, STAY_UP_SECONDS, TAIL_ARGS, tailEnv, tailFault, without, wranglerReason } from "./m5-tails.mjs";
 import {
   absentId, ASKPASS_SCRIPT, cloneUrlProblem, CREDENTIAL_ENV, deliveryBody, deliveryOutcomes, GrantLedger, gitEnv, isCommitSha, LATE_MERGE_MS, CLOCK_SKEW_MS, leaks, loggedText, logHits, lostAuthorityEnding, worstCaseSeconds, mergeCommitProblems, movedHeadEnding, parseArgs, PLAN,
   releaseStatusProblems, repositoryOrgProblem, requesterProblem, reviewStatusProblems, rulesetProblems, scrub, secretProblem, SIGN_UPS, signDelivery, STAGING, STAGING_APP, STAGING_ORG, stagingConfig, stagingOnly,
-  STEADY, steady, tailEnv, Tally, WEBHOOK_PATH, WEBHOOK_SECRET_ENV, webhookSecretProblem,
+  STEADY, steady, Tally, WEBHOOK_PATH, WEBHOOK_SECRET_ENV, webhookSecretProblem,
 } from "./m5-staging-lib.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -203,7 +204,6 @@ check(!webhookSecretProblem("zq9-zq9").includes("zq9"), "a refused webhook secre
   check(leaks(text, needles).length === 0, "IDs and codes alone hold none of the run's strings");
   const leaked = leaks(`${text} pushed e2e/change-1 with ghs_secretsecretsecret e2e`, needles);
   check(JSON.stringify(leaked) === JSON.stringify(["a token", "a branch name"]) && !leaked.join().includes("ghs_"), "a token and a branch name in a log are found, by their labels and never their values; a string under 8 characters isn't looked for");
-  check(JSON.stringify(Object.keys(tailEnv({ PATH: "/usr/bin", HOME: "/home/x", PODSTER_E2E_SIGNUP_SECRET: "s", [WEBHOOK_SECRET_ENV]: "w", CLOUDFLARE_API_TOKEN: "t", GITHUB_TOKEN: "g" })).sort()) === JSON.stringify(["HOME", "PATH"]), "wrangler tail gets the allow-listed names only: no secret of the run's, and no token");
 }
 
 // ---- IDs that name nothing, and what counts as a change ----
@@ -272,8 +272,7 @@ check(absentId("tsk_aa") === null && absentId("nounderscore") === null, "an ID t
     return source.slice(from, next > 0 ? next : undefined);
   };
   // The tails start before anyone signs up.
-  check(source.indexOf("startTails();") > 0 && source.indexOf("startTails();") < source.indexOf('owner = await person("Room owner")') && (source.match(/startTails\(\);/g) ?? []).length === 1, "the log tails are started once, before the first sign-up");
-  check(source.includes("log tails connected before the first sign-up") && section("M5-13a").includes("podster-scanner isn't tailed") && section("M5-13").includes("lines before a tail connected") && section("M5-13").includes("sampling"), "the output says which tails were connected first, that the scanner isn't tailed, and what a tail can miss");
+  check(section("M5-13a").includes("podster-scanner isn't tailed") && section("M5-13").includes("lines before a tail connected") && section("M5-13").includes("sampling"), "the output says the scanner isn't tailed, and what a tail can miss");
   // Every credential the run is handed is scrubbed and looked for: agents' OAuth tokens and invitation tokens too.
   check(source.includes('secret(held?.access_token, "an agent\'s OAuth access token");') && source.includes('secret(held?.refresh_token, "an agent\'s OAuth refresh token");') && source.includes("keep(agent.provider?.tokens?.());"), "an agent's OAuth access and refresh tokens are added to the secrets when it connects");
   check(/agent\.provider\.saveTokens = \(held\) => \{\s*keep\(held\);\s*return save\(held\);/.test(source), "and again each time the SDK saves new ones after a refresh");
@@ -345,7 +344,91 @@ check(absentId("tsk_aa") === null && absentId("nounderscore") === null, "an ID t
   check(isCommitSha("a".repeat(40)) && !["a".repeat(39), "A".repeat(40), `${"a".repeat(40)}/../x`, "", undefined, 7].some(isCommitSha), "only 40 lower-case hex digits are a commit ID");
   check(section("M5-07f").includes('refusedCode(answer, "grant_expired"') && section("M5-07f").includes("listed?.state === \"expired\"") && section("M5-07f").includes("refusedByGithub("), "M5-07f waits for the API to list the push grant expired, wants grant_expired, and times GitHub's refusal");
   const base = parseArgs(["--base-url", STAGING], {}).options;
-  check(worstCaseSeconds(base) === 3 * 240 + 7 * 180 + 2 * 420 + 7 * 180 + 1140 && Math.round(worstCaseSeconds(base) / 60) === 87 && worstCaseSeconds({ ...base, observeWait: 10 }) === worstCaseSeconds(base) - 2 * 410 && worstCaseSeconds({ ...base, mergeWait: 10 }) === worstCaseSeconds(base) - 7 * 170, "the worst case is every bounded wait at its limit, and follows the flags");
+  check(worstCaseSeconds(base) === 3 * 240 + 7 * 180 + 2 * 420 + 7 * 180 + 1150 && Math.round(worstCaseSeconds(base) / 60) === 87 && worstCaseSeconds({ ...base, observeWait: 10 }) === worstCaseSeconds(base) - 2 * 410 && worstCaseSeconds({ ...base, mergeWait: 10 }) === worstCaseSeconds(base) - 7 * 170, "the worst case is every bounded wait at its limit, and follows the flags");
+}
+
+// ---- the log tails, against stand-ins for wrangler ----
+{
+  // What a tail may see of the environment: the allow-list, and the account's ID by name. Nothing else of Cloudflare's.
+  const account = "0123456789abcdef0123456789abcdef";
+  const parentEnv = {
+    PATH: "/usr/bin", HOME: "/home/x", PODSTER_E2E_SIGNUP_SECRET: "s", [WEBHOOK_SECRET_ENV]: "w", GITHUB_TOKEN: "g", CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: "t", CLOUDFLARE_API_KEY: "k", CLOUDFLARE_EMAIL: "e@example.com",
+    CLOUDFLARE_API_BASE_URL: "https://example.com", CLOUDFLARE_ENV: "production", CLOUDFLARE_ACCESS_CLIENT_SECRET: "x", CF_API_TOKEN: "t", CF_ACCOUNT_ID: account, WRANGLER_API_TOKEN: "t", WRANGLER_SEND_METRICS: "true",
+  };
+  const given = tailEnv(parentEnv);
+  check(JSON.stringify(Object.keys(given).sort()) === JSON.stringify(["CLOUDFLARE_ACCOUNT_ID", "HOME", "PATH"]) && given.CLOUDFLARE_ACCOUNT_ID === account, "a tail gets the allow-listed names and CLOUDFLARE_ACCOUNT_ID, and nothing else");
+  check(ACCOUNT_ENV === "CLOUDFLARE_ACCOUNT_ID" && Object.keys(given).filter((name) => /^(CLOUDFLARE|CF|WRANGLER)_/.test(name)).join() === "CLOUDFLARE_ACCOUNT_ID", "no other CLOUDFLARE_, CF_ or WRANGLER_ name passes: no token, key, address, base URL or environment");
+  for (const name of Object.keys(parentEnv).filter((name) => /^CLOUDFLARE_/.test(name) && name !== ACCOUNT_ENV)) check(!(name in given), `${name} doesn't pass`);
+  check(forbidden(ACCOUNT_ENV) && throws(() => childEnv({ [ACCOUNT_ENV]: account })), "child-env.mjs's own rule is unchanged: it still refuses the name for every other child");
+  for (const [title, value] of [["unset", undefined], ["empty", ""], ["a name, not an ID", "podster"], ["too short", account.slice(1)], ["upper case", account.toUpperCase()], ["an ID with something after it", `${account}; rm -rf`]]) {
+    const env = { PATH: "/usr/bin", HOME: "/home/x" };
+    if (value !== undefined) env.CLOUDFLARE_ACCOUNT_ID = value;
+    check(JSON.stringify(Object.keys(tailEnv(env)).sort()) === JSON.stringify(["HOME", "PATH"]), `an account ID that is ${title} isn't passed on`);
+  }
+  check(JSON.stringify(TAIL_ARGS) === JSON.stringify(["tail", "--env", "staging", "--format", "json"]), "a tail is `wrangler tail --env staging --format json`, and nothing more");
+
+  // Stand-ins for wrangler, as the real one behaved against staging on 2026-11-11.
+  const bins = mkdtempSync(join(tmpdir(), "m5-tails-"));
+  const stand = (name, body) => {
+    const file = join(bins, name);
+    writeFileSync(file, `#!${process.execPath}\n${body}\n`);
+    chmodSync(file, 0o755);
+    return file;
+  };
+  // With no account named and several on the login: exit 1 at once, listing every account by name and ID.
+  const noAccount = stand("no-account", `process.stdout.write("\\n"); process.stderr.write("\\x1b[31m✘ \\x1b[41;31m[\\x1b[41;97mERROR\\x1b[41;31m]\\x1b[0m \\x1b[1mMore than one account available but unable to select one in non-interactive mode.\\x1b[0m\\n\\n  Please set the appropriate \`account_id\` in your Wrangler configuration file or assign it to the \`CLOUDFLARE_ACCOUNT_ID\` environment variable.\\n  Available accounts are (\`<name>\`: \`<account_id>\`):\\n    \`Someone's Account\`: \`${account}\`\\n    \`someone@example.com's Account\`: \`fedcba9876543210fedcba9876543210\`\\n"); process.exit(1);`);
+  // On an account that hasn't the Worker.
+  const wrongAccount = stand("wrong-account", `process.stderr.write("✘ [ERROR] A request to the Cloudflare API (/accounts/${account}/workers/scripts/podster-api-staging/tails) failed.\\n\\n  This Worker does not exist on your account. [code: 10007]\\n  \\n  If you think this is a bug, please open an issue\\n"); process.exit(1);`);
+  // Up: nothing at all on connecting, then each event as indented JSON, until it's told to stop. It says what it was given.
+  const up = stand("up", `process.on("SIGINT", () => process.exit(0)); const say = (url) => process.stdout.write(JSON.stringify({ outcome: "ok", logs: [], exceptions: [], event: { request: { url } }, args: process.argv.slice(2), account: process.env.CLOUDFLARE_ACCOUNT_ID ?? null, names: Object.keys(process.env).sort() }, null, 4) + "\\n"); setTimeout(() => say("https://api.internal/v1/public/workrooms/pub_marker-one"), 300); setInterval(() => {}, 1000);`);
+  const open = (app, bin, env) => openTail({ app, bin, cwd: bins, env });
+
+  const failing = [open("api", noAccount, tailEnv({ PATH: process.env.PATH })), open("gateway", wrongAccount, tailEnv({ PATH: process.env.PATH }))];
+  const began = Date.now();
+  const down = await downWithin(failing, 20);
+  check(down.length === 2 && Date.now() - began < 10_000 && down.every((tail) => tail.fault === "wrangler exited with code 1"), "tails that can't start are found as soon as they've all gone, each by its exit, without waiting out the time");
+  check(down[0].reason.startsWith("More than one account available but unable to select one in non-interactive mode. Please set the appropriate `account_id`") && down[1].reason.includes("This Worker does not exist on your account. [code: 10007]"), "each with what wrangler said was wrong");
+  const printed = JSON.stringify(down) + refusalLines(down, {}).join("\n");
+  check(!printed.includes(account) && !printed.includes("fedcba9876543210") && !printed.includes("@") && !printed.includes("Someone") && !/\x1b/.test(printed) && down[1].reason.includes("/accounts/[an ID]/"), "and never an account's ID or name, an address, or a colour code: wrangler's list of accounts is cut");
+  const lines = refusalLines(down, {});
+  check(lines.length === 3 && lines[0].startsWith("the log tail for apps/api didn't start: wrangler exited with code 1. wrangler said: ") && lines[2].includes("CLOUDFLARE_ACCOUNT_ID isn't set") && lines[2].includes("more than one account"), "the refusal names each tail, and says to set the account when none is named and wrangler couldn't choose");
+  check(refusalLines(down, { CLOUDFLARE_ACCOUNT_ID: account }).length === 2 && refusalLines(down, { CLOUDFLARE_ACCOUNT_ID: "podster" }).at(-1).includes("isn't an account ID, so it wasn't passed on"), "it doesn't say that when the account is named, and says when what was set isn't an ID");
+  check(wranglerReason("") === "wrangler said nothing about why" && wranglerReason(undefined) === "wrangler said nothing about why" && wranglerReason("x".repeat(5000)).length < 40 && wranglerReason(`✘ [ERROR] ${"y".repeat(5000)}`).length === 300, "a tail that said nothing is said as that, and a long reason is cut");
+
+  const running = [open("api", up, tailEnv({ PATH: process.env.PATH, HOME: "/home/x", CLOUDFLARE_ACCOUNT_ID: account, CLOUDFLARE_API_TOKEN: "t" })), open("gateway", up, tailEnv({ PATH: process.env.PATH }))];
+  check((await downWithin(running, 1)).length === 0 && running.every((tail) => tailFault(tail) === null), "tails that stay up are none of them down, and the whole time is waited");
+  const mixed = [running[0], open("web", wrongAccount, tailEnv({ PATH: process.env.PATH }))];
+  check((await downWithin(mixed, 1)).map((tail) => tail.app).join() === "web", "with one up and one gone, only the one that's gone is named");
+  // macOS adds one name of its own to every child's environment, which is the operating system's and not this run's.
+  const first = running[0].stream.values[0];
+  check(JSON.stringify(first?.args) === JSON.stringify(TAIL_ARGS) && first?.account === account && JSON.stringify((first?.names ?? []).filter((name) => name !== "__CF_USER_TEXT_ENCODING")) === JSON.stringify(["CLOUDFLARE_ACCOUNT_ID", "HOME", "PATH"]) && running[1].stream.values[0]?.account === null, "the child really is given the tail's arguments and the account's ID, and no token");
+  check(JSON.stringify(without(running, ["marker-one"])) === "[]" && JSON.stringify(without(running, ["marker-two"])) === JSON.stringify(["api", "gateway"]) && JSON.stringify(without(running, ["marker-two", "marker-one"])) === "[]", "a tail is shown connected only by a marker it holds: any one of the markers sent");
+  // A marker counts only in the path or the query of the request an event is for, read from the parsed URL.
+  const event = (url, extra = {}) => ({ outcome: "ok", logs: [], exceptions: [], event: { request: { url, ...extra } } });
+  check(requestHolds(event("https://api.internal/v1/public/workrooms/pub_abc123"), "abc123") && requestHolds(event("https://gateway.test/api/v1/workspaces/ws_abc123?x=1"), "abc123") && requestHolds(event("https://gateway.test/find?room=ws_abc123"), "abc123"), "a marker in a request's path or query is found");
+  for (const [title, held] of [
+    ["only in the host", event("https://abc123.test/v1/public/workrooms/pub_other")], ["only in the user name", event("https://abc123@gateway.test/x")], ["only in the fragment", event("https://gateway.test/x#abc123")],
+    ["only in a header", event("https://gateway.test/x", { headers: { referer: "https://gateway.test/abc123" } })], ["only in a log line", { logs: [{ message: ["abc123"] }], event: { request: { url: "https://gateway.test/x" } } }],
+    ["in an event with no request", { event: { rpcMethod: "getWorkroom", note: "abc123" } }], ["in a URL that isn't one", event("abc123")], ["in nothing", {}],
+  ]) check(!requestHolds(held, "abc123"), `a marker ${title} isn't`);
+  check(!requestHolds(event("https://gateway.test/abc123"), "") && !requestHolds(event("https://gateway.test/abc123"), undefined), "and an empty marker matches nothing");
+  closeTails([...running, ...mixed]);
+  await new Promise((done) => setTimeout(done, 400));
+  check(running.every((tail) => tail.proc.exitCode === 0), "told to stop, a tail exits cleanly");
+  rmSync(bins, { recursive: true, force: true });
+
+  // The script: the tails are up, and shown to be, before anything is sent to staging or anyone signs up.
+  const source = readFileSync(join(here, "m5-staging.mjs"), "utf8");
+  const [started, stayed, refusedDown, dryExit, imported, marked, refusedUnseen, signUp] = [
+    "    startTails();\n    const down = await downWithin(tails, STAY_UP_SECONDS);", "if (down.length) {", "no sign-up was taken. Fix the tails, or pass --skip-logs", 'console.log("\\nThe configuration is complete. Nothing was sent to staging or to GitHub.");',
+    'await import("./lib.mjs")', "const missing = await markerInTails(60, false);", "no request of the run's own reached the log tail of", 'owner = await person("Room owner")',
+  ].map((text) => source.indexOf(text));
+  check(started > 0 && stayed > started && refusedDown > stayed && dryExit > refusedDown && imported > dryExit && marked > imported && refusedUnseen > marked && signUp > refusedUnseen, "in order: the tails start, must stay up, the dry run ends, and only then is staging sent the marker requests, all before the first sign-up");
+  check((source.match(/startTails\(\);/g) ?? []).length === 1 && source.slice(refusedDown, dryExit).includes("process.exit(2);") && source.slice(refusedUnseen, signUp).includes("await cleanUp();\n      process.exit(2);"), "the tails are started once, and each of the two refusals stops the tails and exits 2");
+  check(source.slice(started, dryExit).includes("if (options.logs)") && source.slice(started, dryExit).includes("stopTails();") && STAY_UP_SECONDS === 10, "a dry run starts the tails too, waits ten seconds on them and stops them, unless --skip-logs");
+  const markers = source.slice(source.indexOf("async function markerInTails("), source.indexOf("/** Null when every tail holds a marker request"));
+  check(markers.includes("`${STAGING_APP}/p/pub_${marker}`") && markers.includes("`${STAGING}/api/v1/workspaces/ws_${marker}`") && markers.indexOf("if (signedIn)") > markers.indexOf("ws_${marker}`);") && !/cookie|authorization/i.test(markers.slice(0, markers.indexOf("if (signedIn)"))), "the marker goes in a public page, which the web app's and the API's tails hold, and in a request straight to the gateway, which its tail holds: both with no credential");
+  check(!source.includes("tailsBefore") && !source.includes("Not yet shown connected"), "nothing is left of carrying on with tails that weren't shown connected");
 }
 
 // ---- two races the last review found ----
@@ -482,8 +565,12 @@ check(script(["--base-url", STAGING, "--yes"], { PODSTER_E2E_SIGNUP_SECRET: secr
   check(short.status === 2 && short.stderr.includes("shorter than the 32 characters") && !short.stderr.includes("too-short-to-be-one") && !short.stdout.includes("too-short-to-be-one"), "a webhook secret too short to be one is refused, exit 2, and not printed");
   // With the logs on, the run needs each app's own wrangler before anything is sent. Which way this checkout goes is read here, not assumed.
   const missing = missingWranglers(join(here, ".."));
-  const tailed = run(["--base-url", STAGING, "--dry-run"], { PODSTER_E2E_SIGNUP_SECRET: secret });
-  check(missing.length === 0 ? tailed.status === 0 && tailed.stdout.includes("`wrangler tail` for apps/api, apps/gateway, apps/web") : tailed.status === 2 && missing.every((app) => tailed.stderr.includes(`apps/${app}`)) && tailed.stderr.includes("--skip-logs") && !tailed.stdout.includes("Nothing was sent"), `with the logs on, a dry run ${missing.length === 0 ? "names the three tails" : `refuses, naming the ${missing.length} app(s) with no wrangler installed`}`);
+  // Only where an install is missing: there the script refuses before it starts a tail. Where all three are installed
+  // a dry run starts real tails, which asks Cloudflare, and this test asks nobody. The tails are tested below, against stand-ins.
+  if (missing.length) {
+    const tailed = run(["--base-url", STAGING, "--dry-run"], { PODSTER_E2E_SIGNUP_SECRET: secret });
+    check(tailed.status === 2 && missing.every((app) => tailed.stderr.includes(`apps/${app}`)) && tailed.stderr.includes("--skip-logs") && !tailed.stdout.includes("Nothing was sent") && !tailed.stdout.includes("log tails started"), `with the logs on, a dry run refuses before starting any tail, naming the ${missing.length} app(s) with no wrangler installed`);
+  } else console.log("ok   (every app has its wrangler here, so the logs-on dry run isn't run by this test: it would start real tails)");
 }
 
 rmSync(fixtures, { recursive: true, force: true });

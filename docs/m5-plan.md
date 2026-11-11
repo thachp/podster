@@ -891,9 +891,9 @@ Each gap is one of two things: **(1)** a check in the script, with the exact ans
 
 - **Sign-ups: still 2.** The second person, the first room's admin, also owns a second room, in their own organization, which the first person has no place in. That gives two rooms and two repositories under two people.
 - **It makes 2 public repositories a run, not 1,** and still can't delete either. The second is `e2e-m5-<time>-<4 hex>-<6 hex>`: the first room's name with six digits the server adds.
-- **Time: about 8 to 10 minutes expected, which hasn't been measured; about 87 minutes at worst.** The first run took 2 minutes 45 seconds for 32 checks. The extended run adds about fourteen pull requests, a wait of a minute before a retry is taken (spent on the first run's checks), two grants left to expire, and the log tails. The worst case is every bounded wait running to its limit with the default flags: 3 setups of 240 s, 7 merges of 180 s, 2 moved heads of 420 s, 7 revocations of 180 s, and 19 minutes of fixed bounds. A dry run prints the figure for the flags given.
+- **Time: 7 minutes 23 seconds on its one run (estimated beforehand at 8 to 10); about 87 minutes at worst.** The first run took 2 minutes 45 seconds for 32 checks. The extended run adds about fourteen pull requests, a wait of a minute before a retry is taken (spent on the first run's checks), two grants left to expire, and the log tails. The worst case is every bounded wait running to its limit with the default flags: 3 setups of 240 s, 7 merges of 180 s, 2 moved heads of 420 s, 7 revocations of 180 s, and 19 minutes of fixed bounds. A dry run prints the figure for the flags given.
 - **GitHub fails for real, once, on purpose:** the second room asks for the name the first room's repository already holds, and GitHub refuses it. Nothing else in the run makes GitHub fail, and nothing can make its answer go missing.
-- **Three of the four Workers' logs** are tailed with `wrangler tail`, as `e2e/m4-staging.mjs` does: the API, the gateway and the web app, each with its own installed wrangler, the allow-listed environment from `e2e/child-env.mjs`, and your `wrangler login`. A `CLOUDFLARE_API_TOKEN` in the environment isn't passed on. **`podster-scanner` isn't tailed:** the run sends it nothing. The tails start before the first sign-up, and the run prints which were shown connected by then: the API's can usually only be shown once a signed-in request reaches it, so its lines from the first sign-up may be missed. `wrangler tail` also drops events by sampling under load, which the run can't see. `--skip-logs` turns the tails off, and M5-13a, M5-13, M5-16a and M5-16b then say `SKIP`.
+- **Three of the four Workers' logs** are tailed with `wrangler tail`, as `e2e/m4-staging.mjs` does: the API, the gateway and the web app, each with its own installed wrangler, the allow-listed environment from `e2e/child-env.mjs`, and your `wrangler login`. A `CLOUDFLARE_API_TOKEN` in the environment isn't passed on. *Changed after [the first extended run](#step-10-the-extended-run-on-staging-2026-11-11): `CLOUDFLARE_ACCOUNT_ID` is passed on, and the run refuses to start unless all three tails are shown connected.* **`podster-scanner` isn't tailed:** the run sends it nothing. The tails start before the first sign-up, and all three must be shown connected by then. `wrangler tail` also drops events by sampling under load, which the run can't see. `--skip-logs` turns the tails off, and M5-13a, M5-13, M5-16a and M5-16b then say `SKIP`.
 - **The webhook secret is opt-in.** M5-16a and M5-16b run only when `PODSTER_M5_WEBHOOK_SECRET` is set in the environment for that run. The script reads no file for it, never prints or writes it, and passes it to no child. Without it both say `SKIP`, and are counted. They also need the tails: only the API's log says what became of a delivery.
 - **Four checks can end `SKIP` with everything working,** because their window can't be forced from outside: M5-09f, and AC-13a, AC-13b and AC-13c. A skip there means "this run didn't show it", and needs a further run or the owner's acceptance. **None of them passes or skips a merge it can't account for.** For AC-13, a merge that succeeded is never waved through. **If the run itself saw the order,** that once the authority had ended the merge ahead in the job's order was still waiting and so was this one, **any merge is a `FAIL`, whatever a clock says.** Otherwise only times are left: Podster's own time for the authority ending, from the room's audit log, against Podster's time for the merge finishing and GitHub's time for the merge, allowing 2 seconds between the two clocks. Finished before it by Podster's own clock, or merged more than 3 seconds before it by GitHub's: the race was lost, `SKIP`. Merged more than 7 seconds after it: `FAIL`. From 3 seconds before to 7 seconds after: it can't be told, a `SKIP` counted apart from a lost race in the run's last lines. **How often: not measured.** I expect AC-13's skips to be rare, well under one run in ten: each authority ends about one round trip after its request, behind two merges that each make several calls to GitHub. I expect M5-09f to skip more often, perhaps one run in three, since it races GitHub's own delivery.
 - **GitHub's own answers to calls nobody had made on staging** are held to a short list, not one status: `403` or `404`, and also `422` for a workflow file. The status is printed, and what the call would have changed is read back and must be unchanged. Podster's own answers stay exact, one status and one code. Once a run records GitHub's statuses, they should be pinned.
@@ -948,6 +948,67 @@ Each gap is one of two things: **(1)** a check in the script, with the exact ans
 **Every refusal code the new checks expect was read again against the API's and the gateway's source on 2026-11-11,** after one was found wrong in review (`agent_disconnected`, above). The others stand as written: `name_taken`, `retry_too_soon`, `invalid_argument`, `task_not_linked`, `commit_changed`, `grant_not_found`, `task_not_found`, `workspace_not_found`, `pull_request_not_found`, `invalid_signature`, `provider_refused`, `grant_required`, `access_revoked`, `grant_expired`, `task_not_active`, and the API's log outcomes `nudged`, `replayed`, `unknown_change` and `no_room`. That is a reading, not a run.
 
 **So after a run where every check passes and none is skipped, with the webhook secret set and the logs on, this would still rest on local tests alone, or on nothing:** M5-03's timeout and uncertain cases; that a refused call sent GitHub nothing (M5-05); a marked commit refused by the rules alone, auto-merge for the token, and a private repository (M5-06); a task's own deadline (M5-07, AC-27); the scanner's logs, and whatever a tail missed (M5-13); a lost webhook repaired by polling (M5-11); **a failed check (M5-12, criterion 7)**; the operator's take-back, reset and the daily caps (M5-14, M5-15); a cached assertion (AC-13); a failed write rolling back (AC-16); and an unlisted person. Each is the owner's to accept by name.
+
+### Step 10: the extended run on staging, 2026-11-11
+
+**Recorded from the run's own log.** The extended script ran once, starting at about 22:53Z on 2026-11-11, at `f2e46a3` against staging at `e6592b8`: **64 passed, 1 failed, 3 skipped, in 7 minutes 23 seconds, with 2 sign-ups.** Its exit code was 1.
+
+**The one failure was the script's, not the product's: M5-13a, the log tails.** `wrangler tail` exited 1 for all three Workers. The tails were given `e2e/child-env.mjs`'s allow-listed environment, which holds no `CLOUDFLARE_` name; the wrangler login holds three accounts and no wrangler file names one, so wrangler couldn't choose. **M5-13, M5-16a and M5-16b were skipped because of it,** since all three need a connected tail. The run also printed "log tails connected before the first sign-up: none" and carried on, spending both sign-ups on a run that could never show those three.
+
+**So the Workers' logs (M5-13) and replayed or misdirected deliveries (M5-16) are still unshown on staging.** Everything else the extended script has was shown, and none of the four checks that may skip did.
+
+**What it showed on staging for the first time,** each with the exact answer its row above names:
+
+- **A setup GitHub refused, and a retry** (M5-03a, M5-03b, M5-15a): `name_taken` after 2.9 s; a retry at once `429 retry_too_soon`; the retry then made `e2e-m5-202611112253-a5aa-f5b05a` in 10.2 s, with the first repository untouched. A task made while setup was failed was `task_not_linked`.
+- **Another room's IDs** (AC-05a to AC-05e): all five passed.
+- **Approval after the branch advanced** (M5-08b, AC-31): `409 commit_changed` for the submitted commit and for the new head.
+- **The job ending a merge for a head it found moved** (M5-09f): the request was taken and ended `commit_changed`. It didn't skip.
+- **A merge GitHub refused** (M5-09g, M5-12b, AC-16): `failed`, `provider_refused`, reported apart from checks, with the unmerged commit carrying the merge App's mark.
+- **Authority lost while a merge waited** (AC-13a to AC-13c): `grant_required`, `grant_required` and `access_revoked`. **In all three the run saw the job hadn't reached the merge when the authority ended,** so none rested on timestamps. AC-13d: nothing brought a grant back.
+- **Tokens whose authority ended** (M5-07b to M5-07f): an expired push grant `grant_expired`, listed as expired after 28.9 s; a canceled and a completed task `task_not_active`; a removed agent `access_revoked`; a disconnected agent's call refused with "Grant not found", which is the transport's refusal and not a Podster code. **GitHub answered `401` for each held token within 0.1 to 0.2 s,** against a disclosed remaining life of 56 to 60 minutes.
+- **The token on GitHub** (M5-06f, M5-06g): a branch in the second repository `403`, and `git push` there exit 128; a workflow file `403` through the API and refused through `git`; a forced push rewinding the default branch refused; a new ruleset, switching one off and deleting one `403` each; Actions permissions `403`; the default branch `403`. **Every status GitHub gave was `403`,** so the lists the script allows can now be pinned to it.
+- **A badly signed delivery** (M5-11b): `401 invalid_signature`.
+- **`podsterdev` gained exactly the run's two repositories** (M5-01c).
+
+**Recorded, not judged:**
+
+- **M5-C3, review C-3, confirmed as gaps:** with an agent's token, creating a tag `201`, creating a release `201` (both then deleted, `204`), force-pushing another agent's task branch succeeded, closing its pull request `200`, deleting its branch `204`.
+- **M5-C1:** the rate limit read 4985 of 5000 before and after one read by Podster. That is one observation, and it doesn't show Podster's reads spending the agent token's allowance.
+- **M5-C8:** `allow_forking` true, `allow_auto_merge` false, merge commits, squash and rebase all allowed, `delete_branch_on_merge` false, issues and wiki off; collaborators readable (`200`), default workflow permissions not (`403`).
+
+**The rows after this run.** "Yes" is this run or the three before it.
+
+| Test | On staging now | Still not on staging |
+| --- | --- | --- |
+| M5-01 | Yes, with `podsterdev` looked at | Nothing |
+| M5-03 | A refused setup, no adoption, a retry under a new name, nothing deleted | A timeout, an uncertain request |
+| M5-05 | The refusal | That no token was asked of GitHub |
+| M5-06 | Everything the row lists, and another repository | A marked commit refused by the rules alone; auto-merge for the token |
+| M5-07 | A removed and a disconnected agent, an ended task, an expired grant, each measured | A task's own deadline, which doesn't exist |
+| M5-08 | Yes | Nothing |
+| M5-09 | Yes, the job's `merge.failed` included | Nothing |
+| M5-11 | A moved head seen; an unsigned and a badly signed delivery refused | A lost webhook repaired by polling |
+| M5-12 | Checks and merge apart, and a failed merge | **A failed check** |
+| M5-13 | **No** | All of it |
+| M5-14 | The new rule | An operator's take-back, the daily caps |
+| M5-15 | A failed setup blocking only that room's coding tasks | `repo_not_ready` for a linked task; the operator's reset |
+| M5-16 | **No** | All of it |
+| AC-05 | Yes, for provider-resource IDs | Nothing |
+| AC-13 | A grant taken back, a giver demoted and a requester removed, each with a merge waiting; a replay restoring nothing | A cached assertion |
+| AC-16 | GitHub's refusal of a name and of a merge, recorded as failures | A failed write rolling back |
+| AC-27 | Yes | A task's own deadline |
+| AC-31 | Yes, both halves | Nothing |
+
+**It left** `podsterdev/e2e-m5-202611112253-a5aa` and `podsterdev/e2e-m5-202611112253-a5aa-f5b05a` for the owner to archive or delete, and the rooms `ws_dba7d5add22146119309c953ccad67a5`, `ws_4bc7d0856de84056921a4e2b8ebe0808` and `ws_ee4e08eb9fc440a7a8f6c224e90f1c37`.
+
+**The fix, after the run** (`fix/m5-staging-log-tails`):
+
+- **A tail is given `CLOUDFLARE_ACCOUNT_ID` and no other name of Cloudflare's.** The exception is made in the tails' own environment, `e2e/m5-tails.mjs`; `e2e/child-env.mjs` still refuses the name for every other child. No wrangler file names an account.
+- **The run refuses to start without its tails,** exit 2, having sent staging nothing and taken no sign-up: first each tail must stay up for ten seconds, then each must hold a request of the run's own, sent with no credential. It prints which failed and what wrangler said, with account names and IDs cut.
+- **A dry run starts and stops the three tails too,** so this is found for nothing. It asks Cloudflare and nobody else.
+- **A second fault, found by tailing staging for real and not by the run:** the gateway's tail never held the marker. The web app reaches the gateway by RPC, and that event carries no URL, so a public page shows in the web app's tail and the API's only. A request is now sent to the gateway itself as well. Without this the new refusal would have stopped every run.
+- **Checked against staging, read-only, on 2026-11-11:** with no account named, wrangler exits 1 in under a second with the message the run saw; with the right account all three tails stay up; with `--format json` wrangler prints nothing on connecting; a public page that doesn't exist showed in the API's and the web app's tails after about 3 s, and a request to the gateway in its tail after about 5 s; told to stop, each exits 0. **A dry run of the script itself was run for real three ways:** no account (refused, exit 2), a wrong account (refused, exit 2, "This Worker does not exist on your account"), and the right one (exit 0).
+- **Not checked:** the full run. M5-13, M5-16a and M5-16b have still never executed against a connected tail, and nor has the refusal for a tail that is up and holds no marker.
 
 ### Self-serve repositories: what was built
 

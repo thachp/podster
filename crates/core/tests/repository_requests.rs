@@ -77,7 +77,7 @@ fn a_place_is_held_exactly_when_the_definition_says_over_many_histories() {
         // Stamps from two days back to a minute ahead, clustered around the window's edge half the time.
         let stamps: Vec<i64> = (0..rooms)
             .map(|_| {
-                if next(&mut state) % 2 == 0 {
+                if next(&mut state).is_multiple_of(2) {
                     NOW - REPOSITORY_REQUEST_WINDOW_MS + (next(&mut state) % 5) as i64 - 2
                 } else {
                     NOW - (next(&mut state) % (2 * REPOSITORY_REQUEST_WINDOW_MS as u64)) as i64

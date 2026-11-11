@@ -141,7 +141,7 @@ export function explainGrantRefusal(code: string, status = 400) {
     case "grantee_not_participant":
       return "They're no longer in this workroom, so they can't hold repository access. Nothing changed.";
     case "grantee_public":
-      return "They joined from the public page, so they can't hold repository access. Nothing changed.";
+      return "They joined from the public page, so they can't hold repository access. Choose a participant who joined by invitation or was added directly. Nothing changed.";
     case "repo_not_linked":
       return "This workroom has no linked repository yet. Nothing changed.";
     case "grant_not_found":

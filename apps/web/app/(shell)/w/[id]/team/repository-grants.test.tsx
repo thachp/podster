@@ -127,7 +127,9 @@ describe("giving a grant", () => {
     render(<RepositoryGrants {...props({ grants: [] })} />);
     await userEvent.selectOptions(screen.getByLabelText("Participant"), "agt_1");
     await userEvent.click(screen.getByRole("button", { name: "Grant" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("They joined from the public page, so they can't hold repository access. Nothing changed.");
+    // It says what to do next, and the form keeps the choice so the owner can pick someone else.
+    expect(await screen.findByRole("alert")).toHaveTextContent("They joined from the public page, so they can't hold repository access. Choose a participant who joined by invitation or was added directly. Nothing changed.");
+    expect(screen.getByLabelText("Participant")).toBeEnabled();
   });
 
   it("isn't offered without a linked repository, in an archived room, or to anyone but the owner", () => {

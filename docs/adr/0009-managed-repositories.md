@@ -286,6 +286,7 @@ The marked commit lets the agent's token merge nothing, on the paths tried, so w
 - **A leaked provisioning key** can remove the rules, add a bypass actor and delete repositories in every managed repository (**verified** that the spike's provisioning token did each: `204`, `201`, `204`), and by its permission change visibility. With the rules gone it can do anything.
 - **Response, proposed:** the owner deletes the key and sets a new one. Token issuing and merge stop for every room while that happens. Tokens minted with the leaked key can live up to an hour, and Podster can't revoke tokens it doesn't hold. Suspending the installation may cut that short, and is **unverified**. Afterwards a job reads every managed repository and compares it with what Podster last recorded: that it still exists, its visibility, both rulesets and their bypass lists, and the default branch's head. Each difference is recorded as an observation and shown to the room's owner and the operators.
 - Rotation and response get a written runbook before M5's gate.
+  - **2026-11-11:** the runbook is written: [M5 credentials: rotation and compromise](../runbooks/m5-credentials.md). Nobody has followed it yet. It uses only what's built, and [lists the gaps](../runbooks/m5-credentials.md#gaps): the gateway accepts one webhook secret, with no overlap; there's no inventory and no job that compares repositories after a compromise; and how soon a deleted key stops working, and whether suspending an installation ends live tokens, are still unverified. The by-hand takedown is in [its own procedure](../runbooks/m5-takedown.md). Both came out of [M5's security review](../security/m5-review.md).
 
 ### Deletion, export and transfer
 
@@ -317,7 +318,7 @@ The marked commit lets the agent's token merge nothing, on the paths tried, so w
 | Webhooks and polling | Architecture, plan step 5 | Proposed. All unverified |
 | Checks with Actions off | Criterion 7, M5-12 | Proposed: statuses and check runs from any source |
 | Where state lives | Plan step 2 | Kept |
-| Key rotation and compromise | Plan's threat model | Proposed. Runbook owed |
+| Key rotation and compromise | Plan's threat model | Proposed. Runbook [written on 2026-11-11](../runbooks/m5-credentials.md), not yet followed, with its gaps listed in it |
 | Actions and workflows | Plan's threat model | Proposed: disabled on each repository by the provisioning App. Not currently true, and not tried |
 | Public repositories, takedown, pull requests from forks | Plan's threat model, architecture | Proposed. Needs the owner's yes before use |
 | Ownership and legal terms of the organization | Architecture | Left open, for the owner |

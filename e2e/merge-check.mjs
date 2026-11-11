@@ -118,63 +118,71 @@ await check("M5-S7iv", "an authorized holder's merge_task leads to exactly one m
 });
 
 // What GitHub's two rulesets refused in the spike, as the fake holds to them, each shown through Podster with one exact
-// answer. A new approved task and pull request for each.
-const approvedOn = async (number, { token = false } = {}) => {
-  await fake("agent-repo", { id: repo, status: 201, pulls: { [number]: { head_sha: HEAD, base_sha: BASE } } });
+// answer. A new task and pull request for each, with a commit of its own, so the status on the first one's commit counts
+// for nothing here.
+const headOf = (number) => (0x10 + number).toString(16).repeat(20);
+const taskOn = async (number) => {
+  await fake("agent-repo", { id: repo, status: 201, pulls: { [number]: { head_sha: headOf(number), base_sha: BASE } } });
   const made = await owner.must("POST", `/v1/workspaces/${room}/tasks`, { title: `Change ${number}`, instructions: "x", assignee: coder.id }, { idempotencyKey: key() });
   const here = { workspace_id: room, task_id: made.id };
   const accepted = await coder.must("accept_task", { ...here, version: made.version });
-  const access = token ? await coder.must("get_repo_access", here, false) : undefined;
-  await coder.must("submit_task", { ...here, version: accepted.version, note: "Done", commit_sha: HEAD, pr_number: number });
-  await owner.must("POST", `/v1/workspaces/${room}/tasks/${made.id}/verify`, { submission_no: 1, commit_sha: HEAD });
-  return { here, access };
+  return { here, version: accepted.version };
+};
+const approvedOn = async (number) => {
+  const { here, version } = await taskOn(number);
+  await coder.must("submit_task", { ...here, version, note: "Done", commit_sha: headOf(number), pr_number: number });
+  await owner.must("POST", `/v1/workspaces/${room}/tasks/${here.task_id}/verify`, { submission_no: 1, commit_sha: headOf(number) });
+  return here;
 };
 const changeOf = async (here) => (await owner.must("GET", `/v1/workspaces/${room}/tasks/${here.task_id}`)).change;
-const mergeAndWait = async (here) => {
-  await robot.must("merge_task", { ...here, submission_no: 1, commit_sha: HEAD });
+const mergeAndWait = async (here, number) => {
+  await robot.must("merge_task", { ...here, submission_no: 1, commit_sha: headOf(number) });
   return until(() => changeOf(here), (seen) => seen.merge_state !== "requested", "the merge");
 };
 const mergesOf = async (number) => (await merges()).filter((call) => call.path === `/repositories/${repo}/pulls/${number}/merge`).map((call) => call.status);
 const pullOf = async (number) => (await fake(`merge-calls?repo=${repo}`)).pulls[String(number)];
 
-await check("M5-S7v", "an agent's token can't write to the default branch directly: a commit is refused 409 and a ref update 422", async () => {
+await check("M5-S7v", "an agent's token can't write to the default branch: a commit is refused 409, a ref update 422, and a merge 405", async () => {
   await owner.must("POST", `/v1/workspaces/${room}/repository/grants`, { policy_version: await owner.policyVersion(room), principal_id: coder.id, action: "push" });
-  const { access } = await approvedOn(8, { token: true });
+  // While the task is the agent's to work on, its token is live.
+  const { here } = await taskOn(8);
+  const access = await coder.must("get_repo_access", here, false);
   ok(typeof access?.token === "string" && access.token.length > 0, "the agent got no token");
   const direct = (method, path, body) => fetch(`${github}/repositories/${repo}/${path}`, { method, headers: { authorization: `Bearer ${access.token}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", "user-agent": "e2e" }, body: JSON.stringify(body) });
   eq((await direct("PUT", "contents/README.md", { message: "x", content: "eA==", branch: "main" })).status, 409, "a commit straight to the default branch");
-  eq((await direct("PATCH", "git/refs/heads/main", { sha: HEAD, force: true })).status, 422, "moving the default branch's ref");
-  // And it can't merge the pull request itself, even once the commit is marked.
-  eq((await direct("PUT", "pulls/7/merge", { sha: HEAD, merge_method: "merge" })).status, 405, "the agent merging a pull request");
+  eq((await direct("PATCH", "git/refs/heads/main", { sha: headOf(8), force: true })).status, 422, "moving the default branch's ref");
+  // Nor can it merge a pull request, its own or the one whose commit the merge App has marked.
+  eq((await direct("PUT", "pulls/8/merge", { sha: headOf(8), merge_method: "merge" })).status, 405, "the agent merging its own pull request");
+  eq((await pullOf(8)).merged ?? false, false, "the pull request merged");
 });
 
 await check("M5-S7vi", "a commit with no review status isn't merged: GitHub refuses the merge App, and the merge fails provider_refused", async () => {
-  const { here } = await approvedOn(9);
+  const here = await approvedOn(9);
   // GitHub says the status was set, and it isn't there.
   await fake("agent-repo", { id: repo, status: "drop" });
-  const done = await mergeAndWait(here);
+  const done = await mergeAndWait(here, 9);
   eq([done.merge_state, done.merge_reason], ["failed", "provider_refused"], "the task's change");
   eq(await mergesOf(9), [405], "merge calls");
   eq((await pullOf(9)).merged ?? false, false, "the pull request merged");
 });
 
 await check("M5-S7vii", "a status from another App doesn't satisfy the rule: the merge is refused, and fails provider_refused", async () => {
-  const { here } = await approvedOn(10);
+  const here = await approvedOn(10);
   await fake("agent-repo", { id: repo, status: "foreign" });
-  const done = await mergeAndWait(here);
+  const done = await mergeAndWait(here, 10);
   eq([done.merge_state, done.merge_reason], ["failed", "provider_refused"], "the task's change");
   eq(await mergesOf(10), [405], "merge calls");
   eq((await pullOf(10)).merged ?? false, false, "the pull request merged");
 });
 
 await check("M5-S7viii", "a head that moved after review isn't merged: the merge fails commit_changed and no merge call is made", async () => {
-  const { here } = await approvedOn(11);
+  const here = await approvedOn(11);
   await fake("agent-repo", { id: repo, pulls: { 11: { head_sha: "c3".repeat(20), base_sha: BASE } } });
-  const done = await mergeAndWait(here);
+  const done = await mergeAndWait(here, 11);
   eq([done.merge_state, done.merge_reason, done.commit_changed], ["failed", "commit_changed", true], "the task's change");
   eq(await mergesOf(11), [], "merge calls");
   eq((await pullOf(11)).merged ?? false, false, "the pull request merged");
-  refused(await robot.call("merge_task", { ...here, submission_no: 1, commit_sha: HEAD, idempotency_key: key() }), "commit_changed", "asking again");
+  refused(await robot.call("merge_task", { ...here, submission_no: 1, commit_sha: headOf(11), idempotency_key: key() }), "commit_changed", "asking again");
 });
 
 for (const agent of [coder, sibling, robot]) await agent.close();

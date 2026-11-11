@@ -4,6 +4,8 @@ The security review [M5's gate](../m5-plan.md#the-gate) asks for. Three reviewer
 
 **Nothing here is fixed.** "Assigned" means the architect ruled that it's fixed before M5's gate and gave the work out. The one exception is O-1's interim: [#279](https://github.com/thachp/podster/pull/279), merged at `b66644b`, takes `MANAGED_REPOSITORIES` out of staging's configuration. No fix for any finding was on `main` when this was written. M5's gate hasn't been proposed or called.
 
+**Later on 2026-11-11 UTC that changed.** The paragraph above, the dispositions in the tables and the lists below are kept as they were written that morning. [Each finding's status](#status-of-each-finding-2026-11-11-utc) says what is fixed and on staging, what the owner decided, what is still owed and what is open. The architect has [proposed M5's gate](../m5-plan.md#the-architects-proposal-for-m5s-gate-2026-11-11-for-the-owner-to-review). The owner hasn't called it.
+
 ## Scope
 
 - **What was read:** `main` at `c8053c385ef50c9c4e88b041fadc40c15f3dca49`, on 2026-11-11 UTC. `main` at `8e6ab69`, where this page's citations were checked, differs from it in three files under `docs/` only.
@@ -29,6 +31,65 @@ The security review [M5's gate](../m5-plan.md#the-gate) asks for. Three reviewer
 **It rests on GitHub's rulesets behaving as the design assumes, and the review didn't exercise that.** The [first acceptance run on staging](../m5-plan.md#step-10-the-first-run-on-staging-2026-11-11), the same day and at the same commit, did exercise the basic cases against real GitHub: 32 passed, 0 failed, 0 skipped. Among them, GitHub refused an agent's token a push to the default branch, a merge and the review status, and the merged default branch's tip was one merge commit whose second parent was the reviewed commit. That was one run. It didn't read bypass lists, and it ran none of the [proposed staging checks](#proposed-staging-checks-not-yet-run) below in full.
 
 **The verdict is about authority only.** The operations review found two high findings that aren't about that property: who can reach staging (O-1), and that Podster can't stop a repository (O-2).
+
+## Status of each finding, 2026-11-11 UTC
+
+**As of 17:47Z on 2026-11-11,** when staging was deployed at `e6592b88b4da401cc22f9bedb67a8b227e018183`.
+
+**What "fixed and deployed" means here, and what it doesn't.** The pull request named is merged, its merge commit is an ancestor of `origin/main` (checked with `git merge-base --is-ancestor` for #281, #282 and #283), it's part of `e6592b8`, and the deploy's log says that commit was deployed with every probe passing. The fix's code was looked for on `main` by name, not reviewed again. **It doesn't mean the fix was seen working on staging.** Only three were: A-1, C-8's settings, and O-1's list as far as admitting test people ([the day's runs](../m5-plan.md#step-10-the-day-on-staging-and-the-later-runs-2026-11-11)). Every other fix is shown by its pull request's tests against a fake GitHub, and each pull request says what it left unverified.
+
+**Fixed and deployed to staging:**
+
+| ID | What was done | Pull request | Seen on staging |
+| --- | --- | --- | --- |
+| O-1 | The API's `REPOSITORY_REQUESTERS`; staging's value is `operators,test-people`. Deployed at 16:50Z at `c6f90bc`, which closed the window that had been open since 13:17Z. The interim switch-off (#279) was merged and never deployed | [#281](https://github.com/thachp/podster/pull/281) | In part: the second and third acceptance runs' test people were admitted. No unlisted person has been seen refused |
+| A-1 | The owner's decision 195: a merge is refused `self_review` unless the approving review came from someone the submitter's person doesn't control | [#283](https://github.com/thachp/podster/pull/283) | Yes: M5-10e in the third run |
+| A-3 | The merge job runs the request's own decision on every pass, policy included | #283 | No |
+| A-4 | An organization's admin with no place in the room can take a grant back | #283 | No |
+| A-5 | The delegation routes for anyone but an operator, the operator's recheck and `repo-access` answer as missing while the switch is off | #283 | No: staging's switch is on |
+| A-6 | M5's events follow the switch and the visibility of the read each mirrors | #283 | No |
+| A-9 | Rated "None" in the table. #283 moved the two checks written outside `crates/policy` into it, with behaviour unchanged. The inputs still come from the gateway's assertion | #283 | No |
+| O-5, C-9, and the misreading in C-1 | GitHub's rate-limit signals are read; a limit is never a credential failure and never spends a setup run | [#282](https://github.com/thachp/podster/pull/282) | No. GitHub's real headers and message are unconfirmed |
+| C-2 | Degrading a link marks every held token for revocation, in the same alarm pass | #282 | No |
+| C-4 | Provisioning's tokens are asked for by permission and used only if GitHub's answer matches | #282 | Only that provisioning still works with them: the third run made its repository |
+| C-5 | A GitHub answer is read up to a bound | #282 | No |
+| C-6 | Only `204` counts as revoked; a `401` keeps the row | #282 | No |
+| C-7 | Each App's role is compared with both others, by App, installation and parsed key | #282 | No |
+| C-8 | Settings are sent at creation and read back with the default workflow permissions | #282 | In part: the third run's repository came up `ready`, and GitHub's listing shows it with issues, wiki, projects and discussions off. Auto-merge isn't in that listing |
+| O-8 | A `ready` link is read back 24 hours after it was last found right | #282 | No: a day hasn't passed |
+| O-11 | The web copy no longer promises an operator's reset, an operator's check or a suspension, and the confirmation says the repository is public and in Podster's organization | #282 | No: nobody has looked at the screens in a browser |
+| O-13 | Ended grants are pruned 30 days after they ended | #282 | No |
+
+#282 also built two things this page's [last section](#where-the-reviews-and-the-code-differ) found missing: a repository deleted on GitHub reads back as `repository_gone` after two sightings, and an operator's recheck now degrades a `ready` link. Both are checked against the fake only.
+
+**Written, not followed:** O-3 and the gate's part of O-2, the [credentials runbook](../runbooks/m5-credentials.md) and the [takedown procedure](../runbooks/m5-takedown.md), merged with this page in [#280](https://github.com/thachp/podster/pull/280).
+
+**Owner decisions:**
+
+| ID | Status |
+| --- | --- |
+| A-1 | **Made:** [decision 195](../spec/PRODUCT.md#decisions-needed), 2026-11-11. Built and deployed, as above |
+| A-2 | **Not asked again.** Decision 195 records "controlling person" as staying per credential. #283 added a test that pins today's reading, so a ruling that changes it must change the test |
+| O-2, what Podster promises about a takedown | **Outstanding** |
+| O-1, production's value for the allow-list | **Outstanding.** Owed before production |
+
+**Still owed before production,** unchanged by today's fixes, as [listed below](#owed-before-production-not-before-the-gate) and in [the plan](../m5-plan.md#owed-before-production):
+
+- **O-2:** Podster can't stop a repository. #282's deleted-repository detection and recheck are what Podster does after a by-hand takedown; they don't stop one.
+- **C-1:** Podster's reads share the agent-token installation's rate limit. Only the misreading is fixed. The separate read-only App isn't made.
+- **C-3, O-7:** what an agent's token can do off the default branch. #282 switches issues, wiki and projects off on new repositories; branches, tags, releases and other tasks' pull requests are as the finding says.
+- **O-4** (no inventory), **O-6** (no deployment-wide budget), **O-9** (the kill switch), **O-10** (look-alike names), **O-12** (no log retention or alerting), **O-16** (no global or lifetime cap).
+
+**No action ruled, and none taken:** A-7, A-8, C-10, C-11, O-14 and O-15. For O-14, five public repositories are now in `podsterdev` for the owner to archive or delete.
+
+**Open, not done.** [#285](https://github.com/thachp/podster/pull/285), the follow-up to the reviews of #282, #283 and #284, is an open pull request and isn't on `main`. Nothing in it counts as fixed here:
+
+- **A test double weakened.** #282's merge left the fake GitHub unable to show a presence token that was never revoked. #285 restores that and adds the test.
+- **Contract enum gaps.** `self_review` and `controller_departed` are missing from the contract's `Error.code`. #285 adds those two, and lists 13 older codes the enum also misses without adding them.
+- **CI's font check is one-way.** #285 makes it check both directions.
+- **An accessibility timing that measured nothing** in the fallback run of [#284](https://github.com/thachp/podster/pull/284)'s browser install. #285 makes those two paths fail when too little stays laid out.
+
+**The [proposed staging checks](#proposed-staging-checks-not-yet-run) still haven't been run,** and neither have the eight #282 proposed in its description.
 
 ## Findings
 

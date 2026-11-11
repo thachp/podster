@@ -202,6 +202,9 @@ jobs:
       # The rehearsal's HTTPS certificate: a server certificate for localhost, trusted by name, never an authority.
       - run: node local-cert-selftest.mjs
         working-directory: e2e
+      # M5's staging run, without a network: the one host it accepts, its results and exit code, what its git child sees.
+      - run: node m5-staging-selftest.mjs
+        working-directory: e2e
       # The scripts agents merge, deploy and probe with: every refusal, with stand-ins for gh, wrangler and curl.
       - run: scripts/test/merge-gate-selftest
       - run: scripts/test/deploy-staging-selftest

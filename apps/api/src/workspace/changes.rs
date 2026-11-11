@@ -516,9 +516,10 @@ pub(super) fn without_change_when_off(mut read: Value, switched_on: bool) -> R<V
             fields.remove("change");
             if let Some(history) = fields.get_mut("history").and_then(Value::as_array_mut) {
                 history.retain(|event| {
-                    let kind = event["type"].as_str().unwrap_or_default();
-                    !(podster_policy::is_task_change_event(kind)
-                        || podster_policy::is_merge_event(kind))
+                    podster_policy::shows_with_switch(
+                        event["type"].as_str().unwrap_or_default(),
+                        false,
+                    )
                 });
             }
         }

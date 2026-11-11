@@ -628,15 +628,21 @@ fn refused(refusal: GrantRefusal) -> ApiError {
     }
 }
 
-/// Whether the caller administers the room's organization, by the gateway's assertion.
-fn administers_room_org(sql: &SqlStorage, caller: &Caller, admin_orgs: &[String]) -> R<bool> {
-    if caller.kind != PrincipalKind::Person {
-        return Ok(false);
-    }
+/// Whether the caller administers the room's organization: the organization from the room's own row, the caller's from
+/// the gateway's verified assertion, and `podster_policy` deciding.
+pub(super) fn administers_room_org(
+    sql: &SqlStorage,
+    caller: &Caller,
+    admin_orgs: &[String],
+) -> R<bool> {
     let org = rows(sql, "SELECT owner_org_id FROM workspace", vec![])?
         .first()
         .and_then(|room| text(&room["owner_org_id"]));
-    Ok(org.is_some_and(|org| admin_orgs.contains(&org)))
+    Ok(podster_policy::repositories::administers_org(
+        caller.kind,
+        admin_orgs,
+        org.as_deref(),
+    ))
 }
 
 /// Marks one grant revoked, with its audit entry and event. `reason` is a fixed code. The holder is told unless they

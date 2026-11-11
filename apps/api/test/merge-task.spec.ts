@@ -384,6 +384,10 @@ describe("the job checks everything again", () => {
       ["link degraded", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE repo_link SET status = 'degraded'")), "repo_not_ready"],
       ["room archived", async (r: any) => void (await must(OWNER, "POST", `/v1/workspaces/${r.id}/archive`, { policy_version: await version(r.id) })), "workspace_archived"],
       ["room suspended", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE workspace SET suspended_at = 5, suspension_reason = 'test'")), "room_suspended"],
+      // The request's own policy decision, run again (review A3): a requester who can no longer see the task, and one
+      // who is now in the room through a public claim, are refused as the request would refuse them.
+      ["requester's access narrowed", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE access_grant SET tasks = 'own' WHERE principal_id = ?", MERGER.id)), "task_not_found"],
+      ["requester now there through a public claim", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE member SET joined_via = 'public', role = 'guest' WHERE principal_id = ?", MERGER.id)), "public_participant"],
       // The owner, who gave the grant, has left the organization, and the room hasn't been told. Last, since it's the owner's own record.
       ["grant gone stale", async (r: any) => {
         await must(OWNER, "POST", "/v1/org-departures", {}, { claims: { departure: { person: OWNER.id, org: ORG, left_at: Date.now() } } });
@@ -401,6 +405,23 @@ describe("the job checks everything again", () => {
       expect((await events(r.id)).at(-1), what).toEqual({ type: "merge.failed", actor_id: "system", subject_id: MERGER.id, task_id: r.task, reason });
       expect((await taskRow(r.id, r.task)).status, what).toBe("completed");
     }
+  });
+
+  it("ends the merge when an agent requester's linking person has left since asking, as token issue refuses (review A3)", async () => {
+    const r = await approved();
+    const linker = `per_mt_gone_${++counter}`;
+    const agent: Who = { id: ROBOT.id, org: ORG, linker };
+    await grant(r.id, ROBOT);
+    const asked = await merge(agent, r.id, r.task);
+    expect(asked.status, asked.text).toBe(200);
+    // The linker leaves the organization after the request. Nothing in the room changes: they were never in it.
+    await must({ id: linker, kind: "person", org: ORG }, "POST", "/v1/org-departures", {}, { claims: { departure: { person: linker, org: ORG, left_at: Date.now() } } });
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "failed", merge_reason: "controller_departed", merge_marked_at: null, merge_called_at: null });
+    expect((await github()).calls).toEqual([]);
+    // And a request through a credential whose linker has already left is refused when it's made.
+    const again = await merge(agent, r.id, r.task);
+    expect([again.status, again.code]).toEqual([403, "controller_departed"]);
   });
 
   it("reads the repository's protections back first, and degrades the link instead of merging when they aren't what was set", async () => {
@@ -763,11 +784,12 @@ describe("what's kept, logged and shown", () => {
 });
 
 describe("with managed repositories switched off again", () => {
-  it("shows nobody a change's or a merge's events, in a task's history or the activity, and leaves no page short", async () => {
+  it("shows nobody a managed repository's events, in a task's history or the activity, and leaves no page short", async () => {
     const r = await requested();
     await pass(r.id);
     expect((await change(r.id, r.task)).merge_state).toBe("succeeded");
-    const hiddenKind = (e: any) => e.type.startsWith("merge.") || e.type.startsWith("task_change.");
+    // Every managed-repository event, the grant's included (review A6), not only a change's and a merge's.
+    const hiddenKind = (e: any) => ["merge.", "task_change.", "repository.", "repo_grant.", "repo_access.", "repo_token."].some((prefix) => e.type.startsWith(prefix));
     /** Every page of the room's activity for a viewer, three at a time, and how long each page was. */
     const pages = async (who: Who) => {
       const all: any[] = [];
@@ -961,10 +983,25 @@ describe("the review's findings (M5 step 7b)", () => {
     expect((await readBack()).live).toBe(0);
     // And a merge can be asked for again.
     expect((await merge(MERGER, r.id, r.task)).status).toBe(200);
-    // With managed repositories off, there's no such thing to recheck.
+    // With managed repositories off, there's no such thing to recheck: for anyone, with a key or without, before who is
+    // asking or the room is looked at, exactly as a route that doesn't exist answers (review A5).
     await inRoom(r.id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
-    expect((await recheck(OPERATOR, r.id)).status).toBe(404);
-    expect((await recheck(OPERATOR, "ws_nowhere")).status).toBe(404);
+    const raw = async (who: Who, path: string, key: string | null) => {
+      const headers: Record<string, string> = { "x-podster-assertion": await assertion(who), "content-type": "application/json" };
+      if (key) headers["idempotency-key"] = key;
+      const res = await SELF.fetch(`https://api.internal${path}`, { method: "POST", headers, body: "{}" });
+      return [res.status, await res.text()];
+    };
+    for (const who of [OPERATOR, OWNER, AGENT]) {
+      for (const key of [null, "mt-recheck-off"]) {
+        for (const room of [r.id, "ws_nowhere"]) {
+          const label = `${who.id} ${key} ${room}`;
+          const got = await raw(who, `/v1/moderation/repositories/${room}/recheck`, key);
+          expect(got, label).toEqual(await raw(who, `/v1/moderation/repositories/${room}/no-such-route`, key));
+          expect(got[0], label).toBe(404);
+        }
+      }
+    }
   });
 
   it("counts every request through the command itself: ten for a task in its whole life, twenty an hour for the room (M2)", async () => {
@@ -1006,6 +1043,8 @@ describe("the review's findings (M5 step 7b)", () => {
       ["requester removed", async (r: any) => void (await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/members/${MERGER.id}`, { policy_version: await version(r.id) })), "access_revoked"],
       ["room archived", async (r: any) => void (await must(OWNER, "POST", `/v1/workspaces/${r.id}/archive`, { policy_version: await version(r.id) })), "workspace_archived"],
       ["room suspended", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE workspace SET suspended_at = 5, suspension_reason = 'test'")), "room_suspended"],
+      ["requester's access narrowed", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE access_grant SET tasks = 'own' WHERE principal_id = ?", MERGER.id)), "task_not_found"],
+      ["requester now there through a public claim", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE member SET joined_via = 'public', role = 'guest' WHERE principal_id = ?", MERGER.id)), "public_participant"],
     ] as const;
     for (const [what, lose, reason] of ways) {
       for (const point of ["before the mark", "between the mark and the merge"] as const) {

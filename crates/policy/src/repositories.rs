@@ -27,7 +27,7 @@
 //! a grant, so run alone they'd tell such a caller something about the task.
 
 use podster_core::repo_grants::{check_grant, Grant, GrantRefusal, GrantUse};
-use podster_core::repo_merge::{same_controller, Actor};
+use podster_core::repo_merge::{same_controller, Actor, MergeRefusal};
 use podster_core::repositories::GrantAction;
 use podster_core::Task;
 
@@ -57,6 +57,21 @@ pub enum RepoDenial {
 }
 
 impl RepoDenial {
+    /// The same refusal as a merge records it when the job's recheck finds the requester's authority gone, with the code
+    /// the request itself would have answered.
+    pub fn as_merge_refusal(self) -> MergeRefusal {
+        match self {
+            RepoDenial::NotParticipant => MergeRefusal::AccessRevoked,
+            RepoDenial::Hidden => MergeRefusal::TaskHidden,
+            RepoDenial::PublicParticipant => MergeRefusal::PublicParticipant,
+            RepoDenial::SelfMerge => MergeRefusal::SelfMerge,
+            RepoDenial::Grant(refusal) => MergeRefusal::Grant(refusal),
+            RepoDenial::NotAllowed
+            | RepoDenial::GranteeNotParticipant
+            | RepoDenial::GranteePublic => MergeRefusal::NotAllowed,
+        }
+    }
+
     pub fn code(self) -> &'static str {
         match self {
             RepoDenial::NotParticipant => "not_a_participant",
@@ -112,12 +127,43 @@ pub fn authorize_grant(caller: &Caller) -> Result<(), RepoDenial> {
     authorize_repository_admin(caller)
 }
 
+/// Whether the caller administers an organization: a person whose verified identity lists it among the organizations
+/// they administer. An agent never does. `org` is the organization in question, from the room's own row or the route,
+/// never from a body; `None` when there isn't one, and then nobody does.
+pub fn administers_org(kind: PrincipalKind, admin_orgs: &[String], org: Option<&str>) -> bool {
+    kind == PrincipalKind::Person && org.is_some_and(|org| admin_orgs.iter().any(|o| o == org))
+}
+
+/// Who may read an organization's provisioning delegation: a Podster operator, as a person, or a person who administers
+/// that organization ([`administers_org`]). `is_operator` is the Worker's check of the verified caller.
+pub fn authorize_delegation_read(
+    kind: PrincipalKind,
+    is_operator: bool,
+    administers_org: bool,
+) -> Result<(), RepoDenial> {
+    if kind == PrincipalKind::Person && (is_operator || administers_org) {
+        Ok(())
+    } else {
+        Err(RepoDenial::NotAllowed)
+    }
+}
+
+/// Who may set an organization's provisioning delegation: a Podster operator, as a person, alone. An organization's own
+/// admin can't give it authority over Podster's GitHub organization.
+pub fn authorize_delegation_set(kind: PrincipalKind, is_operator: bool) -> Result<(), RepoDenial> {
+    if kind == PrincipalKind::Person && is_operator {
+        Ok(())
+    } else {
+        Err(RepoDenial::NotAllowed)
+    }
+}
+
 /// Who may take a grant back:
 ///
 /// - its holder, their own, whoever they are and whether or not they're still in the room;
 /// - the room's owner or a room admin, as a person, any grant;
-/// - a person who administers the room's organization, any grant, with or without a place in the room, so a grant can
-///   be pulled when the owner has left.
+/// - a person who administers the room's organization ([`administers_org`]), any grant, with or without a place in the
+///   room, so a grant can be pulled when the owner has left (AC-11).
 ///
 /// Nobody else: not a member, the reviewer or whoever gave the grant, once they're no longer the owner or an admin.
 /// An agent never takes back another principal's grant, whatever role is stored for it.

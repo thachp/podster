@@ -218,8 +218,13 @@ describe("the room's repository read", () => {
 describe("while managed repositories are switched off", () => {
   const off = (id: string) => inRoom(id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
   const PERSON: Who = { id: "per_rp_member", kind: "person", org: "org_rp" };
-  /** The same request to a route that doesn't exist, which is what every managed-repository route must look like. */
-  const missing = (who: Who, method: string, id: string, body: unknown, raw?: string) => api(who, method, `/v1/workspaces/${id}/no-such-route`, body, { raw });
+  /**
+   * The same request to a route that doesn't exist, which is what every managed-repository route must look like. A task's
+   * repo-access looks like a task verb that doesn't exist, as `merge` does (review A5): in an archived room that's the
+   * archive's refusal, as for any task command, and without a key the key's.
+   */
+  const missing = (who: Who, method: string, id: string, body: unknown, raw?: string, path?: string) =>
+    api(who, method, path?.endsWith("/repo-access") ? path.replace(/repo-access$/, "no-such-verb") : `/v1/workspaces/${id}/no-such-route`, body, { raw });
   const same = (a: Awaited<ReturnType<typeof api>>, b: Awaited<ReturnType<typeof api>>, label: string) =>
     expect([a.status, a.body, a.headers], label).toEqual([b.status, b.body, b.headers]);
   const routes = (id: string, grant: string, task: string) => [
@@ -254,7 +259,7 @@ describe("while managed repositories are switched off", () => {
       for (const who of callers()) {
         for (const [method, path, body] of routes(id, rows ? "pg_1" : "pg_none", task)) {
           const answer = await api(who, method, path, body);
-          same(answer, await missing(who, method, id, body), `${who.id} ${method} ${path} rows=${rows}`);
+          same(answer, await missing(who, method, id, body, undefined, path), `${who.id} ${method} ${path} rows=${rows}`);
           expect(answer.text).not.toContain("podsterx");
           expect(answer.text).not.toContain("engineering");
         }
@@ -269,14 +274,14 @@ describe("while managed repositories are switched off", () => {
     for (const who of callers()) {
       for (const [method, path] of routes(id, "pg_1", task).filter(([method]) => method !== "GET")) {
         const answer = await api(who, method, path, undefined, { raw: "{not json" });
-        same(answer, await missing(who, method, id, undefined, "{not json"), `${who.id} ${method} ${path} malformed`);
+        same(answer, await missing(who, method, id, undefined, "{not json", path), `${who.id} ${method} ${path} malformed`);
       }
     }
     // Archived: a missing route is still a missing route there.
     expect((await api(OWNER, "POST", `/v1/workspaces/${id}/archive`, { policy_version: await version(id) })).status).toBe(200);
     for (const who of callers()) {
       for (const [method, path, body] of routes(id, "pg_1", task)) {
-        same(await api(who, method, path, body), await missing(who, method, id, body), `${who.id} ${method} ${path} archived`);
+        same(await api(who, method, path, body), await missing(who, method, id, body, undefined, path), `${who.id} ${method} ${path} archived`);
       }
     }
   });

@@ -734,3 +734,55 @@ describe("what a grant shows and logs", () => {
     expect(contract.filter((r) => /repo-access/i.test(r.path)).map((r) => r.operation)).toEqual(["getRepoAccess"]);
   });
 });
+
+describe("an organization's admin with no place in the room (review A4, AC-11)", () => {
+  it("takes any grant back, as one in the room does, and is given nothing else", async () => {
+    const id = await room();
+    const outside: Who = { id: `per_rg_orgadmin_out_${++counter}`, kind: "person", org: ORG, adminOrgs: [ORG] };
+    const forAgent = (await give(id, AGENT.id, "push")).body;
+    const forMember = (await give(id, MEMBER.id, "merge")).body;
+    // Outside the room, as an admin of its organization.
+    const taken = await take(id, forAgent.id, outside);
+    expect(taken.status, taken.text).toBe(200);
+    expect(taken.body).toMatchObject({ id: forAgent.id, state: "revoked" });
+    expect((await grantRows(id)).find((g) => g.id === forAgent.id)).toMatchObject({ revoked_by: outside.id });
+    expect(await events(id, "repo_grant.revoked")).toEqual([{ actor_id: outside.id, subject_id: AGENT.id }]);
+    // A grant that isn't there answers as one, and a replay answers the same.
+    expect((await take(id, "grt_missing", outside)).code).toBe("grant_not_found");
+    const body = { policy_version: await version(id) };
+    const first = await api(outside, "DELETE", `${grants(id)}/${forMember.id}`, body, { key: "rg-outside-take" });
+    expect(first.status, first.text).toBe(200);
+    expect((await api(outside, "DELETE", `${grants(id)}/${forMember.id}`, body, { key: "rg-outside-take" })).body).toEqual(first.body);
+    // In the room, as a member, the same.
+    const another = (await give(id, OTHER_AGENT.id, "push")).body;
+    expect((await take(id, another.id, ORG_ADMIN)).body.state).toBe("revoked");
+    // Nothing else opens to them: the room, its grants and giving one answer as they do to anyone outside it.
+    for (const [method, path, payload] of [["GET", `/v1/workspaces/${id}`, undefined], ["GET", grants(id), undefined], ["POST", grants(id), { policy_version: await version(id), principal_id: AGENT.id, action: "push" }]] as const) {
+      const got = await api(outside, method, path, payload);
+      expect([got.status, got.code], `${method} ${path}`).toEqual([404, "workspace_not_found"]);
+    }
+  });
+
+  it("is refused, as an outsider, without that organization: a stranger, another organization's admin, an agent", async () => {
+    const id = await room();
+    const given = (await give(id, MEMBER.id, "push")).body;
+    const before = await footprint(id);
+    const plain: Who = { id: `per_rg_plain_${++counter}`, kind: "person", org: ORG };
+    for (const who of [plain, STRANGER, orgAdmin("org_rg_elsewhere"), OUTSIDE_AGENT, { ...OUTSIDE_AGENT, claims: { admin_orgs: [ORG] } }]) {
+      const got = await take(id, given.id, who);
+      expect([got.status, got.code], who.id).toEqual([404, "workspace_not_found"]);
+    }
+    expect(await footprint(id)).toEqual(before);
+    expect((await grantRows(id))[0].revoked_at).toBeNull();
+  });
+
+  it("is gone once they no longer administer the organization, replays included", async () => {
+    const id = await room();
+    const given = (await give(id, AGENT.id, "push")).body;
+    const admin: Who = { id: `per_rg_was_admin_${++counter}`, kind: "person", org: ORG, adminOrgs: [ORG] };
+    const body = { policy_version: await version(id) };
+    expect((await api(admin, "DELETE", `${grants(id)}/${given.id}`, body, { key: "rg-was-admin" })).status).toBe(200);
+    const after = await api({ ...admin, adminOrgs: [] }, "DELETE", `${grants(id)}/${given.id}`, body, { key: "rg-was-admin" });
+    expect([after.status, after.code]).toEqual([404, "workspace_not_found"]);
+  });
+});

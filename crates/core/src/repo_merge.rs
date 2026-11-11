@@ -48,6 +48,15 @@ pub enum MergeRefusal {
     AccessRevoked,
     /// `agent_disconnected`: an agent asked, and its connection no longer holds.
     AgentDisconnected,
+    /// `controller_departed`: the person who controls whoever asked, an agent's linker or a person themselves, has left
+    /// the organization they're in the room through since the merge was asked for, or the room can't name them.
+    ControllerDeparted,
+    /// `task_not_found`: whoever asked can no longer see the task.
+    TaskHidden,
+    /// `public_participant`: whoever asked is in the room through a public claim now.
+    PublicParticipant,
+    /// `not_allowed`: whoever asked may no longer ask for this, for a reason the policy names no better.
+    NotAllowed,
     /// `task_not_linked`: the task has no linked repository.
     TaskNotLinked,
     /// `repo_not_ready`
@@ -84,6 +93,10 @@ impl MergeRefusal {
         match self {
             MergeRefusal::AccessRevoked => "access_revoked",
             MergeRefusal::AgentDisconnected => "agent_disconnected",
+            MergeRefusal::ControllerDeparted => "controller_departed",
+            MergeRefusal::TaskHidden => "task_not_found",
+            MergeRefusal::PublicParticipant => "public_participant",
+            MergeRefusal::NotAllowed => "not_allowed",
             MergeRefusal::TaskNotLinked => "task_not_linked",
             MergeRefusal::RepoNotReady => "repo_not_ready",
             MergeRefusal::SelfMerge => "self_merge",
@@ -116,6 +129,10 @@ pub struct MergeAuthority<'a> {
     pub requester_in_room: bool,
     /// For an agent, whether its connection holds now. Always true for a person.
     pub requester_connected: bool,
+    /// The person who controls the requester, an agent's linker or a person themselves, is still in the organization
+    /// the requester is in the room through. An agent acts for that person, so once they've left it merges nothing, as a
+    /// token is refused then (`repo_access::AccessCheck::controller_holds`).
+    pub requester_controller_holds: bool,
     /// Who made the submission that was approved, from the submission's own row.
     pub submitter: Actor<'a>,
     /// The requester's `merge` grant row that isn't revoked, if any.
@@ -189,6 +206,9 @@ pub fn check_merge_authority(a: &MergeAuthority) -> Result<MergeAuthorized, Merg
     }
     if !a.requester_connected {
         return Err(MergeRefusal::AgentDisconnected);
+    }
+    if !a.requester_controller_holds {
+        return Err(MergeRefusal::ControllerDeparted);
     }
     if !a.task.has_linked_repository {
         return Err(MergeRefusal::TaskNotLinked);

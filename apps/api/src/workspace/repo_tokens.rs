@@ -37,7 +37,7 @@ use podster_core::repo_access::{
 use podster_core::repo_grants::Grant;
 use podster_core::repositories::{GrantAction, LinkStatus, RequestState};
 use podster_egress::endpoint::{open_labeled, parse_key, seal_labeled};
-use podster_policy::repositories::{authorize_repo_access, delegation_holder, GrantStanding};
+use podster_policy::repositories::{authorize_repo_access, GrantStanding};
 use std::time::Duration;
 
 /// The Worker secret holding the sealing key, 64 hex characters. The owner sets it. Unset, nothing is minted.
@@ -282,10 +282,10 @@ fn refused(refusal: AccessRefusal) -> ApiError {
 }
 
 /// What the room learned from `Principal`s before deciding. Neither is ever taken from the request.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Standing {
-    /// The room's owner still holds their owner authority in the room's organization.
-    owner_holds: bool,
+    /// Whether the grant's giver still holds the authority they gave it under, in the organization their role is in.
+    giver: repositories::GiverRead,
     /// The person who linked the agent's credential hasn't left its organization since.
     controller_holds: bool,
 }
@@ -322,7 +322,6 @@ struct PushGrant {
 struct Inputs {
     task: Task,
     grant: Option<PushGrant>,
-    owner: Option<String>,
     request: Option<RequestState>,
     link: Option<(LinkStatus, i64, String)>,
     held: Option<(String, i64, String)>,
@@ -347,9 +346,6 @@ fn read_inputs(sql: &SqlStorage, agent: &str, task_id: &str, now: i64) -> R<Opti
                 revoked_at: g["revoked_at"].as_i64(),
             })
         });
-    let owner = rows(sql, "SELECT owner_person_id FROM workspace", vec![])?
-        .first()
-        .and_then(|w| text(&w["owner_person_id"]));
     let request = rows(sql, "SELECT state FROM repo_request", vec![])?
         .first()
         .and_then(|r| r["state"].as_str().and_then(RequestState::from_name));
@@ -372,7 +368,6 @@ fn read_inputs(sql: &SqlStorage, agent: &str, task_id: &str, now: i64) -> R<Opti
     Ok(Some(Inputs {
         task,
         grant,
-        owner,
         request,
         link,
         held,
@@ -385,7 +380,7 @@ fn decide_now(
     sql: &SqlStorage,
     who: &Participant,
     task_id: &str,
-    standing: Standing,
+    standing: &Standing,
     now: i64,
 ) -> R<std::result::Result<(Inputs, podster_core::repo_access::Access), ApiError>> {
     let caller = &who.caller;
@@ -401,10 +396,17 @@ fn decide_now(
         expires_at: g.expires_at,
         revoked_at: g.revoked_at,
     });
-    let holder = inputs
-        .owner
-        .as_deref()
-        .and_then(|owner| delegation_holder(owner, PrincipalKind::Person, standing.owner_holds));
+    // The giver's standing, from the room's rows as they are in this transaction and what their `Principal` said. If
+    // the giver isn't the one that was asked about, nothing is decided on the answer.
+    let holder = match &inputs.grant {
+        Some(g) => match repositories::standing_giver(sql, &g.delegated_by, &standing.giver)? {
+            Ok(holder) => holder,
+            Err(repositories::GiverChanged) => {
+                return Ok(Err(ApiError::api(503, "standing_unknown")))
+            }
+        },
+        None => None,
+    };
     let link_repo_id = inputs.link.as_ref().map(|(_, id, _)| *id);
     // Without a link there's no repository to hold a grant on. Policy then hides the task or refuses who's asking, and
     // the core decision names the missing link.
@@ -514,16 +516,16 @@ impl Workspace {
         // A first look on what the room records, so a caller who'd be refused anyway costs no calls to `Principal`s.
         // It can only refuse: the decision that counts is taken again below, on what they answer.
         let hopeful = Standing {
-            owner_holds: true,
+            giver: repositories::GiverRead::Hopeful,
             controller_holds: true,
         };
-        if let Err(error) = decide_now(&sql, who, task_id, hopeful, now_ms())? {
+        if let Err(error) = decide_now(&sql, who, task_id, &hopeful, now_ms())? {
             // A refusal ends whatever authority a held token had.
             let (agent, task, now) = (who.caller.id.clone(), task_id.to_string(), now_ms());
             self.in_transaction(move |sql| end_held(sql, &agent, &task, now))?;
             return Err(error);
         }
-        let standing = self.standing(identity, who).await?;
+        let standing = self.standing(identity, who, task_id).await?;
         let now = now_ms();
         let config = agent_config(&self.env, &sql);
         let keys = keys(&self.env, &sql);
@@ -533,6 +535,7 @@ impl Workspace {
         let ready = config.is_some() && keys.current.is_some();
         let outcome = self.in_transaction({
             let (identity, task, room, keys) = (identity.clone(), task.clone(), room.clone(), keys.clone());
+            let standing = standing.clone();
             move |sql| {
                 let who = resolve_caller(sql, &identity)?;
                 command_guard(sql)?;
@@ -548,7 +551,7 @@ impl Workspace {
                         }
                     }
                 }
-                let (inputs, access) = match decide_now(sql, &who, &task, standing, now)? {
+                let (inputs, access) = match decide_now(sql, &who, &task, &standing, now)? {
                     Ok(allowed) => allowed,
                     Err(error) => {
                         end_held(sql, &who.caller.id, &task, now)?;
@@ -682,7 +685,7 @@ impl Workspace {
                 if ours.is_empty() {
                     return Ok(Err(busy()));
                 }
-                match decide_now(sql, &who, &task, standing, now)? {
+                match decide_now(sql, &who, &task, &standing, now)? {
                     Ok((_, access)) if access.repo_id == lease.repo_id => {}
                     Ok(_) => {
                         exec(sql, "DELETE FROM repo_token WHERE id = ?", vec![lease.id.as_str().into()])?;
@@ -755,24 +758,17 @@ impl Workspace {
     }
 
     /// Asks the two `Principal`s. An answer that isn't a clear yes or no refuses: nothing is minted on an unknown.
-    async fn standing(&self, identity: &Identity, who: &Participant) -> R<Standing> {
+    async fn standing(&self, identity: &Identity, who: &Participant, task_id: &str) -> R<Standing> {
         let sql = self.state.storage().sql();
-        let room = rows(
-            &sql,
-            "SELECT owner_person_id, owner_org_id, owner_left_at, owner_since FROM workspace",
-            vec![],
-        )?;
-        let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
         let unknown = || ApiError::api(503, "standing_unknown");
-        let owner_holds = match (text(&room["owner_person_id"]), text(&room["owner_org_id"])) {
-            (Some(owner), Some(org)) if room["owner_left_at"].is_null() => {
-                let since = room["owner_since"].as_i64().unwrap_or(0);
-                !principal::departed_since(&self.env, &owner, &org, since)
-                    .await
-                    .map_err(|_| unknown())?
-            }
-            _ => false,
-        };
+        // Whoever gave the caller's `push` grant, by the same rows the decision reads.
+        let giver = read_inputs(&sql, &who.caller.id, task_id, now_ms())?
+            .and_then(|inputs| inputs.grant)
+            .map(|grant| grant.delegated_by);
+        let giver = self
+            .giver_read(giver.as_deref())
+            .await
+            .ok_or_else(unknown)?;
         // An agent acts for whoever linked its credential, in the agent's organization. A credential with no linker
         // can't be counted against anyone, so it gets nothing.
         let controller_holds = match &identity.linker {
@@ -784,7 +780,7 @@ impl Workspace {
             None => false,
         };
         Ok(Standing {
-            owner_holds,
+            giver,
             controller_holds,
         })
     }

@@ -85,167 +85,159 @@ fn sees(kind: PrincipalKind, role: Role, party: &str) -> bool {
 }
 
 #[test]
-fn only_the_rooms_owner_as_a_person_with_authority_holds_the_delegation() {
-    for kind in [Person, Agent] {
-        for role in Role::ALL {
-            for authority in [false, true] {
-                assert_eq!(
-                    holds_repository_delegation(kind, role, authority),
-                    kind == Person && role == Role::Owner && authority,
-                    "{kind:?} {role:?} {authority}"
-                );
-            }
-        }
-    }
-    assert_eq!(delegation_holder("owner", Person, true), Some("owner"));
-    // An owner who left, or rejoined under a newer membership, holds nothing, and neither does an agent stored as one.
-    assert_eq!(delegation_holder("owner", Person, false), None);
-    assert_eq!(delegation_holder("owner", Agent, true), None);
-}
-
-/// AC-10 and AC-11: a grant needs room authority and the repository's delegation, and neither stands in for the other.
-#[test]
-fn ac_10_ac_11_granting_needs_room_authority_and_the_delegation_both() {
+fn only_a_person_who_is_owner_or_admin_with_authority_holds_the_delegation() {
     let mut checked = 0;
     for kind in [Person, Agent] {
         for role in Role::ALL {
-            for holds_delegation in [false, true] {
-                let human_admin = kind == Person && matches!(role, Role::Owner | Role::Admin);
-                let expected = if role == Role::None {
-                    Err(RepoDenial::NotParticipant)
-                } else if !human_admin {
-                    // AC-11: holding a delegation doesn't administer a room.
-                    Err(RepoDenial::NotAllowed)
-                } else if !holds_delegation {
-                    // AC-10: administering a room isn't a delegation.
-                    Err(RepoDenial::NoProviderDelegation)
-                } else {
-                    Ok(())
-                };
+            for authority in [false, true] {
+                let expected =
+                    kind == Person && matches!(role, Role::Owner | Role::Admin) && authority;
                 assert_eq!(
-                    authorize_grant(&caller("me", kind, role), holds_delegation),
+                    holds_repository_delegation(kind, role, authority),
                     expected,
-                    "{kind:?} {role:?} {holds_delegation}"
+                    "{kind:?} {role:?} {authority}"
+                );
+                // A grant's giver counts exactly when they hold it.
+                assert_eq!(
+                    delegation_holder("giver", kind, role, authority),
+                    expected.then_some("giver"),
+                    "{kind:?} {role:?} {authority}"
                 );
                 checked += 1;
             }
         }
     }
     assert_eq!(checked, 2 * 5 * 2);
-    // As the room wires it, the delegation is the owner's: only the owner grants, and an admin is refused.
-    for (role, authority, expected) in [
-        (Role::Owner, true, Ok(())),
-        (Role::Owner, false, Err(RepoDenial::NoProviderDelegation)),
-        (Role::Admin, true, Err(RepoDenial::NoProviderDelegation)),
-        (Role::Member, true, Err(RepoDenial::NotAllowed)),
-        (Role::Guest, true, Err(RepoDenial::NotAllowed)),
-    ] {
-        let who = caller("me", Person, role);
+    // Each rule, by name. The owner and an admin, as people whose authority holds.
+    assert_eq!(
+        delegation_holder("owner", Person, Role::Owner, true),
+        Some("owner")
+    );
+    assert_eq!(
+        delegation_holder("admin", Person, Role::Admin, true),
+        Some("admin")
+    );
+    // One who left, or rejoined under a newer membership, holds nothing.
+    assert_eq!(delegation_holder("owner", Person, Role::Owner, false), None);
+    assert_eq!(delegation_holder("admin", Person, Role::Admin, false), None);
+    // An admin demoted to member or guest, or removed, holds nothing: what they gave stops counting.
+    for role in [Role::Member, Role::Guest, Role::None] {
         assert_eq!(
-            authorize_grant(
-                &who,
-                holds_repository_delegation(who.kind, who.role, authority)
-            ),
-            expected,
-            "{role:?} {authority}"
+            delegation_holder("was-admin", Person, role, true),
+            None,
+            "{role:?}"
         );
     }
-    // An agent stored as the owner holds neither side.
-    let agent_owner = caller("me", Agent, Role::Owner);
-    assert!(!holds_repository_delegation(
-        agent_owner.kind,
-        agent_owner.role,
-        true
-    ));
-    assert_eq!(
-        authorize_grant(&agent_owner, true),
-        Err(RepoDenial::NotAllowed)
-    );
+    // An agent stored as an owner or admin holds nothing.
+    assert_eq!(delegation_holder("bot", Agent, Role::Owner, true), None);
+    assert_eq!(delegation_holder("bot", Agent, Role::Admin, true), None);
 }
 
-/// Who takes a grant back: the room's owner, a person who administers the room's organization, and the holder their
-/// own. Nobody else, and an agent never another's.
+/// AC-10 and AC-11, as the owner ruled on 2026-11-11 ("Owner and admins"): the room's repository is asked for, and its
+/// grants given, by a person who is the room's owner or a room admin. Never an agent, and nobody with another role.
 #[test]
-fn a_grant_is_taken_back_by_the_owner_an_organization_admin_or_its_holder() {
+fn ac_10_ac_11_the_repository_is_run_by_a_person_who_is_owner_or_admin() {
+    let mut checked = 0;
+    for kind in [Person, Agent] {
+        for role in Role::ALL {
+            let expected = if role == Role::None {
+                Err(RepoDenial::NotParticipant)
+            } else if kind == Person && matches!(role, Role::Owner | Role::Admin) {
+                Ok(())
+            } else {
+                // AC-10: an agent, whatever role is stored for it. AC-11: a person with any other role.
+                Err(RepoDenial::NotAllowed)
+            };
+            let who = caller("me", kind, role);
+            assert_eq!(
+                authorize_repository_admin(&who),
+                expected,
+                "{kind:?} {role:?}"
+            );
+            assert_eq!(authorize_grant(&who), expected, "{kind:?} {role:?}");
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 2 * 5);
+    // Each rule, by name.
+    assert_eq!(authorize_grant(&caller("me", Person, Role::Owner)), Ok(()));
+    assert_eq!(authorize_grant(&caller("me", Person, Role::Admin)), Ok(()));
+    for role in [Role::Member, Role::Guest] {
+        assert_eq!(
+            authorize_grant(&caller("me", Person, role)),
+            Err(RepoDenial::NotAllowed),
+            "{role:?}"
+        );
+    }
+    // An agent stored as the owner or an admin is refused. A participant there through a public claim is an agent
+    // with the guest role, so it's among these.
+    for role in [Role::Owner, Role::Admin, Role::Member, Role::Guest] {
+        assert_eq!(
+            authorize_repository_admin(&caller("bot", Agent, role)),
+            Err(RepoDenial::NotAllowed),
+            "{role:?}"
+        );
+    }
+}
+
+/// Who takes a grant back: the room's owner or a room admin as a person, a person who administers the room's
+/// organization, and the holder their own. Nobody else, and an agent never another's.
+#[test]
+fn a_grant_is_taken_back_by_the_owner_an_admin_an_organization_admin_or_its_holder() {
     let mut checked = 0;
     for kind in [Person, Agent] {
         for role in Role::ALL {
             for own in [false, true] {
-                for holds_delegation in [false, true] {
-                    for org_admin in [false, true] {
-                        let grantee = if own { "me" } else { "other" };
-                        let person = kind == Person;
-                        let expected = if own {
-                            // Their own, whoever they are, still in the room or not.
-                            Ok(())
-                        } else if person && org_admin {
-                            // With or without a place in the room, so a grant can be pulled when the owner has left.
-                            Ok(())
-                        } else if role == Role::None {
-                            Err(RepoDenial::NotParticipant)
-                        } else if person && role == Role::Owner && holds_delegation {
-                            Ok(())
-                        } else {
-                            Err(RepoDenial::NotAllowed)
-                        };
-                        assert_eq!(
-                            authorize_revoke(
-                                &caller("me", kind, role),
-                                grantee,
-                                holds_delegation,
-                                org_admin
-                            ),
-                            expected,
-                            "{kind:?} {role:?} own={own} delegation={holds_delegation} org_admin={org_admin}"
-                        );
-                        checked += 1;
-                    }
+                for org_admin in [false, true] {
+                    let grantee = if own { "me" } else { "other" };
+                    let person = kind == Person;
+                    let expected = if own {
+                        // Their own, whoever they are, still in the room or not.
+                        Ok(())
+                    } else if person && org_admin {
+                        // With or without a place in the room, so a grant can be pulled when the owner has left.
+                        Ok(())
+                    } else if role == Role::None {
+                        Err(RepoDenial::NotParticipant)
+                    } else if person && matches!(role, Role::Owner | Role::Admin) {
+                        Ok(())
+                    } else {
+                        Err(RepoDenial::NotAllowed)
+                    };
+                    assert_eq!(
+                        authorize_revoke(&caller("me", kind, role), grantee, org_admin),
+                        expected,
+                        "{kind:?} {role:?} own={own} org_admin={org_admin}"
+                    );
+                    checked += 1;
                 }
             }
         }
     }
-    assert_eq!(checked, 2 * 5 * 2 * 2 * 2);
+    assert_eq!(checked, 2 * 5 * 2 * 2);
 
     // Each rule, by name.
     let owner = caller("owner", Person, Role::Owner);
-    assert_eq!(authorize_revoke(&owner, "agent", true, false), Ok(()));
-    // An owner whose authority no longer holds isn't the room's owner for this.
-    assert_eq!(
-        authorize_revoke(&owner, "agent", false, false),
-        Err(RepoDenial::NotAllowed)
-    );
+    assert_eq!(authorize_revoke(&owner, "agent", false), Ok(()));
+    let admin = caller("admin", Person, Role::Admin);
+    assert_eq!(authorize_revoke(&admin, "agent", false), Ok(()));
     let org_admin_outside = caller("org-admin", Person, Role::None);
-    assert_eq!(
-        authorize_revoke(&org_admin_outside, "agent", false, true),
-        Ok(())
-    );
+    assert_eq!(authorize_revoke(&org_admin_outside, "agent", true), Ok(()));
     let holder = caller("agent", Agent, Role::Guest);
-    assert_eq!(authorize_revoke(&holder, "agent", false, false), Ok(()));
-    // A room admin, a member, a guest and whoever is in the room otherwise: nobody else.
-    for role in [Role::Admin, Role::Member, Role::Guest] {
+    assert_eq!(authorize_revoke(&holder, "agent", false), Ok(()));
+    // A member, a guest and whoever is in the room otherwise: nobody else.
+    for role in [Role::Member, Role::Guest] {
         assert_eq!(
-            authorize_revoke(&caller("me", Person, role), "agent", false, false),
-            Err(RepoDenial::NotAllowed),
-            "{role:?}"
-        );
-        // A delegation flag on someone who isn't the owner changes nothing.
-        assert_eq!(
-            authorize_revoke(&caller("me", Person, role), "agent", true, false),
+            authorize_revoke(&caller("me", Person, role), "agent", false),
             Err(RepoDenial::NotAllowed),
             "{role:?}"
         );
     }
     // An agent never takes back another principal's grant, whatever is stored for it or claimed about it.
     for role in Role::ALL {
-        for (holds_delegation, org_admin) in [(true, true), (true, false), (false, true)] {
+        for org_admin in [true, false] {
             assert!(
-                authorize_revoke(
-                    &caller("bot", Agent, role),
-                    "agent",
-                    holds_delegation,
-                    org_admin
-                )
-                .is_err(),
+                authorize_revoke(&caller("bot", Agent, role), "agent", org_admin).is_err(),
                 "{role:?}"
             );
         }
@@ -655,7 +647,6 @@ fn denials_have_stable_names_and_count_as_refusals_of_authority() {
         (RepoDenial::NotParticipant, "not_a_participant"),
         (RepoDenial::Hidden, "task_not_found"),
         (RepoDenial::NotAllowed, "not_allowed"),
-        (RepoDenial::NoProviderDelegation, "no_provider_delegation"),
         (RepoDenial::GranteeNotParticipant, "grantee_not_participant"),
         (RepoDenial::GranteePublic, "grantee_public"),
         (RepoDenial::PublicParticipant, "public_participant"),
@@ -675,7 +666,6 @@ fn denials_have_stable_names_and_count_as_refusals_of_authority() {
     // The caller lacked the authority for the change.
     for code in [
         "self_merge",
-        "no_provider_delegation",
         "grant_required",
         "grant_expired",
         "grant_stale",

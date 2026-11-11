@@ -871,7 +871,51 @@ CREATE TABLE IF NOT EXISTS org_provider_delegation (provider TEXT PRIMARY KEY, g
 CREATE TABLE IF NOT EXISTS org_provider_delegation_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, granted INTEGER NOT NULL, set_by TEXT NOT NULL, set_at INTEGER NOT NULL);
 ";
 
+/// The requests for a repository this object counted as accepted, one row per room: for an organization, its rooms'; for a
+/// person, the rooms they asked in. A room has one request in its life, so it's counted once however often it's asked.
+const REPO_REQUESTS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS repo_request_accepted (workspace_id TEXT PRIMARY KEY, at INTEGER NOT NULL);
+";
+
+/// What an organization's object, or a person's, said to a room about to record a request for a repository.
+pub struct RepoRequestReserved {
+    /// The organization holds the provisioning delegation. Always `true` from a person's object, which holds none.
+    pub granted: bool,
+    /// The request is within the cap, and is now counted for this room.
+    pub allowed: bool,
+}
+
+/// Counts a room's request for a repository against the cap of the organization or the person named by `holder`, and,
+/// with `delegation`, reads the organization's delegation in the same call. Nothing is counted when the delegation was
+/// taken back or the cap is reached. A room already counted is allowed again and not counted twice.
+pub async fn reserve_repo_request(
+    env: &Env,
+    holder: &str,
+    workspace: &str,
+    delegation: bool,
+) -> R<RepoRequestReserved> {
+    let body = json!({ "provider": "github", "workspace": workspace, "delegation": delegation });
+    let mut response = internal(env, holder, "/internal/repo-request-reserve", &body).await?;
+    if response.status_code() != 200 {
+        return Err(ApiError::internal("couldn't count the request"));
+    }
+    let answer: Value = response.json().await?;
+    Ok(RepoRequestReserved {
+        granted: answer["granted"].as_bool() == Some(true),
+        allowed: answer["allowed"].as_bool() == Some(true),
+    })
+}
+
+/// Gives back a place taken by [`reserve_repo_request`] for a request the room then didn't record.
+pub async fn release_repo_request(env: &Env, holder: &str, workspace: &str) -> R<()> {
+    let body = json!({ "workspace": workspace });
+    internal(env, holder, "/internal/repo-request-release", &body).await?;
+    Ok(())
+}
+
 /// Whether an organization holds the provisioning delegation for a provider: `{ provider, granted, set_by, set_at }`.
+/// Every organization holds it unless a Podster operator took it back (the owner's decision of 2026-11-11, "No gate,
+/// with limits"), so an organization with no record holds it.
 pub async fn org_delegation(env: &Env, org: &str, provider: &str) -> R<Value> {
     let body = json!({ "provider": provider });
     let mut response = internal(env, org, "/internal/org-delegation", &body).await?;
@@ -882,8 +926,8 @@ pub async fn org_delegation(env: &Env, org: &str, provider: &str) -> R<Value> {
 }
 
 /// `GET` or `PUT /v1/orgs/{org}/provisioning-delegation`. Reading is for a Podster operator or an admin of that
-/// organization. Setting, `{ granted }`, is for a Podster operator alone: an organization can't give itself authority
-/// over Podster's GitHub organization. An agent is refused in both.
+/// organization. Setting, `{ granted }`, is for a Podster operator alone, and matters only to take the delegation back
+/// from an organization or to restore it: an organization holds it until then. An agent is refused in both.
 pub async fn provisioning_delegation(
     env: &Env,
     caller: &Caller,
@@ -1429,10 +1473,85 @@ impl Principal {
                     Some(row) => {
                         json!({ "provider": provider, "granted": int(&row["granted"]) != 0, "set_by": row["set_by"], "set_at": row["set_at"] })
                     }
+                    // No record: held, as every organization is until an operator takes it back.
                     None => {
-                        json!({ "provider": provider, "granted": false, "set_by": null, "set_at": null })
+                        json!({ "provider": provider, "granted": podster_core::provisioning::organization_delegated(None), "set_by": null, "set_at": null })
                     }
                 });
+            }
+            "/internal/repo-request-reserve" => {
+                let body: Value = req.json().await?;
+                let workspace = body["workspace"].as_str().unwrap_or_default().to_string();
+                let provider = body["provider"].as_str().unwrap_or_default().to_string();
+                let granted = if body["delegation"].as_bool() == Some(true) {
+                    exec(&sql, ORG_DELEGATION_SCHEMA, vec![])?;
+                    let recorded = rows(
+                        &sql,
+                        "SELECT granted FROM org_provider_delegation WHERE provider = ?",
+                        vec![provider.as_str().into()],
+                    )?
+                    .first()
+                    .map(|row| int(&row["granted"]) != 0);
+                    podster_core::provisioning::organization_delegated(recorded)
+                } else {
+                    true
+                };
+                if !granted {
+                    return Ok(json!({ "granted": false, "allowed": false }));
+                }
+                let now = now_ms();
+                let state = self.state.storage().sql();
+                let allowed = Rc::new(RefCell::new(false));
+                let slot = allowed.clone();
+                // The count and the new row in one transaction, so two rooms asking at once can't both take the last place.
+                transaction_sync(&self.state, move || {
+                    exec(&state, REPO_REQUESTS_SCHEMA, vec![])?;
+                    // Rows that left the window count for nothing, and a room asks at most once, so they're dropped.
+                    exec(
+                        &state,
+                        "DELETE FROM repo_request_accepted WHERE at <= ?",
+                        vec![
+                            (now - podster_core::provisioning::REPOSITORY_REQUEST_WINDOW_MS).into(),
+                        ],
+                    )?;
+                    let counted = !rows(
+                        &state,
+                        "SELECT 1 FROM repo_request_accepted WHERE workspace_id = ?",
+                        vec![workspace.as_str().into()],
+                    )?
+                    .is_empty();
+                    if counted {
+                        *slot.borrow_mut() = true;
+                        return Ok(());
+                    }
+                    let others: Vec<i64> =
+                        rows(&state, "SELECT at FROM repo_request_accepted", vec![])?
+                            .iter()
+                            .map(|row| int(&row["at"]))
+                            .collect();
+                    if podster_core::provisioning::repository_request_allowed(&others, now).is_ok()
+                    {
+                        exec(
+                            &state,
+                            "INSERT INTO repo_request_accepted (workspace_id, at) VALUES (?, ?)",
+                            vec![workspace.as_str().into(), now.into()],
+                        )?;
+                        *slot.borrow_mut() = true;
+                    }
+                    Ok(())
+                })?;
+                let allowed = *allowed.borrow();
+                return Ok(json!({ "granted": true, "allowed": allowed }));
+            }
+            "/internal/repo-request-release" => {
+                let body: Value = req.json().await?;
+                exec(&sql, REPO_REQUESTS_SCHEMA, vec![])?;
+                exec(
+                    &sql,
+                    "DELETE FROM repo_request_accepted WHERE workspace_id = ?",
+                    vec![body["workspace"].as_str().unwrap_or_default().into()],
+                )?;
+                return Ok(json!({ "released": true }));
             }
             "/internal/org-room-release" => {
                 let body: Value = req.json().await?;

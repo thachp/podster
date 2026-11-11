@@ -870,6 +870,49 @@ pub fn decide_recheck(
     }
 }
 
+/// How many requests for a repository are accepted in [`REPOSITORY_REQUEST_WINDOW_MS`], for one organization and,
+/// separately, for one person who asks (both proposed). Every organization may have managed repositories unless an
+/// operator took that back (the owner's decision of 2026-11-11, "No gate, with limits"), so these hold abuse instead of
+/// an approval. A room has at most one request in its whole life, so a retry of a failed setup and a replayed request
+/// are the same room's request and count once.
+pub const MAX_REPOSITORY_REQUESTS_PER_DAY: i64 = 5;
+/// The rolling window the cap counts over: 24 hours.
+pub const REPOSITORY_REQUEST_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// `repository_request_limit`: the organization, or the person asking, has had its requests for the day accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RequestLimitReached;
+
+impl RequestLimitReached {
+    pub fn code(self) -> &'static str {
+        "repository_request_limit"
+    }
+}
+
+/// Whether one more request for a repository is accepted. `accepted_at` are the times of the requests already
+/// accepted for other rooms, for the organization or for the person, whichever is being counted; one from this room is
+/// never among them, so asking again for the same room is always allowed here. Only those inside the window count.
+pub fn repository_request_allowed(
+    accepted_at: &[i64],
+    now: i64,
+) -> Result<(), RequestLimitReached> {
+    let recent = accepted_at
+        .iter()
+        .filter(|at| now.saturating_sub(**at) < REPOSITORY_REQUEST_WINDOW_MS)
+        .count();
+    if recent as i64 >= MAX_REPOSITORY_REQUESTS_PER_DAY {
+        Err(RequestLimitReached)
+    } else {
+        Ok(())
+    }
+}
+
+/// Whether an organization holds the provisioning delegation, from what its record says: held unless an operator
+/// explicitly took it back. No record means held.
+pub fn organization_delegated(recorded: Option<bool>) -> bool {
+    recorded != Some(false)
+}
+
 #[cfg(test)]
 mod recheck_tests {
     use super::*;

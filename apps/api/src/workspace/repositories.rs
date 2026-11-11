@@ -16,8 +16,8 @@ use podster_core::repo_grants::{
 };
 use podster_core::repositories::GrantAction;
 use podster_policy::repositories::{
-    authorize_grant, authorize_revoke, holds_repository_delegation, may_receive_grant, sees_grant,
-    RepoDenial,
+    authorize_grant, authorize_revoke, delegation_holder, holds_repository_delegation,
+    may_receive_grant, sees_grant, RepoDenial,
 };
 
 /// `GET repository`: the room's request for a repository and its linked repository, each null if there's none. For
@@ -428,9 +428,10 @@ impl GrantRow {
     }
 
     /// The grant as the API answers it. `state` is for showing, from the room's current rows: `live`, `expired`,
-    /// `stale` when its giver no longer holds the delegation, or `revoked`. It authorizes nothing, and it can say `live`
-    /// for a grant that's already stale, when its giver has left their organization and the room hasn't been told yet.
-    /// Step 6 and step 7 never read it: each runs `check_grant` with the delegation holder from current authority.
+    /// `stale` when its giver is no longer the room's owner or a room admin, or `revoked`. It authorizes nothing, and it
+    /// can say `live` for a grant that's already stale, when its giver has left their organization and the room hasn't
+    /// been told yet. Step 6 and step 7 never read it: each runs `check_grant` with the giver's standing as it is now.
+    /// `holder` is [`recorded_holder`] for this grant's giver.
     fn json(&self, holder: Option<&str>, now: i64) -> Value {
         let state = if self.revoked_at.is_some() {
             "revoked"
@@ -461,17 +462,137 @@ fn grant_rows(sql: &SqlStorage, filter: &str, bindings: Vec<V>) -> R<Vec<GrantRo
     .collect())
 }
 
-/// Who holds the repository's delegation, as the room records it: its owner, unless the room records that they left.
-/// For showing a grant's state only. It lags an owner's departure that hasn't reached the room, so nothing that
-/// authorizes may use it: a command takes the delegation from resolved authority, through `owner_authority_holds`.
-fn recorded_holder(sql: &SqlStorage) -> R<Option<String>> {
+/// What the room records now for someone who gave a grant.
+pub(super) struct GiverRecord {
+    pub(super) kind: PrincipalKind,
+    pub(super) role: Role,
+    /// The organization their role is held in, and when the membership it was given under began.
+    pub(super) org: String,
+    pub(super) since: i64,
+}
+
+/// The room's current rows for a grant's giver: its recorded owner, unless the room records that they left, or a member
+/// row that isn't revoked. `None` for anyone else, such as someone removed.
+pub(super) fn recorded_giver(sql: &SqlStorage, giver: &str) -> R<Option<GiverRecord>> {
+    let room = rows(
+        sql,
+        "SELECT owner_person_id, owner_org_id, owner_since FROM workspace WHERE owner_left_at IS NULL",
+        vec![],
+    )?;
+    if let Some(room) = room
+        .first()
+        .filter(|room| room["owner_person_id"].as_str() == Some(giver))
+    {
+        return Ok(text(&room["owner_org_id"]).map(|org| GiverRecord {
+            kind: PrincipalKind::Person,
+            role: Role::Owner,
+            org,
+            since: room["owner_since"].as_i64().unwrap_or(0),
+        }));
+    }
     Ok(rows(
         sql,
-        "SELECT owner_person_id FROM workspace WHERE owner_left_at IS NULL",
-        vec![],
+        "SELECT kind, role, org_id, added_at FROM member WHERE principal_id = ? AND revoked_at IS NULL",
+        vec![giver.into()],
     )?
     .first()
-    .and_then(|room| text(&room["owner_person_id"])))
+    .and_then(|member| {
+        Some(GiverRecord {
+            kind: parse_kind(member["kind"].as_str()?),
+            role: parse_role(member["role"].as_str()?),
+            org: text(&member["org_id"])?,
+            since: int(&member["added_at"]),
+        })
+    }))
+}
+
+/// A grant's giver, if the room records them as a person who is its owner or an admin now. For showing a grant's state
+/// and for the rows that say a grant ended. It lags a departure that hasn't reached the room, so nothing that
+/// authorizes may use it alone: a use asks the giver's `Principal` too, through [`Workspace::giver_read`].
+fn recorded_holder(sql: &SqlStorage, giver: &str) -> R<Option<String>> {
+    Ok(recorded_giver(sql, giver)?
+        .filter(|record| holds_repository_delegation(record.kind, record.role, true))
+        .map(|_| giver.to_string()))
+}
+
+/// Whether the room still records someone as a person who is its owner or an admin: for the setup job, about whoever
+/// asked for the repository.
+pub(super) fn still_runs_repository(sql: &SqlStorage, person: &str) -> R<bool> {
+    Ok(recorded_holder(sql, person)?.is_some())
+}
+
+/// What the room learned, before its transaction, about whether a grant's giver still holds the authority they gave it
+/// under. Never taken from a request.
+#[derive(Clone, Debug)]
+pub(super) enum GiverRead {
+    /// A first look that assumes the giver's authority holds. It can only be used to refuse.
+    Hopeful,
+    /// Nobody was asked: there was no grant, or the room doesn't record its giver as a person who is owner or admin.
+    Nobody,
+    /// The giver's `Principal` said whether they've left the organization their role is held in.
+    Asked { giver: String, holds: bool },
+}
+
+/// The grant's giver changed, or came to hold a role, between the read outside the transaction and the transaction: what
+/// was read doesn't answer for this giver, so nothing is decided on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct GiverChanged;
+
+/// The grant's giver for `GrantUse::delegation_holder`, decided in the transaction from the room's current rows and
+/// what the giver's `Principal` said: the giver if they're a person who is the room's owner or a room admin now, with
+/// that authority still holding, and nobody otherwise.
+pub(super) fn standing_giver<'a>(
+    sql: &SqlStorage,
+    giver: &'a str,
+    read: &GiverRead,
+) -> R<std::result::Result<Option<&'a str>, GiverChanged>> {
+    let Some(record) = recorded_giver(sql, giver)? else {
+        return Ok(Ok(None));
+    };
+    // Someone the room's own rows don't make an owner or admin gave nothing that counts, whatever was read.
+    if !holds_repository_delegation(record.kind, record.role, true) {
+        return Ok(Ok(None));
+    }
+    let holds = match read {
+        GiverRead::Hopeful => true,
+        GiverRead::Asked {
+            giver: asked,
+            holds,
+        } if asked == giver => *holds,
+        _ => return Ok(Err(GiverChanged)),
+    };
+    Ok(Ok(delegation_holder(
+        giver,
+        record.kind,
+        record.role,
+        holds,
+    )))
+}
+
+/// Ends every grant whose giver the room no longer records as a person who is its owner or an admin, in the transaction
+/// that changed a role or removed someone. `check_grant` refuses these at use anyway. This makes the rows say so, and
+/// means someone made an admin again starts with nothing they gave before, as rejoining restores nothing elsewhere.
+pub(super) fn end_grants_of_former_givers(
+    sql: &SqlStorage,
+    actor: &str,
+    actor_kind: &str,
+    now: i64,
+) -> R<()> {
+    let live = grant_rows(sql, "revoked_at IS NULL", vec![])?;
+    for grant in &live {
+        if recorded_holder(sql, &grant.delegated_by)?.is_none() {
+            end_grant(
+                sql,
+                actor,
+                actor_kind,
+                grant,
+                "giver_lost_authority",
+                true,
+                now,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// The room's linked repository: its provider and the provider's repository ID.
@@ -505,12 +626,6 @@ fn refused(refusal: GrantRefusal) -> ApiError {
         GrantRefusal::GrantNotFound => ApiError::api(404, refusal.code()),
         _ => ApiError::api(403, refusal.code()),
     }
-}
-
-/// Whether the caller holds the repository's delegation. `resolve_caller` gives the owner's role only to the recorded
-/// owner whose owner authority still holds, so the role carries that check.
-fn caller_holds_delegation(caller: &Caller) -> bool {
-    holds_repository_delegation(caller.kind, caller.role, caller.role == Role::Owner)
 }
 
 /// Whether the caller administers the room's organization, by the gateway's assertion.
@@ -569,11 +684,12 @@ fn end_grant(
     )
 }
 
-/// `POST repository/grants`: `{ policy_version, principal_id, action, expires_at? }`. The room's owner, as a person whose
-/// owner authority holds, gives a participant one action on the room's repository. Granting the same again changes
+/// `POST repository/grants`: `{ policy_version, principal_id, action, expires_at? }`. A person who is the room's owner or
+/// a room admin, whose authority holds, gives a participant one action on the room's repository. Granting the same again changes
 /// nothing; a new expiry, an expired row or an earlier owner's row is revoked and replaced in this transaction.
 pub(super) fn handle_grant(sql: &SqlStorage, caller: &Caller, body: &Value, now: i64) -> R<Value> {
-    authorize_grant(caller, caller_holds_delegation(caller)).map_err(denied)?;
+    // `resolve_caller` gives a role only while it stands, so the caller's role carries that check.
+    authorize_grant(caller).map_err(denied)?;
     require_policy_version(sql, body)?;
     let fields = body.as_object().ok_or_else(ApiError::invalid_argument)?;
     if fields.keys().any(|k| {
@@ -693,7 +809,7 @@ pub(super) fn handle_grant(sql: &SqlStorage, caller: &Caller, body: &Value, now:
 
 /// Whether a stored answer to a grant may be replayed: only to someone who may still give one.
 pub(super) fn may_still_grant(caller: &Caller) -> R<()> {
-    authorize_grant(caller, caller_holds_delegation(caller)).map_err(denied)
+    authorize_grant(caller).map_err(denied)
 }
 
 /// `DELETE repository/grants/{grant}`: `{ policy_version }`. The room's owner, a person who administers the room's
@@ -732,7 +848,7 @@ pub(super) fn handle_revoke(
     let after = after
         .first()
         .ok_or_else(|| refused(GrantRefusal::GrantNotFound))?;
-    Ok(after.json(recorded_holder(sql)?.as_deref(), now))
+    Ok(after.json(recorded_holder(sql, &after.delegated_by)?.as_deref(), now))
 }
 
 /// Whether a stored answer to taking a grant back may be replayed: only to someone who may still take that grant back.
@@ -762,13 +878,7 @@ fn revocable(
         .next()
         .filter(|g| org_admin || sees_grant(caller, &g.principal))
         .ok_or_else(|| refused(GrantRefusal::GrantNotFound))?;
-    authorize_revoke(
-        caller,
-        &grant.principal,
-        caller_holds_delegation(caller),
-        org_admin,
-    )
-    .map_err(denied)?;
+    authorize_revoke(caller, &grant.principal, org_admin).map_err(denied)?;
     Ok(grant)
 }
 
@@ -780,13 +890,14 @@ pub(super) fn read_grants(sql: &SqlStorage, who: &Participant) -> R<Value> {
     if caller.kind != PrincipalKind::Person {
         return Err(ApiError::not_allowed());
     }
-    let holder = recorded_holder(sql)?;
     let now = now_ms();
-    let grants: Vec<Value> = grant_rows(sql, "revoked_at IS NULL", vec![])?
+    let mut grants: Vec<Value> = vec![];
+    for grant in grant_rows(sql, "revoked_at IS NULL", vec![])?
         .iter()
         .filter(|g| sees_grant(caller, &g.principal))
-        .map(|g| g.json(holder.as_deref(), now))
-        .collect();
+    {
+        grants.push(grant.json(recorded_holder(sql, &grant.delegated_by)?.as_deref(), now));
+    }
     Ok(json!({ "grants": grants }))
 }
 
@@ -831,4 +942,30 @@ pub(super) fn end_grants_after_owner_change(
         end_grant(sql, actor, actor_kind, grant, "owner_changed", tell, now)?;
     }
     Ok(())
+}
+
+impl Workspace {
+    /// Asks the `Principal` of a grant's giver whether they still hold the authority they gave it under: whether they've
+    /// left the organization their role in this room is held in, since that role's membership began. `None` if it
+    /// couldn't say. Nobody is asked about a giver the room's own rows don't make a person who is owner or admin: what
+    /// they gave doesn't count, whatever their `Principal` would say.
+    pub(super) async fn giver_read(&self, giver: Option<&str>) -> Option<GiverRead> {
+        let Some(giver) = giver else {
+            return Some(GiverRead::Nobody);
+        };
+        let sql = self.state.storage().sql();
+        let record = recorded_giver(&sql, giver)
+            .ok()?
+            .filter(|record| holds_repository_delegation(record.kind, record.role, true));
+        let Some(record) = record else {
+            return Some(GiverRead::Nobody);
+        };
+        principal::departed_since(&self.env, giver, &record.org, record.since)
+            .await
+            .ok()
+            .map(|departed| GiverRead::Asked {
+                giver: giver.to_string(),
+                holds: !departed,
+            })
+    }
 }

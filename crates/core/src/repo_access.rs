@@ -191,7 +191,7 @@ pub struct AccessCheck<'a> {
     pub link_repo_id: Option<i64>,
     /// The caller's `push` grant row that isn't revoked, if any.
     pub grant: Option<&'a Grant<'a>>,
-    /// Who holds the repository's delegation now: see [`GrantUse::delegation_holder`].
+    /// The grant's giver, if they still hold authority over the room's repository: see [`GrantUse::delegation_holder`].
     pub delegation_holder: Option<&'a str>,
     pub deadline: Deadline,
     pub budget: Budget,

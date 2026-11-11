@@ -15,17 +15,18 @@ const OPERATOR: Who = { id: "per_operator_one", kind: "person", org: "org_podste
 const AGENT: Who = { id: "agt_pv_member", org: "org_pv_agents" };
 const STRANGER: Who = { id: "per_pv_stranger", kind: "person", org: "org_pv_else", adminOrgs: ["org_pv_else"] };
 
-async function assertion(who: Who) {
+async function assertion(who: Who, claims: object = {}) {
   const now = Math.floor(Date.now() / 1000);
   const isAgent = (who.kind ?? "agent") === "agent";
-  return new SignJWT({ kind: who.kind ?? "agent", org: who.org, ...(isAgent ? { gen: who.gen ?? 1 } : { orgs: [who.org], admin_orgs: who.adminOrgs ?? [] }) })
+  return new SignJWT({ kind: who.kind ?? "agent", org: who.org, ...(isAgent ? { gen: who.gen ?? 1 } : { orgs: [who.org], admin_orgs: who.adminOrgs ?? [] }), ...claims })
     .setProtectedHeader({ alg: "EdDSA", kid: "test" }).setIssuer("podster-gateway").setSubject(who.id).setAudience("podster-api")
     .setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID()).sign(key);
 }
 
 let counter = 0;
-async function api(who: Who, method: string, path: string, body?: unknown, options: { key?: string | null } = {}) {
-  const headers: Record<string, string> = { "x-podster-assertion": await assertion(who), "content-type": "application/json" };
+async function api(who: Who, method: string, path: string, body?: unknown, options: { key?: string | null; claims?: object; fail?: boolean } = {}) {
+  const headers: Record<string, string> = { "x-podster-assertion": await assertion(who, options.claims), "content-type": "application/json" };
+  if (options.fail) headers["x-test-fail"] = "1";
   if (method !== "GET" && options.key !== null) headers["idempotency-key"] = options.key ?? `pv-key-${++counter}`;
   const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: method === "GET" ? undefined : JSON.stringify(body ?? {}) });
   const text = await res.text();
@@ -90,9 +91,25 @@ async function room(options: { delegated?: boolean; script?: object; switchedOn?
   made.push(id);
   if (options.switchedOn !== false) await inRoom(id, (sql) => sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)"));
   await known(org, id);
-  if (options.delegated !== false) expect((await delegate(org)).status).toBe(200);
+  // Every organization holds the delegation until an operator takes it back, so `delegated: false` is a take-back.
+  if (options.delegated === false) expect((await delegate(org, false)).status).toBe(200);
   return { id, org, owner };
 }
+/** A room of `owner`'s, in their organization, with managed repositories switched on. The fake isn't reset. */
+async function roomOf(owner: Who) {
+  const id: string = (await api(owner, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+  made.push(id);
+  await inRoom(id, (sql) => sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)"));
+  return { id, org: owner.org, owner };
+}
+/** The rooms whose request an organization's object, or a person's, has counted. */
+const counted = (holder: string) => runInDurableObject(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(holder)), (_: any, state: any) => {
+  state.storage.sql.exec("CREATE TABLE IF NOT EXISTS repo_request_accepted (workspace_id TEXT PRIMARY KEY, at INTEGER NOT NULL)");
+  return state.storage.sql.exec("SELECT workspace_id FROM repo_request_accepted ORDER BY at, workspace_id").toArray().map((row: any) => row.workspace_id as string);
+}) as Promise<string[]>;
+/** Makes one counted request `ms` older, as if it had been accepted that much earlier. */
+const age = (holder: string, room: string, ms: number) => runInDurableObject(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(holder)), (_: any, state: any) =>
+  void state.storage.sql.exec("UPDATE repo_request_accepted SET at = at - ? WHERE workspace_id = ?", ms, room));
 /** An agent of the room's own organization, added to the room as a member. */
 async function memberAgent(r: { id: string; org: string; owner: Who }) {
   const agent: Who = { id: `agt_pv_${crypto.randomUUID().slice(0, 8)}`, org: r.org };
@@ -103,7 +120,7 @@ async function memberAgent(r: { id: string; org: string; owner: Who }) {
   expect(added.status, added.text).toBe(200);
   return agent;
 }
-const ask = (r: { id: string; owner: Who }, body: unknown = { name: "engineering", visibility: "public" }, options: { key?: string | null; who?: Who } = {}) =>
+const ask = (r: { id: string; owner: Who }, body: unknown = { name: "engineering", visibility: "public" }, options: { key?: string | null; who?: Who; fail?: boolean } = {}) =>
   api(options.who ?? r.owner, "POST", `/v1/workspaces/${r.id}/repository`, body, options);
 /** A retry, as if the wait since the last run were over. `soon` leaves the wait as the room set it. */
 const retry = async (r: { id: string; owner: Who }, who?: Who, soon = false) => {
@@ -159,14 +176,15 @@ describe("the organization's provisioning delegation", () => {
     await known(org, made.body.id);
     const member: Who = { id: "per_pv_d_member", kind: "person", org, adminOrgs: [] };
     const path = `/v1/orgs/${org}/provisioning-delegation`;
-    // Nobody has given it.
-    expect((await api(admin, "GET", path)).body).toEqual({ provider: "github", granted: false, set_by: null, set_at: null });
+    // Nobody has set it: held, as every organization's is until an operator takes it back.
+    expect((await api(admin, "GET", path)).body).toEqual({ provider: "github", granted: true, set_by: null, set_at: null });
     // An organization can't give itself authority over Podster's GitHub organization: not its admin, a member, an agent or a stranger.
     for (const who of [admin, member, AGENT, STRANGER, { ...AGENT, org }]) {
       const refused = await api(who, "PUT", path, { granted: true });
       expect([refused.status, refused.code], who.id).toEqual([403, "not_allowed"]);
     }
-    expect((await api(OPERATOR, "GET", path)).body.granted).toBe(false);
+    // Still as it was: held, with nobody having set it.
+    expect((await api(OPERATOR, "GET", path)).body).toEqual({ provider: "github", granted: true, set_by: null, set_at: null });
     const given = await api(OPERATOR, "PUT", path, { granted: true });
     expect(given.status, given.text).toBe(200);
     expect(given.body).toMatchObject({ provider: "github", granted: true, set_by: OPERATOR.id });
@@ -230,6 +248,152 @@ describe("asking for the room's repository", () => {
     // An agent never gets the read at all. A person who isn't the owner gets it without the field: repositories.spec.ts.
     const agent = await memberAgent(r);
     expect((await api(agent, "GET", `/v1/workspaces/${r.id}/repository`)).code).toBe("not_allowed");
+  });
+
+  it("is for a room admin as for the owner, and never for a member or an agent stored as an admin (AC-10, AC-11)", async () => {
+    const r = await room();
+    const policy = async () => (await api(r.owner, "GET", `/v1/workspaces/${r.id}`)).body.policy_version;
+    const person = async (name: string, role: string) => {
+      const who: Who = { id: `per_pv_${name}_${crypto.randomUUID().slice(0, 8)}`, kind: "person", org: r.org, adminOrgs: [] };
+      const added = await api(r.owner, "POST", `/v1/workspaces/${r.id}/members`, { principal_id: who.id, kind: "person", org_id: r.org, role, policy_version: await policy() }, { claims: { target_member: { person: who.id, orgs: { [r.org]: 1 } } } });
+      expect(added.status, added.text).toBe(200);
+      return who;
+    };
+    const admin = await person("admin", "admin");
+    const member = await person("member", "member");
+    const agent = await memberAgent(r);
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE member SET role = 'admin' WHERE principal_id = ?", agent.id));
+    for (const who of [member, agent]) {
+      const refused = await ask(r, undefined, { who });
+      expect([refused.status, refused.code], who.id).toEqual([403, "not_allowed"]);
+      const again = await retry(r, who);
+      expect([again.status, again.code], who.id).toEqual([403, "not_allowed"]);
+    }
+    expect(await rowsOf(r.id, "repo_request")).toEqual([]);
+    // Nothing was counted for anyone refused.
+    expect(await counted(r.org)).toEqual([]);
+    // The admin is told the organization holds the delegation, asks, and the job carries the request through for them.
+    expect((await api(admin, "GET", `/v1/workspaces/${r.id}/repository`)).body.delegated).toBe(true);
+    const asked = await ask(r, undefined, { who: admin });
+    expect(asked.status, asked.text).toBe(200);
+    expect(asked.body.request).toMatchObject({ state: "pending", requested_by: admin.id });
+    expect((await settled(r)).request).toMatchObject({ state: "ready", requested_by: admin.id });
+    expect((await github()).repos).toHaveLength(1);
+  });
+
+  it("ends a pending request whose asker is no longer the owner or an admin, before anything goes to GitHub", async () => {
+    const r = await room();
+    const admin: Who = { id: `per_pv_demoted_${crypto.randomUUID().slice(0, 8)}`, kind: "person", org: r.org, adminOrgs: [] };
+    const policy = async () => (await api(r.owner, "GET", `/v1/workspaces/${r.id}`)).body.policy_version;
+    const added = await api(r.owner, "POST", `/v1/workspaces/${r.id}/members`, { principal_id: admin.id, kind: "person", org_id: r.org, role: "admin", policy_version: await policy() }, { claims: { target_member: { person: admin.id, orgs: { [r.org]: 1 } } } });
+    expect(added.status, added.text).toBe(200);
+    // Demoted before the job's turn, with the request already on record under their name.
+    await inRoom(r.id, (sql) => {
+      sql.exec("UPDATE member SET role = 'member' WHERE principal_id = ?", admin.id);
+      sql.exec("INSERT INTO repo_request (id, state, name, visibility, attempt, provider_name, requested_by, requested_at, updated_at) VALUES ('rr_t', 'pending', 'engineering', 'public', 1, 'engineering', ?, 1, 1)", admin.id);
+    });
+    expect((await api(r.owner, "PUT", `/v1/workspaces/${r.id}/name`, { name: "Engineering two", policy_version: await policy() })).status).toBe(200);
+    expect((await settled(r)).request).toMatchObject({ state: "failed", reason: "requester_lost_authority" });
+    expect(await writes()).toEqual([]);
+  });
+
+  it("accepts five requests in a rolling day for an organization, refuses the sixth by name, and counts each room once", async () => {
+    await fake("/reset", {});
+    const tag = crypto.randomUUID().slice(0, 8);
+    const org = `org_pv_cap_${tag}`;
+    const rooms = [];
+    // A different person asks in each room, so only the organization's count can be what refuses.
+    for (let i = 0; i < 7; i++) rooms.push(await roomOf({ id: `per_pv_cap_${tag}_${i}`, kind: "person", org, adminOrgs: [org] }));
+    const body = (i: number) => ({ name: `cap-${i}`, visibility: "public" });
+    // A request whose transaction fails is given its place back.
+    expect((await ask(rooms[0], body(0), { fail: true })).status).toBe(500);
+    expect(await counted(org)).toEqual([]);
+    // One the room refuses for itself is never counted.
+    expect((await ask(rooms[0], { name: "podster", visibility: "public" })).code).toBe("name_reserved");
+    expect((await ask(rooms[0], { name: "cap-0", visibility: "private" })).code).toBe("private_unavailable");
+    expect(await counted(org)).toEqual([]);
+    for (let i = 0; i < 5; i++) {
+      const accepted = await ask(rooms[i], body(i), { key: `cap-${tag}-${i}` });
+      expect(accepted.status, `${i}: ${accepted.text}`).toBe(200);
+    }
+    expect((await counted(org)).sort()).toEqual(rooms.slice(0, 5).map((r) => r.id).sort());
+    // A replay is the stored answer, and asking again for a room that has its request is that room's refusal: neither counts.
+    expect((await ask(rooms[0], body(0), { key: `cap-${tag}-0` })).status).toBe(200);
+    expect((await ask(rooms[0], body(0))).code).toBe("repo_request_exists");
+    // A retry of a failed setup is the same request.
+    await inRoom(rooms[1].id, (sql) => void sql.exec("UPDATE repo_request SET state = 'failed', reason = 'name_taken', retry_after = NULL"));
+    expect((await retry(rooms[1])).status).toBe(200);
+    expect(await counted(org)).toHaveLength(5);
+    // The sixth room is refused by name, and nothing is recorded for it or sent anywhere.
+    const sixth = await ask(rooms[5], body(5));
+    expect([sixth.status, sixth.code]).toEqual([429, "repository_request_limit"]);
+    expect(await rowsOf(rooms[5].id, "repo_request")).toEqual([]);
+    expect(await eventTypes(rooms[5].id)).not.toContain("repository.requested");
+    expect(await counted(org)).toHaveLength(5);
+    // The person who was refused wasn't counted either.
+    expect(await counted(rooms[5].owner.id)).toEqual([]);
+    // Another organization is untouched by this one's count.
+    const elsewhere = await room();
+    expect((await ask(elsewhere)).status).toBe(200);
+    // The window rolls: one request leaves it, and one more is accepted. Then the cap holds again.
+    await age(org, rooms[0].id, 86_400_000 - 1_000);
+    expect((await ask(rooms[5], body(5))).code).toBe("repository_request_limit");
+    await age(org, rooms[0].id, 1_000);
+    expect((await ask(rooms[5], body(5))).status).toBe(200);
+    expect((await ask(rooms[6], body(6))).code).toBe("repository_request_limit");
+  });
+
+  it("holds the same cap for one person across organizations, in the person's own record", async () => {
+    await fake("/reset", {});
+    const tag = crypto.randomUUID().slice(0, 8);
+    const person = `per_pv_many_${tag}`;
+    const rooms = [];
+    // One person, an organization of their own making for each room.
+    for (let i = 0; i < 6; i++) {
+      const org = `org_pv_many_${tag}_${i}`;
+      rooms.push(await roomOf({ id: person, kind: "person", org, adminOrgs: [org] }));
+    }
+    for (let i = 0; i < 5; i++) expect((await ask(rooms[i], { name: `many-${i}`, visibility: "public" })).status, `${i}`).toBe(200);
+    expect((await counted(person)).sort()).toEqual(rooms.slice(0, 5).map((r) => r.id).sort());
+    const sixth = await ask(rooms[5], { name: "many-5", visibility: "public" });
+    expect([sixth.status, sixth.code]).toEqual([429, "repository_request_limit"]);
+    expect(await rowsOf(rooms[5].id, "repo_request")).toEqual([]);
+    // The sixth organization's own count was given back: it has accepted nothing.
+    expect(await counted(rooms[5].org)).toEqual([]);
+    // Someone else in that organization's room isn't held by this person's count.
+    const policy = (await api(rooms[5].owner, "GET", `/v1/workspaces/${rooms[5].id}`)).body.policy_version;
+    const admin: Who = { id: `per_pv_many_admin_${tag}`, kind: "person", org: rooms[5].org, adminOrgs: [] };
+    const added = await api(rooms[5].owner, "POST", `/v1/workspaces/${rooms[5].id}/members`, { principal_id: admin.id, kind: "person", org_id: admin.org, role: "admin", policy_version: policy }, { claims: { target_member: { person: admin.id, orgs: { [admin.org]: 1 } } } });
+    expect(added.status, added.text).toBe(200);
+    expect((await ask(rooms[5], { name: "many-5", visibility: "public" }, { who: admin })).status).toBe(200);
+    expect(await counted(admin.id)).toEqual([rooms[5].id]);
+  });
+
+  it("refuses new requests and retries once an operator takes the delegation back, and leaves a linked repository working (ADR 0009)", async () => {
+    const r = await room();
+    expect((await ask(r)).status).toBe(200);
+    expect((await settled(r)).request.state).toBe("ready");
+    const failing = await roomOf(r.owner);
+    await inRoom(failing.id, (sql) => void sql.exec("INSERT INTO repo_request (id, state, name, visibility, attempt, provider_name, reason, requested_by, requested_at, updated_at) VALUES ('rr_f', 'failed', 'second', 'public', 1, 'second', 'name_taken', ?, 1, 1)", r.owner.id));
+    const fresh = await roomOf(r.owner);
+    const before = await counted(r.org);
+    expect((await delegate(r.org, false)).status).toBe(200);
+    // New requests and retries are refused, by the same name as ever, and nothing is counted.
+    const refused = await ask(fresh, { name: "third", visibility: "public" });
+    expect([refused.status, refused.code]).toEqual([403, "not_delegated"]);
+    expect((await retry(failing)).code).toBe("not_delegated");
+    expect(await counted(r.org)).toEqual(before);
+    expect((await read(fresh)).delegated).toBe(false);
+    // The repository that's already linked is as it was, and its grants are still given.
+    const linked = await read(r);
+    expect(linked.repository).toMatchObject({ status: "ready" });
+    const agent = await memberAgent(r);
+    const policy = (await api(r.owner, "GET", `/v1/workspaces/${r.id}`)).body.policy_version;
+    const given = await api(r.owner, "POST", `/v1/workspaces/${r.id}/repository/grants`, { policy_version: policy, principal_id: agent.id, action: "push" });
+    expect([given.status, given.body.state]).toEqual([200, "live"]);
+    // Restored, the organization asks again.
+    expect((await delegate(r.org, true)).status).toBe(200);
+    expect((await ask(fresh, { name: "third", visibility: "public" })).status).toBe(200);
   });
 
   it("is refused without the organization's delegation, and no request reaches GitHub (M5-14, AC-10)", async () => {
@@ -394,10 +558,10 @@ describe("the provisioning job", () => {
     const undelegated = await room({ delegated: false });
     await pending(undelegated.id, undelegated.owner.id);
     expect((await poke(undelegated)).request).toMatchObject({ state: "failed", reason: "not_delegated" });
-    // The person who asked is no longer the room's owner.
+    // The person who asked is no longer the room's owner or an admin of it.
     const moved = await room();
     await pending(moved.id, "per_pv_former_owner");
-    expect((await poke(moved)).request).toMatchObject({ state: "failed", reason: "requester_not_owner" });
+    expect((await poke(moved)).request).toMatchObject({ state: "failed", reason: "requester_lost_authority" });
     // The room was archived.
     // Archived before the request is there, so an alarm the runtime runs on its own can't find it in an open room.
     const archived = await room();

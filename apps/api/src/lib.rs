@@ -459,6 +459,9 @@ async fn route(
             )
             .await;
         }
+        ["v1", "moderation", "repositories", workspace, "recheck"] if method == Method::Post => {
+            return moderation::recheck_repository(&env, &caller, workspace).await;
+        }
         ["v1", "moderation", "rooms", handle, verb @ ("suspend" | "lift")]
             if method == Method::Post =>
         {

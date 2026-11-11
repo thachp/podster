@@ -519,9 +519,12 @@ impl Provider for GitHubApp {
         let (status, actions) = self
             .get(repo_id, &format!("{base}/actions/permissions"))
             .await?;
-        let actions_enabled = (status == 200)
-            .then(|| actions["enabled"].as_bool())
-            .flatten();
+        // Anything but a definite answer is a read that couldn't be made, never "Actions may be on": a server error
+        // or a limit must not read as the repository having drifted.
+        if status != 200 {
+            return Err(Failure::Status(status));
+        }
+        let actions_enabled = Some(actions["enabled"].as_bool().ok_or(Failure::Unreadable)?);
         let (status, listed) = self
             .get(repo_id, &format!("{base}/rulesets?per_page=100"))
             .await?;

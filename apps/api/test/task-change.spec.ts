@@ -965,6 +965,7 @@ describe("the room migration", () => {
     const newest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
     await inRoom(r.id, (sql) => {
       // M5 step 7b's merge bookkeeping, the newest migration, comes off first.
+      sql.exec("DROP TABLE merge_request");
       sql.exec("ALTER TABLE task_change DROP COLUMN merge_finished_at");
       sql.exec("ALTER TABLE task_change DROP COLUMN merge_called_at");
       sql.exec("ALTER TABLE task_change DROP COLUMN merge_mark_set_at");

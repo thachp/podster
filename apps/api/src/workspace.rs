@@ -96,6 +96,7 @@ mod roles;
 mod submission_files;
 mod visibility;
 
+pub(crate) use merges::INTERNAL_REPOSITORY_RECHECK;
 pub(crate) use moderation::INTERNAL_SUSPENSION;
 pub(crate) use public::{INTERNAL_EXPLORE_ENTRY, INTERNAL_PUBLIC_PAGE};
 pub(crate) use public_claims::{INTERNAL_PUBLIC_CLAIM, INTERNAL_PUBLIC_CLAIM_STATUS};
@@ -3919,6 +3920,9 @@ impl Workspace {
     async fn dispatch(&self, mut req: Request) -> R<Value> {
         if req.path() == moderation::INTERNAL_SUSPENSION {
             return self.operator_suspension(req).await;
+        }
+        if req.path() == merges::INTERNAL_REPOSITORY_RECHECK {
+            return self.operator_recheck().await;
         }
         if req.path() == repositories::INTERNAL_PROVIDER_DELIVERY {
             return self.provider_delivery(req).await;

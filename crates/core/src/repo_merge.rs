@@ -146,6 +146,19 @@ pub struct MergeAuthorized {
 }
 
 impl MergeAuthorized {
+    /// The authorization a merge call was made under, rebuilt from the room's record of that call, for reading what
+    /// became of it. Only for a change whose call is on record: the transaction that recorded the intent to call ran
+    /// [`check_merge_authority`] on the rows as they were then, and the call named this commit. It lets a later pass ask
+    /// [`decide_merge_step`] whether that call merged, even if authority has ended since. It never justifies a new
+    /// mark or a new call, which need a fresh [`check_merge_authority`].
+    pub fn when_called(task_id: &str, repo_id: i64, commit_sha: &str) -> MergeAuthorized {
+        MergeAuthorized {
+            task_id: task_id.to_string(),
+            repo_id,
+            commit_sha: commit_sha.to_string(),
+        }
+    }
+
     pub fn task_id(&self) -> &str {
         &self.task_id
     }
@@ -532,12 +545,18 @@ pub fn classify_observed_merge(
 
 /// How many passes the merge job makes at one request before it gives up. Proposed.
 pub const MAX_MERGE_ATTEMPTS: u32 = 5;
-/// How many merges one room may ask for in an hour. Proposed.
+/// How many merge requests one room takes in an hour, counting every request, a repeated one included. Proposed.
 pub const MAX_MERGE_REQUESTS_PER_HOUR: u32 = 20;
+/// How many of them may be for one task. Proposed.
+pub const MAX_MERGE_REQUESTS_PER_TASK_HOUR: u32 = 3;
 
-/// Whether another merge may be asked for, given how many were in the last hour.
-pub fn merge_request_allowed(requests_in_last_hour: u32) -> bool {
-    requests_in_last_hour < MAX_MERGE_REQUESTS_PER_HOUR
+/// Whether another merge may be asked for, given how many requests the room and this task had in the last hour.
+pub fn merge_request_allowed(
+    room_requests_in_last_hour: u32,
+    task_requests_in_last_hour: u32,
+) -> bool {
+    room_requests_in_last_hour < MAX_MERGE_REQUESTS_PER_HOUR
+        && task_requests_in_last_hour < MAX_MERGE_REQUESTS_PER_TASK_HOUR
 }
 
 /// Whether the job may make another pass, having made this many.

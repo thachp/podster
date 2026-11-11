@@ -662,3 +662,38 @@ async fn lose_answer<T>(env: &Env, subject: &str, answered: R<T>) -> R<T> {
     }
     answered
 }
+
+/// `POST /v1/moderation/repositories/{workspace}/recheck`: an operator asks a room to read its repository's protections
+/// back again (M5 step 7b). A link that was `degraded` becomes `ready` only if the read-back is exactly right: nothing
+/// recovers by itself, because rules that changed mean someone with admin rights touched the repository. Answers the
+/// link's status and, if still degraded, the reason. Operators only, and recorded as their action.
+pub async fn recheck_repository(env: &Env, caller: &Caller, workspace: &str) -> R<Response> {
+    require_operator(env, caller)?;
+    if !valid_id(workspace) {
+        return Err(ApiError::workspace_not_found());
+    }
+    let stub = env
+        .durable_object("WORKSPACE")?
+        .id_from_name(workspace)?
+        .get_stub()?;
+    let response = forward(
+        stub,
+        crate::workspace::INTERNAL_REPOSITORY_RECHECK,
+        "",
+        Headers::new(),
+        Method::Post,
+        Some("{}".to_string()),
+    )
+    .await?;
+    if response.status_code() == 200 {
+        record_operator_action(
+            env,
+            &caller.id,
+            "workspace",
+            workspace,
+            "repository_recheck",
+        )
+        .await;
+    }
+    Ok(response)
+}

@@ -322,11 +322,6 @@ describe("asking for a merge", () => {
     await inRoom(r.id, (sql) => sql.exec("UPDATE provider_grant SET expires_at = ? WHERE id = ?", Date.now() - 1, r.grant));
     await refused([403, "grant_expired"]);
     await inRoom(r.id, (sql) => sql.exec("UPDATE provider_grant SET expires_at = NULL WHERE id = ?", r.grant));
-    // Twenty merges were asked for in this room in the last hour.
-    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET merge_requested_at = ? WHERE task_id = ?", Date.now(), waiting));
-    await inRoom(r.id, (sql) => { for (let n = 0; n < 19; n++) sql.exec("INSERT INTO task_change (task_id, provider_repo_id, pr_number, submission_no, merge_requested_at, created_at, updated_at) VALUES (?, ?, ?, 1, ?, 1, 1)", `tsk_cap_${n}`, REPO_ID, 100 + n, Date.now()); });
-    await refused([429, "rate_limited"]);
-    await inRoom(r.id, (sql) => sql.exec("DELETE FROM task_change WHERE task_id LIKE 'tsk_cap_%'"));
     // The merge App isn't configured: nothing is recorded that the job could never do.
     await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_no_merge_app (x INTEGER)"));
     await refused([503, "merge_unavailable"]);
@@ -543,8 +538,8 @@ describe("dying and coming back", () => {
     expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED, merge_attempts: 2 });
     expect(await merges()).toHaveLength(1);
     expect(await marks()).toHaveLength(1);
-    // And with the requester's authority gone in between, what its request already merged is still not counted as
-    // success by a pass that can't authorize it: the request ends as failed, and the pull request is seen as merged.
+    // And with the requester's authority gone in between: the call was authorized when it was made, so the next pass
+    // reads GitHub before it ends the merge, and records what the call did.
     REPO_ID = ++nextRepo;
     await fake({});
     await ready();
@@ -554,8 +549,9 @@ describe("dying and coming back", () => {
     await must(OWNER, "DELETE", `/v1/workspaces/${lost.id}/repository/grants/${lost.grant}`, { policy_version: await version(lost.id) });
     await dies(lost.id, null);
     await pass(lost.id);
-    expect(await change(lost.id, lost.task)).toMatchObject({ merge_state: "failed", merge_reason: "grant_required" });
+    expect(await change(lost.id, lost.task)).toMatchObject({ merge_state: "succeeded", merge_reason: null, merge_sha: MERGED });
     expect(await merges()).toHaveLength(1);
+    expect((await events(lost.id)).at(-1)).toMatchObject({ type: "merge.succeeded" });
   });
 
   /** A second, accepted task of the agent's, with a push grant, to get an agent token with. */
@@ -610,7 +606,8 @@ describe("what GitHub answers to the merge", () => {
     await fake({ merge: "ok" });
     expect((await merge(MERGER, refused.id, refused.task)).status).toBe(200);
     await pass(refused.id);
-    expect(await change(refused.id, refused.task)).toMatchObject({ merge_state: "succeeded", merge_attempts: 1 });
+    // The pass the first request used still counts: asking again doesn't buy a fresh five.
+    expect(await change(refused.id, refused.task)).toMatchObject({ merge_state: "succeeded", merge_attempts: 2 });
     expect((await merges()).map((c) => c.status)).toEqual([405, 200]);
   });
 
@@ -661,6 +658,11 @@ describe("what GitHub answers to the merge", () => {
     expect(await merges()).toEqual([]);
     expect((await events(r.id)).at(-1)).toMatchObject({ type: "merge.failed", reason: "merge_attempts_exhausted" });
     await fake({ status: 201 });
+    // Asking again inside the hour doesn't start the count over: the task has had its passes.
+    const soon = await merge(MERGER, r.id, r.task);
+    expect([soon.status, soon.code]).toEqual([429, "rate_limited"]);
+    // An hour on, it can be asked for again, with a fresh count.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE merge_request SET at = at - 3600001"));
     expect((await merge(MERGER, r.id, r.task)).status).toBe(200);
     await pass(r.id);
     expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_attempts: 1 });
@@ -764,6 +766,7 @@ describe("the room migration", () => {
     const r = await approved();
     const newest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
     await inRoom(r.id, (sql) => {
+      sql.exec("DROP TABLE merge_request");
       for (const column of ["merge_finished_at", "merge_called_at", "merge_mark_set_at", "merge_marked_at", "merge_step", "merge_next_at", "merge_attempts", "merge_requester_person", "submitter_person", "submitter_id"]) sql.exec(`ALTER TABLE task_change DROP COLUMN ${column}`);
       sql.exec("UPDATE schema_version SET version = version - 1");
     });

@@ -280,32 +280,57 @@ pub(super) fn request(
     });
     decide_merge_request(&authority, change.as_ref()).map_err(refused)?;
     check_change_standing(&inputs.standing(), commit_sha).map_err(refused)?;
-    let recent = rows(
+    // Every request counts, a repeated one for the same task included: for the room, and for the task. Requests older
+    // than an hour are forgotten first.
+    exec(
         sql,
-        "SELECT count(*) AS n FROM task_change WHERE merge_requested_at > ?",
+        "DELETE FROM merge_request WHERE at <= ?",
         vec![(now - HOUR_MS).into()],
-    )?
-    .first()
-    .map_or(0, |row| int(&row["n"]));
-    if !merge_request_allowed(recent.clamp(0, i64::from(u32::MAX)) as u32) {
+    )?;
+    let count = |filter: &str, bindings: Vec<V>| -> R<u32> {
+        Ok(rows(
+            sql,
+            &format!("SELECT count(*) AS n FROM merge_request {filter}"),
+            bindings,
+        )?
+        .first()
+        .map_or(0, |row| int(&row["n"]).clamp(0, i64::from(u32::MAX)) as u32))
+    };
+    let for_task = count("WHERE task_id = ?", vec![task_id.into()])?;
+    // Passes already made for this task within the hour still count, so asking again doesn't buy more of them.
+    let carried = if for_task > 0 {
+        inputs
+            .change
+            .as_ref()
+            .map_or(0, |row| int(&row["merge_attempts"]).clamp(0, 64) as u32)
+    } else {
+        0
+    };
+    if !merge_request_allowed(count("", vec![])?, for_task) || !merge_attempt_allowed(carried) {
         return Err(refuse(429, "rate_limited"));
     }
     // Nothing is recorded that the job could never carry out.
     if !asked.configured {
         return Err(refuse(503, "merge_unavailable"));
     }
+    exec(
+        sql,
+        "INSERT INTO merge_request (at, task_id) VALUES (?, ?)",
+        vec![now.into(), task_id.into()],
+    )?;
     // What an earlier request left of its mark and its call stays: a merge that request made, and that only shows now,
     // is still read as Podster's own.
     exec(
         sql,
         "UPDATE task_change SET merge_state = 'requested', merge_reason = NULL, merge_requested_by = ?1, merge_requester_person = ?2,
-           merge_requested_at = ?3, merge_attempts = 0, merge_next_at = ?3, merge_step = 'requested', merge_finished_at = NULL, updated_at = ?3
+           merge_requested_at = ?3, merge_attempts = ?5, merge_next_at = ?3, merge_step = 'requested', merge_finished_at = NULL, updated_at = ?3
          WHERE task_id = ?4",
         vec![
             caller.id.as_str().into(),
             asked.caller_person.as_deref().map_or(V::Null, V::from),
             now.into(),
             task_id.into(),
+            i64::from(carried).into(),
         ],
     )?;
     let told: Vec<String> = store::room_admins(sql)?
@@ -365,61 +390,55 @@ fn dies(sql: &SqlStorage, at: &str) -> bool {
     }
 }
 
-/// What a pass decided from current rows, before it calls anything.
-struct Pass {
-    authorized: MergeAuthorized,
+/// What a merge is of, from the room's own rows: the repository, the pull request, and the commit review recorded.
+#[derive(Clone)]
+struct Target {
     repo_id: i64,
     number: i64,
     default_branch: String,
     public: bool,
+    commit: String,
     reviewed_base_sha: Option<String>,
-    /// A merge call may already have gone out for this change, in this pass's request or an earlier one.
-    called: bool,
-    /// This is the last pass allowed: it reads, and asks GitHub to change nothing.
-    last: bool,
 }
 
-/// How a pass begins.
-enum Begun {
-    /// Nothing to do: the merge isn't asked for any more.
-    Nothing,
-    /// The merge ended here, with this reason.
-    Ended,
-    Go(Box<Pass>),
-}
-
-/// Counts the pass and decides authority again, in one transaction. A merge that no longer has authority ends here.
-fn begin(sql: &SqlStorage, room: &str, task_id: &str, owner_holds: bool, now: i64) -> R<Begun> {
-    let requester = rows(
+fn target(sql: &SqlStorage, task_id: &str) -> R<Option<Target>> {
+    Ok(rows(
         sql,
-        "SELECT merge_requested_by, merge_requester_person, merge_attempts, merge_called_at, pr_number, submission_no, reviewed_base_sha
-           FROM task_change WHERE task_id = ? AND merge_state = 'requested'",
+        "SELECT c.provider_repo_id, c.pr_number, c.reviewed_commit_sha, c.reviewed_base_sha, l.default_branch, l.visibility
+           FROM task_change c JOIN repo_link l ON l.provider_repo_id = c.provider_repo_id WHERE c.task_id = ?",
+        vec![task_id.into()],
+    )?
+    .first()
+    .and_then(|row| {
+        Some(Target {
+            repo_id: row["provider_repo_id"].as_i64()?,
+            number: row["pr_number"].as_i64()?,
+            default_branch: text(&row["default_branch"])?,
+            public: row["visibility"].as_str() == Some("public"),
+            commit: text(&row["reviewed_commit_sha"])?,
+            reviewed_base_sha: text(&row["reviewed_base_sha"]),
+        })
+    }))
+}
+
+/// Whether the merge may go on, decided from the rows as they are now: the room still open, the requester's authority,
+/// and the change still standing as reviewed. `None` when no merge is asked for any more. Run when a pass begins and
+/// again in the transactions that record the intent to mark and the intent to merge, so a revoke, a removal, an
+/// archive or a suspension that commits while GitHub is answering is honoured before the next call.
+fn authority(
+    sql: &SqlStorage,
+    task_id: &str,
+    owner_holds: bool,
+    now: i64,
+) -> R<Option<std::result::Result<MergeAuthorized, MergeFailure>>> {
+    let asked = rows(
+        sql,
+        "SELECT merge_requested_by, merge_requester_person, submission_no FROM task_change WHERE task_id = ? AND merge_state = 'requested'",
         vec![task_id.into()],
     )?;
-    let Some(row) = requester.first() else {
-        return Ok(Begun::Nothing);
+    let Some(row) = asked.first() else {
+        return Ok(None);
     };
-    let requester_id = text(&row["merge_requested_by"]).unwrap_or_default();
-    let requester_person = text(&row["merge_requester_person"]);
-    let attempts = int(&row["merge_attempts"]).clamp(0, i64::from(u32::MAX)) as u32;
-    let called = row["merge_called_at"].as_i64().is_some();
-    let last = !merge_attempt_allowed(attempts);
-    if last && !called {
-        // Nothing was ever asked of GitHub that could have merged it, so there's nothing to read first.
-        finish_failed(sql, room, task_id, MergeFailure::AttemptsExhausted, now)?;
-        return Ok(Begun::Ended);
-    }
-    // The count and the next pass's time go down before anything else, so a pass that dies is still counted.
-    let next = attempts.saturating_add(1);
-    exec(
-        sql,
-        "UPDATE task_change SET merge_attempts = ?, merge_next_at = ?, merge_step = 'pass' WHERE task_id = ?",
-        vec![
-            i64::from(next).into(),
-            (now + job_backoff_ms(next)).into(),
-            task_id.into(),
-        ],
-    )?;
     // A room that was archived or suspended since the merge was asked for does nothing more on a repository.
     let closed = rows(sql, "SELECT status, suspended_at FROM workspace", vec![])?
         .first()
@@ -433,11 +452,12 @@ fn begin(sql: &SqlStorage, room: &str, task_id: &str, owner_holds: bool, now: i6
             }
         });
     if let Some(failure) = closed {
-        finish_failed(sql, room, task_id, failure, now)?;
-        return Ok(Begun::Ended);
+        return Ok(Some(Err(failure)));
     }
+    let requester_id = text(&row["merge_requested_by"]).unwrap_or_default();
+    let requester_person = text(&row["merge_requester_person"]);
     let Some(inputs) = read_inputs(sql, &requester_id, task_id, now)? else {
-        return Ok(Begun::Nothing);
+        return Ok(None);
     };
     let grant = inputs.grant(&requester_id);
     let holder = inputs
@@ -472,47 +492,134 @@ fn begin(sql: &SqlStorage, room: &str, task_id: &str, owner_holds: bool, now: i6
     let decided = check_merge_authority(&authority).and_then(|authorized| {
         check_change_standing(&inputs.standing(), authorized.commit_sha()).map(|()| authorized)
     });
-    let authorized = match decided {
-        Ok(authorized) => authorized,
-        Err(refusal) => {
-            finish_failed(
-                sql,
-                room,
-                task_id,
-                MergeFailure::AuthorityLost(refusal),
-                now,
-            )?;
-            return Ok(Begun::Ended);
-        }
-    };
-    let Some((_, repo_id, default_branch, public)) = inputs.link else {
-        return Ok(Begun::Nothing);
-    };
-    Ok(Begun::Go(Box::new(Pass {
-        authorized,
-        repo_id,
-        number: int(&row["pr_number"]),
-        default_branch,
-        public,
-        reviewed_base_sha: text(&row["reviewed_base_sha"]),
-        called,
-        last,
-    })))
+    Ok(Some(decided.map_err(MergeFailure::AuthorityLost)))
 }
 
-/// Records what the job is about to do, or has done, only while the merge is still the one this pass began with.
-fn note(sql: &SqlStorage, task_id: &str, step: &'static str, set: &str, now: i64) -> R<bool> {
+/// A pass that may go on to GitHub.
+struct Pass {
+    authorized: MergeAuthorized,
+    target: Target,
+    /// A merge call was already on record when this pass began, from this request or an earlier one.
+    called: bool,
+    owner_holds: bool,
+}
+
+/// How a pass begins.
+enum Begun {
+    /// Nothing to do: the merge isn't asked for any more, or it ended here.
+    Nothing,
+    /// Counted, and nothing more this time: the owner's standing couldn't be read.
+    Wait,
+    /// The merge is to end with this failure, and a merge call is on record: GitHub is read first, and what it shows
+    /// is what's recorded.
+    Observe(Target, MergeFailure),
+    Go(Box<Pass>),
+}
+
+/// Counts the pass and decides authority again, in one transaction. `owner_holds` is `None` when the owner's
+/// `Principal` couldn't say.
+fn begin(
+    sql: &SqlStorage,
+    room: &str,
+    task_id: &str,
+    owner_holds: Option<bool>,
+    now: i64,
+) -> R<Begun> {
+    let asked = rows(
+        sql,
+        "SELECT merge_attempts, merge_called_at FROM task_change WHERE task_id = ? AND merge_state = 'requested'",
+        vec![task_id.into()],
+    )?;
+    let Some(row) = asked.first() else {
+        return Ok(Begun::Nothing);
+    };
+    let attempts = int(&row["merge_attempts"]).clamp(0, i64::from(u32::MAX)) as u32;
+    let called = row["merge_called_at"].as_i64().is_some();
+    let last = !merge_attempt_allowed(attempts);
+    // The count and the next pass's time go down before anything else, so a pass that dies, or waits, is still counted.
+    let next = attempts.saturating_add(1);
     exec(
         sql,
-        &format!("UPDATE task_change SET merge_step = ?1, {set} WHERE task_id = ?3 AND merge_state = 'requested'"),
-        vec![step.into(), now.into(), task_id.into()],
+        "UPDATE task_change SET merge_attempts = ?, merge_next_at = ?, merge_step = 'pass' WHERE task_id = ?",
+        vec![
+            i64::from(next).into(),
+            (now + job_backoff_ms(next)).into(),
+            task_id.into(),
+        ],
     )?;
-    Ok(!rows(
-        sql,
-        "SELECT 1 AS still FROM task_change WHERE task_id = ? AND merge_state = 'requested' AND merge_step = ?",
-        vec![task_id.into(), step.into()],
-    )?
-    .is_empty())
+    let target = target(sql, task_id)?;
+    // Once a call has gone out, nothing ends the merge without a read of what that call did.
+    let end = |failure: MergeFailure| -> R<Begun> {
+        match target.clone().filter(|_| called) {
+            Some(target) => Ok(Begun::Observe(target, failure)),
+            None => {
+                finish_failed(sql, room, task_id, failure, now)?;
+                Ok(Begun::Nothing)
+            }
+        }
+    };
+    if last {
+        return end(MergeFailure::AttemptsExhausted);
+    }
+    let Some(owner_holds) = owner_holds else {
+        return Ok(Begun::Wait);
+    };
+    match authority(sql, task_id, owner_holds, now)? {
+        None => Ok(Begun::Nothing),
+        Some(Err(failure)) => end(failure),
+        Some(Ok(authorized)) => match target {
+            Some(target) => Ok(Begun::Go(Box::new(Pass {
+                authorized,
+                target,
+                called,
+                owner_holds,
+            }))),
+            None => Ok(Begun::Nothing),
+        },
+    }
+}
+
+/// What recording an intent came to.
+enum Intent {
+    Go,
+    /// The merge isn't asked for any more.
+    Gone,
+    /// Authority, the change's standing or the room no longer holds. Nothing was recorded.
+    Lost(MergeFailure),
+}
+
+/// Records what the job is about to ask of GitHub, in a transaction that first decides authority again from current
+/// rows. `set` names the columns the intent writes, with `?2` the time and `?4` the base commit seen.
+fn intend(
+    sql: &SqlStorage,
+    task_id: &str,
+    pass: &Pass,
+    step: &'static str,
+    set: &str,
+    base_sha: &str,
+    now: i64,
+) -> R<Intent> {
+    match authority(sql, task_id, pass.owner_holds, now)? {
+        None => Ok(Intent::Gone),
+        Some(Err(failure)) => Ok(Intent::Lost(failure)),
+        // The same commit this pass read the pull request for, and no other.
+        Some(Ok(authorized)) if authorized != pass.authorized => Ok(Intent::Lost(
+            MergeFailure::AuthorityLost(MergeRefusal::CommitChanged),
+        )),
+        Some(Ok(_)) => {
+            exec(
+                sql,
+                &format!("UPDATE task_change SET merge_step = ?1, {set} WHERE task_id = ?3 AND merge_state = 'requested'"),
+                // Only the merge's intent writes the base commit seen.
+                if set.contains("?4") {
+                    vec![step.into(), now.into(), task_id.into(), base_sha.into()]
+                } else {
+                    vec![step.into(), now.into(), task_id.into()]
+                },
+            )?;
+            Ok(Intent::Go)
+        }
+    }
 }
 
 /// Who is told how a merge ended: the room's human owner and admins, and whoever asked, if they're still here.
@@ -537,6 +644,16 @@ fn requester_of(sql: &SqlStorage, task_id: &str) -> R<String> {
     .unwrap_or_default())
 }
 
+fn merge_state_of(sql: &SqlStorage, task_id: &str) -> R<Option<MergeState>> {
+    Ok(rows(
+        sql,
+        "SELECT merge_state FROM task_change WHERE task_id = ?",
+        vec![task_id.into()],
+    )?
+    .first()
+    .and_then(|row| row["merge_state"].as_str().and_then(MergeState::from_name)))
+}
+
 /// Ends a merge as failed, with its reason: state, an event of IDs and a reason code, and outbox rows, together. A
 /// changed commit is also kept on the change for good, so no later request merges it.
 fn finish_failed(
@@ -546,13 +663,7 @@ fn finish_failed(
     failure: MergeFailure,
     now: i64,
 ) -> R<()> {
-    let from = rows(
-        sql,
-        "SELECT merge_state FROM task_change WHERE task_id = ?",
-        vec![task_id.into()],
-    )?
-    .first()
-    .and_then(|row| row["merge_state"].as_str().and_then(MergeState::from_name));
+    let from = merge_state_of(sql, task_id)?;
     let Some(MergeState::Failed) =
         from.and_then(|from| merge_transition(task_id, from, &MergeEvent::Failed))
     else {
@@ -603,13 +714,7 @@ fn finish_succeeded(
     now: i64,
 ) -> R<()> {
     let event = MergeEvent::Succeeded(proof);
-    let from = rows(
-        sql,
-        "SELECT merge_state FROM task_change WHERE task_id = ?",
-        vec![task_id.into()],
-    )?
-    .first()
-    .and_then(|row| row["merge_state"].as_str().and_then(MergeState::from_name));
+    let from = merge_state_of(sql, task_id)?;
     let Some(MergeState::Succeeded) = from.and_then(|from| merge_transition(task_id, from, &event))
     else {
         return Ok(());
@@ -660,7 +765,138 @@ fn observation<'a>(pull: &'a PullSeen, default_branch_has: Option<bool>) -> Pull
     }
 }
 
+/// What a read-back of the repository's protections came to.
+pub(super) enum Readiness {
+    Ready,
+    /// No definite answer: no configuration, no reply, a server error, a limit, or a reply that couldn't be read. It
+    /// says nothing about the repository, so it never degrades a link or ends a merge.
+    CouldNotRead(u16),
+    /// A definite difference from what provisioning set, with its reason code. Someone with admin rights touched the
+    /// repository, so a person should look.
+    Mismatch(&'static str),
+}
+
+/// The Worker's call for an operator's recheck of a degraded link. Reached only from `crate::moderation`, which has
+/// checked the operator.
+pub(crate) const INTERNAL_REPOSITORY_RECHECK: &str = "/internal/operator-repository-recheck";
+
+/// The reason recorded when the default branch GitHub reports isn't the one the link holds.
+const DEFAULT_BRANCH_CHANGED: &str = "default_branch_changed";
+
 impl Workspace {
+    /// Reads the repository's protections back with the provisioning App, which alone sees who may bypass them, and
+    /// judges them with provisioning's own comparison. It also compares the default branch GitHub reports with the one
+    /// the link holds: the rules protect whatever the default branch is now, so a merge into the stored name after
+    /// the default was changed would be into an unprotected branch. The one readiness check, for the merge job and for
+    /// an operator's recheck. At provisioning there's no stored branch yet: the link takes the one this same read reports.
+    pub(super) async fn readiness(
+        &self,
+        repo_id: i64,
+        public: bool,
+        default_branch: &str,
+        room: &str,
+    ) -> Readiness {
+        let Some(config) = Config::from_env(&self.env) else {
+            return Readiness::CouldNotRead(0);
+        };
+        let provider = GitHubApp::new(config);
+        let expected = Expected {
+            repo_id,
+            org_id: provider.config().org_id,
+            merge_app_id: provider.config().merge_app_id,
+            public,
+        };
+        let read_back = provider.read_back(repo_id).await;
+        if provider.release().await > 0 {
+            console_error!(
+                "{}",
+                json!({ "event": "merge.token_unrevoked", "ws": room })
+            );
+        }
+        match read_back {
+            Err(failure) => Readiness::CouldNotRead(failure.status()),
+            Ok((observed, described)) => match verify_ready(&expected, &observed) {
+                Err(not_ready) => Readiness::Mismatch(not_ready.code()),
+                Ok(()) if described.default_branch != default_branch => {
+                    Readiness::Mismatch(DEFAULT_BRANCH_CHANGED)
+                }
+                Ok(()) => Readiness::Ready,
+            },
+        }
+    }
+
+    /// An operator's recheck of a degraded link (reached only from `crate::moderation`, which has checked the
+    /// operator): the same read-back, and only if it's exactly right, the link is `ready` again, with an event. Nothing
+    /// recovers by itself: a person looked, and asked.
+    pub(super) async fn operator_recheck(&self) -> R<Value> {
+        let sql = self.state.storage().sql();
+        if !store::is_initialized(&sql)? {
+            return Err(ApiError::workspace_not_found());
+        }
+        self.migrate_if_needed()?;
+        if !provisioning::enabled(&self.env, &sql)? {
+            return Err(ApiError::not_found());
+        }
+        let found = rows(
+            &sql,
+            "SELECT provider_repo_id, default_branch, visibility, status FROM repo_link WHERE provider = 'github'",
+            vec![],
+        )?;
+        let Some(link) = found.first() else {
+            return Err(refuse(409, "repo_not_ready"));
+        };
+        let status = text(&link["status"]).unwrap_or_default();
+        if status != LinkStatus::Degraded.name() {
+            return Ok(json!({ "status": status, "reason": Value::Null }));
+        }
+        let repo_id = int(&link["provider_repo_id"]);
+        let room = rows(&sql, "SELECT id FROM workspace", vec![])?
+            .first()
+            .and_then(|row| text(&row["id"]))
+            .unwrap_or_default();
+        let read = self
+            .readiness(
+                repo_id,
+                link["visibility"].as_str() == Some("public"),
+                link["default_branch"].as_str().unwrap_or_default(),
+                &room,
+            )
+            .await;
+        match read {
+            Readiness::CouldNotRead(_) => Err(refuse(502, "provider_unavailable")),
+            Readiness::Mismatch(code) => {
+                self.in_transaction(move |sql| {
+                    exec(
+                        sql,
+                        "UPDATE repo_link SET status_reason = ?, updated_at = ? WHERE provider_repo_id = ? AND status = 'degraded'",
+                        vec![code.into(), now_ms().into(), repo_id.into()],
+                    )
+                })?;
+                Ok(json!({ "status": LinkStatus::Degraded.name(), "reason": code }))
+            }
+            Readiness::Ready => {
+                self.in_transaction(move |sql| {
+                    let now = now_ms();
+                    exec(
+                        sql,
+                        "UPDATE repo_link SET status = 'ready', status_reason = NULL, verified_at = ?1, updated_at = ?1 WHERE provider_repo_id = ?2 AND status = 'degraded'",
+                        vec![now.into(), repo_id.into()],
+                    )?;
+                    record_event(
+                        sql,
+                        "repository.ready_again",
+                        SYSTEM,
+                        None,
+                        &Transition::NONE,
+                        store::room_admins(sql)?,
+                        now,
+                    )
+                })?;
+                Ok(json!({ "status": LinkStatus::Ready.name(), "reason": Value::Null }))
+            }
+        }
+    }
+
     /// The merge job, run by the room's alarm: one pass at each merge that's due, a couple an alarm.
     pub(super) async fn merge_upkeep(&self) -> R<()> {
         let sql = self.state.storage().sql();
@@ -735,172 +971,6 @@ impl Workspace {
         );
     }
 
-    /// One pass at one merge. Every way out leaves the merge either ended or due another pass, already counted.
-    async fn merge_pass(&self, room: &str, task_id: &str) -> R<()> {
-        // The owner's standing is asked of their `Principal` first: a grant counts only while its giver holds the
-        // delegation. If it can't say, the pass isn't made and isn't counted, and the alarm comes back.
-        let Some(owner_holds) = self.owner_holds().await else {
-            let (task, now) = (task_id.to_string(), now_ms());
-            self.in_transaction(move |sql| {
-                exec(
-                    sql,
-                    "UPDATE task_change SET merge_next_at = ? WHERE task_id = ? AND merge_state = 'requested'",
-                    vec![(now + job_backoff_ms(1)).into(), task.as_str().into()],
-                )
-            })?;
-            self.log_waiting(room, task_id, "standing", 0);
-            return Ok(());
-        };
-        let begun = self.in_transaction({
-            let (room, task) = (room.to_string(), task_id.to_string());
-            move |sql| begin(sql, &room, &task, owner_holds, now_ms())
-        })?;
-        let Begun::Go(pass) = begun else {
-            return Ok(());
-        };
-        let sql = self.state.storage().sql();
-        let (Some(merge_config), Some(config)) = (
-            self.merge_config(&sql),
-            Config::from_env(&self.env).filter(|_| !pass.last),
-        ) else {
-            if pass.last {
-                return self.last_pass(room, task_id, &pass).await;
-            }
-            self.log_waiting(room, task_id, "configuration", 0);
-            return Ok(());
-        };
-        let merger = MergeApp::new(merge_config);
-        // Readiness: the protections provisioning set, read back with the provisioning App, which alone sees who may
-        // bypass them, and judged by provisioning's own comparison.
-        let provider = GitHubApp::new(config);
-        let expected = Expected {
-            repo_id: pass.repo_id,
-            org_id: provider.config().org_id,
-            merge_app_id: provider.config().merge_app_id,
-            public: pass.public,
-        };
-        let read_back = provider.read_back(pass.repo_id).await;
-        if provider.release().await > 0 {
-            console_error!(
-                "{}",
-                json!({ "event": "merge.token_unrevoked", "ws": room, "task": task_id })
-            );
-        }
-        let observed = match read_back {
-            Ok((observed, _)) => observed,
-            Err(failure) => {
-                self.log_waiting(room, task_id, "readiness", failure.status());
-                return Ok(());
-            }
-        };
-        if let Err(not_ready) = verify_ready(&expected, &observed) {
-            let (room_id, task, repo_id) = (room.to_string(), task_id.to_string(), pass.repo_id);
-            return self.in_transaction(move |sql| {
-                let now = now_ms();
-                // Nothing is marked or merged in a repository whose rules aren't the ones Podster set, and coding
-                // work in the room stops until someone looks.
-                exec(
-                    sql,
-                    "UPDATE repo_link SET status = 'degraded', status_reason = ?, updated_at = ? WHERE provider_repo_id = ? AND status = 'ready'",
-                    vec![not_ready.code().into(), now.into(), repo_id.into()],
-                )?;
-                finish_failed(sql, &room_id, &task, MergeFailure::NotReady, now)
-            });
-        }
-        // The pull request and the default branch, as they are now.
-        let read = merger
-            .observe(
-                pass.repo_id,
-                pass.number,
-                pass.authorized.commit_sha(),
-                &pass.default_branch,
-            )
-            .await;
-        self.log_unrevoked(&read, room, task_id);
-        let seen = match read.answer {
-            Ok(seen) => seen,
-            Err(failure) => {
-                self.log_waiting(room, task_id, "read", failure.status());
-                return Ok(());
-            }
-        };
-        let Some(base_moved_from) = self.judge(room, task_id, &pass, seen, None).await? else {
-            return Ok(());
-        };
-        // Mark: the intent first, then the status on exactly the reviewed commit, then that it was set.
-        let marked = self.in_transaction({
-            let task = task_id.to_string();
-            move |sql| note(sql, &task, "mark", "merge_marked_at = ?2", now_ms())
-        })?;
-        if !marked || dies(&sql, "before_mark") {
-            return Ok(());
-        }
-        let mark = merger
-            .mark(pass.repo_id, pass.authorized.commit_sha())
-            .await;
-        self.log_unrevoked(&mark, room, task_id);
-        if let Err(failure) = mark.answer {
-            self.log_waiting(room, task_id, "mark", failure.status());
-            return Ok(());
-        }
-        let noted = self.in_transaction({
-            let task = task_id.to_string();
-            move |sql| note(sql, &task, "marked", "merge_mark_set_at = ?2", now_ms())
-        })?;
-        if !noted || dies(&sql, "after_mark") {
-            return Ok(());
-        }
-        // Merge: the intent and the base seen first, then the call, then what GitHub shows.
-        let calling = self.in_transaction({
-            let (task, base) = (task_id.to_string(), base_moved_from);
-            move |sql| {
-                exec(
-                    sql,
-                    "UPDATE task_change SET merge_base_sha = ? WHERE task_id = ? AND merge_state = 'requested'",
-                    vec![base.as_str().into(), task.as_str().into()],
-                )?;
-                note(sql, &task, "merge", "merge_called_at = ?2", now_ms())
-            }
-        })?;
-        if !calling {
-            return Ok(());
-        }
-        let merged = merger
-            .merge(
-                pass.repo_id,
-                pass.number,
-                pass.authorized.commit_sha(),
-                &pass.default_branch,
-            )
-            .await;
-        self.log_unrevoked(&merged, room, task_id);
-        if merged.failed_at_mint {
-            // No token, so nothing was asked. The call is un-recorded, so a merge seen later isn't taken for this one.
-            let task = task_id.to_string();
-            self.in_transaction(move |sql| {
-                exec(
-                    sql,
-                    "UPDATE task_change SET merge_called_at = NULL, merge_step = 'marked' WHERE task_id = ? AND merge_state = 'requested'",
-                    vec![task.as_str().into()],
-                )
-            })?;
-            self.log_waiting(room, task_id, "merge", 0);
-            return Ok(());
-        }
-        if dies(&sql, "after_merge_call") {
-            return Ok(());
-        }
-        let (status, after) = merged.answer;
-        match after {
-            Ok(seen) => {
-                self.judge(room, task_id, &pass, seen, Some(status)).await?;
-            }
-            // The answer alone decides nothing. The next pass reads before it does anything else.
-            Err(failure) => self.log_waiting(room, task_id, "read_after", failure.status()),
-        }
-        Ok(())
-    }
-
     /// The merge App's configuration, or `None`. Test builds can stand for a deployment where it isn't set, and can
     /// override one room's variables by a table only a test can make, to show a misconfiguration refused end to end.
     pub(super) fn merge_config(&self, sql: &SqlStorage) -> Option<MergeConfig> {
@@ -937,42 +1007,282 @@ impl Workspace {
         MergeConfig::from_env(&self.env)
     }
 
-    /// The last pass allowed, after a merge call went out at some point: it only reads. A merge that shows now is
-    /// recorded, and anything else ends the request.
-    async fn last_pass(&self, room: &str, task_id: &str, pass: &Pass) -> R<()> {
-        let sql = self.state.storage().sql();
-        let seen = match self.merge_config(&sql) {
-            Some(config) => {
-                let read = MergeApp::new(config)
-                    .observe(
-                        pass.repo_id,
-                        pass.number,
-                        pass.authorized.commit_sha(),
-                        &pass.default_branch,
-                    )
-                    .await;
-                self.log_unrevoked(&read, room, task_id);
-                read.answer.ok()
-            }
-            None => None,
-        };
-        if let Some(seen) = seen {
-            if self.judge(room, task_id, pass, seen, None).await?.is_none() {
-                // Ended one way or the other, or the read said to read again, which a last pass can't.
-                let still = rows(
-                    &sql,
-                    "SELECT 1 AS still FROM task_change WHERE task_id = ? AND merge_state = 'requested'",
-                    vec![task_id.into()],
-                )?;
-                if still.is_empty() {
-                    return Ok(());
-                }
-            }
+    /// Ends a merge with `failure`. If a merge call is on record, GitHub is read first, and a merge that call made is
+    /// recorded as this request's success: it was authorized when it was made.
+    async fn end(
+        &self,
+        room: &str,
+        task_id: &str,
+        target: &Target,
+        called: bool,
+        failure: MergeFailure,
+    ) -> R<()> {
+        if called {
+            return self.observe_then_end(room, task_id, target, failure).await;
         }
         let (room, task) = (room.to_string(), task_id.to_string());
-        self.in_transaction(move |sql| {
-            finish_failed(sql, &room, &task, MergeFailure::AttemptsExhausted, now_ms())
+        self.in_transaction(move |sql| finish_failed(sql, &room, &task, failure, now_ms()))
+    }
+
+    /// For a merge whose call is on record and which is about to end as failed: reads the pull request and the default
+    /// branch, and records what GitHub shows. Merged, with the reviewed commit as its head and the default branch
+    /// holding it, is success. Anything else is `failure`. If GitHub can't be read, nothing is recorded yet, and the
+    /// next pass tries again.
+    async fn observe_then_end(
+        &self,
+        room: &str,
+        task_id: &str,
+        target: &Target,
+        failure: MergeFailure,
+    ) -> R<()> {
+        let sql = self.state.storage().sql();
+        let Some(config) = self.merge_config(&sql) else {
+            self.log_waiting(room, task_id, "configuration", 0);
+            return Ok(());
+        };
+        let read = MergeApp::new(config)
+            .observe(
+                target.repo_id,
+                target.number,
+                &target.commit,
+                &target.default_branch,
+            )
+            .await;
+        self.log_unrevoked(&read, room, task_id);
+        let seen = match read.answer {
+            Ok(seen) => seen,
+            Err(read_failure) => {
+                self.log_waiting(room, task_id, "read", read_failure.status());
+                return Ok(());
+            }
+        };
+        let recorded = MergeAuthorized::when_called(task_id, target.repo_id, &target.commit);
+        let reviewed = ReviewedBase {
+            default_branch: &target.default_branch,
+            base_sha: target.reviewed_base_sha.as_deref(),
+        };
+        let merged = match seen.pull {
+            PullAnswer::Found(pull)
+                if pull.number == target.number && pull.repo_id == Some(target.repo_id) =>
+            {
+                let step = decide_merge_step(
+                    &recorded,
+                    &reviewed,
+                    &observation(&pull, seen.default_branch_has),
+                    None,
+                );
+                match step {
+                    MergeStep::Succeeded(proof) => Some((proof, pull)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let (room, task) = (room.to_string(), task_id.to_string());
+        self.in_transaction(move |sql| match merged {
+            Some((proof, pull)) => finish_succeeded(sql, &room, &task, proof, &pull, now_ms()),
+            None => finish_failed(sql, &room, &task, failure, now_ms()),
         })
+    }
+
+    /// One pass at one merge. Every way out leaves the merge either ended or due another pass, already counted.
+    async fn merge_pass(&self, room: &str, task_id: &str) -> R<()> {
+        // The owner's standing is asked of their `Principal` first: a grant counts only while its giver holds the
+        // delegation. If it can't say, the pass is counted and waits.
+        let owner_holds = self.owner_holds().await;
+        let begun = self.in_transaction({
+            let (room, task) = (room.to_string(), task_id.to_string());
+            move |sql| begin(sql, &room, &task, owner_holds, now_ms())
+        })?;
+        let pass = match begun {
+            Begun::Nothing => return Ok(()),
+            Begun::Wait => {
+                self.log_waiting(room, task_id, "standing", 0);
+                return Ok(());
+            }
+            Begun::Observe(target, failure) => {
+                return self.observe_then_end(room, task_id, &target, failure).await
+            }
+            Begun::Go(pass) => pass,
+        };
+        let target = &pass.target;
+        let sql = self.state.storage().sql();
+        let Some(merge_config) = self.merge_config(&sql) else {
+            self.log_waiting(room, task_id, "configuration", 0);
+            return Ok(());
+        };
+        let merger = MergeApp::new(merge_config);
+        match self
+            .readiness(target.repo_id, target.public, &target.default_branch, room)
+            .await
+        {
+            Readiness::Ready => {}
+            Readiness::CouldNotRead(status) => {
+                self.log_waiting(room, task_id, "readiness", status);
+                return Ok(());
+            }
+            Readiness::Mismatch(code) => {
+                // Nothing is marked or merged in a repository whose rules aren't the ones Podster set, and coding
+                // work in the room stops until an operator has looked and rechecked it.
+                let repo_id = target.repo_id;
+                self.in_transaction(move |sql| {
+                    let now = now_ms();
+                    exec(
+                        sql,
+                        "UPDATE repo_link SET status = 'degraded', status_reason = ?, updated_at = ? WHERE provider_repo_id = ? AND status = 'ready'",
+                        vec![code.into(), now.into(), repo_id.into()],
+                    )?;
+                    record_event(
+                        sql,
+                        "repository.degraded",
+                        SYSTEM,
+                        None,
+                        &Transition {
+                            reason: Some(code),
+                            ..Transition::NONE
+                        },
+                        store::room_admins(sql)?,
+                        now,
+                    )
+                })?;
+                return self
+                    .end(room, task_id, target, pass.called, MergeFailure::NotReady)
+                    .await;
+            }
+        }
+        // The pull request and the default branch, as they are now.
+        let read = merger
+            .observe(
+                target.repo_id,
+                target.number,
+                pass.authorized.commit_sha(),
+                &target.default_branch,
+            )
+            .await;
+        self.log_unrevoked(&read, room, task_id);
+        let seen = match read.answer {
+            Ok(seen) => seen,
+            Err(failure) => {
+                self.log_waiting(room, task_id, "read", failure.status());
+                return Ok(());
+            }
+        };
+        let Some(base_seen) = self.judge(room, task_id, &pass, seen, None).await? else {
+            return Ok(());
+        };
+        // Mark: authority again and the intent, in one transaction; then the status on exactly the reviewed commit;
+        // then that it was set.
+        let intent = self.in_transaction({
+            let (task, pass, base) = (
+                task_id.to_string(),
+                pass.clone_for_intent(),
+                base_seen.clone(),
+            );
+            move |sql| {
+                intend(
+                    sql,
+                    &task,
+                    &pass,
+                    "mark",
+                    "merge_marked_at = ?2",
+                    &base,
+                    now_ms(),
+                )
+            }
+        })?;
+        match intent {
+            Intent::Go => {}
+            Intent::Gone => return Ok(()),
+            Intent::Lost(failure) => {
+                return self.end(room, task_id, target, pass.called, failure).await
+            }
+        }
+        if dies(&sql, "before_mark") {
+            return Ok(());
+        }
+        let mark = merger
+            .mark(target.repo_id, pass.authorized.commit_sha())
+            .await;
+        self.log_unrevoked(&mark, room, task_id);
+        if let Err(failure) = mark.answer {
+            self.log_waiting(room, task_id, "mark", failure.status());
+            return Ok(());
+        }
+        self.in_transaction({
+            let task = task_id.to_string();
+            move |sql| {
+                exec(
+                    sql,
+                    "UPDATE task_change SET merge_step = 'marked', merge_mark_set_at = ? WHERE task_id = ? AND merge_state = 'requested'",
+                    vec![now_ms().into(), task.as_str().into()],
+                )
+            }
+        })?;
+        if dies(&sql, "after_mark") {
+            return Ok(());
+        }
+        // Merge: authority again, the intent and the base seen, in one transaction; then the call; then what GitHub shows.
+        let intent = self.in_transaction({
+            let (task, pass, base) = (task_id.to_string(), pass.clone_for_intent(), base_seen);
+            move |sql| {
+                intend(
+                    sql,
+                    &task,
+                    &pass,
+                    "merge",
+                    "merge_called_at = ?2, merge_base_sha = ?4",
+                    &base,
+                    now_ms(),
+                )
+            }
+        })?;
+        match intent {
+            Intent::Go => {}
+            Intent::Gone => return Ok(()),
+            Intent::Lost(failure) => {
+                return self.end(room, task_id, target, pass.called, failure).await
+            }
+        }
+        if dies(&sql, "before_merge_call") {
+            return Ok(());
+        }
+        let merged = merger
+            .merge(
+                target.repo_id,
+                target.number,
+                pass.authorized.commit_sha(),
+                &target.default_branch,
+            )
+            .await;
+        self.log_unrevoked(&merged, room, task_id);
+        if merged.failed_at_mint {
+            // No token, so nothing was asked. If no call was on record before this pass, this one's is taken off
+            // again, so a merge seen later isn't taken for it. An earlier pass's call stays on record.
+            if !pass.called {
+                let task = task_id.to_string();
+                self.in_transaction(move |sql| {
+                    exec(
+                        sql,
+                        "UPDATE task_change SET merge_called_at = NULL, merge_step = 'marked' WHERE task_id = ? AND merge_state = 'requested'",
+                        vec![task.as_str().into()],
+                    )
+                })?;
+            }
+            self.log_waiting(room, task_id, "merge", 0);
+            return Ok(());
+        }
+        if dies(&sql, "after_merge_call") {
+            return Ok(());
+        }
+        let (status, after) = merged.answer;
+        match after {
+            Ok(seen) => {
+                self.judge(room, task_id, &pass, seen, Some(status)).await?;
+            }
+            // The answer alone decides nothing. The next pass reads before it does anything else.
+            Err(failure) => self.log_waiting(room, task_id, "read_after", failure.status()),
+        }
+        Ok(())
     }
 
     /// Judges what was read of the pull request and the default branch, with the merge call's answer if one was just
@@ -986,14 +1296,16 @@ impl Workspace {
         seen: MergeSeen,
         call: Option<Option<u16>>,
     ) -> R<Option<String>> {
+        // Every ending here follows a read of GitHub made a moment ago, so it's recorded as read.
         let finish = |failure: MergeFailure| -> R<Option<String>> {
             let (room, task) = (room.to_string(), task_id.to_string());
             self.in_transaction(move |sql| finish_failed(sql, &room, &task, failure, now_ms()))?;
             Ok(None)
         };
+        let target = &pass.target;
         let pull = match seen.pull {
             PullAnswer::Found(pull)
-                if pull.number == pass.number && pull.repo_id == Some(pass.repo_id) =>
+                if pull.number == target.number && pull.repo_id == Some(target.repo_id) =>
             {
                 pull
             }
@@ -1009,8 +1321,8 @@ impl Workspace {
             return finish(MergeFailure::MergedElsewhere);
         }
         let reviewed = ReviewedBase {
-            default_branch: &pass.default_branch,
-            base_sha: pass.reviewed_base_sha.as_deref(),
+            default_branch: &target.default_branch,
+            base_sha: target.reviewed_base_sha.as_deref(),
         };
         let step = decide_merge_step(
             &pass.authorized,
@@ -1031,10 +1343,21 @@ impl Workspace {
                 self.log_waiting(room, task_id, "merged_state", 0);
                 Ok(None)
             }
-            // A draft can't be merged, and a last pass asks for nothing.
+            // A draft can't be merged.
             MergeStep::MarkAndMerge { .. } if pull.draft => finish(MergeFailure::PullDraft),
-            MergeStep::MarkAndMerge { .. } if pass.last => Ok(None),
             MergeStep::MarkAndMerge { .. } => Ok(Some(pull.base_sha)),
+        }
+    }
+}
+
+impl Pass {
+    /// A copy for a transaction's closure.
+    fn clone_for_intent(&self) -> Pass {
+        Pass {
+            authorized: self.authorized.clone(),
+            target: self.target.clone(),
+            called: self.called,
+            owner_holds: self.owner_holds,
         }
     }
 }

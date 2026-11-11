@@ -1248,12 +1248,27 @@ fn the_merge_calls_answer_is_read_by_status_and_never_as_a_merge() {
 fn merge_caps_and_the_new_failure_codes() {
     use podster_core::repo_merge::{
         merge_attempt_allowed, merge_request_allowed, MAX_MERGE_ATTEMPTS,
-        MAX_MERGE_REQUESTS_PER_HOUR,
+        MAX_MERGE_REQUESTS_PER_HOUR, MAX_MERGE_REQUESTS_PER_TASK_HOUR,
     };
     assert!(merge_attempt_allowed(MAX_MERGE_ATTEMPTS - 1));
     assert!(!merge_attempt_allowed(MAX_MERGE_ATTEMPTS));
-    assert!(merge_request_allowed(MAX_MERGE_REQUESTS_PER_HOUR - 1));
-    assert!(!merge_request_allowed(MAX_MERGE_REQUESTS_PER_HOUR));
+    assert!(merge_request_allowed(MAX_MERGE_REQUESTS_PER_HOUR - 1, 0));
+    assert!(!merge_request_allowed(MAX_MERGE_REQUESTS_PER_HOUR, 0));
+    assert!(merge_request_allowed(
+        0,
+        MAX_MERGE_REQUESTS_PER_TASK_HOUR - 1
+    ));
+    assert!(!merge_request_allowed(0, MAX_MERGE_REQUESTS_PER_TASK_HOUR));
+    // A call on record can be asked about later, and only a read of GitHub makes it a success.
+    let recorded = MergeAuthorized::when_called("t", REPO, ABC);
+    assert_eq!(
+        (
+            recorded.task_id(),
+            recorded.repo_id(),
+            recorded.commit_sha()
+        ),
+        ("t", REPO, ABC)
+    );
     let codes = [
         MergeFailure::PullDraft.code(),
         MergeFailure::MergedElsewhere.code(),

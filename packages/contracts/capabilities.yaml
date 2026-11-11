@@ -82,6 +82,8 @@ person_only:
   - endPublicClaims
   - createReport
   - listReports
+  # M5 step 7b: an operator rechecks a degraded repository link.
+  - recheckRepository
   - suspendRoomPublicSurface
   - suspendRoomByReport
   - liftRoomByReport

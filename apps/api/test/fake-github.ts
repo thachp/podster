@@ -318,9 +318,11 @@ async function agentMint(body: any, app: "agent" | "merge"): Promise<Response> {
   const script = wanted?.length === 1 ? agentRepos.get(wanted[0]) : undefined;
   if (!wanted || !script) return json({ message: "no such repository" }, 422);
   const mode = script.mode ?? "ok";
-  const refused = app === "merge" ? script.mergeMint : script.mint;
-  if (refused && refused !== 201) return json({ message: "SECRET-PROVIDER-TEXT" }, refused);
+  // The gate first, so a test can change how this mint answers while it waits there.
   if (mode === "gate") await new Promise<void>((open) => gates.set(wanted[0], [...(gates.get(wanted[0]) ?? []), open]));
+  const now = agentRepos.get(wanted[0]) ?? script;
+  const refused = app === "merge" ? now.mergeMint : now.mint;
+  if (refused && refused !== 201) return json({ message: "SECRET-PROVIDER-TEXT" }, refused);
   if (mode === "hang" || mode === "slow") await new Promise((resolve) => setTimeout(resolve, mode === "hang" ? 1500 : 200));
   const token = `ghs_fake_${crypto.randomUUID().replaceAll("-", "")}`;
   const permissions: Record<string, string> = { ...(body?.permissions ?? {}), ...(mode === "extra_permission" ? { administration: "write" } : {}) };

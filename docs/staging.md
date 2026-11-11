@@ -406,7 +406,7 @@ cd e2e && node m4-staging.mjs --base-url https://gateway-staging.podster.dev --a
 
 `node run-m4-staging.mjs` rehearses it against the local stack, with public rooms on for that run only and the gateway's real limits, and `--public-rooms-off` checks that it stops when they're off.
 
-**Runs so far.** Neither was clean, and M4's gate, which is the owner's to call, hasn't been called. The [M4 plan](m4-plan.md#abuse-review-draft-step-14) has both in full.
+**Runs so far.** Neither was clean. The owner called M4's gate met on 2026-11-11 anyway, accepting the one failure on its diagnosis and fix ([decision 196](spec/PRODUCT.md#decisions-needed)); a clean rerun after 10:00 UTC on 2026-11-12 still runs as a check. The [M4 plan](m4-plan.md#abuse-review-step-14) has both in full.
 
 - **2026-11-10:** 102 passed, 3 failed, 0 skipped, 6 owed.
 - **2026-11-11, 10:54:23Z to 11:04:19Z,** the script at `6322461`: 107 passed, 1 failed, 0 skipped, 6 owed by design. Of the three earlier failures, M4-03 and M4-13 passed, with the M4-11 checks changed alongside them. The third failed again, and was the run's one failure: the script's matcher for M4-10's forged `cf-connecting-ip` check. Cloudflare refuses that request with its own 403 for error 1000, as plain text to `curl` and as an HTML page to Node's `fetch`, and the matcher took only the plain text. [#277](https://github.com/thachp/podster/pull/277) fixed it, so that check hasn't passed on staging by the script in either run.

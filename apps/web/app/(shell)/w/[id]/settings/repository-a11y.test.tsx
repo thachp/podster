@@ -23,6 +23,8 @@ const link = (over: Partial<RepoLink> = {}): RepoLink => ({ id: "rl_1", provider
 const STATES: [string, RoomRepository][] = [
   ["none", { request: null, repository: null, delegated: true }],
   ["none, without the delegation", { request: null, repository: null, delegated: false }],
+  ["none, and the deployment doesn't let this person ask", { request: null, repository: null, delegated: true, may_request: false }],
+  ["failed, and the deployment doesn't let this person retry", { request: request({ state: "failed", reason: "repository_requests_closed" }), repository: null, may_request: false }],
   ["pending", { request: request(), repository: null }],
   ["ready", { request: request({ state: "ready" }), repository: link() }],
   ["degraded", { request: request({ state: "ready" }), repository: link({ status: "degraded", status_reason: "ruleset_differs" }) }],

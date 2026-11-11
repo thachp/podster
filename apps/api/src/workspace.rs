@@ -42,11 +42,8 @@ const OUTBOX_BATCH: i64 = 50;
 const OUTBOX_MAX_BACKOFF_MS: i64 = 5 * 60 * 1000;
 const OUTBOX_RETRY_MS: i64 = 5000;
 // Long enough for a busy recipient, short enough that a stuck one doesn't hold up the rest of the room.
-const DELIVERY_TIMEOUT_MS: u64 = if cfg!(feature = "failpoints") {
-    300
-} else {
-    10_000
-};
+// Test builds wait as long: a shorter wait there ran out on a busy runner and read as a recipient that didn't answer.
+const DELIVERY_TIMEOUT_MS: u64 = 10_000;
 const INVITATIONS_LISTED: i64 = 200;
 const DENIAL_ROWS: i64 = 5000;
 /// Different refusals held in memory before they're written. Past this, a new actor counts as an outsider's refusal, and

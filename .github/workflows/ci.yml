@@ -192,6 +192,12 @@ jobs:
         working-directory: apps/gateway
       - run: npm ci
         working-directory: e2e
+      # Every script here, read without running it: an assignment to a constant, a name nothing declares, and a
+      # declaration that hides an assigned outer one. The staging scripts run nowhere else before they run on staging.
+      - run: node static-check.mjs --self-test
+        working-directory: e2e
+      - run: node static-check.mjs
+        working-directory: e2e
       # The staging run's tail reader, fed wrangler's real multi-line JSON shape.
       - run: node tail-stream-selftest.mjs
         working-directory: e2e

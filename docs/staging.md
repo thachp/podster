@@ -444,6 +444,26 @@ cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)
 
 `node m5-staging-selftest.mjs` checks its pure parts and its dry run, and CI runs it.
 
+**Extended on 2026-11-11, and not run since.** The script now has 68 checks: the 33 above and 35 for what the three runs left unshown, listed with each one's exact assertion in the [M5 plan](m5-plan.md#step-10-the-staging-script-extended-2026-11-11). What changes for whoever runs it:
+
+- **Still 2 sign-ins.** The second person also owns a second room.
+- **It leaves 2 public repositories,** not 1: `e2e-m5-<time>-<4 hex>` and `e2e-m5-<time>-<4 hex>-<6 hex>`. It prints both.
+- **About 8 to 10 minutes expected, not measured; about 87 minutes at worst,** if every bounded wait ran to its limit. A dry run prints the worst case for the flags given.
+- **Logs:** it starts `wrangler tail` for the API, the gateway and the web app, as M4's script does. Run `npm ci` in `apps/api`, `apps/gateway` and `apps/web` first: the script checks for the three installs before it sends anything, and exits 2 without them. The tails use your `wrangler login`; a `CLOUDFLARE_API_TOKEN` in the environment isn't passed to them. `--skip-logs` runs without the tails, and M5-13a, M5-13, M5-16a and M5-16b then say `SKIP`. The scanner isn't tailed, lines a Worker logged before its tail connected aren't seen, and `wrangler tail` may drop events by sampling under load. M5-13's result says which tails were connected before the first sign-up. It can't know whether any event was sampled out, and says so. A hit is printed as the Worker, the log line's event name and the kind of string, never the string.
+- **Signed webhook deliveries are opt-in.** M5-16a and M5-16b run only when `PODSTER_M5_WEBHOOK_SECRET` is set in the environment of that run. The script reads no file for it, and never prints it, writes it or passes it on. Without it, or without the tails, the two checks say `SKIP` and are counted. The owner sets it, for the run that needs it and no other.
+- **Four checks can say `SKIP` with nothing wrong:** M5-09f, AC-13a, AC-13b and AC-13c. Each needs the script's request to reach Podster before something else does, which nothing outside can force. A skip there means the run didn't show it. A merge that went through when the run had seen the job still behind is a `FAIL` whatever the clocks say. Otherwise Podster's and GitHub's recorded times decide, and a merge from 3 seconds before to 7 seconds after the authority ended is reported as "can't be told", apart from a lost race.
+- **Clean-up runs on every way out:** the second person is made the first room's admin again if the run stopped while they were demoted, every grant the run gave is taken back, and what couldn't be undone is printed, with any merge the job hasn't ended yet. **This has never run:** the script has not executed end to end anywhere, and `e2e/static-check.mjs`, in CI, is the only thing that reads its control flow.
+- **Ctrl-C** stops the run at its next check or wait, then cleans up: it waits up to two minutes for the step in hand to end first, so nothing lands after clean-up has looked.
+- **A hard kill** (`kill -9`, a closed terminal, a lost machine) runs no clean-up. It can leave:
+  - **the two repositories,** as any run does;
+  - **live grants** in the run's two rooms, and with a live push grant, a repository token that works until its hour is up;
+  - **the second person a plain member** of the first room, if the kill fell between the demotion and its undoing;
+  - **merges still queued,** which the job ends by itself;
+  - `wrangler tail` processes, which end when their terminal does.
+
+  To clear it: the owner archives or deletes the repositories on GitHub, as after any run. Nothing else needs doing for safety. A token expires within its hour. The grants and the demotion are in rooms only the run's two test people could manage, and their session cookies died with the process, so nobody can use or undo them: a grant can be taken back only by the room's owner or an admin, or an admin of its organization. An operator can suspend an agent (`/v1/moderation/agents/{agent}/suspend`); whether that ends a held token wasn't checked.
+- **It leaves** one agent disconnected and one removed from the first room. In its own repository M5-C3 tries to make a tag and a release and then to delete them; its result says what GitHub answered to each, so anything left is named there.
+
 **What it doesn't cover:**
 
 - **Whether a refused call reached GitHub.** M5-05 and M5-14 say it doesn't. The script sees Podster's refusal and nothing of what Podster sent, so that stays the API's tests against the fake.

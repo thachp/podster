@@ -818,6 +818,8 @@ The first four were made before the fixes were deployed, with GitHub's default s
 - **Failed, uncertain and retried setup, and the operator's reset** (M5-03, M5-15). The reset doesn't exist.
 - **The daily caps, the operator's take-back, and an unlisted person being refused.** API tests against the fake only. No one who isn't a test person has asked for a repository on staging under the list.
 - **Against real GitHub: rate-limit handling, degrading revoking tokens, the daily readiness read, deleted-repository detection, and the operator's recheck degrading a link.** These are the eight staging checks [#282](https://github.com/thachp/podster/pull/282) proposed in its description. None was run as a check. The third run bears on three of them only by its setup finishing: the creation call's settings, the workflow-permissions read, and a just-made repository being readable by its ID. The review's own [seven proposed checks](security/m5-review.md#proposed-staging-checks-not-yet-run) haven't been run either, beyond the parts of the first that the acceptance script covers.
+- **A failed check and a failed merge reported** (M5-12). Expanded criterion 7 says checks and merge are reported independently "including failure". Every run's release status was read for a merged task and for one whose head moved, with no check on either commit. No failed check has been posted to a staging repository and no merge has failed there, so the failure half of criterion 7 rests on the API's tests against the fake.
+- **Five access tests the gate names, for their repository parts:** AC-05, AC-13, AC-16, AC-27 and AC-31. [The table below](#what-calling-the-gate-met-would-accept) has each.
 - **Replayed or misdirected webhooks** (M5-16).
 - **Workers' logs** (M5-13).
 - **Nobody has looked at the repository and merge screens in a browser.**
@@ -825,13 +827,57 @@ The first four were made before the fixes were deployed, with GitHub's default s
 - **Whether the four older repositories have degraded as expected.**
 - **And what the first run already listed:** whether a refused call reached GitHub, GitHub's side of a room without a repository, ruleset bypass lists, the job's own refusal of a moved head, and the rest of M5-06, M5-07, M5-08 and M5-12.
 
-Four acceptance tests in [the table](#acceptance-tests) have no staging evidence at all: M5-03, M5-13, M5-15 and M5-16. M5-11's lost webhook repaired by polling wasn't told apart from a delivered one, and its bad signature is the probes' unsigned delivery only. [The gate](#the-gate) says "all of these pass on staging". **So this proposal asks for the gate to be called short of its own wording,** as M3's was called with local runs accepted for four items.
+#### What calling the gate met would accept
+
+[The gate](#the-gate) as written requires, among its five parts, **(i) every row of M5's [acceptance tests](#acceptance-tests) on staging** and **(ii) the access tests that name repositories, grants or merge, on a deployment**. Neither is whole. The two tables say, row by row, what staging has shown and what would be accepted on tests alone. "The runs" are the three of 2026-11-11. "Local" means tests against a fake GitHub: the pure crates, `apps/api`'s specs, and the rehearsals `e2e/run-local.mjs` runs.
+
+**(i) M5's acceptance rows:**
+
+| Test | On staging, in the runs | Not on staging: accepted on local tests alone, or on nothing |
+| --- | --- | --- |
+| M5-01 | Yes: a repository made, with GitHub's ID recorded | "A room without Git creates none" is Podster's own read only (M5-00); nobody looked in `podsterdev` |
+| M5-02 | Yes: public while the room is private | Nothing. Public is the only visibility there is |
+| M5-03 | **No** | All of it: a timeout, an uncertain request, a retry under a new name. Local |
+| M5-04 | Yes: a request naming an organization, and one naming an installation, refused. The log's line names only the organization; the script sends both | Nothing |
+| M5-05 | Yes: refused `grant_required`, no token in the answer | That no token was asked of GitHub. Local |
+| M5-06 | In part: a push, a pull request, and the default branch refused by `git push`, a commit, a ref update and a merge; the review status and settings refused | A merge of a commit the merge App has already marked; another repository; a workflow file; rulesets. The spike saw these once; staging hasn't |
+| M5-07 | In part: after submission, and after a grant is taken back, a new token is refused and GitHub refuses the old one within 0.2 s | A revoked or removed agent; a passed deadline; how long a token works afterwards "measured and written down" beyond those two timings |
+| M5-08 | In part: the submission records its commit | Approval failing `commit_changed` after the branch advances. Local |
+| M5-09 | In part: the reviewed commit merged; a moved head refused `commit_changed` at the request | `merge.failed` recorded by the job for a head it finds moved. Local (`merge-check.mjs` M5-S7viii) |
+| M5-10 | Yes, with `self_review` added in the third run only | Nothing |
+| M5-11 | In part: a moved head was seen within the wait; the probes refuse an unsigned delivery | A badly signed delivery; a lost webhook repaired by polling, which the script can't tell from a delivered one |
+| M5-12 | In part: checks and merge reported separately for a merged task and a moved head, and no release | **A failed check and a failed merge.** Local |
+| M5-13 | **No** | All of it. Nobody read the Workers' logs during a run |
+| M5-14 | The row as written was replaced by [decision 194](spec/PRODUCT.md#decisions-needed). Yes for the new rule: no operator approves first | An operator's take-back refusing a request, and the daily caps. Local |
+| M5-15 | **No** | All of it. Local |
+| M5-16 | **No** | All of it. Local |
+
+So of 16 rows: 3 with nothing left over (M5-02, M5-04, M5-10), 9 in part (M5-01 only for GitHub's side of a room without Git), and 4 with no staging evidence at all (M5-03, M5-13, M5-15, M5-16).
+
+**(ii) The access tests the gate names.** AC-10, AC-11 and AC-17 are the ones the staging script maps checks to: M5-01, M5-A1 and M5-G2; M5-10a to M5-10e and M5-10d. Even those are partial on staging: the caps, the take-back and the unlisted person of AC-10, and AC-11's organization admin, operator and other room's admin, are local. The other five, as [ACCESS-CONTROL.md](spec/ACCESS-CONTROL.md) states them:
+
+| Test | What it asserts | Tested today | On a deployment |
+| --- | --- | --- | --- |
+| AC-05 | An admin who substitutes another room's, organization's, agent's, asset's or provider resource's ID is denied, with nothing disclosed or changed | `crates/core/tests/repo_grants.rs` (a repository ID that isn't the room's link finds no grant); `e2e/journey.mjs` `AC-05`; `apps/api` "keeps rooms apart" | **For provider-resource IDs: no deployment evidence.** The journey's `AC-05` passed on staging on 2026-11-09 at `1d28ee2`, for people's paths on lists, reads, edits and deletes; [m0-gate.md](m0-gate.md) says provider IDs weren't tried, and its rooms have no repository. No journey run with managed repositories on is recorded: none found. Nearest in the runs: M5-04, a request naming an organization refused |
+| AC-13 | Authority revoked while a settings save, a cached assertion or a background job is in flight is rejected by ordering; an old form or retry can't restore a grant | `crates/core/tests/repo_merge.rs` (each step rechecks); `apps/api/test/merge-task.spec.ts` ("after the mark, with authority gone since…"); `repo-grants.spec.ts` (a removed participant's or demoted admin's grants end, and coming back restores nothing; a stored revocation's replay); `e2e/journey.mjs` `AC-13` | **For grants and the merge job: no deployment evidence.** The journey's `AC-13` passed on staging on 2026-11-09 at `1d28ee2`, for stale forms only, before M5. Nearest in the runs: M5-G4, a grant taken back and its token refused, with nothing in flight |
+| AC-16 | When a write fails or the provider rejects a grant, the transaction rolls back, the provider's failure is recorded, and there's no false success or leaked secret | `apps/api` "rolls back task, event, outbox and idempotency when a command fails after writing"; `provisioning.spec.ts` and `merge-task.spec.ts` (GitHub's refusal ends `provider_refused`); `repo-access.spec.ts` ("revokes the minted token when the commit fails, and keeps no trace of it") | **No deployment evidence.** [m0-gate.md](m0-gate.md) records it as local only by ruling, since failpoints never ship. No run has had GitHub refuse Podster |
+| AC-27 | A revoked agent's issued token, a job queued before revocation, and a renewal after the task ends or its time runs out are all denied; residual token lifetime is disclosed, and renewal never extends or widens | `crates/core/tests/repo_access.rs`, `repo_merge.rs`; `apps/api/test/repo-access.spec.ts`; `e2e/repo-access-check.mjs` | **In part, in all three runs of 2026-11-11:** M5-07a (after submission a new token is refused `task_not_active` and GitHub refuses the old one) and M5-G4 (the same after a grant is taken back). **No deployment evidence** for a revoked or removed agent, a queued job after revocation, a cancelled task or a passed deadline |
+| AC-31 | A submission records commit abc, the branch advances to def, the reviewer approves: approval can't bind to def, and approval or merge fails `commit_changed` | `crates/core/tests/commit_pinning.rs`; `apps/api/test/task-change.spec.ts` ("refuses with commit_changed when the head moved after submission…"); `e2e/merge-check.mjs` M5-S7viii | **The merge half, in all three runs:** M5-09e, a head moved after review refused `commit_changed`. **The approval half: no deployment evidence** |
+
+No other staging script reaches these: `e2e/m2-staging.mjs`, `e2e/m4-staging.mjs` and `e2e/a2a-staging.mjs` name none of the five, and no recorded run of theirs is cited for them.
+
+The gate's other three parts: the token boundary on GitHub was shown on staging with `git push` added, except that another repository wasn't tried; the security review is done and written up, though no reviewer walked every row of the threat model; and expanded criterion 7 is shown for a linked repository and a reported merge, and not for failure.
+
+**So calling the gate met on this evidence accepts, on local tests alone:** M5-03, M5-13 (on nothing: no test reads a deployment's logs for M5), M5-15 and M5-16 whole; the right-hand column above for nine more rows; AC-16 and the repository parts of AC-05 and AC-13 whole; and the rest of AC-27 and the approval half of AC-31. That is short of the gate's own wording, "all of these pass on staging". M3's gate was called the same way, with local runs accepted for four items ([decision 193](spec/PRODUCT.md#decisions-needed)); that was the owner's choice then and is the owner's here.
 
 **Owed before production,** whatever the owner decides about the gate. The list is [above](#owed-before-production) and in [the review](security/m5-review.md#owed-before-production-not-before-the-gate), and isn't repeated here. Its heaviest items: Podster can't stop a repository, so a takedown is by hand; Podster's reads need a separate read-only App, so agents can't starve them; there's no GitHub budget across the deployment; an agent's token can write any branch but the default, and tags and releases; there's no inventory; there's no global or lifetime cap across sign-ups; production's value for `REPOSITORY_REQUESTERS` is undecided; and the token-sealing key's value wasn't kept by the setup script. The first, the cap and the key were added to the table today.
 
 **Open, not done:** the follow-up to the reviews of #282, #283 and #284, [#285](https://github.com/thachp/podster/pull/285), isn't merged. It restores a test double for presence-token revocation that a merge had weakened, adds two codes missing from the contract's error enum, makes CI's font check run both ways, and makes an accessibility timing fail where the fallback run measured nothing. It changes one sentence of web copy and no other product code. The proposal doesn't rest on it.
 
-**What the owner is asked:** call M5's gate met on this evidence, or name what must be shown first. The two cheapest additions are a look at the repository and merge screens in a browser, and one signed-in check that a person the list doesn't name is refused.
+**What the owner is asked, exactly.** This stays the architect's proposal, and the gate isn't met by it. Either:
+
+- **call M5's gate met, accepting on local tests alone everything in the right-hand columns of [the two tables](#what-calling-the-gate-met-would-accept)**, and the rest of the not-covered list; or
+- **name which of those must be shown on staging first.** The two cheapest additions are a look at the repository and merge screens in a browser, and one signed-in check that a person the list doesn't name is refused. The cheapest from the tables are M5-12's failed check, which needs a status posted to a staging repository, and AC-31's approval after the branch advances, which needs no new credential.
 
 ### Self-serve repositories: what was built
 

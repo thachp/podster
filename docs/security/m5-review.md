@@ -2,7 +2,7 @@
 
 The security review [M5's gate](../m5-plan.md#the-gate) asks for. Three reviewers each read one part of managed repositories. This page puts their findings in one table, with what the architect ruled for each on 2026-11-11.
 
-**Nothing here is fixed.** "Assigned" means the architect ruled that it's fixed before M5's gate and gave the work out. No fix was on `main` when this was written, at `8e6ab69`. M5's gate hasn't been proposed or called.
+**Nothing here is fixed.** "Assigned" means the architect ruled that it's fixed before M5's gate and gave the work out. The one exception is O-1's interim: [#279](https://github.com/thachp/podster/pull/279), merged at `b66644b`, takes `MANAGED_REPOSITORIES` out of staging's configuration. No fix for any finding was on `main` when this was written. M5's gate hasn't been proposed or called.
 
 ## Scope
 
@@ -71,7 +71,7 @@ C-9 is in the next table, with O-5.
 
 | ID | Severity | Finding | Where | Checked | Disposition |
 | --- | --- | --- | --- | --- | --- |
-| O-1 | High | Staging sign-in is open to anyone, so "test people only" isn't enforced. Any GitHub account or email address can sign in and get 5 public repositories a day under `podsterdev`. No operator approves first ([decision 194](../spec/PRODUCT.md#decisions-needed)), and there's no allow-list | `apps/web/wrangler.jsonc:36`, `apps/gateway/wrangler.jsonc:36`, `apps/gateway/src/email-sign-in.ts:15-18`, `crates/core/src/provisioning.rs:878` | reading | Assigned: a deployment allow-list of who may ask for a repository. Interim: staging switched off again |
+| O-1 | High | Staging sign-in is open to anyone, so "test people only" isn't enforced. Any GitHub account or email address can sign in and get 5 public repositories a day under `podsterdev`. No operator approves first ([decision 194](../spec/PRODUCT.md#decisions-needed)), and there's no allow-list | `apps/web/wrangler.jsonc:36`, `apps/gateway/wrangler.jsonc:36`, `apps/gateway/src/email-sign-in.ts:15-18`, `crates/core/src/provisioning.rs:878` | reading | Assigned: a deployment allow-list of who may ask for a repository. Interim: staging switched off again (#279, merged) |
 | O-2 | High | Podster can't stop a repository or a room's access to it. `suspended` is read in many places and written nowhere. An operator can't reach a private room. Suspending a room stops merges and not tokens. A takedown is by hand on GitHub | `apps/api/src/workspace/merges.rs:912-929`, `apps/api/src/store.rs:830-849`, `apps/api/src/moderation.rs:114-116`, `apps/api/src/lib.rs:462-478` | reading | Production. For the gate, [the by-hand procedure](../runbooks/m5-takedown.md), written with this page |
 | O-3 | Medium | The rotation and compromise runbook ADR 0009 promises "before M5's gate" didn't exist | `docs/adr/0009-managed-repositories.md:288` | reading | [Written with this page](../runbooks/m5-credentials.md). Nobody has followed it yet |
 | O-4 | Medium | No inventory of managed repositories. Linked ones are a row each in D1 that no route lists. Ones created and never linked are recorded only inside their room | `apps/api/migrations/0007_repo_room_index.sql`, `apps/api/src/workspace/repositories.rs:240-291`, `apps/api/src/workspace/provisioning.rs:899-905` | reading | Production |
@@ -89,9 +89,9 @@ C-9 is in the next table, with O-5.
 
 ## Assigned before the gate
 
-As the architect ruled on 2026-11-11. None is on `main` yet.
+As the architect ruled on 2026-11-11. None is on `main` yet, apart from O-1's interim switch-off.
 
-- **O-1:** a deployment allow-list of who may ask for a repository. Until it's built, the ruling is that staging has managed repositories switched off again. `apps/api/wrangler.jsonc` and `apps/gateway/wrangler.jsonc` on `main` at `8e6ab69` still set `MANAGED_REPOSITORIES` to `true` for staging, and this page doesn't say what is deployed.
+- **O-1:** a deployment allow-list of who may ask for a repository. Until it's built, the ruling is that staging has managed repositories switched off again. [#279](https://github.com/thachp/podster/pull/279) is merged and takes the switch out of both Workers' staging variables; [staging.md](../staging.md#managed-repositories-on-staging) says it takes effect when both are next deployed. This page doesn't say what is deployed. The allow-list itself isn't on `main`.
 - **A-3:** the merge job re-runs policy on each pass.
 - **A-4:** an organization's admin may take a grant back, as AC-11 says.
 - **A-5:** the three switch-off paths answer as missing.

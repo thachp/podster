@@ -1064,6 +1064,9 @@ async fn internal(env: &Env, agent: &str, path: &str, body: &Value) -> R<Respons
 pub struct Principal {
     state: State,
     env: Env,
+    /// Test builds only: one alarm at a time, as the platform runs them. See `alarm`.
+    #[cfg(feature = "failpoints")]
+    test_alarm_turn: futures_util::lock::Mutex<()>,
 }
 
 impl Principal {
@@ -2134,7 +2137,12 @@ impl Principal {
 
 impl DurableObject for Principal {
     fn new(state: State, env: Env) -> Self {
-        Self { state, env }
+        Self {
+            state,
+            env,
+            #[cfg(feature = "failpoints")]
+            test_alarm_turn: futures_util::lock::Mutex::new(()),
+        }
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {
@@ -2145,6 +2153,10 @@ impl DurableObject for Principal {
     }
 
     async fn alarm(&self) -> Result<Response> {
+        // The platform never runs two alarms of one object at once. A test calls this handler directly, beside a run the
+        // runtime started itself, so in test builds a direct call waits its turn, as the room's does.
+        #[cfg(feature = "failpoints")]
+        let _turn = self.test_alarm_turn.lock().await;
         // A person has departures and an agent has a fan-out, so neither clears the other's alarm.
         let sql = self.state.storage().sql();
         let is_agent = matches!(connection(&sql), Ok(Some(_)));

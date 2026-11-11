@@ -1,6 +1,7 @@
-import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
+import { alarmPass } from "./alarm.ts";
 
 // A room whose migration fails answers every request with an error. Removing someone's access still has to reach it: a
 // disconnect's fence and an organization departure are held, acknowledged, and applied before anything else once the room
@@ -160,10 +161,8 @@ describe("a room whose migration fails", () => {
     expect((await revoke(id, 99)).status).toBe(200);
     // The outbox is free to send again, but the alarm sends nothing while the fence is held, and comes back later.
     await inRoom(id, (sql) => sql.exec("DROP TABLE test_hold_outbox"));
-    // Run the alarm as the runtime does, with nothing else due soon. An alarm the room set earlier, milliseconds away, would
-    // otherwise fire by itself around this check, and while it runs none is scheduled.
-    await inRoom(id, (_sql, state) => state.storage.setAlarm(Date.now() + 60_000));
-    expect(await runDurableObjectAlarm(stub(id))).toBe(true);
+    // One whole run, after any the runtime had under way since the table went.
+    await alarmPass(stub(id));
     expect(await queued()).toBeGreaterThan(0);
     // It comes back on the outbox's failure delay, 5 seconds, not straight away.
     const next = await inRoom(id, (_sql, state) => state.storage.getAlarm());

@@ -1,6 +1,7 @@
-import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
+import { alarmPass } from "./alarm.ts";
 
 // M4 step 13, M4-17 (criterion 4 across protocols): in one public room, a public participant takes an offer and submits over
 // A2A, and another takes one and submits through the API an MCP client calls. Each task has one history, and redelivered
@@ -45,7 +46,7 @@ const stub = (room: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromN
 const roomSql = (room: string, query: string, ...args: unknown[]) => runInDurableObject(stub(room), (_: any, state: any) => state.storage.sql.exec(query, ...args).toArray()) as Promise<any[]>;
 const version = async (room: string) => (await must(OWNER, "GET", `/v1/workspaces/${room}`)).policy_version;
 const drain = async (room: string) => {
-  for (let n = 0; n < 5; n++) await runDurableObjectAlarm(stub(room));
+  for (let n = 0; n < 5; n++) await alarmPass(stub(room));
 };
 
 /** A fresh agent of its own organization, registered, with its owner allowing public claims. */
@@ -81,8 +82,7 @@ const row = async (room: string, id: string) => (await roomSql(room, "SELECT * F
 /** Makes the next read due, has the room's alarm queue it, then runs that read job. Returns the read's number to redeliver. */
 async function readOnce(room: string, attemptId: string) {
   await roomSql(room, "UPDATE a2a_attempt SET next_read_at = 0 WHERE id = ? AND read_queued = 0", attemptId);
-  await runInDurableObject(stub(room), (_: any, state: any) => state.storage.setAlarm(Date.now() + 60_000));
-  await runDurableObjectAlarm(stub(room));
+  await alarmPass(stub(room));
   const queued = await row(room, attemptId);
   expect(queued.read_queued, "the read was queued").toBe(1);
   return redeliverRead(room, queued);

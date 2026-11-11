@@ -1,6 +1,7 @@
-import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
+import { alarmPass } from "./alarm.ts";
 
 // Decision 143's outbound run: Podster's real send, read-back, cancel and change-request code, in workerd, against LangGraph's
 // own A2A 1.0 server (`langgraph-api` 0.17.1) with one trivial graph. Only e2e/run-langgraph-check.mjs starts that server and
@@ -57,8 +58,7 @@ const job = async (body: Record<string, unknown>) => {
   return ((await res.json()) as any).outcome;
 };
 async function fireAlarm(room: string) {
-  await runInDurableObject(roomStub(room), (_: any, state: any) => state.storage.setAlarm(Date.now() + 60_000));
-  return runDurableObjectAlarm(roomStub(room));
+  await alarmPass(roomStub(room));
 }
 /** A room with the lead, and an agent whose endpoint is LangGraph's, offered a task whose send has gone out. */
 async function sentToLangGraph() {

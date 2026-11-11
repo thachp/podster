@@ -1,11 +1,12 @@
 // Starts the gateway, the API and the dashboard's production build, then runs a11y.mjs against them.
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseJsonc } from "./jsonc.mjs";
 import { setFileStatesWhileStopped } from "./asset-fixture.mjs";
+import { startBounded } from "./bounded.mjs";
+import { childEnv } from "./child-env.mjs";
 import { freePort, local, prepareStack, repo, run, startGateway, startWrangler } from "./stack.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -68,13 +69,27 @@ async function waitForStack() {
   throw new Error("the local stack didn't come up");
 }
 
+// The checks take about six minutes on CI. a11y.mjs bounds each of its own waits and says which one stalled; this is
+// the bound on all of it, for a stall it can't report itself, and it leaves the job's own limit time to show the logs.
+const CHECKS_MS = 15 * 60_000;
+
 let code = 1;
 try {
   await waitForStack();
   console.log(`dashboard is up at ${app}\n`);
-  code = await new Promise((done) => {
-    const proc = spawn(process.execPath, [join(here, "a11y.mjs")], { cwd: here, stdio: ["inherit", "inherit", "inherit", "ipc"], env: { ...process.env, ...(browserName ? { PODSTER_A11Y_BROWSER: browserName } : {}), PODSTER_A11Y_APP: app, PODSTER_A11Y_GATEWAY: gatewayBase } });
-    proc.on("exit", (status) => done(status ?? 1));
+  // a11y.mjs starts a browser, so it gets the allow-listed environment and its own settings, not everything of ours:
+  // where to look, which browser, where Playwright's browsers are if that was moved, and the commit for its results file.
+  const passedOn = Object.fromEntries(["PLAYWRIGHT_BROWSERS_PATH", "GITHUB_SHA", "CI"].filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]]));
+  const checks = startBounded({
+    command: process.execPath,
+    args: [join(here, "a11y.mjs")],
+    options: { cwd: here, stdio: ["inherit", "inherit", "inherit", "ipc"], env: childEnv({ ...passedOn, ...(browserName ? { PODSTER_A11Y_BROWSER: browserName } : {}), PODSTER_A11Y_APP: app, PODSTER_A11Y_GATEWAY: gatewayBase }) },
+    ms: CHECKS_MS,
+    // Its whole process group is stopped, and its browser's, so neither outlives this.
+    onLate: () => console.error(`\nFAIL stalled: a11y.mjs hadn't finished ${CHECKS_MS / 60_000} minutes after it started. Its last line above is the last thing that finished.`),
+  });
+  {
+    const { proc } = checks;
     // INPUT ASSET FIXTURE (screen 9a). Test-only: scan states can't arrive through a scanner here, so they're written with the
     // Workers stopped, then the Workers start again. Why, in asset-fixture.mjs.
     proc.on("message", async (message) => {
@@ -92,8 +107,14 @@ try {
         proc.send({ type: "set-file-states:done", error: String(error?.message ?? error) });
       }
     });
-  });
-  if (code !== 0) console.error(`\n--- end of the Workers' logs ---\n${backend.log.join("").slice(-2000)}\n${dashboard.log.join("").slice(-2000)}`);
+  }
+  const ended = await checks.done;
+  if (!ended.stopped) console.error("Some of a11y.mjs's processes were still running after being killed.");
+  code = ended.code;
+  // Which is which, and whether each was still running, because their logs look alike.
+  if (code !== 0) {
+    for (const [name, worker] of [["the gateway and API", backend], ["the dashboard", dashboard]]) console.error(`\n--- end of the log of ${name} (${worker.stack.exitCode === null ? "still running" : `exited ${worker.stack.exitCode}`}) ---\n${worker.log.join("").slice(-3000)}`);
+  }
 } catch (error) {
   console.error(error);
 } finally {

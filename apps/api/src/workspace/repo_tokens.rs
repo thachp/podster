@@ -38,7 +38,6 @@ use podster_core::repo_grants::Grant;
 use podster_core::repositories::{GrantAction, LinkStatus, RequestState};
 use podster_egress::endpoint::{open_labeled, parse_key, seal_labeled};
 use podster_policy::repositories::{authorize_repo_access, GrantStanding};
-use std::time::Duration;
 
 /// The Worker secret holding the sealing key, 64 hex characters. The owner sets it. Unset, nothing is minted.
 pub(super) const KEY_SECRET: &str = "REPO_TOKEN_KEY";
@@ -813,7 +812,7 @@ impl Workspace {
         if current.is_none_or(|at| at > due) {
             self.state
                 .storage()
-                .set_alarm(Duration::from_millis((due - now).max(1) as u64))
+                .set_alarm(alarm_at(due.max(now + 1)))
                 .await?;
         }
         Ok(())

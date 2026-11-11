@@ -1979,7 +1979,13 @@ async function keyboardPaths(s) {
   // A slow body has to be timed or laid out once, up to about 340 ms locally. Without skipped layout, these blocked for 922 ms on the Task Sheet and 2,226 ms on oversight.
   const LONGEST_BLOCK_SCRIPTS_MS = 800;
   const TAB_BACK_BLOCK_MS = 1_000;
-  const openHeavy = async (label, context, path, tab, longest = LONGEST_BLOCK_MS, idleWait = 3_000) => {
+  // Tabbing back lays out again only what stayed laid out. With few bodies kept it has nothing to measure, and passes
+  // whatever the cost would be. On 16 of 18 CI runs examined on 2026-11-11 the unbroken-scripts paths kept 3 or 4 and
+  // measured 0 ms, because the runner was slow enough that each body took longer than the app's 50 ms step; the two
+  // faster runs kept 12 to 16, and a Mac 7 and 8. Below this many, the measurement is reported as SKIP, counted apart
+  // from passes in the run's summary, and doesn't fail the run. The bound below still applies either way.
+  const MIN_STAYED_SCRIPTS = { sheet: 5, oversight: 6 };
+  const openHeavy = async (label, context, path, tab, longest = LONGEST_BLOCK_MS, idleWait = 3_000, minStayed = 0) => {
     await watchBlocks(context);
     const own = await context.newPage();
     try {
@@ -2015,10 +2021,15 @@ async function keyboardPaths(s) {
       ok(blocked < longest, `${label} blocked the main thread for ${blocked}ms`);
       // Let what's idle finish, then switch away and back: whatever stayed laid out is laid out again, all at once.
       await own.waitForTimeout(idleWait);
-      const stayed = await own.getByRole("dialog").evaluate((sheet) => {
+      const [kept, total] = await own.getByRole("dialog").evaluate((sheet) => {
         const bodies = [...sheet.querySelectorAll("article > div")];
-        return `${bodies.filter((body) => body.style.contentVisibility === "visible").length} of ${bodies.length}`;
+        return [bodies.filter((body) => body.style.contentVisibility === "visible").length, bodies.length];
       });
+      const stayed = `${kept} of ${total}`;
+      if (kept < minStayed) {
+        console.log(`SKIP tab-back not measured: ${stayed} stayed laid out (${label}; ${minStayed} needed for the measurement to mean anything)`);
+        results.push({ measurement: `${label}: tab-back`, status: "skipped", detail: `${stayed} stayed laid out, under ${minStayed}` });
+      }
       await own.evaluate(() => (window.longestBlock = 0));
       await own.getByRole("dialog").getByRole("tab", { name: /^(Details)$/ }).click();
       await own.evaluate(() => new Promise((done) => requestAnimationFrame(() => setTimeout(done, 50))));
@@ -2035,8 +2046,8 @@ async function keyboardPaths(s) {
   };
   await keyboardPath("a heavy thread on the Task Sheet (the latest 20 messages)", () => openHeavy("the Task Sheet", contextFor(s.owner), `/w/${s.room}/tasks?task=${s.heavyThread.id}`, /^Discussion/));
   await keyboardPath("a heavy thread on oversight (50 messages)", () => openHeavy("oversight", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.heavyThread.id}`, "Thread"));
-  await keyboardPath("unbroken scripts on the Task Sheet (the latest 20 messages)", () => openHeavy("the Task Sheet, unbroken scripts", contextFor(s.owner), `/w/${s.room}/tasks?task=${s.scriptThread.id}`, /^Discussion/, LONGEST_BLOCK_SCRIPTS_MS));
-  await keyboardPath("unbroken scripts on oversight (50 messages)", () => openHeavy("oversight, unbroken scripts", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.scriptThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS));
+  await keyboardPath("unbroken scripts on the Task Sheet (the latest 20 messages)", () => openHeavy("the Task Sheet, unbroken scripts", contextFor(s.owner), `/w/${s.room}/tasks?task=${s.scriptThread.id}`, /^Discussion/, LONGEST_BLOCK_SCRIPTS_MS, undefined, MIN_STAYED_SCRIPTS.sheet));
+  await keyboardPath("unbroken scripts on oversight (50 messages)", () => openHeavy("oversight, unbroken scripts", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.scriptThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS, undefined, MIN_STAYED_SCRIPTS.oversight));
   await keyboardPath("unbroken Arabic on oversight (50 messages)", () => openHeavy("oversight, unbroken Arabic", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.arabicThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS));
   await keyboardPath("alternating directions on oversight (50 messages)", () => openHeavy("oversight, alternating directions", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.hebrewLatinThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS));
   await keyboardPath("a heavy short thread on oversight (50 messages)", () => openHeavy("oversight, short messages", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.shortThread.id}`, "Thread"));
@@ -2553,6 +2564,9 @@ for (const entry of knownKeyboard) if (!failures.includes(entry)) unexpected.pus
 mkdirSync(join(here, "results"), { recursive: true });
 const file = join(here, "results", `a11y-${browserName === "chromium" ? "" : `${browserName}-`}${new Date().toISOString().replaceAll(":", "-").slice(0, 19)}.json`);
 writeFileSync(file, `${JSON.stringify({ commit: process.env.GITHUB_SHA ?? null, results, failures }, null, 2)}\n`);
-console.log(`\n${results.filter((r) => r.screen).length} axe runs, ${uniqueFound.size} distinct violations, ${unexpected.length} unexpected. Results: ${file}`);
+// Skipped checks and measurements are counted on their own, so a skipped one is never read as a pass.
+const skipped = results.filter((r) => r.status === "skipped");
+console.log(`\n${results.filter((r) => r.screen).length} axe runs, ${uniqueFound.size} distinct violations, ${unexpected.length} unexpected, ${skipped.length} skipped (not passed). Results: ${file}`);
+for (const skip of skipped) console.log(`  SKIP ${skip.keyboard ?? skip.measurement}: ${skip.detail}`);
 for (const failure of unexpected) console.log(`  ${failure}`);
 process.exit(unexpected.length ? 1 : 0);

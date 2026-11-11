@@ -103,13 +103,18 @@ const mergeCalls: { repo: number; method: string; path: string; permissions: Rec
  * rulesets, an initial commit. Each is one test's own, with its own script, and apart from the provisioning spec's
  * repositories, tokens and call log, which that spec resets while others run.
  */
-type ReadyScript = { readRepo?: number; actionsRead?: number; hideBypass?: boolean; token?: number; workflowRead?: number; limited?: Limited };
+type ReadyScript = { readRepo?: number; actionsRead?: number; hideBypass?: boolean; token?: number; workflowRead?: number; limited?: Limited; presenceRevoke?: number };
 const readyRepos = new Map<number, Repo & { script: ReadyScript }>();
 const readyTokens = new Map<string, number[]>();
 const readyIssued = new Set<string>();
 const readyReads: { repo: number; path: string; scope: number[] }[] = [];
-/** Metadata-only tokens for the whole installation: they read any repository the installation reaches, by ID. */
-const presenceTokens = new Set<string>();
+/**
+ * Metadata-only tokens for the whole installation: they read any repository the installation reaches, by ID. Each
+ * counts as live on the repository it was first used to ask about, until it's revoked, so a test sees one that wasn't.
+ */
+const presenceTokens = new Map<string, number | null>();
+/** Revocations of presence tokens, by the repository each asked about, with the status each got. */
+const presenceRevokes: { repo: number | null; status: number }[] = [];
 const readyRulesets = (): Ruleset[] => [
   { id: 1, name: "podster-review", target: "branch", enforcement: "active", conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } }, bypass_actors: [], source_type: "Repository",
     rules: [{ type: "pull_request", parameters: { required_approving_review_count: 0, dismiss_stale_reviews_on_push: false, require_code_owner_review: false, require_last_push_approval: false, required_review_thread_resolution: false } },
@@ -245,7 +250,12 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
     }
     if (url.pathname === "/ready-reads") {
       const repo = Number(url.searchParams.get("repo"));
-      return json({ reads: readyReads.filter((r) => r.repo === repo).map(({ repo: _, ...r }) => r), live: [...readyTokens.values()].filter((scope) => scope.includes(repo)).length });
+      const presence = [...presenceTokens.entries()].filter(([token, about]) => about === repo && readyTokens.has(token)).length;
+      return json({
+        reads: readyReads.filter((r) => r.repo === repo).map(({ repo: _, ...r }) => r),
+        live: [...readyTokens.values()].filter((scope) => scope.includes(repo)).length + presence,
+        presence: { live: presence, revokes: presenceRevokes.filter((r) => r.repo === repo).map((r) => r.status) },
+      });
     }
     if (url.pathname === "/merge-calls") {
       const repo = Number(url.searchParams.get("repo"));
@@ -311,7 +321,7 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
       // so it never counts as a live token on another test's repository while it's held.
       readyTokens.set(token, []);
       readyIssued.add(token);
-      presenceTokens.add(token);
+      presenceTokens.set(token, null);
       return json({ ...provisionTokenAnswer(token, body, null), repository_selection: "all" }, 201);
     }
     if (readyMint) {
@@ -505,6 +515,17 @@ function readyRoute(request: Request, path: string, bearer: string): Response {
   const scope = readyTokens.get(bearer);
   if (!scope) return json({ message: "Bad credentials" }, 401);
   if (path === "/installation/token" && request.method === "DELETE") {
+    if (presenceTokens.has(bearer)) {
+      const about = presenceTokens.get(bearer) ?? null;
+      const script = about === null ? undefined : readyRepos.get(about)?.script;
+      // `presenceRevoke` fails this many revocations of a presence token, then they go through.
+      if (script?.presenceRevoke) {
+        script.presenceRevoke -= 1;
+        presenceRevokes.push({ repo: about, status: 500 });
+        return json({ message: "SECRET-PROVIDER-TEXT" }, 500);
+      }
+      presenceRevokes.push({ repo: about, status: 204 });
+    }
     readyTokens.delete(bearer);
     return json(null, 204);
   }
@@ -512,6 +533,7 @@ function readyRoute(request: Request, path: string, bearer: string): Response {
   if (request.method !== "GET") return json({ message: "not here" }, 405);
   const scoped = path.match(/^\/repositories\/(\d+)(\/.*)?$/);
   const repo = scoped ? readyRepos.get(Number(scoped[1])) : undefined;
+  if (presenceTokens.has(bearer) && presenceTokens.get(bearer) === null && repo) presenceTokens.set(bearer, repo.id);
   if (repo?.deleted) {
     readyReads.push({ repo: repo.id, path, scope });
     return json({ message: "Not Found" }, 404);

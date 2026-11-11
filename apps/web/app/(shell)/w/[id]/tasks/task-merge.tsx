@@ -97,7 +97,7 @@ const FAILURES: Record<string, string> = {
   access_revoked: "whoever asked was no longer in the workroom when it ran, having left or been removed",
   agent_disconnected: "the agent that asked was disconnected before it ran",
   self_merge: "whoever asked turned out to control the task's submitter, and nobody merges work they control",
-  self_review: "the commit's approving review came from the person who controls its submitter or one of their agents, or was approved before Podster recorded who reviews, and a merge needs an independent review, given again if it wasn't recorded",
+  self_review: "the commit's approving review came from the person who controls its submitter or one of their agents, from an agent whose controlling person isn't known, or was approved before Podster recorded who reviews, and a merge needs an independent review, given again if it wasn't recorded",
   controller_departed: "the person whoever asked acts for had left the organization",
   task_not_found: "whoever asked could no longer see the task",
   grant_required: "whoever asked no longer held a merge grant when it ran",

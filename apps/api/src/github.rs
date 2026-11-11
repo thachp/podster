@@ -65,11 +65,9 @@ const fn is_loopback(url: &str) -> bool {
     true
 }
 const USER_AGENT: &str = "podster-provisioning";
-const CALL_TIMEOUT_MS: u64 = if cfg!(feature = "failpoints") {
-    400
-} else {
-    10_000
-};
+/// Test builds wait as long. A shorter wait there turned any call a busy machine was slow to answer into "no answer",
+/// which a test then read as GitHub failing. The tests that mean "no answer" hold the call at the fake until this is over.
+const CALL_TIMEOUT_MS: u64 = 10_000;
 /// No answer this job reads is anywhere near this long.
 const MAX_ANSWER_BYTES: usize = 256 * 1024;
 /// A pull request's answer carries its whole description, which its author writes and Podster never keeps. This is room

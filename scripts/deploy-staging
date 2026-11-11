@@ -5,10 +5,13 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/deploy-staging [--web] [--apply-migrations <exact-file-name>...]
+Usage: scripts/deploy-staging [--web] [--webhook-secret-set] [--apply-migrations <exact-file-name>...]
 
 Deploys the API, then the gateway, to staging, and with --web the web app after them. Then it runs
 scripts/staging-probes. It deploys to staging only, and never sets a secret or a variable.
+
+--webhook-secret-set is handed to scripts/staging-probes and changes nothing else: give it once the
+owner has set the gateway's GITHUB_WEBHOOK_SECRET, so the webhook probe wants that case's answer.
 
 It refuses, before changing anything, unless:
 
@@ -30,12 +33,14 @@ EOF
 }
 
 web=false
+webhook_secret_set=false
 named=()
 taking_names=false
 for arg in "$@"; do
   case "$arg" in
     -h | --help) usage; exit 0 ;;
     --web) web=true; taking_names=false ;;
+    --webhook-secret-set) webhook_secret_set=true; taking_names=false ;;
     --apply-migrations) taking_names=true ;;
     -*) echo "deploy-staging: unknown option $arg" >&2; usage >&2; exit 2 ;;
     *)
@@ -238,7 +243,9 @@ step "deployed $here"
 show_versions
 
 step "signed-out probes"
-if ! "$root/scripts/staging-probes"; then
+probes=("$root/scripts/staging-probes")
+if [ "$webhook_secret_set" = true ]; then probes+=(--webhook-secret-set); fi
+if ! "${probes[@]}"; then
   echo "deploy-staging: deployed, but a probe FAILED"
   exit 4
 fi

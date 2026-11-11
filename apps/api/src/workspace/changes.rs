@@ -19,8 +19,11 @@
 //!   name, labels and author never leave `crate::github`, and a base branch is kept only when it's the repository's
 //!   default branch, which the room already holds. Logs carry the room's and the task's IDs and a status.
 use super::*;
-use crate::github::{AgentConfig, AgentTokens, Failure, PullAnswer, PullRead, PullReader};
+use crate::github::{
+    AgentConfig, AgentTokens, ChecksReader, ChecksSeen, Failure, PullAnswer, PullRead, PullReader,
+};
 use podster_core::provider_deliveries::{poll_wait_ms, read_allowed, stale, ChangeWatch, Stale};
+use podster_core::release_status::{report, summarize_checks, CheckSeen, ChecksReport};
 use podster_core::repo_merge::{ObservedMerge, PullState};
 use podster_core::repositories::{task_block, LinkStatus, MergeState, RequestState};
 use podster_core::task_change::{
@@ -914,13 +917,164 @@ impl Workspace {
             let read = reader.read_pull(watch.repo_id, watch.number).await;
             note_unrevoked(&read, &room, &watch.task_id);
             let (room, answer, at_mint) = (room.clone(), read.answer, read.failed_at_mint);
-            let refused = self.in_transaction(move |sql| {
-                apply_read(sql, &room, &watch, answer, at_mint, now_ms())
+            let (task_id, repo_id) = (watch.task_id.clone(), watch.repo_id);
+            let refused = self.in_transaction({
+                let room = room.clone();
+                move |sql| apply_read(sql, &room, &watch, answer, at_mint, now_ms())
             })?;
             if refused {
                 break;
             }
+            // The head commit's checks, where the App that reads has been given them (M5 step 8). Best effort: a
+            // read that fails leaves what was held, with its older time.
+            if reads_checks(&self.env, &sql) {
+                let head = change_row(&sql, &task_id)?
+                    .filter(|row| row["pr_state"].as_str() == Some("open"))
+                    .and_then(|row| text(&row["observed_head_sha"]));
+                if let Some(head) = head {
+                    let read = reader.read_checks(repo_id, &head).await;
+                    if !read.revoked {
+                        console_error!(
+                            "{}",
+                            json!({ "event": "task_change.token_unrevoked", "ws": room, "task": task_id })
+                        );
+                    }
+                    match read.answer {
+                        Ok(seen) => self.in_transaction(move |sql| {
+                            apply_checks(sql, &task_id, &head, &seen, now_ms())
+                        })?,
+                        Err(failure) => console_error!(
+                            "{}",
+                            json!({ "event": "task_change.checks_read_failed", "ws": room, "task": task_id, "status": failure.status() })
+                        ),
+                    }
+                }
+            }
         }
         Ok(())
     }
+}
+
+/// Whether the refresh job also reads a head commit's statuses and check runs. Off unless the Worker's
+/// `GITHUB_AGENT_APP_READS_CHECKS` is exactly `true`, which the owner sets once the agent-token App has been given
+/// `statuses: read` and `checks: read`. Until then a token for them can't be minted, so nothing is asked. Test builds
+/// can switch it on for one room.
+fn reads_checks(env: &Env, sql: &SqlStorage) -> bool {
+    #[cfg(feature = "failpoints")]
+    if rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_reads_checks'",
+        vec![],
+    )
+    .is_ok_and(|found| !found.is_empty())
+    {
+        return true;
+    }
+    #[cfg(not(feature = "failpoints"))]
+    let _ = sql;
+    env.var("GITHUB_AGENT_APP_READS_CHECKS")
+        .is_ok_and(|value| value.to_string() == "true")
+}
+
+/// Records what a read of the head commit's checks showed, in the caller's transaction: the state, the counts and the
+/// time, and an event when the state is a different one. Only if the head is still the one that was read for.
+fn apply_checks(sql: &SqlStorage, task_id: &str, head: &str, seen: &ChecksSeen, now: i64) -> R<()> {
+    let Some(row) =
+        change_row(sql, task_id)?.filter(|row| row["observed_head_sha"].as_str() == Some(head))
+    else {
+        return Ok(());
+    };
+    let states: Vec<CheckSeen> = seen
+        .iter()
+        .map(|(state, conclusion)| CheckSeen {
+            state,
+            conclusion: conclusion.as_deref(),
+        })
+        .collect();
+    let (state, counts) = summarize_checks(&states);
+    let changed = row["checks_state"].as_str() != Some(state.name());
+    exec(
+        sql,
+        "UPDATE task_change SET checks_state = ?, checks_json = ?, checks_observed_at = ? WHERE task_id = ?",
+        vec![
+            state.name().into(),
+            json!({ "success": counts.success, "failure": counts.failure, "pending": counts.pending })
+                .to_string()
+                .into(),
+            now.into(),
+            task_id.into(),
+        ],
+    )?;
+    if changed {
+        record_event(
+            sql,
+            "task_change.checks_observed",
+            SYSTEM,
+            Some(task_id),
+            &Transition {
+                reason: Some(state.name()),
+                ..Transition::NONE
+            },
+            Vec::<String>::new(),
+            now,
+        )?;
+    }
+    Ok(())
+}
+
+/// `GET tasks/{task}/release-status` (M5 step 8): the task's checks and its merge, apart, each as Podster last
+/// observed it and with that observation's time, and that no release exists. Read from the room's own rows: nothing is
+/// asked of GitHub. For whoever is shown the task's change, and whoever asked for its merge.
+pub(super) fn release_status(sql: &SqlStorage, who: &Participant, task_id: &str) -> R<Value> {
+    let task = load_task(sql, task_id)?.ok_or_else(ApiError::task_not_found)?;
+    let row = change_row(sql, task_id)?;
+    let asked = row
+        .as_ref()
+        .is_some_and(|row| row["merge_requested_by"].as_str() == Some(who.caller.id.as_str()));
+    podster_policy::repositories::authorize_release_status(&who.caller, &task, asked)
+        .map_err(repositories::denied)?;
+    let held = row.as_ref().map(|row| podster_core::release_status::Held {
+        checks_state: row["checks_state"].as_str(),
+        checks_observed_at: row["checks_observed_at"].as_i64(),
+        merge_state: row["merge_state"].as_str(),
+        merge_reason: row["merge_reason"].as_str(),
+        merge_finished_at: row["merge_finished_at"].as_i64(),
+        merge_observed_at: row["merge_observed_at"].as_i64(),
+        merge_requested_at: row["merge_requested_at"].as_i64(),
+    });
+    let (checks, merge) = report(held.as_ref());
+    let checks = match checks {
+        ChecksReport::Unobserved => {
+            json!({ "state": Value::Null, "counts": Value::Null, "observed_at": Value::Null })
+        }
+        ChecksReport::Observed { state, at } => {
+            // The counts are Podster's own, written with the state. Anything else in that column isn't shown.
+            let counts = row
+                .as_ref()
+                .and_then(|row| row["checks_json"].as_str())
+                .and_then(|stored| serde_json::from_str::<Value>(stored).ok())
+                .map(|stored| json!({ "success": stored["success"].as_u64().unwrap_or(0), "failure": stored["failure"].as_u64().unwrap_or(0), "pending": stored["pending"].as_u64().unwrap_or(0) }));
+            json!({ "state": state.name(), "counts": counts, "observed_at": at })
+        }
+    };
+    let pull = row.as_ref().map_or(Value::Null, |row| {
+        json!({
+            "pr_number": row["pr_number"], "pr_state": row["pr_state"], "pr_observed_at": row["pr_observed_at"],
+            "reviewed_commit_sha": row["reviewed_commit_sha"], "observed_head_sha": row["observed_head_sha"],
+            "head_observed_at": row["head_observed_at"], "commit_changed": row["commit_changed_at"].as_i64().is_some(),
+        })
+    });
+    Ok(json!({
+        "task_id": task.id,
+        "linked": task.has_linked_repository,
+        "pull_request": pull,
+        "checks": checks,
+        "merge": {
+            "state": merge.state.name(), "reason": merge.reason, "observed_at": merge.observed_at,
+            "sha": row.as_ref().map_or(Value::Null, |row| row["merge_sha"].clone()),
+            "requested_by": row.as_ref().map_or(Value::Null, |row| row["merge_requested_by"].clone()),
+        },
+        // M5 has no releases. M6 adds them.
+        "release": { "exists": false },
+    }))
 }

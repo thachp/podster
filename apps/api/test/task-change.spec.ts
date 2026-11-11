@@ -974,6 +974,128 @@ describe("what's kept and logged", () => {
   });
 });
 
+describe("a task's release status (M5 step 8)", () => {
+  const status = (who: Who, id: string, task: string) => api(who, "GET", `/v1/workspaces/${id}/tasks/${task}/release-status`);
+  /** Every read of a commit's checks made of this test's repository, with what the token could do. */
+  const checkReads = async () => ((await (await fetch(`https://github-fake.example.com/merge-calls?repo=${REPO_ID}`)).json()) as { calls: { path: string; permissions: object; status: number }[] }).calls.filter((c) => /\/commits\//.test(c.path));
+  const CHECKS = { checks: "read", metadata: "read", statuses: "read" };
+
+  it("reports checks and merge apart, each with its own time, from what the room holds, and that no release exists (M5-12)", async () => {
+    const r = await approved();
+    await settle(r.id);
+    // Nothing read of the checks yet, and no merge asked for: said as that, never as a pass.
+    const first = await status(OWNER, r.id, r.task);
+    expect(first.status, first.text).toBe(200);
+    const row = await change(r.id, r.task);
+    expect(first.body).toEqual({
+      task_id: r.task, linked: true,
+      pull_request: { pr_number: 7, pr_state: "open", pr_observed_at: row.pr_observed_at, reviewed_commit_sha: HEAD, observed_head_sha: HEAD, head_observed_at: row.head_observed_at, commit_changed: false },
+      checks: { state: null, counts: null, observed_at: null },
+      merge: { state: "not_requested", reason: null, observed_at: null, sha: null, requested_by: null },
+      release: { exists: false },
+    });
+    // The refresh reads the head's checks where the App has been given them: a failed status, a passing run, one still running.
+    await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_reads_checks (x INTEGER)"));
+    await fake({ checks: { statuses: ["success", "failure"], runs: [["completed", "success"], ["in_progress", null]] } });
+    const before = Date.now();
+    await nudge(r.id);
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).checks_state).toBe("failure"));
+    expect((await checkReads()).map((c) => [c.path, c.permissions, c.status])).toEqual([[`/repositories/${REPO_ID}/commits/${HEAD}/status`, CHECKS, 200], [`/repositories/${REPO_ID}/commits/${HEAD}/check-runs`, CHECKS, 200]]);
+    expect((await minted()).every((token) => !token.live)).toBe(true);
+    expect((await events(r.id)).at(-1)).toEqual({ type: "task_change.checks_observed", actor_id: "system", task_id: r.task, reason: "failure" });
+    // A merge that succeeded, recorded as the merge job records it: the failed check stays a failed check beside it.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET merge_state = 'succeeded', merge_sha = ?, merge_requested_by = ?, merge_requested_at = 80, merge_finished_at = 90, pr_state = 'merged'", MERGE, ADMIN.id));
+    const reads = (await checkReads()).length;
+    const both = (await status(OWNER, r.id, r.task)).body;
+    expect(both.checks).toEqual({ state: "failure", counts: { success: 2, failure: 1, pending: 1 }, observed_at: expect.any(Number) });
+    expect(both.checks.observed_at).toBeGreaterThanOrEqual(before);
+    expect(both.merge).toEqual({ state: "succeeded", reason: null, observed_at: 90, sha: MERGE, requested_by: ADMIN.id });
+    expect(both.release).toEqual({ exists: false });
+    // And a failed merge beside passing checks.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET merge_state = 'failed', merge_reason = 'commit_changed', merge_sha = NULL, merge_finished_at = 95, checks_state = 'success'"));
+    const failed = (await status(OWNER, r.id, r.task)).body;
+    expect([failed.checks.state, failed.merge.state, failed.merge.reason, failed.merge.observed_at]).toEqual(["success", "failed", "commit_changed", 95]);
+    // Reading it asked GitHub for nothing.
+    expect((await checkReads()).length).toBe(reads);
+    // Nothing a check carries but its state is kept, shown or logged.
+    const stored = JSON.stringify(await change(r.id, r.task)) + JSON.stringify(both) + JSON.stringify(await events(r.id));
+    expect(stored).not.toContain("SECRET");
+  });
+
+  it("reads no checks until the App that reads has been given them, and keeps what it held when a read fails", async () => {
+    const r = await submitted();
+    await settle(r.id);
+    await fake({ checks: { statuses: ["success"] } });
+    await nudge(r.id);
+    await alarm(r.id, 2);
+    expect(await checkReads()).toEqual([]);
+    expect((await status(OWNER, r.id, r.task)).body.checks).toEqual({ state: null, counts: null, observed_at: null });
+    await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_reads_checks (x INTEGER)"));
+    await nudge(r.id);
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).checks_state).toBe("success"));
+    const held = (await change(r.id, r.task)).checks_observed_at;
+    // GitHub fails the next read: the state and its older time stay.
+    await fake({ checksRead: 500, checks: { statuses: ["failure"] } });
+    const lines: string[] = [];
+    for (const level of ["log", "info", "warn", "error", "debug"] as const) vi.spyOn(console, level).mockImplementation((...args: unknown[]) => void lines.push(args.map(String).join(" ")));
+    const failedBefore = (await checkReads()).filter((c) => c.status === 500).length;
+    await nudge(r.id);
+    await afterPass(r.id, async () => expect((await checkReads()).filter((c) => c.status === 500).length).toBeGreaterThan(failedBefore));
+    await settle(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ checks_state: "success", checks_observed_at: held });
+    const logged = lines.filter((line) => line.includes("task_change.checks_read_failed")).map((line) => JSON.parse(line));
+    expect(logged.length).toBeGreaterThan(0);
+    for (const line of logged) expect(Object.keys(line).sort()).toEqual(["event", "status", "task", "ws"]);
+    expect(lines.join("\n")).not.toContain("SECRET");
+    // A commit with nothing on it reads as none, not as a pass.
+    await fake({ checksRead: 200, checks: { statuses: [], runs: [] } });
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?, read_failures = 0", Date.now() - 3_600_001));
+    await nudge(r.id);
+    await afterPass(r.id, async () => expect((await change(r.id, r.task)).checks_state).toBe("none"));
+    expect((await status(OWNER, r.id, r.task)).body.checks).toMatchObject({ state: "none", counts: { success: 0, failure: 0, pending: 0 } });
+  });
+
+  it("is for those shown the task's change and for whoever asked for the merge, and hides a task that's hidden", async () => {
+    const r = await approved();
+    const seen = async (who: Who) => {
+      const got = await status(who, r.id, r.task);
+      return [got.status, got.code ?? "ok"];
+    };
+    // The owner, who reviews it; an admin; the agent it's assigned to.
+    for (const who of [OWNER, ADMIN, AGENT]) expect(await seen(who), who.id).toEqual([200, "ok"]);
+    // Another agent reads the task and isn't shown its change. Once it has asked for the merge, it may read how that went.
+    expect(await seen(OTHER)).toEqual([403, "not_allowed"]);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET merge_requested_by = ?", OTHER.id));
+    expect(await seen(OTHER)).toEqual([200, "ok"]);
+    // A public-claim participant who can't see the task, a task that doesn't exist, and someone outside the room.
+    const hidden = await status(PUBLIC, r.id, r.task);
+    const missing = await status(PUBLIC, r.id, "tsk_missing");
+    expect([hidden.status, hidden.text]).toEqual([missing.status, missing.text]);
+    expect(hidden.code).toBe("task_not_found");
+    expect((await status(OUTSIDER, r.id, r.task)).code).toBe("workspace_not_found");
+    // A task with no pull request on record answers with nothing observed.
+    const plain = await accepted(r.id);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task SET has_linked_repository = 0 WHERE id = ?", plain.task));
+    expect((await status(OWNER, r.id, plain.task)).body).toEqual({ task_id: plain.task, linked: false, pull_request: null, checks: { state: null, counts: null, observed_at: null }, merge: { state: "not_requested", reason: null, observed_at: null, sha: null, requested_by: null }, release: { exists: false } });
+  });
+
+  it("doesn't exist with managed repositories off: it answers exactly as a read that was never there", async () => {
+    const r = await approved();
+    await inRoom(r.id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
+    for (const who of [OWNER, AGENT, OTHER, PUBLIC]) {
+      const got = await status(who, r.id, r.task);
+      const none = await api(who, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}/no-such-read`);
+      expect([got.status, got.text], who.id).toEqual([none.status, none.text]);
+    }
+    expect((await status(OWNER, r.id, r.task)).code).toBe("not_found");
+    // And nothing reads checks while it's off.
+    await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_reads_checks (x INTEGER)"));
+    await nudge(r.id);
+    await alarm(r.id, 2);
+    expect(await checkReads()).toEqual([]);
+  });
+});
+
 describe("the room migration", () => {
   it("adds the read bookkeeping to a room made before it, and keeps what was there", async () => {
     const r = await submitted();

@@ -34,7 +34,7 @@ const where = { workspace_id: room, task_id: made.id };
 await check("M5-S6a", "with the switch on, the agent is offered exactly get_repo_access and merge_task for a repository, and no deploy tool", async () => {
   const tools = await coder.tools();
   // Step 7b's tool is listed with the switch on, and only then: the journey and managed-off-check.mjs, with it off, find neither.
-  eq(tools.filter((t) => /repo|merge|deploy/.test(t)).sort(), ["get_repo_access", "merge_task"], "the managed-repository tools");
+  eq(tools.filter((t) => /repo|merge|deploy/.test(t)).sort(), ["get_repo_access", "get_task_release_status", "merge_task"], "the managed-repository tools");
 });
 
 await check("M5-S6b", "an agent without a grant gets a refusal and no token", async () => {

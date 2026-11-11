@@ -280,3 +280,24 @@ pub fn authorize_recheck(kind: PrincipalKind, is_operator: bool) -> Result<(), R
         Err(RepoDenial::NotAllowed)
     }
 }
+
+/// Who may read a task's release status: its checks and its merge, as Podster last observed them (M5 step 8). Whoever
+/// is shown the task's change, and whoever asked for its merge, who otherwise couldn't learn how it ended. Someone
+/// who can't see the task is told it doesn't exist. It shows and never authorizes.
+pub fn authorize_release_status(
+    caller: &Caller,
+    task: &Task,
+    asked_for_its_merge: bool,
+) -> Result<(), RepoDenial> {
+    if caller.role == Role::None {
+        return Err(RepoDenial::NotParticipant);
+    }
+    if !can_see_task(caller, task) {
+        return Err(RepoDenial::Hidden);
+    }
+    if sees_task_change(caller, task) || asked_for_its_merge {
+        Ok(())
+    } else {
+        Err(RepoDenial::NotAllowed)
+    }
+}

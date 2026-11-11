@@ -4157,6 +4157,11 @@ impl Workspace {
                     changes::without_change_when_off(read, provisioning::enabled(&self.env, &sql)?)
                 }),
                 ["tasks", id, "messages"] => queries::list_messages(&sql, &who, id, &url),
+                // A task's checks and merge, as last observed (M5 step 8). Switched off, this arm isn't taken, and
+                // the read answers below as any route that doesn't exist.
+                ["tasks", id, "release-status"] if provisioning::enabled(&self.env, &sql)? => {
+                    changes::release_status(&sql, &who, id)
+                }
                 ["repository", "grants"] => repositories::read_grants(&sql, &who),
                 ["events"] => queries::list_events(&sql, &who.caller, &url),
                 ["audit"] => queries::list_audit(&sql, &who.caller, &url),

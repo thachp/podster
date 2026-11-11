@@ -273,8 +273,12 @@ pub enum CreateAnswer {
     Refused(u16),
     /// No token could be had, so no creation call went out and the name was never sent.
     NotSent(u16),
-    /// GitHub limited the rate, for the token or for the call. Nothing was made, and the wait is GitHub's, bounded.
-    RateLimited(i64),
+    /// GitHub limited the rate, for the token (`at_mint`) or for the call. Nothing was made, and the wait is GitHub's,
+    /// bounded, in the failure.
+    RateLimited {
+        failure: Failure,
+        at_mint: bool,
+    },
     /// Nobody knows whether a repository was made.
     Unknown,
 }
@@ -688,7 +692,12 @@ impl Provider for GitHubApp {
         // Without a token no creation call goes out, so nothing can have been made and the name was never sent.
         let token = match self.mint(None).await {
             Ok(token) => token,
-            Err(Failure::RateLimited { wait_ms, .. }) => return CreateAnswer::RateLimited(wait_ms),
+            Err(failure @ Failure::RateLimited { .. }) => {
+                return CreateAnswer::RateLimited {
+                    failure,
+                    at_mint: true,
+                }
+            }
             Err(failure) => return CreateAnswer::NotSent(failure.status()),
         };
         let path = format!("/orgs/{}/repos", self.config.org_login);
@@ -716,11 +725,12 @@ impl Provider for GitHubApp {
         let (status, answer) = match sent {
             Ok(answer) => answer,
             // A definite answer, and a refusal for the rate alone: `core` reads it, and nothing was made.
-            Err(Failure::RateLimited {
-                status, wait_ms, ..
-            }) => {
+            Err(failure @ Failure::RateLimited { status, .. }) => {
                 return match classify_creation(Some(status), false, false, true) {
-                    Creation::RateLimited => CreateAnswer::RateLimited(wait_ms),
+                    Creation::RateLimited => CreateAnswer::RateLimited {
+                        failure,
+                        at_mint: false,
+                    },
                     _ => CreateAnswer::Refused(status),
                 };
             }

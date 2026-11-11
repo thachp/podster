@@ -21,12 +21,14 @@ struct Linked {
     public: bool,
     default_branch: String,
     verified_at: i64,
+    /// When the repository was first seen gone, if a second look is owed.
+    gone_seen_at: Option<i64>,
 }
 
 fn ready_link(sql: &SqlStorage) -> R<Option<Linked>> {
     Ok(rows(
         sql,
-        "SELECT provider_repo_id, visibility, default_branch, verified_at, created_at FROM repo_link WHERE provider = 'github' AND status = 'ready'",
+        "SELECT provider_repo_id, visibility, default_branch, verified_at, created_at, gone_seen_at FROM repo_link WHERE provider = 'github' AND status = 'ready'",
         vec![],
     )?
     .first()
@@ -37,6 +39,7 @@ fn ready_link(sql: &SqlStorage) -> R<Option<Linked>> {
         verified_at: row["verified_at"]
             .as_i64()
             .unwrap_or_else(|| int(&row["created_at"])),
+        gone_seen_at: row["gone_seen_at"].as_i64(),
     }))
 }
 
@@ -62,7 +65,11 @@ pub(super) fn next_due(sql: &SqlStorage, env: &Env, now: i64) -> R<Option<i64>> 
     let Some(link) = ready_link(sql)? else {
         return Ok(None);
     };
-    let due = readiness_due_at(link.verified_at, changes::last_readiness_read(sql, now)?);
+    let due = readiness_due_at(
+        link.verified_at,
+        changes::last_readiness_read(sql, now)?,
+        link.gone_seen_at,
+    );
     Ok(Some(match changes::read_cap_frees_at(sql, now)? {
         Some(frees) => due.max(frees),
         None => due,

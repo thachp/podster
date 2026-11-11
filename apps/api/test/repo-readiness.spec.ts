@@ -59,6 +59,13 @@ const link = (id: string) => inRoom(id, (sql) => sql.exec("SELECT status, status
 const tokens = (id: string) => inRoom(id, (sql) => sql.exec("SELECT state FROM repo_token").toArray().map((t: any) => t.state as string));
 const events = (id: string) => inRoom(id, (sql) => sql.exec("SELECT type, reason FROM event WHERE type LIKE 'repository.%' ORDER BY seq").toArray() as any[]);
 const scheduledReads = (id: string) => inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM repo_read WHERE kind = 'job' AND caller = 'readiness'").one().n as number);
+/** When the repository was first seen gone, if a second look is owed. */
+const goneSeen = (id: string) => inRoom(id, (sql) => sql.exec("SELECT gone_seen_at AS at FROM repo_link").one().at as number | null);
+/** Moves the first gone sighting, and the scheduled read that made it, a little over a minute into the past. */
+const aMinuteLater = (id: string) => inRoom(id, (sql) => {
+  sql.exec("UPDATE repo_link SET gone_seen_at = gone_seen_at - 61000 WHERE gone_seen_at IS NOT NULL");
+  sql.exec("UPDATE repo_read SET at = at - 61000 WHERE caller = 'readiness'");
+});
 /** Makes the link last found right `ms` ago. */
 const checkedAgo = (id: string, ms: number) => inRoom(id, (sql) => void sql.exec("UPDATE repo_link SET verified_at = ?", Date.now() - ms));
 /** An operator's recheck of room `id`'s link, as `crate::moderation` takes it. */
@@ -229,18 +236,61 @@ describe("the scheduled read-back of a ready link", () => {
     const r = await room();
     await ready({ deleted: true });
     await checkedAgo(r.id, DAY + 1);
+    // The first answer that it's gone is only noted: one answer is never enough.
+    const before = Date.now();
+    await alarmPass(stub(r.id));
+    expect(await link(r.id)).toMatchObject({ status: "ready", status_reason: null });
+    expect(await goneSeen(r.id)).toBeGreaterThanOrEqual(before);
+    expect(await tokens(r.id)).toEqual(["held"]);
+    // The second look is due a minute after the first, not sooner.
+    await expectNoAlarmSooner(stub(r.id), 50_000);
+    await aMinuteLater(r.id);
     await alarmPass(stub(r.id));
     expect(await link(r.id)).toMatchObject({ status: "degraded", status_reason: "repository_gone" });
     expect(await minted()).toEqual([expect.objectContaining({ token: r.token, live: false })]);
     expect(await tokens(r.id)).toEqual([]);
     expect(await events(r.id)).toEqual([{ type: "repository.degraded", reason: "repository_gone" }]);
-    // The question was asked by the repository's ID, with a token for the whole installation that GitHub had just minted.
-    expect((await readBack()).reads.map((read) => read.path)).toEqual([`/repositories/${REPO_ID}`]);
+    // Each question was asked by the repository's ID, with a token for the whole installation that GitHub had just minted.
+    expect((await readBack()).reads.map((read) => read.path)).toEqual([`/repositories/${REPO_ID}`, `/repositories/${REPO_ID}`]);
     expect((await readBack()).live).toBe(0);
     // The agent can't have another.
     const task = await inRoom(r.id, (sql) => sql.exec("SELECT id FROM task").one().id as string);
     const again = await api(AGENT, "POST", `/v1/workspaces/${r.id}/tasks/${task}/repo-access`, undefined, { key: null });
     expect([again.status, again.body?.error?.code]).toEqual([409, "repo_not_ready"]);
+  });
+
+  it("degrades on two 404s a minute apart to the token minted for the repository itself (the direct branch)", async () => {
+    const r = await room();
+    // The token for this one repository is minted, and GitHub answers 404 for the repository by its ID.
+    await ready({ script: { readRepo: 404 } });
+    await checkedAgo(r.id, DAY + 1);
+    await alarmPass(stub(r.id));
+    expect((await link(r.id)).status).toBe("ready");
+    expect(await goneSeen(r.id)).not.toBeNull();
+    await aMinuteLater(r.id);
+    await alarmPass(stub(r.id));
+    expect(await link(r.id)).toMatchObject({ status: "degraded", status_reason: "repository_gone" });
+  });
+
+  it("forgets a gone sighting when a later read finds the repository, so one stray 404 never adds up", async () => {
+    const r = await room();
+    await ready({ script: { readRepo: 404 } });
+    await checkedAgo(r.id, DAY + 1);
+    await alarmPass(stub(r.id));
+    expect(await goneSeen(r.id)).not.toBeNull();
+    // It answers again: the sighting is cleared, and the link was never touched.
+    await ready({ script: {} });
+    await aMinuteLater(r.id);
+    await alarmPass(stub(r.id));
+    expect(await goneSeen(r.id)).toBeNull();
+    expect(await link(r.id)).toMatchObject({ status: "ready", status_reason: null });
+    // A single 404 after that starts over.
+    await ready({ script: { readRepo: 404 } });
+    await checkedAgo(r.id, DAY + 1);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_read SET at = at - 3700000 WHERE caller = 'readiness'"));
+    await alarmPass(stub(r.id));
+    expect((await link(r.id)).status).toBe("ready");
+    expect(await events(r.id)).toEqual([]);
   });
 
   it("leaves a link alone when no token can be had, so nothing can be told about the repository", async () => {
@@ -277,6 +327,12 @@ describe("an operator's recheck of a ready link (item 12)", () => {
   it("degrades it when the repository is gone, as after a takedown done by hand", async () => {
     const r = await room();
     await ready({ deleted: true });
+    // The first look only notes it, and says GitHub gave no definite answer yet.
+    const first = await recheck(OPERATOR, r.id);
+    expect([first.status, first.body?.error?.code]).toEqual([502, "provider_unavailable"]);
+    expect((await link(r.id)).status).toBe("ready");
+    // A minute on, a second look makes it definite.
+    await aMinuteLater(r.id);
     expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "degraded", reason: "repository_gone" });
     expect(await link(r.id)).toMatchObject({ status: "degraded", status_reason: "repository_gone" });
   });

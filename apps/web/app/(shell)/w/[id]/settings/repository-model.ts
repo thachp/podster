@@ -91,7 +91,7 @@ const REASONS: Record<string, string> = {
   unexpected_ruleset: "The repository has a rule Podster didn't set.",
   settings_differ: "The repository's issues, wiki, projects, discussions or merge settings aren't set the way Podster needs.",
   workflow_permissions_differ: "Workflows in the repository can write or approve pull requests, and Podster needs them read-only.",
-  provider_rate_limited: "GitHub kept limiting Podster's calls, so setup stopped after waiting a day.",
+  provider_rate_limited: "GitHub kept limiting Podster's calls for a day, so setup stopped. No attempt was used up: a retry is taken, and it waits until GitHub's limit resets before it calls GitHub.",
   retry_limit_reached: "Setup has run as many times as a workroom is allowed.",
   authority_lost: "The authority to set it up ended before setup finished.",
   internal_error: "Something went wrong in Podster.",

@@ -32,7 +32,8 @@ use crate::github::{
     PullAnswer,
 };
 use podster_core::provisioning::{
-    decide_recheck, job_backoff_ms, verify_ready, Expected, Recheck, RecheckRead,
+    decide_recheck, gone_look, job_backoff_ms, verify_ready, Expected, GoneLook, NotReady, Recheck,
+    RecheckRead,
 };
 use podster_core::repo_grants::Grant;
 use podster_core::repo_merge::{
@@ -988,7 +989,8 @@ impl Workspace {
                 json!({ "event": "merge.token_unrevoked", "ws": room })
             );
         }
-        match read_back {
+        let present = matches!(&read_back, Ok((observed, _)) if observed.present);
+        let verdict = match read_back {
             Err(failure) => Readiness::CouldNotRead(failure.status()),
             Ok((observed, described)) => match verify_ready(&expected, &observed) {
                 Err(not_ready) => Readiness::Mismatch(not_ready.code()),
@@ -997,6 +999,32 @@ impl Workspace {
                 }
                 Ok(()) => Readiness::Ready,
             },
+        };
+        // "Gone" takes two definite answers a minute apart (`core::gone_look`); any read that finds it clears the first.
+        let gone =
+            matches!(verdict, Readiness::Mismatch(code) if code == NotReady::RepositoryGone.code());
+        let look = self.in_transaction(move |sql| {
+            let now = now_ms();
+            if !gone {
+                if present {
+                    exec(sql, "UPDATE repo_link SET gone_seen_at = NULL WHERE provider_repo_id = ? AND gone_seen_at IS NOT NULL", vec![repo_id.into()])?;
+                }
+                return Ok(None);
+            }
+            let first = rows(sql, "SELECT gone_seen_at FROM repo_link WHERE provider_repo_id = ?", vec![repo_id.into()])?
+                .first()
+                .and_then(|row| row["gone_seen_at"].as_i64());
+            let look = gone_look(first, now);
+            if look == GoneLook::FirstSeen {
+                exec(sql, "UPDATE repo_link SET gone_seen_at = ? WHERE provider_repo_id = ?", vec![now.into(), repo_id.into()])?;
+            }
+            Ok(Some(look))
+        });
+        match (verdict, look) {
+            (verdict, Ok(None) | Ok(Some(GoneLook::Confirmed))) => verdict,
+            (_, Ok(Some(GoneLook::FirstSeen | GoneLook::TooSoon)) | Err(_)) => {
+                Readiness::CouldNotRead(404)
+            }
         }
     }
 

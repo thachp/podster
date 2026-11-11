@@ -272,6 +272,9 @@ ALTER TABLE task_change ADD COLUMN merge_called_at INTEGER;
 ALTER TABLE task_change ADD COLUMN merge_finished_at INTEGER;
 CREATE TABLE merge_request (at INTEGER NOT NULL, task_id TEXT NOT NULL);
 CREATE INDEX merge_request_at ON merge_request (at);
+", "
+ALTER TABLE repo_link ADD COLUMN gone_seen_at INTEGER;
+ALTER TABLE repo_request ADD COLUMN limited_since INTEGER;
 "];
 
 pub fn int(value: &Value) -> i64 {

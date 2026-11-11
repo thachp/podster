@@ -16,20 +16,24 @@ pub const RETRY_SUFFIX_DIGITS: usize = 6;
 /// How many times setup may run for one room's request: the first run and four retries. Past that a retry is refused
 /// until an operator resets it, which isn't built yet.
 pub const MAX_SETUP_RUNS: i64 = 5;
-/// How many times in a row one request may wait out a GitHub rate limit without spending one of its runs. At the
-/// longest wait GitHub's headers can give, an hour, that's a day. Past it the run is spent, as
-/// [`RATE_LIMITED_REASON`], so a deployment GitHub keeps limiting can't hold a request pending for ever. That run is given
-/// back too, so the owner or an admin can retry without it counting as a spent setup run.
-pub const MAX_RATE_LIMITED_WAITS: i64 = 24;
-/// The reason a request ends with when it has waited out [`MAX_RATE_LIMITED_WAITS`] limits in a row.
+/// How long one request may stay pending while GitHub rate-limits it, from its first limited attempt: a day. Each limit
+/// waits the time GitHub gave and spends no run (the M5 security review's F5). Past this the request ends `failed` as
+/// [`RATE_LIMITED_REASON`], still without spending a run, and a retry's first call waits for the last reset GitHub gave.
+pub const RATE_LIMITED_FOR_MS: i64 = 24 * 60 * 60 * 1000;
+/// The reason a request ends with once it has been rate-limited for [`RATE_LIMITED_FOR_MS`].
 pub const RATE_LIMITED_REASON: &str = "provider_rate_limited";
 
-/// Whether a run GitHub rate-limited is given back and the request waits, after `waits_so_far` such waits in a row.
-/// A limit says nothing about the request, so it never counts as one of the [`MAX_SETUP_RUNS`] (the M5 security
-/// review's F5). Past the waits, the request ends, still without spending the run.
-pub fn rate_limited_run_waits(waits_so_far: i64) -> bool {
-    waits_so_far < MAX_RATE_LIMITED_WAITS
+/// Whether a run GitHub rate-limited waits, given when the request was first limited (`limited_since`, or `None` if
+/// this is the first). Bounded by elapsed time, not by how many limits came, so short waits can't end it early.
+pub fn rate_limited_run_waits(limited_since: Option<i64>, now: i64) -> bool {
+    limited_since.is_none_or(|since| now.saturating_sub(since) < RATE_LIMITED_FOR_MS)
 }
+
+/// The wait before setup reads a repository it just created again, when GitHub answered that it isn't there. A new
+/// repository can take a moment to show by its ID, so setup never fails on that alone.
+pub const SETUP_GONE_WAIT_MS: i64 = 60 * 1000;
+/// How many such waits in a row before the run fails as `read_back_failed`, never `repository_gone`.
+pub const SETUP_GONE_WAITS: i64 = 10;
 
 /// How often a linked repository's protections and settings are read back when nothing else reads them (ADR 0009's
 /// "on a schedule", and the M5 security review's F8): a day after the last read that found them exactly right.
@@ -39,12 +43,23 @@ pub const READINESS_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
 pub const READINESS_RETRY_MS: i64 = 60 * 60 * 1000;
 
 /// When a ready link is next due its scheduled read-back: [`READINESS_INTERVAL_MS`] after it was last found exactly
-/// right, and never sooner than [`READINESS_RETRY_MS`] after the last scheduled attempt, whatever came of it.
-pub fn readiness_due_at(verified_at: i64, last_attempt_at: Option<i64>) -> i64 {
-    let scheduled = verified_at.saturating_add(READINESS_INTERVAL_MS);
-    last_attempt_at.map_or(scheduled, |at| {
-        scheduled.max(at.saturating_add(READINESS_RETRY_MS))
-    })
+/// right, and never sooner than [`READINESS_RETRY_MS`] after the last scheduled attempt, whatever came of it. A
+/// repository seen gone (`gone_seen_at`) is looked at again [`GONE_CONFIRM_MS`] later, and never sooner than that after
+/// the last attempt, so a second look that can't be made doesn't bring the alarm straight back.
+pub fn readiness_due_at(
+    verified_at: i64,
+    last_attempt_at: Option<i64>,
+    gone_seen_at: Option<i64>,
+) -> i64 {
+    let after_last = |wait: i64| last_attempt_at.map_or(i64::MIN, |at| at.saturating_add(wait));
+    match gone_seen_at {
+        Some(seen) => seen
+            .saturating_add(GONE_CONFIRM_MS)
+            .max(after_last(GONE_CONFIRM_MS)),
+        None => verified_at
+            .saturating_add(READINESS_INTERVAL_MS)
+            .max(after_last(READINESS_RETRY_MS)),
+    }
 }
 
 /// The wait before a retry is taken: a minute after the first run, doubling, up to an hour.
@@ -465,6 +480,30 @@ fn check_ruleset(ruleset: &Ruleset, kind: &Kind, expected: &Expected) -> Result<
 /// server's error) says nothing about the repository and still waits.
 pub fn repository_gone(token_minted: bool, status: u16) -> bool {
     token_minted && status == 404
+}
+
+/// How long after a repository was first seen gone a second look must come before the link is degraded.
+pub const GONE_CONFIRM_MS: i64 = 60 * 1000;
+
+/// What one more "gone" answer means, given when the repository was first seen gone since it last read back right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoneLook {
+    /// The first: record when, and wait. Nothing changes yet.
+    FirstSeen,
+    /// Seen before, less than [`GONE_CONFIRM_MS`] ago: wait for a later look.
+    TooSoon,
+    /// Seen again a minute or more after the first, with no read that found it in between: it's gone.
+    Confirmed,
+}
+
+/// Two definite answers at least [`GONE_CONFIRM_MS`] apart make a repository gone (ruled by the architect,
+/// 2026-11-11). Any read that finds it in between clears the first, which the caller does.
+pub fn gone_look(first_seen_at: Option<i64>, now: i64) -> GoneLook {
+    match first_seen_at {
+        None => GoneLook::FirstSeen,
+        Some(at) if now.saturating_sub(at) < GONE_CONFIRM_MS => GoneLook::TooSoon,
+        Some(_) => GoneLook::Confirmed,
+    }
 }
 
 /// The read-back of a repository [`repository_gone`] says isn't there: nothing in it but its ID.
@@ -1046,19 +1085,31 @@ mod tests {
 
     #[test]
     fn a_ready_link_is_read_back_a_day_after_it_was_last_found_right_and_retried_hourly() {
-        assert_eq!(readiness_due_at(1_000, None), 1_000 + READINESS_INTERVAL_MS);
+        assert_eq!(
+            readiness_due_at(1_000, None, None),
+            1_000 + READINESS_INTERVAL_MS
+        );
         // An attempt long ago doesn't bring it forward.
         assert_eq!(
-            readiness_due_at(1_000, Some(500)),
+            readiness_due_at(1_000, Some(500), None),
             1_000 + READINESS_INTERVAL_MS
         );
         // A day on, an attempt that found nothing definite: the next waits an hour, not a day.
         let attempt = 1_000 + READINESS_INTERVAL_MS;
         assert_eq!(
-            readiness_due_at(1_000, Some(attempt)),
+            readiness_due_at(1_000, Some(attempt), None),
             attempt + READINESS_RETRY_MS
         );
-        assert_eq!(readiness_due_at(i64::MAX, None), i64::MAX);
+        assert_eq!(readiness_due_at(i64::MAX, None, None), i64::MAX);
+        // Seen gone: looked at again a minute later, and a minute after a look that couldn't be made.
+        assert_eq!(
+            readiness_due_at(1_000, None, Some(5_000)),
+            5_000 + GONE_CONFIRM_MS
+        );
+        assert_eq!(
+            readiness_due_at(1_000, Some(70_000), Some(5_000)),
+            70_000 + GONE_CONFIRM_MS
+        );
     }
 
     #[test]
@@ -1099,11 +1150,30 @@ mod tests {
     }
 
     #[test]
-    fn a_rate_limited_run_waits_a_bounded_number_of_times() {
-        assert!(rate_limited_run_waits(0));
-        assert!(rate_limited_run_waits(MAX_RATE_LIMITED_WAITS - 1));
-        assert!(!rate_limited_run_waits(MAX_RATE_LIMITED_WAITS));
-        assert!(!rate_limited_run_waits(i64::MAX));
+    fn a_rate_limited_request_waits_for_a_day_from_its_first_limit_however_many_come() {
+        assert!(rate_limited_run_waits(None, 5_000));
+        assert!(rate_limited_run_waits(
+            Some(5_000),
+            5_000 + RATE_LIMITED_FOR_MS - 1
+        ));
+        assert!(!rate_limited_run_waits(
+            Some(5_000),
+            5_000 + RATE_LIMITED_FOR_MS
+        ));
+        assert!(!rate_limited_run_waits(Some(i64::MIN), i64::MAX));
+    }
+
+    #[test]
+    fn a_repository_is_gone_only_on_a_second_look_a_minute_after_the_first() {
+        assert_eq!(gone_look(None, 1_000), GoneLook::FirstSeen);
+        assert_eq!(
+            gone_look(Some(1_000), 1_000 + GONE_CONFIRM_MS - 1),
+            GoneLook::TooSoon
+        );
+        assert_eq!(
+            gone_look(Some(1_000), 1_000 + GONE_CONFIRM_MS),
+            GoneLook::Confirmed
+        );
     }
 
     #[test]

@@ -4066,7 +4066,12 @@ impl Workspace {
                 };
                 return match rest {
                     [] => queries::list_tasks(&sql, &view.caller, &url),
-                    [task] => queries::get_task(&sql, &view, task, true),
+                    [task] => queries::get_task(&sql, &view, task, true).and_then(|read| {
+                        changes::without_change_when_off(
+                            read,
+                            provisioning::enabled(&self.env, &sql)?,
+                        )
+                    }),
                     [task, "messages"] => queries::list_messages(&sql, &view, task, &url),
                     _ => Err(ApiError::not_found()),
                 };
@@ -4109,6 +4114,23 @@ impl Workspace {
         );
 
         if method == Method::Get {
+            // Managed repositories switched off: their reads aren't there, as their commands aren't, so a person's screen
+            // learns "off" from the server. The answer is a missing route's, whether or not the room kept rows from an
+            // earlier on.
+            if provisioning::is_managed_route(tail) && !provisioning::enabled(&self.env, &sql)? {
+                return Err(ApiError::not_found());
+            }
+            if let ["repository"] = tail {
+                let mut read = repositories::read(&sql, &who)?;
+                // Display only, and for the room's owner alone, by current standing: the request command asks the
+                // organization again. Unknown isn't false, so a record that can't be read leaves the field out.
+                if provisioning::is_current_owner(&who.caller) {
+                    if let Some(delegated) = self.org_delegated().await {
+                        read["delegated"] = json!(delegated);
+                    }
+                }
+                return Ok(read);
+            }
             return match tail {
                 [] => queries::get_workspace(&sql, &who),
                 ["invitations"] => queries::list_invitations(&sql, &who.caller, now_ms()),
@@ -4131,9 +4153,10 @@ impl Workspace {
                 ["public-claims"] => public_claims::read(&sql, &who.caller, now_ms()),
                 ["activity"] => queries::list_activity(&sql, &who, &url),
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
-                ["tasks", id] => queries::get_task(&sql, &who, id, false),
+                ["tasks", id] => queries::get_task(&sql, &who, id, false).and_then(|read| {
+                    changes::without_change_when_off(read, provisioning::enabled(&self.env, &sql)?)
+                }),
                 ["tasks", id, "messages"] => queries::list_messages(&sql, &who, id, &url),
-                ["repository"] => repositories::read(&sql, &who),
                 ["repository", "grants"] => repositories::read_grants(&sql, &who),
                 ["events"] => queries::list_events(&sql, &who.caller, &url),
                 ["audit"] => queries::list_audit(&sql, &who.caller, &url),
@@ -4141,8 +4164,16 @@ impl Workspace {
             };
         }
 
-        // An agent's repository token (M5 step 6). No idempotency key, and its own switch decides whether it exists.
+        // An agent's repository token (M5 step 6). No idempotency key. Switched off, it isn't taken here, and answers
+        // below where every managed-repository command does, as a missing route, after the same body parse.
         if let (Method::Post, ["tasks", task, "repo-access"]) = (&method, tail) {
+            if !provisioning::enabled(&self.env, &sql)? {
+                let raw = req.text().await?;
+                if !raw.trim().is_empty() && serde_json::from_str::<Value>(&raw).is_err() {
+                    return Err(ApiError::invalid_argument());
+                }
+                return Err(ApiError::not_found());
+            }
             let raw = req.text().await?;
             let test_fail =
                 cfg!(feature = "failpoints") && req.headers().get("x-test-fail")?.is_some();
@@ -4166,6 +4197,10 @@ impl Workspace {
         let target = parts.get(4).map(|s| (*s).to_string()).unwrap_or_default();
         let verb = parts.get(5).map(|s| (*s).to_string()).unwrap_or_default();
         let switched_on = provisioning::enabled(&self.env, &sql)?;
+        // Switched off, a managed-repository command answers where a missing route would, after the same body parse.
+        if !switched_on && provisioning::is_managed_route(tail) {
+            return Err(ApiError::not_found());
+        }
 
         match (method, tail) {
             (Method::Post, ["tasks"]) => self.command(
@@ -4574,9 +4609,7 @@ impl Workspace {
                     hash,
                     stops_when_archived,
                     test_fail,
-                    |sql: &SqlStorage, who: &Participant| {
-                        provisioning::may_request(sql, &who.caller)
-                    },
+                    |_: &SqlStorage, who: &Participant| provisioning::may_request(&who.caller),
                     move |sql, who, now| {
                         provisioning::request(sql, who, &body, switched_on, delegated, now)
                     },
@@ -4597,9 +4630,7 @@ impl Workspace {
                     hash,
                     stops_when_archived,
                     test_fail,
-                    |sql: &SqlStorage, who: &Participant| {
-                        provisioning::may_request(sql, &who.caller)
-                    },
+                    |_: &SqlStorage, who: &Participant| provisioning::may_request(&who.caller),
                     move |sql, who, now| {
                         provisioning::retry(sql, who, &body, switched_on, delegated, &suffix, now)
                     },

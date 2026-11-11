@@ -74,7 +74,11 @@ async function room(options: { link?: string | null } = {}) {
     const added = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: "agent", org_id: ORG, role, policy_version: await version(id) });
     expect(added.status, `add ${who.id}: ${added.text}`).toBe(200);
   }
-  await inRoom(id, (sql) => sql.exec("UPDATE member SET joined_via = 'public' WHERE principal_id = ?", PUBLIC_AGENT.id));
+  await inRoom(id, (sql) => {
+    sql.exec("UPDATE member SET joined_via = 'public' WHERE principal_id = ?", PUBLIC_AGENT.id);
+    // Managed repositories switched on for this room: while they're off, none of these routes is there.
+    sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)");
+  });
   if (options.link !== null) await link(id, options.link ?? "ready");
   return id;
 }

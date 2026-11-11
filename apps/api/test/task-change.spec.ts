@@ -377,7 +377,8 @@ describe("which tasks are linked, and the switch", () => {
     const sent = await submit(AGENT, id, t.task, { version: t.version, pr_number: 7 });
     expect(sent.status, sent.text).toBe(200);
     expect((await verify(OWNER, id, t.task, { submission_no: 1 })).status).toBe(200);
-    expect((await must(OWNER, "GET", `/v1/workspaces/${id}/tasks/${t.task}`)).change).toBeNull();
+    // Off, the task read has no `change` at all.
+    expect((await must(OWNER, "GET", `/v1/workspaces/${id}/tasks/${t.task}`))).not.toHaveProperty("change");
     // A task that was linked while it was on is decided as before this step: a commit, and no read.
     const old = await accepted(id);
     await inRoom(id, (sql) => sql.exec("UPDATE task SET has_linked_repository = 1 WHERE id = ?", old.task));

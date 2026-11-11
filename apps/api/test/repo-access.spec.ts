@@ -156,11 +156,13 @@ async function room(options: { switchedOn?: boolean; grant?: boolean; accept?: b
   }
   await inRoom(id, (sql) => {
     sql.exec("UPDATE member SET joined_via = 'public' WHERE principal_id = ?", PUBLIC.id);
-    if (options.switchedOn !== false) sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)");
+    sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)");
     sql.exec("INSERT INTO repo_link (id, request_id, provider, provider_repo_id, provider_org_id, full_name, visibility, default_branch, status, created_by, created_at, verified_at, updated_at) VALUES ('rl_1', 'rr_1', 'github', ?, 4242, 'podster-test-org/engineering', 'public', 'main', 'ready', ?, 1000, 2000, 2000)", REPO_ID, OWNER.id);
   });
   let grant: string | undefined;
   if (options.grant !== false) grant = (await must(OWNER, "POST", `/v1/workspaces/${id}/repository/grants`, { policy_version: await version(id), principal_id: AGENT.id, action: "push" })).id;
+  // The grant route is there only while the switch is on, so a room that's off is switched off after its grant.
+  if (options.switchedOn === false) await inRoom(id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
   const task = await newTask(id, options.assignee ?? AGENT, options);
   return { id, task, grant: grant! };
 }
@@ -347,10 +349,11 @@ describe("refusing", () => {
     await refusedWith(await access(AGENT, r.id, r.task), 409, "repo_not_ready");
   });
 
-  it("answers as a route that doesn't exist while the switch is off, whatever the body", async () => {
+  it("answers as a route that doesn't exist while the switch is off, a malformed body included", async () => {
     const r = await room({ switchedOn: false });
     await refusedWith(await access(AGENT, r.id, r.task), 404, "not_found");
-    await refusedWith(await access(AGENT, r.id, r.task, undefined, { raw: "{not json" }), 404, "not_found");
+    // A missing route parses the body first, so a malformed one is `invalid_argument` there and here alike.
+    await refusedWith(await access(AGENT, r.id, r.task, undefined, { raw: "{not json" }), 400, "invalid_argument");
     await refusedWith(await access(AGENT, r.id, "tsk_missing"), 404, "not_found");
   });
 

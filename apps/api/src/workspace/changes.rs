@@ -501,6 +501,17 @@ pub(super) fn record(
 /// A task's change, for those `podster_policy::repositories::sees_task_change` allows: IDs, commit IDs, states and
 /// times. `commit_changed` says the head has been seen off the reviewed commit, and stays true even if the branch is
 /// put back: the approval stands, and the way on is a follow-up task (decision 25).
+/// A task read with managed repositories switched off has no `change` at all, even for a task that got one while they
+/// were on: off, the feature isn't there, and its rows stay in the room for when it's back.
+pub(super) fn without_change_when_off(mut read: Value, switched_on: bool) -> R<Value> {
+    if !switched_on {
+        if let Some(fields) = read.as_object_mut() {
+            fields.remove("change");
+        }
+    }
+    Ok(read)
+}
+
 pub(super) fn of_task(sql: &SqlStorage, task_id: &str) -> R<Value> {
     Ok(change_row(sql, task_id)?.map_or(Value::Null, |row| {
         let observed = row["pr_observed_at"].as_i64();

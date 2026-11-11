@@ -2299,7 +2299,12 @@ mod queries {
     /// A room's history, filtered for this viewer. It reads only, has no read state and never touches an inbox. The query
     /// itself is narrowed, so a page never comes back short because of what's hidden, and the cursor is an event's own
     /// random ID, so nothing here counts what the viewer can't see. Policy then re-checks each row.
-    pub fn list_activity(sql: &SqlStorage, who: &Participant, url: &Url) -> R<Value> {
+    pub fn list_activity(
+        sql: &SqlStorage,
+        who: &Participant,
+        url: &Url,
+        managed_repositories: bool,
+    ) -> R<Value> {
         let caller = &who.caller;
         let limit = query_int(url, "limit")?.unwrap_or(ACTIVITY_PAGE);
         if !(1..=ACTIVITY_PAGE).contains(&limit) {
@@ -2370,6 +2375,13 @@ mod queries {
         // (`sees_task_change`): a person in the room who's no guest, or the task's own assignee or reviewer, and for
         // a merge whoever asked for it. Narrowed here as well as by `can_see_event` below, so a page isn't left short
         // by rows the viewer can't see.
+        // With managed repositories switched off there's no such thing as a task's pull request or its merge, for
+        // anyone: their events stay in the room and out of every page, here in the query, so no page comes up short.
+        if !managed_repositories {
+            query.push_str(
+                " AND substr(type, 1, 12) <> 'task_change.' AND substr(type, 1, 6) <> 'merge.'",
+            );
+        }
         if caller.kind != PrincipalKind::Person || caller.role == Role::Guest {
             query.push_str(
                 " AND ((substr(type, 1, 12) <> 'task_change.' AND substr(type, 1, 6) <> 'merge.')
@@ -4151,7 +4163,12 @@ impl Workspace {
                 ["brief"] => queries::get_brief(&sql, &who),
                 ["visibility"] => visibility::read(&sql, &who, public_rooms),
                 ["public-claims"] => public_claims::read(&sql, &who.caller, now_ms()),
-                ["activity"] => queries::list_activity(&sql, &who, &url),
+                ["activity"] => queries::list_activity(
+                    &sql,
+                    &who,
+                    &url,
+                    provisioning::enabled(&self.env, &sql)?,
+                ),
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
                 ["tasks", id] => queries::get_task(&sql, &who, id, false).and_then(|read| {
                     changes::without_change_when_off(read, provisioning::enabled(&self.env, &sql)?)

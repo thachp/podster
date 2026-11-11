@@ -505,11 +505,19 @@ pub(super) fn record(
 /// times. `commit_changed` says the head has been seen off the reviewed commit, and stays true even if the branch is
 /// put back: the approval stands, and the way on is a follow-up task (decision 25).
 /// A task read with managed repositories switched off has no `change` at all, even for a task that got one while they
-/// were on: off, the feature isn't there, and its rows stay in the room for when it's back.
+/// were on, and its history has none of the events about its pull request or its merge: off, the feature isn't there,
+/// and its rows stay in the room for when it's back.
 pub(super) fn without_change_when_off(mut read: Value, switched_on: bool) -> R<Value> {
     if !switched_on {
         if let Some(fields) = read.as_object_mut() {
             fields.remove("change");
+            if let Some(history) = fields.get_mut("history").and_then(Value::as_array_mut) {
+                history.retain(|event| {
+                    let kind = event["type"].as_str().unwrap_or_default();
+                    !(podster_policy::is_task_change_event(kind)
+                        || podster_policy::is_merge_event(kind))
+                });
+            }
         }
     }
     Ok(read)

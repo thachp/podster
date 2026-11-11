@@ -762,6 +762,52 @@ describe("what's kept, logged and shown", () => {
   });
 });
 
+describe("with managed repositories switched off again", () => {
+  it("shows nobody a change's or a merge's events, in a task's history or the activity, and leaves no page short", async () => {
+    const r = await requested();
+    await pass(r.id);
+    expect((await change(r.id, r.task)).merge_state).toBe("succeeded");
+    const hiddenKind = (e: any) => e.type.startsWith("merge.") || e.type.startsWith("task_change.");
+    /** Every page of the room's activity for a viewer, three at a time, and how long each page was. */
+    const pages = async (who: Who) => {
+      const all: any[] = [];
+      const sizes: number[] = [];
+      for (let after: string | undefined; ; ) {
+        const page = await must(who, "GET", `/v1/workspaces/${r.id}/activity?limit=3${after ? `&after=${after}` : ""}`);
+        sizes.push(page.events.length);
+        all.push(...page.events);
+        if (!page.next_after) return { all, sizes };
+        after = page.next_after;
+      }
+    };
+    // On, the owner sees them, among the room's other events.
+    const on = await pages(OWNER);
+    const shown = on.all.filter(hiddenKind).length;
+    expect(shown).toBeGreaterThanOrEqual(3);
+    // Off, nobody does: not the owner, the assignee or whoever asked for the merge.
+    await inRoom(r.id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
+    for (const who of [OWNER, AGENT, MERGER]) {
+      const task = await must(who, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`);
+      expect((task.history as any[]).filter(hiddenKind), who.id).toEqual([]);
+      expect("change" in task, who.id).toBe(false);
+      expect(((await must(who, "GET", `/v1/workspaces/${r.id}/activity?task=${r.task}`)).events as any[]).filter(hiddenKind), who.id).toEqual([]);
+    }
+    // The owner's pages hold everything else, and every page but the last is full: the hidden rows took no room in any.
+    const off = await pages(OWNER);
+    expect(off.all.filter(hiddenKind)).toEqual([]);
+    expect(off.all.length).toBe(on.all.length - shown);
+    expect(off.all.map((e) => e.id)).toEqual(on.all.filter((e) => !hiddenKind(e)).map((e) => e.id));
+    expect(off.sizes.slice(0, -1).every((size) => size === 3)).toBe(true);
+    // On again, they're back: nothing was removed.
+    await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)"));
+    expect((await pages(OWNER)).all.filter(hiddenKind)).toHaveLength(shown);
+    // And on, a viewer who isn't shown them gets full pages too.
+    const other = await pages(SIBLING);
+    expect(other.all.filter(hiddenKind)).toEqual([]);
+    expect(other.sizes.slice(0, -1).every((size) => size === 3)).toBe(true);
+  });
+});
+
 describe("the room migration", () => {
   it("adds the merge bookkeeping to a room made before it, and keeps what was there", async () => {
     const r = await approved();

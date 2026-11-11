@@ -85,6 +85,25 @@ const FAILURES: Record<string, string> = {
   room_suspended: "the workroom was suspended",
   default_branch_changed: "the repository's default branch changed, so Podster marked the repository degraded",
   unrequested_merge: "it was merged outside Podster",
+  // The job rechecks the requester's authority before its call, and these are the refusals that end a request there.
+  access_revoked: "whoever asked left the workroom before it ran",
+  agent_disconnected: "the agent that asked was disconnected before it ran",
+  self_merge: "whoever asked turned out to control the task's submitter, and nobody merges work they control",
+  grant_required: "whoever asked no longer held a merge grant when it ran",
+  grant_expired: "whoever asked had a merge grant that expired before it ran",
+  grant_stale: "whoever asked had a merge grant from an owner who no longer holds the repository's delegation",
+  grant_not_found: "whoever asked no longer held a merge grant when it ran",
+  public_participant: "whoever asked is in the workroom through a public claim, which can't merge",
+  repo_not_linked: "the workroom's repository was no longer linked",
+  task_not_linked: "the task was no longer linked to the workroom's repository",
+  not_approved: "the task was no longer approved",
+  submission_mismatch: "the approved submission changed before it ran",
+  change_not_found: "Podster no longer had the task's pull request on record",
+  review_required: "the approval needs a fresh review before a merge",
+  change_unwatched: "Podster stopped reading the pull request",
+  already_merged: "the task was already merged",
+  merge_already_requested: "another merge was already under way",
+  invalid_argument: "the reviewed commit wasn't a full commit ID",
   unreviewed_merge: "a commit nobody reviewed was merged outside Podster",
 };
 
@@ -124,8 +143,10 @@ export function MergeControl({ api, me }: { api: SheetApi<LoadedTask>; me: strin
   const [branch, setBranch] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const commit = change ? shortSha(change.reviewed_commit_sha) : null;
-  // One key per intent: the same task, submission and commit. A retry after a lost answer reuses it.
-  const intent = `${data.task.id}:${data.task.approved_submission_no}:${change?.reviewed_commit_sha}`;
+  // One key per intent: the same task, submission and commit, and the same attempt. A retry after a lost answer reuses it;
+  // asking again after a merge ended is a new attempt, named by when the last one ended or was asked for, so it gets a new key.
+  const attempt = change ? (change.merge_finished_at ?? change.merge_requested_at ?? 0) : 0;
+  const intent = `${data.task.id}:${data.task.approved_submission_no}:${change?.reviewed_commit_sha}:${attempt}`;
   const key = useRef({ intent, value: crypto.randomUUID() });
   if (key.current.intent !== intent) key.current = { intent, value: crypto.randomUUID() };
   const candidate = change !== null && change !== undefined && typeof data.task.approved_submission_no === "number" && commit !== null && data.task.assignee !== me;

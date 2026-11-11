@@ -91,6 +91,54 @@ describe("merging from the task Sheet", () => {
     expect(keys[0]).toBe(keys[1]);
   });
 
+  it("asks again after a failed merge under a new key, and retries that ask under its own", async () => {
+    // Once the merge is asked for, the job runs and fails; the Sheet's next read says so, with when it ended.
+    let asked = false;
+    const firstMerge = reads.merge;
+    reads.merge = () => {
+      asked = true;
+      return firstMerge();
+    };
+    reads.task = () => json(200, asked ? detail({ merge_state: "failed", merge_reason: "provider_refused", merge_requested_at: 100, merge_finished_at: 200 }) : detail());
+    await open();
+    await userEvent.click(await screen.findByRole("button", { name: "Merge reviewed commit" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Merge" }));
+    await waitFor(() => expect(calls.filter((call) => call.method === "POST")).toHaveLength(1));
+    // The control stays mounted. Now the asks are lost answers.
+    reads.merge = () => json(500, {});
+    for (let i = 0; i < 2; i++) {
+      await userEvent.click(await screen.findByRole("button", { name: "Ask to merge again" }));
+      await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Merge" }));
+      await waitFor(() => expect(calls.filter((call) => call.method === "POST")).toHaveLength(i + 2));
+    }
+    const [first, again, retried] = calls.filter((call) => call.method === "POST").map((call) => call.key);
+    expect(again).not.toBe(first);
+    expect(retried).toBe(again);
+  });
+
+  it("sends one request however fast Merge is pressed twice", async () => {
+    let answer: (response: Response) => void = () => undefined;
+    reads.merge = () => new Promise<Response>((done) => (answer = done)) as unknown as Response;
+    await open();
+    await userEvent.click(await screen.findByRole("button", { name: "Merge reviewed commit" }));
+    const confirm = within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Merge" });
+    await userEvent.click(confirm);
+    await userEvent.click(confirm);
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    answer(json(200, { task_id: "tsk_1", merge_state: "requested", commit_sha: REVIEWED, submission_no: 2, requested_at: 1 }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+  });
+
+  it("passes axe with the control offered and with its confirmation open", async () => {
+    await open();
+    const button = await screen.findByRole("button", { name: "Merge reviewed commit" });
+    const rules = { rules: { "color-contrast": { enabled: false } } };
+    expect((await axe.run(screen.getByRole("dialog"), rules)).violations.map((v) => v.id)).toEqual([]);
+    await userEvent.click(button);
+    expect((await axe.run(await screen.findByRole("alertdialog"), rules)).violations.map((v) => v.id)).toEqual([]);
+  });
+
   it("shows the API's refusal as a sentence", async () => {
     reads.merge = () => refused(403, "self_merge");
     await open();
@@ -175,6 +223,8 @@ describe("every code as a sentence", () => {
 
   it("names every reason a merge ended without merging", () => {
     const codes = ["commit_changed", "base_changed", "head_repo_changed", "pull_request_closed", "pull_request_draft", "merged_elsewhere", "repo_not_ready", "provider_refused", "merge_attempts_exhausted", "workspace_archived", "room_suspended", "default_branch_changed", "unrequested_merge", "unreviewed_merge"];
+    // And every refusal the job's recheck of the requester's authority can end a request with (core's MergeRefusal and GrantRefusal).
+    codes.push("access_revoked", "agent_disconnected", "self_merge", "grant_required", "grant_expired", "grant_stale", "grant_not_found", "public_participant", "repo_not_linked", "task_not_linked", "not_approved", "submission_mismatch", "change_not_found", "review_required", "change_unwatched", "already_merged", "merge_already_requested", "invalid_argument");
     for (const code of codes) expect(failureSentence(code), code).not.toContain("(");
     expect(failureSentence("new_reason")).toBe("the merge stopped (new_reason)");
   });

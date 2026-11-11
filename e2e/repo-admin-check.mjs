@@ -56,7 +56,8 @@ await check("AC-10a", "nobody but a person who is the room's owner or an admin a
 });
 
 await check("AC-10b", "an admin asks with no operator's approval: the organization holds the delegation by default, and the room's job sets the repository up", async () => {
-  eq(await owner.must("GET", `/orgs/${team}/provisioning-delegation`), { provider: "github", granted: true, set_by: null, set_at: null }, "the organization's delegation, which nobody set");
+  const held = await owner.must("GET", `/v1/orgs/${team}/provisioning-delegation`);
+  eq([held.provider, held.granted, held.set_by, held.set_at], ["github", true, null, null], "the organization's delegation, which nobody set");
   eq((await admin.must("GET", repository)).delegated, true, "what the admin is told");
   const asked = await admin.must("POST", repository, { name: name(), visibility: "public" });
   eq([asked.request?.state, asked.request?.requested_by], ["pending", admin.id], "the request");
@@ -76,6 +77,7 @@ await check("AC-11a", "an admin gives a grant as the owner does, and a member an
 
 await check("AC-11b", "a grant counts only while its giver is still an admin: demoted, what they gave ends at once and they give no more", async () => {
   await owner.must("POST", `/v1/workspaces/${room}/members/${admin.id}/role`, { role: "member", policy_version: await owner.policyVersion(room) });
+  ok(given, "the admin's grant wasn't given, so there's nothing to see ended");
   eq((await owner.must("GET", `${repository}/grants`)).grants, [], "the grants that aren't revoked");
   refused(await grant(admin, coder), "not_allowed", "the former admin granting");
   // Made an admin again, nothing they gave before comes back.
@@ -97,8 +99,8 @@ await check("AC-10c", "an organization is held to five accepted requests in a da
 });
 
 await check("AC-10d", "an operator takes the ability away from an organization: new requests are refused not_delegated, and the repository already linked keeps working", async () => {
-  refused(await owner.dash("PUT", `/orgs/${team}/provisioning-delegation`, { granted: false }), "not_allowed", "the organization's own admin taking it back");
-  const taken = await operator.dash("PUT", `/orgs/${team}/provisioning-delegation`, { granted: false });
+  refused(await owner.dash("PUT", `/v1/orgs/${team}/provisioning-delegation`, { granted: false }), "not_allowed", "the organization's own admin taking it back");
+  const taken = await operator.dash("PUT", `/v1/orgs/${team}/provisioning-delegation`, { granted: false });
   ok(taken.ok, `the take-back: HTTP ${taken.status} ${taken.code ?? ""}`);
   refused(await owner.dash("POST", `/v1/workspaces/${rooms[4]}/repository`, { name: name(), visibility: "public" }), "not_delegated", "asking after the take-back");
   eq((await owner.must("GET", `/v1/workspaces/${rooms[4]}/repository`)).delegated, false, "what the owner is told");
@@ -106,8 +108,8 @@ await check("AC-10d", "an operator takes the ability away from an organization: 
   const again = await grant(owner, coder);
   ok(again.ok, `a grant on the linked repository: HTTP ${again.status} ${again.code ?? ""}`);
   // Only an operator restores it.
-  refused(await owner.dash("PUT", `/orgs/${team}/provisioning-delegation`, { granted: true }), "not_allowed", "the organization's own admin restoring it");
-  ok((await operator.dash("PUT", `/orgs/${team}/provisioning-delegation`, { granted: true })).ok, "the operator restores it");
+  refused(await owner.dash("PUT", `/v1/orgs/${team}/provisioning-delegation`, { granted: true }), "not_allowed", "the organization's own admin restoring it");
+  ok((await operator.dash("PUT", `/v1/orgs/${team}/provisioning-delegation`, { granted: true })).ok, "the operator restores it");
   eq((await owner.must("GET", `/v1/workspaces/${rooms[4]}/repository`)).delegated, true, "what the owner is told once it's restored");
 });
 

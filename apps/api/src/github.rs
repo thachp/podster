@@ -31,7 +31,39 @@ use wasm_bindgen::{JsCast, JsValue};
 use worker::wasm_bindgen_futures::JsFuture;
 use worker::*;
 
+#[cfg(not(feature = "rehearsal"))]
 const API: &str = "https://api.github.com";
+/// The local rehearsal's fake GitHub (`e2e/run-local.mjs`). The address is fixed when that build is made, and the build
+/// fails unless it is on this machine. No variable, secret or request can point a deployed Worker anywhere but GitHub.
+#[cfg(feature = "rehearsal")]
+const API: &str = env!("PODSTER_REHEARSAL_GITHUB_URL");
+#[cfg(feature = "rehearsal")]
+const _: () = assert!(
+    is_loopback(API),
+    "PODSTER_REHEARSAL_GITHUB_URL must be http://127.0.0.1:<port>"
+);
+
+/// Whether an address is plain HTTP to this machine's loopback, with a port and nothing after it.
+#[cfg(feature = "rehearsal")]
+const fn is_loopback(url: &str) -> bool {
+    let (url, prefix) = (url.as_bytes(), b"http://127.0.0.1:");
+    if url.len() <= prefix.len() || url.len() > prefix.len() + 5 {
+        return false;
+    }
+    let mut at = 0;
+    while at < url.len() {
+        let ok = if at < prefix.len() {
+            url[at] == prefix[at]
+        } else {
+            url[at].is_ascii_digit()
+        };
+        if !ok {
+            return false;
+        }
+        at += 1;
+    }
+    true
+}
 const USER_AGENT: &str = "podster-provisioning";
 const CALL_TIMEOUT_MS: u64 = if cfg!(feature = "failpoints") {
     400

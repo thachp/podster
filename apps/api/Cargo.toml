@@ -10,6 +10,9 @@ crate-type = ["cdylib"]
 [features]
 # Test builds only: lets a test force a failure after a command's writes.
 failpoints = []
+# The local rehearsal only (e2e/run-local.mjs): sends GitHub's calls to a fake on this machine, at an address fixed when
+# the build is made and checked then to be loopback. No deployment is built with it, and nothing at run time can turn it on.
+rehearsal = []
 
 [dependencies]
 podster-assertion = { path = "../../crates/assertion" }

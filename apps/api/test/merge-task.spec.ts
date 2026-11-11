@@ -778,3 +778,241 @@ describe("the room migration", () => {
     expect([got.status, got.code]).toEqual([403, "self_merge"]);
   });
 });
+
+/** Resolves once a mint for this test's repository is waiting at the fake's gate (`mode: "gate"`). */
+const minting = async () => {
+  for (const deadline = Date.now() + 5_000; Date.now() < deadline; ) {
+    const { waiting } = (await (await fetch(`https://github-fake.example.com/agent-gate?repo=${REPO_ID}`)).json()) as { waiting: number };
+    if (waiting > 0) return;
+    await new Promise((x) => setTimeout(x, 2));
+  }
+  throw new Error("no mint reached the gate");
+};
+/** Lets the mint waiting at the gate answer. */
+const release = () => fetch("https://github-fake.example.com/agent-release", { method: "POST", body: JSON.stringify({ id: REPO_ID }) });
+const OPERATOR: Who = { id: "per_operator_one", kind: "person", org: "org_operators" };
+const recheck = (who: Who, id: string) => api(who, "POST", `/v1/moderation/repositories/${id}/recheck`, {});
+const fresh = async () => {
+  REPO_ID = ++nextRepo;
+  await fake({});
+  await ready();
+};
+
+describe("the review's findings (M5 step 7b)", () => {
+  it("waits when a protection can't be read, and never degrades a healthy link over it (M1)", async () => {
+    const r = await requested();
+    // A server error, a limit and a refusal on each read of the read-back: none is a definite answer.
+    for (const script of [{ actionsRead: 500 }, { actionsRead: 429 }, { actionsRead: 403 }, { readRepo: 503 }, { token: 500 }]) {
+      await ready({ script });
+      await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET merge_attempts = 0"));
+      await pass(r.id);
+      expect(await link(r.id), JSON.stringify(script)).toEqual({ status: "ready", status_reason: null });
+      expect(await change(r.id, r.task), JSON.stringify(script)).toMatchObject({ merge_state: "requested", merge_attempts: 1, merge_marked_at: null });
+    }
+    expect((await github()).calls).toEqual([]);
+    expect(await events(r.id, "repository.")).toEqual([]);
+    // Readable again, the merge goes through.
+    await ready({ script: {} });
+    await pass(r.id);
+    expect((await change(r.id, r.task)).merge_state).toBe("succeeded");
+  });
+
+  it("degrades the link when GitHub's default branch isn't the link's, and merges nothing into the stored one (M3)", async () => {
+    const r = await requested();
+    await ready({ defaultBranch: "trunk" });
+    await pass(r.id);
+    expect(await link(r.id)).toEqual({ status: "degraded", status_reason: "default_branch_changed" });
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "failed", merge_reason: "repo_not_ready", merge_marked_at: null });
+    expect((await github()).calls).toEqual([]);
+    expect(await events(r.id, "repository.")).toEqual([{ type: "repository.degraded", actor_id: "system", subject_id: null, task_id: null, reason: "default_branch_changed" }]);
+  });
+
+  it("puts a degraded link back to ready only on an operator's recheck that reads it exactly right (M1b)", async () => {
+    const r = await requested();
+    await ready({ rulesets: "extra_bypass" });
+    await pass(r.id);
+    expect(await link(r.id)).toEqual({ status: "degraded", status_reason: "bypass_differs" });
+    // Nothing recovers by itself, however often the alarm runs, even once the repository is right again.
+    await ready({ rulesets: "ready" });
+    await alarm(r.id, 3);
+    expect((await link(r.id)).status).toBe("degraded");
+    // Only an operator may ask: not the room's owner, an admin, an agent or someone outside.
+    for (const who of [OWNER, ADMIN, MERGER, AGENT]) {
+      const got = await recheck(who, r.id);
+      expect([got.status, got.code], who.id).toEqual([403, "not_allowed"]);
+    }
+    // Still wrong: it stays degraded, with what differs now.
+    await ready({ actionsEnabled: true });
+    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "degraded", reason: "actions_enabled" });
+    expect(await link(r.id)).toEqual({ status: "degraded", status_reason: "actions_enabled" });
+    // No definite answer changes nothing.
+    await ready({ actionsEnabled: false, script: { readRepo: 500 } });
+    const down = await recheck(OPERATOR, r.id);
+    expect([down.status, down.code]).toEqual([502, "provider_unavailable"]);
+    expect((await link(r.id)).status).toBe("degraded");
+    // Exactly right: ready again, said once, and recorded as the operator's action.
+    await ready({ script: {} });
+    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "ready", reason: null });
+    expect(await link(r.id)).toEqual({ status: "ready", status_reason: null });
+    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "ready", reason: null });
+    expect((await events(r.id, "repository.")).map((e) => [e.type, e.reason])).toEqual([["repository.degraded", "bypass_differs"], ["repository.ready_again", null]]);
+    expect((await readBack()).live).toBe(0);
+    // And a merge can be asked for again.
+    expect((await merge(MERGER, r.id, r.task)).status).toBe(200);
+    // With managed repositories off, there's no such thing to recheck.
+    await inRoom(r.id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
+    expect((await recheck(OPERATOR, r.id)).status).toBe(404);
+    expect((await recheck(OPERATOR, "ws_nowhere")).status).toBe(404);
+  });
+
+  it("counts every request, for the task and for the room, through the command itself (M2)", async () => {
+    const r = await approved();
+    await fake({ merge: "refuse" });
+    // Three requests an hour for one task, each failing: asking again doesn't loop without limit.
+    for (let n = 1; n <= 3; n++) {
+      expect((await merge(MERGER, r.id, r.task)).status, String(n)).toBe(200);
+      await pass(r.id);
+      expect(await change(r.id, r.task), String(n)).toMatchObject({ merge_state: "failed", merge_reason: "provider_refused", merge_attempts: n });
+    }
+    const fourth = await merge(MERGER, r.id, r.task);
+    expect([fourth.status, fourth.code]).toEqual([429, "rate_limited"]);
+    expect(await merges()).toHaveLength(3);
+    expect(await inRoom(r.id, (sql) => sql.exec("SELECT count(*) AS n FROM merge_request WHERE task_id = ?", r.task).one().n)).toBe(3);
+    // Twenty an hour for the room: six more tasks, three requests each, and the twenty-first request is refused.
+    let asked = 3;
+    let last = { status: 0, code: undefined as string | undefined };
+    for (let t = 0; t < 6 && asked < 21; t++) {
+      await pull(20 + t);
+      const task = await submitted(r.id, 20 + t);
+      await must(OWNER, "POST", `/v1/workspaces/${r.id}/tasks/${task}/verify`, { submission_no: 1, commit_sha: HEAD });
+      for (let n = 0; n < 3 && asked < 21; n++) {
+        last = await merge(MERGER, r.id, task);
+        asked += 1;
+        if (last.status === 200) await pass(r.id);
+      }
+    }
+    expect(asked).toBe(21);
+    expect([last.status, last.code]).toEqual([429, "rate_limited"]);
+    expect(await inRoom(r.id, (sql) => sql.exec("SELECT count(*) AS n FROM merge_request").one().n)).toBe(20);
+    expect(await merges()).toHaveLength(20);
+    // A refused request records nothing and counts for nothing.
+    expect((await events(r.id)).filter((e) => e.type === "merge.requested")).toHaveLength(20);
+  });
+
+  it("honours authority that ends while GitHub is answering: before the mark, and between the mark and the merge (M4)", async () => {
+    const ways = [
+      ["grant revoked", async (r: any) => void (await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) })), "grant_required"],
+      ["requester removed", async (r: any) => void (await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/members/${MERGER.id}`, { policy_version: await version(r.id) })), "access_revoked"],
+      ["room archived", async (r: any) => void (await must(OWNER, "POST", `/v1/workspaces/${r.id}/archive`, { policy_version: await version(r.id) })), "workspace_archived"],
+      ["room suspended", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE workspace SET suspended_at = 5, suspension_reason = 'test'")), "room_suspended"],
+    ] as const;
+    for (const [what, lose, reason] of ways) {
+      for (const point of ["before the mark", "between the mark and the merge"] as const) {
+        await fresh();
+        const r = await requested();
+        // The merge App's token requests wait at a gate: the read's first, then the mark's, then the merge's.
+        await fake({ mode: "gate" });
+        const running = pass(r.id);
+        await minting();
+        if (point === "between the mark and the merge") {
+          // Let the read go. The mark's intent is recorded, and its token request now waits.
+          await release();
+          await minting();
+        }
+        await lose(r);
+        await fake({ mode: "ok" });
+        await release();
+        await running;
+        const label = `${what}, ${point}`;
+        expect(await change(r.id, r.task), label).toMatchObject({ merge_state: "failed", merge_reason: reason, merge_called_at: null });
+        expect(await merges(), label).toEqual([]);
+        // Before the mark nothing was set. After it, the status is on the commit and nothing was merged with it.
+        expect((await github()).statuses.length, label).toBe(point === "before the mark" ? 0 : 1);
+        expect((await github()).pulls["7"].merged ?? false, label).toBe(false);
+        expect((await minted()).every((token) => !token.live), label).toBe(true);
+      }
+    }
+  });
+
+  it("reads GitHub before ending a merge whose call went out, whatever ends it, and records what the call did (M5)", async () => {
+    const dieAfterCall = async () => {
+      await fresh();
+      const r = await requested();
+      await dies(r.id, "after_merge_call");
+      await pass(r.id);
+      await dies(r.id, null);
+      return r;
+    };
+    // The call merged, and then: the grant goes, the room is archived, the repository's rules change.
+    for (const [what, then] of [
+      ["grant revoked", async (r: any) => void (await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) }))],
+      ["room archived", async (r: any) => void (await must(OWNER, "POST", `/v1/workspaces/${r.id}/archive`, { policy_version: await version(r.id) }))],
+      ["rules changed", async () => void (await ready({ rulesets: "no_update" }))],
+    ] as const) {
+      const r = await dieAfterCall();
+      await then(r);
+      await pass(r.id);
+      expect(await change(r.id, r.task), what).toMatchObject({ merge_state: "succeeded", merge_reason: null, merge_sha: MERGED });
+      expect(await merges(), what).toHaveLength(1);
+      if (what === "rules changed") expect(await link(r.id)).toEqual({ status: "degraded", status_reason: "ruleset_missing" });
+    }
+    // The intent to call was recorded and the call never went out: the read shows it open, so it ends as it would have.
+    await fresh();
+    const r = await requested();
+    await dies(r.id, "before_merge_call");
+    await pass(r.id);
+    expect((await change(r.id, r.task)).merge_called_at).toBeGreaterThan(0);
+    await dies(r.id, null);
+    await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) });
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "failed", merge_reason: "grant_required", merge_sha: null });
+    expect(await merges()).toEqual([]);
+    // Out of passes after a call: it reads, finds the merge, and records it. If GitHub can't be read, nothing is ended yet.
+    const spent = await dieAfterCall();
+    await inRoom(spent.id, (sql) => sql.exec("UPDATE task_change SET merge_attempts = 5"));
+    await fake({ mergeMint: 500 });
+    await pass(spent.id);
+    expect((await change(spent.id, spent.task)).merge_state).toBe("requested");
+    await fake({ mergeMint: 201 });
+    await pass(spent.id);
+    expect(await change(spent.id, spent.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED });
+  });
+
+  it("keeps an earlier pass's call on record when a later pass can't get a token to call with (L6)", async () => {
+    const r = await requested();
+    // A first call that GitHub answered 500 to, and didn't merge: it's on record.
+    await fake({ merge: "error" });
+    await pass(r.id);
+    const called = (await change(r.id, r.task)).merge_called_at;
+    expect(called).toBeGreaterThan(0);
+    // The next pass reads and marks, and then can't get the token for its merge call.
+    await fake({ merge: "ok", mode: "gate" });
+    const running = pass(r.id);
+    await minting();
+    await release();
+    await minting();
+    await release();
+    await minting();
+    await fake({ mode: "ok", mergeMint: 500 });
+    await release();
+    await running;
+    const kept = await change(r.id, r.task);
+    expect({ state: kept.merge_state, reason: kept.merge_reason, step: kept.merge_step, called: kept.merge_called_at }).toEqual({ state: "requested", reason: null, step: "merge", called: expect.any(Number) });
+    expect(kept.merge_called_at).toBeGreaterThanOrEqual(called);
+    expect(await merges()).toHaveLength(1);
+    // And a pass with no call before it does take its own back, so a merge seen later isn't taken for it.
+    await fresh();
+    const first = await requested();
+    await fake({ mode: "gate" });
+    const again = pass(first.id);
+    await minting();
+    await release();
+    await minting();
+    await release();
+    await minting();
+    await fake({ mode: "ok", mergeMint: 500 });
+    await release();
+    await again;
+    expect(await change(first.id, first.task)).toMatchObject({ merge_state: "requested", merge_called_at: null, merge_step: "marked" });
+  });
+});

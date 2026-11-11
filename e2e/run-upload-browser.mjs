@@ -73,16 +73,42 @@ async function waitForStack() {
   throw new Error("the local stack didn't come up");
 }
 
-/** Whether the API logged refusing this object for this reason. Its lines hold only IDs and codes. */
-async function refusalLogged(object, codes, waitMs = 10_000) {
-  const deadline = Date.now() + waitMs;
-  while (Date.now() < deadline) {
-    const found = logs().split("\n").some((line) => line.includes('"upload.refused"') && line.includes(object) && [codes].flat().some((code) => line.includes(code)));
-    if (found) return true;
-    await new Promise((done) => setTimeout(done, 200));
-  }
-  return false;
+/**
+ * The API's line refusing this object, parsed, as soon as a Workers process prints it, or null once `boundMs` has passed. It
+ * listens to the processes' output rather than rereading the log on a timer, so the only clock is the bound. Its lines hold
+ * only IDs and codes.
+ */
+function refusalLine(object, boundMs = 10_000) {
+  const find = () => {
+    for (const line of logs().split("\n")) {
+      if (!line.includes('"upload.refused"') || !line.includes(object)) continue;
+      // A line still arriving doesn't parse yet, and the next chunk brings the rest.
+      try {
+        return JSON.parse(line.slice(line.indexOf("{")));
+      } catch {}
+    }
+    return null;
+  };
+  // stack.mjs's own listeners come first, so the log holds each chunk by the time this hears it.
+  const streams = [backend.stack.stdout, backend.stack.stderr, dashboard.stack.stdout, dashboard.stack.stderr];
+  return new Promise((done) => {
+    const finish = (line) => {
+      clearTimeout(bound);
+      for (const stream of streams) stream.off("data", hear);
+      done(line);
+    };
+    const hear = () => {
+      const line = find();
+      if (line) finish(line);
+    };
+    const bound = setTimeout(() => finish(null), boundMs);
+    for (const stream of streams) stream.on("data", hear);
+    hear();
+  });
 }
+
+/** Whether the API logged refusing this object for this reason. */
+const refusalLogged = async (object, codes, boundMs) => [codes].flat().includes((await refusalLine(object, boundMs))?.code);
 
 async function main() {
   await waitForStack();
@@ -279,9 +305,14 @@ async function main() {
     });
     socket.on("error", failed);
   });
-  // Across these processes a reset doesn't get through, so the API sees a sender gone quiet, and gives up after its minute.
-  const goneRefused = await refusalLogged(gone.id, ["upload_mismatch", "upload_timed_out"], 75_000);
-  check(goneRefused, "a sender that vanishes ends its attempt at the API");
+  // Across these processes a reset doesn't get through, so the API sees a sender gone quiet. It ends the attempt on the first of
+  // its checks, every 15 s, that finds more than its 60 s idle limit since the last bytes: between 60 and 75 s after they stop.
+  // The bound is that latest moment and 15 s more for the line to reach this process, so it can't land on the API's own last
+  // check, as a 75 s wait did.
+  const API_IDLE_LIMIT_MS = 60_000;
+  const API_CHECK_EVERY_MS = 15_000;
+  const goneLine = await refusalLine(gone.id, API_IDLE_LIMIT_MS + API_CHECK_EVERY_MS + 15_000);
+  check(goneLine?.code === "upload_timed_out" && goneLine.ms > API_IDLE_LIMIT_MS && goneLine.ms <= API_IDLE_LIMIT_MS + API_CHECK_EVERY_MS + 5_000, "a sender that vanishes ends its attempt at the API", goneLine ? `${goneLine.code} after ${goneLine.ms} ms` : "nothing logged");
   await choose(small);
   const backAgain = await page.evaluate(
     ([path, token]) =>

@@ -89,11 +89,25 @@ export function closeTails(tails) {
   for (const tail of tails) if (tail.proc && tail.proc.exitCode === null && !tail.proc.signalCode) tail.proc.kill("SIGINT");
 }
 
-/** Every event a tail has read, as text to search. */
-export const tailText = (tail) => tail.stream.values.map((value) => JSON.stringify(value));
+/**
+ * Whether an event is a request whose path or query holds `needle`. The URL is parsed and only those two parts are
+ * looked at: a host, a header or a log line that happened to hold the same characters shows nothing about where a
+ * request went.
+ */
+export function requestHolds(event, needle) {
+  const address = event?.event?.request?.url;
+  if (typeof address !== "string" || typeof needle !== "string" || !needle) return false;
+  let url;
+  try {
+    url = new URL(address);
+  } catch {
+    return false;
+  }
+  return url.pathname.includes(needle) || url.search.includes(needle);
+}
 
-/** The apps whose tail holds none of these markers. A marker is a string of the run's own that a request carried. */
-export const without = (tails, markers) => tails.filter((tail) => !tailText(tail).some((text) => markers.some((marker) => text.includes(marker)))).map((tail) => tail.app);
+/** The apps whose tail holds no request carrying any of these markers. A marker is a string of the run's own, put in a request's path. */
+export const without = (tails, markers) => tails.filter((tail) => !tail.stream.values.some((event) => markers.some((marker) => requestHolds(event, marker)))).map((tail) => tail.app);
 
 /**
  * What a run prints when a tail didn't start, one line a tail. With no account named and wrangler saying it couldn't

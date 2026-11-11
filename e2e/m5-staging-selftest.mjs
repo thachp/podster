@@ -12,7 +12,7 @@ import { createHmac } from "node:crypto";
 import { childEnv, forbidden } from "./child-env.mjs";
 import { parseJsonc } from "./jsonc.mjs";
 import { missingWranglers } from "./m4-staging-lib.mjs";
-import { ACCOUNT_ENV, closeTails, downWithin, openTail, refusalLines, STAY_UP_SECONDS, TAIL_ARGS, tailEnv, tailFault, without, wranglerReason } from "./m5-tails.mjs";
+import { ACCOUNT_ENV, closeTails, downWithin, openTail, refusalLines, requestHolds, STAY_UP_SECONDS, TAIL_ARGS, tailEnv, tailFault, without, wranglerReason } from "./m5-tails.mjs";
 import {
   absentId, ASKPASS_SCRIPT, cloneUrlProblem, CREDENTIAL_ENV, deliveryBody, deliveryOutcomes, GrantLedger, gitEnv, isCommitSha, LATE_MERGE_MS, CLOCK_SKEW_MS, leaks, loggedText, logHits, lostAuthorityEnding, worstCaseSeconds, mergeCommitProblems, movedHeadEnding, parseArgs, PLAN,
   releaseStatusProblems, repositoryOrgProblem, requesterProblem, reviewStatusProblems, rulesetProblems, scrub, secretProblem, SIGN_UPS, signDelivery, STAGING, STAGING_APP, STAGING_ORG, stagingConfig, stagingOnly,
@@ -389,7 +389,7 @@ check(absentId("tsk_aa") === null && absentId("nounderscore") === null, "an ID t
   check(down.length === 2 && Date.now() - began < 10_000 && down.every((tail) => tail.fault === "wrangler exited with code 1"), "tails that can't start are found as soon as they've all gone, each by its exit, without waiting out the time");
   check(down[0].reason.startsWith("More than one account available but unable to select one in non-interactive mode. Please set the appropriate `account_id`") && down[1].reason.includes("This Worker does not exist on your account. [code: 10007]"), "each with what wrangler said was wrong");
   const printed = JSON.stringify(down) + refusalLines(down, {}).join("\n");
-  check(!printed.includes(account) && !printed.includes("fedcba9876543210") && !printed.includes("example.com") && !printed.includes("Someone") && !/\x1b/.test(printed) && down[1].reason.includes("/accounts/[an ID]/"), "and never an account's ID or name, an address, or a colour code: wrangler's list of accounts is cut");
+  check(!printed.includes(account) && !printed.includes("fedcba9876543210") && !printed.includes("@") && !printed.includes("Someone") && !/\x1b/.test(printed) && down[1].reason.includes("/accounts/[an ID]/"), "and never an account's ID or name, an address, or a colour code: wrangler's list of accounts is cut");
   const lines = refusalLines(down, {});
   check(lines.length === 3 && lines[0].startsWith("the log tail for apps/api didn't start: wrangler exited with code 1. wrangler said: ") && lines[2].includes("CLOUDFLARE_ACCOUNT_ID isn't set") && lines[2].includes("more than one account"), "the refusal names each tail, and says to set the account when none is named and wrangler couldn't choose");
   check(refusalLines(down, { CLOUDFLARE_ACCOUNT_ID: account }).length === 2 && refusalLines(down, { CLOUDFLARE_ACCOUNT_ID: "podster" }).at(-1).includes("isn't an account ID, so it wasn't passed on"), "it doesn't say that when the account is named, and says when what was set isn't an ID");
@@ -403,6 +403,15 @@ check(absentId("tsk_aa") === null && absentId("nounderscore") === null, "an ID t
   const first = running[0].stream.values[0];
   check(JSON.stringify(first?.args) === JSON.stringify(TAIL_ARGS) && first?.account === account && JSON.stringify((first?.names ?? []).filter((name) => name !== "__CF_USER_TEXT_ENCODING")) === JSON.stringify(["CLOUDFLARE_ACCOUNT_ID", "HOME", "PATH"]) && running[1].stream.values[0]?.account === null, "the child really is given the tail's arguments and the account's ID, and no token");
   check(JSON.stringify(without(running, ["marker-one"])) === "[]" && JSON.stringify(without(running, ["marker-two"])) === JSON.stringify(["api", "gateway"]) && JSON.stringify(without(running, ["marker-two", "marker-one"])) === "[]", "a tail is shown connected only by a marker it holds: any one of the markers sent");
+  // A marker counts only in the path or the query of the request an event is for, read from the parsed URL.
+  const event = (url, extra = {}) => ({ outcome: "ok", logs: [], exceptions: [], event: { request: { url, ...extra } } });
+  check(requestHolds(event("https://api.internal/v1/public/workrooms/pub_abc123"), "abc123") && requestHolds(event("https://gateway.test/api/v1/workspaces/ws_abc123?x=1"), "abc123") && requestHolds(event("https://gateway.test/find?room=ws_abc123"), "abc123"), "a marker in a request's path or query is found");
+  for (const [title, held] of [
+    ["only in the host", event("https://abc123.test/v1/public/workrooms/pub_other")], ["only in the user name", event("https://abc123@gateway.test/x")], ["only in the fragment", event("https://gateway.test/x#abc123")],
+    ["only in a header", event("https://gateway.test/x", { headers: { referer: "https://gateway.test/abc123" } })], ["only in a log line", { logs: [{ message: ["abc123"] }], event: { request: { url: "https://gateway.test/x" } } }],
+    ["in an event with no request", { event: { rpcMethod: "getWorkroom", note: "abc123" } }], ["in a URL that isn't one", event("abc123")], ["in nothing", {}],
+  ]) check(!requestHolds(held, "abc123"), `a marker ${title} isn't`);
+  check(!requestHolds(event("https://gateway.test/abc123"), "") && !requestHolds(event("https://gateway.test/abc123"), undefined), "and an empty marker matches nothing");
   closeTails([...running, ...mixed]);
   await new Promise((done) => setTimeout(done, 400));
   check(running.every((tail) => tail.proc.exitCode === 0), "told to stop, a tail exits cleanly");

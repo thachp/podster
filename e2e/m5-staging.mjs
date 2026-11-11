@@ -60,7 +60,7 @@ import {
   stagingConfig, STATUS_CONTEXT, steady, Tally, USAGE, WEBHOOK_PATH, WEBHOOK_SECRET_ENV, webhookSecretProblem,
 } from "./m5-staging-lib.mjs";
 import { RoomPublisher } from "./room-publisher.mjs";
-import { ACCOUNT_ENV, closeTails, downWithin, openTail, refusalLines, STAY_UP_SECONDS, tailFault as tailProblem, tailText, without } from "./m5-tails.mjs";
+import { ACCOUNT_ENV, closeTails, downWithin, openTail, refusalLines, requestHolds, STAY_UP_SECONDS, tailFault as tailProblem, without } from "./m5-tails.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const parsed = parseArgs(process.argv.slice(2), process.env);
@@ -1759,7 +1759,7 @@ try {
     stopTails();
     for (const tail of tails) ok(!(tail.error ?? tail.stream.error), `the ${tail.app}'s tail: ${tail.error ?? tail.stream.error}`);
     const ids = [room, roomB].filter(Boolean);
-    for (const tail of tails.filter((t) => t.app !== "web")) ok(tailText(tail).some((text) => ids.some((id) => text.includes(id))), `the ${tail.app}'s tail holds none of this run's own requests`);
+    for (const tail of tails.filter((t) => t.app !== "web")) ok(tail.stream.values.some((event) => ids.some((id) => requestHolds(event, id))), `the ${tail.app}'s tail holds none of this run's own requests`);
     const needles = [...[...kinds].map(([value, kind]) => ({ label: kind, value })), ...chosen, { label: "the run's name, which every title carries", value: RUN }, { label: "a submission's note", value: MARK }];
     // A hit is named by the Worker, the log line's own event name and the kind of string it held: never the string.
     const hits = logHits(tails.map((tail) => ({ app: tail.app, events: tail.stream.values })), needles);

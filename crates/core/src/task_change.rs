@@ -225,12 +225,19 @@ pub enum ReadFailure {
     /// is the installation gone and says nothing about any pull request. A key, a permission or the installation: every
     /// change in the room would fail the same way, so the whole room's reads wait and no change is given up on.
     Credential,
+    /// GitHub limited how fast Podster may call it (`crate::rate_limit`). It says nothing about the key, the
+    /// installation or any pull request, so it's never `Credential` and never counts towards giving up on a change.
+    /// The room's reads wait for the time GitHub gave, and nothing is recorded as a refusal.
+    RateLimited,
     /// Anything else: no answer, an error, or an answer that couldn't be read. That change waits.
     Other,
 }
 
-pub fn classify_read_failure(stage: ReadStage, status: u16) -> ReadFailure {
+/// `rate_limited` is whether the answer was a rate limit by `crate::rate_limit::rate_limit_wait_ms`, which is decided
+/// before the status is looked at: a limit is a `403` or `429` too.
+pub fn classify_read_failure(stage: ReadStage, status: u16, rate_limited: bool) -> ReadFailure {
     match (stage, status) {
+        _ if rate_limited => ReadFailure::RateLimited,
         (_, 401 | 403) | (ReadStage::Mint, 404) => ReadFailure::Credential,
         _ => ReadFailure::Other,
     }
@@ -581,13 +588,13 @@ mod tests {
         for stage in [ReadStage::Mint, ReadStage::Read] {
             for refused in [401, 403] {
                 assert_eq!(
-                    classify_read_failure(stage, refused),
+                    classify_read_failure(stage, refused, false),
                     ReadFailure::Credential
                 );
             }
             for other in [0, 422, 429, 500, 502] {
                 assert_eq!(
-                    classify_read_failure(stage, other),
+                    classify_read_failure(stage, other, false),
                     ReadFailure::Other,
                     "{other}"
                 );
@@ -595,15 +602,38 @@ mod tests {
         }
         // No token because the installation is gone is a credential problem. It never counts as a missing pull request.
         assert_eq!(
-            classify_read_failure(ReadStage::Mint, 404),
+            classify_read_failure(ReadStage::Mint, 404, false),
             ReadFailure::Credential
         );
         assert_eq!(
-            classify_read_failure(ReadStage::Read, 404),
+            classify_read_failure(ReadStage::Read, 404, false),
             ReadFailure::Other
         );
         assert!(!stops_watching(MAX_NOT_FOUND_READS - 1));
         assert!(stops_watching(MAX_NOT_FOUND_READS));
+    }
+
+    #[test]
+    fn a_rate_limit_is_never_a_refused_credential() {
+        // A `403` or `429` that GitHub marked as a limit, at either stage, is its own outcome.
+        for stage in [ReadStage::Mint, ReadStage::Read] {
+            for status in [403, 429] {
+                assert_eq!(
+                    classify_read_failure(stage, status, true),
+                    ReadFailure::RateLimited,
+                    "{status}"
+                );
+            }
+        }
+        // The same statuses without the limit's signals are what they were.
+        assert_eq!(
+            classify_read_failure(ReadStage::Read, 403, false),
+            ReadFailure::Credential
+        );
+        assert_eq!(
+            classify_read_failure(ReadStage::Read, 429, false),
+            ReadFailure::Other
+        );
     }
 
     #[test]

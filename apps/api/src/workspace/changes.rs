@@ -294,6 +294,56 @@ fn count_read(sql: &SqlStorage, caller: Option<&str>, now: i64) -> R<bool> {
     Ok(room)
 }
 
+/// The caller recorded on a scheduled read-back of the repository (`readiness_upkeep`), which counts against the
+/// refresh job's hourly cap like any of its reads.
+const READINESS_CALLER: &str = "readiness";
+
+/// Counts one scheduled read-back against the repository's hourly read cap, if there's room.
+pub(super) fn count_readiness_read(sql: &SqlStorage, now: i64) -> R<bool> {
+    exec(
+        sql,
+        "DELETE FROM repo_read WHERE at <= ?",
+        vec![(now - HOUR_MS).into()],
+    )?;
+    let made = rows(
+        sql,
+        "SELECT count(*) AS n FROM repo_read WHERE kind = 'job'",
+        vec![],
+    )?
+    .first()
+    .map_or(0, |row| int(&row["n"]));
+    if !read_allowed(made.clamp(0, i64::from(u32::MAX)) as u32) {
+        return Ok(false);
+    }
+    exec(
+        sql,
+        "INSERT INTO repo_read (at, kind, caller) VALUES (?, 'job', ?)",
+        vec![now.into(), READINESS_CALLER.into()],
+    )?;
+    Ok(true)
+}
+
+/// When the last scheduled read-back within the hour was made, if one was.
+pub(super) fn last_readiness_read(sql: &SqlStorage, now: i64) -> R<Option<i64>> {
+    Ok(rows(
+        sql,
+        "SELECT max(at) AS at FROM repo_read WHERE kind = 'job' AND caller = ? AND at > ?",
+        vec![READINESS_CALLER.into(), (now - HOUR_MS).into()],
+    )?
+    .first()
+    .and_then(|row| row["at"].as_i64()))
+}
+
+/// GitHub rate-limited a read: the refresh job's reads of this repository wait until `until`, or longer if they were
+/// already waiting. Nothing else is recorded: a limit is no refusal of Podster (the M5 security review's F1).
+fn hold_reads(sql: &SqlStorage, repo_id: i64, until: i64) -> R<()> {
+    exec(
+        sql,
+        "UPDATE repo_link SET reads_not_before = max(COALESCE(reads_not_before, 0), ?) WHERE provider_repo_id = ?",
+        vec![until.into(), repo_id.into()],
+    )
+}
+
 /// A read's token that GitHub didn't confirm taking back lives out its hour: read-only, on the one repository. Said in
 /// the log with IDs only.
 fn note_unrevoked(read: &PullRead, room: &str, task: &str) {
@@ -348,6 +398,11 @@ impl Workspace {
                     "{}",
                     json!({ "event": "task_change.read_failed", "ws": identity.workspace_id, "task": task_id, "status": failure.status() })
                 );
+                // A limit holds the refresh job's reads too, so it doesn't spend the rest of the installation's hour.
+                if let Some(wait) = failure.rate_limit_wait_ms() {
+                    let until = now_ms() + wait;
+                    let _ = self.in_transaction(move |sql| hold_reads(sql, repo_id, until));
+                }
                 Outcome::Refused(502, "provider_unavailable")
             }
         })
@@ -708,10 +763,18 @@ fn apply_read(
         }
         Ok(false)
     };
-    let failed = |stage: ReadStage, status: u16| -> R<bool> {
+    let failed = |stage: ReadStage, status: u16, limit_wait: Option<i64>| -> R<bool> {
         log_failed(status);
-        if classify_read_failure(stage, status) == ReadFailure::Other {
-            return waits(0);
+        match classify_read_failure(stage, status, limit_wait.is_some()) {
+            ReadFailure::Other => return waits(0),
+            ReadFailure::RateLimited => {
+                // GitHub limited the rate, for every read through this installation. The room's reads wait until the
+                // time GitHub gave, and nothing else changes: no refusal is recorded, no change is touched, and the
+                // run of refusals isn't added to. This alarm's other reads stop.
+                hold_reads(sql, watch.repo_id, now + limit_wait.unwrap_or_default())?;
+                return Ok(true);
+            }
+            ReadFailure::Credential => {}
         }
         // A key, a permission or the installation: every change in the room would fail the same way, so the room's
         // reads wait and no change is touched. Said once for each run of refusals, with a fixed code.
@@ -749,12 +812,12 @@ fn apply_read(
         {
             seen
         }
-        Ok(PullAnswer::Found(_)) => return failed(ReadStage::Read, 0),
+        Ok(PullAnswer::Found(_)) => return failed(ReadStage::Read, 0, None),
         Ok(PullAnswer::Missing) => {
             log_failed(404);
             return waits(int(&row["not_found_reads"]).saturating_add(1).clamp(1, 64));
         }
-        Err(failure) => return failed(stage, failure.status()),
+        Err(failure) => return failed(stage, failure.status(), failure.rate_limit_wait_ms()),
     };
     if link.read_failures > 0 || link.reads_not_before.is_some() {
         exec(
@@ -967,10 +1030,17 @@ impl Workspace {
                         Ok(seen) => self.in_transaction(move |sql| {
                             apply_checks(sql, &task_id, &head, &seen, now_ms())
                         })?,
-                        Err(failure) => console_error!(
-                            "{}",
-                            json!({ "event": "task_change.checks_read_failed", "ws": room, "task": task_id, "status": failure.status() })
-                        ),
+                        Err(failure) => {
+                            console_error!(
+                                "{}",
+                                json!({ "event": "task_change.checks_read_failed", "ws": room, "task": task_id, "status": failure.status() })
+                            );
+                            if let Some(wait) = failure.rate_limit_wait_ms() {
+                                let until = now_ms() + wait;
+                                self.in_transaction(move |sql| hold_reads(sql, repo_id, until))?;
+                                break;
+                            }
+                        }
                     }
                 }
             }

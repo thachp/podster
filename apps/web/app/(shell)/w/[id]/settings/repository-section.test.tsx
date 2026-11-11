@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setUrl } from "@/test/next-navigation";
 import { RepositorySection } from "./repository-section";
-import { availability, explainGrantRefusal, explainRepositoryRefusal, nameProblem, PUBLIC_WARNING, reasonSentence, repositoryUrl, type RepoLink, type RepoRequest, type RoomRepository } from "./repository-model";
+import { availability, explainGrantRefusal, explainRepositoryRefusal, nameProblem, publicWarning, reasonSentence, repositoryUrl, type RepoLink, type RepoRequest, type RoomRepository } from "./repository-model";
 
 const request = (over: Partial<RepoRequest> = {}): RepoRequest => ({ id: "rr_1", state: "pending", name: "engineering", visibility: "public", reason: null, requested_by: "per_owner", requested_at: Date.UTC(2026, 10, 10), updated_at: Date.UTC(2026, 10, 10), attempts_left: 4, ...over });
 const link = (over: Partial<RepoLink> = {}): RepoLink => ({ id: "rl_1", provider: "github", provider_repo_id: 42, full_name: "podsterdev/engineering", visibility: "public", default_branch: "main", status: "ready", status_reason: null, created_at: 1, verified_at: Date.UTC(2026, 10, 10), updated_at: 1, ...over });
@@ -76,11 +76,12 @@ describe("each state, in words", () => {
     expect(screen.getByText(/as many times as a workroom is allowed/)).toBeInTheDocument();
   });
 
-  it("uncertain: says honestly a repository may or may not exist, and that an operator can check", () => {
+  it("uncertain: says honestly a repository may or may not exist, and promises no operator's check that doesn't exist", () => {
     show({ request: request({ state: "uncertain", reason: "creation_outcome_unknown" }), repository: null }, { runsRepository: false });
     expect(screen.getByText("Outcome unknown")).toBeInTheDocument();
     expect(screen.getByText(/may or may not have been created/)).toBeInTheDocument();
-    expect(screen.getByText(/A Podster operator can check/)).toBeInTheDocument();
+    expect(screen.getByText(/a retry uses a new name/)).toBeInTheDocument();
+    expect(screen.queryByText(/operator can/)).toBeNull();
     expect(screen.queryByRole("button")).toBeNull();
   });
 
@@ -92,6 +93,15 @@ describe("each state, in words", () => {
     show({ request: request({ state: "ready" }), repository: link({ status: "suspended" }) });
     expect(screen.getByText("Suspended")).toBeInTheDocument();
     expect(screen.getByText(/coding tasks are blocked/)).toBeInTheDocument();
+    // Nothing in Podster suspends a repository yet, so nothing says Podster did.
+    expect(screen.queryByText(/Podster has suspended/)).toBeNull();
+  });
+
+  it("says plainly there's no reset once setup has run as often as it may, and no operator can reset it", () => {
+    show({ request: request({ state: "failed", reason: "provider_refused", attempts_left: 0 }), repository: null });
+    expect(screen.getByText(/it can't be reset yet/)).toBeInTheDocument();
+    expect(screen.queryByText(/operator can reset/)).toBeNull();
+    expect(explainRepositoryRefusal("retry_limit_reached")).not.toMatch(/operator/);
   });
 
   it("says plainly when an operator took managed repositories away from the organization, instead of a button that will be refused", () => {
@@ -126,8 +136,13 @@ describe("asking for the repository", () => {
     await userEvent.type(field, "engineering");
     await userEvent.click(screen.getByRole("button", { name: "Create a repository" }));
     const dialog = await screen.findByRole("alertdialog");
-    // Before anything is created: public, pushed branches public at once, never deleted.
-    for (const line of PUBLIC_WARNING) expect(within(dialog).getByText(line)).toBeInTheDocument();
+    // Before anything is created: public, in Podster's organization and not the room's, anything an agent with a push
+    // grant pushes is public at once, and Podster can't delete it for them today.
+    const lines = publicWarning(undefined);
+    for (const line of lines) expect(within(dialog).getByText(line)).toBeInTheDocument();
+    expect(lines.join(" ")).toMatch(/public on GitHub, in Podster's GitHub organization, not in yours/);
+    expect(lines.join(" ")).toMatch(/Any agent given a push grant can publish files there/);
+    expect(lines.join(" ")).toMatch(/Podster can't delete it for you today/);
     expect(sent).toHaveLength(0);
     await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
     expect(sent).toHaveLength(0);
@@ -209,7 +224,7 @@ describe("every code as a sentence", () => {
   });
 
   it("turns every reason code the contract lists into its own sentence", () => {
-    const codes = ["managed_repositories_off", "provisioning_not_configured", "token_refused", "not_delegated", "delegation_unavailable", "room_archived", "requester_not_owner", "requester_lost_authority", "name_taken", "provider_refused", "wrong_owner", "creation_outcome_unknown", "read_back_failed", "setup_call_failed", "wrong_repository", "visibility_differs", "archived", "no_initial_commit", "actions_enabled", "actions_unreadable", "ruleset_missing", "ruleset_inactive", "ruleset_differs", "bypass_differs", "unexpected_ruleset", "authority_lost", "internal_error"];
+    const codes = ["managed_repositories_off", "provisioning_not_configured", "token_refused", "not_delegated", "delegation_unavailable", "room_archived", "requester_not_owner", "requester_lost_authority", "name_taken", "provider_refused", "wrong_owner", "creation_outcome_unknown", "read_back_failed", "setup_call_failed", "wrong_repository", "visibility_differs", "archived", "no_initial_commit", "actions_enabled", "actions_unreadable", "ruleset_missing", "ruleset_inactive", "ruleset_differs", "bypass_differs", "unexpected_ruleset", "settings_differ", "workflow_permissions_differ", "provider_rate_limited", "authority_lost", "internal_error"];
     const sentences = codes.map(reasonSentence);
     expect(new Set(sentences).size).toBe(codes.length);
     // None falls back to the code itself.

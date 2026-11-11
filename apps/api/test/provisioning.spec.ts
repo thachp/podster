@@ -38,6 +38,8 @@ type Call = { method: string; path: string; body: any; auth: string; scope?: "al
 const fake = async (path: string, body?: unknown) => (await fetch(`https://github-fake.example.com${path}`, { method: "POST", body: JSON.stringify(body ?? {}) })).json() as Promise<any>;
 const github = async () => (await fake("/state")) as { calls: Call[]; repos: any[]; liveTokens: ("all" | number[])[] };
 const TOKENS = "/access_tokens";
+/** What every provisioning token asks for, and the only answer it accepts. */
+const PROVISIONING = { administration: "write", metadata: "read" };
 const REVOKE = "/installation/token";
 const tokenCall = (c: Call) => c.path.endsWith(TOKENS) || c.path === REVOKE;
 /** Anything that would delete or edit at GitHub. A token revoking itself isn't one. */
@@ -736,7 +738,7 @@ describe("the provisioning job", () => {
     // What went to GitHub, in order: one token from a signed App JWT, one creation in the configured organization, a
     // read, the three pieces of setup, and the read that decides.
     const id = made.id;
-    const readBack = [`GET /repositories/${id}`, `GET /repositories/${id}/branches/main`, `GET /repositories/${id}/actions/permissions`, `GET /repositories/${id}/rulesets`];
+    const readBack = [`GET /repositories/${id}`, `GET /repositories/${id}/branches/main`, `GET /repositories/${id}/actions/permissions`, `GET /repositories/${id}/actions/permissions/workflow`, `GET /repositories/${id}/rulesets`];
     const two = made.rulesets.map((x: any) => `GET /repositories/${id}/rulesets/${x.id}`);
     const mint = `POST /app/installations/${GH.installationId}/access_tokens`;
     expect(seen.map((c) => `${c.method} ${c.path}`)).toEqual([
@@ -749,12 +751,15 @@ describe("the provisioning job", () => {
       `DELETE ${REVOKE}`,
     ]);
     expect(seen.map((c) => c.auth)).toEqual(seen.map((c) => (c.path.endsWith(TOKENS) ? "app" : "token")));
-    expect(seen[0].body).toBeNull();
-    expect(seen[3].body).toEqual({ repository_ids: [id] });
+    // Each token asks for provisioning's two permissions by name, and the second is narrowed to the one repository.
+    expect(seen[0].body).toEqual({ permissions: PROVISIONING });
+    expect(seen[3].body).toEqual({ repository_ids: [id], permissions: PROVISIONING });
     expect(seen.slice(1, 3).map((c) => c.scope)).toEqual(["all", "all"]);
     expect(seen.slice(4).map((c) => c.scope)).toEqual(seen.slice(4).map(() => [id]));
     expect((await github()).liveTokens).toEqual([]);
-    expect(seen[1].body).toEqual({ name: "engineering", private: false, auto_init: true });
+    // Issues, wiki, projects and auto-merge off from the start, and branches kept after a merge.
+    expect(seen[1].body).toEqual({ name: "engineering", private: false, auto_init: true, has_issues: false, has_wiki: false, has_projects: false, allow_auto_merge: false, delete_branch_on_merge: false });
+    expect(made.settings).toEqual({ has_issues: false, has_wiki: false, has_projects: false, has_discussions: false, allow_auto_merge: false, delete_branch_on_merge: false });
     // The repository as setup left it: Actions off, and exactly the two rulesets of ADR 0009.
     expect(made.actionsEnabled).toBe(false);
     const [review, update] = made.rulesets;
@@ -945,6 +950,14 @@ describe("the provisioning job", () => {
       ["the repository is archived", { fresh: { archived: true } }, "archived", 0],
       ["a setup call is refused", { ruleset: "forbidden" }, "setup_call_failed", 2],
       ["switching Actions off is refused", { disableActions: "forbidden" }, "setup_call_failed", 1],
+      // Settings creation turned off, found on (the M5 security review's F7): never switched back by setup.
+      ["issues came back on", { fresh: { settings: { has_issues: true, has_wiki: false, has_projects: false, has_discussions: false, allow_auto_merge: false, delete_branch_on_merge: false } } }, "settings_differ", 0],
+      ["the wiki came back on", { fresh: { settings: { has_issues: false, has_wiki: true, has_projects: false, has_discussions: false, allow_auto_merge: false, delete_branch_on_merge: false } } }, "settings_differ", 0],
+      ["discussions are on", { fresh: { settings: { has_issues: false, has_wiki: false, has_projects: false, has_discussions: true, allow_auto_merge: false, delete_branch_on_merge: false } } }, "settings_differ", 0],
+      ["auto-merge is on", { fresh: { settings: { has_issues: false, has_wiki: false, has_projects: false, has_discussions: false, allow_auto_merge: true, delete_branch_on_merge: false } } }, "settings_differ", 0],
+      ["merged branches are deleted", { fresh: { settings: { has_issues: false, has_wiki: false, has_projects: false, has_discussions: false, allow_auto_merge: false, delete_branch_on_merge: true } } }, "settings_differ", 0],
+      // Workflows that can write are narrowed by setup, and one that stays wide is a difference.
+      ["workflows can still write", { fresh: { workflow: { default_workflow_permissions: "write", can_approve_pull_request_reviews: false } }, workflowWrite: "ignore" }, "workflow_permissions_differ", 4],
     ];
     for (const [what, script, reason, setupCalls] of cases) {
       const r = await room({ script });
@@ -958,6 +971,96 @@ describe("the provisioning job", () => {
       expect(await indexRow(made.id), what).toBeNull();
       expect((await eventTypes(r.id)).filter((t) => t.startsWith("repository.")), what).toEqual(["repository.requested", "repository.setup_failed"]);
     }
+  });
+
+  it("narrows workflows that could write or approve, and reads them back read-only before linking", async () => {
+    const r = await room({ script: { fresh: { workflow: { default_workflow_permissions: "write", can_approve_pull_request_reviews: true } } } });
+    await ask(r);
+    expect((await settled(r)).request).toMatchObject({ state: "ready", reason: null });
+    const [made] = (await github()).repos;
+    expect(made.workflow).toEqual({ default_workflow_permissions: "read", can_approve_pull_request_reviews: false });
+    const put = (await github()).calls.filter((c) => c.method === "PUT" && c.path.endsWith("/actions/permissions/workflow"));
+    expect(put.map((c) => c.body)).toEqual([{ default_workflow_permissions: "read", can_approve_pull_request_reviews: false }]);
+  });
+
+  it("links a repository whose merge settings GitHub doesn't show to provisioning's token", async () => {
+    const r = await room({ script: { fresh: { hideMergeSettings: true } } });
+    await ask(r);
+    expect((await settled(r)).request).toMatchObject({ state: "ready", reason: null });
+  });
+
+  it("uses a provisioning token only if GitHub's answer is exactly what was asked for, and revokes one that isn't", async () => {
+    // [how the answer differs, the reason, whether a repository was made]
+    const cases: [string, string, boolean][] = [
+      ["extra_permission", "token_refused", false],
+      ["long_life", "token_refused", false],
+      ["no_expiry", "token_refused", false],
+      // The creation token can't be narrowed, so reaching another repository shows only on the narrowed one.
+      ["other_repo", "read_back_failed", true],
+    ];
+    for (const [tokenMode, reason, madeOne] of cases) {
+      const r = await room({ script: { tokenMode } });
+      await ask(r);
+      expect((await settled(r)).request, tokenMode).toMatchObject({ state: "failed", reason });
+      const state = await github();
+      expect(state.repos.length, tokenMode).toBe(madeOne ? 1 : 0);
+      // Whatever came back was taken back unused: nothing but the revocation went out with it.
+      expect(state.liveTokens, tokenMode).toEqual([]);
+      if (!madeOne) expect(state.calls.map((c) => `${c.method} ${c.path}`), tokenMode).toEqual([`POST /app/installations/${GH.installationId}/access_tokens`, `DELETE ${REVOKE}`]);
+    }
+  });
+
+  it("waits out a GitHub rate limit without spending a run, and sends the same name again (M5 security review F5)", async () => {
+    /** Runs the room's alarm until the job has waited out a limit or ended, and answers the request row. */
+    const limitedOrEnded = async (r: { id: string }) => {
+      for (let i = 0; i < 80; i++) {
+        await alarmPass(stub(r.id));
+        const [row] = await rowsOf(r.id, "repo_request");
+        if (row.job_failures > 0 || row.state !== "pending") return row;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      throw new Error("the job neither waited nor ended");
+    };
+    const waitOver = (r: { id: string }) => inRoom(r.id, (sql) => sql.exec("UPDATE repo_request SET job_not_before = NULL"));
+    // [what GitHub limited, the fake's script, whether a repository was made before the limit]
+    const cases: [string, object, boolean][] = [
+      ["the creation call, by the primary limit", { create: ["limited", "ok"] }, false],
+      ["the creation call, by a secondary limit", { create: ["secondary", "ok"] }, false],
+      ["the creation token, by a bare 429", { token: { kind: "429" } }, false],
+      ["a setup call", { setupLimited: 1 }, true],
+    ];
+    for (const [what, script, madeFirst] of cases) {
+      const r = await room({ script });
+      await ask(r);
+      const before = Date.now();
+      const waiting = await limitedOrEnded(r);
+      // Still pending, with the run given back and the wait GitHub gave: neither refused nor counted against the room.
+      expect(waiting, what).toMatchObject({ state: "pending", runs: 0, job_failures: 1, reason: null });
+      expect(waiting.job_not_before, what).toBeGreaterThanOrEqual(before + 1_000);
+      expect(waiting.job_not_before, what).toBeLessThanOrEqual(Date.now() + 60 * 60_000);
+      // A limit made nothing, so no attempt stays on record as one that may have gone out. A limit after creation leaves
+      // creation's own record as it was.
+      expect((await rowsOf(r.id, "repo_request_attempt")).map((a) => a.outcome), what).toEqual(madeFirst ? ["created"] : []);
+      expect((await github()).repos.length, what).toBe(madeFirst ? 1 : 0);
+      expect((await eventTypes(r.id)).filter((t) => t.startsWith("repository.")), what).toEqual(["repository.requested"]);
+      // Once the wait is over the job goes on, under the same name, and the room still has all five runs.
+      if ("token" in script) await fake("/script", { token: 201 });
+      await waitOver(r);
+      const done = await settled(r);
+      expect(done.request, what).toMatchObject({ state: "ready", reason: null });
+      expect((await github()).repos.map((x) => x.name), what).toEqual(["engineering"]);
+      expect((await rowsOf(r.id, "repo_request"))[0], what).toMatchObject({ runs: 1, job_failures: 0 });
+    }
+  });
+
+  it("spends the run once a request has waited out as many limits as it may", async () => {
+    const r = await room({ script: { create: ["limited"] } });
+    await ask(r);
+    // The 24 waits before this one were used up, as a day of limits would.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_request SET job_failures = 24"));
+    expect((await settled(r)).request).toMatchObject({ state: "failed", reason: "provider_rate_limited" });
+    expect((await rowsOf(r.id, "repo_request"))[0]).toMatchObject({ runs: 1, job_failures: 0 });
+    expect((await github()).repos).toEqual([]);
   });
 
   it("never repairs a rule that's there and wrong: a retry reads it again and fails again", async () => {
@@ -1099,7 +1202,7 @@ describe("the provisioning job", () => {
     expect((await settled(held)).request.state).toBe("ready");
     const after = await github();
     expect(after.calls.filter((c) => c.scope === "all")).toEqual([]);
-    expect(after.calls.find((c) => c.path.endsWith(TOKENS))?.body).toEqual({ repository_ids: [after.repos[0].id] });
+    expect(after.calls.find((c) => c.path.endsWith(TOKENS))?.body).toEqual({ repository_ids: [after.repos[0].id], permissions: PROVISIONING });
     expect(after.liveTokens).toEqual([]);
   });
 

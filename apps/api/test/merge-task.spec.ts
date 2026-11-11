@@ -209,7 +209,7 @@ describe("asking for a merge", () => {
     for (const at of [done.merge_marked_at, done.merge_mark_set_at, done.merge_called_at, done.merge_finished_at]) expect(at).toBeGreaterThan(0);
     // Readiness first, with the provisioning App narrowed to this repository; then a read; the mark; the merge and its reads.
     const back = await readBack();
-    expect(back.reads.map((read) => read.path)).toEqual([`/repositories/${REPO_ID}`, `/repositories/${REPO_ID}/branches/main`, `/repositories/${REPO_ID}/actions/permissions`, `/repositories/${REPO_ID}/rulesets?per_page=100`.replace("?per_page=100", ""), `/repositories/${REPO_ID}/rulesets/1`, `/repositories/${REPO_ID}/rulesets/2`]);
+    expect(back.reads.map((read) => read.path)).toEqual([`/repositories/${REPO_ID}`, `/repositories/${REPO_ID}/branches/main`, `/repositories/${REPO_ID}/actions/permissions`, `/repositories/${REPO_ID}/actions/permissions/workflow`, `/repositories/${REPO_ID}/rulesets?per_page=100`.replace("?per_page=100", ""), `/repositories/${REPO_ID}/rulesets/1`, `/repositories/${REPO_ID}/rulesets/2`]);
     expect(back.reads.every((read) => JSON.stringify(read.scope) === JSON.stringify([REPO_ID]))).toBe(true);
     const seen = await github();
     expect(seen.calls.map((c) => [c.method, c.path, c.permissions, c.status])).toEqual([

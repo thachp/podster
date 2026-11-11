@@ -909,7 +909,7 @@ fn observation<'a>(pull: &'a PullSeen, default_branch_has: Option<bool>) -> Pull
 
 /// Sets a ready link `degraded`, with the reason and an event for the room's owner and admins. Only for a definite
 /// difference from what provisioning set. Coding work in the room stops until an operator has rechecked it.
-fn degrade(sql: &SqlStorage, repo_id: i64, code: &'static str, now: i64) -> R<()> {
+pub(super) fn degrade(sql: &SqlStorage, repo_id: i64, code: &'static str, now: i64) -> R<()> {
     let was_ready = !rows(
         sql,
         "SELECT 1 AS ready FROM repo_link WHERE provider_repo_id = ? AND status = 'ready'",
@@ -924,6 +924,8 @@ fn degrade(sql: &SqlStorage, repo_id: i64, code: &'static str, now: i64) -> R<()
         "UPDATE repo_link SET status = 'degraded', status_reason = ?, updated_at = ? WHERE provider_repo_id = ? AND status = 'ready'",
         vec![code.into(), now.into(), repo_id.into()],
     )?;
+    // Every token agents hold on it is marked for revocation in this same transaction (the M5 security review's F2).
+    store::mark_stale_repo_tokens(sql, now)?;
     record_event(
         sql,
         "repository.degraded",

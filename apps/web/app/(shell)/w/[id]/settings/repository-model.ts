@@ -5,7 +5,13 @@ import { explainRefusal } from "../team/model";
 export type RepoRequest = { id: string; state: "pending" | "ready" | "failed" | "uncertain"; name: string; visibility: "public" | "private"; reason: string | null; requested_by: string; requested_at: number; updated_at: number; attempts_left: number };
 export type RepoLink = { id: string; provider: "github"; provider_repo_id: number; full_name: string; visibility: "public" | "private"; default_branch: string; status: "ready" | "degraded" | "suspended"; status_reason: string | null; created_at: number; verified_at: number | null; updated_at: number };
 /** `delegated` is present only for the room's owner and admins, and only when the API could read it. Display only: the request command decides. */
-export type RoomRepository = { request: RepoRequest | null; repository: RepoLink | null; delegated?: boolean };
+export type RoomRepository = {
+  request: RepoRequest | null;
+  repository: RepoLink | null;
+  delegated?: boolean;
+  /** The GitHub organization Podster's repositories are made in, as the server's configuration names it. Null or absent while it isn't configured. */
+  organization?: string | null;
+};
 
 /** Display only. The API checks every grant again, from current authority, at each use; `state` can lag. */
 export type RepoGrant = { id: string; principal_id: string; action: "push" | "merge"; delegated_by: string; created_at: number; expires_at: number | null; revoked_at: number | null; state: "live" | "expired" | "stale" | "revoked" };
@@ -41,12 +47,19 @@ export function repositoryUrl(fullName: string): string | null {
   return `https://github.com/${fullName}`;
 }
 
-/** The confirmation, before anything is created. The architect rules on these words. */
-export const PUBLIC_WARNING = [
-  "The repository will be public on GitHub: anyone can read it.",
-  "Anything an agent pushes to a task branch is public as soon as it's pushed, before anyone reviews it.",
-  "Podster never deletes it. It stays on GitHub after this workroom is archived.",
-];
+/**
+ * The confirmation, before anything is created (the M5 security review's F11). It says only what's true today: the
+ * repository is public, it's in Podster's GitHub organization, which `organization` names as the server's read gave it,
+ * nobody at Podster can delete it for the room, and any agent given a push grant can publish files there.
+ */
+export function publicWarning(organization: string | null | undefined): string[] {
+  const where = organization ? `Podster's GitHub organization, ${organization}` : "Podster's GitHub organization";
+  return [
+    `The repository will be public on GitHub, in ${where}, not in yours: anyone can read it.`,
+    "Any agent given a push grant can publish files there. Anything it pushes to a task branch is public as soon as it's pushed, before anyone reviews it.",
+    "Podster can't delete it for you today. It stays on GitHub after this workroom is archived.",
+  ];
+}
 
 /** Why setup ended, from the request's reason code. Never the provider's own text. */
 const REASONS: Record<string, string> = {
@@ -75,6 +88,9 @@ const REASONS: Record<string, string> = {
   ruleset_differs: "A protection rule isn't set the way Podster needs.",
   bypass_differs: "Someone can bypass a protection rule who shouldn't.",
   unexpected_ruleset: "The repository has a rule Podster didn't set.",
+  settings_differ: "The repository's issues, wiki, projects, discussions or merge settings aren't set the way Podster needs.",
+  workflow_permissions_differ: "Workflows in the repository can write or approve pull requests, and Podster needs them read-only.",
+  provider_rate_limited: "GitHub kept limiting Podster's calls, so setup stopped after waiting a day.",
   retry_limit_reached: "Setup has run as many times as a workroom is allowed.",
   authority_lost: "The authority to set it up ended before setup finished.",
   internal_error: "Something went wrong in Podster.",
@@ -89,7 +105,7 @@ export function describe(state: RoomRepository): { label: string; tone: "neutral
     if (repository.status === "ready") return { label: "Ready", tone: "green", text: "Agents with a push grant can work on tasks in this repository." };
     if (repository.status === "degraded")
       return { label: "Degraded", tone: "amber", text: "Podster found the repository's rules or settings differ from what it needs, so coding tasks are blocked until that's fixed." };
-    return { label: "Suspended", tone: "danger", text: "Podster has suspended this repository, so coding tasks are blocked. Nothing in it was deleted." };
+    return { label: "Suspended", tone: "danger", text: "This repository is marked suspended, so coding tasks are blocked. Nothing in it was deleted." };
   }
   if (!request) return { label: "None", tone: "neutral", text: "This workroom has no repository." };
   if (request.state === "pending") return { label: "Setting up", tone: "blue", text: "Podster is creating the repository and setting its rules. This page shows the result when you reload it." };
@@ -97,7 +113,7 @@ export function describe(state: RoomRepository): { label: string; tone: "neutral
     return {
       label: "Outcome unknown",
       tone: "amber",
-      text: "GitHub's answer was lost, so a repository may or may not have been created. Podster won't adopt one by its name. A Podster operator can check, and a retry uses a new name. Coding tasks are blocked meanwhile.",
+      text: "GitHub's answer was lost, so a repository may or may not have been created. Podster won't adopt one by its name, and a retry uses a new name. Coding tasks are blocked meanwhile.",
     };
   if (request.state === "failed") return { label: "Setup failed", tone: "danger", text: `${reasonSentence(request.reason)} Coding tasks are blocked until setup succeeds.` };
   return { label: "Ready", tone: "green", text: "The repository is set up." };
@@ -121,7 +137,7 @@ export function explainRepositoryRefusal(code: string, status = 400) {
     case "repo_request_exists":
       return "This workroom already has a repository request. Reload to see it.";
     case "retry_limit_reached":
-      return "Setup has run as many times as a workroom is allowed. A Podster operator can reset it. Nothing changed.";
+      return "Setup has run as many times as a workroom is allowed, and it can't be reset yet. Nothing changed.";
     case "retry_too_soon":
       return "It's too soon to retry. Setup waits a minute after a run, doubling up to an hour. Nothing changed.";
     case "repo_request_not_found":

@@ -19,10 +19,11 @@
 //! repository is known by the ID in the provider's answer to this room's own creation call, never by a name. Nothing here
 //! deletes a repository or falls back to another organization. Logs and events carry IDs, reason codes and HTTP statuses.
 use super::*;
-use crate::github::{Config, CreateAnswer, GitHubApp, Provider};
+use crate::github::{Config, CreateAnswer, Failure, GitHubApp, Provider};
 use podster_core::provisioning::{
-    job_backoff_ms, missing_steps, reserved_name, retry_allowed, retry_name, retry_wait_ms,
-    verify_ready, Expected, RequestLimitReached, MAX_SETUP_RUNS,
+    job_backoff_ms, missing_steps, rate_limited_run_waits, reserved_name, retry_allowed,
+    retry_name, retry_wait_ms, verify_ready, Expected, RequestLimitReached, MAX_SETUP_RUNS,
+    RATE_LIMITED_REASON,
 };
 use podster_core::repositories::{
     decide_retry, valid_repo_name, RepoVisibility, RequestState, RetryPlan, RetryRefusal,
@@ -424,6 +425,9 @@ struct Ended {
     reason: &'static str,
     /// The provider's HTTP status, when one decided it.
     status: u16,
+    /// GitHub rate-limited this run, and said to wait this long. The run is given back and the request stays pending,
+    /// unless it has waited as often as it may.
+    limited: Option<i64>,
 }
 
 fn failed(reason: &'static str, status: u16) -> Ended {
@@ -431,6 +435,18 @@ fn failed(reason: &'static str, status: u16) -> Ended {
         state: RequestState::Failed,
         reason,
         status,
+        limited: None,
+    }
+}
+
+/// How a run ends when a call to GitHub failed: a rate limit waits, anything else is `reason`.
+fn failed_call(reason: &'static str, failure: Failure) -> Ended {
+    match failure.rate_limit_wait_ms() {
+        Some(wait_ms) => Ended {
+            limited: Some(wait_ms),
+            ..failed(RATE_LIMITED_REASON, failure.status())
+        },
+        None => failed(reason, failure.status()),
     }
 }
 
@@ -611,6 +627,38 @@ impl Workspace {
             Ok(Some(ended)) => ended,
             Err(error) => failed(error.code().unwrap_or("internal_error"), 0),
         };
+        if let Some(wait_ms) = ended.limited {
+            // GitHub limited the rate: the run is given back, and the request waits for the time GitHub gave. Each such
+            // wait is counted in `job_failures`, and past the bound the run is spent like any other failure.
+            let id = request_id.clone();
+            let waited = self.in_transaction(move |sql| {
+                let now = now_ms();
+                let waits = rows(
+                    sql,
+                    "SELECT job_failures FROM repo_request WHERE id = ? AND state = ?",
+                    vec![id.as_str().into(), RequestState::Pending.name().into()],
+                )?
+                .first()
+                .map(|r| int(&r["job_failures"]));
+                let Some(waits) = waits.filter(|waits| rate_limited_run_waits(*waits)) else {
+                    return Ok(false);
+                };
+                exec(
+                    sql,
+                    "UPDATE repo_request SET runs = max(runs - 1, 0), job_failures = ?, job_not_before = ?, updated_at = ? WHERE id = ?",
+                    vec![(waits + 1).into(), (now + wait_ms).into(), now.into(), id.as_str().into()],
+                )?;
+                Ok(true)
+            });
+            if let Ok(true) = waited {
+                self.provision_not_before.set(0);
+                console_log!(
+                    "{}",
+                    json!({ "at": "provision", "room": room, "request": request_id, "outcome": "rate_limited", "wait_ms": wait_ms })
+                );
+                return Ok(());
+            }
+        }
         let id = request_id.clone();
         let finished = self.in_transaction(move |sql| {
             finish(sql, &id, ended.state, ended.reason, now_ms())?;
@@ -790,6 +838,7 @@ impl Workspace {
                 state,
                 reason,
                 status: 0,
+                limited: None,
             }));
         }
 
@@ -799,6 +848,21 @@ impl Workspace {
                 let name = text(&request["provider_name"]).unwrap_or_default();
                 let answer = provider.create_repository(&name, public).await;
                 let id = request_id.to_string();
+                if let CreateAnswer::RateLimited(wait_ms) = answer {
+                    // A definite refusal for the rate alone: nothing was made, so the record that a call may have gone
+                    // out under this attempt's name is taken back, and the next run sends the same name.
+                    self.in_transaction(move |sql| {
+                        exec(
+                            sql,
+                            "DELETE FROM repo_request_attempt WHERE request_id = ? AND attempt = ? AND outcome = ?",
+                            vec![id.as_str().into(), attempt.into(), STARTED.into()],
+                        )
+                    })?;
+                    return Ok(Some(failed_call(
+                        RATE_LIMITED_REASON,
+                        Failure::RateLimited { status: 0, wait_ms },
+                    )));
+                }
                 let (outcome, ended, created) = match answer {
                     // A repository under anyone else isn't ours, whatever its ID is. It isn't held.
                     CreateAnswer::Created(made) if made.owner_id != config.org_id => {
@@ -815,12 +879,13 @@ impl Workspace {
                     CreateAnswer::NotSent(status) => {
                         (NOT_SENT, Some(failed("token_refused", status)), None)
                     }
-                    CreateAnswer::Unknown => (
+                    CreateAnswer::Unknown | CreateAnswer::RateLimited(_) => (
                         "uncertain",
                         Some(Ended {
                             state: RequestState::Uncertain,
                             reason: "creation_outcome_unknown",
                             status: 0,
+                            limited: None,
                         }),
                         None,
                     ),
@@ -855,7 +920,7 @@ impl Workspace {
         };
         let (observed, _) = match provider.read_back(repo_id).await {
             Ok(read) => read,
-            Err(failure) => return Ok(Some(failed("read_back_failed", failure.status()))),
+            Err(failure) => return Ok(Some(failed_call("read_back_failed", failure))),
         };
         let steps = match missing_steps(&expected, &observed) {
             Ok(steps) => steps,
@@ -863,12 +928,12 @@ impl Workspace {
         };
         for step in steps {
             if let Err(failure) = provider.apply(repo_id, step).await {
-                return Ok(Some(failed("setup_call_failed", failure.status())));
+                return Ok(Some(failed_call("setup_call_failed", failure)));
             }
         }
         let (observed, described) = match provider.read_back(repo_id).await {
             Ok(read) => read,
-            Err(failure) => return Ok(Some(failed("read_back_failed", failure.status()))),
+            Err(failure) => return Ok(Some(failed_call("read_back_failed", failure))),
         };
         if let Err(not_ready) = verify_ready(&expected, &observed) {
             return Ok(Some(failed(not_ready.code(), 0)));

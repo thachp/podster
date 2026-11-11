@@ -1,0 +1,208 @@
+import { env, runInDurableObject, SELF } from "cloudflare:test";
+import { importJWK, SignJWT } from "jose";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { alarmPass, alarmQuiet } from "./alarm.ts";
+
+// The M5 security review's F2 and F8: a ready link is read back once a day from the room's alarm, and a link that's
+// degraded, by that read or a merge's, has its agents' tokens revoked in the same alarm pass. Against the fake GitHub:
+// the provisioning App reads the repository back, and the agent-token App mints and revokes. Nothing here reaches GitHub.
+
+const BINDINGS = env as any;
+let key: any;
+type Who = { id: string; kind?: "agent" | "person"; org: string; adminOrgs?: string[] };
+const ORG = "org_rr";
+const OWNER: Who = { id: "per_rr_owner", kind: "person", org: ORG, adminOrgs: [ORG] };
+const AGENT: Who = { id: "agt_rr_agent", org: ORG };
+const orgAdmin: Who = { id: "per_rr_orgadmin", kind: "person", org: ORG, adminOrgs: [ORG] };
+const DAY = 24 * 60 * 60 * 1000;
+let REPO_ID = 0;
+let nextRepo = 6_000_000 + Math.floor(Math.random() * 1_000_000) * 10;
+
+async function assertion(who: Who) {
+  const now = Math.floor(Date.now() / 1000);
+  const isAgent = (who.kind ?? "agent") === "agent";
+  const facts = isAgent ? { gen: 1, linker: { person: OWNER.id, since: 1 } } : { orgs: [who.org], admin_orgs: who.adminOrgs ?? [] };
+  return new SignJWT({ kind: who.kind ?? "agent", org: who.org, ...facts })
+    .setProtectedHeader({ alg: "EdDSA", kid: "test" }).setIssuer("podster-gateway").setSubject(who.id).setAudience("podster-api")
+    .setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID()).sign(key);
+}
+
+let counter = 0;
+async function api(who: Who, method: string, path: string, body?: unknown, options: { key?: string | null } = {}) {
+  const headers: Record<string, string> = { "x-podster-assertion": await assertion(who), "content-type": "application/json" };
+  if (method !== "GET" && options.key !== null) headers["idempotency-key"] = options.key ?? `rr-key-${++counter}`;
+  const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: method === "GET" || body === undefined ? undefined : JSON.stringify(body) });
+  const text = await res.text();
+  return { status: res.status, body: text ? JSON.parse(text) : null, text };
+}
+const must = async (who: Who, method: string, path: string, body?: unknown) => {
+  const res = await api(who, method, path, body);
+  if (res.status !== 200) throw new Error(`${method} ${path}: ${res.status} ${res.text}`);
+  return res.body;
+};
+
+const fake = (path: string, body: object) => fetch(`https://github-fake.example.com${path}`, { method: "POST", body: JSON.stringify(body) });
+/** This test's repository as provisioning left it, or changed: `rulesets`, `settings`, `workflow`, and a `script` for its reads. */
+const ready = (patch: object = {}) => fake("/ready-repo", { id: REPO_ID, ...patch });
+/** The provisioning App's reads of this test's repository. */
+const readBack = async () => (await (await fetch(`https://github-fake.example.com/ready-reads?repo=${REPO_ID}`)).json()) as { reads: { path: string }[]; live: number };
+/** Every token the agent-token App minted for this test's repository, and whether it's still live. */
+const minted = async () => (await (await fetch(`https://github-fake.example.com/agent-tokens?repo=${REPO_ID}`)).json()) as { token: string; live: boolean }[];
+
+const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
+const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(stub(id), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
+const version = async (id: string) => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version as number;
+const link = (id: string) => inRoom(id, (sql) => sql.exec("SELECT status, status_reason, verified_at FROM repo_link").one() as any);
+const tokens = (id: string) => inRoom(id, (sql) => sql.exec("SELECT state FROM repo_token").toArray().map((t: any) => t.state as string));
+const events = (id: string) => inRoom(id, (sql) => sql.exec("SELECT type, reason FROM event WHERE type LIKE 'repository.%' ORDER BY seq").toArray() as any[]);
+const scheduledReads = (id: string) => inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM repo_read WHERE kind = 'job' AND caller = 'readiness'").one().n as number);
+/** Makes the link last found right `ms` ago. */
+const checkedAgo = (id: string, ms: number) => inRoom(id, (sql) => void sql.exec("UPDATE repo_link SET verified_at = ?", Date.now() - ms));
+const made: string[] = [];
+
+beforeAll(async () => {
+  key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
+  for (const statement of BINDINGS.TEST_D1_SCHEMA.split(";").map((x: string) => x.trim()).filter(Boolean)) await BINDINGS.DB.prepare(statement).run();
+  const res = await SELF.fetch(`https://api.internal/v1/agents/${AGENT.id}`, { method: "PUT", headers: { "x-podster-assertion": await assertion(orgAdmin) }, body: JSON.stringify({ org_id: ORG, name: AGENT.id }) });
+  if (res.status !== 200) throw new Error(`register: ${res.status}`);
+});
+
+beforeEach(async () => {
+  REPO_ID = ++nextRepo;
+  await fake("/agent-repo", { id: REPO_ID });
+  await ready({ rulesets: "ready" });
+});
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  for (const id of made.splice(0)) await alarmQuiet(stub(id));
+});
+
+/**
+ * A room with managed repositories on, a ready link found right a moment ago, the scheduled read switched on for it,
+ * and the agent holding a token for its accepted, linked task under a push grant.
+ */
+async function room() {
+  const id: string = (await must(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).id;
+  made.push(id);
+  await must(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: AGENT.id, kind: "agent", org_id: ORG, role: "member", policy_version: await version(id) });
+  await inRoom(id, (sql) => {
+    sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)");
+    sql.exec("CREATE TABLE test_readiness_schedule (x INTEGER)");
+    sql.exec("INSERT INTO repo_link (id, request_id, provider, provider_repo_id, provider_org_id, full_name, visibility, default_branch, status, created_by, created_at, verified_at, updated_at) VALUES ('rl_1', 'rr_1', 'github', ?, 4242, 'podster-test-org/engineering', 'public', 'main', 'ready', ?, ?, ?, ?)", REPO_ID, OWNER.id, Date.now(), Date.now(), Date.now());
+  });
+  await must(OWNER, "POST", `/v1/workspaces/${id}/repository/grants`, { policy_version: await version(id), principal_id: AGENT.id, action: "push" });
+  const task = await must(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Code", instructions: "Change the code", assignee: AGENT.id });
+  await inRoom(id, (sql) => sql.exec("UPDATE task SET has_linked_repository = 1 WHERE id = ?", task.id));
+  await must(AGENT, "POST", `/v1/workspaces/${id}/tasks/${task.id}/accept`, { version: task.version });
+  const got = await api(AGENT, "POST", `/v1/workspaces/${id}/tasks/${task.id}/repo-access`, undefined, { key: null });
+  expect(got.status, got.text).toBe(200);
+  expect(await tokens(id)).toEqual(["held"]);
+  return { id, token: got.body.token as string };
+}
+
+describe("the scheduled read-back of a ready link", () => {
+  it("degrades a link whose protections changed, and revokes the agents' tokens in that same alarm pass (F8, F2)", async () => {
+    const r = await room();
+    // Someone with admin rights removes the update rule. Nothing reads it back for a day.
+    await ready({ rulesets: "no_update" });
+    await alarmPass(stub(r.id));
+    expect((await readBack()).reads).toEqual([]);
+    expect((await link(r.id)).status).toBe("ready");
+    // A day on, one alarm pass reads it back, degrades the link, and takes the agent's token back.
+    await checkedAgo(r.id, DAY + 1);
+    await alarmPass(stub(r.id));
+    expect(await link(r.id)).toMatchObject({ status: "degraded", status_reason: "ruleset_missing" });
+    expect(await minted()).toEqual([expect.objectContaining({ token: r.token, live: false })]);
+    expect(await tokens(r.id)).toEqual([]);
+    expect(await events(r.id)).toEqual([{ type: "repository.degraded", reason: "ruleset_missing" }]);
+    // The read went through the provisioning App, counted against the repository's read cap, and left no token live.
+    expect((await readBack()).reads.map((read) => read.path)).toContain(`/repositories/${REPO_ID}/rulesets/1`);
+    expect((await readBack()).live).toBe(0);
+    expect(await scheduledReads(r.id)).toBe(1);
+  });
+
+  it("degrades on a changed setting or workflow permission too", async () => {
+    // [the change, the reason]
+    const cases: [object, string][] = [
+      [{ settings: { has_issues: true, has_wiki: false, has_projects: false, has_discussions: false, allow_auto_merge: false, delete_branch_on_merge: false } }, "settings_differ"],
+      [{ settings: { has_issues: false, has_wiki: false, has_projects: false, has_discussions: false, allow_auto_merge: true, delete_branch_on_merge: false } }, "settings_differ"],
+      [{ workflow: { default_workflow_permissions: "write", can_approve_pull_request_reviews: false } }, "workflow_permissions_differ"],
+    ];
+    for (const [patch, reason] of cases) {
+      REPO_ID = ++nextRepo;
+      await fake("/agent-repo", { id: REPO_ID });
+      await ready({ rulesets: "ready" });
+      const r = await room();
+      await ready(patch);
+      await checkedAgo(r.id, DAY + 1);
+      await alarmPass(stub(r.id));
+      expect(await link(r.id), reason).toMatchObject({ status: "degraded", status_reason: reason });
+      expect(await tokens(r.id), reason).toEqual([]);
+    }
+  });
+
+  it("finds a link exactly right, and only moves its check time on", async () => {
+    const r = await room();
+    await checkedAgo(r.id, DAY + 1);
+    const before = Date.now();
+    await alarmPass(stub(r.id));
+    const now = await link(r.id);
+    expect(now).toMatchObject({ status: "ready", status_reason: null });
+    expect(now.verified_at).toBeGreaterThanOrEqual(before);
+    expect(await tokens(r.id)).toEqual(["held"]);
+    expect(await events(r.id)).toEqual([]);
+    // Not again for a day.
+    const reads = (await readBack()).reads.length;
+    await alarmPass(stub(r.id));
+    expect((await readBack()).reads.length).toBe(reads);
+  });
+
+  it("changes nothing when the read can't be made, a rate limit included, and tries again an hour later", async () => {
+    // [why the read can't be made]
+    const cases: object[] = [{ readRepo: 503 }, { workflowRead: 500 }, { limited: { kind: "primary", seconds: 600 } }, { limited: { kind: "secondary", seconds: 120 } }];
+    for (const script of cases) {
+      REPO_ID = ++nextRepo;
+      await fake("/agent-repo", { id: REPO_ID });
+      await ready({ rulesets: "ready" });
+      const r = await room();
+      const old = Date.now() - DAY - 1;
+      await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET verified_at = ?", old));
+      await ready({ script });
+      await alarmPass(stub(r.id));
+      expect(await link(r.id), JSON.stringify(script)).toEqual({ status: "ready", status_reason: null, verified_at: old });
+      expect(await tokens(r.id), JSON.stringify(script)).toEqual(["held"]);
+      expect(await events(r.id), JSON.stringify(script)).toEqual([]);
+      expect(await scheduledReads(r.id), JSON.stringify(script)).toBe(1);
+      // Not again within the hour.
+      await alarmPass(stub(r.id));
+      expect(await scheduledReads(r.id), JSON.stringify(script)).toBe(1);
+    }
+  });
+
+  it("waits while the repository's hourly read cap is used up", async () => {
+    const r = await room();
+    await checkedAgo(r.id, DAY + 1);
+    await inRoom(r.id, (sql) => {
+      for (let n = 0; n < 60; n++) sql.exec("INSERT INTO repo_read (at, kind, caller) VALUES (?, 'job', NULL)", Date.now());
+    });
+    await alarmPass(stub(r.id));
+    expect((await readBack()).reads).toEqual([]);
+    expect(await scheduledReads(r.id)).toBe(0);
+    expect((await link(r.id)).status).toBe("ready");
+  });
+
+  it("reads nothing back for a link that isn't ready, or with managed repositories switched off", async () => {
+    const r = await room();
+    await checkedAgo(r.id, DAY + 1);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET status = 'degraded', status_reason = 'ruleset_missing'"));
+    await alarmPass(stub(r.id));
+    expect((await readBack()).reads).toEqual([]);
+    await inRoom(r.id, (sql) => {
+      sql.exec("UPDATE repo_link SET status = 'ready', status_reason = NULL");
+      sql.exec("DROP TABLE test_managed_repositories_on");
+    });
+    await alarmPass(stub(r.id));
+    expect((await readBack()).reads).toEqual([]);
+  });
+});

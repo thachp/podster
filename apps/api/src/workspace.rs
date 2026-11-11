@@ -86,6 +86,7 @@ mod planned;
 mod provisioning;
 mod public;
 mod public_claims;
+mod readiness_upkeep;
 mod removal;
 mod repo_tokens;
 mod repositories;
@@ -3665,6 +3666,15 @@ impl Workspace {
         {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
+        // A ready link's scheduled read-back.
+        if let Some(next) = migrated
+            .then(|| readiness_upkeep::next_due(&sql, &self.env, now))
+            .transpose()?
+            .flatten()
+        {
+            let next = next.max(now + 10);
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
         // The oldest webhook delivery ID, when it's time to forget it.
         if let Some(next) = migrated
             .then(|| repositories::next_delivery_expiry(&sql, now))
@@ -4966,13 +4976,18 @@ impl DurableObject for Workspace {
         }
         // The job keeps its own wait, so its failure doesn't bring the alarm back in five seconds.
         let repo_index = self.repository_upkeep(&sql).await;
-        // Agent repository tokens whose authority ended are taken back. Each keeps its own backoff.
-        if let Err(error) = self.repo_token_upkeep().await {
-            console_error!("repo token upkeep failed: {:?}", error.code());
-        }
         // A merge that was asked for is carried out, one recorded step at a time.
         if let Err(error) = self.merge_upkeep().await {
             console_error!("merge upkeep failed: {:?}", error.code());
+        }
+        // A ready link's protections and settings, read back once a day (ADR 0009's drift check).
+        if let Err(error) = self.readiness_upkeep().await {
+            console_error!("readiness upkeep failed: {:?}", error.code());
+        }
+        // Agent repository tokens whose authority ended are taken back. Each keeps its own backoff. After the merge
+        // pass and the scheduled read-back, so a link either degraded has its tokens revoked in this same alarm.
+        if let Err(error) = self.repo_token_upkeep().await {
+            console_error!("repo token upkeep failed: {:?}", error.code());
         }
         // Pull requests whose state is stale are read again, within the read cap.
         if let Err(error) = self.refresh_changes().await {

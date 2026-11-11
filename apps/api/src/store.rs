@@ -847,3 +847,25 @@ pub fn mark_stale_repo_tokens(sql: &SqlStorage, now: i64) -> R<()> {
         vec![now.into()],
     )
 }
+
+/// How long a revoked or expired repository grant is kept after it ended (the M5 security review's F13): long enough
+/// for anyone looking into a token or a merge from the time to find the row, and short enough that grant and take-back
+/// cycles can't grow the room without limit. The audit record and the events of each grant and take-back are kept
+/// whatever happens here. Proposed.
+pub const ENDED_GRANT_KEPT_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+/// At most this many ended grants are dropped in one pass, so a room with a long backlog clears it over a few alarms.
+pub const GRANTS_PRUNED_PER_PASS: i64 = 200;
+
+/// Drops repository grants that were revoked, or expired, more than [`ENDED_GRANT_KEPT_MS`] ago and that no token
+/// row still names. A live grant is never touched, and neither is any audit or event row. Runs in the caller's
+/// transaction.
+pub fn prune_ended_grants(sql: &SqlStorage, now: i64) -> R<()> {
+    exec(
+        sql,
+        "DELETE FROM provider_grant WHERE id IN (SELECT g.id FROM provider_grant g
+           WHERE COALESCE(g.revoked_at, CASE WHEN g.expires_at <= ?1 THEN g.expires_at END) <= ?1 - ?2
+             AND NOT EXISTS (SELECT 1 FROM repo_token t WHERE t.grant_id = g.id)
+           ORDER BY g.created_at LIMIT ?3)",
+        vec![now.into(), ENDED_GRANT_KEPT_MS.into(), GRANTS_PRUNED_PER_PASS.into()],
+    )
+}

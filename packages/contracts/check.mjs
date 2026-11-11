@@ -1,7 +1,7 @@
 // Checks that capabilities map to API operations, and that the CQRS sides agree.
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
-import { collectErrorCodes } from "./error-codes.mjs";
+import { collectErrorCodes, compareWithEnum, readSources } from "./error-codes.mjs";
 
 const api = parse(readFileSync(new URL("openapi.yaml", import.meta.url), "utf8"));
 const { capabilities, person_only: personOnly = [], transfer_only: transferOnly = [], provider_only: providerOnly = [] } = parse(readFileSync(new URL("capabilities.yaml", import.meta.url), "utf8"));
@@ -92,22 +92,23 @@ for (const schema of ["RepoRequest", "RepoLink", "RoomRepository", "RepoGrant", 
   if (api.components.schemas[schema]?.additionalProperties !== false) problems.push(`${schema}: isn't closed`);
 }
 
-// `Error.code` lists exactly the codes the API and the gateway can answer a caller with (error-codes.mjs), apart from
-// these, which only an internal route answers, so no caller ever sees them.
+// `Error.code` lists exactly the codes the API and the gateway can answer a caller with in the REST error body,
+// collected by error-codes.mjs. Not OAuth's `error`, MCP or JSON-RPC errors, A2A's own errors, or a code built at run
+// time. These are left out, each with why:
 const INTERNAL_ONLY = {
   already_sent: "the room's answer to the A2A worker's own finish call (apps/api/src/workspace/a2a_out.rs)",
   scan_mismatch: "the room's answer to the scanner's verdict call (apps/api/src/workspace/objects.rs)",
-  unavailable: "a person's object answering a room's repository-request reservation (apps/api/src/principal.rs)",
+  unavailable: "a person's object answering three internal routes, /internal/repo-request-reserve, /internal/departed and /internal/a2a-endpoint-report, and only in test builds, where the failpoints feature makes it (apps/api/src/principal.rs)",
+};
+/** Gateway routes whose answers aren't the contract's `Error` for a caller it describes. Their codes are listed apart. */
+const EXCLUDED_SURFACES = {
+  "apps/gateway/src/github-webhook.ts": "GitHub's webhook deliveries: the caller is GitHub, which reads only the status",
+  "apps/gateway/src/a2a/": "the A2A endpoint, with its own error profile",
 };
 const errorCodes = new Set(api.components.schemas.Error?.properties?.error?.properties?.code?.enum ?? []);
-const found = collectErrorCodes(new URL("../../", import.meta.url).pathname);
-problems.push(...found.problems);
-for (const [code, where] of found.codes) {
-  if (!errorCodes.has(code) && !(code in INTERNAL_ONLY)) problems.push(`Error.code: missing ${code}, which ${where} answers`);
-  if (errorCodes.has(code) && code in INTERNAL_ONLY) problems.push(`Error.code: lists ${code}, which only an internal route answers`);
-}
-for (const code of errorCodes) if (!found.codes.has(code)) problems.push(`Error.code: lists ${code}, which nothing in the API or the gateway answers`);
-for (const code of Object.keys(INTERNAL_ONLY)) if (!found.codes.has(code)) problems.push(`INTERNAL_ONLY: ${code} isn't answered anywhere any more, so take it off the list`);
+const found = collectErrorCodes(readSources(new URL("../../", import.meta.url).pathname), EXCLUDED_SURFACES);
+problems.push(...found.problems, ...compareWithEnum(errorCodes, found, INTERNAL_ONLY));
+const apart = [...found.excluded.keys()].filter((code) => !found.codes.has(code));
 
 if (problems.length) { console.error(problems.join("\n")); process.exit(1); }
-console.log(`${Object.keys(capabilities).length} capabilities match ${operations.size} operations; Error.code lists the ${errorCodes.size} codes callers can get`);
+console.log(`${Object.keys(capabilities).length} capabilities match ${operations.size} operations; Error.code lists the ${errorCodes.size} codes the REST error body can carry (not OAuth's, MCP's, JSON-RPC's or A2A's, and not codes built at run time); ${Object.keys(INTERNAL_ONLY).length} internal-only codes and ${apart.length} on excluded surfaces (${apart.join(", ")}) are left out`);

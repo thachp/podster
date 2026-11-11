@@ -151,6 +151,7 @@ impl ApiError {
         }
     }
 
+    // codes: errors
     /// The stable code, for a refusal. An internal error has none.
     pub fn code(&self) -> Option<&'static str> {
         match self {

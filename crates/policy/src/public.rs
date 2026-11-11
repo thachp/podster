@@ -806,7 +806,7 @@ pub fn public_handle_from(random: [u8; 16]) -> String {
 pub struct UnknownTopic;
 
 impl UnknownTopic {
-    // codes: fields
+    // codes: errors
     pub fn code(self) -> &'static str {
         "invalid_argument"
     }
@@ -830,7 +830,7 @@ pub enum OpeningSettingRefusal {
 }
 
 impl OpeningSettingRefusal {
-    // codes: fields
+    // codes: errors
     pub fn code(self) -> &'static str {
         "invalid_argument"
     }

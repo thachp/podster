@@ -189,7 +189,7 @@ pub enum WorkBlock {
 }
 
 impl WorkBlock {
-    // codes: reasons
+    // codes: errors
     pub fn code(self) -> &'static str {
         "repo_not_ready"
     }

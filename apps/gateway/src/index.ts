@@ -1297,6 +1297,7 @@ const a2aHandler = {
       const identity = await resolveAgent(env, "mcp_oauth", externalId);
       return await answerA2a(await request.text(), identity.id, env.BASE_URL, a2aReads(env, identity), request.headers.get("A2A-Extensions"));
     } catch (error) {
+      // error-codes: from new AgentRefused
       if (error instanceof AgentRefused) return denied(error.message, 403);
       throw error;
     }
@@ -1341,6 +1342,7 @@ async function agentFromCredential(env: Env, token: string, request: Request): P
             const identity = { ...(await resolveAgent(env, "agent_auth", pluginAgent)), spends } as Identity;
             return await serveFile(env, identity, new URL(request.url).pathname);
           } catch (error) {
+            // error-codes: from new AgentRefused
             if (error instanceof AgentRefused) return denied(error.message, 403);
             throw error;
           }
@@ -1373,6 +1375,7 @@ async function agentFromCredential(env: Env, token: string, request: Request): P
     const identity = await resolveAgent(env, "mcp_oauth", externalId);
     return held.scope?.includes("mcp") ? identity : notGranted(DOWNLOAD_CAPABILITY);
   } catch (error) {
+    // error-codes: from new AgentRefused
     if (error instanceof AgentRefused) return denied(error.message, 403);
     throw error;
   }
@@ -1392,6 +1395,7 @@ async function agentFromA2aToken(env: Env, token: string): Promise<Identity | Re
     if (!held.scope?.includes("a2a")) return denied("insufficient_scope", 403);
     return await resolveAgent(env, "mcp_oauth", externalId);
   } catch (error) {
+    // error-codes: from new AgentRefused
     if (error instanceof AgentRefused) return denied(error.message, 403);
     throw error;
   }

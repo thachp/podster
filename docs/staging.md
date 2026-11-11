@@ -295,6 +295,10 @@ Until a secret is set, its part refuses and nothing reaches GitHub for it: a rep
 
 **Switching it off again:** set `MANAGED_REPOSITORIES` to anything but `true`, or remove it, in both files' staging variables, and deploy the API and the gateway. Keep `REPO_TOKEN_KEY` and the agent-token App's ID, installation ID and key set for at least 65 minutes afterwards, as [below](#the-repository-token-keys) says, or the tokens still out can't be revoked. Switching off deletes no repository.
 
+**The journey** against staging takes `--managed-repositories-on` while the switch is on: `e2e/journey.mjs` then wants `merge_task` as the only tool named for a merge, and its refusal for an agent with no grant. Without the flag it wants no such tool, and fails here. It never infers which holds.
+
+**A room whose repository setup is stuck** has no reset: abandon it and make a new room. That's ruled acceptable for staging's test people only ([M5 plan](m5-plan.md#owed-before-production)).
+
 **Not yet true:** nothing has run against GitHub from the deployed product, and no acceptance test has passed on staging.
 
 ## The repository token keys

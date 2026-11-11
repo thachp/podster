@@ -1291,8 +1291,11 @@ try {
     refusedAs(await verify(next), 409, "commit_changed", "approving the new head, which no submission named");
     const read = await taskRead(owner, task.id);
     eq([read.task.status, read.change?.reviewed_commit_sha ?? null, read.change?.merge_state], ["submitted", null, "not_requested"], "the task and its change afterwards");
+    // Podster's own sight of the new head, before anything later compares this change with itself: GitHub's delivery
+    // for the push, or the poll, could otherwise land between two reads of a later check and look like a change.
+    const { seconds } = await within(options.observeWait, "Podster seeing the pushed head", () => changeOf(task.id), (c) => c.observed_head_sha === next, 3000);
     advance = { task, next };
-    return `pull request ${task.pr}: ${task.head} submitted, ${next} pushed`;
+    return `pull request ${task.pr}: ${task.head} submitted, ${next} pushed, and seen by Podster after ${seconds} s`;
   });
 
   say("\n## another room's IDs");
@@ -1620,7 +1623,16 @@ try {
 
   await check("M5-07c", async () => {
     after("M5-S1");
-    const done = have(tasks.land ?? tasks.late, "the second coder has no completed task");
+    // A task that reads as completed now, found before any token is asked for: one that was made and never approved
+    // is still the agent's to work on, and asking for its token would be given one.
+    let done = null;
+    for (const candidate of [tasks.land, tasks.late].filter(Boolean)) {
+      if ((await taskRead(owner, candidate.id)).task.status === "completed") {
+        done = candidate;
+        break;
+      }
+    }
+    have(done, "the second coder has no task that reads as completed");
     const task = await taskIn(first(), "cancel", other);
     await tokenIn(first(), task);
     eq((await github(`/repos/${repo.full}`, { token: task.token })).status, 200, "the token before the task is canceled");

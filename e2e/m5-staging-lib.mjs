@@ -508,8 +508,10 @@ export const isCommitSha = (value) => typeof value === "string" && /^[0-9a-f]{40
  * between them. A run that passes takes a small part of this.
  */
 export function worstCaseSeconds(options) {
-  const fixed = { tails: 60 + 120 + 60, retry: 180, expiries: 90 + 90, publicRoom: 60, deliveries: 120 + 5 * 60, githubHeads: 3 * 60 };
-  return 3 * options.setupWait + 7 * options.mergeWait + options.observeWait + 7 * options.revokeWait + Object.values(fixed).reduce((sum, seconds) => sum + seconds, 0);
+  // Five waits of a minute for the API's log line on a delivery, and nothing else for deliveries.
+  const fixed = { tails: 60 + 120 + 60, retry: 180, expiries: 90 + 90, publicRoom: 60, deliveries: 5 * 60, githubHeads: 3 * 60 };
+  // A moved head is waited for twice: once after review (M5-11a), once after a submission (M5-08b).
+  return 3 * options.setupWait + 7 * options.mergeWait + 2 * options.observeWait + 7 * options.revokeWait + Object.values(fixed).reduce((sum, seconds) => sum + seconds, 0);
 }
 
 /** A log line's own name for what it records, if it has one that is plainly a name: never free text, which could hold what's looked for. */

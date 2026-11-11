@@ -345,7 +345,17 @@ check(absentId("tsk_aa") === null && absentId("nounderscore") === null, "an ID t
   check(isCommitSha("a".repeat(40)) && !["a".repeat(39), "A".repeat(40), `${"a".repeat(40)}/../x`, "", undefined, 7].some(isCommitSha), "only 40 lower-case hex digits are a commit ID");
   check(section("M5-07f").includes('refusedCode(answer, "grant_expired"') && section("M5-07f").includes("listed?.state === \"expired\"") && section("M5-07f").includes("refusedByGithub("), "M5-07f waits for the API to list the push grant expired, wants grant_expired, and times GitHub's refusal");
   const base = parseArgs(["--base-url", STAGING], {}).options;
-  check(worstCaseSeconds(base) === 3 * 240 + 7 * 180 + 420 + 7 * 180 + 1260 && Math.round(worstCaseSeconds(base) / 60) === 82 && worstCaseSeconds({ ...base, mergeWait: 10 }) === worstCaseSeconds(base) - 7 * 170, "the worst case is every bounded wait at its limit, and follows the flags");
+  check(worstCaseSeconds(base) === 3 * 240 + 7 * 180 + 2 * 420 + 7 * 180 + 1140 && Math.round(worstCaseSeconds(base) / 60) === 87 && worstCaseSeconds({ ...base, observeWait: 10 }) === worstCaseSeconds(base) - 2 * 410 && worstCaseSeconds({ ...base, mergeWait: 10 }) === worstCaseSeconds(base) - 7 * 170, "the worst case is every bounded wait at its limit, and follows the flags");
+}
+
+// ---- two races the last review found ----
+{
+  const source = readFileSync(join(here, "m5-staging.mjs"), "utf8");
+  const section = (id) => source.slice(source.indexOf(`check("${id}"`), source.indexOf("await check(", source.indexOf(`check("${id}"`) + 1));
+  const seen = section("M5-08b").indexOf("(c) => c.observed_head_sha === next");
+  check(seen > 0 && section("M5-08b").includes("within(options.observeWait,") && seen < section("M5-08b").indexOf("advance = { task, next };"), "M5-08b ends only once Podster has seen the pushed head, so no later check that compares the change with itself can catch it mid-way");
+  const body = section("M5-07c");
+  check(body.includes('.task.status === "completed"') && body.indexOf('have(done, "the second coder has no task that reads as completed")') > 0 && body.indexOf("have(done,") < body.indexOf('taskIn(first(), "cancel"') && !body.includes("tasks.land ?? tasks.late"), "M5-07c finds a task that reads as completed before it makes or asks for anything, and skips without one");
 }
 
 // ---- what git gets ----

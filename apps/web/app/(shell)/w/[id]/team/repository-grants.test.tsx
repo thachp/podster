@@ -105,7 +105,11 @@ describe("giving a grant", () => {
     expect(screen.getByRole("button", { name: "Grant" })).toBeDisabled();
     await userEvent.clear(screen.getByLabelText("Expires (optional)"));
     await userEvent.type(screen.getByLabelText("Expires (optional)"), "2026-11-09");
-    expect(screen.getByText("Choose a day after today.")).toBeInTheDocument();
+    expect(screen.getByText("Choose a day that hasn't ended yet, in UTC.")).toBeInTheDocument();
+    // Today hasn't ended, so the API's "after now" takes it.
+    await userEvent.clear(screen.getByLabelText("Expires (optional)"));
+    await userEvent.type(screen.getByLabelText("Expires (optional)"), "2026-11-10");
+    expect(screen.getByRole("button", { name: "Grant" })).toBeEnabled();
     await userEvent.clear(screen.getByLabelText("Expires (optional)"));
     await userEvent.type(screen.getByLabelText("Expires (optional)"), "2027-06-30");
     await userEvent.click(screen.getByRole("button", { name: "Grant" }));

@@ -149,7 +149,7 @@ export function RepositoryGrants({ roomId, grants, linked, isOwner, isOrgAdmin, 
               Expires (optional)
             </label>
             <input id={ids.expiry} type="date" className={`${FIELD} w-auto`} value={day} disabled={pending} aria-invalid={expiry.problem !== null} aria-describedby={ids.expiryHint} onChange={(event) => setDay(event.target.value)} />
-            <p id={ids.expiryHint} className={expiry.problem ? "text-sm text-status-danger" : "text-sm text-muted-foreground"}>
+            <p id={ids.expiryHint} aria-live="polite" className={expiry.problem ? "text-sm text-status-danger" : "text-sm text-muted-foreground"}>
               {expiry.problem ?? "At most a year from now. It ends at the end of that day, UTC. Leave empty for no expiry."}
             </p>
           </div>

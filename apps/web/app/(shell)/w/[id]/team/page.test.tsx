@@ -42,7 +42,36 @@ describe("repository access on Team", () => {
     await show();
     expect(screen.queryByText("Repository access")).toBeNull();
     expect(screen.queryByText(/repository/i)).toBeNull();
-    expect(state.asked.filter((path) => path.includes("/repository"))).toEqual(["/api/v1/workspaces/ws_1/repository/grants"]);
+    expect(state.asked.filter((path) => path.includes("/repository"))).toEqual(["/api/v1/workspaces/ws_1/repository"]);
+  });
+
+  it("never reads the grants while off, so a failing grants read can't add a heading", async () => {
+    state.grants = { ok: false, status: 500, code: "error" };
+    await show();
+    expect(screen.queryByText("Repository access")).toBeNull();
+    expect(state.asked).not.toContain("/api/v1/workspaces/ws_1/repository/grants");
+  });
+
+  it("shows nothing when neither read can say whether the feature is on", async () => {
+    state.repository = { ok: false, status: 429, code: "rate_limited" };
+    state.grants = { ok: false, status: 500, code: "error" };
+    await show();
+    expect(screen.queryByText("Repository access")).toBeNull();
+  });
+
+  it("says it couldn't refresh the grants once the feature is known to be on", async () => {
+    state.repository = { ok: true, data: { request: null, repository: null } };
+    state.grants = { ok: false, status: 500, code: "error" };
+    await show();
+    expect(screen.getByRole("heading", { name: "Repository access" })).toBeInTheDocument();
+    expect(screen.getByText(/Couldn't refresh/)).toBeInTheDocument();
+  });
+
+  it("takes a refused repository read as on, for someone who doesn't see the whole room, and shows their own grant", async () => {
+    state.repository = { ok: false, status: 403, code: "not_allowed" };
+    state.grants = { ok: true, data: { grants: [grant] } };
+    await show();
+    expect(screen.getByRole("heading", { name: "Repository access" })).toBeInTheDocument();
   });
 
   it("shows nothing while on with no repository and no grants", async () => {

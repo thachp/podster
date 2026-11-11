@@ -104,7 +104,7 @@ export function RepositorySection({ roomId, state, isOwner, archived }: { roomId
           {repository.status_reason ? (
             <>
               <dt className="text-muted-foreground">Reason</dt>
-              <dd className="break-all font-mono">{repository.status_reason}</dd>
+              <dd className="break-all font-mono">{visibleText(repository.status_reason)}</dd>
             </>
           ) : null}
         </dl>
@@ -165,7 +165,7 @@ export function RepositorySection({ roomId, state, isOwner, archived }: { roomId
               }}
               onBlur={() => setTouched(true)}
             />
-            <p id={ids.problem} className={cn("text-sm", touched && problem ? "text-status-danger" : "text-muted-foreground")}>
+            <p id={ids.problem} aria-live="polite" className={cn("text-sm", touched && problem ? "text-status-danger" : "text-muted-foreground")}>
               {touched && problem ? problem : "Lower-case letters, digits and hyphens, at most 64 characters. Some names are reserved."}
             </p>
           </div>

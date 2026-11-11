@@ -13,12 +13,18 @@ export default async function Team({ params }: { params: Promise<{ id: string }>
   const { id } = await params;
   const room = await loadWorkroom(id);
   const canManage = canManageWorkroom(room);
-  const [identity, organizations, agents, invitations, roles] = await Promise.all([
+  // Managed repositories: the repository read says whether they're switched on. Off, it answers as a route that doesn't
+  // exist, and then the grants read isn't spent at all. Both run alongside the page's other reads.
+  const repositoryRead = gatewayQuery<RoomRepository>(`/api/v1/workspaces/${id}/repository`);
+  const grantsRead = repositoryRead.then((read) => (availability(read).kind === "off" ? null : gatewayQuery<{ grants: RepoGrant[] }>(`/api/v1/workspaces/${id}/repository/grants`)));
+  const [identity, organizations, agents, invitations, roles, repositoryResult, grantsResult] = await Promise.all([
     getIdentity(),
     getOrganizations(),
     gatewayQuery<{ agents: AgentRow[]; truncated?: boolean }>("/api/agents"),
     canManage ? gatewayQuery<{ invitations: InvitationRow[]; truncated: boolean }>(`/api/v1/workspaces/${id}/invitations`) : null,
     gatewayQuery<RoleRead>(`/api/v1/workspaces/${id}/roles`),
+    repositoryRead,
+    grantsRead,
   ]);
   if (!identity.ok) {
     return (
@@ -32,12 +38,12 @@ export default async function Team({ params }: { params: Promise<{ id: string }>
   const agentRows = agents.ok ? agents.data.agents : [];
   const people = await loadPeopleNames(gatewayQuery, orgs);
   const roomOrg = room.owner_org ?? null;
-  // The grants read is also how this page learns whether managed repositories are switched on: off, it answers as a route
-  // that doesn't exist and nothing about repositories shows. Only then is the repository read spent, and only by those who
-  // manage access, to learn whether the room has a repository to grant on.
-  const grants = availability(await gatewayQuery<{ grants: RepoGrant[] }>(`/api/v1/workspaces/${id}/repository/grants`));
-  const repository = grants.kind === "on" && canManage ? availability(await gatewayQuery<RoomRepository>(`/api/v1/workspaces/${id}/repository`)) : null;
-  const linked = repository?.kind === "on" ? repository.data.repository !== null : null;
+  const repository = availability(repositoryResult);
+  // Someone who doesn't see the whole room is refused the repository read, which means it's there: the feature is on.
+  const repositoryRefused = !repositoryResult.ok && repositoryResult.status === 403 && repositoryResult.code === "not_allowed";
+  const featureOn = repository.kind === "on" || repositoryRefused;
+  const grants = grantsResult === null ? ({ kind: "off" } as const) : availability(grantsResult);
+  const linked = repository.kind === "on" ? repository.data.repository !== null : null;
   const isOwner = identity.data.id === room.owner && typeof room.owner_left_at !== "number";
   const names = { ...people, ...Object.fromEntries(agentRows.map((agent) => [agent.id, agent.name])) };
   const team = (
@@ -60,7 +66,8 @@ export default async function Team({ params }: { params: Promise<{ id: string }>
       invitations={invitations?.ok ? { pending: invitations.data.invitations.map(toPending), complete: !invitations.data.truncated } : null}
     />
   );
-  if (grants.kind === "off" || (grants.kind === "on" && linked !== true && grants.data.grants.length === 0)) return team;
+  // Off, or not known to be on: nothing about repositories. A failed read shows as one only once the feature is known to be on.
+  if (repository.kind === "off" || grants.kind === "off" || (grants.kind === "failed" && !featureOn) || (grants.kind === "on" && linked !== true && grants.data.grants.length === 0)) return team;
   return (
     <div className="space-y-8">
       {team}

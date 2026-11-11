@@ -169,7 +169,8 @@ export function expiryFromDay(day: string, now: number): { at: number | null; pr
   if (day === "") return { at: null, problem: null };
   const at = Date.parse(`${day}T23:59:59.000Z`);
   if (Number.isNaN(at)) return { at: null, problem: "Enter a date." };
-  if (at <= now) return { at: null, problem: "Choose a day after today." };
+  // The API takes an expiry after now. A day ends at 23:59:59 UTC, so today counts until then.
+  if (at <= now) return { at: null, problem: "Choose a day that hasn't ended yet, in UTC." };
   if (at > now + YEAR_MS) return { at: null, problem: "Choose a day at most a year from now." };
   return { at, problem: null };
 }

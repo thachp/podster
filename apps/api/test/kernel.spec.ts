@@ -5803,12 +5803,11 @@ describe("planned relationships", () => {
       expect(await seenBy(OWNER)).toContain(kind);
       expect(await seenBy(BOB)).not.toContain(kind);
     }
-    // It's addressed to the people who can change it, and to no agent. What the lines above queued goes out first, in
-    // one whole run of the alarm, so only this one's rows are read.
-    await alarmPass(stub(id));
+    // It's addressed to the people who can change it, and to no agent. Only this line's own event is read: the lines
+    // above queued theirs for the admin too, and those may not have gone out yet.
     await holdOutbox(id);
     expect((await managed(ADMIN, "POST", planned(id), id, line(b, a, "Told"))).status).toBe(200);
-    const told = await sql(id, "SELECT DISTINCT o.recipient_principal_id AS who FROM outbox o JOIN event e ON e.id = o.event_id WHERE e.type = 'relationship.planned'");
+    const told = await sql(id, "SELECT DISTINCT o.recipient_principal_id AS who FROM outbox o JOIN event e ON e.id = o.event_id WHERE e.seq = (SELECT max(seq) FROM event WHERE type = 'relationship.planned')");
     expect(told.map((row) => row.who)).toEqual([OWNER.id]);
     await releaseOutbox(id);
     expect((await api(OUTSIDER, "GET", map(id))).code).toBe("workspace_not_found");

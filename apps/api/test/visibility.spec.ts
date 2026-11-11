@@ -805,6 +805,8 @@ describe("the discovery-index reconcile", () => {
 
   it("backs off from 5 s, longer after each failure, while D1 fails", async () => {
     const { id } = await published();
+    // Delivery is held, so a notice still waiting out a retry can't be what the alarm is set for below.
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("CREATE TABLE test_hold_outbox (x)"));
     await BINDINGS.DB.prepare("ALTER TABLE public_workroom_index RENAME TO public_workroom_index_away").run();
     try {
       const waits: number[] = [];

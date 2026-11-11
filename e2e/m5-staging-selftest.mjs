@@ -4,14 +4,15 @@
 //
 //   node m5-staging-selftest.mjs
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { forbidden } from "./child-env.mjs";
+import { parseJsonc } from "./jsonc.mjs";
 import {
-  ASKPASS_SCRIPT, cloneUrlProblem, CREDENTIAL_ENV, gitEnv, mergeCommitProblems, parseArgs, PLAN, releaseStatusProblems, reviewStatusProblems, rulesetProblems, scrub,
-  secretProblem, SIGN_UPS, STAGING, stagingConfig, stagingOnly, Tally,
+  ASKPASS_SCRIPT, cloneUrlProblem, CREDENTIAL_ENV, GrantLedger, gitEnv, mergeCommitProblems, parseArgs, PLAN, releaseStatusProblems, repositoryOrgProblem, reviewStatusProblems,
+  rulesetProblems, scrub, secretProblem, SIGN_UPS, STAGING, STAGING_ORG, stagingConfig, stagingOnly, Tally,
 } from "./m5-staging-lib.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -58,7 +59,50 @@ check(!read.error && read.org === "podsterdev" && read.orgId === 354820586 && re
 check(!stagingConfig({ ...vars, MANAGED_REPOSITORIES: "false" }).error && !stagingConfig({ ...vars, MANAGED_REPOSITORIES: "true" }).error, "the switch isn't read from the file: staging is asked");
 check(Boolean(stagingConfig({}).error) && Boolean(stagingConfig(undefined).error) && Boolean(stagingConfig({ ...vars, GITHUB_MERGE_APP_ID: "x" }).error) && Boolean(stagingConfig({ ...vars, GITHUB_ORG_LOGIN: "a/b" }).error), "a configuration with an ID missing or a malformed name is refused");
 check(args("--base-url", STAGING, "--api-config", "/x/wrangler.jsonc").options.apiConfig === "/x/wrangler.jsonc" && args("--base-url", STAGING).options.apiConfig === undefined && Boolean(args("--base-url", STAGING, "--api-config").error), "--api-config names another file, and needs a value");
-check(SIGN_UPS.length === 3, "a run takes three sign-ups");
+check(SIGN_UPS.length === 2 && !SIGN_UPS.some((take) => /operator/i.test(`${take.who} ${take.why}`)), "a run takes two sign-ups, and none is an operator's");
+
+// ---- the organization, pinned in code ----
+check(STAGING_ORG === "podsterdev", "the organization is podsterdev, in code");
+for (const org of ["podsterx", "Podsterdev", "podsterdev-test", "another-organization"]) {
+  const refused = stagingConfig({ ...vars, GITHUB_ORG_LOGIN: org });
+  check(Boolean(refused.error) && refused.error.includes("podsterdev only") && refused.org === undefined, `a configuration naming ${org} is refused, with the rest of it right`);
+}
+check(repositoryOrgProblem("podsterdev/e2e-m5-1") === null, "a repository staging links under podsterdev is accepted");
+for (const full of ["podsterx/e2e-m5-1", "podsterdev", "podsterdev/a/b", "other/podsterdev", "", undefined, null, 7]) {
+  check(repositoryOrgProblem(full) !== null, `a linked repository of ${JSON.stringify(full)} is refused`);
+}
+{
+  // The real file, as it is in this checkout: staging's block must name the pinned organization, or the run would refuse
+  // itself, and a change of organization there must be a change here too.
+  const real = parseJsonc(readFileSync(join(here, "../apps/api/wrangler.jsonc"), "utf8")).env?.staging?.vars;
+  check(real?.GITHUB_ORG_LOGIN === "podsterdev", "apps/api/wrangler.jsonc names podsterdev for staging");
+  check(!stagingConfig(real).error && stagingConfig(real).org === STAGING_ORG, "and the run accepts the real staging configuration");
+}
+
+// ---- grants that must not outlive the run ----
+{
+  const ledger = new GrantLedger();
+  check(ledger.left().length === 0, "a run that gave no short grant has nothing to take back");
+  ledger.note("pgr_short", "watcher's short merge grant");
+  check(JSON.stringify(ledger.left()) === JSON.stringify([{ id: "pgr_short", what: "watcher's short merge grant" }]), "a short grant whose expiry was never seen is left for clean-up to take back");
+  ledger.settle("pgr_short");
+  check(ledger.left().length === 0, "one seen expired is taken off, and clean-up leaves it alone");
+  ledger.note("pgr_a", "a");
+  ledger.note("pgr_b", "b");
+  ledger.settle("pgr_other");
+  check(ledger.left().map((grant) => grant.id).join() === "pgr_a,pgr_b", "settling another grant takes none off, and they're listed in the order given");
+  ledger.note(undefined, "a grant that was never given");
+  ledger.note("", "an empty ID");
+  check(ledger.left().length === 2, "a grant with no ID isn't listed: there's nothing to take back");
+}
+{
+  // The script notes the short grant before it waits, settles it only once it's listed expired, and takes back what's left.
+  const source = readFileSync(join(here, "m5-staging.mjs"), "utf8");
+  const [given, waited, settled] = ['ledger.note(grant?.id, "watcher\'s short merge grant")', "the API listing the short grant as expired", "ledger.settle(grant.id)"].map((text) => source.indexOf(text));
+  check(given > 0 && waited > given && settled > waited, "M5-G3 notes its grant before the wait and settles it only after");
+  check(source.includes("for (const { id, what } of ledger.left())") && source.includes("/repository/grants/${id}`"), "clean-up takes back every grant left");
+  check(!/operator|PODSTER_E2E_OPERATOR_COOKIE/i.test(source.replace(/No operator takes part[^\n]*\n[^\n]*/, "")), "the script has no operator step and reads no operator's session");
+}
 
 // ---- the plan and the results ----
 const ids = PLAN.map((entry) => entry.id);
@@ -189,9 +233,11 @@ const secret = "s".repeat(40);
 {
   const run = script(["--base-url", STAGING, "--dry-run"], { PODSTER_E2E_SIGNUP_SECRET: secret });
   check(run.status === 0 && run.stdout.includes("Nothing was sent") && ids.every((id) => run.stdout.includes(id)), "a dry run exits 0, names every check and says nothing was sent");
-  check(run.stdout.includes("Sign-ups this run takes: 3") && !run.stdout.includes(secret) && !run.stderr.includes(secret), "it states its three sign-ups, and never the secret");
-  const two = script(["--base-url", STAGING, "--dry-run"], { PODSTER_E2E_SIGNUP_SECRET: secret, PODSTER_E2E_OPERATOR_COOKIE: "session=abc" });
-  check(two.status === 0 && two.stdout.includes("Sign-ups this run takes: 2") && !two.stdout.includes("session=abc"), "with an operator's session it takes two, and never prints the session");
+  check(run.stdout.includes("Sign-ups this run takes: 2") && !run.stdout.includes(secret) && !run.stderr.includes(secret), "it states its two sign-ups, and never the secret");
+  const elsewhere = join(fixtures, "elsewhere.jsonc");
+  writeFileSync(elsewhere, `{ "env": { "staging": { "vars": ${JSON.stringify({ ...vars, GITHUB_ORG_LOGIN: "podsterx" })} } } }`);
+  const refused = script(["--base-url", STAGING, "--dry-run"], { PODSTER_E2E_SIGNUP_SECRET: secret }, elsewhere);
+  check(refused.status === 2 && refused.stderr.includes("podsterdev only") && !refused.stdout.includes("Nothing was sent"), "told another organization, the script refuses to run, exit 2");
 }
 check(script(["--base-url", STAGING, "--dry-run"]).status === 2, "a dry run without the sign-up secret exits 2");
 check(script(["--base-url", STAGING, "--dry-run"], { PODSTER_E2E_SIGNUP_SECRET: secret }, emptyConfig).status === 2 && script(["--base-url", STAGING, "--dry-run"], { PODSTER_E2E_SIGNUP_SECRET: secret }, join(fixtures, "missing.jsonc")).status === 2, "a dry run with no organization configured, or no file, exits 2");

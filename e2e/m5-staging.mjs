@@ -8,10 +8,13 @@
 // Staging's gateway is the only base URL it accepts. There is no local rehearsal of this script: locally GitHub is a
 // fake, and merge-check.mjs and repo-access-check.mjs are the rehearsals against it.
 //
-// People: three takes of staging's test sign-up, of its 6 a minute and 40 a day: the room's owner, a second person, and
-// the fixed test operator M4's run uses, who gives the owner's organization the provisioning delegation and must be
-// named in the API's OPERATORS. With PODSTER_E2E_OPERATOR_COOKIE set to an operator's session, that one is used instead
-// and the run takes two. Agents are made under these people and take none. Every test session is signed out at the end.
+// People: two takes of staging's test sign-up, of its 6 a minute and 40 a day: the room's owner, and a second person
+// who is the room's admin. No operator takes part: every organization may have managed repositories unless an operator
+// took that back (decision 194, 2026-11-11). Agents are made under these people and take none. Every test session is
+// signed out at the end. The room is in an organization the owner makes for the run, which the second person joins.
+//
+// The organization on GitHub is pinned in code to `podsterdev`: the run refuses a configuration naming another, and
+// fails a repository staging links anywhere else.
 //
 // GitHub: Podster's own calls go out from staging. This script also asks GitHub directly, three ways. Without a
 // credential, about ten reads of the public API, to see what anyone sees: the repository, its rulesets, the merge commit
@@ -35,8 +38,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseJsonc } from "./jsonc.mjs";
 import {
-  ASKPASS_SCRIPT, cloneUrlProblem, gitEnv, MERGE_APP_SLUG, mergeCommitProblems, parseArgs, PLAN, releaseStatusProblems, reviewStatusProblems, rulesetProblems,
-  scrub, secretProblem, SIGN_UPS, STAGING, stagingConfig, STATUS_CONTEXT, Tally, USAGE,
+  ASKPASS_SCRIPT, cloneUrlProblem, GrantLedger, gitEnv, MERGE_APP_SLUG, mergeCommitProblems, parseArgs, PLAN, releaseStatusProblems, repositoryOrgProblem,
+  reviewStatusProblems, rulesetProblems, scrub, secretProblem, SIGN_UPS, STAGING, stagingConfig, STATUS_CONTEXT, Tally, USAGE,
 } from "./m5-staging-lib.mjs";
 import { RoomPublisher } from "./room-publisher.mjs";
 
@@ -52,7 +55,6 @@ if (options.help) {
   process.exit(0);
 }
 const signupSecret = process.env.PODSTER_E2E_SIGNUP_SECRET;
-const operatorCookie = process.env.PODSTER_E2E_OPERATOR_COOKIE;
 const config = (() => {
   try {
     return stagingConfig(parseJsonc(readFileSync(options.apiConfig ?? join(here, "../apps/api/wrangler.jsonc"), "utf8")).env?.staging?.vars);
@@ -60,7 +62,7 @@ const config = (() => {
     return { error: "the API's wrangler file couldn't be read" };
   }
 })();
-const signUpsNeeded = operatorCookie ? SIGN_UPS.slice(0, 2) : SIGN_UPS;
+const signUpsNeeded = SIGN_UPS;
 
 // ---- the plan, and the configuration, before anything is sent ----
 
@@ -70,7 +72,6 @@ const signUpsNeeded = operatorCookie ? SIGN_UPS.slice(0, 2) : SIGN_UPS;
   console.log(`M5's staging run, against ${STAGING}${options.dryRun ? " (dry run: nothing is sent)" : ""}`);
   console.log(`\nSign-ups this run takes: ${signUpsNeeded.length}, of the test sign-up's 6 a minute and 40 a day.`);
   for (const { who, why } of signUpsNeeded) console.log(`  - ${who}: ${why}`);
-  if (operatorCookie) console.log("  The operator is the session in PODSTER_E2E_OPERATOR_COOKIE, which takes no sign-up and isn't signed out.");
   if (!config.error) console.log(`\nGitHub: repositories are made in ${config.org} (${config.orgId}); the merge App is ${MERGE_APP_SLUG} (${config.mergeAppId}).`);
   console.log(`Waits, in seconds: setup ${options.setupWait}, merge ${options.mergeWait}, a moved head ${options.observeWait}, revocation ${options.revokeWait}.`);
   if (options.dryRun) {
@@ -93,7 +94,7 @@ const POLL_MS = 2000;
 const target = new Target(STAGING, { pollMs: POLL_MS });
 const RUN = `M5 staging ${new Date().toISOString().slice(0, 16)}`;
 /** Nothing here may reach the output: the sign-up secret, every session and every repository token. */
-const secrets = [signupSecret, operatorCookie].filter(Boolean);
+const secrets = [signupSecret].filter(Boolean);
 const say = (line = "") => console.log(scrub(line, secrets));
 const tally = new Tally(PLAN, say);
 
@@ -163,8 +164,6 @@ async function signUpCookie(label, body) {
   return cookie;
 }
 const person = async (label) => Person.fromCookie(target, label, await signUpCookie(label));
-/** An operator: the session given, or staging's one fixed test operator, the same person every run. */
-const operatorPerson = async () => Person.fromCookie(target, "Operator", operatorCookie ?? (await signUpCookie("the test operator", { stable: "operator" })));
 async function agentOf(owner, label) {
   const agent = await McpAgent.connect(target, owner, `${RUN} ${label}`);
   agents.push(agent);
@@ -249,9 +248,13 @@ async function commitIn(dir, name) {
 
 // ---- the run's state ----
 
-let owner, other, operator, coder, merger, watcher, guest;
-/** Whether this run gave the owner's organization the delegation, which clean-up takes back. */
-let delegated = false;
+let owner, other, coder, merger, watcher, guest;
+/** The organization the owner made for this run, which the room is in and the second person joined. */
+let team;
+/** The second person's calls as the room's admin carry the room's organization. Their own agents stay in their own. */
+const asAdmin = () => ({ org: team });
+/** Grants this run gave that must not be left live: clean-up takes back whatever wasn't seen ended. */
+const ledger = new GrantLedger();
 let room;
 /** The room's repository: GitHub's ID, its full name, its default branch and its clone URL. */
 let repo;
@@ -266,10 +269,10 @@ function noteMade(name, why) {
  * Asks for the room's repository. Any answer but a plain refusal is recorded at once, before any assertion about it,
  * so clean-up names the repository even when the request was one this run expected to be refused.
  */
-async function askRepository(body) {
+async function askRepository(body, who = owner, options = undefined) {
   let result;
   try {
-    result = await owner.dash("POST", `/v1/workspaces/${room}/repository`, body);
+    result = await who.dash("POST", `/v1/workspaces/${room}/repository`, body, options);
   } catch (error) {
     noteMade(body.name, "a request's answer never came, so it may have been taken");
     throw error;
@@ -325,10 +328,13 @@ function cleanUp() {
   cleaned ??= (async () => {
     const { left } = await publisher.stop();
     if (left) say(`\nA room this run made public couldn't be made private again: ${room}.`);
-    // The test organization keeps nothing it no longer needs. A linked repository isn't touched by this.
-    if (delegated) {
-      const back = await operator.dash("PUT", `/v1/orgs/${owner.org}/provisioning-delegation`, { granted: false }).catch(() => null);
-      say(`\nThe delegation was ${back?.ok && back.body?.granted === false ? "taken back from" : "NOT taken back from"} ${owner.org}.`);
+    // A grant the run didn't see ended is taken back, so none it gave stays live: a short merge grant whose expiry
+    // the run never saw listed is the case this is for.
+    for (const { id, what } of ledger.left()) {
+      const back = await (async () => owner.dash("DELETE", `/v1/workspaces/${room}/repository/grants/${id}`, { policy_version: await owner.policyVersion(room) }))().catch(() => null);
+      const gone = back?.ok && back.body?.revoked_at !== null && back.body?.revoked_at !== undefined;
+      say(`\nThe ${what} (${id}) was ${gone ? "taken back" : `NOT taken back: ${back ? `HTTP ${back.status} ${back.code ?? ""}` : "no answer"}. The owner takes it back on Team`}.`);
+      if (gone) ledger.settle(id);
     }
     for (const agent of agents) await agent.close().catch(() => null);
     for (const cookie of sessions.splice(0)) {
@@ -352,8 +358,12 @@ let stopped = null;
 try {
   say("\n## the room, and the switch");
   owner = await person("Room owner");
+  // An organization of the run's own, so a second person can join it and be the room's admin: nobody is invited into a
+  // personal one.
+  await owner.useNewOrg(`${RUN} team`);
+  team = owner.org;
   room = await owner.createRoom(`${RUN} repository`);
-  say(`     room ${room}, owner ${owner.id}, organization ${owner.org}`);
+  say(`     room ${room}, owner ${owner.id}, organization ${team}`);
   const repositoryPath = `/v1/workspaces/${room}/repository`;
   const name = `e2e-m5-${new Date().toISOString().slice(0, 16).replace(/\D/g, "")}-${randomBytes(2).toString("hex")}`;
 
@@ -367,21 +377,24 @@ try {
     if (!(await check("M5-00", () => eq([read.status, read.body?.request, read.body?.repository], [200, null, null], "the room's repository read")))) throw new Stop("the room's repository can't be read");
   }
 
-  await check("M5-14", async () => {
-    refusedAs(await askRepository({ name, visibility: "public" }), 403, "not_delegated", "asking without the delegation");
-    const read = await owner.must("GET", repositoryPath);
-    eq([read.request, read.repository], [null, null], "what the room holds afterwards");
-  });
-
-  say("\n## the delegation, from an operator");
-  {
-    operator = await operatorPerson();
-    const set = await operator.dash("PUT", `/v1/orgs/${owner.org}/provisioning-delegation`, { granted: true });
-    say(`     operator ${operator.id}: HTTP ${set.status} ${set.code ?? ""}`);
-    if (set.status === 403) throw new Stop(`${operator.id} isn't an operator on staging. The owner names it in the API's OPERATORS (docs/staging.md), or the run is given an operator's session in PODSTER_E2E_OPERATOR_COOKIE.`);
-    if (!(set.status === 200 && set.body?.granted === true)) throw new Stop(`the delegation couldn't be given: HTTP ${set.status} ${set.code ?? ""}`);
-    delegated = true;
+  say("\n## the room's admin, a second person");
+  try {
+    other = await person("Second person");
+    const invited = await owner.must("POST", `/orgs/${team}/invitations`, { role: "member" });
+    await other.must("POST", "/org-invitations/accept", { token: invited.token });
+    await owner.must("POST", `/v1/workspaces/${room}/members`, { principal_id: other.id, kind: "person", org_id: team, role: "admin", policy_version: await owner.policyVersion(room) });
+    say(`     second person ${other.id}, a member of ${team} and an admin of the room`);
+  } catch (error) {
+    throw new Stop(`the room's admin couldn't be set up: ${cause(error)}`);
   }
+
+  await check("M5-14", async () => {
+    const held = await owner.dash("GET", `/v1/orgs/${team}/provisioning-delegation`);
+    eq([held.status, held.body?.provider, held.body?.granted, held.body?.set_by, held.body?.set_at], [200, "github", true, null, null], "the organization's delegation, which nobody set");
+    eq((await owner.must("GET", repositoryPath)).delegated, true, "what the owner is told");
+    const theirs = await other.dash("GET", repositoryPath, undefined, asAdmin());
+    eq([theirs.status, theirs.body?.delegated, theirs.body?.request, theirs.body?.repository], [200, true, null, null], "what the room's admin is told");
+  });
 
   say("\n## the repository");
   await check("M5-04", async () => {
@@ -391,11 +404,13 @@ try {
   });
 
   const ready = await check("M5-01", async () => {
-    const asked = await askRepository({ name, visibility: "public" });
-    eq([asked.status, asked.body?.request?.state, asked.body?.request?.name, asked.body?.request?.visibility, asked.body?.repository], [200, "pending", name, "public", null], "the request as recorded");
+    // The room's admin asks, not its owner.
+    const asked = await askRepository({ name, visibility: "public" }, other, asAdmin());
+    eq([asked.status, asked.body?.request?.state, asked.body?.request?.name, asked.body?.request?.visibility, asked.body?.request?.requested_by, asked.body?.repository], [200, "pending", name, "public", other.id, null], "the request as recorded");
     const { value: read, seconds } = await within(options.setupWait, "the repository's setup", () => owner.must("GET", repositoryPath), (r) => r.request?.state !== "pending");
     eq([read.request.state, read.request.reason], ["ready", null], "the request's state and reason");
     const link = read.repository;
+    eq(repositoryOrgProblem(link?.full_name), null, "the organization staging linked the repository under");
     eq([link?.status, link?.provider, link?.visibility, link?.full_name], ["ready", "github", "public", `${config.org}/${name}`], "the linked repository");
     ok(Number.isInteger(link.provider_repo_id) && link.provider_repo_id > 0 && link.verified_at > 0, "the link records no repository ID from GitHub, or no read-back");
     repo = { id: link.provider_repo_id, full: link.full_name, defaultBranch: link.default_branch, cloneUrl: `https://github.com/${link.full_name}.git` };
@@ -419,9 +434,8 @@ try {
     return `rulesets ${rulesets.map((set) => set.id).join(" and ")}; ${bypassRead ? "their bypass lists match too" : "GitHub shows bypass lists to administrators only, so those are Podster's own read-back to check, not this one's"}`;
   });
 
-  say("\n## the second person, and the agents");
+  say("\n## the agents");
   try {
-    other = await person("Second person");
     coder = await agentOf(owner, "coder");
     await owner.addAgent(room, coder);
     merger = await agentOf(other, "merger");
@@ -431,7 +445,7 @@ try {
     eq([...((await other.accept(asMembers.token, other.org, [merger, watcher])).body?.agents ?? [])].sort(), [merger.id, watcher.id].sort(), "the second person's agents joining as members");
     const asGuest = await owner.invite(room, other.org);
     eq((await other.accept(asGuest.token, other.org, [guest])).body?.agents, [guest.id], "the second person's guest joining");
-    say(`     second person ${other.id}; coder ${coder.id}; merger ${merger.id}; watcher ${watcher.id}; guest ${guest.id}`);
+    say(`     coder ${coder.id}; merger ${merger.id}; watcher ${watcher.id}; guest ${guest.id}`);
     await newTask("change-1");
   } catch (error) {
     throw new Stop(`the people and agents couldn't be set up: ${cause(error)}`);
@@ -439,6 +453,13 @@ try {
   const t1 = tasks["change-1"];
 
   say("\n## grants, and the agent's token");
+  await check("M5-A1", async () => {
+    const promoted = await owner.dash("POST", `/v1/workspaces/${room}/members/${coder.id}/role`, { role: "admin", policy_version: await owner.policyVersion(room) });
+    refusedAs(promoted, 400, "invalid_argument", "making an agent a room admin");
+    const tools = await coder.tools();
+    eq(tools.filter((tool) => /repositor|grant|delegat/.test(tool) && tool !== "get_repo_access"), [], "an agent's tools for asking for a repository, granting or delegating");
+  });
+
   await check("M5-05", async () => {
     const answer = await coder.call("get_repo_access", t1.at);
     refusedCode(answer, "grant_required", "asking with no grant");
@@ -446,8 +467,9 @@ try {
   });
 
   await check("M5-G2", async () => {
-    const grant = await give(coder, "push");
-    eq([grant.principal_id, grant.action, grant.state, grant.expires_at, grant.revoked_at, grant.delegated_by], [coder.id, "push", "live", null, null, owner.id], "the grant");
+    // The room's admin gives it, not its owner.
+    const grant = await other.must("POST", `/v1/workspaces/${room}/repository/grants`, { policy_version: await owner.policyVersion(room), principal_id: coder.id, action: "push" }, asAdmin());
+    eq([grant.principal_id, grant.action, grant.state, grant.expires_at, grant.revoked_at, grant.delegated_by], [coder.id, "push", "live", null, null, other.id], "the grant");
     eq((await listedGrant(grant.id))?.state, "live", "the grant as listed");
     grants.push = grant.id;
     return `grant ${grant.id}`;
@@ -559,10 +581,15 @@ try {
   await check("M5-G3", async () => {
     have(approved, "the task wasn't approved");
     const grant = await give(watcher, "merge", { expires_at: Date.now() + 20_000 });
+    // Noted before anything is asserted about it: if the wait below runs out, clean-up takes it back, so the watcher
+    // is never left holding a live merge grant.
+    ledger.note(grant?.id, "watcher's short merge grant");
     eq([grant.state, grant.principal_id], ["live", watcher.id], "the short grant");
     // The API's own clock decides, never this machine's: merge_task is only sent once the API lists the grant as
     // expired. Sent a moment early on a skewed clock, it would be a real merge by a live grant.
     const { seconds } = await within(90, "the API listing the short grant as expired", () => listedGrant(grant.id), (listed) => listed?.state === "expired");
+    // Seen expired by the API's own word: it can't merge any more, and there's nothing to take back.
+    ledger.settle(grant.id);
     refusedCode(await askMerge(watcher, t1), "grant_expired", "asking on an expired grant");
     return `grant ${grant.id}, listed as expired after ${seconds} s`;
   });

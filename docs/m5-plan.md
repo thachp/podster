@@ -585,7 +585,9 @@ Three person-only routes on the room's Durable Object, the two cascades, and the
 **Written, 2026-11-11. It has not run against staging, so nothing below has passed.** `e2e/m5-staging.mjs` walks one room through the whole flow on staging, against real GitHub in `podsterdev`, and [staging.md](staging.md#m5s-staging-run) says how to run it. Its first run is the architect's to schedule, around M4's rerun, since both draw on the test sign-up's 40 people a day.
 
 - **It accepts staging's gateway and nothing else.** There's no local rehearsal of the script itself. `e2e/merge-check.mjs` and `e2e/repo-access-check.mjs` stay the local rehearsals, against the fake GitHub.
-- **Sign-ups: 3 a run.** The room's owner, a second person, and the fixed test operator, who gives the owner's organization the provisioning delegation and must be named in the API's `OPERATORS`. With an operator's own session in `PODSTER_E2E_OPERATOR_COOKIE` it takes 2. The five agents are made under those people.
+- **Sign-ups: 2 a run,** the fewest it can take: the room's owner, and a second person who is the room's admin. *Until 2026-11-11 it took 3, with a test operator who gave the delegation; [decision 194](spec/PRODUCT.md#decisions-needed) ended that, and no operator takes part.* The room is in an organization the owner makes for the run, which the second person joins. The five agents are made under those two people.
+- **The organization on GitHub is pinned in code** to `podsterdev`: the script refuses to run on a configuration naming another, and fails a repository staging links anywhere else. The self-test checks that `apps/api/wrangler.jsonc` names `podsterdev` for staging.
+- **The daily cap isn't shown on staging.** Its refusal only comes after 5 accepted requests, which would be 5 real public repositories a run that nothing can delete. `apps/api`'s tests and the local rehearsal's `AC-10c` show it against the fake.
 - **One exact answer per assertion:** a status and a code for a person, and a code for an agent, since MCP carries no HTTP status. No check accepts one of several answers. The statuses GitHub itself gives the agent's token (`409`, `422`, `405`, `403`, `401`) are the ones [the spike](../spikes/m5-github/README.md#results-merge-restriction) saw.
 - **The token** goes to `git` in a child process with `e2e/child-env.mjs`'s allow-listed environment and a home directory of its own, under one name in that environment. It's never printed, never on a command line and never written to a file. The script holds no App key.
 - **A check that can't run says `SKIP`,** with its reason, and is counted. The run exits 0 only if nothing failed. Before the gate is called, a skip needs its own answer.
@@ -595,13 +597,14 @@ Three person-only routes on the room's Durable Object, the two cascades, and the
 | Check | What it shows on staging | From |
 | --- | --- | --- |
 | M5-00 | Managed repositories are on, and a room that hasn't asked has no repository | M5-01 |
-| M5-14 | Without the delegation the owner's request is refused `403 not_delegated` and records nothing | M5-14 |
+| M5-14 | No operator approves first: the organization, which nobody set a delegation for, holds it, and the room's owner and admin are told so. *Until 2026-11-11: without the delegation the owner's request was refused `403 not_delegated`; an operator's take-back is in `apps/api`'s tests and the rehearsal's `AC-10d`.* | M5-14, decision 194 |
 | M5-04 | A request naming an organization or an installation is refused `400 invalid_argument` | M5-04 |
-| M5-01 | The request is recorded `pending` and becomes a `ready` repository within the wait, with GitHub's ID | M5-01 |
+| M5-01 | A room admin's request, a person who isn't the owner, is recorded `pending` under their name and becomes a `ready` repository within the wait, with GitHub's ID, under `podsterdev` | M5-01, AC-10 |
 | M5-02 | GitHub shows the repository public, under `podsterdev` by its ID, while the room is private | M5-02 |
 | M5-01b | GitHub shows exactly two rulesets on the default branch, both active: one with `pull_request` and `podster/review` required from the merge App, one with `update` | ADR 0009 |
+| M5-A1 | An agent can't be made a room admin, `400 invalid_argument`, and is offered no tool to ask for a repository or give a grant | AC-10 |
 | M5-05 | `get_repo_access` with no grant is refused `grant_required`, with no token in the answer | M5-05 |
-| M5-G2 | The owner's `push` grant is given and listed `live` | Step 5b |
+| M5-G2 | The room admin's `push` grant is given, recorded as theirs and listed `live` | Step 5b, AC-11 |
 | M5-06a | The token is for the room's repository, with exactly contents, pull requests and metadata, for at most an hour, and asking again returns the same one | M5-06 |
 | M5-06b | It pushes a task branch with `git` over HTTPS and opens a pull request | M5-06 |
 | M5-06c | `git push` to the default branch is refused by GitHub, and the branch doesn't move | M5-06, the gate |
@@ -612,7 +615,7 @@ Three person-only routes on the room's Durable Object, the two cascades, and the
 | M5-10a | A merge-grant holder asking before approval is refused `not_approved` | M5-10 |
 | M5-10b | After approval, the submitter and the person who controls it, each holding a merge grant, are refused `self_merge` (`403` for the person) | M5-10 |
 | M5-10c | An agent another person controls, with the task approved and no merge grant, is refused `grant_required`. Staging has never exercised this | M5-10 |
-| M5-G3 | A merge grant past its expiry is refused `grant_expired`. The script waits until the API lists it `expired`, by the API's clock, before it asks | Step 5b |
+| M5-G3 | A merge grant past its expiry is refused `grant_expired`. The script waits until the API lists it `expired`, by the API's clock, before it asks. If that wait runs out, clean-up takes the grant back, so no live merge grant is left | Step 5b |
 | M5-10d | Approval and every refusal merged nothing: the merge is `not_requested` and the default branch hasn't moved | AC-17 |
 | M5-09a | The grant holder's `merge_task` is recorded `requested`, and the merge `succeeded` within the wait | M5-09 |
 | M5-09b | On GitHub the default branch's tip is the recorded merge commit, whose parents are the old tip and exactly the reviewed commit | M5-09 |
@@ -653,7 +656,7 @@ Three person-only routes on the room's Durable Object, the two cascades, and the
 - **The setup job** ends a pending request `requester_lost_authority` when whoever asked is no longer the room's owner or an admin. `requester_not_owner` stays in rows from before.
 - **An operator's take-back** refuses new requests and retries `not_delegated`, counts nothing, and stops a job that hasn't linked its repository. A linked repository keeps its grants, tokens and merges (ADR 0009).
 - **The rehearsal:** `e2e/repo-admin-check.mjs`, run by `e2e/run-local.mjs` on the switched-on stack: AC-10 and AC-11 under the new rule, the cap and the take-back, each refusal one exact code. `e2e/merge-check.mjs` no longer has an operator delegate first. `e2e/journey.mjs` had no AC-10 or AC-11 check and is unchanged.
-- **Not done here:** `e2e/m5-staging.mjs` arrives with PR #270, which hadn't merged; it still has an operator delegate first, which now changes nothing and isn't needed.
+- **The staging script,** `e2e/m5-staging.mjs`, follows the rule: no operator and 2 sign-ups, the room's admin asks for the repository and gives the push grant, and an agent can't be made an admin. It also pins `podsterdev` in code, and takes back M5-G3's short merge grant if its expiry was never seen ([step 10](#step-10-the-staging-script)). It hasn't run against staging.
 
 ## Owed before production
 

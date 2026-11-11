@@ -8,11 +8,14 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { forbidden } from "./child-env.mjs";
+import { createHmac } from "node:crypto";
+import { childEnv, forbidden } from "./child-env.mjs";
 import { parseJsonc } from "./jsonc.mjs";
+import { missingWranglers } from "./m4-staging-lib.mjs";
 import {
-  ASKPASS_SCRIPT, cloneUrlProblem, CREDENTIAL_ENV, GrantLedger, gitEnv, mergeCommitProblems, parseArgs, PLAN, releaseStatusProblems, repositoryOrgProblem, requesterProblem, reviewStatusProblems,
-  rulesetProblems, scrub, secretProblem, SIGN_UPS, STAGING, STAGING_ORG, stagingConfig, stagingOnly, Tally,
+  absentId, ASKPASS_SCRIPT, cloneUrlProblem, CREDENTIAL_ENV, deliveryBody, deliveryOutcomes, GrantLedger, gitEnv, leaks, loggedText, lostAuthorityEnding, mergeCommitProblems, movedHeadEnding, parseArgs, PLAN,
+  releaseStatusProblems, repositoryOrgProblem, requesterProblem, reviewStatusProblems, rulesetProblems, scrub, secretProblem, SIGN_UPS, signDelivery, STAGING, STAGING_APP, STAGING_ORG, stagingConfig, stagingOnly,
+  STEADY, steady, tailEnv, Tally, WEBHOOK_PATH, WEBHOOK_SECRET_ENV, webhookSecretProblem,
 } from "./m5-staging-lib.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -49,6 +52,7 @@ check(Boolean(args("--base-url", STAGING, "--force").error) && Boolean(args("--b
 check(args("--base-url", STAGING, "--observe-wait-s", "600").options.observeWait === 600 && args("--base-url", STAGING).options.setupWait === 240, "a wait is taken, and has a default");
 for (const bad of ["5", "1801", "ten", "-30", "12.5"]) check(Boolean(args("--base-url", STAGING, "--merge-wait-s", bad).error), `a wait of ${bad} is refused`);
 check(args("--help").options?.help === true, "--help needs nothing else");
+check(args("--base-url", STAGING).options.logs === true && args("--base-url", STAGING, "--skip-logs").options.logs === false, "the logs are tailed unless --skip-logs is given");
 
 // ---- configuration ----
 check(secretProblem(undefined) !== null && secretProblem("short") !== null && secretProblem("x".repeat(32)) === null, "the sign-up secret must be set and at least 32 characters");
@@ -113,7 +117,15 @@ for (const full of ["podsterx/e2e-m5-1", "podsterdev", "podsterdev/a/b", "other/
 
 // ---- the plan and the results ----
 const ids = PLAN.map((entry) => entry.id);
-check(new Set(ids).size === ids.length && ids.every((id) => /^M5-[0-9A-Z]+[a-z]?$/.test(id)) && PLAN.every((entry) => entry.title.length > 0), "every check has one stable ID and a title");
+check(new Set(ids).size === ids.length && ids.every((id) => /^(M5|AC)-[0-9A-Z]+[a-z]?$/.test(id) && id.length <= 7) && PLAN.every((entry) => entry.title.length > 0), "every check has one stable ID and a title");
+{
+  // Every check the script runs is in the plan, and every planned check is run: a result for an unplanned ID would throw mid-run.
+  const source = readFileSync(join(here, "m5-staging.mjs"), "utf8");
+  const run = [...source.matchAll(/(?:check|lostAuthority)\("((?:M5|AC)-[0-9A-Za-z]+)"/g)].map((found) => found[1]);
+  check(new Set(run).size === run.length && JSON.stringify([...run].sort()) === JSON.stringify([...ids].sort()), "the script runs each planned check once, and no other");
+  // The gate's rows and access tests the extended run exists for each have a check.
+  for (const id of ["M5-03a", "M5-03b", "M5-15a", "M5-13", "M5-16a", "M5-16b", "M5-12b", "M5-08b", "M5-09f", "AC-05a", "AC-05e", "AC-13a", "AC-13b", "AC-13c", "AC-13d", "AC-16", "M5-07c", "M5-07d", "M5-07e", "M5-06f", "M5-06g", "M5-C3"]) check(ids.includes(id), `the plan has ${id}`);
+}
 const quiet = () => new Tally(PLAN, () => {});
 {
   const tally = quiet();
@@ -140,6 +152,78 @@ const quiet = () => new Tally(PLAN, () => {});
 const token = `ghs_${"a1B2".repeat(9)}`;
 check(scrub(`before ${token} after`, []) === "before [redacted] after" && scrub("cookie=abcdefghijklmnopqrstu", ["abcdefghijklmnopqrstu"]) === "cookie=[redacted]", "a GitHub token and a named secret are taken out of output");
 check(scrub("pull request 7, head 0123abc", ["", undefined]) === "pull request 7, head 0123abc", "ordinary output is left alone");
+
+// ---- the webhook secret, and deliveries ----
+check(WEBHOOK_SECRET_ENV === "PODSTER_M5_WEBHOOK_SECRET" && forbidden(WEBHOOK_SECRET_ENV) && throws(() => childEnv({ [WEBHOOK_SECRET_ENV]: "x" })), "the webhook secret's name is one child-env.mjs never passes on");
+check(webhookSecretProblem(undefined) === null && webhookSecretProblem("") === null && webhookSecretProblem("w".repeat(32)) === null && typeof webhookSecretProblem("zq9-zq9") === "string", "the webhook secret may be unset, and a set one must be at least 32 characters");
+check(!webhookSecretProblem("zq9-zq9").includes("zq9"), "a refused webhook secret isn't printed");
+{
+  const source = readFileSync(join(here, "m5-staging.mjs"), "utf8");
+  const lib = readFileSync(join(here, "m5-staging-lib.mjs"), "utf8");
+  check(!/webhook-secret|\.podster\/|readFileSync\([^)]*ecret/i.test(source) && !/webhook-secret|\.podster\//.test(lib), "neither file names the webhook secret's file or the directory it's kept in, and the script reads no secret from a file");
+  check((source.match(/\bwebhookSecret\b/g) ?? []).length === 6 && source.includes("const webhookSecret = process.env[WEBHOOK_SECRET_ENV] || undefined;") && source.includes("const secrets = [signupSecret, webhookSecret].filter(Boolean);"), "the script takes the webhook secret from its one name, scrubs it from output, and uses it nowhere but to check and to sign");
+  check(source.split("have(webhookSecret").length - 1 === 2 && !/writeFileSync\([^)]*ecret/.test(source), "only the two signed-delivery checks read it, each skipping without it, and it's never written");
+  check(WEBHOOK_PATH === "/webhooks/github" && source.includes("target.http(WEBHOOK_PATH") && STAGING_APP === "https://app-staging.podster.dev", "deliveries go to the gateway's webhook route on staging, and the web app asked for a marker page is staging's");
+}
+{
+  const body = deliveryBody({ repositoryId: 987, number: 7, head: "a".repeat(40), nonce: "n1" });
+  const payload = JSON.parse(body);
+  // What apps/gateway/src/github-webhook.ts reads from a pull_request delivery, and nothing a title or a branch could ride in.
+  check(payload.repository.id === 987 && payload.pull_request.number === 7 && payload.pull_request.head.sha === "a".repeat(40), "a delivery's body names the repository's ID, the pull request's number and its head commit");
+  check(JSON.stringify(Object.keys(payload).sort()) === JSON.stringify(["action", "nonce", "number", "pull_request", "repository"]) && !/title|ref|login|url/.test(body), "and nothing else: no title, branch, login or URL");
+  check(body !== deliveryBody({ repositoryId: 987, number: 7, head: "a".repeat(40), nonce: "n2" }), "a new nonce makes a new body, which the room takes as a new delivery");
+  const key = "k".repeat(40);
+  check(signDelivery(key, body) === `sha256=${createHmac("sha256", key).update(body).digest("hex")}` && /^sha256=[0-9a-f]{64}$/.test(signDelivery(key, body)), "a delivery is signed as GitHub signs one: HMAC-SHA256 of the body, in hex");
+  check(signDelivery(key, body) !== signDelivery("j".repeat(40), body) && signDelivery(key, body) !== signDelivery(key, `${body} `), "another key, or another body, is another signature");
+}
+{
+  // `wrangler tail` events, as the API logs a delivery: one JSON line of IDs and a fixed code.
+  const line = (delivery, outcome, extra = {}) => ({ logs: [{ level: "log", message: [JSON.stringify({ at: "provider.delivery", delivery, outcome, ...extra })] }], exceptions: [] });
+  const events = [line("d-1", "nudged", { room: "ws_1" }), { logs: [{ message: ["not json"] }, { message: [JSON.stringify({ at: "github.webhook", delivery: "d-1", outcome: "accepted" })] }] }, line("d-2", "no_room"), line("d-1", "replayed", { room: "ws_1" }), { logs: null }, {}];
+  check(JSON.stringify(deliveryOutcomes(events, "d-1")) === JSON.stringify(["nudged", "replayed"]) && JSON.stringify(deliveryOutcomes(events, "d-2")) === JSON.stringify(["no_room"]), "the API's outcome for a delivery is read from its own log lines, in order");
+  check(deliveryOutcomes(events, "d-3").length === 0 && deliveryOutcomes([], "d-1").length === 0, "a delivery the log doesn't hold has no outcome, and the gateway's line isn't taken for the API's");
+}
+
+// ---- what the Workers logged ----
+{
+  const event = { outcome: "ok", event: { request: { url: "https://gateway-staging.podster.dev/api/v1/workspaces/ws_1", headers: { cookie: "session-cookie-value-123" } } }, logs: [{ message: ['{"event":"merge.pass_failed","ws":"ws_1","task":"tsk_1","code":"provider_unavailable"}'] }], exceptions: [] };
+  const text = loggedText([event]);
+  check(text.includes("merge.pass_failed") && !text.includes("session-cookie-value-123") && !text.includes("gateway-staging"), "what a Worker logged is read from its logs and exceptions, never from the request the tail shows beside them");
+  const needles = [{ label: "a token", value: "ghs_secretsecretsecret" }, { label: "a branch name", value: "e2e/change-1" }, { label: "a short one", value: "e2e" }, { label: "nothing", value: undefined }];
+  check(leaks(text, needles).length === 0, "IDs and codes alone hold none of the run's strings");
+  const leaked = leaks(`${text} pushed e2e/change-1 with ghs_secretsecretsecret e2e`, needles);
+  check(JSON.stringify(leaked) === JSON.stringify(["a token", "a branch name"]) && !leaked.join().includes("ghs_"), "a token and a branch name in a log are found, by their labels and never their values; a string under 8 characters isn't looked for");
+  check(JSON.stringify(Object.keys(tailEnv({ PATH: "/usr/bin", HOME: "/home/x", PODSTER_E2E_SIGNUP_SECRET: "s", [WEBHOOK_SECRET_ENV]: "w", CLOUDFLARE_API_TOKEN: "t", GITHUB_TOKEN: "g" })).sort()) === JSON.stringify(["HOME", "PATH"]), "wrangler tail gets the allow-listed names only: no secret of the run's, and no token");
+}
+
+// ---- IDs that name nothing, and what counts as a change ----
+check(absentId("tsk_0123456789abcdef") === "tsk_fedcba9876543210" && absentId("ws_ab12") === "ws_21ba" && absentId("pgr_abab") === "pgr_baba", "an ID that names nothing keeps the shape of a real one");
+check(absentId("tsk_aa") === null && absentId("nounderscore") === null, "an ID that reversing can't change, or with no prefix, gives none");
+{
+  const change = Object.fromEntries(STEADY.map((field, at) => [field, at]));
+  check(JSON.stringify(steady({ ...change, pr_observed_at: 1, head_observed_at: 2 })) === JSON.stringify(steady({ ...change, pr_observed_at: 9, head_observed_at: 9 })), "reading a pull request again, with nothing changed, isn't a change");
+  check(STEADY.every((field) => JSON.stringify(steady({ ...change, [field]: "other" })) !== JSON.stringify(steady(change))) && steady(null) === null, "a moved head, a new state or a merge is one, field by field");
+}
+
+// ---- merges the run can't force ----
+{
+  const failed = (reason) => ({ merge_state: "failed", merge_reason: reason, merge_sha: null });
+  check(lostAuthorityEnding(failed("grant_required"), "grant_required").shown === true && lostAuthorityEnding(failed("access_revoked"), "access_revoked").shown === true, "a merge the job ended with the lost authority's own code is shown");
+  const first = lostAuthorityEnding({ merge_state: "succeeded", merge_sha: "a".repeat(40) }, "grant_required");
+  check(first.shown === false && !first.problem && first.why.length > 0, "a merge the job finished first shows nothing, and is a skip with its reason, not a failure");
+  for (const [title, change] of [["another reason", failed("provider_refused")], ["the wrong authority's code", failed("access_revoked")], ["a failure that still names a merge commit", { ...failed("grant_required"), merge_sha: "a".repeat(40) }], ["a merge still requested", { merge_state: "requested" }], ["no change", null]])
+    check(typeof lostAuthorityEnding(change, "grant_required").problem === "string", `refused: ${title}`);
+  const reviewed = "b".repeat(40);
+  check(movedHeadEnding({ change: failed("commit_changed"), reviewed }).shown === true, "a merge the job ended commit_changed is shown");
+  for (const [title, found] of [
+    ["Podster had already seen the move", { refusedCode: "commit_changed" }], ["GitHub refused the merge call", { change: failed("provider_refused"), reviewed }],
+    ["GitHub merged exactly the reviewed commit", { change: { merge_state: "succeeded", merge_sha: "c".repeat(40) }, mergedSecondParent: reviewed, reviewed }],
+  ]) check(movedHeadEnding(found).shown === false && !movedHeadEnding(found).problem, `not shown, and no failure: ${title}`);
+  for (const [title, found] of [
+    ["the request refused for another reason", { refusedCode: "grant_required" }], ["the request refused with no code", { refusedCode: null }], ["another commit merged", { change: { merge_state: "succeeded", merge_sha: "c".repeat(40) }, mergedSecondParent: "d".repeat(40), reviewed }],
+    ["a merge with no second parent read", { change: { merge_state: "succeeded" }, reviewed }], ["a failure for another reason", { change: failed("grant_required"), reviewed }], ["a commit_changed that names a merge commit", { change: { ...failed("commit_changed"), merge_sha: "c".repeat(40) }, reviewed }],
+  ]) check(typeof movedHeadEnding(found).problem === "string", `refused: ${title}`);
+}
 
 // ---- what git gets ----
 const parent = { PATH: "/usr/bin", HOME: "/home/x", PODSTER_E2E_SIGNUP_SECRET: "s", PODSTER_E2E_OPERATOR_COOKIE: "c", CLOUDFLARE_API_TOKEN: "t", GITHUB_TOKEN: "g", GH_TOKEN: "g", SSH_AUTH_SOCK: "/s", GIT_ASKPASS: "/evil" };
@@ -235,7 +319,9 @@ const apiConfig = join(fixtures, "wrangler.jsonc");
 writeFileSync(apiConfig, `{ // a comment, as the real file has\n "env": { "staging": { "vars": ${JSON.stringify({ ...vars, MANAGED_REPOSITORIES: "false" })} } } }`);
 const emptyConfig = join(fixtures, "empty.jsonc");
 writeFileSync(emptyConfig, `{ "env": { "staging": { "vars": {} } } }`);
-const script = (argv, env = {}, config = apiConfig) => spawnSync(process.execPath, [join(here, "m5-staging.mjs"), ...argv, "--api-config", config], { env: { PATH: process.env.PATH, HOME: process.env.HOME, ...env }, encoding: "utf8", timeout: 60_000 });
+// --skip-logs, so these don't depend on whether this checkout has the apps' wrangler installs. The tails' own preflight is below.
+const run = (argv, env = {}, config = apiConfig) => spawnSync(process.execPath, [join(here, "m5-staging.mjs"), ...argv, "--api-config", config], { env: { PATH: process.env.PATH, HOME: process.env.HOME, ...env }, encoding: "utf8", timeout: 60_000 });
+const script = (argv, env, config) => run([...argv, "--skip-logs"], env, config);
 const secret = "s".repeat(40);
 {
   const run = script(["--base-url", STAGING, "--dry-run"], { PODSTER_E2E_SIGNUP_SECRET: secret });
@@ -253,6 +339,19 @@ for (const base of ["https://gateway.podster.dev", "http://localhost:8787", "htt
   check(run.status === 2 && run.stderr.includes("Only https://gateway-staging.podster.dev"), `the script refuses ${base} before anything else`);
 }
 check(script(["--base-url", STAGING, "--yes"], { PODSTER_E2E_SIGNUP_SECRET: secret }).status === 2, "the script refuses an unknown flag");
+{
+  const skipped = script(["--base-url", STAGING, "--dry-run"], { PODSTER_E2E_SIGNUP_SECRET: secret });
+  check(skipped.stdout.includes("not tailed (--skip-logs), so M5-13a and M5-13 will be skipped") && skipped.stdout.includes(`${WEBHOOK_SECRET_ENV} isn't set, so M5-16a and M5-16b will be skipped`), "a dry run says the logs won't be tailed, and that the signed deliveries will be skipped without their secret");
+  const hook = "w".repeat(40);
+  const signed = script(["--base-url", STAGING, "--dry-run"], { PODSTER_E2E_SIGNUP_SECRET: secret, [WEBHOOK_SECRET_ENV]: hook });
+  check(signed.status === 0 && signed.stdout.includes("so M5-16a and M5-16b will run") && !signed.stdout.includes(hook) && !signed.stderr.includes(hook), "with the webhook secret set it says they'll run, and never prints it");
+  const short = script(["--base-url", STAGING, "--dry-run"], { PODSTER_E2E_SIGNUP_SECRET: secret, [WEBHOOK_SECRET_ENV]: "too-short-to-be-one" });
+  check(short.status === 2 && short.stderr.includes("shorter than the 32 characters") && !short.stderr.includes("too-short-to-be-one") && !short.stdout.includes("too-short-to-be-one"), "a webhook secret too short to be one is refused, exit 2, and not printed");
+  // With the logs on, the run needs each app's own wrangler before anything is sent. Which way this checkout goes is read here, not assumed.
+  const missing = missingWranglers(join(here, ".."));
+  const tailed = run(["--base-url", STAGING, "--dry-run"], { PODSTER_E2E_SIGNUP_SECRET: secret });
+  check(missing.length === 0 ? tailed.status === 0 && tailed.stdout.includes("`wrangler tail` for apps/api, apps/gateway, apps/web") : tailed.status === 2 && missing.every((app) => tailed.stderr.includes(`apps/${app}`)) && tailed.stderr.includes("--skip-logs") && !tailed.stdout.includes("Nothing was sent"), `with the logs on, a dry run ${missing.length === 0 ? "names the three tails" : `refuses, naming the ${missing.length} app(s) with no wrangler installed`}`);
+}
 
 rmSync(fixtures, { recursive: true, force: true });
 

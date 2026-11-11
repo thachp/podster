@@ -444,6 +444,16 @@ cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)
 
 `node m5-staging-selftest.mjs` checks its pure parts and its dry run, and CI runs it.
 
+**Extended on 2026-11-11, and not run since.** The script now has 65 checks: the 33 above and 32 for what the three runs left unshown, listed with each one's exact assertion in the [M5 plan](m5-plan.md#step-10-the-staging-script-extended-2026-11-11). What changes for whoever runs it:
+
+- **Still 2 sign-ins.** The second person also owns a second room.
+- **It leaves 2 public repositories,** not 1: `e2e-m5-<time>-<4 hex>` and `e2e-m5-<time>-<4 hex>-<6 hex>`. It prints both.
+- **About 7 to 9 minutes,** estimated and not measured.
+- **Logs:** it starts `wrangler tail` for the API, the gateway and the web app, as M4's script does. Run `npm ci` in `apps/api`, `apps/gateway` and `apps/web` first: the script checks for the three installs before it sends anything, and exits 2 without them. The tails use your `wrangler login`; a `CLOUDFLARE_API_TOKEN` in the environment isn't passed to them. `--skip-logs` runs without the tails, and M5-13a and M5-13 then say `SKIP`.
+- **Signed webhook deliveries are opt-in.** M5-16a and M5-16b run only when `PODSTER_M5_WEBHOOK_SECRET` is set in the environment of that run. The script reads no file for it, and never prints it, writes it or passes it on. Without it the two checks say `SKIP` and are counted. The owner sets it, for the run that needs it and no other.
+- **Four checks can say `SKIP` with nothing wrong:** M5-09f, AC-13a, AC-13b and AC-13c. Each needs the script's request to reach Podster before something else does, which nothing outside can force. A skip there means the run didn't show it.
+- **It leaves** one agent disconnected and one removed from the first room. In its own repository M5-C3 tries to make a tag and a release and then to delete them; its result says what GitHub answered to each, so anything left is named there.
+
 **What it doesn't cover:**
 
 - **Whether a refused call reached GitHub.** M5-05 and M5-14 say it doesn't. The script sees Podster's refusal and nothing of what Podster sent, so that stays the API's tests against the fake.

@@ -33,6 +33,13 @@ Agents deploy with `scripts/deploy-staging`, and not by hand. It takes main's ti
 
 The steps below are what it follows. They stay here as the reference, and for rebuilding staging.
 
+**Deploy notes, 2026-11-11 (UTC).** `scripts/deploy-staging` was refused or stopped by Cloudflare five times that day, with nothing deployed each time:
+
+- **Code 7403 at the D1 migrations read, twice,** earlier in the day: "The given account is not valid or is not authorized to access this service", from `wrangler d1 migrations list`. The script refused, and each time a retry minutes later succeeded. One of the two was at 06:10Z, deploying `81982b5`.
+- **Code 10021 at the API's version upload, three times,** at 12:44Z, 12:48Z and 12:54Z, deploying `c8053c3`: "binding DB of type d1 failed to generate. Please try again later or contact support." The script stopped with no Worker deployed. A fourth attempt succeeded at 13:16Z.
+
+The configuration was unchanged throughout and the database read normally throughout. **The cause isn't established.**
+
 ## First deploy
 
 This has been done once for staging, so it's kept here for rebuilding it, and as the outline for production. To ship a change, apply any new migrations, then run `npx wrangler deploy --env staging` from the app that changed, with the API first if both did. Migrations always go first: for example, the API's webhook delivery route (M5 step 5) reads `repo_room_index`, so `0007_repo_room_index.sql` must be applied to `podster-api-staging` before that API is deployed, or the route fails closed.
@@ -299,7 +306,7 @@ Until a secret is set, its part refuses and nothing reaches GitHub for it: a rep
 
 **A room whose repository setup is stuck** has no reset: abandon it and make a new room. That's ruled acceptable for staging's test people only ([M5 plan](m5-plan.md#owed-before-production)).
 
-**Not yet true:** no acceptance test has passed on staging. [M5's staging run](#m5s-staging-run) is the script for them, and it hasn't run.
+**Not yet true:** no acceptance test has passed on staging. [M5's staging run](#m5s-staging-run) is the script for them, and it hasn't run. **2026-11-11, later:** it ran once, 13:18:04Z to 13:20:49Z, with 32 passed, 0 failed and 0 skipped; [the M5 plan](m5-plan.md#step-10-the-first-run-on-staging-2026-11-11) has each check and what the run didn't cover. M5's security review hasn't been done and its gate hasn't been proposed or called.
 
 ## The repository token keys
 
@@ -367,9 +374,18 @@ cd e2e && node m4-staging.mjs --base-url https://gateway-staging.podster.dev --a
 
 `node run-m4-staging.mjs` rehearses it against the local stack, with public rooms on for that run only and the gateway's real limits, and `--public-rooms-off` checks that it stops when they're off.
 
+**Runs so far.** Neither was clean, and M4's gate, which is the owner's to call, hasn't been called. The [M4 plan](m4-plan.md#abuse-review-draft-step-14) has both in full.
+
+- **2026-11-10:** 102 passed, 3 failed, 0 skipped, 6 owed.
+- **2026-11-11, 10:54:23Z to 11:04:19Z,** the script at `6322461`: 107 passed, 1 failed, 0 skipped, 6 owed by design. Of the three earlier failures, M4-03 and M4-13 passed, with the M4-11 checks changed alongside them. The third failed again, and was the run's one failure: the script's matcher for M4-10's forged `cf-connecting-ip` check. Cloudflare refuses that request with its own 403 for error 1000, as plain text to `curl` and as an HTML page to Node's `fetch`, and the matcher took only the plain text. [#277](https://github.com/thachp/podster/pull/277) fixed it, so that check hasn't passed on staging by the script in either run.
+- **A first attempt that day, at 10:01Z, stopped after one sign-up:** the fresh checkout lacked the apps' `wrangler` installs, so no tail could start. Run `npm ci` in `apps/api`, `apps/gateway` and `apps/web` of the checkout first; since #277 the script checks for the installs before any sign-up.
+- **Sign-ups:** those two attempts used 24 of the day's 40, so the earliest clean rerun is after the window resets at 10:00 UTC on 2026-11-12.
+
 ## M5's staging run
 
 `e2e/m5-staging.mjs` is M5 step 10's script: managed repositories end to end, against staging and real GitHub, in `podsterdev`. **It has been written and hasn't run against staging.** Its checks and their IDs are in the [M5 plan](m5-plan.md#step-10-the-staging-script). It accepts `https://gateway-staging.podster.dev` as its base URL and refuses anything else, so there is no local rehearsal of it: locally GitHub is a fake, and `e2e/merge-check.mjs` and `e2e/repo-access-check.mjs` are the rehearsals.
+
+**It has run once, on 2026-11-11,** from 13:18:04Z to 13:20:49Z, against staging at `c8053c3`: 32 passed, 0 failed, 0 skipped, with 2 sign-ups. It left the public repository `podsterdev/e2e-m5-202611111318-b690` for the owner to archive or delete, and the room `ws_323f213040e349bf87206f36690ce226` on staging. Each check's result, what the run showed for the first time and what it didn't cover are in the [M5 plan](m5-plan.md#step-10-the-first-run-on-staging-2026-11-11). Nobody has looked at the repository and merge screens in a browser, M5's security review hasn't been done, and M5's gate hasn't been proposed or called.
 
 - **People:** a run takes **2 sign-ins** from the test sign-up, of its 6 a minute and 40 a day: the room's owner, and a second person who is the room's admin. Its five agents are made under those people and take none. With M4's 23, both runs fit in one day, with 15 to spare.
 - **No operator:** every organization may have managed repositories unless an operator took that back ([decision 194](spec/PRODUCT.md#decisions-needed)), so the run needs none, and `OPERATORS` doesn't matter to it. The room is in an organization the owner makes for the run.

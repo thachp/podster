@@ -182,6 +182,17 @@ Each threat maps to the step that mitigates it and the test that checks it. ADR 
 
 **A rerun is owed** after these fixes are deployed, at the earliest 24 hours after this run, since the test sign-up allows 40 people a day and the run spent them.
 
+**The rerun of 2026-11-11 (UTC).** `e2e/m4-staging.mjs`, at `6322461`, ran against staging with public rooms on, from 10:54:23Z to 11:04:19Z: **107 passed, 1 failed, 0 skipped, 6 owed by design.** The script exited 1, so the run failed. **The gate isn't called.**
+
+- **What it ran against:** API version `aafd7972-41d3-444e-aa9c-80da82148086`, gateway `fe27778f-dc9e-483e-8075-5dde087b3d04` and web `d51913c3-f64e-4d7f-8702-ef6a604c1bbe`, the build `scripts/deploy-staging` deployed from `c3e4068` at 08:53Z. The run's log records no version, so these are from the architect's deploy record.
+- **A first attempt didn't count.** It started at 10:01:04Z and stopped at 10:01:18Z with 1 passed and 2 failed: `wrangler tail` couldn't start for the API, the gateway or the web app (`ENOENT`), because the fresh checkout lacked the apps' `wrangler` installs. The script stopped "before any more sign-ups", having taken one.
+- **Two of the three failures of 2026-11-10 now pass, M4-03 and M4-13, and so do the M4-11 checks changed with them.** The third, M4-10's forged `cf-connecting-ip` check, failed again, as the next point says. M4-03: the page was not-found from two connections 2.586 and 5.396 seconds after the unpublish, and the old handle answered 404 on 5 reads from 32.5 seconds after it. M4-11: the public page, the not-found and the 429, each asked for as a browser does, had no script element. M4-13: every variant got the same bytes, the odd `Host` included.
+- **The one failure is M4-10's forged `cf-connecting-ip` check, the same check that failed on 2026-11-10, and it was the script's matcher, not the product.** The log's line: "a forged cf-connecting-ip got an answer other than the page, the limit or the edge's refusal: HTTP 403 at request 1". Cloudflare refuses that request with its own 403 for error 1000, as plain text to `curl` and as an HTML page to Node's `fetch`, and the matcher written after the first run accepted only the plain text. The architect confirmed the refusal by hand. [#277](https://github.com/thachp/podster/pull/277), merged as `b9872b9`, fixed the matcher and added a preflight that names missing installs before any sign-up.
+- **That check has not passed on staging by the script.** It needs a full run, which costs 23 sign-ups. The two attempts used 24 of the day's 40 (23 and 1), so the earliest clean rerun is after the window resets at 10:00 UTC on 2026-11-12.
+- **The rest of the run:** the per-client limit first refused at request 237; a suspended room's page was not-found 28.795 seconds after the suspension, inside the 30-second cache; the tails held this run's own requests (API 396 of 1136 events, gateway 119 of 705, web 148 of 158) and no canary, report note, access token or client address; 23 rooms were made private again.
+- **Owed by design, 6,** the same six the script prints every run and the list below names: a deleted room's handle (M4-02), a linking person's limits across organizations and an organization's hour (M4-09), other clients served while one is limited (M4-10), M4-12 in a real browser, an operator's ID used by a caller that isn't a person (M4-14), and the public assertion on every other API route (M4-15).
+- **The gate:** it's the owner's to call and hasn't been called. The architect recommended waiting for the clean rerun.
+
 **Owed, which no run of the script covers** (each printed "owed" by the script):
 
 - A deleted room's handle in M4-02: rooms have no delete route. A suspended room's handle is checked in M4-14.
@@ -213,6 +224,8 @@ Each threat maps to the step that mitigates it and the test that checks it. ADR 
 The gate still needs, besides the rows above: M3's gate, the test operator named in `OPERATORS`, the full `e2e/m4-staging.mjs` run on staging with an operator's session and the logs taken, and the owner's yes.
 
 **2026-11-11:** M3's gate was met, by the owner's call ([decision 193](spec/PRODUCT.md#decisions-needed)). So M4's gate no longer waits on M3's gate. The other items listed here still stand.
+
+**2026-11-11, after the rerun:** the full `e2e/m4-staging.mjs` run has now happened twice on staging, with an operator's session and the logs taken, and neither run was clean: [the rerun](#abuse-review-draft-step-14) got 107 passed and 1 failed, the failure being the script's own matcher for M4-10's forged `cf-connecting-ip` check. That check hasn't passed on staging by the script; the earliest clean rerun is after 10:00 UTC on 2026-11-12. The table's rows above stand as written and aren't updated from this run. The gate is the owner's to call and hasn't been called; the architect recommended waiting for the clean rerun.
 
 ## Questions for the architect
 

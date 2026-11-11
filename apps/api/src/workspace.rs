@@ -2237,10 +2237,13 @@ mod queries {
         )?;
         let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
         let members = if !sees_whole_room(caller) {
-            rows(sql, "SELECT principal_id, kind, org_id, role, guest_can_create FROM member WHERE principal_id = ? AND revoked_at IS NULL", vec![caller.id.as_str().into()])?
+            rows(sql, "SELECT principal_id, kind, org_id, role, guest_can_create, joined_via FROM member WHERE principal_id = ? AND revoked_at IS NULL", vec![caller.id.as_str().into()])?
         } else {
-            rows(sql, "SELECT principal_id, kind, org_id, role, guest_can_create FROM member WHERE revoked_at IS NULL ORDER BY added_at", vec![])?
+            rows(sql, "SELECT principal_id, kind, org_id, role, guest_can_create, joined_via FROM member WHERE revoked_at IS NULL ORDER BY added_at", vec![])?
         };
+        // How each participant joined is for those who manage access, so the grant form offers no grant a participant can't
+        // hold. It authorizes nothing: granting checks the room's own row.
+        let told_join_source = podster_policy::repositories::sees_join_source(caller);
         let manages = authorize_workroom(caller, WorkroomAction::ManageAccess) == Verdict::Allow;
         // Someone who joined by a public claim isn't told who owns the room or wrote its brief: those are person IDs.
         let public_participant = !rows(
@@ -2255,6 +2258,9 @@ mod queries {
                 "principal_id": m["principal_id"], "kind": m["kind"], "org_id": m["org_id"], "role": m["role"],
                 "guest_can_create": int(&m["guest_can_create"]) != 0,
             });
+            if told_join_source {
+                entry["public_claim"] = json!(m["joined_via"].as_str() == Some("public"));
+            }
             // Someone's scopes are for them and those who manage access.
             let id = m["principal_id"].as_str().unwrap_or_default();
             if manages || id == caller.id {

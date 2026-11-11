@@ -393,6 +393,38 @@ describe("taking a grant back", () => {
   });
 });
 
+describe("who is told how each participant joined", () => {
+  it("tells those who manage access which participants joined through a public claim, and nobody else, not even false", async () => {
+    const id = await room();
+    for (const who of [OWNER, ADMIN]) {
+      const read = await api(who, "GET", `/v1/workspaces/${id}`);
+      expect(read.status, read.text).toBe(200);
+      const told = Object.fromEntries(read.body.members.map((m: any) => [m.principal_id, m.public_claim]));
+      expect(told, who.id).toMatchObject({ [PUBLIC_AGENT.id]: true, [AGENT.id]: false, [MEMBER.id]: false, [GUEST.id]: false, [ORG_ADMIN.id]: false });
+    }
+    // A member who sees the whole room, a guest, an agent and the public-claim agent itself: no member carries the field.
+    for (const who of [MEMBER, ORG_ADMIN, GUEST, AGENT, PUBLIC_AGENT]) {
+      const read = await api(who, "GET", `/v1/workspaces/${id}`);
+      expect(read.status, `${who.id}: ${read.text}`).toBe(200);
+      expect(read.body.members.length, who.id).toBeGreaterThan(0);
+      for (const member of read.body.members) expect(member, `${who.id} sees ${member.principal_id}`).not.toHaveProperty("public_claim");
+    }
+  });
+
+  it("goes by the caller's current role: an admin made a member stops being told", async () => {
+    const id = await room();
+    expect((await api(ADMIN, "GET", `/v1/workspaces/${id}`)).body.members[0]).toHaveProperty("public_claim");
+    await inRoom(id, (sql) => sql.exec("UPDATE member SET role = 'member' WHERE principal_id = ?", ADMIN.id));
+    for (const member of (await api(ADMIN, "GET", `/v1/workspaces/${id}`)).body.members) expect(member).not.toHaveProperty("public_claim");
+  });
+
+  it("authorizes nothing: the grant is still refused from the room's own row", async () => {
+    const id = await room();
+    const refused = await give(id, PUBLIC_AGENT.id, "push");
+    expect([refused.status, refused.code]).toEqual([400, "grantee_public"]);
+  });
+});
+
 describe("the list of grants", () => {
   it("shows a human owner or admin every grant that isn't revoked, and anyone else their own", async () => {
     const id = await room();

@@ -205,6 +205,16 @@ describe("issuing a token", () => {
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT count(*) AS n FROM idempotency WHERE response_json LIKE '%ghs_%' OR request_hash LIKE '%ghs_%'").one().n)).toBe(0);
   });
 
+  it("issues a token in a room that has its repository when the deployment's list of requesters names nobody in it", async () => {
+    // `REPOSITORY_REQUESTERS` bears on asking for a repository and retrying its setup, and on nothing else.
+    for (const value of ["per_ra_someone_else", ""]) {
+      const r = await room();
+      await inRoom(r.id, (sql) => { sql.exec("CREATE TABLE test_repository_requesters (value TEXT)"); sql.exec("INSERT INTO test_repository_requesters VALUES (?)", value); });
+      const got = await access(AGENT, r.id, r.task);
+      expect([got.status, got.body?.repository], JSON.stringify(value)).toEqual([200, "podster-test-org/engineering"]);
+    }
+  });
+
   it("returns the held token again, and only near its expiry mints a new one and revokes the old (M5-07)", async () => {
     const r = await room();
     const first = (await access(AGENT, r.id, r.task)).body;
@@ -393,12 +403,26 @@ describe("refusing", () => {
     await refusedWith(await access(AGENT, r.id, r.task), 409, "repo_not_ready");
   });
 
-  it("answers as a route that doesn't exist while the switch is off, a malformed body included", async () => {
+  it("answers exactly as a task verb that doesn't exist while the switch is off, with a key or without (review A5)", async () => {
     const r = await room({ switchedOn: false });
-    await refusedWith(await access(AGENT, r.id, r.task), 404, "not_found");
-    // A missing route parses the body first, so a malformed one is `invalid_argument` there and here alike.
-    await refusedWith(await access(AGENT, r.id, r.task, undefined, { raw: "{not json" }), 400, "invalid_argument");
-    await refusedWith(await access(AGENT, r.id, "tsk_missing"), 404, "not_found");
+    const verb = (name: string, task: string, options: { key?: string | null; raw?: string } = {}) =>
+      api(AGENT, "POST", `/v1/workspaces/${r.id}/tasks/${task}/${name}`, undefined, { key: null, ...options });
+    for (const [what, task, options] of [
+      ["no key", r.task, {}],
+      ["a key", r.task, { key: "ra-off-key" }],
+      ["a malformed body", r.task, { raw: "{not json" }],
+      ["a malformed body and a key", r.task, { raw: "{not json", key: "ra-off-key-2" }],
+      ["a task that doesn't exist", "tsk_missing", {}],
+      ["a task that doesn't exist, with a key", "tsk_missing", { key: "ra-off-key-3" }],
+    ] as const) {
+      const got = await verb("repo-access", task, options);
+      const none = await verb("no-such-verb", task, options);
+      expect([got.status, got.text], what).toEqual([none.status, none.text]);
+    }
+    // Without a key that's the key's refusal, as for any command, and with one a missing route's.
+    await refusedWith(await access(AGENT, r.id, r.task), 400, "idempotency_key_required");
+    await refusedWith(await verb("repo-access", r.task, { key: "ra-off-key-4" }), 404, "not_found");
+    expect(await tokens(r.id)).toEqual([]);
   });
 
   it("takes nothing from the caller: any field at all is refused", async () => {

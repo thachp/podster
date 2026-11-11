@@ -23,7 +23,15 @@ use podster_policy::repositories::{
 /// `GET repository`: the room's request for a repository and its linked repository, each null if there's none. For
 /// a person who sees the whole room, never an agent: the contract lists it as person-only, and an agent will learn of the
 /// repository through `get_repo_access`, once step 6 builds it. It's a read of current state and authorizes nothing.
-pub(super) fn read(sql: &SqlStorage, who: &Participant) -> R<Value> {
+///
+/// `may_request` says whether the caller could ask for the repository or retry its setup as far as who they are goes:
+/// a person who is the room's owner or a room admin, whom this deployment lets ask. It's for a screen to show the
+/// option or say it's unavailable, and the commands decide again for themselves.
+pub(super) fn read(
+    sql: &SqlStorage,
+    who: &Participant,
+    requesters: &super::provisioning::Requesters,
+) -> R<Value> {
     if who.caller.kind != PrincipalKind::Person || !sees_whole_room(&who.caller) {
         return Err(ApiError::not_allowed());
     }
@@ -42,7 +50,8 @@ pub(super) fn read(sql: &SqlStorage, who: &Participant) -> R<Value> {
             "status_reason": r["status_reason"], "created_at": r["created_at"], "verified_at": r["verified_at"],
             "updated_at": r["updated_at"],
         }));
-    Ok(json!({ "request": request, "repository": repository }))
+    let may_request = requesters.authorize(&who.caller).is_ok();
+    Ok(json!({ "request": request, "repository": repository, "may_request": may_request }))
 }
 
 /// The Worker's call for a provider's webhook delivery. Reached only from `crate::provider`, which has verified the
@@ -606,11 +615,29 @@ fn linked_repo(sql: &SqlStorage) -> R<Option<(String, i64)>> {
     .and_then(|link| Some((text(&link["provider"])?, link["provider_repo_id"].as_i64()?))))
 }
 
+/// `self_review`'s message when the approving review came from someone the submitter's person controls. The contract
+/// names it, and the web app shows its own sentence for it.
+pub(crate) const SELF_REVIEW_MESSAGE: &str = "This commit needs an approving review from someone other than the person who controls its submitter, or another agent that person controls, before it can be merged.";
+/// `self_review`'s message for an approval recorded before Podster kept who gave it: the review may have been
+/// independent, so the commit is to be reviewed again, not by someone else.
+pub(crate) const REVIEW_AGAIN_MESSAGE: &str = "This commit was approved before Podster recorded who reviews a commit, so it needs to be reviewed again before it can be merged.";
+
+/// `self_review`'s message for a review by an agent whose credential named no linking person: who controls the reviewer
+/// isn't known, so someone else's review is needed.
+pub(crate) const REVIEWER_UNKNOWN_MESSAGE: &str = "This commit's approving review came from an agent whose controlling person isn't known, so it needs an approving review from someone else before it can be merged.";
+
 /// A refusal from the policy, as the API answers it.
 pub(super) fn denied(denial: RepoDenial) -> ApiError {
     match denial {
         RepoDenial::Grant(refusal) => refused(refusal),
         RepoDenial::Hidden => ApiError::task_not_found(),
+        RepoDenial::SelfReview => ApiError::explained(403, denial.code(), SELF_REVIEW_MESSAGE),
+        RepoDenial::ReviewUnrecorded => {
+            ApiError::explained(403, denial.code(), REVIEW_AGAIN_MESSAGE)
+        }
+        RepoDenial::ReviewerUnknown => {
+            ApiError::explained(403, denial.code(), REVIEWER_UNKNOWN_MESSAGE)
+        }
         RepoDenial::GranteeNotParticipant | RepoDenial::GranteePublic => {
             ApiError::api(400, denial.code())
         }
@@ -628,15 +655,21 @@ fn refused(refusal: GrantRefusal) -> ApiError {
     }
 }
 
-/// Whether the caller administers the room's organization, by the gateway's assertion.
-fn administers_room_org(sql: &SqlStorage, caller: &Caller, admin_orgs: &[String]) -> R<bool> {
-    if caller.kind != PrincipalKind::Person {
-        return Ok(false);
-    }
+/// Whether the caller administers the room's organization: the organization from the room's own row, the caller's from
+/// the gateway's verified assertion, and `podster_policy` deciding.
+pub(super) fn administers_room_org(
+    sql: &SqlStorage,
+    caller: &Caller,
+    admin_orgs: &[String],
+) -> R<bool> {
     let org = rows(sql, "SELECT owner_org_id FROM workspace", vec![])?
         .first()
         .and_then(|room| text(&room["owner_org_id"]));
-    Ok(org.is_some_and(|org| admin_orgs.contains(&org)))
+    Ok(podster_policy::repositories::administers_org(
+        caller.kind,
+        admin_orgs,
+        org.as_deref(),
+    ))
 }
 
 /// Marks one grant revoked, with its audit entry and event. `reason` is a fixed code. The holder is told unless they

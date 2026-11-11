@@ -29,6 +29,14 @@ export function explainMergeRefusal(code: string, status = 400): string {
       return "You joined this workroom from its public page, so you can't merge its work. Nothing was asked for.";
     case "self_merge":
       return "You can't merge this task: you, or the person who controls you, also control whoever submitted it. Someone else with a merge grant can. Nothing was asked for.";
+    case "self_review":
+      return "This commit can't be merged yet: it needs an approving review from someone other than the person who controls its submitter, or one of their agents. Nothing was asked for.";
+    case REVIEWER_UNKNOWN:
+      return "This commit's approving review came from an agent whose controlling person isn't known, so it needs an approving review from someone else before it can be merged. Nothing was asked for.";
+    case REVIEW_AGAIN:
+      return "This commit was approved before Podster recorded who reviews a commit, so it needs to be reviewed again before it can be merged. Nothing was asked for.";
+    case "controller_departed":
+      return "You can't merge this task: the person you act for has left the organization. Nothing was asked for.";
     case "task_not_linked":
       return "This task isn't linked to the workroom's repository, so there's nothing to merge.";
     case "repo_not_ready":
@@ -89,6 +97,9 @@ const FAILURES: Record<string, string> = {
   access_revoked: "whoever asked was no longer in the workroom when it ran, having left or been removed",
   agent_disconnected: "the agent that asked was disconnected before it ran",
   self_merge: "whoever asked turned out to control the task's submitter, and nobody merges work they control",
+  self_review: "the commit's approving review came from the person who controls its submitter or one of their agents, or was approved before Podster recorded who reviews, and a merge needs an independent review, given again if it wasn't recorded",
+  controller_departed: "the person whoever asked acts for had left the organization",
+  task_not_found: "whoever asked could no longer see the task",
   grant_required: "whoever asked no longer held a merge grant when it ran",
   grant_expired: "whoever asked had a merge grant that expired before it ran",
   grant_stale: "whoever asked had a merge grant from an owner who no longer holds the repository's delegation",
@@ -105,6 +116,21 @@ const FAILURES: Record<string, string> = {
   merge_already_requested: "another merge was already under way",
   invalid_argument: "the reviewed commit wasn't a full commit ID",
   unreviewed_merge: "a commit nobody reviewed was merged outside Podster",
+};
+
+/**
+ * `self_review` for an approval recorded before Podster kept who reviewed it: the same code, which the server tells apart
+ * by its message (decision 195). Asking for someone else's review would mislead whoever reviewed it independently, so
+ * the control says to review it again. A code of this screen's own, never sent by the server.
+ */
+export const REVIEW_AGAIN = "self_review_again";
+/** `self_review` for a review by an agent whose controlling person isn't known, told apart the same way. */
+export const REVIEWER_UNKNOWN = "self_review_reviewer_unknown";
+export const reviewAgainRefusal = <T extends { ok: boolean; code?: string; message?: string }>(result: T): T => {
+  if (result.ok || result.code !== "self_review") return result;
+  if (/reviewed again/.test(result.message ?? "")) return { ...result, code: REVIEW_AGAIN };
+  if (/controlling person isn't known/.test(result.message ?? "")) return { ...result, code: REVIEWER_UNKNOWN };
+  return result;
 };
 
 /** These 503s are answered before anything is recorded, so they're definite refusals, not unknown outcomes. */
@@ -170,7 +196,7 @@ export function MergeControl({ api, me }: { api: SheetApi<LoadedTask>; me: strin
 
   const merge = async () => {
     await run(
-      async () => definiteMergeRefusal(await clientCommand(`/api/v1/workspaces/${encodeURIComponent(data.workspace)}/tasks/${encodeURIComponent(data.task.id)}/merge`, { submission_no: data.task.approved_submission_no, commit_sha: change.reviewed_commit_sha }, { idempotencyKey: key.current.value })),
+      async () => reviewAgainRefusal(definiteMergeRefusal(await clientCommand(`/api/v1/workspaces/${encodeURIComponent(data.workspace)}/tasks/${encodeURIComponent(data.task.id)}/merge`, { submission_no: data.task.approved_submission_no, commit_sha: change.reviewed_commit_sha }, { idempotencyKey: key.current.value }))),
       explainMergeRefusal,
     );
     setOpen(false);

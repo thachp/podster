@@ -4,14 +4,22 @@ import { explainRefusal } from "../team/model";
 /** M5 managed repositories (ADR 0009). Every field here is what the room's read said; none of it decides anything. */
 export type RepoRequest = { id: string; state: "pending" | "ready" | "failed" | "uncertain"; name: string; visibility: "public" | "private"; reason: string | null; requested_by: string; requested_at: number; updated_at: number; attempts_left: number };
 export type RepoLink = { id: string; provider: "github"; provider_repo_id: number; full_name: string; visibility: "public" | "private"; default_branch: string; status: "ready" | "degraded" | "suspended"; status_reason: string | null; created_at: number; verified_at: number | null; updated_at: number };
-/** `delegated` is present only for the room's owner and admins, and only when the API could read it. Display only: the request command decides. */
+/**
+ * `delegated` is present only for the room's owner and admins, and only when the API could read it. `may_request` is the
+ * API's word on whether this person could ask for the repository or retry its setup: an owner or admin whom this
+ * deployment lets ask. Display only, both: the commands decide.
+ */
 export type RoomRepository = {
   request: RepoRequest | null;
   repository: RepoLink | null;
   delegated?: boolean;
+  may_request?: boolean;
   /** The GitHub organization Podster's repositories are made in, as the server's configuration names it. Null or absent while it isn't configured. */
   organization?: string | null;
 };
+
+/** Shown to an owner or admin the deployment doesn't let ask, in place of the controls. */
+export const REQUESTS_CLOSED = "Creating a repository isn't available to your account on this Podster deployment yet, so one can't be created or set up again from here.";
 
 /** Display only. The API checks every grant again, from current authority, at each use; `state` can lag. */
 export type RepoGrant = { id: string; principal_id: string; action: "push" | "merge"; delegated_by: string; created_at: number; expires_at: number | null; revoked_at: number | null; state: "live" | "expired" | "stale" | "revoked" };
@@ -67,6 +75,7 @@ const REASONS: Record<string, string> = {
   provisioning_not_configured: "Podster's GitHub setup wasn't complete when this ran.",
   token_refused: "GitHub refused Podster's access when setup started.",
   not_delegated: "A Podster operator had taken managed repositories away from this workroom's organization.",
+  repository_requests_closed: "Creating repositories wasn't available to the person who asked when setup ran.",
   delegation_unavailable: "Podster couldn't confirm this workroom's organization holds the delegation.",
   room_archived: "The workroom was archived before setup ran.",
   requester_not_owner: "The person who asked was no longer this workroom's owner when setup ran.",
@@ -129,6 +138,8 @@ export function explainRepositoryRefusal(code: string, status = 400) {
       return "That name is reserved, because it would read as Podster's own. Choose another. Nothing was created.";
     case "not_delegated":
       return "A Podster operator has taken managed repositories away from this workroom's organization. Nothing was created.";
+    case "repository_requests_closed":
+      return "Creating a repository isn't available to your account on this Podster deployment yet. Nothing was created or changed.";
     case "delegation_unavailable":
       return "Podster couldn't check this request against today's limits just now. Nothing was created. Try again.";
     case "repository_request_limit":

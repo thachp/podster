@@ -68,6 +68,8 @@ afterEach(async () => {
 
 const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(stub(id), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
 const delegate = (org: string, granted = true, by: Who = OPERATOR) => api(by, "PUT", `/v1/orgs/${org}/provisioning-delegation`, { granted });
+/** Switches managed repositories on for one organization's own routes, as `test_managed_repositories_on` does for a room. */
+const orgOn = (org: string) => runInDurableObject(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(org)), (_: any, state: any) => void state.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_managed_repositories_on (x INTEGER)"));
 
 let orgs = 0;
 /**
@@ -175,24 +177,48 @@ const eventTypes = (id: string) => inRoom(id, (sql) => sql.exec("SELECT type FRO
 const indexRow = async (repo: number) => (await BINDINGS.DB.prepare("SELECT workspace_id FROM repo_room_index WHERE provider = 'github' AND provider_repo_id = ?").bind(repo).first())?.workspace_id ?? null;
 
 describe("the organization's provisioning delegation", () => {
-  it("keeps answering while managed repositories are switched off, the same as when they're on (ruled 2026-11-11)", async () => {
-    // Off is this runtime's state for the whole Worker. The delegation routes never read the switch, so an operator
-    // can set the delegation before the feature is switched on. A room switched on for a test changes nothing here.
+  it("keeps answering an operator while managed repositories are switched off, and nobody else (ruled 2026-11-11, narrowed 2026-11-11 after the security review)", async () => {
+    // Off is this runtime's state for the whole Worker. A Podster operator's read and write never read the switch, so an
+    // operator can take an organization's ability away, or restore it, before the feature is switched on. Anyone else,
+    // the organization's own admin included, is answered exactly as a route that doesn't exist while it's off: an
+    // ordinary person doesn't learn from it that the feature exists (review A5). A room switched on changes nothing here.
     expect(BINDINGS.MANAGED_REPOSITORIES).toBeUndefined();
     const offRoom = await room({ delegated: false, switchedOn: false });
     const onRoom = await room({ delegated: false });
     const outsider: Who = { id: "per_pv_off_outsider", kind: "person", org: "org_pv_elsewhere", adminOrgs: ["org_pv_elsewhere"] };
+    const raw = async (who: Who, method: string, path: string, body?: unknown) => {
+      const got = await api(who, method, path, body);
+      return [got.status, got.text];
+    };
     for (const r of [offRoom, onRoom]) {
       const path = `/v1/orgs/${r.org}/provisioning-delegation`;
       expect((await api(OPERATOR, "GET", path)).body).toMatchObject({ provider: "github", granted: false });
       const set = await api(OPERATOR, "PUT", path, { granted: true });
       expect([set.status, set.body.granted], r.id).toEqual([200, true]);
-      expect((await api(r.owner, "GET", path)).body.granted).toBe(true);
-      // Someone who is neither an operator nor the organization's admin is refused as ever, reading or setting.
-      for (const method of ["GET", "PUT"]) {
-        const refused = await api(outsider, method, path, method === "PUT" ? { granted: false } : undefined);
-        expect([refused.status, refused.code], `${r.id} ${method}`).toEqual([403, "not_allowed"]);
+      // The organization's admin, an outsider and an agent, reading or setting, with a key or a body or not: a missing route.
+      for (const who of [r.owner, outsider, AGENT]) {
+        for (const [method, body] of [["GET", undefined], ["PUT", { granted: false }]] as const) {
+          const label = `${r.id} ${who.id} ${method}`;
+          const got = await raw(who, method, path, body);
+          expect(got, label).toEqual(await raw(who, method, `/v1/orgs/${r.org}/no-such-route`, body));
+          expect(got[0], label).toBe(404);
+        }
       }
+    }
+  });
+
+  it("answers an organization's admin as before once the switch is on for it", async () => {
+    const r = await room({ delegated: false });
+    await orgOn(r.org);
+    const path = `/v1/orgs/${r.org}/provisioning-delegation`;
+    expect((await api(r.owner, "GET", path)).body).toMatchObject({ provider: "github", granted: false });
+    expect((await delegate(r.org)).status).toBe(200);
+    expect((await api(r.owner, "GET", path)).body.granted).toBe(true);
+    // Setting it is still for an operator alone.
+    const outsider: Who = { id: "per_pv_on_outsider", kind: "person", org: "org_pv_elsewhere", adminOrgs: ["org_pv_elsewhere"] };
+    for (const [who, method] of [[r.owner, "PUT"], [outsider, "GET"], [outsider, "PUT"]] as const) {
+      const refused = await api(who, method, path, method === "PUT" ? { granted: false } : undefined);
+      expect([refused.status, refused.code], `${who.id} ${method}`).toEqual([403, "not_allowed"]);
     }
   });
 
@@ -206,6 +232,8 @@ describe("the organization's provisioning delegation", () => {
     const made = await api(admin, "POST", "/v1/workspaces", { name: "Engineering" });
     expect(made.status).toBe(200);
     await known(org, made.body.id);
+    // Switched on for this organization, so its admin's read and everyone else's refusals answer as they do once it's on.
+    await orgOn(org);
     const member: Who = { id: "per_pv_d_member", kind: "person", org, adminOrgs: [] };
     const path = `/v1/orgs/${org}/provisioning-delegation`;
     // Nobody has set it: held, as every organization's is until an operator takes it back.
@@ -814,7 +842,7 @@ describe("the provisioning job", () => {
     expect((await api(r.owner, "POST", `/v1/workspaces/${r.id}/tasks`, { title: "Write the brief", instructions: "Write it." })).status).toBe(200);
     for (let i = 0; i < 3; i++) await alarmPass(stub(r.id));
     expect((await github()).calls).toEqual([]);
-    expect(await read(r)).toEqual({ request: null, repository: null, delegated: true, organization: GH_ORG });
+    expect(await read(r)).toEqual({ request: null, repository: null, delegated: true, may_request: true, organization: GH_ORG });
   });
 
   it("refuses cleanly while the App's key isn't set, and goes on under the chosen name once it is", async () => {
@@ -1229,13 +1257,27 @@ describe("the provisioning job", () => {
     expect(await rowsOf(r.id, "repo_request_attempt")).toEqual([]);
   });
 
-  it("is set for staging only in the Worker's configuration, with no key beside it", () => {
+  it("is set for staging only in the Worker's configuration, beside the list of who may ask, with no key beside it", () => {
     // This reads the configuration file. A variable set on the deployed Worker by hand wouldn't show here.
-    // The owner said "let's unblock m5 staging" on 2026-11-11: the switch, the organization and the three Apps' IDs are
-    // staging's variables. The top level, which local runs and these tests use, and any other environment set none.
+    // The owner said "let's unblock m5 staging" on 2026-11-11. The architect took the switch out again that day, since
+    // staging's sign-in is open to anyone, and put it back with `REPOSITORY_REQUESTERS`: on staging only the operators
+    // the `OPERATORS` secret names and test people may ask, and no person's ID is in the file. The switch, that list, the organization and the three Apps' IDs
+    // are staging's variables. The top level, which local runs and these tests use, and any other environment set none.
     const config = JSON.parse(BINDINGS.TEST_WRANGLER.replace(/^\s*\/\/.*$/gm, ""));
+    // Wherever the switch is on, the list is set, to something that isn't everyone. Unset would be everyone. The rule
+    // is the one scripts/deploy-staging refuses on (scripts/requesters-rule.mjs), run over this file by the test
+    // configuration: it passes the file as it is, and would refuse it with staging's list taken out.
+    const rule = JSON.parse(BINDINGS.TEST_REQUESTERS_RULE);
+    expect(rule.real).toBeNull();
+    expect(rule.withoutList).toMatch(/set no REPOSITORY_REQUESTERS/);
+    expect(rule.valid).toEqual({ "operators,test-people": true, "test-people": true, per_owner1: true, "": false, "operators,": false, everyone: false });
+    // No other scope has the switch at all, so the rule's reading of staging is the whole of it.
+    for (const [environment, scope] of [["top level", config], ...Object.entries<any>(config.env)] as [string, any][]) {
+      if (environment !== "staging") expect(scope.vars?.MANAGED_REPOSITORIES, environment).toBeUndefined();
+    }
     const staging: Record<string, string> = {
       MANAGED_REPOSITORIES: "true",
+      REPOSITORY_REQUESTERS: "operators,test-people",
       GITHUB_ORG_LOGIN: "podsterdev",
       GITHUB_ORG_ID: "354820586",
       GITHUB_PROVISION_APP_ID: "5695065",
@@ -1479,5 +1521,339 @@ describe("the provisioning job", () => {
     // The events carry types and IDs. The repository's name isn't in one.
     const events = JSON.stringify(await rowsOf(ok.id, "event"));
     expect(events).not.toContain("engineering");
+  });
+});
+
+// A deployment's own list of who may ask (`REPOSITORY_REQUESTERS`), added after M5's security review. The Worker's
+// variable is unset here, as the first test checks, so each room is given a setting of its own by a table only a test
+// build reads, where `provisioning::requesters` reads the variable in a deployment.
+describe("a deployment's list of repository requesters", () => {
+  /** Gives one room the setting, as if the Worker's variable held `value`. */
+  const listed = (id: string, value: string) => inRoom(id, (sql) => {
+    sql.exec("CREATE TABLE IF NOT EXISTS test_repository_requesters (value TEXT)");
+    sql.exec("DELETE FROM test_repository_requesters");
+    sql.exec("INSERT INTO test_repository_requesters VALUES (?)", value);
+  });
+  const unset = (id: string) => inRoom(id, (sql) => void sql.exec("DROP TABLE IF EXISTS test_repository_requesters"));
+  const CLOSED = [403, "repository_requests_closed"];
+  const policyOf = async (r: { id: string; owner: Who }) => (await api(r.owner, "GET", `/v1/workspaces/${r.id}`)).body.policy_version;
+  const person = async (r: { id: string; org: string; owner: Who }, id: string, role: string) => {
+    const who: Who = { id, kind: "person", org: r.org, adminOrgs: [] };
+    const added = await api(r.owner, "POST", `/v1/workspaces/${r.id}/members`, { principal_id: who.id, kind: "person", org_id: r.org, role, policy_version: await policyOf(r) }, { claims: { target_member: { person: who.id, orgs: { [r.org]: 1 } } } });
+    expect(added.status, added.text).toBe(200);
+    return who;
+  };
+  const failedRequest = (id: string, by: string) => inRoom(id, (sql) => void sql.exec("INSERT INTO repo_request (id, state, name, visibility, attempt, provider_name, reason, requested_by, requested_at, updated_at) VALUES ('rr_f', 'failed', 'engineering', 'public', 1, 'engineering', 'name_taken', ?, 1, 1)", by));
+  /** Everything a refused request must leave as it was: no request, no event, no place in either count, nothing at GitHub. */
+  const untouched = async (r: { id: string; org: string }, people: string[], events: string[]) => {
+    expect(await rowsOf(r.id, "repo_request")).toEqual([]);
+    expect(await rowsOf(r.id, "repo_request_attempt")).toEqual([]);
+    expect(await eventTypes(r.id)).toEqual(events);
+    for (const holder of [r.org, ...people]) expect(await counted(holder), holder).not.toContain(r.id);
+    expect((await github()).calls).toEqual([]);
+  };
+
+  it("lets everyone the room's rule lets while the setting is unset, as this runtime has it", async () => {
+    expect(BINDINGS.REPOSITORY_REQUESTERS).toBeUndefined();
+    const r = await room();
+    expect((await read(r)).may_request).toBe(true);
+    expect((await ask(r)).status).toBe(200);
+  });
+
+  it("refuses an owner who isn't listed, with nothing recorded, nothing counted and nothing sent to GitHub, and takes them once they are", async () => {
+    const r = await room();
+    const events = await eventTypes(r.id);
+    await listed(r.id, "per_pv_someone_else");
+    const refused = await ask(r);
+    expect([refused.status, refused.code]).toEqual(CLOSED);
+    // The refusal says nothing of who is listed.
+    expect(refused.text).not.toContain("per_pv_someone_else");
+    expect(refused.body).toEqual({ error: { code: "repository_requests_closed", message: expect.any(String) } });
+    // Under another key, and the same key again: the same refusal each time, and still no place taken.
+    expect((await ask(r, undefined, { key: "pv-closed-key" })).code).toBe("repository_requests_closed");
+    expect((await ask(r, undefined, { key: "pv-closed-key" })).code).toBe("repository_requests_closed");
+    await untouched(r, [r.owner.id], events);
+    expect(await inRoom(r.id, (sql) => sql.exec("SELECT action FROM audit_event WHERE action LIKE 'repository.%'").toArray())).toEqual([]);
+    // The read says so before anyone asks, and a request the room wouldn't take for its own reasons is refused the same.
+    expect((await read(r)).may_request).toBe(false);
+    expect((await ask(r, { name: "engineering", visibility: "private" })).code).toBe("repository_requests_closed");
+    expect((await ask(r, { nonsense: true })).code).toBe("repository_requests_closed");
+    // Listed, the same person asks and the repository is made.
+    await listed(r.id, `per_pv_someone_else,${r.owner.id}`);
+    expect((await read(r)).may_request).toBe(true);
+    expect((await ask(r)).status).toBe(200);
+    expect(await counted(r.org)).toContain(r.id);
+    expect(await counted(r.owner.id)).toContain(r.id);
+    expect((await settled(r)).request.state).toBe("ready");
+  });
+
+  it("refuses a retry by someone who isn't listed the same way, and leaves the failed request as it was", async () => {
+    const r = await room();
+    await failedRequest(r.id, r.owner.id);
+    const before = await rowsOf(r.id, "repo_request");
+    const events = await eventTypes(r.id);
+    await listed(r.id, "per_pv_someone_else");
+    const refused = await retry(r);
+    expect([refused.status, refused.code]).toEqual(CLOSED);
+    expect(await rowsOf(r.id, "repo_request")).toEqual(before);
+    expect(await eventTypes(r.id)).toEqual(events);
+    expect((await github()).calls).toEqual([]);
+    for (const holder of [r.org, r.owner.id]) expect(await counted(holder)).not.toContain(r.id);
+    expect((await read(r)).may_request).toBe(false);
+    // Listed, the retry is taken.
+    await listed(r.id, r.owner.id);
+    expect((await retry(r)).status).toBe(200);
+    expect((await rowsOf(r.id, "repo_request"))[0].state).toBe("pending");
+  });
+
+  it("takes test people only with the entry for them, and a test person's ID is only ever the verified caller's", async () => {
+    await fake("/reset", {});
+    const tag = crypto.randomUUID().replaceAll("-", "");
+    const org = `org_pv_e2e_${tag.slice(0, 8)}`;
+    const testPerson: Who = { id: `per_e2e_${tag}`, kind: "person", org, adminOrgs: [org] };
+    const r = await roomOf(testPerson);
+    const events = await eventTypes(r.id);
+    // A list without the entry holds no test person.
+    await listed(r.id, "per_pv_someone_else");
+    expect((await ask(r)).code).toBe("repository_requests_closed");
+    expect((await read(r)).may_request).toBe(false);
+    await untouched(r, [testPerson.id], events);
+    // With it, a test person asks.
+    await listed(r.id, "per_pv_someone_else,test-people");
+    expect((await read(r)).may_request).toBe(true);
+    // Someone else in the room who only says they're a test person, in a body, a header or a claim, is who the
+    // assertion's subject says they are.
+    const ordinary = await person(r, `per_pv_ordinary_${tag.slice(0, 8)}`, "admin");
+    const pretending = await api(ordinary, "POST", `/v1/workspaces/${r.id}/repository`, { name: "engineering", visibility: "public", person: testPerson.id, requested_by: testPerson.id }, { claims: { test_person: true, person: testPerson.id } });
+    expect([pretending.status, pretending.code]).toEqual(CLOSED);
+    const plain = await ask(r, undefined, { who: ordinary });
+    expect([plain.status, plain.code]).toEqual(CLOSED);
+    expect((await api(ordinary, "GET", `/v1/workspaces/${r.id}/repository`)).body.may_request).toBe(false);
+    await untouched(r, [testPerson.id, ordinary.id], [...events, ...(await eventTypes(r.id)).slice(events.length)]);
+    expect((await ask(r)).status).toBe(200);
+    expect((await rowsOf(r.id, "repo_request"))[0].requested_by).toBe(testPerson.id);
+  });
+
+  it("is nobody when the setting is empty or malformed, even for an ID that's in it", async () => {
+    const r = await room();
+    const events = await eventTypes(r.id);
+    await failedRequest(r.id, r.owner.id);
+    for (const value of ["", " ", ",", `${r.owner.id},`, `${r.owner.id},,test-people`, `${r.owner.id};per_pv_two`, `${r.owner.id},everyone`, "*", "all", "true", `${r.owner.id}\n`]) {
+      await listed(r.id, value);
+      expect((await retry(r)).code, JSON.stringify(value)).toBe("repository_requests_closed");
+      expect((await read(r)).may_request, JSON.stringify(value)).toBe(false);
+    }
+    // And for a first request, in a room with none.
+    const fresh = await roomOf(r.owner);
+    for (const value of ["", `${r.owner.id},`, "*"]) {
+      await listed(fresh.id, value);
+      expect((await ask(fresh)).code, JSON.stringify(value)).toBe("repository_requests_closed");
+    }
+    expect(await rowsOf(fresh.id, "repo_request")).toEqual([]);
+    expect(await eventTypes(r.id)).toEqual(events);
+    for (const holder of [r.org, r.owner.id]) for (const id of [r.id, fresh.id]) expect(await counted(holder)).not.toContain(id);
+    expect((await github()).calls).toEqual([]);
+  });
+
+  it("takes the deployment's operators only with the entry for them, and nobody by it when no operator is configured", async () => {
+    // This runtime's OPERATORS names `per_operator_one` and `per_operator_two`, as moderation's tests use them.
+    expect(BINDINGS.OPERATORS).toBe("per_operator_one, per_operator_two");
+    await fake("/reset", {});
+    const tag = crypto.randomUUID().slice(0, 8);
+    const org = `org_pv_ops_${tag}`;
+    const operator: Who = { id: "per_operator_one", kind: "person", org, adminOrgs: [org] };
+    const r = await roomOf(operator);
+    const events = await eventTypes(r.id);
+    const other = await person(r, `per_pv_notop_${tag}`, "admin");
+    const told = async (who: Who) => (await api(who, "GET", `/v1/workspaces/${r.id}/repository`)).body.may_request;
+    // No entry: an operator isn't implied, beside test people or anyone else.
+    for (const value of ["test-people", "per_pv_someone_else", "per_pv_someone_else,test-people"]) {
+      await listed(r.id, value);
+      expect((await ask(r)).code, value).toBe("repository_requests_closed");
+      expect(await told(operator), value).toBe(false);
+    }
+    // A word that only looks like the entry closes the whole list.
+    for (const value of ["operator", "Operators", "operators,admins", "operators,"]) {
+      await listed(r.id, value);
+      expect((await ask(r)).code, value).toBe("repository_requests_closed");
+    }
+    // The entry, with no operator configured: it admits nobody.
+    await listed(r.id, "operators,test-people");
+    await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_no_operators (x INTEGER)"));
+    expect((await ask(r)).code).toBe("repository_requests_closed");
+    expect(await told(operator)).toBe(false);
+    await inRoom(r.id, (sql) => void sql.exec("DROP TABLE test_no_operators"));
+    // The entry, and a caller who isn't among the operators: refused, whatever they send.
+    const pretending = await api(other, "POST", `/v1/workspaces/${r.id}/repository`, { name: "engineering", visibility: "public", operator: true }, { claims: { operator: true, operators: [other.id] } });
+    expect([pretending.status, pretending.code]).toEqual(CLOSED);
+    expect(await told(other)).toBe(false);
+    await untouched(r, [operator.id, other.id], [...events, ...(await eventTypes(r.id)).slice(events.length)]);
+    // An agent stored as an admin gets the room's own refusal, the entry or not.
+    const agent = await memberAgent(r);
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE member SET role = 'admin' WHERE principal_id = ?", agent.id));
+    expect((await ask(r, undefined, { who: agent })).code).toBe("not_allowed");
+    // The entry, and the caller among the operators: they ask, and the repository is made.
+    expect(await told(operator)).toBe(true);
+    expect((await ask(r)).status).toBe(200);
+    expect((await rowsOf(r.id, "repo_request"))[0].requested_by).toBe(operator.id);
+    expect((await settled(r)).request.state).toBe("ready");
+  });
+
+  it("stops a request an operator made once the deployment names no operator, before anything goes to GitHub", async () => {
+    await fake("/reset", {});
+    const org = `org_pv_ops2_${crypto.randomUUID().slice(0, 8)}`;
+    const operator: Who = { id: "per_operator_two", kind: "person", org, adminOrgs: [org] };
+    const r = await roomOf(operator);
+    await listed(r.id, "operators");
+    await alarmQuiet(stub(r.id));
+    expect((await ask(r)).status).toBe(200);
+    await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_no_operators (x INTEGER)"));
+    for (let i = 0; i < 40 && (await rowsOf(r.id, "repo_request"))[0].state === "pending"; i++) await alarmPass(stub(r.id));
+    expect((await rowsOf(r.id, "repo_request"))[0]).toMatchObject({ state: "failed", reason: "repository_requests_closed" });
+    expect((await github()).calls).toEqual([]);
+  });
+
+  // The settings are read from the raw binding. These point one room's read at a stand-in binding of the test
+  // runtime, so the Worker's own reader meets a real list, number, object, boolean and null.
+  const bound = (id: string, table: "test_requesters_binding" | "test_switch_binding" | "test_operators_binding", name: string) => inRoom(id, (sql) => {
+    sql.exec(`CREATE TABLE IF NOT EXISTS ${table} (name TEXT)`);
+    sql.exec(`DELETE FROM ${table}`);
+    sql.exec(`INSERT INTO ${table} VALUES (?)`, name);
+  });
+  const unbound = (id: string, table: string) => inRoom(id, (sql) => void sql.exec(`DROP TABLE IF EXISTS ${table}`));
+
+  it("reads only a list that is truly absent as everyone: a list, a number, an object, a boolean or null bound under the name is nobody", async () => {
+    expect(BINDINGS.TEST_SETTING_LIST).toEqual(["operators", "test-people"]);
+    expect(BINDINGS.TEST_SETTING_NUMBER).toBe(7);
+    expect(BINDINGS.TEST_SETTING_OBJECT).toEqual({ operators: true, "test-people": true });
+    expect(BINDINGS.TEST_SETTING_ABSENT).toBeUndefined();
+    await fake("/reset", {});
+    const org = `org_pv_raw_${crypto.randomUUID().slice(0, 8)}`;
+    // An operator, whom the list's text would admit: `["operators","test-people"]` as a list must not.
+    const operator: Who = { id: "per_operator_two", kind: "person", org, adminOrgs: [org] };
+    const r = await roomOf(operator);
+    const events = await eventTypes(r.id);
+    await failedRequest(r.id, operator.id);
+    for (const name of ["TEST_SETTING_LIST", "TEST_SETTING_NUMBER", "TEST_SETTING_OBJECT", "TEST_SETTING_TRUE", "TEST_SETTING_NULL"]) {
+      await bound(r.id, "test_requesters_binding", name);
+      expect((await retry(r)).code, name).toBe("repository_requests_closed");
+      expect((await read(r)).may_request, name).toBe(false);
+    }
+    await inRoom(r.id, (sql) => void sql.exec("DELETE FROM repo_request"));
+    await bound(r.id, "test_requesters_binding", "TEST_SETTING_LIST");
+    expect((await ask(r)).code).toBe("repository_requests_closed");
+    await untouched(r, [operator.id], events);
+    // The same reader, on strings: the text `operators` admits the operator, and a name with nothing bound is everyone.
+    await bound(r.id, "test_requesters_binding", "TEST_SETTING_TEXT_TRUE");
+    expect((await read(r)).may_request).toBe(false);
+    await bound(r.id, "test_requesters_binding", "TEST_SETTING_TEXT_OPERATORS");
+    expect((await read(r)).may_request).toBe(true);
+    await bound(r.id, "test_requesters_binding", "TEST_SETTING_ABSENT");
+    expect((await read(r)).may_request).toBe(true);
+    const anyone = await person(r, `per_pv_rawany_${crypto.randomUUID().slice(0, 8)}`, "admin");
+    expect((await api(anyone, "GET", `/v1/workspaces/${r.id}/repository`)).body.may_request).toBe(true);
+    await bound(r.id, "test_requesters_binding", "TEST_SETTING_TEXT_OPERATORS");
+    expect((await api(anyone, "GET", `/v1/workspaces/${r.id}/repository`)).body.may_request).toBe(false);
+    expect((await ask(r)).status).toBe(200);
+  });
+
+  it("reads the switch as on only from the string true, and operators only from a string", async () => {
+    await fake("/reset", {});
+    const org = `org_pv_raw2_${crypto.randomUUID().slice(0, 8)}`;
+    const operator: Who = { id: "per_operator_one", kind: "person", org, adminOrgs: [org] };
+    const r = await roomOf(operator);
+    // The switch: the boolean true, a number, a list, null and nothing bound are all off, for the read and both commands.
+    for (const name of ["TEST_SETTING_TRUE", "TEST_SETTING_NUMBER", "TEST_SETTING_LIST", "TEST_SETTING_OBJECT", "TEST_SETTING_NULL", "TEST_SETTING_ABSENT", "TEST_SETTING_TEXT_OPERATORS"]) {
+      await bound(r.id, "test_switch_binding", name);
+      expect((await api(operator, "GET", `/v1/workspaces/${r.id}/repository`)).status, name).toBe(404);
+      expect((await ask(r)).status, name).toBe(404);
+      expect((await retry(r)).status, name).toBe(404);
+    }
+    expect(await rowsOf(r.id, "repo_request")).toEqual([]);
+    await bound(r.id, "test_switch_binding", "TEST_SETTING_TEXT_TRUE");
+    expect((await api(operator, "GET", `/v1/workspaces/${r.id}/repository`)).status).toBe(200);
+    // The operators: a list bound under the name names nobody, though this operator's ID is in it.
+    expect(BINDINGS.TEST_SETTING_OPERATOR_LIST).toEqual(["per_operator_one"]);
+    await listed(r.id, "operators");
+    expect((await read(r)).may_request).toBe(true);
+    for (const name of ["TEST_SETTING_OPERATOR_LIST", "TEST_SETTING_NUMBER", "TEST_SETTING_OBJECT", "TEST_SETTING_NULL", "TEST_SETTING_ABSENT"]) {
+      await bound(r.id, "test_operators_binding", name);
+      expect((await read(r)).may_request, name).toBe(false);
+      expect((await ask(r)).code, name).toBe("repository_requests_closed");
+    }
+    await unbound(r.id, "test_operators_binding");
+    expect((await ask(r)).status).toBe(200);
+  });
+
+  it("answers the room's own rule first, so only someone who could otherwise ask learns that requests are closed", async () => {
+    const r = await room();
+    const tag = crypto.randomUUID().slice(0, 8);
+    const admin = await person(r, `per_pv_la_${tag}`, "admin");
+    const member = await person(r, `per_pv_lm_${tag}`, "member");
+    const agent = await memberAgent(r);
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE member SET role = 'admin' WHERE principal_id = ?", agent.id));
+    await failedRequest(r.id, r.owner.id);
+    // Listing a member, an agent or a stranger gives them nothing: the list only narrows.
+    await listed(r.id, `${admin.id},${member.id},${STRANGER.id}`);
+    for (const [who, status, code] of [[member, 403, "not_allowed"], [agent, 403, "not_allowed"], [STRANGER, 404, "workspace_not_found"], [r.owner, 403, "repository_requests_closed"]] as [Who, number, string][]) {
+      const again = await retry(r, who);
+      expect([again.status, again.code], who.id).toEqual([status, code]);
+    }
+    expect((await api(member, "GET", `/v1/workspaces/${r.id}/repository`)).body.may_request).toBe(false);
+    expect((await read(r)).may_request).toBe(false);
+    expect((await api(admin, "GET", `/v1/workspaces/${r.id}/repository`)).body.may_request).toBe(true);
+    // The listed admin retries, while the owner, who isn't listed, can't.
+    expect((await retry(r, admin)).status).toBe(200);
+    expect((await github()).calls.filter((c) => c.method !== "GET" && !tokenCall(c))).toEqual([]);
+  });
+
+  it("answers as a missing route while managed repositories are off, whoever is listed", async () => {
+    const off = await room({ switchedOn: false });
+    for (const value of ["per_pv_someone_else", off.owner.id, ""]) {
+      await listed(off.id, value);
+      expect((await ask(off)).status, value).toBe(404);
+      expect((await retry(off)).status, value).toBe(404);
+      expect((await api(off.owner, "GET", `/v1/workspaces/${off.id}/repository`)).status, value).toBe(404);
+    }
+    expect(await rowsOf(off.id, "repo_request")).toEqual([]);
+  });
+
+  it("stops a request recorded under a wider setting before anything goes to GitHub, and replays no stored answer to someone who isn't listed", async () => {
+    const r = await room();
+    await alarmQuiet(stub(r.id));
+    const first = await ask(r, undefined, { key: "pv-narrowed-key" });
+    expect(first.status).toBe(200);
+    // The setting is narrowed before the job has run.
+    await listed(r.id, "per_pv_someone_else");
+    const replay = await ask(r, undefined, { key: "pv-narrowed-key" });
+    expect([replay.status, replay.code]).toEqual(CLOSED);
+    for (let i = 0; i < 40 && (await rowsOf(r.id, "repo_request"))[0].state === "pending"; i++) await alarmPass(stub(r.id));
+    expect((await rowsOf(r.id, "repo_request"))[0]).toMatchObject({ state: "failed", reason: "repository_requests_closed" });
+    expect((await github()).calls).toEqual([]);
+    expect(await rowsOf(r.id, "repo_request_attempt")).toEqual([]);
+    // Listed again, a retry runs it.
+    await unset(r.id);
+    expect((await retry(r)).status).toBe(200);
+    expect((await settled(r)).request.state).toBe("ready");
+  });
+
+  it("leaves a room that already has its repository working when nobody in it is listed: the read and the grants", async () => {
+    const r = await room();
+    expect((await ask(r)).status).toBe(200);
+    expect((await settled(r)).request.state).toBe("ready");
+    const agent = await memberAgent(r);
+    for (const value of ["per_pv_someone_else", ""]) {
+      await listed(r.id, value);
+      const now = await read(r);
+      expect(now.repository).toMatchObject({ status: "ready" });
+      expect(now.request).toMatchObject({ state: "ready" });
+      expect(now.may_request).toBe(false);
+      const given = await api(r.owner, "POST", `/v1/workspaces/${r.id}/repository/grants`, { policy_version: await policyOf(r), principal_id: agent.id, action: "push" });
+      expect([given.status, given.body.state], value).toEqual([200, "live"]);
+      const all = await api(r.owner, "GET", `/v1/workspaces/${r.id}/repository/grants`);
+      expect(all.status).toBe(200);
+      const taken = await api(r.owner, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${given.body.id}`, { policy_version: await policyOf(r) });
+      expect(taken.status, taken.text).toBe(200);
+    }
   });
 });

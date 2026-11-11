@@ -31,8 +31,9 @@
       "d1_databases": [{ "binding": "DB", "database_name": "podster-gateway-staging", "database_id": "055c6e16-853c-4dae-8a32-693b2d1f50c2", "migrations_dir": "migrations" }],
       "kv_namespaces": [{ "binding": "OAUTH_KV", "id": "57637530b0404f209d89b9ab00b5ef0c" }],
       // MANAGED_REPOSITORIES lists the repository tools to agents (M5 step 6), as the API's own switch lets them be used. The
-      // owner said "let's unblock m5 staging" on 2026-11-11. It's set here only: a test fails if the top level or any
-      // other environment sets it.
+      // owner said "let's unblock m5 staging" on 2026-11-11. The architect took it out again that day and put it back once
+      // the API could name who may ask for a repository (its REPOSITORY_REQUESTERS, docs/staging.md). It's set here only:
+      // a test fails if the top level or any other environment sets it.
       "vars": { "BASE_URL": "https://gateway-staging.podster.dev", "APP_URL": "https://app-staging.podster.dev", "ENABLE_E2E_SIGNUP": "true", "ENABLE_EMAIL_SIGNIN": "true", "EMAIL_FROM": "sign-in@podster.dev", "MANAGED_REPOSITORIES": "true" },
       // Sign-in links. This binding can only send from that one address.
       "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["sign-in@podster.dev"] }],

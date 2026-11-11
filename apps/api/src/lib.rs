@@ -110,6 +110,25 @@ async fn forward(
 }
 
 /// Tests share a few organizations across many rooms, so in test builds the limit only applies where a test asks for it.
+/// What the Worker's configuration holds under a name, read from the raw binding: nothing, a string, or something
+/// that isn't a string. `Env::var` answers an error for the last two alike, so a caller that took an error for "unset"
+/// would read a list or a number as nothing at all. A setting that decides authority reads this instead.
+pub(crate) enum Setting {
+    Absent,
+    Text(String),
+    Unreadable,
+}
+
+/// Reads the raw binding under `name`. Only `undefined` is absent. `null`, a number, a boolean, a list, an object, a
+/// binding of another kind and a failed read are all unreadable.
+pub(crate) fn setting(env: &Env, name: &str) -> Setting {
+    match js_sys::Reflect::get(env, &wasm_bindgen::JsValue::from_str(name)) {
+        Err(_) => Setting::Unreadable,
+        Ok(found) if found.is_undefined() => Setting::Absent,
+        Ok(found) => found.as_string().map_or(Setting::Unreadable, Setting::Text),
+    }
+}
+
 fn room_limit_applies(org: &str) -> bool {
     !cfg!(feature = "failpoints") || org.starts_with("org_limit_")
 }

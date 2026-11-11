@@ -235,6 +235,10 @@ describe("the room's sweep", () => {
       state.storage.sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");
       state.storage.sql.exec("ALTER TABLE repo_request DROP COLUMN limited_call");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+      // The step that keeps an approval's reviewer (A1, decision 195) comes off next.
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_person");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_id");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP TABLE merge_request");
       state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN merge_finished_at");
       state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN merge_called_at");
@@ -428,6 +432,10 @@ describe("the room's sweep", () => {
       state.storage.sql.exec("ALTER TABLE repo_link DROP COLUMN gone_seen_at");
       state.storage.sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");
       state.storage.sql.exec("ALTER TABLE repo_request DROP COLUMN limited_call");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+      // The step that keeps an approval's reviewer (A1, decision 195) comes off next.
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_person");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_id");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP TABLE merge_request");
       state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN merge_finished_at");
@@ -768,6 +776,10 @@ describe("removal by the rules, review fixes", () => {
       state.storage.sql.exec("ALTER TABLE repo_link DROP COLUMN gone_seen_at");
       state.storage.sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");
       state.storage.sql.exec("ALTER TABLE repo_request DROP COLUMN limited_call");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+      // The step that keeps an approval's reviewer (A1, decision 195) comes off next.
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_person");
+      state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_id");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP TABLE merge_request");
       state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN merge_finished_at");

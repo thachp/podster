@@ -47,6 +47,7 @@ export const PLAN = [
   ["M5-09b", "on GitHub the default branch's tip is one merge commit whose second parent is exactly the reviewed commit"],
   ["M5-09c", "the reviewed commit carries exactly one podster/review status, set by the merge App"],
   ["M5-09d", "asking again is refused already_merged"],
+  ["M5-10e", "a commit the submitter's own person approved isn't merged: the review completes the task, and merge_task is refused self_review"],
   ["M5-11a", "a head moved after review is observed by Podster, by a webhook or by polling, within the wait"],
   ["M5-09e", "the moved head isn't merged: merge_task is refused commit_changed, and GitHub shows the pull request open"],
   ["M5-12", "release status matches the task's change, pairs checks with their commit, and says no release exists"],
@@ -136,6 +137,17 @@ export function stagingConfig(vars = {}) {
 /** Why a repository's full name isn't one under the pinned organization, or null. What staging answers is checked too. */
 export function repositoryOrgProblem(fullName) {
   return typeof fullName === "string" && /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(fullName) && fullName.split("/")[0] === STAGING_ORG ? null : `staging linked ${JSON.stringify(fullName)}, which isn't a repository under ${STAGING_ORG}`;
+}
+
+/**
+ * Why one of the run's people can't ask for the room's repository, or null. Staging names who may ask in the API's
+ * REPOSITORY_REQUESTERS, and the run's people are in it through its `test-people` entry alone: each is made by the test
+ * sign-up, so their ID starts `per_e2e_`. `mayRequest` is what the room's repository read said to that person.
+ */
+export function requesterProblem(personId, mayRequest) {
+  if (typeof personId !== "string" || !/^per_e2e_[A-Za-z0-9]+$/.test(personId)) return `${JSON.stringify(personId)} isn't a test person's ID, so staging's list of repository requesters can't hold them as one`;
+  if (mayRequest !== true) return `staging told ${personId} they may not ask for a repository (may_request: ${JSON.stringify(mayRequest)}). The API's REPOSITORY_REQUESTERS must hold the entry test-people, exactly, with every other entry well formed`;
+  return null;
 }
 
 /**

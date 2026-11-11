@@ -47,6 +47,41 @@ describe("each state, in words", () => {
     expect(screen.getByText("Only this workroom's owner and admins can create its repository.")).toBeInTheDocument();
   });
 
+  it("an owner or admin the deployment doesn't let ask is told so in a sentence, and is offered neither the form nor a retry", () => {
+    const sentence = "Creating a repository isn't available to your account on this Podster deployment yet, so one can't be created or set up again from here.";
+    const first = show({ request: null, repository: null, delegated: true, may_request: false });
+    expect(screen.getByRole("note")).toHaveTextContent(sentence);
+    expect(screen.queryByLabelText("Repository name")).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+    first.unmount();
+    // A failed setup shows its state and its reason, and no retry.
+    const failed = show({ request: request({ state: "failed", reason: "name_taken", attempts_left: 3 }), repository: null, delegated: true, may_request: false });
+    expect(screen.getByText("Setup failed")).toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent(sentence);
+    expect(screen.queryByRole("button", { name: "Retry setup" })).toBeNull();
+    failed.unmount();
+    // A repository the room already has is shown as ever, with no note: nothing about it is closed.
+    const linked = show({ request: request({ state: "ready" }), repository: link(), may_request: false });
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.queryByRole("note")).toBeNull();
+    linked.unmount();
+    // Someone who doesn't run the repository is told what they always were, not this.
+    const member = show({ request: null, repository: null, may_request: false }, { runsRepository: false });
+    expect(screen.queryByRole("note")).toBeNull();
+    expect(screen.getByText("Only this workroom's owner and admins can create its repository.")).toBeInTheDocument();
+    member.unmount();
+    // The API's yes, and an answer without the field, both offer the form.
+    for (const state of [{ request: null, repository: null, delegated: true, may_request: true }, { request: null, repository: null, delegated: true }]) {
+      const offered = show(state);
+      expect(screen.getByLabelText("Repository name")).toBeInTheDocument();
+      expect(screen.queryByRole("note")).toBeNull();
+      offered.unmount();
+    }
+    const retryable = show({ request: request({ state: "failed", reason: "name_taken", attempts_left: 3 }), repository: null, delegated: true, may_request: true });
+    expect(screen.getByRole("button", { name: "Retry setup" })).toBeInTheDocument();
+    retryable.unmount();
+  });
+
   it("setting up", () => {
     show({ request: request(), repository: null });
     expect(screen.getByText("Setting up")).toBeInTheDocument();
@@ -228,7 +263,7 @@ describe("what's rendered inertly", () => {
 describe("every code as a sentence", () => {
   it("names every refusal for asking, retrying, granting and taking back", () => {
     const generic = explainRepositoryRefusal("something_new");
-    for (const code of ["name_reserved", "not_delegated", "repository_request_limit", "delegation_unavailable", "private_unavailable", "repo_request_exists", "retry_limit_reached", "retry_too_soon", "repo_request_not_found", "setup_in_progress", "already_ready", "not_allowed", "not_found", "workspace_archived", "rate_limited", "invalid_argument"]) {
+    for (const code of ["name_reserved", "not_delegated", "repository_requests_closed", "repository_request_limit", "delegation_unavailable", "private_unavailable", "repo_request_exists", "retry_limit_reached", "retry_too_soon", "repo_request_not_found", "setup_in_progress", "already_ready", "not_allowed", "not_found", "workspace_archived", "rate_limited", "invalid_argument"]) {
       const text = explainRepositoryRefusal(code);
       expect(text, code).not.toBe(generic);
       expect(text, code).toMatch(/\.$/);
@@ -238,7 +273,7 @@ describe("every code as a sentence", () => {
   });
 
   it("turns every reason code the contract lists into its own sentence", () => {
-    const codes = ["managed_repositories_off", "provisioning_not_configured", "token_refused", "not_delegated", "delegation_unavailable", "room_archived", "requester_not_owner", "requester_lost_authority", "name_taken", "provider_refused", "wrong_owner", "creation_outcome_unknown", "read_back_failed", "setup_call_failed", "repository_gone", "wrong_repository", "visibility_differs", "archived", "no_initial_commit", "actions_enabled", "actions_unreadable", "ruleset_missing", "ruleset_inactive", "ruleset_differs", "bypass_differs", "unexpected_ruleset", "settings_differ", "workflow_permissions_differ", "provider_rate_limited", "authority_lost", "internal_error"];
+    const codes = ["managed_repositories_off", "provisioning_not_configured", "token_refused", "not_delegated", "repository_requests_closed", "delegation_unavailable", "room_archived", "requester_not_owner", "requester_lost_authority", "name_taken", "provider_refused", "wrong_owner", "creation_outcome_unknown", "read_back_failed", "setup_call_failed", "repository_gone", "wrong_repository", "visibility_differs", "archived", "no_initial_commit", "actions_enabled", "actions_unreadable", "ruleset_missing", "ruleset_inactive", "ruleset_differs", "bypass_differs", "unexpected_ruleset", "settings_differ", "workflow_permissions_differ", "provider_rate_limited", "authority_lost", "internal_error"];
     const sentences = codes.map(reasonSentence);
     expect(new Set(sentences).size).toBe(codes.length);
     // None falls back to the code itself.

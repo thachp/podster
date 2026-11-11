@@ -391,6 +391,10 @@ describe("the discovery index (step 6)", () => {
       sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");
       sql.exec("ALTER TABLE repo_request DROP COLUMN limited_call");
       sql.exec("UPDATE schema_version SET version = version - 1");
+      // The step that keeps an approval's reviewer (A1, decision 195) comes off next.
+      sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_person");
+      sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_id");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE merge_request");
       sql.exec("ALTER TABLE task_change DROP COLUMN merge_finished_at");
       sql.exec("ALTER TABLE task_change DROP COLUMN merge_called_at");
@@ -457,6 +461,10 @@ describe("the discovery index (step 6)", () => {
       sql.exec("ALTER TABLE repo_link DROP COLUMN gone_seen_at");
       sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");
       sql.exec("ALTER TABLE repo_request DROP COLUMN limited_call");
+      sql.exec("UPDATE schema_version SET version = version - 1");
+      // The step that keeps an approval's reviewer (A1, decision 195) comes off next.
+      sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_person");
+      sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_id");
       sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE merge_request");
       sql.exec("ALTER TABLE task_change DROP COLUMN merge_finished_at");

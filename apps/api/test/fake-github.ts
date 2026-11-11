@@ -108,6 +108,8 @@ const readyRepos = new Map<number, Repo & { script: ReadyScript }>();
 const readyTokens = new Map<string, number[]>();
 const readyIssued = new Set<string>();
 const readyReads: { repo: number; path: string; scope: number[] }[] = [];
+/** Metadata-only tokens for the whole installation: they read any repository the installation reaches, by ID. */
+const presenceTokens = new Set<string>();
 const readyRulesets = (): Ruleset[] => [
   { id: 1, name: "podster-review", target: "branch", enforcement: "active", conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } }, bypass_actors: [], source_type: "Repository",
     rules: [{ type: "pull_request", parameters: { required_approving_review_count: 0, dismiss_stale_reviews_on_push: false, require_code_owner_review: false, require_last_push_approval: false, required_review_thread_resolution: false } },
@@ -305,10 +307,11 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
     if (app === "agent" || app === "merge") return agentMint(body, app);
     if (presenceMint) {
       const token = `ghs_fake_${crypto.randomUUID().replaceAll("-", "")}`;
-      // Every repository the installation reaches: the ones that weren't deleted.
-      const reach = [...readyRepos.values()].filter((r) => !r.deleted).map((r) => r.id);
-      readyTokens.set(token, reach);
+      // It reaches every repository the installation does, which `readyRoute` answers for by ID. Its scope is kept empty,
+      // so it never counts as a live token on another test's repository while it's held.
+      readyTokens.set(token, []);
       readyIssued.add(token);
+      presenceTokens.add(token);
       return json({ ...provisionTokenAnswer(token, body, null), repository_selection: "all" }, 201);
     }
     if (readyMint) {
@@ -512,6 +515,12 @@ function readyRoute(request: Request, path: string, bearer: string): Response {
   if (repo?.deleted) {
     readyReads.push({ repo: repo.id, path, scope });
     return json({ message: "Not Found" }, 404);
+  }
+  // The presence check reads the repository itself by ID, and nothing else.
+  if (presenceTokens.has(bearer)) {
+    if (!repo || scoped?.[2]) return json({ message: "Not Found" }, 404);
+    readyReads.push({ repo: repo.id, path, scope });
+    return json(repoView(repo));
   }
   if (!scoped || !repo || !scope.includes(repo.id)) return json({ message: "Not Found" }, 404);
   readyReads.push({ repo: repo.id, path, scope });

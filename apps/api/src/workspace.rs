@@ -100,6 +100,44 @@ pub(crate) use public::{INTERNAL_EXPLORE_ENTRY, INTERNAL_PUBLIC_PAGE};
 pub(crate) use public_claims::{INTERNAL_PUBLIC_CLAIM, INTERNAL_PUBLIC_CLAIM_STATUS};
 pub(crate) use visibility::public_rooms_enabled;
 
+/// The room's own answer to whether managed repositories are switched on for it, for routes the Worker answers outside
+/// the room. Test builds only: a deployment reads its Worker variable alone.
+#[cfg(feature = "failpoints")]
+pub(crate) const INTERNAL_MANAGED_SWITCH: &str = "/internal/managed-switch";
+
+/// Whether managed repositories are switched on for a room, decided before anything about the caller or the room, so a
+/// route of theirs outside the room can answer as a missing one while they're off. A deployment reads the Worker's
+/// `MANAGED_REPOSITORIES`. Test builds also ask the room, which a test can switch on alone, as the room's own routes do.
+pub(crate) async fn managed_switch_on(env: &Env, workspace: &str) -> R<bool> {
+    if env
+        .var("MANAGED_REPOSITORIES")
+        .is_ok_and(|value| value.to_string() == "true")
+    {
+        return Ok(true);
+    }
+    #[cfg(feature = "failpoints")]
+    if crate::valid_id(workspace) {
+        let stub = env
+            .durable_object("WORKSPACE")?
+            .id_from_name(workspace)?
+            .get_stub()?;
+        let mut response = stub
+            .fetch_with_request(Request::new(
+                &format!("https://workspace.internal{INTERNAL_MANAGED_SWITCH}"),
+                Method::Get,
+            )?)
+            .await?;
+        let answer: Value = response.json().await?;
+        return Ok(answer["on"].as_bool() == Some(true));
+    }
+    let _ = workspace;
+    Ok(false)
+}
+
+/// An event type `podster_policy::is_managed_repository_event` names, as SQL on the event table's `type`, so a query
+/// leaves them out before a page is cut. `test/m5-events.spec.ts` writes one event of each type and checks every read.
+const MANAGED_EVENT_SQL: &str = "(substr(type, 1, 11) IN ('repository.', 'repo_grant.', 'repo_token.') OR substr(type, 1, 12) IN ('repo_access.', 'task_change.') OR substr(type, 1, 6) = 'merge.')";
+
 /// The caller as this room knows them. `org` comes from stored state, not the request.
 struct Participant {
     caller: Caller,
@@ -291,6 +329,46 @@ fn resolve_caller(sql: &SqlStorage, identity: &Identity) -> R<Participant> {
             scopes: store::granted_scopes(sql, &identity.id)?,
         },
         org,
+    })
+}
+
+/// The caller of `DELETE repository/grants/{grant}`. As `resolve_caller` finds them; or, where it finds them no place in
+/// the room, a person who administers the room's organization, with no role here (AC-11), so a grant can be pulled when
+/// the owner has left. That gives them nothing else: `repositories::revocable` decides the grant, and every other route
+/// still resolves through `resolve_caller`. Anyone else gets `resolve_caller`'s own answer.
+fn resolve_revoker(sql: &SqlStorage, identity: &Identity) -> R<Participant> {
+    let refusal = match resolve_caller(sql, identity) {
+        Ok(who) => return Ok(who),
+        Err(refusal) => refusal,
+    };
+    let caller = Caller {
+        id: identity.id.clone(),
+        kind: parse_kind(&identity.kind),
+        role: Role::None,
+        scopes: Scopes::PUBLIC_PARTICIPANT,
+    };
+    if !repositories::administers_room_org(sql, &caller, &identity.admin_orgs)? {
+        return Err(refusal);
+    }
+    Ok(Participant {
+        caller,
+        org: room_owner_org(sql)?,
+    })
+}
+
+/// Someone as the room records them now, for a decision made without their request in hand: the merge job's requester,
+/// or an event's recipient. Their kind and current role, as `store::participant` gives it, and their stored access. No
+/// role once they've left the room or their owner authority ended.
+fn caller_now(sql: &SqlStorage, id: &str) -> R<Caller> {
+    let (kind, role) = match participant(sql, id)? {
+        Some((kind, role)) => (parse_kind(&kind), parse_role(&role)),
+        None => (parse_kind_of(id), Role::None),
+    };
+    Ok(Caller {
+        id: id.to_string(),
+        kind,
+        role,
+        scopes: store::granted_scopes(sql, id)?,
     })
 }
 
@@ -2394,12 +2472,20 @@ mod queries {
         // (`sees_task_change`): a person in the room who's no guest, or the task's own assignee or reviewer, and for
         // a merge whoever asked for it. Narrowed here as well as by `can_see_event` below, so a page isn't left short
         // by rows the viewer can't see.
-        // With managed repositories switched off there's no such thing as a task's pull request or its merge, for
-        // anyone: their events stay in the room and out of every page, here in the query, so no page comes up short.
+        // With managed repositories switched off none of their events is shown, to anyone: the repository's, its
+        // grants', its tokens', a task's change's and a merge's all stay in the room and out of every page, here in the
+        // query, so no page comes up short.
         if !managed_repositories {
-            query.push_str(
-                " AND substr(type, 1, 12) <> 'task_change.' AND substr(type, 1, 6) <> 'merge.'",
-            );
+            query.push_str(&format!(" AND NOT {MANAGED_EVENT_SQL}"));
+        }
+        // The repository's events follow its read, which is for a person who sees the whole room, whoever acted.
+        if !podster_policy::repositories::sees_repository(caller) {
+            query.push_str(" AND substr(type, 1, 11) <> 'repository.'");
+        }
+        // A token's events name a grant or a token, so they're for those who see the holder's grants: a human owner or
+        // admin, and the holder, who is the event's actor.
+        if !podster_policy::repositories::sees_every_grant(caller) {
+            query.push_str(" AND ((substr(type, 1, 12) <> 'repo_access.' AND substr(type, 1, 11) <> 'repo_token.') OR actor_id = ?4)");
         }
         if caller.kind != PrincipalKind::Person || caller.role == Role::Guest {
             query.push_str(
@@ -2433,13 +2519,15 @@ mod queries {
                 Some(task_id) => load_task(sql, task_id)?,
                 None => None,
             };
-            if !can_see_event(
-                caller,
-                kind,
-                actor,
-                task.as_ref(),
-                row["subject_id"].as_str(),
-            ) {
+            if !podster_policy::shows_with_switch(kind, managed_repositories)
+                || !can_see_event(
+                    caller,
+                    kind,
+                    actor,
+                    task.as_ref(),
+                    row["subject_id"].as_str(),
+                )
+            {
                 continue;
             }
             // Only something the viewer may see becomes the cursor, even if the query and policy ever disagree.
@@ -2591,10 +2679,12 @@ mod queries {
         // In order, without saying where each entry sits among the room's events, which would count the ones not shown.
         // `origin` is set by the room alone, `a2a_remote` for what a read of the agent's own A2A endpoint did (step 13). The
         // attempt it names stays out, since it's no ID a reader can use.
-        let history = rows(sql, "SELECT id, type, actor_id, actor_org, reason, prior_status, new_status, task_version, created_at, origin FROM event WHERE task_id = ?1 AND (type <> ?2 OR ?3) ORDER BY seq", vec![id.into(), podster_policy::TASK_PLAN_CHANGED.into(), flag(sees_whole_room(&who.caller))])?;
+        let history = rows(sql, "SELECT id, type, actor_id, actor_org, reason, prior_status, new_status, task_version, created_at, origin, subject_id FROM event WHERE task_id = ?1 AND (type <> ?2 OR ?3) ORDER BY seq", vec![id.into(), podster_policy::TASK_PLAN_CHANGED.into(), flag(sees_whole_room(&who.caller))])?;
         let marked = |row: &Value, id: &str, org: &str| -> Value {
             let mut out = row.clone();
             if let Some(map) = out.as_object_mut() {
+                // Read only to decide who sees the entry. It isn't part of one.
+                map.remove("subject_id");
                 map.insert("from".into(), json!({ "id": row[id], "org": row[org] }));
                 map.insert(
                     "external".into(),
@@ -2614,25 +2704,18 @@ mod queries {
             .collect();
         // What Podster saw of the task's pull request is in its history only for those shown the change itself.
         let shown_change = podster_policy::repositories::sees_task_change(&who.caller, &task);
-        // A merge's events are also for whoever asked for it, as `can_see_event` has it.
-        let own_merge_events: Vec<String> = if shown_change {
-            vec![]
-        } else {
-            rows(sql, "SELECT id FROM event WHERE task_id = ?1 AND substr(type, 1, 6) = 'merge.' AND (actor_id = ?2 OR subject_id = ?2)", vec![id.into(), who.caller.id.as_str().into()])?
-                .iter()
-                .filter_map(|r| text(&r["id"]))
-                .collect()
-        };
+        // Each entry as the room's activity shows it, by `can_see_event`: a change's and a merge's events to fewer than
+        // may read the task, and a token's to those who see the holder's grants. The switch is applied by the caller.
         let history: Vec<Value> = history
             .iter()
             .filter(|r| {
-                let kind = r["type"].as_str().unwrap_or_default();
-                shown_change
-                    || !(podster_policy::is_task_change_event(kind)
-                        || podster_policy::is_merge_event(kind))
-                    || r["id"]
-                        .as_str()
-                        .is_some_and(|event| own_merge_events.iter().any(|own| own == event))
+                can_see_event(
+                    &who.caller,
+                    r["type"].as_str().unwrap_or_default(),
+                    r["actor_id"].as_str().unwrap_or_default(),
+                    Some(&task),
+                    r["subject_id"].as_str(),
+                )
             })
             .map(|r| marked(r, "actor_id", "actor_org"))
             .collect();
@@ -2681,10 +2764,17 @@ mod queries {
         )
     }
 
-    pub fn list_events(sql: &SqlStorage, caller: &Caller, url: &Url) -> R<Value> {
+    /// The room's events in order, for those who may read its audit log. With managed repositories switched off their
+    /// events are left out, as they are from activity and history, in the query, so a page isn't left short.
+    pub fn list_events(
+        sql: &SqlStorage,
+        caller: &Caller,
+        url: &Url,
+        managed_repositories: bool,
+    ) -> R<Value> {
         ApiError::from_verdict(authorize_workroom(caller, WorkroomAction::ReadAuditLog))?;
         let after = query_int(url, "after")?.unwrap_or(0);
-        let events = rows(sql, "SELECT seq, id, type, actor_id, actor_org, task_id, reason, prior_status, new_status, task_version, created_at FROM event WHERE seq > ? ORDER BY seq LIMIT ?", vec![after.into(), PAGE_SIZE.into()])?;
+        let events = rows(sql, &format!("SELECT seq, id, type, actor_id, actor_org, task_id, reason, prior_status, new_status, task_version, created_at FROM event WHERE seq > ? AND (? OR NOT {MANAGED_EVENT_SQL}) ORDER BY seq LIMIT ?"), vec![after.into(), flag(managed_repositories), PAGE_SIZE.into()])?;
         Ok(json!({ "events": events }))
     }
 
@@ -2824,6 +2914,31 @@ impl Workspace {
         recheck: impl FnOnce(&SqlStorage, &Participant) -> R<()> + 'static,
         handler: impl FnOnce(&SqlStorage, &Participant, i64) -> R<Value> + 'static,
     ) -> R<Value> {
+        self.command_as(
+            identity,
+            key,
+            hash,
+            stops_when_archived,
+            test_fail,
+            resolve_caller,
+            recheck,
+            handler,
+        )
+    }
+
+    /// The same, with `resolve` finding the caller in the transaction. Only taking a grant back resolves differently.
+    #[allow(clippy::too_many_arguments)]
+    fn command_as(
+        &self,
+        identity: &Identity,
+        key: Option<String>,
+        hash: String,
+        stops_when_archived: bool,
+        test_fail: bool,
+        resolve: fn(&SqlStorage, &Identity) -> R<Participant>,
+        recheck: impl FnOnce(&SqlStorage, &Participant) -> R<()> + 'static,
+        handler: impl FnOnce(&SqlStorage, &Participant, i64) -> R<Value> + 'static,
+    ) -> R<Value> {
         let key = key
             .filter(|k| !k.is_empty() && k.len() <= MAX_KEY_BYTES)
             .ok_or_else(ApiError::idempotency_required)?;
@@ -2833,7 +2948,7 @@ impl Workspace {
         let slot = out.clone();
         transaction_sync(&self.state, move || {
             // Authority first, so a revoked caller can't replay a stored response.
-            let who = resolve_caller(&sql, &identity)?;
+            let who = resolve(&sql, &identity)?;
             recheck(&sql, &who)?;
             let now = now_ms();
             if let Some(answer) = stored_answer(&sql, &identity.id, &key, &hash, now)? {
@@ -3385,7 +3500,8 @@ impl Workspace {
             return Ok(());
         };
         let now = Date::now().as_millis() as i64;
-        let pending = rows(&sql, "SELECT o.event_id, o.recipient_principal_id, o.attempts, e.seq, e.type, e.actor_id, e.task_id, e.created_at
+        let managed_repositories = provisioning::enabled(&self.env, &sql)?;
+        let pending = rows(&sql, "SELECT o.event_id, o.recipient_principal_id, o.attempts, e.seq, e.type, e.actor_id, e.task_id, e.created_at, e.subject_id
           FROM outbox o JOIN event e ON e.id = o.event_id
           WHERE o.recipient_principal_id NOT IN (SELECT recipient_principal_id FROM outbox WHERE next_attempt_at > ?)
           ORDER BY e.seq LIMIT ?", vec![now.into(), OUTBOX_BATCH.into()])?;
@@ -3405,6 +3521,31 @@ impl Workspace {
             )?;
             if still_queued.is_empty() {
                 continue;
+            }
+            // A managed-repository event reaches an inbox only as the room's activity would show it to its recipient
+            // now: while the switch is on, and to someone `can_see_event` lets see it. Anything else is dropped unsent.
+            let kind = row["type"].as_str().unwrap_or_default();
+            if podster_policy::is_managed_repository_event(kind) {
+                let task = match row["task_id"].as_str() {
+                    Some(task_id) => load_task(&sql, task_id)?,
+                    None => None,
+                };
+                let shown = managed_repositories
+                    && can_see_event(
+                        &caller_now(&sql, &recipient)?,
+                        kind,
+                        row["actor_id"].as_str().unwrap_or_default(),
+                        task.as_ref(),
+                        row["subject_id"].as_str(),
+                    );
+                if !shown {
+                    exec(
+                        &sql,
+                        "DELETE FROM outbox WHERE event_id = ? AND recipient_principal_id = ?",
+                        key,
+                    )?;
+                    continue;
+                }
             }
             let body = json!({ "event_id": event_id, "event_seq": row["seq"], "workspace_id": workspace_id, "type": row["type"], "actor_id": row["actor_id"], "task_id": row["task_id"], "created_at": row["created_at"] });
             if send_to_inbox(&self.env, &recipient, &body).await {
@@ -3964,6 +4105,12 @@ impl Workspace {
         if req.path() == merges::INTERNAL_REPOSITORY_RECHECK {
             return self.operator_recheck(req).await;
         }
+        #[cfg(feature = "failpoints")]
+        if req.path() == INTERNAL_MANAGED_SWITCH {
+            let sql = self.state.storage().sql();
+            let on = store::is_initialized(&sql)? && provisioning::enabled(&self.env, &sql)?;
+            return Ok(json!({ "on": on }));
+        }
         if req.path() == repositories::INTERNAL_PROVIDER_DELIVERY {
             return self.provider_delivery(req).await;
         }
@@ -4122,8 +4269,17 @@ impl Workspace {
                 return downloads::read_overseen(&sql, &identity, agent, id);
             }
         }
-        // Authority comes before anything about the request, so an outsider gets one answer for every request.
-        let who = resolve_caller(&sql, &identity)?;
+        // Authority comes before anything about the request, so an outsider gets one answer for every request. Taking a
+        // grant back is also open to an admin of the room's organization with no place here (AC-11), while the route is
+        // there: switched off, they're an outsider to it as to every other route.
+        let revoking = method == Method::Delete
+            && matches!(path_parts.get(3..), Some(["repository", "grants", _]))
+            && provisioning::enabled(&self.env, &sql)?;
+        let who = if revoking {
+            resolve_revoker(&sql, &identity)?
+        } else {
+            resolve_caller(&sql, &identity)?
+        };
         let public_rooms = visibility::public_rooms_enabled(&self.env, &req)?;
 
         let segments: Vec<String> = path
@@ -4161,7 +4317,8 @@ impl Workspace {
                 return Err(ApiError::not_found());
             }
             if let ["repository"] = tail {
-                let mut read = repositories::read(&sql, &who)?;
+                let mut read =
+                    repositories::read(&sql, &who, &provisioning::requesters(&self.env, &sql)?)?;
                 // Display only, and for the room's owner and admins alone, by current standing: the request command asks
                 // the organization again. Unknown isn't false, so a record that can't be read leaves the field out.
                 if provisioning::runs_repository(&who.caller) {
@@ -4211,28 +4368,28 @@ impl Workspace {
                     changes::release_status(&sql, &who, id)
                 }
                 ["repository", "grants"] => repositories::read_grants(&sql, &who),
-                ["events"] => queries::list_events(&sql, &who.caller, &url),
+                ["events"] => queries::list_events(
+                    &sql,
+                    &who.caller,
+                    &url,
+                    provisioning::enabled(&self.env, &sql)?,
+                ),
                 ["audit"] => queries::list_audit(&sql, &who.caller, &url),
                 _ => Err(ApiError::not_found()),
             };
         }
 
-        // An agent's repository token (M5 step 6). No idempotency key. Switched off, it isn't taken here, and answers
-        // below where every managed-repository command does, as a missing route, after the same body parse.
+        // An agent's repository token (M5 step 6). No idempotency key. Switched off, this isn't taken, and the request
+        // goes on as any task verb that doesn't exist does, and answers exactly as one, with a key or without.
         if let (Method::Post, ["tasks", task, "repo-access"]) = (&method, tail) {
-            if !provisioning::enabled(&self.env, &sql)? {
+            if provisioning::enabled(&self.env, &sql)? {
                 let raw = req.text().await?;
-                if !raw.trim().is_empty() && serde_json::from_str::<Value>(&raw).is_err() {
-                    return Err(ApiError::invalid_argument());
-                }
-                return Err(ApiError::not_found());
+                let test_fail =
+                    cfg!(feature = "failpoints") && req.headers().get("x-test-fail")?.is_some();
+                return self
+                    .repo_access(&identity, &who, task, &raw, test_fail)
+                    .await;
             }
-            let raw = req.text().await?;
-            let test_fail =
-                cfg!(feature = "failpoints") && req.headers().get("x-test-fail")?.is_some();
-            return self
-                .repo_access(&identity, &who, task, &raw, test_fail)
-                .await;
         }
         let key = req.headers().get("idempotency-key")?;
         let raw = req.text().await?;
@@ -4283,6 +4440,7 @@ impl Workspace {
                 let asked = merges::Asked {
                     giver,
                     caller_person: changes::controller_of(&identity),
+                    controller_holds: self.controller_holds(&identity, &who).await?,
                     configured: self.merge_config(&sql).is_some(),
                 };
                 self.command(
@@ -4656,38 +4814,38 @@ impl Workspace {
             // counted against the organization's and the asker's daily caps in that same call, and stays counted
             // whatever becomes of it. A stored answer goes only to someone who may still ask.
             (Method::Post, ["repository"]) => {
-                let switched_on = provisioning::enabled(&self.env, &sql)?;
-                let (delegated, counted) = if switched_on {
+                let deployment = provisioning::Deployment::read(&self.env, &sql)?;
+                let (delegated, counted) = if deployment.switched_on {
                     self.count_repository_request(&identity, &body).await?
                 } else {
                     (false, None)
                 };
-                let counted_for = counted.clone();
-                let recorded = self.command_checked(
+                let may_ask = deployment.clone();
+                // Nothing is given back, whatever the command comes to: the room's place in each count stays.
+                self.command_checked(
                     &identity,
                     key,
                     hash,
                     stops_when_archived,
                     test_fail,
-                    |_: &SqlStorage, who: &Participant| provisioning::may_request(&who.caller),
+                    move |_: &SqlStorage, who: &Participant| may_ask.may_ask(&who.caller),
                     move |sql, who, now| {
                         provisioning::request(
                             sql,
                             who,
                             &body,
-                            switched_on,
+                            &deployment,
                             delegated,
-                            counted_for.as_ref(),
+                            counted.as_ref(),
                             now,
                         )
                     },
-                );
-                // Nothing is given back, whatever the command came to: the room's place in each count stays.
-                recorded
+                )
             }
             (Method::Post, ["repository", "retry"]) => {
                 let delegated = self.org_delegated().await == Some(true);
-                let switched_on = provisioning::enabled(&self.env, &sql)?;
+                let deployment = provisioning::Deployment::read(&self.env, &sql)?;
+                let may_ask = deployment.clone();
                 let suffix: String = uuid::Uuid::new_v4()
                     .simple()
                     .to_string()
@@ -4700,9 +4858,9 @@ impl Workspace {
                     hash,
                     stops_when_archived,
                     test_fail,
-                    |_: &SqlStorage, who: &Participant| provisioning::may_request(&who.caller),
+                    move |_: &SqlStorage, who: &Participant| may_ask.may_ask(&who.caller),
                     move |sql, who, now| {
-                        provisioning::retry(sql, who, &body, switched_on, delegated, &suffix, now)
+                        provisioning::retry(sql, who, &body, &deployment, delegated, &suffix, now)
                     },
                 )
             }
@@ -4848,12 +5006,13 @@ impl Workspace {
             (Method::Delete, ["repository", "grants", grant]) => {
                 let (grant, admin_orgs) = ((*grant).to_string(), identity.admin_orgs.clone());
                 let (recheck_grant, recheck_orgs) = (grant.clone(), admin_orgs.clone());
-                self.command_checked(
+                self.command_as(
                     &identity,
                     key,
                     hash,
                     stops_when_archived,
                     test_fail,
+                    resolve_revoker,
                     move |sql: &SqlStorage, who: &Participant| {
                         repositories::may_still_revoke(
                             sql,

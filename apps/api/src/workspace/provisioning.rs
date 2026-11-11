@@ -22,17 +22,24 @@ use super::*;
 use crate::github::{Config, CreateAnswer, Failure, GitHubApp, Provider};
 use podster_core::provisioning::{
     job_backoff_ms, missing_steps, rate_limited_run_waits, reserved_name, retry_allowed,
-    retry_name, retry_wait_ms, verify_ready, Expected, RequestLimitReached, MAX_SETUP_RUNS,
-    RATE_LIMITED_REASON, SETUP_GONE_WAITS, SETUP_GONE_WAIT_MS,
+    retry_name, retry_wait_ms, verify_ready, Configured, Expected, RepositoryRequesters,
+    RequestLimitReached, MAX_SETUP_RUNS, RATE_LIMITED_REASON, SETUP_GONE_WAITS, SETUP_GONE_WAIT_MS,
 };
 use podster_core::rate_limit::limit_repeated_after_reset;
 use podster_core::repositories::{
     decide_retry, valid_repo_name, RepoVisibility, RequestState, RetryPlan, RetryRefusal,
 };
-use podster_policy::repositories::authorize_repository_admin;
+use podster_policy::moderation::parse_operators;
+use podster_policy::repositories::{
+    authorize_repository_admin, authorize_repository_request, RepoDenial,
+};
 
 const PROVIDER: &str = "github";
 const SWITCH_VAR: &str = "MANAGED_REPOSITORIES";
+/// The Worker variable that names who this deployment lets ask for a room's repository: see [`requesters`].
+const REQUESTERS_VAR: &str = "REPOSITORY_REQUESTERS";
+/// The setup job's reason when whoever asked isn't someone this deployment lets ask, now.
+const REQUESTS_CLOSED: &str = "repository_requests_closed";
 /// The attempt outcomes that say a creation call may have gone out under the attempt's name.
 const NOT_SENT: &str = "not_sent";
 const STARTED: &str = "started";
@@ -62,25 +69,153 @@ pub(super) fn configured(env: &Env, sql: &SqlStorage) -> bool {
     organization(env, sql).is_some()
 }
 
-/// Whether managed repositories are switched on for this deployment. Test builds can switch them on for one room, by a
-/// table only a test can make, so every other test runs with them off, as every deployment does today.
-pub(super) fn enabled(env: &Env, sql: &SqlStorage) -> R<bool> {
-    let set = env
-        .var(SWITCH_VAR)
-        .is_ok_and(|value| value.to_string() == "true");
-    #[cfg(feature = "failpoints")]
-    if !rows(
+/// A test build reads a setting from another binding's name, if the room holds a table of that name with the binding's
+/// name in it: so a test can put a list, a number or an object where a deployment has the setting.
+#[cfg(feature = "failpoints")]
+fn test_binding(sql: &SqlStorage, table: &str) -> R<Option<String>> {
+    if rows(
         sql,
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_managed_repositories_on'",
-        vec![],
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        vec![table.into()],
     )?
     .is_empty()
     {
-        return Ok(true);
+        return Ok(None);
+    }
+    Ok(rows(sql, &format!("SELECT name FROM {table}"), vec![])?
+        .first()
+        .and_then(|row| text(&row["name"])))
+}
+
+/// Whether managed repositories are switched on for this deployment: only if the binding is the string `true`,
+/// exactly. Absent, any other string, and anything that isn't a string, such as the boolean `true`, are off. Test
+/// builds can switch them on for one room, by a table only a test can make, so every other test runs with them off,
+/// as every deployment does today.
+pub(super) fn enabled(env: &Env, sql: &SqlStorage) -> R<bool> {
+    let on = |name: &str| matches!(crate::setting(env, name), crate::Setting::Text(value) if value == "true");
+    #[cfg(feature = "failpoints")]
+    {
+        if let Some(name) = test_binding(sql, "test_switch_binding")? {
+            return Ok(on(&name));
+        }
+        if !rows(
+            sql,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_managed_repositories_on'",
+            vec![],
+        )?
+        .is_empty()
+        {
+            return Ok(true);
+        }
     }
     #[cfg(not(feature = "failpoints"))]
     let _ = sql;
-    Ok(set)
+    Ok(on(SWITCH_VAR))
+}
+
+/// Who this deployment lets ask for a room's repository or retry its setup: the list in the Worker variable
+/// `REPOSITORY_REQUESTERS`, and the deployment's own operators, which the list's `operators` entry stands for. Both are
+/// the deployment's configuration, never a caller's word, and the ID they're held against is the verified caller's.
+#[derive(Clone, Debug)]
+pub(super) struct Requesters {
+    list: RepositoryRequesters,
+    /// `OPERATORS` as configured, the source `moderation` reads. Empty when unset, which names nobody.
+    operators: String,
+}
+
+impl Requesters {
+    /// Whether the caller may ask or retry: the room's rule, then the list. An agent never passes the first.
+    pub(super) fn authorize(&self, caller: &Caller) -> Result<(), RepoDenial> {
+        authorize_repository_request(caller, &self.list, &parse_operators(&self.operators))
+    }
+
+    /// Whether this person may ask, as far as the list goes: for the job, about the person who asked, whose place in
+    /// the room it checks for itself.
+    fn allows(&self, person: &str) -> bool {
+        self.list.allows(person, &parse_operators(&self.operators))
+    }
+}
+
+/// Reads [`Requesters`] from the Worker's configuration. `REPOSITORY_REQUESTERS`, read from the raw binding by
+/// `RepositoryRequesters::read`: with nothing bound, everyone the room's own rule lets; a string is the listed person
+/// IDs, with `test-people` the test sign-up's people, and with `operators` the people `OPERATORS` names; an empty or
+/// malformed string, and anything bound that isn't a string, nobody. So only a setting that is truly absent leaves
+/// requests open. Both commands and the job check it. A test build can give one room a setting of its own, read
+/// either setting from another binding, and take the operators away, by tables only a test can make.
+pub(super) fn requesters(env: &Env, sql: &SqlStorage) -> R<Requesters> {
+    let read = |name: &str| match crate::setting(env, name) {
+        crate::Setting::Absent => RepositoryRequesters::read(Configured::Absent),
+        crate::Setting::Text(value) => RepositoryRequesters::read(Configured::Text(&value)),
+        crate::Setting::Unreadable => RepositoryRequesters::read(Configured::Unreadable),
+    };
+    #[cfg(feature = "failpoints")]
+    {
+        let has = |table: &str| -> R<bool> {
+            Ok(!rows(
+                sql,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                vec![table.into()],
+            )?
+            .is_empty())
+        };
+        // A room holding the first table stands for a deployment whose OPERATORS is unset, and one holding the second
+        // for a deployment whose OPERATORS is whatever is bound under the name in it.
+        let operators = if has("test_no_operators")? {
+            String::new()
+        } else if let Some(name) = test_binding(sql, "test_operators_binding")? {
+            crate::moderation::operators_under(env, &name)
+        } else {
+            crate::moderation::configured_operators(env)
+        };
+        if let Some(name) = test_binding(sql, "test_requesters_binding")? {
+            return Ok(Requesters {
+                list: read(&name),
+                operators,
+            });
+        }
+        if has("test_repository_requesters")? {
+            let set = rows(sql, "SELECT value FROM test_repository_requesters", vec![])?;
+            let value = set.first().and_then(|row| text(&row["value"]));
+            return Ok(Requesters {
+                list: RepositoryRequesters::parse(Some(value.as_deref().unwrap_or_default())),
+                operators,
+            });
+        }
+    }
+    #[cfg(not(feature = "failpoints"))]
+    let _ = sql;
+    Ok(Requesters {
+        list: read(REQUESTERS_VAR),
+        operators: crate::moderation::configured_operators(env),
+    })
+}
+
+/// What this deployment's configuration says to a request or a retry: whether managed repositories are switched on, and
+/// who may ask. Read by the route just before the command's transaction, never from a caller.
+#[derive(Clone, Debug)]
+pub(super) struct Deployment {
+    pub(super) switched_on: bool,
+    pub(super) requesters: Requesters,
+}
+
+impl Deployment {
+    pub(super) fn read(env: &Env, sql: &SqlStorage) -> R<Self> {
+        Ok(Deployment {
+            switched_on: enabled(env, sql)?,
+            requesters: requesters(env, sql)?,
+        })
+    }
+
+    /// Whether the caller may ask or retry at all, for the check that comes before a stored answer is replayed: the
+    /// room's rule, then this deployment's list. Switched off, only the room's rule is asked, so the command answers
+    /// as a missing route whoever is listed.
+    pub(super) fn may_ask(&self, caller: &Caller) -> R<()> {
+        authorize_repository_admin(caller).map_err(repositories::denied)?;
+        if self.switched_on {
+            may_request(caller, &self.requesters)?;
+        }
+        Ok(())
+    }
 }
 
 /// The room's managed-repository routes for people: the read and request, the retry, and the grants. While the switch
@@ -110,9 +245,10 @@ pub(super) fn runs_repository(caller: &Caller) -> bool {
     authorize_repository_admin(caller).is_ok()
 }
 
-/// Only a person who is the room's owner or a room admin asks for or retries the room's repository.
-pub(super) fn may_request(caller: &Caller) -> R<()> {
-    authorize_repository_admin(caller).map_err(repositories::denied)
+/// Only a person who is the room's owner or a room admin asks for or retries the room's repository, and only one this
+/// deployment lets ask. The room's rule answers first.
+pub(super) fn may_request(caller: &Caller, requesters: &Requesters) -> R<()> {
+    requesters.authorize(caller).map_err(repositories::denied)
 }
 
 /// A request's two fields, checked: the chosen name and visibility. Nothing else is accepted.
@@ -143,8 +279,13 @@ fn requested(body: &Value) -> R<(&str, RepoVisibility)> {
 /// Whether a request, as far as the room alone can tell, would be recorded if the organization holds the delegation
 /// and the caps allow it: so the room knows whether to have it counted. `Ok(false)` when the room already has its one
 /// request, which the command then answers for itself.
-pub(super) fn worth_counting(sql: &SqlStorage, who: &Participant, body: &Value) -> R<bool> {
-    may_request(&who.caller)?;
+pub(super) fn worth_counting(
+    sql: &SqlStorage,
+    who: &Participant,
+    body: &Value,
+    requesters: &Requesters,
+) -> R<bool> {
+    may_request(&who.caller, requesters)?;
     requested(body)?;
     Ok(request_row(sql)?.is_none())
 }
@@ -187,16 +328,18 @@ pub(super) fn request(
     sql: &SqlStorage,
     who: &Participant,
     body: &Value,
-    switched_on: bool,
+    deployment: &Deployment,
     delegated: bool,
     counted: Option<&Counted>,
     now: i64,
 ) -> R<Value> {
-    may_request(&who.caller)?;
-    // Switched off, the route isn't there, for the owner as for anyone.
-    if !switched_on {
+    let requesters = &deployment.requesters;
+    // The room's rule alone first: switched off, the route isn't there, for the owner as for anyone, whoever is listed.
+    authorize_repository_admin(&who.caller).map_err(repositories::denied)?;
+    if !deployment.switched_on {
         return Err(ApiError::not_found());
     }
+    may_request(&who.caller, requesters)?;
     let (name, visibility) = requested(body)?;
     if !delegated {
         return refuse(403, "not_delegated");
@@ -242,7 +385,7 @@ pub(super) fn request(
         roles::room_managers(sql, &who.caller.id)?,
         now,
     )?;
-    repositories::read(sql, who)
+    repositories::read(sql, who, requesters)
 }
 
 /// `POST repository/retry {}`: puts a failed or uncertain setup back to `pending`. With a repository ID held, setup
@@ -252,15 +395,17 @@ pub(super) fn retry(
     sql: &SqlStorage,
     who: &Participant,
     body: &Value,
-    switched_on: bool,
+    deployment: &Deployment,
     delegated: bool,
     suffix: &str,
     now: i64,
 ) -> R<Value> {
-    may_request(&who.caller)?;
-    if !switched_on {
+    let requesters = &deployment.requesters;
+    authorize_repository_admin(&who.caller).map_err(repositories::denied)?;
+    if !deployment.switched_on {
         return Err(ApiError::not_found());
     }
+    may_request(&who.caller, requesters)?;
     if !body.as_object().is_some_and(|fields| fields.is_empty()) {
         return Err(ApiError::invalid_argument());
     }
@@ -372,7 +517,7 @@ pub(super) fn retry(
         roles::room_managers(sql, &who.caller.id)?,
         now,
     )?;
-    repositories::read(sql, who)
+    repositories::read(sql, who, requesters)
 }
 
 /// Ends the job's turn: the request leaves `pending` with a reason code and the time a retry may next be taken, and the
@@ -568,7 +713,9 @@ impl Workspace {
         let Ok(who) = resolve_caller(&sql, identity) else {
             return Ok((false, None));
         };
-        if !matches!(worth_counting(&sql, &who, body), Ok(true)) {
+        // That includes someone this deployment doesn't let ask: no place is taken for them, in either object.
+        let requesters = requesters(&self.env, &sql)?;
+        if !matches!(worth_counting(&sql, &who, body, &requesters), Ok(true)) {
             let delegated = self.org_delegated().await == Some(true);
             // A test holds this call here, after it decided not to count, to change the room before its transaction.
             #[cfg(feature = "failpoints")]
@@ -859,6 +1006,12 @@ impl Workspace {
         let sql = self.state.storage().sql();
         if !enabled(&self.env, &sql)? {
             return Ok(Some(failed("managed_repositories_off", 0)));
+        }
+        // Whoever asked must still be someone this deployment lets ask, before anything goes to the provider: a request
+        // recorded under an earlier setting doesn't run under a narrower one.
+        let asked_by = text(&request["requested_by"]).unwrap_or_default();
+        if !requesters(&self.env, &sql)?.allows(&asked_by) {
+            return Ok(Some(failed(REQUESTS_CLOSED, 0)));
         }
         // Test builds only: a room holding this table stands for a deployment whose key the owner hasn't set yet.
         #[cfg(feature = "failpoints")]

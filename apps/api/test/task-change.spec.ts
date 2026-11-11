@@ -1210,6 +1210,10 @@ describe("the room migration", () => {
       // The newest step, the M5 security review's two columns, comes off first.
       for (const [table, column] of [["repo_link", "gone_seen_at"], ["repo_request", "limited_since"], ["repo_request", "limited_call"]]) sql.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
       sql.exec("UPDATE schema_version SET version = version - 1");
+      // The step that keeps an approval's reviewer (A1, decision 195) comes off next.
+      sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_person");
+      sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_id");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       // M5 step 7b's merge bookkeeping comes off next.
       sql.exec("DROP TABLE merge_request");
       sql.exec("ALTER TABLE task_change DROP COLUMN merge_finished_at");

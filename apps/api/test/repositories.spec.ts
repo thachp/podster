@@ -98,6 +98,10 @@ describe("the managed repositories migration", () => {
       sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");
       sql.exec("ALTER TABLE repo_request DROP COLUMN limited_call");
       sql.exec("UPDATE schema_version SET version = version - 1");
+      // The step that keeps an approval's reviewer (A1, decision 195) comes off next.
+      sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_person");
+      sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_id");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE merge_request");
       sql.exec("ALTER TABLE task_change DROP COLUMN merge_finished_at");
       sql.exec("ALTER TABLE task_change DROP COLUMN merge_called_at");
@@ -137,11 +141,11 @@ describe("the managed repositories migration", () => {
     expect(await columns(id, "repo_request_attempt")).toEqual(["request_id", "attempt", "provider_name", "outcome", "at"]);
     expect(await columns(id, "repo_link")).toEqual(["id", "singleton", "request_id", "provider", "provider_repo_id", "provider_org_id", "full_name", "visibility", "default_branch", "status", "status_reason", "created_by", "created_at", "verified_at", "updated_at", "indexed_at", "read_failures", "reads_not_before", "gone_seen_at"]);
     expect(await columns(id, "provider_grant")).toEqual(["id", "principal_id", "provider", "provider_repo_id", "action", "delegated_by", "created_at", "expires_at", "revoked_at", "revoked_by"]);
-    expect(await columns(id, "task_change")).toEqual(["task_id", "provider_repo_id", "pr_number", "submission_no", "reviewed_commit_sha", "observed_head_sha", "head_observed_at", "checks_state", "checks_json", "checks_observed_at", "merge_state", "merge_reason", "merge_sha", "merge_requested_by", "merge_requested_at", "merge_observed_at", "created_at", "updated_at", "head_repo_id", "base_ref", "reviewed_base_sha", "merge_base_sha", "pr_state", "pr_observed_at", "nudged_at", "observed_base_sha", "read_at", "unchanged_reads", "merged_by_id", "read_failures", "not_found_reads", "unwatched_at", "commit_changed_at", "pr_draft", "submitter_id", "submitter_person", "merge_requester_person", "merge_attempts", "merge_next_at", "merge_step", "merge_marked_at", "merge_mark_set_at", "merge_called_at", "merge_finished_at"]);
+    expect(await columns(id, "task_change")).toEqual(["task_id", "provider_repo_id", "pr_number", "submission_no", "reviewed_commit_sha", "observed_head_sha", "head_observed_at", "checks_state", "checks_json", "checks_observed_at", "merge_state", "merge_reason", "merge_sha", "merge_requested_by", "merge_requested_at", "merge_observed_at", "created_at", "updated_at", "head_repo_id", "base_ref", "reviewed_base_sha", "merge_base_sha", "pr_state", "pr_observed_at", "nudged_at", "observed_base_sha", "read_at", "unchanged_reads", "merged_by_id", "read_failures", "not_found_reads", "unwatched_at", "commit_changed_at", "pr_draft", "submitter_id", "submitter_person", "merge_requester_person", "merge_attempts", "merge_next_at", "merge_step", "merge_marked_at", "merge_mark_set_at", "merge_called_at", "merge_finished_at", "reviewer_id", "reviewer_person"]);
     // Nothing is made up for a room that never asked for a repository, and what it held is as it was.
     expect((await footprint(id)).rows).toEqual([0, 0, 0, 0, 0]);
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}/tasks/${task}`)).body.task).toMatchObject({ id: task, title: "Add the parser", assignee: ASSIGNEE.id });
-    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toEqual({ request: null, repository: null, delegated: true, organization: GH_ORG });
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toEqual({ request: null, repository: null, delegated: true, may_request: true, organization: GH_ORG });
     // A migrated room doesn't migrate again: a row written since is still there after reads and a write.
     await link(id);
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
@@ -191,7 +195,7 @@ describe("the managed repositories migration", () => {
 describe("the room's repository read", () => {
   it("answers a person who sees the whole room from the room's own state", async () => {
     const { id } = await room();
-    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toEqual({ request: null, repository: null, delegated: true, organization: GH_ORG });
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toEqual({ request: null, repository: null, delegated: true, may_request: true, organization: GH_ORG });
     await inRoom(id, (sql) => sql.exec("INSERT INTO repo_request (id, state, name, visibility, attempt, provider_name, reason, requested_by, requested_at, updated_at) VALUES ('rr_1', 'failed', 'engineering', 'public', 2, 'engineering-7f3a', 'name_taken', ?, 1000, 1500)", OWNER.id));
     await link(id, "degraded");
     const read = await api(OWNER, "GET", `/v1/workspaces/${id}/repository`);
@@ -203,6 +207,7 @@ describe("the room's repository read", () => {
       repository: { id: "rl_1", provider: "github", provider_repo_id: REPO_ID, full_name: "podsterx/engineering", visibility: "public", default_branch: "main", status: "degraded", status_reason: null, created_at: 1000, verified_at: 2000, updated_at: 2000 },
       delegated: true,
       organization: GH_ORG,
+      may_request: true,
     });
   });
 
@@ -228,8 +233,13 @@ describe("the room's repository read", () => {
 describe("while managed repositories are switched off", () => {
   const off = (id: string) => inRoom(id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
   const PERSON: Who = { id: "per_rp_member", kind: "person", org: "org_rp" };
-  /** The same request to a route that doesn't exist, which is what every managed-repository route must look like. */
-  const missing = (who: Who, method: string, id: string, body: unknown, raw?: string) => api(who, method, `/v1/workspaces/${id}/no-such-route`, body, { raw });
+  /**
+   * The same request to a route that doesn't exist, which is what every managed-repository route must look like. A task's
+   * repo-access looks like a task verb that doesn't exist, as `merge` does (review A5): in an archived room that's the
+   * archive's refusal, as for any task command, and without a key the key's.
+   */
+  const missing = (who: Who, method: string, id: string, body: unknown, raw?: string, path?: string) =>
+    api(who, method, path?.endsWith("/repo-access") ? path.replace(/repo-access$/, "no-such-verb") : `/v1/workspaces/${id}/no-such-route`, body, { raw });
   const same = (a: Awaited<ReturnType<typeof api>>, b: Awaited<ReturnType<typeof api>>, label: string) =>
     expect([a.status, a.body, a.headers], label).toEqual([b.status, b.body, b.headers]);
   const routes = (id: string, grant: string, task: string) => [
@@ -264,7 +274,7 @@ describe("while managed repositories are switched off", () => {
       for (const who of callers()) {
         for (const [method, path, body] of routes(id, rows ? "pg_1" : "pg_none", task)) {
           const answer = await api(who, method, path, body);
-          same(answer, await missing(who, method, id, body), `${who.id} ${method} ${path} rows=${rows}`);
+          same(answer, await missing(who, method, id, body, undefined, path), `${who.id} ${method} ${path} rows=${rows}`);
           expect(answer.text).not.toContain("podsterx");
           expect(answer.text).not.toContain("engineering");
         }
@@ -279,14 +289,14 @@ describe("while managed repositories are switched off", () => {
     for (const who of callers()) {
       for (const [method, path] of routes(id, "pg_1", task).filter(([method]) => method !== "GET")) {
         const answer = await api(who, method, path, undefined, { raw: "{not json" });
-        same(answer, await missing(who, method, id, undefined, "{not json"), `${who.id} ${method} ${path} malformed`);
+        same(answer, await missing(who, method, id, undefined, "{not json", path), `${who.id} ${method} ${path} malformed`);
       }
     }
     // Archived: a missing route is still a missing route there.
     expect((await api(OWNER, "POST", `/v1/workspaces/${id}/archive`, { policy_version: await version(id) })).status).toBe(200);
     for (const who of callers()) {
       for (const [method, path, body] of routes(id, "pg_1", task)) {
-        same(await api(who, method, path, body), await missing(who, method, id, body), `${who.id} ${method} ${path} archived`);
+        same(await api(who, method, path, body), await missing(who, method, id, body, undefined, path), `${who.id} ${method} ${path} archived`);
       }
     }
   });
@@ -328,12 +338,12 @@ describe("what the read says to whom", () => {
     // No record for the organization: it holds the delegation, and the owner and an admin are both told so.
     for (const who of [OWNER, admin]) {
       const read = await api(who, "GET", `/v1/workspaces/${id}/repository`);
-      expect([read.status, read.body], who.id).toEqual([200, { request: null, repository: null, delegated: true, organization: GH_ORG }]);
+      expect([read.status, read.body], who.id).toEqual([200, { request: null, repository: null, delegated: true, may_request: true, organization: GH_ORG }]);
     }
     // A person who sees the whole room and doesn't run its repository is told nothing about the delegation.
     const theirs = await api(member, "GET", `/v1/workspaces/${id}/repository`);
     expect(theirs.status, theirs.text).toBe(200);
-    expect(theirs.body).toEqual({ request: null, repository: null, organization: GH_ORG });
+    expect(theirs.body).toEqual({ request: null, repository: null, may_request: false, organization: GH_ORG });
     expect(theirs.text).not.toContain("delegated");
   });
 
@@ -342,7 +352,7 @@ describe("what the read says to whom", () => {
     await inRoom(id, (sql) => sql.exec("CREATE TABLE test_delegation_unreadable (x INTEGER)"));
     const read = await api(OWNER, "GET", `/v1/workspaces/${id}/repository`);
     expect(read.status, read.text).toBe(200);
-    expect(read.body).toEqual({ request: null, repository: null, organization: GH_ORG });
+    expect(read.body).toEqual({ request: null, repository: null, may_request: true, organization: GH_ORG });
     await inRoom(id, (sql) => sql.exec("DROP TABLE test_delegation_unreadable"));
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toHaveProperty("delegated", true);
   });

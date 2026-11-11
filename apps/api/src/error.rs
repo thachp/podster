@@ -5,13 +5,29 @@ use worker::{console_error, Response, Result};
 
 #[derive(Debug)]
 pub enum ApiError {
-    Api { status: u16, code: &'static str },
+    Api {
+        status: u16,
+        code: &'static str,
+    },
+    /// A refusal whose message says more than its code: a fixed sentence the contract names, never anything a caller sent.
+    Explained {
+        status: u16,
+        code: &'static str,
+        message: &'static str,
+    },
     Internal(String),
 }
 
 impl ApiError {
     pub const fn api(status: u16, code: &'static str) -> ApiError {
         ApiError::Api { status, code }
+    }
+    pub const fn explained(status: u16, code: &'static str, message: &'static str) -> ApiError {
+        ApiError::Explained {
+            status,
+            code,
+            message,
+        }
     }
     pub fn invalid_assertion() -> ApiError {
         ApiError::api(401, "invalid_assertion")
@@ -128,7 +144,9 @@ impl ApiError {
 
     pub fn status_and_code(&self) -> (u16, &'static str) {
         match self {
-            ApiError::Api { status, code } => (*status, code),
+            ApiError::Api { status, code } | ApiError::Explained { status, code, .. } => {
+                (*status, code)
+            }
             ApiError::Internal(_) => (500, "internal_error"),
         }
     }
@@ -136,7 +154,7 @@ impl ApiError {
     /// The stable code, for a refusal. An internal error has none.
     pub fn code(&self) -> Option<&'static str> {
         match self {
-            ApiError::Api { code, .. } => Some(code),
+            ApiError::Api { code, .. } | ApiError::Explained { code, .. } => Some(code),
             ApiError::Internal(_) => None,
         }
     }
@@ -146,12 +164,14 @@ impl ApiError {
             console_error!("internal error: {detail}");
         }
         let (status, code) = self.status_and_code();
-        Ok(
-            Response::from_json(
-                &serde_json::json!({ "error": { "code": code, "message": code } }),
-            )?
-            .with_status(status),
-        )
+        let message = match &self {
+            ApiError::Explained { message, .. } => message,
+            _ => code,
+        };
+        Ok(Response::from_json(
+            &serde_json::json!({ "error": { "code": code, "message": message } }),
+        )?
+        .with_status(status))
     }
 }
 

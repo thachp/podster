@@ -1469,6 +1469,139 @@ pub fn organization_delegated(recorded: Option<bool>) -> bool {
     recorded != Some(false)
 }
 
+/// The literal entry in a deployment's list of repository requesters that stands for every test person.
+pub const TEST_PEOPLE_ENTRY: &str = "test-people";
+
+/// The literal entry that stands for the deployment's operators: the people its own configuration names as Podster
+/// operators. A deployment gets them only by writing this entry. They're never implied.
+pub const OPERATORS_ENTRY: &str = "operators";
+
+/// What every test person's ID starts with: `per_` and the `e2e_` the gateway's secret-protected test sign-up gives
+/// its users' IDs, which no other sign-up produces. The ID is the verified caller's, from the gateway's assertion,
+/// never anything a client sends.
+pub const TEST_PERSON_PREFIX: &str = "per_e2e_";
+
+/// The longest person ID a list entry may be. Longer is malformed.
+const MAX_REQUESTER_ID: usize = 128;
+
+/// Whether an ID is a test person's: made by the test sign-up.
+pub fn is_test_person(person_id: &str) -> bool {
+    person_id.len() > TEST_PERSON_PREFIX.len() && person_id.starts_with(TEST_PERSON_PREFIX)
+}
+
+/// Whether a list entry is shaped like a person's ID: `per_`, then letters, digits, `_` or `-`.
+fn person_id_entry(entry: &str) -> bool {
+    entry.len() <= MAX_REQUESTER_ID
+        && entry.strip_prefix("per_").is_some_and(|rest| {
+            !rest.is_empty()
+                && rest
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        })
+}
+
+/// Who a deployment lets ask for a room's repository, or retry its setup: a deployment's setting, beside the rule
+/// that it's a person who is the room's owner or a room admin (added by the architect on 2026-11-11, after M5's
+/// security review). It narrows who may ask and never widens it. Nothing else reads it: grants, tokens, merges and
+/// reads of a repository a room already has don't.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RepositoryRequesters {
+    /// The setting is absent: the feature's ordinary rules apply to everyone.
+    Everyone,
+    /// The setting is present: only these may ask. Empty with no test people is nobody.
+    Only {
+        /// Person IDs, exactly as listed.
+        people: Vec<String>,
+        /// Whether the list holds [`TEST_PEOPLE_ENTRY`]: every test person may ask.
+        test_people: bool,
+        /// Whether the list holds [`OPERATORS_ENTRY`]: every operator the deployment names may ask.
+        operators: bool,
+    },
+}
+
+/// What a deployment's configuration holds under a setting's name, as the Worker found it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Configured<'a> {
+    /// Nothing is bound under the name.
+    Absent,
+    /// A string is bound under it.
+    Text(&'a str),
+    /// Something is bound under it that isn't a string, or it couldn't be read: a list, a number, an object, a
+    /// binding of another kind, an error.
+    Unreadable,
+}
+
+impl RepositoryRequesters {
+    /// Reads the setting from what the Worker found under its name. Only a name with nothing bound is "unset", which
+    /// is everyone. A string is read by [`RepositoryRequesters::parse`]. Anything else is nobody: a setting that is
+    /// there and can't be read as text was meant to narrow who may ask, so it never widens it.
+    pub fn read(configured: Configured) -> Self {
+        match configured {
+            Configured::Absent => RepositoryRequesters::Everyone,
+            Configured::Text(value) => Self::parse(Some(value)),
+            Configured::Unreadable => Self::nobody(),
+        }
+    }
+
+    /// Nobody may ask.
+    pub fn nobody() -> Self {
+        RepositoryRequesters::Only {
+            people: Vec::new(),
+            test_people: false,
+            operators: false,
+        }
+    }
+
+    /// Reads the setting. Absent is everyone. Present, it's entries separated by commas, each a person's ID,
+    /// [`TEST_PEOPLE_ENTRY`] or [`OPERATORS_ENTRY`], with spaces around an entry ignored. Anything else is nobody, the
+    /// whole list with it: an empty value, an empty entry, an entry of any other shape or an unknown word. So a slip
+    /// in the setting closes requests and never opens them. An operator isn't implied, and neither is anyone else.
+    pub fn parse(configured: Option<&str>) -> Self {
+        let Some(configured) = configured else {
+            return RepositoryRequesters::Everyone;
+        };
+        let mut people = Vec::new();
+        let mut test_people = false;
+        let mut operators = false;
+        for entry in configured.split(',').map(|entry| entry.trim_matches(' ')) {
+            if entry == TEST_PEOPLE_ENTRY {
+                test_people = true;
+            } else if entry == OPERATORS_ENTRY {
+                operators = true;
+            } else if person_id_entry(entry) {
+                people.push(entry.to_string());
+            } else {
+                return Self::nobody();
+            }
+        }
+        RepositoryRequesters::Only {
+            people,
+            test_people,
+            operators,
+        }
+    }
+
+    /// Whether this person may ask, as far as the deployment's setting goes. `person_id` is the verified caller's,
+    /// and a person's: the caller's kind is the policy's to check first. `deployment_operators` is the people the
+    /// deployment's own configuration names as operators, read by the Worker and never from a caller. It counts
+    /// only if the list holds [`OPERATORS_ENTRY`], and an empty one names nobody.
+    pub fn allows(&self, person_id: &str, deployment_operators: &[&str]) -> bool {
+        match self {
+            RepositoryRequesters::Everyone => true,
+            RepositoryRequesters::Only {
+                people,
+                test_people,
+                operators,
+            } => {
+                !person_id.is_empty()
+                    && ((*test_people && is_test_person(person_id))
+                        || (*operators && deployment_operators.contains(&person_id))
+                        || people.iter().any(|listed| listed == person_id))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod recheck_tests {
     use super::*;

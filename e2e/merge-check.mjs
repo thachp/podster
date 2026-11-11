@@ -44,9 +44,11 @@ const room = await owner.createRoom(`e2e merge ${new Date().toISOString().slice(
 const coder = await McpAgent.connect(target, owner, "Coder");
 const sibling = await McpAgent.connect(target, owner, "Sibling");
 const robot = await McpAgent.connect(target, other, "Robot");
+// The other person's second agent: it merges, and is no party to the tasks it merges, so it's shown the merge alone.
+const merger = await McpAgent.connect(target, other, "Merger");
 for (const agent of [coder, sibling]) await owner.addAgent(room, agent);
 const invitation = await owner.invite(room, other.org, { role: "member" });
-eq((await other.accept(invitation.token, other.org, [robot])).body?.agents, [robot.id], "the other person's agent joined");
+eq([...((await other.accept(invitation.token, other.org, [robot, merger])).body?.agents ?? [])].sort(), [robot.id, merger.id].sort(), "the other person's agents joined");
 
 let repo;
 let task;
@@ -65,12 +67,15 @@ await check("M5-S7-setup", "with no operator's approval, the owner asks, and the
   await fake("agent-repo", { id: repo, pulls: { 7: { head_sha: HEAD, base_sha: BASE } } });
 });
 
+// Who reviews and who merges. The coder, the owner's agent, submits. The robot, an agent the other person controls, is
+// named reviewer and approves: a review independent of the submitter's person, as the owner's decision of 2026-11-11 on
+// review A1 asks before a commit is merged. The merger, the other person's second agent and no party to the task, merges.
 await check("M5-S7i", "an approved, linked task that nobody asks to merge is not merged, however long the room's alarm runs", async () => {
-  const made = await owner.must("POST", `/v1/workspaces/${room}/tasks`, { title: "Change the code", instructions: "x", assignee: coder.id }, { idempotencyKey: key() });
+  const made = await owner.must("POST", `/v1/workspaces/${room}/tasks`, { title: "Change the code", instructions: "x", assignee: coder.id, reviewer: robot.id }, { idempotencyKey: key() });
   task = made.id;
   const accepted = await coder.must("accept_task", { ...where(), version: made.version });
   await coder.must("submit_task", { ...where(), version: accepted.version, note: "Done", commit_sha: HEAD, pr_number: 7 });
-  await owner.must("POST", `/v1/workspaces/${room}/tasks/${task}/verify`, { submission_no: 1, commit_sha: HEAD });
+  await robot.must("verify_task", { ...where(), submission_no: 1, commit_sha: HEAD });
   eq((await change()).reviewed_commit_sha, HEAD, "the reviewed commit");
   // The room's alarm has work of its own here: the change is read again a minute after approval at the latest. Four
   // seconds is long enough for anything that would merge on approval to have done so.
@@ -92,17 +97,17 @@ await check("M5-S7ii", "a merge-grant holder who is the submitter, its owner, or
 });
 
 await check("M5-S7iii", "a participant with no merge grant is refused grant_required", async () => {
-  refused(await ask(robot), "grant_required", "an agent another person controls, with no grant");
+  refused(await ask(merger), "grant_required", "an agent another person controls, with no grant");
   eq((await change()).merge_state, "not_requested", "the merge's state");
   eq(await merges(), [], "merge calls");
 });
 
 await check("M5-S7iv", "an authorized holder's merge_task leads to exactly one merge call, for the reviewed commit, and the task records the merge", async () => {
-  await grantNow(robot);
-  const asked = await robot.must("merge_task", { ...where(), submission_no: 1, commit_sha: HEAD });
+  await grantNow(merger);
+  const asked = await merger.must("merge_task", { ...where(), submission_no: 1, commit_sha: HEAD });
   eq(asked.merge_state, "requested", "the answer's state");
   const done = await until(change, (seen) => seen.merge_state !== "requested", "the merge");
-  eq([done.merge_state, done.merge_reason, done.pr_state, done.merge_requested_by], ["succeeded", null, "merged", robot.id], "the task's change");
+  eq([done.merge_state, done.merge_reason, done.pr_state, done.merge_requested_by], ["succeeded", null, "merged", merger.id], "the task's change");
   const calls = await merges();
   eq(calls.map((call) => [call.path, call.status, call.body.sha, call.body.merge_method]), [[`/repositories/${repo}/pulls/7/merge`, 200, HEAD, "merge"]], "merge calls");
   const seen = await fake(`merge-calls?repo=${repo}`);
@@ -110,12 +115,12 @@ await check("M5-S7iv", "an authorized holder's merge_task leads to exactly one m
   eq([seen.pulls["7"].merged, seen.pulls["7"].head_sha, seen.has], [true, HEAD, [HEAD]], "the pull request and the default branch");
   eq(done.merge_sha, seen.pulls["7"].merge_commit_sha, "the merge commit recorded");
   // Asking again merges nothing more.
-  refused(await ask(robot), "already_merged", "asking again");
+  refused(await ask(merger), "already_merged", "asking again");
   eq((await merges()).length, 1, "merge calls after asking again");
   // The agent that asked reads how it went from the release status (M5 step 8), which fetches nothing. It isn't shown
   // the task's change, so it gets the merge alone: nothing of the pull request or its checks. No release exists.
-  const status = await robot.must("get_task_release_status", where(), false);
-  eq([status.merge.state, status.merge.reason, status.merge.sha, status.merge.requested_by], ["succeeded", null, done.merge_sha, robot.id], "the release status's merge");
+  const status = await merger.must("get_task_release_status", where(), false);
+  eq([status.merge.state, status.merge.reason, status.merge.sha, status.merge.requested_by], ["succeeded", null, done.merge_sha, merger.id], "the release status's merge");
   ok(typeof status.merge.observed_at === "number", "the merge has no observation time");
   eq([status.pull_request, status.checks], [null, null], "what the requester is shown of the change");
   eq(status.release.exists, false, "the release");
@@ -131,22 +136,24 @@ await check("M5-S7iv", "an authorized holder's merge_task leads to exactly one m
 // answer. A new task and pull request for each, with a commit of its own, so the status on the first one's commit counts
 // for nothing here.
 const headOf = (number) => (0x10 + number).toString(16).repeat(20);
-const taskOn = async (number) => {
+const taskOn = async (number, reviewer = robot) => {
   await fake("agent-repo", { id: repo, status: 201, pulls: { [number]: { head_sha: headOf(number), base_sha: BASE } } });
-  const made = await owner.must("POST", `/v1/workspaces/${room}/tasks`, { title: `Change ${number}`, instructions: "x", assignee: coder.id }, { idempotencyKey: key() });
+  const made = await owner.must("POST", `/v1/workspaces/${room}/tasks`, { title: `Change ${number}`, instructions: "x", assignee: coder.id, reviewer: reviewer.id }, { idempotencyKey: key() });
   const here = { workspace_id: room, task_id: made.id };
   const accepted = await coder.must("accept_task", { ...here, version: made.version });
   return { here, version: accepted.version };
 };
-const approvedOn = async (number) => {
-  const { here, version } = await taskOn(number);
+/** A task on pull request `number`, approved by `reviewer`: the robot, independent of the submitter, unless a check needs the owner. */
+const approvedOn = async (number, reviewer = robot) => {
+  const { here, version } = await taskOn(number, reviewer);
   await coder.must("submit_task", { ...here, version, note: "Done", commit_sha: headOf(number), pr_number: number });
-  await owner.must("POST", `/v1/workspaces/${room}/tasks/${here.task_id}/verify`, { submission_no: 1, commit_sha: headOf(number) });
+  if (reviewer === robot) await robot.must("verify_task", { ...here, submission_no: 1, commit_sha: headOf(number) });
+  else await reviewer.must("POST", `/v1/workspaces/${room}/tasks/${here.task_id}/verify`, { submission_no: 1, commit_sha: headOf(number) });
   return here;
 };
 const changeOf = async (here) => (await owner.must("GET", `/v1/workspaces/${room}/tasks/${here.task_id}`)).change;
 const mergeAndWait = async (here, number) => {
-  await robot.must("merge_task", { ...here, submission_no: 1, commit_sha: headOf(number) });
+  await merger.must("merge_task", { ...here, submission_no: 1, commit_sha: headOf(number) });
   return until(() => changeOf(here), (seen) => seen.merge_state !== "requested", "the merge");
 };
 const mergesOf = async (number) => (await merges()).filter((call) => call.path === `/repositories/${repo}/pulls/${number}/merge`).map((call) => call.status);
@@ -192,10 +199,19 @@ await check("M5-S7viii", "a head that moved after review isn't merged: the merge
   eq([done.merge_state, done.merge_reason, done.commit_changed], ["failed", "commit_changed", true], "the task's change");
   eq(await mergesOf(11), [], "merge calls");
   eq((await pullOf(11)).merged ?? false, false, "the pull request merged");
-  refused(await robot.call("merge_task", { ...here, submission_no: 1, commit_sha: headOf(11), idempotency_key: key() }), "commit_changed", "asking again");
+  refused(await merger.call("merge_task", { ...here, submission_no: 1, commit_sha: headOf(11), idempotency_key: key() }), "commit_changed", "asking again");
 });
 
-for (const agent of [coder, sibling, robot]) await agent.close();
+await check("M5-S7ix", "a commit the submitter's own person approved isn't merged: the review completes the task, and the merge is refused self_review", async () => {
+  const here = await approvedOn(12, owner);
+  // Ordinary review is unchanged: the owner, who controls the coder, completed the task's review.
+  eq((await owner.must("GET", `/v1/workspaces/${room}/tasks/${here.task_id}`)).task.status, "completed", "the task's status");
+  refused(await merger.call("merge_task", { ...here, submission_no: 1, commit_sha: headOf(12), idempotency_key: key() }), "self_review", "a grant holder asking to merge it");
+  eq((await changeOf(here)).merge_state, "not_requested", "the merge's state");
+  eq(await mergesOf(12), [], "merge calls");
+});
+
+for (const agent of [coder, sibling, robot, merger]) await agent.close();
 const counts = report.counts();
 console.log(`\nmerge_task, against the fake GitHub: ${counts.pass} passed, ${counts.fail} failed`);
 process.exit(counts.fail > 0 ? 1 : 0);

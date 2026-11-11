@@ -921,9 +921,37 @@ pub async fn org_delegation(env: &Env, org: &str, provider: &str) -> R<Value> {
     Ok(response.json().await?)
 }
 
+/// Whether managed repositories are switched on, for an organization's own routes. A deployment reads the Worker's
+/// `MANAGED_REPOSITORIES`. Test builds can also switch one organization on, in its own object, as they switch on a room.
+async fn managed_switch_on_for_org(env: &Env, org: &str) -> R<bool> {
+    if env
+        .var("MANAGED_REPOSITORIES")
+        .is_ok_and(|value| value.to_string() == "true")
+    {
+        return Ok(true);
+    }
+    #[cfg(feature = "failpoints")]
+    {
+        let mut response = internal(env, org, "/internal/managed-switch", &json!({})).await?;
+        let answer: Value = response.json().await?;
+        Ok(answer["on"].as_bool() == Some(true))
+    }
+    #[cfg(not(feature = "failpoints"))]
+    {
+        let _ = org;
+        Ok(false)
+    }
+}
+
 /// `GET` or `PUT /v1/orgs/{org}/provisioning-delegation`. Reading is for a Podster operator or an admin of that
 /// organization. Setting, `{ granted }`, is for a Podster operator alone, and matters only to take the delegation back
 /// from an organization or to restore it: an organization holds it until then. An agent is refused in both.
+///
+/// A Podster operator's read and write answer whatever the switch says, so an operator can take an organization's
+/// ability away, or restore it, before managed repositories are switched on (ruled 2026-11-11). Anyone else, an
+/// organization's admin included, is answered exactly as a route that doesn't exist while the switch is off, before
+/// anything else is decided: an ordinary person doesn't learn from it that the feature exists (narrowed 2026-11-11
+/// after M5's security review, A5).
 pub async fn provisioning_delegation(
     env: &Env,
     caller: &Caller,
@@ -934,18 +962,25 @@ pub async fn provisioning_delegation(
         return Err(ApiError::not_found());
     }
     let operator = crate::moderation::require_operator(env, caller).is_ok();
+    if !operator && !managed_switch_on_for_org(env, org).await? {
+        return Err(ApiError::not_found());
+    }
+    let kind = if caller.kind == "person" {
+        podster_policy::PrincipalKind::Person
+    } else {
+        podster_policy::PrincipalKind::Agent
+    };
     let Some(raw) = set else {
-        let admin = caller.kind == "person" && caller.admin_orgs.iter().any(|o| o == org);
-        if !operator && !admin {
-            return Err(ApiError::not_allowed());
-        }
+        let admin =
+            podster_policy::repositories::administers_org(kind, &caller.admin_orgs, Some(org));
+        podster_policy::repositories::authorize_delegation_read(kind, operator, admin)
+            .map_err(|_| ApiError::not_allowed())?;
         return Ok(Response::from_json(
             &org_delegation(env, org, "github").await?,
         )?);
     };
-    if !operator {
-        return Err(ApiError::not_allowed());
-    }
+    podster_policy::repositories::authorize_delegation_set(kind, operator)
+        .map_err(|_| ApiError::not_allowed())?;
     let body: Value = serde_json::from_str(raw).map_err(|_| ApiError::invalid_argument())?;
     let granted = body
         .as_object()
@@ -1424,6 +1459,17 @@ impl Principal {
                     vec![workspace.as_str().into()],
                 )?;
                 return Ok(json!({ "reserved": true }));
+            }
+            // Test builds only: whether a test switched managed repositories on for this organization alone.
+            #[cfg(feature = "failpoints")]
+            "/internal/managed-switch" => {
+                let on = !rows(
+                    &sql,
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_managed_repositories_on'",
+                    vec![],
+                )?
+                .is_empty();
+                return Ok(json!({ "on": on }));
             }
             "/internal/org-delegation" | "/internal/org-delegation-set" => {
                 let body: Value = req.json().await?;

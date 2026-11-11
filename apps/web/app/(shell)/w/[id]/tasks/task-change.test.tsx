@@ -47,7 +47,7 @@ describe("a task's pull request, read-only", () => {
   it("keeps the merge stages apart, and never counts a merge Podster didn't ask for as a success", () => {
     expect(mergeLabel(change({ merge_state: "succeeded" }))).toBe("Merged");
     expect(mergeLabel(change({ merge_state: "failed" }))).toBe("Merge failed");
-    expect(mergeLabel(change({ merge_state: "requested" }))).toBe("Merging");
+    expect(mergeLabel(change({ merge_state: "requested" }))).toBe("Merge requested");
     expect(mergeLabel(change({ merge_state: "succeeded", merge_reason: "unrequested_merge" }))).toBe("Merged outside Podster");
     expect(mergeLabel(change({ merge_state: "not_requested", merge_reason: "unreviewed_merge" }))).toBe("Merged outside Podster");
   });

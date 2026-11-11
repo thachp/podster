@@ -299,15 +299,15 @@ describe("the scheduled read-back of a ready link", () => {
     // The revocation failed once: the token lives out its hour, read-only on metadata, and the room says so by ID.
     expect((await readBack()).presence).toEqual({ live: 1, revokes: [500] });
     expect(lines.filter((line) => line.includes('"merge.token_unrevoked"'))).toEqual([JSON.stringify({ event: "merge.token_unrevoked", ws: r.id })]);
-    // Nothing GitHub wrote, and no token, reaches the log.
-    const logged = lines.join("\n");
-    for (const text of ["ghs_", "SECRET-PROVIDER-TEXT", "does not exist or is not accessible"]) expect(logged).not.toContain(text);
     // The second look comes due a minute later and runs: it asks with a new token, which is revoked. The first is never
     // tried again, since nothing holds it to try with, and it's still the one live.
     await aMinuteLater(r.id);
     await alarmPass(stub(r.id));
     expect(await link(r.id)).toMatchObject({ status: "degraded", status_reason: "repository_gone" });
     expect((await readBack()).presence).toEqual({ live: 1, revokes: [500, 204] });
+    // Nothing GitHub wrote, and no token, reached the log in either pass.
+    const logged = lines.join("\n");
+    for (const text of ["ghs_", "SECRET-PROVIDER-TEXT", "does not exist or is not accessible"]) expect(logged).not.toContain(text);
   });
 
   it("degrades on two 404s a minute apart to the token minted for the repository itself (the direct branch)", async () => {

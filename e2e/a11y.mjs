@@ -653,11 +653,13 @@ function pageScripts(sheet) {
 /**
  * Whether the browser really draws each script's letter, answered by the browser itself: Chromium names the font it used
  * for a node, and on Linux fontconfig says whether that font has the letter. A letter no font has is drawn with the
- * "missing" box of whichever font came first, which Chromium still names, so the name alone isn't enough. Null where it
- * can't be told: another browser, or a font fontconfig doesn't list.
+ * "missing" box of whichever font came first, which Chromium still names, so the name alone isn't enough. Each answer is
+ * `{ glyph: true | false | null, why }`, where null is "can't tell" and `why` says why: another browser, a font the page
+ * loaded itself, no font named, macOS (where fontconfig isn't asked, so a named font is unconfirmed), or fontconfig
+ * missing, timing out or failing.
  */
 async function realGlyphs(page, samples) {
-  const out = Object.fromEntries(Object.keys(samples).map((name) => [name, null]));
+  const out = Object.fromEntries(Object.keys(samples).map((name) => [name, { glyph: null, why: `not asked in ${browserName}` }]));
   if (browserName !== "chromium" || !Object.keys(samples).length) return out;
   const ids = await page.evaluate((entries) => entries.map(([name, { letter, family }], i) => {
     const span = document.createElement("span");
@@ -676,23 +678,27 @@ async function realGlyphs(page, samples) {
     const { root } = await session.send("DOM.getDocument");
     for (const [name, id, letter] of ids) {
       const { nodeId } = await session.send("DOM.querySelector", { nodeId: root.nodeId, selector: `#${id}` });
-      // A font the page loaded itself isn't one fontconfig knows, so it can't be asked about.
       const fonts = (await session.send("CSS.getPlatformFontsForNode", { nodeId })).fonts;
-      if (!fonts.length || fonts.some((font) => font.isCustomFont)) {
-        console.log(`     can't tell ${name}: ${fonts.length ? `a font the page loaded (${fonts.map((font) => font.familyName).join(", ")})` : "the browser named no font"}`);
-        continue;
-      }
       const used = fonts.map((font) => font.familyName);
-      if (process.platform !== "linux") {
-        out[name] = used.length > 0 ? true : null;
-        continue;
+      if (!fonts.length) {
+        out[name] = { glyph: null, why: "the browser named no font" };
+      } else if (fonts.some((font) => font.isCustomFont)) {
+        // A font the page loaded itself isn't one fontconfig knows, so it can't be asked about.
+        out[name] = { glyph: null, why: `a font the page loaded (${used.join(", ")})` };
+      } else if (process.platform !== "linux") {
+        out[name] = { glyph: null, why: `unconfirmed on ${process.platform}: the browser named ${used.join(", ")}, and fontconfig is only asked on Linux` };
+      } else {
+        const asks = used.map((family) => {
+          const listed = spawnSync("fc-list", [`${family.replaceAll(/[\\:,=-]/g, (c) => `\\${c}`)}:charset=${letter.codePointAt(0).toString(16)}`, "family"], { encoding: "utf8", env: childEnv(), timeout: 10_000 });
+          if (listed.error?.code === "ENOENT") return { answer: null, why: "fc-list isn't installed" };
+          if (listed.error?.code === "ETIMEDOUT" || listed.signal) return { answer: null, why: "fc-list timed out" };
+          if (listed.error || listed.status !== 0) return { answer: null, why: `fc-list failed (${listed.error?.message ?? `exit ${listed.status}`})` };
+          return { answer: listed.stdout.trim() !== "" };
+        });
+        const yes = asks.some((ask) => ask.answer === true);
+        const unknown = asks.find((ask) => ask.answer === null);
+        out[name] = yes ? { glyph: true } : unknown ? { glyph: null, why: unknown.why } : { glyph: false, why: `no font the browser used has it (${used.join(", ")})` };
       }
-      const has = (family) => {
-        const listed = spawnSync("fc-list", [`${family.replaceAll(/[\\:,=-]/g, (c) => `\\${c}`)}:charset=${letter.codePointAt(0).toString(16)}`, "family"], { encoding: "utf8", env: childEnv(), timeout: 10_000 });
-        return listed.status === 0 ? listed.stdout.trim() !== "" : null;
-      };
-      const answers = used.map(has);
-      out[name] = answers.includes(true) ? true : answers.includes(null) || !used.length ? null : false;
     }
   } finally {
     await session.detach().catch(() => {});
@@ -701,6 +707,35 @@ async function realGlyphs(page, samples) {
     }, ids.length);
   }
   return out;
+}
+
+/**
+ * The browser's install path, as install-browser.mjs left it in results/browser-install.json: "packages", "fallback" or
+ * "no-packages". Null when the run didn't come through it, as locally.
+ */
+const installPath = (() => {
+  try {
+    return JSON.parse(readFileSync(join(here, "results", "browser-install.json"), "utf8")).path ?? null;
+  } catch {
+    return null;
+  }
+})();
+
+/**
+ * Judges the scripts a page showed. No glyph fails. "Can't tell" fails on the fallback path, whose whole point is to prove
+ * every script has a real font, and is a counted, named SKIP anywhere else, never a pass.
+ */
+function judgeGlyphs(label, scripts) {
+  const named = Object.entries(scripts).map(([name, { glyph }]) => `${name}${glyph === null ? " (can't tell)" : glyph ? "" : " (NO GLYPH)"}`);
+  console.log(`     ${label}: scripts on the page: ${named.join(", ") || "Latin only"}`);
+  const missing = Object.entries(scripts).filter(([, { glyph }]) => glyph === false);
+  ok(missing.length === 0, `${label}: ${missing.map(([name, { why }]) => `${name} (${why})`).join(", ")} drawn with no real glyph here, so this path's timings measure nothing for them`);
+  for (const [name, { glyph, why }] of Object.entries(scripts)) {
+    if (glyph !== null) continue;
+    ok(installPath !== "fallback", `${label}: can't tell whether ${name} has a real glyph (${why}), and on the fallback path every script must be shown to`);
+    console.log(`SKIP glyph not confirmed: ${name} (${label}; ${why})`);
+    results.push({ measurement: `${label}: ${name} glyph`, status: "skipped", detail: why });
+  }
 }
 
 async function keyboardPath(name, fn) {
@@ -735,6 +770,32 @@ async function controls() {
   ok(light !== dark, `the dark theme didn't change the page's background (${light})`);
   await page.close();
   console.log(`ok   controls: axe flags low contrast, and dark changes the background from ${light} to ${dark}`);
+  await glyphControl();
+}
+
+/**
+ * Shows the glyph check can say "no glyph": a letter of Garay, a script added in Unicode 16 (2024), which no font on the
+ * runner has. It's made with String.fromCodePoint, not written out, so it isn't text the run seeds. Where fontconfig
+ * isn't asked (off Linux), the check can't tell, and this control is a counted SKIP, not a pass.
+ */
+async function glyphControl() {
+  const page = await signedOut.newPage();
+  try {
+    const letter = String.fromCodePoint(0x10d4a);
+    await page.setContent(`<div role="dialog"><article><p>${letter}</p></article></div>`);
+    const found = await realGlyphs(page, await page.locator('[role="dialog"]').evaluate(pageScripts));
+    const [name, answer] = Object.entries(found)[0] ?? [];
+    ok(name, "the glyph check found no script in a page holding a Garay letter");
+    if (answer.glyph === null) {
+      console.log(`SKIP controls: the glyph check's "no glyph" isn't shown here (${answer.why})`);
+      results.push({ measurement: "controls: glyph check says no glyph", status: "skipped", detail: answer.why });
+      return;
+    }
+    ok(answer.glyph === false, `the glyph check called ${name} drawn, though no font here has it`);
+    console.log(`ok   controls: the glyph check says ${name} has no glyph (${answer.why})`);
+  } finally {
+    await page.close();
+  }
 }
 
 async function keyboardPaths(s) {
@@ -2108,11 +2169,7 @@ async function keyboardPaths(s) {
       ok(blocked < longest, `${label} blocked the main thread for ${blocked}ms`);
       // What's really on the page, not what the seed's source says: every script in the messages' text, and whether this
       // browser draws it with a real glyph. Text drawn as "missing" boxes is never shaped, so a timing over it means nothing.
-      const scripts = await realGlyphs(own, await own.getByRole("dialog").evaluate(pageScripts));
-      const named = Object.entries(scripts).map(([name, glyph]) => `${name}${glyph === null ? " (can't tell)" : glyph ? "" : " (NO GLYPH)"}`);
-      console.log(`     ${label}: scripts on the page: ${named.join(", ") || "Latin only"}`);
-      const boxes = Object.entries(scripts).filter(([, glyph]) => glyph === false).map(([name]) => name);
-      ok(boxes.length === 0, `${label}: ${boxes.join(", ")} drawn as missing boxes here, so this path's timings measure nothing for them`);
+      judgeGlyphs(label, await realGlyphs(own, await own.getByRole("dialog").evaluate(pageScripts)));
       // Let what's idle finish, then switch away and back: whatever stayed laid out is laid out again, all at once.
       await own.waitForTimeout(idleWait);
       const [kept, total] = await own.getByRole("dialog").evaluate((sheet) => {

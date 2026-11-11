@@ -3,6 +3,7 @@ name = "podster-policy"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 podster-core = { path = "../core" }

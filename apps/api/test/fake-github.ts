@@ -40,10 +40,14 @@ type Script = {
  * The agent-token App's side (M5 step 6), kept apart from everything above so specs running in parallel can't reset it:
  * each test registers a repository of its own, and its script and tokens are that repository's.
  * `mode` is how the answer differs from what was asked: wide (every repository), extra_permission, other_repo,
- * no_repositories, long_life (two hours), slow (answers after 200 ms), or hang (no answer in time). `revoke` is a status
- * for revoking, if not 204.
+ * no_repositories, long_life (two hours), slow (answers after 200 ms), hang (no answer in time), or gate (answers only
+ * once the test releases it through `/agent-release`, having seen it waiting through `/agent-gate`, so a test can do
+ * something while a mint is under way without sleeping). `revoke` is a status for revoking, if not 204, and `mint` one
+ * for the token request itself, if not 201.
  */
-type AgentScript = { mode?: string; revoke?: number; pulls?: Record<string, Pull | null>; pullRead?: number };
+type AgentScript = { mode?: string; revoke?: number; pulls?: Record<string, Pull | null>; pullRead?: number; mint?: number };
+/** Mints held by `mode: "gate"`, by repository, until a test releases them. */
+const gates = new Map<number, (() => void)[]>();
 /**
  * A pull request of a test's repository, for the server's own read (M5 step 7a). `head_repo` and `base_repo` default to
  * the repository itself; `head_repo: null` is a fork that's gone. `as_number` answers with another number than asked.
@@ -118,6 +122,14 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
       const { id, ...rest } = (await request.json()) as AgentScript & { id: number };
       const before = agentRepos.get(id) ?? {};
       agentRepos.set(id, { ...before, ...rest, pulls: { ...(before.pulls ?? {}), ...(rest.pulls ?? {}) } });
+      return json({ ok: true });
+    }
+    if (url.pathname === "/agent-gate") {
+      return json({ waiting: gates.get(Number(url.searchParams.get("repo")))?.length ?? 0 });
+    }
+    if (url.pathname === "/agent-release") {
+      const { id } = (await request.json()) as { id: number };
+      for (const open of gates.get(id)?.splice(0) ?? []) open();
       return json({ ok: true });
     }
     if (url.pathname === "/agent-reads") {
@@ -231,6 +243,8 @@ async function agentMint(body: any): Promise<Response> {
   const script = wanted?.length === 1 ? agentRepos.get(wanted[0]) : undefined;
   if (!wanted || !script) return json({ message: "no such repository" }, 422);
   const mode = script.mode ?? "ok";
+  if (script.mint && script.mint !== 201) return json({ message: "SECRET-PROVIDER-TEXT" }, script.mint);
+  if (mode === "gate") await new Promise<void>((open) => gates.set(wanted[0], [...(gates.get(wanted[0]) ?? []), open]));
   if (mode === "hang" || mode === "slow") await new Promise((resolve) => setTimeout(resolve, mode === "hang" ? 1500 : 200));
   const token = `ghs_fake_${crypto.randomUUID().replaceAll("-", "")}`;
   const permissions: Record<string, string> = { ...(body?.permissions ?? {}), ...(mode === "extra_permission" ? { administration: "write" } : {}) };

@@ -18,6 +18,7 @@ const AGENT: Who = { id: "agt_tc_agent", org: ORG };
 const OTHER: Who = { id: "agt_tc_other", org: ORG };
 const PUBLIC: Who = { id: "agt_tc_public", org: ORG };
 const OUTSIDER: Who = { id: "agt_tc_outsider", org: ORG };
+const GUEST: Who = { id: "per_tc_guest", kind: "person", org: ORG };
 const orgAdmin: Who = { id: "per_tc_orgadmin", kind: "person", org: ORG, adminOrgs: [ORG] };
 /** Each test's own repository, so the fake's state for it is the test's alone while other specs run beside it. */
 let REPO_ID = 0;
@@ -39,8 +40,8 @@ async function assertion(who: Who, claims: object = {}) {
 }
 
 let counter = 0;
-async function api(who: Who, method: string, path: string, body?: unknown, options: { key?: string; claims?: object } = {}) {
-  const headers: Record<string, string> = { "x-podster-assertion": await assertion(who, options.claims), "content-type": "application/json" };
+async function api(who: Who, method: string, path: string, body?: unknown, options: { key?: string; claims?: object; headers?: Record<string, string> } = {}) {
+  const headers: Record<string, string> = { "x-podster-assertion": await assertion(who, options.claims), "content-type": "application/json", ...(options.headers ?? {}) };
   if (method !== "GET") headers["idempotency-key"] = options.key ?? `tc-key-${++counter}`;
   const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: method === "GET" || body === undefined ? undefined : JSON.stringify(body) });
   const text = await res.text();
@@ -59,6 +60,16 @@ const fake = (body: object) => fetch("https://github-fake.example.com/agent-repo
 const pull = (number: number, patch: Partial<Pull> = {}) => fake({ pulls: { [number]: { head_sha: HEAD, base_sha: BASE, ...patch } } });
 /** Every read made of this test's repository: its path, what the token could do, and the answer's status. */
 const reads = async () => (await (await fetch(`https://github-fake.example.com/agent-reads?repo=${REPO_ID}`)).json()) as { path: string; permissions: object; status: number }[];
+/** Resolves once a mint for this test's repository is waiting at the fake's gate (`mode: "gate"`). */
+const minting = async () => {
+  for (;;) {
+    const { waiting } = (await (await fetch(`https://github-fake.example.com/agent-gate?repo=${REPO_ID}`)).json()) as { waiting: number };
+    if (waiting > 0) return;
+    await new Promise((x) => setTimeout(x, 2));
+  }
+};
+/** Lets the mint waiting at the gate answer. */
+const release = () => fetch("https://github-fake.example.com/agent-release", { method: "POST", body: JSON.stringify({ id: REPO_ID }) });
 /** Every token minted for this test's repository, and whether it's still live. */
 const minted = async () => (await (await fetch(`https://github-fake.example.com/agent-tokens?repo=${REPO_ID}`)).json()) as { token: string; live: boolean; repo: unknown; permissions: object; asked: any }[];
 
@@ -475,11 +486,12 @@ describe("review pins the commit", () => {
   it("refuses with pull_request_unread, and approves nothing, when the room changes while GitHub is being read", async () => {
     const r = await submitted();
     await settle(r.id);
-    // GitHub takes 200 ms to answer. Meanwhile the task's record comes to name another pull request.
-    await fake({ mode: "slow" });
+    // GitHub holds its answer. Meanwhile the task's record comes to name another pull request, and then it answers.
+    await fake({ mode: "gate" });
     const pending = verify(OWNER, r.id, r.task, { submission_no: 1, commit_sha: HEAD });
-    await new Promise((x) => setTimeout(x, 60));
+    await minting();
     await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET pr_number = 8"));
+    await release();
     const got = await pending;
     expect([got.status, got.code]).toEqual([409, "pull_request_unread"]);
     expect(await taskRow(r.id, r.task)).toMatchObject({ status: "submitted", approved_submission_no: null });
@@ -724,8 +736,9 @@ describe("the refresh job", () => {
     await alarm(r.id, 2);
     expect(await gone()).toBe(5);
     // One 404 between other failures doesn't count towards it: the run has to be unbroken.
-    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET unwatched_at = NULL, not_found_reads = 4, read_at = 1"));
+    // The fake's answer first, then the row that makes a read due: the room's own alarm may read at once.
     await fake({ pullRead: 500 });
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET unwatched_at = NULL, not_found_reads = 4, read_at = 1"));
     await nudge(r.id);
     await eventually(r.id, async () => expect((await change(r.id, r.task)).not_found_reads).toBe(0));
     expect((await change(r.id, r.task)).unwatched_at).toBeNull();
@@ -764,6 +777,45 @@ describe("the refresh job", () => {
     await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET reads_not_before = ?", Date.now() - 1));
     await nudge(r.id);
     await eventually(r.id, async () => expect(await link()).toEqual({ read_failures: 0, reads_not_before: null }));
+    // Said once for the run of refusals, with a fixed code and no task.
+    expect(await events(r.id, "repository.read_refused")).toEqual([{ type: "repository.read_refused", actor_id: "system", task_id: null, reason: "provider_credential_failed" }]);
+  });
+
+  it("treats a token that can't be had as the room's credential failing, and never as a pull request that's gone", async () => {
+    const r = await approved();
+    await settle(r.id);
+    const link = () => inRoom(r.id, (sql) => sql.exec("SELECT read_failures, reads_not_before FROM repo_link").one() as any);
+    // The installation is gone, so asking for a token answers 404, far more often than would unwatch a change. Then the
+    // key is refused. No pull request was ever asked about.
+    let failures = 0;
+    for (const status of [404, 404, 404, 404, 404, 404, 401, 403]) {
+      await fake({ mint: status });
+      await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET reads_not_before = ?", Date.now() - 1));
+      await nudge(r.id);
+      failures += 1;
+      const want = failures;
+      await eventually(r.id, async () => expect((await link()).read_failures).toBe(want));
+      await settle(r.id);
+    }
+    expect(await reads()).toHaveLength(2);
+    expect(await change(r.id, r.task)).toMatchObject({ unwatched_at: null, not_found_reads: 0, read_failures: 0, pr_state: "open", reviewed_commit_sha: HEAD });
+    expect((await events(r.id)).filter((e) => e.type === "task_change.unwatched")).toEqual([]);
+    expect(await events(r.id, "repository.read_refused")).toEqual([{ type: "repository.read_refused", actor_id: "system", task_id: null, reason: "provider_credential_failed" }]);
+    expect((await must(OWNER, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`)).change.watched).toBe(true);
+    // A token request that fails some other way is that change's own failed read, and the room doesn't wait.
+    await fake({ mint: 201 });
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET read_failures = 0, reads_not_before = NULL"));
+    await fake({ mint: 500 });
+    await nudge(r.id);
+    await eventually(r.id, async () => expect((await change(r.id, r.task)).read_failures).toBe(1));
+    expect(await link()).toEqual({ read_failures: 0, reads_not_before: null });
+    expect(await change(r.id, r.task)).toMatchObject({ unwatched_at: null, not_found_reads: 0 });
+    // Put right, the change is read again once its own wait is over.
+    await fake({ mint: 201 });
+    await pull(7, { head_sha: HEAD2 });
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET read_at = ?", Date.now() - 60_001));
+    await nudge(r.id);
+    await eventually(r.id, async () => expect(await change(r.id, r.task)).toMatchObject({ observed_head_sha: HEAD2, read_failures: 0 }));
   });
 
   it("doesn't read for a task that's back with its agent, a room whose repository isn't ready, or a room with the switch off", async () => {
@@ -786,28 +838,60 @@ describe("the refresh job", () => {
 });
 
 describe("who is shown a task's change", () => {
-  it("shows it to people who see the task and to its assignee and reviewer, and to no other agent or guest", async () => {
-    const r = await submitted();
-    const seenBy = async (who: Who) => {
-      const got = await api(who, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`);
-      return got.status === 200 ? (got.body.change === null ? "hidden" : "shown") : got.status;
+  it("shows it and its events to people who see the task and to its assignee and reviewer, and to no other agent, guest or public page", async () => {
+    const r = await approved();
+    await settle(r.id);
+    // Something observed, so the task has events about its change beyond the link.
+    await pull(7, { head_sha: HEAD2 });
+    await nudge(r.id);
+    await eventually(r.id, async () => expect((await change(r.id, r.task)).commit_changed_at).toBeGreaterThan(0));
+    await must(OWNER, "POST", `/v1/workspaces/${r.id}/members`, { principal_id: GUEST.id, kind: "person", org_id: ORG, role: "guest", policy_version: await version(r.id) }, { claims: { target_member: { person: GUEST.id, orgs: { [ORG]: 1 } } } });
+    /** What a caller gets of the change: the object, its events in the task's history, and its events in the room's activity. */
+    const seenBy = async (who: Who, task = r.task) => {
+      const got = await api(who, "GET", `/v1/workspaces/${r.id}/tasks/${task}`);
+      if (got.status !== 200) return got.status;
+      const history = (got.body.history as any[]).filter((e) => e.type.startsWith("task_change.")).length;
+      const activity = ((await must(who, "GET", `/v1/workspaces/${r.id}/activity?task=${task}`)).events as any[]).filter((e) => e.type.startsWith("task_change.")).length;
+      return { change: got.body.change !== null, history: history > 0, activity: activity > 0 };
     };
+    const shown = { change: true, history: true, activity: true };
+    const hidden = { change: false, history: false, activity: false };
     // The owner, who reviews it; an admin; and the agent it's assigned to.
-    expect([await seenBy(OWNER), await seenBy(ADMIN), await seenBy(AGENT)]).toEqual(["shown", "shown", "shown"]);
-    // Another agent in the room reads the task, and isn't shown its pull request.
-    expect(await seenBy(OTHER)).toBe("hidden");
-    // A public-claim participant doesn't see the task at all, and someone outside doesn't see the room.
-    expect([await seenBy(PUBLIC), await seenBy(OUTSIDER)]).toEqual([404, 404]);
-    // Made the reviewer, the public-claim participant is a party to it and is shown it. Given the task to read and no
-    // more, it isn't.
-    await inRoom(r.id, (sql) => sql.exec("UPDATE task SET requester_id = ? WHERE id = ?", PUBLIC.id, r.task));
-    expect(await seenBy(PUBLIC)).toBe("hidden");
-    await inRoom(r.id, (sql) => sql.exec("UPDATE task SET reviewer_id = ? WHERE id = ?", PUBLIC.id, r.task));
-    expect(await seenBy(PUBLIC)).toBe("shown");
-    // Nothing of it is on the room's public page or in the task list.
+    expect([await seenBy(OWNER), await seenBy(ADMIN), await seenBy(AGENT)]).toEqual([shown, shown, shown]);
+    // Another agent in the room reads the task, and gets none of it.
+    expect(await seenBy(OTHER)).toEqual(hidden);
+    // A guest person and a public-claim participant don't see the task at all, and someone outside doesn't see the room.
+    expect([await seenBy(GUEST), await seenBy(PUBLIC), await seenBy(OUTSIDER)]).toEqual([404, 404, 404]);
+    // As the task's requester each of them may read it, and still gets none of its change.
+    for (const who of [GUEST, PUBLIC]) {
+      await inRoom(r.id, (sql) => sql.exec("UPDATE task SET requester_id = ? WHERE id = ?", who.id, r.task));
+      expect(await seenBy(who), who.id).toEqual(hidden);
+    }
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task SET requester_id = ? WHERE id = ?", OWNER.id, r.task));
+    // A public-claim participant sees the change of a task that's its own to do, and a guest person one it reviews.
+    const own = await accepted(r.id, PUBLIC);
+    await pull(8);
+    expect((await submit(PUBLIC, r.id, own.task, { version: own.version, commit_sha: HEAD, pr_number: 8 })).status).toBe(200);
+    expect(await seenBy(PUBLIC, own.task)).toEqual(shown);
+    expect(await seenBy(PUBLIC)).toBe(404);
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task SET reviewer_id = ? WHERE id = ?", GUEST.id, own.task));
+    expect(await seenBy(GUEST, own.task)).toEqual(shown);
+    // Nothing of it is in the task list, for anyone.
     const listed = JSON.stringify(await must(OWNER, "GET", `/v1/workspaces/${r.id}/tasks`));
-    expect(listed).not.toContain("pr_number");
-    expect(listed).not.toContain(HEAD);
+    for (const part of ["pr_number", HEAD, HEAD2, "task_change"]) expect(listed).not.toContain(part);
+    // Nor on the room's public page, once the room is public.
+    const on = { headers: { "x-test-public-rooms": "on" } };
+    expect((await api(OWNER, "PUT", `/v1/workspaces/${r.id}/review-policy`, { require_person: true, policy_version: await version(r.id) })).status).toBe(200);
+    const hash = (await must(OWNER, "GET", `/v1/workspaces/${r.id}/visibility`)).view_hash;
+    const published = await api(OWNER, "PUT", `/v1/workspaces/${r.id}/visibility`, { visibility: "public", view_hash: hash }, on);
+    expect(published.status, published.text).toBe(200);
+    await alarm(r.id, 3);
+    const now = Math.floor(Date.now() / 1000);
+    const anyone = await new SignJWT({ kind: "public" }).setProtectedHeader({ alg: "EdDSA", kid: "test" }).setIssuer("podster-gateway").setAudience("podster-api").setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID()).sign(key);
+    const page = await SELF.fetch(`https://api.internal/v1/public/workrooms/${published.body.public_handle}`, { headers: { "x-podster-assertion": anyone, "x-test-public-rooms": "on" } });
+    const text = await page.text();
+    expect(page.status, text).toBe(200);
+    for (const part of ["pr_number", HEAD, HEAD2, "task_change", "commit_changed", String(REPO_ID)]) expect(text, part).not.toContain(part);
   });
 });
 
@@ -884,14 +968,16 @@ describe("the room migration", () => {
       for (const column of ["reads_not_before", "read_failures"]) sql.exec(`ALTER TABLE repo_link DROP COLUMN ${column}`);
       sql.exec("UPDATE schema_version SET version = version - 1");
     });
+    // What GitHub will say is set before the request that migrates the room: with no read on record the change is due
+    // one at once, and the room's own alarm may make it before this test's next line.
+    await pull(7, { head_sha: HEAD2 });
     await must(OWNER, "GET", `/v1/workspaces/${r.id}`);
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(newest);
-    // The runtime may already have read the change again by now, which fills these in. The columns are there either way.
+    // That read may already have happened, which fills the read's columns in. These are there either way.
     expect(await change(r.id, r.task)).toMatchObject({ pr_number: 7, read_failures: 0, not_found_reads: 0, unwatched_at: null, commit_changed_at: null, merged_by_id: null });
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT read_failures, reads_not_before FROM repo_link").one())).toEqual({ read_failures: 0, reads_not_before: null });
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT name FROM pragma_table_info('repo_read')").toArray().map((c: any) => c.name))).toEqual(["at", "kind", "caller"]);
     // A change with no read on record is due one.
-    await pull(7, { head_sha: HEAD2 });
     await eventually(r.id, async () => expect((await change(r.id, r.task)).observed_head_sha).toBe(HEAD2));
   });
 });

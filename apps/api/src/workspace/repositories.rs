@@ -154,7 +154,9 @@ pub(super) fn nudge(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         for task in &known {
             exec(
                 sql,
-                "UPDATE task_change SET nudged_at = ? WHERE task_id = ?",
+                // A change the refresh job gave up on, because its pull request kept answering as not there, is watched
+                // again once a delivery names it (M5 step 7a).
+                "UPDATE task_change SET nudged_at = ?, unwatched_at = NULL, not_found_reads = 0 WHERE task_id = ?",
                 vec![now.into(), task.as_str().into()],
             )?;
         }

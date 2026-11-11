@@ -190,6 +190,21 @@ describe("a delivery as a nudge", () => {
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}/tasks/${task}`)).body.task).toMatchObject({ id: task, status: "offered" });
   });
 
+  it("puts a change the refresh job gave up on back under watch when a delivery names it (M5 step 7a)", async () => {
+    const repo = newRepo();
+    const { id } = await room(repo);
+    // Its pull request answered as not there five times, so the job stopped reading it.
+    await inRoom(id, (sql) => sql.exec("UPDATE task_change SET unwatched_at = 5, not_found_reads = 5"));
+    expect((await deliver({ delivery_id: deliveryId(), event: "pull_request", repository_id: repo, pull_requests: [7], head_sha: HEAD })).status).toBe(202);
+    const row = await change(id) as any;
+    expect(row).toMatchObject({ unwatched_at: null, not_found_reads: 0 });
+    expect(row.nudged_at).toBeGreaterThan(5);
+    // A delivery about another pull request leaves a given-up change as it is.
+    await inRoom(id, (sql) => sql.exec("UPDATE task_change SET unwatched_at = 5, not_found_reads = 5"));
+    expect((await deliver({ delivery_id: deliveryId(), event: "pull_request", repository_id: repo, pull_requests: [8] })).status).toBe(202);
+    expect(await change(id)).toMatchObject({ unwatched_at: 5, not_found_reads: 5 });
+  });
+
   it("changes nothing when a delivery ID comes again, or the same body under a new ID", async () => {
     const repo = newRepo();
     const { id } = await room(repo);
@@ -457,8 +472,9 @@ describe("the delivery migration", () => {
     expect((await deliver({ delivery_id: deliveryId(), event: "pull_request", repository_id: repo, pull_requests: [7], head_sha: HEAD })).status).toBe(202);
     expect(await version()).toBe(newest);
     expect(await columns("provider_delivery")).toEqual(["delivery_id", "body_sha256", "received_at", "expires_at"]);
-    expect(await columns("task_change")).toContain("nudged_at");
-    expect(await columns("repo_link")).toContain("indexed_at");
+    // Step 5's column comes back where it was, with step 7a's behind it.
+    expect(await columns("task_change")).toEqual(["task_id", "provider_repo_id", "pr_number", "submission_no", "reviewed_commit_sha", "observed_head_sha", "head_observed_at", "checks_state", "checks_json", "checks_observed_at", "merge_state", "merge_reason", "merge_sha", "merge_requested_by", "merge_requested_at", "merge_observed_at", "created_at", "updated_at", "head_repo_id", "base_ref", "reviewed_base_sha", "merge_base_sha", "pr_state", "pr_observed_at", "nudged_at", "observed_base_sha", "read_at", "unchanged_reads", "merged_by_id", "read_failures", "not_found_reads", "unwatched_at", "commit_changed_at", "pr_draft"]);
+    expect(await columns("repo_link")).toEqual(["id", "singleton", "request_id", "provider", "provider_repo_id", "provider_org_id", "full_name", "visibility", "default_branch", "status", "status_reason", "created_by", "created_at", "verified_at", "updated_at", "indexed_at", "read_failures", "reads_not_before"]);
     // The link and the change are as they were, and the delivery that migrated it was taken.
     const kept = await change(id) as any;
     expect(kept).toMatchObject({ task_id: task, provider_repo_id: repo, pr_number: 7, reviewed_commit_sha: REVIEWED });

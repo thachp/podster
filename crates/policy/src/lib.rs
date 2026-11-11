@@ -748,6 +748,11 @@ pub fn sees_notices_about_itself(caller: &Caller) -> bool {
     caller.kind == PrincipalKind::Agent
 }
 
+/// Whether an event is about a task's pull request and what Podster observed of it (M5 step 7a).
+pub fn is_task_change_event(kind: &str) -> bool {
+    kind.starts_with("task_change.")
+}
+
 /// Whether someone can see one event in a room's activity. A task's events follow the task, as it stands now, apart from
 /// plan edits. A room's own events follow the member list, apart from the ones above, notices to an agent about itself and
 /// what the viewer did themselves. `subject` is who the event says it's about, and old events have none. Denies by default.
@@ -766,6 +771,8 @@ pub fn can_see_event(
     }
     match task {
         Some(_) if kind == TASK_PLAN_CHANGED => sees_whole_room(caller),
+        // What Podster saw of a task's pull request is shown to fewer than may read the task.
+        Some(task) if is_task_change_event(kind) => repositories::sees_task_change(caller, task),
         Some(task) => can_see_task(caller, task),
         None => {
             is_human_admin(caller)

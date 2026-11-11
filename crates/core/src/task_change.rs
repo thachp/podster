@@ -207,25 +207,34 @@ pub fn observe(task: &Task, linked: &Linked, held: &Held, seen: &PullSeen) -> Ob
 /// After this many reads in a row that found no such pull request, the job stops watching the change. Proposed.
 pub const MAX_NOT_FOUND_READS: u32 = 5;
 
-/// What a failed read by the refresh job means for what's read next.
+/// Where a read of a pull request failed: getting the token for it, or reading with the token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadStage {
+    Mint,
+    Read,
+}
+
+/// What a failed read by the refresh job means for what's read next. A pull request that isn't there is no failure:
+/// the provider answered, and only that answer counts towards giving up on a change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReadFailure {
-    /// The provider refused Podster itself (`401` or `403`): a key or a permission. Every change in the room would
-    /// fail the same way, so the whole room's reads wait.
-    Refused,
-    /// No such pull request (`404`).
-    NotFound,
-    /// Anything else: no answer, an error, or an answer that couldn't be read.
+    /// The provider refused Podster itself: `401` or `403` at either stage, or `404` when asking for the token, which
+    /// is the installation gone and says nothing about any pull request. A key, a permission or the installation: every
+    /// change in the room would fail the same way, so the whole room's reads wait and no change is given up on.
+    Credential,
+    /// Anything else: no answer, an error, or an answer that couldn't be read. That change waits.
     Other,
 }
 
-pub fn classify_read_failure(status: u16) -> ReadFailure {
-    match status {
-        401 | 403 => ReadFailure::Refused,
-        404 => ReadFailure::NotFound,
+pub fn classify_read_failure(stage: ReadStage, status: u16) -> ReadFailure {
+    match (stage, status) {
+        (_, 401 | 403) | (ReadStage::Mint, 404) => ReadFailure::Credential,
         _ => ReadFailure::Other,
     }
 }
+
+/// The reason code recorded when the room's reads wait because the provider refused Podster.
+pub const CREDENTIAL_FAILED: &str = "provider_credential_failed";
 
 /// How long to wait after a run of failed reads: a minute, doubling to an hour. Zero failures is no wait.
 pub fn read_retry_wait_ms(consecutive_failures: u32) -> i64 {
@@ -565,12 +574,30 @@ mod tests {
         assert_eq!(read_retry_wait_ms(2), 120_000);
         assert_eq!(read_retry_wait_ms(7), 3_600_000);
         assert_eq!(read_retry_wait_ms(u32::MAX), 3_600_000);
-        assert_eq!(classify_read_failure(401), ReadFailure::Refused);
-        assert_eq!(classify_read_failure(403), ReadFailure::Refused);
-        assert_eq!(classify_read_failure(404), ReadFailure::NotFound);
-        for other in [0, 422, 429, 500, 502] {
-            assert_eq!(classify_read_failure(other), ReadFailure::Other, "{other}");
+        for stage in [ReadStage::Mint, ReadStage::Read] {
+            for refused in [401, 403] {
+                assert_eq!(
+                    classify_read_failure(stage, refused),
+                    ReadFailure::Credential
+                );
+            }
+            for other in [0, 422, 429, 500, 502] {
+                assert_eq!(
+                    classify_read_failure(stage, other),
+                    ReadFailure::Other,
+                    "{other}"
+                );
+            }
         }
+        // No token because the installation is gone is a credential problem. It never counts as a missing pull request.
+        assert_eq!(
+            classify_read_failure(ReadStage::Mint, 404),
+            ReadFailure::Credential
+        );
+        assert_eq!(
+            classify_read_failure(ReadStage::Read, 404),
+            ReadFailure::Other
+        );
         assert!(!stops_watching(MAX_NOT_FOUND_READS - 1));
         assert!(stops_watching(MAX_NOT_FOUND_READS));
     }

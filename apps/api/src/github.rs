@@ -767,6 +767,8 @@ pub enum PullAnswer {
 /// didn't confirm taking it back, so it lives out its hour: read-only, on the one repository.
 pub struct PullRead {
     pub answer: std::result::Result<PullAnswer, Failure>,
+    /// Whether a failure came from asking for the token, before any pull request was asked about.
+    pub failed_at_mint: bool,
     pub revoked: bool,
 }
 
@@ -822,6 +824,7 @@ impl PullReader for AgentTokens {
             Err(failure) => {
                 return PullRead {
                     answer: Err(failure),
+                    failed_at_mint: true,
                     revoked: true,
                 }
             }
@@ -859,6 +862,10 @@ impl PullReader for AgentTokens {
             Err(Failure::Unreadable)
         };
         let revoked = self.revoke_token(&minted.token).await == Revoked::Gone;
-        PullRead { answer, revoked }
+        PullRead {
+            answer,
+            failed_at_mint: false,
+            revoked,
+        }
     }
 }

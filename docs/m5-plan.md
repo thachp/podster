@@ -443,7 +443,14 @@ Three person-only routes on the room's Durable Object, the two cascades, and the
 - **L9.** `core::decide` runs once without the read before anything about the pull request is checked, so a stale or malformed command is answered as that (`version_conflict` included) and never with a pull-request refusal. The first look had already kept such a command from costing a read.
 - **L10.** Who is shown a task's change, above.
 - **L11.** A requested merge is left to 7b, above.
-- **`pull_request_unread` is tested,** by changing the task's record while the fake takes 200 ms to answer.
+- **`pull_request_unread` is tested,** by changing the task's record while the fake holds its answer at a gate the test opens.
+
+**The re-review's findings, fixed on 2026-11-10:**
+
+- **A failed token request never unwatches a change.** Only GitHub's own answer that the pull request isn't there counts towards the five. A `401` or `403` at either stage, or a `404` when asking for the token, which is the installation gone, is the room's credential failing: the room's reads wait, no change is touched, and one `repository.read_refused` event with the fixed code `provider_credential_failed` goes to the room's owner and admins for each run of refusals. Any other failed token request is that change's own failed read.
+- **A delivery puts a given-up change back under watch.** A nudge that names the change clears `unwatched_at` and the not-found count, so a pull request that reappears is read again, also on a completed task.
+- **Events follow the same rule as the change.** `task_change.*` events are shown, in a task's history and in the room's activity, only to those `sees_task_change` allows; `can_see_event` decides. The notices go to the room's human owner and admins, the reviewer, and the requester only if they're a person and no guest.
+- **Tests no longer rest on a sleep or on the order of the room's own alarm.** The fake holds a mint at a gate until the test releases it, for this step's race test and for step 6's test of authority ending during a mint. That test's ordering is now fixed. It still needs the mint released within the test build's 400 ms call timeout, so a runner that stalls for longer can still answer `provider_unavailable`.
 
 **Gaps, acknowledged:**
 

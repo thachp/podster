@@ -26,7 +26,7 @@ use podster_core::repositories::{task_block, LinkStatus, MergeState, RequestStat
 use podster_core::task_change::{
     check_pull, check_pull_number, classify_read_failure, observe, pull_state_from_name,
     pull_state_name, read_retry_wait_ms, stops_watching, targets_default, watched, Held,
-    LinkRefusal, Linked, PullSeen, ReadFailure,
+    LinkRefusal, Linked, PullSeen, ReadFailure, ReadStage, CREDENTIAL_FAILED,
 };
 
 const HOUR_MS: i64 = 60 * 60 * 1000;
@@ -602,6 +602,7 @@ fn apply_read(
     room: &str,
     watch: &Watch,
     answer: std::result::Result<PullAnswer, Failure>,
+    failed_at_mint: bool,
     now: i64,
 ) -> R<bool> {
     // The room may have changed while GitHub was answering. Only the same pull request of the same linked repository.
@@ -621,33 +622,17 @@ fn apply_read(
         reason: Some(reason),
         ..Transition::NONE
     };
-    // A failed read waits longer each time, a minute doubling to an hour, and never resets the poll's own backoff.
-    let failed = |status: u16| -> R<bool> {
+    let log_failed = |status: u16| {
         console_error!(
             "{}",
             json!({ "event": "task_change.read_failed", "ws": room, "task": watch.task_id, "status": status })
         );
-        let kind = classify_read_failure(status);
-        if kind == ReadFailure::Refused {
-            // A key or a permission: every change in the room would fail the same way, so the room's reads wait.
-            let failures = link.read_failures.saturating_add(1).clamp(1, 64);
-            exec(
-                sql,
-                "UPDATE repo_link SET read_failures = ?, reads_not_before = ? WHERE provider_repo_id = ?",
-                vec![
-                    failures.into(),
-                    (now + read_retry_wait_ms(failures as u32)).into(),
-                    watch.repo_id.into(),
-                ],
-            )?;
-            return Ok(true);
-        }
-        let not_found = if kind == ReadFailure::NotFound {
-            int(&row["not_found_reads"]).saturating_add(1).clamp(1, 64)
-        } else {
-            0
-        };
-        let gone = stops_watching(not_found as u32);
+    };
+    // A failed read waits longer each time, a minute doubling to an hour, and never resets the poll's own backoff.
+    // `not_found` is the run of answers that the pull request isn't there, which only GitHub's own answer about the
+    // pull request adds to. Any other failure ends that run.
+    let waits = |not_found: i64| -> R<bool> {
+        let gone = stops_watching(not_found.clamp(0, 64) as u32);
         exec(
             sql,
             "UPDATE task_change SET read_at = ?1, read_failures = min(read_failures + 1, 64), not_found_reads = ?2,
@@ -660,18 +645,54 @@ fn apply_read(
             ],
         )?;
         if gone {
-            // The pull request isn't there any more, so the job stops asking. The room's owner and admins are told.
+            // The pull request isn't there any more, so the job stops asking until a delivery names it again or a
+            // command reads it. The room's owner and admins are told.
             record_event(
                 sql,
                 "task_change.unwatched",
                 SYSTEM,
                 task_id,
                 &reason(LinkRefusal::NotFound.code()),
-                roles::room_managers(sql, "")?,
+                store::room_admins(sql)?,
                 now,
             )?;
         }
         Ok(false)
+    };
+    let failed = |stage: ReadStage, status: u16| -> R<bool> {
+        log_failed(status);
+        if classify_read_failure(stage, status) == ReadFailure::Other {
+            return waits(0);
+        }
+        // A key, a permission or the installation: every change in the room would fail the same way, so the room's
+        // reads wait and no change is touched. Said once for each run of refusals, with a fixed code.
+        let failures = link.read_failures.saturating_add(1).clamp(1, 64);
+        exec(
+            sql,
+            "UPDATE repo_link SET read_failures = ?, reads_not_before = ? WHERE provider_repo_id = ?",
+            vec![
+                failures.into(),
+                (now + read_retry_wait_ms(failures as u32)).into(),
+                watch.repo_id.into(),
+            ],
+        )?;
+        if failures == 1 {
+            record_event(
+                sql,
+                "repository.read_refused",
+                SYSTEM,
+                None,
+                &reason(CREDENTIAL_FAILED),
+                store::room_admins(sql)?,
+                now,
+            )?;
+        }
+        Ok(true)
+    };
+    let stage = if failed_at_mint {
+        ReadStage::Mint
+    } else {
+        ReadStage::Read
     };
     let seen = match answer {
         Ok(PullAnswer::Found(seen))
@@ -679,9 +700,12 @@ fn apply_read(
         {
             seen
         }
-        Ok(PullAnswer::Found(_)) => return failed(0),
-        Ok(PullAnswer::Missing) => return failed(404),
-        Err(failure) => return failed(failure.status()),
+        Ok(PullAnswer::Found(_)) => return failed(ReadStage::Read, 0),
+        Ok(PullAnswer::Missing) => {
+            log_failed(404);
+            return waits(int(&row["not_found_reads"]).saturating_add(1).clamp(1, 64));
+        }
+        Err(failure) => return failed(stage, failure.status()),
     };
     if link.read_failures > 0 || link.reads_not_before.is_some() {
         exec(
@@ -758,11 +782,16 @@ fn apply_read(
             "UPDATE task_change SET commit_changed_at = ?, updated_at = ? WHERE task_id = ? AND commit_changed_at IS NULL",
             vec![now.into(), now.into(), watch.task_id.as_str().into()],
         )?;
-        let mut told = roles::room_managers(sql, "")?;
-        for party in [&task.requester, &task.reviewer] {
-            if participant(sql, party)?.is_some() {
-                told.push(party.clone());
-            }
+        let mut told = store::room_admins(sql)?;
+        // The reviewer is always shown a task's change. The requester only if they're a person in the room and no guest,
+        // as `sees_task_change` has it, so the notice reaches nobody the change itself is hidden from.
+        if participant(sql, &task.reviewer)?.is_some() {
+            told.push(task.reviewer.clone());
+        }
+        if participant(sql, &task.requester)?
+            .is_some_and(|(kind, role)| kind == "person" && role != "guest")
+        {
+            told.push(task.requester.clone());
         }
         told.sort();
         told.dedup();
@@ -802,7 +831,7 @@ fn apply_read(
             SYSTEM,
             task_id,
             &reason(code),
-            roles::room_managers(sql, "")?,
+            store::room_admins(sql)?,
             now,
         )?;
     }
@@ -849,9 +878,10 @@ impl Workspace {
             }
             let read = reader.read_pull(watch.repo_id, watch.number).await;
             note_unrevoked(&read, &room, &watch.task_id);
-            let (room, answer) = (room.clone(), read.answer);
-            let refused =
-                self.in_transaction(move |sql| apply_read(sql, &room, &watch, answer, now_ms()))?;
+            let (room, answer, at_mint) = (room.clone(), read.answer, read.failed_at_mint);
+            let refused = self.in_transaction(move |sql| {
+                apply_read(sql, &room, &watch, answer, at_mint, now_ms())
+            })?;
             if refused {
                 break;
             }

@@ -2568,13 +2568,21 @@ mod queries {
             .filter(readable)
             .map(|r| marked(r, "submitted_by", "submitted_org"))
             .collect();
+        // What Podster saw of the task's pull request is in its history only for those shown the change itself.
+        let shown_change = podster_policy::repositories::sees_task_change(&who.caller, &task);
         let history: Vec<Value> = history
             .iter()
+            .filter(|r| {
+                shown_change
+                    || !r["type"]
+                        .as_str()
+                        .is_some_and(podster_policy::is_task_change_event)
+            })
             .map(|r| marked(r, "actor_id", "actor_org"))
             .collect();
         let files = super::submission_files::for_task(sql, who, &task, oversight)?;
         // A task's pull request is for people who see the task and for its assignee and reviewer, not everyone who may read it.
-        let change = if podster_policy::repositories::sees_task_change(&who.caller, &task) {
+        let change = if shown_change {
             super::changes::of_task(sql, &task.id)?
         } else {
             Value::Null

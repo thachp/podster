@@ -62,6 +62,16 @@ const access = (who: Who, id: string, task: string, body?: unknown, options: { f
 const minted = async () => (await (await fetch(`https://github-fake.example.com/agent-tokens?repo=${REPO_ID}`)).json()) as { token: string; live: boolean; repo: unknown; permissions: object; asked: any }[];
 /** How the fake answers for this test's repository: `mode` for a mint, `revoke` for a revocation's status. */
 const script = (body: { mode?: string; revoke?: number }) => fetch("https://github-fake.example.com/agent-repo", { method: "POST", body: JSON.stringify({ id: REPO_ID, ...body }) });
+/** Resolves once a mint for this test's repository is waiting at the fake's gate (`mode: "gate"`). */
+const minting = async () => {
+  for (;;) {
+    const { waiting } = (await (await fetch(`https://github-fake.example.com/agent-gate?repo=${REPO_ID}`)).json()) as { waiting: number };
+    if (waiting > 0) return;
+    await new Promise((x) => setTimeout(x, 2));
+  }
+};
+/** Lets the mint waiting at the gate answer. */
+const release = () => fetch("https://github-fake.example.com/agent-release", { method: "POST", body: JSON.stringify({ id: REPO_ID }) });
 /** A fresh repository for this test, known to the fake's agent-token App. */
 const freshRepo = async () => {
   REPO_ID = ++nextRepo;
@@ -659,13 +669,15 @@ describe("the review's findings (M5 step 6)", () => {
   it("answers the proper refusal when authority ends while the token is minted, and revokes it (L3)", async () => {
     for (const [name, code] of [["archived", "workspace_archived"], ["removed", "access_revoked"]] as const) {
       await freshRepo();
-      await script({ mode: "slow" });
+      // GitHub holds the mint until the test has ended the authority and lets it go, so the order doesn't rest on a sleep.
+      await script({ mode: "gate" });
       const r = await room();
       const v = await version(r.id);
       const asked = access(AGENT, r.id, r.task);
-      await new Promise((x) => setTimeout(x, 60));
+      await minting();
       const ended = await (name === "archived" ? api(OWNER, "POST", `/v1/workspaces/${r.id}/archive`, { policy_version: v }) : api(OWNER, "DELETE", `/v1/workspaces/${r.id}/members/${AGENT.id}`, { policy_version: v }));
       expect(ended.status, `${name}: ${ended.text}`).toBe(200);
+      await release();
       const res = await asked;
       expect(res.code, name).toBe(code);
       expect(res.status, name).not.toBe(500);

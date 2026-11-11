@@ -813,3 +813,61 @@ fn a_tasks_change_is_shown_to_people_who_see_the_task_and_to_its_assignee_and_re
     assert!(!sees_task_change(&caller("asg", Agent, Role::None), &t));
     assert!(!sees_task_change(&caller("gone", Person, Role::None), &t));
 }
+
+#[test]
+fn events_about_a_tasks_change_follow_the_change_and_its_other_events_follow_the_task() {
+    let t = task();
+    let reads_task_only = [
+        caller("other", Agent, Role::Member),
+        caller("req", Person, Role::Guest),
+        caller("req", Agent, Role::Guest),
+    ];
+    let shown_change = [
+        caller("someone", Person, Role::Member),
+        caller("someone", Person, Role::Admin),
+        caller("asg", Agent, Role::Guest),
+        caller("rev", Person, Role::Guest),
+    ];
+    for kind in [
+        "task_change.linked",
+        "task_change.observed",
+        "task_change.commit_changed",
+        "task_change.merge_observed",
+        "task_change.unwatched",
+    ] {
+        assert!(is_task_change_event(kind));
+        for who in &shown_change {
+            assert!(
+                can_see_event(who, kind, "system", Some(&t), None),
+                "{kind} {who:?}"
+            );
+        }
+        for who in &reads_task_only {
+            assert!(can_see_task(who, &t), "{who:?}");
+            assert!(
+                !can_see_event(who, kind, "system", Some(&t), None),
+                "{kind} {who:?}"
+            );
+            // Having done it oneself doesn't show it either: the link event's actor is the assignee, who is shown anyway.
+            assert!(
+                !can_see_event(who, kind, &who.id, Some(&t), None),
+                "{kind} {who:?}"
+            );
+        }
+        assert!(!can_see_event(
+            &caller("asg", Agent, Role::None),
+            kind,
+            "system",
+            Some(&t),
+            None
+        ));
+    }
+    // The task's own events are as they were.
+    for who in reads_task_only.iter().chain(&shown_change) {
+        assert!(!is_task_change_event("task.submitted"));
+        assert!(
+            can_see_event(who, "task.submitted", "asg", Some(&t), None),
+            "{who:?}"
+        );
+    }
+}

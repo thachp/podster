@@ -697,7 +697,9 @@ async function realGlyphs(page, samples) {
         });
         const yes = asks.some((ask) => ask.answer === true);
         const unknown = asks.find((ask) => ask.answer === null);
-        out[name] = yes ? { glyph: true } : unknown ? { glyph: null, why: unknown.why } : { glyph: false, why: `no font the browser used has it (${used.join(", ")})` };
+        // For the log: each font the browser named, and fontconfig's word on it.
+        const said = used.map((family, i) => `${family}: ${asks[i].answer === null ? asks[i].why : asks[i].answer ? "fontconfig says it has it" : "fontconfig says it doesn't"}`).join("; ");
+        out[name] = yes ? { glyph: true, why: said } : unknown ? { glyph: null, why: unknown.why } : { glyph: false, why: `no font the browser used has it (${said})` };
       }
     }
   } finally {
@@ -726,7 +728,7 @@ const installPath = (() => {
  * every script has a real font, and is a counted, named SKIP anywhere else, never a pass.
  */
 function judgeGlyphs(label, scripts) {
-  const named = Object.entries(scripts).map(([name, { glyph }]) => `${name}${glyph === null ? " (can't tell)" : glyph ? "" : " (NO GLYPH)"}`);
+  const named = Object.entries(scripts).map(([name, { glyph, why }]) => `${name}${glyph === null ? " (can't tell)" : glyph ? "" : " (NO GLYPH)"}${why ? ` [${why}]` : ""}`);
   console.log(`     ${label}: scripts on the page: ${named.join(", ") || "Latin only"}`);
   const missing = Object.entries(scripts).filter(([, { glyph }]) => glyph === false);
   ok(missing.length === 0, `${label}: ${missing.map(([name, { why }]) => `${name} (${why})`).join(", ")} drawn with no real glyph here, so this path's timings measure nothing for them`);
@@ -774,25 +776,52 @@ async function controls() {
 }
 
 /**
- * Shows the glyph check can say "no glyph": a letter of Garay, a script added in Unicode 16 (2024), which no font on the
- * runner has. It's made with String.fromCodePoint, not written out, so it isn't text the run seeds. Where fontconfig
- * isn't asked (off Linux), the check can't tell, and this control is a counted SKIP, not a pass.
+ * Shows the glyph check can say "no glyph": U+4E000, in plane 4, where nothing is assigned, so no font should have it.
+ * On Linux, fontconfig is first asked whether any installed font lists it; if one does, this control can't show anything
+ * and fails saying so. Off Linux the check can't tell, and this is a counted SKIP, not a pass.
+ *
+ * Also records, without judging it, what the check says for U+10D4A, a Garay letter (Unicode 16). On 2026-11-11 the
+ * check called it drawn on the CI runner. The line names the font Chromium used, fontconfig's word on that font, and
+ * every font fontconfig lists with the letter, so the log shows whether the check was right.
  */
 async function glyphControl() {
   const page = await signedOut.newPage();
+  const hex = (codePoint) => `U+${codePoint.toString(16).toUpperCase()}`;
+  const anyFontWith = (codePoint) => {
+    if (process.platform !== "linux") return { listed: null, why: "not asked off Linux" };
+    const asked = spawnSync("fc-list", [`:charset=${codePoint.toString(16)}`, "family"], { encoding: "utf8", env: childEnv(), timeout: 10_000 });
+    if (asked.error || asked.status !== 0) return { listed: null, why: `fc-list failed (${asked.error?.message ?? `exit ${asked.status}`})` };
+    return { listed: asked.stdout.trim().split("\n").filter(Boolean) };
+  };
+  const check = async (codePoint) => {
+    await page.setContent(`<div role="dialog"><article><p>${String.fromCodePoint(codePoint)}</p></article></div>`);
+    return Object.entries(await realGlyphs(page, await page.locator('[role="dialog"]').evaluate(pageScripts)))[0] ?? [];
+  };
   try {
-    const letter = String.fromCodePoint(0x10d4a);
-    await page.setContent(`<div role="dialog"><article><p>${letter}</p></article></div>`);
-    const found = await realGlyphs(page, await page.locator('[role="dialog"]').evaluate(pageScripts));
-    const [name, answer] = Object.entries(found)[0] ?? [];
-    ok(name, "the glyph check found no script in a page holding a Garay letter");
+    // Informational: recorded, not judged.
+    const garay = 0x10d4a;
+    const [, seen] = await check(garay);
+    const fonts = anyFontWith(garay);
+    const listed = fonts.listed === null ? fonts.why : fonts.listed.join(" / ") || "none";
+    const said = seen ? `${seen.glyph === null ? "can't tell" : seen.glyph ? "drawn" : "no glyph"} [${seen.why ?? ""}]` : "found nothing";
+    console.log(`info controls (not judged): the glyph check says ${hex(garay)} is ${said}; fonts fontconfig lists with it: ${listed}`);
+    results.push({ measurement: `controls: ${hex(garay)} (informational)`, status: "info", detail: `${said}; listed: ${listed}` });
+
+    const control = 0x4e000;
+    const before = anyFontWith(control);
+    if (process.platform === "linux") {
+      ok(before.listed !== null, `controls: fontconfig couldn't be asked about ${hex(control)}: ${before.why}`);
+      ok(before.listed.length === 0, `controls: a font here lists ${hex(control)} (${before.listed?.join(" / ")}), so this control can't show the check saying "no glyph"`);
+    }
+    const [name, answer] = await check(control);
+    ok(name, `the glyph check found nothing in a page holding ${hex(control)}`);
     if (answer.glyph === null) {
       console.log(`SKIP controls: the glyph check's "no glyph" isn't shown here (${answer.why})`);
       results.push({ measurement: "controls: glyph check says no glyph", status: "skipped", detail: answer.why });
       return;
     }
-    ok(answer.glyph === false, `the glyph check called ${name} drawn, though no font here has it`);
-    console.log(`ok   controls: the glyph check says ${name} has no glyph (${answer.why})`);
+    ok(answer.glyph === false, `the glyph check called ${name} drawn, though no font here lists it [${answer.why}]`);
+    console.log(`ok   controls: the glyph check says ${name} has no glyph [${answer.why}]`);
   } finally {
     await page.close();
   }

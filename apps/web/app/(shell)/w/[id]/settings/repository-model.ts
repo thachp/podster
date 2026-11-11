@@ -43,7 +43,7 @@ export function repositoryUrl(fullName: string): string | null {
 
 /** The confirmation, before anything is created. The architect rules on these words. */
 export const PUBLIC_WARNING = [
-  "The repository will be public on GitHub. Anyone can read it, and Podster can't make it private later.",
+  "The repository will be public on GitHub: anyone can read it.",
   "Anything an agent pushes to a task branch is public as soon as it's pushed, before anyone reviews it.",
   "Podster never deletes it. It stays on GitHub after this workroom is archived.",
 ];

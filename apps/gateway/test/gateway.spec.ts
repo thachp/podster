@@ -1509,14 +1509,14 @@ describe("rate limits", () => {
     }
   });
 
-  it("has managed repositories switched on nowhere in the Worker's configuration, staging included (M5 step 6)", () => {
-    // The owner had it on for staging on 2026-11-11. The architect took it out again that day, until only named people
-    // and test people can ask for a repository there. No scope sets it, to any value.
+  it("has managed repositories switched on for staging only in the Worker's configuration (M5 step 6)", () => {
+    // The owner said "let's unblock m5 staging" on 2026-11-11. The architect took it out again that day and put it back
+    // once the API could name who may ask for a repository. The top level, which these tests run on, stays off.
     const config = JSON.parse(e.TEST_WRANGLER.replace(/^\s*\/\/.*$/gm, ""));
     expect(config.vars?.MANAGED_REPOSITORIES).toBeUndefined();
     expect(Object.keys(config.env ?? {})).toContain("staging");
-    for (const [name, environment] of Object.entries<any>(config.env ?? {})) expect(environment.vars?.MANAGED_REPOSITORIES, name).toBeUndefined();
-    expect(e.TEST_WRANGLER).not.toContain('"MANAGED_REPOSITORIES"');
+    for (const [name, environment] of Object.entries<any>(config.env ?? {})) expect(environment.vars?.MANAGED_REPOSITORIES, name).toBe(name === "staging" ? "true" : undefined);
+    expect(e.TEST_WRANGLER.match(/"MANAGED_REPOSITORIES"/g)).toHaveLength(1);
     // The webhook secret is the owner's to set, and never a variable in this file.
     expect(e.TEST_WRANGLER).not.toContain('"GITHUB_WEBHOOK_SECRET"');
     expect((e as any).MANAGED_REPOSITORIES).toBeUndefined();

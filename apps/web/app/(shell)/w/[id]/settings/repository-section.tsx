@@ -7,7 +7,7 @@ import { visibleText } from "@/lib/public/visible-text";
 import { CommandNotice, useCommands } from "../team/commands";
 import { ConfirmAction } from "../team/confirm-action";
 import { FIELD } from "../team/field";
-import { dayOf, describe, explainRepositoryRefusal, nameProblem, PUBLIC_WARNING, repositoryUrl, retryOffered, type RoomRepository } from "./repository-model";
+import { dayOf, describe, explainRepositoryRefusal, nameProblem, PUBLIC_WARNING, repositoryUrl, REQUESTS_CLOSED, retryOffered, type RoomRepository } from "./repository-model";
 
 const TONES = {
   neutral: "bg-status-neutral-surface text-status-neutral",
@@ -66,7 +66,9 @@ export function RepositorySection({ roomId, state, runsRepository, archived }: {
   const busy = retrying;
   // Display only: present for the owner and admins when the API could read it. The request command checks the delegation again.
   const delegated = state.delegated;
-  const mayAsk = runsRepository && !archived && !request && !repository;
+  // Display only: the API says this owner or admin isn't someone the deployment lets ask. The commands refuse it themselves.
+  const closed = runsRepository && state.may_request === false;
+  const mayAsk = runsRepository && !closed && !archived && !request && !repository;
   const fullName = repository ? visibleText(repository.full_name) : null;
   const url = repository ? repositoryUrl(repository.full_name) : null;
 
@@ -125,7 +127,12 @@ export function RepositorySection({ roomId, state, runsRepository, archived }: {
         </dl>
       ) : null}
 
-      {runsRepository && retryOffered(state) && !archived ? (
+      {closed && !archived && !repository && (!request || retryOffered(state)) ? (
+        <p role="note" className="rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">
+          {REQUESTS_CLOSED}
+        </p>
+      ) : null}
+      {runsRepository && !closed && retryOffered(state) && !archived ? (
         <div className="space-y-1">
           <p id={ids.hint} className="text-sm text-muted-foreground">
             {request?.attempts_left === 1 ? "1 attempt left." : `${request?.attempts_left} attempts left.`} A retry may be refused as too soon: setup waits a minute after a run, doubling up to an hour.

@@ -180,6 +180,191 @@ fn ac_10_ac_11_the_repository_is_run_by_a_person_who_is_owner_or_admin() {
     }
 }
 
+/// Asking for the repository, or retrying its setup, under a deployment's list of requesters: the room's rule first,
+/// then the list, for every kind, role and setting.
+#[test]
+fn a_deployments_list_narrows_who_may_ask_and_never_widens_it() {
+    use podster_core::provisioning::RepositoryRequesters;
+    const TEST_PERSON: &str = "per_e2e_0123456789abcdef";
+    let settings: [(Option<&str>, &[&str]); 9] = [
+        // Unset: everyone the room's rule lets.
+        (None, &["per_listed", "per_other", TEST_PERSON]),
+        (Some("per_listed"), &["per_listed"]),
+        (Some("per_listed,test-people"), &["per_listed", TEST_PERSON]),
+        (Some("test-people"), &[TEST_PERSON]),
+        // A list without the entry holds no test person.
+        (Some("per_listed,per_second"), &["per_listed"]),
+        // Empty and malformed: nobody.
+        (Some(""), &[]),
+        (Some("per_listed,"), &[]),
+        (Some("per_listed,everyone"), &[]),
+        (Some("*"), &[]),
+    ];
+    let mut checked = 0;
+    for (setting, allowed) in settings {
+        let requesters = RepositoryRequesters::parse(setting);
+        for id in ["per_listed", "per_other", TEST_PERSON] {
+            for kind in [Person, Agent] {
+                for role in Role::ALL {
+                    let who = caller(id, kind, role);
+                    let runs_it = kind == Person && matches!(role, Role::Owner | Role::Admin);
+                    let expected = if role == Role::None {
+                        Err(RepoDenial::NotParticipant)
+                    } else if !runs_it {
+                        // The room's rule answers first, so the list tells nothing to anyone it wouldn't concern.
+                        Err(RepoDenial::NotAllowed)
+                    } else if allowed.contains(&id) {
+                        Ok(())
+                    } else {
+                        Err(RepoDenial::RequestsClosed)
+                    };
+                    assert_eq!(
+                        authorize_repository_request(&who, &requesters, &[]),
+                        expected,
+                        "{setting:?} {id} {kind:?} {role:?}"
+                    );
+                    // The list bears on asking alone: running the repository and giving its grants don't read it.
+                    assert_eq!(
+                        authorize_repository_admin(&who).is_ok(),
+                        runs_it && role != Role::None,
+                        "{setting:?} {id} {kind:?} {role:?}"
+                    );
+                    assert_eq!(authorize_grant(&who), authorize_repository_admin(&who));
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 9 * 3 * 2 * 5);
+    assert_eq!(
+        RepoDenial::RequestsClosed.code(),
+        "repository_requests_closed"
+    );
+    // An agent whose ID is listed, or reads as a test person's, stored as the owner: never.
+    let listed_agent = RepositoryRequesters::parse(Some("per_listed,test-people"));
+    for id in ["per_listed", TEST_PERSON] {
+        assert_eq!(
+            authorize_repository_request(&caller(id, Agent, Role::Owner), &listed_agent, &[]),
+            Err(RepoDenial::NotAllowed)
+        );
+    }
+}
+
+/// The `operators` entry: the deployment's own operators may ask, only where the setting holds the entry, and only as
+/// people who run the room.
+#[test]
+fn the_operators_entry_admits_the_deployments_operators_and_never_an_agent() {
+    use podster_core::provisioning::RepositoryRequesters;
+    use podster_policy::moderation::parse_operators;
+    const OP: &str = "per_operator_one";
+    const TEST_PERSON: &str = "per_e2e_0123456789abcdef";
+    // (the setting, the deployment's OPERATORS as configured, who may ask of an operator, a test person and another)
+    let cases: [(Option<&str>, &str, &[&str]); 9] = [
+        // The entry, and the caller among the operators.
+        (
+            Some("operators,test-people"),
+            "per_operator_one, per_operator_two",
+            &[OP, TEST_PERSON],
+        ),
+        (Some("operators"), "per_operator_one", &[OP]),
+        // The entry, and the caller not among them.
+        (
+            Some("operators,test-people"),
+            "per_operator_two",
+            &[TEST_PERSON],
+        ),
+        // The entry, and OPERATORS unset or empty: it admits nobody.
+        (Some("operators,test-people"), "", &[TEST_PERSON]),
+        (Some("operators"), "", &[]),
+        (Some("operators"), " , ", &[]),
+        // No entry: an operator isn't implied.
+        (Some("test-people"), "per_operator_one", &[TEST_PERSON]),
+        // An unknown word beside it closes the list, operators included.
+        (Some("operators,admins"), "per_operator_one", &[]),
+        // Unset: everyone the room's rule lets, whatever OPERATORS says.
+        (None, "", &[OP, TEST_PERSON, "per_other"]),
+    ];
+    let mut checked = 0;
+    for (setting, configured, allowed) in cases {
+        let requesters = RepositoryRequesters::parse(setting);
+        let operators = parse_operators(configured);
+        for id in [OP, TEST_PERSON, "per_other"] {
+            for kind in [Person, Agent] {
+                for role in Role::ALL {
+                    let runs_it = kind == Person && matches!(role, Role::Owner | Role::Admin);
+                    let expected = if role == Role::None {
+                        Err(RepoDenial::NotParticipant)
+                    } else if !runs_it {
+                        // An operator who is a member or a guest of the room, and an agent whose ID is among the
+                        // operators, get the room's own refusal.
+                        Err(RepoDenial::NotAllowed)
+                    } else if allowed.contains(&id) {
+                        Ok(())
+                    } else {
+                        Err(RepoDenial::RequestsClosed)
+                    };
+                    assert_eq!(
+                        authorize_repository_request(
+                            &caller(id, kind, role),
+                            &requesters,
+                            &operators
+                        ),
+                        expected,
+                        "{setting:?} {configured:?} {id} {kind:?} {role:?}"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 9 * 3 * 2 * 5);
+    // By name: an agent stored as the room's owner, with an ID the deployment lists as an operator.
+    assert_eq!(
+        authorize_repository_request(
+            &caller(OP, Agent, Role::Owner),
+            &RepositoryRequesters::parse(Some("operators")),
+            &[OP]
+        ),
+        Err(RepoDenial::NotAllowed)
+    );
+}
+
+/// The deploy script's own rule for a well-formed list is JavaScript (`scripts/requesters-rule.mjs`), since it can't
+/// run this Rust. Both read the same fixture, so a change to one grammar that the other doesn't follow fails here or
+/// in `scripts/test/deploy-staging-selftest`.
+#[test]
+fn the_list_is_read_as_the_deploy_scripts_rule_reads_it() {
+    use podster_core::provisioning::RepositoryRequesters;
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../scripts/test/fixtures/requesters-grammar.json"
+    ))
+    .unwrap();
+    let values = |key: &str| -> Vec<String> {
+        fixture[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect()
+    };
+    let (valid, invalid) = (values("valid"), values("invalid"));
+    assert!(valid.len() >= 5 && invalid.len() >= 5);
+    for value in &valid {
+        assert_ne!(
+            RepositoryRequesters::parse(Some(value)),
+            RepositoryRequesters::nobody(),
+            "{value:?} is well formed, and lets somebody ask"
+        );
+    }
+    for value in &invalid {
+        assert_eq!(
+            RepositoryRequesters::parse(Some(value)),
+            RepositoryRequesters::nobody(),
+            "{value:?} is malformed, and lets nobody ask"
+        );
+    }
+}
+
 /// Who takes a grant back: the room's owner or a room admin as a person, a person who administers the room's
 /// organization, and the holder their own. Nobody else, and an agent never another's.
 #[test]

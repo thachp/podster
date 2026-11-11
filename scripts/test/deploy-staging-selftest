@@ -87,6 +87,17 @@ table() { # table NAME...: wrangler's list of pending migrations
 }
 
 account=0123456789abcdef0123456789abcdef
+api_config() { # api_config VARS: an API configuration whose staging variables are these, with comments as the real file has
+  printf '{\n  // the top level sets neither\n  "vars": {},\n  "env": {\n    // staging\n    "staging": { "vars": { "APP_URL": "https://app-staging.podster.dev"%s } }\n  }\n}\n' "${1:+, $1}"
+}
+# with_api_config VARS: main's tip now has that configuration, and the checkout is detached at it.
+with_api_config() {
+  api_config "$1" > "$tmp/seed/apps/api/wrangler.jsonc"
+  git -C "$tmp/seed" add -A
+  git -C "$tmp/seed" -c user.name=selftest -c user.email=selftest@example.invalid commit --quiet --allow-empty -m "api config"
+  quiet git -C "$tmp/seed" push "$origin" main
+  quiet git -C "$work" fetch origin && quiet git -C "$work" checkout --detach origin/main
+}
 origin="$tmp/origin.git"
 work="$tmp/work"
 quiet() { "$@" > /dev/null 2>&1; }
@@ -98,7 +109,9 @@ fresh() {
   rm -f "$fix"/*
   healthy_staging
   mkdir -p "$tmp/seed/scripts" "$tmp/seed/apps/api/migrations" "$tmp/seed/apps/gateway/migrations" "$tmp/seed/apps/web"
-  cp "$scripts/deploy-staging" "$scripts/staging-probes" "$tmp/seed/scripts/"
+  cp "$scripts/deploy-staging" "$scripts/staging-probes" "$scripts/requesters-rule.mjs" "$tmp/seed/scripts/"
+  # The API's configuration as staging has it: the switch on, and the list of who may ask beside it.
+  api_config '"MANAGED_REPOSITORIES": "true", "REPOSITORY_REQUESTERS": "operators,test-people"' > "$tmp/seed/apps/api/wrangler.jsonc"
   echo "-- seven" > "$tmp/seed/apps/api/migrations/0007_repo_room_index.sql"
   echo "-- eight" > "$tmp/seed/apps/api/migrations/0008_next.sql"
   echo "-- five" > "$tmp/seed/apps/gateway/migrations/0005_org_departure.sql"
@@ -197,6 +210,48 @@ refused "a checkout ahead of origin/main" 'origin/main is at'
 
 echo scratch > "$work/pr-body.md"
 refused "an untracked file" 'changed or untracked'
+
+# --- managed repositories never go to staging switched on with nobody named to ask ---
+with_api_config '"MANAGED_REPOSITORIES": "true"'
+refused "the switch on with no list of requesters" 'switch MANAGED_REPOSITORIES on and set no REPOSITORY_REQUESTERS'
+for bad in '""' '"operators,"' '"everyone"' '"operators,admins"' '["operators","test-people"]' '7' 'null' 'true'; do
+  with_api_config "\"MANAGED_REPOSITORIES\": \"true\", \"REPOSITORY_REQUESTERS\": $bad"
+  refused "the switch on with the list set to $bad" "REPOSITORY_REQUESTERS isn't a well-formed list"
+done
+printf '{ "env": { "staging": { "vars": { "MANAGED_REPOSITORIES": "true", } } }\n' > "$tmp/seed/apps/api/wrangler.jsonc"
+git -C "$tmp/seed" add -A && commit "$tmp/seed" "broken config" && quiet git -C "$tmp/seed" push "$origin" main
+quiet git -C "$work" fetch origin && quiet git -C "$work" checkout --detach origin/main
+refused "a configuration that can't be read" "configuration can't be read"
+git -C "$tmp/seed" rm --quiet apps/api/wrangler.jsonc && commit "$tmp/seed" "no config" && quiet git -C "$tmp/seed" push "$origin" main
+quiet git -C "$work" fetch origin && quiet git -C "$work" checkout --detach origin/main
+refused "no configuration file at all" "can't be read"
+with_api_config '"MANAGED_REPOSITORIES": "true", "REPOSITORY_REQUESTERS": "operators,test-people"'
+check "the switch on with a well-formed list deploys: exit 0" deploy 0
+fresh
+with_api_config '"MANAGED_REPOSITORIES": "true", "REPOSITORY_REQUESTERS": "per_owner1"'
+check "the switch on with one person listed deploys: exit 0" deploy 0
+fresh
+with_api_config ''
+check "the switch absent, and no list, deploys: exit 0" deploy 0
+fresh
+with_api_config '"MANAGED_REPOSITORIES": "false"'
+check "the switch off, and no list, deploys: exit 0" deploy 0
+fresh
+with_api_config '"REPOSITORY_REQUESTERS": "nonsense"'
+check "the switch absent, whatever the list says, deploys: exit 0" deploy 0
+fresh
+# The rule and the Rust that reads the list agree on every value in the fixture, which crates/policy's tests read too.
+check "the rule reads every value in the grammar fixture as the fixture says" node --input-type=module -e '
+  import { readFileSync } from "node:fs";
+  const { validRequesters } = await import(process.argv[2]);
+  const { valid, invalid } = JSON.parse(readFileSync(process.argv[1], "utf8"));
+  const wrong = [...valid.filter((value) => !validRequesters(value)), ...invalid.filter((value) => validRequesters(value))];
+  if (valid.length < 5 || invalid.length < 5 || wrong.length) { console.error(JSON.stringify(wrong)); process.exit(1); }
+' "$scripts/test/fixtures/requesters-grammar.json" "$scripts/requesters-rule.mjs"
+check "  and a value that isn't a string is never a list" node --input-type=module -e '
+  const { validRequesters } = await import(process.argv[2]);
+  if ([undefined, null, 7, true, ["operators"], { operators: true }].some((value) => validRequesters(value))) process.exit(1);
+' values "$scripts/requesters-rule.mjs"
 
 echo "-- edited" >> "$work/apps/api/migrations/0007_repo_room_index.sql"
 refused "a changed file" 'changed or untracked'

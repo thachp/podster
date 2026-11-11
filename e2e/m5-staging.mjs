@@ -11,7 +11,9 @@
 //
 // People: two takes of staging's test sign-up, of its 6 a minute and 40 a day: the room's owner, and a second person
 // who is the room's admin. No operator takes part: every organization may have managed repositories unless an operator
-// took that back (decision 194, 2026-11-11). Agents are made under these people and take none. Every test session is
+// took that back (decision 194, 2026-11-11). Staging lets only the people its REPOSITORY_REQUESTERS names ask for a
+// repository; both of the run's people are test people, whom that list holds by its `test-people` entry, and the run
+// stops before asking if the room's read says its owner may not. Agents are made under these people and take none. Every test session is
 // signed out at the end. The room is in an organization the owner makes for the run, which the second person joins.
 //
 // The organization on GitHub is pinned in code to `podsterdev`: the run refuses a configuration naming another, and
@@ -39,7 +41,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseJsonc } from "./jsonc.mjs";
 import {
-  ASKPASS_SCRIPT, cloneUrlProblem, GrantLedger, gitEnv, MERGE_APP_SLUG, mergeCommitProblems, parseArgs, PLAN, releaseStatusProblems, repositoryOrgProblem,
+  ASKPASS_SCRIPT, cloneUrlProblem, GrantLedger, gitEnv, MERGE_APP_SLUG, mergeCommitProblems, parseArgs, PLAN, releaseStatusProblems, repositoryOrgProblem, requesterProblem,
   reviewStatusProblems, rulesetProblems, scrub, secretProblem, SIGN_UPS, STAGING, stagingConfig, STATUS_CONTEXT, Tally, USAGE,
 } from "./m5-staging-lib.mjs";
 import { RoomPublisher } from "./room-publisher.mjs";
@@ -381,6 +383,14 @@ try {
       process.exit(3);
     }
     if (!(await check("M5-00", () => eq([read.status, read.body?.request, read.body?.repository], [200, null, null], "the room's repository read")))) throw new Stop("the room's repository can't be read");
+    // Staging lets only the people its REPOSITORY_REQUESTERS names ask. The run's people are test people, which that
+    // list holds by its `test-people` entry: without it nothing below can run, and nothing would reach GitHub.
+    const closed = requesterProblem(owner.id, read.body?.may_request);
+    if (closed) {
+      console.error(`\n${closed}. Nothing here can run until it does.`);
+      await cleanUp();
+      process.exit(3);
+    }
   }
 
   say("\n## the room's admin, a second person");

@@ -71,6 +71,12 @@ printf '%s' "$status"
 EOF
 }
 
+A2A_CHALLENGE='Bearer realm="OAuth", resource_metadata="https://gateway-staging.podster.dev/.well-known/oauth-protected-resource/a2a", scope="a2a"'
+a2a_challenge() { # a2a_challenge KEY HEADER-NAME VALUE: that path's answer carries this challenge
+  printf 'HTTP/2 401\r\n%s: %s\r\ncontent-length: 0\r\na2a-version: 1.0\r\n\r\n' "$2" "$3" > "$fix/$1.headers"
+}
+no_challenge() { printf 'HTTP/2 401\r\ncontent-length: 0\r\na2a-version: 1.0\r\n\r\n' > "$fix/$1.headers"; } # no_challenge KEY
+
 # What staging answers when all is well.
 healthy_staging() {
   rm -f "$fix"/*.status "$fix"/*.body "$fix"/*.headers "$fix/calls"
@@ -80,8 +86,11 @@ healthy_staging() {
     printf 'HTTP/2 000\r\ncontent-type: application/json\r\n\r\n' > "$fix/$key.headers"
   done
   echo 401 > "$fix/me.status"; echo '{"error":{"code":"unauthenticated"}}' > "$fix/me.body"
-  echo 401 > "$fix/a2a.status"; echo '{"error":"unauthorized"}' > "$fix/a2a.body"
-  echo 401 > "$fix/a2a-slash.status"; echo '{"error":"unauthorized"}' > "$fix/a2a-slash.body"
+  # As staging answered on 2026-11-10: an OAuth challenge and no body. The second spells the header's name another way.
+  echo 401 > "$fix/a2a.status"; : > "$fix/a2a.body"
+  echo 401 > "$fix/a2a-slash.status"; : > "$fix/a2a-slash.body"
+  a2a_challenge a2a "www-authenticate" "$A2A_CHALLENGE"
+  a2a_challenge a2a-slash "WWW-Authenticate" "$A2A_CHALLENGE"
   echo 404 > "$fix/webhook.status"; echo '{"error":{"code":"not_found"}}' > "$fix/webhook.body"
   echo 404 > "$fix/public.status"; echo '<!doctype html><title>Not found</title><p>Not found</p>' > "$fix/public.body"
   printf 'HTTP/2 404\r\ncontent-type: text/html\r\nCache-Control: no-store, no-transform\r\n\r\n' > "$fix/public.headers"

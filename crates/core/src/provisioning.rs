@@ -971,7 +971,30 @@ pub enum RepositoryRequesters {
     },
 }
 
+/// What a deployment's configuration holds under a setting's name, as the Worker found it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Configured<'a> {
+    /// Nothing is bound under the name.
+    Absent,
+    /// A string is bound under it.
+    Text(&'a str),
+    /// Something is bound under it that isn't a string, or it couldn't be read: a list, a number, an object, a
+    /// binding of another kind, an error.
+    Unreadable,
+}
+
 impl RepositoryRequesters {
+    /// Reads the setting from what the Worker found under its name. Only a name with nothing bound is "unset", which
+    /// is everyone. A string is read by [`RepositoryRequesters::parse`]. Anything else is nobody: a setting that is
+    /// there and can't be read as text was meant to narrow who may ask, so it never widens it.
+    pub fn read(configured: Configured) -> Self {
+        match configured {
+            Configured::Absent => RepositoryRequesters::Everyone,
+            Configured::Text(value) => Self::parse(Some(value)),
+            Configured::Unreadable => Self::nobody(),
+        }
+    }
+
     /// Nobody may ask.
     pub fn nobody() -> Self {
         RepositoryRequesters::Only {

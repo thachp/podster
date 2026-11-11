@@ -1489,6 +1489,78 @@ describe("a deployment's list of repository requesters", () => {
     expect((await github()).calls).toEqual([]);
   });
 
+  // The settings are read from the raw binding. These point one room's read at a stand-in binding of the test
+  // runtime, so the Worker's own reader meets a real list, number, object, boolean and null.
+  const bound = (id: string, table: "test_requesters_binding" | "test_switch_binding" | "test_operators_binding", name: string) => inRoom(id, (sql) => {
+    sql.exec(`CREATE TABLE IF NOT EXISTS ${table} (name TEXT)`);
+    sql.exec(`DELETE FROM ${table}`);
+    sql.exec(`INSERT INTO ${table} VALUES (?)`, name);
+  });
+  const unbound = (id: string, table: string) => inRoom(id, (sql) => void sql.exec(`DROP TABLE IF EXISTS ${table}`));
+
+  it("reads only a list that is truly absent as everyone: a list, a number, an object, a boolean or null bound under the name is nobody", async () => {
+    expect(BINDINGS.TEST_SETTING_LIST).toEqual(["operators", "test-people"]);
+    expect(BINDINGS.TEST_SETTING_NUMBER).toBe(7);
+    expect(BINDINGS.TEST_SETTING_OBJECT).toEqual({ operators: true, "test-people": true });
+    expect(BINDINGS.TEST_SETTING_ABSENT).toBeUndefined();
+    await fake("/reset", {});
+    const org = `org_pv_raw_${crypto.randomUUID().slice(0, 8)}`;
+    // An operator, whom the list's text would admit: `["operators","test-people"]` as a list must not.
+    const operator: Who = { id: "per_operator_two", kind: "person", org, adminOrgs: [org] };
+    const r = await roomOf(operator);
+    const events = await eventTypes(r.id);
+    await failedRequest(r.id, operator.id);
+    for (const name of ["TEST_SETTING_LIST", "TEST_SETTING_NUMBER", "TEST_SETTING_OBJECT", "TEST_SETTING_TRUE", "TEST_SETTING_NULL"]) {
+      await bound(r.id, "test_requesters_binding", name);
+      expect((await retry(r)).code, name).toBe("repository_requests_closed");
+      expect((await read(r)).may_request, name).toBe(false);
+    }
+    await inRoom(r.id, (sql) => void sql.exec("DELETE FROM repo_request"));
+    await bound(r.id, "test_requesters_binding", "TEST_SETTING_LIST");
+    expect((await ask(r)).code).toBe("repository_requests_closed");
+    await untouched(r, [operator.id], events);
+    // The same reader, on strings: the text `operators` admits the operator, and a name with nothing bound is everyone.
+    await bound(r.id, "test_requesters_binding", "TEST_SETTING_TEXT_TRUE");
+    expect((await read(r)).may_request).toBe(false);
+    await bound(r.id, "test_requesters_binding", "TEST_SETTING_TEXT_OPERATORS");
+    expect((await read(r)).may_request).toBe(true);
+    await bound(r.id, "test_requesters_binding", "TEST_SETTING_ABSENT");
+    expect((await read(r)).may_request).toBe(true);
+    const anyone = await person(r, `per_pv_rawany_${crypto.randomUUID().slice(0, 8)}`, "admin");
+    expect((await api(anyone, "GET", `/v1/workspaces/${r.id}/repository`)).body.may_request).toBe(true);
+    await bound(r.id, "test_requesters_binding", "TEST_SETTING_TEXT_OPERATORS");
+    expect((await api(anyone, "GET", `/v1/workspaces/${r.id}/repository`)).body.may_request).toBe(false);
+    expect((await ask(r)).status).toBe(200);
+  });
+
+  it("reads the switch as on only from the string true, and operators only from a string", async () => {
+    await fake("/reset", {});
+    const org = `org_pv_raw2_${crypto.randomUUID().slice(0, 8)}`;
+    const operator: Who = { id: "per_operator_one", kind: "person", org, adminOrgs: [org] };
+    const r = await roomOf(operator);
+    // The switch: the boolean true, a number, a list, null and nothing bound are all off, for the read and both commands.
+    for (const name of ["TEST_SETTING_TRUE", "TEST_SETTING_NUMBER", "TEST_SETTING_LIST", "TEST_SETTING_OBJECT", "TEST_SETTING_NULL", "TEST_SETTING_ABSENT", "TEST_SETTING_TEXT_OPERATORS"]) {
+      await bound(r.id, "test_switch_binding", name);
+      expect((await api(operator, "GET", `/v1/workspaces/${r.id}/repository`)).status, name).toBe(404);
+      expect((await ask(r)).status, name).toBe(404);
+      expect((await retry(r)).status, name).toBe(404);
+    }
+    expect(await rowsOf(r.id, "repo_request")).toEqual([]);
+    await bound(r.id, "test_switch_binding", "TEST_SETTING_TEXT_TRUE");
+    expect((await api(operator, "GET", `/v1/workspaces/${r.id}/repository`)).status).toBe(200);
+    // The operators: a list bound under the name names nobody, though this operator's ID is in it.
+    expect(BINDINGS.TEST_SETTING_OPERATOR_LIST).toEqual(["per_operator_one"]);
+    await listed(r.id, "operators");
+    expect((await read(r)).may_request).toBe(true);
+    for (const name of ["TEST_SETTING_OPERATOR_LIST", "TEST_SETTING_NUMBER", "TEST_SETTING_OBJECT", "TEST_SETTING_NULL", "TEST_SETTING_ABSENT"]) {
+      await bound(r.id, "test_operators_binding", name);
+      expect((await read(r)).may_request, name).toBe(false);
+      expect((await ask(r)).code, name).toBe("repository_requests_closed");
+    }
+    await unbound(r.id, "test_operators_binding");
+    expect((await ask(r)).status).toBe(200);
+  });
+
   it("answers the room's own rule first, so only someone who could otherwise ask learns that requests are closed", async () => {
     const r = await room();
     const tag = crypto.randomUUID().slice(0, 8);

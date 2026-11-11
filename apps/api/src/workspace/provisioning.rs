@@ -22,7 +22,7 @@ use super::*;
 use crate::github::{Config, CreateAnswer, GitHubApp, Provider};
 use podster_core::provisioning::{
     job_backoff_ms, missing_steps, reserved_name, retry_allowed, retry_name, retry_wait_ms,
-    verify_ready, Expected, RepositoryRequesters, RequestLimitReached, MAX_SETUP_RUNS,
+    verify_ready, Configured, Expected, RepositoryRequesters, RequestLimitReached, MAX_SETUP_RUNS,
 };
 use podster_core::repositories::{
     decide_retry, valid_repo_name, RepoVisibility, RequestState, RetryPlan, RetryRefusal,
@@ -42,25 +42,48 @@ const REQUESTS_CLOSED: &str = "repository_requests_closed";
 const NOT_SENT: &str = "not_sent";
 const STARTED: &str = "started";
 
-/// Whether managed repositories are switched on for this deployment. Test builds can switch them on for one room, by a
-/// table only a test can make, so every other test runs with them off, as every deployment does today.
-pub(super) fn enabled(env: &Env, sql: &SqlStorage) -> R<bool> {
-    let set = env
-        .var(SWITCH_VAR)
-        .is_ok_and(|value| value.to_string() == "true");
-    #[cfg(feature = "failpoints")]
-    if !rows(
+/// A test build reads a setting from another binding's name, if the room holds a table of that name with the binding's
+/// name in it: so a test can put a list, a number or an object where a deployment has the setting.
+#[cfg(feature = "failpoints")]
+fn test_binding(sql: &SqlStorage, table: &str) -> R<Option<String>> {
+    if rows(
         sql,
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_managed_repositories_on'",
-        vec![],
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        vec![table.into()],
     )?
     .is_empty()
     {
-        return Ok(true);
+        return Ok(None);
+    }
+    Ok(rows(sql, &format!("SELECT name FROM {table}"), vec![])?
+        .first()
+        .and_then(|row| text(&row["name"])))
+}
+
+/// Whether managed repositories are switched on for this deployment: only if the binding is the string `true`,
+/// exactly. Absent, any other string, and anything that isn't a string, such as the boolean `true`, are off. Test
+/// builds can switch them on for one room, by a table only a test can make, so every other test runs with them off,
+/// as every deployment does today.
+pub(super) fn enabled(env: &Env, sql: &SqlStorage) -> R<bool> {
+    let on = |name: &str| matches!(crate::setting(env, name), crate::Setting::Text(value) if value == "true");
+    #[cfg(feature = "failpoints")]
+    {
+        if let Some(name) = test_binding(sql, "test_switch_binding")? {
+            return Ok(on(&name));
+        }
+        if !rows(
+            sql,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_managed_repositories_on'",
+            vec![],
+        )?
+        .is_empty()
+        {
+            return Ok(true);
+        }
     }
     #[cfg(not(feature = "failpoints"))]
     let _ = sql;
-    Ok(set)
+    Ok(on(SWITCH_VAR))
 }
 
 /// Who this deployment lets ask for a room's repository or retry its setup: the list in the Worker variable
@@ -86,13 +109,18 @@ impl Requesters {
     }
 }
 
-/// Reads [`Requesters`] from the Worker's configuration. `REPOSITORY_REQUESTERS`, read by
-/// `RepositoryRequesters::parse`: unset is everyone the room's own rule lets; set, it's the listed person IDs, with
-/// `test-people` the test sign-up's people, and with `operators` the people `OPERATORS` names; empty or malformed,
-/// nobody. Both commands and the job check it. A test build can give one room a setting of its own, and take the
-/// operators away from it, by tables only a test can make.
+/// Reads [`Requesters`] from the Worker's configuration. `REPOSITORY_REQUESTERS`, read from the raw binding by
+/// `RepositoryRequesters::read`: with nothing bound, everyone the room's own rule lets; a string is the listed person
+/// IDs, with `test-people` the test sign-up's people, and with `operators` the people `OPERATORS` names; an empty or
+/// malformed string, and anything bound that isn't a string, nobody. So only a setting that is truly absent leaves
+/// requests open. Both commands and the job check it. A test build can give one room a setting of its own, read
+/// either setting from another binding, and take the operators away, by tables only a test can make.
 pub(super) fn requesters(env: &Env, sql: &SqlStorage) -> R<Requesters> {
-    let operators = crate::moderation::configured_operators(env);
+    let read = |name: &str| match crate::setting(env, name) {
+        crate::Setting::Absent => RepositoryRequesters::read(Configured::Absent),
+        crate::Setting::Text(value) => RepositoryRequesters::read(Configured::Text(&value)),
+        crate::Setting::Unreadable => RepositoryRequesters::read(Configured::Unreadable),
+    };
     #[cfg(feature = "failpoints")]
     {
         let has = |table: &str| -> R<bool> {
@@ -103,12 +131,21 @@ pub(super) fn requesters(env: &Env, sql: &SqlStorage) -> R<Requesters> {
             )?
             .is_empty())
         };
-        // A room holding this table stands for a deployment whose OPERATORS is unset.
+        // A room holding the first table stands for a deployment whose OPERATORS is unset, and one holding the second
+        // for a deployment whose OPERATORS is whatever is bound under the name in it.
         let operators = if has("test_no_operators")? {
             String::new()
+        } else if let Some(name) = test_binding(sql, "test_operators_binding")? {
+            crate::moderation::operators_under(env, &name)
         } else {
-            operators.clone()
+            crate::moderation::configured_operators(env)
         };
+        if let Some(name) = test_binding(sql, "test_requesters_binding")? {
+            return Ok(Requesters {
+                list: read(&name),
+                operators,
+            });
+        }
         if has("test_repository_requesters")? {
             let set = rows(sql, "SELECT value FROM test_repository_requesters", vec![])?;
             let value = set.first().and_then(|row| text(&row["value"]));
@@ -120,10 +157,9 @@ pub(super) fn requesters(env: &Env, sql: &SqlStorage) -> R<Requesters> {
     }
     #[cfg(not(feature = "failpoints"))]
     let _ = sql;
-    let set = env.var(REQUESTERS_VAR).ok().map(|value| value.to_string());
     Ok(Requesters {
-        list: RepositoryRequesters::parse(set.as_deref()),
-        operators,
+        list: read(REQUESTERS_VAR),
+        operators: crate::moderation::configured_operators(env),
     })
 }
 

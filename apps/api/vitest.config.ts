@@ -150,6 +150,17 @@ export default defineConfig({
           SCANNER_SECRET: "test-scanner-secret",
           // Test operators only (M4 step 10). Naming real ones is the owner's call.
           OPERATORS: "per_operator_one, per_operator_two",
+          // Stand-ins for a setting bound as something other than a string, or as a string, under names no deployment
+          // uses. A test points one room's read of REPOSITORY_REQUESTERS, MANAGED_REPOSITORIES or OPERATORS at one of
+          // these. The real names stay unbound here, except OPERATORS above.
+          TEST_SETTING_LIST: ["operators", "test-people"],
+          TEST_SETTING_NUMBER: 7,
+          TEST_SETTING_OBJECT: { operators: true, "test-people": true },
+          TEST_SETTING_TRUE: true,
+          TEST_SETTING_NULL: null,
+          TEST_SETTING_TEXT_TRUE: "true",
+          TEST_SETTING_TEXT_OPERATORS: "operators",
+          TEST_SETTING_OPERATOR_LIST: ["per_operator_one"],
           // A test value only. The real key is the owner's to set (decision 122).
           A2A_TOKEN_KEY: "0f".repeat(32),
           EXPLORE_CURSOR_KEY: "a5".repeat(32),

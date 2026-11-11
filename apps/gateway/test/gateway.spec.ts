@@ -1470,6 +1470,14 @@ describe("rate limits", () => {
     const refused = await off.json<any>();
     expect(refused.result?.isError ?? Boolean(refused.error)).toBe(true);
     expect(JSON.stringify(refused)).toContain("get_repo_access");
+    // The same for merge_task (M5 step 7b): off, calling it answers exactly as calling a tool that doesn't exist does,
+    // whatever is sent with it, so nothing about it can be told from the answer.
+    const called = async (name: string) => {
+      const res = await send("/mcp", { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name, arguments: { workspace_id: "w", task_id: "t", submission_no: 1, commit_sha: "a".repeat(40), idempotency_key: "k" } } }) });
+      return [res.status, (await res.text()).replaceAll(name, "<tool>")];
+    };
+    expect(await called("merge_task")).toEqual(await called("no_such_tool"));
+    expect((await called("merge_task"))[1]).toContain("<tool>");
     // Nothing else is ever gated, and the gated tool is a retry-safe command that names only the task.
     expect(capabilitiesFor({}).map((c) => c.name)).toEqual(CAPABILITIES.map((c) => c.name).filter((n) => n !== "get_repo_access" && n !== "merge_task"));
     // The merge tool (M5 step 7b) is listed the same way: only with the switch exactly on. Off, no agent is offered one (AC-17).

@@ -852,6 +852,15 @@ describe("the review's findings (M5 step 7b)", () => {
     expect(await link(late.id)).toEqual({ status: "degraded", status_reason: "default_branch_changed" });
     expect(await merges()).toEqual([]);
     expect((await github()).pulls["7"].merged ?? false).toBe(false);
+    // Changed a moment after the merge landed: the merge is recorded as the merge it was, and the link is degraded.
+    await fresh();
+    const landed = await requested();
+    await fake({ merge: "default_moves" });
+    await pass(landed.id);
+    expect(await change(landed.id, landed.task)).toMatchObject({ merge_state: "succeeded", merge_reason: null, merge_sha: MERGED });
+    expect(await link(landed.id)).toEqual({ status: "degraded", status_reason: "default_branch_changed" });
+    expect(await merges()).toHaveLength(1);
+    expect((await events(landed.id)).at(-1)).toMatchObject({ type: "merge.succeeded" });
     // A default branch with a slash in its name is read and merged into like any other.
     await fresh();
     await ready({ defaultBranch: "release/v1" });

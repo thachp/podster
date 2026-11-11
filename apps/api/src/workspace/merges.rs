@@ -1457,6 +1457,36 @@ impl Workspace {
             }
             PullAnswer::Missing => return finish(MergeFailure::PullClosed),
         };
+        let reviewed = ReviewedBase {
+            default_branch: &target.default_branch,
+            base_sha: target.reviewed_base_sha.as_deref(),
+        };
+        let default_differs = seen
+            .default_branch
+            .as_deref()
+            .is_some_and(|reported| reported != target.default_branch);
+        // Once a merge call is on record, what became of it comes first. A merge that landed is recorded as merged even
+        // if the default branch was changed between the check before the call and this read. The link is still
+        // degraded for that, so nothing more is merged until an operator has looked.
+        if (pass.called || call.is_some()) && pull.state == PullState::Merged {
+            let landed = decide_merge_step(
+                &pass.authorized,
+                &reviewed,
+                &observation(&pull, seen.default_branch_has),
+                call.map(merge_call),
+            );
+            if let MergeStep::Succeeded(proof) = landed {
+                let (room, task, repo_id) = (room.to_string(), task_id.to_string(), target.repo_id);
+                self.in_transaction(move |sql| {
+                    let now = now_ms();
+                    if default_differs {
+                        degrade(sql, repo_id, DEFAULT_BRANCH_CHANGED, now)?;
+                    }
+                    finish_succeeded(sql, &room, &task, proof, &pull, now)
+                })?;
+                return Ok(None);
+            }
+        }
         // The default branch GitHub reports, read with the pull request, must be the one the link holds: before the mark,
         // and again in the read that follows the merge call. A different one is a definite answer: the link is degraded
         // and nothing is merged into either branch. One that couldn't be read settles nothing.
@@ -1478,10 +1508,6 @@ impl Workspace {
         if pull.state == PullState::Merged && !pass.called && call.is_none() {
             return finish(MergeFailure::MergedElsewhere);
         }
-        let reviewed = ReviewedBase {
-            default_branch: &target.default_branch,
-            base_sha: target.reviewed_base_sha.as_deref(),
-        };
         let step = decide_merge_step(
             &pass.authorized,
             &reviewed,

@@ -490,6 +490,8 @@ function mergeCall(request: Request, path: string, bearer: string, body: any): R
     if (!marked) return answer({ message: "Required status check \"podster/review\" is expected." }, 405);
     Object.assign(pull, { merged: true, state: "closed", merge_commit_sha: "9e".repeat(20), merged_by: FAKE_GITHUB.mergeBotId });
     agentRepos.set(repo, { ...script, has: [...(script.has ?? []), pull.head_sha] });
+    // The repository's default branch is changed a moment after the merge lands.
+    if (script.merge === "default_moves") agentRepos.set(repo, { ...agentRepos.get(repo), defaultBranch: "trunk" });
     if (script.merge === "lost") return answer({ message: "SECRET-PROVIDER-TEXT" }, 500);
     return answer({ sha: pull.merge_commit_sha, merged: true, message: "Pull Request successfully merged" });
   }

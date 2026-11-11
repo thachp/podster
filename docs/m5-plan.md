@@ -575,7 +575,8 @@ Three person-only routes on the room's Durable Object, the two cascades, and the
 
 **Accepted, not changed (ruled by the architect):**
 
-- The owner's and admins' `events` feed still lists merge event types while the switch is off. It carries IDs only, and it's their oversight record.
+- *Superseded on 2026-11-11 by the security review's A-6 ([PR #283](https://github.com/thachp/podster/pull/283)):* ~~The owner's and admins' `events` feed still lists merge event types while the switch is off.~~ The `events` feed now leaves out every managed-repository event while the switch is off, as activity, history and the inbox do.
+- **`GET audit` doesn't follow the switch** (2026-11-11, outside A-6, no code change). It's for a human owner or admin alone, who may read the room's whole audit log. While the switch is off it still lists repository, grant and merge actions audited during an earlier on-period, with their action names and the IDs they recorded.
 - A person merging exactly the reviewed commit by hand, after the job recorded its intent to merge, is recorded as this request's success, as the job's own read already has it: the reviewed commit is what's on the default branch.
 - When the watch sees a merge of a commit nobody reviewed on a change whose request then fails, `merge_reason` becomes `unreviewed_merge`, over the reason the request was about to end with. It's the more important fact.
 

@@ -31,6 +31,8 @@ export function explainMergeRefusal(code: string, status = 400): string {
       return "You can't merge this task: you, or the person who controls you, also control whoever submitted it. Someone else with a merge grant can. Nothing was asked for.";
     case "self_review":
       return "This commit can't be merged yet: it needs an approving review from someone other than the person who controls its submitter, or one of their agents. Nothing was asked for.";
+    case REVIEWER_UNKNOWN:
+      return "This commit's approving review came from an agent whose controlling person isn't known, so it needs an approving review from someone else before it can be merged. Nothing was asked for.";
     case REVIEW_AGAIN:
       return "This commit was approved before Podster recorded who reviews a commit, so it needs to be reviewed again before it can be merged. Nothing was asked for.";
     case "controller_departed":
@@ -122,8 +124,14 @@ const FAILURES: Record<string, string> = {
  * the control says to review it again. A code of this screen's own, never sent by the server.
  */
 export const REVIEW_AGAIN = "self_review_again";
-export const reviewAgainRefusal = <T extends { ok: boolean; code?: string; message?: string }>(result: T): T =>
-  !result.ok && result.code === "self_review" && /reviewed again/.test(result.message ?? "") ? { ...result, code: REVIEW_AGAIN } : result;
+/** `self_review` for a review by an agent whose controlling person isn't known, told apart the same way. */
+export const REVIEWER_UNKNOWN = "self_review_reviewer_unknown";
+export const reviewAgainRefusal = <T extends { ok: boolean; code?: string; message?: string }>(result: T): T => {
+  if (result.ok || result.code !== "self_review") return result;
+  if (/reviewed again/.test(result.message ?? "")) return { ...result, code: REVIEW_AGAIN };
+  if (/controlling person isn't known/.test(result.message ?? "")) return { ...result, code: REVIEWER_UNKNOWN };
+  return result;
+};
 
 /** These 503s are answered before anything is recorded, so they're definite refusals, not unknown outcomes. */
 const NOTHING_RECORDED = new Set(["merge_unavailable", "standing_unknown"]);

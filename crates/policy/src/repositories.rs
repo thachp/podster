@@ -59,6 +59,9 @@ pub enum RepoDenial {
     /// independent, and nothing says so, so the commit needs to be reviewed again before it's merged. Its own variant so
     /// the answer can say that rather than ask for someone else.
     ReviewUnrecorded,
+    /// `self_review` as well, for a review by an agent whose credential named no linking person: who controls the
+    /// reviewer isn't known, so the review can't be shown independent. Its own variant so the answer says that.
+    ReviewerUnknown,
     /// `grant_required`, `grant_expired` or `grant_stale`
     Grant(GrantRefusal),
 }
@@ -72,7 +75,9 @@ impl RepoDenial {
             RepoDenial::Hidden => MergeRefusal::TaskHidden,
             RepoDenial::PublicParticipant => MergeRefusal::PublicParticipant,
             RepoDenial::SelfMerge => MergeRefusal::SelfMerge,
-            RepoDenial::SelfReview | RepoDenial::ReviewUnrecorded => MergeRefusal::SelfReview,
+            RepoDenial::SelfReview | RepoDenial::ReviewUnrecorded | RepoDenial::ReviewerUnknown => {
+                MergeRefusal::SelfReview
+            }
             RepoDenial::Grant(refusal) => MergeRefusal::Grant(refusal),
             RepoDenial::NotAllowed
             | RepoDenial::GranteeNotParticipant
@@ -89,7 +94,9 @@ impl RepoDenial {
             RepoDenial::GranteePublic => "grantee_public",
             RepoDenial::PublicParticipant => "public_participant",
             RepoDenial::SelfMerge => "self_merge",
-            RepoDenial::SelfReview | RepoDenial::ReviewUnrecorded => "self_review",
+            RepoDenial::SelfReview | RepoDenial::ReviewUnrecorded | RepoDenial::ReviewerUnknown => {
+                "self_review"
+            }
             RepoDenial::Grant(refusal) => refusal.code(),
         }
     }
@@ -309,10 +316,10 @@ pub fn authorize_merge(
 /// something it can see.
 pub fn independent_review(reviewer: Option<&Actor>, submitter: &Actor) -> Result<(), RepoDenial> {
     match reviewer {
-        // Who approved, or the person who controlled them then, wasn't recorded: reviewed again, it's known.
-        Some(reviewer) if reviewer.id.is_empty() || reviewer.person.is_none() => {
-            Err(RepoDenial::ReviewUnrecorded)
-        }
+        // Who approved wasn't recorded, as for an approval from before the room kept it: reviewed again, it's known.
+        Some(reviewer) if reviewer.id.is_empty() => Err(RepoDenial::ReviewUnrecorded),
+        // An agent reviewed whose credential named no linking person: nobody can say who controls it.
+        Some(reviewer) if reviewer.person.is_none() => Err(RepoDenial::ReviewerUnknown),
         Some(reviewer) if same_controller(reviewer, submitter) => Err(RepoDenial::SelfReview),
         _ => Ok(()),
     }

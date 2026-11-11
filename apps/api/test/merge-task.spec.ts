@@ -431,9 +431,32 @@ describe("an independent review (the owner's decision of 2026-11-11 on review A1
     // may well have been independent, and simply wasn't recorded.
     expect(refused.body.error.message).toMatch(/needs to be reviewed again/);
     expect(refused.body.error.message).not.toMatch(/someone other than/);
-    // An agent whose controlling person wasn't recorded counts as not independent too.
+    // A reviewer on record whose controlling person isn't counts as not independent too, said as such.
     await inRoom(r.id, (sql) => void sql.exec("UPDATE task_change SET reviewer_id = ?, reviewer_person = NULL", ROBOT.id));
-    expect((await merge(MERGER, r.id, r.task)).code).toBe("self_review");
+    const unknown = await merge(MERGER, r.id, r.task);
+    expect(unknown.code).toBe("self_review");
+    expect(unknown.body.error.message).toMatch(/controlling person isn't known/);
+  });
+
+  it("refuses a commit an agent with no linking person approved, saying who controls the reviewer isn't known", async () => {
+    const r = await approvedBy(UNLINKED);
+    expect(await change(r.id, r.task)).toMatchObject({ reviewer_id: UNLINKED.id, reviewer_person: null });
+    const refused = await merge(MERGER, r.id, r.task);
+    expect([refused.status, refused.code]).toEqual([403, "self_review"]);
+    expect(refused.body.error.message).toMatch(/controlling person isn't known/);
+    expect(refused.body.error.message).not.toMatch(/reviewed again/);
+  });
+
+  it("clears the recorded reviewer together with the reviewed commit when the work is submitted again", async () => {
+    const id = await room();
+    const task = await submitted(id);
+    // An approval's record on the change, as an earlier review left it, while the task is back for changes.
+    await inRoom(id, (sql) => void sql.exec("UPDATE task_change SET reviewed_commit_sha = ?, reviewer_id = ?, reviewer_person = ?", HEAD, ROBOT.id, "per_mt_other_linker"));
+    const back = await must(OWNER, "POST", `/v1/workspaces/${id}/tasks/${task}/request-changes`, { submission_no: 1, reason: "More" });
+    await pull(7, { head_sha: HEAD2 });
+    const again = await api(AGENT, "POST", `/v1/workspaces/${id}/tasks/${task}/submit`, { version: back.version, note: "Again", commit_sha: HEAD2, pr_number: 7 });
+    expect(again.status, again.text).toBe(200);
+    expect(await change(id, task)).toMatchObject({ submission_no: 2, observed_head_sha: HEAD2, reviewed_commit_sha: null, reviewer_id: null, reviewer_person: null });
   });
 
   it("tells a caller who may not merge nothing about the review", async () => {
@@ -1138,6 +1161,8 @@ describe("the review's findings (M5 step 7b)", () => {
       ["room suspended", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE workspace SET suspended_at = 5, suspension_reason = 'test'")), "room_suspended"],
       ["requester's access narrowed", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE access_grant SET tasks = 'own' WHERE principal_id = ?", MERGER.id)), "task_not_found"],
       ["requester now there through a public claim", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE member SET joined_via = 'public', role = 'guest' WHERE principal_id = ?", MERGER.id)), "public_participant"],
+      // The room's record of the approving review turns out not to be independent (A1, decision 195).
+      ["review not independent", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE task_change SET reviewer_person = ?", LINKER.id)), "self_review"],
     ] as const;
     for (const [what, lose, reason] of ways) {
       for (const point of ["before the mark", "between the mark and the merge"] as const) {

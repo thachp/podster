@@ -613,6 +613,10 @@ pub(crate) const SELF_REVIEW_MESSAGE: &str = "This commit needs an approving rev
 /// independent, so the commit is to be reviewed again, not by someone else.
 pub(crate) const REVIEW_AGAIN_MESSAGE: &str = "This commit was approved before Podster recorded who reviews a commit, so it needs to be reviewed again before it can be merged.";
 
+/// `self_review`'s message for a review by an agent whose credential named no linking person: who controls the reviewer
+/// isn't known, so someone else's review is needed.
+pub(crate) const REVIEWER_UNKNOWN_MESSAGE: &str = "This commit's approving review came from an agent whose controlling person isn't known, so it needs an approving review from someone else before it can be merged.";
+
 /// A refusal from the policy, as the API answers it.
 pub(super) fn denied(denial: RepoDenial) -> ApiError {
     match denial {
@@ -621,6 +625,9 @@ pub(super) fn denied(denial: RepoDenial) -> ApiError {
         RepoDenial::SelfReview => ApiError::explained(403, denial.code(), SELF_REVIEW_MESSAGE),
         RepoDenial::ReviewUnrecorded => {
             ApiError::explained(403, denial.code(), REVIEW_AGAIN_MESSAGE)
+        }
+        RepoDenial::ReviewerUnknown => {
+            ApiError::explained(403, denial.code(), REVIEWER_UNKNOWN_MESSAGE)
         }
         RepoDenial::GranteeNotParticipant | RepoDenial::GranteePublic => {
             ApiError::api(400, denial.code())

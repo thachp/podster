@@ -1261,9 +1261,12 @@ fn a1_only_an_independent_review_lets_a_commit_be_merged_whoever_merges() {
                 Err(RepoDenial::SelfMerge)
             } else if *independent {
                 Ok(())
-            } else if reviewer.as_ref().is_some_and(|r| r.person.is_none()) {
+            } else if reviewer.as_ref().is_some_and(|r| r.id.is_empty()) {
                 // The same code, said as "review it again": nothing shows the review wasn't independent.
                 Err(RepoDenial::ReviewUnrecorded)
+            } else if reviewer.as_ref().is_some_and(|r| r.person.is_none()) {
+                // The same code, said as "who controls the reviewer isn't known".
+                Err(RepoDenial::ReviewerUnknown)
             } else {
                 Err(RepoDenial::SelfReview)
             };
@@ -1278,6 +1281,11 @@ fn a1_only_an_independent_review_lets_a_commit_be_merged_whoever_merges() {
         "self_review"
     );
     assert_eq!(RepoDenial::ReviewUnrecorded.code(), "self_review");
+    assert_eq!(RepoDenial::ReviewerUnknown.code(), "self_review");
+    assert_eq!(
+        RepoDenial::ReviewerUnknown.as_merge_refusal().code(),
+        "self_review"
+    );
     assert_eq!(
         RepoDenial::ReviewUnrecorded.as_merge_refusal().code(),
         "self_review"

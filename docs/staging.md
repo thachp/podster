@@ -374,10 +374,10 @@ cd e2e && node m4-staging.mjs --base-url https://gateway-staging.podster.dev --a
 - **People:** a run takes **3 sign-ins** from the test sign-up, of its 6 a minute and 40 a day: the room's owner, a second person, and the fixed test operator that M4's run uses. Its five agents are made under those people and take none. With M4's 23, both runs fit in one day, with 14 to spare.
 - **The operator:** only a Podster operator can give an organization the provisioning delegation, so the run needs one. By default it signs in the fixed test operator, **whose ID must be in the API's `OPERATORS`**, as for [M4's run](#m4s-staging-run). Otherwise it stops after two sign-ins and says so. Set `PODSTER_E2E_OPERATOR_COOKIE` to an operator's own session instead, and the run takes 2 sign-ins and never signs that session out. The delegation is taken back when the run ends.
 - **GitHub:** Podster's own calls go out from staging, with the Apps' keys the owner set. The script holds no App key. It asks GitHub directly in three ways: about ten reads of the public API with no credential, of GitHub's 60 an hour for one address; calls with the agent's own token from `get_repo_access`; and `git` over HTTPS, as a child process with `e2e/child-env.mjs`'s allow-listed environment, a home directory of its own, and the token in its environment under one name. The token is never printed, never on a command line and never in a file.
-- **What it leaves behind:** one public repository in `podsterdev`, named `e2e-m5-<time>-<4 hex>`, with two pull requests, and its room. **Podster has no way to delete a repository, and the script can't.** It prints the repository's name at the end, for the owner to archive or delete in GitHub.
+- **What it leaves behind:** one public repository in `podsterdev`, named `e2e-m5-<time>-<4 hex>`, with two pull requests, and its room. **Podster has no way to delete a repository, and the script can't.** It prints the repository's name as soon as any request for it is accepted or goes unanswered, and again at the end, for the owner to archive or delete in GitHub. In the room, M5-G1 leaves person review switched on, a publicly claimable opening named Observer, and the claimant as a participant through its public claim. The room itself is made private again.
 - **Exit:** 0 only when nothing failed. A check that can't run is printed `SKIP` with its reason and counted: release status is skipped while its route answers as a missing one, and the public-claim check while `PUBLIC_ROOMS` is off. 2 for a refused configuration, and 3 when managed repositories are off on staging.
 
-`--dry-run` checks the configuration, prints the sign-ins and every check, and sends nothing:
+`--dry-run` checks the configuration, prints the sign-ins and every check, and sends nothing. It reads the organization and the merge App from `apps/api/wrangler.jsonc`, or from the file `--api-config` names, and doesn't read the switch from it: the run asks staging.
 
 ```bash
 cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)" node m5-staging.mjs --base-url https://gateway-staging.podster.dev --dry-run
@@ -393,6 +393,8 @@ cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)
 
 **What it doesn't cover:**
 
+- **Whether a refused call reached GitHub.** M5-05 and M5-14 say it doesn't. The script sees Podster's refusal and nothing of what Podster sent, so that stays the API's tests against the fake.
+- **A room without Git on GitHub's side.** M5-00 reads from Podster that a room that hasn't asked has no repository. It doesn't look in `podsterdev` for one.
 - **A webhook's signature.** An unsigned or badly signed delivery is `scripts/staging-probes`' to check, with `--webhook-secret-set`. The script only reports how long Podster took to notice a pushed commit, and can't tell a webhook from the poll.
 - **The operator's recheck** of a degraded repository, and a failed, uncertain or retried setup (M5-03, M5-15). It never breaks a repository's rules to cause them.
 - **Bypass lists.** GitHub shows a ruleset's bypass actors to administrators only, so the script sees the two rulesets and their rules and not who may bypass them. That stays Podster's own read-back.

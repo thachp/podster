@@ -4,11 +4,11 @@
 //
 //   node m5-staging-selftest.mjs
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { forbidden } from "./child-env.mjs";
-import { parseJsonc } from "./jsonc.mjs";
 import {
   ASKPASS_SCRIPT, cloneUrlProblem, CREDENTIAL_ENV, gitEnv, mergeCommitProblems, parseArgs, PLAN, releaseStatusProblems, reviewStatusProblems, rulesetProblems, scrub,
   secretProblem, SIGN_UPS, STAGING, stagingConfig, stagingOnly, Tally,
@@ -51,10 +51,13 @@ check(args("--help").options?.help === true, "--help needs nothing else");
 
 // ---- configuration ----
 check(secretProblem(undefined) !== null && secretProblem("short") !== null && secretProblem("x".repeat(32)) === null, "the sign-up secret must be set and at least 32 characters");
-const vars = parseJsonc(readFileSync(join(here, "../apps/api/wrangler.jsonc"), "utf8")).env?.staging?.vars;
-const real = stagingConfig(vars);
-check(!real.error && real.org === "podsterdev" && real.orgId > 0 && real.mergeAppId > 0, "staging's own configuration names podsterdev, its ID and the merge App");
-check(Boolean(stagingConfig({ ...vars, MANAGED_REPOSITORIES: "false" }).error) && Boolean(stagingConfig({}).error) && Boolean(stagingConfig({ ...vars, GITHUB_MERGE_APP_ID: "x" }).error), "a configuration with the switch off, or an ID missing, is refused");
+// A configuration of this test's own, so nothing here depends on what apps/api/wrangler.jsonc holds today.
+const vars = { GITHUB_ORG_LOGIN: "podsterdev", GITHUB_ORG_ID: "354820586", GITHUB_MERGE_APP_ID: "5695088" };
+const read = stagingConfig(vars);
+check(!read.error && read.org === "podsterdev" && read.orgId === 354820586 && read.mergeAppId === 5695088, "a configuration names the organization, its ID and the merge App");
+check(!stagingConfig({ ...vars, MANAGED_REPOSITORIES: "false" }).error && !stagingConfig({ ...vars, MANAGED_REPOSITORIES: "true" }).error, "the switch isn't read from the file: staging is asked");
+check(Boolean(stagingConfig({}).error) && Boolean(stagingConfig(undefined).error) && Boolean(stagingConfig({ ...vars, GITHUB_MERGE_APP_ID: "x" }).error) && Boolean(stagingConfig({ ...vars, GITHUB_ORG_LOGIN: "a/b" }).error), "a configuration with an ID missing or a malformed name is refused");
+check(args("--base-url", STAGING, "--api-config", "/x/wrangler.jsonc").options.apiConfig === "/x/wrangler.jsonc" && args("--base-url", STAGING).options.apiConfig === undefined && Boolean(args("--base-url", STAGING, "--api-config").error), "--api-config names another file, and needs a value");
 check(SIGN_UPS.length === 3, "a run takes three sign-ups");
 
 // ---- the plan and the results ----
@@ -98,8 +101,15 @@ check(!Object.values(plain).includes(token) && !(CREDENTIAL_ENV in plain), "with
 check(JSON.stringify(Object.keys(withToken).sort()) === JSON.stringify([...allowed, CREDENTIAL_ENV].sort()) && withToken[CREDENTIAL_ENV] === token, "for a push, the token is under one name only");
 check(Object.entries(withToken).filter(([, value]) => value === token).length === 1 && !Object.keys(withToken).some((n) => n !== CREDENTIAL_ENV && forbidden(n)), "and no secret of ours is beside it");
 check(!ASKPASS_SCRIPT.includes("ghs_") && ASKPASS_SCRIPT.includes(`$${CREDENTIAL_ENV}`), "the askpass script holds no token, only the name it reads");
-const asked = (prompt) => spawnSync("sh", ["-s", prompt], { input: ASKPASS_SCRIPT, env: { PATH: process.env.PATH, [CREDENTIAL_ENV]: token }, encoding: "utf8" }).stdout;
-check(asked("Username for 'https://github.com': ") === "x-access-token\n" && asked("Password for 'https://x-access-token@github.com': ") === `${token}\n`, "it answers git's two questions");
+const asked = (prompt) => spawnSync("sh", ["-s", prompt], { input: ASKPASS_SCRIPT, env: { PATH: process.env.PATH, [CREDENTIAL_ENV]: token }, encoding: "utf8" });
+check(asked("Username for 'https://github.com': ").stdout === "x-access-token\n" && asked("Password for 'https://x-access-token@github.com': ").stdout === `${token}\n`, "it answers git's two questions about github.com");
+for (const prompt of [
+  "Password for 'https://x-access-token@example.com': ", "Password for 'https://x-access-token@github.com.example.com': ", "Password for 'https://someone@github.com': ", "Password for 'http://x-access-token@github.com': ",
+  "Password for 'https://x-access-token@github.com:8443': ", "Username for 'https://example.com': ", "Username for 'https://api.github.com': ", "Password for 'https://github.com': ", "",
+]) {
+  const answer = asked(prompt);
+  check(answer.stdout === "" && answer.status !== 0, `it gives nothing to: ${prompt || "(no question)"}`);
+}
 check(cloneUrlProblem("https://github.com/podsterdev/e2e.git", "podsterdev/e2e") === null, "the repository's own clone URL is accepted");
 for (const url of ["https://github.com.example.com/podsterdev/e2e.git", "http://github.com/podsterdev/e2e.git", "https://x@github.com/podsterdev/e2e.git", "https://github.com/other/e2e.git", "https://github.com/podsterdev/e2e", undefined])
   check(cloneUrlProblem(url, "podsterdev/e2e") !== null, `the token isn't offered to ${url}`);
@@ -137,9 +147,16 @@ for (const [title, parents] of [["a squash or rebase, with one parent", [TIP]], 
 const status = { context: "podster/review", state: "success", creator: { login: "podster-staging-merge[bot]", type: "Bot" } };
 check(reviewStatusProblems([status, { context: "ci", state: "failure", creator: { login: "x", type: "User" } }]).length === 0, "one review status from the merge App is accepted, whatever else is there");
 for (const [title, statuses] of [
-  ["no review status", []], ["two review statuses", [status, status]], ["a status from another App", [{ ...status, creator: { login: "podster-staging-agent[bot]", type: "Bot" } }]],
+  ["no review status", []], ["a status from another App", [{ ...status, creator: { login: "podster-staging-agent[bot]", type: "Bot" } }]],
   ["a status from a person", [{ ...status, creator: { login: "podster-staging-merge[bot]", type: "User" } }]], ["a pending status", [{ ...status, state: "pending" }]], ["an answer that isn't a list", { message: "Not Found" }],
 ]) check(reviewStatusProblems(statuses).length === 1, `refused: ${title}`);
+
+{
+  const twice = reviewStatusProblems([status, status]);
+  const stranger = reviewStatusProblems([{ ...status, creator: { login: "someone", type: "User" } }]);
+  check(twice.length === 1 && twice[0].includes("2 podster/review statuses were found") && twice[0].includes("retried"), "refused: two review statuses, said as more than one found");
+  check(stranger.length === 1 && stranger[0].includes("the one status is") && !stranger[0].includes("were found"), "and a wrong creator is said differently");
+}
 
 const change = { pr_number: 7, pr_state: "merged", reviewed_commit_sha: HEAD, observed_head_sha: HEAD, commit_changed: false, merge_state: "succeeded", merge_reason: null, merge_sha: TIP, merge_requested_by: "agt_1" };
 const release = {
@@ -160,7 +177,14 @@ check(wrongRelease((r) => ((r.release = { exists: true }), r)) && wrongRelease((
 check(wrongRelease((r) => ((r.task_id = "tsk_2"), r)), "refused: another task's status");
 
 // ---- the script itself, as a dry run ----
-const script = (argv, env = {}) => spawnSync(process.execPath, [join(here, "m5-staging.mjs"), ...argv], { env: { PATH: process.env.PATH, HOME: process.env.HOME, ...env }, encoding: "utf8", timeout: 60_000 });
+// The API's configuration is a file of this test's own, with the switch off: a dry run reads no switch, and CI must not
+// depend on what apps/api/wrangler.jsonc sets for staging today.
+const fixtures = mkdtempSync(join(tmpdir(), "m5-selftest-"));
+const apiConfig = join(fixtures, "wrangler.jsonc");
+writeFileSync(apiConfig, `{ // a comment, as the real file has\n "env": { "staging": { "vars": ${JSON.stringify({ ...vars, MANAGED_REPOSITORIES: "false" })} } } }`);
+const emptyConfig = join(fixtures, "empty.jsonc");
+writeFileSync(emptyConfig, `{ "env": { "staging": { "vars": {} } } }`);
+const script = (argv, env = {}, config = apiConfig) => spawnSync(process.execPath, [join(here, "m5-staging.mjs"), ...argv, "--api-config", config], { env: { PATH: process.env.PATH, HOME: process.env.HOME, ...env }, encoding: "utf8", timeout: 60_000 });
 const secret = "s".repeat(40);
 {
   const run = script(["--base-url", STAGING, "--dry-run"], { PODSTER_E2E_SIGNUP_SECRET: secret });
@@ -170,11 +194,14 @@ const secret = "s".repeat(40);
   check(two.status === 0 && two.stdout.includes("Sign-ups this run takes: 2") && !two.stdout.includes("session=abc"), "with an operator's session it takes two, and never prints the session");
 }
 check(script(["--base-url", STAGING, "--dry-run"]).status === 2, "a dry run without the sign-up secret exits 2");
+check(script(["--base-url", STAGING, "--dry-run"], { PODSTER_E2E_SIGNUP_SECRET: secret }, emptyConfig).status === 2 && script(["--base-url", STAGING, "--dry-run"], { PODSTER_E2E_SIGNUP_SECRET: secret }, join(fixtures, "missing.jsonc")).status === 2, "a dry run with no organization configured, or no file, exits 2");
 for (const base of ["https://gateway.podster.dev", "http://localhost:8787", "https://gateway-staging.podster.dev.example.com"]) {
   const run = script(["--base-url", base], { PODSTER_E2E_SIGNUP_SECRET: secret });
   check(run.status === 2 && run.stderr.includes("Only https://gateway-staging.podster.dev"), `the script refuses ${base} before anything else`);
 }
 check(script(["--base-url", STAGING, "--yes"], { PODSTER_E2E_SIGNUP_SECRET: secret }).status === 2, "the script refuses an unknown flag");
+
+rmSync(fixtures, { recursive: true, force: true });
 
 console.log(failed ? `\n${failed} failed` : "\nM5 staging self-test: all passed");
 process.exit(failed ? 1 : 0);

@@ -53,7 +53,13 @@ if (options.help) {
 }
 const signupSecret = process.env.PODSTER_E2E_SIGNUP_SECRET;
 const operatorCookie = process.env.PODSTER_E2E_OPERATOR_COOKIE;
-const config = stagingConfig(parseJsonc(readFileSync(join(here, "../apps/api/wrangler.jsonc"), "utf8")).env?.staging?.vars);
+const config = (() => {
+  try {
+    return stagingConfig(parseJsonc(readFileSync(options.apiConfig ?? join(here, "../apps/api/wrangler.jsonc"), "utf8")).env?.staging?.vars);
+  } catch {
+    return { error: "the API's wrangler file couldn't be read" };
+  }
+})();
 const signUpsNeeded = operatorCookie ? SIGN_UPS.slice(0, 2) : SIGN_UPS;
 
 // ---- the plan, and the configuration, before anything is sent ----
@@ -205,7 +211,8 @@ chmodSync(askpass, 0o700);
 /** Runs git with no configuration but its own, and the token, when given, in its environment only. Output comes back scrubbed. */
 function git(args, { cwd = work, credential } = {}) {
   return new Promise((resolve) => {
-    const child = spawn("git", ["-c", "credential.helper=", ...args], { cwd, env: gitEnv({ home: work, askpass, credential }), stdio: ["ignore", "pipe", "pipe"] });
+    // No helper may keep the token, and no redirect may carry a request, and so the token, to another host.
+    const child = spawn("git", ["-c", "credential.helper=", "-c", "http.followRedirects=false", ...args], { cwd, env: gitEnv({ home: work, askpass, credential }), stdio: ["ignore", "pipe", "pipe"] });
     const out = { stdout: "", stderr: "" };
     child.stdout.on("data", (chunk) => (out.stdout += chunk));
     child.stderr.on("data", (chunk) => (out.stderr += chunk));
@@ -248,7 +255,29 @@ let delegated = false;
 let room;
 /** The room's repository: GitHub's ID, its full name, its default branch and its clone URL. */
 let repo;
-const made = [];
+/** Every repository that may now exist on GitHub because of this run, by full name, with why it's listed. */
+const made = new Map();
+function noteMade(name, why) {
+  const full = `${config.org}/${name}`;
+  if (!made.has(full)) say(`     a repository may now exist on GitHub: ${full} (${why})`);
+  made.set(full, why);
+}
+/**
+ * Asks for the room's repository. Any answer but a plain refusal is recorded at once, before any assertion about it,
+ * so clean-up names the repository even when the request was one this run expected to be refused.
+ */
+async function askRepository(body) {
+  let result;
+  try {
+    result = await owner.dash("POST", `/v1/workspaces/${room}/repository`, body);
+  } catch (error) {
+    noteMade(body.name, "a request's answer never came, so it may have been taken");
+    throw error;
+  }
+  if (result.ok) noteMade(result.body?.request?.name ?? body.name, "a request was accepted");
+  else if (result.status >= 500) noteMade(body.name, `a request answered HTTP ${result.status}, so it may have been taken`);
+  return result;
+}
 /** Each task: its ID, where it is, the agent's token for it, and its branch, pull request and commits once they exist. */
 const tasks = {};
 const grants = {};
@@ -339,7 +368,7 @@ try {
   }
 
   await check("M5-14", async () => {
-    refusedAs(await owner.dash("POST", repositoryPath, { name, visibility: "public" }), 403, "not_delegated", "asking without the delegation");
+    refusedAs(await askRepository({ name, visibility: "public" }), 403, "not_delegated", "asking without the delegation");
     const read = await owner.must("GET", repositoryPath);
     eq([read.request, read.repository], [null, null], "what the room holds afterwards");
   });
@@ -356,15 +385,14 @@ try {
 
   say("\n## the repository");
   await check("M5-04", async () => {
-    refusedAs(await owner.dash("POST", repositoryPath, { name, visibility: "public", organization: "another-organization" }), 400, "invalid_argument", "a request naming an organization");
-    refusedAs(await owner.dash("POST", repositoryPath, { name, visibility: "public", installation_id: 1 }), 400, "invalid_argument", "a request naming an installation");
+    refusedAs(await askRepository({ name, visibility: "public", organization: "another-organization" }), 400, "invalid_argument", "a request naming an organization");
+    refusedAs(await askRepository({ name, visibility: "public", installation_id: 1 }), 400, "invalid_argument", "a request naming an installation");
     eq((await owner.must("GET", repositoryPath)).request, null, "what the room holds afterwards");
   });
 
   const ready = await check("M5-01", async () => {
-    const asked = await owner.dash("POST", repositoryPath, { name, visibility: "public" });
+    const asked = await askRepository({ name, visibility: "public" });
     eq([asked.status, asked.body?.request?.state, asked.body?.request?.name, asked.body?.request?.visibility, asked.body?.repository], [200, "pending", name, "public", null], "the request as recorded");
-    made.push(`${config.org}/${name}`);
     const { value: read, seconds } = await within(options.setupWait, "the repository's setup", () => owner.must("GET", repositoryPath), (r) => r.request?.state !== "pending");
     eq([read.request.state, read.request.reason], ["ready", null], "the request's state and reason");
     const link = read.repository;
@@ -452,7 +480,10 @@ try {
     await commitIn(t1.dir, "direct");
     const pushed = await git(["push", "origin", `HEAD:refs/heads/${repo.defaultBranch}`], { cwd: t1.dir, credential: t1.token });
     const said = pushed.stdout + pushed.stderr;
-    eq([pushed.code !== 0, said.includes("[remote rejected]")], [true, true], "git push to the default branch was refused by GitHub itself");
+    // What git itself said of the refusal, already scrubbed, for when it isn't the refusal this expects.
+    const lines = said.split("\n").filter((line) => /^\s*!|^remote:|^error:|^fatal:/.test(line)).slice(0, 5).join(" | ").slice(0, 500);
+    ok(pushed.code !== 0, `git push to the default branch wasn't refused: git exited 0${lines ? `, saying: ${lines}` : ""}`);
+    ok(said.includes("[remote rejected]"), `git push failed (exit ${pushed.code}) without GitHub's "[remote rejected]", so it isn't shown that GitHub's rules refused it. git said: ${lines || "nothing"}`);
     eq(await tipOf(repo.defaultBranch), tipBefore, "the default branch's tip");
     return `git exited ${pushed.code}; GitHub's rule code GH013 ${said.includes("GH013") ? "named" : "not named"}`;
   });
@@ -529,11 +560,11 @@ try {
     have(approved, "the task wasn't approved");
     const grant = await give(watcher, "merge", { expires_at: Date.now() + 20_000 });
     eq([grant.state, grant.principal_id], ["live", watcher.id], "the short grant");
-    // Until two seconds past its expiry, a poll interval at a time.
-    while (Date.now() < grant.expires_at + 2000) await sleep(Math.min(POLL_MS, grant.expires_at + 2000 - Date.now()));
+    // The API's own clock decides, never this machine's: merge_task is only sent once the API lists the grant as
+    // expired. Sent a moment early on a skewed clock, it would be a real merge by a live grant.
+    const { seconds } = await within(90, "the API listing the short grant as expired", () => listedGrant(grant.id), (listed) => listed?.state === "expired");
     refusedCode(await askMerge(watcher, t1), "grant_expired", "asking on an expired grant");
-    eq((await listedGrant(grant.id))?.state, "expired", "the grant as listed");
-    return `grant ${grant.id}`;
+    return `grant ${grant.id}, listed as expired after ${seconds} s`;
   });
 
   await check("M5-10d", async () => {
@@ -704,14 +735,21 @@ try {
 }
 
 tally.skipRest(stopped ? "not reached: the run stopped" : "not reached");
+// What the room holds now, whatever the checks made of it: a retried setup would carry a name of the server's own.
+if (owner && room) {
+  const held = await owner.dash("GET", `/v1/workspaces/${room}/repository`).catch(() => null);
+  if (held?.body?.request?.name) noteMade(held.body.request.name, "the room holds a request for it");
+  const full = held?.body?.repository?.full_name;
+  if (typeof full === "string" && !made.has(full)) made.set(full, "the room is linked to it");
+}
 const left = await cleanUp();
 
 say("\n## clean-up");
-if (made.length) {
+if (made.size) {
   say("This run can't delete what it made on GitHub: the product has no delete, and the script holds no credential that could.");
-  say("For the owner to archive or delete, at github.com:");
-  for (const full of made) say(`  - ${full}`);
-} else say("No repository was asked for.");
+  say("For the owner to look for, and archive or delete, at github.com:");
+  for (const [full, why] of made) say(`  - ${full} (${why})`);
+} else say("No request for a repository was accepted or left unanswered, and the room holds none, so this run made none.");
 say(`The room ${room ?? "(none)"} and its tasks stay on staging, as every run's do. ${signUpsTaken} test sign-ups were taken, and ${publicReads} reads of GitHub without a credential.`);
 
 const failed = tally.ids("fail");

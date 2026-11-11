@@ -57,27 +57,30 @@ export const PLAN = [
 const WAITS = { "--setup-wait-s": ["setupWait", 240], "--merge-wait-s": ["mergeWait", 180], "--observe-wait-s": ["observeWait", 420], "--revoke-wait-s": ["revokeWait", 180] };
 
 export const USAGE = `node m5-staging.mjs --base-url ${STAGING} [--dry-run]
-    [--setup-wait-s N] [--merge-wait-s N] [--observe-wait-s N] [--revoke-wait-s N]
+    [--setup-wait-s N] [--merge-wait-s N] [--observe-wait-s N] [--revoke-wait-s N] [--api-config FILE]
 
   --dry-run   check the configuration and print the plan. Sends nothing anywhere.
   The waits bound, in seconds, the repository's setup (240), a merge (180), Podster noticing a moved head (420)
   and a token's revocation (180). Each is 10 to 1800.
+  --api-config   the API's wrangler file, which names staging's GitHub organization and merge App.
+                 It defaults to apps/api/wrangler.jsonc.
 
   PODSTER_E2E_SIGNUP_SECRET     staging's test sign-up secret. Needed.
   PODSTER_E2E_OPERATOR_COOKIE   an operator's session, instead of the fixed test operator. Optional.`;
 
 /** The arguments, or why they're refused. Nothing is guessed: an unknown flag or a missing value is an error. */
 export function parseArgs(argv, env = {}) {
-  const options = { base: undefined, dryRun: false, help: false };
+  const options = { base: undefined, dryRun: false, help: false, apiConfig: undefined };
   for (const [key, fallback] of Object.values(WAITS)) options[key] = fallback;
   for (let at = 0; at < argv.length; at++) {
     const flag = argv[at];
     if (flag === "--dry-run") options.dryRun = true;
     else if (flag === "--help" || flag === "-h") options.help = true;
-    else if (flag === "--base-url" || WAITS[flag]) {
+    else if (flag === "--base-url" || flag === "--api-config" || WAITS[flag]) {
       const value = argv[++at];
       if (value === undefined || value.startsWith("--")) return { error: `${flag} needs a value` };
       if (flag === "--base-url") options.base = value;
+      else if (flag === "--api-config") options.apiConfig = value;
       else {
         if (!/^\d+$/.test(value) || Number(value) < 10 || Number(value) > 1800) return { error: `${flag} takes whole seconds from 10 to 1800` };
         options[WAITS[flag][0]] = Number(value);
@@ -112,12 +115,15 @@ export function secretProblem(secret) {
   return secret.length < 32 ? "PODSTER_E2E_SIGNUP_SECRET is shorter than the 32 characters the gateway wants" : null;
 }
 
-/** What the run needs from staging's own configuration, `env.staging.vars` of apps/api/wrangler.jsonc, or why it can't run. */
+/**
+ * What the run needs from staging's own configuration, `env.staging.vars` of the API's wrangler file, or why it can't
+ * run: the organization and the merge App, to compare GitHub's answers with. Whether managed repositories are switched
+ * on isn't read from the file. The run asks staging, and stops with exit code 3 when they're off.
+ */
 export function stagingConfig(vars = {}) {
-  if (vars.MANAGED_REPOSITORIES !== "true") return { error: "apps/api/wrangler.jsonc doesn't switch MANAGED_REPOSITORIES on for staging" };
   const [org, orgId, mergeAppId] = [vars.GITHUB_ORG_LOGIN, Number(vars.GITHUB_ORG_ID), Number(vars.GITHUB_MERGE_APP_ID)];
   if (!org || !/^[A-Za-z0-9-]+$/.test(org) || !Number.isInteger(orgId) || orgId <= 0 || !Number.isInteger(mergeAppId) || mergeAppId <= 0) {
-    return { error: "apps/api/wrangler.jsonc doesn't name staging's GitHub organization, its ID and the merge App's ID" };
+    return { error: "the API's wrangler file doesn't name staging's GitHub organization, its ID and the merge App's ID" };
   }
   return { org, orgId, mergeAppId };
 }
@@ -185,11 +191,15 @@ export function scrub(text, secrets = []) {
 /** The one name the repository token travels under, to the `git` child and nowhere else. */
 export const CREDENTIAL_ENV = "M5_GIT_ANSWER";
 
-/** What git runs to ask for a name and a password. It holds no token: it prints the one in its environment. */
+/**
+ * What git runs to ask for a name and a password. It holds no token: it prints the one in its environment, and only to
+ * git's two questions about github.com itself. Any other question, for another host or another name, gets no answer.
+ */
 export const ASKPASS_SCRIPT = `#!/bin/sh
 case "$1" in
-  Username*) printf '%s\\n' x-access-token ;;
-  *) printf '%s\\n' "$${CREDENTIAL_ENV}" ;;
+  "Username for 'https://github.com': ") printf '%s\\n' x-access-token ;;
+  "Password for 'https://x-access-token@github.com': ") printf '%s\\n' "$${CREDENTIAL_ENV}" ;;
+  *) exit 1 ;;
 esac
 `;
 
@@ -249,10 +259,12 @@ export function mergeCommitProblems(commit, { tipBefore, reviewed }) {
 /** What's wrong with a commit's statuses: exactly one for the review context, a success, created by the merge App's bot. */
 export function reviewStatusProblems(statuses, slug = MERGE_APP_SLUG) {
   const ours = (Array.isArray(statuses) ? statuses : []).filter((s) => s.context === STATUS_CONTEXT);
-  if (ours.length !== 1) return [`${ours.length} ${STATUS_CONTEXT} statuses, not 1`];
+  // More than one is a different finding from a wrong creator: it's what a merge job that ran twice leaves.
+  if (ours.length > 1) return [`${ours.length} ${STATUS_CONTEXT} statuses were found, not 1, as a retried merge job would leave: ${ours.map((s) => `${s.state} by ${s.creator?.login ?? "nobody"}`).join(", ")}`];
+  if (ours.length === 0) return [`no ${STATUS_CONTEXT} status was found`];
   const [{ state, creator }] = ours;
   const seen = [state, creator?.login, creator?.type];
-  return JSON.stringify(seen) === JSON.stringify(["success", `${slug}[bot]`, "Bot"]) ? [] : [`the status is ${state} by ${creator?.login ?? "nobody"} (${creator?.type ?? "unknown"})`];
+  return JSON.stringify(seen) === JSON.stringify(["success", `${slug}[bot]`, "Bot"]) ? [] : [`the one status is ${state} by ${creator?.login ?? "nobody"} (${creator?.type ?? "unknown"})`];
 }
 
 /**

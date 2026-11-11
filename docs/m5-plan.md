@@ -589,7 +589,8 @@ Three person-only routes on the room's Durable Object, the two cascades, and the
 - **One exact answer per assertion:** a status and a code for a person, and a code for an agent, since MCP carries no HTTP status. No check accepts one of several answers. The statuses GitHub itself gives the agent's token (`409`, `422`, `405`, `403`, `401`) are the ones [the spike](../spikes/m5-github/README.md#results-merge-restriction) saw.
 - **The token** goes to `git` in a child process with `e2e/child-env.mjs`'s allow-listed environment and a home directory of its own, under one name in that environment. It's never printed, never on a command line and never written to a file. The script holds no App key.
 - **A check that can't run says `SKIP`,** with its reason, and is counted. The run exits 0 only if nothing failed. Before the gate is called, a skip needs its own answer.
-- **It can't clean up GitHub.** Podster has no delete, so each run leaves one public repository, `e2e-m5-<time>-<4 hex>`, with two pull requests. The script prints the name for the owner to archive or delete.
+- **It can't clean up GitHub.** Podster has no delete, so each run leaves one public repository, `e2e-m5-<time>-<4 hex>`, with two pull requests. The script prints the name for the owner to archive or delete, as soon as any request for it is accepted or goes unanswered, and again at the end.
+- **What M5-G1 leaves in the room:** person review switched on, a publicly claimable opening named Observer, and the claimant as a participant through its public claim. The room is made private again, and the delegation is taken back.
 
 | Check | What it shows on staging | From |
 | --- | --- | --- |
@@ -611,7 +612,7 @@ Three person-only routes on the room's Durable Object, the two cascades, and the
 | M5-10a | A merge-grant holder asking before approval is refused `not_approved` | M5-10 |
 | M5-10b | After approval, the submitter and the person who controls it, each holding a merge grant, are refused `self_merge` (`403` for the person) | M5-10 |
 | M5-10c | An agent another person controls, with the task approved and no merge grant, is refused `grant_required`. Staging has never exercised this | M5-10 |
-| M5-G3 | A merge grant past its expiry is refused `grant_expired`, and is listed `expired` | Step 5b |
+| M5-G3 | A merge grant past its expiry is refused `grant_expired`. The script waits until the API lists it `expired`, by the API's clock, before it asks | Step 5b |
 | M5-10d | Approval and every refusal merged nothing: the merge is `not_requested` and the default branch hasn't moved | AC-17 |
 | M5-09a | The grant holder's `merge_task` is recorded `requested`, and the merge `succeeded` within the wait | M5-09 |
 | M5-09b | On GitHub the default branch's tip is the recorded merge commit, whose parents are the old tip and exactly the reviewed commit | M5-09 |
@@ -627,6 +628,8 @@ Three person-only routes on the room's Durable Object, the two cascades, and the
 
 **What it leaves out, each still owed before the gate or covered elsewhere:**
 
+- **"Nothing reaches GitHub" can't be seen from outside.** M5-05 and M5-14 each say a refused call sends GitHub nothing. The script sees only Podster's refusal, and for M5-14 that the room records no request. Whether a call went out is shown only by the API's tests against the fake.
+- **"A room without Git creates none"** (the rest of M5-01) is only M5-00: Podster's own read of a room that hasn't asked says it has no request and no repository. The script doesn't look in `podsterdev` for a repository that shouldn't be there.
 - **M5-03 and M5-15:** a timed-out, failed or retried setup. The script never breaks GitHub to cause one.
 - **The rest of M5-06:** another repository, a workflow file and creating a ruleset. **The rest of M5-07:** a removed agent, and how long its token works. **The rest of M5-08:** approval refused after the branch advances. **The rest of M5-09:** a request that lands before Podster notices the moved head and fails in the job, which is M5-S7viii locally.
 - **M5-11's bad signature and M5-16:** `scripts/staging-probes` checks an unsigned delivery. A replayed or misdirected delivery needs the webhook secret, which the script never holds.

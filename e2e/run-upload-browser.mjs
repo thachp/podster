@@ -12,6 +12,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { join } from "node:path";
 import * as playwright from "playwright";
+import { childEnv } from "./child-env.mjs";
 import { parseJsonc } from "./jsonc.mjs";
 import { key, Person, Target } from "./lib.mjs";
 import { freePort, local, prepareStack, repo, run, startGateway, startWrangler } from "./stack.mjs";
@@ -94,7 +95,8 @@ async function main() {
   const refused = join(local, "setup.exe");
   writeFileSync(refused, "not really a program\n");
 
-  const browser = await playwright[browserName].launch();
+  // The browser is someone else's program, so it gets the allow-listed environment and nothing of ours.
+  const browser = await playwright[browserName].launch({ env: childEnv() });
   const context = await browser.newContext();
   const page = await context.newPage();
   await page.goto(`${app}/sign-in`);

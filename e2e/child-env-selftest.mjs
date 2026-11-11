@@ -36,5 +36,17 @@ check(uses("./run-a2a-kit.mjs", /spawn\(join\(kit, "\.venv\/bin\/python"\), args
 check(uses("./run-fasta2a-check.mjs", /env: childEnv\(\{ RUN_SECONDS \}\)/), "fasta2a starts with it");
 check(uses("./run-langgraph-check.mjs", /env: childEnv\(\{ LANGGRAPH_CLI_NO_ANALYTICS/), "LangGraph starts with it");
 check(uses("./a2a-roundtrip.mjs", /chromium\.launch\(\{ env: childEnv\(\) \}\)/) && !uses("./a2a-roundtrip.mjs", /chromium\.launch\(\)/), "the staging browser starts with it");
+// Every browser these scripts start, wherever it is: a launch without the allow-listed environment inherits everything of ours.
+import { readdirSync } from "node:fs";
+const scripts = readdirSync(new URL(".", import.meta.url)).filter((name) => name.endsWith(".mjs") && name !== "child-env-selftest.mjs");
+const launches = scripts.flatMap((name) => {
+  const source = readFileSync(new URL(name, import.meta.url), "utf8");
+  return [...source.matchAll(/\.(launch|launchPersistentContext|launchServer)\(([^\n]*)/g)].map((found) => ({ name, call: `${found[1]}(${found[2]}`.slice(0, 60), listed: /^\{ env: childEnv\(/.test(found[2]) && !/process\.env/.test(found[2]) }));
+});
+check(launches.length >= 3, `the browsers these scripts start were found (${launches.length})`);
+for (const launch of launches.filter((found) => !found.listed)) check(false, `${launch.name} starts a browser with the full environment: ${launch.call}`);
+check(launches.every((found) => found.listed), "every browser starts with the allow-listed environment");
+// And the script that starts one for the accessibility run, which run-a11y.mjs starts in turn.
+check(uses("./run-a11y.mjs", /args: \[join\(here, "a11y\.mjs"\)\],\s*options: \{[^\n]*env: childEnv\(/) && !uses("./run-a11y.mjs", /\.\.\.process\.env/), "a11y.mjs starts with it, and its own named settings");
 console.log(failed ? `${failed} failed` : "child-env selftest passed");
 process.exit(failed ? 1 : 0);

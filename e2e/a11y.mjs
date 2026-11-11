@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import * as playwright from "playwright";
 import { seedInputAssets } from "./asset-fixture.mjs";
 import { bounded, boundMethods, waitingFor } from "./bounded.mjs";
+import { childEnv } from "./child-env.mjs";
 import { AuthAgent, key, ok, Person, Target } from "./lib.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -451,7 +452,8 @@ ok(["chromium", "firefox", "webkit"].includes(browserName), `There's no browser 
 // Safari's Tab skips links and buttons unless someone turns on full keyboard access, and Option-Tab reaches them either way.
 const TAB = browserName === "webkit" ? "Alt+Tab" : "Tab";
 const SHIFT_TAB = browserName === "webkit" ? "Alt+Shift+Tab" : "Shift+Tab";
-const browser = await playwright[browserName].launch();
+// The browser is someone else's program, so it gets the allow-listed environment and nothing of ours.
+const browser = await playwright[browserName].launch({ env: childEnv() });
 console.log(`browser: ${browserName} ${browser.version()}`);
 const newContext = () => browser.newContext({ reducedMotion: "reduce", viewport: { width: 1280, height: 900 } });
 const signedOut = await newContext();

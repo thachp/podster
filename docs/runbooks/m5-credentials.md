@@ -61,7 +61,8 @@ From ADR 0009, the review and the code. "Verified" is the spike's or the staging
 ### `GITHUB_WEBHOOK_SECRET`
 
 - Sign deliveries the gateway accepts. A delivery is a nudge: it carries IDs and one commit ID, and Podster records only what its own read of GitHub shows.
-- At most: cause reads of a repository's pull requests, up to 60 an hour for a room, each about three GitHub calls on the shared installation, and so slow down what Podster notices; put a change the refresh job gave up on back on watch ([C-10](../security/m5-review.md#credentials-github-and-webhooks)); and learn by timing which repository IDs are managed.
+- At most: cause reads of a repository's pull requests, up to 60 an hour for a room, each about three GitHub calls on the shared installation, and so slow down what Podster notices; and put a change the refresh job gave up on back on watch ([C-10](../security/m5-review.md#credentials-github-and-webhooks)).
+- Not from either review: the plan's [threat model](../m5-plan.md#threat-model) records, as accepted, that a holder can learn by timing which repository IDs are managed. Nobody measured it.
 - Not: change a task, a grant, a merge or a link.
 - A captured genuine delivery can be replayed until the secret changes, since a delivery carries no time ([C-11](../security/m5-review.md#credentials-github-and-webhooks)). The room takes one body once.
 
@@ -93,6 +94,8 @@ Rotating a key doesn't end tokens already minted with the old one. Each lives ou
 
 A token lives at most an hour, so the old key is needed for an hour after the change. The code tries the current key first and then the previous one to open a sealed token, and seals with the current key only.
 
+**Precondition: the owner still has the current key's value.** A Worker secret can't be read back, so the owner keeps each value somewhere safe at the time it's set. If the value is gone, use the [fallback](#if-the-current-keys-value-is-gone) below.
+
 1. **Owner:** set `REPO_TOKEN_KEY_PREVIOUS` to the current key.
 2. **Owner:** set `REPO_TOKEN_KEY` to the new key, 64 hex characters such as `openssl rand -hex 32` prints.
 3. Wait at least 65 minutes.
@@ -109,6 +112,15 @@ cd apps/api && npx wrangler secret put REPO_TOKEN_KEY --env staging
 ```bash
 cd apps/api && npx wrangler secret delete REPO_TOKEN_KEY_PREVIOUS --env staging
 ```
+
+#### If the current key's value is gone
+
+It can't be copied to `REPO_TOKEN_KEY_PREVIOUS`, so once a new key is set, tokens sealed under the old one can't be opened or revoked and live out their hour. To avoid that, let them end first, while the old key is still set on the Worker:
+
+1. Switch managed repositories off, as in [what the switch does](#what-the-switch-does-and-doesnt-stop). Nothing new is sealed, and each room revokes what it holds with the key that's still set.
+2. Wait at least 65 minutes.
+3. **Owner:** set the new `REPO_TOKEN_KEY`, and keep its value.
+4. Switch back on.
 
 What can go wrong, by the code:
 
@@ -156,12 +168,13 @@ Contain first, then rotate, then check. Write down the time each step is done, i
 1. **Contain. Owner:** delete the leaked key in the App's settings on GitHub. If the App has only that key, GitHub wants a new one generated first. How soon a deleted key stops signing is **unverified**.
 2. **Contain. Owner:** if tokens minted with it may be in use, suspend that App's installation. Without that, such tokens live up to an hour from their minting, and Podster can't revoke tokens it doesn't hold. With it, that role stops for every room: no new repositories (provisioning), no agent tokens and none of Podster's reads (agent-token), no merges (merge).
 3. **For the provisioning key, also:** assume rules may have been removed. Until the checks below are done, a merge in an affected repository isn't safe. Podster reads the rules back before each merge and stops if they differ, but it doesn't read the settings in [C-8](../security/m5-review.md#credentials-github-and-webhooks). Consider switching managed repositories off until the check is done.
-4. **Rotate:** set the new key as the role's secret, as in [routine rotation](#an-apps-private-key), and lift the suspension. **Owner.**
-5. **Check afterwards,** [below](#checking-afterwards).
+4. **Rotate:** set the new key as the role's secret, as in [routine rotation](#an-apps-private-key). **Owner.**
+5. **Lift the suspension. Owner.** **Not before 60 minutes after the leaked key was deleted.** An installation token lives up to an hour, and whether suspension ends live tokens or only blocks them while it lasts is unverified, so a token minted with the leaked key might work again once the suspension is lifted. This wait is a precaution resting on a GitHub behaviour nobody has tried.
+6. **Check afterwards,** [below](#checking-afterwards).
 
 ### The repository token key
 
-A leak of `REPO_TOKEN_KEY` alone opens nothing. If the room's storage may have leaked too, go to [everything at once](#the-api-worker-or-several-secrets-at-once). Otherwise rotate it as in [routine rotation](#repo_token_key), keeping the leaked key as `REPO_TOKEN_KEY_PREVIOUS` for the 65 minutes, since it's still needed to revoke what was sealed with it.
+A leak of `REPO_TOKEN_KEY` alone opens nothing. If the room's storage may have leaked too, go to [everything at once](#the-api-worker-or-several-secrets-at-once). Otherwise rotate it as in [routine rotation](#repo_token_key), keeping the leaked key as `REPO_TOKEN_KEY_PREVIOUS` for the 65 minutes, since it's still needed to revoke what was sealed with it. That needs the leaked key's value, which the owner must have kept; if it's gone, follow [the fallback](#if-the-current-keys-value-is-gone).
 
 ### The webhook secret
 
@@ -173,9 +186,10 @@ The private API Worker holds every key, and its rooms hold the sealed tokens.
 
 1. **Contain. Owner:** suspend all three installations on GitHub.
 2. Switch managed repositories off, as [above](#what-the-switch-does-and-doesnt-stop).
-3. **Owner:** delete every App key on GitHub and generate new ones. Set them, a new `REPO_TOKEN_KEY` with the old one as `REPO_TOKEN_KEY_PREVIOUS`, and a new `GITHUB_WEBHOOK_SECRET`.
+3. **Owner:** delete every App key on GitHub and generate new ones. Set them, a new `REPO_TOKEN_KEY` with the old one as `REPO_TOKEN_KEY_PREVIOUS`, and a new `GITHUB_WEBHOOK_SECRET`. If the old sealing key's value wasn't kept, wait 65 minutes after switching off before setting the new one, as in [the fallback](#if-the-current-keys-value-is-gone).
 4. The Worker's other secrets (`ASSERTION_KEYS`, `SCANNER_SECRET`, `A2A_TOKEN_KEY`, `OPERATORS`) are outside this runbook and need the same thought.
-5. Check afterwards, then lift the suspensions and switch back on.
+5. Check afterwards.
+6. **Lift the suspensions and switch back on. Owner.** **Not before 60 minutes after the last leaked key was deleted.** An installation token lives up to an hour, and whether suspension ends live tokens or only blocks them while it lasts is unverified, so a token minted with the leaked key might work again once the suspension is lifted. This wait is a precaution resting on a GitHub behaviour nobody has tried.
 
 ## Checking afterwards
 

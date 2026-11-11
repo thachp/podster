@@ -49,7 +49,7 @@ ADR 0009 [proposes](../adr/0009-managed-repositories.md#public-repositories-fork
 | Writes stopped, content stays public | **Archive it** | Read-only, still public. ADR 0009's action for a room that's been removed, not for a takedown |
 | Content gone | **Delete it** | Removed. ADR 0009's proposal is that nothing is deleted, so this is the owner's call each time |
 
-Why private and archived together: private alone doesn't stop writes. An agent's token still reaches a private repository, and on the Free plan a private repository's rulesets may stop being enforced, so the default branch may lose its protection. That's **unverified**; ADR 0009 lists it. Do private first: whether an archived repository's visibility can still be changed wasn't checked.
+Why private and archived together: private alone doesn't stop writes. An agent's token is expected to still reach a private repository, since the App's installation covers every repository in the organization whatever its visibility; that's from GitHub's documentation and untried. On the Free plan a private repository's rulesets may stop being enforced, so the default branch may lose its protection. That's **unverified**; ADR 0009 lists it. Do private first: whether an archived repository's visibility can still be changed wasn't checked.
 
 **What doesn't exist on GitHub either:**
 
@@ -73,6 +73,8 @@ Podster isn't told about any of this. By reading the code; none of it was tried.
 | Deleted | The read-back can't be made, so the job waits, counted against its attempts, and never degrades the link. **The link stays `ready`** indefinitely | Each call tries to mint, GitHub refuses, and the agent gets `502 provider_unavailable`. Nothing is minted |
 
 So the room keeps offering push tokens until a merge attempt degrades the link, and for a deleted repository it keeps trying for good.
+
+Two fixes are assigned and not on `main`: one that lets Podster notice a deleted repository, and one that lets an operator's recheck degrade a healthy link. Until they land, this procedure stands as written.
 
 **Held tokens after a degrade** aren't revoked at once ([C-2](../security/m5-review.md#credentials-github-and-webhooks)). The room marks them at its next alarm, which may be as late as the token's expiry, up to an hour.
 
@@ -105,4 +107,4 @@ Where takedown records are kept isn't decided. This repository is not the place 
 
 - **Read in the code:** every statement about Podster above.
 - **Read in GitHub's documentation on 2026-11-11:** the revoke call ends only the calling token; archiving makes a repository's code, branches, tags, pull requests and releases read-only; an organization's owner can suspend or uninstall an App's installation and change which repositories it reaches.
-- **Not verified:** that archiving leaves visibility as it was; whether an archived repository's visibility can be changed; what a private repository on the Free plan does to rulesets and to Podster's read-back; what GitHub answers a token mint for an archived or deleted repository; forks; whether a deleted repository can be restored; and the whole procedure end to end.
+- **Not verified, and to confirm on staging:** that an agent's token still reaches a repository made private, and can write to it; that archiving leaves visibility as it was; whether an archived repository's visibility can be changed; what a private repository on the Free plan does to rulesets and to Podster's read-back; what GitHub answers a token mint for an archived or deleted repository; forks; whether a deleted repository can be restored; and the whole procedure end to end.

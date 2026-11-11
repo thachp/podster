@@ -1208,7 +1208,7 @@ describe("the room migration", () => {
     const newest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
     await inRoom(r.id, (sql) => {
       // The newest step, the M5 security review's two columns, comes off first.
-      for (const [table, column] of [["repo_link", "gone_seen_at"], ["repo_request", "limited_since"]]) sql.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+      for (const [table, column] of [["repo_link", "gone_seen_at"], ["repo_request", "limited_since"], ["repo_request", "limited_call"]]) sql.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
       sql.exec("UPDATE schema_version SET version = version - 1");
       // M5 step 7b's merge bookkeeping comes off next.
       sql.exec("DROP TABLE merge_request");

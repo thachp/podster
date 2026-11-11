@@ -989,7 +989,6 @@ impl Workspace {
                 json!({ "event": "merge.token_unrevoked", "ws": room })
             );
         }
-        let present = matches!(&read_back, Ok((observed, _)) if observed.present);
         let verdict = match read_back {
             Err(failure) => Readiness::CouldNotRead(failure.status()),
             Ok((observed, described)) => match verify_ready(&expected, &observed) {
@@ -1006,9 +1005,9 @@ impl Workspace {
         let look = self.in_transaction(move |sql| {
             let now = now_ms();
             if !gone {
-                if present {
-                    exec(sql, "UPDATE repo_link SET gone_seen_at = NULL WHERE provider_repo_id = ? AND gone_seen_at IS NOT NULL", vec![repo_id.into()])?;
-                }
+                // Anything but "gone" again clears a first sighting, a read that couldn't be made included: the confirming
+                // look either degrades or clears, so a pending sighting costs at most one more read.
+                exec(sql, "UPDATE repo_link SET gone_seen_at = NULL WHERE provider_repo_id = ? AND gone_seen_at IS NOT NULL", vec![repo_id.into()])?;
                 return Ok(None);
             }
             let first = rows(sql, "SELECT gone_seen_at FROM repo_link WHERE provider_repo_id = ?", vec![repo_id.into()])?

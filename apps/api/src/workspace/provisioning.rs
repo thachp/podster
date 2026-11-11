@@ -339,12 +339,12 @@ pub(super) fn retry(
     match plan {
         RetryPlan::ResumeHeldRepository => exec(
             sql,
-            "UPDATE repo_request SET state = ?, reason = NULL, limited_since = NULL, updated_at = ? WHERE id = ?",
+            "UPDATE repo_request SET state = ?, reason = NULL, limited_since = NULL, limited_call = NULL, updated_at = ? WHERE id = ?",
             vec![RequestState::Pending.name().into(), now.into(), id.as_str().into()],
         )?,
         RetryPlan::CreateUnderNewName => exec(
             sql,
-            "UPDATE repo_request SET state = ?, reason = NULL, limited_since = NULL, provider_repo_id = NULL, provider_name = ?, attempt = attempt + ?, updated_at = ? WHERE id = ?",
+            "UPDATE repo_request SET state = ?, reason = NULL, limited_since = NULL, limited_call = NULL, provider_repo_id = NULL, provider_name = ?, attempt = attempt + ?, updated_at = ? WHERE id = ?",
             vec![
                 RequestState::Pending.name().into(),
                 new_name.unwrap_or_default().as_str().into(),
@@ -412,7 +412,7 @@ fn finish(
     };
     exec(
         sql,
-        "UPDATE repo_request SET state = ?, reason = ?, retry_after = ?, job_failures = 0, job_not_before = NULL, limited_since = NULL, updated_at = ? WHERE id = ?",
+        "UPDATE repo_request SET state = ?, reason = ?, retry_after = ?, job_failures = 0, job_not_before = NULL, limited_since = NULL, limited_call = NULL, updated_at = ? WHERE id = ?",
         vec![
             state.name().into(),
             reason.into(),
@@ -704,7 +704,7 @@ impl Workspace {
                 }
                 exec(
                     sql,
-                    "UPDATE repo_request SET runs = max(runs - 1, 0), job_failures = ?, job_not_before = ?, limited_since = NULL WHERE id = ?",
+                    "UPDATE repo_request SET runs = max(runs - 1, 0), job_failures = ?, job_not_before = ?, limited_since = NULL, limited_call = NULL WHERE id = ?",
                     vec![(waits + 1).into(), (now + SETUP_GONE_WAIT_MS).into(), id.as_str().into()],
                 )?;
                 Ok(true)
@@ -725,11 +725,14 @@ impl Workspace {
             // day from its first limit. Then it ends, still without spending the run.
             let id = request_id.clone();
             let primary_403 = ended.primary_403;
+            // Which call was limited, by the refusal it would be: the creation token, the creation call, a setup call or
+            // the read-back. Only that same call answering a spent limit again counts as a refusal.
+            let call = ended.otherwise;
             let decided = self.in_transaction(move |sql| {
                 let now = now_ms();
                 let Some(row) = rows(
                     sql,
-                    "SELECT limited_since, job_not_before FROM repo_request WHERE id = ? AND state = ?",
+                    "SELECT limited_since, limited_call, job_not_before FROM repo_request WHERE id = ? AND state = ?",
                     vec![id.as_str().into(), RequestState::Pending.name().into()],
                 )?
                 .into_iter()
@@ -737,8 +740,11 @@ impl Workspace {
                     return Ok(None);
                 };
                 let since = row["limited_since"].as_i64();
-                // The last limit's wait, if this run follows one: it's over, since the job ran.
-                let held = since.and(row["job_not_before"].as_i64());
+                // The last limit's wait, if this run follows a limit of this same call: it's over, since the job ran.
+                let same_call = row["limited_call"].as_str() == Some(call);
+                let held = since
+                    .filter(|_| same_call)
+                    .and(row["job_not_before"].as_i64());
                 if limit_repeated_after_reset(primary_403, held, now) {
                     return Ok(Some(Limited::Refused));
                 }
@@ -752,8 +758,8 @@ impl Workspace {
                 }
                 exec(
                     sql,
-                    "UPDATE repo_request SET limited_since = COALESCE(limited_since, ?1), job_not_before = ?2 WHERE id = ?3",
-                    vec![now.into(), (now + wait_ms).into(), id.as_str().into()],
+                    "UPDATE repo_request SET limited_since = COALESCE(limited_since, ?1), limited_call = ?2, job_not_before = ?3 WHERE id = ?4",
+                    vec![now.into(), call.into(), (now + wait_ms).into(), id.as_str().into()],
                 )?;
                 Ok(Some(Limited::Waits))
             });
@@ -774,12 +780,13 @@ impl Workspace {
         let id = request_id.clone();
         let finished = self.in_transaction(move |sql| {
             finish(sql, &id, ended.state, reason, now_ms())?;
-            // A request that ended rate-limited keeps GitHub's last reset, so a retry's first call waits for it.
-            // `retry` leaves `job_not_before` alone, and the job never runs before it.
+            // A request that ended rate-limited takes a retry once GitHub's last reset has passed, and answers
+            // `retry_too_soon` with that time until then. `job_not_before` keeps it too, so even a retry taken right at it
+            // never calls GitHub sooner.
             if let Some(reset) = limited_end {
                 exec(
                     sql,
-                    "UPDATE repo_request SET job_not_before = ? WHERE id = ?",
+                    "UPDATE repo_request SET retry_after = ?1, job_not_before = ?1 WHERE id = ?2",
                     vec![reset.into(), id.as_str().into()],
                 )?;
             }
@@ -1112,7 +1119,7 @@ impl Workspace {
             )?;
             exec(
                 sql,
-                "UPDATE repo_request SET state = ?, reason = NULL, job_failures = 0, job_not_before = NULL, limited_since = NULL, updated_at = ? WHERE id = ?",
+                "UPDATE repo_request SET state = ?, reason = NULL, job_failures = 0, job_not_before = NULL, limited_since = NULL, limited_call = NULL, updated_at = ? WHERE id = ?",
                 vec![RequestState::Ready.name().into(), now.into(), id.as_str().into()],
             )?;
             audit_as(

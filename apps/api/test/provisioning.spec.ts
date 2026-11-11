@@ -1093,6 +1093,20 @@ describe("the provisioning job", () => {
     expect((await github()).repos).toEqual([]);
   });
 
+  it("counts a spent-limit 403 as a refusal only when the call that was limited answers it again", async () => {
+    // The creation call is limited, then goes through. A setup call then gets its own first spent-limit 403.
+    const r = await room({ script: { create: ["limited", "ok"], setupLimited: 1, setupLimit: { kind: "primary", seconds: 90 } } });
+    await ask(r);
+    await alarmPass(stub(r.id));
+    expect((await rowsOf(r.id, "repo_request"))[0]).toMatchObject({ state: "pending", limited_call: "provider_refused" });
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_request SET job_not_before = ?", Date.now() - 1));
+    await alarmPass(stub(r.id));
+    // Another call's limit history doesn't make this one a refusal: it waits, with the run given back.
+    expect((await rowsOf(r.id, "repo_request"))[0]).toMatchObject({ state: "pending", runs: 0, reason: null, limited_call: "setup_call_failed" });
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_request SET job_not_before = NULL"));
+    expect((await settled(r)).request).toMatchObject({ state: "ready", reason: null });
+  });
+
   it("waits and reads again when a repository it just created doesn't show by its ID yet, and never fails on that alone", async () => {
     const r = await room({ script: { readRepo: 404 } });
     await ask(r);
@@ -1109,7 +1123,7 @@ describe("the provisioning job", () => {
     expect((await github()).repos).toHaveLength(1);
   });
 
-  it("ends a request rate-limited for a day without spending a run, and a retry's first call waits for GitHub's reset", async () => {
+  it("ends a request rate-limited for a day without spending a run, and takes a retry only once GitHub's reset has passed", async () => {
     const r = await room({ script: { create: ["secondary", "ok"] } });
     await ask(r);
     // Limited since a day ago: short waits never end it early, only the day does.
@@ -1122,14 +1136,16 @@ describe("the provisioning job", () => {
     // GitHub's last reset is kept: a secondary limit with no time is a minute.
     expect(row.job_not_before).toBeGreaterThanOrEqual(before + 60_000);
     expect((await github()).repos).toEqual([]);
-    // The owner's retry is taken, but nothing goes to GitHub before that reset.
+    // Until that reset, a retry is refused as too soon, and nothing goes to GitHub.
+    expect(row.retry_after).toBe(row.job_not_before);
     await fake("/forget-calls");
-    expect((await retry(r)).status).toBe(200);
-    await alarmPass(stub(r.id));
+    const early = await retry(r, undefined, true);
+    expect([early.status, early.code]).toEqual([429, "retry_too_soon"]);
     expect(await calls()).toEqual([]);
-    expect((await read(r)).request.state).toBe("pending");
-    // Once it's passed, the retry goes on under the same name.
-    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_request SET job_not_before = NULL"));
+    // The reset passes: the owner's retry is taken.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_request SET retry_after = ?1, job_not_before = ?1", Date.now() - 1));
+    expect((await retry(r, undefined, true)).status).toBe(200);
+    // It goes on under the same name.
     expect((await settled(r)).request).toMatchObject({ state: "ready", reason: null });
     expect((await github()).repos.map((x) => x.name)).toEqual(["engineering"]);
   });

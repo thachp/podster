@@ -91,7 +91,7 @@ const REASONS: Record<string, string> = {
   unexpected_ruleset: "The repository has a rule Podster didn't set.",
   settings_differ: "The repository's issues, wiki, projects, discussions or merge settings aren't set the way Podster needs.",
   workflow_permissions_differ: "Workflows in the repository can write or approve pull requests, and Podster needs them read-only.",
-  provider_rate_limited: "GitHub kept limiting Podster's calls for a day, so setup stopped. No attempt was used up: a retry is taken, and it waits until GitHub's limit resets before it calls GitHub.",
+  provider_rate_limited: "GitHub kept limiting Podster's calls for a day, so setup stopped. No attempt was used up: a retry is taken once GitHub's limit resets.",
   retry_limit_reached: "Setup has run as many times as a workroom is allowed.",
   authority_lost: "The authority to set it up ended before setup finished.",
   internal_error: "Something went wrong in Podster.",
@@ -140,7 +140,7 @@ export function explainRepositoryRefusal(code: string, status = 400) {
     case "retry_limit_reached":
       return "Setup has run as many times as a workroom is allowed, and it can't be reset yet. Nothing changed.";
     case "retry_too_soon":
-      return "It's too soon to retry. Setup waits a minute after a run, doubling up to an hour. Nothing changed.";
+      return "It's too soon to retry. Setup waits a minute after a run, doubling up to an hour, and after GitHub's limit until it resets. Nothing changed.";
     case "repo_request_not_found":
       return "This workroom has no repository request to retry. Reload to see where it stands.";
     case "setup_in_progress":

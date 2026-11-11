@@ -445,6 +445,7 @@ describe("the delivery migration", () => {
       // The newest step, the M5 security review's two columns, comes off first.
       sql.exec("ALTER TABLE repo_link DROP COLUMN gone_seen_at");
       sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");
+      sql.exec("ALTER TABLE repo_request DROP COLUMN limited_call");
       sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE merge_request");
       sql.exec("ALTER TABLE task_change DROP COLUMN merge_finished_at");

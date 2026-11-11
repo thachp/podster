@@ -275,6 +275,7 @@ CREATE INDEX merge_request_at ON merge_request (at);
 ", "
 ALTER TABLE repo_link ADD COLUMN gone_seen_at INTEGER;
 ALTER TABLE repo_request ADD COLUMN limited_since INTEGER;
+ALTER TABLE repo_request ADD COLUMN limited_call TEXT;
 "];
 
 pub fn int(value: &Value) -> i64 {

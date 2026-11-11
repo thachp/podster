@@ -96,6 +96,7 @@ describe("the managed repositories migration", () => {
       // The newest step, the M5 security review's two columns, comes off first.
       sql.exec("ALTER TABLE repo_link DROP COLUMN gone_seen_at");
       sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");
+      sql.exec("ALTER TABLE repo_request DROP COLUMN limited_call");
       sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE merge_request");
       sql.exec("ALTER TABLE task_change DROP COLUMN merge_finished_at");
@@ -132,7 +133,7 @@ describe("the managed repositories migration", () => {
     // A read migrates the room.
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
     expect(await schemaVersion(id)).toBe(newest);
-    expect(await columns(id, "repo_request")).toEqual(["id", "singleton", "state", "name", "visibility", "attempt", "provider_name", "provider_repo_id", "reason", "requested_by", "requested_at", "updated_at", "runs", "retry_after", "job_failures", "job_not_before", "limited_since"]);
+    expect(await columns(id, "repo_request")).toEqual(["id", "singleton", "state", "name", "visibility", "attempt", "provider_name", "provider_repo_id", "reason", "requested_by", "requested_at", "updated_at", "runs", "retry_after", "job_failures", "job_not_before", "limited_since", "limited_call"]);
     expect(await columns(id, "repo_request_attempt")).toEqual(["request_id", "attempt", "provider_name", "outcome", "at"]);
     expect(await columns(id, "repo_link")).toEqual(["id", "singleton", "request_id", "provider", "provider_repo_id", "provider_org_id", "full_name", "visibility", "default_branch", "status", "status_reason", "created_by", "created_at", "verified_at", "updated_at", "indexed_at", "read_failures", "reads_not_before", "gone_seen_at"]);
     expect(await columns(id, "provider_grant")).toEqual(["id", "principal_id", "provider", "provider_repo_id", "action", "delegated_by", "created_at", "expires_at", "revoked_at", "revoked_by"]);

@@ -128,6 +128,8 @@ describe("the scheduled read-back of a ready link", () => {
     expect(await minted()).toEqual([expect.objectContaining({ token: r.token, live: false })]);
     expect(await tokens(r.id)).toEqual([]);
     expect(await events(r.id)).toEqual([{ type: "repository.degraded", reason: "ruleset_missing" }]);
+    // Degraded, nothing more is due for it, so the alarm doesn't come back for it.
+    await expectNoAlarmSooner(stub(r.id), QUIET_MS);
     // The read went through the provisioning App, counted against the repository's read cap, and left no token live.
     expect((await readBack()).reads.map((read) => read.path)).toContain(`/repositories/${REPO_ID}/rulesets/1`);
     expect((await readBack()).live).toBe(0);
@@ -224,12 +226,14 @@ describe("the scheduled read-back of a ready link", () => {
     await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET status = 'degraded', status_reason = 'ruleset_missing'"));
     await alarmPass(stub(r.id));
     expect((await readBack()).reads).toEqual([]);
+    await expectNoAlarmSooner(stub(r.id), QUIET_MS);
     await inRoom(r.id, (sql) => {
       sql.exec("UPDATE repo_link SET status = 'ready', status_reason = NULL");
       sql.exec("DROP TABLE test_managed_repositories_on");
     });
     await alarmPass(stub(r.id));
     expect((await readBack()).reads).toEqual([]);
+    await expectNoAlarmSooner(stub(r.id), QUIET_MS);
   });
 
   it("degrades a link whose repository was deleted, which a read can't otherwise tell from GitHub being down (item 11)", async () => {

@@ -46,8 +46,9 @@ type Script = {
   token?: number | Limited;
   /** How a provisioning token's answer differs from what was asked: extra_permission, other_repo, long_life, no_expiry. */
   tokenMode?: string;
-  /** A rate limit on the next N setup calls (rulesets and Actions), then answers as usual. */
+  /** A rate limit on the next N setup calls (rulesets and Actions), then answers as usual: `setupLimit`, or a secondary one with a 30 s wait. */
   setupLimited?: number;
+  setupLimit?: Limited;
   /** ignore: a workflow-permissions change says done and changes nothing. */
   workflowWrite?: string;
   /** A new repository's state, over GitHub's defaults: Actions on, an initial commit, no rulesets. */
@@ -378,7 +379,7 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
   if (rest === "/actions/permissions/workflow" && request.method === "GET") return json(repo.workflow ?? READ_ONLY_WORKFLOWS);
   if (request.method !== "GET" && (script.setupLimited ?? 0) > 0) {
     script.setupLimited = (script.setupLimited ?? 0) - 1;
-    return limitedAnswer({ kind: "secondary", seconds: 30 });
+    return limitedAnswer(script.setupLimit ?? { kind: "secondary", seconds: 30 });
   }
   if (rest === "/actions/permissions/workflow" && request.method === "PUT") {
     if (script.workflowWrite !== "ignore") repo.workflow = { default_workflow_permissions: body?.default_workflow_permissions, can_approve_pull_request_reviews: body?.can_approve_pull_request_reviews };

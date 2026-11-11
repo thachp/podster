@@ -496,11 +496,17 @@ pub enum GoneLook {
     Confirmed,
 }
 
-/// Two definite answers at least [`GONE_CONFIRM_MS`] apart make a repository gone (ruled by the architect,
-/// 2026-11-11). Any read that finds it in between clears the first, which the caller does.
+/// A first sighting older than this is no sighting: one `404`, then a long stretch with nothing read, then one more
+/// never adds up to "gone". Proposed.
+pub const GONE_SIGHTING_MAX_AGE_MS: i64 = 60 * 60 * 1000;
+
+/// Two definite answers at least [`GONE_CONFIRM_MS`] apart, and within [`GONE_SIGHTING_MAX_AGE_MS`] of each other,
+/// make a repository gone (ruled by the architect, 2026-11-11). The caller clears the first sighting on any other
+/// outcome of a later look, so the confirming look either degrades or clears it.
 pub fn gone_look(first_seen_at: Option<i64>, now: i64) -> GoneLook {
     match first_seen_at {
         None => GoneLook::FirstSeen,
+        Some(at) if now.saturating_sub(at) > GONE_SIGHTING_MAX_AGE_MS => GoneLook::FirstSeen,
         Some(at) if now.saturating_sub(at) < GONE_CONFIRM_MS => GoneLook::TooSoon,
         Some(_) => GoneLook::Confirmed,
     }
@@ -1173,6 +1179,15 @@ mod tests {
         assert_eq!(
             gone_look(Some(1_000), 1_000 + GONE_CONFIRM_MS),
             GoneLook::Confirmed
+        );
+        assert_eq!(
+            gone_look(Some(1_000), 1_000 + GONE_SIGHTING_MAX_AGE_MS),
+            GoneLook::Confirmed
+        );
+        // Older than that, it's a first sighting again.
+        assert_eq!(
+            gone_look(Some(1_000), 1_000 + GONE_SIGHTING_MAX_AGE_MS + 1),
+            GoneLook::FirstSeen
         );
     }
 

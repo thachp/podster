@@ -242,12 +242,17 @@ describe("an operator's recheck of a ready link (item 12)", () => {
   it("degrades it on a definite difference, in one command with its event, and its tokens go", async () => {
     const r = await room();
     await ready({ rulesets: "no_update" });
+    // GitHub refuses the revocation for now, so the marked row is there to read whether or not the runtime has run the
+    // alarm the command set.
+    await fake("/agent-repo", { id: REPO_ID, revoke: 500 });
     const got = await recheck(OPERATOR, r.id);
     expect(got.body).toEqual({ status: "degraded", reason: "ruleset_missing" });
     expect(await link(r.id)).toMatchObject({ status: "degraded", status_reason: "ruleset_missing" });
     expect(await events(r.id)).toEqual([{ type: "repository.degraded", reason: "ruleset_missing" }]);
     // Marked in the command's own transaction, and revoked by the room's alarm.
     expect(await tokens(r.id)).toEqual(["revoke"]);
+    await fake("/agent-repo", { id: REPO_ID, revoke: 204 });
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_token SET revoke_next_at = 0"));
     await alarmPass(stub(r.id));
     expect(await minted()).toEqual([expect.objectContaining({ token: r.token, live: false })]);
     expect(await tokens(r.id)).toEqual([]);

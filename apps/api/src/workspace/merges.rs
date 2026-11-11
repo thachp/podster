@@ -497,7 +497,6 @@ struct Pass {
     target: Target,
     /// A merge call was already on record when this pass began, from this request or an earlier one.
     called: bool,
-    owner_holds: bool,
 }
 
 /// How a pass begins.
@@ -568,7 +567,6 @@ fn begin(
                 authorized,
                 target,
                 called,
-                owner_holds,
             }))),
             None => Ok(Begun::Nothing),
         },
@@ -586,16 +584,18 @@ enum Intent {
 
 /// Records what the job is about to ask of GitHub, in a transaction that first decides authority again from current
 /// rows. `set` names the columns the intent writes, with `?2` the time and `?4` the base commit seen.
+#[allow(clippy::too_many_arguments)]
 fn intend(
     sql: &SqlStorage,
     task_id: &str,
     pass: &Pass,
+    owner_holds: bool,
     step: &'static str,
     set: &str,
     base_sha: &str,
     now: i64,
 ) -> R<Intent> {
-    match authority(sql, task_id, pass.owner_holds, now)? {
+    match authority(sql, task_id, owner_holds, now)? {
         None => Ok(Intent::Gone),
         Some(Err(failure)) => Ok(Intent::Lost(failure)),
         // The same commit this pass read the pull request for, and no other.
@@ -1313,6 +1313,12 @@ impl Workspace {
         };
         // Mark: authority again and the intent, in one transaction; then the status on exactly the reviewed commit;
         // then that it was set.
+        // The owner's standing is asked again, not carried from the start of the pass: a grant counts only while its
+        // giver holds the delegation now. If it can't be read, nothing more is asked of GitHub in this pass.
+        let Some(owner_holds) = self.owner_holds().await else {
+            self.log_waiting(room, task_id, "standing", 0);
+            return Ok(());
+        };
         let intent = self.in_transaction({
             let (task, pass, base) = (
                 task_id.to_string(),
@@ -1324,6 +1330,7 @@ impl Workspace {
                     sql,
                     &task,
                     &pass,
+                    owner_holds,
                     "mark",
                     "merge_marked_at = ?2",
                     &base,
@@ -1363,6 +1370,12 @@ impl Workspace {
             return Ok(());
         }
         // Merge: authority again, the intent and the base seen, in one transaction; then the call; then what GitHub shows.
+        // The owner's standing is asked again, not carried from the start of the pass: a grant counts only while its
+        // giver holds the delegation now. If it can't be read, nothing more is asked of GitHub in this pass.
+        let Some(owner_holds) = self.owner_holds().await else {
+            self.log_waiting(room, task_id, "standing", 0);
+            return Ok(());
+        };
         let intent = self.in_transaction({
             let (task, pass, base) = (task_id.to_string(), pass.clone_for_intent(), base_seen);
             move |sql| {
@@ -1370,6 +1383,7 @@ impl Workspace {
                     sql,
                     &task,
                     &pass,
+                    owner_holds,
                     "merge",
                     "merge_called_at = ?2, merge_base_sha = ?4",
                     &base,
@@ -1546,7 +1560,6 @@ impl Pass {
             authorized: self.authorized.clone(),
             target: self.target.clone(),
             called: self.called,
-            owner_holds: self.owner_holds,
         }
     }
 }

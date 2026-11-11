@@ -155,11 +155,13 @@ async function room(options: { switchedOn?: boolean; grant?: boolean; accept?: b
   }
   await inRoom(id, (sql) => {
     sql.exec("UPDATE member SET joined_via = 'public' WHERE principal_id = ?", PUBLIC.id);
-    if (options.switchedOn !== false) sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)");
+    sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)");
     sql.exec("INSERT INTO repo_link (id, request_id, provider, provider_repo_id, provider_org_id, full_name, visibility, default_branch, status, created_by, created_at, verified_at, updated_at) VALUES ('rl_1', 'rr_1', 'github', ?, 4242, 'podster-test-org/engineering', 'public', 'main', 'ready', ?, 1000, 2000, 2000)", REPO_ID, OWNER.id);
   });
   let grant: string | undefined;
   if (options.grant !== false) grant = (await must(OWNER, "POST", `/v1/workspaces/${id}/repository/grants`, { policy_version: await version(id), principal_id: AGENT.id, action: "push" })).id;
+  // The grant route is there only while the switch is on, so a room that's off is switched off after its grant.
+  if (options.switchedOn === false) await inRoom(id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
   const task = await newTask(id, options.assignee ?? AGENT, options);
   return { id, task, grant: grant! };
 }

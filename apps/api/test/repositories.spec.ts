@@ -16,17 +16,17 @@ const GUEST: Who = { id: "agt_rp_guest", org: "org_rp" };
 const STRANGER: Who = { id: "agt_rp_stranger", org: "org_rp_x" };
 const orgAdmin = (org: string): Who => ({ id: `per_rp_admin_${org}`, kind: "person", org, adminOrgs: [org] });
 
-async function assertion(who: Who) {
+async function assertion(who: Who, claims: object = {}) {
   const now = Math.floor(Date.now() / 1000);
   const isAgent = (who.kind ?? "agent") === "agent";
-  return new SignJWT({ kind: who.kind ?? "agent", org: who.org, ...(isAgent ? { gen: who.gen ?? 1 } : { orgs: [who.org], admin_orgs: who.adminOrgs ?? [] }) })
+  return new SignJWT({ kind: who.kind ?? "agent", org: who.org, ...(isAgent ? { gen: who.gen ?? 1 } : { orgs: [who.org], admin_orgs: who.adminOrgs ?? [] }), ...claims })
     .setProtectedHeader({ alg: "EdDSA", kid: "test" }).setIssuer("podster-gateway").setSubject(who.id).setAudience("podster-api")
     .setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID()).sign(key);
 }
 
 let counter = 0;
-async function api(who: Who, method: string, path: string, body?: unknown, options: { key?: string | null } = {}) {
-  const headers: Record<string, string> = { "x-podster-assertion": await assertion(who), "content-type": "application/json" };
+async function api(who: Who, method: string, path: string, body?: unknown, options: { key?: string | null; claims?: object } = {}) {
+  const headers: Record<string, string> = { "x-podster-assertion": await assertion(who, options.claims), "content-type": "application/json" };
   if (method !== "GET" && options.key !== null) headers["idempotency-key"] = options.key ?? `rp-key-${++counter}`;
   const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: method === "GET" ? undefined : JSON.stringify(body ?? {}) });
   const text = await res.text();
@@ -49,6 +49,8 @@ const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(BINDIN
 /** A room with a member who sees everything and two guests who see only their own tasks, one of them on the task. */
 async function room() {
   const id: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+  // Managed repositories switched on for this room. While they're off the read isn't there (see "while switched off").
+  await inRoom(id, (sql) => sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)"));
   for (const [who, role] of [[MEMBER, "member"], [ASSIGNEE, "guest"], [GUEST, "guest"]] as const) {
     const r = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: "agent", org_id: who.org, role, policy_version: await version(id) });
     expect(r.status, `add ${who.id}: ${JSON.stringify(r.body)}`).toBe(200);
@@ -119,7 +121,7 @@ describe("the managed repositories migration", () => {
     // Nothing is made up for a room that never asked for a repository, and what it held is as it was.
     expect((await footprint(id)).rows).toEqual([0, 0, 0, 0, 0]);
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}/tasks/${task}`)).body.task).toMatchObject({ id: task, title: "Add the parser", assignee: ASSIGNEE.id });
-    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toEqual({ request: null, repository: null });
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toEqual({ request: null, repository: null, delegated: false });
     // A migrated room doesn't migrate again: a row written since is still there after reads and a write.
     await link(id);
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
@@ -169,15 +171,17 @@ describe("the managed repositories migration", () => {
 describe("the room's repository read", () => {
   it("answers a person who sees the whole room from the room's own state", async () => {
     const { id } = await room();
-    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toEqual({ request: null, repository: null });
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toEqual({ request: null, repository: null, delegated: false });
     await inRoom(id, (sql) => sql.exec("INSERT INTO repo_request (id, state, name, visibility, attempt, provider_name, reason, requested_by, requested_at, updated_at) VALUES ('rr_1', 'failed', 'engineering', 'public', 2, 'engineering-7f3a', 'name_taken', ?, 1000, 1500)", OWNER.id));
     await link(id, "degraded");
     const read = await api(OWNER, "GET", `/v1/workspaces/${id}/repository`);
     expect(read.status, read.text).toBe(200);
-    // Exactly the contract's fields: the organization's ID, the name sent to the provider and the attempt count stay in the room.
+    // Exactly the contract's fields: the organization's ID, the name sent to the provider and the attempt number stay in
+    // the room. What's said of attempts is how many setup runs are left, and `delegated` is the owner's alone.
     expect(read.body).toEqual({
-      request: { id: "rr_1", state: "failed", name: "engineering", visibility: "public", reason: "name_taken", requested_by: OWNER.id, requested_at: 1000, updated_at: 1500 },
+      request: { id: "rr_1", state: "failed", name: "engineering", visibility: "public", reason: "name_taken", requested_by: OWNER.id, requested_at: 1000, updated_at: 1500, attempts_left: 5 },
       repository: { id: "rl_1", provider: "github", provider_repo_id: REPO_ID, full_name: "podsterx/engineering", visibility: "public", default_branch: "main", status: "degraded", status_reason: null, created_at: 1000, verified_at: 2000, updated_at: 2000 },
+      delegated: false,
     });
   });
 
@@ -193,9 +197,82 @@ describe("the room's repository read", () => {
     const outside = await api(STRANGER, "GET", `/v1/workspaces/${id}/repository`);
     expect([outside.status, outside.code]).toEqual([404, "workspace_not_found"]);
     expect(outside.text).not.toContain("podsterx");
-    // It's a read. Step 4 made POST the owner's request for a repository, and while managed repositories are switched
-    // off, as they are here and everywhere, that route isn't there either.
-    for (const method of ["POST", "PUT", "DELETE"]) expect((await api(OWNER, method, `/v1/workspaces/${id}/repository`, {})).code, method).toBe("not_found");
+    // It's a read. Step 4 made POST the owner's request for a repository, and there's no PUT or DELETE.
+    for (const method of ["PUT", "DELETE"]) expect((await api(OWNER, method, `/v1/workspaces/${id}/repository`, {})).code, method).toBe("not_found");
+  });
+});
+
+describe("while managed repositories are switched off", () => {
+  const off = (id: string) => inRoom(id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
+  /** The same request to a route that doesn't exist, which is what every managed-repository route must look like. */
+  const missing = (who: Who, method: string, id: string, body?: unknown) => api(who, method, `/v1/workspaces/${id}/no-such-route`, body);
+  const same = (a: { status: number; body: unknown }, b: { status: number; body: unknown }, label: string) => expect([a.status, a.body], label).toEqual([b.status, b.body]);
+  const routes = (id: string, grant: string) => [
+    ["GET", `/v1/workspaces/${id}/repository`, undefined],
+    ["GET", `/v1/workspaces/${id}/repository/grants`, undefined],
+    ["POST", `/v1/workspaces/${id}/repository`, { name: "engineering", visibility: "public" }],
+    ["POST", `/v1/workspaces/${id}/repository/retry`, {}],
+    ["POST", `/v1/workspaces/${id}/repository/grants`, { policy_version: 1, principal_id: MEMBER.id, action: "push" }],
+    ["DELETE", `/v1/workspaces/${id}/repository/grants/${grant}`, { policy_version: 1 }],
+  ] as const;
+
+  it("answers every repository route as a missing one, for the owner, a member, an agent and an outsider, rows or none", async () => {
+    for (const rows of [false, true]) {
+      const { id } = await room();
+      if (rows) {
+        // What an earlier on-period could have left: a request, a link and a grant.
+        await inRoom(id, (sql) => sql.exec("INSERT INTO repo_request (id, state, name, visibility, attempt, provider_name, reason, requested_by, requested_at, updated_at, runs) VALUES ('rr_1', 'failed', 'engineering', 'public', 2, 'engineering-7f3a', 'name_taken', ?, 1000, 1500, 2)", OWNER.id));
+        await link(id);
+        await inRoom(id, (sql) => sql.exec("INSERT INTO provider_grant (id, principal_id, provider, provider_repo_id, action, delegated_by, created_at) VALUES ('pg_1', ?, 'github', ?, 'push', ?, 1000)", MEMBER.id, REPO_ID, OWNER.id));
+      }
+      await off(id);
+      const before = await footprint(id);
+      for (const who of [OWNER, orgAdmin("org_rp"), MEMBER, GUEST, STRANGER]) {
+        for (const [method, path, body] of routes(id, rows ? "pg_1" : "pg_none")) {
+          const answer = await api(who, method, path, body);
+          same(answer, await missing(who, method, id, body), `${who.id} ${method} ${path} rows=${rows}`);
+          expect(answer.text).not.toContain("podsterx");
+          expect(answer.text).not.toContain("engineering");
+        }
+      }
+      // Nothing was recorded, refused into the audit or replayed: a missing route leaves nothing behind either.
+      expect(await footprint(id)).toEqual(before);
+    }
+  });
+
+  it("answers again, as before, once it's switched back on, with the rows the room kept", async () => {
+    const { id } = await room();
+    await link(id);
+    await off(id);
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).code).toBe("not_found");
+    await inRoom(id, (sql) => sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)"));
+    const read = await api(OWNER, "GET", `/v1/workspaces/${id}/repository`);
+    expect(read.status).toBe(200);
+    expect(read.body.repository).toMatchObject({ id: "rl_1", status: "ready" });
+  });
+});
+
+describe("what the read says to whom", () => {
+  it("gives `delegated` to the room's owner alone, absent and not false for anyone else", async () => {
+    const { id } = await room();
+    const admin = orgAdmin("org_rp");
+    await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: admin.id, kind: "person", org_id: "org_rp", role: "admin", policy_version: await version(id) }, { claims: { target_member: { person: admin.id, orgs: { org_rp: 1 } } } });
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toHaveProperty("delegated", false);
+    const theirs = await api(admin, "GET", `/v1/workspaces/${id}/repository`);
+    expect(theirs.status, theirs.text).toBe(200);
+    expect(theirs.body).toEqual({ request: null, repository: null });
+    expect(theirs.text).not.toContain("delegated");
+  });
+
+  it("counts attempts left from the room's runs, down to 0 at the cap and never below", async () => {
+    const { id } = await room();
+    await inRoom(id, (sql) => sql.exec("INSERT INTO repo_request (id, state, name, visibility, attempt, provider_name, reason, requested_by, requested_at, updated_at) VALUES ('rr_1', 'failed', 'engineering', 'public', 1, 'engineering', 'name_taken', ?, 1000, 1500)", OWNER.id));
+    const left: number[] = [];
+    for (const runs of [0, 1, 4, 5, 9]) {
+      await inRoom(id, (sql) => sql.exec("UPDATE repo_request SET runs = ?", runs));
+      left.push((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body.request.attempts_left);
+    }
+    expect(left).toEqual([5, 4, 1, 0, 0]);
   });
 });
 
@@ -203,6 +280,7 @@ describe("the routes later steps build", () => {
   it("don't exist yet, so nothing can ask for a merge or a status, and a token only with the switch on (step 6)", async () => {
     const { id, task } = await room();
     await link(id);
+    await inRoom(id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
     for (const [method, tail] of [["POST", "repo-access"], ["POST", "merge"], ["GET", "release-status"]] as const) {
       const answer = await api(OWNER, method, `/v1/workspaces/${id}/tasks/${task}/${tail}`, { submission_no: 1, commit_sha: COMMIT });
       expect([answer.status, answer.code], tail).toEqual([404, "not_found"]);

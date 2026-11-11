@@ -53,6 +53,23 @@ pub(super) fn enabled(env: &Env, sql: &SqlStorage) -> R<bool> {
     Ok(set)
 }
 
+/// The room's managed-repository routes for people: the read and request, the retry, and the grants. While the switch
+/// is off each answers as a route that doesn't exist. An agent's token route keeps its own check, in `repo_tokens`.
+pub(super) fn is_managed_route(tail: &[&str]) -> bool {
+    matches!(
+        tail,
+        ["repository"]
+            | ["repository", "retry"]
+            | ["repository", "grants"]
+            | ["repository", "grants", _]
+    )
+}
+
+/// How many more times setup may run for the room's request: the cap less the runs so far, never below 0.
+pub(super) fn attempts_left(runs: i64) -> i64 {
+    (MAX_SETUP_RUNS - runs).max(0)
+}
+
 fn refuse<T>(status: u16, code: &'static str) -> R<T> {
     Err(ApiError::api(status, code))
 }

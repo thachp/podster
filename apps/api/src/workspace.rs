@@ -4073,6 +4073,20 @@ impl Workspace {
         );
 
         if method == Method::Get {
+            // Managed repositories switched off: their reads aren't there, as their commands aren't, so a person's screen
+            // learns "off" from the server. The answer is a missing route's, whether or not the room kept rows from an
+            // earlier on.
+            if provisioning::is_managed_route(tail) && !provisioning::enabled(&self.env, &sql)? {
+                return Err(ApiError::not_found());
+            }
+            if let ["repository"] = tail {
+                let mut read = repositories::read(&sql, &who)?;
+                // Display only, and for the room's owner alone: the request command asks the organization again.
+                if who.caller.kind == PrincipalKind::Person && is_owner(&sql, &who.caller.id)? {
+                    read["delegated"] = json!(self.org_delegated().await == Some(true));
+                }
+                return Ok(read);
+            }
             return match tail {
                 [] => queries::get_workspace(&sql, &who),
                 ["invitations"] => queries::list_invitations(&sql, &who.caller, now_ms()),
@@ -4097,7 +4111,6 @@ impl Workspace {
                 ["tasks"] => queries::list_tasks(&sql, &who.caller, &url),
                 ["tasks", id] => queries::get_task(&sql, &who, id, false),
                 ["tasks", id, "messages"] => queries::list_messages(&sql, &who, id, &url),
-                ["repository"] => repositories::read(&sql, &who),
                 ["repository", "grants"] => repositories::read_grants(&sql, &who),
                 ["events"] => queries::list_events(&sql, &who.caller, &url),
                 ["audit"] => queries::list_audit(&sql, &who.caller, &url),
@@ -4130,6 +4143,10 @@ impl Workspace {
         let target = parts.get(4).map(|s| (*s).to_string()).unwrap_or_default();
         let verb = parts.get(5).map(|s| (*s).to_string()).unwrap_or_default();
         let switched_on = provisioning::enabled(&self.env, &sql)?;
+        // Switched off, a managed-repository command answers where a missing route would, after the same body parse.
+        if !switched_on && provisioning::is_managed_route(tail) {
+            return Err(ApiError::not_found());
+        }
 
         match (method, tail) {
             (Method::Post, ["tasks"]) => self.command(

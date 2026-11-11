@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { alarmPass, alarmQuiet, expectNoAlarmSooner } from "./alarm.ts";
 
 // The M5 security review's F2 and F8: a ready link is read back once a day from the room's alarm, and a link that's
 // degraded, by that read or a merge's, has its agents' tokens revoked in the same alarm pass. Against the fake GitHub:
@@ -16,6 +16,8 @@ const AGENT: Who = { id: "agt_rr_agent", org: ORG };
 const orgAdmin: Who = { id: "per_rr_orgadmin", kind: "person", org: ORG, adminOrgs: [ORG] };
 const OPERATOR: Who = { id: "per_operator_one", kind: "person", org: "org_operators" };
 const DAY = 24 * 60 * 60 * 1000;
+/** The soonest anything in these rooms is due again after a pass that read nothing: the held token's renewal is an hour off. */
+const QUIET_MS = 30 * 60 * 1000;
 let REPO_ID = 0;
 let nextRepo = 6_000_000 + Math.floor(Math.random() * 1_000_000) * 10;
 
@@ -156,6 +158,7 @@ describe("the scheduled read-back of a ready link", () => {
     expect(await tokens(r.id)).toEqual(["held"]);
     expect(await events(r.id)).toEqual([]);
     // Not again for a day.
+    await expectNoAlarmSooner(stub(r.id), QUIET_MS);
     const reads = (await readBack()).reads.length;
     await alarmPass(stub(r.id));
     expect((await readBack()).reads.length).toBe(reads);
@@ -177,7 +180,8 @@ describe("the scheduled read-back of a ready link", () => {
       expect(await tokens(r.id), JSON.stringify(script)).toEqual(["held"]);
       expect(await events(r.id), JSON.stringify(script)).toEqual([]);
       expect(await scheduledReads(r.id), JSON.stringify(script)).toBe(1);
-      // Not again within the hour.
+      // Not again within the hour, and the alarm isn't set for sooner.
+      await expectNoAlarmSooner(stub(r.id), QUIET_MS);
       await alarmPass(stub(r.id));
       expect(await scheduledReads(r.id), JSON.stringify(script)).toBe(1);
     }
@@ -193,6 +197,18 @@ describe("the scheduled read-back of a ready link", () => {
     expect((await readBack()).reads).toEqual([]);
     expect(await scheduledReads(r.id)).toBe(0);
     expect((await link(r.id)).status).toBe("ready");
+    // And the alarm doesn't come straight back for it: not before the oldest counted read is an hour old.
+    await expectNoAlarmSooner(stub(r.id), QUIET_MS);
+  });
+
+  it("isn't due at all while provisioning isn't configured, so the alarm doesn't keep coming back", async () => {
+    const r = await room();
+    await checkedAgo(r.id, DAY + 1);
+    await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_no_provisioning_key (x INTEGER)"));
+    await alarmPass(stub(r.id));
+    expect((await readBack()).reads).toEqual([]);
+    expect(await scheduledReads(r.id)).toBe(0);
+    await expectNoAlarmSooner(stub(r.id), QUIET_MS);
   });
 
   it("reads nothing back for a link that isn't ready, or with managed repositories switched off", async () => {
@@ -263,6 +279,20 @@ describe("an operator's recheck of a ready link (item 12)", () => {
     await ready({ deleted: true });
     expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "degraded", reason: "repository_gone" });
     expect(await link(r.id)).toMatchObject({ status: "degraded", status_reason: "repository_gone" });
+  });
+
+  it("restores a repository made before these settings were set, once they're switched off by hand on GitHub", async () => {
+    const r = await room();
+    // A repository from before: issues, wiki and projects on, as GitHub's defaults left them. Nothing repairs them.
+    const before = { has_issues: true, has_wiki: true, has_projects: true, has_discussions: false, allow_auto_merge: false, delete_branch_on_merge: false };
+    await ready({ settings: before });
+    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "degraded", reason: "settings_differ" });
+    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "degraded", reason: "settings_differ" });
+    // Someone with admin rights switches them off on GitHub: the next recheck finds it right and restores the link.
+    await ready({ settings: { ...before, has_issues: false, has_wiki: false, has_projects: false } });
+    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "ready", reason: null });
+    expect(await link(r.id)).toMatchObject({ status: "ready", status_reason: null });
+    expect((await events(r.id)).map((e) => e.type)).toEqual(["repository.degraded", "repository.ready_again"]);
   });
 
   it("leaves one that reads back right as it is, with no event, and refuses anyone but an operator", async () => {

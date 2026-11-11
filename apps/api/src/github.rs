@@ -21,7 +21,9 @@ use podster_core::provisioning::{
     RepoSettings, Ruleset, SetupStep, WorkflowPermissions, DEFAULT_BRANCH_REF,
     PRESENCE_PERMISSIONS, PROVISIONING_PERMISSIONS, STATUS_CONTEXT,
 };
-use podster_core::rate_limit::{has_secondary_marker, rate_limit_wait_ms, LimitSignals};
+use podster_core::rate_limit::{
+    has_secondary_marker, primary_403, rate_limit_wait_ms, LimitSignals,
+};
 use podster_core::repo_access::{minted_token_matches, TokenPermissions};
 use podster_core::repo_merge::PullState;
 use podster_core::repositories::valid_commit_sha;
@@ -222,7 +224,12 @@ pub enum Failure {
     /// GitHub limited how fast Podster may call it, by its documented signals (`podster_core::rate_limit`). The call
     /// was refused for that alone: it says nothing about the credential, the installation or what was asked, and
     /// nothing was done. `wait_ms` is how long GitHub said to wait, bounded.
-    RateLimited { status: u16, wait_ms: i64 },
+    RateLimited {
+        status: u16,
+        wait_ms: i64,
+        /// Only GitHub's spent primary limit (`core::rate_limit::primary_403`), the one a refusal could also look like.
+        primary_403: bool,
+    },
 }
 
 impl Failure {
@@ -232,6 +239,17 @@ impl Failure {
             Failure::Status(status) | Failure::RateLimited { status, .. } => status,
             Failure::Unreachable | Failure::Unreadable => 0,
         }
+    }
+
+    /// Whether this was a limit that a refusal could also look like: a `403` with `x-ratelimit-remaining: 0` alone.
+    pub fn primary_403(self) -> bool {
+        matches!(
+            self,
+            Failure::RateLimited {
+                primary_403: true,
+                ..
+            }
+        )
     }
 
     /// How long to wait, if this was a rate limit.
@@ -413,13 +431,18 @@ async fn call_within(
             secondary_marker: parsed["message"].as_str().is_some_and(has_secondary_marker),
             ..signals
         };
-        let limited = rate_limit_wait_ms(&signals, Date::now().as_millis() as i64);
+        let limited = rate_limit_wait_ms(&signals, Date::now().as_millis() as i64)
+            .map(|wait_ms| (wait_ms, primary_403(&signals)));
         Ok::<_, Error>((status, parsed, limited))
     };
     let timeout = Delay::from(Duration::from_millis(CALL_TIMEOUT_MS));
     let answer = match select(Box::pin(attempt), timeout).await {
-        Either::Left((Ok((status, _, Some(wait_ms))), _)) => {
-            Err(Failure::RateLimited { status, wait_ms })
+        Either::Left((Ok((status, _, Some((wait_ms, primary_403)))), _)) => {
+            Err(Failure::RateLimited {
+                status,
+                wait_ms,
+                primary_403,
+            })
         }
         Either::Left((Ok((status, parsed, None)), _)) => Ok((status, parsed)),
         Either::Left((Err(_), _)) | Either::Right(_) => Err(Failure::Unreachable),
@@ -693,7 +716,9 @@ impl Provider for GitHubApp {
         let (status, answer) = match sent {
             Ok(answer) => answer,
             // A definite answer, and a refusal for the rate alone: `core` reads it, and nothing was made.
-            Err(Failure::RateLimited { status, wait_ms }) => {
+            Err(Failure::RateLimited {
+                status, wait_ms, ..
+            }) => {
                 return match classify_creation(Some(status), false, false, true) {
                     Creation::RateLimited => CreateAnswer::RateLimited(wait_ms),
                     _ => CreateAnswer::Refused(status),
@@ -787,7 +812,10 @@ impl Provider for GitHubApp {
             return Err(Failure::Status(status));
         }
         let actions_enabled = Some(actions["enabled"].as_bool().ok_or(Failure::Unreadable)?);
-        // The one settings read beyond the repository's own answer: what a workflow's token may do by default.
+        // The one settings read beyond the repository's own answer: what a workflow's token may do by default. Any answer
+        // but a readable 200 fails the read-back, as the Actions read does: setup ends `read_back_failed` and is retried,
+        // the merge job and the daily read wait, and nothing is degraded. Unverified: that GitHub answers 200 here with
+        // Actions switched off. If it doesn't, setup can never finish, so it's the first of the staging checks owed.
         let (status, workflow) = self
             .get(repo_id, &format!("{base}/actions/permissions/workflow"))
             .await?;
@@ -1419,13 +1447,16 @@ impl MergeApp {
         let default_branch_has = match plain_branch.filter(|_| valid_commit_sha(sha)) {
             Some(branch) => {
                 let path = format!("/repositories/{repo_id}/compare/{branch}...{sha}");
-                match call(Method::Get, &path, token, None).await? {
-                    (200, body) => match body["status"].as_str() {
+                // A limited compare says nothing about the branch: "unknown", as any other answer that isn't 200 is, so
+                // the merge job waits and reads again, and never ends a merge on it.
+                match call(Method::Get, &path, token, None).await {
+                    Ok((200, body)) => match body["status"].as_str() {
                         Some("behind" | "identical") => Some(true),
                         Some("ahead" | "diverged") => Some(false),
                         _ => None,
                     },
-                    _ => None,
+                    Ok(_) | Err(Failure::RateLimited { .. }) => None,
+                    Err(failure) => return Err(failure),
                 }
             }
             None => None,

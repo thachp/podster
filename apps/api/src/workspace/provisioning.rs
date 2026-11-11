@@ -55,6 +55,12 @@ pub(super) fn organization(env: &Env, sql: &SqlStorage) -> Option<String> {
     Config::from_env(env).map(|config| config.org_login().to_string())
 }
 
+/// Whether provisioning's App is configured, so a read-back can be made at all. Test builds stand for a deployment
+/// whose key isn't set yet with the same table the job reads.
+pub(super) fn configured(env: &Env, sql: &SqlStorage) -> bool {
+    organization(env, sql).is_some()
+}
+
 /// Whether managed repositories are switched on for this deployment. Test builds can switch them on for one room, by a
 /// table only a test can make, so every other test runs with them off, as every deployment does today.
 pub(super) fn enabled(env: &Env, sql: &SqlStorage) -> R<bool> {
@@ -889,7 +895,11 @@ impl Workspace {
                     })?;
                     return Ok(Some(failed_call(
                         RATE_LIMITED_REASON,
-                        Failure::RateLimited { status: 0, wait_ms },
+                        Failure::RateLimited {
+                            status: 0,
+                            wait_ms,
+                            primary_403: false,
+                        },
                     )));
                 }
                 let (outcome, ended, created) = match answer {

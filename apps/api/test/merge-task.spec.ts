@@ -649,6 +649,18 @@ describe("what GitHub answers to the merge", () => {
     expect(await merges()).toHaveLength(1);
   });
 
+  it("waits when GitHub rate-limits the compare with the default branch, and never ends the merge on it", async () => {
+    const r = await requested();
+    // The merge lands, then the compare that would show the default branch holds it is rate-limited.
+    await fake({ compare: { kind: "primary", seconds: 600 } });
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "requested", merge_step: "merge" });
+    await fake({ compare: "behind" });
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded" });
+    expect(await merges()).toHaveLength(1);
+  });
+
   it("gives up after five passes with a reason, and a person asks again", async () => {
     const r = await requested();
     await fake({ status: 500 });

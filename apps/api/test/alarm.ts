@@ -28,3 +28,16 @@ export const alarmQuiet = (room: DurableObjectStub) =>
     await instance.alarm();
     await state.storage.deleteAlarm();
   });
+
+/** When the room's next alarm is set for, or null if none is. */
+export const nextAlarm = (room: DurableObjectStub) =>
+  runInDurableObject(room, (_: any, state: any) => state.storage.getAlarm()) as Promise<number | null>;
+
+/**
+ * Checks that a pass left no alarm sooner than `minMs` from now: either none, or one at least that far off. A pass that
+ * did nothing must never leave its own due time in the past, which would bring the alarm straight back in a loop.
+ */
+export async function expectNoAlarmSooner(room: DurableObjectStub, minMs: number) {
+  const at = await nextAlarm(room);
+  if (at !== null && at < Date.now() + minMs) throw new Error(`the next alarm is due in ${at - Date.now()} ms, sooner than ${minMs} ms`);
+}

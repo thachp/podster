@@ -12,7 +12,6 @@
 //! - Logs carry the room's ID, a fixed word and an HTTP status, never anything GitHub wrote.
 use super::merges::{degrade, Readiness};
 use super::*;
-use crate::github::Config;
 use podster_core::provisioning::readiness_due_at;
 
 /// The ready link, as this job needs it: its repository, whether it's public, its default branch and when it was last
@@ -41,9 +40,11 @@ fn ready_link(sql: &SqlStorage) -> R<Option<Linked>> {
     }))
 }
 
-/// When the room's ready link is next due its scheduled read, or `None` without one or with the switch off.
+/// When the room's ready link is next due its scheduled read, or `None` without one, with the switch off, or without
+/// provisioning's configuration, when no read could be made. Never a time a pass that does nothing would leave in the
+/// past: with the hour's read cap used up, not before the oldest counted read is an hour old.
 pub(super) fn next_due(sql: &SqlStorage, env: &Env, now: i64) -> R<Option<i64>> {
-    if !provisioning::enabled(env, sql)? {
+    if !provisioning::enabled(env, sql)? || !provisioning::configured(env, sql) {
         return Ok(None);
     }
     // Test builds read back on a schedule only in a room holding this table, so the many specs that write a ready link
@@ -61,10 +62,11 @@ pub(super) fn next_due(sql: &SqlStorage, env: &Env, now: i64) -> R<Option<i64>> 
     let Some(link) = ready_link(sql)? else {
         return Ok(None);
     };
-    Ok(Some(readiness_due_at(
-        link.verified_at,
-        changes::last_readiness_read(sql, now)?,
-    )))
+    let due = readiness_due_at(link.verified_at, changes::last_readiness_read(sql, now)?);
+    Ok(Some(match changes::read_cap_frees_at(sql, now)? {
+        Some(frees) => due.max(frees),
+        None => due,
+    }))
 }
 
 impl Workspace {
@@ -80,8 +82,9 @@ impl Workspace {
             Some(due) if due <= now => {}
             _ => return Ok(()),
         }
-        // Without the provisioning App's configuration nothing can be read, so nothing is counted either.
-        if Config::from_env(&self.env).is_none() {
+        // Without the provisioning App's configuration nothing can be read, so nothing is counted either. `next_due` then
+        // says nothing is due, so the alarm doesn't come back for it.
+        if !provisioning::configured(&self.env, &sql) {
             return Ok(());
         }
         let Some(link) = ready_link(&sql)? else {

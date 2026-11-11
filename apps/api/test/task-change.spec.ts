@@ -841,6 +841,24 @@ describe("the refresh job", () => {
     await afterPass(r.id, async () => expect(await link()).toEqual({ read_failures: 0, reads_not_before: null }));
   });
 
+  it("reads a spent-limit 403 as a limit once, and as GitHub refusing Podster if it comes again after the reset", async () => {
+    const r = await submitted();
+    await settle(r.id);
+    const link = () => inRoom(r.id, (sql) => sql.exec("SELECT read_failures, reads_not_before FROM repo_link").one() as any);
+    await fake({ pullRead: { kind: "primary", seconds: 120 } });
+    await nudge(r.id);
+    await afterPass(r.id, async () => expect((await link()).reads_not_before).not.toBeNull());
+    await settle(r.id);
+    expect((await link()).read_failures).toBe(0);
+    expect(await events(r.id, "repository.read_refused")).toEqual([]);
+    // The reset has passed and the same call is still refused the same way: the limit refilled, so this is a refusal.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET reads_not_before = ?", Date.now() - 1));
+    await nudge(r.id);
+    await afterPass(r.id, async () => expect((await link()).read_failures).toBe(1));
+    await settle(r.id);
+    expect(await events(r.id, "repository.read_refused")).toEqual([{ type: "repository.read_refused", actor_id: "system", task_id: null, reason: "provider_credential_failed" }]);
+  });
+
   it("treats a token that can't be had as the room's credential failing, and never as a pull request that's gone", async () => {
     const r = await approved();
     await settle(r.id);

@@ -23,6 +23,7 @@ use crate::github::{
     AgentConfig, AgentTokens, ChecksReader, ChecksSeen, Failure, PullAnswer, PullRead, PullReader,
 };
 use podster_core::provider_deliveries::{poll_wait_ms, read_allowed, stale, ChangeWatch, Stale};
+use podster_core::rate_limit::limit_repeated_after_reset;
 use podster_core::release_status::{report, summarize_checks, CheckSeen, ChecksReport};
 use podster_core::repo_merge::{ObservedMerge, PullState};
 use podster_core::repositories::{task_block, LinkStatus, MergeState, RequestState};
@@ -321,6 +322,21 @@ pub(super) fn count_readiness_read(sql: &SqlStorage, now: i64) -> R<bool> {
         vec![now.into(), READINESS_CALLER.into()],
     )?;
     Ok(true)
+}
+
+/// When the repository's hourly read cap next has room, if it's full now: an hour after the oldest read it counts.
+pub(super) fn read_cap_frees_at(sql: &SqlStorage, now: i64) -> R<Option<i64>> {
+    let reads = rows(
+        sql,
+        "SELECT count(*) AS n, min(at) AS oldest FROM repo_read WHERE kind = 'job' AND at > ?",
+        vec![(now - HOUR_MS).into()],
+    )?;
+    let (made, oldest) = reads
+        .first()
+        .map_or((0, None), |row| (int(&row["n"]), row["oldest"].as_i64()));
+    Ok(oldest
+        .filter(|_| !read_allowed(made.clamp(0, i64::from(u32::MAX)) as u32))
+        .map(|oldest| oldest + HOUR_MS))
 }
 
 /// When the last scheduled read-back within the hour was made, if one was.
@@ -817,7 +833,14 @@ fn apply_read(
             log_failed(404);
             return waits(int(&row["not_found_reads"]).saturating_add(1).clamp(1, 64));
         }
-        Err(failure) => return failed(stage, failure.status(), failure.rate_limit_wait_ms()),
+        Err(failure) => {
+            // A spent-limit 403 again after the room's reads waited out the last limit (a limit leaves the run of
+            // refusals at 0) is a refusal, not a limit.
+            let held = link.reads_not_before.filter(|_| link.read_failures == 0);
+            let again = limit_repeated_after_reset(failure.primary_403(), held, now);
+            let wait = failure.rate_limit_wait_ms().filter(|_| !again);
+            return failed(stage, failure.status(), wait);
+        }
     };
     if link.read_failures > 0 || link.reads_not_before.is_some() {
         exec(

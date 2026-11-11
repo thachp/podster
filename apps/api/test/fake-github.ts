@@ -90,7 +90,7 @@ type AgentScript = {
   /** How the merge call goes: ok; lost (merges, then answers 500); error (answers 500, merges nothing); refuse (405, as the rules would); moved (the head changes first, so 409); merged_by_other (someone merges another head first, so 200). */
   merge?: string;
   /** What comparing with the default branch says, whatever is there: a status such as "ahead", or a number for a failed read. */
-  compare?: string | number;
+  compare?: string | number | Limited;
   /** Commits the default branch holds. A merge adds the pull request's head. */
   has?: string[];
 };
@@ -580,6 +580,10 @@ function mergeCall(request: Request, path: string, bearer: string, body: any): R
   if (comparing && request.method === "GET") {
     if (!held.permissions.contents) return denied();
     if (typeof script.compare === "number") return answer({ message: "SECRET-PROVIDER-TEXT" }, script.compare);
+    if (typeof script.compare === "object") {
+      mergeCalls.push({ repo, method: request.method, path, permissions: held.permissions, status: script.compare.kind === "429" ? 429 : 403, body });
+      return limitedAnswer(script.compare);
+    }
     const has = (script.has ?? []).includes(comparing[3]);
     return answer({ status: script.compare ?? (has ? "behind" : "ahead"), commits: [{ commit: { message: "SECRET-COMMIT-MESSAGE" } }] });
   }

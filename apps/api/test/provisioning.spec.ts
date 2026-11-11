@@ -1038,15 +1038,14 @@ describe("the provisioning job", () => {
   });
 
   it("waits out a GitHub rate limit without spending a run, and sends the same name again (M5 security review F5)", async () => {
-    /** Runs the room's alarm until the job has waited out a limit or ended, and answers the request row. */
+    /**
+     * One whole pass of the room's alarm, then the request row. The pass waits out any run the runtime had under way, so
+     * the job has run once by the time it returns: that run, or this one. A second run in the same pass finds the wait the
+     * first set and does nothing.
+     */
     const limitedOrEnded = async (r: { id: string }) => {
-      for (let i = 0; i < 80; i++) {
-        await alarmPass(stub(r.id));
-        const [row] = await rowsOf(r.id, "repo_request");
-        if (row.job_failures > 0 || row.state !== "pending") return row;
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      throw new Error("the job neither waited nor ended");
+      await alarmPass(stub(r.id));
+      return (await rowsOf(r.id, "repo_request"))[0];
     };
     const waitOver = (r: { id: string }) => inRoom(r.id, (sql) => sql.exec("UPDATE repo_request SET job_not_before = NULL"));
     // [what GitHub limited, the fake's script, whether a repository was made before the limit]

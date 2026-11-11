@@ -76,6 +76,23 @@ pub fn rate_limit_wait_ms(signals: &LimitSignals, now_ms: i64) -> Option<i64> {
     Some(wait.clamp(MIN_LIMIT_WAIT_MS, MAX_LIMIT_WAIT_MS))
 }
 
+/// Whether an answer that reads as a limit is only GitHub's spent primary limit: a `403` with `x-ratelimit-remaining`
+/// at `0`, and neither `retry-after` nor the secondary-limit marker. That's the one signal a refusal could also carry.
+pub fn primary_403(signals: &LimitSignals) -> bool {
+    signals.status == 403
+        && number(signals.remaining.as_ref()) == Some(0)
+        && signals.retry_after.is_none()
+        && !signals.secondary_marker
+}
+
+/// Whether a spent-primary-limit `403` should now be read as a refusal (the M5 review's follow-up, item E): it's read as
+/// a limit once, but if the same call answers it again after the reset GitHub gave has passed, the limit has refilled
+/// and the `403` is GitHub refusing. `held_until` is when the wait the earlier limit set ended, if the last answer to
+/// this call was such a limit.
+pub fn limit_repeated_after_reset(primary_403: bool, held_until: Option<i64>, now_ms: i64) -> bool {
+    primary_403 && held_until.is_some_and(|until| until <= now_ms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +193,39 @@ mod tests {
                 status,
             };
             assert_eq!(rate_limit_wait_ms(&everything, NOW), None, "{status}");
+        }
+    }
+
+    #[test]
+    fn a_spent_limit_403_seen_again_after_its_reset_is_a_refusal() {
+        let spent = LimitSignals {
+            remaining: Some("0".into()),
+            reset: Some(((NOW / 1000) + 60).to_string()),
+            ..signals(403)
+        };
+        assert!(primary_403(&spent));
+        // The first time, a limit.
+        assert!(!limit_repeated_after_reset(true, None, NOW));
+        // Again while the wait isn't over: still a limit.
+        assert!(!limit_repeated_after_reset(true, Some(NOW + 1), NOW));
+        // Again after the reset passed: a refusal.
+        assert!(limit_repeated_after_reset(true, Some(NOW), NOW));
+        // A secondary limit, a retry-after or a 429 is never turned into a refusal.
+        for other in [
+            LimitSignals {
+                secondary_marker: true,
+                ..spent.clone()
+            },
+            LimitSignals {
+                retry_after: Some("30".into()),
+                ..spent.clone()
+            },
+            LimitSignals {
+                status: 429,
+                ..spent.clone()
+            },
+        ] {
+            assert!(!primary_403(&other));
         }
     }
 

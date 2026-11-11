@@ -14,6 +14,8 @@ import { ReviewPolicy } from "./review-policy";
 import { RoomControls } from "./room-controls";
 import { TransferOwnership } from "./transfer-ownership";
 import { VisibilityControls } from "./visibility-controls";
+import { RepositorySection } from "./repository-section";
+import { availability, type RoomRepository } from "./repository-model";
 import type { RoomVisibility } from "./visibility-model";
 
 const Section = ({ id, title, children }: { id: string; title: string; children: React.ReactNode }) => (
@@ -31,7 +33,15 @@ export default async function Settings({ params, searchParams }: { params: Promi
   // Owner and admins only. For anyone else this page isn't there; the API refuses the writes either way.
   if (!canManageWorkroom(room) || room.policy_version === null) notFound();
   const after = pageAfter(query.after);
-  const [identity, audit, visibility] = await Promise.all([getIdentity(), gatewayQuery<{ audit: AuditRow[]; next_cursor: number | null }>(`/api/v1/workspaces/${id}/audit?after=${after}`), gatewayQuery<RoomVisibility>(`/api/v1/workspaces/${id}/visibility`)]);
+  // The repository read is also how this page learns whether managed repositories are switched on: off, it answers as a
+  // route that doesn't exist, and the page stays as it was before them.
+  const [identity, audit, visibility, repositoryRead] = await Promise.all([
+    getIdentity(),
+    gatewayQuery<{ audit: AuditRow[]; next_cursor: number | null }>(`/api/v1/workspaces/${id}/audit?after=${after}`),
+    gatewayQuery<RoomVisibility>(`/api/v1/workspaces/${id}/visibility`),
+    gatewayQuery<RoomRepository>(`/api/v1/workspaces/${id}/repository`),
+  ]);
+  const repository = availability(repositoryRead);
   const admins = membersOf(room).filter((member) => member.role === "admin");
   const isOwner = identity.ok && identity.data.id === room.owner;
   // Only what to offer. Rust checks all of this again when asked.
@@ -100,12 +110,18 @@ export default async function Settings({ params, searchParams }: { params: Promi
         <TransferOwnership roomId={id} name={room.name} policyVersion={room.policy_version} archived={isArchived(room)} isOwner={isOwner} candidates={candidates} />
       </Section>
 
-      <Section id="settings-services" title="Repository and release">
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="outline">Not connected</Badge>
-          <span className="text-sm text-muted-foreground">Podster doesn't connect repositories or deployments yet, so nothing in this workroom grants them.</span>
-        </div>
-      </Section>
+      {repository.kind === "off" ? (
+        <Section id="settings-services" title="Repository and release">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline">Not connected</Badge>
+            <span className="text-sm text-muted-foreground">Podster doesn't connect repositories or deployments yet, so nothing in this workroom grants them.</span>
+          </div>
+        </Section>
+      ) : (
+        <Section id="settings-repository" title="Repository">
+          {repository.kind === "on" ? <RepositorySection roomId={id} state={repository.data} isOwner={isOwner && typeof room.owner_left_at !== "number"} archived={isArchived(room)} /> : <ReadFailure />}
+        </Section>
+      )}
 
       <Section id="settings-history" title="Access history">
         <p className="text-sm text-muted-foreground">Every change to who's here and what they can do. Nobody can edit it.</p>

@@ -3,13 +3,14 @@ import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setUrl } from "@/test/next-navigation";
 
-const state = vi.hoisted(() => ({ room: null as unknown, me: "per_owner", asked: [] as string[] }));
+const state = vi.hoisted(() => ({ room: null as unknown, me: "per_owner", asked: [] as string[], repository: { ok: false, status: 404, code: "not_found" } as unknown }));
 vi.mock("react", async (original) => ({ ...(await original<object>()), cache: <T,>(fn: T) => fn }));
 vi.mock("@/lib/gateway/server", () => ({
   gatewayQuery: async (path: string) => {
     state.asked.push(path);
     if (path === "/api/v1/workspaces/ws_1") return { ok: true, data: state.room };
     if (path.includes("/audit")) return { ok: true, data: { audit: [], next_cursor: null } };
+    if (path === "/api/v1/workspaces/ws_1/repository") return state.repository;
     if (path === "/api/orgs/org_a/members") return { ok: true, data: { members: [{ person_id: "per_heir", name: "Heir" }] } };
     return { ok: false, status: 404, code: "not_found" };
   },
@@ -27,6 +28,7 @@ describe("workroom settings' ownership section", () => {
     setUrl("/w/ws_1/settings");
     state.me = "per_owner";
     state.asked.length = 0;
+    state.repository = { ok: false, status: 404, code: "not_found" };
     state.room = {
       id: "ws_1",
       name: "Launch room",
@@ -63,5 +65,46 @@ describe("workroom settings' ownership section", () => {
     (state.room as { owner_left_at: number }).owner_left_at = Date.UTC(2026, 10, 3);
     await show();
     expect(screen.getByText(/The owner left this workroom's organization on 2026-11-03/)).toBeInTheDocument();
+  });
+});
+
+describe("workroom settings' repository section", () => {
+  beforeEach(() => {
+    setUrl("/w/ws_1/settings");
+    state.me = "per_owner";
+    state.asked.length = 0;
+    state.room = { id: "ws_1", name: "Launch room", owner: "per_owner", owner_org: "org_a", status: "active", policy_version: 3, members: [] };
+  });
+
+  it("with managed repositories off, is as it was before them, after the one read that says so", async () => {
+    state.repository = { ok: false, status: 404, code: "not_found" };
+    await show();
+    expect(screen.getByRole("heading", { name: "Repository and release" })).toBeInTheDocument();
+    expect(screen.getByText("Not connected")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Repository" })).toBeNull();
+    expect(screen.queryByLabelText("Repository name")).toBeNull();
+    expect(state.asked.filter((path) => path.includes("/repository"))).toEqual(["/api/v1/workspaces/ws_1/repository"]);
+  });
+
+  it("with them on, shows the repository section in place of that", async () => {
+    state.repository = { ok: true, data: { request: null, repository: null, delegated: true } };
+    await show();
+    expect(screen.getByRole("heading", { name: "Repository" })).toBeInTheDocument();
+    expect(screen.queryByText("Not connected")).toBeNull();
+    expect(screen.getByLabelText("Repository name")).toBeInTheDocument();
+  });
+
+  it("offers a recorded owner who left the organization nothing to ask with", async () => {
+    state.repository = { ok: true, data: { request: null, repository: null } };
+    (state.room as { owner_left_at: number }).owner_left_at = 1;
+    await show();
+    expect(screen.queryByLabelText("Repository name")).toBeNull();
+  });
+
+  it("says it couldn't read the section when the read fails, rather than calling it off", async () => {
+    state.repository = { ok: false, status: 500, code: "error" };
+    await show();
+    expect(screen.getByRole("heading", { name: "Repository" })).toBeInTheDocument();
+    expect(screen.queryByText("Not connected")).toBeNull();
   });
 });

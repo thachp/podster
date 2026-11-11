@@ -965,6 +965,20 @@ describe("what the viewer's access leaves out", () => {
     expect(screen.queryByText(/your access/i)).toBeNull();
   });
 
+  it("shows a Release panel only when the read carries a change: absent while repositories are off, or null", () => {
+    const base = detail({ submission_no: 1 }, { submissions: [], artifacts: [], messages: [] });
+    const { unmount } = render(<Details data={base} me="agt_a" names={{}} orgNames={{}} />);
+    expect(screen.queryByRole("heading", { name: "Release" })).toBeNull();
+    unmount();
+    const none = render(<Details data={{ ...base, change: null }} me="agt_a" names={{}} orgNames={{}} />);
+    expect(screen.queryByRole("heading", { name: "Release" })).toBeNull();
+    none.unmount();
+    const change = { provider_repo_id: 1, pr_number: 9, submission_no: 1, pr_state: "open" as const, pr_draft: false, pr_observed_at: 1, commit_changed_at: null, watched: true, observed_head_sha: null, head_observed_at: null, head_in_repository: true, base_is_default: true, observed_base_sha: null, reviewed_commit_sha: null, reviewed_base_sha: null, commit_changed: false, merge_state: "not_requested" as const, merge_reason: null, merge_sha: null, merge_observed_at: null };
+    render(<Details data={{ ...base, change }} me="agt_a" names={{}} orgNames={{}} />);
+    expect(screen.getByRole("heading", { name: "Release" })).toBeInTheDocument();
+    expect(screen.getByText(/#9 · Open/)).toBeInTheDocument();
+  });
+
   it("says reasons are left out of the history", async () => {
     const user = userEvent.setup();
     answer = () => json(200, narrowed());

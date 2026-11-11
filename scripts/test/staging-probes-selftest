@@ -33,6 +33,12 @@ refuses "/a2a and /a2a/ with different statuses are refused" a2a
 echo '{"error":"not_found"}' > "$fix/a2a-slash.body"
 refuses "/a2a and /a2a/ with different bodies are refused" a2a
 
+: > "$fix/a2a.body"; : > "$fix/a2a-slash.body"
+refuses "/a2a and /a2a/ both 401 with empty bodies are refused, though identical" a2a
+
+: > "$fix/a2a-slash.body"
+refuses "/a2a/ at 401 with an empty body is refused" a2a
+
 echo unreachable > "$fix/a2a.status"; echo unreachable > "$fix/a2a-slash.status"
 refuses "/a2a and /a2a/ both unreachable are refused, though identical" a2a
 

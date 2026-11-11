@@ -9,25 +9,31 @@ Usage: scripts/merge-gate <pr-number> <full-40-char-head-sha> [--merge | --rerun
 
 With no flag it only reports. It passes when ALL of these hold, and prints each one:
 
-  - the pull request is open, not a draft, and targets main
+  - the pull request is open, not a draft, targets main, and comes from this repository, not a fork
   - its head is exactly the given sha (40 lowercase hex characters, never abbreviated)
+    If any of those fails it stops there, before reading anything else.
   - every check has completed as SUCCESS or SKIPPED (NEUTRAL only for the check named "CodeQL")
-  - every job of ci.yml is among the checks and succeeded. Only a docs/ branch may have them
-    SKIPPED. The four "Analyze (...)" checks and "CodeQL" are there too, and none was skipped
+  - every job of ci.yml is among the checks and succeeded. They may be SKIPPED only on a docs/
+    branch whose every changed file, and the old path of every renamed one, is under docs/, or
+    is a Markdown file other than CLAUDE.md and outside .claude/ and .github/
+  - code scanning has an analysis of this exact head for every language its default setup lists,
+    and the "Analyze (<language>)" check of each, and "CodeQL", are there and weren't skipped
   - ci.yml on main still has exactly the jobs this script expects
-  - code scanning analysed this head, and has no open alert for refs/pull/<n>/merge or /head
+  - code scanning has no open alert for this pull request
   - mergeStateStatus is CLEAN (it waits while UNKNOWN, up to a minute; anything else fails)
+
+It reads code scanning alerts for this pull request's own refs only, which in this repository
+means its head. It never reads main's alerts: one open on main doesn't stop a merge, and isn't
+reported here.
 
 --merge              After the gate passes, runs `gh pr merge <n> --merge --match-head-commit <sha>`
                      (a merge commit), then waits for ci.yml on the merge commit on main and reports
                      its conclusion.
 --rerun-known-flake  Skips the gate. Reruns the failed jobs of the head's ci.yml run, once, and only
                      when that is the sha's only ci.yml run, on its first attempt, and its only
-                     failed job is
-                       web, whose only failed step is the accessibility run, with the line
-                         "FAIL run: database is locked", or
-                       api, whose only failing test is the one alarm test named in this script.
-                     Anything else it refuses, and says why.
+                     failed job is api, whose only failing test is the one alarm test named in
+                     this script. Anything else it refuses, and says why. A failed web job is
+                     never rerun.
 
 It never dismisses an alert, resolves a conflict, updates a branch or reruns anything else.
 
@@ -61,11 +67,12 @@ fi
 # ci.yml's jobs. A pull request must have every one as a check. The gate also reads ci.yml on main and refuses if this
 # list isn't its jobs, so a renamed or added job can't pass unnoticed, and the self-test pins it to the workflow file.
 CI_JOBS="rust migrations contracts api web scanner gateway e2e"
-# What code scanning reports on every pull request, docs/ branches included.
-SCANNING_CHECKS=("Analyze (actions)" "Analyze (javascript-typescript)" "Analyze (python)" "Analyze (rust)" "CodeQL")
-# The two known flakes. Anything else that fails is a failure.
-WEB_FLAKE_STEP="Run node run-a11y.mjs --skip-web-build"
-WEB_FLAKE_LINE="FAIL run: database is locked"
+# The one known flake. Anything else that fails is a failure. Its likely cause is now known: the test runtime runs a
+# room's alarm on its own, and `runDurableObjectAlarm` calls `alarm()` directly, so two runs overlap. #259 fixed that
+# for the tests that use the helpers in apps/api/test/alarm.ts. DELETE THIS, and the api case below, when
+# kernel.spec.ts is moved onto those helpers. There was a second allowance, for "database is locked" in the web job's
+# accessibility run. #254 fixed its cause, so that failing again means the fix didn't hold, and is looked into, never
+# rerun.
 API_FLAKE_TEST="test/kernel.spec.ts > inbox > the alarm follows whichever recipient is due first, not the one waiting longest"
 
 problems=0
@@ -74,19 +81,24 @@ bad() { echo "REFUSE  $*"; problems=$((problems + 1)); }
 refuse() { echo "REFUSE  $*"; echo "merge-gate: refused"; exit 1; }
 tab=$'\t'
 
-# The pull request itself, and its head. Both modes need these.
-pull=$(gh pr view "$pr" --json state,isDraft,baseRefName,headRefName,headRefOid \
-  --jq '[.state, (.isDraft | tostring), .baseRefName, .headRefName, .headRefOid] | @tsv') || refuse "could not read pull request #$pr"
-IFS=$tab read -r state draft base branch head <<< "$pull"
+# The pull request itself, and its head. Both modes need these, and nothing else is read unless they all hold.
+pull=$(gh pr view "$pr" --json state,isDraft,isCrossRepository,baseRefName,headRefName,headRefOid \
+  --jq '[.state, (.isDraft | tostring), (.isCrossRepository | tostring), .baseRefName, .headRefName, .headRefOid] | @tsv') \
+  || refuse "could not read pull request #$pr"
+IFS=$tab read -r state draft fork base branch head <<< "$pull"
 echo "pull request #$pr from $branch at $head"
 if [ "$state" = OPEN ]; then ok "it is open"; else bad "it is $state, not open"; fi
 if [ "$draft" = false ]; then ok "it is not a draft"; else bad "it is a draft"; fi
+if [ "$fork" = false ]; then ok "it comes from this repository"; else bad "it comes from a fork, which this gate never merges"; fi
 if [ "$base" = main ]; then ok "it targets main"; else bad "it targets $base, not main"; fi
 if [ "$head" = "$sha" ]; then ok "its head is the given sha"; else bad "its head is $head, not the given $sha"; fi
+if [ "$problems" -ne 0 ]; then
+  echo "merge-gate: refused, $problems problem(s). Nothing else was read, and nothing was merged or rerun."
+  exit 1
+fi
 
 rerun_known_flake() {
-  if [ "$problems" -ne 0 ]; then echo "merge-gate: refused, nothing was rerun"; exit 1; fi
-  local runs id status conclusion attempt jobs job steps failing
+  local runs id status conclusion attempt jobs job failing
   runs=$(gh run list --workflow ci.yml --commit "$sha" --event pull_request --limit 100 \
     --json databaseId,status,conclusion,attempt \
     --jq '.[] | [(.databaseId | tostring), .status, (if (.conclusion // "") == "" then "none" else .conclusion end), (.attempt | tostring)] | @tsv') \
@@ -110,36 +122,25 @@ rerun_known_flake() {
     refuse "more than one job did not pass: $(printf '%s' "$jobs" | tr '\n' ' ')"
   fi
   job=$jobs
+  if [ "$job" = web ]; then
+    refuse "the failed job is web, which is never rerun. If its log says \"database is locked\", the fix in #254 didn't hold: look into it"
+  fi
+  if [ "$job" != api ]; then refuse "the failed job is $job, which has no known flake"; fi
 
   # Not local: the trap runs after this function has returned.
   log=$(mktemp)
   trap 'rm -f "$log"' EXIT
   gh run view "$id" --log-failed > "$log" || refuse "could not read the failed log"
-  # Colour codes would hide the words this looks for.
-  sed -i.raw $'s/\x1b\\[[0-9;]*m//g' "$log" && rm -f "$log.raw"
+  # Colour codes would hide the words this looks for. gh prints the escape character as the two characters "^[", so
+  # both spellings are taken out.
+  sed -i.raw -e $'s/\x1b\\[[0-9;]*m//g' -e 's/\^\[\[[0-9;]*m//g' "$log" && rm -f "$log.raw"
 
-  case "$job" in
-    web)
-      steps=$(gh run view "$id" --json jobs \
-        --jq '.jobs[] | select(.name == "web") | .steps[] | select(.conclusion != "success" and .conclusion != "skipped") | .name') \
-        || refuse "could not read the web job's steps"
-      if [ "$steps" != "$WEB_FLAKE_STEP" ]; then
-        refuse "web's failed steps are not the accessibility run alone: $(printf '%s' "${steps:-none}" | tr '\n' ',')"
-      fi
-      grep -q -E "[[:space:]]$WEB_FLAKE_LINE[[:space:]]*\$" "$log" \
-        || refuse "web's accessibility run failed, and without the line \"$WEB_FLAKE_LINE\""
-      ok "the only failed job is web, at its accessibility run alone, with \"$WEB_FLAKE_LINE\""
-      ;;
-    api)
-      failing=$(sed -n 's/^.* FAIL  *\([^ ].* > .*\)$/\1/p' "$log" | sort -u)
-      grep -q -E 'Test Files +1 failed' "$log" || refuse "api failed, and not with exactly one failed test file"
-      grep -q -E 'Tests +1 failed' "$log" || refuse "api failed, and not with exactly one failed test"
-      if [ "$(printf '%s\n' "$failing" | grep -c .)" -ne 1 ]; then refuse "api failed, and its log does not name exactly one failing test"; fi
-      if [ "$failing" != "$API_FLAKE_TEST" ]; then refuse "api's failing test is not the known alarm flake: $failing"; fi
-      ok "the only failed job is api, and its only failing test is $failing"
-      ;;
-    *) refuse "the failed job is $job, which has no known flake" ;;
-  esac
+  failing=$(sed -n 's/^.* FAIL  *\([^ ].* > .*\)$/\1/p' "$log" | sort -u)
+  grep -q -E 'Test Files +1 failed' "$log" || refuse "api failed, and not with exactly one failed test file"
+  grep -q -E 'Tests +1 failed' "$log" || refuse "api failed, and not with exactly one failed test"
+  if [ "$(printf '%s\n' "$failing" | grep -c .)" -ne 1 ]; then refuse "api failed, and its log does not name exactly one failing test"; fi
+  if [ "$failing" != "$API_FLAKE_TEST" ]; then refuse "api's failing test is not the known alarm flake: $failing"; fi
+  ok "the only failed job is api, and its only failing test is $failing"
 
   gh run rerun "$id" --failed || refuse "the rerun was not accepted"
   echo "merge-gate: reran the failed job of run $id once. Run the gate again when it finishes."
@@ -150,38 +151,48 @@ if [ "$mode" = rerun-known-flake ]; then
   exit 0
 fi
 
-# Code scanning. An answer that isn't a list, or no answer, counts as not clean. So does a head nobody analysed,
-# because the alert list for a ref with no analysis is empty too. This repository's analyses are filed under the pull
-# request's head ref, so both refs are asked.
-count() { # count PATH JQ: a number, or "unknown"
-  local n
-  n=$(gh api "repos/{owner}/{repo}/code-scanning/$1" --jq "$2") || n=unknown
-  case "$n" in "" | *[!0-9]*) echo unknown ;; *) echo "$n" ;; esac
-}
-length='if type == "array" then length else error("not a list") end'
+# Code scanning's alerts, for this pull request's refs and no other. An answer that isn't a list, or no answer, counts
+# as not clean. This repository's results are filed under the head ref; the merge ref is asked too, in case that changes.
 alerts=0
 for ref in "refs/pull/$pr/merge" "refs/pull/$pr/head"; do
-  found=$(count "alerts?ref=$ref&state=open" "$length")
+  found=$(gh api "repos/{owner}/{repo}/code-scanning/alerts?ref=$ref&state=open" \
+    --jq 'if type == "array" then length else error("not a list") end') || found=unknown
   case "$found" in
     0) ok "code scanning has no open alert for $ref" ;;
-    unknown) bad "could not read code scanning alerts for $ref"; alerts=unknown ;;
+    "" | *[!0-9]*) bad "could not read code scanning alerts for $ref"; alerts=unknown ;;
     *)
       bad "code scanning has $found or more open alerts for $ref"
       if [ "$alerts" != unknown ]; then alerts=$((alerts + found)); fi
       ;;
   esac
 done
-on_merge=$(count "analyses?ref=refs/pull/$pr/merge&per_page=100" "$length")
-on_head=$(count "analyses?ref=refs/pull/$pr/head&per_page=100" \
-  "if type == \"array\" then [.[] | select(.commit_sha == \"$sha\")] | length else error(\"not a list\") end")
-if [ "$on_merge" = unknown ] || [ "$on_head" = unknown ]; then
+
+# An empty alert list means nothing for a head nobody analysed, or that only some languages were analysed for. So
+# every language code scanning is set up for must have an analysis of this exact sha. The languages come from the
+# repository's default setup, which is where its CodeQL workflow is defined: there is no workflow file. A language
+# listed beside its own pair ("javascript" beside "javascript-typescript") is analysed as the pair.
+languages=$(gh api "repos/{owner}/{repo}/code-scanning/default-setup" --jq '
+  if .state != "configured" then error("default setup is not configured") else . end
+  | .languages as $all
+  | [$all[] | select(. as $one | any($all[]; . != $one and (split("-") | index($one) != null)) | not)]
+  | unique | .[]' 2>&1) || { setup_error=$languages; languages=; }
+analysed=$(gh api "repos/{owner}/{repo}/code-scanning/analyses?ref=refs/pull/$pr/head&per_page=100" --jq "
+  if type == \"array\" then [.[] | select(.commit_sha == \"$sha\") | .category] | unique | .[] else error(\"not a list\") end") \
+  || analysed=unreadable
+if [ -z "$languages" ] && printf '%s' "${setup_error:-}" | grep -q 'HTTP 403'; then
+  bad "could not read which languages code scanning analyses: GitHub answered 403. The token needs permission to read the code scanning default setup, which for a fine-grained token is Administration: read"
+elif [ -z "$languages" ]; then
+  bad "could not read which languages code scanning analyses"
+elif [ "$analysed" = unreadable ]; then
   bad "could not read code scanning's analyses"
-elif [ "$on_head" -gt 0 ]; then
-  ok "code scanning analysed this head ($on_head analyses)"
-elif [ "$on_merge" -gt 0 ]; then
-  ok "code scanning analysed the merge ref ($on_merge analyses)"
 else
-  bad "code scanning has no analysis of this head or of the merge ref, so its empty alert list means nothing"
+  for language in $languages; do
+    if printf '%s\n' "$analysed" | grep -q -x -F "/language:$language"; then
+      ok "code scanning analysed this head for $language"
+    else
+      bad "code scanning has no analysis of this head for $language, so its empty alert list means nothing"
+    fi
+  done
 fi
 
 # ci.yml's jobs on the base, against the list above.
@@ -192,6 +203,51 @@ if [ "$workflow_jobs" = "$CI_JOBS" ]; then
   ok "ci.yml on $base has the jobs this script requires"
 else
   bad "ci.yml on $base has the jobs '${workflow_jobs:-unreadable}', and this script requires '$CI_JOBS'. Update CI_JOBS in scripts/merge-gate"
+fi
+
+# CI skips its jobs for a docs/ branch by the branch's name alone. The gate lets them be skipped only if the files
+# agree. Otherwise the jobs must have run, whatever the name.
+#
+# What counts as documentation: anything under docs/, and a Markdown file anywhere else, except agent instructions
+# and anything beside workflows. CLAUDE.md, .claude/ and .github/ always take the full path.
+# The exceptions are matched in lower case: on a checkout that ignores case, claude.md and .GitHub/ are those files.
+is_docs() {
+  case "$1" in docs/*) return 0 ;; esac
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    claude.md | */claude.md | .claude/* | */.claude/* | .github/* | */.github/*) return 1 ;;
+  esac
+  case "$1" in
+    *.md) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+may_skip=false
+if [[ "$branch" == docs/* ]]; then
+  # The REST list, because it alone gives a renamed file's old path. Without it, code moved under docs/ would read as
+  # a docs/ file, and leave its own folder with CI skipped.
+  count=$(gh api "repos/{owner}/{repo}/pulls/$pr" --jq '.changed_files | tostring') || count=
+  files=$(gh api "repos/{owner}/{repo}/pulls/$pr/files?per_page=100" --paginate \
+    --jq '.[] | [.status, .filename, (.previous_filename // "")] | @tsv') || files=
+  outside=""
+  while IFS=$tab read -r status path previous; do
+    [ -n "$status" ] || continue
+    case "$status" in
+      added | modified | removed | renamed) ;;
+      *) outside="$outside, $path ($status)"; continue ;;
+    esac
+    if ! is_docs "$path"; then outside="$outside, $path"; fi
+    if [ "$status" = renamed ] && ! is_docs "$previous"; then outside="$outside, ${previous:-an unnamed file} (renamed to $path)"; fi
+  done <<< "$files"
+  if ! [[ "$count" =~ ^[1-9][0-9]*$ ]] || [ -z "$files" ]; then
+    bad "could not read the files this docs/ branch changes"
+  elif [ "$count" != "$(printf '%s\n' "$files" | wc -l | tr -d ' ')" ]; then
+    echo "        this docs/ branch changes $count files, and not all of them could be listed, so ci.yml's jobs must have run"
+  elif [ -n "$outside" ]; then
+    echo "        this docs/ branch changes files that aren't documentation (${outside#, }), so ci.yml's jobs must have run"
+  else
+    may_skip=true
+    ok "this docs/ branch changes only documentation, so ci.yml's jobs may be skipped"
+  fi
 fi
 
 # Checks, read together with the head they belong to.
@@ -211,6 +267,7 @@ elif [ "$checked_head" != "$sha" ]; then
 elif [ -z "$checks" ]; then
   bad "no check has reported"
 else
+  # Every check, so a name that reports twice is judged twice.
   while IFS=$tab read -r name status conclusion; do
     if [ "$status" != COMPLETED ]; then
       bad "check $name is $status"
@@ -229,11 +286,13 @@ else
     got=$(conclusions "$job")
     if [ -z "$got" ]; then
       bad "ci.yml's $job is not among the checks"
-    elif [[ "$branch" != docs/* ]] && printf '%s\n' "$got" | grep -q -x SKIPPED; then
-      bad "ci.yml's $job was SKIPPED, which only a docs/ branch may do"
+    elif [ "$may_skip" != true ] && printf '%s\n' "$got" | grep -q -x SKIPPED; then
+      bad "ci.yml's $job was SKIPPED, which only a docs/ branch that changes documentation alone may do"
     fi
   done
-  for name in "${SCANNING_CHECKS[@]}"; do
+  scanning=(CodeQL)
+  for language in $languages; do scanning+=("Analyze ($language)"); done
+  for name in "${scanning[@]}"; do
     got=$(conclusions "$name")
     if [ -z "$got" ]; then
       bad "$name is not among the checks"

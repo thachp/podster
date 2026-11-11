@@ -13,8 +13,10 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { request as httpsRequest } from "node:https";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { localCertificate } from "./local-cert.mjs";
 import { freePort, groupGone, prepareStack, startGateway } from "./stack.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -30,9 +32,11 @@ const passOn = flags.filter((f) => !["--skip-build", "--rehearse-cookies", "--re
 const { gateway, apiConfig, persist, privateKey, kid } = prepareStack({ skipBuild });
 
 const port = await freePort();
-// A worker only sees staging's HTTPS URLs if the local stack is on HTTPS too, with wrangler's own certificate.
+// A worker only sees staging's HTTPS URLs if the local stack is on HTTPS too.
 const base = `${testPeople ? "https" : "http"}://localhost:${port}`;
-if (testPeople) process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+// Its certificate is made for this run, and is the one thing this run and the journey trust beyond the usual.
+// Certificate checking stays on everywhere. What the certificate is, in local-cert.mjs.
+const tls = testPeople ? localCertificate() : undefined;
 // These reach only the gateway, and die with this run.
 const vars = {
   AUTH_SECRET: randomBytes(32).toString("base64"),
@@ -50,15 +54,27 @@ if (testPeople) {
   Object.assign(vars, { BASE_URL: `https://${STAGING_HOST}`, APP_URL: "https://app-staging.podster.dev", ENABLE_E2E_SIGNUP: "true", E2E_SIGNUP_SECRET: signupSecret });
 }
 
-let { stack, log, stop } = startGateway({ gateway, apiConfig, persist, vars, port, extraArgs: testPeople ? ["--local-upstream", STAGING_HOST, "--local-protocol", "https"] : [], inspectorPort: await freePort() });
+let { stack, log, stop } = startGateway({ gateway, apiConfig, persist, vars, port, extraArgs: testPeople ? ["--local-upstream", STAGING_HOST, "--local-protocol", "https", "--https-key-path", tls.key, "--https-cert-path", tls.cert] : [], inspectorPort: await freePort() });
+
+/** Whether the HTTPS stack answers at all, with its certificate checked against the one made above. */
+function answersOverTls(base) {
+  return new Promise((done) => {
+    const request = httpsRequest(`${base}/api/auth/ok`, { ca: tls.ca, timeout: 30_000 }, (response) => {
+      response.resume();
+      done(true);
+    });
+    request.on("timeout", () => request.destroy());
+    request.on("error", () => done(false));
+    request.end();
+  });
+}
 
 async function waitForStack(base) {
   const deadline = Date.now() + 120_000;
   let cookie;
   // Nobody can sign up on this stack without using up the test sign-up's limit, and any answer means it's listening.
   while (testPeople && Date.now() < deadline && stack.exitCode === null) {
-    const answered = await fetch(`${base}/api/auth/ok`, { redirect: "manual", signal: AbortSignal.timeout(30_000) }).catch(() => null);
-    if (answered) return;
+    if (await answersOverTls(base)) return;
     await new Promise((done) => setTimeout(done, 500));
   }
   while (Date.now() < deadline) {
@@ -95,7 +111,8 @@ try {
   console.log(`local stack is up at ${base}\n`);
   if (testPeople) {
     const redirect = ["--import", join(here, "rehearse-fetch.mjs")];
-    const rehearsal = { PODSTER_E2E_REHEARSE_PORT: String(port), PODSTER_E2E_SIGNUP_SECRET: signupSecret, PODSTER_E2E_COOKIE_A: "", PODSTER_E2E_COOKIE_B: "" };
+    // The journey trusts this run's certificate through Node's own list of extra authorities, and checks it as usual.
+    const rehearsal = { PODSTER_E2E_REHEARSE_PORT: String(port), PODSTER_E2E_SIGNUP_SECRET: signupSecret, PODSTER_E2E_COOKIE_A: "", PODSTER_E2E_COOKIE_B: "", NODE_EXTRA_CA_CERTS: tls.cert };
     const resultFiles = () => (existsSync(join(here, "results")) ? readdirSync(join(here, "results")) : []);
     const before = new Set(resultFiles());
     code = await child("journey.mjs", ["--base-url", `https://${STAGING_HOST}`, ...passOn], rehearsal, redirect);

@@ -53,6 +53,17 @@ export async function seedInputAssets({ gatewayBase, owner, room, task }) {
   return { files: made, changes: made.filter((file) => file.state !== "scanning").map(({ id, state }) => ({ id, state })) };
 }
 
+/**
+ * The one way file states are set: stops the started Workers, waits until every process under them has ended, and only
+ * then writes. Workers still running after `timeout` throw, and nothing is written: writing under a live runtime could
+ * corrupt a room's files or be overwritten. `started` is what `startWrangler` returns. `write` is for the self-test.
+ */
+export async function setFileStatesWhileStopped(started, persist, changes, { timeout = 30_000, write = writeFileStates } = {}) {
+  started.stop();
+  if (!(await started.gone(timeout))) throw new Error(`the Workers' processes were still running ${timeout / 1000} seconds after being stopped, so the file states weren't written`);
+  return write(persist, changes);
+}
+
 /** Marked as the fixture's, so a row written here can't be mistaken for a real scan. */
 const FIXTURE_SCAN_DATABASE = JSON.stringify({ engine: "a11y-fixture", version: "0", built_at: new Date().toISOString() });
 
@@ -61,7 +72,7 @@ const FIXTURE_SCAN_DATABASE = JSON.stringify({ engine: "a11y-fixture", version: 
  * a scanner's report (ready, blocked) sets the state with its reason, the SHA-256 it scanned, the signature database and the time;
  * an hour with no report (failed) sets only the state. Nothing reads the scan columns yet, so they don't change what's shown.
  */
-export async function writeFileStates(persist, changes) {
+async function writeFileStates(persist, changes) {
   const states = apiFileStates();
   for (const change of changes) ok(states.has(change.state) && change.state !== "uploading", `refusing to write file state ${change.state}`);
   const { DatabaseSync } = await import("node:sqlite");

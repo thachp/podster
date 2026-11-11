@@ -1,4 +1,6 @@
+import type { ReactNode } from "react";
 import { Timestamp } from "./task-bits";
+import { failureSentence } from "./task-merge";
 
 /** A task's pull request as Podster last read it from GitHub (M5 step 7a). IDs, commit IDs, states and times only. */
 export type PullRequestChange = {
@@ -18,10 +20,14 @@ export type PullRequestChange = {
   reviewed_commit_sha: string | null;
   reviewed_base_sha: string | null;
   commit_changed: boolean;
-  merge_state: "not_requested" | "requested" | "succeeded" | "failed";
+  merge_state: "not_requested" | "requested" | "succeeded" | "failed" | "outcome_unknown";
   merge_reason: string | null;
   merge_sha: string | null;
   merge_observed_at: number | null;
+  /** From M5 step 7b. Optional, so a read from before it still renders. */
+  merge_requested_by?: string | null;
+  merge_requested_at?: number | null;
+  merge_finished_at?: number | null;
 };
 
 /** docs/spec/DESIGN.md section 4's merge stage. "Commit changed" outranks the rest until a merge is recorded. */
@@ -29,8 +35,9 @@ export function mergeLabel(change: Pick<PullRequestChange, "merge_state" | "merg
   if (change.merge_reason === "unrequested_merge" || change.merge_reason === "unreviewed_merge") return "Merged outside Podster";
   if (change.merge_state === "succeeded") return "Merged";
   if (change.merge_state === "failed") return "Merge failed";
+  if (change.merge_state === "outcome_unknown") return "Merge outcome unknown";
+  if (change.merge_state === "requested") return "Merge requested";
   if (change.commit_changed) return "Commit changed";
-  if (change.merge_state === "requested") return "Merging";
   return "Not requested";
 }
 
@@ -50,7 +57,7 @@ function Commit({ sha }: { sha: string | null }) {
  * The Release panel's pull request and merge stage, read-only. No merge control here yet: merging is M5 step 7b. Nothing
  * from the pull request's content is shown, because the API keeps none of it.
  */
-export function TaskChangePanel({ change }: { change: PullRequestChange }) {
+export function TaskChangePanel({ change, mergeControl }: { change: PullRequestChange; mergeControl?: ReactNode }) {
   const pr = change.pr_state ? `${PR_STATES[change.pr_state] ?? change.pr_state}${change.pr_draft ? " · Draft" : ""}` : "Not read yet";
   return (
     <section className="space-y-2">
@@ -79,6 +86,21 @@ export function TaskChangePanel({ change }: { change: PullRequestChange }) {
         <dt className="text-muted-foreground">Merge</dt>
         <dd>
           {mergeLabel(change)}
+          {change.merge_requested_at ? (
+            <span className="block text-xs text-muted-foreground">
+              Asked for <Timestamp at={change.merge_requested_at} />
+            </span>
+          ) : null}
+          {change.merge_finished_at ? (
+            <span className="block text-xs text-muted-foreground">
+              Ended <Timestamp at={change.merge_finished_at} />
+            </span>
+          ) : null}
+          {change.merge_observed_at ? (
+            <span className="block text-xs text-muted-foreground">
+              Seen on GitHub <Timestamp at={change.merge_observed_at} />
+            </span>
+          ) : null}
           {change.merge_sha ? (
             <span className="block text-xs text-muted-foreground">
               Merge commit <Commit sha={change.merge_sha} />
@@ -91,6 +113,14 @@ export function TaskChangePanel({ change }: { change: PullRequestChange }) {
           Commit changed: the pull request&apos;s head moved off the reviewed commit{change.commit_changed_at ? <> <Timestamp at={change.commit_changed_at} /></> : null}. The approval stands for the commit it named, and the way on is a follow-up task.
         </p>
       ) : null}
+      {change.merge_state === "requested" ? <p role="status" className="text-sm">Podster is checking the pull request against the reviewed commit and merging it. Reload to see the result.</p> : null}
+      {change.merge_state === "outcome_unknown" ? (
+        <p role="note" className="rounded-lg bg-status-amber-surface p-3 text-sm text-status-amber">
+          Podster sent the merge, but couldn&apos;t read GitHub to see what it did. It keeps reading until it knows. Nothing new can be asked for meanwhile.
+        </p>
+      ) : null}
+      {change.merge_state === "failed" || change.merge_reason === "unrequested_merge" || change.merge_reason === "unreviewed_merge" ? <p className="text-sm">{change.merge_state === "failed" ? "The merge didn't happen" : "Podster didn't merge this"}: {failureSentence(change.merge_reason)}.</p> : null}
+      {mergeControl}
       {change.head_in_repository === false ? <p className="text-sm text-status-amber">The head branch is no longer in this workroom&apos;s repository.</p> : null}
       {change.base_is_default === false ? <p className="text-sm text-status-amber">The pull request no longer targets the repository&apos;s default branch.</p> : null}
       {!change.watched ? <p className="text-sm text-muted-foreground">GitHub answered not found several times, so Podster stopped reading this pull request.</p> : null}

@@ -126,6 +126,27 @@ const eventTypes = (id: string) => inRoom(id, (sql) => sql.exec("SELECT type FRO
 const indexRow = async (repo: number) => (await BINDINGS.DB.prepare("SELECT workspace_id FROM repo_room_index WHERE provider = 'github' AND provider_repo_id = ?").bind(repo).first())?.workspace_id ?? null;
 
 describe("the organization's provisioning delegation", () => {
+  it("keeps answering while managed repositories are switched off, the same as when they're on (ruled 2026-11-11)", async () => {
+    // Off is this runtime's state for the whole Worker. The delegation routes never read the switch, so an operator
+    // can set the delegation before the feature is switched on. A room switched on for a test changes nothing here.
+    expect(BINDINGS.MANAGED_REPOSITORIES).toBeUndefined();
+    const offRoom = await room({ delegated: false, switchedOn: false });
+    const onRoom = await room({ delegated: false });
+    const outsider: Who = { id: "per_pv_off_outsider", kind: "person", org: "org_pv_elsewhere", adminOrgs: ["org_pv_elsewhere"] };
+    for (const r of [offRoom, onRoom]) {
+      const path = `/v1/orgs/${r.org}/provisioning-delegation`;
+      expect((await api(OPERATOR, "GET", path)).body).toMatchObject({ provider: "github", granted: false });
+      const set = await api(OPERATOR, "PUT", path, { granted: true });
+      expect([set.status, set.body.granted], r.id).toEqual([200, true]);
+      expect((await api(r.owner, "GET", path)).body.granted).toBe(true);
+      // Someone who is neither an operator nor the organization's admin is refused as ever, reading or setting.
+      for (const method of ["GET", "PUT"]) {
+        const refused = await api(outsider, method, path, method === "PUT" ? { granted: false } : undefined);
+        expect([refused.status, refused.code], `${r.id} ${method}`).toEqual([403, "not_allowed"]);
+      }
+    }
+  });
+
   it("is given and taken back by a Podster operator, and nobody else", async () => {
     const org = `org_pv_d_${crypto.randomUUID().slice(0, 8)}`;
     const admin: Who = { id: "per_pv_d_admin", kind: "person", org, adminOrgs: [org] };

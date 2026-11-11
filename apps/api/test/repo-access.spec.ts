@@ -348,10 +348,11 @@ describe("refusing", () => {
     await refusedWith(await access(AGENT, r.id, r.task), 409, "repo_not_ready");
   });
 
-  it("answers as a route that doesn't exist while the switch is off, whatever the body", async () => {
+  it("answers as a route that doesn't exist while the switch is off, a malformed body included", async () => {
     const r = await room({ switchedOn: false });
     await refusedWith(await access(AGENT, r.id, r.task), 404, "not_found");
-    await refusedWith(await access(AGENT, r.id, r.task, undefined, { raw: "{not json" }), 404, "not_found");
+    // A missing route parses the body first, so a malformed one is `invalid_argument` there and here alike.
+    await refusedWith(await access(AGENT, r.id, r.task, undefined, { raw: "{not json" }), 400, "invalid_argument");
     await refusedWith(await access(AGENT, r.id, "tsk_missing"), 404, "not_found");
   });
 

@@ -645,3 +645,129 @@ pub fn merge_call(status: Option<u16>) -> MergeCall {
         Some(other) => MergeCall::Refused(other),
     }
 }
+
+/// How many times the job reads again for a merge whose outcome isn't known, before it stops. Proposed.
+pub const MAX_UNKNOWN_READS: u32 = 12;
+const UNKNOWN_READ_MIN_MS: i64 = 15 * 60 * 1000;
+const UNKNOWN_READ_MAX_MS: i64 = 6 * 60 * 60 * 1000;
+
+/// How long to wait before the next read of a merge whose outcome isn't known, having tried this many times: fifteen
+/// minutes, doubling to six hours. Proposed.
+pub fn unknown_read_wait_ms(reads_made: u32) -> i64 {
+    UNKNOWN_READ_MIN_MS
+        .checked_shl(reads_made.min(16))
+        .map_or(UNKNOWN_READ_MAX_MS, |wait| {
+            wait.clamp(UNKNOWN_READ_MIN_MS, UNKNOWN_READ_MAX_MS)
+        })
+}
+
+/// Whether the job reads again for a merge whose outcome isn't known. Never in a room that's archived or suspended,
+/// and not past the cap. After that the outcome stays recorded as unknown until a person asks for the merge again,
+/// which begins with a read.
+pub fn unknown_read_allowed(reads_made: u32, room_open: bool) -> bool {
+    room_open && reads_made < MAX_UNKNOWN_READS
+}
+
+/// What a read made after a merge call was recorded says became of that call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Landed {
+    /// The pull request reads as merged, with the reviewed commit, and the default branch holds it. The proof moves
+    /// the merge to succeeded. `default_branch_differs` says the provider's default branch isn't the link's any more:
+    /// the merge is still recorded as the merge it was, and the link is degraded so nothing more is merged.
+    Merged {
+        proof: MergeObserved,
+        default_branch_differs: bool,
+    },
+    /// The pull request reads as merged and the provider's default branch couldn't be read. Nothing is recorded
+    /// without that comparison: read again.
+    DefaultBranchUnread,
+    /// It didn't land as this request's merge. The step says what the read comes to otherwise.
+    No(MergeStep),
+}
+
+/// Decides what a read made after a recorded merge call means. The one decision for every place that asks, so the
+/// pass that made the call and a later pass that only reads can't come to different answers.
+pub fn decide_landed(
+    authorized: &MergeAuthorized,
+    reviewed: &ReviewedBase,
+    observed: &PullObservation,
+    call: Option<MergeCall>,
+    reported_default_branch: Option<&str>,
+) -> Landed {
+    let step = decide_merge_step(authorized, reviewed, observed, call);
+    if observed.state != PullState::Merged {
+        return Landed::No(step);
+    }
+    match (step, reported_default_branch) {
+        (MergeStep::Succeeded(_), None) => Landed::DefaultBranchUnread,
+        (MergeStep::Succeeded(proof), Some(reported)) => Landed::Merged {
+            proof,
+            default_branch_differs: reported != reviewed.default_branch,
+        },
+        (other, _) => Landed::No(other),
+    }
+}
+
+/// The state a new merge request is decided from. A merge whose outcome the job has stopped reading for may be asked
+/// for again, as a failed one may: that request's first pass begins with a read. While the job is still reading, it
+/// may not.
+pub fn requestable_state(state: MergeState, unknown_reads_ended: bool) -> MergeState {
+    match state {
+        MergeState::OutcomeUnknown if unknown_reads_ended => MergeState::Failed,
+        other => other,
+    }
+}
+
+/// How the ordinary watch of a task's change settles a merge whose outcome isn't known.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WatchSettles {
+    /// The pull request is merged with the reviewed commit as its head, into the default branch, and the provider's
+    /// default branch is the link's.
+    Merged(MergeObserved),
+    /// The pull request is closed and not merged, or merged at another commit or into another branch: the recorded
+    /// call didn't merge the reviewed commit.
+    Failed,
+    /// It reads as merged, and the provider's default branch isn't the link's. The watch doesn't record a merge into a
+    /// branch that isn't the default the provider reports: the link is degraded, and the merge job's own read, or a
+    /// new request, decides, with [`decide_landed`].
+    DefaultBranchDiffers,
+    /// Still open, or not enough read to say, such as a default branch the answer didn't name.
+    NotYet,
+}
+
+/// Decides, from the watch's own read of the pull request, what became of a merge call whose outcome is unknown,
+/// whether the job is still reading for it or has stopped. It's [`decide_landed`] on what that one read carries: "the
+/// default branch holds the commit" is the pull request saying it merged into its base, with that base being the
+/// link's default branch, and the provider's default branch is the one the pull request's own answer names for its
+/// repository. No call is made and nothing more is read for this.
+pub fn settle_unknown_from_watch(
+    authorized: &MergeAuthorized,
+    reviewed: &ReviewedBase,
+    observed: &PullObservation,
+    reported_default_branch: Option<&str>,
+) -> WatchSettles {
+    if observed.state == PullState::Open {
+        return WatchSettles::NotYet;
+    }
+    let observed = PullObservation {
+        default_branch_has_reviewed: Some(
+            observed.state == PullState::Merged && observed.base_ref == reviewed.default_branch,
+        ),
+        ..*observed
+    };
+    match decide_landed(
+        authorized,
+        reviewed,
+        &observed,
+        None,
+        reported_default_branch,
+    ) {
+        Landed::Merged {
+            proof,
+            default_branch_differs: false,
+        } => WatchSettles::Merged(proof),
+        Landed::Merged { .. } => WatchSettles::DefaultBranchDiffers,
+        Landed::DefaultBranchUnread | Landed::No(MergeStep::ReadAgain) => WatchSettles::NotYet,
+        Landed::No(_) => WatchSettles::Failed,
+    }
+}

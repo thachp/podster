@@ -841,6 +841,10 @@ fn pull_seen(answer: &Value) -> Option<PullSeen> {
         base_sha: sha(&answer["base"]["sha"])?,
         state,
         draft: answer["draft"].as_bool()?,
+        repo_default_branch: plain(
+            &answer["base"]["repo"]["default_branch"],
+            MAX_BRANCH_NAME_BYTES,
+        ),
         merge_sha: merged.then(|| sha(&answer["merge_commit_sha"])).flatten(),
         merged_by_id: merged.then(|| id(&answer["merged_by"]["id"])).flatten(),
     })
@@ -900,6 +904,120 @@ impl PullReader for AgentTokens {
             failed_at_mint: false,
             revoked,
         }
+    }
+}
+
+/// A commit's statuses and check runs, as states only: a status's `state`, or a check run's `status` with its
+/// `conclusion`. A context, a name, a description or a URL is never read out of the answers.
+pub type ChecksSeen = Vec<(String, Option<String>)>;
+
+/// The provider, as the room's read of a head commit's checks needs it (M5 step 8).
+pub(crate) trait ChecksReader {
+    /// Reads one commit's combined status and its check runs, with a token minted for this read alone, for the one
+    /// repository, that can read statuses and checks and nothing else, revoked when the read ends.
+    async fn read_checks(
+        &self,
+        repo_id: i64,
+        sha: &str,
+    ) -> MergeStepRead<std::result::Result<ChecksSeen, Failure>>;
+}
+
+/// At most this many statuses and check runs are counted for one commit. More than a managed repository would have.
+const MAX_CHECKS_READ: usize = 100;
+
+impl ChecksReader for AgentTokens {
+    async fn read_checks(
+        &self,
+        repo_id: i64,
+        sha: &str,
+    ) -> MergeStepRead<std::result::Result<ChecksSeen, Failure>> {
+        let wanted = TokenPermissions::CHECKS_READER;
+        let minted = match self.mint_agent_token(repo_id, &wanted.pairs()).await {
+            Ok(minted) => minted,
+            Err(failure) => {
+                return MergeStepRead {
+                    answer: Err(failure),
+                    failed_at_mint: true,
+                    revoked: true,
+                }
+            }
+        };
+        let granted: Vec<(&str, &str)> = minted
+            .permissions
+            .iter()
+            .map(|(name, level)| (name.as_str(), level.as_str()))
+            .collect();
+        let narrow = minted_token_matches(repo_id, &minted.repo_ids, &granted, wanted);
+        let answer = if narrow && valid_commit_sha(sha) {
+            Self::checks_of(&minted.token, repo_id, sha).await
+        } else {
+            Err(Failure::Unreadable)
+        };
+        let revoked = self.revoke_token(&minted.token).await == Revoked::Gone;
+        MergeStepRead {
+            answer,
+            failed_at_mint: false,
+            revoked,
+        }
+    }
+}
+
+impl AgentTokens {
+    async fn checks_of(
+        token: &str,
+        repo_id: i64,
+        sha: &str,
+    ) -> std::result::Result<ChecksSeen, Failure> {
+        let word = |value: &Value| {
+            value
+                .as_str()
+                .filter(|word| !word.is_empty() && word.len() <= 32)
+                .map(str::to_string)
+        };
+        let base = format!("/repositories/{repo_id}/commits/{sha}");
+        let mut seen = vec![];
+        let (status, combined) = call_within(
+            Method::Get,
+            &format!("{base}/status?per_page=100"),
+            token,
+            None,
+            MAX_PULL_ANSWER_BYTES,
+        )
+        .await?;
+        if status != 200 {
+            return Err(Failure::Status(status));
+        }
+        for one in combined["statuses"]
+            .as_array()
+            .ok_or(Failure::Unreadable)?
+            .iter()
+            .take(MAX_CHECKS_READ)
+        {
+            seen.push((word(&one["state"]).ok_or(Failure::Unreadable)?, None));
+        }
+        let (status, runs) = call_within(
+            Method::Get,
+            &format!("{base}/check-runs?per_page=100"),
+            token,
+            None,
+            MAX_PULL_ANSWER_BYTES,
+        )
+        .await?;
+        if status != 200 {
+            return Err(Failure::Status(status));
+        }
+        for one in runs["check_runs"]
+            .as_array()
+            .ok_or(Failure::Unreadable)?
+            .iter()
+            .take(MAX_CHECKS_READ)
+        {
+            seen.push((
+                word(&one["status"]).ok_or(Failure::Unreadable)?,
+                word(&one["conclusion"]),
+            ));
+        }
+        Ok(seen)
     }
 }
 

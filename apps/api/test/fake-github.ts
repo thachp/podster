@@ -54,6 +54,11 @@ type AgentScript = {
   mergeMint?: number;
   /** A number fails the status call. "drop" answers 201 and sets nothing. "foreign" sets it as another App's, which the review rule doesn't count. */
   status?: number | string;
+  /** A commit's checks, for the server's own read (M5 step 8): commit status states, and check runs as [status, conclusion]. `checksRead` is a status for that read, if not 200. */
+  checks?: { statuses?: string[]; runs?: [string, string | null][] };
+  checksRead?: number;
+  /** A status for reading the repository itself, and with it its default branch, if not 200. */
+  describe?: number;
   /** The default branch the agent-token and merge Apps are told, if not the repository's own. */
   defaultBranch?: string;
   /** How the merge call goes: ok; lost (merges, then answers 500); error (answers 500, merges nothing); refuse (405, as the rules would); moved (the head changes first, so 409); merged_by_other (someone merges another head first, so 200). */
@@ -378,7 +383,7 @@ function agentRead(request: Request, path: string, bearer: string): Response | n
   if (script?.pullRead && script.pullRead !== 200) return answer({ message: "SECRET-PROVIDER-TEXT" }, script.pullRead);
   const pull = script?.pulls?.[asked[2]];
   if (!pull) return answer({ message: "Not Found" }, 404);
-  const side = (id: number | null) => (id === null ? null : { id, name: "SECRET-REPO-NAME", full_name: "SECRET-OWNER/SECRET-REPO-NAME" });
+  const side = (id: number | null) => (id === null ? null : { id, name: "SECRET-REPO-NAME", full_name: "SECRET-OWNER/SECRET-REPO-NAME", default_branch: script?.defaultBranch ?? repos.get(repo)?.defaultBranch ?? readyRepos.get(repo)?.defaultBranch ?? "main" });
   const merged = pull.merged === true;
   return answer({
     number: pull.as_number ?? Number(asked[2]),
@@ -435,7 +440,8 @@ function mergeCall(request: Request, path: string, bearer: string, body: any): R
   const comparing = path.match(/^\/repositories\/(\d+)\/compare\/([^.]+)\.\.\.([0-9a-f]+)$/);
   const describing = request.method === "GET" ? path.match(/^\/repositories\/(\d+)$/) : null;
   const pushing = path.match(/^\/repositories\/(\d+)\/(contents\/.+|git\/refs\/heads\/.+)$/);
-  const asked = marking ?? merging ?? comparing ?? describing ?? pushing;
+  const checking = request.method === "GET" ? path.match(/^\/repositories\/(\d+)\/commits\/([0-9a-f]+)\/(status|check-runs)$/) : null;
+  const asked = marking ?? merging ?? comparing ?? describing ?? pushing ?? checking;
   if (!asked || !held || !agentLive.has(bearer)) return null;
   const repo = Number(asked[1]);
   const answer = (payload: unknown, status = 200) => {
@@ -448,7 +454,15 @@ function mergeCall(request: Request, path: string, bearer: string, body: any): R
   const script = agentRepos.get(repo) ?? {};
   const defaultBranch = script.defaultBranch ?? repos.get(repo)?.defaultBranch ?? readyRepos.get(repo)?.defaultBranch ?? "main";
   // The repository itself, for its default branch. Not counted among the calls a test lists.
-  if (describing) return json({ id: repo, default_branch: defaultBranch, description: "SECRET-DESCRIPTION" });
+  if (describing) return script.describe && script.describe !== 200 ? json({ message: "SECRET-PROVIDER-TEXT" }, script.describe) : json({ id: repo, default_branch: defaultBranch, description: "SECRET-DESCRIPTION" });
+  // A commit's statuses or check runs, for a token that may read them. Their names and text are theirs, and Podster keeps none.
+  if (checking) {
+    const needs = checking[3] === "status" ? "statuses" : "checks";
+    if (!held.permissions[needs]) return denied();
+    if (script.checksRead && script.checksRead !== 200) return answer({ message: "SECRET-PROVIDER-TEXT" }, script.checksRead);
+    if (checking[3] === "status") return answer({ state: "SECRET-COMBINED", statuses: (script.checks?.statuses ?? []).map((state) => ({ state, context: "SECRET-CHECK-CONTEXT", description: "SECRET-CHECK-TEXT", target_url: "https://secret.example/SECRET-URL" })) });
+    return answer({ total_count: script.checks?.runs?.length ?? 0, check_runs: (script.checks?.runs ?? []).map(([status, conclusion]) => ({ status, conclusion, name: "SECRET-CHECK-NAME", output: { title: "SECRET-CHECK-TITLE" } })) });
+  }
   // A write straight to a branch: the update rule refuses everyone but the merge App, and Podster's merge App never asks.
   if (pushing && request.method !== "GET") {
     const ref = pushing[2].startsWith("git/refs/heads/");
@@ -492,6 +506,8 @@ function mergeCall(request: Request, path: string, bearer: string, body: any): R
     agentRepos.set(repo, { ...script, has: [...(script.has ?? []), pull.head_sha] });
     // The repository's default branch is changed a moment after the merge lands.
     if (script.merge === "default_moves") agentRepos.set(repo, { ...agentRepos.get(repo), defaultBranch: "trunk" });
+    // The repository can't be read for a moment after the merge lands, so its default branch isn't known.
+    if (script.merge === "default_unreadable") agentRepos.set(repo, { ...agentRepos.get(repo), describe: 503 });
     if (script.merge === "lost") return answer({ message: "SECRET-PROVIDER-TEXT" }, 500);
     return answer({ sha: pull.merge_commit_sha, merged: true, message: "Pull Request successfully merged" });
   }

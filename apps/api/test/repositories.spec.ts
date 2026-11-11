@@ -375,7 +375,7 @@ describe("the routes later steps build", () => {
     }
     const contract: { path: string; operation: string }[] = JSON.parse(BINDINGS.TEST_API_ROUTES);
     // Step 7b added the merge route, which answers as above while the switch is off. Nothing for a release or a deploy.
-    expect(contract.filter((r) => /merge|release-status|deploy/i.test(r.path + r.operation)).map((r) => r.operation)).toEqual(["mergeTask"]);
+    expect(contract.filter((r) => /merge|release-status|deploy/i.test(r.path + r.operation)).map((r) => r.operation).sort()).toEqual(["getTaskReleaseStatus", "mergeTask"]);
     expect(contract.filter((r) => /repo-access/i.test(r.path)).map((r) => r.operation)).toEqual(["getRepoAccess"]);
   });
 });

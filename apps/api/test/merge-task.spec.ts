@@ -762,6 +762,52 @@ describe("what's kept, logged and shown", () => {
   });
 });
 
+describe("with managed repositories switched off again", () => {
+  it("shows nobody a change's or a merge's events, in a task's history or the activity, and leaves no page short", async () => {
+    const r = await requested();
+    await pass(r.id);
+    expect((await change(r.id, r.task)).merge_state).toBe("succeeded");
+    const hiddenKind = (e: any) => e.type.startsWith("merge.") || e.type.startsWith("task_change.");
+    /** Every page of the room's activity for a viewer, three at a time, and how long each page was. */
+    const pages = async (who: Who) => {
+      const all: any[] = [];
+      const sizes: number[] = [];
+      for (let after: string | undefined; ; ) {
+        const page = await must(who, "GET", `/v1/workspaces/${r.id}/activity?limit=3${after ? `&after=${after}` : ""}`);
+        sizes.push(page.events.length);
+        all.push(...page.events);
+        if (!page.next_after) return { all, sizes };
+        after = page.next_after;
+      }
+    };
+    // On, the owner sees them, among the room's other events.
+    const on = await pages(OWNER);
+    const shown = on.all.filter(hiddenKind).length;
+    expect(shown).toBeGreaterThanOrEqual(3);
+    // Off, nobody does: not the owner, the assignee or whoever asked for the merge.
+    await inRoom(r.id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
+    for (const who of [OWNER, AGENT, MERGER]) {
+      const task = await must(who, "GET", `/v1/workspaces/${r.id}/tasks/${r.task}`);
+      expect((task.history as any[]).filter(hiddenKind), who.id).toEqual([]);
+      expect("change" in task, who.id).toBe(false);
+      expect(((await must(who, "GET", `/v1/workspaces/${r.id}/activity?task=${r.task}`)).events as any[]).filter(hiddenKind), who.id).toEqual([]);
+    }
+    // The owner's pages hold everything else, and every page but the last is full: the hidden rows took no room in any.
+    const off = await pages(OWNER);
+    expect(off.all.filter(hiddenKind)).toEqual([]);
+    expect(off.all.length).toBe(on.all.length - shown);
+    expect(off.all.map((e) => e.id)).toEqual(on.all.filter((e) => !hiddenKind(e)).map((e) => e.id));
+    expect(off.sizes.slice(0, -1).every((size) => size === 3)).toBe(true);
+    // On again, they're back: nothing was removed.
+    await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)"));
+    expect((await pages(OWNER)).all.filter(hiddenKind)).toHaveLength(shown);
+    // And on, a viewer who isn't shown them gets full pages too.
+    const other = await pages(SIBLING);
+    expect(other.all.filter(hiddenKind)).toEqual([]);
+    expect(other.sizes.slice(0, -1).every((size) => size === 3)).toBe(true);
+  });
+});
+
 describe("the room migration", () => {
   it("adds the merge bookkeeping to a room made before it, and keeps what was there", async () => {
     const r = await approved();
@@ -1056,6 +1102,223 @@ describe("the review's findings (M5 step 7b)", () => {
     await fake({ mergeMint: 201 });
     await pass(open.id);
     expect(await change(open.id, open.task)).toMatchObject({ merge_state: "failed", merge_reason: "grant_required", merge_sha: null });
+  });
+
+  it("records a landed merge only once the default branch has been read, and waits until then", async () => {
+    const r = await requested();
+    // The merge lands, and the read that follows can't say what the default branch is.
+    await fake({ merge: "default_unreadable" });
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "requested", merge_step: "merge", merge_sha: null });
+    expect(await merges()).toHaveLength(1);
+    // Still unreadable: still not recorded, and no second merge call.
+    await pass(r.id);
+    expect((await change(r.id, r.task)).merge_state).toBe("requested");
+    expect(await merges()).toHaveLength(1);
+    // Readable, and the same branch: recorded as the merge it was.
+    await fake({ merge: "ok", describe: 200 });
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED });
+    expect(await link(r.id)).toEqual({ status: "ready", status_reason: null });
+    expect(await merges()).toHaveLength(1);
+  });
+
+  it("stops reading for an unknown outcome after twelve tries, waiting longer each time, and at once in a room that's closed", async () => {
+    const unknown = async () => {
+      await fresh();
+      const r = await requested();
+      await dies(r.id, "after_merge_call");
+      await pass(r.id);
+      await dies(r.id, null);
+      await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) });
+      await fake({ mergeMint: 500 });
+      await pass(r.id);
+      expect(await change(r.id, r.task)).toMatchObject({ merge_state: "outcome_unknown", merge_attempts: 0, merge_step: "outcome_unknown" });
+      return r;
+    };
+    const r = await unknown();
+    const waits: number[] = [];
+    for (let n = 1; n <= 11; n++) {
+      const before = Date.now();
+      await pass(r.id);
+      const row = await change(r.id, r.task);
+      expect(row, String(n)).toMatchObject({ merge_state: "outcome_unknown", merge_attempts: n, merge_step: "outcome_unknown" });
+      waits.push(Math.round((row.merge_next_at - before) / 60_000));
+    }
+    // Thirty minutes, an hour, two, four, and then six hours each time.
+    expect(waits).toEqual([30, 60, 120, 240, 360, 360, 360, 360, 360, 360, 360]);
+    // The twelfth try is the last: no next read, said once, and the outcome still isn't claimed either way.
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "outcome_unknown", merge_step: "outcome_unknown_final", merge_next_at: null, merge_finished_at: null });
+    const tokens = (await minted()).length;
+    await alarm(r.id, 3);
+    expect((await minted()).length).toBe(tokens);
+    expect((await events(r.id)).filter((e) => e.type === "merge.outcome_unknown_final")).toEqual([{ type: "merge.outcome_unknown_final", actor_id: "system", subject_id: MERGER.id, task_id: r.task, reason: null }]);
+    // A person asking again begins with a read, and with GitHub readable the merge the first call made is recorded.
+    await fake({ mergeMint: 201 });
+    await grant(r.id, MERGER);
+    expect((await merge(MERGER, r.id, r.task)).status).toBe(200);
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED });
+    expect(await merges()).toHaveLength(1);
+    // In a room archived, or suspended, after the outcome became unknown: the job stops at once, and asks GitHub nothing.
+    for (const close of [
+      async (room: any) => void (await must(OWNER, "POST", `/v1/workspaces/${room.id}/archive`, { policy_version: await version(room.id) })),
+      (room: any) => inRoom(room.id, (sql) => void sql.exec("UPDATE workspace SET suspended_at = 5, suspension_reason = 'test'")),
+    ]) {
+      const closed = await unknown();
+      await close(closed);
+      await fake({ mergeMint: 201 });
+      const before = (await minted()).length;
+      await pass(closed.id);
+      expect(await change(closed.id, closed.task)).toMatchObject({ merge_state: "outcome_unknown", merge_step: "outcome_unknown_final", merge_next_at: null });
+      expect((await minted()).length).toBe(before);
+    }
+  });
+
+  it("asks the owner's standing again before the mark and before the merge, not once a pass", async () => {
+    // The owner leaves the organization while GitHub is answering, and the room hasn't been told: the grant they gave
+    // counts for nothing by the time the next intent is recorded. Rooms made after this aren't reached by it.
+    for (const point of ["before the mark", "between the mark and the merge"] as const) {
+      await fresh();
+      const r = await requested();
+      await fake({ mode: "gate" });
+      const running = pass(r.id);
+      await minting();
+      if (point === "between the mark and the merge") {
+        await release();
+        await minting();
+      }
+      await must(OWNER, "POST", "/v1/org-departures", {}, { claims: { departure: { person: OWNER.id, org: ORG, left_at: Date.now() } } });
+      await inRoom(r.id, (sql) => void sql.exec("UPDATE workspace SET owner_left_at = NULL"));
+      await fake({ mode: "ok" });
+      await release();
+      await running;
+      expect(await change(r.id, r.task), point).toMatchObject({ merge_state: "failed", merge_reason: "grant_stale", merge_called_at: null });
+      expect(await merges(), point).toEqual([]);
+      expect((await github()).statuses.length, point).toBe(point === "before the mark" ? 0 : 1);
+    }
+  });
+
+  it("ends a merge whose call went out by the same decision as the pass that made it: no success without the default branch, and a changed one degrades", async () => {
+    const lostAfterCall = async () => {
+      await fresh();
+      const r = await requested();
+      await dies(r.id, "after_merge_call");
+      await pass(r.id);
+      await dies(r.id, null);
+      await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) });
+      return r;
+    };
+    // The merge landed, authority has gone, and the read can't say what the default branch is: not a success yet.
+    const unread = await lostAfterCall();
+    await fake({ describe: 503 });
+    await pass(unread.id);
+    expect(await change(unread.id, unread.task)).toMatchObject({ merge_state: "outcome_unknown", merge_reason: "grant_required", merge_sha: null });
+    await fake({ describe: 200 });
+    await pass(unread.id);
+    expect(await change(unread.id, unread.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED });
+    expect(await link(unread.id)).toEqual({ status: "ready", status_reason: null });
+    // The default branch was changed after the merge landed: recorded as the merge it was, and the link is degraded.
+    const changed = await lostAfterCall();
+    await fake({ defaultBranch: "trunk" });
+    await pass(changed.id);
+    expect(await change(changed.id, changed.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED });
+    expect(await link(changed.id)).toEqual({ status: "degraded", status_reason: "default_branch_changed" });
+    expect(await merges()).toHaveLength(1);
+  });
+
+  it("lets the ordinary watch settle a merge the job stopped reading for, with no merge call and no token of the merge App's", async () => {
+    /** A merge whose outcome the job stopped reading for, with the merge call made (and merged) or only recorded. */
+    const finalUnknown = async (at: "after_merge_call" | "before_merge_call") => {
+      await fresh();
+      const r = await requested();
+      await dies(r.id, at);
+      await pass(r.id);
+      await dies(r.id, null);
+      await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) });
+      await fake({ mergeMint: 500 });
+      await pass(r.id);
+      await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET merge_attempts = 11"));
+      await pass(r.id);
+      expect(await change(r.id, r.task)).toMatchObject({ merge_state: "outcome_unknown", merge_step: "outcome_unknown_final", merge_next_at: null });
+      return r;
+    };
+    /** The change's own watch reads the pull request, as a delivery about it would make it. */
+    const watch = async (id: string) => {
+      await inRoom(id, (sql) => void sql.exec("UPDATE task_change SET nudged_at = ?, read_at = 1, read_failures = 0", Date.now() + 1));
+      await alarm(id);
+    };
+    const mergeTokens = async () => (await minted()).filter((t) => t.permissions.statuses === "write" || t.permissions.contents).length;
+    // The call had merged the reviewed commit: the watch's read of the pull request says so, and that's this request's success.
+    const merged = await finalUnknown("after_merge_call");
+    const before = await mergeTokens();
+    await watch(merged.id);
+    expect(await change(merged.id, merged.task)).toMatchObject({ merge_state: "succeeded", merge_reason: null, merge_sha: MERGED, pr_state: "merged" });
+    expect((await events(merged.id)).at(-1)).toMatchObject({ type: "merge.succeeded", subject_id: MERGER.id });
+    expect(await merges()).toHaveLength(1);
+    expect(await mergeTokens()).toBe(before);
+    // The call never went out, and the pull request is closed unmerged: failed, with the reason it was about to end with.
+    const closed = await finalUnknown("before_merge_call");
+    await watch(closed.id);
+    expect((await change(closed.id, closed.task)).merge_state).toBe("outcome_unknown");
+    await pull(7, { state: "closed" });
+    await watch(closed.id);
+    expect(await change(closed.id, closed.task)).toMatchObject({ merge_state: "failed", merge_reason: "grant_required", merge_sha: null });
+    expect(await merges()).toEqual([]);
+    // Merged by someone at another commit: not the reviewed commit, so not this request's success. The request is
+    // failed, and what the watch saw is recorded as what it is: a merge of a commit nobody reviewed.
+    const other = await finalUnknown("before_merge_call");
+    await pull(7, { head_sha: HEAD2, merged: true, merge_commit_sha: "8d".repeat(20), merged_by: 31337 });
+    await watch(other.id);
+    expect(await change(other.id, other.task)).toMatchObject({ merge_state: "failed", merge_reason: "unreviewed_merge", merged_by_id: 31337 });
+    expect((await change(other.id, other.task)).merge_observed_at).toBeGreaterThan(0);
+    expect((await events(other.id)).map((e) => e.type).slice(-1)).toEqual(["merge.failed"]);
+  });
+
+  it("lets the watch settle an unknown outcome while the job is still counting its reads, and the job then finds it settled", async () => {
+    /** A merge whose call went out and merged, whose outcome is unknown, with the job still reading for it. */
+    const counting = async () => {
+      await fresh();
+      const r = await requested();
+      await dies(r.id, "after_merge_call");
+      await pass(r.id);
+      await dies(r.id, null);
+      await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) });
+      await fake({ mergeMint: 500 });
+      await pass(r.id);
+      expect(await change(r.id, r.task)).toMatchObject({ merge_state: "outcome_unknown", merge_step: "outcome_unknown", merge_attempts: 0 });
+      expect((await change(r.id, r.task)).merge_next_at).toBeGreaterThan(Date.now());
+      return r;
+    };
+    const watch = async (id: string) => {
+      await inRoom(id, (sql) => void sql.exec("UPDATE task_change SET nudged_at = ?, read_at = 1, read_failures = 0", Date.now() + 1));
+      await alarm(id);
+    };
+    // The watch reads first, sees the pull request merged with the reviewed commit, and settles it in that same step.
+    const r = await counting();
+    await watch(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_reason: null, merge_sha: MERGED, pr_state: "merged", merge_next_at: null });
+    // The job's own read, when its time comes, finds it settled: no second outcome, no call, nothing changed.
+    await fake({ mergeMint: 201 });
+    const tokens = (await minted()).length;
+    await pass(r.id);
+    await alarm(r.id, 2);
+    expect((await minted()).length).toBe(tokens);
+    expect((await events(r.id)).filter((e) => e.type === "merge.succeeded")).toHaveLength(1);
+    expect(await merges()).toHaveLength(1);
+    // GitHub's default branch isn't the link's any more: the watch records no merge into a branch that isn't the
+    // default, degrades the link, and leaves the outcome for the job's fuller read.
+    const renamed = await counting();
+    await fake({ defaultBranch: "trunk" });
+    await watch(renamed.id);
+    expect((await change(renamed.id, renamed.task)).merge_state).toBe("outcome_unknown");
+    expect(await link(renamed.id)).toEqual({ status: "degraded", status_reason: "default_branch_changed" });
+    // The job's read then decides as the pass that made the call would: the merge it was, on a degraded link.
+    await fake({ mergeMint: 201 });
+    await pass(renamed.id);
+    expect(await change(renamed.id, renamed.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED });
+    expect(await link(renamed.id)).toEqual({ status: "degraded", status_reason: "default_branch_changed" });
   });
 
   it("keeps an earlier pass's call on record when a later pass can't get a token to call with (L6)", async () => {

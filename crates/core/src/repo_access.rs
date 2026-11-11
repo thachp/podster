@@ -43,8 +43,10 @@ pub struct TokenPermissions {
     pub contents: Option<Level>,
     pub pull_requests: Option<Level>,
     pub metadata: Level,
-    /// Commit statuses. Only the merge App's marking token has it.
+    /// Commit statuses. The merge App's marking token writes them, and the checks reader reads them.
     pub statuses: Option<Level>,
+    /// Check runs. Only the checks reader has it.
+    pub checks: Option<Level>,
 }
 
 impl TokenPermissions {
@@ -54,6 +56,7 @@ impl TokenPermissions {
         pull_requests: Some(Level::Write),
         metadata: Level::Read,
         statuses: None,
+        checks: None,
     };
 
     /// The server's own read of a pull request (M5 step 7a): the same App, with pull requests and metadata to read and
@@ -63,6 +66,7 @@ impl TokenPermissions {
         pull_requests: Some(Level::Read),
         metadata: Level::Read,
         statuses: None,
+        checks: None,
     };
 
     /// The merge App's token for marking the reviewed commit (M5 step 7b): commit statuses and nothing else. It can't
@@ -72,6 +76,7 @@ impl TokenPermissions {
         pull_requests: None,
         metadata: Level::Read,
         statuses: Some(Level::Write),
+        checks: None,
     };
 
     /// The merge App's token for reading a pull request and the default branch when the job picks a merge up again:
@@ -81,6 +86,7 @@ impl TokenPermissions {
         pull_requests: Some(Level::Read),
         metadata: Level::Read,
         statuses: None,
+        checks: None,
     };
 
     /// The merge App's token for the merge call and the reads around it: contents and pull requests. It can't set a
@@ -90,11 +96,23 @@ impl TokenPermissions {
         pull_requests: Some(Level::Write),
         metadata: Level::Read,
         statuses: None,
+        checks: None,
+    };
+
+    /// The server's own read of a commit's statuses and check runs (M5 step 8): nothing it can write with, and no
+    /// contents. The agent-token App must hold both for this to be minted, which is the owner's to add.
+    pub const CHECKS_READER: TokenPermissions = TokenPermissions {
+        contents: None,
+        pull_requests: None,
+        metadata: Level::Read,
+        statuses: Some(Level::Read),
+        checks: Some(Level::Read),
     };
 
     /// The permissions as GitHub names them, to ask for and to compare its answer with.
     pub fn pairs(self) -> Vec<(&'static str, &'static str)> {
         [
+            self.checks.map(|level| ("checks", level.name())),
             self.contents.map(|level| ("contents", level.name())),
             Some(("metadata", self.metadata.name())),
             self.pull_requests

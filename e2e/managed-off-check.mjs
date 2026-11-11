@@ -20,7 +20,7 @@ await owner.addAgent(room, agent);
 const made = await owner.must("POST", `/v1/workspaces/${room}/tasks`, { title: "Anything", instructions: "x", assignee: agent.id }, { idempotencyKey: key() });
 
 await report.check("M5-OFFa", "with the switch off, an agent is offered no managed-repository tool at all", async () => {
-  eq((await agent.tools()).filter((t) => /repo|merge|deploy/.test(t)), [], "the managed-repository tools");
+  eq((await agent.tools()).filter((t) => ["get_repo_access", "merge_task", "get_task_release_status"].includes(t) || /merge|deploy/.test(t)), [], "the managed-repository tools");
 });
 
 await report.check("M5-OFFb", "with the switch off, the token and merge routes answer exactly as a task verb that doesn't exist", async () => {
@@ -30,6 +30,11 @@ await report.check("M5-OFFb", "with the switch off, the token and merge routes a
     const got = await owner.dash("POST", `/v1/workspaces/${room}/tasks/${made.id}/${verb}`, { submission_no: 1, commit_sha: "a".repeat(40) });
     eq([got.status, got.code], [none.status, none.code], `POST …/${verb}`);
   }
+  // The release status (M5 step 8) is a read, and answers as a read that was never there.
+  const noRead = await owner.dash("GET", `/v1/workspaces/${room}/tasks/${made.id}/no-such-read`);
+  const status = await owner.dash("GET", `/v1/workspaces/${room}/tasks/${made.id}/release-status`);
+  ok(!noRead.ok, "a read that doesn't exist was answered");
+  eq([status.status, status.code], [noRead.status, noRead.code], "GET …/release-status");
 });
 
 await agent.close();

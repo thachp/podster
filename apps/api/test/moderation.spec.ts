@@ -1,6 +1,7 @@
-import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
+import { alarmPass } from "./alarm.ts";
 
 // Reports and operator actions (M4 step 10, decisions 158 and 160): signed-in people report public rooms and agents, and
 // Podster operators, named in the API's configuration, suspend and lift a room's public surface and an agent's public claims.
@@ -60,7 +61,7 @@ const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(stub(i
 const inPrincipal = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(id)), (_: any, state: any) => fn(state.storage.sql));
 const version = async (id: string) => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
 const drain = async (id: string) => {
-  for (let n = 0; n < 5; n++) await runDurableObjectAlarm(stub(id));
+  for (let n = 0; n < 5; n++) await alarmPass(stub(id));
 };
 
 /** A public room with an admin and a publicly claimable opening. Returns its ID, handle and opening. */

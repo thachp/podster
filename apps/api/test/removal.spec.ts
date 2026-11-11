@@ -1,6 +1,7 @@
-import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
+import { alarmPass } from "./alarm.ts";
 
 const BINDINGS = env as any;
 let key: any;
@@ -83,11 +84,8 @@ const refusal = async (res: Response) => ({ status: res.status, code: ((await re
 const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
 const row = (id: string, object: string): Promise<any> => inRoom(id, (sql) => sql.exec("SELECT * FROM stored_object WHERE id = ?", object).toArray()[0]) as Promise<any>;
 const remove = (who: Who, id: string, object: string) => api(who, "POST", `/v1/workspaces/${id}/files/${object}/remove`);
-/** Runs the room's alarm now. Running it does nothing when none is set, so one is set first, far enough off that this runs it. */
-const alarm = async (id: string) => {
-  await runInDurableObject(stub(id), (_: any, state: any) => state.storage.setAlarm(Date.now() + 60_000));
-  expect(await runDurableObjectAlarm(stub(id))).toBe(true);
-};
+/** One whole run of the room's alarm, now, whether or not one was set, and after any the runtime had under way. */
+const alarm = (id: string) => alarmPass(stub(id));
 /** Forces a sweep pass. */
 const sweep = async (id: string) => {
   await inRoom(id, (sql) => sql.exec("UPDATE storage_sweep SET due_at = 0"));

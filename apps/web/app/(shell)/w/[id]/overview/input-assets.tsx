@@ -222,12 +222,14 @@ function Uploader({ workspace, onUploaded }: { workspace: string; onUploaded: ()
   const [done, setDone] = useState<string | null>(null);
   const [waiting, setWaiting] = useState<number | null>(null);
   // Starting over after a rate limit waits as long as Podster asked, as the upload client's own retry does.
-  const [held, setHeld] = useState(false);
+  // It's held from the render that first shows the failure, not from an effect after it: there's no moment when the
+  // button can be pressed early. The timer only records which failure's wait is over.
+  const [waitedOut, setWaitedOut] = useState<Failure | null>(null);
   const failureHold = failure?.again && failure.retryAfter ? Math.min(failure.retryAfter, MAX_HOLD_SECONDS) : 0;
+  const held = failureHold > 0 && waitedOut !== failure;
   useEffect(() => {
-    if (!failureHold) return setHeld(false);
-    setHeld(true);
-    const timer = setTimeout(() => setHeld(false), failureHold * 1000);
+    if (!failure || !failureHold) return;
+    const timer = setTimeout(() => setWaitedOut(failure), failureHold * 1000);
     return () => clearTimeout(timer);
   }, [failure, failureHold]);
   const abort = useRef<AbortController | null>(null);

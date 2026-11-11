@@ -1,6 +1,7 @@
-import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { alarmPass } from "./alarm.ts";
 
 const BINDINGS = env as any;
 let key: any;
@@ -292,11 +293,17 @@ const undoBriefMigration = (state: any) => {
   state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
 };
 const holdOutbox = (id: string) => runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("CREATE TABLE test_hold_outbox (x)"));
-/** Lets delivery go again, with an alarm far enough off that the test decides when it runs. */
-const releaseOutbox = (id: string) => runInDurableObject(stub(id), async (_: any, state: any) => {
-  state.storage.sql.exec("DROP TABLE test_hold_outbox");
-  await state.storage.setAlarm(Date.now() + 60_000);
-});
+/**
+ * Lets delivery go again, with an alarm far enough off that the test decides when it runs. A run the runtime had under
+ * way is waited out first, while delivery is still held, so it can't deliver what the test is about to release.
+ */
+const releaseOutbox = async (id: string) => {
+  await alarmPass(stub(id));
+  await runInDurableObject(stub(id), async (_: any, state: any) => {
+    state.storage.sql.exec("DROP TABLE test_hold_outbox");
+    await state.storage.setAlarm(Date.now() + 60_000);
+  });
+};
 const count = (id: string, table: string) => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec(`SELECT count(*) AS n FROM ${table}`).one().n as number);
 
 describe("assertions", () => {
@@ -1207,7 +1214,9 @@ describe("global disconnect fence", () => {
     await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: agent.id, kind: "agent", org_id: "org_a", role: "member" });
     const failing = await disconnect(agent, { "x-test-hold-fan-out": "acks" });
     expect(failing.status).toBe("disconnecting");
-    expect(await runDurableObjectAlarm(principal(agent))).toBe(true);
+    // The retry was set before the fan-out's first call, 5 seconds off, and a run of it leaves the agent as it was.
+    expect(await runInDurableObject(principal(agent), (_: any, state: any) => state.storage.getAlarm())).not.toBeNull();
+    await alarmPass(principal(agent));
     expect((await api(orgAdmin("org_a"), "GET", `/v1/agents/${agent.id}`)).body.status).toBe("disconnecting");
     expect((await api(orgAdmin("org_a"), "POST", `/v1/agents/${agent.id}/test-release-fan-out`, {})).body.status).toBe("disconnected");
   });
@@ -1583,17 +1592,17 @@ describe("workspace listing", () => {
   it("lists rooms after projection, drops removed ones, and never authorizes", async () => {
     const { id } = await room();
     const list = async (who: Who) => (await api(who, "GET", "/v1/workspaces")).body.workspaces.map((w: any) => w.workspace_id);
-    await runDurableObjectAlarm(stub(id));
+    await alarmPass(stub(id));
     expect(await list(OWNER)).toContain(id);
     expect(await list(BOB)).toContain(id);
     expect(await list(OUTSIDER)).not.toContain(id);
     await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${BOB.id}`);
-    await runDurableObjectAlarm(stub(id));
+    await alarmPass(stub(id));
     expect(await list(BOB)).not.toContain(id);
     // A delayed older update can't restore a newer row.
     await BINDINGS.DB.prepare("UPDATE membership_index SET updated_seq = 1000000, removed = 1 WHERE workspace_id = ? AND principal_id = ?").bind(id, LEAD.id).run();
     await api(OWNER, "POST", `/v1/workspaces/${id}/members/${LEAD.id}/role`, { role: "guest" });
-    await runDurableObjectAlarm(stub(id));
+    await alarmPass(stub(id));
     expect(await list(LEAD)).not.toContain(id);
     // A forged or stale listing row grants nothing.
     await BINDINGS.DB.prepare("INSERT INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, 'org_x', 'admin', 'x', 0, 999)").bind(id, OUTSIDER.id).run();
@@ -1617,15 +1626,10 @@ describe("inbox", () => {
   /** Runs the alarm until nothing is due, so a test sees what delivery produced. */
   const drain = async (id: string) => {
     for (let i = 0; i < 100 && (await count(id, "outbox")) > 0; i++) {
-      // Each turn sets an alarm, because `runDurableObjectAlarm` does nothing while none is pending, and makes every row
-      // due, because a send that failed while the system was busy waits out its backoff. A real alarm may also be
-      // running, so a turn can find nothing to do. That's why this waits a moment between turns.
-      await runInDurableObject(stub(id), (_: any, state: any) => {
-        state.storage.sql.exec("UPDATE outbox SET next_attempt_at = 0");
-        return state.storage.setAlarm(Date.now() + 60_000);
-      });
-      await runDurableObjectAlarm(stub(id));
-      if ((await count(id, "outbox")) > 0) await new Promise((resolve) => setTimeout(resolve, 50));
+      // Each turn makes every row due, because a send that failed while the system was busy waits out its backoff, and
+      // is one whole run of the alarm, after any the runtime had under way.
+      await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("UPDATE outbox SET next_attempt_at = 0"));
+      await alarmPass(stub(id));
     }
     expect(await count(id, "outbox")).toBe(0);
   };
@@ -1811,7 +1815,7 @@ describe("inbox", () => {
     const second = await offerTo(tasks, bob, "second");
     const toCarol = await offerTo(tasks, carol, "carol");
     await releaseOutbox(id);
-    await runDurableObjectAlarm(stub(id));
+    await alarmPass(stub(id));
     expect((await inbox(bob)).events).toEqual([]);
     expect((await inbox(carol, "?limit=50")).events.some((e: any) => e.task_id === toCarol.id)).toBe(true);
     const row = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT attempts, next_attempt_at FROM outbox WHERE recipient_principal_id = ? AND attempts > 0", bob.id).toArray() as any[]);
@@ -1821,10 +1825,10 @@ describe("inbox", () => {
     // The alarm waits for the retry. Rows behind the head look overdue, and they must not make it fire in a loop.
     const alarm = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm());
     expect(alarm).toBeGreaterThan(Date.now() + 500);
-    // Scheduled relative to the clock, so it can land a moment after the row's time.
-    expect(alarm).toBeLessThanOrEqual(row[0].next_attempt_at + 100);
+    // Set for the moment itself, so it's never past the row's time.
+    expect(alarm).toBeLessThanOrEqual(row[0].next_attempt_at);
     // Still failing: another pass before the wait is over doesn't try again.
-    await runDurableObjectAlarm(stub(id));
+    await alarmPass(stub(id));
     expect((await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT max(attempts) AS n FROM outbox").one().n))).toBe(1);
     await principalSql(bob.id, "DROP TABLE test_fail_deliver");
     await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("UPDATE outbox SET next_attempt_at = 0"));
@@ -1870,7 +1874,7 @@ describe("inbox", () => {
     await holdOutbox(id);
     await api(OWNER, "DELETE", `/v1/workspaces/${id}/members/${bob.id}`);
     await releaseOutbox(id);
-    await runDurableObjectAlarm(stub(id));
+    await alarmPass(stub(id));
     // The room's row is still queued, and the failed attempt cleared nothing and set no floor.
     expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT max(attempts) AS n FROM outbox").one().n)).toBe(1);
     expect((await inbox(bob)).events.map((e: any) => e.task_id)).toEqual([task.id]);
@@ -1923,18 +1927,25 @@ describe("inbox", () => {
     await holdOutbox(id);
     await offerTo(tasks, bob);
     await offerTo(tasks, carol, "carol");
-    await releaseOutbox(id);
-    await runInDurableObject(stub(id), async (_: any, state: any) => {
+    // Both waits are given while delivery is still held, so no run of the alarm, the runtime's own included, finds a row
+    // due and delivers it. Carol's is far enough off that the alarm can't fire while the test reads it.
+    const carolDue = Date.now() + 30_000;
+    await runInDurableObject(stub(id), (_: any, state: any) => {
       state.storage.sql.exec("UPDATE outbox SET next_attempt_at = ? WHERE recipient_principal_id = ?", Date.now() + 300_000, bob.id);
-      // Far enough off that the alarm can't fire while the test reads it, under load too.
-      state.storage.sql.exec("UPDATE outbox SET next_attempt_at = ? WHERE recipient_principal_id = ?", Date.now() + 30_000, carol.id);
-      await state.storage.setAlarm(Date.now() + 3_600_000);
+      state.storage.sql.exec("UPDATE outbox SET next_attempt_at = ? WHERE recipient_principal_id = ?", carolDue, carol.id);
+      state.storage.sql.exec("DROP TABLE test_hold_outbox");
     });
-    // Any write schedules delivery, even one that's refused.
+    // One whole run, after any the runtime had under way, so nothing but the two waits is left. Then the alarm goes far
+    // off, and stays exactly there: no run is left to move it.
+    await alarmPass(stub(id));
+    const far = Date.now() + 3_600_000;
+    await runInDurableObject(stub(id), (_: any, state: any) => state.storage.setAlarm(far));
+    const alarmNow = () => runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm());
+    expect(await count(id, "outbox")).toBe(2);
+    expect(await alarmNow()).toBe(far);
+    // Any write schedules delivery, even one that's refused: to the millisecond of the wait that ends first.
     expect((await api(OWNER, "POST", tasks, {})).status).toBeGreaterThanOrEqual(400);
-    const alarm = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm());
-    expect(alarm).not.toBeNull();
-    expect(alarm).toBeLessThanOrEqual(Date.now() + 30_500);
+    expect(await alarmNow()).toBe(carolDue);
   });
 
   it("if the drain itself fails, it retries after a few seconds rather than in a loop", async () => {
@@ -1943,7 +1954,7 @@ describe("inbox", () => {
     const task = await offerTo(tasks, bob);
     await releaseOutbox(id);
     await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("ALTER TABLE event RENAME TO event_away"));
-    await runDurableObjectAlarm(stub(id));
+    await alarmPass(stub(id));
     const alarm = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm());
     expect(alarm).toBeGreaterThan(Date.now() + 3000);
     expect(alarm).toBeLessThanOrEqual(Date.now() + 5100);
@@ -1958,7 +1969,7 @@ describe("inbox", () => {
     await holdOutbox(id);
     await offerTo(tasks, bob);
     await releaseOutbox(id);
-    await runDurableObjectAlarm(stub(id));
+    await alarmPass(stub(id));
     const wait = () => runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT attempts, next_attempt_at - ? AS wait FROM outbox WHERE recipient_principal_id = ?", Date.now(), bob.id).one() as any);
     const first = await wait();
     expect(first.attempts).toBe(1);
@@ -1968,7 +1979,7 @@ describe("inbox", () => {
       state.storage.sql.exec("UPDATE outbox SET next_attempt_at = 0, attempts = 40");
       await state.storage.setAlarm(Date.now() + 60_000);
     });
-    await runDurableObjectAlarm(stub(id));
+    await alarmPass(stub(id));
     const capped = await wait();
     expect(capped.attempts).toBe(41);
     expect(capped.wait).toBeGreaterThan(250_000);
@@ -1985,11 +1996,14 @@ describe("inbox", () => {
     await offerTo(tasks, bob);
     const other = await offerTo(tasks, carol, "carol");
     await releaseOutbox(id);
-    await runDurableObjectAlarm(stub(id));
+    // Bob's inbox holds the call for 30 seconds, and the room gives up on it after its own 10, as a deployment does.
+    const before = Date.now();
+    await alarmPass(stub(id));
+    expect(Date.now() - before).toBeGreaterThanOrEqual(10_000);
     expect((await inbox(carol, "?limit=50")).events.some((e: any) => e.task_id === other.id)).toBe(true);
     const attempts = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT attempts FROM outbox WHERE recipient_principal_id = ?", bob.id).one().attempts);
     expect(attempts).toBe(1);
-  });
+  }, 60_000);
 
   it("a command schedules delivery on its own, even with an alarm set far off", async () => {
     const { id, tasks, bob } = await setup();
@@ -2008,7 +2022,7 @@ describe("inbox", () => {
     await BINDINGS.DB.prepare("ALTER TABLE membership_index RENAME TO membership_index_away").run();
     try {
       await releaseOutbox(id);
-      await runDurableObjectAlarm(stub(id));
+      await alarmPass(stub(id));
       expect((await inbox(bob)).events.map((e: any) => e.task_id)).toContain(task.id);
       const alarm = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm());
       expect(alarm).toBeGreaterThan(Date.now() + 2000);
@@ -2710,7 +2724,7 @@ describe("a person leaving the room's organization", () => {
     const version = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
     expect((await depart(OWNER, { ...leaving })).status).toBe(200);
     await makeDue(who);
-    await runDurableObjectAlarm(principal(who));
+    await alarmPass(principal(who));
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version).toBe(version);
     expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who, kind: "person", org_id: "org_a", role: "member" })).status).toBe(200);
     expect(await roleOf(id, asPerson(who))).toBe("member");
@@ -2787,7 +2801,7 @@ describe("a person leaving the room's organization", () => {
     const leaving = { person: founder.id, org: "org_a", left_at: leftAt };
     expect((await depart(asPerson(helper), leaving)).status).toBe(200);
     await makeDue(founder.id);
-    await runDurableObjectAlarm(principal(founder.id));
+    await alarmPass(principal(founder.id));
     const seen = (await api(asPerson(helper), "GET", `/v1/workspaces/${id}`)).body;
     expect(seen.owner).toBe(founder.id);
     expect(seen.owner_left_at).toBe(leftAt);
@@ -2817,7 +2831,7 @@ describe("a person leaving the room's organization", () => {
     // A retry of the same departure records nothing more.
     expect((await depart(asPerson(helper), leaving, false)).status).toBe(200);
     await makeDue(founder.id);
-    await runDurableObjectAlarm(principal(founder.id));
+    await alarmPass(principal(founder.id));
     expect((await log()).filter((e) => e.action === "owner.left_organization")).toHaveLength(1);
   });
 
@@ -2874,27 +2888,27 @@ describe("a person leaving the room's organization", () => {
     // A retry asks only the room that failed, so a change to the one that applied it stays.
     await addAdmin(applied, who);
     await makeDue(who);
-    await runDurableObjectAlarm(principal(who));
+    await alarmPass(principal(who));
     expect((await pending(who))[0].failures).toBe(2);
     expect(await roleOf(applied, asPerson(who))).toBe("admin");
     // Once that room answers, the sweep counts, and the next one finds the room the index left out.
     await (env as any).DB.prepare("DELETE FROM membership_index WHERE workspace_id = 'ws_fail_departure' AND principal_id = ?").bind(who).run();
     await runInDurableObject(principal(who), (_: any, state: any) => void state.storage.sql.exec("UPDATE org_departure_room SET applied = 1 WHERE workspace_id = 'ws_fail_departure'"));
     await makeDue(who);
-    await runDurableObjectAlarm(principal(who));
+    await alarmPass(principal(who));
     expect((await pending(who))[0]).toEqual({ sweeps_left: 39, failures: 0 });
     await listRoom(id, who);
     expect(await roleOf(id, asPerson(who))).toBe("admin");
     await makeDue(who);
-    await runDurableObjectAlarm(principal(who));
+    await alarmPass(principal(who));
     expect(await roleOf(id, asPerson(who))).toBeUndefined();
     expect((await pending(who))[0].sweeps_left).toBe(38);
     // The last sweep ends it.
     await runInDurableObject(principal(who), (_: any, state: any) => void state.storage.sql.exec("UPDATE org_departure SET sweeps_left = 1"));
     await makeDue(who);
-    await runDurableObjectAlarm(principal(who));
+    await alarmPass(principal(who));
     expect(await pending(who)).toEqual([]);
-    expect(await runDurableObjectAlarm(principal(who))).toBe(false);
+    expect(await runInDurableObject(principal(who), (_: any, state: any) => state.storage.getAlarm())).toBeNull();
   });
 
   it("waits longer between sweeps, and still reaches a room whose listing only appears much later", async () => {
@@ -2910,19 +2924,19 @@ describe("a person leaving the room's organization", () => {
     };
     for (let sweep = 0; sweep < 5; sweep++) {
       await makeDue(who);
-      await runDurableObjectAlarm(principal(who));
+      await alarmPass(principal(who));
     }
     expect((await pending(who))[0].sweeps_left).toBeLessThanOrEqual(35);
     expect(await gap()).toBeGreaterThan(5 * 60_000);
     // Long past the first three sweeps, the listing turns up, and the room hears.
     await listRoom(id, who);
     await makeDue(who);
-    await runDurableObjectAlarm(principal(who));
+    await alarmPass(principal(who));
     expect(await roleOf(id, asPerson(who))).toBeUndefined();
     // The wait stops growing at a day.
     await runInDurableObject(principal(who), (_: any, state: any) => void state.storage.sql.exec("UPDATE org_departure SET sweeps_left = 2"));
     await makeDue(who);
-    await runDurableObjectAlarm(principal(who));
+    await alarmPass(principal(who));
     expect(await gap()).toBeLessThanOrEqual(24 * 60 * 60 * 1000);
     expect(await gap()).toBeGreaterThan(23 * 60 * 60 * 1000);
   });
@@ -5792,10 +5806,11 @@ describe("planned relationships", () => {
       expect(await seenBy(OWNER)).toContain(kind);
       expect(await seenBy(BOB)).not.toContain(kind);
     }
-    // It's addressed to the people who can change it, and to no agent.
+    // It's addressed to the people who can change it, and to no agent. Only this line's own event is read: the lines
+    // above queued theirs for the admin too, and those may not have gone out yet.
     await holdOutbox(id);
     expect((await managed(ADMIN, "POST", planned(id), id, line(b, a, "Told"))).status).toBe(200);
-    const told = await sql(id, "SELECT DISTINCT o.recipient_principal_id AS who FROM outbox o JOIN event e ON e.id = o.event_id WHERE e.type = 'relationship.planned'");
+    const told = await sql(id, "SELECT DISTINCT o.recipient_principal_id AS who FROM outbox o JOIN event e ON e.id = o.event_id WHERE e.seq = (SELECT max(seq) FROM event WHERE type = 'relationship.planned')");
     expect(told.map((row) => row.who)).toEqual([OWNER.id]);
     await releaseOutbox(id);
     expect((await api(OUTSIDER, "GET", map(id))).code).toBe("workspace_not_found");
@@ -6395,7 +6410,7 @@ describe("task plans", () => {
     expect((await set(LEAD, tasks, b.id, id, { duration_days: 2, predecessors: [a.id] })).status).toBe(200);
     const queued = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT count(*) AS n FROM outbox o JOIN event e ON e.id = o.event_id WHERE e.type = 'task.plan_changed'").one().n);
     expect(queued).toBe(0);
-    await runDurableObjectAlarm(stub(id));
+    await alarmPass(stub(id));
     expect((await inboxes()).some((e: any) => e.type === "task.plan_changed")).toBe(false);
     expect(await count(id, "event")).toBe(events + 1);
     expect((await api(BOB, "GET", `${tasks}/${b.id}`)).body.task.status).toBe("offered");
@@ -6980,7 +6995,7 @@ describe("notices in a limited agent's Activity", () => {
     await invite(id, await opening(id), me);
     const inbox = async () => (await api(me, "GET", "/v1/inbox")).body.events.filter((e: any) => e.workspace_id === id);
     await vi.waitFor(async () => {
-      await runDurableObjectAlarm(stub(id));
+      await alarmPass(stub(id));
       expect((await inbox()).map((e: any) => e.type)).toEqual(["member.added", "role.created", "role.invited"]);
     }, { timeout: 5000, interval: 25 });
     const told = await inbox();
@@ -7074,7 +7089,7 @@ describe("directory cards", () => {
 
   it("lets the room decide: a stale listing shows nothing, and a room that can't answer keeps its row", async () => {
     const { id } = await room();
-    await runDurableObjectAlarm(stub(id));
+    await alarmPass(stub(id));
     const row = async (who: Who) => {
       for (let offset: number | undefined = 0; offset !== undefined; ) {
         const page: { workspaces: any[]; next_offset?: number } = await cards(who, `?offset=${offset}`);
@@ -7096,7 +7111,7 @@ describe("directory cards", () => {
   it("gives up on a room that hangs, and keeps every other row and the next page", async () => {
     const who: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a", orgs: ["org_a"], adminOrgs: ["org_a"] };
     const mine = (await api(who, "POST", "/v1/workspaces", { name: "A working room", goal: "Ship" })).body.id as string;
-    await runDurableObjectAlarm(stub(mine));
+    await alarmPass(stub(mine));
     const add = (workspace: string, name: string) => BINDINGS.DB.prepare("INSERT OR REPLACE INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, 'org_a', 'member', ?, 0, 1000000)").bind(workspace, who.id, name).run();
     await add("ws_hang_one", "A hung room");
     for (let n = 0; n < 20; n++) await add(`ws_after_${n}`, `Later ${n}`);

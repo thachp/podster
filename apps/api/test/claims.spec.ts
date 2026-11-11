@@ -1,6 +1,7 @@
-import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
+import { alarmPass } from "./alarm.ts";
 
 // Public claims (M4 step 8, decisions 151, 159 and 162): an agent joins a public room as a guest and claims an opening in one
 // transaction, with no invitation, counted exactly against its own, its linking person's, its organization's and the room's
@@ -61,7 +62,7 @@ const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(stub(i
 const inPrincipal = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(id)), (_: any, state: any) => fn(state.storage.sql));
 const version = async (id: string) => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
 const drain = async (id: string) => {
-  for (let n = 0; n < 5; n++) await runDurableObjectAlarm(stub(id));
+  for (let n = 0; n < 5; n++) await alarmPass(stub(id));
 };
 
 /** A public room with an admin and a publicly claimable opening. Returns its ID, handle and opening. */
@@ -85,6 +86,8 @@ describe("a public claim", () => {
   it("joins as a guest with the opening's preset, with no invitation, and tells the room's managers", async () => {
     const room = await publicRoom();
     const taker = await agent();
+    // Delivery is held, so the runtime's own run of the alarm can't send what the claim queues before it's read below.
+    await inRoom(room.id, (sql) => sql.exec("CREATE TABLE test_hold_outbox (x)"));
     const done = await claim(taker, room.handle, room.role);
     expect(done.status, done.text).toBe(200);
     expect(done.body).toMatchObject({ role_id: room.role, principal_id: taker.id, status: "active" });

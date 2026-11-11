@@ -5,7 +5,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/merge-gate <pr-number> <full-40-char-head-sha> [--merge | --rerun-known-flake]
+Usage: scripts/merge-gate <pr-number> <full-40-char-head-sha> [--merge]
 
 With no flag it only reports. It passes when ALL of these hold, and prints each one:
 
@@ -29,13 +29,8 @@ reported here.
 --merge              After the gate passes, runs `gh pr merge <n> --merge --match-head-commit <sha>`
                      (a merge commit), then waits for ci.yml on the merge commit on main and reports
                      its conclusion.
---rerun-known-flake  Skips the gate. Reruns the failed jobs of the head's ci.yml run, once, and only
-                     when that is the sha's only ci.yml run, on its first attempt, and its only
-                     failed job is api, whose only failing test is the one alarm test named in
-                     this script. Anything else it refuses, and says why. A failed web job is
-                     never rerun.
-
-It never dismisses an alert, resolves a conflict, updates a branch or reruns anything else.
+It never dismisses an alert, resolves a conflict, updates a branch or reruns anything. A failed job is a failure,
+and is looked into.
 
 Exit codes: 0 passed (and, with --merge, main's CI succeeded); 1 refused; 2 wrong usage;
 3 merged, but main's CI did not succeed; 4 merged, but main's CI did not finish in time.
@@ -47,9 +42,9 @@ positional=()
 for arg in "$@"; do
   case "$arg" in
     -h | --help) usage; exit 0 ;;
-    --merge | --rerun-known-flake)
-      if [ "$mode" != report ]; then echo "merge-gate: give one of --merge and --rerun-known-flake, once" >&2; exit 2; fi
-      mode=${arg#--}
+    --merge)
+      if [ "$mode" != report ]; then echo "merge-gate: give --merge once" >&2; exit 2; fi
+      mode=merge
       ;;
     -*) echo "merge-gate: unknown option $arg" >&2; usage >&2; exit 2 ;;
     *) positional+=("$arg") ;;
@@ -67,13 +62,10 @@ fi
 # ci.yml's jobs. A pull request must have every one as a check. The gate also reads ci.yml on main and refuses if this
 # list isn't its jobs, so a renamed or added job can't pass unnoticed, and the self-test pins it to the workflow file.
 CI_JOBS="rust migrations contracts api web scanner gateway e2e"
-# The one known flake. Anything else that fails is a failure. Its likely cause is now known: the test runtime runs a
-# room's alarm on its own, and `runDurableObjectAlarm` calls `alarm()` directly, so two runs overlap. #259 fixed that
-# for the tests that use the helpers in apps/api/test/alarm.ts. DELETE THIS, and the api case below, when
-# kernel.spec.ts is moved onto those helpers. There was a second allowance, for "database is locked" in the web job's
-# accessibility run. #254 fixed its cause, so that failing again means the fix didn't hold, and is looked into, never
-# rerun.
-API_FLAKE_TEST="test/kernel.spec.ts > inbox > the alarm follows whichever recipient is due first, not the one waiting longest"
+# There is no flake allowance. There were two: an alarm test of apps/api/test/kernel.spec.ts, whose cause was the test
+# runtime running a room's alarm beside the test's own run of it, and "database is locked" in the web job's
+# accessibility run, which #254 fixed. The API specs now run alarms through apps/api/test/alarm.ts. Either failing
+# again means its fix didn't hold, and is looked into, never rerun.
 
 problems=0
 ok() { echo "ok      $*"; }
@@ -81,7 +73,7 @@ bad() { echo "REFUSE  $*"; problems=$((problems + 1)); }
 refuse() { echo "REFUSE  $*"; echo "merge-gate: refused"; exit 1; }
 tab=$'\t'
 
-# The pull request itself, and its head. Both modes need these, and nothing else is read unless they all hold.
+# The pull request itself, and its head. Nothing else is read unless these all hold.
 pull=$(gh pr view "$pr" --json state,isDraft,isCrossRepository,baseRefName,headRefName,headRefOid \
   --jq '[.state, (.isDraft | tostring), (.isCrossRepository | tostring), .baseRefName, .headRefName, .headRefOid] | @tsv') \
   || refuse "could not read pull request #$pr"
@@ -93,62 +85,8 @@ if [ "$fork" = false ]; then ok "it comes from this repository"; else bad "it co
 if [ "$base" = main ]; then ok "it targets main"; else bad "it targets $base, not main"; fi
 if [ "$head" = "$sha" ]; then ok "its head is the given sha"; else bad "its head is $head, not the given $sha"; fi
 if [ "$problems" -ne 0 ]; then
-  echo "merge-gate: refused, $problems problem(s). Nothing else was read, and nothing was merged or rerun."
+  echo "merge-gate: refused, $problems problem(s). Nothing else was read, and nothing was merged."
   exit 1
-fi
-
-rerun_known_flake() {
-  local runs id status conclusion attempt jobs job failing
-  runs=$(gh run list --workflow ci.yml --commit "$sha" --event pull_request --limit 100 \
-    --json databaseId,status,conclusion,attempt \
-    --jq '.[] | [(.databaseId | tostring), .status, (if (.conclusion // "") == "" then "none" else .conclusion end), (.attempt | tostring)] | @tsv') \
-    || refuse "could not list ci.yml runs for $sha"
-  if [ -z "$runs" ]; then refuse "there is no ci.yml run for $sha"; fi
-  # Once for a head sha, not once for a run: a second run of the same sha is a rerun by another name.
-  if [ "$(printf '%s\n' "$runs" | wc -l | tr -d ' ')" -ne 1 ]; then
-    refuse "$sha has more than one ci.yml run. A known flake is rerun once for a sha, and this one has run again"
-  fi
-  IFS=$tab read -r id status conclusion attempt <<< "$runs"
-  echo "ci.yml run $id: $status, $conclusion, attempt $attempt"
-  if [ "$status" != completed ]; then refuse "the run is still $status"; fi
-  if [ "$conclusion" != failure ]; then refuse "the run's conclusion is $conclusion, not failure"; fi
-  if [ "$attempt" != 1 ]; then refuse "the run is on attempt $attempt. A known flake is rerun once, and this one has been"; fi
-
-  jobs=$(gh run view "$id" --json jobs \
-    --jq '.jobs[] | select(.conclusion != "success" and .conclusion != "skipped") | .name') \
-    || refuse "could not read the run's jobs"
-  if [ -z "$jobs" ]; then refuse "the run has no failed job"; fi
-  if [ "$(printf '%s\n' "$jobs" | wc -l | tr -d ' ')" -ne 1 ]; then
-    refuse "more than one job did not pass: $(printf '%s' "$jobs" | tr '\n' ' ')"
-  fi
-  job=$jobs
-  if [ "$job" = web ]; then
-    refuse "the failed job is web, which is never rerun. If its log says \"database is locked\", the fix in #254 didn't hold: look into it"
-  fi
-  if [ "$job" != api ]; then refuse "the failed job is $job, which has no known flake"; fi
-
-  # Not local: the trap runs after this function has returned.
-  log=$(mktemp)
-  trap 'rm -f "$log"' EXIT
-  gh run view "$id" --log-failed > "$log" || refuse "could not read the failed log"
-  # Colour codes would hide the words this looks for. gh prints the escape character as the two characters "^[", so
-  # both spellings are taken out.
-  sed -i.raw -e $'s/\x1b\\[[0-9;]*m//g' -e 's/\^\[\[[0-9;]*m//g' "$log" && rm -f "$log.raw"
-
-  failing=$(sed -n 's/^.* FAIL  *\([^ ].* > .*\)$/\1/p' "$log" | sort -u)
-  grep -q -E 'Test Files +1 failed' "$log" || refuse "api failed, and not with exactly one failed test file"
-  grep -q -E 'Tests +1 failed' "$log" || refuse "api failed, and not with exactly one failed test"
-  if [ "$(printf '%s\n' "$failing" | grep -c .)" -ne 1 ]; then refuse "api failed, and its log does not name exactly one failing test"; fi
-  if [ "$failing" != "$API_FLAKE_TEST" ]; then refuse "api's failing test is not the known alarm flake: $failing"; fi
-  ok "the only failed job is api, and its only failing test is $failing"
-
-  gh run rerun "$id" --failed || refuse "the rerun was not accepted"
-  echo "merge-gate: reran the failed job of run $id once. Run the gate again when it finishes."
-}
-
-if [ "$mode" = rerun-known-flake ]; then
-  rerun_known_flake
-  exit 0
 fi
 
 # Code scanning's alerts, for this pull request's refs and no other. An answer that isn't a list, or no answer, counts

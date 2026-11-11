@@ -1,4 +1,4 @@
-import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { alarmPass } from "./alarm.ts";
@@ -114,7 +114,7 @@ const eventually = async (id: string, check: () => Promise<void>) => {
 
 /**
  * The owner leaves the organization, and room `id` has heard by the time this returns. The person's own alarm takes a
- * departure to their rooms, and the runtime may already be running it, so it's run until the room has heard.
+ * departure to their rooms: one whole run of it, after any the runtime had under way.
  */
 const ownerLeaves = async (id: string) => {
   // The departure finds the room through the listing the room's alarm writes. Written here, so it doesn't wait on that.
@@ -122,11 +122,8 @@ const ownerLeaves = async (id: string) => {
   await must({ ...OWNER, departure: { person: OWNER.id, org: ORG, left_at: Date.now() } }, "POST", "/v1/org-departures", {});
   const person = BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(OWNER.id));
   const heard = () => inRoom(id, (sql) => sql.exec("SELECT owner_left_at AS t FROM workspace").one().t as number | null);
-  for (let n = 0; n < 30 && (await heard()) === null; n++) {
-    await runInDurableObject(person, (_: any, state: any) => void state.storage.sql.exec("UPDATE org_departure SET next_sweep_at = 0"));
-    await runDurableObjectAlarm(person);
-    await new Promise((x) => setTimeout(x, 100));
-  }
+  await runInDurableObject(person, (_: any, state: any) => void state.storage.sql.exec("UPDATE org_departure SET next_sweep_at = 0"));
+  await alarmPass(person);
   expect(await heard()).not.toBeNull();
 };
 
@@ -216,10 +213,16 @@ describe("issuing a token", () => {
     expect(await minted()).toHaveLength(1);
     // Five minutes from its expiry it's replaced, after the same checks.
     await inRoom(r.id, (sql) => sql.exec("UPDATE repo_token SET expires_at = ?", Date.now() + 4 * 60_000));
+    // GitHub refuses the revocation for now, so the old token's row is still there to read whether or not the runtime
+    // has run the alarm that takes it back, which comes due within milliseconds.
+    await script({ revoke: 500 });
     const renewed = await access(AGENT, r.id, r.task);
     expect(renewed.status, renewed.text).toBe(200);
     expect(renewed.body.token).not.toBe(first.token);
     expect((await tokens(r.id)).map((t) => t.state).sort()).toEqual(["held", "revoke"]);
+    expect(await minted()).toEqual([expect.objectContaining({ token: first.token, live: true }), expect.objectContaining({ token: renewed.body.token, live: true })]);
+    await script({ revoke: 204 });
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_token SET revoke_next_at = 0 WHERE state = 'revoke'"));
     await alarm(r.id);
     expect(await minted()).toEqual([expect.objectContaining({ token: first.token, live: false }), expect.objectContaining({ token: renewed.body.token, live: true })]);
     expect((await tokens(r.id)).map((t) => t.state)).toEqual(["held"]);
@@ -523,8 +526,12 @@ describe("revoking a token whose authority ended", () => {
   });
   it("when a request is refused, which revokes the held one", () => endsWith("refused", async (r) => {
     await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET status = 'suspended'"));
+    // GitHub refuses the revocation for now, so the row is there to read whether or not the runtime has run its alarm.
+    await script({ revoke: 500 });
     expect((await access(AGENT, r.id, r.task)).code).toBe("repo_not_ready");
     expect((await tokens(r.id)).map((t) => t.state)).toEqual(["revoke"]);
+    await script({ revoke: 204 });
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_token SET revoke_next_at = 0"));
   }));
   it("a revocation that fails doesn't hold up the cascade, and is retried", async () => {
     const r = await room();
@@ -600,9 +607,8 @@ describe("the review's findings (M5 step 6)", () => {
       if (alarmAt === null) await new Promise((x) => setTimeout(x, 50));
     }
     expect(alarmAt).not.toBeNull();
-    // The room sets its alarm as a wait from a clock it read a moment earlier, so the time kept trails the expiry by
-    // however long that moment was. Seconds of allowance still tell the grant's expiry from the token's, an hour on.
-    expect(alarmAt!).toBeLessThanOrEqual(expires + 5_000);
+    // The room sets its alarm for the moment itself, so it's never past the grant's expiry, and the token's is an hour on.
+    expect(alarmAt!).toBeLessThanOrEqual(expires);
     expect(got.body.expires_at - expires).toBeGreaterThan(30 * 60_000);
     // The agent never asks again. When the grant lapses, the alarm takes the token back.
     await inRoom(r.id, (sql) => sql.exec("UPDATE provider_grant SET expires_at = ? WHERE id = ?", Date.now() - 1, grant));

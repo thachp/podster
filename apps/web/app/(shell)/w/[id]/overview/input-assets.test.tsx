@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RoomFile } from "@/components/files/model";
@@ -295,23 +295,62 @@ describe("uploading", () => {
   });
 
   it("holds Try again until a refused reservation's retry-after passes, at most 300 seconds", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    // The clock moves only when the test moves it, so the presses are plain events, which wait on no timer.
+    vi.useFakeTimers();
+    const settle = () => act(() => vi.advanceTimersByTimeAsync(0));
+    // Every name the button has while it's on the page, so one render of it not yet held is seen too.
+    const names: string[] = [];
+    const watch = new MutationObserver(() => {
+      const name = screen.queryByRole("alert")?.querySelector("button")?.textContent;
+      if (name && names.at(-1) !== name) names.push(name);
+    });
+    watch.observe(document.body, { childList: true, subtree: true, characterData: true });
     upload.uploadFile.mockResolvedValueOnce({ ok: false, status: 429, code: "rate_limited", retryAfter: 15 });
     show();
-    await user.upload(screen.getByLabelText("Asset upload"), new File(["x"], "notes.txt", { type: "text/plain" }));
-    await user.click(screen.getByRole("button", { name: "Upload" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Wait 15 seconds and try again.");
+    fireEvent.change(screen.getByLabelText("Asset upload"), { target: { files: [new File(["x"], "notes.txt", { type: "text/plain" })] } });
+    fireEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await settle();
+    expect(screen.getByRole("alert")).toHaveTextContent("Wait 15 seconds and try again.");
     expect(screen.getByRole("button", { name: "Try again in 15 seconds" })).toBeDisabled();
-    await act(() => vi.advanceTimersByTimeAsync(14_000));
+    await act(() => vi.advanceTimersByTimeAsync(14_999));
     expect(screen.getByRole("button", { name: "Try again in 15 seconds" })).toBeDisabled();
-    await act(() => vi.advanceTimersByTimeAsync(1_000));
-    upload.uploadFile.mockResolvedValueOnce({ ok: false, status: 429, code: "rate_limited", retryAfter: 9_000 });
-    await user.click(screen.getByRole("button", { name: "Try again" }));
-    expect(upload.uploadFile).toHaveBeenCalledTimes(2);
-    expect(await screen.findByRole("button", { name: "Try again in 300 seconds" })).toBeDisabled();
-    await act(() => vi.advanceTimersByTimeAsync(300_000));
+    await act(() => vi.advanceTimersByTimeAsync(1));
     expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+    upload.uploadFile.mockResolvedValueOnce({ ok: false, status: 429, code: "rate_limited", retryAfter: 9_000 });
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(upload.uploadFile).toHaveBeenCalledTimes(2);
+    await settle();
+    expect(screen.getByRole("button", { name: "Try again in 300 seconds" })).toBeDisabled();
+    await act(() => vi.advanceTimersByTimeAsync(299_999));
+    expect(screen.getByRole("button", { name: "Try again in 300 seconds" })).toBeDisabled();
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+    watch.disconnect();
+    expect(names).toEqual(["Try again in 15 seconds", "Try again", "Try again in 300 seconds", "Try again"]);
+  });
+
+  it("holds Try again from the render that first shows it", async () => {
+    // As a browser runs it: React schedules its own work, with nothing flushed on the test's behalf.
+    const env = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+    const before = env.IS_REACT_ACT_ENVIRONMENT;
+    upload.uploadFile.mockResolvedValueOnce({ ok: false, status: 429, code: "rate_limited", retryAfter: 15 });
+    show();
+    fireEvent.change(screen.getByLabelText("Asset upload"), { target: { files: [new File(["x"], "notes.txt", { type: "text/plain" })] } });
+    const names: string[] = [];
+    const watch = new MutationObserver(() => {
+      const name = screen.queryByRole("alert")?.querySelector("button")?.textContent;
+      if (name && names.at(-1) !== name) names.push(name);
+    });
+    watch.observe(document.body, { childList: true, subtree: true, characterData: true });
+    env.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Upload" }));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Try again in 15 seconds" })).toBeDisabled());
+    } finally {
+      env.IS_REACT_ACT_ENVIRONMENT = before;
+      watch.disconnect();
+    }
+    expect(names).toEqual(["Try again in 15 seconds"]);
   });
 
   it("can be canceled", async () => {

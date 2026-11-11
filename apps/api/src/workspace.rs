@@ -42,11 +42,8 @@ const OUTBOX_BATCH: i64 = 50;
 const OUTBOX_MAX_BACKOFF_MS: i64 = 5 * 60 * 1000;
 const OUTBOX_RETRY_MS: i64 = 5000;
 // Long enough for a busy recipient, short enough that a stuck one doesn't hold up the rest of the room.
-const DELIVERY_TIMEOUT_MS: u64 = if cfg!(feature = "failpoints") {
-    300
-} else {
-    10_000
-};
+// Test builds wait as long: a shorter wait there ran out on a busy runner and read as a recipient that didn't answer.
+const DELIVERY_TIMEOUT_MS: u64 = 10_000;
 const INVITATIONS_LISTED: i64 = 200;
 const DENIAL_ROWS: i64 = 5000;
 /// Different refusals held in memory before they're written. Past this, a new actor counts as an outsider's refusal, and
@@ -325,6 +322,12 @@ fn require_participant(sql: &SqlStorage, id: &str) -> R<()> {
 
 fn now_ms() -> i64 {
     Date::now().as_millis() as i64
+}
+
+/// An alarm time as the moment itself. A wait would be counted from a clock the runtime reads later than the one the
+/// moment was worked out from, so the time kept would trail the time meant.
+fn alarm_at(ms: i64) -> ScheduledTime {
+    ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(ms as f64)))
 }
 
 fn task_json(t: &Task) -> Value {
@@ -3671,7 +3674,7 @@ impl Workspace {
         if current.is_none_or(|at| at > due) {
             self.state
                 .storage()
-                .set_alarm(std::time::Duration::from_millis((due - now).max(1) as u64))
+                .set_alarm(alarm_at(due.max(now + 1)))
                 .await?;
         }
         Ok(())

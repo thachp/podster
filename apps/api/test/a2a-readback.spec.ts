@@ -1,6 +1,7 @@
-import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
+import { alarmPass } from "./alarm.ts";
 
 // M3 step 13: reading remote tasks back (ADR 0007, decision 117). A sent attempt's remote task is read by GetTask, one
 // queued job at a time, which the room's alarm queues once it's due. Each read goes through step 5's decide_remote, and its
@@ -104,10 +105,9 @@ async function sentOffer(path?: string) {
   expect(sent.state).toBe("sent");
   return { room, ...t, task: created, attempt: sent, remote: sent.remote_task_id as string };
 }
-/** Runs the room's alarm now. A test that edits rows directly hasn't scheduled one, and only a scheduled alarm runs. */
+/** One whole run of the room's alarm, now, whether or not one was set. */
 async function fireAlarm(room: string) {
-  await runInDurableObject(roomStub(room), (_: any, state: any) => state.storage.setAlarm(Date.now() + 60_000));
-  return runDurableObjectAlarm(roomStub(room));
+  await alarmPass(roomStub(room));
 }
 const row = async (room: string, id: string) => (await roomSql(room, "SELECT * FROM a2a_attempt WHERE id = ?", id))[0] as any;
 /** Makes the next read due, runs the room's alarm so it queues it, then runs that read job. */

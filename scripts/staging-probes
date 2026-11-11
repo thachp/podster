@@ -13,14 +13,17 @@ A2A_SIGNED_OUT_STATUS=401
 A2A_CHALLENGE_RESOURCE="resource_metadata=\"$GATEWAY/.well-known/oauth-protected-resource/a2a\""
 # A well-formed A2A call, so that the missing credential is the only thing wrong with it.
 A2A_CALL='{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"tsk_00000000000000000000000000000000"}}'
-# What the gateway answers a GitHub delivery while GITHUB_WEBHOOK_SECRET is unset on staging: the path isn't there.
-# CHANGE THIS TO 401 once the owner sets that secret. An unsigned delivery is then refused as invalid_signature, and
-# this probe fails until the constant says so. apps/gateway/test/github-webhook.spec.ts pins both answers.
+# What the gateway answers an unsigned GitHub delivery. While GITHUB_WEBHOOK_SECRET is unset on staging the path isn't
+# there. Once the owner has set it, the delivery is refused as invalid_signature. A secret can't be read from outside,
+# so the caller says which holds, with --webhook-secret-set, and the probe accepts that case's answer and no other.
+# apps/gateway/test/github-webhook.spec.ts pins both answers.
 WEBHOOK_STATUS_WHILE_SECRET_UNSET=404
+WEBHOOK_STATUS_WHILE_SECRET_SET=401
+WEBHOOK_CODE_WHILE_SECRET_SET='"code":"invalid_signature"'
 
 usage() {
   cat <<'EOF'
-Usage: scripts/staging-probes
+Usage: scripts/staging-probes [--webhook-secret-set]
 
 Sends five signed-out requests to staging and prints PASS or FAIL for each probe:
 
@@ -29,22 +32,27 @@ Sends five signed-out requests to staging and prints PASS or FAIL for each probe
             401 with the same WWW-Authenticate challenge, which names the gateway's own A2A
             resource metadata, and the same body (an OAuth 401's body may be empty)
   webhook   POST gateway /webhooks/github with no signature is 404, the answer while the
-            webhook secret is unset (the script says what to change when the owner sets it)
+            webhook secret is unset. With --webhook-secret-set it must be 401 with the code
+            invalid_signature instead, the answer once the owner has set the secret. Each
+            case accepts its own answer only, and the other's fails
   public    GET  app /p/pub_0000000000000000000000 as HTML is 404, with
             Cache-Control "no-store, no-transform" and no <script in the body
 
-It takes no arguments, sends no cookie or credential, follows no redirect, and reaches only
-gateway-staging.podster.dev and app-staging.podster.dev.
+It takes no other argument, sends no cookie or credential, follows no redirect, and reaches
+only gateway-staging.podster.dev and app-staging.podster.dev.
 
 Exit codes: 0 every probe passed, 1 a probe failed, 2 wrong usage.
 EOF
 }
 
+webhook_secret_set=false
 case "${1:-}" in
   -h | --help) usage; exit 0 ;;
   "") ;;
-  *) echo "staging-probes: takes no arguments, got '$1'" >&2; usage >&2; exit 2 ;;
+  --webhook-secret-set) webhook_secret_set=true ;;
+  *) echo "staging-probes: takes only --webhook-secret-set, got '$1'" >&2; usage >&2; exit 2 ;;
 esac
+if [ "$#" -gt 1 ]; then echo "staging-probes: takes only --webhook-secret-set, got '$2' after it" >&2; usage >&2; exit 2; fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -98,10 +106,18 @@ else
 fi
 
 request POST "$GATEWAY/webhooks/github" -H "Content-Length: 0"
-if [ "$STATUS" = "$WEBHOOK_STATUS_WHILE_SECRET_UNSET" ]; then
+if [ "$webhook_secret_set" = true ]; then
+  if [ "$STATUS" != "$WEBHOOK_STATUS_WHILE_SECRET_SET" ]; then
+    fail webhook "an unsigned delivery got $STATUS, wanted $WEBHOOK_STATUS_WHILE_SECRET_SET, the answer once the webhook secret is set (--webhook-secret-set was given)"
+  elif ! grep -q -F "$WEBHOOK_CODE_WHILE_SECRET_SET" "$work/body"; then
+    fail webhook "an unsigned delivery got $STATUS without the code invalid_signature, so it isn't the webhook route's refusal"
+  else
+    pass webhook "an unsigned delivery is refused with $STATUS invalid_signature, as once the webhook secret is set"
+  fi
+elif [ "$STATUS" = "$WEBHOOK_STATUS_WHILE_SECRET_UNSET" ]; then
   pass webhook "an unsigned delivery is refused with $STATUS, as while the webhook secret is unset"
 else
-  fail webhook "an unsigned delivery got $STATUS, wanted $WEBHOOK_STATUS_WHILE_SECRET_UNSET (see WEBHOOK_STATUS_WHILE_SECRET_UNSET in this script)"
+  fail webhook "an unsigned delivery got $STATUS, wanted $WEBHOOK_STATUS_WHILE_SECRET_UNSET, the answer while the webhook secret is unset (give --webhook-secret-set once the owner has set it)"
 fi
 
 request GET "$APP/p/pub_0000000000000000000000" -H "Accept: text/html"

@@ -622,15 +622,33 @@ describe("the provisioning job", () => {
     expect(await rowsOf(r.id, "repo_request_attempt")).toEqual([]);
   });
 
-  it("is set nowhere in the Worker's configuration", () => {
+  it("is set for staging only in the Worker's configuration, with no key beside it", () => {
     // This reads the configuration file. A variable set on the deployed Worker by hand wouldn't show here.
+    // The owner said "let's unblock m5 staging" on 2026-11-11: the switch, the organization and the three Apps' IDs are
+    // staging's variables. The top level, which local runs and these tests use, and any other environment set none.
     const config = JSON.parse(BINDINGS.TEST_WRANGLER.replace(/^\s*\/\/.*$/gm, ""));
-    expect(config.vars?.MANAGED_REPOSITORIES).toBeUndefined();
-    for (const [name, environment] of Object.entries<any>(config.env)) expect(environment.vars?.MANAGED_REPOSITORIES, name).toBeUndefined();
-    expect(BINDINGS.TEST_WRANGLER).not.toContain("MANAGED_REPOSITORIES");
-    // Nor is any of provisioning's configuration, or a key.
-    // The agent-token App and the sealing key for its tokens (M5 step 6) are the owner's to set too.
-    for (const name of ["GITHUB_ORG_LOGIN", "GITHUB_ORG_ID", "GITHUB_PROVISION_APP_ID", "GITHUB_PROVISION_INSTALLATION_ID", "GITHUB_MERGE_APP_ID", "GITHUB_PROVISION_APP_KEY", "GITHUB_AGENT_APP_ID", "GITHUB_AGENT_INSTALLATION_ID", "GITHUB_AGENT_APP_KEY", "REPO_TOKEN_KEY", "REPO_TOKEN_KEY_PREVIOUS"]) expect(BINDINGS.TEST_WRANGLER, name).not.toContain(name);
+    const staging: Record<string, string> = {
+      MANAGED_REPOSITORIES: "true",
+      GITHUB_ORG_LOGIN: "podsterdev",
+      GITHUB_ORG_ID: "354820586",
+      GITHUB_PROVISION_APP_ID: "5695065",
+      GITHUB_PROVISION_INSTALLATION_ID: "180477080",
+      GITHUB_AGENT_APP_ID: "5695079",
+      GITHUB_AGENT_INSTALLATION_ID: "180477157",
+      GITHUB_MERGE_APP_ID: "5695088",
+      GITHUB_MERGE_INSTALLATION_ID: "180477225",
+    };
+    expect(Object.keys(config.env)).toContain("staging");
+    for (const [name, value] of Object.entries(staging)) {
+      expect(config.vars?.[name], name).toBeUndefined();
+      for (const [environment, scope] of Object.entries<any>(config.env)) expect(scope.vars?.[name], `${environment} ${name}`).toBe(environment === "staging" ? value : undefined);
+      expect(BINDINGS.TEST_WRANGLER.match(new RegExp(`"${name}"`, "g")), name).toHaveLength(1);
+    }
+    // Three roles, three Apps and three installations, each a positive number, as `github.rs` asks.
+    for (const kind of ["APP_ID", "INSTALLATION_ID"]) expect(new Set(["PROVISION", "AGENT", "MERGE"].map((role) => staging[`GITHUB_${role}_${kind}`])).size, kind).toBe(3);
+    for (const [name, value] of Object.entries(staging)) if (name.endsWith("_ID")) expect(value, name).toMatch(/^[1-9][0-9]*$/);
+    // The keys are secrets, and the owner's to set. None is named anywhere in the file.
+    for (const name of ["GITHUB_PROVISION_APP_KEY", "GITHUB_AGENT_APP_KEY", "GITHUB_MERGE_APP_KEY", "REPO_TOKEN_KEY", "REPO_TOKEN_KEY_PREVIOUS"]) expect(BINDINGS.TEST_WRANGLER, name).not.toContain(name);
     expect(BINDINGS.MANAGED_REPOSITORIES).toBeUndefined();
   });
 

@@ -70,7 +70,8 @@ describe("axe over the repository screens", () => {
 
   it("the grants on Team, with the owner's form", async () => {
     const grants = [{ id: "pg_1", principal_id: "agt_1", action: "push" as const, delegated_by: "per_owner", created_at: 1, expires_at: null, revoked_at: null, state: "live" as const }];
-    const { container } = render(<RepositoryGrants roomId="ws_1" grants={grants} linked isOwner isOrgAdmin={false} viewerId="per_owner" policyVersion={3} archived={false} members={[{ principal_id: "agt_1", kind: "agent", org_id: "org_a", role: "member" }]} names={{}} />);
+    const { container } = render(<RepositoryGrants roomId="ws_1" grants={grants} linked isOwner isOrgAdmin={false} viewerId="per_owner" policyVersion={3} archived={false} members={[{ principal_id: "agt_1", kind: "agent", org_id: "org_a", role: "member", public_claim: false }, { principal_id: "agt_pub", kind: "agent", org_id: "org_b", role: "guest", public_claim: true }]} names={{}} />);
+    expect(screen.getByText(/Unavailable:/)).toBeInTheDocument();
     await check(container);
   });
 

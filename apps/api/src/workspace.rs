@@ -4169,6 +4169,9 @@ impl Workspace {
                         read["delegated"] = json!(delegated);
                     }
                 }
+                // Where a repository would be made, for the confirmation to name. Only in this read, and only while the
+                // switch is on, which the check above holds to.
+                read["organization"] = json!(provisioning::organization(&self.env, &sql));
                 return Ok(read);
             }
             return match tail {

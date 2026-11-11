@@ -14,6 +14,7 @@ const ORG = "org_rr";
 const OWNER: Who = { id: "per_rr_owner", kind: "person", org: ORG, adminOrgs: [ORG] };
 const AGENT: Who = { id: "agt_rr_agent", org: ORG };
 const orgAdmin: Who = { id: "per_rr_orgadmin", kind: "person", org: ORG, adminOrgs: [ORG] };
+const OPERATOR: Who = { id: "per_operator_one", kind: "person", org: "org_operators" };
 const DAY = 24 * 60 * 60 * 1000;
 let REPO_ID = 0;
 let nextRepo = 6_000_000 + Math.floor(Math.random() * 1_000_000) * 10;
@@ -58,6 +59,8 @@ const events = (id: string) => inRoom(id, (sql) => sql.exec("SELECT type, reason
 const scheduledReads = (id: string) => inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM repo_read WHERE kind = 'job' AND caller = 'readiness'").one().n as number);
 /** Makes the link last found right `ms` ago. */
 const checkedAgo = (id: string, ms: number) => inRoom(id, (sql) => void sql.exec("UPDATE repo_link SET verified_at = ?", Date.now() - ms));
+/** An operator's recheck of room `id`'s link, as `crate::moderation` takes it. */
+const recheck = (who: Who, id: string) => api(who, "POST", `/v1/moderation/repositories/${id}/recheck`, {});
 const made: string[] = [];
 
 beforeAll(async () => {
@@ -204,5 +207,74 @@ describe("the scheduled read-back of a ready link", () => {
     });
     await alarmPass(stub(r.id));
     expect((await readBack()).reads).toEqual([]);
+  });
+
+  it("degrades a link whose repository was deleted, which a read can't otherwise tell from GitHub being down (item 11)", async () => {
+    const r = await room();
+    await ready({ deleted: true });
+    await checkedAgo(r.id, DAY + 1);
+    await alarmPass(stub(r.id));
+    expect(await link(r.id)).toMatchObject({ status: "degraded", status_reason: "repository_gone" });
+    expect(await minted()).toEqual([expect.objectContaining({ token: r.token, live: false })]);
+    expect(await tokens(r.id)).toEqual([]);
+    expect(await events(r.id)).toEqual([{ type: "repository.degraded", reason: "repository_gone" }]);
+    // The question was asked by the repository's ID, with a token for the whole installation that GitHub had just minted.
+    expect((await readBack()).reads.map((read) => read.path)).toEqual([`/repositories/${REPO_ID}`]);
+    expect((await readBack()).live).toBe(0);
+    // The agent can't have another.
+    const task = await inRoom(r.id, (sql) => sql.exec("SELECT id FROM task").one().id as string);
+    const again = await api(AGENT, "POST", `/v1/workspaces/${r.id}/tasks/${task}/repo-access`, undefined, { key: null });
+    expect([again.status, again.body?.error?.code]).toEqual([409, "repo_not_ready"]);
+  });
+
+  it("leaves a link alone when no token can be had, so nothing can be told about the repository", async () => {
+    const r = await room();
+    await ready({ deleted: true, script: { token: 403 } });
+    await checkedAgo(r.id, DAY + 1);
+    await alarmPass(stub(r.id));
+    expect(await link(r.id)).toMatchObject({ status: "ready", status_reason: null });
+    expect(await tokens(r.id)).toEqual(["held"]);
+    expect(await events(r.id)).toEqual([]);
+  });
+});
+
+describe("an operator's recheck of a ready link (item 12)", () => {
+  it("degrades it on a definite difference, in one command with its event, and its tokens go", async () => {
+    const r = await room();
+    await ready({ rulesets: "no_update" });
+    const got = await recheck(OPERATOR, r.id);
+    expect(got.body).toEqual({ status: "degraded", reason: "ruleset_missing" });
+    expect(await link(r.id)).toMatchObject({ status: "degraded", status_reason: "ruleset_missing" });
+    expect(await events(r.id)).toEqual([{ type: "repository.degraded", reason: "ruleset_missing" }]);
+    // Marked in the command's own transaction, and revoked by the room's alarm.
+    expect(await tokens(r.id)).toEqual(["revoke"]);
+    await alarmPass(stub(r.id));
+    expect(await minted()).toEqual([expect.objectContaining({ token: r.token, live: false })]);
+    expect(await tokens(r.id)).toEqual([]);
+  });
+
+  it("degrades it when the repository is gone, as after a takedown done by hand", async () => {
+    const r = await room();
+    await ready({ deleted: true });
+    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "degraded", reason: "repository_gone" });
+    expect(await link(r.id)).toMatchObject({ status: "degraded", status_reason: "repository_gone" });
+  });
+
+  it("leaves one that reads back right as it is, with no event, and refuses anyone but an operator", async () => {
+    const r = await room();
+    for (const who of [OWNER, AGENT]) {
+      const refused = await recheck(who, r.id);
+      expect([refused.status, refused.body?.error?.code], who.id).toEqual([403, "not_allowed"]);
+    }
+    expect((await readBack()).reads).toEqual([]);
+    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "ready", reason: null });
+    expect(await link(r.id)).toMatchObject({ status: "ready", status_reason: null });
+    expect(await events(r.id)).toEqual([]);
+    expect(await tokens(r.id)).toEqual(["held"]);
+    // No definite answer: refused as unavailable, and nothing changes.
+    await ready({ script: { readRepo: 503 } });
+    const down = await recheck(OPERATOR, r.id);
+    expect([down.status, down.body?.error?.code]).toEqual([502, "provider_unavailable"]);
+    expect((await link(r.id)).status).toBe("ready");
   });
 });

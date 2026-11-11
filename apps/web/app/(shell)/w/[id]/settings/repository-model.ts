@@ -77,6 +77,7 @@ const REASONS: Record<string, string> = {
   creation_outcome_unknown: "GitHub's answer to the creation call was lost.",
   read_back_failed: "Podster couldn't read the repository's settings back from GitHub.",
   setup_call_failed: "A setup call to GitHub failed.",
+  repository_gone: "GitHub says the repository isn't there any more: it was deleted, or Podster's GitHub App no longer reaches it.",
   wrong_repository: "GitHub described a different repository than the one Podster created.",
   visibility_differs: "The repository's visibility isn't what was asked for.",
   archived: "The repository is archived on GitHub.",

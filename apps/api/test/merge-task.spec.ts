@@ -955,8 +955,10 @@ describe("the review's findings (M5 step 7b)", () => {
     // The same key answers the same, from the record, with no second read. A new one finds nothing to recheck.
     const readsBefore = (await readBack()).reads.length;
     expect((await api(OPERATOR, "POST", `/v1/moderation/repositories/${r.id}/recheck`, {}, { key: "mt-recheck" })).body).toEqual(fixed.body);
-    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "ready", reason: null });
     expect((await readBack()).reads.length).toBe(readsBefore);
+    // A new one reads the ready link again, finds it right, and changes nothing.
+    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "ready", reason: null });
+    expect((await readBack()).reads.length).toBeGreaterThan(readsBefore);
     expect((await events(r.id, "repository.")).map((e) => [e.type, e.reason])).toEqual([["repository.degraded", "bypass_differs"], ["repository.ready_again", null]]);
     expect((await readBack()).live).toBe(0);
     // And a merge can be asked for again.

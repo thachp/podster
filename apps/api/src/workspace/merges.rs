@@ -1034,8 +1034,9 @@ impl Workspace {
             return Err(ApiError::internal("unknown link status"));
         };
         let repo_id = int(&link["provider_repo_id"]);
-        // Only a degraded link is read: for any other the decision is the same whatever GitHub says.
-        let read = if status == LinkStatus::Degraded {
+        // A degraded link is read to restore it, and a ready one to degrade it on a definite difference. A suspended one
+        // isn't read: the decision is the same whatever GitHub says.
+        let read = if matches!(status, LinkStatus::Degraded | LinkStatus::Ready) {
             let room = rows(&sql, "SELECT id FROM workspace", vec![])?
                 .first()
                 .and_then(|row| text(&row["id"]))
@@ -1068,6 +1069,10 @@ impl Workspace {
             let answer = match decide_recheck(current.unwrap_or(status), read.filter(|_| current == Some(status))) {
                 Recheck::Unchanged => unchanged,
                 Recheck::Unavailable => return Err(refuse(502, "provider_unavailable")),
+                Recheck::Degrade(code) => {
+                    degrade(sql, repo_id, code, now)?;
+                    json!({ "status": LinkStatus::Degraded.name(), "reason": code })
+                }
                 Recheck::StillDegraded(code) => {
                     exec(
                         sql,

@@ -125,6 +125,20 @@ describe("each state, in words", () => {
 });
 
 describe("asking for the repository", () => {
+  it("names Podster's organization as the server's read gives it, and says only \"Podster's GitHub organization\" without one", async () => {
+    for (const [organization, wording] of [["podsterdev", "in Podster's GitHub organization, podsterdev, not in yours"], [null, "in Podster's GitHub organization, not in yours"]] as const) {
+      const { unmount } = show({ request: null, repository: null, delegated: true, organization });
+      await userEvent.type(screen.getByLabelText("Repository name"), "engineering");
+      await userEvent.click(screen.getByRole("button", { name: "Create a repository" }));
+      const dialog = await screen.findByRole("alertdialog");
+      expect(within(dialog).getByText(new RegExp(wording))).toBeInTheDocument();
+      if (organization === null) expect(within(dialog).queryByText(/podsterdev/)).toBeNull();
+      await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      unmount();
+    }
+    expect(sent).toHaveLength(0);
+  });
+
   it("checks the name to the API's rule, and sends nothing until the confirmation is confirmed", async () => {
     show({ request: null, repository: null, delegated: true });
     const field = screen.getByLabelText("Repository name");
@@ -224,7 +238,7 @@ describe("every code as a sentence", () => {
   });
 
   it("turns every reason code the contract lists into its own sentence", () => {
-    const codes = ["managed_repositories_off", "provisioning_not_configured", "token_refused", "not_delegated", "delegation_unavailable", "room_archived", "requester_not_owner", "requester_lost_authority", "name_taken", "provider_refused", "wrong_owner", "creation_outcome_unknown", "read_back_failed", "setup_call_failed", "wrong_repository", "visibility_differs", "archived", "no_initial_commit", "actions_enabled", "actions_unreadable", "ruleset_missing", "ruleset_inactive", "ruleset_differs", "bypass_differs", "unexpected_ruleset", "settings_differ", "workflow_permissions_differ", "provider_rate_limited", "authority_lost", "internal_error"];
+    const codes = ["managed_repositories_off", "provisioning_not_configured", "token_refused", "not_delegated", "delegation_unavailable", "room_archived", "requester_not_owner", "requester_lost_authority", "name_taken", "provider_refused", "wrong_owner", "creation_outcome_unknown", "read_back_failed", "setup_call_failed", "repository_gone", "wrong_repository", "visibility_differs", "archived", "no_initial_commit", "actions_enabled", "actions_unreadable", "ruleset_missing", "ruleset_inactive", "ruleset_differs", "bypass_differs", "unexpected_ruleset", "settings_differ", "workflow_permissions_differ", "provider_rate_limited", "authority_lost", "internal_error"];
     const sentences = codes.map(reasonSentence);
     expect(new Set(sentences).size).toBe(codes.length);
     // None falls back to the code itself.

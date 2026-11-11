@@ -8,6 +8,8 @@ import { alarmPass, alarmQuiet } from "./alarm.ts";
 // installation token as GitHub would, and a test scripts how it misbehaves.
 
 const BINDINGS = env as any;
+/** The organization the test Worker is configured with, which the repository read names. */
+const GH_ORG = JSON.parse(BINDINGS.TEST_FAKE_GITHUB).orgLogin as string;
 const GH = JSON.parse(BINDINGS.TEST_FAKE_GITHUB) as { orgLogin: string; orgId: number; provisionAppId: number; installationId: number; mergeAppId: number };
 let key: any;
 type Who = { id: string; kind?: "agent" | "person"; org: string; adminOrgs?: string[]; gen?: number };
@@ -701,6 +703,31 @@ describe("asking for the room's repository", () => {
     expect((await github()).calls).toEqual([]);
   });
 
+  it("names the configured organization in the repository read alone, and null while provisioning isn't configured", async () => {
+    const r = await room();
+    const read = await api(r.owner, "GET", `/v1/workspaces/${r.id}/repository`);
+    expect(read.body.organization).toBe(GH.orgLogin);
+    // The command answers carry the same request and repository, and no organization.
+    const asked = await ask(r);
+    expect(asked.status, asked.text).toBe(200);
+    expect(asked.body).not.toHaveProperty("organization");
+    await settled(r);
+    // Nor does any event, outbox row or stored answer, nor the room's own read.
+    const events = await inRoom(r.id, (sql) => sql.exec("SELECT * FROM event").toArray().map((row: any) => JSON.stringify(row)));
+    expect(events.filter((row) => row.includes("organization"))).toEqual([]);
+    const answers = await inRoom(r.id, (sql) => sql.exec("SELECT response_json FROM idempotency").toArray().map((row: any) => JSON.parse(row.response_json)));
+    expect(answers.filter((answer) => answer && typeof answer === "object" && "organization" in answer)).toEqual([]);
+    expect((await api(r.owner, "GET", `/v1/workspaces/${r.id}`)).text).not.toContain("\"organization\"");
+    // A deployment whose provisioning key isn't set yet has no organization to name.
+    await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_no_provisioning_key (x INTEGER)"));
+    expect((await api(r.owner, "GET", `/v1/workspaces/${r.id}/repository`)).body.organization).toBeNull();
+    // Switched off, the read isn't there, so neither is the name.
+    await inRoom(r.id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
+    const off = await api(r.owner, "GET", `/v1/workspaces/${r.id}/repository`);
+    expect([off.status, off.code]).toEqual([404, "not_found"]);
+    expect(off.text).not.toContain(GH.orgLogin);
+  });
+
   it("records one request, answers a repeat with the same answer, and refuses a second", async () => {
     const r = await room();
     const first = await ask(r, undefined, { key: "pv-same" });
@@ -787,7 +814,7 @@ describe("the provisioning job", () => {
     expect((await api(r.owner, "POST", `/v1/workspaces/${r.id}/tasks`, { title: "Write the brief", instructions: "Write it." })).status).toBe(200);
     for (let i = 0; i < 3; i++) await alarmPass(stub(r.id));
     expect((await github()).calls).toEqual([]);
-    expect(await read(r)).toEqual({ request: null, repository: null, delegated: true });
+    expect(await read(r)).toEqual({ request: null, repository: null, delegated: true, organization: GH_ORG });
   });
 
   it("refuses cleanly while the App's key isn't set, and goes on under the chosen name once it is", async () => {
@@ -1053,14 +1080,19 @@ describe("the provisioning job", () => {
     }
   });
 
-  it("spends the run once a request has waited out as many limits as it may", async () => {
-    const r = await room({ script: { create: ["limited"] } });
+  it("ends a request that has waited out as many limits as it may, without spending a run, so a retry can go again", async () => {
+    const r = await room({ script: { create: ["limited", "ok"] } });
     await ask(r);
     // The 24 waits before this one were used up, as a day of limits would.
     await inRoom(r.id, (sql) => sql.exec("UPDATE repo_request SET job_failures = 24"));
-    expect((await settled(r)).request).toMatchObject({ state: "failed", reason: "provider_rate_limited" });
-    expect((await rowsOf(r.id, "repo_request"))[0]).toMatchObject({ runs: 1, job_failures: 0 });
+    const ended = await settled(r);
+    expect(ended.request).toMatchObject({ state: "failed", reason: "provider_rate_limited", attempts_left: 5 });
+    expect((await rowsOf(r.id, "repo_request"))[0]).toMatchObject({ runs: 0, job_failures: 0 });
     expect((await github()).repos).toEqual([]);
+    // The owner's retry is taken, and goes on under the same name.
+    expect((await retry(r)).status).toBe(200);
+    expect((await settled(r)).request).toMatchObject({ state: "ready", reason: null });
+    expect((await github()).repos.map((x) => x.name)).toEqual(["engineering"]);
   });
 
   it("never repairs a rule that's there and wrong: a retry reads it again and fails again", async () => {

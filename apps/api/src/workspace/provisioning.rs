@@ -36,6 +36,25 @@ const SWITCH_VAR: &str = "MANAGED_REPOSITORIES";
 const NOT_SENT: &str = "not_sent";
 const STARTED: &str = "started";
 
+/// The organization Podster's repositories are made in, for the room's repository read: the configured
+/// `GITHUB_ORG_LOGIN`, or `None` while provisioning isn't configured. Display only. Test builds stand for a deployment
+/// whose key isn't set yet with the same table the job reads.
+pub(super) fn organization(env: &Env, sql: &SqlStorage) -> Option<String> {
+    #[cfg(feature = "failpoints")]
+    if rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_no_provisioning_key'",
+        vec![],
+    )
+    .is_ok_and(|found| !found.is_empty())
+    {
+        return None;
+    }
+    #[cfg(not(feature = "failpoints"))]
+    let _ = sql;
+    Config::from_env(env).map(|config| config.org_login().to_string())
+}
+
 /// Whether managed repositories are switched on for this deployment. Test builds can switch them on for one room, by a
 /// table only a test can make, so every other test runs with them off, as every deployment does today.
 pub(super) fn enabled(env: &Env, sql: &SqlStorage) -> R<bool> {
@@ -640,9 +659,19 @@ impl Workspace {
                 )?
                 .first()
                 .map(|r| int(&r["job_failures"]));
-                let Some(waits) = waits.filter(|waits| rate_limited_run_waits(*waits)) else {
+                let Some(waits) = waits else {
                     return Ok(false);
                 };
+                if !rate_limited_run_waits(waits) {
+                    // The waits ran out. The request ends `provider_rate_limited`, and this run is given back too, so
+                    // the owner or an admin can retry without it counting as a spent setup run.
+                    exec(
+                        sql,
+                        "UPDATE repo_request SET runs = max(runs - 1, 0) WHERE id = ?",
+                        vec![id.as_str().into()],
+                    )?;
+                    return Ok(false);
+                }
                 exec(
                     sql,
                     "UPDATE repo_request SET runs = max(runs - 1, 0), job_failures = ?, job_not_before = ?, updated_at = ? WHERE id = ?",

@@ -21,7 +21,7 @@ type Ruleset = { id: number; name: string; target: string; enforcement: string; 
 /** The repository settings Podster asks for at creation and reads back (the M5 security review's F7 and F8). */
 type Settings = { has_issues: boolean; has_wiki: boolean; has_projects: boolean; has_discussions: boolean; allow_auto_merge: boolean; delete_branch_on_merge: boolean };
 type Workflow = { default_workflow_permissions: string; can_approve_pull_request_reviews: boolean };
-type Repo = { id: number; name: string; ownerId: number; private: boolean; archived: boolean; actionsEnabled: boolean; hasCommit: boolean; defaultBranch: string; rulesets: Ruleset[]; settings?: Settings; workflow?: Workflow; hideMergeSettings?: boolean };
+type Repo = { id: number; name: string; ownerId: number; private: boolean; archived: boolean; actionsEnabled: boolean; hasCommit: boolean; defaultBranch: string; rulesets: Ruleset[]; settings?: Settings; workflow?: Workflow; hideMergeSettings?: boolean; deleted?: boolean };
 /** What Podster asks for, and GitHub's defaults for what a creation call leaves out. */
 const ASKED: Settings = { has_issues: false, has_wiki: false, has_projects: false, has_discussions: false, allow_auto_merge: false, delete_branch_on_merge: false };
 const GITHUB_DEFAULTS: Settings = { has_issues: true, has_wiki: true, has_projects: true, has_discussions: false, allow_auto_merge: false, delete_branch_on_merge: false };
@@ -291,7 +291,10 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
   // A read-back of one test's own repository, by the provisioning App, is that test's and not the provisioning spec's.
   const wantedIds: unknown = body?.repository_ids;
   const readyMint = !!tokenRoute && app === "provision" && Array.isArray(wantedIds) && wantedIds.length > 0 && wantedIds.every((id) => readyRepos.has(id as number));
-  const readyCall = readyMint || readyIssued.has(bearer);
+  // A token for the whole installation that can only read metadata: the read-back asking whether a repository is there.
+  const asked = body?.permissions && typeof body.permissions === "object" ? Object.entries(body.permissions) : [];
+  const presenceMint = !!tokenRoute && app === "provision" && !Array.isArray(wantedIds) && asked.length === 1 && asked[0][0] === "metadata" && asked[0][1] === "read";
+  const readyCall = readyMint || presenceMint || readyIssued.has(bearer);
   if (!agentCall && !readyCall) calls.push({ method: request.method, path, body, auth, ...(scope ? { scope } : {}) });
   const versioned = request.headers.get("x-github-api-version") === "2022-11-28" && request.headers.get("accept") === "application/vnd.github+json" && !!request.headers.get("user-agent");
   if (!versioned) return json({ message: "missing headers" }, 400);
@@ -299,10 +302,20 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
   if (tokenRoute) {
     if (request.method !== "POST" || auth !== "app") return json({ message: "Bad credentials" }, 401);
     if (app === "agent" || app === "merge") return agentMint(body, app);
+    if (presenceMint) {
+      const token = `ghs_fake_${crypto.randomUUID().replaceAll("-", "")}`;
+      // Every repository the installation reaches: the ones that weren't deleted.
+      const reach = [...readyRepos.values()].filter((r) => !r.deleted).map((r) => r.id);
+      readyTokens.set(token, reach);
+      readyIssued.add(token);
+      return json({ ...provisionTokenAnswer(token, body, null), repository_selection: "all" }, 201);
+    }
     if (readyMint) {
       const ids = wantedIds as number[];
       const refused = readyRepos.get(ids[0])?.script.token;
       if (refused && refused !== 201) return json({ message: "SECRET-PROVIDER-TEXT" }, refused);
+      // GitHub won't narrow a token to a repository the installation no longer reaches.
+      if (ids.some((id) => readyRepos.get(id)?.deleted)) return json({ message: "There is at least one repository that does not exist or is not accessible to the parent installation." }, 422);
       const token = `ghs_fake_${crypto.randomUUID().replaceAll("-", "")}`;
       readyTokens.set(token, ids);
       readyIssued.add(token);
@@ -495,6 +508,10 @@ function readyRoute(request: Request, path: string, bearer: string): Response {
   if (request.method !== "GET") return json({ message: "not here" }, 405);
   const scoped = path.match(/^\/repositories\/(\d+)(\/.*)?$/);
   const repo = scoped ? readyRepos.get(Number(scoped[1])) : undefined;
+  if (repo?.deleted) {
+    readyReads.push({ repo: repo.id, path, scope });
+    return json({ message: "Not Found" }, 404);
+  }
   if (!scoped || !repo || !scope.includes(repo.id)) return json({ message: "Not Found" }, 404);
   readyReads.push({ repo: repo.id, path, scope });
   if (repo.script.limited) return limitedAnswer(repo.script.limited);

@@ -17,9 +17,9 @@ use futures_util::future::{select, Either};
 use futures_util::StreamExt;
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use podster_core::provisioning::{
-    classify_creation, provisioning_token_matches, Bypass, Creation, Observed, RepoSettings,
-    Ruleset, SetupStep, WorkflowPermissions, DEFAULT_BRANCH_REF, PROVISIONING_PERMISSIONS,
-    STATUS_CONTEXT,
+    classify_creation, gone, repository_gone, token_answer_matches, Bypass, Creation, Observed,
+    RepoSettings, Ruleset, SetupStep, WorkflowPermissions, DEFAULT_BRANCH_REF,
+    PRESENCE_PERMISSIONS, PROVISIONING_PERMISSIONS, STATUS_CONTEXT,
 };
 use podster_core::rate_limit::{has_secondary_marker, rate_limit_wait_ms, LimitSignals};
 use podster_core::repo_access::{minted_token_matches, TokenPermissions};
@@ -117,6 +117,12 @@ pub struct Config {
 }
 
 impl Config {
+    /// The organization Podster's repositories are made in, as the Worker's configuration names it: checked to be
+    /// letters, digits and hyphens of GitHub's length when it was read. Never anything from GitHub's answers.
+    pub fn org_login(&self) -> &str {
+        &self.org_login
+    }
+
     /// `None` unless every variable and the key are set and well-formed. The caller says only that provisioning isn't
     /// configured, never which part.
     pub fn from_env(env: &Env) -> Option<Config> {
@@ -532,12 +538,21 @@ impl GitHubApp {
     /// name, and uses the token only if GitHub's answer is exactly that, for exactly that repository, and expires within
     /// the hour (the M5 security review's F4). A token that came back otherwise is revoked unused.
     async fn mint(&self, repo_id: Option<i64>) -> std::result::Result<String, Failure> {
+        self.mint_with(repo_id, &PROVISIONING_PERMISSIONS).await
+    }
+
+    /// The same, asking for `asked` and accepting nothing else back.
+    async fn mint_with(
+        &self,
+        repo_id: Option<i64>,
+        asked: &[(&str, &str)],
+    ) -> std::result::Result<String, Failure> {
         let jwt = app_jwt(self.config.app_id, &self.config.key_pem).await?;
         let path = format!(
             "/app/installations/{}/access_tokens",
             self.config.installation_id
         );
-        let permissions: serde_json::Map<String, Value> = PROVISIONING_PERMISSIONS
+        let permissions: serde_json::Map<String, Value> = asked
             .iter()
             .map(|(name, level)| ((*name).to_string(), Value::from(*level)))
             .collect();
@@ -560,10 +575,11 @@ impl GitHubApp {
             .map(|(name, level)| (name.as_str(), level.as_str()))
             .collect();
         let expires_at = parse_time(&answer["expires_at"]);
-        if !provisioning_token_matches(
+        if !token_answer_matches(
             repo_id,
             &repo_ids,
             &granted,
+            asked,
             expires_at,
             Date::now().as_millis() as i64,
         ) {
@@ -574,6 +590,19 @@ impl GitHubApp {
             return Err(Failure::Unreadable);
         }
         Ok(token)
+    }
+
+    /// Whether a repository GitHub wouldn't mint a narrowed token for is gone, by `core::repository_gone`: asked with a
+    /// token for the whole installation that can read metadata and nothing else, revoked as soon as it's answered.
+    /// `Err` when that token can't be had or the read gets no answer, which says nothing about the repository.
+    async fn presence(&self, base: &str) -> std::result::Result<bool, Failure> {
+        let token = self.mint_with(None, &PRESENCE_PERMISSIONS).await?;
+        let read = self.send(Method::Get, base, &token, None).await;
+        if !self.revoke(&token).await {
+            self.unrevoked.set(self.unrevoked.get().saturating_add(1));
+        }
+        let (status, _) = read?;
+        Ok(repository_gone(true, status))
     }
 
     /// Revokes a token. Whether it worked is all that comes back.
@@ -690,7 +719,30 @@ impl Provider for GitHubApp {
 
     async fn read_back(&self, repo_id: i64) -> std::result::Result<(Observed, Described), Failure> {
         let base = format!("/repositories/{repo_id}");
-        let (status, repo) = self.get(repo_id, &base).await?;
+        // A repository that's gone is a definite answer, never "couldn't read" (`core::repository_gone`).
+        let gone_back = || {
+            let nothing = Described {
+                full_name: String::new(),
+                default_branch: String::new(),
+            };
+            Ok((gone(repo_id), nothing))
+        };
+        let (status, repo) = match self.get(repo_id, &base).await {
+            Ok(answer) => answer,
+            // GitHub refused a token narrowed to this repository with `422`, its answer for a repository the
+            // installation doesn't reach. Whether it's there at all is asked once more, with a token for metadata alone.
+            Err(Failure::Status(422)) => {
+                return match self.presence(&base).await? {
+                    true => gone_back(),
+                    false => Err(Failure::Status(422)),
+                };
+            }
+            Err(failure) => return Err(failure),
+        };
+        // The token for this repository was just minted, so a `404` for it by its ID is the repository gone.
+        if repository_gone(true, status) {
+            return gone_back();
+        }
         if status != 200 {
             return Err(Failure::Status(status));
         }
@@ -772,6 +824,7 @@ impl Provider for GitHubApp {
         }
         Ok((
             Observed {
+                present: true,
                 repo_id: id(&repo["id"]).ok_or(Failure::Unreadable)?,
                 owner_id: id(&repo["owner"]["id"]).ok_or(Failure::Unreadable)?,
                 private,

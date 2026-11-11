@@ -1980,9 +1980,10 @@ async function keyboardPaths(s) {
   const LONGEST_BLOCK_SCRIPTS_MS = 800;
   const TAB_BACK_BLOCK_MS = 1_000;
   // Tabbing back lays out again only what stayed laid out. With few bodies kept, it has nothing to measure and passes
-  // whatever the cost would be, as the fallback-font run on 2026-11-11 did: 3 of 20 and 3 of 50 kept, 0 ms. A normal CI
-  // run keeps 12 of 20 and 16 of 50 of the unbroken scripts. Half of that is the least that makes the check mean anything.
-  const MIN_STAYED_SCRIPTS = { sheet: 6, oversight: 8 };
+  // whatever the cost would be, as the fallback-font run on 2026-11-11 did: 3 of 20 and 3 of 50 kept, 0 ms. Normal runs
+  // kept 12 of 20 and 16 of 50 on CI and 7 of 20 and 8 of 50 on a Mac. The floor sits between: above the vacuous run,
+  // below every normal one seen.
+  const MIN_STAYED_SCRIPTS = { sheet: 5, oversight: 6 };
   const openHeavy = async (label, context, path, tab, longest = LONGEST_BLOCK_MS, idleWait = 3_000, minStayed = 0) => {
     await watchBlocks(context);
     const own = await context.newPage();

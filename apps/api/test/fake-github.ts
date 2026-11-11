@@ -40,9 +40,9 @@ type Script = {
  * The agent-token App's side (M5 step 6), kept apart from everything above so specs running in parallel can't reset it:
  * each test registers a repository of its own, and its script and tokens are that repository's.
  * `mode` is how the answer differs from what was asked: wide (every repository), extra_permission, other_repo,
- * no_repositories, long_life (two hours), slow (answers after 200 ms), hang (no answer in time), or gate (answers only
- * once the test releases it through `/agent-release`, having seen it waiting through `/agent-gate`, so a test can do
- * something while a mint is under way without sleeping). `revoke` is a status for revoking, if not 204, and `mint` one
+ * no_repositories, long_life (two hours), slow (answers after 200 ms), or gate (answers only once the test releases it
+ * through `/agent-release`, having seen it waiting through `/agent-gate`, so a test can do something while a mint is
+ * under way without sleeping, or let the caller's own wait run out for a mint that gets no answer in time). `revoke` is a status for revoking, if not 204, and `mint` one
  * for the token request itself, if not 201.
  */
 type AgentScript = { mode?: string; revoke?: number; pulls?: Record<string, Pull | null>; pullRead?: number; mint?: number };
@@ -70,6 +70,15 @@ let script: Script = {};
 let nextId = 9000;
 let nextRuleset = 100;
 let creations = 0;
+
+/**
+ * Holds a call until the caller has given up on it, so "no answer in time" never rests on this side's clock beating the
+ * caller's. It ends when the caller drops the request, or well after any caller's wait, and nobody reads what follows.
+ */
+const unanswered = (request: Request) => new Promise<void>((done) => {
+  request.signal.addEventListener("abort", () => done());
+  setTimeout(done, 60_000).unref?.();
+});
 
 const json = (body: unknown, status = 200) => new Response(body === null ? null : JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const decode = (part: string) => JSON.parse(Buffer.from(part, "base64url").toString("utf8"));
@@ -199,7 +208,7 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
     repo.rulesets = structuredClone(repo.rulesets);
     repos.set(repo.id, repo);
     if (mode === "lost") return json({ message: "SECRET-PROVIDER-TEXT" }, 500);
-    if (mode === "hang") await new Promise((resolve) => setTimeout(resolve, 1500));
+    if (mode === "hang") await unanswered(request);
     if (mode === "no_id") return json({ name: repo.name }, 201);
     return json(repoView(repo), 201);
   }
@@ -245,7 +254,7 @@ async function agentMint(body: any): Promise<Response> {
   const mode = script.mode ?? "ok";
   if (script.mint && script.mint !== 201) return json({ message: "SECRET-PROVIDER-TEXT" }, script.mint);
   if (mode === "gate") await new Promise<void>((open) => gates.set(wanted[0], [...(gates.get(wanted[0]) ?? []), open]));
-  if (mode === "hang" || mode === "slow") await new Promise((resolve) => setTimeout(resolve, mode === "hang" ? 1500 : 200));
+  if (mode === "slow") await new Promise((resolve) => setTimeout(resolve, 200));
   const token = `ghs_fake_${crypto.randomUUID().replaceAll("-", "")}`;
   const permissions: Record<string, string> = { ...(body?.permissions ?? {}), ...(mode === "extra_permission" ? { administration: "write" } : {}) };
   const scope: number[] | "all" = mode === "wide" ? "all" : mode === "other_repo" ? [...wanted, 1] : wanted;

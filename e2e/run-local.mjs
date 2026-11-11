@@ -202,8 +202,9 @@ try {
     await start();
     console.log(`\nlocal stack with managed repositories on is up at ${onBase}, with a fake GitHub at ${github}\n`);
     const access = await child("repo-access-check.mjs", ["--base-url", onBase]);
-    const merge = await child("merge-check.mjs", ["--base-url", onBase, "--github", github], { PODSTER_E2E_OPERATOR_COOKIE: operator.cookie });
-    code = access || merge;
+    const admins = await child("repo-admin-check.mjs", ["--base-url", onBase], { PODSTER_E2E_OPERATOR_COOKIE: operator.cookie });
+    const merge = await child("merge-check.mjs", ["--base-url", onBase, "--github", github]);
+    code = access || admins || merge;
     if (code !== 0) console.error(`\n--- last of the stack's log ---\n${log.join("").slice(-4000)}`);
   }
 } catch (error) {

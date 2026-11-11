@@ -55,7 +55,7 @@ import { fileURLToPath } from "node:url";
 import { parseJsonc } from "./jsonc.mjs";
 import { missingWranglers, TAILED_APPS } from "./m4-staging-lib.mjs";
 import {
-  absentId, ASKPASS_SCRIPT, cloneUrlProblem, deliveryBody, isCommitSha, logHits, worstCaseSeconds, deliveryOutcomes, GrantLedger, gitEnv, lostAuthorityEnding, MERGE_APP_SLUG, mergeCommitProblems, movedHeadEnding,
+  absentId, ASKPASS_SCRIPT, cloneUrlProblem, deliveryBody, deliveryProblem, deliveryTrace, isCommitSha, logHits, worstCaseSeconds, GrantLedger, gitEnv, lostAuthorityEnding, MERGE_APP_SLUG, mergeCommitProblems, movedHeadEnding,
   parseArgs, PLAN, releaseStatusProblems, repositoryOrgProblem, requesterProblem, reviewStatusProblems, rulesetProblems, scrub, secretProblem, SIGN_UPS, signDelivery, STAGING, STAGING_APP,
   stagingConfig, STATUS_CONTEXT, steady, Tally, USAGE, WEBHOOK_PATH, WEBHOOK_SECRET_ENV, webhookSecretProblem,
 } from "./m5-staging-lib.mjs";
@@ -577,12 +577,29 @@ async function markerInEveryTail(seconds) {
   if (broken.length) return broken.join(", ");
   return missing.length ? `the marker never arrived in the tail of ${missing.join(", ")} within ${seconds} s` : null;
 }
-/** The API's own word for what became of a delivery, once its tail holds that many lines for it. */
-async function outcomeOf(deliveryId, lines = 1) {
+/**
+ * What the API's tail holds of a delivery once it holds `lines` lines for it, or after a minute: `{ outcomes }`, or
+ * `{ problem, lost }` saying what was there instead. A line with a missing or malformed outcome ends the wait at once
+ * and is said as that. With no line, it says whether the tail holds the API's own request for the delivery.
+ */
+async function traced(deliveryId, lines = 1) {
   const api = tails.find((tail) => tail.app === "api");
   ok(api && tally.passed("M5-13a"), "the API's log isn't tailed");
-  const { value } = await within(60, `the API's ${lines} log line(s) for delivery ${deliveryId}`, async () => deliveryOutcomes(api.stream.values, deliveryId), (outcomes) => outcomes.length >= lines, 2000);
-  return value.join(",");
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    ok(!stopping, "the run was told to stop");
+    const trace = deliveryTrace(api.stream.values, deliveryId);
+    const problem = deliveryProblem(trace, lines);
+    if (!problem) return { outcomes: trace.outcomes.join(",") };
+    if (trace.odd.length || Date.now() > deadline) return { problem: `for delivery ${deliveryId}, after ${trace.odd.length ? "its line arrived" : "60 s"}, ${problem.text}`, lost: problem.lost };
+    await sleep(2000);
+  }
+}
+/** The API's own word for what became of a delivery. Throws what the tail held instead, if it wasn't that many lines. */
+async function outcomeOf(deliveryId, lines = 1) {
+  const found = await traced(deliveryId, lines);
+  ok(!found.problem, found.problem);
+  return found.outcomes;
 }
 
 // ---- clean-up ----
@@ -1435,13 +1452,32 @@ try {
     after("M5-S2");
     ok(task.pr !== tasks["second-1"].pr, "the first room's pull request has the number of the second room's, so the delivery would name a change there");
     const [before, theirs] = [JSON.stringify(steady(await changeOf(task.id))), await secondRoomNow()];
-    const elsewhere = await deliver(deliveryBody({ repositoryId: repoB.id, number: task.pr, head: next, nonce: randomUUID() }), { secret: key });
-    // GitHub's repository 1 is nobody's room.
-    const nobody = await deliver(deliveryBody({ repositoryId: 1, number: task.pr, head: next, nonce: randomUUID() }), { secret: key });
-    eq([elsewhere.status, elsewhere.accepted, nobody.status, nobody.accepted], [202, true, 202, true], "both deliveries");
-    eq([await outcomeOf(elsewhere.id), await outcomeOf(nobody.id)], ["unknown_change", "no_room"], "what the API logged for each");
+    // Each is judged by itself, so one run answers both. GitHub's repository 1 is nobody's room.
+    const cases = [
+      { what: "the delivery naming the second room's repository", repositoryId: repoB.id, wanted: "unknown_change" },
+      { what: "the delivery naming a repository no room has", repositoryId: 1, wanted: "no_room" },
+    ];
+    const send = (repositoryId) => deliver(deliveryBody({ repositoryId, number: task.pr, head: next, nonce: randomUUID() }), { secret: key });
+    for (const one of cases) one.sent = await send(one.repositoryId);
+    eq(cases.flatMap((one) => [one.sent.status, one.sent.accepted]), [202, true, 202, true], "both deliveries");
+    const problems = [];
+    const notes = [];
+    for (const one of cases) {
+      let found = await traced(one.sent.id);
+      // Only when the tail holds nothing of it at all, not even the API's request: another is sent, once, as a new
+      // delivery with a new body, and its line is the one judged. A request the tail does hold is never sent again.
+      if (found.problem && found.lost) {
+        const again = await send(one.repositoryId);
+        eq([again.status, again.accepted], [202, true], `${one.what}, sent again`);
+        notes.push(`${one.what} was sent again once: ${found.problem}`);
+        found = await traced(again.id);
+      }
+      if (found.problem) problems.push(`${one.what}: ${found.problem}`);
+      else if (found.outcomes !== one.wanted) problems.push(`${one.what}: the API logged ${found.outcomes}, not ${one.wanted}`);
+    }
+    ok(problems.length === 0, [...problems, ...notes].join("; "));
     eq([JSON.stringify(steady(await changeOf(task.id))), await secondRoomNow()], [before, theirs], "the first room's change, and the second room, afterwards");
-    return "the API logged unknown_change for the second room's repository, and no_room for nobody's";
+    return `the API logged unknown_change for the second room's repository, and no_room for nobody's${notes.length ? `. ${notes.join("; ")}` : ""}`;
   });
 
   say("\n## a merge asked for before Podster sees a moved head");

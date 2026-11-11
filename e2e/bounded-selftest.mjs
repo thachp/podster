@@ -3,6 +3,7 @@
 //
 //   node bounded-selftest.mjs
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { bounded, boundMethods, callSite, groupsUnder, Stalled, startBounded, waitingFor } from "./bounded.mjs";
 import { groupAlive } from "./stack.mjs";
 
@@ -71,32 +72,47 @@ const caught = (promise) => promise.then((value) => ({ value }), (error) => ({ e
 
 // The bound on a whole script, as run-a11y.mjs puts on a11y.mjs: made to fire, with a short bound, on a script that never
 // exits and won't stop when asked, over a "browser" in a group of its own that won't either, as Playwright starts one.
+// The stand-ins are bounded-selftest-child.mjs, told what to be by an argument.
+const standIn = fileURLToPath(new URL("./bounded-selftest-child.mjs", import.meta.url));
 {
-  const stubborn = `process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);`;
-  const script = `const { spawn } = require("node:child_process"); process.on("SIGTERM", () => {}); const browser = spawn(process.execPath, ["-e", ${JSON.stringify(`${stubborn} console.log(process.pid);`)}], { detached: true, stdio: ["ignore", "inherit", "inherit"] }); setInterval(() => {}, 1000);`;
   let told = 0;
+  let browser;
   const started = Date.now();
-  const { proc, done } = startBounded({ command: process.execPath, args: ["-e", script], options: { stdio: ["ignore", "pipe", "inherit"], env: { PATH: process.env.PATH, ONLY_THIS: "1" } }, ms: 3_000, graceMs: 1_000, onLate: () => told++ });
-  const browser = Number(await bounded("the stand-in browser starting", 30_000, new Promise((got) => proc.stdout.once("data", (chunk) => got(String(chunk).trim())))));
-  check(Number.isInteger(browser) && groupAlive(browser) && groupAlive(proc.pid), "a script and its browser are running, each in its own group");
-  check(groupsUnder(proc.pid).includes(browser), "the browser's group is found under the script");
-  const ended = await bounded("a late script being stopped", 60_000, done);
-  const took = Date.now() - started;
-  check(ended.late === true && ended.code === 1, "a script that never exits is stopped at its bound, as a failure", `after ${took} ms`);
-  check(told === 1, "and the caller is told once");
-  check(!groupAlive(proc.pid), "nothing of the script is left, though it ignored being asked to stop");
-  check(!groupAlive(browser), "nothing of its browser is left either, though it was in a group of its own");
-  check(ended.stopped === true, "and it says everything stopped");
+  const { proc, done } = startBounded({ command: process.execPath, args: [standIn, "script"], options: { stdio: ["ignore", "pipe", "inherit"], env: { PATH: process.env.PATH, ONLY_THIS: "1" } }, ms: 3_000, graceMs: 1_000, onLate: () => told++ });
+  try {
+    browser = Number(await bounded("the stand-in browser starting", 30_000, new Promise((got) => proc.stdout.once("data", (chunk) => got(String(chunk).trim())))));
+    check(Number.isInteger(browser) && groupAlive(browser) && groupAlive(proc.pid), "a script and its browser are running, each in its own group");
+    check(groupsUnder(proc.pid).includes(browser), "the browser's group is found under the script");
+    const ended = await bounded("a late script being stopped", 60_000, done);
+    const took = Date.now() - started;
+    check(ended.late === true && ended.code === 1, "a script that never exits is stopped at its bound, as a failure", `after ${took} ms`);
+    check(told === 1, "and the caller is told once");
+    check(!groupAlive(proc.pid), "nothing of the script is left, though it ignored being asked to stop");
+    check(!groupAlive(browser), "nothing of its browser is left either, though it was in a group of its own");
+    check(ended.stopped === true, "and it says everything stopped");
+  } finally {
+    // Neither stand-in stops when asked, so if anything above threw, they're killed here and not left running.
+    for (const group of new Set([proc.pid, ...groupsUnder(proc.pid), browser])) {
+      if (!Number.isInteger(group) || group <= 1) continue;
+      try {
+        process.kill(-group, "SIGKILL");
+      } catch {
+        // Already gone, which is what the checks above expect.
+      }
+    }
+  }
 }
 
 {
-  const exits = (status) => startBounded({ command: process.execPath, args: ["-e", `process.stdout.write(JSON.stringify(Object.keys(process.env).sort())); process.exit(${status});`], options: { stdio: ["ignore", "pipe", "inherit"], env: { ONLY_THIS: "1" } }, ms: 30_000 });
+  const exits = (status, onLate) => startBounded({ command: process.execPath, args: [standIn, "exit", String(status)], options: { stdio: ["ignore", "pipe", "inherit"], env: { ONLY_THIS: "1" } }, ms: 30_000, onLate });
   let told = 0;
   const fine = exits(0);
   let seen = "";
   fine.proc.stdout.on("data", (chunk) => (seen += chunk));
   const first = await fine.done;
-  const second = await startBounded({ command: process.execPath, args: ["-e", "process.exit(3)"], ms: 30_000, onLate: () => told++ }).done;
+  const failing = exits(3, () => told++);
+  failing.proc.stdout.resume();
+  const second = await failing.done;
   check(first.code === 0 && first.late === false, "a script that exits in time gives its status");
   check(second.code === 3 && second.late === false && told === 0, "a failing one gives its own, and neither is called late");
   // macOS adds one name of its own to every process.

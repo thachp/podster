@@ -259,6 +259,19 @@ ALTER TABLE repo_link ADD COLUMN read_failures INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE repo_link ADD COLUMN reads_not_before INTEGER;
 CREATE TABLE repo_read (at INTEGER NOT NULL, kind TEXT NOT NULL, caller TEXT);
 CREATE INDEX repo_read_at ON repo_read (at);
+", "
+ALTER TABLE task_change ADD COLUMN submitter_id TEXT;
+ALTER TABLE task_change ADD COLUMN submitter_person TEXT;
+ALTER TABLE task_change ADD COLUMN merge_requester_person TEXT;
+ALTER TABLE task_change ADD COLUMN merge_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE task_change ADD COLUMN merge_next_at INTEGER;
+ALTER TABLE task_change ADD COLUMN merge_step TEXT;
+ALTER TABLE task_change ADD COLUMN merge_marked_at INTEGER;
+ALTER TABLE task_change ADD COLUMN merge_mark_set_at INTEGER;
+ALTER TABLE task_change ADD COLUMN merge_called_at INTEGER;
+ALTER TABLE task_change ADD COLUMN merge_finished_at INTEGER;
+CREATE TABLE merge_request (at INTEGER NOT NULL, task_id TEXT NOT NULL);
+CREATE INDEX merge_request_at ON merge_request (at);
 "];
 
 pub fn int(value: &Value) -> i64 {

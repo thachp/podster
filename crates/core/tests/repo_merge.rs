@@ -1172,3 +1172,173 @@ fn a_merge_podster_didnt_make_is_named_for_what_it_was() {
         assert_eq!(got.reason(), reason, "{name}");
     }
 }
+
+#[test]
+fn a_change_stands_as_reviewed_only_with_a_recorded_review_no_changed_commit_and_a_watch() {
+    use podster_core::repo_merge::{check_change_standing, ChangeStanding};
+    let reviewed = "a1".repeat(20);
+    let standing = ChangeStanding {
+        reviewed_commit_sha: Some(&reviewed),
+        commit_changed: false,
+        watched: true,
+    };
+    assert_eq!(check_change_standing(&standing, &reviewed), Ok(()));
+    // Approved while managed repositories were off: nothing was read, so nothing was reviewed here.
+    let unread = ChangeStanding {
+        reviewed_commit_sha: None,
+        ..standing
+    };
+    assert_eq!(
+        check_change_standing(&unread, &reviewed),
+        Err(MergeRefusal::ReviewRequired)
+    );
+    assert_eq!(MergeRefusal::ReviewRequired.code(), "review_required");
+    // Another commit than the reviewed one, or a head seen off it at any time, even if it's back.
+    assert_eq!(
+        check_change_standing(&standing, &"b2".repeat(20)),
+        Err(MergeRefusal::CommitChanged)
+    );
+    let changed = ChangeStanding {
+        commit_changed: true,
+        ..standing
+    };
+    assert_eq!(
+        check_change_standing(&changed, &reviewed),
+        Err(MergeRefusal::CommitChanged)
+    );
+    let unwatched = ChangeStanding {
+        watched: false,
+        ..standing
+    };
+    assert_eq!(
+        check_change_standing(&unwatched, &reviewed),
+        Err(MergeRefusal::ChangeUnwatched)
+    );
+    assert_eq!(MergeRefusal::ChangeUnwatched.code(), "change_unwatched");
+    // A changed commit is said before an unwatched change.
+    let both = ChangeStanding {
+        commit_changed: true,
+        watched: false,
+        ..standing
+    };
+    assert_eq!(
+        check_change_standing(&both, &reviewed),
+        Err(MergeRefusal::CommitChanged)
+    );
+}
+
+#[test]
+fn the_merge_calls_answer_is_read_by_status_and_never_as_a_merge() {
+    use podster_core::repo_merge::merge_call;
+    assert_eq!(merge_call(Some(200)), MergeCall::Accepted);
+    assert_eq!(merge_call(Some(409)), MergeCall::HeadModified);
+    for status in [None, Some(500), Some(502), Some(503), Some(599)] {
+        assert_eq!(merge_call(status), MergeCall::Unknown, "{status:?}");
+    }
+    for status in [201, 204, 302, 401, 403, 404, 405, 422, 429] {
+        assert_eq!(
+            merge_call(Some(status)),
+            MergeCall::Refused(status),
+            "{status}"
+        );
+    }
+}
+
+#[test]
+fn merge_caps_and_the_new_failure_codes() {
+    use podster_core::repo_merge::{
+        merge_attempt_allowed, merge_request_allowed, RequestLimit, MAX_MERGE_ATTEMPTS,
+        MAX_MERGE_REQUESTS_PER_HOUR, MAX_MERGE_REQUESTS_PER_TASK,
+    };
+    assert!(merge_attempt_allowed(MAX_MERGE_ATTEMPTS - 1));
+    assert!(!merge_attempt_allowed(MAX_MERGE_ATTEMPTS));
+    assert_eq!(
+        merge_request_allowed(MAX_MERGE_REQUESTS_PER_HOUR - 1, 0),
+        Ok(())
+    );
+    assert_eq!(
+        merge_request_allowed(MAX_MERGE_REQUESTS_PER_HOUR, 0),
+        Err(RequestLimit::Room)
+    );
+    assert_eq!(
+        merge_request_allowed(0, MAX_MERGE_REQUESTS_PER_TASK - 1),
+        Ok(())
+    );
+    assert_eq!(
+        merge_request_allowed(0, MAX_MERGE_REQUESTS_PER_TASK),
+        Err(RequestLimit::Task)
+    );
+    // The task's lifetime limit is said first, since no wait lifts it.
+    assert_eq!(
+        merge_request_allowed(MAX_MERGE_REQUESTS_PER_HOUR, MAX_MERGE_REQUESTS_PER_TASK),
+        Err(RequestLimit::Task)
+    );
+    assert_eq!(
+        [RequestLimit::Room.code(), RequestLimit::Task.code()],
+        ["rate_limited", "merge_request_limit"]
+    );
+    // An outcome that isn't known yet is settled only by a read: to succeeded with its proof, or to failed.
+    assert_eq!(
+        merge_transition("t", MergeState::Requested, &MergeEvent::OutcomeUnknown),
+        Some(MergeState::OutcomeUnknown)
+    );
+    assert_eq!(
+        merge_transition("t", MergeState::OutcomeUnknown, &MergeEvent::Failed),
+        Some(MergeState::Failed)
+    );
+    assert_eq!(
+        merge_transition("t", MergeState::OutcomeUnknown, &MergeEvent::Requested),
+        None
+    );
+    assert_eq!(
+        merge_transition("t", MergeState::Failed, &MergeEvent::OutcomeUnknown),
+        None
+    );
+    assert_eq!(MergeEvent::OutcomeUnknown.name(), "merge.outcome_unknown");
+    assert_eq!(
+        MergeState::from_name("outcome_unknown"),
+        Some(MergeState::OutcomeUnknown)
+    );
+    assert_eq!(
+        MergeFailure::DefaultBranchChanged.code(),
+        "default_branch_changed"
+    );
+    // A call on record can be asked about later, and only a read of GitHub makes it a success.
+    let recorded = MergeAuthorized::when_called("t", REPO, ABC);
+    assert_eq!(
+        (
+            recorded.task_id(),
+            recorded.repo_id(),
+            recorded.commit_sha()
+        ),
+        ("t", REPO, ABC)
+    );
+    let codes = [
+        MergeFailure::PullDraft.code(),
+        MergeFailure::MergedElsewhere.code(),
+        MergeFailure::NotReady.code(),
+        MergeFailure::AttemptsExhausted.code(),
+        MergeFailure::RoomArchived.code(),
+        MergeFailure::RoomSuspended.code(),
+    ];
+    assert_eq!(
+        codes,
+        [
+            "pull_request_draft",
+            "merged_elsewhere",
+            "repo_not_ready",
+            "merge_attempts_exhausted",
+            "workspace_archived",
+            "room_suspended"
+        ]
+    );
+    // None of them is a changed commit, so none asks for a follow-up task by itself.
+    for failure in [
+        MergeFailure::PullDraft,
+        MergeFailure::MergedElsewhere,
+        MergeFailure::NotReady,
+        MergeFailure::AttemptsExhausted,
+    ] {
+        assert!(!failure.needs_follow_up());
+    }
+}

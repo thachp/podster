@@ -72,6 +72,11 @@ pub enum MergeRefusal {
     AlreadyRequested,
     /// `already_merged`
     AlreadyMerged,
+    /// `review_required`: the approval recorded no reviewed commit, as one made while managed repositories were off
+    /// doesn't. Nothing was read from the provider for it, so it needs a fresh review.
+    ReviewRequired,
+    /// `change_unwatched`: the task's pull request kept answering as not there, and Podster stopped reading it.
+    ChangeUnwatched,
 }
 
 impl MergeRefusal {
@@ -90,6 +95,8 @@ impl MergeRefusal {
             MergeRefusal::ChangeNotFound => "change_not_found",
             MergeRefusal::AlreadyRequested => "merge_already_requested",
             MergeRefusal::AlreadyMerged => "already_merged",
+            MergeRefusal::ReviewRequired => "review_required",
+            MergeRefusal::ChangeUnwatched => "change_unwatched",
         }
     }
 }
@@ -139,6 +146,19 @@ pub struct MergeAuthorized {
 }
 
 impl MergeAuthorized {
+    /// The authorization a merge call was made under, rebuilt from the room's record of that call, for reading what
+    /// became of it. Only for a change whose call is on record: the transaction that recorded the intent to call ran
+    /// [`check_merge_authority`] on the rows as they were then, and the call named this commit. It lets a later pass ask
+    /// [`decide_merge_step`] whether that call merged, even if authority has ended since. It never justifies a new
+    /// mark or a new call, which need a fresh [`check_merge_authority`].
+    pub fn when_called(task_id: &str, repo_id: i64, commit_sha: &str) -> MergeAuthorized {
+        MergeAuthorized {
+            task_id: task_id.to_string(),
+            repo_id,
+            commit_sha: commit_sha.to_string(),
+        }
+    }
+
     pub fn task_id(&self) -> &str {
         &self.task_id
     }
@@ -252,7 +272,8 @@ pub fn decide_merge_request(
             Err(MergeRefusal::CommitChanged)
         }
         MergeState::NotRequested | MergeState::Failed => Ok(MergeState::Requested),
-        MergeState::Requested => Err(MergeRefusal::AlreadyRequested),
+        // One whose outcome isn't known yet is still under way: the job is reading until it knows.
+        MergeState::Requested | MergeState::OutcomeUnknown => Err(MergeRefusal::AlreadyRequested),
         MergeState::Succeeded => Err(MergeRefusal::AlreadyMerged),
     }
 }
@@ -284,6 +305,8 @@ pub enum MergeEvent {
     /// Carries the observation it rests on.
     Succeeded(MergeObserved),
     Failed,
+    /// A merge call went out, the merge was about to end, and the provider couldn't be read to see what the call did.
+    OutcomeUnknown,
 }
 
 impl MergeEvent {
@@ -293,6 +316,7 @@ impl MergeEvent {
             MergeEvent::Requested => "merge.requested",
             MergeEvent::Succeeded(_) => "merge.succeeded",
             MergeEvent::Failed => "merge.failed",
+            MergeEvent::OutcomeUnknown => "merge.outcome_unknown",
         }
     }
 }
@@ -305,10 +329,15 @@ pub fn merge_transition(task_id: &str, from: MergeState, event: &MergeEvent) -> 
         (MergeState::NotRequested | MergeState::Failed, MergeEvent::Requested) => {
             Some(MergeState::Requested)
         }
-        (MergeState::Requested, MergeEvent::Succeeded(seen)) if seen.task_id == task_id => {
+        (MergeState::Requested | MergeState::OutcomeUnknown, MergeEvent::Succeeded(seen))
+            if seen.task_id == task_id =>
+        {
             Some(MergeState::Succeeded)
         }
-        (MergeState::Requested, MergeEvent::Failed) => Some(MergeState::Failed),
+        (MergeState::Requested | MergeState::OutcomeUnknown, MergeEvent::Failed) => {
+            Some(MergeState::Failed)
+        }
+        (MergeState::Requested, MergeEvent::OutcomeUnknown) => Some(MergeState::OutcomeUnknown),
         _ => None,
     }
 }
@@ -328,6 +357,22 @@ pub enum MergeFailure {
     ProviderRefused(u16),
     /// The job's recheck found the requester's authority gone, with that refusal's own code.
     AuthorityLost(MergeRefusal),
+    /// `pull_request_draft`: it went back to a draft after review. A draft can't be merged.
+    PullDraft,
+    /// `merged_elsewhere`: the pull request was already merged when the job first read it, before the job had asked the
+    /// provider for anything. That merge isn't this request's, whatever commit it was of.
+    MergedElsewhere,
+    /// `repo_not_ready`: the repository's protections, read back before the merge, aren't what provisioning set.
+    NotReady,
+    /// `merge_attempts_exhausted`: the job ran its last allowed pass without an outcome. A person asks again.
+    AttemptsExhausted,
+    /// `workspace_archived`: the room was archived after the merge was asked for. Nothing is done in an archived room.
+    RoomArchived,
+    /// `room_suspended`: an operator suspended the room after the merge was asked for.
+    RoomSuspended,
+    /// `default_branch_changed`: the repository's default branch on the provider isn't the one the room's link holds.
+    /// The rules protect whichever branch is the default now, so nothing is merged into either.
+    DefaultBranchChanged,
 }
 
 impl MergeFailure {
@@ -339,6 +384,13 @@ impl MergeFailure {
             MergeFailure::PullClosed => "pull_request_closed",
             MergeFailure::ProviderRefused(_) => "provider_refused",
             MergeFailure::AuthorityLost(refusal) => refusal.code(),
+            MergeFailure::PullDraft => "pull_request_draft",
+            MergeFailure::MergedElsewhere => "merged_elsewhere",
+            MergeFailure::NotReady => "repo_not_ready",
+            MergeFailure::AttemptsExhausted => "merge_attempts_exhausted",
+            MergeFailure::RoomArchived => "workspace_archived",
+            MergeFailure::RoomSuspended => "room_suspended",
+            MergeFailure::DefaultBranchChanged => "default_branch_changed",
         }
     }
 
@@ -499,7 +551,97 @@ pub fn classify_observed_merge(
         return ObservedMerge::Unreviewed;
     }
     match merge_state {
-        MergeState::Requested | MergeState::Succeeded => ObservedMerge::Requested,
+        MergeState::Requested | MergeState::Succeeded | MergeState::OutcomeUnknown => {
+            ObservedMerge::Requested
+        }
         MergeState::NotRequested | MergeState::Failed => ObservedMerge::Unrequested,
+    }
+}
+
+/// How many passes the merge job makes at one request before it gives up. Proposed.
+pub const MAX_MERGE_ATTEMPTS: u32 = 5;
+/// How many merge requests one room takes in an hour, counting every request, a repeated one included. Proposed.
+pub const MAX_MERGE_REQUESTS_PER_HOUR: u32 = 20;
+/// How many merge requests one task takes in its whole life. Asking again never resets it. Proposed.
+pub const MAX_MERGE_REQUESTS_PER_TASK: u32 = 10;
+
+/// Why a merge can't be asked for just now, by count alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestLimit {
+    /// `rate_limited`: the room has had its requests for this hour.
+    Room,
+    /// `merge_request_limit`: this task has had every merge request it will ever get.
+    Task,
+}
+
+impl RequestLimit {
+    pub fn code(self) -> &'static str {
+        match self {
+            RequestLimit::Room => "rate_limited",
+            RequestLimit::Task => "merge_request_limit",
+        }
+    }
+}
+
+/// Whether another merge may be asked for, given how many requests this task has ever had and how many the room had
+/// in the last hour. The task's own limit is said first: waiting an hour doesn't lift it.
+pub fn merge_request_allowed(
+    room_requests_in_last_hour: u32,
+    task_requests_ever: u32,
+) -> Result<(), RequestLimit> {
+    if task_requests_ever >= MAX_MERGE_REQUESTS_PER_TASK {
+        Err(RequestLimit::Task)
+    } else if room_requests_in_last_hour >= MAX_MERGE_REQUESTS_PER_HOUR {
+        Err(RequestLimit::Room)
+    } else {
+        Ok(())
+    }
+}
+
+/// Whether the job may make another pass, having made this many.
+pub fn merge_attempt_allowed(attempts_made: u32) -> bool {
+    attempts_made < MAX_MERGE_ATTEMPTS
+}
+
+/// What the room holds of a task's change that a merge depends on beyond [`Change`]: what review recorded, and what
+/// Podster's own reads have shown since (M5 step 7a).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChangeStanding<'a> {
+    /// The commit recorded by an approval made from a read of the provider. `None` for an approval made while managed
+    /// repositories were off.
+    pub reviewed_commit_sha: Option<&'a str>,
+    /// The head has been seen off the reviewed commit, at any time since review, even if it was put back.
+    pub commit_changed: bool,
+    /// Podster is still reading the pull request.
+    pub watched: bool,
+}
+
+/// Whether the task's change still stands as reviewed, for the commit the merge names. Asked when a merge is requested
+/// and again by the job. A changed commit is never merged, even if the branch is put back (plan decision 6): the way
+/// on is a follow-up task.
+pub fn check_change_standing(
+    standing: &ChangeStanding,
+    commit_sha: &str,
+) -> Result<(), MergeRefusal> {
+    let reviewed = standing
+        .reviewed_commit_sha
+        .ok_or(MergeRefusal::ReviewRequired)?;
+    if reviewed != commit_sha || standing.commit_changed {
+        return Err(MergeRefusal::CommitChanged);
+    }
+    if !standing.watched {
+        return Err(MergeRefusal::ChangeUnwatched);
+    }
+    Ok(())
+}
+
+/// What the provider's answer to the merge call says, by its status. It never says the merge happened: only a read of
+/// the pull request and the default branch does, through [`decide_merge_step`]. No answer, or a server error, is unknown.
+pub fn merge_call(status: Option<u16>) -> MergeCall {
+    match status {
+        Some(200) => MergeCall::Accepted,
+        Some(409) => MergeCall::HeadModified,
+        None | Some(500..=599) => MergeCall::Unknown,
+        Some(other) => MergeCall::Refused(other),
     }
 }

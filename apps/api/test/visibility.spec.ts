@@ -386,6 +386,19 @@ describe("the discovery index (step 6)", () => {
       // Step 8's public claims came after, so they come off first.
       // M5 step 6's agent tokens, the newest migration, come off first.
       // M5 step 7a's read bookkeeping, the newest migration, comes off first.
+      // M5 step 7b's merge bookkeeping, the newest migration, comes off first.
+      sql.exec("DROP TABLE merge_request");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_finished_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_called_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_mark_set_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_marked_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_step");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_next_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_attempts");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_requester_person");
+      sql.exec("ALTER TABLE task_change DROP COLUMN submitter_person");
+      sql.exec("ALTER TABLE task_change DROP COLUMN submitter_id");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE repo_read");
       sql.exec("ALTER TABLE repo_link DROP COLUMN reads_not_before");
       sql.exec("ALTER TABLE repo_link DROP COLUMN read_failures");
@@ -435,6 +448,19 @@ describe("the discovery index (step 6)", () => {
       // Step 8's public claims came after, so they come off first.
       // M5 step 6's agent tokens, the newest migration, come off first.
       // M5 step 7a's read bookkeeping, the newest migration, comes off first.
+      // M5 step 7b's merge bookkeeping, the newest migration, comes off first.
+      sql.exec("DROP TABLE merge_request");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_finished_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_called_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_mark_set_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_marked_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_step");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_next_at");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_attempts");
+      sql.exec("ALTER TABLE task_change DROP COLUMN merge_requester_person");
+      sql.exec("ALTER TABLE task_change DROP COLUMN submitter_person");
+      sql.exec("ALTER TABLE task_change DROP COLUMN submitter_id");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE repo_read");
       sql.exec("ALTER TABLE repo_link DROP COLUMN reads_not_before");
       sql.exec("ALTER TABLE repo_link DROP COLUMN read_failures");

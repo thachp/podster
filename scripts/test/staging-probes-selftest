@@ -31,24 +31,67 @@ echo 404 > "$fix/a2a-slash.status"
 refuses "/a2a and /a2a/ with different statuses are refused" a2a
 
 echo '{"error":"not_found"}' > "$fix/a2a-slash.body"
-refuses "/a2a and /a2a/ with different bodies are refused" a2a
+refuses "/a2a and /a2a/ with the same challenge and different bodies are refused" a2a
 
-: > "$fix/a2a.body"; : > "$fix/a2a-slash.body"
-refuses "/a2a and /a2a/ both 401 with empty bodies are refused, though identical" a2a
+echo '{"error":"unauthorized"}' > "$fix/a2a.body"; echo '{"error":"unauthorized"}' > "$fix/a2a-slash.body"
+check "the same challenge with the same body, not empty, passes too" run 0 "$probes"
+check "  and says what was compared" said '^PASS a2a: .*both answer 401 with the same WWW-Authenticate challenge, for this gateway.s A2A resource, and the same body$'
+healthy_staging
 
-: > "$fix/a2a-slash.body"
-refuses "/a2a/ at 401 with an empty body is refused" a2a
+no_challenge a2a; no_challenge a2a-slash
+refuses "two bare 401s with no challenge and empty bodies are refused, though identical" a2a
+no_challenge a2a; no_challenge a2a-slash
+check "  and it says there is no challenge to compare" run 1 "$probes"
+check "  in those words" said '^FAIL a2a: .*no WWW-Authenticate challenge'
+healthy_staging
+
+no_challenge a2a-slash
+refuses "a challenge missing on /a2a/ is refused" a2a
+
+no_challenge a2a
+refuses "a challenge missing on /a2a is refused" a2a
+
+a2a_challenge a2a-slash www-authenticate ""
+refuses "an empty challenge on one path is refused" a2a
+
+a2a_challenge a2a-slash www-authenticate 'Bearer realm="OAuth", resource_metadata="https://gateway-staging.podster.dev/.well-known/oauth-protected-resource/a2a", scope="mcp"'
+refuses "challenges that differ in scope are refused" a2a
+a2a_challenge a2a-slash www-authenticate "$A2A_CHALLENGE "
+refuses "challenges that differ by a trailing space, which is not a line ending, are refused" a2a
+healthy_staging
+a2a_challenge a2a-slash www-authenticate "$A2A_CHALLENGE, error=\"invalid_token\""
+refuses "challenges that differ by a suffix are refused" a2a
+
+for elsewhere in \
+  'Bearer realm="OAuth", resource_metadata="https://gateway.podster.dev/.well-known/oauth-protected-resource/a2a", scope="a2a"' \
+  'Bearer realm="OAuth", resource_metadata="https://evil.example/.well-known/oauth-protected-resource/a2a", scope="a2a"' \
+  'Bearer realm="OAuth", resource_metadata="https://gateway-staging.podster.dev.evil.example/.well-known/oauth-protected-resource/a2a", scope="a2a"' \
+  'Bearer realm="OAuth", resource_metadata="https://gateway-staging.podster.dev/.well-known/oauth-protected-resource/mcp", scope="a2a"' \
+  'Bearer realm="OAuth", resource_metadata="https://gateway-staging.podster.dev/.well-known/oauth-protected-resource/a2a/other", scope="a2a"' \
+  'Bearer realm="OAuth", scope="a2a"' \
+  'Basic realm="staging"'; do
+  a2a_challenge a2a www-authenticate "$elsewhere"; a2a_challenge a2a-slash www-authenticate "$elsewhere"
+  refuses "the same challenge on both paths, pointing elsewhere ($(printf '%s' "$elsewhere" | sed 's/.*resource_metadata="\([^"]*\)".*/\1/' | cut -c1-70)), is refused" a2a
+done
+a2a_challenge a2a www-authenticate 'Bearer realm="OAuth", resource_metadata="https://evil.example/.well-known/oauth-protected-resource/a2a"'
+a2a_challenge a2a-slash www-authenticate 'Bearer realm="OAuth", resource_metadata="https://evil.example/.well-known/oauth-protected-resource/a2a"'
+check "  and it says which resource it wanted" run 1 "$probes"
+check "  by its full address" said "^FAIL a2a: .*doesn't have resource_metadata=\"https://gateway-staging.podster.dev/.well-known/oauth-protected-resource/a2a\"\$"
+healthy_staging
 
 echo unreachable > "$fix/a2a.status"; echo unreachable > "$fix/a2a-slash.status"
 refuses "/a2a and /a2a/ both unreachable are refused, though identical" a2a
 
 for status in 415 404 500 502 200 403; do
   echo "$status" > "$fix/a2a.status"; echo "$status" > "$fix/a2a-slash.status"
-  refuses "/a2a and /a2a/ both answering $status, with the same body, are refused" a2a
+  refuses "/a2a and /a2a/ both answering $status, with the same challenge and body, are refused" a2a
 done
 
-echo 404 > "$fix/a2a-slash.status"; echo '{"error":"unauthorized"}' > "$fix/a2a-slash.body"
-refuses "/a2a at 401 with /a2a/ not found is refused" a2a
+echo 404 > "$fix/a2a-slash.status"
+refuses "/a2a at 401 with /a2a/ not found is refused, though it carries the challenge" a2a
+
+check "the probe no longer asks for a body" test "$(grep -c 'empty body' "$probes")" -eq 0
+check "the challenge it wants is the gateway tests' own" grep -q -F 'expect(res.headers.get("www-authenticate")).toContain("/.well-known/oauth-protected-resource/a2a");' "$scripts/../apps/gateway/test/a2a.spec.ts"
 
 for status in 500 202 401 400 403; do
   echo "$status" > "$fix/webhook.status"

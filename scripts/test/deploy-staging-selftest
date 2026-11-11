@@ -55,7 +55,11 @@ case "$*" in
   "wrangler d1 migrations list "*" --remote --env staging")
     list="$fix/pending-$5"
     [ -f "$fix/applied-$5" ] && list="$fix/pending-after-$5"
-    [ "$(cat "$list")" = wrangler-fails ] && exit 1
+    if [ "$(sed -n 1p "$list")" = wrangler-fails ]; then
+      # The first line says to fail. The second is the exit status, and the rest goes to stderr.
+      sed 1,2d "$list" >&2
+      exit "$(sed -n 2p "$list")"
+    fi
     cat "$list"
     ;;
   "wrangler d1 migrations apply "*" --remote --env staging")
@@ -253,14 +257,59 @@ refused "a pending migration on each database, with only the API's named" 'must 
 
 refused "a named migration when none is pending" 'no migration is pending' --apply-migrations 0007_repo_room_index.sql
 
-echo wrangler-fails > "$fix/pending-podster-gateway-staging"
-refused "a list wrangler can't give" "could not read podster-gateway-staging"
+# A list that can't be read: refused like a pending migration, and told apart from one.
+account_in_error=0123456789abcdef0123456789abcdef
+token_in_error=cfut_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGh
+unreadable() { # unreadable DATABASE STATUS: wrangler fails for that database, as it does when the network drops
+  printf 'wrangler-fails\n%s\n✘ [ERROR] A request to the Cloudflare API (/accounts/%s/d1/database) failed.\n\n  fetch failed [code: 10000], with Authorization: Bearer %s\n' "$2" "$account_in_error" "$token_in_error" > "$fix/pending-$1"
+}
+unreadable podster-gateway-staging 1
+refused "a list wrangler can't give" "could not read podster-gateway-staging's pending migrations, for the reason above"
+
+unreadable podster-api-staging 7
+check "a list wrangler can't give is refused with a non-zero status: exit 1" deploy 1
+check "  it names the command that failed, and where" said '`npx wrangler d1 migrations list podster-api-staging --remote --env staging`, run in apps/api, exited with status 7\. Its stderr:'
+check "  and passes on what wrangler said" said '^ +\| ✘ \[ERROR\] A request to the Cloudflare API \(/accounts/0123456789abcdef0123456789abcdef/d1/database\) failed\.$'
+check "  with the account ID kept and anything long enough to be a credential masked" said '^ +\| +fetch failed \[code: 10000\], with Authorization: Bearer \[masked\]$'
+check "  and the credential is nowhere in the output" test "$(grep -c "$token_in_error" "$tmp/out")" -eq 0
+check "  and says it is not a list of pending migrations" said 'This is a failure to read the list, not a list of pending migrations\. Nothing was retried\.'
+check "  and doesn't say any are pending" test "$(grep -c -E 'migrations are pending|^pending:' "$tmp/out")" -eq 0
+check "  and asked for that list once, with no retry" test "$(grep -c 'migrations list podster-api-staging' "$fix/calls")" -eq 1
+check "  and nothing was applied or deployed" never_called "$changed_staging"
+fresh
+
+printf 'wrangler-fails\n1\n' > "$fix/pending-podster-api-staging"
+check "a list wrangler can't give, with nothing on stderr, still says which command and status: exit 1" deploy 1
+check "  with its stderr shown as empty" said '^ +\| \(empty\)$'
+fresh
+
+table 0007_repo_room_index.sql > "$fix/pending-podster-api-staging"
+check "a pending migration is refused with the same non-zero status: exit 1" deploy 1
+check "  and its reason reads differently: these are pending" said 'REFUSE  migrations are pending: 0007_repo_room_index.sql'
+check "  with nothing about a command failing" test "$(grep -c -E 'exited with status|failure to read the list' "$tmp/out")" -eq 0
+fresh
+
+table 0007_repo_room_index.sql > "$fix/pending-podster-api-staging"
+table 0007_repo_room_index.sql > "$fix/pending-after-podster-api-staging"
+unreadable podster-gateway-staging 1
+check "an unreadable list is refused before a named migration is applied: exit 1" deploy 1 --apply-migrations 0007_repo_room_index.sql
+check "  and nothing was applied" never_called 'migrations apply'
+fresh
 
 echo "Something this script has never seen" > "$fix/pending-podster-api-staging"
 refused "a list this doesn't recognise, which isn't taken for none" "could not read podster-api-staging"
+echo "Something this script has never seen" > "$fix/pending-podster-api-staging"
+check "  and it shows the output it didn't recognise" deploy 1
+check "  under what it expected" said 'succeeded, and its output is neither a list of migrations nor "No migrations to apply":'
+check "  line for line" said '^ +\| Something this script has never seen$'
+fresh
 
 table 0042_unknown.sql > "$fix/pending-podster-api-staging"
 refused "a pending migration that isn't a file in this checkout" "could not read podster-api-staging" --apply-migrations 0042_unknown.sql
+table 0042_unknown.sql > "$fix/pending-podster-api-staging"
+check "  and it names the file it couldn't find" deploy 1 --apply-migrations 0042_unknown.sql
+check "  and where it looked" said 'lists 0042_unknown.sql as pending, and apps/api/migrations has no such file in this checkout'
+fresh
 
 echo "-- same" > "$tmp/seed/apps/gateway/migrations/0007_repo_room_index.sql"
 git -C "$tmp/seed" add -A && commit "$tmp/seed" same && quiet git -C "$tmp/seed" push "$origin" main

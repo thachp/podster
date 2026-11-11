@@ -146,6 +146,15 @@ async function seed() {
   };
   const arabicThread = await oneScript("Task with unbroken Arabic", byBytes("ع"));
   const hebrewLatinThread = await oneScript("Task with alternating directions", byBytes("אa"));
+  // The same scripts, unbroken, in bodies small enough to lay out inside the app's 50 ms step on any runner: laying out an
+  // unbroken run grows faster than its length, and at these sizes the slowest took 13 ms on a Mac throttled tenfold, where
+  // the 16 KB bodies above took 600 to 930 ms. Every body stays laid out, so tabbing back always has them to lay out again.
+  const keptBytes = (unit, bytes) => unit.repeat(Math.floor(bytes / Buffer.byteLength(unit)));
+  const keptScripts = [keptBytes("ع", 1024), keptBytes("ก", 2048), keptBytes("אa", 1024)];
+  const keptThread = await make("Task with scripts that stay laid out", { assignee: guest.id });
+  await guest.must("accept_task", { ...at(keptThread), version: keptThread.version });
+  for (let i = 0; i < 50; i++) await guest.must("send_message", { ...at(keptThread), body: keptScripts[i % keptScripts.length] });
+  const keptArabicThread = await oneScript("Task with Arabic that stays laid out", keptBytes("ع", 1024));
   // Long bodies whose results soon use up what can be applied out of view: for keeping the reader's place, and for how far ahead they format.
   const tallThread = await make("Task with tall messages", { assignee: guest.id });
   await guest.must("accept_task", { ...at(tallThread), version: tallThread.version });
@@ -313,7 +322,7 @@ async function seed() {
   await askRunner({ type: "set-file-states", changes: [{ id: removedFile.fileId, state: "ready" }] });
   await removedFile.approveThenRemove();
   // END REMOVED OUTPUT FILE FIXTURE
-  return { outputs, done, plannedRoom, viewer, narrowed, otherWorker, limitedRoom, secretTask, viewerTask, SECRET, teamOrgId: teamOrg, longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
+  return { outputs, done, plannedRoom, viewer, narrowed, otherWorker, limitedRoom, secretTask, viewerTask, SECRET, teamOrgId: teamOrg, longRoom, shortListRoom, lastReview, LONG_TASKS, opening, plannedTo, owner, partner, room, emptyRoom, lead, guest, revokee, review, reviewScreen, oversized, heavyThread, shortThread, scriptThread, arabicThread, hebrewLatinThread, keptThread, keptArabicThread, tallThread, linkThread, longBrief, slowBrief, numberedBrief, composeTask, hostileRoom, hostile, off, pending, roomInvite, orgInvite, teamOrg, consent, heir, transferRoom, ownerlessRoom };
 }
 
 const screens = (s) => {
@@ -617,6 +626,51 @@ const chromiumOnly = (name, fn) => {
   console.log(`skip keyboard: ${name}: needs Chromium`);
   results.push({ keyboard: name, status: "skipped", detail: `needs Chromium, not ${browserName}` });
 };
+
+/**
+ * Run in the page, on a dialog: every script in its messages' text, by the Unicode script of each character, with whether
+ * the browser draws a sample of it with a real glyph in the text's own font, or null where a glyph can't be told from the
+ * "missing" box here. Latin, inherited marks and emoji are left out; other shared characters (CJK punctuation, symbols)
+ * are checked as "Common". Characters in no listed script are named by code point.
+ */
+function pageScripts(sheet) {
+  const names = ["Arabic", "Hebrew", "Thai", "Syriac", "Thaana", "Cyrillic", "Greek", "Armenian", "Georgian", "Han", "Hiragana", "Katakana", "Hangul", "Devanagari", "Bengali", "Gurmukhi", "Gujarati", "Oriya", "Tamil", "Telugu", "Kannada", "Malayalam", "Sinhala", "Lao", "Tibetan", "Myanmar", "Khmer", "Mongolian", "Ethiopic"];
+  const tests = names.map((name) => [name, new RegExp(`\\p{Script=${name}}`, "u")]);
+  const found = new Map();
+  for (const article of sheet.querySelectorAll("article")) {
+    const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      for (const letter of node.data) {
+        if (/[\p{Script=Latin}\p{Script=Inherited}\p{Extended_Pictographic}\s]/u.test(letter) || letter.codePointAt(0) < 0x80) continue;
+        const name = /\p{Script=Common}/u.test(letter) ? "Common" : tests.find(([, test]) => test.test(letter))?.[0] ?? `U+${letter.codePointAt(0).toString(16).toUpperCase()}`;
+        if (!found.has(name)) found.set(name, { letter, family: getComputedStyle(node.parentElement).fontFamily });
+      }
+    }
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 64;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  const draw = (family, letter) => {
+    context.clearRect(0, 0, 64, 64);
+    context.font = `32px ${family}`;
+    context.textBaseline = "middle";
+    context.fillText(letter, 16, 32);
+    const pixels = context.getImageData(0, 0, 64, 64).data;
+    let ink = 0;
+    let hash = 0;
+    for (let i = 3; i < pixels.length; i += 4) {
+      if (pixels[i]) ink++;
+      hash = (hash * 31 + pixels[i]) | 0;
+    }
+    return `${ink}:${hash}`;
+  };
+  return Object.fromEntries([...found].map(([name, { letter, family }]) => {
+    // Two unassigned code points draw the "missing" box. If they differ, the box can't be told here.
+    const [missing, other] = [draw(family, "\u0378"), draw(family, "\u0379")];
+    const picture = draw(family, letter);
+    return [name, missing !== other ? null : picture !== missing && !picture.startsWith("0:")];
+  }));
+}
 
 async function keyboardPath(name, fn) {
   try {
@@ -1980,11 +2034,13 @@ async function keyboardPaths(s) {
   const LONGEST_BLOCK_SCRIPTS_MS = 800;
   const TAB_BACK_BLOCK_MS = 1_000;
   // Tabbing back lays out again only what stayed laid out. With few bodies kept it has nothing to measure, and passes
-  // whatever the cost would be. On 16 of 18 CI runs examined on 2026-11-11 the unbroken-scripts paths kept 3 or 4 and
-  // measured 0 ms, because the runner was slow enough that each body took longer than the app's 50 ms step; the two
-  // faster runs kept 12 to 16, and a Mac 7 and 8. Below this many, the measurement is reported as SKIP, counted apart
-  // from passes in the run's summary, and doesn't fail the run. The bound below still applies either way.
+  // whatever the cost would be. The worst-case paths below (16 KB of unbroken text a body) keep few or none on a slow
+  // runner by the app's design, so their tab-back is measured when they keep enough and is otherwise a counted SKIP,
+  // never a pass. "Unbroken Arabic" keeps none anywhere: each body takes about 90 ms to lay out on a fast Mac, over the
+  // 50 ms step. The "stay laid out" paths are the evidence for the bound: every body in them stays laid out on any runner,
+  // and one that doesn't fails the run.
   const MIN_STAYED_SCRIPTS = { sheet: 5, oversight: 6 };
+  const ALL_STAY = "all";
   const openHeavy = async (label, context, path, tab, longest = LONGEST_BLOCK_MS, idleWait = 3_000, minStayed = 0) => {
     await watchBlocks(context);
     const own = await context.newPage();
@@ -2019,6 +2075,13 @@ async function keyboardPaths(s) {
       });
       const blocked = await own.evaluate(() => Math.round(window.longestBlock));
       ok(blocked < longest, `${label} blocked the main thread for ${blocked}ms`);
+      // What's really on the page, not what the seed's source says: every script in the messages' text, and whether this
+      // browser draws it with a real glyph. Text drawn as "missing" boxes is never shaped, so a timing over it means nothing.
+      const scripts = await own.getByRole("dialog").evaluate(pageScripts);
+      const named = Object.entries(scripts).map(([name, glyph]) => `${name}${glyph === null ? " (can't tell)" : glyph ? "" : " (NO GLYPH)"}`);
+      console.log(`     ${label}: scripts on the page: ${named.join(", ") || "Latin only"}`);
+      const boxes = Object.entries(scripts).filter(([, glyph]) => glyph === false).map(([name]) => name);
+      ok(boxes.length === 0, `${label}: ${boxes.join(", ")} drawn as missing boxes here, so this path's timings measure nothing for them`);
       // Let what's idle finish, then switch away and back: whatever stayed laid out is laid out again, all at once.
       await own.waitForTimeout(idleWait);
       const [kept, total] = await own.getByRole("dialog").evaluate((sheet) => {
@@ -2026,7 +2089,9 @@ async function keyboardPaths(s) {
         return [bodies.filter((body) => body.style.contentVisibility === "visible").length, bodies.length];
       });
       const stayed = `${kept} of ${total}`;
-      if (kept < minStayed) {
+      if (minStayed === ALL_STAY) {
+        ok(kept === total && total > 0, `${label}: only ${stayed} stayed laid out, and every body here must, so tabbing back measures them`);
+      } else if (kept < minStayed) {
         console.log(`SKIP tab-back not measured: ${stayed} stayed laid out (${label}; ${minStayed} needed for the measurement to mean anything)`);
         results.push({ measurement: `${label}: tab-back`, status: "skipped", detail: `${stayed} stayed laid out, under ${minStayed}` });
       }
@@ -2048,8 +2113,11 @@ async function keyboardPaths(s) {
   await keyboardPath("a heavy thread on oversight (50 messages)", () => openHeavy("oversight", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.heavyThread.id}`, "Thread"));
   await keyboardPath("unbroken scripts on the Task Sheet (the latest 20 messages)", () => openHeavy("the Task Sheet, unbroken scripts", contextFor(s.owner), `/w/${s.room}/tasks?task=${s.scriptThread.id}`, /^Discussion/, LONGEST_BLOCK_SCRIPTS_MS, undefined, MIN_STAYED_SCRIPTS.sheet));
   await keyboardPath("unbroken scripts on oversight (50 messages)", () => openHeavy("oversight, unbroken scripts", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.scriptThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS, undefined, MIN_STAYED_SCRIPTS.oversight));
-  await keyboardPath("unbroken Arabic on oversight (50 messages)", () => openHeavy("oversight, unbroken Arabic", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.arabicThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS));
-  await keyboardPath("alternating directions on oversight (50 messages)", () => openHeavy("oversight, alternating directions", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.hebrewLatinThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS));
+  await keyboardPath("unbroken Arabic on oversight (50 messages)", () => openHeavy("oversight, unbroken Arabic", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.arabicThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS, undefined, MIN_STAYED_SCRIPTS.oversight));
+  await keyboardPath("alternating directions on oversight (50 messages)", () => openHeavy("oversight, alternating directions", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.hebrewLatinThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS, undefined, MIN_STAYED_SCRIPTS.oversight));
+  await keyboardPath("scripts that stay laid out on the Task Sheet (the latest 20 messages)", () => openHeavy("the Task Sheet, scripts that stay laid out", contextFor(s.owner), `/w/${s.room}/tasks?task=${s.keptThread.id}`, /^Discussion/, LONGEST_BLOCK_SCRIPTS_MS, undefined, ALL_STAY));
+  await keyboardPath("scripts that stay laid out on oversight (50 messages)", () => openHeavy("oversight, scripts that stay laid out", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.keptThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS, undefined, ALL_STAY));
+  await keyboardPath("Arabic that stays laid out on oversight (50 messages)", () => openHeavy("oversight, Arabic that stays laid out", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.keptArabicThread.id}`, "Thread", LONGEST_BLOCK_SCRIPTS_MS, undefined, ALL_STAY));
   await keyboardPath("a heavy short thread on oversight (50 messages)", () => openHeavy("oversight, short messages", contextFor(s.partner), `/oversight/${s.room}/${s.guest.id}?task=${s.shortThread.id}`, "Thread"));
 
   await keyboardPath("a long brief formats in a worker, under the real CSP", async () => {

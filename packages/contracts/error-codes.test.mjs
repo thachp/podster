@@ -110,11 +110,12 @@ check("an excluded surface's codes are listed apart, and its problems aren't rai
 
 check("the enum must equal what's collected: missing, unanswered and wrongly internal codes are each named", () => {
   const found = collectErrorCodes(rust(`fn f() -> ApiError { ApiError::api(409, "answered") }\nfn g() -> ApiError { ApiError::api(409, "internal_one") }`));
-  const problems = compareWithEnum(["internal_error", "listed_but_unanswered", "internal_one"], found, { internal_one: "why", gone_internal: "why" });
+  const problems = compareWithEnum(["internal_error", "listed_but_unanswered", "internal_one"], found, { internal_one: { why: "x", sites: { "apps/api/src/x.rs#g": 1 } }, gone_internal: { why: "x", sites: { "apps/api/src/x.rs#h": 1 } } });
   assert.deepEqual(problems.sort(), [
     "Error.code: lists internal_one, which only an internal route answers",
     "Error.code: lists listed_but_unanswered, which nothing in the API or the gateway answers",
     "Error.code: missing answered, which apps/api/src/x.rs answers",
+    "INTERNAL_ONLY: gone_internal is pinned to apps/api/src/x.rs#h, which doesn't answer it any more",
     "INTERNAL_ONLY: gone_internal isn't answered anywhere any more, so take it off the list",
   ]);
 });
@@ -202,6 +203,74 @@ check("excluded surfaces: a stale one, one with no error left, and codes not pin
     "EXCLUDED_SURFACES: apps/gateway/src/hook.ts is pinned to pinned_gone, which it doesn't answer any more",
     "EXCLUDED_SURFACES: apps/gateway/src/quiet.ts makes no error any more, so take it off the list",
   ]);
+});
+
+check("1: an internal-only code is excused only at its pinned sites, so a new public use of it fails", () => {
+  const found = collectErrorCodes(rust(`fn reserve() -> ApiError { ApiError::api(503, "unavailable") }\nfn new_public_route() -> ApiError { ApiError::api(503, "unavailable") }`));
+  const problems = compareWithEnum(["internal_error"], found, { unavailable: { why: "x", sites: { "apps/api/src/x.rs#reserve": 1 } } });
+  assert.deepEqual(problems, ["INTERNAL_ONLY: unavailable is answered at apps/api/src/x.rs#new_public_route, which isn't pinned for it; pin the site if it's internal, or list the code in Error.code"]);
+  // One more use inside a pinned function fails too: a function such as a dispatcher can route public requests as well.
+  const more = collectErrorCodes(rust(`fn dispatch(n: u8) -> ApiError { if n == 1 { return ApiError::api(503, "unavailable"); } ApiError::api(503, "unavailable") }`));
+  assert.deepEqual(compareWithEnum(["internal_error"], more, { unavailable: { why: "x", sites: { "apps/api/src/x.rs#dispatch": 1 } } }), ["INTERNAL_ONLY: unavailable is answered 2 times at apps/api/src/x.rs#dispatch, which is pinned for 1; pin the new count if every use is internal, or list the code in Error.code"]);
+});
+
+check("2: Rust shapes: a point-free wrapper is a problem; json! error bodies, Self::Api and a use-alias are read; the ApiError sink is known", () => {
+  const pointFree = collectErrorCodes(rust(`fn refuse(code: &'static str) -> ApiError { ApiError::api(400, code) }\nfn f(r: Result<(), &'static str>) -> Result<(), ApiError> { r.map_err(refuse) }`));
+  assert.match(pointFree.problems.join("\n"), /refuse is passed as a function value/);
+  const shapes = collectErrorCodes(files("rust", [
+    { path: "apps/api/src/a.rs", text: `fn f() -> Response { json!({ "error": { "message": "m", "code": "json_body" } }) }\nimpl ApiError {\n    fn g() -> Self { Self::Api { status: 400, code: "self_struct" } }\n}\npub fn refuse(status: u16, code: &'static str) -> ApiError { ApiError::api(status, code) }` },
+    { path: "apps/api/src/b.rs", text: `use crate::a::refuse as no;\nfn h() -> ApiError { no(409, "rust_alias") }` },
+  ]));
+  assert.deepEqual(codes(shapes), ["json_body", "rust_alias", "self_struct"]);
+  assert.deepEqual(shapes.problems, []);
+  const sink = `impl ApiError {\n    pub fn into_response(self) -> Response {\n        let (status, code) = self.status_and_code();\n        json!({ "error": { "code": code } })\n    }\n}`;
+  assert.deepEqual(collectErrorCodes(rust(sink, "apps/api/src/error.rs")).problems, []);
+  assert.match(collectErrorCodes(rust(sink.replace("into_response", "into_body"), "apps/api/src/error.rs")).problems.join("\n"), /SINKS entry for it is stale/);
+});
+
+check("2: gateway shapes: a namespace call, a renamed import, export { f }, a default code and out.error are read", () => {
+  const found = collectErrorCodes(files("ts", [
+    { path: "apps/gateway/src/a.ts", text: `export const denied = (code: string, status: number) => json({ error: { code, message: code } }, status);\nfunction answer(code = "default_code", status = 400) { return json({ error: { code } }, status); }\nexport { answer };` },
+    { path: "apps/gateway/src/b.ts", text: `import * as h from "./a";\nimport { denied as no } from "./a";\nimport { answer } from "./a";\nexport function a() { return h.denied("via_namespace", 403); }\nexport function b() { return no("via_alias", 403); }\nexport function c() { return answer(); }\nexport function d() { return answer("via_export_list"); }\nexport function e() { const out: any = {}; out.error = { message: "m", code: "assigned" }; return json(out); }` },
+  ]));
+  assert.deepEqual(codes(found), ["assigned", "default_code", "via_alias", "via_export_list", "via_namespace"]);
+  assert.deepEqual(found.problems, []);
+});
+
+check("2: gateway: an error that's a variable is a problem", () => {
+  const found = collectErrorCodes(gateway(`export function a(made: { code: string }) { return json({ error: made }, 400); }`));
+  assert.match(found.problems.join("\n"), /can't tell the error code in error: made/);
+});
+
+check("3: commented-out code isn't counted, and markers in comments still work", () => {
+  const found = collectErrorCodes(rust(`// ApiError::api(400, "dead_line")\n/* ApiError::api(400, "dead_block") /* nested */ ApiError::api(400, "dead_nested") */\nfn f() -> ApiError { ApiError::api(400, "alive") }\nenum E { A }\nimpl E {\n    // codes: errors\n    pub fn code(self) -> &'static str { /* "dead_in_code" */ "from_marked" }\n}`));
+  assert.deepEqual(codes(found), ["alive", "from_marked"]);
+  const ts = collectErrorCodes(gateway(`// export const x = () => json({ error: { code: "dead_ts" } });\nexport const y = () => json({ error: { code: "alive_ts" } }); // json({ error: { code: "dead_tail" } })`));
+  assert.deepEqual(codes(ts), ["alive_ts"]);
+});
+
+check("4: a fixed point not reached in the pass limit is a problem, not a quiet stop", () => {
+  const chain = rust(`fn one(code: &'static str) -> ApiError { two(code) }\nfn g() -> ApiError { one("deep_code") }\nfn two(code: &'static str) -> ApiError { three(code) }\nfn three(code: &'static str) -> ApiError { ApiError::api(400, code) }`);
+  assert.match(collectErrorCodes(chain, {}, { maxPasses: 1 }).problems.join("\n"), /didn't settle after 1 pass/);
+  const settled = collectErrorCodes(chain);
+  assert.deepEqual(settled.problems, []);
+  assert.deepEqual(codes(settled), ["deep_code"]);
+});
+
+check("6: the scanner reads past raw strings, char literals and quotes in comments", () => {
+  const found = collectErrorCodes(rust([
+    `fn refuse(a: char, code: &'static str) -> ApiError { ApiError::api(400, code) }`,
+    `fn f() -> ApiError { ApiError::explained(400, "after_raw", r#"he said ") and ""#) }`,
+    `fn g() -> ApiError { refuse(')', "after_paren_char") }`,
+    `fn h() -> ApiError { refuse('\\'', "after_quote_char") }`,
+    `fn i() -> ApiError { refuse(',', "after_comma_char") }`,
+    `fn j() -> ApiError {\n    ApiError::explained(\n        400,\n        // say "hi and don't\n        "after_comment_quotes",\n        "m",\n    )\n}`,
+  ].join("\n")));
+  assert.deepEqual(codes(found), ["after_comma_char", "after_comment_quotes", "after_paren_char", "after_quote_char", "after_raw"]);
+  assert.deepEqual(found.problems, []);
+  const ts = collectErrorCodes(gateway(`function say(note: string, code: string) { return json({ error: { code } }); }\nexport function a() { return say('it\\'s, ")', "ts_after_quotes"); }\nexport function b() { return say(/["')]/.source, "ts_after_regex"); }`));
+  assert.deepEqual(codes(ts), ["ts_after_quotes", "ts_after_regex"]);
+  assert.deepEqual(ts.problems, []);
 });
 
 console.log(failed ? `${failed} failed` : "error-codes selftest passed");

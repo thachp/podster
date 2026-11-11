@@ -327,6 +327,12 @@ fn now_ms() -> i64 {
     Date::now().as_millis() as i64
 }
 
+/// An alarm time as the moment itself. A wait would be counted from a clock the runtime reads later than the one the
+/// moment was worked out from, so the time kept would trail the time meant.
+fn alarm_at(ms: i64) -> ScheduledTime {
+    ScheduledTime::new(js_sys::Date::new(&JsValue::from_f64(ms as f64)))
+}
+
 fn task_json(t: &Task) -> Value {
     json!({
         "id": t.id, "title": t.title, "instructions": t.instructions, "acceptance_criteria": t.acceptance_criteria,
@@ -3662,7 +3668,7 @@ impl Workspace {
         if current.is_none_or(|at| at > due) {
             self.state
                 .storage()
-                .set_alarm(std::time::Duration::from_millis((due - now).max(1) as u64))
+                .set_alarm(alarm_at(due.max(now + 1)))
                 .await?;
         }
         Ok(())

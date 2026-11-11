@@ -64,10 +64,6 @@ case "$*" in
   "api repos/{owner}/{repo}/contents/.github/workflows/ci.yml?ref=main -H Accept: application/vnd.github.raw") answer workflow ;;
   "pr merge "*) answer merge-result ;;
   "run list --workflow ci.yml --branch main --event push --commit "*) next main-run ;;
-  "run list --workflow ci.yml --commit "*" --event pull_request --limit 100 "*) answer pr-runs ;;
-  "run view "*" --json jobs "*) answer jobs ;;
-  "run view "*" --log-failed") answer log ;;
-  "run rerun "*) answer rerun-result ;;
   *) echo "stand-in gh: unexpected: gh $*" >&2; exit 97 ;;
 esac
 EOF
@@ -99,17 +95,7 @@ docs_branch() { # docs_branch FILE...: a docs/ branch, CI skipped, modifying tho
   changes "${list[@]}"
 }
 docs_changes() { on_branch docs/thing; skip_jobs; changes "$@"; } # the same, with each change spelled out
-alarm="test/kernel.spec.ts > inbox > the alarm follows whichever recipient is due first, not the one waiting longest"
-api_log() { # api_log FILES-FAILED TESTS-FAILED FAIL-LINE...
-  local files=$1 tests=$2 line
-  shift 2
-  : > "$fix/log"
-  for line in ${1+"$@"}; do printf 'api\tRun npm test\t2026-11-09T19:10:30.6977475Z  FAIL  %s\n' "$line" >> "$fix/log"; done
-  printf 'api\tRun npm test\t2026-11-09T19:10:30.6989484Z  Test Files  %s failed | 18 passed (19)\n' "$files" >> "$fix/log"
-  printf 'api\tRun npm test\t2026-11-09T19:10:30.6991018Z       Tests  %s failed | 813 passed (814)\n' "$tests" >> "$fix/log"
-}
-
-# A pull request the gate passes, whose merge then goes green on main, and a head run with the api flake.
+# A pull request the gate passes, whose merge then goes green on main.
 healthy() {
   rm -f "$fix"/*
   : > "$fix/calls"
@@ -131,10 +117,6 @@ healthy() {
   : > "$fix/merge-result"
   echo "$merged" > "$fix/merged"
   printf '\n900\tin_progress\tnone\thttps://github.invalid/runs/900\n900\tcompleted\tsuccess\thttps://github.invalid/runs/900\n' > "$fix/main-run"
-  printf '555\tcompleted\tfailure\t1\n' > "$fix/pr-runs"
-  echo api > "$fix/jobs"
-  api_log 1 1 "$alarm"
-  : > "$fix/rerun-result"
 }
 changes='gh pr merge|gh run rerun'
 
@@ -148,7 +130,8 @@ check "an abbreviated sha is refused with --merge too, exit 2" run 2 "$gate" 77 
 check "an upper-case sha is refused, exit 2" run 2 "$gate" 77 0123456789ABCDEF0123456789ABCDEF01234567
 check "a branch name for a sha is refused, exit 2" run 2 "$gate" 77 main
 check "a pull request that isn't a number is refused, exit 2" run 2 "$gate" feat/x "$sha"
-check "--merge with --rerun-known-flake is refused, exit 2" run 2 "$gate" 77 "$sha" --merge --rerun-known-flake
+check "--merge given twice is refused, exit 2" run 2 "$gate" 77 "$sha" --merge --merge
+check "--rerun-known-flake, which is gone, is refused as an unknown option, exit 2" run 2 "$gate" 77 "$sha" --rerun-known-flake
 check "an unknown option is refused, exit 2" run 2 "$gate" 77 "$sha" --squash
 check "--help exits 0" run 0 "$gate" --help
 check "  and says whose alerts it reads" said "It never reads main's alerts"
@@ -177,7 +160,7 @@ refused() { # refused TITLE WHAT-IT-SAYS: the caller changed the fixtures; both 
 # The same, for what stops it at once: one question to gh, no wait, and no word about the checks.
 at_once() { # at_once TITLE WHAT-IT-SAYS
   local flag
-  for flag in "" --merge --rerun-known-flake; do
+  for flag in "" --merge; do
     : > "$fix/calls"
     check "$1${flag:+, with $flag}: refused at once, exit 1" run 1 "$gate" 77 "$sha" $flag
     check "  and says why, once" test "$(grep -c -E "^REFUSE  $2" "$tmp/out")" -eq 1
@@ -491,127 +474,16 @@ healthy
 check "--merge whose merge commit can't be read exits 4" run 4 "$gate" 77 "$sha" --merge
 healthy
 
-# --- --rerun-known-flake ---
-check "the api alarm flake is rerun, exit 0" run 0 "$gate" 77 "$sha" --rerun-known-flake
-check "  failed jobs only" called '^gh run rerun 555 --failed$'
-check "  once" test "$(grep -c '^gh run rerun' "$fix/calls")" -eq 1
-check "  and nothing is merged" never_called 'gh pr merge'
-check "  and the gate's checks are not what decides it" never_called 'statusCheckRollup'
-healthy
-
-printf 'api\tRun npm test\t2026-11-09T19:10:30Z \033[41m\033[1m FAIL \033[22m\033[49m %s\n' "$alarm" > "$fix/log"
-printf 'api\tRun npm test\t2026-11-09T19:10:31Z \033[2m Test Files \033[22m \033[1m\033[31m1 failed\033[39m\033[22m | 18 passed (19)\n' >> "$fix/log"
-printf 'api\tRun npm test\t2026-11-09T19:10:31Z \033[2m      Tests \033[22m \033[1m\033[31m1 failed\033[39m\033[22m | 813 passed (814)\n' >> "$fix/log"
-check "the api alarm flake is recognised in a coloured log, exit 0" run 0 "$gate" 77 "$sha" --rerun-known-flake
-healthy
-
-# gh's own spelling of those colours: a caret and a bracket where the escape character was.
-printf 'api\tRun npm test\t2026-11-10T22:10:30Z ^[[41m^[[1m FAIL ^[[22m^[[49m test/kernel.spec.ts^[[2m > ^[[22minbox^[[2m > ^[[22m%s\n' "${alarm#test/kernel.spec.ts > inbox > }" > "$fix/log"
-printf 'api\tRun npm test\t2026-11-10T22:10:31Z ^[[2m Test Files ^[[22m ^[[1m^[[31m1 failed^[[39m^[[22m^[[2m | ^[[22m^[[1m^[[32m24 passed^[[39m^[[22m^[[90m (25)^[[39m\n' >> "$fix/log"
-printf 'api\tRun npm test\t2026-11-10T22:10:31Z ^[[2m      Tests ^[[22m ^[[1m^[[31m1 failed^[[39m^[[22m^[[2m | ^[[22m^[[1m^[[32m973 passed^[[39m^[[22m^[[90m (974)^[[39m\n' >> "$fix/log"
-check "the api alarm flake is recognised in a log as gh prints it, exit 0" run 0 "$gate" 77 "$sha" --rerun-known-flake
-healthy
-
-no_rerun() { # no_rerun TITLE WHAT-IT-SAYS
-  check "$1 is not rerun, exit 1" run 1 "$gate" 77 "$sha" --rerun-known-flake
-  check "  and says why" said "REFUSE .*$2"
-  check "  and nothing was rerun or merged" never_called "$changes"
-  healthy
-}
-
-# A real one: this script's own pull request, whose api job failed two tests that aren't the flake.
-cp "$captured/api-failed.log" "$fix/log"
-no_rerun "a real failed api log, with two other tests failed" 'not with exactly one failed test file'
-check "  and that fixture is in gh's spelling, with no escape character" test "$(grep -c '\^\[\[' "$captured/api-failed.log")" -gt 0 -a "$(grep -c "$(printf '\033')" "$captured/api-failed.log")" -eq 0
-
-# The same log with one of the two taken out, to show the names are read through gh's colours.
-grep -v 'repo-access.spec.ts' "$captured/api-failed.log" | sed -e 's/2 failed/1 failed/' > "$fix/log"
-no_rerun "the real log with one failing test left, which isn't the alarm test" 'not the known alarm flake: test/provider-deliveries.spec.ts > a delivery as a nudge > marks the change'
-
-: > "$fix/pr-runs"
-no_rerun "a sha with no ci.yml run" 'there is no ci.yml run'
-
-printf '555\tin_progress\tnone\t1\n' > "$fix/pr-runs"
-no_rerun "a run still in progress" 'the run is still in_progress'
-
-printf '555\tcompleted\tsuccess\t1\n' > "$fix/pr-runs"
-no_rerun "a run that succeeded" 'conclusion is success'
-
-printf '555\tcompleted\tcancelled\t1\n' > "$fix/pr-runs"
-no_rerun "a cancelled run" 'conclusion is cancelled'
-
-printf '555\tcompleted\tfailure\t2\n' > "$fix/pr-runs"
-no_rerun "a run already rerun once" 'attempt 2'
-
-printf '556\tcompleted\tfailure\t1\n555\tcompleted\tfailure\t1\n' > "$fix/pr-runs"
-no_rerun "a sha whose ci.yml already ran twice, each on its first attempt" 'more than one ci.yml run'
-
-printf '556\tcompleted\tfailure\t1\n555\tcompleted\tfailure\t2\n' > "$fix/pr-runs"
-no_rerun "a sha with an earlier run that was rerun" 'more than one ci.yml run'
-
-printf 'web\napi\n' > "$fix/jobs"
-no_rerun "a run with two failed jobs" 'more than one job'
-
-: > "$fix/jobs"
-no_rerun "a failed run with no failed job" 'no failed job'
-
-echo gateway > "$fix/jobs"
-no_rerun "a failed gateway job" 'the failed job is gateway'
-
-# The allowance this used to have. #254 fixed the cause, so it is a failure like any other.
-echo web > "$fix/jobs"
-printf 'web\tRun node run-a11y.mjs --skip-web-build\t2026-11-09T23:30:16.1257336Z FAIL run: database is locked\n' > "$fix/log"
-no_rerun "a failed web job, with \"FAIL run: database is locked\" from its accessibility run" 'the failed job is web, which is never rerun'
-echo web > "$fix/jobs"
-check "  and its log isn't even read" run 1 "$gate" 77 "$sha" --rerun-known-flake
-check "  nor its steps" never_called 'log-failed|steps'
-healthy
-
-echo gh-fails > "$fix/log"
-no_rerun "a failed log gh can't read" 'could not read the failed log'
-
-api_log 1 1 "test/kernel.spec.ts > inbox > delivers an offer once"
-no_rerun "an api failure in another kernel.spec.ts test" 'not the known alarm flake'
-
-api_log 1 1 "test/kernel.spec.ts > inbox > a command schedules delivery on its own, even with an alarm set far off"
-no_rerun "an api failure in another alarm test of kernel.spec.ts" 'not the known alarm flake'
-
-api_log 1 1 "test/kernel.spec.ts > inbox > gets through more rooms than one alarm can ask"
-no_rerun "an api failure in a third alarm test of kernel.spec.ts" 'not the known alarm flake'
-
-api_log 1 1 "test/held-access.spec.ts > inbox > the alarm follows whichever recipient is due first, not the one waiting longest"
-no_rerun "an api failure with the flake's title in another file" 'not the known alarm flake'
-
-api_log 1 2 "$alarm" "test/kernel.spec.ts > inbox > delivers an offer once"
-no_rerun "the alarm test failing with a second test" 'not with exactly one failed test'
-
-api_log 2 2 "$alarm" "test/claims.spec.ts > a public claim > takes the last place"
-no_rerun "the alarm test failing with another file" 'not with exactly one failed test file'
-
-api_log 1 1
-no_rerun "an api failure that names no failing test" 'does not name exactly one failing test'
-
-api_log 1 1 "$alarm"
-printf 'api\tRun npm test\t2026-11-09T19:10:30Z  FAIL  test/claims.spec.ts > a public claim > takes the last place\n' >> "$fix/log"
-no_rerun "an api log that names a second failing test" 'does not name exactly one failing test'
-
-printf 'api\tRun cargo install worker-build\t2026-11-09T19:10:30Z error: could not compile\n' > "$fix/log"
-no_rerun "an api job that failed before its tests" 'not with exactly one failed test file'
-
-echo gh-fails > "$fix/rerun-result"
-check "a rerun GitHub doesn't accept is refused, exit 1" run 1 "$gate" 77 "$sha" --rerun-known-flake
-check "  and it isn't tried twice" test "$(grep -c '^gh run rerun' "$fix/calls")" -eq 1
-
 # --- gh's real JSON, through the script's own jq ---
 # #252 was captured after it merged, so as captured it is MERGED with an UNKNOWN merge state.
 real_head=$(jq -r .headRefOid "$captured/pull.json")
 real_merge=$(jq -r .mergeCommit.oid "$captured/merged.json")
 real() { # the captured answers, as they were
   healthy
-  rm -f "$fix/pull" "$fix/checks" "$fix/merge-state" "$fix/merged" "$fix/main-run" "$fix/pr-runs" "$fix/jobs"
+  rm -f "$fix/pull" "$fix/checks" "$fix/merge-state" "$fix/merged" "$fix/main-run"
   rm -f "$fix/alerts-merge" "$fix/alerts-head" "$fix/analyses" "$fix/languages"
   local name
-  for name in pull checks merge-state merged main-run pr-runs jobs analyses; do cp "$captured/$name.json" "$fix/$name.json"; done
+  for name in pull checks merge-state merged main-run analyses; do cp "$captured/$name.json" "$fix/$name.json"; done
   cp "$captured/alerts.json" "$fix/alerts-merge.json"
   cp "$captured/alerts.json" "$fix/alerts-head.json"
   cp "$captured/default-setup.json" "$fix/languages.json"
@@ -721,41 +593,19 @@ as_docs; edit files '.[4] |= (.status = "modified" | .filename = "CLAUDE.md")'
 check "the JSON with CLAUDE.md changed is refused: exit 1" run 1 "$gate" 252 "$real_head"
 check "  and names it" said "aren't documentation \(CLAUDE.md\)"
 
-fail_job() { edit pr-runs '.[0].conclusion = "failure"'; edit jobs "(.jobs[] | select(.name == \"$1\")).conclusion = \"failure\""; }
-still_open; fail_job api
-check "the captured run, with its api job failed on the alarm test, is rerun: exit 0" run 0 "$gate" 252 "$real_head" --rerun-known-flake
-check "  by its real run id" called "^gh run rerun $(jq -r '.[0].databaseId' "$captured/pr-runs.json") --failed\$"
-
-still_open; fail_job web
-check "the captured run, with its web job failed, is not: exit 1" run 1 "$gate" 252 "$real_head" --rerun-known-flake
-check "  and says web is never rerun" said 'the failed job is web, which is never rerun'
-
-still_open
-check "the captured run as it was, a success, is not rerun: exit 1" run 1 "$gate" 252 "$real_head" --rerun-known-flake
-check "  and says why" said 'conclusion is success'
-
-still_open; fail_job api
-edit pr-runs '. + [.[0] | .databaseId = 1 | .attempt = 2]'
-check "the captured run, with an earlier run of the same sha, is not: exit 1" run 1 "$gate" 252 "$real_head" --rerun-known-flake
-check "  and nothing was rerun" never_called 'gh run rerun'
-
 # --- what the script pins, and what it can't do at all ---
 listed=$(sed -n 's/^CI_JOBS="\(.*\)"$/\1/p' "$gate")
 in_workflow=$(awk '/^jobs:/ { jobs = 1; next } jobs && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { sub(/:.*/, ""); sub(/^  /, ""); printf "%s%s", sep, $0; sep = " " }' "$workflow")
 check "the script's required jobs are exactly ci.yml's jobs" test -n "$listed" -a "$listed" = "$in_workflow"
 check "  all eight of them" test "$(echo $listed | wc -w | tr -d ' ')" -eq 8
-flake=$(sed -n 's/^API_FLAKE_TEST="test\/kernel.spec.ts > inbox > \(.*\)"$/\1/p' "$gate")
-kernel="$scripts/../apps/api/test/kernel.spec.ts"
-check "the alarm test it names is one test of kernel.spec.ts" test -n "$flake" -a "$(grep -c -F "  it(\"$flake\"," "$kernel")" -eq 1
-check "  inside its inbox suite" test "$(awk '/^describe\(/ { suite = $0 } /the alarm follows whichever recipient is due first/ { print suite }' "$kernel")" = 'describe("inbox", () => {'
-check "  and the script says when to delete it" grep -q 'DELETE THIS, and the api case below, when$' "$gate"
-check "  which is when kernel.spec.ts uses the alarm helpers, which exist" test -f "$scripts/../apps/api/test/alarm.ts" -a "$(grep -c 'kernel.spec.ts is moved onto those helpers' "$gate")" -eq 1
-check "the script has one flake allowance, and none for web" test "$(grep -c -E '^[A-Z_]*FLAKE[A-Z_]*=' "$gate")$(grep -c 'WEB_FLAKE' "$gate")" = 10
+check "the script has no flake allowance" test "$(grep -c -E '^[A-Z_]*FLAKE[A-Z_]*=|rerun-known-flake' "$gate")" -eq 0
+check "  and the alarm helpers its note names exist" test -f "$scripts/../apps/api/test/alarm.ts" -a "$(grep -c 'apps/api/test/alarm.ts' "$gate")" -eq 1
+check "  and no API spec runs an alarm with the pool's own call" test "$(grep -l 'runDurableObjectAlarm(' "$scripts"/../apps/api/test/*.spec.ts | wc -l | tr -d ' ')" -eq 0
 check "it never accepts an analysis of the merge ref" test "$(grep -c 'analyses?ref=refs/pull/$pr/merge' "$gate")" -eq 0
 check "it names no language itself" test "$(grep -c -E 'Analyze \((actions|python|rust|javascript)' "$gate")" -eq 0
 check "the script has no squash, rebase, admin or auto merge, branch update or alert change" \
   test "$(grep -c -E -- '--(squash|rebase|admin|auto)\b|update-branch|-X +(PATCH|POST|PUT|DELETE)|--method|-f state=' "$gate")" -eq 0
-check "it merges in one place and reruns in one place" \
-  test "$(grep -c -E '^ *gh (pr merge|run rerun) ' "$gate")" -eq 2
+check "it merges in one place and reruns nowhere" \
+  test "$(grep -c -E '^ *gh pr merge ' "$gate")$(grep -c 'gh run rerun' "$gate")" = 10
 
 finish merge-gate

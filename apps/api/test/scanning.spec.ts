@@ -1,6 +1,7 @@
-import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { alarmPass, alarmQuiet } from "./alarm.ts";
 
 const BINDINGS = env as any;
 const SECRET = "test-scanner-secret";
@@ -229,31 +230,27 @@ describe("a scan with no verdict", () => {
     const hash = await sha256(DATA);
     const upload = (await api("POST", `/v1/workspaces/${id}/uploads`, { name: "n.txt", size: DATA.length, sha256: hash })).body;
     // Whatever else the room had to do is done, so the alarm after this can only be the scan's. The unfinished upload leaves one
-    // for removal's sweep, which clears it, more than an hour off.
-    await vi.waitFor(async () => {
-      await runDurableObjectAlarm(stub(id));
-      const left = await inRoom(id, (_sql, state) => state.storage.getAlarm());
-      expect(left === null || left > Date.now() + HOUR + 30 * 60 * 1000).toBe(true);
-    });
+    // for removal's sweep, which clears it, more than an hour off. Two whole runs: the second finds what the first left due.
+    await alarmPass(stub(id));
+    await alarmPass(stub(id));
+    const left = await inRoom(id, (_sql, state) => state.storage.getAlarm());
+    expect(left === null || left > Date.now() + HOUR + 30 * 60 * 1000).toBe(true);
     const before = Date.now();
     expect((await SELF.fetch(`https://api.internal${upload.upload_path}`, { method: "PUT", headers: { authorization: `Bearer ${upload.token}` }, body: DATA })).status).toBe(200);
-    // The room's turn on the scan queue is due at once, and its hour starts when it takes it.
-    await vi.waitFor(async () => {
-      const [file] = await inRoom(id, (sql) => sql.exec("SELECT scanning_since FROM stored_object WHERE id = ?", upload.id).toArray());
-      expect(file.scanning_since).toBeGreaterThanOrEqual(before);
-    });
-    // First, 30 minutes on, to send it once more if no verdict has come.
-    const resend = await inRoom(id, (_sql, state) => state.storage.getAlarm());
-    expect(resend).toBeGreaterThan(before + 30 * 60 * 1000 - 5000);
-    expect(resend).toBeLessThan(Date.now() + 30 * 60 * 1000 + 5000);
+    // The room's turn on the scan queue is due at once, and its hour starts when it takes it. The runtime runs that alarm on
+    // its own, and this run comes after it, or takes the turn itself.
+    await alarmPass(stub(id));
+    const sent = async () => (await inRoom(id, (sql) => sql.exec("SELECT scanning_since FROM stored_object WHERE id = ?", upload.id).toArray()))[0].scanning_since as number;
+    const first = await sent();
+    expect(first).toBeGreaterThanOrEqual(before);
+    // First, 30 minutes on from then, to the millisecond, to send it once more if no verdict has come.
+    expect(await inRoom(id, (_sql, state) => state.storage.getAlarm())).toBe(first + 30 * 60 * 1000);
     // Once that's past, the next is the end of its hour.
-    await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET scanning_since = ? WHERE id = ?", Date.now() - 30 * 60 * 1000 - 1000, upload.id));
-    await runInDurableObject(stub(id), (_: any, state: any) => state.storage.setAlarm(Date.now() + 60_000));
-    await runDurableObjectAlarm(stub(id));
-    const [{ scanning_since }] = await inRoom(id, (sql) => sql.exec("SELECT scanning_since FROM stored_object WHERE id = ?", upload.id).toArray());
-    const alarm = await inRoom(id, (_sql, state) => state.storage.getAlarm());
-    expect(alarm).toBeGreaterThan(scanning_since + HOUR - 5000);
-    expect(alarm).toBeLessThan(scanning_since + HOUR + 5000);
+    const earlier = Date.now() - 30 * 60 * 1000 - 1000;
+    await inRoom(id, (sql) => sql.exec("UPDATE stored_object SET scanning_since = ? WHERE id = ?", earlier, upload.id));
+    await alarmPass(stub(id));
+    expect(await sent()).toBe(earlier);
+    expect(await inRoom(id, (_sql, state) => state.storage.getAlarm())).toBe(earlier + HOUR);
   });
 
   it("ends as failed when the room's alarm runs past the hour", async () => {
@@ -261,12 +258,8 @@ describe("a scan with no verdict", () => {
     const late = await stored(id);
     const inTime = await stored(id, "other.txt");
     await overdue(id, late.id);
-    await runDurableObjectAlarm(stub(id));
-    await inRoom(id, () => null);
-    await vi.waitFor(async () => {
-      if ((await row(id, late.id)).state !== "failed") await runInDurableObject(stub(id), (instance: any) => instance.alarm());
-      expect((await row(id, late.id)).state).toBe("failed");
-    });
+    await alarmPass(stub(id));
+    expect((await row(id, late.id)).state).toBe("failed");
     expect((await row(id, inTime.id)).state).toBe("scanning");
     const audit = await inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM audit_event WHERE action = 'object.scan_expired'").one().n);
     expect(audit).toBe(1);
@@ -279,11 +272,8 @@ describe("a scan with no verdict", () => {
     expect((await answer(await send(verdict(id, scanned)))).body.state).toBe("ready");
     const late = await stored(id, "other.txt");
     await overdue(id, late.id);
-    await runDurableObjectAlarm(stub(id));
-    await vi.waitFor(async () => {
-      if ((await row(id, late.id)).state !== "failed") await runInDurableObject(stub(id), (instance: any) => instance.alarm());
-      expect((await row(id, late.id)).state).toBe("failed");
-    });
+    await alarmPass(stub(id));
+    expect((await row(id, late.id)).state).toBe("failed");
     expect((await api("GET", `/v1/workspaces/${id}`)).body.policy_version).toBe(version);
     const actions = (await api("GET", `/v1/workspaces/${id}/audit`)).body.audit.map((e: any) => e.action);
     for (const action of ["object.upload_created", "object.stored", "object.scan_recorded", "object.scan_expired"]) expect(actions).toContain(action);
@@ -335,7 +325,8 @@ describe("queueing a scan", () => {
     const upload = (await api("POST", `/v1/workspaces/${id}/uploads`, { name: "n.txt", size: DATA.length, sha256: hash })).body;
     const res = await SELF.fetch(`https://api.internal${upload.upload_path}`, { method: "PUT", headers: { authorization: `Bearer ${upload.token}` }, body: DATA });
     expect(res.status).toBe(422);
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // A whole run of the alarm, which would have sent it.
+    await alarmPass(stub(id));
     expect((await queued()).filter((job) => job.object_id === upload.id)).toEqual([]);
   });
 });
@@ -513,14 +504,22 @@ describe("a room from before this", () => {
   it("arms the alarm when a read migrates it, so a scan stuck from before still ends", async () => {
     const id = await room();
     const stuck = await stored(id);
+    // The room is left with no alarm and none running, so the only alarm after this is one the read sets. And the scan isn't
+    // overdue yet: an alarm for one that is comes due in milliseconds, and the runtime runs it, leaving none to read.
+    await alarmQuiet(stub(id));
     await undo(id);
+    const since = Date.now() - 10 * 60 * 1000;
     await runInDurableObject(stub(id), async (_: any, state: any) => {
-      state.storage.sql.exec("UPDATE stored_object SET scanning_since = ? WHERE id = ?", Date.now() - HOUR - 1000, stuck.id);
+      state.storage.sql.exec("UPDATE stored_object SET scanning_since = ? WHERE id = ?", since, stuck.id);
       await state.storage.deleteAlarm();
     });
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm())).toBeNull();
     expect((await api("GET", `/v1/workspaces/${id}`)).status).toBe(200);
-    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm())).not.toBeNull();
-    await runDurableObjectAlarm(stub(id));
+    // The first thing due for that scan, to the millisecond: its second send, 30 minutes after its first.
+    expect(await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm())).toBe(since + 30 * 60 * 1000);
+    // And once its hour is over, a run of the alarm ends it.
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("UPDATE stored_object SET scanning_since = ? WHERE id = ?", Date.now() - HOUR - 1000, stuck.id));
+    await alarmPass(stub(id));
     expect((await row(id, stuck.id)).state).toBe("failed");
   });
 
@@ -559,10 +558,7 @@ describe("each room's share of the scan queue", () => {
     inRoom(id, (sql) => sql.exec("SELECT COUNT(scanning_since) AS queued, COUNT(*) - COUNT(scanning_since) AS waiting FROM stored_object WHERE state = 'scanning'").one()) as Promise<{ queued: number; waiting: number }>;
   /** Runs the room's alarm until its turns are taken, as the platform would. */
   const settle = async (id: string) => {
-    for (let n = 0; n < 3; n++) {
-      await runInDurableObject(stub(id), (_: any, state: any) => state.storage.setAlarm(Date.now() + 60_000));
-      await runDurableObjectAlarm(stub(id));
-    }
+    for (let n = 0; n < 3; n++) await alarmPass(stub(id));
   };
   /** The room's order: arrival, then ID, as it takes turns. */
   const arrivalOrder = (id: string) => inRoom(id, (sql) => sql.exec("SELECT id FROM stored_object WHERE state = 'scanning' ORDER BY stored_at, id").toArray().map((r: any) => r.id)) as Promise<string[]>;

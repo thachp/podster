@@ -1,6 +1,7 @@
-import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
+import { alarmPass } from "./alarm.ts";
 
 // The public read surface (M4 step 7, ADR 0008): the room page, which is the only route that takes the public assertion,
 // and Explore, which needs sign-in. Its merge criteria are the canary test and the route-list test below.
@@ -60,7 +61,7 @@ const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(stub(i
 const version = async (id: string) => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
 /** Runs the room's alarm until nothing is due, as the platform would, so its index row is written. */
 const drain = async (id: string) => {
-  for (let n = 0; n < 5; n++) await runDurableObjectAlarm(stub(id));
+  for (let n = 0; n < 5; n++) await alarmPass(stub(id));
 };
 const page = (handle: string, who: Who | "public" = "public", opts: Opts = {}) => api(who, "GET", `/v1/public/workrooms/${handle}`, undefined, { on: true, ...opts });
 const explore = (who: Who | "public", query = "", opts: Opts = {}) => api(who, "GET", `/v1/public/explore${query}`, undefined, { on: true, ...opts });

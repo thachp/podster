@@ -1,7 +1,7 @@
 import { runInDurableObject } from "cloudflare:test";
 
 /**
- * One whole run of a room's alarm, which has ended when this returns, and which no other run of it overlapped.
+ * One whole run of a room's alarm, or of a person's or an agent's own object's, which has ended when this returns, and which no other run of it overlapped.
  *
  * The test runtime runs alarms on its own as they come due, beside whatever a test does. The pool's
  * `runDurableObjectAlarm` doesn't fit with that in two ways. It calls the handler directly, so its run can overlap one
@@ -9,8 +9,8 @@ import { runInDurableObject } from "cloudflare:test";
  * reads the first's attempt as a run that died. And it returns at once, having run nothing, when no alarm is set, which
  * is also what it sees while the runtime's own run is under way, so a check straight after it races that run.
  *
- * This always runs the handler. In test builds the room gives a direct call its turn (see `alarm` in
- * `src/workspace.rs`), so it waits out a run under way and then runs alone. The alarm that was set is cleared first, as
+ * This always runs the handler. In test builds the object gives a direct call its turn (see `alarm` in
+ * `src/workspace.rs` and `src/principal.rs`), so it waits out a run under way and then runs alone. The alarm that was set is cleared first, as
  * `runDurableObjectAlarm` clears it, and the run sets the next one.
  */
 export const alarmPass = (room: DurableObjectStub) =>

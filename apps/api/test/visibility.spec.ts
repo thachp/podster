@@ -1,6 +1,7 @@
-import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { alarmPass } from "./alarm.ts";
 
 // A room's visibility (M4 step 5, ADR 0008): the owner's preview, publishing with its hash, going private, the topic, and
 // `publicly_claimable` on openings. `PUBLIC_ROOMS` is off unless a test build's request says `x-test-public-rooms: on`.
@@ -258,7 +259,7 @@ describe("the discovery index (step 6)", () => {
   const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
   /** Runs the room's alarm until nothing is due, as the platform would. */
   const drain = async (id: string) => {
-    for (let n = 0; n < 5; n++) await runDurableObjectAlarm(stub(id));
+    for (let n = 0; n < 5; n++) await alarmPass(stub(id));
   };
   const indexRow = async (id: string) =>
     BINDINGS.DB.prepare("SELECT * FROM public_workroom_index WHERE workspace_id = ?").bind(id).first();
@@ -364,13 +365,11 @@ describe("the discovery index (step 6)", () => {
     await inRoom(id, (sql) => sql.exec("CREATE TABLE test_index_inflight (x INTEGER)"));
     await publish(id);
     const seq = await inRoom(id, (sql) => sql.exec("SELECT seq FROM event WHERE type = 'room.published'").one().seq);
-    // The alarm may already be running on its own, and while it is there's none to run, so this runs alarms until the
-    // second write has landed, for at most 5 s.
-    for (let n = 0; n < 250; n++) {
-      await runDurableObjectAlarm(stub(id));
+    // Each pass is one whole run, after any the runtime had under way. The first write and the second may each take one.
+    for (let n = 0; n < 5; n++) {
+      await alarmPass(stub(id));
       const now = await due(id);
       if (now.length === 1 && now[0].seq === seq + 1 && now[0].pending === 0) break;
-      await new Promise((resolve) => setTimeout(resolve, 20));
     }
     // The first write carried the publish's seq. The row stayed due, so a second write carried the newer one.
     expect(await due(id)).toEqual([{ seq: seq + 1, pending: 0 }]);
@@ -580,11 +579,8 @@ describe("the discovery index (step 6)", () => {
     let lines: string[] = [];
     try {
       handle = (await publish(id)).body.public_handle;
-      for (let n = 0; n < 50 && lines.length === 0; n++) {
-        await runDurableObjectAlarm(stub(id));
-        lines = errors.mock.calls.map((call) => call.map(String).join(" ")).filter((line) => line.includes("public index projection failed"));
-        if (lines.length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
-      }
+      await alarmPass(stub(id));
+      lines = errors.mock.calls.map((call) => call.map(String).join(" ")).filter((line) => line.includes("public index projection failed"));
     } finally {
       await BINDINGS.DB.prepare("ALTER TABLE public_workroom_index_away RENAME TO public_workroom_index").run();
       errors.mockRestore();
@@ -707,7 +703,7 @@ describe("the deeper review's checks", () => {
 describe("the discovery-index reconcile", () => {
   const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id));
   const drain = async (id: string) => {
-    for (let n = 0; n < 5; n++) await runDurableObjectAlarm(stub(id));
+    for (let n = 0; n < 5; n++) await alarmPass(stub(id));
   };
   const indexRow = async (id: string) => BINDINGS.DB.prepare("SELECT * FROM public_workroom_index WHERE workspace_id = ?").bind(id).first();
   const NEXT = "public_index_verify_next";
@@ -815,7 +811,7 @@ describe("the discovery-index reconcile", () => {
       for (let n = 1; n <= 3; n++) {
         await due(id);
         const before = Date.now();
-        await runDurableObjectAlarm(stub(id));
+        await alarmPass(stub(id));
         expect(await stored(id, FAILURES)).toBe(n);
         const next = (await stored(id, NEXT)) as number;
         const alarm = (await runInDurableObject(stub(id), (_: any, state: any) => state.storage.getAlarm())) as number;

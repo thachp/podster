@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
+import { alarmPass } from "./alarm.ts";
 
 // M3 step 12: outbound offers (ADR 0007, decisions 117, 118, 122 and 129). An offer to an agent records an attempt with the
 // offer. The room's outbox puts it on the A2A queue with IDs only. The consumer asks the agent's Principal, then the room,
@@ -379,23 +380,31 @@ describe("the room's one alarm", () => {
     const { agent } = await target(room);
     await runInDurableObject(roomStub(room), (_: any, state: any) => void state.storage.sql.exec("CREATE TABLE test_hold_outbox (x)"));
     const task = await offer(room, agent.id);
-    await runInDurableObject(roomStub(room), async (_: any, state: any) => {
-      state.storage.sql.exec("UPDATE a2a_attempt SET queued = 0, next_queue_at = ? WHERE task_id = ?", Date.now() + attemptIn, task.id);
-      state.storage.sql.exec("UPDATE outbox SET next_attempt_at = ?", Date.now() + inboxIn);
+    const attemptAt = Date.now() + attemptIn;
+    const inboxAt = Date.now() + inboxIn;
+    await runInDurableObject(roomStub(room), (_: any, state: any) => {
+      state.storage.sql.exec("UPDATE a2a_attempt SET queued = 0, next_queue_at = ? WHERE task_id = ?", attemptAt, task.id);
+      state.storage.sql.exec("UPDATE outbox SET next_attempt_at = ?", inboxAt);
       state.storage.sql.exec("DROP TABLE test_hold_outbox");
-      await state.storage.setAlarm(Date.now() + 3_600_000);
     });
+    // One whole run of the alarm, after any the runtime had under way, so nothing but the two waits is left to move it.
+    await alarmPass(roomStub(room));
+    const far = Date.now() + 3_600_000;
+    await runInDurableObject(roomStub(room), (_: any, state: any) => state.storage.setAlarm(far));
+    expect(await runInDurableObject(roomStub(room), (_: any, state: any) => state.storage.getAlarm())).toBe(far);
     // Any write schedules the room, even a refused one.
     expect((await api(OWNER, "POST", `/v1/workspaces/${room}/tasks`, {})).status).toBeGreaterThanOrEqual(400);
-    return runInDurableObject(roomStub(room), (_: any, state: any) => state.storage.getAlarm()) as Promise<number>;
+    return { alarm: (await runInDurableObject(roomStub(room), (_: any, state: any) => state.storage.getAlarm())) as number, attemptAt, inboxAt };
   }
 
   it("follows an inbox recipient due before a pending A2A attempt", async () => {
-    expect(await pending(300_000, 2000)).toBeLessThanOrEqual(Date.now() + 2500);
+    const { alarm, inboxAt } = await pending(300_000, 20_000);
+    expect(alarm).toBe(inboxAt);
   });
 
   it("follows a pending A2A attempt due before an inbox recipient", async () => {
-    expect(await pending(1000, 300_000)).toBeLessThanOrEqual(Date.now() + 1500);
+    const { alarm, attemptAt } = await pending(20_000, 300_000);
+    expect(alarm).toBe(attemptAt);
   });
 
   it("isn't due for A2A while delivery is held", async () => {
@@ -403,11 +412,13 @@ describe("the room's one alarm", () => {
     const { agent } = await target(room);
     await runInDurableObject(roomStub(room), (_: any, state: any) => void state.storage.sql.exec("CREATE TABLE test_hold_outbox (x)"));
     await offer(room, agent.id);
-    await runInDurableObject(roomStub(room), async (_: any, state: any) => {
-      await state.storage.setAlarm(Date.now() + 3_600_000);
-    });
+    // One whole run of the alarm, after any the runtime had under way, so the room's listing is written and no run is left
+    // to bring the alarm back.
+    await alarmPass(roomStub(room));
+    const far = Date.now() + 3_600_000;
+    await runInDurableObject(roomStub(room), (_: any, state: any) => state.storage.setAlarm(far));
     expect((await api(OWNER, "POST", `/v1/workspaces/${room}/tasks`, {})).status).toBeGreaterThanOrEqual(400);
-    expect(await runInDurableObject(roomStub(room), (_: any, state: any) => state.storage.getAlarm())).toBeGreaterThan(Date.now() + 3_000_000);
+    expect(await runInDurableObject(roomStub(room), (_: any, state: any) => state.storage.getAlarm())).toBe(far);
   });
 });
 

@@ -281,6 +281,16 @@ Write pass or fail for each step.
 
 [e2e/run-a11y.mjs](../e2e/run-a11y.mjs) starts the gateway, the API and the dashboard's production build, and [e2e/a11y.mjs](../e2e/a11y.mjs) drives them in Chromium. It runs in the `web` CI job. These are local results, on empty local databases seeded by the run itself, and they ran three times in a row with the same result before this was written.
 
+**The browser in CI (2026-11-11).** The `web` job installs Chromium with [e2e/install-browser.mjs](../e2e/install-browser.mjs), not `npx playwright install --with-deps`. On 2026-11-11 the runners' Ubuntu mirror stopped resolving, apt waited ten minutes and failed the job before any check ran, on `main` and every open PR. On GitHub's Ubuntu 24.04 image the libraries Chromium needs are already installed, and apt only adds fonts. The script downloads the browser from Playwright's own host, tries the system packages three times at 90 seconds each, then starts the browser once with [e2e/browser-launch-check.mjs](../e2e/browser-launch-check.mjs).
+
+- If the packages installed, nothing else changes.
+- If they didn't and the browser can't start, the job fails with the browser's error.
+- If they didn't, that's the fallback. The start-up check says which font draws each script the accessibility paths use: Arabic, Thai and Hebrew, and no others. Those paths ("unbroken scripts", "unbroken Arabic", "alternating directions") bound how long the main thread is blocked laying that text out. Text with no font is drawn as boxes and never shaped, so they would pass having measured nothing.
+  - GitHub's image has fonts for Arabic (DejaVu Sans) and Hebrew (Liberation Serif) and none for Thai. For a script with none, the script copies a pinned font into the runner user's font folder and starts the browser again. The Thai one is Noto Sans Thai, a static TrueType file from `@expo-google-fonts/noto-sans-thai`, a development dependency of `e2e` at an exact version with its hash in `e2e/package-lock.json`. It is under the SIL Open Font License 1.1, whose text is in the package. It is used on the test machine only and is in nothing Podster builds or ships, so it puts no condition on Podster's MIT licence.
+  - If a script is still drawn as a box, or has no pinned font, the job fails and names it.
+  - Otherwise the job goes on, and its log has one line starting `WARNING browser-system-packages-not-installed`, also shown as a warning on the run's page, with each script's font and whether it came from the runner image or the pinned package.
+- **A run with that line used different fonts for the non-Latin paths than a normal run**: the image's own and the pinned Thai font, not the ones apt installs. Their assertions are bounds on main-thread blocking, and they still shape real text when a real font draws it, but a timing or layout result from such a run isn't directly comparable with a normal run's. A normal run never installs the pinned font. Every run's last line from the script says which path it took: `packages`, `fallback` or `no-packages` (not Linux).
+
 | Check | Result |
 | --- | --- |
 | axe with WCAG 2.0, 2.1 and 2.2 A and AA rules, including contrast, on 33 screens and states, each in light and dark | 66 runs, no violations, after the fixes below |

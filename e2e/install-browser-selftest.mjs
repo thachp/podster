@@ -114,6 +114,18 @@ const text = (file) => readFileSync(new URL(file, import.meta.url), "utf8");
 const letters = [...text("./browser-launch-check.mjs").match(/export const SCRIPTS = \{([^}]*)\}/)[1].matchAll(/"([^"]+)"/g)].map((found) => found[1]);
 const seeded = text("./a11y.mjs").match(/const scripts = \[([^\]]*)\];/)?.[1] ?? "";
 check(letters.length === 3 && letters.every((letter) => seeded.includes(`byBytes("${letter}`)), `the scripts asked about are the ones a11y.mjs seeds (${letters.join(" ")})`);
+// And the other way: every letter a11y.mjs could put on a page, outside Latin, is in a script the launch check asks about.
+// Escapes are read as the letters they stand for, so a script can't be seeded without being asked about.
+{
+  const names = [...text("./browser-launch-check.mjs").match(/export const SCRIPTS = \{([^}]*)\}/)[1].matchAll(/(\w+): "([^"]+)"/g)].map((found) => [found[1], found[2]]);
+  check(names.every(([name, letter]) => new RegExp(`^\\p{Script=${name}}$`, "u").test(letter)), "each script the launch check asks about is named by its Unicode script, and its letter is in it");
+  const unescaped = text("./a11y.mjs")
+    .replace(/\\u\{([0-9a-fA-F]+)\}/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)));
+  const covered = (letter) => names.some(([name]) => new RegExp(`\\p{Script=${name}}`, "u").test(letter));
+  const uncovered = [...new Set([...unescaped].filter((ch) => /\p{L}/u.test(ch) && !/\p{Script=Latin}/u.test(ch) && !covered(ch)))];
+  check(uncovered.length === 0, `a11y.mjs seeds no letter outside the scripts the launch check asks about${uncovered.length ? ` (it seeds ${uncovered.join(" ")})` : ""}`);
+}
 // The pinned fonts: an exact version with its hash in the lockfile, a development dependency only, and the file and its
 // licence really in the package.
 const manifest = JSON.parse(text("./package.json"));

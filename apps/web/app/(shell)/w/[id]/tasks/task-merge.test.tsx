@@ -239,6 +239,8 @@ describe("every code as a sentence", () => {
   it("says a commit needs a review independent of its submitter's person before it's merged (A1)", () => {
     expect(explainMergeRefusal("self_review", 403)).toMatch(/someone other than the person who controls its submitter/);
     expect(failureSentence("self_review")).toMatch(/independent/);
+    // A merge the job ended on a review by an agent whose controlling person isn't known says so too.
+    expect(failureSentence("self_review")).toMatch(/an agent whose controlling person isn't known/);
   });
 
   it("says a request ended by the requester's place in the room for leaving and for being removed alike", () => {

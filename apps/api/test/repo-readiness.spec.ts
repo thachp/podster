@@ -48,7 +48,11 @@ const fake = (path: string, body: object) => fetch(`https://github-fake.example.
 /** This test's repository as provisioning left it, or changed: `rulesets`, `settings`, `workflow`, and a `script` for its reads. */
 const ready = (patch: object = {}) => fake("/ready-repo", { id: REPO_ID, ...patch });
 /** The provisioning App's reads of this test's repository. */
-const readBack = async () => (await (await fetch(`https://github-fake.example.com/ready-reads?repo=${REPO_ID}`)).json()) as { reads: { path: string }[]; live: number };
+/**
+ * The provisioning App's reads of this test's repository, how many of its tokens on it are live, and the presence check's
+ * own tokens: how many asked about this repository and are live, and the status each revocation of one got.
+ */
+const readBack = async () => (await (await fetch(`https://github-fake.example.com/ready-reads?repo=${REPO_ID}`)).json()) as { reads: { path: string }[]; live: number; presence: { live: number; revokes: number[] } };
 /** Every token the agent-token App minted for this test's repository, and whether it's still live. */
 const minted = async () => (await (await fetch(`https://github-fake.example.com/agent-tokens?repo=${REPO_ID}`)).json()) as { token: string; live: boolean }[];
 
@@ -251,6 +255,8 @@ describe("the scheduled read-back of a ready link", () => {
     expect(await link(r.id)).toMatchObject({ status: "ready", status_reason: null });
     expect(await goneSeen(r.id)).toBeGreaterThanOrEqual(before);
     expect(await tokens(r.id)).toEqual(["held"]);
+    // The installation-wide token that asked was revoked as soon as it was answered.
+    expect((await readBack()).presence).toEqual({ live: 0, revokes: [204] });
     // The second look is due a minute after the first, not sooner.
     await expectNoAlarmSooner(stub(r.id), 50_000);
     await aMinuteLater(r.id);
@@ -262,10 +268,41 @@ describe("the scheduled read-back of a ready link", () => {
     // Each question was asked by the repository's ID, with a token for the whole installation that GitHub had just minted.
     expect((await readBack()).reads.map((read) => read.path)).toEqual([`/repositories/${REPO_ID}`, `/repositories/${REPO_ID}`]);
     expect((await readBack()).live).toBe(0);
+    expect((await readBack()).presence).toEqual({ live: 0, revokes: [204, 204] });
     // The agent can't have another.
     const task = await inRoom(r.id, (sql) => sql.exec("SELECT id FROM task").one().id as string);
     const again = await api(AGENT, "POST", `/v1/workspaces/${r.id}/tasks/${task}/repo-access`, undefined, { key: null });
     expect([again.status, again.body?.error?.code]).toEqual([409, "repo_not_ready"]);
+  });
+
+  it("treats a first sighting older than an hour as none, so one more 404 only starts over", async () => {
+    const r = await room();
+    await ready({ deleted: true });
+    // A sighting from over an hour ago, and no read since: the link is due, and the repository answers 404 again.
+    const before = Date.now();
+    await checkedAgo(r.id, DAY + 1, (sql) => sql.exec("UPDATE repo_link SET gone_seen_at = ?", Date.now() - 61 * 60_000));
+    await alarmPass(stub(r.id));
+    expect(await link(r.id)).toMatchObject({ status: "ready", status_reason: null });
+    expect(await events(r.id)).toEqual([]);
+    expect(await tokens(r.id)).toEqual(["held"]);
+    // The old sighting was replaced by this one: a second look a minute from now is what it takes.
+    expect(await goneSeen(r.id)).toBeGreaterThanOrEqual(before);
+  });
+
+  it("counts a presence token GitHub wouldn't take back as unrevoked, logs it by ID, and doesn't ask again", async () => {
+    const r = await room();
+    await ready({ deleted: true, script: { presenceRevoke: 1 } });
+    const lines: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => void lines.push(args.map(String).join(" ")));
+    await checkedAgo(r.id, DAY + 1);
+    await alarmPass(stub(r.id));
+    // The revocation failed once: the token lives out its hour, read-only on metadata, and the room says so by ID.
+    expect((await readBack()).presence).toEqual({ live: 1, revokes: [500] });
+    expect(lines.filter((line) => line.includes('"merge.token_unrevoked"'))).toEqual([JSON.stringify({ event: "merge.token_unrevoked", ws: r.id })]);
+    expect(lines.join("\n")).not.toContain("ghs_");
+    // Nothing tries that token again: it isn't held anywhere to try with.
+    await alarmPass(stub(r.id));
+    expect((await readBack()).presence.revokes).toEqual([500]);
   });
 
   it("degrades on two 404s a minute apart to the token minted for the repository itself (the direct branch)", async () => {

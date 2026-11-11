@@ -199,6 +199,9 @@ jobs:
       # The accessibility run writes into the Workers' files once they've stopped, so "stopped" has to mean every process.
       - run: node stack-stop-selftest.mjs
         working-directory: e2e
+      # The accessibility run's bounds: a wait that never finishes is stopped and named, instead of running out the job's time.
+      - run: node bounded-selftest.mjs
+        working-directory: e2e
       # The rehearsal's HTTPS certificate: a server certificate for localhost, trusted by name, never an authority.
       - run: node local-cert-selftest.mjs
         working-directory: e2e

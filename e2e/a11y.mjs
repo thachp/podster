@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as playwright from "playwright";
 import { seedInputAssets } from "./asset-fixture.mjs";
+import { bounded, boundMethods, waitingFor } from "./bounded.mjs";
 import { AuthAgent, key, ok, Person, Target } from "./lib.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -456,13 +457,91 @@ const newContext = () => browser.newContext({ reducedMotion: "reduce", viewport:
 const signedOut = await newContext();
 const contexts = new Map();
 
+// EVERY WAIT HAS A BOUND. Playwright bounds its own actions at 30 seconds, but not a script run in the page: a page whose
+// main thread is busy, or that never gets an animation frame, leaves `evaluate` waiting for ever. A run on main stopped
+// that way inside one keyboard path and was only ended by the job's 25-minute limit, with nothing saying where. So each
+// script in a page, each screen, each keyboard path, the seeding and each request to run-a11y.mjs has a bound well above
+// what it takes on a slow runner (the slowest script in a page takes about 20 seconds there, the slowest path under a
+// minute, seeding about 30 seconds). Reaching one isn't retried and isn't a finding about a screen: the page can't be
+// trusted after it, so the run says what it was waiting for and what each page was doing, and stops.
+const SCRIPT_IN_PAGE_MS = 90_000;
+const SCREEN_MS = 120_000;
+const KEYBOARD_PATH_MS = 240_000;
+const SEED_MS = 300_000;
+// run-a11y.mjs gives the Workers 30 seconds to stop and 120 to come back.
+const RUNNER_MS = 200_000;
+const BROWSER_CLOSE_MS = 30_000;
+let stopping = false;
+
+/** Where a page is, as its path and the names of its query parameters. Their values aren't printed. */
+function whereIs(page) {
+  try {
+    const url = new URL(page.url());
+    const names = [...url.searchParams.keys()];
+    return `${url.pathname}${names.length ? `?${names.join("&")}` : ""}`;
+  } catch {
+    return page.url() || "(no address)";
+  }
+}
+
+/** Says what the run was waiting for and what each open page was doing, writes what it has, and ends the run as failed. */
+async function stall(error) {
+  if (stopping) return;
+  stopping = true;
+  // First, so that a run which reaches its end while the pages are being asked still ends as failed.
+  failures.push(`stalled: ${error.message}`);
+  console.log(`\nFAIL stalled: ${error.message}`);
+  const others = waitingFor().filter((what) => !error.message.includes(what));
+  if (others.length) console.log(`     also waiting for: ${others.join("; ")}`);
+  console.log("--- the browser's pages when it stalled ---");
+  const within = (ms, work, late) => Promise.race([work, new Promise((done) => setTimeout(() => done(late), ms).unref())]);
+  const said = (failure) => `refused (${String(failure?.message ?? failure).split("\n")[0]})`;
+  for (const context of browser.contexts()) {
+    for (const page of context.pages()) {
+      // The real `evaluate`, raced here, because a page that's stuck won't answer this either. A crashed page refuses at once.
+      const answers = await within(3_000, realPage.evaluate.call(page, () => `${document.readyState}, ${document.visibilityState}`).catch(said), null);
+      let state = "doesn't answer a script in 3 seconds: its main thread is busy or stopped";
+      if (answers !== null) {
+        const frame = await within(3_000, realPage.evaluate.call(page, () => new Promise((done) => requestAnimationFrame(() => done("frames are drawn")))).catch(said), "no animation frame in 3 seconds");
+        state = `answers a script (${answers}), ${frame}`;
+      }
+      console.log(`  ${whereIs(page)}: ${state}`);
+    }
+  }
+  try {
+    mkdirSync(join(here, "results"), { recursive: true });
+    const file = join(here, "results", `a11y-${browserName === "chromium" ? "" : `${browserName}-`}${new Date().toISOString().replaceAll(":", "-").slice(0, 19)}-stalled.json`);
+    writeFileSync(file, `${JSON.stringify({ commit: process.env.GITHUB_SHA ?? null, results, failures }, null, 2)}\n`);
+    console.log(`\nThe run stalled and was stopped. What it had: ${file}`);
+  } catch {
+    // The lines above already say what happened.
+  }
+  process.exit(1);
+}
+
+/** `work` within `ms`. Past that the run stops, here, whatever the caller does with the rejection. */
+const mustFinish = (what, ms, work) => bounded(what, ms, work, stall);
+
+// Bounded on the classes themselves, so no call can be left out. `realPage` is for asking a page something after a stall.
+let realPage;
+{
+  const page = await signedOut.newPage();
+  const handle = await page.evaluateHandle(() => ({}));
+  const limit = { ms: SCRIPT_IN_PAGE_MS, file: "a11y.mjs", onStall: stall };
+  boundMethods(Object.getPrototypeOf(page.locator("html")), ["evaluate", "evaluateAll", "evaluateHandle"], limit);
+  boundMethods(Object.getPrototypeOf(handle), ["evaluate", "evaluateHandle"], limit);
+  boundMethods(Object.getPrototypeOf(page.mainFrame()), ["evaluate", "evaluateHandle"], limit);
+  realPage = boundMethods(Object.getPrototypeOf(page), ["evaluate", "evaluateHandle"], limit);
+  await page.close();
+}
+
 const RUN_THROUGH_RUNNER = "Run this through run-a11y.mjs, which can restart the Workers.";
 const canAskRunner = () => typeof process.send === "function";
 
 /** Asks run-a11y.mjs to do what only it can, with the Workers stopped, and waits for it to say it's done. */
 function askRunner(request) {
   ok(canAskRunner(), RUN_THROUGH_RUNNER);
-  return new Promise((done, fail) => {
+  return mustFinish(`run-a11y.mjs to answer ${request.type}`, RUNNER_MS, new Promise((done, fail) => {
     const answer = (message) => {
       if (message?.type !== `${request.type}:done`) return;
       process.off("message", answer);
@@ -471,7 +550,7 @@ function askRunner(request) {
     };
     process.on("message", answer);
     process.send(request);
-  });
+  }));
 }
 
 /** Sign-up belongs to the application host once `APP_URL` is set, so it runs in the browser there. The session works on both hosts. */
@@ -539,7 +618,7 @@ const chromiumOnly = (name, fn) => {
 
 async function keyboardPath(name, fn) {
   try {
-    await fn();
+    await mustFinish(`the keyboard path "${name}"`, KEYBOARD_PATH_MS, fn());
     console.log(`ok   keyboard: ${name}`);
     results.push({ keyboard: name, status: "pass" });
   } catch (error) {
@@ -2421,37 +2500,42 @@ async function keyboardPaths(s) {
 }
 
 async function run() {
-  const seeded = await seed();
+  const seeded = await mustFinish("seeding the rooms, tasks and threads", SEED_MS, seed());
   checkTokens();
-  await controls();
+  await mustFinish("the controls that show axe can fail", SCREEN_MS, controls());
   for (const [name, path, expected, who = "owner", sheet = false, org] of screens(seeded)) {
     const person = who === null ? null : who === "partner" ? seeded.partner : seeded.owner;
     const context = contextFor(person);
-    // A person's current organization is this cookie, as the profile menu sets it.
-    if (org) await context.addCookies([{ name: ORG_COOKIE, value: org, domain: new URL(app).hostname, path: "/" }]);
-    const page = await context.newPage();
-    try {
-      const response = await page.goto(`${app}${path}`);
-      await hydrated(page);
-      if ((name === "Not found") === response.ok()) throw new Error(`HTTP ${response.status()}`);
-      await page.getByText(expected).first().waitFor({ timeout: 15_000 });
-      // A failed read would pass axe while hiding the screen.
-      if (await page.getByText("Couldn't refresh").count()) throw new Error("the screen's read failed");
-      if (sheet) await page.getByRole("dialog").waitFor({ timeout: 15_000 });
-      // This one's text has a table, which is formatted in the worker, and it's what shows tables to axe.
-      if (name === "Task Sheet, review") await page.locator("article table").first().waitFor({ timeout: 15_000 });
-      await audit(page, name);
-    } catch (error) {
-      fail(name, error.message.split("\n")[0]);
-    }
-    await page.close();
-    if (org) await context.clearCookies({ name: ORG_COOKIE });
+    const screen = async () => {
+      // A person's current organization is this cookie, as the profile menu sets it.
+      if (org) await context.addCookies([{ name: ORG_COOKIE, value: org, domain: new URL(app).hostname, path: "/" }]);
+      const page = await context.newPage();
+      try {
+        const response = await page.goto(`${app}${path}`);
+        await hydrated(page);
+        if ((name === "Not found") === response.ok()) throw new Error(`HTTP ${response.status()}`);
+        await page.getByText(expected).first().waitFor({ timeout: 15_000 });
+        // A failed read would pass axe while hiding the screen.
+        if (await page.getByText("Couldn't refresh").count()) throw new Error("the screen's read failed");
+        if (sheet) await page.getByRole("dialog").waitFor({ timeout: 15_000 });
+        // This one's text has a table, which is formatted in the worker, and it's what shows tables to axe.
+        if (name === "Task Sheet, review") await page.locator("article table").first().waitFor({ timeout: 15_000 });
+        await audit(page, name);
+      } catch (error) {
+        fail(name, error.message.split("\n")[0]);
+      }
+      await page.close();
+      if (org) await context.clearCookies({ name: ORG_COOKIE });
+    };
+    await mustFinish(`the screen "${name}"`, SCREEN_MS, screen());
   }
   await keyboardPaths(seeded);
 }
 
 await run().catch((error) => fail("run", error.message));
-await browser.close();
+// A stall ends the run from `stall`, once it has said what each page was doing.
+if (stopping) await new Promise(() => {});
+await mustFinish("the browser to close", BROWSER_CLOSE_MS, browser.close());
 
 // Compare to the known list, by screen, rule and element.
 const found = results.flatMap((r) => (r.violations ?? []).map((v) => `${r.screen}|${v.rule}|${v.target}`));

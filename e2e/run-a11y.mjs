@@ -68,13 +68,27 @@ async function waitForStack() {
   throw new Error("the local stack didn't come up");
 }
 
+// The checks take about six minutes on CI. a11y.mjs bounds each of its own waits and says which one stalled; this is
+// the bound on all of it, for a stall it can't report itself, and it leaves the job's own limit time to show the logs.
+const CHECKS_MS = 15 * 60_000;
+
 let code = 1;
 try {
   await waitForStack();
   console.log(`dashboard is up at ${app}\n`);
   code = await new Promise((done) => {
     const proc = spawn(process.execPath, [join(here, "a11y.mjs")], { cwd: here, stdio: ["inherit", "inherit", "inherit", "ipc"], env: { ...process.env, ...(browserName ? { PODSTER_A11Y_BROWSER: browserName } : {}), PODSTER_A11Y_APP: app, PODSTER_A11Y_GATEWAY: gatewayBase } });
-    proc.on("exit", (status) => done(status ?? 1));
+    const late = setTimeout(() => {
+      console.error(`\nFAIL stalled: a11y.mjs hadn't finished ${CHECKS_MS / 60_000} minutes after it started. Its last line above is the last thing that finished.`);
+      // Playwright closes its browser on this signal. One that doesn't end is killed, and the run fails either way.
+      proc.kill("SIGTERM");
+      setTimeout(() => proc.kill("SIGKILL"), 10_000).unref();
+    }, CHECKS_MS);
+    // A killed process has no status, and that's a failure.
+    proc.on("exit", (status) => {
+      clearTimeout(late);
+      done(status ?? 1);
+    });
     // INPUT ASSET FIXTURE (screen 9a). Test-only: scan states can't arrive through a scanner here, so they're written with the
     // Workers stopped, then the Workers start again. Why, in asset-fixture.mjs.
     proc.on("message", async (message) => {
@@ -93,7 +107,10 @@ try {
       }
     });
   });
-  if (code !== 0) console.error(`\n--- end of the Workers' logs ---\n${backend.log.join("").slice(-2000)}\n${dashboard.log.join("").slice(-2000)}`);
+  // Which is which, and whether each was still running, because their logs look alike.
+  if (code !== 0) {
+    for (const [name, worker] of [["the gateway and API", backend], ["the dashboard", dashboard]]) console.error(`\n--- end of the log of ${name} (${worker.stack.exitCode === null ? "still running" : `exited ${worker.stack.exitCode}`}) ---\n${worker.log.join("").slice(-3000)}`);
+  }
 } catch (error) {
   console.error(error);
 } finally {

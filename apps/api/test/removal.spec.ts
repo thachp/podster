@@ -230,6 +230,10 @@ describe("the room's sweep", () => {
       // M5 step 6's agent tokens, the newest migration, come off first.
       // M5 step 7a's read bookkeeping, the newest migration, comes off first.
       // M5 step 7b's merge bookkeeping, the newest migration, comes off first.
+      // The newest step, the M5 security review's two columns, comes off first.
+      state.storage.sql.exec("ALTER TABLE repo_link DROP COLUMN gone_seen_at");
+      state.storage.sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP TABLE merge_request");
       state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN merge_finished_at");
       state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN merge_called_at");
@@ -419,6 +423,10 @@ describe("the room's sweep", () => {
       // M5 step 6's agent tokens, the newest migration, come off first.
       // M5 step 7a's read bookkeeping, the newest migration, comes off first.
       // M5 step 7b's merge bookkeeping, the newest migration, comes off first.
+      // The newest step, the M5 security review's two columns, comes off first.
+      state.storage.sql.exec("ALTER TABLE repo_link DROP COLUMN gone_seen_at");
+      state.storage.sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP TABLE merge_request");
       state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN merge_finished_at");
       state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN merge_called_at");
@@ -754,6 +762,10 @@ describe("removal by the rules, review fixes", () => {
       // M5 step 6's agent tokens, the newest migration, come off first.
       // M5 step 7a's read bookkeeping, the newest migration, comes off first.
       // M5 step 7b's merge bookkeeping, the newest migration, comes off first.
+      // The newest step, the M5 security review's two columns, comes off first.
+      state.storage.sql.exec("ALTER TABLE repo_link DROP COLUMN gone_seen_at");
+      state.storage.sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP TABLE merge_request");
       state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN merge_finished_at");
       state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN merge_called_at");

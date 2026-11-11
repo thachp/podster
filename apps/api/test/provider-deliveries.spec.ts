@@ -442,6 +442,10 @@ describe("the delivery migration", () => {
       // M5 step 6's agent tokens, the newest migration, come off first.
       // M5 step 7a's read bookkeeping, the newest migration, comes off first.
       // M5 step 7b's merge bookkeeping, the newest migration, comes off first.
+      // The newest step, the M5 security review's two columns, comes off first.
+      sql.exec("ALTER TABLE repo_link DROP COLUMN gone_seen_at");
+      sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE merge_request");
       sql.exec("ALTER TABLE task_change DROP COLUMN merge_finished_at");
       sql.exec("ALTER TABLE task_change DROP COLUMN merge_called_at");
@@ -487,7 +491,7 @@ describe("the delivery migration", () => {
     expect(await columns("provider_delivery")).toEqual(["delivery_id", "body_sha256", "received_at", "expires_at"]);
     // Step 5's column comes back where it was, with step 7a's behind it.
     expect(await columns("task_change")).toEqual(["task_id", "provider_repo_id", "pr_number", "submission_no", "reviewed_commit_sha", "observed_head_sha", "head_observed_at", "checks_state", "checks_json", "checks_observed_at", "merge_state", "merge_reason", "merge_sha", "merge_requested_by", "merge_requested_at", "merge_observed_at", "created_at", "updated_at", "head_repo_id", "base_ref", "reviewed_base_sha", "merge_base_sha", "pr_state", "pr_observed_at", "nudged_at", "observed_base_sha", "read_at", "unchanged_reads", "merged_by_id", "read_failures", "not_found_reads", "unwatched_at", "commit_changed_at", "pr_draft", "submitter_id", "submitter_person", "merge_requester_person", "merge_attempts", "merge_next_at", "merge_step", "merge_marked_at", "merge_mark_set_at", "merge_called_at", "merge_finished_at"]);
-    expect(await columns("repo_link")).toEqual(["id", "singleton", "request_id", "provider", "provider_repo_id", "provider_org_id", "full_name", "visibility", "default_branch", "status", "status_reason", "created_by", "created_at", "verified_at", "updated_at", "indexed_at", "read_failures", "reads_not_before"]);
+    expect(await columns("repo_link")).toEqual(["id", "singleton", "request_id", "provider", "provider_repo_id", "provider_org_id", "full_name", "visibility", "default_branch", "status", "status_reason", "created_by", "created_at", "verified_at", "updated_at", "indexed_at", "read_failures", "reads_not_before", "gone_seen_at"]);
     // The link and the change are as they were, and the delivery that migrated it was taken.
     const kept = await change(id) as any;
     expect(kept).toMatchObject({ task_id: task, provider_repo_id: repo, pr_number: 7, reviewed_commit_sha: REVIEWED });

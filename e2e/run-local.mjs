@@ -205,6 +205,16 @@ try {
     const admins = await child("repo-admin-check.mjs", ["--base-url", onBase], { PODSTER_E2E_OPERATOR_COOKIE: operator.cookie });
     const merge = await child("merge-check.mjs", ["--base-url", onBase, "--github", github]);
     code = access || admins || merge;
+    // Last, the same stack with the API's REPOSITORY_REQUESTERS naming one person, on the same state: the operator, who
+    // is already signed in. Everyone the checks above made is then someone the deployment doesn't list.
+    if (code === 0) {
+      stop();
+      if (!(await groupGone(stack.pid))) throw new Error("the stack didn't stop to take its list of requesters");
+      const open = JSON.parse(readFileSync(on.apiConfig, "utf8"));
+      writeFileSync(on.apiConfig, JSON.stringify({ ...open, vars: { ...open.vars, REPOSITORY_REQUESTERS: operator.id } }));
+      await start();
+      code = await child("repo-requesters-check.mjs", ["--base-url", onBase, "--github", github], { PODSTER_E2E_LISTED_COOKIE: operator.cookie });
+    }
     if (code !== 0) console.error(`\n--- last of the stack's log ---\n${log.join("").slice(-4000)}`);
   }
 } catch (error) {

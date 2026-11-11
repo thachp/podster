@@ -16,14 +16,22 @@ use podster_core::repo_grants::{
 };
 use podster_core::repositories::GrantAction;
 use podster_policy::repositories::{
-    authorize_grant, authorize_revoke, delegation_holder, holds_repository_delegation,
-    may_receive_grant, sees_grant, RepoDenial,
+    authorize_grant, authorize_repository_request, authorize_revoke, delegation_holder,
+    holds_repository_delegation, may_receive_grant, sees_grant, RepoDenial,
 };
 
 /// `GET repository`: the room's request for a repository and its linked repository, each null if there's none. For
 /// a person who sees the whole room, never an agent: the contract lists it as person-only, and an agent will learn of the
 /// repository through `get_repo_access`, once step 6 builds it. It's a read of current state and authorizes nothing.
-pub(super) fn read(sql: &SqlStorage, who: &Participant) -> R<Value> {
+///
+/// `may_request` says whether the caller could ask for the repository or retry its setup as far as who they are goes:
+/// a person who is the room's owner or a room admin, whom this deployment lets ask. It's for a screen to show the
+/// option or say it's unavailable, and the commands decide again for themselves.
+pub(super) fn read(
+    sql: &SqlStorage,
+    who: &Participant,
+    requesters: &podster_core::provisioning::RepositoryRequesters,
+) -> R<Value> {
     if who.caller.kind != PrincipalKind::Person || !sees_whole_room(&who.caller) {
         return Err(ApiError::not_allowed());
     }
@@ -42,7 +50,8 @@ pub(super) fn read(sql: &SqlStorage, who: &Participant) -> R<Value> {
             "status_reason": r["status_reason"], "created_at": r["created_at"], "verified_at": r["verified_at"],
             "updated_at": r["updated_at"],
         }));
-    Ok(json!({ "request": request, "repository": repository }))
+    let may_request = authorize_repository_request(&who.caller, requesters).is_ok();
+    Ok(json!({ "request": request, "repository": repository, "may_request": may_request }))
 }
 
 /// The Worker's call for a provider's webhook delivery. Reached only from `crate::provider`, which has verified the

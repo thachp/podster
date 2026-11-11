@@ -205,6 +205,16 @@ describe("issuing a token", () => {
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT count(*) AS n FROM idempotency WHERE response_json LIKE '%ghs_%' OR request_hash LIKE '%ghs_%'").one().n)).toBe(0);
   });
 
+  it("issues a token in a room that has its repository when the deployment's list of requesters names nobody in it", async () => {
+    // `REPOSITORY_REQUESTERS` bears on asking for a repository and retrying its setup, and on nothing else.
+    for (const value of ["per_ra_someone_else", ""]) {
+      const r = await room();
+      await inRoom(r.id, (sql) => { sql.exec("CREATE TABLE test_repository_requesters (value TEXT)"); sql.exec("INSERT INTO test_repository_requesters VALUES (?)", value); });
+      const got = await access(AGENT, r.id, r.task);
+      expect([got.status, got.body?.repository], JSON.stringify(value)).toEqual([200, "podster-test-org/engineering"]);
+    }
+  });
+
   it("returns the held token again, and only near its expiry mints a new one and revokes the old (M5-07)", async () => {
     const r = await room();
     const first = (await access(AGENT, r.id, r.task)).body;

@@ -4151,7 +4151,8 @@ impl Workspace {
                 return Err(ApiError::not_found());
             }
             if let ["repository"] = tail {
-                let mut read = repositories::read(&sql, &who)?;
+                let mut read =
+                    repositories::read(&sql, &who, &provisioning::requesters(&self.env, &sql)?)?;
                 // Display only, and for the room's owner and admins alone, by current standing: the request command asks
                 // the organization again. Unknown isn't false, so a record that can't be read leaves the field out.
                 if provisioning::runs_repository(&who.caller) {
@@ -4643,38 +4644,38 @@ impl Workspace {
             // counted against the organization's and the asker's daily caps in that same call, and stays counted
             // whatever becomes of it. A stored answer goes only to someone who may still ask.
             (Method::Post, ["repository"]) => {
-                let switched_on = provisioning::enabled(&self.env, &sql)?;
-                let (delegated, counted) = if switched_on {
+                let deployment = provisioning::Deployment::read(&self.env, &sql)?;
+                let (delegated, counted) = if deployment.switched_on {
                     self.count_repository_request(&identity, &body).await?
                 } else {
                     (false, None)
                 };
-                let counted_for = counted.clone();
-                let recorded = self.command_checked(
+                let may_ask = deployment.clone();
+                // Nothing is given back, whatever the command comes to: the room's place in each count stays.
+                self.command_checked(
                     &identity,
                     key,
                     hash,
                     stops_when_archived,
                     test_fail,
-                    |_: &SqlStorage, who: &Participant| provisioning::may_request(&who.caller),
+                    move |_: &SqlStorage, who: &Participant| may_ask.may_ask(&who.caller),
                     move |sql, who, now| {
                         provisioning::request(
                             sql,
                             who,
                             &body,
-                            switched_on,
+                            &deployment,
                             delegated,
-                            counted_for.as_ref(),
+                            counted.as_ref(),
                             now,
                         )
                     },
-                );
-                // Nothing is given back, whatever the command came to: the room's place in each count stays.
-                recorded
+                )
             }
             (Method::Post, ["repository", "retry"]) => {
                 let delegated = self.org_delegated().await == Some(true);
-                let switched_on = provisioning::enabled(&self.env, &sql)?;
+                let deployment = provisioning::Deployment::read(&self.env, &sql)?;
+                let may_ask = deployment.clone();
                 let suffix: String = uuid::Uuid::new_v4()
                     .simple()
                     .to_string()
@@ -4687,9 +4688,9 @@ impl Workspace {
                     hash,
                     stops_when_archived,
                     test_fail,
-                    |_: &SqlStorage, who: &Participant| provisioning::may_request(&who.caller),
+                    move |_: &SqlStorage, who: &Participant| may_ask.may_ask(&who.caller),
                     move |sql, who, now| {
-                        provisioning::retry(sql, who, &body, switched_on, delegated, &suffix, now)
+                        provisioning::retry(sql, who, &body, &deployment, delegated, &suffix, now)
                     },
                 )
             }

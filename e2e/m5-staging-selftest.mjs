@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { forbidden } from "./child-env.mjs";
 import { parseJsonc } from "./jsonc.mjs";
 import {
-  ASKPASS_SCRIPT, cloneUrlProblem, CREDENTIAL_ENV, GrantLedger, gitEnv, mergeCommitProblems, parseArgs, PLAN, releaseStatusProblems, repositoryOrgProblem, reviewStatusProblems,
+  ASKPASS_SCRIPT, cloneUrlProblem, CREDENTIAL_ENV, GrantLedger, gitEnv, mergeCommitProblems, parseArgs, PLAN, releaseStatusProblems, repositoryOrgProblem, requesterProblem, reviewStatusProblems,
   rulesetProblems, scrub, secretProblem, SIGN_UPS, STAGING, STAGING_ORG, stagingConfig, stagingOnly, Tally,
 } from "./m5-staging-lib.mjs";
 
@@ -66,6 +66,10 @@ check(STAGING_ORG === "podsterdev", "the organization is podsterdev, in code");
 for (const org of ["podsterx", "Podsterdev", "podsterdev-test", "another-organization"]) {
   const refused = stagingConfig({ ...vars, GITHUB_ORG_LOGIN: org });
   check(Boolean(refused.error) && refused.error.includes("podsterdev only") && refused.org === undefined, `a configuration naming ${org} is refused, with the rest of it right`);
+}
+check(requesterProblem("per_e2e_0123abcd", true) === null, "a test person staging says may ask is accepted");
+for (const [id, may] of [["per_e2e_0123abcd", false], ["per_e2e_0123abcd", undefined], ["per_e2e_0123abcd", "true"], ["per_Xy7ordinary", true], ["per_e2e_", true], ["agt_e2e_0123", true], [undefined, true]]) {
+  check(requesterProblem(id, may) !== null, `a person ${JSON.stringify(id)} told ${JSON.stringify(may)} is refused`);
 }
 check(repositoryOrgProblem("podsterdev/e2e-m5-1") === null, "a repository staging links under podsterdev is accepted");
 for (const full of ["podsterx/e2e-m5-1", "podsterdev", "podsterdev/a/b", "other/podsterdev", "", undefined, null, 7]) {

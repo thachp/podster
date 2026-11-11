@@ -22,15 +22,19 @@ use super::*;
 use crate::github::{Config, CreateAnswer, GitHubApp, Provider};
 use podster_core::provisioning::{
     job_backoff_ms, missing_steps, reserved_name, retry_allowed, retry_name, retry_wait_ms,
-    verify_ready, Expected, RequestLimitReached, MAX_SETUP_RUNS,
+    verify_ready, Expected, RepositoryRequesters, RequestLimitReached, MAX_SETUP_RUNS,
 };
 use podster_core::repositories::{
     decide_retry, valid_repo_name, RepoVisibility, RequestState, RetryPlan, RetryRefusal,
 };
-use podster_policy::repositories::authorize_repository_admin;
+use podster_policy::repositories::{authorize_repository_admin, authorize_repository_request};
 
 const PROVIDER: &str = "github";
 const SWITCH_VAR: &str = "MANAGED_REPOSITORIES";
+/// The Worker variable that names who this deployment lets ask for a room's repository: see [`requesters`].
+const REQUESTERS_VAR: &str = "REPOSITORY_REQUESTERS";
+/// The setup job's reason when whoever asked isn't someone this deployment lets ask, now.
+const REQUESTS_CLOSED: &str = "repository_requests_closed";
 /// The attempt outcomes that say a creation call may have gone out under the attempt's name.
 const NOT_SENT: &str = "not_sent";
 const STARTED: &str = "started";
@@ -54,6 +58,60 @@ pub(super) fn enabled(env: &Env, sql: &SqlStorage) -> R<bool> {
     #[cfg(not(feature = "failpoints"))]
     let _ = sql;
     Ok(set)
+}
+
+/// Who this deployment lets ask for a room's repository or retry its setup, from the Worker variable
+/// `REPOSITORY_REQUESTERS`, read by `RepositoryRequesters::parse`: unset is everyone the room's own rule lets; set, it's
+/// the listed person IDs and, with `test-people`, the test sign-up's people; empty or malformed, nobody. It's the
+/// deployment's configuration, never a caller's word, and the ID it's held against is the verified caller's. Both
+/// commands and the job check it. A test build can give one room a setting of its own, by a table only a test can make.
+pub(super) fn requesters(env: &Env, sql: &SqlStorage) -> R<RepositoryRequesters> {
+    #[cfg(feature = "failpoints")]
+    if !rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_repository_requesters'",
+        vec![],
+    )?
+    .is_empty()
+    {
+        let set = rows(sql, "SELECT value FROM test_repository_requesters", vec![])?;
+        let value = set.first().and_then(|row| text(&row["value"]));
+        return Ok(RepositoryRequesters::parse(Some(
+            value.as_deref().unwrap_or_default(),
+        )));
+    }
+    #[cfg(not(feature = "failpoints"))]
+    let _ = sql;
+    let set = env.var(REQUESTERS_VAR).ok().map(|value| value.to_string());
+    Ok(RepositoryRequesters::parse(set.as_deref()))
+}
+
+/// What this deployment's configuration says to a request or a retry: whether managed repositories are switched on, and
+/// who may ask. Read by the route just before the command's transaction, never from a caller.
+#[derive(Clone, Debug)]
+pub(super) struct Deployment {
+    pub(super) switched_on: bool,
+    pub(super) requesters: RepositoryRequesters,
+}
+
+impl Deployment {
+    pub(super) fn read(env: &Env, sql: &SqlStorage) -> R<Self> {
+        Ok(Deployment {
+            switched_on: enabled(env, sql)?,
+            requesters: requesters(env, sql)?,
+        })
+    }
+
+    /// Whether the caller may ask or retry at all, for the check that comes before a stored answer is replayed: the
+    /// room's rule, then this deployment's list. Switched off, only the room's rule is asked, so the command answers
+    /// as a missing route whoever is listed.
+    pub(super) fn may_ask(&self, caller: &Caller) -> R<()> {
+        authorize_repository_admin(caller).map_err(repositories::denied)?;
+        if self.switched_on {
+            may_request(caller, &self.requesters)?;
+        }
+        Ok(())
+    }
 }
 
 /// The room's managed-repository routes for people: the read and request, the retry, and the grants. While the switch
@@ -83,9 +141,10 @@ pub(super) fn runs_repository(caller: &Caller) -> bool {
     authorize_repository_admin(caller).is_ok()
 }
 
-/// Only a person who is the room's owner or a room admin asks for or retries the room's repository.
-pub(super) fn may_request(caller: &Caller) -> R<()> {
-    authorize_repository_admin(caller).map_err(repositories::denied)
+/// Only a person who is the room's owner or a room admin asks for or retries the room's repository, and only one this
+/// deployment lets ask. The room's rule answers first.
+pub(super) fn may_request(caller: &Caller, requesters: &RepositoryRequesters) -> R<()> {
+    authorize_repository_request(caller, requesters).map_err(repositories::denied)
 }
 
 /// A request's two fields, checked: the chosen name and visibility. Nothing else is accepted.
@@ -116,8 +175,13 @@ fn requested(body: &Value) -> R<(&str, RepoVisibility)> {
 /// Whether a request, as far as the room alone can tell, would be recorded if the organization holds the delegation
 /// and the caps allow it: so the room knows whether to have it counted. `Ok(false)` when the room already has its one
 /// request, which the command then answers for itself.
-pub(super) fn worth_counting(sql: &SqlStorage, who: &Participant, body: &Value) -> R<bool> {
-    may_request(&who.caller)?;
+pub(super) fn worth_counting(
+    sql: &SqlStorage,
+    who: &Participant,
+    body: &Value,
+    requesters: &RepositoryRequesters,
+) -> R<bool> {
+    may_request(&who.caller, requesters)?;
     requested(body)?;
     Ok(request_row(sql)?.is_none())
 }
@@ -160,16 +224,18 @@ pub(super) fn request(
     sql: &SqlStorage,
     who: &Participant,
     body: &Value,
-    switched_on: bool,
+    deployment: &Deployment,
     delegated: bool,
     counted: Option<&Counted>,
     now: i64,
 ) -> R<Value> {
-    may_request(&who.caller)?;
-    // Switched off, the route isn't there, for the owner as for anyone.
-    if !switched_on {
+    let requesters = &deployment.requesters;
+    // The room's rule alone first: switched off, the route isn't there, for the owner as for anyone, whoever is listed.
+    authorize_repository_admin(&who.caller).map_err(repositories::denied)?;
+    if !deployment.switched_on {
         return Err(ApiError::not_found());
     }
+    may_request(&who.caller, requesters)?;
     let (name, visibility) = requested(body)?;
     if !delegated {
         return refuse(403, "not_delegated");
@@ -215,7 +281,7 @@ pub(super) fn request(
         roles::room_managers(sql, &who.caller.id)?,
         now,
     )?;
-    repositories::read(sql, who)
+    repositories::read(sql, who, requesters)
 }
 
 /// `POST repository/retry {}`: puts a failed or uncertain setup back to `pending`. With a repository ID held, setup
@@ -225,15 +291,17 @@ pub(super) fn retry(
     sql: &SqlStorage,
     who: &Participant,
     body: &Value,
-    switched_on: bool,
+    deployment: &Deployment,
     delegated: bool,
     suffix: &str,
     now: i64,
 ) -> R<Value> {
-    may_request(&who.caller)?;
-    if !switched_on {
+    let requesters = &deployment.requesters;
+    authorize_repository_admin(&who.caller).map_err(repositories::denied)?;
+    if !deployment.switched_on {
         return Err(ApiError::not_found());
     }
+    may_request(&who.caller, requesters)?;
     if !body.as_object().is_some_and(|fields| fields.is_empty()) {
         return Err(ApiError::invalid_argument());
     }
@@ -345,7 +413,7 @@ pub(super) fn retry(
         roles::room_managers(sql, &who.caller.id)?,
         now,
     )?;
-    repositories::read(sql, who)
+    repositories::read(sql, who, requesters)
 }
 
 /// Ends the job's turn: the request leaves `pending` with a reason code and the time a retry may next be taken, and the
@@ -495,7 +563,9 @@ impl Workspace {
         let Ok(who) = resolve_caller(&sql, identity) else {
             return Ok((false, None));
         };
-        if !matches!(worth_counting(&sql, &who, body), Ok(true)) {
+        // That includes someone this deployment doesn't let ask: no place is taken for them, in either object.
+        let requesters = requesters(&self.env, &sql)?;
+        if !matches!(worth_counting(&sql, &who, body, &requesters), Ok(true)) {
             let delegated = self.org_delegated().await == Some(true);
             // A test holds this call here, after it decided not to count, to change the room before its transaction.
             #[cfg(feature = "failpoints")]
@@ -683,6 +753,12 @@ impl Workspace {
         let sql = self.state.storage().sql();
         if !enabled(&self.env, &sql)? {
             return Ok(Some(failed("managed_repositories_off", 0)));
+        }
+        // Whoever asked must still be someone this deployment lets ask, before anything goes to the provider: a request
+        // recorded under an earlier setting doesn't run under a narrower one.
+        let asked_by = text(&request["requested_by"]).unwrap_or_default();
+        if !requesters(&self.env, &sql)?.allows(&asked_by) {
+            return Ok(Some(failed(REQUESTS_CLOSED, 0)));
         }
         // Test builds only: a room holding this table stands for a deployment whose key the owner hasn't set yet.
         #[cfg(feature = "failpoints")]

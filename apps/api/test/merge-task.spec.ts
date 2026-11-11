@@ -241,6 +241,16 @@ describe("asking for a merge", () => {
     expect([again.status, again.code]).toEqual([409, "already_merged"]);
   });
 
+  it("merges in a room that has its repository when the deployment's list of requesters names nobody in it", async () => {
+    // `REPOSITORY_REQUESTERS` bears on asking for a repository and retrying its setup, and on nothing else.
+    const r = await approved();
+    await inRoom(r.id, (sql) => { sql.exec("CREATE TABLE test_repository_requesters (value TEXT)"); sql.exec("INSERT INTO test_repository_requesters VALUES ('')"); });
+    const asked = await merge(MERGER, r.id, r.task);
+    expect(asked.status, asked.text).toBe(200);
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED });
+  });
+
   it("merges nothing on approval alone, however long passes (AC-17)", async () => {
     const r = await approved();
     await alarm(r.id, 3);

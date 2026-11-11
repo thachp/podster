@@ -103,15 +103,20 @@ const dies = (id: string, at: string | null) => inRoom(id, (sql) => {
 });
 /** Makes the merge's next pass due now, as time passing would. */
 const due = (id: string) => inRoom(id, (sql) => void sql.exec("UPDATE task_change SET merge_next_at = 0 WHERE merge_state IN ('requested', 'outcome_unknown')"));
-/** One pass of the merge job, whatever its backoff says. */
-const pass = async (id: string) => {
-  await inRoom(id, (sql) => {
+/**
+ * One pass of the merge job, whatever its backoff says. The hold comes off, the pass is made due and the alarm runs, all
+ * in one step in the room, with the alarm the room had set taken away first: so the runtime's own alarm can't make a
+ * pass in between, and exactly one is made.
+ */
+const pass = (id: string) =>
+  runInDurableObject(stub(id), async (instance: any, state: any) => {
+    const sql = state.storage.sql;
     sql.exec("CREATE TABLE IF NOT EXISTS test_merge_dies (at TEXT)");
     sql.exec("DELETE FROM test_merge_dies WHERE at = 'start'");
+    sql.exec("UPDATE task_change SET merge_next_at = 0 WHERE merge_state IN ('requested', 'outcome_unknown')");
+    await state.storage.deleteAlarm();
+    await instance.alarm();
   });
-  await due(id);
-  await alarm(id);
-};
 const made: string[] = [];
 
 beforeAll(async () => {

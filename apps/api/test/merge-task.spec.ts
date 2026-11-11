@@ -347,10 +347,21 @@ describe("asking for a merge", () => {
   it("doesn't exist with managed repositories off", async () => {
     const r = await approved();
     await inRoom(r.id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
-    for (const who of [MERGER, OWNER, AGENT]) {
-      const got = await merge(who, r.id, r.task);
-      expect([got.status, got.code], who.id).toEqual([404, "not_found"]);
+    // Exactly as a task verb that doesn't exist answers, for everyone and whatever is sent.
+    for (const who of [MERGER, OWNER, AGENT, PUBLIC]) {
+      for (const body of [{ submission_no: 1, commit_sha: HEAD }, {}]) {
+        const got = await merge(who, r.id, r.task, body);
+        const none = await api(who, "POST", `/v1/workspaces/${r.id}/tasks/${r.task}/no-such-verb`, body);
+        expect([got.status, got.text], who.id).toEqual([none.status, none.text]);
+      }
     }
+    expect((await merge(MERGER, r.id, r.task)).code).toBe("not_found");
+    // Without an idempotency key too.
+    const bare = async (verb: string) => {
+      const res = await SELF.fetch(`https://api.internal/v1/workspaces/${r.id}/tasks/${r.task}/${verb}`, { method: "POST", headers: { "x-podster-assertion": await assertion(MERGER), "content-type": "application/json" }, body: "{}" });
+      return [res.status, await res.text()];
+    };
+    expect(await bare("merge")).toEqual(await bare("no-such-verb"));
     // A merge asked for before the switch went off isn't carried out while it's off.
     await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)"));
     expect((await merge(MERGER, r.id, r.task)).status).toBe(200);

@@ -4181,11 +4181,9 @@ impl Workspace {
                 move |sql, who, now| handle_send_message(sql, who, &target, &body, now),
             ),
             // Asking for a merge of a task's reviewed commit (M5 step 7b). It records the request, and the alarm's job
-            // does the rest. With managed repositories off the route doesn't exist.
-            (Method::Post, ["tasks", _, "merge"]) => {
-                if !switched_on {
-                    return Err(ApiError::not_found());
-                }
+            // does the rest. With managed repositories off this arm isn't taken, so the request goes on as any task
+            // verb that doesn't exist does, and answers exactly as one.
+            (Method::Post, ["tasks", _, "merge"]) if switched_on => {
                 let owner_holds = self
                     .owner_holds()
                     .await

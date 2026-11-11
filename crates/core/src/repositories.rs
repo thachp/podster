@@ -128,6 +128,9 @@ pub enum MergeState {
     Succeeded,
     /// A visible state of a completed task, with a reason code such as `commit_changed`.
     Failed,
+    /// A merge call went out and what it did couldn't be read. Nothing more is asked of the provider but reads, which
+    /// go on until one settles it as succeeded or failed.
+    OutcomeUnknown,
 }
 
 impl MergeState {
@@ -137,6 +140,7 @@ impl MergeState {
             MergeState::Requested => "requested",
             MergeState::Succeeded => "succeeded",
             MergeState::Failed => "failed",
+            MergeState::OutcomeUnknown => "outcome_unknown",
         }
     }
 
@@ -146,6 +150,7 @@ impl MergeState {
             MergeState::Requested,
             MergeState::Succeeded,
             MergeState::Failed,
+            MergeState::OutcomeUnknown,
         ]
         .into_iter()
         .find(|s| s.name() == name)

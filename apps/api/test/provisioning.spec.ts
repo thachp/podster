@@ -521,7 +521,7 @@ describe("the provisioning job", () => {
       ["the update ruleset has an extra bypass actor", { ruleset: "extra_bypass" }, "bypass_differs", 3],
       ["the bypass lists can't be seen", { hideBypass: true }, "bypass_differs", 3],
       ["Actions are still on", { disableActions: "ignore" }, "actions_enabled", 3],
-      ["Actions can't be read", { actionsRead: 403 }, "actions_unreadable", 0],
+      ["Actions can't be read", { actionsRead: 403 }, "read_back_failed", 0],
       ["a ruleset Podster didn't make is there", { fresh: { rulesets: [stray] } }, "unexpected_ruleset", 0],
       ["the default branch has no commit", { fresh: { hasCommit: false } }, "no_initial_commit", 0],
       ["the repository came back private", { fresh: { private: true } }, "visibility_differs", 0],

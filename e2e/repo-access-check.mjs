@@ -3,7 +3,8 @@
 //
 //   node repo-access-check.mjs --base-url http://localhost:8787
 //
-// A local stack can't reach GitHub, so no room here can have a linked repository and no token can ever be minted. What
+// The room here has no linked repository, so no token can ever be minted for it (merge-check.mjs makes one, against the
+// rehearsal's fake GitHub). What
 // this shows end to end is the switch's wiring and that every call is refused with no token in the answer: the agent
 // sees the tool only with the switch on, and an agent without a grant, and one whose task isn't its own, gets a
 // refusal. The grant, standing and minting paths themselves are covered against a fake GitHub in apps/api's tests.
@@ -30,10 +31,10 @@ const made = await owner.must("POST", `/v1/workspaces/${room}/tasks`, { title: "
 const accepted = await coder.must("accept_task", { workspace_id: room, task_id: made.id, version: made.version });
 const where = { workspace_id: room, task_id: made.id };
 
-await check("M5-S6a", "with the switch on, the agent is offered get_repo_access, and no merge or deploy tool", async () => {
+await check("M5-S6a", "with the switch on, the agent is offered exactly get_repo_access and merge_task for a repository, and no deploy tool", async () => {
   const tools = await coder.tools();
-  ok(tools.includes("get_repo_access"), `get_repo_access isn't listed: ${tools.join(", ")}`);
-  ok(!tools.some((t) => /merge|deploy/.test(t)), "a merge or deploy tool is exposed");
+  // Step 7b's tool is listed with the switch on, and only then: the journey and managed-off-check.mjs, with it off, find neither.
+  eq(tools.filter((t) => /repo|merge|deploy/.test(t)).sort(), ["get_repo_access", "merge_task"], "the managed-repository tools");
 });
 
 await check("M5-S6b", "an agent without a grant gets a refusal and no token", async () => {

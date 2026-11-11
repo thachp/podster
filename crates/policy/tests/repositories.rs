@@ -871,3 +871,14 @@ fn events_about_a_tasks_change_follow_the_change_and_its_other_events_follow_the
         );
     }
 }
+
+#[test]
+fn only_an_operator_as_a_person_may_recheck_a_repository() {
+    assert_eq!(authorize_recheck(Person, true), Ok(()));
+    assert_eq!(
+        authorize_recheck(Person, false),
+        Err(RepoDenial::NotAllowed)
+    );
+    assert_eq!(authorize_recheck(Agent, true), Err(RepoDenial::NotAllowed));
+    assert_eq!(authorize_recheck(Agent, false), Err(RepoDenial::NotAllowed));
+}

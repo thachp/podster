@@ -828,3 +828,85 @@ mod tests {
         assert_eq!(codes.len(), all.len());
     }
 }
+
+/// What an operator's recheck of a room's repository read (M5 step 7b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecheckRead {
+    /// Everything read back is exactly what provisioning set, and the default branch is the link's.
+    ExactlyRight,
+    /// A definite difference, with its reason code.
+    Differs(&'static str),
+    /// No definite answer.
+    CouldNotRead,
+}
+
+/// What a recheck does to the link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recheck {
+    /// The link isn't degraded, so there's nothing to recheck. It stays as it is.
+    Unchanged,
+    /// Degraded, and read back exactly right: ready again.
+    MakeReady,
+    /// Still degraded, for this reason now.
+    StillDegraded(&'static str),
+    /// Nothing can be said, and nothing changes.
+    Unavailable,
+}
+
+/// Decides an operator's recheck. Only a degraded link is ever changed, only to ready, and only on a read-back that is
+/// exactly right. A suspended link isn't lifted here, and nothing here degrades. `read` is `None` when no read was made.
+pub fn decide_recheck(
+    status: crate::repositories::LinkStatus,
+    read: Option<RecheckRead>,
+) -> Recheck {
+    use crate::repositories::LinkStatus;
+    match (status, read) {
+        (LinkStatus::Ready | LinkStatus::Suspended, _) => Recheck::Unchanged,
+        (LinkStatus::Degraded, Some(RecheckRead::ExactlyRight)) => Recheck::MakeReady,
+        (LinkStatus::Degraded, Some(RecheckRead::Differs(reason))) => {
+            Recheck::StillDegraded(reason)
+        }
+        (LinkStatus::Degraded, Some(RecheckRead::CouldNotRead) | None) => Recheck::Unavailable,
+    }
+}
+
+#[cfg(test)]
+mod recheck_tests {
+    use super::*;
+    use crate::repositories::LinkStatus;
+
+    #[test]
+    fn only_a_degraded_link_read_back_exactly_right_becomes_ready() {
+        assert_eq!(
+            decide_recheck(LinkStatus::Degraded, Some(RecheckRead::ExactlyRight)),
+            Recheck::MakeReady
+        );
+        assert_eq!(
+            decide_recheck(
+                LinkStatus::Degraded,
+                Some(RecheckRead::Differs("bypass_differs"))
+            ),
+            Recheck::StillDegraded("bypass_differs")
+        );
+        for unread in [Some(RecheckRead::CouldNotRead), None] {
+            assert_eq!(
+                decide_recheck(LinkStatus::Degraded, unread),
+                Recheck::Unavailable
+            );
+        }
+        for status in [LinkStatus::Ready, LinkStatus::Suspended] {
+            for read in [
+                Some(RecheckRead::ExactlyRight),
+                Some(RecheckRead::Differs("x")),
+                Some(RecheckRead::CouldNotRead),
+                None,
+            ] {
+                assert_eq!(
+                    decide_recheck(status, read),
+                    Recheck::Unchanged,
+                    "{status:?}"
+                );
+            }
+        }
+    }
+}

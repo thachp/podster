@@ -2,7 +2,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
-import { FAKE_AGENT_KEY_PEM, FAKE_APP_KEY_PEM, FAKE_GITHUB, fakeGithub } from "./test/fake-github.ts";
+import { FAKE_AGENT_KEY_PEM, FAKE_APP_KEY_PEM, FAKE_GITHUB, FAKE_MERGE_KEY_PEM, fakeGithub } from "./test/fake-github.ts";
 
 // A throwaway key per run. Tests sign as the gateway, and the Worker verifies with the public half.
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -138,6 +138,9 @@ export default defineConfig({
           GITHUB_AGENT_INSTALLATION_ID: String(FAKE_GITHUB.agentInstallationId),
           GITHUB_AGENT_APP_KEY: FAKE_AGENT_KEY_PEM,
           REPO_TOKEN_KEY: "3c".repeat(32),
+          // The merge App (M5 step 7b), pointing at the fake, with its own installation and key. The real ones are the owner's to set.
+          GITHUB_MERGE_INSTALLATION_ID: String(FAKE_GITHUB.mergeInstallationId),
+          GITHUB_MERGE_APP_KEY: FAKE_MERGE_KEY_PEM,
           TEST_FAKE_GITHUB: JSON.stringify(FAKE_GITHUB),
           // Set only by e2e/run-langgraph-check.mjs. Empty, a2a-langgraph.spec.ts skips.
           TEST_LANGGRAPH_ASSISTANT: process.env.PODSTER_LANGGRAPH_URL ? (process.env.PODSTER_LANGGRAPH_ASSISTANT ?? "") : "",

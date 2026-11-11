@@ -459,6 +459,10 @@ async fn route(
             )
             .await;
         }
+        ["v1", "moderation", "repositories", workspace, "recheck"] if method == Method::Post => {
+            let key = req.headers().get("idempotency-key")?;
+            return moderation::recheck_repository(&env, &caller, workspace, key).await;
+        }
         ["v1", "moderation", "rooms", handle, verb @ ("suspend" | "lift")]
             if method == Method::Post =>
         {

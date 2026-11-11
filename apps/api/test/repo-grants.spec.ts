@@ -619,7 +619,8 @@ describe("what a grant shows and logs", () => {
   it("adds no route an agent could reach for a merge or a release, and the token route is step 6's alone", async () => {
     const contract: { path: string; method: string; operation: string }[] = JSON.parse(BINDINGS.TEST_API_ROUTES);
     expect(contract.filter((r) => r.path.includes("/repository/grants")).map((r) => r.operation).sort()).toEqual(["grantRepositoryAction", "listRepositoryGrants", "revokeRepositoryGrant"]);
-    expect(contract.filter((r) => /merge|release-status|deploy/i.test(r.path + r.operation))).toEqual([]);
+    // The one merge route is step 7b's, behind the switch. Nothing for a release or a deploy.
+    expect(contract.filter((r) => /merge|release-status|deploy/i.test(r.path + r.operation)).map((r) => r.operation)).toEqual(["mergeTask"]);
     expect(contract.filter((r) => /repo-access/i.test(r.path)).map((r) => r.operation)).toEqual(["getRepoAccess"]);
   });
 });

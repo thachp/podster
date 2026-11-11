@@ -80,6 +80,7 @@ mod collaboration;
 mod cursor;
 mod downloads;
 mod held;
+mod merges;
 mod moderation;
 mod objects;
 mod outputs;
@@ -95,6 +96,7 @@ mod roles;
 mod submission_files;
 mod visibility;
 
+pub(crate) use merges::INTERNAL_REPOSITORY_RECHECK;
 pub(crate) use moderation::INTERNAL_SUSPENSION;
 pub(crate) use public::{INTERNAL_EXPLORE_ENTRY, INTERNAL_PUBLIC_PAGE};
 pub(crate) use public_claims::{INTERNAL_PUBLIC_CLAIM, INTERNAL_PUBLIC_CLAIM_STATUS};
@@ -2364,6 +2366,17 @@ mod queries {
             let grant_events = REPO_GRANT_EVENTS.map(|kind| format!("'{kind}'")).join(", ");
             query.push_str(&format!(" AND (task_id IS NOT NULL OR type NOT IN ({grant_events}) OR subject_id = ?4 OR actor_id = ?4)"));
         }
+        // What Podster saw of a task's pull request, and a merge's events, are shown to fewer than may read the task
+        // (`sees_task_change`): a person in the room who's no guest, or the task's own assignee or reviewer, and for
+        // a merge whoever asked for it. Narrowed here as well as by `can_see_event` below, so a page isn't left short
+        // by rows the viewer can't see.
+        if caller.kind != PrincipalKind::Person || caller.role == Role::Guest {
+            query.push_str(
+                " AND ((substr(type, 1, 12) <> 'task_change.' AND substr(type, 1, 6) <> 'merge.')
+                   OR task_id IN (SELECT id FROM task WHERE assignee_id = ?4 OR reviewer_id = ?4)
+                   OR (substr(type, 1, 6) = 'merge.' AND (actor_id = ?4 OR subject_id = ?4)))",
+            );
+        }
         query.push_str(if newest {
             " ORDER BY seq DESC"
         } else {
@@ -2570,13 +2583,25 @@ mod queries {
             .collect();
         // What Podster saw of the task's pull request is in its history only for those shown the change itself.
         let shown_change = podster_policy::repositories::sees_task_change(&who.caller, &task);
+        // A merge's events are also for whoever asked for it, as `can_see_event` has it.
+        let own_merge_events: Vec<String> = if shown_change {
+            vec![]
+        } else {
+            rows(sql, "SELECT id FROM event WHERE task_id = ?1 AND substr(type, 1, 6) = 'merge.' AND (actor_id = ?2 OR subject_id = ?2)", vec![id.into(), who.caller.id.as_str().into()])?
+                .iter()
+                .filter_map(|r| text(&r["id"]))
+                .collect()
+        };
         let history: Vec<Value> = history
             .iter()
             .filter(|r| {
+                let kind = r["type"].as_str().unwrap_or_default();
                 shown_change
-                    || !r["type"]
+                    || !(podster_policy::is_task_change_event(kind)
+                        || podster_policy::is_merge_event(kind))
+                    || r["id"]
                         .as_str()
-                        .is_some_and(podster_policy::is_task_change_event)
+                        .is_some_and(|event| own_merge_events.iter().any(|own| own == event))
             })
             .map(|r| marked(r, "actor_id", "actor_org"))
             .collect();
@@ -3594,6 +3619,14 @@ impl Workspace {
         {
             due = Some(due.map_or(next, |d| d.min(next)));
         }
+        // A merge that's been asked for and is due a pass (M5 step 7b).
+        if let Some(next) = migrated
+            .then(|| merges::next_due(&sql, &self.env, now))
+            .transpose()?
+            .flatten()
+        {
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
         // A task's pull request that's due a read (M5 step 7a).
         if let Some(next) = migrated
             .then(|| changes::next_due(&sql, &self.env, now))
@@ -3887,6 +3920,9 @@ impl Workspace {
     async fn dispatch(&self, mut req: Request) -> R<Value> {
         if req.path() == moderation::INTERNAL_SUSPENSION {
             return self.operator_suspension(req).await;
+        }
+        if req.path() == merges::INTERNAL_REPOSITORY_RECHECK {
+            return self.operator_recheck(req).await;
         }
         if req.path() == repositories::INTERNAL_PROVIDER_DELIVERY {
             return self.provider_delivery(req).await;
@@ -4183,6 +4219,28 @@ impl Workspace {
                 test_fail,
                 move |sql, who, now| handle_send_message(sql, who, &target, &body, now),
             ),
+            // Asking for a merge of a task's reviewed commit (M5 step 7b). It records the request, and the alarm's job
+            // does the rest. With managed repositories off this arm isn't taken, so the request goes on as any task
+            // verb that doesn't exist does, and answers exactly as one.
+            (Method::Post, ["tasks", _, "merge"]) if switched_on => {
+                let owner_holds = self
+                    .owner_holds()
+                    .await
+                    .ok_or_else(|| ApiError::api(503, "standing_unknown"))?;
+                let asked = merges::Asked {
+                    owner_holds,
+                    caller_person: changes::controller_of(&identity),
+                    configured: self.merge_config(&sql).is_some(),
+                };
+                self.command(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    move |sql, who, now| merges::request(sql, who, &target, &body, &asked, now),
+                )
+            }
             (Method::Post, ["tasks", _, _]) => {
                 let accept = verb == "accept";
                 let task_id = target.clone();
@@ -4190,7 +4248,11 @@ impl Workspace {
                 let fresh = self
                     .read_for_command(&identity, &target, &verb, &body, switched_on)
                     .await;
-                let context = changes::Context { switched_on, fresh };
+                let context = changes::Context {
+                    switched_on,
+                    fresh,
+                    controller: changes::controller_of(&identity),
+                };
                 let task = self.command(
                     &identity,
                     key,
@@ -4850,6 +4912,10 @@ impl DurableObject for Workspace {
         // Agent repository tokens whose authority ended are taken back. Each keeps its own backoff.
         if let Err(error) = self.repo_token_upkeep().await {
             console_error!("repo token upkeep failed: {:?}", error.code());
+        }
+        // A merge that was asked for is carried out, one recorded step at a time.
+        if let Err(error) = self.merge_upkeep().await {
+            console_error!("merge upkeep failed: {:?}", error.code());
         }
         // Pull requests whose state is stale are read again, within the read cap.
         if let Err(error) = self.refresh_changes().await {

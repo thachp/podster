@@ -32,7 +32,8 @@ use crate::github::{
     PullAnswer,
 };
 use podster_core::provisioning::{
-    decide_recheck, job_backoff_ms, verify_ready, Expected, Recheck, RecheckRead,
+    decide_recheck, gone_look, job_backoff_ms, verify_ready, Expected, GoneLook, NotReady, Recheck,
+    RecheckRead,
 };
 use podster_core::repo_grants::Grant;
 use podster_core::repo_merge::{
@@ -1027,7 +1028,7 @@ fn observation<'a>(pull: &'a PullSeen, default_branch_has: Option<bool>) -> Pull
 
 /// Sets a ready link `degraded`, with the reason and an event for the room's owner and admins. Only for a definite
 /// difference from what provisioning set. Coding work in the room stops until an operator has rechecked it.
-fn degrade(sql: &SqlStorage, repo_id: i64, code: &'static str, now: i64) -> R<()> {
+pub(super) fn degrade(sql: &SqlStorage, repo_id: i64, code: &'static str, now: i64) -> R<()> {
     let was_ready = !rows(
         sql,
         "SELECT 1 AS ready FROM repo_link WHERE provider_repo_id = ? AND status = 'ready'",
@@ -1042,6 +1043,8 @@ fn degrade(sql: &SqlStorage, repo_id: i64, code: &'static str, now: i64) -> R<()
         "UPDATE repo_link SET status = 'degraded', status_reason = ?, updated_at = ? WHERE provider_repo_id = ? AND status = 'ready'",
         vec![code.into(), now.into(), repo_id.into()],
     )?;
+    // Every token agents hold on it is marked for revocation in this same transaction (the M5 security review's F2).
+    store::mark_stale_repo_tokens(sql, now)?;
     record_event(
         sql,
         "repository.degraded",
@@ -1104,7 +1107,7 @@ impl Workspace {
                 json!({ "event": "merge.token_unrevoked", "ws": room })
             );
         }
-        match read_back {
+        let verdict = match read_back {
             Err(failure) => Readiness::CouldNotRead(failure.status()),
             Ok((observed, described)) => match verify_ready(&expected, &observed) {
                 Err(not_ready) => Readiness::Mismatch(not_ready.code()),
@@ -1113,6 +1116,32 @@ impl Workspace {
                 }
                 Ok(()) => Readiness::Ready,
             },
+        };
+        // "Gone" takes two definite answers a minute apart (`core::gone_look`); any read that finds it clears the first.
+        let gone =
+            matches!(verdict, Readiness::Mismatch(code) if code == NotReady::RepositoryGone.code());
+        let look = self.in_transaction(move |sql| {
+            let now = now_ms();
+            if !gone {
+                // Anything but "gone" again clears a first sighting, a read that couldn't be made included: the confirming
+                // look either degrades or clears, so a pending sighting costs at most one more read.
+                exec(sql, "UPDATE repo_link SET gone_seen_at = NULL WHERE provider_repo_id = ? AND gone_seen_at IS NOT NULL", vec![repo_id.into()])?;
+                return Ok(None);
+            }
+            let first = rows(sql, "SELECT gone_seen_at FROM repo_link WHERE provider_repo_id = ?", vec![repo_id.into()])?
+                .first()
+                .and_then(|row| row["gone_seen_at"].as_i64());
+            let look = gone_look(first, now);
+            if look == GoneLook::FirstSeen {
+                exec(sql, "UPDATE repo_link SET gone_seen_at = ? WHERE provider_repo_id = ?", vec![now.into(), repo_id.into()])?;
+            }
+            Ok(Some(look))
+        });
+        match (verdict, look) {
+            (verdict, Ok(None) | Ok(Some(GoneLook::Confirmed))) => verdict,
+            (_, Ok(Some(GoneLook::FirstSeen | GoneLook::TooSoon)) | Err(_)) => {
+                Readiness::CouldNotRead(404)
+            }
         }
     }
 
@@ -1150,8 +1179,9 @@ impl Workspace {
             return Err(ApiError::internal("unknown link status"));
         };
         let repo_id = int(&link["provider_repo_id"]);
-        // Only a degraded link is read: for any other the decision is the same whatever GitHub says.
-        let read = if status == LinkStatus::Degraded {
+        // A degraded link is read to restore it, and a ready one to degrade it on a definite difference. A suspended one
+        // isn't read: the decision is the same whatever GitHub says.
+        let read = if matches!(status, LinkStatus::Degraded | LinkStatus::Ready) {
             let room = rows(&sql, "SELECT id FROM workspace", vec![])?
                 .first()
                 .and_then(|row| text(&row["id"]))
@@ -1184,6 +1214,10 @@ impl Workspace {
             let answer = match decide_recheck(current.unwrap_or(status), read.filter(|_| current == Some(status))) {
                 Recheck::Unchanged => unchanged,
                 Recheck::Unavailable => return Err(refuse(502, "provider_unavailable")),
+                Recheck::Degrade(code) => {
+                    degrade(sql, repo_id, code, now)?;
+                    json!({ "status": LinkStatus::Degraded.name(), "reason": code })
+                }
                 Recheck::StillDegraded(code) => {
                     exec(
                         sql,

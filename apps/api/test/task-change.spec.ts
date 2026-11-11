@@ -798,6 +798,67 @@ describe("the refresh job", () => {
     expect(await events(r.id, "repository.read_refused")).toEqual([{ type: "repository.read_refused", actor_id: "system", task_id: null, reason: "provider_credential_failed" }]);
   });
 
+  it("stops reading an answer at its bound instead of waiting for the rest (M5 security review F5)", async () => {
+    const id = await room();
+    const t = await accepted(id);
+    // A pull request's answer is read up to 1 MB. This one sends 2 MB with no stated length, then nothing, and never ends.
+    await fake({ pullRead: "flood" });
+    const started = Date.now();
+    const sent = await submit(AGENT, id, t.task, { version: t.version, commit_sha: HEAD, pr_number: 7 });
+    expect([sent.status, sent.body?.error?.code]).toEqual([502, "provider_unavailable"]);
+    // The read stopped at the bound. Reading to the end would have waited out the call's 10 seconds.
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("waits as long as GitHub says when it rate-limits a read, and records no refusal of Podster (M5 security review F1)", async () => {
+    const r = await submitted();
+    await settle(r.id);
+    const link = () => inRoom(r.id, (sql) => sql.exec("SELECT read_failures, reads_not_before FROM repo_link").one() as any);
+    // [the limit GitHub answered with, the wait it gave]
+    const cases: [object, number][] = [[{ kind: "primary", seconds: 600 }, 600_000], [{ kind: "secondary", seconds: 300 }, 300_000], [{ kind: "429" }, 60_000]];
+    for (const [limited, wait] of cases) {
+      // The fake's answer first, then the room's wait lifted: its own alarm may read at once.
+      await fake({ pullRead: limited });
+      await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET read_failures = 0, reads_not_before = NULL"));
+      const before = Date.now();
+      await nudge(r.id);
+      await afterPass(r.id, async () => expect((await link()).reads_not_before).not.toBeNull());
+      await settle(r.id);
+      const held = await link();
+      // The room's reads wait for GitHub's time, bounded, and the run of refusals isn't added to.
+      expect(held.read_failures, JSON.stringify(limited)).toBe(0);
+      expect(held.reads_not_before, JSON.stringify(limited)).toBeGreaterThanOrEqual(before + wait - 1_000);
+      expect(held.reads_not_before, JSON.stringify(limited)).toBeLessThanOrEqual(Date.now() + wait + 1_000);
+      // Nor is the change's own: a limit says nothing about it.
+      expect(await change(r.id, r.task), JSON.stringify(limited)).toMatchObject({ read_failures: 0, not_found_reads: 0, unwatched_at: null });
+    }
+    // GitHub refusing Podster is never said, since it didn't.
+    expect(await events(r.id, "repository.read_refused")).toEqual([]);
+    // The wait over, a read that answers clears it.
+    await fake({ pullRead: 200 });
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET reads_not_before = ?", Date.now() - 1));
+    await nudge(r.id);
+    await afterPass(r.id, async () => expect(await link()).toEqual({ read_failures: 0, reads_not_before: null }));
+  });
+
+  it("reads a spent-limit 403 as a limit once, and as GitHub refusing Podster if it comes again after the reset", async () => {
+    const r = await submitted();
+    await settle(r.id);
+    const link = () => inRoom(r.id, (sql) => sql.exec("SELECT read_failures, reads_not_before FROM repo_link").one() as any);
+    await fake({ pullRead: { kind: "primary", seconds: 120 } });
+    await nudge(r.id);
+    await afterPass(r.id, async () => expect((await link()).reads_not_before).not.toBeNull());
+    await settle(r.id);
+    expect((await link()).read_failures).toBe(0);
+    expect(await events(r.id, "repository.read_refused")).toEqual([]);
+    // The reset has passed and the same call is still refused the same way: the limit refilled, so this is a refusal.
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET reads_not_before = ?", Date.now() - 1));
+    await nudge(r.id);
+    await afterPass(r.id, async () => expect((await link()).read_failures).toBe(1));
+    await settle(r.id);
+    expect(await events(r.id, "repository.read_refused")).toEqual([{ type: "repository.read_refused", actor_id: "system", task_id: null, reason: "provider_credential_failed" }]);
+  });
+
   it("treats a token that can't be had as the room's credential failing, and never as a pull request that's gone", async () => {
     const r = await approved();
     await settle(r.id);
@@ -1146,11 +1207,14 @@ describe("the room migration", () => {
     await settle(r.id);
     const newest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
     await inRoom(r.id, (sql) => {
-      // M5 step 7b's merge bookkeeping, the newest migration, comes off first.
-      // The newest migration, which keeps an approval's reviewer (A1, decision 195), comes off first.
+      // The newest step, the M5 security review's two columns, comes off first.
+      for (const [table, column] of [["repo_link", "gone_seen_at"], ["repo_request", "limited_since"], ["repo_request", "limited_call"]]) sql.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+      sql.exec("UPDATE schema_version SET version = version - 1");
+      // The step that keeps an approval's reviewer (A1, decision 195) comes off next.
       sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_person");
       sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_id");
       sql.exec("UPDATE schema_version SET version = version - 1");
+      // M5 step 7b's merge bookkeeping comes off next.
       sql.exec("DROP TABLE merge_request");
       sql.exec("ALTER TABLE task_change DROP COLUMN merge_finished_at");
       sql.exec("ALTER TABLE task_change DROP COLUMN merge_called_at");

@@ -16,6 +16,52 @@ pub const RETRY_SUFFIX_DIGITS: usize = 6;
 /// How many times setup may run for one room's request: the first run and four retries. Past that a retry is refused
 /// until an operator resets it, which isn't built yet.
 pub const MAX_SETUP_RUNS: i64 = 5;
+/// How long one request may stay pending while GitHub rate-limits it, from its first limited attempt: a day. Each limit
+/// waits the time GitHub gave and spends no run (the M5 security review's F5). Past this the request ends `failed` as
+/// [`RATE_LIMITED_REASON`], still without spending a run, and a retry's first call waits for the last reset GitHub gave.
+pub const RATE_LIMITED_FOR_MS: i64 = 24 * 60 * 60 * 1000;
+/// The reason a request ends with once it has been rate-limited for [`RATE_LIMITED_FOR_MS`].
+pub const RATE_LIMITED_REASON: &str = "provider_rate_limited";
+
+/// Whether a run GitHub rate-limited waits, given when the request was first limited (`limited_since`, or `None` if
+/// this is the first). Bounded by elapsed time, not by how many limits came, so short waits can't end it early.
+pub fn rate_limited_run_waits(limited_since: Option<i64>, now: i64) -> bool {
+    limited_since.is_none_or(|since| now.saturating_sub(since) < RATE_LIMITED_FOR_MS)
+}
+
+/// The wait before setup reads a repository it just created again, when GitHub answered that it isn't there. A new
+/// repository can take a moment to show by its ID, so setup never fails on that alone.
+pub const SETUP_GONE_WAIT_MS: i64 = 60 * 1000;
+/// How many such waits in a row before the run fails as `read_back_failed`, never `repository_gone`.
+pub const SETUP_GONE_WAITS: i64 = 10;
+
+/// How often a linked repository's protections and settings are read back when nothing else reads them (ADR 0009's
+/// "on a schedule", and the M5 security review's F8): a day after the last read that found them exactly right.
+/// Proposed. A merge reads them too, before it's asked for.
+pub const READINESS_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
+/// After a scheduled read that couldn't be made, or found nothing definite, the next waits this long.
+pub const READINESS_RETRY_MS: i64 = 60 * 60 * 1000;
+
+/// When a ready link is next due its scheduled read-back: [`READINESS_INTERVAL_MS`] after it was last found exactly
+/// right, and never sooner than [`READINESS_RETRY_MS`] after the last scheduled attempt, whatever came of it. A
+/// repository seen gone (`gone_seen_at`) is looked at again [`GONE_CONFIRM_MS`] later, and never sooner than that after
+/// the last attempt, so a second look that can't be made doesn't bring the alarm straight back.
+pub fn readiness_due_at(
+    verified_at: i64,
+    last_attempt_at: Option<i64>,
+    gone_seen_at: Option<i64>,
+) -> i64 {
+    let after_last = |wait: i64| last_attempt_at.map_or(i64::MIN, |at| at.saturating_add(wait));
+    match gone_seen_at {
+        Some(seen) => seen
+            .saturating_add(GONE_CONFIRM_MS)
+            .max(after_last(GONE_CONFIRM_MS)),
+        None => verified_at
+            .saturating_add(READINESS_INTERVAL_MS)
+            .max(after_last(READINESS_RETRY_MS)),
+    }
+}
+
 /// The wait before a retry is taken: a minute after the first run, doubling, up to an hour.
 pub const RETRY_WAIT_MIN_MS: i64 = 60 * 1000;
 pub const RETRY_WAIT_MAX_MS: i64 = 60 * 60 * 1000;
@@ -109,20 +155,78 @@ pub enum Creation {
     NameTaken,
     /// The provider refused the call. Nothing was made by this call.
     Refused,
+    /// The provider limited how fast Podster may call it (`crate::rate_limit`). Nothing was made by this call, and it
+    /// says nothing about the request: the run isn't spent, and the same name is sent again after the wait.
+    RateLimited,
     /// Nobody knows: no answer, a server error, or an answer that can't be read. A repository may exist.
     Unknown,
 }
 
 /// Reads a creation call's outcome from its HTTP status, if one came back. `name_error` says the provider's answer blamed
-/// the name, and `has_id` that a created answer carried a repository ID.
-pub fn classify_creation(status: Option<u16>, name_error: bool, has_id: bool) -> Creation {
+/// the name, `has_id` that a created answer carried a repository ID, and `rate_limited` that the answer was a rate limit
+/// by `crate::rate_limit::rate_limit_wait_ms`, which comes before the status: a limit is a `403` or `429` too.
+pub fn classify_creation(
+    status: Option<u16>,
+    name_error: bool,
+    has_id: bool,
+    rate_limited: bool,
+) -> Creation {
     match status {
+        Some(403 | 429) if rate_limited => Creation::RateLimited,
         Some(201) if has_id => Creation::Created,
         Some(422) if name_error => Creation::NameTaken,
         // A client error says the call was understood and refused, so nothing was made.
         Some(400..=499) => Creation::Refused,
         _ => Creation::Unknown,
     }
+}
+
+/// The permissions provisioning asks for on each of its tokens, and the only ones it accepts back: the provisioning
+/// App's own, Administration to write and Metadata to read (ADR 0009). Asking names them, so a later change to the
+/// App's permissions can't widen these tokens unseen (the M5 security review's F4).
+pub const PROVISIONING_PERMISSIONS: [(&str, &str); 2] =
+    [("administration", "write"), ("metadata", "read")];
+/// The one token provisioning asks for across the whole installation besides the creation call's: Metadata to read and
+/// nothing else, to ask whether a repository a narrowed token couldn't be minted for is there at all.
+pub const PRESENCE_PERMISSIONS: [(&str, &str); 1] = [("metadata", "read")];
+/// GitHub's installation tokens expire one hour after they're made. A minute more allows for clocks.
+pub const TOKEN_LIFE_MAX_MS: i64 = 61 * 60 * 1000;
+
+/// Whether a token provisioning was given is the one it asked for, before it's used: exactly
+/// [`PROVISIONING_PERMISSIONS`], expiring within [`TOKEN_LIFE_MAX_MS`] and not already, and, when it was narrowed to
+/// one repository, reaching that repository and no other. The creation token can't be narrowed, since its repository
+/// doesn't exist yet, so `narrowed_to` is `None` and the answer's repositories aren't judged.
+pub fn provisioning_token_matches(
+    narrowed_to: Option<i64>,
+    answer_repo_ids: &[i64],
+    answer_permissions: &[(&str, &str)],
+    expires_at: Option<i64>,
+    now: i64,
+) -> bool {
+    token_answer_matches(
+        narrowed_to,
+        answer_repo_ids,
+        answer_permissions,
+        &PROVISIONING_PERMISSIONS,
+        expires_at,
+        now,
+    )
+}
+
+/// The same check, for a token that asked for `asked`.
+pub fn token_answer_matches(
+    narrowed_to: Option<i64>,
+    answer_repo_ids: &[i64],
+    answer_permissions: &[(&str, &str)],
+    asked: &[(&str, &str)],
+    expires_at: Option<i64>,
+    now: i64,
+) -> bool {
+    let scoped = narrowed_to.is_none_or(|repo_id| answer_repo_ids == [repo_id]);
+    let exact = answer_permissions.len() == asked.len()
+        && asked.iter().all(|pair| answer_permissions.contains(pair));
+    let fresh = expires_at.is_some_and(|at| at > now && at <= now + TOKEN_LIFE_MAX_MS);
+    scoped && exact && fresh
 }
 
 /// The name a retry sends: the chosen name with a suffix the server generated, kept within the limit. `None` if the suffix
@@ -176,9 +280,70 @@ pub struct Ruleset {
     pub bypass: Option<Vec<Bypass>>,
 }
 
+/// The repository's own settings that bear on what strangers and agents can do, as read back. Podster asks for every
+/// one of these off at creation (the M5 security review's F7 and F8). A public repository can't forbid forks: GitHub
+/// lets anyone fork a public repository whatever its settings, so forking isn't read or judged here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepoSettings {
+    pub has_issues: bool,
+    pub has_wiki: bool,
+    pub has_projects: bool,
+    pub has_discussions: bool,
+    /// `None` when the answer didn't carry it. GitHub documents that merge settings show only to a token that can read
+    /// and write contents, which provisioning's can't, so its absence is no difference. A value that's there is judged.
+    pub allow_auto_merge: Option<bool>,
+    /// The same.
+    pub delete_branch_on_merge: Option<bool>,
+}
+
+impl RepoSettings {
+    /// What Podster asks for at creation: issues, wiki, projects and discussions off, auto-merge off, and branches
+    /// kept after a merge, which is GitHub's default and needs no organization owner to set.
+    pub const EXPECTED: RepoSettings = RepoSettings {
+        has_issues: false,
+        has_wiki: false,
+        has_projects: false,
+        has_discussions: false,
+        allow_auto_merge: Some(false),
+        delete_branch_on_merge: Some(false),
+    };
+
+    fn as_expected(self) -> bool {
+        let e = RepoSettings::EXPECTED;
+        self.has_issues == e.has_issues
+            && self.has_wiki == e.has_wiki
+            && self.has_projects == e.has_projects
+            && self.has_discussions == e.has_discussions
+            && self
+                .allow_auto_merge
+                .is_none_or(|v| Some(v) == e.allow_auto_merge)
+            && self
+                .delete_branch_on_merge
+                .is_none_or(|v| Some(v) == e.delete_branch_on_merge)
+    }
+}
+
+/// The repository's default permissions for a workflow's token, as read back. Actions are off, so no workflow runs, but
+/// a repository whose Actions are switched back on mustn't start with workflows that can write or approve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowPermissions {
+    /// GitHub's `default_workflow_permissions`: `read` or `write`.
+    pub default: String,
+    pub can_approve_pull_request_reviews: bool,
+}
+
+impl WorkflowPermissions {
+    fn as_expected(&self) -> bool {
+        self.default == "read" && !self.can_approve_pull_request_reviews
+    }
+}
+
 /// Everything read back about a repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observed {
+    /// False when the read showed, definitely, that the repository isn't there ([`repository_gone`]). Nothing else read
+    /// then means anything.
+    pub present: bool,
     pub repo_id: i64,
     pub owner_id: i64,
     pub private: bool,
@@ -186,12 +351,16 @@ pub struct Observed {
     pub default_branch_has_commit: bool,
     /// `None` if the setting couldn't be read.
     pub actions_enabled: Option<bool>,
+    pub settings: RepoSettings,
+    pub workflow: WorkflowPermissions,
     pub rulesets: Vec<Ruleset>,
 }
 
 /// Why a repository isn't ready. Each is a reason code the room's people see.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotReady {
+    /// The repository isn't there any more: deleted, or out of the installation's reach (see [`repository_gone`]).
+    RepositoryGone,
     WrongRepository,
     WrongOwner,
     VisibilityDiffers,
@@ -204,11 +373,16 @@ pub enum NotReady {
     RulesetDiffers,
     BypassDiffers,
     UnexpectedRuleset,
+    /// Issues, wiki, projects, discussions, auto-merge or branch deletion differ from what creation asked for.
+    SettingsDiffer,
+    /// Workflows' default token can write, or approve pull requests.
+    WorkflowPermissionsDiffer,
 }
 
 impl NotReady {
     pub fn code(self) -> &'static str {
         match self {
+            NotReady::RepositoryGone => "repository_gone",
             NotReady::WrongRepository => "wrong_repository",
             NotReady::WrongOwner => "wrong_owner",
             NotReady::VisibilityDiffers => "visibility_differs",
@@ -221,6 +395,8 @@ impl NotReady {
             NotReady::RulesetDiffers => "ruleset_differs",
             NotReady::BypassDiffers => "bypass_differs",
             NotReady::UnexpectedRuleset => "unexpected_ruleset",
+            NotReady::SettingsDiffer => "settings_differ",
+            NotReady::WorkflowPermissionsDiffer => "workflow_permissions_differ",
         }
     }
 }
@@ -229,6 +405,8 @@ impl NotReady {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetupStep {
     DisableActions,
+    /// Workflows' default token reads only, and can't approve pull requests.
+    RestrictWorkflowPermissions,
     /// A pull request and the required status from the merge App, with no bypass actor.
     CreateReviewRuleset,
     /// No update of the default branch, with the merge App as the only bypass actor.
@@ -292,9 +470,73 @@ fn check_ruleset(ruleset: &Ruleset, kind: &Kind, expected: &Expected) -> Result<
     Ok(())
 }
 
+/// Whether an answer says, definitely, that the repository is gone (the lead's ruling of 2026-11-11 on takedowns).
+///
+/// GitHub's "Get a repository" documents `404` for a repository that doesn't exist or that the token can't see, and
+/// `301` for one that moved, which isn't this. A repository deleted on GitHub answers `404` by its ID. Only a `404` to a
+/// token that was minted successfully just before, for Podster's own installation, is definite: then the key, the
+/// installation and the rate limit were all fine a moment ago, and the installation no longer reaches the repository,
+/// whether it was deleted or taken out of the installation by hand. Anything else (no token, a refusal, a limit, a
+/// server's error) says nothing about the repository and still waits.
+pub fn repository_gone(token_minted: bool, status: u16) -> bool {
+    token_minted && status == 404
+}
+
+/// How long after a repository was first seen gone a second look must come before the link is degraded.
+pub const GONE_CONFIRM_MS: i64 = 60 * 1000;
+
+/// What one more "gone" answer means, given when the repository was first seen gone since it last read back right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoneLook {
+    /// The first: record when, and wait. Nothing changes yet.
+    FirstSeen,
+    /// Seen before, less than [`GONE_CONFIRM_MS`] ago: wait for a later look.
+    TooSoon,
+    /// Seen again a minute or more after the first, with no read that found it in between: it's gone.
+    Confirmed,
+}
+
+/// A first sighting older than this is no sighting: one `404`, then a long stretch with nothing read, then one more
+/// never adds up to "gone". Proposed.
+pub const GONE_SIGHTING_MAX_AGE_MS: i64 = 60 * 60 * 1000;
+
+/// Two definite answers at least [`GONE_CONFIRM_MS`] apart, and within [`GONE_SIGHTING_MAX_AGE_MS`] of each other,
+/// make a repository gone (ruled by the architect, 2026-11-11). The caller clears the first sighting on any other
+/// outcome of a later look, so the confirming look either degrades or clears it.
+pub fn gone_look(first_seen_at: Option<i64>, now: i64) -> GoneLook {
+    match first_seen_at {
+        None => GoneLook::FirstSeen,
+        Some(at) if now.saturating_sub(at) > GONE_SIGHTING_MAX_AGE_MS => GoneLook::FirstSeen,
+        Some(at) if now.saturating_sub(at) < GONE_CONFIRM_MS => GoneLook::TooSoon,
+        Some(_) => GoneLook::Confirmed,
+    }
+}
+
+/// The read-back of a repository [`repository_gone`] says isn't there: nothing in it but its ID.
+pub fn gone(repo_id: i64) -> Observed {
+    Observed {
+        present: false,
+        repo_id,
+        owner_id: 0,
+        private: false,
+        archived: false,
+        default_branch_has_commit: false,
+        actions_enabled: None,
+        settings: RepoSettings::EXPECTED,
+        workflow: WorkflowPermissions {
+            default: String::new(),
+            can_approve_pull_request_reviews: false,
+        },
+        rulesets: vec![],
+    }
+}
+
 /// What setup still has to add, or why this repository can't be made ready. Anything present and wrong is a refusal:
 /// setup never edits or removes a rule, so a rule someone changed is seen and not papered over.
 pub fn missing_steps(expected: &Expected, observed: &Observed) -> Result<Vec<SetupStep>, NotReady> {
+    if !observed.present {
+        return Err(NotReady::RepositoryGone);
+    }
     if observed.repo_id != expected.repo_id {
         return Err(NotReady::WrongRepository);
     }
@@ -310,11 +552,20 @@ pub fn missing_steps(expected: &Expected, observed: &Observed) -> Result<Vec<Set
     if !observed.default_branch_has_commit {
         return Err(NotReady::NoInitialCommit);
     }
+    // Creation asked for these. One that differs was changed by someone with admin rights, or GitHub didn't take it,
+    // and setup never edits a repository's settings to paper over either.
+    if !observed.settings.as_expected() {
+        return Err(NotReady::SettingsDiffer);
+    }
     let mut steps = vec![];
     match observed.actions_enabled {
         None => return Err(NotReady::ActionsUnreadable),
         Some(true) => steps.push(SetupStep::DisableActions),
         Some(false) => {}
+    }
+    // An organization's default may give workflows write. Setup narrows it, as it switches Actions off.
+    if !observed.workflow.as_expected() {
+        steps.push(SetupStep::RestrictWorkflowPermissions);
     }
     let mut review = false;
     let mut update = false;
@@ -345,6 +596,7 @@ pub fn verify_ready(expected: &Expected, observed: &Observed) -> Result<(), NotR
     match missing_steps(expected, observed)?.first() {
         None => Ok(()),
         Some(SetupStep::DisableActions) => Err(NotReady::ActionsEnabled),
+        Some(SetupStep::RestrictWorkflowPermissions) => Err(NotReady::WorkflowPermissionsDiffer),
         Some(SetupStep::CreateReviewRuleset | SetupStep::CreateUpdateRuleset) => {
             Err(NotReady::RulesetMissing)
         }
@@ -399,12 +651,18 @@ mod tests {
 
     fn ready() -> Observed {
         Observed {
+            present: true,
             repo_id: 9001,
             owner_id: 4242,
             private: false,
             archived: false,
             default_branch_has_commit: true,
             actions_enabled: Some(false),
+            settings: RepoSettings::EXPECTED,
+            workflow: WorkflowPermissions {
+                default: "read".to_string(),
+                can_approve_pull_request_reviews: false,
+            },
             rulesets: vec![review(), update()],
         }
     }
@@ -487,23 +745,26 @@ mod tests {
 
     #[test]
     fn a_creation_answer_is_read_from_its_status_and_nothing_else() {
-        assert_eq!(classify_creation(Some(201), false, true), Creation::Created);
+        assert_eq!(
+            classify_creation(Some(201), false, true, false),
+            Creation::Created
+        );
         // Made, by the status, but with no ID to know it by: nobody knows which repository that is.
         assert_eq!(
-            classify_creation(Some(201), false, false),
+            classify_creation(Some(201), false, false, false),
             Creation::Unknown
         );
         assert_eq!(
-            classify_creation(Some(422), true, false),
+            classify_creation(Some(422), true, false, false),
             Creation::NameTaken
         );
         assert_eq!(
-            classify_creation(Some(422), false, false),
+            classify_creation(Some(422), false, false, false),
             Creation::Refused
         );
         for refused in [400, 401, 403, 404, 409, 429] {
             assert_eq!(
-                classify_creation(Some(refused), false, false),
+                classify_creation(Some(refused), false, false, false),
                 Creation::Refused,
                 "{refused}"
             );
@@ -520,7 +781,7 @@ mod tests {
             Some(302),
         ] {
             assert_eq!(
-                classify_creation(unknown, false, true),
+                classify_creation(unknown, false, true, false),
                 Creation::Unknown,
                 "{unknown:?}"
             );
@@ -827,6 +1088,284 @@ mod tests {
         codes.dedup();
         assert_eq!(codes.len(), all.len());
     }
+
+    #[test]
+    fn a_ready_link_is_read_back_a_day_after_it_was_last_found_right_and_retried_hourly() {
+        assert_eq!(
+            readiness_due_at(1_000, None, None),
+            1_000 + READINESS_INTERVAL_MS
+        );
+        // An attempt long ago doesn't bring it forward.
+        assert_eq!(
+            readiness_due_at(1_000, Some(500), None),
+            1_000 + READINESS_INTERVAL_MS
+        );
+        // A day on, an attempt that found nothing definite: the next waits an hour, not a day.
+        let attempt = 1_000 + READINESS_INTERVAL_MS;
+        assert_eq!(
+            readiness_due_at(1_000, Some(attempt), None),
+            attempt + READINESS_RETRY_MS
+        );
+        assert_eq!(readiness_due_at(i64::MAX, None, None), i64::MAX);
+        // Seen gone: looked at again a minute later, and a minute after a look that couldn't be made.
+        assert_eq!(
+            readiness_due_at(1_000, None, Some(5_000)),
+            5_000 + GONE_CONFIRM_MS
+        );
+        assert_eq!(
+            readiness_due_at(1_000, Some(70_000), Some(5_000)),
+            70_000 + GONE_CONFIRM_MS
+        );
+    }
+
+    #[test]
+    fn only_a_404_to_a_token_just_minted_says_the_repository_is_gone() {
+        assert!(repository_gone(true, 404));
+        // No token: the key, the installation or a limit, never the repository.
+        assert!(!repository_gone(false, 404));
+        for status in [200, 301, 401, 403, 422, 429, 500, 502, 503] {
+            assert!(!repository_gone(true, status), "{status}");
+        }
+        assert_eq!(
+            missing_steps(&EXPECTED, &gone(9001)),
+            Err(NotReady::RepositoryGone)
+        );
+        assert_eq!(
+            verify_ready(&EXPECTED, &gone(9001)),
+            Err(NotReady::RepositoryGone)
+        );
+        assert_eq!(NotReady::RepositoryGone.code(), "repository_gone");
+        // The presence check's token: metadata to read, and nothing more.
+        let hour = 1_000 + 60 * 60 * 1000;
+        assert!(token_answer_matches(
+            None,
+            &[],
+            &PRESENCE_PERMISSIONS,
+            &PRESENCE_PERMISSIONS,
+            Some(hour),
+            1_000
+        ));
+        assert!(!token_answer_matches(
+            None,
+            &[],
+            &PROVISIONING_PERMISSIONS,
+            &PRESENCE_PERMISSIONS,
+            Some(hour),
+            1_000
+        ));
+    }
+
+    #[test]
+    fn a_rate_limited_request_waits_for_a_day_from_its_first_limit_however_many_come() {
+        assert!(rate_limited_run_waits(None, 5_000));
+        assert!(rate_limited_run_waits(
+            Some(5_000),
+            5_000 + RATE_LIMITED_FOR_MS - 1
+        ));
+        assert!(!rate_limited_run_waits(
+            Some(5_000),
+            5_000 + RATE_LIMITED_FOR_MS
+        ));
+        assert!(!rate_limited_run_waits(Some(i64::MIN), i64::MAX));
+    }
+
+    #[test]
+    fn a_repository_is_gone_only_on_a_second_look_a_minute_after_the_first() {
+        assert_eq!(gone_look(None, 1_000), GoneLook::FirstSeen);
+        assert_eq!(
+            gone_look(Some(1_000), 1_000 + GONE_CONFIRM_MS - 1),
+            GoneLook::TooSoon
+        );
+        assert_eq!(
+            gone_look(Some(1_000), 1_000 + GONE_CONFIRM_MS),
+            GoneLook::Confirmed
+        );
+        assert_eq!(
+            gone_look(Some(1_000), 1_000 + GONE_SIGHTING_MAX_AGE_MS),
+            GoneLook::Confirmed
+        );
+        // Older than that, it's a first sighting again.
+        assert_eq!(
+            gone_look(Some(1_000), 1_000 + GONE_SIGHTING_MAX_AGE_MS + 1),
+            GoneLook::FirstSeen
+        );
+    }
+
+    #[test]
+    fn a_rate_limited_creation_is_its_own_outcome_and_made_nothing() {
+        for status in [403, 429] {
+            assert_eq!(
+                classify_creation(Some(status), false, false, true),
+                Creation::RateLimited,
+                "{status}"
+            );
+        }
+        // Only a 403 or a 429 can be a limit. The others read as they always did.
+        assert_eq!(
+            classify_creation(Some(201), false, true, true),
+            Creation::Created
+        );
+        assert_eq!(
+            classify_creation(Some(500), false, false, true),
+            Creation::Unknown
+        );
+    }
+
+    #[test]
+    fn settings_creation_turned_off_must_read_back_off() {
+        assert_eq!(verify_ready(&EXPECTED, &ready()), Ok(()));
+        let differs: [fn(&mut RepoSettings); 6] = [
+            |s| s.has_issues = true,
+            |s| s.has_wiki = true,
+            |s| s.has_projects = true,
+            |s| s.has_discussions = true,
+            |s| s.allow_auto_merge = Some(true),
+            |s| s.delete_branch_on_merge = Some(true),
+        ];
+        for change in differs {
+            let mut observed = ready();
+            change(&mut observed.settings);
+            assert_eq!(
+                missing_steps(&EXPECTED, &observed),
+                Err(NotReady::SettingsDiffer)
+            );
+            assert_eq!(
+                verify_ready(&EXPECTED, &observed),
+                Err(NotReady::SettingsDiffer)
+            );
+        }
+        // GitHub shows merge settings only to a token that can write contents. Not shown is no difference.
+        let mut unseen = ready();
+        unseen.settings.allow_auto_merge = None;
+        unseen.settings.delete_branch_on_merge = None;
+        assert_eq!(verify_ready(&EXPECTED, &unseen), Ok(()));
+        assert_eq!(NotReady::SettingsDiffer.code(), "settings_differ");
+    }
+
+    #[test]
+    fn workflows_that_can_write_or_approve_are_narrowed_at_setup_and_a_difference_after() {
+        for workflow in [
+            WorkflowPermissions {
+                default: "write".to_string(),
+                can_approve_pull_request_reviews: false,
+            },
+            WorkflowPermissions {
+                default: "read".to_string(),
+                can_approve_pull_request_reviews: true,
+            },
+            WorkflowPermissions {
+                default: "?".to_string(),
+                can_approve_pull_request_reviews: false,
+            },
+        ] {
+            let observed = Observed {
+                workflow,
+                ..ready()
+            };
+            assert_eq!(
+                missing_steps(&EXPECTED, &observed),
+                Ok(vec![SetupStep::RestrictWorkflowPermissions])
+            );
+            assert_eq!(
+                verify_ready(&EXPECTED, &observed),
+                Err(NotReady::WorkflowPermissionsDiffer)
+            );
+        }
+        assert_eq!(
+            NotReady::WorkflowPermissionsDiffer.code(),
+            "workflow_permissions_differ"
+        );
+    }
+
+    #[test]
+    fn a_provisioning_token_is_used_only_if_it_is_exactly_what_was_asked_for() {
+        const NOW: i64 = 1_000_000;
+        let asked = PROVISIONING_PERMISSIONS;
+        let hour = NOW + 60 * 60 * 1000;
+        assert!(provisioning_token_matches(
+            Some(9001),
+            &[9001],
+            &asked,
+            Some(hour),
+            NOW
+        ));
+        // The creation token reaches the installation's repositories, since its own doesn't exist yet.
+        assert!(provisioning_token_matches(
+            None,
+            &[],
+            &asked,
+            Some(hour),
+            NOW
+        ));
+        // Another repository, or more than the one.
+        assert!(!provisioning_token_matches(
+            Some(9001),
+            &[9002],
+            &asked,
+            Some(hour),
+            NOW
+        ));
+        assert!(!provisioning_token_matches(
+            Some(9001),
+            &[9001, 9002],
+            &asked,
+            Some(hour),
+            NOW
+        ));
+        assert!(!provisioning_token_matches(
+            Some(9001),
+            &[],
+            &asked,
+            Some(hour),
+            NOW
+        ));
+        // Wider, narrower, or different permissions.
+        let wider = [asked[0], asked[1], ("contents", "write")];
+        assert!(!provisioning_token_matches(
+            Some(9001),
+            &[9001],
+            &wider,
+            Some(hour),
+            NOW
+        ));
+        assert!(!provisioning_token_matches(
+            Some(9001),
+            &[9001],
+            &asked[..1],
+            Some(hour),
+            NOW
+        ));
+        let read_only = [("administration", "read"), ("metadata", "read")];
+        assert!(!provisioning_token_matches(
+            Some(9001),
+            &[9001],
+            &read_only,
+            Some(hour),
+            NOW
+        ));
+        // No expiry, one already past, or one further off than GitHub gives.
+        assert!(!provisioning_token_matches(
+            Some(9001),
+            &[9001],
+            &asked,
+            None,
+            NOW
+        ));
+        assert!(!provisioning_token_matches(
+            Some(9001),
+            &[9001],
+            &asked,
+            Some(NOW),
+            NOW
+        ));
+        assert!(!provisioning_token_matches(
+            Some(9001),
+            &[9001],
+            &asked,
+            Some(NOW + TOKEN_LIFE_MAX_MS + 1),
+            NOW
+        ));
+    }
 }
 
 /// What an operator's recheck of a room's repository read (M5 step 7b).
@@ -843,8 +1382,11 @@ pub enum RecheckRead {
 /// What a recheck does to the link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Recheck {
-    /// The link isn't degraded, so there's nothing to recheck. It stays as it is.
+    /// Nothing to change: a ready link read back exactly right, or a suspended one, which isn't lifted here.
     Unchanged,
+    /// Ready, and read back with a definite difference: degraded now, for this reason, as the scheduled read and a
+    /// merge would. An operator's way to make Podster stop after a takedown done by hand on GitHub.
+    Degrade(&'static str),
     /// Degraded, and read back exactly right: ready again.
     MakeReady,
     /// Still degraded, for this reason now.
@@ -853,15 +1395,21 @@ pub enum Recheck {
     Unavailable,
 }
 
-/// Decides an operator's recheck. Only a degraded link is ever changed, only to ready, and only on a read-back that is
-/// exactly right. A suspended link isn't lifted here, and nothing here degrades. `read` is `None` when no read was made.
+/// Decides an operator's recheck, from the same read-back the merge job and the scheduled read use. A degraded link
+/// becomes ready only on a read-back that is exactly right. A ready link is degraded on a definite difference, and stays
+/// as it is when it reads back right. A suspended link isn't lifted here. `read` is `None` when no read was made, which,
+/// like a read that couldn't be made, changes nothing and says so.
 pub fn decide_recheck(
     status: crate::repositories::LinkStatus,
     read: Option<RecheckRead>,
 ) -> Recheck {
     use crate::repositories::LinkStatus;
     match (status, read) {
-        (LinkStatus::Ready | LinkStatus::Suspended, _) => Recheck::Unchanged,
+        (LinkStatus::Suspended, _) | (LinkStatus::Ready, Some(RecheckRead::ExactlyRight)) => {
+            Recheck::Unchanged
+        }
+        (LinkStatus::Ready, Some(RecheckRead::Differs(reason))) => Recheck::Degrade(reason),
+        (LinkStatus::Ready, Some(RecheckRead::CouldNotRead) | None) => Recheck::Unavailable,
         (LinkStatus::Degraded, Some(RecheckRead::ExactlyRight)) => Recheck::MakeReady,
         (LinkStatus::Degraded, Some(RecheckRead::Differs(reason))) => {
             Recheck::StillDegraded(reason)
@@ -1078,7 +1626,25 @@ mod recheck_tests {
                 Recheck::Unavailable
             );
         }
-        for status in [LinkStatus::Ready, LinkStatus::Suspended] {
+        // A ready link: degraded on a definite difference, left as it is when it reads right, and unread is unavailable.
+        assert_eq!(
+            decide_recheck(
+                LinkStatus::Ready,
+                Some(RecheckRead::Differs("repository_gone"))
+            ),
+            Recheck::Degrade("repository_gone")
+        );
+        assert_eq!(
+            decide_recheck(LinkStatus::Ready, Some(RecheckRead::ExactlyRight)),
+            Recheck::Unchanged
+        );
+        for unread in [Some(RecheckRead::CouldNotRead), None] {
+            assert_eq!(
+                decide_recheck(LinkStatus::Ready, unread),
+                Recheck::Unavailable
+            );
+        }
+        for status in [LinkStatus::Suspended] {
             for read in [
                 Some(RecheckRead::ExactlyRight),
                 Some(RecheckRead::Differs("x")),

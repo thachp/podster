@@ -209,7 +209,7 @@ describe("asking for a merge", () => {
     for (const at of [done.merge_marked_at, done.merge_mark_set_at, done.merge_called_at, done.merge_finished_at]) expect(at).toBeGreaterThan(0);
     // Readiness first, with the provisioning App narrowed to this repository; then a read; the mark; the merge and its reads.
     const back = await readBack();
-    expect(back.reads.map((read) => read.path)).toEqual([`/repositories/${REPO_ID}`, `/repositories/${REPO_ID}/branches/main`, `/repositories/${REPO_ID}/actions/permissions`, `/repositories/${REPO_ID}/rulesets?per_page=100`.replace("?per_page=100", ""), `/repositories/${REPO_ID}/rulesets/1`, `/repositories/${REPO_ID}/rulesets/2`]);
+    expect(back.reads.map((read) => read.path)).toEqual([`/repositories/${REPO_ID}`, `/repositories/${REPO_ID}/branches/main`, `/repositories/${REPO_ID}/actions/permissions`, `/repositories/${REPO_ID}/actions/permissions/workflow`, `/repositories/${REPO_ID}/rulesets?per_page=100`.replace("?per_page=100", ""), `/repositories/${REPO_ID}/rulesets/1`, `/repositories/${REPO_ID}/rulesets/2`]);
     expect(back.reads.every((read) => JSON.stringify(read.scope) === JSON.stringify([REPO_ID]))).toBe(true);
     const seen = await github();
     expect(seen.calls.map((c) => [c.method, c.path, c.permissions, c.status])).toEqual([
@@ -778,6 +778,18 @@ describe("what GitHub answers to the merge", () => {
     expect(await merges()).toHaveLength(1);
   });
 
+  it("waits when GitHub rate-limits the compare with the default branch, and never ends the merge on it", async () => {
+    const r = await requested();
+    // The merge lands, then the compare that would show the default branch holds it is rate-limited.
+    await fake({ compare: { kind: "primary", seconds: 600 } });
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "requested", merge_step: "merge" });
+    await fake({ compare: "behind" });
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded" });
+    expect(await merges()).toHaveLength(1);
+  });
+
   it("gives up after five passes with a reason, and a person asks again", async () => {
     const r = await requested();
     await fake({ status: 500 });
@@ -943,6 +955,9 @@ describe("the room migration", () => {
     const r = await approved();
     const newest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
     await inRoom(r.id, (sql) => {
+      // The newest step, the M5 security review's two columns, comes off first.
+      for (const [table, column] of [["repo_link", "gone_seen_at"], ["repo_request", "limited_since"], ["repo_request", "limited_call"]]) sql.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+      sql.exec("UPDATE schema_version SET version = version - 1");
       for (const column of ["reviewer_person", "reviewer_id"]) sql.exec(`ALTER TABLE task_change DROP COLUMN ${column}`);
       sql.exec("UPDATE schema_version SET version = version - 1");
     });
@@ -960,6 +975,9 @@ describe("the room migration", () => {
     const r = await approved();
     const newest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
     await inRoom(r.id, (sql) => {
+      // The newest step, the M5 security review's two columns, comes off first.
+      for (const [table, column] of [["repo_link", "gone_seen_at"], ["repo_request", "limited_since"], ["repo_request", "limited_call"]]) sql.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+      sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE merge_request");
       // The step after this one, which keeps an approval's reviewer (A1), goes too: a room this old has neither.
       for (const column of ["reviewer_person", "reviewer_id", "merge_finished_at", "merge_called_at", "merge_mark_set_at", "merge_marked_at", "merge_step", "merge_next_at", "merge_attempts", "merge_requester_person", "submitter_person", "submitter_id"]) sql.exec(`ALTER TABLE task_change DROP COLUMN ${column}`);
@@ -1103,8 +1121,10 @@ describe("the review's findings (M5 step 7b)", () => {
     // The same key answers the same, from the record, with no second read. A new one finds nothing to recheck.
     const readsBefore = (await readBack()).reads.length;
     expect((await api(OPERATOR, "POST", `/v1/moderation/repositories/${r.id}/recheck`, {}, { key: "mt-recheck" })).body).toEqual(fixed.body);
-    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "ready", reason: null });
     expect((await readBack()).reads.length).toBe(readsBefore);
+    // A new one reads the ready link again, finds it right, and changes nothing.
+    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "ready", reason: null });
+    expect((await readBack()).reads.length).toBeGreaterThan(readsBefore);
     expect((await events(r.id, "repository.")).map((e) => [e.type, e.reason])).toEqual([["repository.degraded", "bypass_differs"], ["repository.ready_again", null]]);
     expect((await readBack()).live).toBe(0);
     // And a merge can be asked for again.

@@ -636,6 +636,24 @@ describe("revoking a token whose authority ended", () => {
     await alarm(r.id);
     expect(await minted()).toEqual([expect.objectContaining({ token: got.token, live: false })]);
   });
+  it("keeps a token GitHub answered 401 for, and tries again: only 204 says it's revoked (M5 security review F6)", async () => {
+    const r = await room();
+    const got = (await access(AGENT, r.id, r.task)).body;
+    // GitHub documents only 204 for this call. A 401 may be GitHub refusing for another reason while the token still works.
+    await script({ revoke: 401 });
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) })).status).toBe(200);
+    await alarm(r.id);
+    expect(await minted()).toEqual([expect.objectContaining({ token: got.token, live: true })]);
+    const [row] = await inRoom(r.id, (sql) => sql.exec("SELECT state, revoke_attempts, revoke_next_at FROM repo_token").toArray() as any[]);
+    expect(row.state).toBe("revoke");
+    expect(row.revoke_attempts).toBeGreaterThanOrEqual(1);
+    expect(row.revoke_next_at).toBeGreaterThan(Date.now());
+    await script({ revoke: 204 });
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_token SET revoke_next_at = 0"));
+    await alarm(r.id);
+    expect(await minted()).toEqual([expect.objectContaining({ token: got.token, live: false })]);
+    expect(await tokens(r.id)).toEqual([]);
+  });
 });
 
 describe("where a token may be", () => {
@@ -855,6 +873,34 @@ describe("the re-review's lows (M5 step 6 follow-up)", () => {
       // And with the table empty, the same room mints: the refusal was the configuration's.
       await inRoom(r.id, (sql) => sql.exec("DELETE FROM test_github_vars"));
       expect((await access(AGENT, r.id, r.task)).status, name).toBe(200);
+      await freshRepo();
+    }
+  });
+
+  it("refuses an agent-token App that shares the merge App's installation, or another App's key however it's written (M5 security review F7)", async () => {
+    // Each would have been taken before: only provisioning's installation and key, compared as text, were checked.
+    const asText = (pem: string) => pem.replace(/\n/g, "\r\n");
+    const cases: [string, string, string][] = [
+      ["the merge App's installation", "GITHUB_AGENT_INSTALLATION_ID", String(GH.mergeInstallationId)],
+      ["the merge App's key", "GITHUB_AGENT_APP_KEY", BINDINGS.GITHUB_MERGE_APP_KEY],
+      ["provisioning's key with other line breaks", "GITHUB_AGENT_APP_KEY", asText(BINDINGS.GITHUB_PROVISION_APP_KEY)],
+      ["the merge App's key with whitespace around it", "GITHUB_AGENT_APP_KEY", `\n\n${BINDINGS.GITHUB_MERGE_APP_KEY}  \n`],
+    ];
+    for (const [what, name, value] of cases) {
+      const r = await room();
+      await inRoom(r.id, (sql) => {
+        sql.exec("CREATE TABLE test_github_vars (name TEXT, value TEXT)");
+        sql.exec("INSERT INTO test_github_vars (name, value) VALUES (?, ?)", name, value);
+      });
+      const refused = await access(AGENT, r.id, r.task);
+      expect([refused.status, refused.code], what).toEqual([503, "repo_access_unavailable"]);
+      expect(await minted(), what).toEqual([]);
+      // Its own key written another way is still its own, and mints.
+      await inRoom(r.id, (sql) => {
+        sql.exec("DELETE FROM test_github_vars");
+        sql.exec("INSERT INTO test_github_vars (name, value) VALUES ('GITHUB_AGENT_APP_KEY', ?)", asText(BINDINGS.GITHUB_AGENT_APP_KEY));
+      });
+      expect((await access(AGENT, r.id, r.task)).status, what).toBe(200);
       await freshRepo();
     }
   });

@@ -14,16 +14,23 @@
 //! - **Unverified against GitHub:** addressing a repository as `/repositories/{id}`, switching Actions off per repository
 //!   and reading that back. The spike made its calls by name and never switched Actions off. Both are owed before staging.
 use futures_util::future::{select, Either};
+use futures_util::StreamExt;
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use podster_core::provisioning::{
-    classify_creation, Bypass, Creation, Observed, Ruleset, SetupStep, DEFAULT_BRANCH_REF,
-    STATUS_CONTEXT,
+    classify_creation, gone, repository_gone, token_answer_matches, Bypass, Creation, Observed,
+    RepoSettings, Ruleset, SetupStep, WorkflowPermissions, DEFAULT_BRANCH_REF,
+    PRESENCE_PERMISSIONS, PROVISIONING_PERMISSIONS, STATUS_CONTEXT,
+};
+use podster_core::rate_limit::{
+    has_secondary_marker, primary_403, rate_limit_wait_ms, LimitSignals,
 };
 use podster_core::repo_access::{minted_token_matches, TokenPermissions};
 use podster_core::repo_merge::PullState;
 use podster_core::repositories::valid_commit_sha;
 use podster_core::task_change::PullSeen;
-use podster_egress::app_key::{app_is_distinct, app_jwt_signing_input, base64url, pkcs8_from_pem};
+use podster_egress::app_key::{
+    app_jwt_signing_input, base64url, pkcs8_from_pem, role_is_distinct, AppRole,
+};
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::time::Duration;
@@ -112,6 +119,12 @@ pub struct Config {
 }
 
 impl Config {
+    /// The organization Podster's repositories are made in, as the Worker's configuration names it: checked to be
+    /// letters, digits and hyphens of GitHub's length when it was read. Never anything from GitHub's answers.
+    pub fn org_login(&self) -> &str {
+        &self.org_login
+    }
+
     /// `None` unless every variable and the key are set and well-formed. The caller says only that provisioning isn't
     /// configured, never which part.
     pub fn from_env(env: &Env) -> Option<Config> {
@@ -133,14 +146,70 @@ impl Config {
             key_pem,
         };
         // Three roles, three Apps: provisioning shares its App, installation and key with neither other role.
-        let distinct = app_is_distinct(
-            (config.app_id, config.installation_id),
-            &[Some(config.merge_app_id), number("GITHUB_AGENT_APP_ID")],
-            &[number("GITHUB_AGENT_INSTALLATION_ID")],
-        ) && secret(env, "GITHUB_AGENT_APP_KEY").as_deref()
-            != Some(config.key_pem.as_str());
+        let distinct = roles_distinct(Role::Provision, &|name: &str| lookup(env, name));
+        if !distinct {
+            console_error!("provision.app_not_distinct");
+        }
         distinct.then_some(config)
     }
+}
+
+/// The three GitHub App roles, each with an App, an installation and a key of its own (ADR 0009).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Role {
+    Provision,
+    Agent,
+    Merge,
+}
+
+impl Role {
+    const ALL: [Role; 3] = [Role::Provision, Role::Agent, Role::Merge];
+
+    /// The names of its App ID, installation ID and key in the Worker's configuration.
+    fn names(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Role::Provision => (
+                "GITHUB_PROVISION_APP_ID",
+                "GITHUB_PROVISION_INSTALLATION_ID",
+                "GITHUB_PROVISION_APP_KEY",
+            ),
+            Role::Agent => (
+                "GITHUB_AGENT_APP_ID",
+                "GITHUB_AGENT_INSTALLATION_ID",
+                "GITHUB_AGENT_APP_KEY",
+            ),
+            Role::Merge => (
+                "GITHUB_MERGE_APP_ID",
+                "GITHUB_MERGE_INSTALLATION_ID",
+                "GITHUB_MERGE_APP_KEY",
+            ),
+        }
+    }
+
+    fn read(self, get: &dyn Fn(&str) -> Option<String>) -> AppRole {
+        let (app, installation, key) = self.names();
+        let number = |name: &str| {
+            get(name)
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|n| *n > 0)
+        };
+        AppRole {
+            app_id: number(app),
+            installation_id: number(installation),
+            key: get(key).and_then(|pem| pkcs8_from_pem(&pem)),
+        }
+    }
+}
+
+/// Whether `own` shares its App ID, installation ID or key with neither of the other two roles (the M5 security
+/// review's F7). Keys are compared as parsed key material, so the same key written two ways is caught.
+pub(crate) fn roles_distinct(own: Role, get: &dyn Fn(&str) -> Option<String>) -> bool {
+    let others: Vec<AppRole> = Role::ALL
+        .into_iter()
+        .filter(|role| *role != own)
+        .map(|role| role.read(get))
+        .collect();
+    role_is_distinct(&own.read(get), &others)
 }
 
 /// Why a call gave nothing to go on. Neither carries any of the provider's text.
@@ -152,14 +221,42 @@ pub enum Failure {
     Status(u16),
     /// An answer of the right status that doesn't hold what it must.
     Unreadable,
+    /// GitHub limited how fast Podster may call it, by its documented signals (`podster_core::rate_limit`). The call
+    /// was refused for that alone: it says nothing about the credential, the installation or what was asked, and
+    /// nothing was done. `wait_ms` is how long GitHub said to wait, bounded.
+    RateLimited {
+        status: u16,
+        wait_ms: i64,
+        /// Only GitHub's spent primary limit (`core::rate_limit::primary_403`), the one a refusal could also look like.
+        primary_403: bool,
+    },
 }
 
 impl Failure {
     /// The provider's HTTP status, for the log. Zero when there was none.
     pub fn status(self) -> u16 {
         match self {
-            Failure::Status(status) => status,
+            Failure::Status(status) | Failure::RateLimited { status, .. } => status,
             Failure::Unreachable | Failure::Unreadable => 0,
+        }
+    }
+
+    /// Whether this was a limit that a refusal could also look like: a `403` with `x-ratelimit-remaining: 0` alone.
+    pub fn primary_403(self) -> bool {
+        matches!(
+            self,
+            Failure::RateLimited {
+                primary_403: true,
+                ..
+            }
+        )
+    }
+
+    /// How long to wait, if this was a rate limit.
+    pub fn rate_limit_wait_ms(self) -> Option<i64> {
+        match self {
+            Failure::RateLimited { wait_ms, .. } => Some(wait_ms),
+            _ => None,
         }
     }
 }
@@ -176,6 +273,12 @@ pub enum CreateAnswer {
     Refused(u16),
     /// No token could be had, so no creation call went out and the name was never sent.
     NotSent(u16),
+    /// GitHub limited the rate, for the token (`at_mint`) or for the call. Nothing was made, and the wait is GitHub's,
+    /// bounded, in the failure.
+    RateLimited {
+        failure: Failure,
+        at_mint: bool,
+    },
     /// Nobody knows whether a repository was made.
     Unknown,
 }
@@ -258,7 +361,34 @@ async fn call(
     call_within(method, path, bearer, body, MAX_ANSWER_BYTES).await
 }
 
-/// The same, reading an answer of up to `max_bytes`. A longer one reads as having no body.
+/// Reads at most `max_bytes` of an answer, stopping there and never buffering more (the M5 security review's F5). `None`
+/// for a longer one, whether its length says so up front or it only shows while reading.
+async fn bounded_body(response: &mut Response, max_bytes: usize) -> Result<Option<Vec<u8>>> {
+    let declared = response
+        .headers()
+        .get("content-length")?
+        .and_then(|n| n.trim().parse::<usize>().ok());
+    if declared.is_some_and(|n| n > max_bytes) {
+        return Ok(None);
+    }
+    // An answer with no body, such as a `204`, has nothing to stream. One the runtime already holds whole is read as it is.
+    let Ok(mut stream) = response.stream() else {
+        let bytes = response.bytes().await?;
+        return Ok((bytes.len() <= max_bytes).then_some(bytes));
+    };
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            return Ok(None);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(Some(bytes))
+}
+
+/// The same, reading an answer of up to `max_bytes`. A longer one reads as having no body. A rate limit, by GitHub's
+/// documented status, headers and message, is `Failure::RateLimited`, never a status a caller could read as a refusal.
 async fn call_within(
     method: Method,
     path: &str,
@@ -287,17 +417,38 @@ async fn call_within(
             .send_with_signal(&signal)
             .await?;
         let status = response.status_code();
-        let bytes = response.bytes().await?;
-        let parsed = if bytes.is_empty() || bytes.len() > max_bytes {
-            Value::Null
-        } else {
-            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        let header = |name: &str| response.headers().get(name).ok().flatten();
+        let signals = LimitSignals {
+            status,
+            retry_after: header("retry-after"),
+            remaining: header("x-ratelimit-remaining"),
+            reset: header("x-ratelimit-reset"),
+            secondary_marker: false,
         };
-        Ok::<_, Error>((status, parsed))
+        let parsed = match bounded_body(&mut response, max_bytes).await? {
+            Some(bytes) if !bytes.is_empty() => {
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+            }
+            _ => Value::Null,
+        };
+        let signals = LimitSignals {
+            secondary_marker: parsed["message"].as_str().is_some_and(has_secondary_marker),
+            ..signals
+        };
+        let limited = rate_limit_wait_ms(&signals, Date::now().as_millis() as i64)
+            .map(|wait_ms| (wait_ms, primary_403(&signals)));
+        Ok::<_, Error>((status, parsed, limited))
     };
     let timeout = Delay::from(Duration::from_millis(CALL_TIMEOUT_MS));
     let answer = match select(Box::pin(attempt), timeout).await {
-        Either::Left((Ok(answer), _)) => Ok(answer),
+        Either::Left((Ok((status, _, Some((wait_ms, primary_403)))), _)) => {
+            Err(Failure::RateLimited {
+                status,
+                wait_ms,
+                primary_403,
+            })
+        }
+        Either::Left((Ok((status, parsed, None)), _)) => Ok((status, parsed)),
         Either::Left((Err(_), _)) | Either::Right(_) => Err(Failure::Unreachable),
     };
     controller.abort();
@@ -410,23 +561,75 @@ impl GitHubApp {
     }
 
     /// Mints an installation token from a fresh App JWT: for one repository, or, with `None`, for the whole
-    /// installation, which only the creation call needs.
+    /// installation, which only the creation call needs. Either way it asks for provisioning's two permissions by
+    /// name, and uses the token only if GitHub's answer is exactly that, for exactly that repository, and expires within
+    /// the hour (the M5 security review's F4). A token that came back otherwise is revoked unused.
     async fn mint(&self, repo_id: Option<i64>) -> std::result::Result<String, Failure> {
+        self.mint_with(repo_id, &PROVISIONING_PERMISSIONS).await
+    }
+
+    /// The same, asking for `asked` and accepting nothing else back.
+    async fn mint_with(
+        &self,
+        repo_id: Option<i64>,
+        asked: &[(&str, &str)],
+    ) -> std::result::Result<String, Failure> {
         let jwt = app_jwt(self.config.app_id, &self.config.key_pem).await?;
         let path = format!(
             "/app/installations/{}/access_tokens",
             self.config.installation_id
         );
-        let narrowed = repo_id.map(|id| json!({ "repository_ids": [id] }));
-        let (status, body) = self.send(Method::Post, &path, &jwt, narrowed).await?;
+        let permissions: serde_json::Map<String, Value> = asked
+            .iter()
+            .map(|(name, level)| ((*name).to_string(), Value::from(*level)))
+            .collect();
+        let body = match repo_id {
+            Some(id) => json!({ "repository_ids": [id], "permissions": permissions }),
+            None => json!({ "permissions": permissions }),
+        };
+        let (status, answer) = self.send(Method::Post, &path, &jwt, Some(body)).await?;
         if status != 201 {
             return Err(Failure::Status(status));
         }
-        Ok(body["token"]
+        let token = answer["token"]
             .as_str()
             .filter(|token| !token.is_empty() && token.len() <= 512 && token.is_ascii())
             .ok_or(Failure::Unreadable)?
-            .to_string())
+            .to_string();
+        let (repo_ids, granted) = granted(&answer);
+        let granted: Vec<(&str, &str)> = granted
+            .iter()
+            .map(|(name, level)| (name.as_str(), level.as_str()))
+            .collect();
+        let expires_at = parse_time(&answer["expires_at"]);
+        if !token_answer_matches(
+            repo_id,
+            &repo_ids,
+            &granted,
+            asked,
+            expires_at,
+            Date::now().as_millis() as i64,
+        ) {
+            if !self.revoke(&token).await {
+                self.unrevoked.set(self.unrevoked.get().saturating_add(1));
+            }
+            console_error!("{}", json!({ "event": "provision.token_mismatch" }));
+            return Err(Failure::Unreadable);
+        }
+        Ok(token)
+    }
+
+    /// Whether a repository GitHub wouldn't mint a narrowed token for is gone, by `core::repository_gone`: asked with a
+    /// token for the whole installation that can read metadata and nothing else, revoked as soon as it's answered.
+    /// `Err` when that token can't be had or the read gets no answer, which says nothing about the repository.
+    async fn presence(&self, base: &str) -> std::result::Result<bool, Failure> {
+        let token = self.mint_with(None, &PRESENCE_PERMISSIONS).await?;
+        let read = self.send(Method::Get, base, &token, None).await;
+        if !self.revoke(&token).await {
+            self.unrevoked.set(self.unrevoked.get().saturating_add(1));
+        }
+        let (status, _) = read?;
+        Ok(repository_gone(true, status))
     }
 
     /// Revokes a token. Whether it worked is all that comes back.
@@ -489,10 +692,30 @@ impl Provider for GitHubApp {
         // Without a token no creation call goes out, so nothing can have been made and the name was never sent.
         let token = match self.mint(None).await {
             Ok(token) => token,
+            Err(failure @ Failure::RateLimited { .. }) => {
+                return CreateAnswer::RateLimited {
+                    failure,
+                    at_mint: true,
+                }
+            }
             Err(failure) => return CreateAnswer::NotSent(failure.status()),
         };
         let path = format!("/orgs/{}/repos", self.config.org_login);
-        let body = json!({ "name": name, "private": !public, "auto_init": true });
+        // Everything a stranger or an agent could use that Podster doesn't, off from the start (the M5 security review's
+        // F7): issues, wiki and projects, and auto-merge. Discussions can't be set here and start off. Branches stay after
+        // a merge, which is GitHub's default and needs no organization owner. A public repository can always be forked:
+        // GitHub has no setting that forbids it, so nothing here pretends to.
+        let expected = RepoSettings::EXPECTED;
+        let body = json!({
+            "name": name,
+            "private": !public,
+            "auto_init": true,
+            "has_issues": expected.has_issues,
+            "has_wiki": expected.has_wiki,
+            "has_projects": expected.has_projects,
+            "allow_auto_merge": expected.allow_auto_merge,
+            "delete_branch_on_merge": expected.delete_branch_on_merge,
+        });
         let sent = self.send(Method::Post, &path, &token, Some(body)).await;
         // The broad token has done the one thing it was for, however that went. If it can't be revoked it lives out its
         // hour with authority over every repository, so that is counted and reported, never dropped.
@@ -501,26 +724,60 @@ impl Provider for GitHubApp {
         }
         let (status, answer) = match sent {
             Ok(answer) => answer,
+            // A definite answer, and a refusal for the rate alone: `core` reads it, and nothing was made.
+            Err(failure @ Failure::RateLimited { status, .. }) => {
+                return match classify_creation(Some(status), false, false, true) {
+                    Creation::RateLimited => CreateAnswer::RateLimited {
+                        failure,
+                        at_mint: false,
+                    },
+                    _ => CreateAnswer::Refused(status),
+                };
+            }
             Err(_) => return CreateAnswer::Unknown,
         };
         let name_error = answer["errors"]
             .as_array()
             .is_some_and(|errors| errors.iter().any(|e| e["field"].as_str() == Some("name")));
         let created = id(&answer["id"]).zip(id(&answer["owner"]["id"]));
-        match classify_creation(Some(status), name_error, created.is_some()) {
+        match classify_creation(Some(status), name_error, created.is_some(), false) {
             Creation::Created => match created {
                 Some((repo_id, owner_id)) => CreateAnswer::Created(Created { repo_id, owner_id }),
                 None => CreateAnswer::Unknown,
             },
             Creation::NameTaken => CreateAnswer::NameTaken,
             Creation::Refused => CreateAnswer::Refused(status),
-            Creation::Unknown => CreateAnswer::Unknown,
+            // Not reached: a limit came back as `Failure::RateLimited` above.
+            Creation::RateLimited | Creation::Unknown => CreateAnswer::Unknown,
         }
     }
 
     async fn read_back(&self, repo_id: i64) -> std::result::Result<(Observed, Described), Failure> {
         let base = format!("/repositories/{repo_id}");
-        let (status, repo) = self.get(repo_id, &base).await?;
+        // A repository that's gone is a definite answer, never "couldn't read" (`core::repository_gone`).
+        let gone_back = || {
+            let nothing = Described {
+                full_name: String::new(),
+                default_branch: String::new(),
+            };
+            Ok((gone(repo_id), nothing))
+        };
+        let (status, repo) = match self.get(repo_id, &base).await {
+            Ok(answer) => answer,
+            // GitHub refused a token narrowed to this repository with `422`, its answer for a repository the
+            // installation doesn't reach. Whether it's there at all is asked once more, with a token for metadata alone.
+            Err(Failure::Status(422)) => {
+                return match self.presence(&base).await? {
+                    true => gone_back(),
+                    false => Err(Failure::Status(422)),
+                };
+            }
+            Err(failure) => return Err(failure),
+        };
+        // The token for this repository was just minted, so a `404` for it by its ID is the repository gone.
+        if repository_gone(true, status) {
+            return gone_back();
+        }
         if status != 200 {
             return Err(Failure::Status(status));
         }
@@ -532,6 +789,16 @@ impl Provider for GitHubApp {
             .as_bool()
             .zip(repo["archived"].as_bool())
             .ok_or(Failure::Unreadable)?;
+        let flag = |name: &str| repo[name].as_bool().ok_or(Failure::Unreadable);
+        let settings = RepoSettings {
+            has_issues: flag("has_issues")?,
+            has_wiki: flag("has_wiki")?,
+            has_projects: flag("has_projects")?,
+            has_discussions: flag("has_discussions")?,
+            // GitHub documents these as shown only to a token that can read and write contents, which this one can't.
+            allow_auto_merge: repo["allow_auto_merge"].as_bool(),
+            delete_branch_on_merge: repo["delete_branch_on_merge"].as_bool(),
+        };
         // The default branch has a commit if the branch can be read and names one.
         let (status, branch) = self
             .get(
@@ -555,6 +822,26 @@ impl Provider for GitHubApp {
             return Err(Failure::Status(status));
         }
         let actions_enabled = Some(actions["enabled"].as_bool().ok_or(Failure::Unreadable)?);
+        // The one settings read beyond the repository's own answer: what a workflow's token may do by default. Any answer
+        // but a readable 200 fails the read-back, as the Actions read does: setup ends `read_back_failed` and is retried,
+        // the merge job and the daily read wait, and nothing is degraded. Unverified: that GitHub answers 200 here with
+        // Actions switched off. If it doesn't, setup can never finish, so it's the first of the staging checks owed.
+        let (status, workflow) = self
+            .get(repo_id, &format!("{base}/actions/permissions/workflow"))
+            .await?;
+        if status != 200 {
+            return Err(Failure::Status(status));
+        }
+        let workflow = WorkflowPermissions {
+            default: workflow["default_workflow_permissions"]
+                .as_str()
+                .filter(|word| word.len() <= 16)
+                .ok_or(Failure::Unreadable)?
+                .to_string(),
+            can_approve_pull_request_reviews: workflow["can_approve_pull_request_reviews"]
+                .as_bool()
+                .ok_or(Failure::Unreadable)?,
+        };
         let (status, listed) = self
             .get(repo_id, &format!("{base}/rulesets?per_page=100"))
             .await?;
@@ -575,12 +862,15 @@ impl Provider for GitHubApp {
         }
         Ok((
             Observed {
+                present: true,
                 repo_id: id(&repo["id"]).ok_or(Failure::Unreadable)?,
                 owner_id: id(&repo["owner"]["id"]).ok_or(Failure::Unreadable)?,
                 private,
                 archived,
                 default_branch_has_commit,
                 actions_enabled,
+                settings,
+                workflow,
                 rulesets,
             },
             described,
@@ -595,6 +885,12 @@ impl Provider for GitHubApp {
                 Method::Put,
                 format!("{base}/actions/permissions"),
                 json!({ "enabled": false }),
+                204,
+            ),
+            SetupStep::RestrictWorkflowPermissions => (
+                Method::Put,
+                format!("{base}/actions/permissions/workflow"),
+                json!({ "default_workflow_permissions": "read", "can_approve_pull_request_reviews": false }),
                 204,
             ),
             SetupStep::CreateReviewRuleset => (
@@ -660,15 +956,7 @@ impl AgentConfig {
             installation_id: number("GITHUB_AGENT_INSTALLATION_ID")?,
             key_pem,
         };
-        let distinct = app_is_distinct(
-            (config.app_id, config.installation_id),
-            &[
-                number("GITHUB_PROVISION_APP_ID"),
-                number("GITHUB_MERGE_APP_ID"),
-            ],
-            &[number("GITHUB_PROVISION_INSTALLATION_ID")],
-        ) && get("GITHUB_PROVISION_APP_KEY").as_deref()
-            != Some(config.key_pem.as_str());
+        let distinct = roles_distinct(Role::Agent, get);
         if !distinct {
             console_error!("repo_token.app_not_distinct");
         }
@@ -690,7 +978,7 @@ pub struct Minted {
 /// How a revocation went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Revoked {
-    /// GitHub took it back, or no longer accepts it: `204`, or `401` for a token already revoked or expired.
+    /// GitHub took it back: `204`, the only answer its documentation gives for this call.
     Gone,
     /// Anything else. The token may still be live, so the room tries again.
     Failed,
@@ -716,6 +1004,29 @@ impl AgentTokens {
     pub fn new(config: AgentConfig) -> AgentTokens {
         AgentTokens { config }
     }
+}
+
+/// The repositories and permissions a token answer names. Empty for either it didn't name.
+fn granted(answer: &Value) -> (Vec<i64>, Vec<(String, String)>) {
+    let repo_ids = answer["repositories"]
+        .as_array()
+        .map(|repos| {
+            repos
+                .iter()
+                .map(|r| r["id"].as_i64().unwrap_or(0))
+                .collect()
+        })
+        .unwrap_or_default();
+    let permissions = answer["permissions"]
+        .as_object()
+        .map(|granted| {
+            granted
+                .iter()
+                .map(|(name, level)| (name.clone(), level.as_str().unwrap_or("").to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    (repo_ids, permissions)
 }
 
 /// GitHub's ISO 8601 time, in milliseconds. `None` unless it's a time the runtime reads.
@@ -755,24 +1066,7 @@ impl TokenIssuer for AgentTokens {
             self.revoke_token(&token).await;
             return Err(Failure::Unreadable);
         };
-        let repo_ids = answer["repositories"]
-            .as_array()
-            .map(|repos| {
-                repos
-                    .iter()
-                    .map(|r| r["id"].as_i64().unwrap_or(0))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let permissions = answer["permissions"]
-            .as_object()
-            .map(|granted| {
-                granted
-                    .iter()
-                    .map(|(name, level)| (name.clone(), level.as_str().unwrap_or("").to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let (repo_ids, permissions) = granted(&answer);
         Ok(Minted {
             token,
             expires_at,
@@ -782,8 +1076,12 @@ impl TokenIssuer for AgentTokens {
     }
 
     async fn revoke_token(&self, token: &str) -> Revoked {
+        // Only `204` counts (the M5 security review's F6). GitHub's documentation for "Revoke an installation access
+        // token" gives no other answer, none for a token that's already invalid, so a `401` is no proof: it may be GitHub
+        // refusing for another reason while the token still works. The row is kept and tried again, and a token past
+        // its expiry is dropped by the room's upkeep without asking.
         match call(Method::Delete, "/installation/token", token, None).await {
-            Ok((204 | 401, _)) => Revoked::Gone,
+            Ok((204, _)) => Revoked::Gone,
             _ => Revoked::Failed,
         }
     }
@@ -1048,19 +1346,7 @@ impl MergeConfig {
             installation_id: number("GITHUB_MERGE_INSTALLATION_ID")?,
             key_pem,
         };
-        let distinct = app_is_distinct(
-            (config.app_id, config.installation_id),
-            &[
-                number("GITHUB_PROVISION_APP_ID"),
-                number("GITHUB_AGENT_APP_ID"),
-            ],
-            &[
-                number("GITHUB_PROVISION_INSTALLATION_ID"),
-                number("GITHUB_AGENT_INSTALLATION_ID"),
-            ],
-        ) && [get("GITHUB_PROVISION_APP_KEY"), get("GITHUB_AGENT_APP_KEY")]
-            .iter()
-            .all(|other| other.as_deref() != Some(config.key_pem.as_str()));
+        let distinct = roles_distinct(Role::Merge, get);
         if !distinct {
             console_error!("merge.app_not_distinct");
         }
@@ -1171,13 +1457,16 @@ impl MergeApp {
         let default_branch_has = match plain_branch.filter(|_| valid_commit_sha(sha)) {
             Some(branch) => {
                 let path = format!("/repositories/{repo_id}/compare/{branch}...{sha}");
-                match call(Method::Get, &path, token, None).await? {
-                    (200, body) => match body["status"].as_str() {
+                // A limited compare says nothing about the branch: "unknown", as any other answer that isn't 200 is, so
+                // the merge job waits and reads again, and never ends a merge on it.
+                match call(Method::Get, &path, token, None).await {
+                    Ok((200, body)) => match body["status"].as_str() {
                         Some("behind" | "identical") => Some(true),
                         Some("ahead" | "diverged") => Some(false),
                         _ => None,
                     },
-                    _ => None,
+                    Ok(_) | Err(Failure::RateLimited { .. }) => None,
+                    Err(failure) => return Err(failure),
                 }
             }
             None => None,
@@ -1263,10 +1552,12 @@ impl Merger for MergeApp {
         let status = if default_now.as_deref() == Some(default_branch) {
             let path = format!("/repositories/{repo_id}/pulls/{number}/merge");
             let body = json!({ "sha": sha, "merge_method": "merge" });
-            call(Method::Put, &path, &token, Some(body))
-                .await
-                .ok()
-                .map(|(status, _)| status)
+            // A rate limit is still an answer with a status, as it was before limits were told apart: the merge job
+            // reads what GitHub did either way.
+            match call(Method::Put, &path, &token, Some(body)).await {
+                Ok((status, _)) | Err(Failure::RateLimited { status, .. }) => Some(status),
+                Err(_) => None,
+            }
         } else {
             None
         };

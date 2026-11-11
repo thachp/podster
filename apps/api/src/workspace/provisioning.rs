@@ -19,11 +19,13 @@
 //! repository is known by the ID in the provider's answer to this room's own creation call, never by a name. Nothing here
 //! deletes a repository or falls back to another organization. Logs and events carry IDs, reason codes and HTTP statuses.
 use super::*;
-use crate::github::{Config, CreateAnswer, GitHubApp, Provider};
+use crate::github::{Config, CreateAnswer, Failure, GitHubApp, Provider};
 use podster_core::provisioning::{
-    job_backoff_ms, missing_steps, reserved_name, retry_allowed, retry_name, retry_wait_ms,
-    verify_ready, Configured, Expected, RepositoryRequesters, RequestLimitReached, MAX_SETUP_RUNS,
+    job_backoff_ms, missing_steps, rate_limited_run_waits, reserved_name, retry_allowed,
+    retry_name, retry_wait_ms, verify_ready, Configured, Expected, RepositoryRequesters,
+    RequestLimitReached, MAX_SETUP_RUNS, RATE_LIMITED_REASON, SETUP_GONE_WAITS, SETUP_GONE_WAIT_MS,
 };
+use podster_core::rate_limit::limit_repeated_after_reset;
 use podster_core::repositories::{
     decide_retry, valid_repo_name, RepoVisibility, RequestState, RetryPlan, RetryRefusal,
 };
@@ -41,6 +43,31 @@ const REQUESTS_CLOSED: &str = "repository_requests_closed";
 /// The attempt outcomes that say a creation call may have gone out under the attempt's name.
 const NOT_SENT: &str = "not_sent";
 const STARTED: &str = "started";
+
+/// The organization Podster's repositories are made in, for the room's repository read: the configured
+/// `GITHUB_ORG_LOGIN`, or `None` while provisioning isn't configured. Display only. Test builds stand for a deployment
+/// whose key isn't set yet with the same table the job reads.
+pub(super) fn organization(env: &Env, sql: &SqlStorage) -> Option<String> {
+    #[cfg(feature = "failpoints")]
+    if rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_no_provisioning_key'",
+        vec![],
+    )
+    .is_ok_and(|found| !found.is_empty())
+    {
+        return None;
+    }
+    #[cfg(not(feature = "failpoints"))]
+    let _ = sql;
+    Config::from_env(env).map(|config| config.org_login().to_string())
+}
+
+/// Whether provisioning's App is configured, so a read-back can be made at all. Test builds stand for a deployment
+/// whose key isn't set yet with the same table the job reads.
+pub(super) fn configured(env: &Env, sql: &SqlStorage) -> bool {
+    organization(env, sql).is_some()
+}
 
 /// A test build reads a setting from another binding's name, if the room holds a table of that name with the binding's
 /// name in it: so a test can put a list, a number or an object where a deployment has the setting.
@@ -457,12 +484,12 @@ pub(super) fn retry(
     match plan {
         RetryPlan::ResumeHeldRepository => exec(
             sql,
-            "UPDATE repo_request SET state = ?, reason = NULL, updated_at = ? WHERE id = ?",
+            "UPDATE repo_request SET state = ?, reason = NULL, limited_since = NULL, limited_call = NULL, updated_at = ? WHERE id = ?",
             vec![RequestState::Pending.name().into(), now.into(), id.as_str().into()],
         )?,
         RetryPlan::CreateUnderNewName => exec(
             sql,
-            "UPDATE repo_request SET state = ?, reason = NULL, provider_repo_id = NULL, provider_name = ?, attempt = attempt + ?, updated_at = ? WHERE id = ?",
+            "UPDATE repo_request SET state = ?, reason = NULL, limited_since = NULL, limited_call = NULL, provider_repo_id = NULL, provider_name = ?, attempt = attempt + ?, updated_at = ? WHERE id = ?",
             vec![
                 RequestState::Pending.name().into(),
                 new_name.unwrap_or_default().as_str().into(),
@@ -530,7 +557,7 @@ fn finish(
     };
     exec(
         sql,
-        "UPDATE repo_request SET state = ?, reason = ?, retry_after = ?, job_failures = 0, job_not_before = NULL, updated_at = ? WHERE id = ?",
+        "UPDATE repo_request SET state = ?, reason = ?, retry_after = ?, job_failures = 0, job_not_before = NULL, limited_since = NULL, limited_call = NULL, updated_at = ? WHERE id = ?",
         vec![
             state.name().into(),
             reason.into(),
@@ -569,6 +596,16 @@ struct Ended {
     reason: &'static str,
     /// The provider's HTTP status, when one decided it.
     status: u16,
+    /// GitHub rate-limited this run, and said to wait this long. The run is given back and the request stays pending,
+    /// for up to `core::RATE_LIMITED_FOR_MS` from its first limit.
+    limited: Option<i64>,
+    /// The limit was only a spent-limit `403` (`core::rate_limit::primary_403`). If one comes again after the last
+    /// limit's wait is over, it's a refusal, and the run ends as `otherwise`.
+    primary_403: bool,
+    /// The reason this run ends with if what looked like a limit is a refusal.
+    otherwise: &'static str,
+    /// A repository this run created read back as not there. Setup waits and reads again, and never fails on that alone.
+    gone_wait: bool,
 }
 
 fn failed(reason: &'static str, status: u16) -> Ended {
@@ -576,7 +613,43 @@ fn failed(reason: &'static str, status: u16) -> Ended {
         state: RequestState::Failed,
         reason,
         status,
+        limited: None,
+        primary_403: false,
+        otherwise: reason,
+        gone_wait: false,
     }
+}
+
+/// How a run ends when a call to GitHub failed: a rate limit waits, anything else is `reason`.
+fn failed_call(reason: &'static str, failure: Failure) -> Ended {
+    match failure.rate_limit_wait_ms() {
+        Some(wait_ms) => Ended {
+            limited: Some(wait_ms),
+            primary_403: failure.primary_403(),
+            otherwise: reason,
+            ..failed(RATE_LIMITED_REASON, failure.status())
+        },
+        None => failed(reason, failure.status()),
+    }
+}
+
+/// How a run ends when a repository it holds read back as not there: it waits and reads again.
+fn gone_at_setup() -> Ended {
+    Ended {
+        gone_wait: true,
+        ..failed("read_back_failed", 404)
+    }
+}
+
+/// What became of a run GitHub rate-limited, in the request's own transaction.
+enum Limited {
+    /// It waits for GitHub's time, with the run given back.
+    Waits,
+    /// It has been limited for a day: it ends `provider_rate_limited`, with the run given back, and a retry's first call
+    /// waits for this reset.
+    Ends(i64),
+    /// A spent-limit 403 again after the last limit's wait: GitHub is refusing, so it ends as the refusal it is.
+    Refused,
 }
 
 impl Workspace {
@@ -758,9 +831,112 @@ impl Workspace {
             Ok(Some(ended)) => ended,
             Err(error) => failed(error.code().unwrap_or("internal_error"), 0),
         };
+        if ended.gone_wait {
+            // A repository this request created didn't show by its ID: the run is given back, and setup reads again in a
+            // minute, up to `SETUP_GONE_WAITS` times, counted in `job_failures`. Past that it ends `read_back_failed`.
+            let id = request_id.clone();
+            let waited = self.in_transaction(move |sql| {
+                let now = now_ms();
+                let Some(waits) = rows(
+                    sql,
+                    "SELECT job_failures FROM repo_request WHERE id = ? AND state = ?",
+                    vec![id.as_str().into(), RequestState::Pending.name().into()],
+                )?
+                .first()
+                .map(|r| int(&r["job_failures"])) else {
+                    return Ok(false);
+                };
+                if waits >= SETUP_GONE_WAITS {
+                    return Ok(false);
+                }
+                exec(
+                    sql,
+                    "UPDATE repo_request SET runs = max(runs - 1, 0), job_failures = ?, job_not_before = ?, limited_since = NULL, limited_call = NULL WHERE id = ?",
+                    vec![(waits + 1).into(), (now + SETUP_GONE_WAIT_MS).into(), id.as_str().into()],
+                )?;
+                Ok(true)
+            });
+            if let Ok(true) = waited {
+                self.provision_not_before.set(0);
+                console_log!(
+                    "{}",
+                    json!({ "at": "provision", "room": room, "request": request_id, "outcome": "not_found_yet" })
+                );
+                return Ok(());
+            }
+        }
+        let mut limited_end: Option<i64> = None;
+        let mut reason = ended.reason;
+        if let Some(wait_ms) = ended.limited {
+            // GitHub limited the rate: the run is given back, and the request waits for the time GitHub gave, for up to a
+            // day from its first limit. Then it ends, still without spending the run.
+            let id = request_id.clone();
+            let primary_403 = ended.primary_403;
+            // Which call was limited, by the refusal it would be: the creation token, the creation call, a setup call or
+            // the read-back. Only that same call answering a spent limit again counts as a refusal.
+            let call = ended.otherwise;
+            let decided = self.in_transaction(move |sql| {
+                let now = now_ms();
+                let Some(row) = rows(
+                    sql,
+                    "SELECT limited_since, limited_call, job_not_before FROM repo_request WHERE id = ? AND state = ?",
+                    vec![id.as_str().into(), RequestState::Pending.name().into()],
+                )?
+                .into_iter()
+                .next() else {
+                    return Ok(None);
+                };
+                let since = row["limited_since"].as_i64();
+                // The last limit's wait, if this run follows a limit of this same call: it's over, since the job ran.
+                let same_call = row["limited_call"].as_str() == Some(call);
+                let held = since
+                    .filter(|_| same_call)
+                    .and(row["job_not_before"].as_i64());
+                if limit_repeated_after_reset(primary_403, held, now) {
+                    return Ok(Some(Limited::Refused));
+                }
+                exec(
+                    sql,
+                    "UPDATE repo_request SET runs = max(runs - 1, 0) WHERE id = ?",
+                    vec![id.as_str().into()],
+                )?;
+                if !rate_limited_run_waits(since, now) {
+                    return Ok(Some(Limited::Ends(now + wait_ms)));
+                }
+                exec(
+                    sql,
+                    "UPDATE repo_request SET limited_since = COALESCE(limited_since, ?1), limited_call = ?2, job_not_before = ?3 WHERE id = ?4",
+                    vec![now.into(), call.into(), (now + wait_ms).into(), id.as_str().into()],
+                )?;
+                Ok(Some(Limited::Waits))
+            });
+            match decided {
+                Ok(Some(Limited::Waits)) => {
+                    self.provision_not_before.set(0);
+                    console_log!(
+                        "{}",
+                        json!({ "at": "provision", "room": room, "request": request_id, "outcome": "rate_limited", "wait_ms": wait_ms })
+                    );
+                    return Ok(());
+                }
+                Ok(Some(Limited::Ends(reset))) => limited_end = Some(reset),
+                Ok(Some(Limited::Refused)) => reason = ended.otherwise,
+                Ok(None) | Err(_) => {}
+            }
+        }
         let id = request_id.clone();
         let finished = self.in_transaction(move |sql| {
-            finish(sql, &id, ended.state, ended.reason, now_ms())?;
+            finish(sql, &id, ended.state, reason, now_ms())?;
+            // A request that ended rate-limited takes a retry once GitHub's last reset has passed, and answers
+            // `retry_too_soon` with that time until then. `job_not_before` keeps it too, so even a retry taken right at it
+            // never calls GitHub sooner.
+            if let Some(reset) = limited_end {
+                exec(
+                    sql,
+                    "UPDATE repo_request SET retry_after = ?1, job_not_before = ?1 WHERE id = ?2",
+                    vec![reset.into(), id.as_str().into()],
+                )?;
+            }
             Ok(rows(
                 sql,
                 "SELECT state, reason FROM repo_request WHERE id = ?",
@@ -941,8 +1117,7 @@ impl Workspace {
             };
             return Ok(Some(Ended {
                 state,
-                reason,
-                status: 0,
+                ..failed(reason, 0)
             }));
         }
 
@@ -952,6 +1127,23 @@ impl Workspace {
                 let name = text(&request["provider_name"]).unwrap_or_default();
                 let answer = provider.create_repository(&name, public).await;
                 let id = request_id.to_string();
+                if let CreateAnswer::RateLimited { failure, at_mint } = answer {
+                    // A definite refusal for the rate alone: nothing was made, so the record that a call may have gone
+                    // out under this attempt's name is taken back, and the next run sends the same name.
+                    self.in_transaction(move |sql| {
+                        exec(
+                            sql,
+                            "DELETE FROM repo_request_attempt WHERE request_id = ? AND attempt = ? AND outcome = ?",
+                            vec![id.as_str().into(), attempt.into(), STARTED.into()],
+                        )
+                    })?;
+                    let otherwise = if at_mint {
+                        "token_refused"
+                    } else {
+                        "provider_refused"
+                    };
+                    return Ok(Some(failed_call(otherwise, failure)));
+                }
                 let (outcome, ended, created) = match answer {
                     // A repository under anyone else isn't ours, whatever its ID is. It isn't held.
                     CreateAnswer::Created(made) if made.owner_id != config.org_id => {
@@ -968,12 +1160,16 @@ impl Workspace {
                     CreateAnswer::NotSent(status) => {
                         (NOT_SENT, Some(failed("token_refused", status)), None)
                     }
-                    CreateAnswer::Unknown => (
+                    CreateAnswer::Unknown | CreateAnswer::RateLimited { .. } => (
                         "uncertain",
                         Some(Ended {
                             state: RequestState::Uncertain,
                             reason: "creation_outcome_unknown",
                             status: 0,
+                            limited: None,
+                            primary_403: false,
+                            otherwise: "creation_outcome_unknown",
+                            gone_wait: false,
                         }),
                         None,
                     ),
@@ -1008,21 +1204,28 @@ impl Workspace {
         };
         let (observed, _) = match provider.read_back(repo_id).await {
             Ok(read) => read,
-            Err(failure) => return Ok(Some(failed("read_back_failed", failure.status()))),
+            Err(failure) => return Ok(Some(failed_call("read_back_failed", failure))),
         };
+        // A repository this request just created may not show by its ID yet: setup waits and reads again.
+        if !observed.present {
+            return Ok(Some(gone_at_setup()));
+        }
         let steps = match missing_steps(&expected, &observed) {
             Ok(steps) => steps,
             Err(not_ready) => return Ok(Some(failed(not_ready.code(), 0))),
         };
         for step in steps {
             if let Err(failure) = provider.apply(repo_id, step).await {
-                return Ok(Some(failed("setup_call_failed", failure.status())));
+                return Ok(Some(failed_call("setup_call_failed", failure)));
             }
         }
         let (observed, described) = match provider.read_back(repo_id).await {
             Ok(read) => read,
-            Err(failure) => return Ok(Some(failed("read_back_failed", failure.status()))),
+            Err(failure) => return Ok(Some(failed_call("read_back_failed", failure))),
         };
+        if !observed.present {
+            return Ok(Some(gone_at_setup()));
+        }
         if let Err(not_ready) = verify_ready(&expected, &observed) {
             return Ok(Some(failed(not_ready.code(), 0)));
         }
@@ -1069,7 +1272,7 @@ impl Workspace {
             )?;
             exec(
                 sql,
-                "UPDATE repo_request SET state = ?, reason = NULL, job_failures = 0, job_not_before = NULL, updated_at = ? WHERE id = ?",
+                "UPDATE repo_request SET state = ?, reason = NULL, job_failures = 0, job_not_before = NULL, limited_since = NULL, limited_call = NULL, updated_at = ? WHERE id = ?",
                 vec![RequestState::Ready.name().into(), now.into(), id.as_str().into()],
             )?;
             audit_as(

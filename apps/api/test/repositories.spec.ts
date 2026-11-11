@@ -7,6 +7,8 @@ import { beforeAll, describe, expect, it } from "vitest";
 // nothing in the API can make one yet.
 
 const BINDINGS = env as any;
+/** The organization the test Worker is configured with, which the repository read names. */
+const GH_ORG = JSON.parse(BINDINGS.TEST_FAKE_GITHUB).orgLogin as string;
 let key: any;
 type Who = { id: string; kind?: "agent" | "person"; org: string; adminOrgs?: string[]; gen?: number };
 const OWNER: Who = { id: "per_rp_owner", kind: "person", org: "org_rp", adminOrgs: ["org_rp"] };
@@ -91,7 +93,12 @@ describe("the managed repositories migration", () => {
     await inRoom(id, (sql) => {
       // M5 step 7a's read bookkeeping, the newest migration, comes off first.
       // M5 step 7b's merge bookkeeping, the newest migration, comes off first.
-      // The newest migration, which keeps an approval's reviewer (A1, decision 195), comes off first.
+      // The newest step, the M5 security review's two columns, comes off first.
+      sql.exec("ALTER TABLE repo_link DROP COLUMN gone_seen_at");
+      sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");
+      sql.exec("ALTER TABLE repo_request DROP COLUMN limited_call");
+      sql.exec("UPDATE schema_version SET version = version - 1");
+      // The step that keeps an approval's reviewer (A1, decision 195) comes off next.
       sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_person");
       sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_id");
       sql.exec("UPDATE schema_version SET version = version - 1");
@@ -130,15 +137,15 @@ describe("the managed repositories migration", () => {
     // A read migrates the room.
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
     expect(await schemaVersion(id)).toBe(newest);
-    expect(await columns(id, "repo_request")).toEqual(["id", "singleton", "state", "name", "visibility", "attempt", "provider_name", "provider_repo_id", "reason", "requested_by", "requested_at", "updated_at", "runs", "retry_after", "job_failures", "job_not_before"]);
+    expect(await columns(id, "repo_request")).toEqual(["id", "singleton", "state", "name", "visibility", "attempt", "provider_name", "provider_repo_id", "reason", "requested_by", "requested_at", "updated_at", "runs", "retry_after", "job_failures", "job_not_before", "limited_since", "limited_call"]);
     expect(await columns(id, "repo_request_attempt")).toEqual(["request_id", "attempt", "provider_name", "outcome", "at"]);
-    expect(await columns(id, "repo_link")).toEqual(["id", "singleton", "request_id", "provider", "provider_repo_id", "provider_org_id", "full_name", "visibility", "default_branch", "status", "status_reason", "created_by", "created_at", "verified_at", "updated_at", "indexed_at", "read_failures", "reads_not_before"]);
+    expect(await columns(id, "repo_link")).toEqual(["id", "singleton", "request_id", "provider", "provider_repo_id", "provider_org_id", "full_name", "visibility", "default_branch", "status", "status_reason", "created_by", "created_at", "verified_at", "updated_at", "indexed_at", "read_failures", "reads_not_before", "gone_seen_at"]);
     expect(await columns(id, "provider_grant")).toEqual(["id", "principal_id", "provider", "provider_repo_id", "action", "delegated_by", "created_at", "expires_at", "revoked_at", "revoked_by"]);
     expect(await columns(id, "task_change")).toEqual(["task_id", "provider_repo_id", "pr_number", "submission_no", "reviewed_commit_sha", "observed_head_sha", "head_observed_at", "checks_state", "checks_json", "checks_observed_at", "merge_state", "merge_reason", "merge_sha", "merge_requested_by", "merge_requested_at", "merge_observed_at", "created_at", "updated_at", "head_repo_id", "base_ref", "reviewed_base_sha", "merge_base_sha", "pr_state", "pr_observed_at", "nudged_at", "observed_base_sha", "read_at", "unchanged_reads", "merged_by_id", "read_failures", "not_found_reads", "unwatched_at", "commit_changed_at", "pr_draft", "submitter_id", "submitter_person", "merge_requester_person", "merge_attempts", "merge_next_at", "merge_step", "merge_marked_at", "merge_mark_set_at", "merge_called_at", "merge_finished_at", "reviewer_id", "reviewer_person"]);
     // Nothing is made up for a room that never asked for a repository, and what it held is as it was.
     expect((await footprint(id)).rows).toEqual([0, 0, 0, 0, 0]);
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}/tasks/${task}`)).body.task).toMatchObject({ id: task, title: "Add the parser", assignee: ASSIGNEE.id });
-    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toEqual({ request: null, repository: null, delegated: true, may_request: true });
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toEqual({ request: null, repository: null, delegated: true, may_request: true, organization: GH_ORG });
     // A migrated room doesn't migrate again: a row written since is still there after reads and a write.
     await link(id);
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}`)).status).toBe(200);
@@ -188,7 +195,7 @@ describe("the managed repositories migration", () => {
 describe("the room's repository read", () => {
   it("answers a person who sees the whole room from the room's own state", async () => {
     const { id } = await room();
-    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toEqual({ request: null, repository: null, delegated: true, may_request: true });
+    expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toEqual({ request: null, repository: null, delegated: true, may_request: true, organization: GH_ORG });
     await inRoom(id, (sql) => sql.exec("INSERT INTO repo_request (id, state, name, visibility, attempt, provider_name, reason, requested_by, requested_at, updated_at) VALUES ('rr_1', 'failed', 'engineering', 'public', 2, 'engineering-7f3a', 'name_taken', ?, 1000, 1500)", OWNER.id));
     await link(id, "degraded");
     const read = await api(OWNER, "GET", `/v1/workspaces/${id}/repository`);
@@ -199,6 +206,7 @@ describe("the room's repository read", () => {
       request: { id: "rr_1", state: "failed", name: "engineering", visibility: "public", reason: "name_taken", requested_by: OWNER.id, requested_at: 1000, updated_at: 1500, attempts_left: 5 },
       repository: { id: "rl_1", provider: "github", provider_repo_id: REPO_ID, full_name: "podsterx/engineering", visibility: "public", default_branch: "main", status: "degraded", status_reason: null, created_at: 1000, verified_at: 2000, updated_at: 2000 },
       delegated: true,
+      organization: GH_ORG,
       may_request: true,
     });
   });
@@ -211,6 +219,8 @@ describe("the room's repository read", () => {
       const read = await api(who, "GET", `/v1/workspaces/${id}/repository`);
       expect([read.status, read.code], who.id).toEqual([403, "not_allowed"]);
       expect(read.text).not.toContain("podsterx");
+      // Nor where repositories are made.
+      expect(read.text).not.toContain(GH_ORG);
     }
     const outside = await api(STRANGER, "GET", `/v1/workspaces/${id}/repository`);
     expect([outside.status, outside.code]).toEqual([404, "workspace_not_found"]);
@@ -328,12 +338,12 @@ describe("what the read says to whom", () => {
     // No record for the organization: it holds the delegation, and the owner and an admin are both told so.
     for (const who of [OWNER, admin]) {
       const read = await api(who, "GET", `/v1/workspaces/${id}/repository`);
-      expect([read.status, read.body], who.id).toEqual([200, { request: null, repository: null, delegated: true, may_request: true }]);
+      expect([read.status, read.body], who.id).toEqual([200, { request: null, repository: null, delegated: true, may_request: true, organization: GH_ORG }]);
     }
     // A person who sees the whole room and doesn't run its repository is told nothing about the delegation.
     const theirs = await api(member, "GET", `/v1/workspaces/${id}/repository`);
     expect(theirs.status, theirs.text).toBe(200);
-    expect(theirs.body).toEqual({ request: null, repository: null, may_request: false });
+    expect(theirs.body).toEqual({ request: null, repository: null, may_request: false, organization: GH_ORG });
     expect(theirs.text).not.toContain("delegated");
   });
 
@@ -342,7 +352,7 @@ describe("what the read says to whom", () => {
     await inRoom(id, (sql) => sql.exec("CREATE TABLE test_delegation_unreadable (x INTEGER)"));
     const read = await api(OWNER, "GET", `/v1/workspaces/${id}/repository`);
     expect(read.status, read.text).toBe(200);
-    expect(read.body).toEqual({ request: null, repository: null, may_request: true });
+    expect(read.body).toEqual({ request: null, repository: null, may_request: true, organization: GH_ORG });
     await inRoom(id, (sql) => sql.exec("DROP TABLE test_delegation_unreadable"));
     expect((await api(OWNER, "GET", `/v1/workspaces/${id}/repository`)).body).toHaveProperty("delegated", true);
   });

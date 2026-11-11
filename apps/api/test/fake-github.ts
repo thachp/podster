@@ -18,12 +18,39 @@ const mergePair = generateKeyPairSync("rsa", { modulusLength: 2048 });
 export const FAKE_MERGE_KEY_PEM = mergePair.privateKey.export({ type: "pkcs1", format: "pem" }) as string;
 
 type Ruleset = { id: number; name: string; target: string; enforcement: string; conditions: unknown; bypass_actors?: unknown[]; rules: unknown[]; source_type: string };
-type Repo = { id: number; name: string; ownerId: number; private: boolean; archived: boolean; actionsEnabled: boolean; hasCommit: boolean; defaultBranch: string; rulesets: Ruleset[] };
+/** The repository settings Podster asks for at creation and reads back (the M5 security review's F7 and F8). */
+type Settings = { has_issues: boolean; has_wiki: boolean; has_projects: boolean; has_discussions: boolean; allow_auto_merge: boolean; delete_branch_on_merge: boolean };
+type Workflow = { default_workflow_permissions: string; can_approve_pull_request_reviews: boolean };
+type Repo = { id: number; name: string; ownerId: number; private: boolean; archived: boolean; actionsEnabled: boolean; hasCommit: boolean; defaultBranch: string; rulesets: Ruleset[]; settings?: Settings; workflow?: Workflow; hideMergeSettings?: boolean; deleted?: boolean };
+/** What Podster asks for, and GitHub's defaults for what a creation call leaves out. */
+const ASKED: Settings = { has_issues: false, has_wiki: false, has_projects: false, has_discussions: false, allow_auto_merge: false, delete_branch_on_merge: false };
+const GITHUB_DEFAULTS: Settings = { has_issues: true, has_wiki: true, has_projects: true, has_discussions: false, allow_auto_merge: false, delete_branch_on_merge: false };
+const READ_ONLY_WORKFLOWS: Workflow = { default_workflow_permissions: "read", can_approve_pull_request_reviews: false };
+/**
+ * A rate-limited answer, as GitHub's documentation describes them: `primary` is a 403 with `x-ratelimit-remaining: 0`
+ * and the reset `seconds` from now; `secondary` a 403 whose message says a secondary rate limit was exceeded, with
+ * `retry-after` if `seconds` is given; `429` a bare 429.
+ */
+export type Limited = { kind: "primary" | "secondary" | "429"; seconds?: number };
+const limitedAnswer = ({ kind, seconds }: Limited) => {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (kind === "primary") Object.assign(headers, { "x-ratelimit-limit": "5000", "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + (seconds ?? 60)) });
+  if (kind === "secondary" && seconds !== undefined) headers["retry-after"] = String(seconds);
+  const message = kind === "secondary" ? "You have exceeded a secondary rate limit. Please wait a few minutes before you try again." : "API rate limit exceeded for installation ID 888002.";
+  return new Response(JSON.stringify({ message, documentation_url: "https://docs.github.com/rest/overview/rate-limits-for-the-rest-api" }), { status: kind === "429" ? 429 : 403, headers });
+};
 type Script = {
-  /** One per creation call, the last repeating: ok, taken, forbidden, error500, lost (made, then a 500), hang (made, then no answer in time), wrong_owner, no_id. */
+  /** One per creation call, the last repeating: ok, taken, forbidden, error500, lost (made, then a 500), hang (made, then no answer in time), wrong_owner, no_id, limited (a primary rate limit), secondary (a secondary one). */
   create?: string[];
-  /** The status for a token request, if not 201. */
-  token?: number;
+  /** The status for a token request, if not 201, or a rate limit. */
+  token?: number | Limited;
+  /** How a provisioning token's answer differs from what was asked: extra_permission, other_repo, long_life, no_expiry. */
+  tokenMode?: string;
+  /** A rate limit on the next N setup calls (rulesets and Actions), then answers as usual: `setupLimit`, or a secondary one with a 30 s wait. */
+  setupLimited?: number;
+  setupLimit?: Limited;
+  /** ignore: a workflow-permissions change says done and changes nothing. */
+  workflowWrite?: string;
   /** A new repository's state, over GitHub's defaults: Actions on, an initial commit, no rulesets. */
   fresh?: Partial<Repo>;
   /** ok, ignore (says done, changes nothing), forbidden. */
@@ -49,7 +76,7 @@ type Script = {
  * for the token request itself, if not 201.
  */
 type AgentScript = {
-  mode?: string; revoke?: number; pulls?: Record<string, Pull | null>; pullRead?: number; mint?: number;
+  mode?: string; revoke?: number; pulls?: Record<string, Pull | null>; pullRead?: number | Limited | "flood"; mint?: number | Limited;
   /** The merge App's side (M5 step 7b). `mergeMint` is a status for its token request, if not 201, and `status` one for setting a commit status. */
   mergeMint?: number;
   /** A number fails the status call. "drop" answers 201 and sets nothing. "foreign" sets it as another App's, which the review rule doesn't count. */
@@ -64,7 +91,7 @@ type AgentScript = {
   /** How the merge call goes: ok; lost (merges, then answers 500); error (answers 500, merges nothing); refuse (405, as the rules would); moved (the head changes first, so 409); merged_by_other (someone merges another head first, so 200). */
   merge?: string;
   /** What comparing with the default branch says, whatever is there: a status such as "ahead", or a number for a failed read. */
-  compare?: string | number;
+  compare?: string | number | Limited;
   /** Commits the default branch holds. A merge adds the pull request's head. */
   has?: string[];
 };
@@ -76,11 +103,13 @@ const mergeCalls: { repo: number; method: string; path: string; permissions: Rec
  * rulesets, an initial commit. Each is one test's own, with its own script, and apart from the provisioning spec's
  * repositories, tokens and call log, which that spec resets while others run.
  */
-type ReadyScript = { readRepo?: number; actionsRead?: number; hideBypass?: boolean; token?: number };
+type ReadyScript = { readRepo?: number; actionsRead?: number; hideBypass?: boolean; token?: number; workflowRead?: number; limited?: Limited };
 const readyRepos = new Map<number, Repo & { script: ReadyScript }>();
 const readyTokens = new Map<string, number[]>();
 const readyIssued = new Set<string>();
 const readyReads: { repo: number; path: string; scope: number[] }[] = [];
+/** Metadata-only tokens for the whole installation: they read any repository the installation reaches, by ID. */
+const presenceTokens = new Set<string>();
 const readyRulesets = (): Ruleset[] => [
   { id: 1, name: "podster-review", target: "branch", enforcement: "active", conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } }, bypass_actors: [], source_type: "Repository",
     rules: [{ type: "pull_request", parameters: { required_approving_review_count: 0, dismiss_stale_reviews_on_push: false, require_code_owner_review: false, require_last_push_approval: false, required_review_thread_resolution: false } },
@@ -96,6 +125,12 @@ const gates = new Map<number, (() => void)[]>();
  * `padding` makes the description that many bytes long. A null entry removes the pull request.
  */
 type Pull = { head_sha: string; base_sha: string; base_ref?: string; head_repo?: number | null; base_repo?: number; state?: "open" | "closed"; merged?: boolean; merge_commit_sha?: string; merged_by?: number; as_number?: number; padding?: number; draft?: boolean };
+/**
+ * An answer that doesn't end (`pullRead: "flood"`): 2 MB with no stated length, then nothing more until the caller gives
+ * up. A reader that stops at its bound has its answer at once. One that reads to the end waits out its own time limit.
+ */
+const FLOOD_CHUNK = 64 * 1024;
+const FLOOD_BYTES = 2 * 1024 * 1024;
 /** Every read an agent-token App token made, by repository: what it asked for and what the token could do. */
 const agentReads: { repo: number; path: string; permissions: Record<string, string>; status: number }[] = [];
 type AgentToken = { token: string; repo: number[] | "all"; permissions: Record<string, string>; asked: unknown; forRepo: number; app: "agent" | "merge" };
@@ -145,7 +180,20 @@ function appJwtValid(bearer: string, installation: string): "provision" | "agent
   }
 }
 
-const repoView = (r: Repo) => ({ id: r.id, name: r.name, full_name: `${FAKE_GITHUB.orgLogin}/${r.name}`, private: r.private, archived: r.archived, default_branch: r.defaultBranch, owner: { id: r.ownerId, login: FAKE_GITHUB.orgLogin }, description: "SECRET-DESCRIPTION", html_url: `https://github.com/${FAKE_GITHUB.orgLogin}/${r.name}` });
+const repoView = (r: Repo) => {
+  const settings = r.settings ?? ASKED;
+  // GitHub shows merge settings only to a token that can read and write contents.
+  const { allow_auto_merge, delete_branch_on_merge, ...always } = settings;
+  return { id: r.id, name: r.name, full_name: `${FAKE_GITHUB.orgLogin}/${r.name}`, private: r.private, archived: r.archived, default_branch: r.defaultBranch, owner: { id: r.ownerId, login: FAKE_GITHUB.orgLogin }, description: "SECRET-DESCRIPTION", html_url: `https://github.com/${FAKE_GITHUB.orgLogin}/${r.name}`, ...always, ...(r.hideMergeSettings ? {} : { allow_auto_merge, delete_branch_on_merge }) };
+};
+
+/** A provisioning token's answer: what it may do, where, and until when, as GitHub gives them. */
+const provisionTokenAnswer = (token: string, asked: any, narrowed: number[] | null, mode?: string) => {
+  const permissions: Record<string, string> = { ...(asked?.permissions ?? { administration: "write", contents: "write", metadata: "read" }), ...(mode === "extra_permission" ? { contents: "write" } : {}) };
+  const reach = narrowed && mode === "other_repo" ? [...narrowed, 1] : narrowed;
+  const life = mode === "long_life" ? 7_200_000 : 3_600_000;
+  return { token, ...(mode === "no_expiry" ? {} : { expires_at: new Date(Date.now() + life).toISOString() }), permissions, repository_selection: reach ? "selected" : "all", ...(reach ? { repositories: reach.map((id) => ({ id, name: `repo-${id}` })) } : {}) };
+};
 
 /** Answers a request to GitHub or to the fake's control host, or returns null for any other host. */
 export async function fakeGithub(request: Request): Promise<Response | null> {
@@ -180,7 +228,7 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
       // Makes this test's repository as provisioning would have left it, or changes it: `actionsEnabled`, `archived`,
       // `rulesets` (none, no_update, extra_bypass, inactive, extra), and a `script` for its reads.
       const { id, script: readyScript, rulesets, ...patch } = (await request.json()) as { id: number; script?: ReadyScript; rulesets?: string } & Partial<Repo>;
-      const repo = readyRepos.get(id) ?? { id, name: `repo-${id}`, ownerId: FAKE_GITHUB.orgId, private: false, archived: false, actionsEnabled: false, hasCommit: true, defaultBranch: "main", rulesets: readyRulesets(), script: {} };
+      const repo = readyRepos.get(id) ?? { id, name: `repo-${id}`, ownerId: FAKE_GITHUB.orgId, private: false, archived: false, actionsEnabled: false, hasCommit: true, defaultBranch: "main", rulesets: readyRulesets(), settings: { ...ASKED }, workflow: { ...READ_ONLY_WORKFLOWS }, script: {} };
       Object.assign(repo, patch);
       if (readyScript) repo.script = readyScript;
       if (rulesets) {
@@ -246,7 +294,10 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
   // A read-back of one test's own repository, by the provisioning App, is that test's and not the provisioning spec's.
   const wantedIds: unknown = body?.repository_ids;
   const readyMint = !!tokenRoute && app === "provision" && Array.isArray(wantedIds) && wantedIds.length > 0 && wantedIds.every((id) => readyRepos.has(id as number));
-  const readyCall = readyMint || readyIssued.has(bearer);
+  // A token for the whole installation that can only read metadata: the read-back asking whether a repository is there.
+  const asked = body?.permissions && typeof body.permissions === "object" ? Object.entries(body.permissions) : [];
+  const presenceMint = !!tokenRoute && app === "provision" && !Array.isArray(wantedIds) && asked.length === 1 && asked[0][0] === "metadata" && asked[0][1] === "read";
+  const readyCall = readyMint || presenceMint || readyIssued.has(bearer);
   if (!agentCall && !readyCall) calls.push({ method: request.method, path, body, auth, ...(scope ? { scope } : {}) });
   const versioned = request.headers.get("x-github-api-version") === "2022-11-28" && request.headers.get("accept") === "application/vnd.github+json" && !!request.headers.get("user-agent");
   if (!versioned) return json({ message: "missing headers" }, 400);
@@ -254,22 +305,34 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
   if (tokenRoute) {
     if (request.method !== "POST" || auth !== "app") return json({ message: "Bad credentials" }, 401);
     if (app === "agent" || app === "merge") return agentMint(body, app);
+    if (presenceMint) {
+      const token = `ghs_fake_${crypto.randomUUID().replaceAll("-", "")}`;
+      // It reaches every repository the installation does, which `readyRoute` answers for by ID. Its scope is kept empty,
+      // so it never counts as a live token on another test's repository while it's held.
+      readyTokens.set(token, []);
+      readyIssued.add(token);
+      presenceTokens.add(token);
+      return json({ ...provisionTokenAnswer(token, body, null), repository_selection: "all" }, 201);
+    }
     if (readyMint) {
       const ids = wantedIds as number[];
       const refused = readyRepos.get(ids[0])?.script.token;
       if (refused && refused !== 201) return json({ message: "SECRET-PROVIDER-TEXT" }, refused);
+      // GitHub won't narrow a token to a repository the installation no longer reaches.
+      if (ids.some((id) => readyRepos.get(id)?.deleted)) return json({ message: "There is at least one repository that does not exist or is not accessible to the parent installation." }, 422);
       const token = `ghs_fake_${crypto.randomUUID().replaceAll("-", "")}`;
       readyTokens.set(token, ids);
       readyIssued.add(token);
-      return json({ token, expires_at: new Date(Date.now() + 3_600_000).toISOString() }, 201);
+      return json(provisionTokenAnswer(token, body, ids), 201);
     }
+    if (typeof script.token === "object") return limitedAnswer(script.token);
     if (script.token && script.token !== 201) return json({ message: "SECRET-PROVIDER-TEXT" }, script.token);
     const token = `ghs_fake_${crypto.randomUUID().replaceAll("-", "")}`;
     // Narrowed to the repositories asked for, as GitHub does, or good for the whole installation.
     const wanted = Array.isArray(body?.repository_ids) ? (body.repository_ids as number[]) : null;
     if (wanted && wanted.some((id) => !repos.has(id))) return json({ message: "no such repository" }, 422);
     tokens.set(token, wanted ?? "all");
-    return json({ token, expires_at: new Date(Date.now() + 3_600_000).toISOString() }, 201);
+    return json(provisionTokenAnswer(token, body, wanted, script.tokenMode), 201);
   }
   if (agentLive.has(bearer) || agentTokens.some((t) => t.token === bearer)) return agentRead(request, path, bearer) ?? mergeCall(request, path, bearer, body) ?? agentRevoke(request, path, bearer);
   if (readyIssued.has(bearer)) return readyRoute(request, path, bearer);
@@ -292,9 +355,13 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
     const mode = modes[Math.min(creations, modes.length - 1)];
     creations += 1;
     if (mode === "forbidden") return json({ message: "SECRET-PROVIDER-TEXT" }, 403);
+    if (mode === "limited") return limitedAnswer({ kind: "primary", seconds: 90 });
+    if (mode === "secondary") return limitedAnswer({ kind: "secondary" });
     if (mode === "taken" || [...repos.values()].some((r) => r.name === body?.name)) return json({ message: "Repository creation failed.", errors: [{ resource: "Repository", code: "custom", field: "name", message: "name already exists on this account" }] }, 422);
     if (mode === "error500") return json({ message: "SECRET-PROVIDER-TEXT" }, 500);
-    const repo: Repo = { id: nextId++, name: body?.name, ownerId: mode === "wrong_owner" ? 1 : FAKE_GITHUB.orgId, private: body?.private === true, archived: false, actionsEnabled: true, hasCommit: body?.auto_init === true, defaultBranch: "main", rulesets: [], ...(script.fresh ?? {}) };
+    // Each setting takes what the call asked for, or GitHub's default for one it left out.
+    const settings = Object.fromEntries(Object.entries(GITHUB_DEFAULTS).map(([name, value]) => [name, typeof body?.[name] === "boolean" ? body[name] : value])) as Settings;
+    const repo: Repo = { id: nextId++, name: body?.name, ownerId: mode === "wrong_owner" ? 1 : FAKE_GITHUB.orgId, private: body?.private === true, archived: false, actionsEnabled: true, hasCommit: body?.auto_init === true, defaultBranch: "main", rulesets: [], settings, workflow: { ...READ_ONLY_WORKFLOWS }, ...(script.fresh ?? {}) };
     repo.rulesets = structuredClone(repo.rulesets);
     repos.set(repo.id, repo);
     if (mode === "lost") return json({ message: "SECRET-PROVIDER-TEXT" }, 500);
@@ -312,6 +379,15 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
   if (rest === "" && request.method === "GET") return script.readRepo ? json({ message: "SECRET-PROVIDER-TEXT" }, script.readRepo) : json(repoView(repo));
   if (rest === `/branches/${repo.defaultBranch}` && request.method === "GET") return repo.hasCommit ? json({ name: repo.defaultBranch, commit: { sha: "c0".repeat(20) } }) : json({ message: "Branch not found" }, 404);
   if (rest === "/actions/permissions" && request.method === "GET") return script.actionsRead ? json({ message: "no" }, script.actionsRead) : json({ enabled: repo.actionsEnabled });
+  if (rest === "/actions/permissions/workflow" && request.method === "GET") return json(repo.workflow ?? READ_ONLY_WORKFLOWS);
+  if (request.method !== "GET" && (script.setupLimited ?? 0) > 0) {
+    script.setupLimited = (script.setupLimited ?? 0) - 1;
+    return limitedAnswer(script.setupLimit ?? { kind: "secondary", seconds: 30 });
+  }
+  if (rest === "/actions/permissions/workflow" && request.method === "PUT") {
+    if (script.workflowWrite !== "ignore") repo.workflow = { default_workflow_permissions: body?.default_workflow_permissions, can_approve_pull_request_reviews: body?.can_approve_pull_request_reviews };
+    return json(null, 204);
+  }
   if (rest === "/actions/permissions" && request.method === "PUT") {
     if (script.disableActions === "forbidden") return json({ message: "no" }, 403);
     if (script.disableActions !== "ignore") repo.actionsEnabled = body?.enabled !== false;
@@ -346,6 +422,7 @@ async function agentMint(body: any, app: "agent" | "merge"): Promise<Response> {
   if (mode === "gate") await new Promise<void>((open) => gates.set(wanted[0], [...(gates.get(wanted[0]) ?? []), open]));
   const now = agentRepos.get(wanted[0]) ?? script;
   const refused = app === "merge" ? now.mergeMint : now.mint;
+  if (typeof refused === "object") return limitedAnswer(refused);
   if (refused && refused !== 201) return json({ message: "SECRET-PROVIDER-TEXT" }, refused);
   if (mode === "slow") await new Promise((resolve) => setTimeout(resolve, 200));
   const token = `ghs_fake_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -386,6 +463,22 @@ function agentRead(request: Request, path: string, bearer: string): Response | n
   const reaches = held.repo === "all" || held.repo.includes(repo);
   if (!reaches || !held.permissions.pull_requests) return answer({ message: "Resource not accessible by integration" }, 403);
   const script = agentRepos.get(repo);
+  if (script?.pullRead === "flood") {
+    agentReads.push({ repo, path, permissions: held.permissions, status: 200 });
+    const chunk = new Uint8Array(FLOOD_CHUNK).fill(0x20);
+    let sent = 0;
+    return new Response(new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (sent >= FLOOD_BYTES) return unanswered(request);
+        controller.enqueue(sent === 0 ? new TextEncoder().encode("{") : chunk);
+        sent += sent === 0 ? 1 : chunk.length;
+      },
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  }
+  if (typeof script?.pullRead === "object") {
+    agentReads.push({ repo, path, permissions: held.permissions, status: script.pullRead.kind === "429" ? 429 : 403 });
+    return limitedAnswer(script.pullRead);
+  }
   if (script?.pullRead && script.pullRead !== 200) return answer({ message: "SECRET-PROVIDER-TEXT" }, script.pullRead);
   const pull = script?.pulls?.[asked[2]];
   if (!pull) return answer({ message: "Not Found" }, 404);
@@ -419,10 +512,22 @@ function readyRoute(request: Request, path: string, bearer: string): Response {
   if (request.method !== "GET") return json({ message: "not here" }, 405);
   const scoped = path.match(/^\/repositories\/(\d+)(\/.*)?$/);
   const repo = scoped ? readyRepos.get(Number(scoped[1])) : undefined;
+  if (repo?.deleted) {
+    readyReads.push({ repo: repo.id, path, scope });
+    return json({ message: "Not Found" }, 404);
+  }
+  // The presence check reads the repository itself by ID, and nothing else.
+  if (presenceTokens.has(bearer)) {
+    if (!repo || scoped?.[2]) return json({ message: "Not Found" }, 404);
+    readyReads.push({ repo: repo.id, path, scope });
+    return json(repoView(repo));
+  }
   if (!scoped || !repo || !scope.includes(repo.id)) return json({ message: "Not Found" }, 404);
   readyReads.push({ repo: repo.id, path, scope });
+  if (repo.script.limited) return limitedAnswer(repo.script.limited);
   const rest = scoped[2] ?? "";
   if (rest === "") return repo.script.readRepo ? json({ message: "SECRET-PROVIDER-TEXT" }, repo.script.readRepo) : json(repoView(repo));
+  if (rest === "/actions/permissions/workflow") return repo.script.workflowRead ? json({ message: "no" }, repo.script.workflowRead) : json(repo.workflow ?? READ_ONLY_WORKFLOWS);
   if (rest === `/branches/${repo.defaultBranch}`) return repo.hasCommit ? json({ name: repo.defaultBranch, commit: { sha: "c0".repeat(20) } }) : json({ message: "Branch not found" }, 404);
   if (rest === "/actions/permissions") return repo.script.actionsRead ? json({ message: "no" }, repo.script.actionsRead) : json({ enabled: repo.actionsEnabled });
   if (rest.startsWith("/rulesets") && rest.replace(/\?.*$/, "") === "/rulesets") return json(repo.rulesets.map((r) => ({ id: r.id, name: r.name, source_type: r.source_type })));
@@ -485,6 +590,10 @@ function mergeCall(request: Request, path: string, bearer: string, body: any): R
   if (comparing && request.method === "GET") {
     if (!held.permissions.contents) return denied();
     if (typeof script.compare === "number") return answer({ message: "SECRET-PROVIDER-TEXT" }, script.compare);
+    if (typeof script.compare === "object") {
+      mergeCalls.push({ repo, method: request.method, path, permissions: held.permissions, status: script.compare.kind === "429" ? 429 : 403, body });
+      return limitedAnswer(script.compare);
+    }
     const has = (script.has ?? []).includes(comparing[3]);
     return answer({ status: script.compare ?? (has ? "behind" : "ahead"), commits: [{ commit: { message: "SECRET-COMMIT-MESSAGE" } }] });
   }

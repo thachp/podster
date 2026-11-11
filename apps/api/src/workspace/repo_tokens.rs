@@ -616,7 +616,7 @@ impl Workspace {
                 // A refusal from GitHub minted nothing. No answer, or one that couldn't be read, may have: that lease is
                 // kept as a record of a token that may be live and can't be revoked, for at most its hour.
                 match failure {
-                    Failure::Status(_) => self.drop_lease(&lease.id),
+                    Failure::Status(_) | Failure::RateLimited { .. } => self.drop_lease(&lease.id),
                     Failure::Unreachable | Failure::Unreadable => self.lease_unknown(&lease.id),
                 }
                 console_error!(
@@ -892,7 +892,9 @@ impl Workspace {
             }
             abandon_leases(sql, now)?;
             // An expired token is dead whatever its state, and so is the record of one that may have been minted.
-            exec(sql, "DELETE FROM repo_token WHERE expires_at <= ?", vec![now.into()])
+            exec(sql, "DELETE FROM repo_token WHERE expires_at <= ?", vec![now.into()])?;
+            // Grants that ended long ago, once no token names them.
+            store::prune_ended_grants(sql, now)
         })?;
         let due = rows(&sql, "SELECT id, agent_id, task_id, grant_id, provider_repo_id, sealed, revoke_attempts, expires_at FROM repo_token WHERE state = 'revoke' AND revoke_next_at <= ? ORDER BY revoke_next_at LIMIT ?", vec![now.into(), REVOKES_PER_ALARM.into()])?;
         if due.is_empty() {

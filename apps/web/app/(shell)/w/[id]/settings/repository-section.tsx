@@ -7,7 +7,7 @@ import { visibleText } from "@/lib/public/visible-text";
 import { CommandNotice, useCommands } from "../team/commands";
 import { ConfirmAction } from "../team/confirm-action";
 import { FIELD } from "../team/field";
-import { dayOf, describe, explainRepositoryRefusal, nameProblem, PUBLIC_WARNING, repositoryUrl, REQUESTS_CLOSED, retryOffered, type RoomRepository } from "./repository-model";
+import { dayOf, describe, explainRepositoryRefusal, nameProblem, publicWarning, repositoryUrl, REQUESTS_CLOSED, retryOffered, type RoomRepository } from "./repository-model";
 
 const TONES = {
   neutral: "bg-status-neutral-surface text-status-neutral",
@@ -30,7 +30,7 @@ function StateBadge({ label, tone }: { label: string; tone: keyof typeof TONES }
   );
 }
 
-function Warning({ name }: { name?: string }) {
+function Warning({ name, organization }: { name?: string; organization: string | null | undefined }) {
   return (
     <span className="block space-y-2">
       {name ? (
@@ -38,7 +38,7 @@ function Warning({ name }: { name?: string }) {
           Name: <span className="break-all font-mono">{name}</span>
         </span>
       ) : null}
-      {PUBLIC_WARNING.map((line) => (
+      {publicWarning(organization).map((line) => (
         <span key={line} className="block">
           {line}
         </span>
@@ -137,11 +137,11 @@ export function RepositorySection({ roomId, state, runsRepository, archived }: {
           <p id={ids.hint} className="text-sm text-muted-foreground">
             {request?.attempts_left === 1 ? "1 attempt left." : `${request?.attempts_left} attempts left.`} A retry may be refused as too soon: setup waits a minute after a run, doubling up to an hour.
           </p>
-          <ConfirmAction label="Retry setup" describedBy={ids.hint} disabled={busy} title="Retry setting up this workroom's repository?" description={<Warning />} confirm="Retry setup" action={retry} focusAfter={after} />
+          <ConfirmAction label="Retry setup" describedBy={ids.hint} disabled={busy} title="Retry setting up this workroom's repository?" description={<Warning organization={state.organization} />} confirm="Retry setup" action={retry} focusAfter={after} />
         </div>
       ) : null}
       {runsRepository && request && !repository && (request.state === "failed" || request.state === "uncertain") && request.attempts_left === 0 ? (
-        <p className="text-sm text-muted-foreground">Setup has run as many times as a workroom is allowed. A Podster operator can reset it.</p>
+        <p className="text-sm text-muted-foreground">Setup has run as many times as a workroom is allowed, and it can&apos;t be reset yet.</p>
       ) : null}
 
       {mayAsk && delegated === false ? (
@@ -176,13 +176,13 @@ export function RepositorySection({ roomId, state, runsRepository, archived }: {
               {touched && problem ? problem : "Lower-case letters, digits and hyphens, at most 64 characters. Some names are reserved."}
             </p>
           </div>
-          <ConfirmAction label="Create a repository" disabled={busy || problem !== null} title="Create a public repository for this workroom?" description={<Warning name={name} />} confirm="Create public repository" action={create} focusAfter={after} />
+          <ConfirmAction label="Create a repository" disabled={busy || problem !== null} title="Create a public repository for this workroom?" description={<Warning name={name} organization={state.organization} />} confirm="Create public repository" action={create} focusAfter={after} />
         </div>
       ) : null}
       {runsRepository && archived && !request && !repository ? <p className="text-sm text-muted-foreground">This workroom is archived, so a repository can&apos;t be created for it.</p> : null}
       {!runsRepository && !request && !repository ? <p className="text-sm text-muted-foreground">Only this workroom&apos;s owner and admins can create its repository.</p> : null}
 
-      <p className="text-sm text-muted-foreground">Creating a repository grants nobody access to it. The owner and admins grant push or merge to each participant on Team, and Podster never deletes a repository.</p>
+      <p className="text-sm text-muted-foreground">Creating a repository grants nobody access to it. The owner and admins grant push or merge to each participant on Team, and Podster doesn&apos;t delete repositories.</p>
     </div>
   );
 }

@@ -387,7 +387,12 @@ describe("a room from before this", () => {
       // M5 step 6's agent tokens, the newest migration, come off first.
       // M5 step 7a's read bookkeeping, the newest migration, comes off first.
       // M5 step 7b's merge bookkeeping, the newest migration, comes off first.
-      // The newest migration, which keeps an approval's reviewer (A1, decision 195), comes off first.
+      // The newest step, the M5 security review's two columns, comes off first.
+      sql.exec("ALTER TABLE repo_link DROP COLUMN gone_seen_at");
+      sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");
+      sql.exec("ALTER TABLE repo_request DROP COLUMN limited_call");
+      sql.exec("UPDATE schema_version SET version = version - 1");
+      // The step that keeps an approval's reviewer (A1, decision 195) comes off next.
       sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_person");
       sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_id");
       sql.exec("UPDATE schema_version SET version = version - 1");

@@ -230,7 +230,12 @@ describe("the room's sweep", () => {
       // M5 step 6's agent tokens, the newest migration, come off first.
       // M5 step 7a's read bookkeeping, the newest migration, comes off first.
       // M5 step 7b's merge bookkeeping, the newest migration, comes off first.
-      // The newest migration, which keeps an approval's reviewer (A1, decision 195), comes off first.
+      // The newest step, the M5 security review's two columns, comes off first.
+      state.storage.sql.exec("ALTER TABLE repo_link DROP COLUMN gone_seen_at");
+      state.storage.sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");
+      state.storage.sql.exec("ALTER TABLE repo_request DROP COLUMN limited_call");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+      // The step that keeps an approval's reviewer (A1, decision 195) comes off next.
       state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_person");
       state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_id");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
@@ -423,7 +428,12 @@ describe("the room's sweep", () => {
       // M5 step 6's agent tokens, the newest migration, come off first.
       // M5 step 7a's read bookkeeping, the newest migration, comes off first.
       // M5 step 7b's merge bookkeeping, the newest migration, comes off first.
-      // The newest migration, which keeps an approval's reviewer (A1, decision 195), comes off first.
+      // The newest step, the M5 security review's two columns, comes off first.
+      state.storage.sql.exec("ALTER TABLE repo_link DROP COLUMN gone_seen_at");
+      state.storage.sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");
+      state.storage.sql.exec("ALTER TABLE repo_request DROP COLUMN limited_call");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+      // The step that keeps an approval's reviewer (A1, decision 195) comes off next.
       state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_person");
       state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_id");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
@@ -762,7 +772,12 @@ describe("removal by the rules, review fixes", () => {
       // M5 step 6's agent tokens, the newest migration, come off first.
       // M5 step 7a's read bookkeeping, the newest migration, comes off first.
       // M5 step 7b's merge bookkeeping, the newest migration, comes off first.
-      // The newest migration, which keeps an approval's reviewer (A1, decision 195), comes off first.
+      // The newest step, the M5 security review's two columns, comes off first.
+      state.storage.sql.exec("ALTER TABLE repo_link DROP COLUMN gone_seen_at");
+      state.storage.sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");
+      state.storage.sql.exec("ALTER TABLE repo_request DROP COLUMN limited_call");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+      // The step that keeps an approval's reviewer (A1, decision 195) comes off next.
       state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_person");
       state.storage.sql.exec("ALTER TABLE task_change DROP COLUMN reviewer_id");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");

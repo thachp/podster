@@ -10,7 +10,7 @@ This is a procedure, not a policy. What Podster promises a reporter or a room's 
 
 By the code:
 
-- **Set a repository's link `suspended`.** The status is read in many places and written nowhere. The only changes are to `degraded`, by a merge attempt that finds the rules different, and back to `ready`, by an operator's recheck.
+- **Set a repository's link `suspended`.** The status is read in many places and written nowhere. The only changes are to `degraded`, by a merge attempt, the daily read-back or an operator's recheck that finds the repository different or gone, and back to `ready`, by an operator's recheck that finds it exactly right.
 - **Make a repository private, archive it or delete it.** No call for any of them exists in `apps/api/src/github.rs`.
 - **Reach a private room as an operator.** An operator suspends a room by its public handle. A room with no public handle can't be suspended, and suspending one stops merges and not push tokens.
 - **Revoke the tokens of one repository.** A room revokes the tokens it holds when their authority ends in that room. No operator route asks a room to do it.
@@ -64,34 +64,37 @@ Why private and archived together: private alone doesn't stop writes. An agent's
 
 Podster isn't told about any of this. By reading the code; none of it was tried.
 
-**The link still reads `ready`,** and the room's settings show the repository as before.
+**The link still reads `ready`** until Podster reads the repository back. The room's settings show the repository as before until then. What notices it, by reading the code and the tests against the fake GitHub; none of it was tried against GitHub:
 
-| After | A merge attempt in the room | `get_repo_access` |
+| After | What reads it back | `get_repo_access` |
 | --- | --- | --- |
-| Private, or private and archived | Reads the repository back, finds it differs (`visibility_differs` or `archived`), sets the link `degraded`, ends the merge, and tells the room's owner and admins. That needs the read-back to answer for a private repository, which is unverified on the Free plan | Until degraded: still mints a token. GitHub refuses writes to an archived repository. Once degraded: refused `repo_not_ready` |
+| Private, or private and archived | The room's daily read-back, an operator's recheck, or a merge attempt. Each finds it differs (`visibility_differs` or `archived`), sets the link `degraded`, and tells the room's owner and admins. That needs the read-back to answer for a private repository, which is unverified on the Free plan | Until degraded: still mints a token. GitHub refuses writes to an archived repository. Once degraded: refused `repo_not_ready` |
 | Archived only | The same, with `archived` | The same |
-| Deleted | The read-back can't be made, so the job waits, counted against its attempts, and never degrades the link. **The link stays `ready`** indefinitely | Each call tries to mint, GitHub refuses, and the agent gets `502 provider_unavailable`. Nothing is minted |
+| Deleted, or taken out of the installation | Two read-backs at least a minute apart, within an hour, each answered "not found" by ID to a token GitHub had just minted, with nothing finding it in between, set the link `degraded` with `repository_gone`. One answer alone changes nothing | Until degraded: each call tries to mint, GitHub refuses, and the agent gets `502 provider_unavailable`. Once degraded: refused `repo_not_ready` |
 
-So the room keeps offering push tokens until a merge attempt degrades the link, and for a deleted repository it keeps trying for good.
+**Held tokens are revoked with the degrade.** Degrading marks every token agents hold on the repository in the same change, and the room's alarm revokes them; for the daily read, in that same pass.
 
-Two fixes are assigned and not on `main`: one that lets Podster notice a deleted repository, and one that lets an operator's recheck degrade a healthy link. Until they land, this procedure stands as written.
+### Making Podster stop now
 
-**Held tokens after a degrade** aren't revoked at once ([C-2](../security/m5-review.md#credentials-github-and-webhooks)). The room marks them at its next alarm, which may be as late as the token's expiry, up to an hour.
+**An operator rechecks the room's repository** with `POST /v1/moderation/repositories/{room}/recheck`. It reads a `ready` link back, as the daily read does, and degrades it on any definite difference.
 
-**An operator's recheck doesn't help here.** It reads GitHub only for a link that's already `degraded`, and can only turn it back to `ready`. It never degrades a `ready` link. Don't recheck a taken-down repository's room unless the repository has been restored exactly.
+- **Private or archived:** the first recheck answers `{ "status": "degraded", "reason": "visibility_differs" }` (or `archived`). From then on the room offers no tokens and makes no merges, and the tokens already out are revoked at its next alarm pass.
+- **Deleted:** the first recheck answers `502 provider_unavailable` and changes nothing, since one "not found" isn't enough. Wait at least a minute, and no more than an hour, and recheck again. The second answers `{ "status": "degraded", "reason": "repository_gone" }`, and from then on it's as above. A recheck that answers 502 for another reason (GitHub down, a rate limit) clears the first sighting: start again.
+- **Without a recheck,** the daily read-back finds it within a day, and confirms a deleted one a minute later.
 
-### Forcing it today
+A recheck needs the room's ID. Nothing lists rooms by repository for an operator yet ([owed before production](../m5-plan.md#owed-before-production)).
 
-**An operator can't.** No operator route degrades or suspends a link, or revokes a room's tokens. What exists:
+**Restoring:** if the repository is put back exactly as Podster set it, a recheck of the `degraded` link reads it back and makes it `ready` again.
+
+### Other ways to stop it
 
 - **The room's owner or an admin takes back the push and merge grants.** Each token the grant backed is marked in the same change and revoked by the room's alarm. On staging, once, GitHub refused such a token 0.2 seconds after the grant was taken back. They can give grants again, so this holds only with their cooperation.
 - **The room is archived** by its own people. Its tokens are marked for revocation, and no grant counts in an archived room.
-- **Someone holding a merge grant asks to merge an approved task** in that room. The job's read-back then degrades the link, if the repository is private or archived. It needs an approved task with a pull request, so it can't be done to order.
 - **An operator takes the organization's provisioning delegation back,** with `PUT /v1/orgs/{org}/provisioning-delegation` and `{ "granted": false }`. That stops the organization asking for another repository, and stops a setup that hasn't linked yet. It does nothing to a linked repository, its tokens, grants or merges, and a person can make another organization. It needs the organization's ID, which nothing tells an operator.
 - **For a room with a public handle, an operator suspends the room.** That stops merges. It doesn't stop push tokens.
 - **Switching `MANAGED_REPOSITORIES` off** stops everything, for every room.
 
-Without one of these, the GitHub step is what holds: an archived or deleted repository takes no writes, whatever Podster's link says.
+Whatever Podster's link says, the GitHub step is what holds: an archived or deleted repository takes no writes.
 
 ## What to record
 

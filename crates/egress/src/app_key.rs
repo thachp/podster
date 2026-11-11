@@ -151,16 +151,29 @@ pub fn app_jwt_signing_input(app_id: i64, now: i64) -> String {
     )
 }
 
-/// Whether each GitHub App role has an App of its own (M5 step 6). `own` is this role's App ID and installation ID;
-/// `others` are the other roles' that are configured. A role whose App or installation is another role's is refused, so
-/// a misconfiguration can never have, say, an agent's token signed with the key of the App that administers
-/// repositories. A role that isn't configured has nothing to collide with.
-pub fn app_is_distinct(
-    own: (i64, i64),
-    others: &[Option<i64>],
-    other_installations: &[Option<i64>],
-) -> bool {
-    !others.contains(&Some(own.0)) && !other_installations.contains(&Some(own.1))
+/// One GitHub App role's configuration, as the Worker holds it: its App ID, its installation ID and its key as PKCS#8
+/// DER from [`pkcs8_from_pem`]. Any part may be missing, for a role that isn't configured.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AppRole {
+    pub app_id: Option<i64>,
+    pub installation_id: Option<i64>,
+    pub key: Option<Vec<u8>>,
+}
+
+/// Whether a GitHub App role has an App of its own (M5 step 6, and the M5 security review's F7): `own` against each of
+/// `others`, by App ID, by installation ID, and by key. Keys are compared as parsed key material, so the same key
+/// written as PKCS#1 for one role and PKCS#8 for another, or with different line breaks, is the same key. A part that
+/// either side doesn't have collides with nothing. Every role runs this against both others, so a misconfiguration
+/// can never have, say, an agent's token signed with the key of the App that administers repositories.
+pub fn role_is_distinct(own: &AppRole, others: &[AppRole]) -> bool {
+    fn differs<T: PartialEq>(a: Option<&T>, b: Option<&T>) -> bool {
+        a.is_none() || b.is_none() || a != b
+    }
+    others.iter().all(|other| {
+        differs(own.app_id.as_ref(), other.app_id.as_ref())
+            && differs(own.installation_id.as_ref(), other.installation_id.as_ref())
+            && differs(own.key.as_ref(), other.key.as_ref())
+    })
 }
 
 #[cfg(test)]
@@ -297,15 +310,50 @@ mod tests {
         assert!(!input.contains('=') && !input.contains('+') && !input.contains('/'));
     }
 
+    fn role(app_id: i64, installation_id: i64, key: Option<Vec<u8>>) -> AppRole {
+        AppRole {
+            app_id: Some(app_id),
+            installation_id: Some(installation_id),
+            key,
+        }
+    }
+
     #[test]
-    fn each_app_role_needs_an_app_of_its_own() {
-        // Agent tokens: App 2 on installation 20, beside provisioning (1, 10) and merging (3).
-        assert!(app_is_distinct((2, 20), &[Some(1), Some(3)], &[Some(10)]));
-        // The same App as provisioning or merging, or provisioning's installation, is refused.
-        assert!(!app_is_distinct((1, 20), &[Some(1), Some(3)], &[Some(10)]));
-        assert!(!app_is_distinct((3, 20), &[Some(1), Some(3)], &[Some(10)]));
-        assert!(!app_is_distinct((2, 10), &[Some(1), Some(3)], &[Some(10)]));
-        // Another role that isn't configured collides with nothing.
-        assert!(app_is_distinct((2, 20), &[None, None], &[None]));
+    fn each_app_role_needs_an_app_installation_and_key_of_its_own() {
+        let (mut one, mut two) = (vec![0x30, 0x82, 0x01, 0x2c], vec![0x30, 0x82, 0x01, 0x2c]);
+        one.extend([1u8; 300]);
+        two.extend([2u8; 300]);
+        let key = |der: &[u8]| pkcs8_from_pem(&pem("RSA PRIVATE KEY", der));
+        // Agent tokens: App 2 on installation 20, beside provisioning (1, 10) and merging (3, 30).
+        let provisioning = role(1, 10, key(&one));
+        let merging = role(3, 30, None);
+        let others = [provisioning.clone(), merging.clone()];
+        assert!(role_is_distinct(&role(2, 20, key(&two)), &others));
+        // Another role's App, or its installation, whichever role it is, is refused.
+        for clash in [
+            role(1, 20, None),
+            role(3, 20, None),
+            role(2, 10, None),
+            role(2, 30, None),
+        ] {
+            assert!(!role_is_distinct(&clash, &others), "{clash:?}");
+        }
+        // The same key, however it's written: PKCS#1 here, PKCS#8 there, other line breaks, other whitespace.
+        let pkcs8 = pkcs8_from_pem(&pem("RSA PRIVATE KEY", &one)).unwrap();
+        for written in [
+            pem("PRIVATE KEY", &pkcs8),
+            pem("RSA PRIVATE KEY", &one).replace('\n', "\r\n"),
+            format!("\n\n{}  \n", pem("RSA PRIVATE KEY", &one)),
+        ] {
+            let same = role(2, 20, pkcs8_from_pem(&written));
+            assert!(same.key.is_some());
+            assert!(!role_is_distinct(&same, &others));
+        }
+        // A role that isn't configured collides with nothing, and neither does a part that's missing.
+        assert!(role_is_distinct(
+            &role(2, 20, key(&one)),
+            &[AppRole::default()]
+        ));
+        assert!(role_is_distinct(&role(2, 20, None), &others));
     }
 }

@@ -466,6 +466,34 @@ describe("who is told how each participant joined", () => {
   });
 });
 
+describe("ended grants", () => {
+  it("are dropped 30 days after they ended, unless a token row still names them, and their audit and events stay (M5 security review F13)", async () => {
+    const id = await room();
+    const DAY = 24 * 60 * 60 * 1000;
+    const live = (await give(id, AGENT.id, "push")).body;
+    const old = (await give(id, OTHER_AGENT.id, "push")).body;
+    const recent = (await give(id, MEMBER.id, "merge")).body;
+    const tokened = (await give(id, GUEST.id, "push")).body;
+    const lapsed = (await give(id, ADMIN.id, "merge", { expires_at: Date.now() + 60_000 })).body;
+    for (const grant of [old, recent, tokened]) expect((await take(id, grant.id)).status).toBe(200);
+    const now = Date.now();
+    await inRoom(id, (sql) => {
+      sql.exec("UPDATE provider_grant SET revoked_at = ? WHERE id IN (?, ?)", now - 31 * DAY, old.id, tokened.id);
+      sql.exec("UPDATE provider_grant SET revoked_at = ? WHERE id = ?", now - 29 * DAY, recent.id);
+      sql.exec("UPDATE provider_grant SET expires_at = ? WHERE id = ?", now - 31 * DAY, lapsed.id);
+      // A token's row, waiting to be revoked, still names its grant.
+      sql.exec("INSERT INTO repo_token (id, agent_id, task_id, grant_id, provider_repo_id, state, sealed, expires_at, created_at, revoke_next_at) VALUES ('rt_kept', ?, 'tsk_x', ?, ?, 'revoke', 'zz', ?, ?, ?)", GUEST.id, tokened.id, REPO_ID, now + 30 * 60_000, now, now + 60 * 60_000);
+    });
+    const before = await footprint(id);
+    await flush(id);
+    expect((await grantRows(id)).map((g) => g.id).sort()).toEqual([live.id, recent.id, tokened.id].sort());
+    const after = await footprint(id);
+    expect([after.events, after.audit]).toEqual([before.events, before.audit]);
+    expect(await audits(id, "repo_grant.given")).toHaveLength(5);
+    expect(await audits(id, "repo_grant.revoked")).toHaveLength(3);
+  });
+});
+
 describe("the list of grants", () => {
   it("shows a human owner or admin every grant that isn't revoked, and anyone else their own", async () => {
     const id = await room();

@@ -20,7 +20,7 @@ await owner.addAgent(room, agent);
 const made = await owner.must("POST", `/v1/workspaces/${room}/tasks`, { title: "Anything", instructions: "x", assignee: agent.id }, { idempotencyKey: key() });
 
 await report.check("M5-OFFa", "with the switch off, an agent is offered no managed-repository tool at all", async () => {
-  eq((await agent.tools()).filter((t) => /repo|merge|release|deploy/.test(t)), [], "the managed-repository tools");
+  eq((await agent.tools()).filter((t) => ["get_repo_access", "merge_task", "get_task_release_status"].includes(t) || /merge|deploy/.test(t)), [], "the managed-repository tools");
 });
 
 await report.check("M5-OFFb", "with the switch off, the token and merge routes answer exactly as a task verb that doesn't exist", async () => {

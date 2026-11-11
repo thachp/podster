@@ -53,13 +53,36 @@ pub(super) fn enabled(env: &Env, sql: &SqlStorage) -> R<bool> {
     Ok(set)
 }
 
+/// The room's managed-repository routes for people: the read and request, the retry, and the grants. While the switch
+/// is off each answers as a route that doesn't exist. An agent's token route keeps its own check, in `repo_tokens`.
+pub(super) fn is_managed_route(tail: &[&str]) -> bool {
+    matches!(
+        tail,
+        ["repository"]
+            | ["repository", "retry"]
+            | ["repository", "grants"]
+            | ["repository", "grants", _]
+    )
+}
+
+/// How many more times setup may run for the room's request: the cap less the runs so far, never below 0.
+pub(super) fn attempts_left(runs: i64) -> i64 {
+    (MAX_SETUP_RUNS - runs).max(0)
+}
+
 fn refuse<T>(status: u16, code: &'static str) -> R<T> {
     Err(ApiError::api(status, code))
 }
 
+/// The room's owner by current standing: a person the room resolved as its owner, whose owner authority holds. The
+/// stored owner alone isn't enough, since an owner who left the organization is still recorded as one until recovery.
+pub(super) fn is_current_owner(caller: &Caller) -> bool {
+    caller.kind == PrincipalKind::Person && caller.role == Role::Owner
+}
+
 /// Only the room's owner, as a person, asks for or retries the room's repository.
-pub(super) fn may_request(sql: &SqlStorage, caller: &Caller) -> R<()> {
-    if caller.kind == PrincipalKind::Person && is_owner(sql, &caller.id)? {
+pub(super) fn may_request(caller: &Caller) -> R<()> {
+    if is_current_owner(caller) {
         Ok(())
     } else {
         Err(ApiError::not_allowed())
@@ -86,7 +109,7 @@ pub(super) fn request(
     delegated: bool,
     now: i64,
 ) -> R<Value> {
-    may_request(sql, &who.caller)?;
+    may_request(&who.caller)?;
     // Switched off, the route isn't there, for the owner as for anyone.
     if !switched_on {
         return Err(ApiError::not_found());
@@ -165,7 +188,7 @@ pub(super) fn retry(
     suffix: &str,
     now: i64,
 ) -> R<Value> {
-    may_request(sql, &who.caller)?;
+    may_request(&who.caller)?;
     if !switched_on {
         return Err(ApiError::not_found());
     }
@@ -388,6 +411,17 @@ impl Workspace {
     /// Whether the room's organization holds the provisioning delegation now. `None` if its `Principal` couldn't say.
     pub(super) async fn org_delegated(&self) -> Option<bool> {
         let sql = self.state.storage().sql();
+        // A test can make the organization's record unreadable for one room.
+        #[cfg(feature = "failpoints")]
+        if rows(
+            &sql,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_delegation_unreadable'",
+            vec![],
+        )
+        .is_ok_and(|found| !found.is_empty())
+        {
+            return None;
+        }
         let org = rows(&sql, "SELECT owner_org_id FROM workspace", vec![])
             .ok()?
             .first()

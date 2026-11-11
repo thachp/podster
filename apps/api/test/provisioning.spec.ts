@@ -126,6 +126,27 @@ const eventTypes = (id: string) => inRoom(id, (sql) => sql.exec("SELECT type FRO
 const indexRow = async (repo: number) => (await BINDINGS.DB.prepare("SELECT workspace_id FROM repo_room_index WHERE provider = 'github' AND provider_repo_id = ?").bind(repo).first())?.workspace_id ?? null;
 
 describe("the organization's provisioning delegation", () => {
+  it("keeps answering while managed repositories are switched off, the same as when they're on (ruled 2026-11-11)", async () => {
+    // Off is this runtime's state for the whole Worker. The delegation routes never read the switch, so an operator
+    // can set the delegation before the feature is switched on. A room switched on for a test changes nothing here.
+    expect(BINDINGS.MANAGED_REPOSITORIES).toBeUndefined();
+    const offRoom = await room({ delegated: false, switchedOn: false });
+    const onRoom = await room({ delegated: false });
+    const outsider: Who = { id: "per_pv_off_outsider", kind: "person", org: "org_pv_elsewhere", adminOrgs: ["org_pv_elsewhere"] };
+    for (const r of [offRoom, onRoom]) {
+      const path = `/v1/orgs/${r.org}/provisioning-delegation`;
+      expect((await api(OPERATOR, "GET", path)).body).toMatchObject({ provider: "github", granted: false });
+      const set = await api(OPERATOR, "PUT", path, { granted: true });
+      expect([set.status, set.body.granted], r.id).toEqual([200, true]);
+      expect((await api(r.owner, "GET", path)).body.granted).toBe(true);
+      // Someone who is neither an operator nor the organization's admin is refused as ever, reading or setting.
+      for (const method of ["GET", "PUT"]) {
+        const refused = await api(outsider, method, path, method === "PUT" ? { granted: false } : undefined);
+        expect([refused.status, refused.code], `${r.id} ${method}`).toEqual([403, "not_allowed"]);
+      }
+    }
+  });
+
   it("is given and taken back by a Podster operator, and nobody else", async () => {
     const org = `org_pv_d_${crypto.randomUUID().slice(0, 8)}`;
     const admin: Who = { id: "per_pv_d_admin", kind: "person", org, adminOrgs: [org] };
@@ -193,6 +214,24 @@ describe("an organization the API knows", () => {
 });
 
 describe("asking for the room's repository", () => {
+  it("tells the owner whether the organization holds the delegation, from its record each time, and the command still decides", async () => {
+    const r = await room({ delegated: false });
+    expect((await read(r)).delegated).toBe(false);
+    expect((await ask(r)).code).toBe("not_delegated");
+    expect((await delegate(r.org)).status).toBe(200);
+    expect((await read(r)).delegated).toBe(true);
+    expect((await delegate(r.org, false)).status).toBe(200);
+    expect((await read(r)).delegated).toBe(false);
+    // It's display only: asking is refused exactly as before, by the command's own check.
+    expect((await ask(r)).code).toBe("not_delegated");
+    expect(await rowsOf(r.id, "repo_request")).toEqual([]);
+    expect((await delegate(r.org)).status).toBe(200);
+    expect((await read(r)).delegated).toBe(true);
+    // An agent never gets the read at all. A person who isn't the owner gets it without the field: repositories.spec.ts.
+    const agent = await memberAgent(r);
+    expect((await api(agent, "GET", `/v1/workspaces/${r.id}/repository`)).code).toBe("not_allowed");
+  });
+
   it("is refused without the organization's delegation, and no request reaches GitHub (M5-14, AC-10)", async () => {
     const r = await room({ delegated: false });
     const refused = await ask(r);
@@ -326,7 +365,7 @@ describe("the provisioning job", () => {
     expect((await api(r.owner, "POST", `/v1/workspaces/${r.id}/tasks`, { title: "Write the brief", instructions: "Write it." })).status).toBe(200);
     for (let i = 0; i < 3; i++) await alarmPass(stub(r.id));
     expect((await github()).calls).toEqual([]);
-    expect(await read(r)).toEqual({ request: null, repository: null });
+    expect(await read(r)).toEqual({ request: null, repository: null, delegated: true });
   });
 
   it("refuses cleanly while the App's key isn't set, and goes on under the chosen name once it is", async () => {
@@ -575,7 +614,9 @@ describe("the provisioning job", () => {
     // A request recorded while it was on doesn't run once it's off, and can't be retried.
     await inRoom(r.id, (sql) => sql.exec("INSERT INTO repo_request (id, state, name, visibility, attempt, provider_name, requested_by, requested_at, updated_at) VALUES ('rr_t', 'pending', 'engineering', 'public', 1, 'engineering', ?, 1, 1)", r.owner.id));
     expect((await api(r.owner, "PUT", `/v1/workspaces/${r.id}/name`, { name: "Engineering two", policy_version: (await api(r.owner, "GET", `/v1/workspaces/${r.id}`)).body.policy_version })).status).toBe(200);
-    expect((await settled(r)).request).toMatchObject({ state: "failed", reason: "managed_repositories_off" });
+    // The read isn't there while it's off, so the room's own row says how the request ended.
+    for (let i = 0; i < 5 && (await rowsOf(r.id, "repo_request"))[0].state === "pending"; i++) await alarmPass(stub(r.id));
+    expect((await rowsOf(r.id, "repo_request"))[0]).toMatchObject({ state: "failed", reason: "managed_repositories_off" });
     expect((await retry(r)).status).toBe(404);
     expect((await github()).calls).toEqual([]);
     expect(await rowsOf(r.id, "repo_request_attempt")).toEqual([]);
@@ -729,6 +770,8 @@ describe("the provisioning job", () => {
     await settled(r);
     const [first] = await rowsOf(r.id, "repo_request");
     expect(first.runs).toBe(1);
+    // The owner is told how many runs are left: the cap less the runs so far.
+    expect((await read(r)).request.attempts_left).toBe(4);
     // A minute after the first run.
     expect(first.retry_after).toBeGreaterThanOrEqual(before + 60_000);
     expect(first.retry_after).toBeLessThanOrEqual(Date.now() + 60_000);
@@ -748,6 +791,7 @@ describe("the provisioning job", () => {
       expect((await retry(r)).status, String(run)).toBe(200);
       await settled(r);
       expect((await rowsOf(r.id, "repo_request"))[0].runs).toBe(run);
+      expect((await read(r)).request.attempts_left, String(run)).toBe(5 - run);
     }
     const over = await retry(r);
     expect([over.status, over.code]).toEqual([409, "retry_limit_reached"]);

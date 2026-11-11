@@ -27,11 +27,12 @@ pub(super) fn read(sql: &SqlStorage, who: &Participant) -> R<Value> {
     if who.caller.kind != PrincipalKind::Person || !sees_whole_room(&who.caller) {
         return Err(ApiError::not_allowed());
     }
-    let request = rows(sql, "SELECT id, state, name, visibility, reason, requested_by, requested_at, updated_at FROM repo_request", vec![])?
+    let request = rows(sql, "SELECT id, state, name, visibility, reason, requested_by, requested_at, updated_at, runs FROM repo_request", vec![])?
         .first()
         .map_or(Value::Null, |r| json!({
             "id": r["id"], "state": r["state"], "name": r["name"], "visibility": r["visibility"], "reason": r["reason"],
             "requested_by": r["requested_by"], "requested_at": r["requested_at"], "updated_at": r["updated_at"],
+            "attempts_left": super::provisioning::attempts_left(int(&r["runs"])),
         }));
     let repository = rows(sql, "SELECT id, provider, provider_repo_id, full_name, visibility, default_branch, status, status_reason, created_at, verified_at, updated_at FROM repo_link", vec![])?
         .first()

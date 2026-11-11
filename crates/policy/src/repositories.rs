@@ -256,6 +256,14 @@ pub fn sees_every_grant(caller: &Caller) -> bool {
     caller.role != Role::None && is_human_admin(caller)
 }
 
+/// Who is told, in the room read, whether each participant joined through a public claim: those who manage the room's
+/// access, a human owner or admin, by the caller's current role. It's information for the grant form, which offers no
+/// grant a participant can't hold. It shows and never authorizes: `may_receive_grant` decides a grant from the room's own
+/// row at the time.
+pub fn sees_join_source(caller: &Caller) -> bool {
+    caller.role != Role::None && is_human_admin(caller)
+}
+
 /// Who is shown a task's change: its pull request and what Podster observed of it (M5 step 7a). People who can see the
 /// task, and the task's own assignee and reviewer. Not another agent, and not a guest, which is what someone who joined
 /// through a public claim is, even though each may read the task. Run after the task's own read is allowed. It shows

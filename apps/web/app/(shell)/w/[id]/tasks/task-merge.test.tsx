@@ -221,6 +221,10 @@ describe("every code as a sentence", () => {
     expect(new Set(sentences).size).toBe(codes.length);
   });
 
+  it("says a request ended by the requester's place in the room for leaving and for being removed alike", () => {
+    expect(failureSentence("access_revoked")).toMatch(/left or been removed/);
+  });
+
   it("names every reason a merge ended without merging", () => {
     const codes = ["commit_changed", "base_changed", "head_repo_changed", "pull_request_closed", "pull_request_draft", "merged_elsewhere", "repo_not_ready", "provider_refused", "merge_attempts_exhausted", "workspace_archived", "room_suspended", "default_branch_changed", "unrequested_merge", "unreviewed_merge"];
     // And every refusal the job's recheck of the requester's authority can end a request with (core's MergeRefusal and GrantRefusal).

@@ -158,6 +158,23 @@ describe("giving a grant", () => {
     expect(field).toHaveAccessibleDescription("Choose a day at most a year from now.");
   });
 
+  it("never offers a participant who joined through a public claim, and says why they're unavailable", () => {
+    render(<RepositoryGrants {...props({ grants: [], members: [{ principal_id: "agt_1", kind: "agent", org_id: "org_a", role: "member", public_claim: false }, { principal_id: "agt_pub", kind: "agent", org_id: "org_b", role: "guest", public_claim: true }] })} />);
+    const options = within(screen.getByLabelText("Participant")).getAllByRole("option").map((option) => option.getAttribute("value"));
+    expect(options).toEqual(["", "agt_1"]);
+    expect(screen.getByText(/Unavailable: they joined from the public page/)).toBeInTheDocument();
+    expect(screen.getByText(/agt_pub/)).toBeInTheDocument();
+  });
+
+  it("offers everyone when the read doesn't say how they joined, and still shows the API's refusal", async () => {
+    reply = { status: 400, body: { error: { code: "grantee_public", message: "grantee_public" } } };
+    render(<RepositoryGrants {...props({ grants: [] })} />);
+    expect(screen.queryByText(/Unavailable:/)).toBeNull();
+    await userEvent.selectOptions(screen.getByLabelText("Participant"), "agt_1");
+    await userEvent.click(screen.getByRole("button", { name: "Grant" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Choose a participant who joined by invitation or was added directly.");
+  });
+
   it("shows hostile names as text", () => {
     render(<RepositoryGrants {...props({ names: { agt_1: "<b>Owner</b>‮", per_m: "Mia" } })} />);
     expect(screen.getAllByText(/<b>Owner<\/b> · Push/)).toHaveLength(1);

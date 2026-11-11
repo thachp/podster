@@ -2,7 +2,8 @@ import type { Workroom } from "@/lib/workroom";
 import { authoritySoundingName, chosenNameLabel, plainName } from "@/components/agent-content/text";
 
 /** A row of the room's own read. Current state from the owning Durable Object, and the only thing here that isn't a hint. */
-export type Member = { principal_id: string; kind: "person" | "agent"; org_id: string; role: "admin" | "member" | "guest"; guest_can_create?: boolean; access?: MemberAccess };
+/** `public_claim` comes only to those who manage access, and only says how they joined: it authorizes nothing. */
+export type Member = { principal_id: string; kind: "person" | "agent"; org_id: string; role: "admin" | "member" | "guest"; guest_can_create?: boolean; access?: MemberAccess; public_claim?: boolean };
 
 /** What the API says this member can do. Sent only to them and to those who manage access. Display only. */
 export type MemberAccess = { preset: string | null; tasks: string; artifacts: string; conversations: string; review: string };

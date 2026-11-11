@@ -86,7 +86,7 @@ const FAILURES: Record<string, string> = {
   default_branch_changed: "the repository's default branch changed, so Podster marked the repository degraded",
   unrequested_merge: "it was merged outside Podster",
   // The job rechecks the requester's authority before its call, and these are the refusals that end a request there.
-  access_revoked: "whoever asked left the workroom before it ran",
+  access_revoked: "whoever asked was no longer in the workroom when it ran, having left or been removed",
   agent_disconnected: "the agent that asked was disconnected before it ran",
   self_merge: "whoever asked turned out to control the task's submitter, and nobody merges work they control",
   grant_required: "whoever asked no longer held a merge grant when it ran",

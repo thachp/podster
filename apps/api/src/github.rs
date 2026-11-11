@@ -841,6 +841,10 @@ fn pull_seen(answer: &Value) -> Option<PullSeen> {
         base_sha: sha(&answer["base"]["sha"])?,
         state,
         draft: answer["draft"].as_bool()?,
+        repo_default_branch: plain(
+            &answer["base"]["repo"]["default_branch"],
+            MAX_BRANCH_NAME_BYTES,
+        ),
         merge_sha: merged.then(|| sha(&answer["merge_commit_sha"])).flatten(),
         merged_by_id: merged.then(|| id(&answer["merged_by"]["id"])).flatten(),
     })

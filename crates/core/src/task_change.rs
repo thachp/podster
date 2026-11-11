@@ -56,6 +56,9 @@ pub struct PullSeen {
     pub state: PullState,
     /// Whether its author still marks it as a draft. A flag, and nothing else about it.
     pub draft: bool,
+    /// The default branch of the repository the pull request is in, as the provider's answer about the pull request
+    /// says. `None` if it didn't say. Compared with the link's, and never kept.
+    pub repo_default_branch: Option<String>,
     /// The merge commit, once merged.
     pub merge_sha: Option<String>,
     /// The provider's ID for the account that merged it.
@@ -273,6 +276,7 @@ mod tests {
             base_sha: sha("b2"),
             state: PullState::Open,
             draft: false,
+            repo_default_branch: Some("main".to_string()),
             merge_sha: None,
             merged_by_id: None,
         }

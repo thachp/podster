@@ -1462,19 +1462,50 @@ fn a_final_unknown_may_be_asked_for_again_and_the_watch_settles_it() {
         default_branch: "main",
         base_sha: Some(BASE),
     };
-    let settle = |state, head: &'static str, base: &'static str| {
-        settle_unknown_from_watch(&auth, &reviewed, state, head, Some(REPO), base, BASE)
+    let settle = |state, head: &'static str, base: &'static str, reported: Option<&'static str>| {
+        let seen = PullObservation {
+            state,
+            base_ref: base,
+            base_sha: BASE,
+            head_repo_id: Some(REPO),
+            head_sha: head,
+            default_branch_has_reviewed: None,
+        };
+        settle_unknown_from_watch(&auth, &reviewed, &seen, reported)
     };
     assert!(matches!(
-        settle(PullState::Merged, ABC, "main"),
+        settle(PullState::Merged, ABC, "main", Some("main")),
         WatchSettles::Merged(_)
     ));
-    assert_eq!(settle(PullState::Open, ABC, "main"), WatchSettles::NotYet);
-    assert_eq!(settle(PullState::Closed, ABC, "main"), WatchSettles::Failed);
-    // Merged at another commit, or into another branch: not the reviewed commit on the default branch.
-    assert_eq!(settle(PullState::Merged, DEF, "main"), WatchSettles::Failed);
     assert_eq!(
-        settle(PullState::Merged, ABC, "release"),
+        settle(PullState::Open, ABC, "main", Some("main")),
+        WatchSettles::NotYet
+    );
+    assert_eq!(
+        settle(PullState::Closed, ABC, "main", Some("main")),
         WatchSettles::Failed
+    );
+    assert_eq!(
+        settle(PullState::Closed, ABC, "main", None),
+        WatchSettles::Failed
+    );
+    // Merged at another commit, or into another branch: not the reviewed commit on the default branch.
+    assert_eq!(
+        settle(PullState::Merged, DEF, "main", Some("main")),
+        WatchSettles::Failed
+    );
+    assert_eq!(
+        settle(PullState::Merged, ABC, "release", Some("main")),
+        WatchSettles::Failed
+    );
+    // The provider's default branch isn't the link's: not recorded as merged by the watch, and the link degrades.
+    assert_eq!(
+        settle(PullState::Merged, ABC, "main", Some("trunk")),
+        WatchSettles::DefaultBranchDiffers
+    );
+    // The answer named no default branch: nothing is settled without the comparison.
+    assert_eq!(
+        settle(PullState::Merged, ABC, "main", None),
+        WatchSettles::NotYet
     );
 }

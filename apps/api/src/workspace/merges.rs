@@ -1651,11 +1651,13 @@ impl Pass {
     }
 }
 
-/// Settles a merge whose outcome the job stopped reading for, from the ordinary watch's read of the pull request (M5
-/// step 7a's refresh), in the caller's transaction. Only for a change in that state. `core::settle_unknown_from_watch`
-/// decides: merged with the reviewed commit into the default branch is this request's success, closed unmerged or
-/// merged at another commit is its failure, with the reason it was about to end with. Nothing more is read and no call
-/// is made for it.
+/// Settles a merge whose outcome isn't known, from the ordinary watch's read of the pull request (M5 step 7a's
+/// refresh), in the watch's own transaction with its observation. For any change in `outcome_unknown`, whether the job
+/// is still reading for it or has stopped: the watch may well see the merge first, and it stops watching a merged pull
+/// request, so it settles what it sees. `core::settle_unknown_from_watch` decides: merged with the reviewed commit into
+/// the default branch is this request's success; closed unmerged, or merged at another commit, is its failure, with
+/// the reason it was about to end with. A default branch that isn't the link's degrades the link and settles nothing.
+/// Nothing more is read and no call is made for it, and the job's next read finds it settled and does nothing.
 pub(super) fn settle_from_watch(
     sql: &SqlStorage,
     room: &str,
@@ -1665,8 +1667,8 @@ pub(super) fn settle_from_watch(
 ) -> R<()> {
     let held = rows(
         sql,
-        "SELECT merge_reason FROM task_change WHERE task_id = ? AND merge_state = 'outcome_unknown' AND merge_step = ?",
-        vec![task_id.into(), UNKNOWN_FINAL.into()],
+        "SELECT merge_reason FROM task_change WHERE task_id = ? AND merge_state = 'outcome_unknown'",
+        vec![task_id.into()],
     )?;
     let (Some(row), Some(target)) = (held.first(), target(sql, task_id)?) else {
         return Ok(());
@@ -1679,11 +1681,8 @@ pub(super) fn settle_from_watch(
     match settle_unknown_from_watch(
         &recorded,
         &reviewed,
-        pull.state,
-        &pull.head_sha,
-        pull.head_repo_id,
-        pull.base_ref.as_deref().unwrap_or_default(),
-        &pull.base_sha,
+        &observation(pull, None),
+        pull.repo_default_branch.as_deref(),
     ) {
         WatchSettles::Merged(proof) => finish_succeeded(sql, room, task_id, proof, pull, now),
         WatchSettles::Failed => {
@@ -1693,6 +1692,9 @@ pub(super) fn settle_from_watch(
                 follow_up: false,
             };
             fail_with(sql, room, task_id, &ending, now)
+        }
+        WatchSettles::DefaultBranchDiffers => {
+            degrade(sql, target.repo_id, DEFAULT_BRANCH_CHANGED, now)
         }
         WatchSettles::NotYet => Ok(()),
     }

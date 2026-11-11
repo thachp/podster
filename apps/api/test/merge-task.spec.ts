@@ -1276,6 +1276,51 @@ describe("the review's findings (M5 step 7b)", () => {
     expect((await events(other.id)).map((e) => e.type).slice(-1)).toEqual(["merge.failed"]);
   });
 
+  it("lets the watch settle an unknown outcome while the job is still counting its reads, and the job then finds it settled", async () => {
+    /** A merge whose call went out and merged, whose outcome is unknown, with the job still reading for it. */
+    const counting = async () => {
+      await fresh();
+      const r = await requested();
+      await dies(r.id, "after_merge_call");
+      await pass(r.id);
+      await dies(r.id, null);
+      await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) });
+      await fake({ mergeMint: 500 });
+      await pass(r.id);
+      expect(await change(r.id, r.task)).toMatchObject({ merge_state: "outcome_unknown", merge_step: "outcome_unknown", merge_attempts: 0 });
+      expect((await change(r.id, r.task)).merge_next_at).toBeGreaterThan(Date.now());
+      return r;
+    };
+    const watch = async (id: string) => {
+      await inRoom(id, (sql) => void sql.exec("UPDATE task_change SET nudged_at = ?, read_at = 1, read_failures = 0", Date.now() + 1));
+      await alarm(id);
+    };
+    // The watch reads first, sees the pull request merged with the reviewed commit, and settles it in that same step.
+    const r = await counting();
+    await watch(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_reason: null, merge_sha: MERGED, pr_state: "merged", merge_next_at: null });
+    // The job's own read, when its time comes, finds it settled: no second outcome, no call, nothing changed.
+    await fake({ mergeMint: 201 });
+    const tokens = (await minted()).length;
+    await pass(r.id);
+    await alarm(r.id, 2);
+    expect((await minted()).length).toBe(tokens);
+    expect((await events(r.id)).filter((e) => e.type === "merge.succeeded")).toHaveLength(1);
+    expect(await merges()).toHaveLength(1);
+    // GitHub's default branch isn't the link's any more: the watch records no merge into a branch that isn't the
+    // default, degrades the link, and leaves the outcome for the job's fuller read.
+    const renamed = await counting();
+    await fake({ defaultBranch: "trunk" });
+    await watch(renamed.id);
+    expect((await change(renamed.id, renamed.task)).merge_state).toBe("outcome_unknown");
+    expect(await link(renamed.id)).toEqual({ status: "degraded", status_reason: "default_branch_changed" });
+    // The job's read then decides as the pass that made the call would: the merge it was, on a degraded link.
+    await fake({ mergeMint: 201 });
+    await pass(renamed.id);
+    expect(await change(renamed.id, renamed.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED });
+    expect(await link(renamed.id)).toEqual({ status: "degraded", status_reason: "default_branch_changed" });
+  });
+
   it("keeps an earlier pass's call on record when a later pass can't get a token to call with (L6)", async () => {
     const r = await requested();
     // A first call that GitHub answered 500 to, and didn't merge: it's on record.

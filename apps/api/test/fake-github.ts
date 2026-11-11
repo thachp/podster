@@ -383,7 +383,7 @@ function agentRead(request: Request, path: string, bearer: string): Response | n
   if (script?.pullRead && script.pullRead !== 200) return answer({ message: "SECRET-PROVIDER-TEXT" }, script.pullRead);
   const pull = script?.pulls?.[asked[2]];
   if (!pull) return answer({ message: "Not Found" }, 404);
-  const side = (id: number | null) => (id === null ? null : { id, name: "SECRET-REPO-NAME", full_name: "SECRET-OWNER/SECRET-REPO-NAME" });
+  const side = (id: number | null) => (id === null ? null : { id, name: "SECRET-REPO-NAME", full_name: "SECRET-OWNER/SECRET-REPO-NAME", default_branch: script?.defaultBranch ?? repos.get(repo)?.defaultBranch ?? readyRepos.get(repo)?.defaultBranch ?? "main" });
   const merged = pull.merged === true;
   return answer({
     number: pull.as_number ?? Number(asked[2]),

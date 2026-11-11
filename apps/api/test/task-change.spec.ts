@@ -191,7 +191,7 @@ describe("linking a pull request at submission", () => {
     expect(shown).toEqual({
       provider_repo_id: REPO_ID, pr_number: 7, submission_no: 1, pr_state: "open", pr_observed_at: row.pr_observed_at, observed_head_sha: HEAD, head_observed_at: row.head_observed_at,
       head_in_repository: true, base_is_default: true, observed_base_sha: BASE, reviewed_commit_sha: null, reviewed_base_sha: null, commit_changed: false,
-      pr_draft: false, commit_changed_at: null, watched: true, merge_state: "not_requested", merge_reason: null, merge_sha: null, merge_observed_at: null,
+      pr_draft: false, commit_changed_at: null, watched: true, merge_state: "not_requested", merge_reason: null, merge_sha: null, merge_observed_at: null, merge_requested_by: null, merge_requested_at: null, merge_finished_at: null,
     });
   });
 

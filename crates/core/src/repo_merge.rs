@@ -344,6 +344,10 @@ pub enum MergeFailure {
     NotReady,
     /// `merge_attempts_exhausted`: the job ran its last allowed pass without an outcome. A person asks again.
     AttemptsExhausted,
+    /// `workspace_archived`: the room was archived after the merge was asked for. Nothing is done in an archived room.
+    RoomArchived,
+    /// `room_suspended`: an operator suspended the room after the merge was asked for.
+    RoomSuspended,
 }
 
 impl MergeFailure {
@@ -359,6 +363,8 @@ impl MergeFailure {
             MergeFailure::MergedElsewhere => "merged_elsewhere",
             MergeFailure::NotReady => "repo_not_ready",
             MergeFailure::AttemptsExhausted => "merge_attempts_exhausted",
+            MergeFailure::RoomArchived => "workspace_archived",
+            MergeFailure::RoomSuspended => "room_suspended",
         }
     }
 

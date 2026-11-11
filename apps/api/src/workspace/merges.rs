@@ -420,6 +420,22 @@ fn begin(sql: &SqlStorage, room: &str, task_id: &str, owner_holds: bool, now: i6
             task_id.into(),
         ],
     )?;
+    // A room that was archived or suspended since the merge was asked for does nothing more on a repository.
+    let closed = rows(sql, "SELECT status, suspended_at FROM workspace", vec![])?
+        .first()
+        .and_then(|room| {
+            if room["status"].as_str() == Some(ARCHIVED) {
+                Some(MergeFailure::RoomArchived)
+            } else {
+                room["suspended_at"]
+                    .as_i64()
+                    .map(|_| MergeFailure::RoomSuspended)
+            }
+        });
+    if let Some(failure) = closed {
+        finish_failed(sql, room, task_id, failure, now)?;
+        return Ok(Begun::Ended);
+    }
     let Some(inputs) = read_inputs(sql, &requester_id, task_id, now)? else {
         return Ok(Begun::Nothing);
     };
@@ -667,6 +683,10 @@ impl Workspace {
             .and_then(|row| text(&row["id"]))
             .unwrap_or_default();
         for task_id in due {
+            // Test builds only: a room can hold the job off entirely, so a test can look at a request before any pass.
+            if dies(&sql, "start") {
+                continue;
+            }
             if let Err(error) = self.merge_pass(&room, &task_id).await {
                 console_error!(
                     "{}",

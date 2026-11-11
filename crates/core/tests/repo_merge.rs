@@ -1259,6 +1259,8 @@ fn merge_caps_and_the_new_failure_codes() {
         MergeFailure::MergedElsewhere.code(),
         MergeFailure::NotReady.code(),
         MergeFailure::AttemptsExhausted.code(),
+        MergeFailure::RoomArchived.code(),
+        MergeFailure::RoomSuspended.code(),
     ];
     assert_eq!(
         codes,
@@ -1266,7 +1268,9 @@ fn merge_caps_and_the_new_failure_codes() {
             "pull_request_draft",
             "merged_elsewhere",
             "repo_not_ready",
-            "merge_attempts_exhausted"
+            "merge_attempts_exhausted",
+            "workspace_archived",
+            "room_suspended"
         ]
     );
     // None of them is a changed commit, so none asks for a follow-up task by itself.

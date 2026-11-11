@@ -1089,7 +1089,7 @@ components:
         commit_changed_at: { type: [integer, "null"], description: "When that was first seen. Never cleared." }
         watched: { type: boolean, description: "False once the pull request answered as not found five times in a row, when Podster stops reading it again." }
         merge_state: { type: string, enum: [not_requested, requested, succeeded, failed] }
-        merge_reason: { type: [string, "null"], description: "Why a requested merge failed, as a code: `commit_changed`, `base_changed`, `head_repo_changed`, `pull_request_closed`, `pull_request_draft`, `merged_elsewhere`, `repo_not_ready`, `provider_refused`, `merge_attempts_exhausted`, or the refusal that ended the requester's authority. Or `unrequested_merge` or `unreviewed_merge` for a merge Podster saw and didn't ask for, which is recorded and never counted as a success." }
+        merge_reason: { type: [string, "null"], description: "Why a requested merge failed, as a code: `commit_changed`, `base_changed`, `head_repo_changed`, `pull_request_closed`, `pull_request_draft`, `merged_elsewhere`, `repo_not_ready`, `provider_refused`, `merge_attempts_exhausted`, `workspace_archived`, `room_suspended`, or the refusal that ended the requester's authority. Or `unrequested_merge` or `unreviewed_merge` for a merge Podster saw and didn't ask for, which is recorded and never counted as a success." }
         merge_sha: { type: [string, "null"] }
         merge_observed_at: { type: [integer, "null"], description: "When a merge Podster didn't ask for was first seen." }
         merge_requested_by: { type: [string, "null"], description: "Who last asked Podster for the merge, by ID." }

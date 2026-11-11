@@ -87,10 +87,28 @@ const link = (id: string) => inRoom(id, (sql) => sql.exec("SELECT status, status
 const alarm = async (id: string, times = 1) => {
   for (let n = 0; n < times; n++) await alarmPass(stub(id));
 };
+/**
+ * Holds the merge job off in this room, so a test can look at a request, or change something, before any pass is made:
+ * asking for a merge sets the room's alarm for at once, and the runtime may run it before the test's next line.
+ */
+const hold = (id: string) => inRoom(id, (sql) => {
+  sql.exec("CREATE TABLE IF NOT EXISTS test_merge_dies (at TEXT)");
+  sql.exec("INSERT INTO test_merge_dies (at) VALUES ('start')");
+});
+/** Stands for a Worker that dies at this point of a pass, or, with null, for one that doesn't. */
+const dies = (id: string, at: string | null) => inRoom(id, (sql) => {
+  sql.exec("CREATE TABLE IF NOT EXISTS test_merge_dies (at TEXT)");
+  sql.exec("DELETE FROM test_merge_dies WHERE at <> 'start'");
+  if (at) sql.exec("INSERT INTO test_merge_dies (at) VALUES (?)", at);
+});
 /** Makes the merge's next pass due now, as time passing would. */
 const due = (id: string) => inRoom(id, (sql) => void sql.exec("UPDATE task_change SET merge_next_at = 0 WHERE merge_state = 'requested'"));
 /** One pass of the merge job, whatever its backoff says. */
 const pass = async (id: string) => {
+  await inRoom(id, (sql) => {
+    sql.exec("CREATE TABLE IF NOT EXISTS test_merge_dies (at TEXT)");
+    sql.exec("DELETE FROM test_merge_dies WHERE at = 'start'");
+  });
   await due(id);
   await alarm(id);
 };
@@ -152,6 +170,8 @@ async function approved() {
   const granted = await grant(id, MERGER);
   // The read made for the submission and the one for the approval are done. From here on, only the merge's calls count.
   await alarm(id);
+  // No pass of the merge job is made until the test makes one.
+  await hold(id);
   return { id, task, grant: granted };
 }
 const merge = (who: Who, id: string, task: string, body: object = { submission_no: 1, commit_sha: HEAD }, options: { key?: string } = {}) => api(who, "POST", `/v1/workspaces/${id}/tasks/${task}/merge`, body, options);
@@ -349,6 +369,8 @@ describe("the job checks everything again", () => {
       ["requester removed", async (r: any) => void (await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/members/${MERGER.id}`, { policy_version: await version(r.id) })), "access_revoked"],
       ["commit seen changed", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE task_change SET commit_changed_at = 5")), "commit_changed"],
       ["link degraded", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE repo_link SET status = 'degraded'")), "repo_not_ready"],
+      ["room archived", async (r: any) => void (await must(OWNER, "POST", `/v1/workspaces/${r.id}/archive`, { policy_version: await version(r.id) })), "workspace_archived"],
+      ["room suspended", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE workspace SET suspended_at = 5, suspension_reason = 'test'")), "room_suspended"],
       // The owner, who gave the grant, has left the organization, and the room hasn't been told. Last, since it's the owner's own record.
       ["grant gone stale", async (r: any) => {
         await must(OWNER, "POST", "/v1/org-departures", {}, { claims: { departure: { person: OWNER.id, org: ORG, left_at: Date.now() } } });
@@ -443,12 +465,6 @@ describe("the job checks everything again", () => {
 });
 
 describe("dying and coming back", () => {
-  const dies = (id: string, at: string | null) => inRoom(id, (sql) => {
-    sql.exec("CREATE TABLE IF NOT EXISTS test_merge_dies (at TEXT)");
-    sql.exec("DELETE FROM test_merge_dies");
-    if (at) sql.exec("INSERT INTO test_merge_dies (at) VALUES (?)", at);
-  });
-
   it("before the mark: the intent is on record, nothing was set, and the next pass does everything again and merges once", async () => {
     const r = await requested();
     await dies(r.id, "before_mark");

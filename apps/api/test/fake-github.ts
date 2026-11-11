@@ -199,7 +199,7 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
     }
     if (url.pathname === "/agent-tokens") {
       const repo = Number(url.searchParams.get("repo"));
-      return json(agentTokens.filter((t) => t.forRepo === repo).map(({ forRepo: _, ...t }) => ({ ...t, live: agentLive.has(t.token) })));
+      return json(agentTokens.filter((t) => t.forRepo === repo).map(({ forRepo: _, app: __, ...t }) => ({ ...t, live: agentLive.has(t.token) })));
     }
     if (url.pathname === "/forget-calls") {
       calls = [];

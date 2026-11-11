@@ -1067,13 +1067,18 @@ describe("the provisioning job", () => {
     expect(await rowsOf(r.id, "repo_request_attempt")).toEqual([]);
   });
 
-  it("is set for staging only in the Worker's configuration, with no key beside it", () => {
+  it("is set nowhere in the Worker's configuration, staging included, whose organization and Apps stay, with no key beside them", () => {
     // This reads the configuration file. A variable set on the deployed Worker by hand wouldn't show here.
-    // The owner said "let's unblock m5 staging" on 2026-11-11: the switch, the organization and the three Apps' IDs are
-    // staging's variables. The top level, which local runs and these tests use, and any other environment set none.
+    // The owner had the switch on for staging on 2026-11-11. The architect took it out again that day, until only named
+    // people and test people can ask for a repository there: staging's sign-in is open to anyone. So no scope sets it,
+    // to any value, and the file names it as a key nowhere.
     const config = JSON.parse(BINDINGS.TEST_WRANGLER.replace(/^\s*\/\/.*$/gm, ""));
+    expect(config.vars?.MANAGED_REPOSITORIES).toBeUndefined();
+    for (const [environment, scope] of Object.entries<any>(config.env)) expect(scope.vars?.MANAGED_REPOSITORIES, environment).toBeUndefined();
+    expect(BINDINGS.TEST_WRANGLER).not.toContain('"MANAGED_REPOSITORIES"');
+    // The organization and the three Apps' IDs stay staging's variables, so a room can still revoke the tokens that are
+    // out. The top level, which local runs and these tests use, and any other environment set none.
     const staging: Record<string, string> = {
-      MANAGED_REPOSITORIES: "true",
       GITHUB_ORG_LOGIN: "podsterdev",
       GITHUB_ORG_ID: "354820586",
       GITHUB_PROVISION_APP_ID: "5695065",

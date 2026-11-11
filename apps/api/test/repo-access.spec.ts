@@ -213,10 +213,16 @@ describe("issuing a token", () => {
     expect(await minted()).toHaveLength(1);
     // Five minutes from its expiry it's replaced, after the same checks.
     await inRoom(r.id, (sql) => sql.exec("UPDATE repo_token SET expires_at = ?", Date.now() + 4 * 60_000));
+    // GitHub refuses the revocation for now, so the old token's row is still there to read whether or not the runtime
+    // has run the alarm that takes it back, which comes due within milliseconds.
+    await script({ revoke: 500 });
     const renewed = await access(AGENT, r.id, r.task);
     expect(renewed.status, renewed.text).toBe(200);
     expect(renewed.body.token).not.toBe(first.token);
     expect((await tokens(r.id)).map((t) => t.state).sort()).toEqual(["held", "revoke"]);
+    expect(await minted()).toEqual([expect.objectContaining({ token: first.token, live: true }), expect.objectContaining({ token: renewed.body.token, live: true })]);
+    await script({ revoke: 204 });
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_token SET revoke_next_at = 0 WHERE state = 'revoke'"));
     await alarm(r.id);
     expect(await minted()).toEqual([expect.objectContaining({ token: first.token, live: false }), expect.objectContaining({ token: renewed.body.token, live: true })]);
     expect((await tokens(r.id)).map((t) => t.state)).toEqual(["held"]);
@@ -520,8 +526,12 @@ describe("revoking a token whose authority ended", () => {
   });
   it("when a request is refused, which revokes the held one", () => endsWith("refused", async (r) => {
     await inRoom(r.id, (sql) => sql.exec("UPDATE repo_link SET status = 'suspended'"));
+    // GitHub refuses the revocation for now, so the row is there to read whether or not the runtime has run its alarm.
+    await script({ revoke: 500 });
     expect((await access(AGENT, r.id, r.task)).code).toBe("repo_not_ready");
     expect((await tokens(r.id)).map((t) => t.state)).toEqual(["revoke"]);
+    await script({ revoke: 204 });
+    await inRoom(r.id, (sql) => sql.exec("UPDATE repo_token SET revoke_next_at = 0"));
   }));
   it("a revocation that fails doesn't hold up the cascade, and is retried", async () => {
     const r = await room();

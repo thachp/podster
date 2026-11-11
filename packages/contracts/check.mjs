@@ -1,4 +1,6 @@
-// Checks that capabilities map to API operations, and that the CQRS sides agree.
+// Checks the contract against itself and the code: capabilities map to API operations and the CQRS sides agree, the
+// public view and the managed-repository operations keep their shapes, and `Error.code` equals the error codes a text
+// scan of the API and the gateway finds (error-codes.mjs, which says what that scan can't see).
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { collectErrorCodes, compareExcluded, compareWithEnum, readSources } from "./error-codes.mjs";
@@ -92,13 +94,23 @@ for (const schema of ["RepoRequest", "RepoLink", "RoomRepository", "RepoGrant", 
   if (api.components.schemas[schema]?.additionalProperties !== false) problems.push(`${schema}: isn't closed`);
 }
 
-// `Error.code` lists exactly the codes the API and the gateway can answer a caller with in the REST error body,
-// collected by error-codes.mjs. Not OAuth's `error`, MCP or JSON-RPC errors, A2A's own errors, or a code built at run
-// time. These are left out, each with why:
+// `Error.code` lists exactly the codes error-codes.mjs's scan finds in the REST error body of the API and the gateway.
+// Not OAuth's `error`, MCP or JSON-RPC errors, A2A's own errors, Agent Auth's own error body, or a code built at run
+// time. These are left out, each with why and the sites (`path#function`, with how many uses) allowed to answer it; a
+// use anywhere else, or one more in a pinned function, fails:
 const INTERNAL_ONLY = {
-  already_sent: "the room's answer to the A2A worker's own finish call (apps/api/src/workspace/a2a_out.rs)",
-  scan_mismatch: "the room's answer to the scanner's verdict call (apps/api/src/workspace/objects.rs)",
-  unavailable: "a person's object answering three internal routes, /internal/repo-request-reserve, /internal/departed and /internal/a2a-endpoint-report, and only in test builds, where the failpoints feature makes it (apps/api/src/principal.rs)",
+  already_sent: {
+    why: "the room's answer to the A2A worker's own finish call",
+    sites: { "apps/api/src/workspace/a2a_out.rs#finish": 1 },
+  },
+  scan_mismatch: {
+    why: "the room's answer to the scanner's verdict call",
+    sites: { "apps/api/src/workspace/objects.rs#record_verdict": 1 },
+  },
+  unavailable: {
+    why: "a person's object answering three internal routes, /internal/repo-request-reserve, /internal/departed and /internal/a2a-endpoint-report, and only in test builds, where the failpoints feature makes it",
+    sites: { "apps/api/src/principal.rs#Principal::dispatch": 3 },
+  },
 };
 /**
  * Gateway routes whose answers aren't the contract's `Error` for a caller it describes. Each pins the codes it answers,
@@ -120,4 +132,4 @@ problems.push(...found.problems, ...compareWithEnum(errorCodes, found, INTERNAL_
 const apart = [...found.excluded.keys()].filter((code) => !found.codes.has(code));
 
 if (problems.length) { console.error(problems.join("\n")); process.exit(1); }
-console.log(`${Object.keys(capabilities).length} capabilities match ${operations.size} operations; Error.code lists the ${errorCodes.size} codes the REST error body can carry (not OAuth's, MCP's, JSON-RPC's or A2A's, and not codes built at run time); ${Object.keys(INTERNAL_ONLY).length} internal-only codes and ${apart.length} answered only on excluded surfaces (${apart.join(", ")}) are left out, and each excluded surface answers exactly its pinned codes`);
+console.log(`${Object.keys(capabilities).length} capabilities match ${operations.size} operations; Error.code lists the ${errorCodes.size} codes the scan found in the REST error body (not OAuth's, MCP's, JSON-RPC's, A2A's or Agent Auth's, and not codes built at run time; error-codes.mjs lists what the scan can't see); ${Object.keys(INTERNAL_ONLY).length} internal-only codes, each at its pinned sites, and ${apart.length} answered only on excluded surfaces (${apart.join(", ")}) are left out, and each excluded surface answers exactly its pinned codes`);

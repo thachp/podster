@@ -29,6 +29,7 @@ pub enum LinkRefusal {
 }
 
 impl LinkRefusal {
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             LinkRefusal::NotInputAsset => "file_not_found",

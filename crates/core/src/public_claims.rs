@@ -46,6 +46,7 @@ pub enum PublicClaimLimit {
 }
 
 impl PublicClaimLimit {
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             PublicClaimLimit::OrgBlocked => "not_allowed",

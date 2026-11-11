@@ -93,6 +93,7 @@ pub enum MergeRefusal {
 }
 
 impl MergeRefusal {
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             MergeRefusal::AccessRevoked => "access_revoked",
@@ -401,6 +402,7 @@ pub enum MergeFailure {
 }
 
 impl MergeFailure {
+    // codes: reasons
     pub fn code(self) -> &'static str {
         match self {
             MergeFailure::CommitChanged => "commit_changed",
@@ -600,6 +602,7 @@ pub enum RequestLimit {
 }
 
 impl RequestLimit {
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             RequestLimit::Room => "rate_limited",

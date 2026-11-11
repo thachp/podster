@@ -69,6 +69,7 @@ pub enum SubmissionFileRefusal {
 }
 
 impl SubmissionFileRefusal {
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             SubmissionFileRefusal::TooMany => "too_many_artifacts",
@@ -93,6 +94,7 @@ pub enum ApprovalFileRefusal {
 }
 
 impl ApprovalFileRefusal {
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             ApprovalFileRefusal::NotReady => "file_not_ready",

@@ -75,6 +75,7 @@ pub enum ReportRefusal {
 }
 
 impl ReportRefusal {
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             ReportRefusal::NotAPerson => "not_allowed",

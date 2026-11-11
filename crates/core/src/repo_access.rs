@@ -228,6 +228,7 @@ pub enum AccessRefusal {
 }
 
 impl AccessRefusal {
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             AccessRefusal::NotAllowed => "not_allowed",

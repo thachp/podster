@@ -107,6 +107,7 @@ pub enum FileRefusal {
 }
 
 impl FileRefusal {
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             FileRefusal::RoomArchived => "workspace_archived",

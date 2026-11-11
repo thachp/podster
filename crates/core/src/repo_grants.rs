@@ -52,6 +52,7 @@ pub enum GrantRefusal {
 }
 
 impl GrantRefusal {
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             GrantRefusal::RepoNotLinked => "repo_not_linked",

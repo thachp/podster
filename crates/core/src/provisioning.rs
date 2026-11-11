@@ -117,6 +117,7 @@ pub enum RetryHeld {
 }
 
 impl RetryHeld {
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             RetryHeld::LimitReached => "retry_limit_reached",
@@ -380,6 +381,7 @@ pub enum NotReady {
 }
 
 impl NotReady {
+    // codes: reasons
     pub fn code(self) -> &'static str {
         match self {
             NotReady::RepositoryGone => "repository_gone",
@@ -1432,6 +1434,7 @@ pub const REPOSITORY_REQUEST_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 pub struct RequestLimitReached;
 
 impl RequestLimitReached {
+    // codes: errors
     pub fn code(self) -> &'static str {
         "repository_request_limit"
     }

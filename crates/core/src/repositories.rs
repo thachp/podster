@@ -189,6 +189,7 @@ pub enum WorkBlock {
 }
 
 impl WorkBlock {
+    // codes: reasons
     pub fn code(self) -> &'static str {
         "repo_not_ready"
     }
@@ -278,6 +279,7 @@ pub enum RetryRefusal {
 }
 
 impl RetryRefusal {
+    // codes: errors
     pub fn code(self) -> &'static str {
         match self {
             RetryRefusal::NoRequest => "repo_request_not_found",

@@ -114,6 +114,7 @@ pub enum NudgeOutcome {
 }
 
 impl NudgeOutcome {
+    // codes: reasons
     pub fn code(self) -> &'static str {
         match self {
             NudgeOutcome::NotThisRoom => "not_this_room",

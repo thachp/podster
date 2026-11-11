@@ -102,13 +102,46 @@ describe("the colours these screens use, in both themes", () => {
     };
   };
 
-  for (const [label, selector] of [["light", ":root"], ["dark", ".dark"]] as const) {
-    it(`meets AA for normal text in ${label}`, () => {
-      const token = theme(selector);
-      // Amber text on the Sheet's background (task-change.tsx's branch and base warnings) and on its own surface (the notes).
-      for (const [text, background] of [["status-amber", "background"], ["status-amber", "status-amber-surface"], ["status-danger", "background"], ["status-danger", "status-danger-surface"], ["status-green", "status-green-surface"], ["status-blue", "status-blue-surface"], ["status-neutral", "status-neutral-surface"], ["muted-foreground", "background"]] as const) {
-        expect(ratio(token(text), token(background)), `${text} on ${background}`).toBeGreaterThanOrEqual(4.5);
+  /** Every coloured text these screens render, with the background it sits on: its own `bg-` class or the nearest ancestor's. */
+  const pairs = () => {
+    const fixtures = [
+      ...STATES.flatMap(([, state]) => [true, false].map((isOwner) => <RepositorySection key={String(isOwner)} roomId="ws_1" state={state} isOwner={isOwner} archived={false} />)),
+      <RepositorySection key="archived" roomId="ws_1" state={STATES[0]![1]} isOwner archived />,
+      <RepositoryGrants key="grants" roomId="ws_1" grants={[{ id: "pg_1", principal_id: "agt_1", action: "merge", delegated_by: "per_owner", created_at: 1, expires_at: 2, revoked_at: null, state: "stale" }]} linked isOwner isOrgAdmin={false} viewerId="per_owner" policyVersion={3} archived={false} members={[]} names={{}} />,
+      ...(["not_requested", "requested", "succeeded", "failed", "outcome_unknown"] as const).map((merge_state) => (
+        <TaskChangePanel key={merge_state} change={{ provider_repo_id: 1, pr_number: 7, submission_no: 1, pr_state: "open", pr_draft: true, pr_observed_at: 1, commit_changed_at: 1, watched: false, observed_head_sha: "a".repeat(40), head_observed_at: 1, head_in_repository: false, base_is_default: false, observed_base_sha: null, reviewed_commit_sha: "b".repeat(40), reviewed_base_sha: null, commit_changed: true, merge_state, merge_reason: merge_state === "failed" ? "base_changed" : null, merge_sha: null, merge_observed_at: null }} />
+      )),
+    ];
+    const found = new Set<string>();
+    for (const fixture of fixtures) {
+      const { container, unmount } = render(fixture);
+      for (const element of container.querySelectorAll("[class*='text-']")) {
+        const text = /(?:^|\s)text-(status-[a-z]+|muted-foreground|primary|foreground)(?=\s|$)/.exec(element.getAttribute("class") ?? "")?.[1];
+        if (!text) continue;
+        let background = "background";
+        for (let at: Element | null = element; at && at !== container; at = at.parentElement) {
+          const bg = /(?:^|\s)bg-(status-[a-z]+-surface|background|card|muted)(?=\s|$)/.exec(at.getAttribute("class") ?? "")?.[1];
+          if (bg) {
+            background = bg;
+            break;
+          }
+        }
+        found.add(`${text}|${background}`);
       }
+      unmount();
+    }
+    return [...found].map((pair) => pair.split("|") as [string, string]);
+  };
+
+  it("finds the coloured text it checks, amber on the page and on its own surface among it", () => {
+    const seen = pairs().map(([text, background]) => `${text} on ${background}`);
+    expect(seen).toEqual(expect.arrayContaining(["status-amber on background", "status-amber on status-amber-surface", "muted-foreground on background"]));
+  });
+
+  for (const [label, selector] of [["light", ":root"], ["dark", ".dark"]] as const) {
+    it(`meets AA for normal text in ${label}, for every pair the screens render`, () => {
+      const token = theme(selector);
+      for (const [text, background] of pairs()) expect(ratio(token(text), token(background)), `${text} on ${background}`).toBeGreaterThanOrEqual(4.5);
     });
   }
 });

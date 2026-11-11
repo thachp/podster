@@ -684,6 +684,10 @@ pub async fn recheck_repository(
     workspace: &str,
     key: Option<String>,
 ) -> R<Response> {
+    // Switched off, this is a route that doesn't exist, for everyone: before who is asking, the key or the room.
+    if !crate::workspace::managed_switch_on(env, workspace).await? {
+        return Err(ApiError::not_found());
+    }
     let kind = if caller.kind == "person" {
         podster_policy::PrincipalKind::Person
     } else {

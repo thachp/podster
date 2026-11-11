@@ -106,6 +106,7 @@ fn passing<'a>(task: &'a Task, grant: &'a Grant<'a>) -> MergeAuthority<'a> {
         requester: actor("merger", "p-merger"),
         requester_in_room: true,
         requester_connected: true,
+        requester_controller_holds: true,
         submitter: SUBMITTER,
         grant: Some(grant),
         delegation_holder: Some("owner"),
@@ -201,6 +202,15 @@ fn every_missing_piece_of_authority_refuses_by_name() {
             },
             R::AgentDisconnected,
             "agent_disconnected",
+        ),
+        (
+            "an agent whose linking person has left, or a person who has",
+            MergeAuthority {
+                requester_controller_holds: false,
+                ..base
+            },
+            R::ControllerDeparted,
+            "controller_departed",
         ),
         (
             "a task with no repository",
@@ -1507,5 +1517,37 @@ fn a_final_unknown_may_be_asked_for_again_and_the_watch_settles_it() {
     assert_eq!(
         settle(PullState::Merged, ABC, "main", None),
         WatchSettles::NotYet
+    );
+}
+
+/// A2, for the owner to rule on: who "controls" an agent is the person who linked the credential a request came with,
+/// recorded per request (`changes::controller_of`, `submitter_person`, `merge_requester_person`), not a property of the
+/// agent. So a submission made through the credential person B linked is B's, and person A may merge it, even if A also
+/// holds a credential for the same agent: nothing here sees A's. This pins today's behaviour so that a ruling which takes
+/// every person holding a credential for the agent changes it on purpose.
+#[test]
+fn a2_today_the_controller_is_whoever_linked_the_credential_the_request_came_with() {
+    let (task, grant) = (approved(), grant(GrantAction::Merge));
+    let through_b = Actor {
+        id: "asg",
+        person: Some("p-b"),
+    };
+    let a = MergeAuthority {
+        requester: actor("merger", "p-a"),
+        submitter: through_b,
+        ..passing(&task, &grant)
+    };
+    assert!(check_merge_authority(&a).is_ok());
+    // The same agent's submission through A's credential is A's, and A is refused.
+    let through_a = MergeAuthority {
+        submitter: Actor {
+            id: "asg",
+            person: Some("p-a"),
+        },
+        ..a
+    };
+    assert_eq!(
+        check_merge_authority(&through_a),
+        Err(MergeRefusal::SelfMerge)
     );
 }

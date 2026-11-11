@@ -403,12 +403,26 @@ describe("refusing", () => {
     await refusedWith(await access(AGENT, r.id, r.task), 409, "repo_not_ready");
   });
 
-  it("answers as a route that doesn't exist while the switch is off, a malformed body included", async () => {
+  it("answers exactly as a task verb that doesn't exist while the switch is off, with a key or without (review A5)", async () => {
     const r = await room({ switchedOn: false });
-    await refusedWith(await access(AGENT, r.id, r.task), 404, "not_found");
-    // A missing route parses the body first, so a malformed one is `invalid_argument` there and here alike.
-    await refusedWith(await access(AGENT, r.id, r.task, undefined, { raw: "{not json" }), 400, "invalid_argument");
-    await refusedWith(await access(AGENT, r.id, "tsk_missing"), 404, "not_found");
+    const verb = (name: string, task: string, options: { key?: string | null; raw?: string } = {}) =>
+      api(AGENT, "POST", `/v1/workspaces/${r.id}/tasks/${task}/${name}`, undefined, { key: null, ...options });
+    for (const [what, task, options] of [
+      ["no key", r.task, {}],
+      ["a key", r.task, { key: "ra-off-key" }],
+      ["a malformed body", r.task, { raw: "{not json" }],
+      ["a malformed body and a key", r.task, { raw: "{not json", key: "ra-off-key-2" }],
+      ["a task that doesn't exist", "tsk_missing", {}],
+      ["a task that doesn't exist, with a key", "tsk_missing", { key: "ra-off-key-3" }],
+    ] as const) {
+      const got = await verb("repo-access", task, options);
+      const none = await verb("no-such-verb", task, options);
+      expect([got.status, got.text], what).toEqual([none.status, none.text]);
+    }
+    // Without a key that's the key's refusal, as for any command, and with one a missing route's.
+    await refusedWith(await access(AGENT, r.id, r.task), 400, "idempotency_key_required");
+    await refusedWith(await verb("repo-access", r.task, { key: "ra-off-key-4" }), 404, "not_found");
+    expect(await tokens(r.id)).toEqual([]);
   });
 
   it("takes nothing from the caller: any field at all is refused", async () => {

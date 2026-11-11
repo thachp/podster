@@ -768,20 +768,32 @@ impl Workspace {
             .giver_read(giver.as_deref())
             .await
             .ok_or_else(unknown)?;
-        // An agent acts for whoever linked its credential, in the agent's organization. A credential with no linker
-        // can't be counted against anyone, so it gets nothing.
-        let controller_holds = match &identity.linker {
-            Some(linker) => {
-                !principal::departed_since(&self.env, &linker.person, &who.org, linker.since)
-                    .await
-                    .map_err(|_| unknown())?
-            }
-            None => false,
-        };
+        let controller_holds = self.controller_holds(identity, who).await?;
         Ok(Standing {
             giver,
             controller_holds,
         })
+    }
+
+    /// Whether the person who controls the caller still holds, asked of their `Principal`: an agent acts for whoever
+    /// linked its credential, in the agent's organization, and a credential with no linker can't be counted against
+    /// anyone, so it gets nothing. A person is their own, and the room's `resolve_caller` has already read their
+    /// standing. Token issue and a merge request ask this the same way. An answer that isn't a clear yes or no is
+    /// `standing_unknown`.
+    pub(super) async fn controller_holds(&self, identity: &Identity, who: &Participant) -> R<bool> {
+        if who.caller.kind == PrincipalKind::Person {
+            return Ok(true);
+        }
+        match &identity.linker {
+            Some(linker) => {
+                Ok(
+                    !principal::departed_since(&self.env, &linker.person, &who.org, linker.since)
+                        .await
+                        .map_err(|_| ApiError::api(503, "standing_unknown"))?,
+                )
+            }
+            None => Ok(false),
+        }
     }
 
     /// Keeps a lease whose mint may have happened as a `mint_unknown` record, with its event.

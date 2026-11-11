@@ -615,11 +615,29 @@ fn linked_repo(sql: &SqlStorage) -> R<Option<(String, i64)>> {
     .and_then(|link| Some((text(&link["provider"])?, link["provider_repo_id"].as_i64()?))))
 }
 
+/// `self_review`'s message when the approving review came from someone the submitter's person controls. The contract
+/// names it, and the web app shows its own sentence for it.
+pub(crate) const SELF_REVIEW_MESSAGE: &str = "This commit needs an approving review from someone other than the person who controls its submitter, or another agent that person controls, before it can be merged.";
+/// `self_review`'s message for an approval recorded before Podster kept who gave it: the review may have been
+/// independent, so the commit is to be reviewed again, not by someone else.
+pub(crate) const REVIEW_AGAIN_MESSAGE: &str = "This commit was approved before Podster recorded who reviews a commit, so it needs to be reviewed again before it can be merged.";
+
+/// `self_review`'s message for a review by an agent whose credential named no linking person: who controls the reviewer
+/// isn't known, so someone else's review is needed.
+pub(crate) const REVIEWER_UNKNOWN_MESSAGE: &str = "This commit's approving review came from an agent whose controlling person isn't known, so it needs an approving review from someone else before it can be merged.";
+
 /// A refusal from the policy, as the API answers it.
 pub(super) fn denied(denial: RepoDenial) -> ApiError {
     match denial {
         RepoDenial::Grant(refusal) => refused(refusal),
         RepoDenial::Hidden => ApiError::task_not_found(),
+        RepoDenial::SelfReview => ApiError::explained(403, denial.code(), SELF_REVIEW_MESSAGE),
+        RepoDenial::ReviewUnrecorded => {
+            ApiError::explained(403, denial.code(), REVIEW_AGAIN_MESSAGE)
+        }
+        RepoDenial::ReviewerUnknown => {
+            ApiError::explained(403, denial.code(), REVIEWER_UNKNOWN_MESSAGE)
+        }
         RepoDenial::GranteeNotParticipant | RepoDenial::GranteePublic => {
             ApiError::api(400, denial.code())
         }
@@ -637,15 +655,21 @@ fn refused(refusal: GrantRefusal) -> ApiError {
     }
 }
 
-/// Whether the caller administers the room's organization, by the gateway's assertion.
-fn administers_room_org(sql: &SqlStorage, caller: &Caller, admin_orgs: &[String]) -> R<bool> {
-    if caller.kind != PrincipalKind::Person {
-        return Ok(false);
-    }
+/// Whether the caller administers the room's organization: the organization from the room's own row, the caller's from
+/// the gateway's verified assertion, and `podster_policy` deciding.
+pub(super) fn administers_room_org(
+    sql: &SqlStorage,
+    caller: &Caller,
+    admin_orgs: &[String],
+) -> R<bool> {
     let org = rows(sql, "SELECT owner_org_id FROM workspace", vec![])?
         .first()
         .and_then(|room| text(&room["owner_org_id"]));
-    Ok(org.is_some_and(|org| admin_orgs.contains(&org)))
+    Ok(podster_policy::repositories::administers_org(
+        caller.kind,
+        admin_orgs,
+        org.as_deref(),
+    ))
 }
 
 /// Marks one grant revoked, with its audit entry and event. `reason` is a fixed code. The holder is told unless they

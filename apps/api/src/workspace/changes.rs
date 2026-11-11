@@ -443,7 +443,7 @@ pub(super) fn record(
             sql,
             "UPDATE task_change SET reviewed_commit_sha = ?1, reviewed_base_sha = ?2, observed_head_sha = ?1, head_observed_at = ?3, head_repo_id = ?4,
                base_ref = ?5, observed_base_sha = ?2, pr_state = ?6, pr_draft = 0, pr_observed_at = ?3, read_at = ?3, unchanged_reads = 0,
-               read_failures = 0, not_found_reads = 0, unwatched_at = NULL, updated_at = ?3
+               read_failures = 0, not_found_reads = 0, unwatched_at = NULL, updated_at = ?3, reviewer_id = ?10, reviewer_person = ?11
              WHERE task_id = ?7 AND provider_repo_id = ?8 AND pr_number = ?9",
             vec![
                 pull.head_sha.as_str().into(),
@@ -455,6 +455,11 @@ pub(super) fn record(
                 task.id.as_str().into(),
                 repo_id.into(),
                 number.into(),
+                // Who approved, and the person who controlled them then: what a merge's independent review compares
+                // with the submitter's (the owner's decision of 2026-11-11 on review A1). From the room's caller and the
+                // gateway's assertion, never from a body.
+                caller.into(),
+                controller.as_deref().map_or(V::Null, V::from),
             ],
         );
     }
@@ -468,7 +473,7 @@ pub(super) fn record(
              head_observed_at = excluded.head_observed_at, head_repo_id = excluded.head_repo_id, base_ref = excluded.base_ref,
              observed_base_sha = excluded.observed_base_sha, pr_state = excluded.pr_state, pr_draft = 0, pr_observed_at = excluded.pr_observed_at,
              read_at = excluded.read_at, unchanged_reads = 0, read_failures = 0, not_found_reads = 0, unwatched_at = NULL,
-             reviewed_commit_sha = NULL, reviewed_base_sha = NULL, updated_at = excluded.updated_at,
+             reviewed_commit_sha = NULL, reviewed_base_sha = NULL, reviewer_id = NULL, reviewer_person = NULL, updated_at = excluded.updated_at,
              submitter_id = excluded.submitter_id, submitter_person = excluded.submitter_person,
              checks_state = CASE WHEN task_change.observed_head_sha IS excluded.observed_head_sha THEN checks_state ELSE NULL END,
              checks_json = CASE WHEN task_change.observed_head_sha IS excluded.observed_head_sha THEN checks_json ELSE NULL END,
@@ -516,9 +521,10 @@ pub(super) fn without_change_when_off(mut read: Value, switched_on: bool) -> R<V
             fields.remove("change");
             if let Some(history) = fields.get_mut("history").and_then(Value::as_array_mut) {
                 history.retain(|event| {
-                    let kind = event["type"].as_str().unwrap_or_default();
-                    !(podster_policy::is_task_change_event(kind)
-                        || podster_policy::is_merge_event(kind))
+                    podster_policy::shows_with_switch(
+                        event["type"].as_str().unwrap_or_default(),
+                        false,
+                    )
                 });
             }
         }

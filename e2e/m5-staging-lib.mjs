@@ -47,6 +47,7 @@ export const PLAN = [
   ["M5-09b", "on GitHub the default branch's tip is one merge commit whose second parent is exactly the reviewed commit"],
   ["M5-09c", "the reviewed commit carries exactly one podster/review status, set by the merge App"],
   ["M5-09d", "asking again is refused already_merged"],
+  ["M5-10e", "a commit the submitter's own person approved isn't merged: the review completes the task, and merge_task is refused self_review"],
   ["M5-11a", "a head moved after review is observed by Podster, by a webhook or by polling, within the wait"],
   ["M5-09e", "the moved head isn't merged: merge_task is refused commit_changed, and GitHub shows the pull request open"],
   ["M5-12", "release status matches the task's change, pairs checks with their commit, and says no release exists"],

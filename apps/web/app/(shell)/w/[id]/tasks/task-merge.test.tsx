@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SheetLink } from "@/components/sheet/target-sheet";
 import { setUrl } from "@/test/next-navigation";
 import { TaskChangePanel, mergeLabel, type PullRequestChange } from "./task-change";
-import { explainMergeRefusal, failureSentence, mergeOffered } from "./task-merge";
+import { explainMergeRefusal, failureSentence, mergeOffered, REVIEW_AGAIN, REVIEWER_UNKNOWN, reviewAgainRefusal } from "./task-merge";
 import type { Room, Task, TaskDetail } from "./task-model";
 import { TaskSheet } from "./task-sheet";
 
@@ -215,10 +215,30 @@ describe("each merge state, with its times", () => {
 describe("every code as a sentence", () => {
   it("names every refusal mergeTask lists", () => {
     const generic = explainMergeRefusal("something_new");
-    const codes = ["task_not_found", "grant_required", "grant_expired", "grant_stale", "public_participant", "self_merge", "task_not_linked", "repo_not_ready", "not_approved", "submission_mismatch", "commit_changed", "review_required", "change_unwatched", "change_not_found", "merge_already_requested", "already_merged", "standing_unknown", "rate_limited", "merge_request_limit", "merge_unavailable", "invalid_argument", "access_revoked", "agent_disconnected", "workspace_archived", "not_found", "unknown"];
+    const codes = ["task_not_found", "grant_required", "grant_expired", "grant_stale", "public_participant", "self_merge", "self_review", REVIEW_AGAIN, REVIEWER_UNKNOWN, "controller_departed", "task_not_linked", "repo_not_ready", "not_approved", "submission_mismatch", "commit_changed", "review_required", "change_unwatched", "change_not_found", "merge_already_requested", "already_merged", "standing_unknown", "rate_limited", "merge_request_limit", "merge_unavailable", "invalid_argument", "access_revoked", "agent_disconnected", "workspace_archived", "not_found", "unknown"];
     const sentences = codes.map((code) => explainMergeRefusal(code));
     for (const [index, text] of sentences.entries()) expect(text, codes[index]).not.toBe(generic);
     expect(new Set(sentences).size).toBe(codes.length);
+  });
+
+  it("says a commit approved before Podster recorded its reviewer needs reviewing again, not someone else's review", () => {
+    const unrecorded = reviewAgainRefusal({ ok: false, status: 403, code: "self_review", message: "This commit was approved before Podster recorded who reviews a commit, so it needs to be reviewed again before it can be merged." });
+    expect(unrecorded.code).toBe(REVIEW_AGAIN);
+    expect(explainMergeRefusal(unrecorded.code, 403)).toMatch(/reviewed again/);
+    expect(explainMergeRefusal(unrecorded.code, 403)).not.toMatch(/someone other than/);
+    // Not independent: someone else's review, as before.
+    const dependent = reviewAgainRefusal({ ok: false, status: 403, code: "self_review", message: "This commit needs an approving review from someone other than the person who controls its submitter, or another agent that person controls, before it can be merged." });
+    expect(dependent.code).toBe("self_review");
+    // An agent reviewer whose controlling person isn't known: its own sentence, neither of the other two.
+    const unknown = reviewAgainRefusal({ ok: false, status: 403, code: "self_review", message: "This commit's approving review came from an agent whose controlling person isn't known, so it needs an approving review from someone else before it can be merged." });
+    expect(unknown.code).toBe(REVIEWER_UNKNOWN);
+    expect(explainMergeRefusal(unknown.code, 403)).toMatch(/controlling person isn't known/);
+    expect(explainMergeRefusal(unknown.code, 403)).not.toMatch(/reviewed again/);
+  });
+
+  it("says a commit needs a review independent of its submitter's person before it's merged (A1)", () => {
+    expect(explainMergeRefusal("self_review", 403)).toMatch(/someone other than the person who controls its submitter/);
+    expect(failureSentence("self_review")).toMatch(/independent/);
   });
 
   it("says a request ended by the requester's place in the room for leaving and for being removed alike", () => {
@@ -228,7 +248,7 @@ describe("every code as a sentence", () => {
   it("names every reason a merge ended without merging", () => {
     const codes = ["commit_changed", "base_changed", "head_repo_changed", "pull_request_closed", "pull_request_draft", "merged_elsewhere", "repo_not_ready", "provider_refused", "merge_attempts_exhausted", "workspace_archived", "room_suspended", "default_branch_changed", "unrequested_merge", "unreviewed_merge"];
     // And every refusal the job's recheck of the requester's authority can end a request with (core's MergeRefusal and GrantRefusal).
-    codes.push("access_revoked", "agent_disconnected", "self_merge", "grant_required", "grant_expired", "grant_stale", "grant_not_found", "public_participant", "repo_not_linked", "task_not_linked", "not_approved", "submission_mismatch", "change_not_found", "review_required", "change_unwatched", "already_merged", "merge_already_requested", "invalid_argument");
+    codes.push("access_revoked", "agent_disconnected", "self_merge", "self_review", "controller_departed", "task_not_found", "grant_required", "grant_expired", "grant_stale", "grant_not_found", "public_participant", "repo_not_linked", "task_not_linked", "not_approved", "submission_mismatch", "change_not_found", "review_required", "change_unwatched", "already_merged", "merge_already_requested", "invalid_argument");
     for (const code of codes) expect(failureSentence(code), code).not.toContain("(");
     expect(failureSentence("new_reason")).toBe("the merge stopped (new_reason)");
   });

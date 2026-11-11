@@ -1129,3 +1129,350 @@ fn only_those_who_manage_access_are_told_how_each_participant_joined() {
         );
     }
 }
+
+#[test]
+fn a_person_administers_only_the_organizations_their_identity_lists() {
+    let orgs = vec!["org_a".to_string()];
+    assert!(administers_org(Person, &orgs, Some("org_a")));
+    assert!(!administers_org(Person, &orgs, Some("org_b")));
+    assert!(!administers_org(Person, &orgs, None));
+    assert!(!administers_org(Person, &[], Some("org_a")));
+    // An agent never does, whatever it's said to administer.
+    assert!(!administers_org(Agent, &orgs, Some("org_a")));
+}
+
+#[test]
+fn an_organizations_delegation_is_read_by_operators_and_its_admins_and_set_by_operators_alone() {
+    assert!(authorize_delegation_read(Person, true, false).is_ok());
+    assert!(authorize_delegation_read(Person, false, true).is_ok());
+    assert_eq!(
+        authorize_delegation_read(Person, false, false),
+        Err(RepoDenial::NotAllowed)
+    );
+    assert_eq!(
+        authorize_delegation_read(Agent, true, true),
+        Err(RepoDenial::NotAllowed)
+    );
+    assert!(authorize_delegation_set(Person, true).is_ok());
+    // The organization's own admin can't give it authority over Podster's GitHub organization.
+    assert_eq!(
+        authorize_delegation_set(Person, false),
+        Err(RepoDenial::NotAllowed)
+    );
+    assert_eq!(
+        authorize_delegation_set(Agent, true),
+        Err(RepoDenial::NotAllowed)
+    );
+}
+
+#[test]
+fn an_organization_admin_takes_any_grant_back_with_or_without_a_place_in_the_room() {
+    // AC-11. Outside the room the API resolves them with no role, and they still pass as the organization's admin.
+    let outside = caller("org-admin", Person, Role::None);
+    assert!(authorize_revoke(&outside, "someone", true).is_ok());
+    assert_eq!(
+        authorize_revoke(&outside, "someone", false),
+        Err(RepoDenial::NotParticipant)
+    );
+    let member = caller("org-admin", Person, Role::Member);
+    assert!(authorize_revoke(&member, "someone", true).is_ok());
+    // An agent is never an organization's admin, whatever the API was told.
+    let agent = caller("agt", Agent, Role::None);
+    assert_eq!(
+        authorize_revoke(&agent, "someone", true),
+        Err(RepoDenial::NotParticipant)
+    );
+}
+
+#[test]
+fn a_merge_refused_by_policy_in_the_job_keeps_the_code_the_request_would_have_answered() {
+    for denial in [
+        RepoDenial::NotParticipant,
+        RepoDenial::Hidden,
+        RepoDenial::PublicParticipant,
+        RepoDenial::SelfMerge,
+        RepoDenial::NotAllowed,
+        RepoDenial::Grant(GrantRefusal::GrantRequired),
+        RepoDenial::Grant(GrantRefusal::GrantStale),
+    ] {
+        let expected = match denial {
+            RepoDenial::NotParticipant => "access_revoked",
+            other => other.code(),
+        };
+        assert_eq!(denial.as_merge_refusal().code(), expected, "{denial:?}");
+    }
+}
+
+#[test]
+fn every_m5_event_type_is_known_and_follows_the_switch() {
+    for kind in [
+        "repository.requested",
+        "repository.retry_requested",
+        "repository.setup_failed",
+        "repository.ready",
+        "repository.degraded",
+        "repository.ready_again",
+        "repository.read_refused",
+        "repo_grant.given",
+        "repo_grant.revoked",
+        "repo_access.issued",
+        "repo_token.mint_unknown",
+        "repo_token.unrevocable",
+        "task_change.linked",
+        "task_change.observed",
+        "task_change.commit_changed",
+        "task_change.merge_observed",
+        "task_change.checks_observed",
+        "task_change.unwatched",
+        "merge.requested",
+        "merge.succeeded",
+        "merge.failed",
+        "merge.outcome_unknown",
+        "merge.outcome_unknown_final",
+    ] {
+        assert!(is_managed_repository_event(kind), "{kind}");
+        assert!(shows_with_switch(kind, true), "{kind}");
+        assert!(!shows_with_switch(kind, false), "{kind}");
+    }
+    for kind in [
+        "task.created",
+        "task.completed",
+        "member.added",
+        "room.unpublished",
+    ] {
+        assert!(!is_managed_repository_event(kind), "{kind}");
+        assert!(shows_with_switch(kind, false), "{kind}");
+    }
+}
+
+#[test]
+fn a_repositorys_events_are_for_those_who_may_read_the_repository() {
+    let owner = caller("owner", Person, Role::Owner);
+    let member = caller("mem", Person, Role::Member);
+    let guest = caller("gst", Person, Role::Guest);
+    // An agent that sees the whole room is still not shown the repository, as GET repository answers it nothing.
+    let admin_agent = caller("agt", Agent, Role::Admin);
+    let worker = caller("wrk", Agent, Role::Member);
+    for kind in [
+        "repository.requested",
+        "repository.degraded",
+        "repository.read_refused",
+    ] {
+        assert!(can_see_event(&owner, kind, "owner", None, None), "{kind}");
+        assert_eq!(
+            can_see_event(&member, kind, "owner", None, None),
+            sees_repository(&member),
+            "{kind}"
+        );
+        for who in [&guest, &admin_agent, &worker] {
+            assert!(
+                !can_see_event(who, kind, "owner", None, None),
+                "{kind} {}",
+                who.id
+            );
+        }
+        // Even whoever acted, once they no longer read the repository.
+        assert!(!can_see_event(&guest, kind, "gst", None, None), "{kind}");
+    }
+}
+
+#[test]
+fn a_tokens_events_are_for_those_who_see_the_holders_grant() {
+    let t = task();
+    let owner = caller("owner", Person, Role::Owner);
+    let assignee = caller("asg", Agent, Role::Member);
+    let reviewer = caller("rev", Person, Role::Member);
+    let member = caller("mem", Person, Role::Member);
+    for kind in [
+        "repo_access.issued",
+        "repo_token.mint_unknown",
+        "repo_token.unrevocable",
+    ] {
+        // The holder, who is the actor, and a human owner or admin.
+        assert!(
+            can_see_event(&assignee, kind, "asg", Some(&t), Some("grt_1")),
+            "{kind}"
+        );
+        assert!(
+            can_see_event(&owner, kind, "asg", Some(&t), Some("grt_1")),
+            "{kind}"
+        );
+        // Not everyone else who can read the task.
+        assert!(can_see_task(&reviewer, &t));
+        assert!(
+            !can_see_event(&reviewer, kind, "asg", Some(&t), Some("grt_1")),
+            "{kind}"
+        );
+        assert!(
+            !can_see_event(&member, kind, "asg", Some(&t), Some("grt_1")),
+            "{kind}"
+        );
+        // And never without a task to hang it on.
+        assert!(
+            !can_see_event(&owner, kind, "asg", None, Some("grt_1")),
+            "{kind}"
+        );
+    }
+}
+
+/// A1, decided by the owner on 2026-11-11: a commit is merged into a managed repository only if the review that approved
+/// it came from someone not controlled by the submitter's person. Ordinary task review stays as it is: the submitter's
+/// own person may still approve the task, and only the merge is refused.
+#[test]
+fn a1_the_submitters_own_person_may_still_approve_but_their_review_merges_nothing() {
+    let task = task();
+    // `rev`, the reviewer, is the person who controls `asg`, the submitting agent. The task's review allows it, as before.
+    let reviewer = caller("rev", Person, Role::Member);
+    assert_eq!(
+        authorize_task(&reviewer, &task, TaskAction::Verify),
+        Verdict::Allow
+    );
+    let submitter = Actor {
+        id: "asg",
+        person: Some("rev"),
+    };
+    // A different person with a merge grant may ask, and the review isn't independent, so it's refused.
+    let other = caller("p-other", Person, Role::Member);
+    let theirs = grant("p-other", GrantAction::Merge);
+    assert_eq!(
+        authorize_merge(
+            &other,
+            Some("p-other"),
+            &task,
+            &submitter,
+            &standing(Some(&theirs))
+        ),
+        Ok(())
+    );
+    let review = Actor {
+        id: "rev",
+        person: Some("rev"),
+    };
+    assert_eq!(
+        independent_review(Some(&review), &submitter),
+        Err(RepoDenial::SelfReview)
+    );
+    assert_eq!(RepoDenial::SelfReview.code(), "self_review");
+}
+
+#[test]
+fn a1_only_an_independent_review_lets_a_commit_be_merged_whoever_merges() {
+    let task = task();
+    // The submitter is `asg`, an agent `p-sub` controls.
+    let reviewers: [(&str, Option<Actor>, bool); 7] = [
+        (
+            "the submitter's person",
+            Some(Actor {
+                id: "p-sub",
+                person: Some("p-sub"),
+            }),
+            false,
+        ),
+        (
+            "another agent of the submitter's person",
+            Some(Actor {
+                id: "sibling",
+                person: Some("p-sub"),
+            }),
+            false,
+        ),
+        (
+            "the submitter itself",
+            Some(Actor {
+                id: "asg",
+                person: Some("p-sub"),
+            }),
+            false,
+        ),
+        (
+            "another person",
+            Some(Actor {
+                id: "p-rev",
+                person: Some("p-rev"),
+            }),
+            true,
+        ),
+        (
+            "another person's agent",
+            Some(Actor {
+                id: "agt-rev",
+                person: Some("p-rev"),
+            }),
+            true,
+        ),
+        (
+            "someone whose person wasn't recorded",
+            Some(Actor {
+                id: "agt-old",
+                person: None,
+            }),
+            false,
+        ),
+        (
+            "nobody recorded, from before the room kept reviewers",
+            Some(Actor {
+                id: "",
+                person: None,
+            }),
+            false,
+        ),
+    ];
+    // Mergers: a person, an agent of another person, the reviewer itself, and the submitter's person.
+    let mergers: [(&str, &'static str, PrincipalKind, Option<&str>); 4] = [
+        ("another person", "p-merge", Person, Some("p-merge")),
+        (
+            "another person's agent",
+            "agt-merge",
+            Agent,
+            Some("p-merge"),
+        ),
+        ("the reviewer's person", "p-rev", Person, Some("p-rev")),
+        ("the submitter's person", "p-sub", Person, Some("p-sub")),
+    ];
+    for (merger_name, id, kind, merger_person) in &mergers {
+        let merger = caller(id, *kind, Role::Member);
+        let merge = grant(id, GrantAction::Merge);
+        let allowed = authorize_merge(
+            &merger,
+            *merger_person,
+            &task,
+            &SUBMITTER,
+            &standing(Some(&merge)),
+        );
+        for (reviewer_name, reviewer, independent) in &reviewers {
+            let label = format!("{merger_name} merging after {reviewer_name}");
+            let decided = allowed.and_then(|()| independent_review(reviewer.as_ref(), &SUBMITTER));
+            let expected = if *merger_person == Some("p-sub") {
+                Err(RepoDenial::SelfMerge)
+            } else if *independent {
+                Ok(())
+            } else if reviewer.as_ref().is_some_and(|r| r.id.is_empty()) {
+                // The same code, said as "review it again": nothing shows the review wasn't independent.
+                Err(RepoDenial::ReviewUnrecorded)
+            } else if reviewer.as_ref().is_some_and(|r| r.person.is_none()) {
+                // The same code, said as "who controls the reviewer isn't known".
+                Err(RepoDenial::ReviewerUnknown)
+            } else {
+                Err(RepoDenial::SelfReview)
+            };
+            assert_eq!(decided, expected, "{label}");
+        }
+    }
+    // With no approval on record this says nothing, and core refuses it as `not_approved` or `review_required`.
+    assert_eq!(independent_review(None, &SUBMITTER), Ok(()));
+    // A merge refused for it in the job keeps its code.
+    assert_eq!(
+        RepoDenial::SelfReview.as_merge_refusal().code(),
+        "self_review"
+    );
+    assert_eq!(RepoDenial::ReviewUnrecorded.code(), "self_review");
+    assert_eq!(RepoDenial::ReviewerUnknown.code(), "self_review");
+    assert_eq!(
+        RepoDenial::ReviewerUnknown.as_merge_refusal().code(),
+        "self_review"
+    );
+    assert_eq!(
+        RepoDenial::ReviewUnrecorded.as_merge_refusal().code(),
+        "self_review"
+    );
+}

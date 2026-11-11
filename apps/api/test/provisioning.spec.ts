@@ -64,6 +64,8 @@ afterEach(async () => {
 
 const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(stub(id), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
 const delegate = (org: string, granted = true, by: Who = OPERATOR) => api(by, "PUT", `/v1/orgs/${org}/provisioning-delegation`, { granted });
+/** Switches managed repositories on for one organization's own routes, as `test_managed_repositories_on` does for a room. */
+const orgOn = (org: string) => runInDurableObject(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(org)), (_: any, state: any) => void state.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_managed_repositories_on (x INTEGER)"));
 
 let orgs = 0;
 /**
@@ -171,24 +173,48 @@ const eventTypes = (id: string) => inRoom(id, (sql) => sql.exec("SELECT type FRO
 const indexRow = async (repo: number) => (await BINDINGS.DB.prepare("SELECT workspace_id FROM repo_room_index WHERE provider = 'github' AND provider_repo_id = ?").bind(repo).first())?.workspace_id ?? null;
 
 describe("the organization's provisioning delegation", () => {
-  it("keeps answering while managed repositories are switched off, the same as when they're on (ruled 2026-11-11)", async () => {
-    // Off is this runtime's state for the whole Worker. The delegation routes never read the switch, so an operator
-    // can set the delegation before the feature is switched on. A room switched on for a test changes nothing here.
+  it("keeps answering an operator while managed repositories are switched off, and nobody else (ruled 2026-11-11, narrowed 2026-11-11 after the security review)", async () => {
+    // Off is this runtime's state for the whole Worker. A Podster operator's read and write never read the switch, so an
+    // operator can take an organization's ability away, or restore it, before the feature is switched on. Anyone else,
+    // the organization's own admin included, is answered exactly as a route that doesn't exist while it's off: an
+    // ordinary person doesn't learn from it that the feature exists (review A5). A room switched on changes nothing here.
     expect(BINDINGS.MANAGED_REPOSITORIES).toBeUndefined();
     const offRoom = await room({ delegated: false, switchedOn: false });
     const onRoom = await room({ delegated: false });
     const outsider: Who = { id: "per_pv_off_outsider", kind: "person", org: "org_pv_elsewhere", adminOrgs: ["org_pv_elsewhere"] };
+    const raw = async (who: Who, method: string, path: string, body?: unknown) => {
+      const got = await api(who, method, path, body);
+      return [got.status, got.text];
+    };
     for (const r of [offRoom, onRoom]) {
       const path = `/v1/orgs/${r.org}/provisioning-delegation`;
       expect((await api(OPERATOR, "GET", path)).body).toMatchObject({ provider: "github", granted: false });
       const set = await api(OPERATOR, "PUT", path, { granted: true });
       expect([set.status, set.body.granted], r.id).toEqual([200, true]);
-      expect((await api(r.owner, "GET", path)).body.granted).toBe(true);
-      // Someone who is neither an operator nor the organization's admin is refused as ever, reading or setting.
-      for (const method of ["GET", "PUT"]) {
-        const refused = await api(outsider, method, path, method === "PUT" ? { granted: false } : undefined);
-        expect([refused.status, refused.code], `${r.id} ${method}`).toEqual([403, "not_allowed"]);
+      // The organization's admin, an outsider and an agent, reading or setting, with a key or a body or not: a missing route.
+      for (const who of [r.owner, outsider, AGENT]) {
+        for (const [method, body] of [["GET", undefined], ["PUT", { granted: false }]] as const) {
+          const label = `${r.id} ${who.id} ${method}`;
+          const got = await raw(who, method, path, body);
+          expect(got, label).toEqual(await raw(who, method, `/v1/orgs/${r.org}/no-such-route`, body));
+          expect(got[0], label).toBe(404);
+        }
       }
+    }
+  });
+
+  it("answers an organization's admin as before once the switch is on for it", async () => {
+    const r = await room({ delegated: false });
+    await orgOn(r.org);
+    const path = `/v1/orgs/${r.org}/provisioning-delegation`;
+    expect((await api(r.owner, "GET", path)).body).toMatchObject({ provider: "github", granted: false });
+    expect((await delegate(r.org)).status).toBe(200);
+    expect((await api(r.owner, "GET", path)).body.granted).toBe(true);
+    // Setting it is still for an operator alone.
+    const outsider: Who = { id: "per_pv_on_outsider", kind: "person", org: "org_pv_elsewhere", adminOrgs: ["org_pv_elsewhere"] };
+    for (const [who, method] of [[r.owner, "PUT"], [outsider, "GET"], [outsider, "PUT"]] as const) {
+      const refused = await api(who, method, path, method === "PUT" ? { granted: false } : undefined);
+      expect([refused.status, refused.code], `${who.id} ${method}`).toEqual([403, "not_allowed"]);
     }
   });
 
@@ -202,6 +228,8 @@ describe("the organization's provisioning delegation", () => {
     const made = await api(admin, "POST", "/v1/workspaces", { name: "Engineering" });
     expect(made.status).toBe(200);
     await known(org, made.body.id);
+    // Switched on for this organization, so its admin's read and everyone else's refusals answer as they do once it's on.
+    await orgOn(org);
     const member: Who = { id: "per_pv_d_member", kind: "person", org, adminOrgs: [] };
     const path = `/v1/orgs/${org}/provisioning-delegation`;
     // Nobody has set it: held, as every organization's is until an operator takes it back.

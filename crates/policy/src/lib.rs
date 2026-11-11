@@ -757,6 +757,33 @@ pub fn is_merge_event(kind: &str) -> bool {
     kind.starts_with("merge.")
 }
 
+/// Whether an event is about the room's repository itself: its request, setup and state (M5 step 4).
+pub fn is_repository_event(kind: &str) -> bool {
+    kind.starts_with("repository.")
+}
+
+/// Whether an event is about a repository token an agent was given for a task (M5 step 6). Its subject is the grant's
+/// or the token's ID, and its actor the agent that holds them.
+pub fn is_repo_token_event(kind: &str) -> bool {
+    kind.starts_with("repo_access.") || kind.starts_with("repo_token.")
+}
+
+/// Every event type managed repositories (M5) record: the repository's, its grants', its tokens', a task's change's and
+/// a merge's. With managed repositories switched off none of them is shown anywhere, as their reads aren't there.
+pub fn is_managed_repository_event(kind: &str) -> bool {
+    is_repository_event(kind)
+        || kind.starts_with("repo_grant.")
+        || is_repo_token_event(kind)
+        || is_task_change_event(kind)
+        || is_merge_event(kind)
+}
+
+/// Whether an event may be shown at all while managed repositories are switched on or off. Who may see it is
+/// [`can_see_event`]; this is the switch alone.
+pub fn shows_with_switch(kind: &str, managed_repositories: bool) -> bool {
+    managed_repositories || !is_managed_repository_event(kind)
+}
+
 /// Whether someone can see one event in a room's activity. A task's events follow the task, as it stands now, apart from
 /// plan edits. A room's own events follow the member list, apart from the ones above, notices to an agent about itself and
 /// what the viewer did themselves. `subject` is who the event says it's about, and old events have none. Denies by default.
@@ -772,6 +799,15 @@ pub fn can_see_event(
     }
     if task.is_none() && REPO_GRANT_EVENTS.contains(&kind) {
         return is_human_admin(caller) || actor == caller.id || subject == Some(caller.id.as_str());
+    }
+    // The room's repository is read by people who see the whole room, and its events follow that read, whoever acted.
+    if is_repository_event(kind) {
+        return task.is_none() && repositories::sees_repository(caller);
+    }
+    // A token's events name a grant or a token: for those who see the holder's grants, and only on a task they can see.
+    if is_repo_token_event(kind) {
+        return task.is_some_and(|task| can_see_task(caller, task))
+            && repositories::sees_grant(caller, actor);
     }
     match task {
         Some(_) if kind == TASK_PLAN_CHANGED => sees_whole_room(caller),

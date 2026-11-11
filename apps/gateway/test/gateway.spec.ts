@@ -3078,3 +3078,26 @@ describe("a person's public reads (M4 step 7)", () => {
     expect([room.status, room.headers.get("cache-control"), (await room.json<any>()).error.code]).toEqual([404, "no-store", "workspace_not_found"]);
   });
 });
+
+describe("managed repositories switched off, through the gateway (review A5)", () => {
+  it("answers a repository recheck and a task's repo-access exactly as routes that don't exist, with a key or without", async () => {
+    const owner = await signUp();
+    const made = await dash(owner, "POST", "/v1/workspaces", { name: "Engineering" });
+    expect(made.status).toBe(200);
+    const id = made.body.id as string;
+    const send = async (path: string, withKey: boolean) => {
+      const headers: Record<string, string> = { cookie: owner.cookie, origin: BASE, "content-type": "application/json" };
+      if (withKey) headers["idempotency-key"] = unique("k");
+      const res = await call(`/api${path}`, { method: "POST", headers, body: "{}" });
+      return [res.status, await res.text()];
+    };
+    for (const withKey of [false, true]) {
+      for (const [path, missing] of [
+        [`/v1/moderation/repositories/${id}/recheck`, `/v1/moderation/repositories/${id}/no-such-route`],
+        [`/v1/workspaces/${id}/tasks/tsk_none/repo-access`, `/v1/workspaces/${id}/tasks/tsk_none/no-such-verb`],
+      ]) {
+        expect(await send(path, withKey), `${path} ${withKey}`).toEqual(await send(missing, withKey));
+      }
+    }
+  });
+});

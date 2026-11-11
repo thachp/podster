@@ -1,6 +1,7 @@
 // M5's staging run (step 10 of docs/m5-plan.md): managed repositories end to end, against staging and the real GitHub
 // organization staging is configured for, `podsterdev`. A room's owner asks for a repository, an agent pushes a branch
-// and opens a pull request with its short-lived token, the task is reviewed, and merge_task merges the reviewed commit.
+// and opens a pull request with its short-lived token, the room's admin, a second person, reviews it, and merge_task
+// merges the reviewed commit. The owner controls the coder, so a review by the owner merges nothing (M5-10e, A1).
 // Around that, each refusal with its one exact answer.
 //
 //   node m5-staging.mjs --base-url https://gateway-staging.podster.dev [--dry-run]
@@ -293,9 +294,14 @@ const changeOf = async (id) => (await taskRead(owner, id)).change;
 const give = async (principal, action, extra = {}) => owner.must("POST", `/v1/workspaces/${room}/repository/grants`, { policy_version: await owner.policyVersion(room), principal_id: principal.id, action, ...extra });
 const listedGrant = async (id) => (await owner.must("GET", `/v1/workspaces/${room}/repository/grants`)).grants.find((g) => g.id === id);
 const askMerge = (agent, task) => agent.call("merge_task", { ...task.at, submission_no: 1, commit_sha: task.head, idempotency_key: key() });
-/** A task for the coder, accepted, made now that the repository is ready, so it's linked to it. */
-async function newTask(name) {
-  const task = await owner.must("POST", `/v1/workspaces/${room}/tasks`, { title: `${RUN} ${name}`, instructions: "Change the code.", acceptance_criteria: "A pull request.", assignee: coder.id, reviewer: owner.id }, { idempotencyKey: key() });
+/**
+ * A task for the coder, accepted, made now that the repository is ready, so it's linked to it. Who reviews: the second
+ * person, the room's admin, who controls neither the coder nor anything of the owner's, so the review is independent of
+ * the submitter's person, as a merge needs (the owner's decision of 2026-11-11 on review A1). The merger, that person's
+ * agent, merges. `reviewer: owner` is for the check that a review by the submitter's own person merges nothing.
+ */
+async function newTask(name, reviewer = other) {
+  const task = await owner.must("POST", `/v1/workspaces/${room}/tasks`, { title: `${RUN} ${name}`, instructions: "Change the code.", acceptance_criteria: "A pull request.", assignee: coder.id, reviewer: reviewer.id }, { idempotencyKey: key() });
   const at = { workspace_id: room, task_id: task.id };
   const accepted = await coder.must("accept_task", { ...at, version: task.version });
   say(`     task ${name}: ${task.id}`);
@@ -572,7 +578,7 @@ try {
   let approved = false;
   await check("M5-10b", async () => {
     after("M5-08a");
-    await owner.must("POST", `/v1/workspaces/${room}/tasks/${t1.id}/verify`, { submission_no: 1, commit_sha: t1.head });
+    await other.must("POST", `/v1/workspaces/${room}/tasks/${t1.id}/verify`, { submission_no: 1, commit_sha: t1.head }, asAdmin());
     const read = await taskRead(owner, t1.id);
     eq([read.task.status, read.change.reviewed_commit_sha], ["completed", t1.head], "the approved task and its reviewed commit");
     approved = true;
@@ -647,6 +653,21 @@ try {
     refusedCode(await askMerge(merger, t1), "already_merged", "asking again");
   });
 
+  await check("M5-10e", async () => {
+    after("M5-09a");
+    // The owner, who controls the coder, reviews this one: the task's review completes as ever, and its merge is refused.
+    const t4 = await newTask("change-4", owner);
+    await tokenFor(t4);
+    await branchAndPullRequest(t4, "change-4");
+    await coder.must("submit_task", { ...t4.at, version: t4.version, note: "Ready for review.", commit_sha: t4.head, pr_number: t4.pr });
+    await owner.must("POST", `/v1/workspaces/${room}/tasks/${t4.id}/verify`, { submission_no: 1, commit_sha: t4.head });
+    eq((await taskRead(owner, t4.id)).task.status, "completed", "the task reviewed by the submitter's own person");
+    refusedCode(await askMerge(merger, t4), "self_review", "a merge-grant holder asking to merge it");
+    eq((await changeOf(t4.id)).merge_state, "not_requested", "the merge's state");
+    const pull = await publicRead(`/repos/${repo.full}/pulls/${t4.pr}`, "the pull request");
+    eq([pull.merged, pull.state], [false, "open"], "the pull request on GitHub");
+  });
+
   say("\n## a head that moves after review");
   let moved = null;
   await check("M5-11a", async () => {
@@ -655,7 +676,7 @@ try {
     await tokenFor(t2);
     await branchAndPullRequest(t2, "change-2");
     await coder.must("submit_task", { ...t2.at, version: t2.version, note: "Ready for review.", commit_sha: t2.head, pr_number: t2.pr });
-    await owner.must("POST", `/v1/workspaces/${room}/tasks/${t2.id}/verify`, { submission_no: 1, commit_sha: t2.head });
+    await other.must("POST", `/v1/workspaces/${room}/tasks/${t2.id}/verify`, { submission_no: 1, commit_sha: t2.head }, asAdmin());
     eq((await changeOf(t2.id)).reviewed_commit_sha, t2.head, "the reviewed commit");
     // The submitted task's token is revoked, so the push comes with the token of another task the agent still works on:
     // a token reaches every branch of the repository but the default one.

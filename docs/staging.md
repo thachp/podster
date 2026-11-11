@@ -295,11 +295,11 @@ Until a secret is set, its part refuses and nothing reaches GitHub for it: a rep
 
 **Switching it off again:** set `MANAGED_REPOSITORIES` to anything but `true`, or remove it, in both files' staging variables, and deploy the API and the gateway. Keep `REPO_TOKEN_KEY` and the agent-token App's ID, installation ID and key set for at least 65 minutes afterwards, as [below](#the-repository-token-keys) says, or the tokens still out can't be revoked. Switching off deletes no repository.
 
-**The journey** against staging takes `--managed-repositories-on` while the switch is on: `e2e/journey.mjs` then wants `merge_task` as the only tool named for a merge, and its refusal for an agent with no grant. Without the flag it wants no such tool, and fails here. It never infers which holds.
+**The journey** against staging takes `--managed-repositories-on` while the switch is on: `e2e/journey.mjs` then wants `merge_task` as the only tool named for a merge, and wants it refused with `self_merge` when a task's reviewer or the room's lead asks to merge approved work. That check shows that approval and a role give no merge. It doesn't show that a grant is what's missing: the journey's rooms have no repository, so no change names a submitter, and the API refuses every requester as possibly controlled by the same person, before it looks at a grant. `grant_required`, in a room that has a repository, is M5-10c of [M5's staging run](#m5s-staging-run), and M5-S7iii of `e2e/merge-check.mjs` locally. Without the flag the journey wants no such tool, and fails here. It never infers which holds.
 
 **A room whose repository setup is stuck** has no reset: abandon it and make a new room. That's ruled acceptable for staging's test people only ([M5 plan](m5-plan.md#owed-before-production)).
 
-**Not yet true:** nothing has run against GitHub from the deployed product, and no acceptance test has passed on staging.
+**Not yet true:** no acceptance test has passed on staging. [M5's staging run](#m5s-staging-run) is the script for them, and it hasn't run.
 
 ## The repository token keys
 
@@ -366,6 +366,39 @@ cd e2e && node m4-staging.mjs --base-url https://gateway-staging.podster.dev --a
 ```
 
 `node run-m4-staging.mjs` rehearses it against the local stack, with public rooms on for that run only and the gateway's real limits, and `--public-rooms-off` checks that it stops when they're off.
+
+## M5's staging run
+
+`e2e/m5-staging.mjs` is M5 step 10's script: managed repositories end to end, against staging and real GitHub, in `podsterdev`. **It has been written and hasn't run against staging.** Its checks and their IDs are in the [M5 plan](m5-plan.md#step-10-the-staging-script). It accepts `https://gateway-staging.podster.dev` as its base URL and refuses anything else, so there is no local rehearsal of it: locally GitHub is a fake, and `e2e/merge-check.mjs` and `e2e/repo-access-check.mjs` are the rehearsals.
+
+- **People:** a run takes **3 sign-ins** from the test sign-up, of its 6 a minute and 40 a day: the room's owner, a second person, and the fixed test operator that M4's run uses. Its five agents are made under those people and take none. With M4's 23, both runs fit in one day, with 14 to spare.
+- **The operator:** only a Podster operator can give an organization the provisioning delegation, so the run needs one. By default it signs in the fixed test operator, **whose ID must be in the API's `OPERATORS`**, as for [M4's run](#m4s-staging-run). Otherwise it stops after two sign-ins and says so. Set `PODSTER_E2E_OPERATOR_COOKIE` to an operator's own session instead, and the run takes 2 sign-ins and never signs that session out. The delegation is taken back when the run ends.
+- **GitHub:** Podster's own calls go out from staging, with the Apps' keys the owner set. The script holds no App key. It asks GitHub directly in three ways: about ten reads of the public API with no credential, of GitHub's 60 an hour for one address; calls with the agent's own token from `get_repo_access`; and `git` over HTTPS, as a child process with `e2e/child-env.mjs`'s allow-listed environment, a home directory of its own, and the token in its environment under one name. The token is never printed, never on a command line and never in a file.
+- **What it leaves behind:** one public repository in `podsterdev`, named `e2e-m5-<time>-<4 hex>`, with two pull requests, and its room. **Podster has no way to delete a repository, and the script can't.** It prints the repository's name at the end, for the owner to archive or delete in GitHub.
+- **Exit:** 0 only when nothing failed. A check that can't run is printed `SKIP` with its reason and counted: release status is skipped while its route answers as a missing one, and the public-claim check while `PUBLIC_ROOMS` is off. 2 for a refused configuration, and 3 when managed repositories are off on staging.
+
+`--dry-run` checks the configuration, prints the sign-ins and every check, and sends nothing:
+
+```bash
+cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)" node m5-staging.mjs --base-url https://gateway-staging.podster.dev --dry-run
+```
+
+The run itself. Every wait is bounded, and the longest, for Podster to notice a moved head, is seven minutes unless `--observe-wait-s` changes it:
+
+```bash
+cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)" node m5-staging.mjs --base-url https://gateway-staging.podster.dev
+```
+
+`node m5-staging-selftest.mjs` checks its pure parts and its dry run, and CI runs it.
+
+**What it doesn't cover:**
+
+- **A webhook's signature.** An unsigned or badly signed delivery is `scripts/staging-probes`' to check, with `--webhook-secret-set`. The script only reports how long Podster took to notice a pushed commit, and can't tell a webhook from the poll.
+- **The operator's recheck** of a degraded repository, and a failed, uncertain or retried setup (M5-03, M5-15). It never breaks a repository's rules to cause them.
+- **Bypass lists.** GitHub shows a ruleset's bypass actors to administrators only, so the script sees the two rulesets and their rules and not who may bypass them. That stays Podster's own read-back.
+- **The job's own refusal of a moved head.** The script waits until Podster has seen the new head, then wants `merge_task` refused with `commit_changed`. A request that lands before Podster notices, and fails in the job, is M5-S7viii locally.
+- **Approval refused after the branch advances** (the rest of M5-08), **a failed check** (M5-12), **another repository** and workflow files (the rest of M5-06), **how long a token works after the agent is removed** (the rest of M5-07), and **the Workers' logs** (M5-13).
+- **Production.** There is none.
 
 ## Explore's cursor key
 

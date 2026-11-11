@@ -129,7 +129,8 @@ web_config() { # web_config JQ: the staging build's file, changed
   "services": [
     { "binding": "GATEWAY", "service": "podster-gateway-staging" },
     { "binding": "PUBLIC_READS", "service": "podster-gateway-staging", "entrypoint": "PublicReads" }
-  ]
+  ],
+  "vars": { "APP_URL": "https://app-staging.podster.dev", "GATEWAY_URL": "https://gateway-staging.podster.dev", "SIGN_IN_PROVIDERS": "github,email" }
 }
 JSON
 }
@@ -351,6 +352,15 @@ not_staging "workers_dev is missing" 'del(.workers_dev)' 'workers_dev is undefin
 not_staging "route is another host" '.routes[0].pattern = "app.podster.dev"' 'its routes are app.podster.dev'
 not_staging "routes have a second host" '.routes += [{ "pattern": "app.podster.dev" }]' 'its routes are app-staging.podster.dev,app.podster.dev'
 not_staging "routes are missing" 'del(.routes)' 'its routes are none'
+not_staging "routes are right, with a route key beside them" '.route = "app.podster.dev"' 'it has a route key, "app.podster.dev", beside routes'
+not_staging "only route is a route key" 'del(.routes) | .route = { "pattern": "app-staging.podster.dev", "custom_domain": true }' 'it has a route key'
+not_staging "route is a pattern under the right host" '.routes[0].pattern = "app-staging.podster.dev/*"' 'its routes are app-staging.podster.dev/\*'
+not_staging "gateway URL is the local one" '.vars.GATEWAY_URL = "http://localhost:8787"' 'its GATEWAY_URL is http://localhost:8787'
+not_staging "gateway URL is another host" '.vars.GATEWAY_URL = "https://gateway.podster.dev"' 'its GATEWAY_URL is https://gateway.podster.dev'
+not_staging "gateway URL only starts like staging's" '.vars.GATEWAY_URL = "https://gateway-staging.podster.dev.example.com"' 'its GATEWAY_URL is'
+not_staging "gateway URL is missing" 'del(.vars.GATEWAY_URL)' 'its GATEWAY_URL is undefined'
+not_staging "vars are missing" 'del(.vars)' 'its GATEWAY_URL is undefined'
+not_staging "application URL is another host" '.vars.APP_URL = "https://app.podster.dev"' 'its APP_URL is https://app.podster.dev'
 not_staging "gateway binding isn't staging's" '.services[0].service = "podster-gateway"' 'its GATEWAY binding is podster-gateway'
 not_staging "second binding isn't staging's" '.services[1].service = "podster-gateway"' 'its PUBLIC_READS binding is podster-gateway'
 not_staging "service bindings are missing" 'del(.services)' 'it binds no service'

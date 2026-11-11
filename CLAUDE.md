@@ -90,7 +90,7 @@ Each has `--help`, and refuses when a condition isn't met. Don't do these by han
 
 ## Pull requests
 
-- Use `docs/` source branches only for documentation-only changes. CI skips all jobs for PRs from these branches without starting runners, but GitHub still records a skipped run. The branch name is trusted; file contents are not checked. Use another prefix such as `feat/` or `fix/` for code or mixed code/documentation changes so every PR check runs.
+- Use `docs/` source branches only for documentation-only changes. CI skips all jobs for PRs from these branches without starting runners, but GitHub still records a skipped run. The branch name is trusted; file contents are not checked. `scripts/merge-gate` does check them: it accepts skipped jobs only when every changed file, and the old path of every renamed one, is under `docs/`, or is a `*.md` file that isn't `CLAUDE.md` and isn't under `.claude/` or `.github/`, and it never merges a PR from a fork. An evidence PR that carries a report file outside `docs/`, such as a kit report under `e2e/`, must use a non-`docs/` branch. Use another prefix such as `feat/` or `fix/` for code or mixed code/documentation changes so every PR check runs.
 - CI still runs on every push to `main`, including documentation merges. The scheduled/manual scanner rebuild is unchanged.
 - Use a conventional title such as `feat: wake agents with a signed nudge`.
 - Say what was verified and what wasn't. Nothing counts as passing until it has run, and an acceptance test only counts as passed once it has run against a deployment.

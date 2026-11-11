@@ -2,7 +2,10 @@
 // and one that finishes isn't touched. A run once waited 20 minutes on a page that never answered.
 //
 //   node bounded-selftest.mjs
-import { bounded, boundMethods, callSite, Stalled, waitingFor } from "./bounded.mjs";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { bounded, boundMethods, callSite, groupsUnder, Stalled, startBounded, waitingFor } from "./bounded.mjs";
+import { groupAlive } from "./stack.mjs";
 
 let failed = 0;
 const check = (passed, title, detail) => {
@@ -66,6 +69,58 @@ const caught = (promise) => promise.then((value) => ({ value }), (error) => ({ e
   check(callSite("a11y.mjs", stack) === "a11y.mjs:1929", "the calling line is the nearest one in the named file", callSite("a11y.mjs", stack));
   check(callSite("a11y.mjs", "Error\n    at somewhere else") === "a11y.mjs, at a line that couldn't be read", "a stack without that file says so");
 }
+
+// The bound on a whole script, as run-a11y.mjs puts on a11y.mjs: made to fire, with a short bound, on a script that never
+// exits and won't stop when asked, over a "browser" in a group of its own that won't either, as Playwright starts one.
+// The stand-ins are bounded-selftest-child.mjs, told what to be by an argument.
+const standIn = fileURLToPath(new URL("./bounded-selftest-child.mjs", import.meta.url));
+{
+  let told = 0;
+  let browser;
+  const started = Date.now();
+  const { proc, done } = startBounded({ command: process.execPath, args: [standIn, "script"], options: { stdio: ["ignore", "pipe", "inherit"], env: { PATH: process.env.PATH, ONLY_THIS: "1" } }, ms: 3_000, graceMs: 1_000, onLate: () => told++ });
+  try {
+    browser = Number(await bounded("the stand-in browser starting", 30_000, new Promise((got) => proc.stdout.once("data", (chunk) => got(String(chunk).trim())))));
+    check(Number.isInteger(browser) && groupAlive(browser) && groupAlive(proc.pid), "a script and its browser are running, each in its own group");
+    check(groupsUnder(proc.pid).includes(browser), "the browser's group is found under the script");
+    const ended = await bounded("a late script being stopped", 60_000, done);
+    const took = Date.now() - started;
+    check(ended.late === true && ended.code === 1, "a script that never exits is stopped at its bound, as a failure", `after ${took} ms`);
+    check(told === 1, "and the caller is told once");
+    check(!groupAlive(proc.pid), "nothing of the script is left, though it ignored being asked to stop");
+    check(!groupAlive(browser), "nothing of its browser is left either, though it was in a group of its own");
+    check(ended.stopped === true, "and it says everything stopped");
+  } finally {
+    // Neither stand-in stops when asked, so if anything above threw, they're killed here and not left running.
+    for (const group of new Set([proc.pid, ...groupsUnder(proc.pid), browser])) {
+      if (!Number.isInteger(group) || group <= 1) continue;
+      try {
+        process.kill(-group, "SIGKILL");
+      } catch {
+        // Already gone, which is what the checks above expect.
+      }
+    }
+  }
+}
+
+{
+  const exits = (status, onLate) => startBounded({ command: process.execPath, args: [standIn, "exit", String(status)], options: { stdio: ["ignore", "pipe", "inherit"], env: { ONLY_THIS: "1" } }, ms: 30_000, onLate });
+  let told = 0;
+  const fine = exits(0);
+  let seen = "";
+  fine.proc.stdout.on("data", (chunk) => (seen += chunk));
+  const first = await fine.done;
+  const failing = exits(3, () => told++);
+  failing.proc.stdout.resume();
+  const second = await failing.done;
+  check(first.code === 0 && first.late === false, "a script that exits in time gives its status");
+  check(second.code === 3 && second.late === false && told === 0, "a failing one gives its own, and neither is called late");
+  // macOS adds one name of its own to every process.
+  check(JSON.stringify(JSON.parse(seen).filter((name) => name !== "__CF_USER_TEXT_ENCODING")) === '["ONLY_THIS"]', "a script gets the environment it's given, and no more", seen);
+}
+
+// run-a11y.mjs uses it, so its bound is this one.
+check(/const checks = startBounded\(\{/.test(readFileSync(new URL("./run-a11y.mjs", import.meta.url), "utf8")), "run-a11y.mjs starts a11y.mjs with this bound");
 
 console.log(failed ? `\n${failed} failed` : "\nall passed");
 process.exit(failed ? 1 : 0);

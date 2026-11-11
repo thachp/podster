@@ -321,7 +321,23 @@ check(absentId("tsk_aa") === null && absentId("nounderscore") === null, "an ID t
     check(body.includes("await recorded(seen,") && !/\b(eq|ok|refusedCode|refusedAs|refusedBy|mustGit|pullIn|taskIn)\(/.test(outside), `${id} records each step and asserts nothing about it`);
   }
   check(source.includes("seen.push(`${label}: not recorded (") && !section("M5-C3").includes('"victim"'), "a step that can't be made is recorded as that, and M5-C3 makes no task of its own");
-  check(section("M5-07e").includes('refusedCode(answer, "agent_disconnected"') && !section("M5-07e").includes("!answer.ok"), "M5-07e wants the one code a disconnected agent gets");
+  // A disconnect revokes the agent's OAuth grant and drops its link (apps/gateway/src/index.ts, revokeCredentials), so its
+  // call ends as a transport's 401 or as an unclaimed agent, never as agent_disconnected. No code is promised: no answer, no token.
+  check(!section("M5-07e").includes("agent_disconnected") && !section("M5-07e").includes("refusedCode(") && section("M5-07e").includes('ok(!answer.ok, "a disconnected agent\'s call was answered");') && section("M5-07e").includes('tokenless(answer, "a disconnected agent\'s call");'), "M5-07e wants no answer and no token from a disconnected agent, and names no code");
+  check(section("M5-07e").indexOf("refusedByGithub(live.token") > section("M5-07e").indexOf("tokenless(answer") && !PLAN.find((entry) => entry.id === "M5-07e").title.includes("agent_disconnected"), "and then still times GitHub's refusal of the token it held");
+  // The five merges: what finished is kept, and a grant leaves clean-up's list only once the audit log shows it ended.
+  {
+    const body = section("M5-09g");
+    check(body.indexOf("batch = {") > 0 && body.indexOf("batch = {") < body.indexOf("await settledMerge(task)") && body.includes("late.push(") && body.indexOf('ok(late.length === 0') > body.indexOf("ledger.settle(id)"), "M5-09g keeps the step's state before it waits on any merge, and a merge that never ends doesn't lose the others");
+    check(body.includes("for (const id of [watcherGrant.id, adminGrant.id, thirdGrant.id]) if (ended.has(id)) ledger.settle(id);") && (body.match(/ledger\.settle\(/g) ?? []).length === 1, "each of the three grants is settled only when the room's audit log shows it revoked");
+    check(section("M5-12b").includes('have(b.ends.clash, "the second merge didn\'t end within the wait")') && source.includes('have(b.ends[label], "this merge didn\'t end within the wait")') && section("AC-16").includes("have(b.ends.land,"), "each check after it skips by itself if its own merge didn't end");
+  }
+  // The working token's hour.
+  check(source.includes("await keepWorkingToken();") && source.includes("bench.expiresAt - Date.now() > RENEW_WITHIN_MS") && source.includes("const RENEW_WITHIN_MS = 10 * 60_000;") && source.includes('have(tasks.bench?.token, tasks.bench?.spent ??'), "before each check the working token is renewed once it's within ten minutes of its expiry, and one that ran out makes its checks skip with that reason");
+  check(section("M5-07d").includes("bench.ended = true;") && section("M5-07d").indexOf("bench.ended = true;") < section("M5-07d").indexOf("owner.revoke(room, coder2.id)") && source.includes("bench.ended ||"), "nothing renews it once the check that ends it has begun");
+  // A signal stops the flow before clean-up looks at anything.
+  check(source.includes("if (stopping) throw new Halt(") && source.indexOf("if (stopping) throw new Halt(") < source.indexOf("  try {\n    tally.add(id, \"pass\"") && source.includes("Promise.race([flowDone, sleep(120_000)]).then(() => cleanUp())") && source.includes("} finally {\n  flowEnded();\n}") && source.includes("ok(!stopping, `${label}: the run was told to stop`);"), "on a signal the run halts at its next check or wait, and clean-up starts only once the flow has ended");
+  check(section("M5-16a").includes('eq(await outcomeOf(one.id), "nudged"') && !section("M5-16a").includes("pr_observed_at"), "M5-16a is judged on the API's nudged line, not on a read that the routine poll makes too");
   for (const id of ["M5-16a", "M5-16b"]) check(section(id).includes("logged();") && !section(id).includes("sleep(") && section(id).includes("await outcomeOf(") && !section(id).includes("!== null"), `${id} needs the API's log, waits on its lines and on nothing fixed, and never passes without them`);
   check(source.includes('have(options.logs && tally.passed("M5-13a")'), "without a connected tail the two delivery checks are skipped, by name");
   const reads = [...source.matchAll(/publicRead\(`\/repos\/\$\{repo\.full\}\/commits\/\$\{([a-zA-Z.]+)\.merge_sha\}/g)].map((found) => found[1]);

@@ -162,7 +162,17 @@ const cause = (error) => {
   return parts.join(": ") || String(error);
 };
 /** Runs one check. Its function answers a detail to print, throws to fail, or throws a Skip. Answers whether it passed. */
+/** Set by a signal. The run halts at its next check or wait, and clean-up starts only once it has. */
+let stopping = false;
+/** The run was told to stop. Not a check's failure: it ends the flow. */
+class Halt extends Error {}
+/** Resolved when the run's flow has ended, however it ended. */
+let flowEnded;
+const flowDone = new Promise((done) => (flowEnded = done));
 async function check(id, run) {
+  // Outside the try, so a stop ends the flow instead of being counted as this check's failure.
+  if (stopping) throw new Halt("stopped by a signal");
+  await keepWorkingToken();
   try {
     tally.add(id, "pass", (await run()) ?? "");
     return true;
@@ -191,6 +201,7 @@ const tokenless = (result, label) => ok(!/gh[a-z]_/.test(JSON.stringify(result ?
 async function within(seconds, label, read, done, stepMs = POLL_MS) {
   const start = Date.now();
   for (;;) {
+    ok(!stopping, `${label}: the run was told to stop`);
     const value = await read();
     const took = Math.round((Date.now() - start) / 100) / 10;
     if (done(value)) return { value, seconds: took };
@@ -458,7 +469,24 @@ async function pullIn(ctx, task, name, { credential = task.token, file, content 
   return task;
 }
 /** The live token the first room's second coder works with, for a task it never submits. */
-const benchToken = () => have(tasks.bench?.token, "the second coder holds no live token");
+const benchToken = () => have(tasks.bench?.token, tasks.bench?.spent ?? "the second coder holds no live token");
+/** How near its disclosed expiry the working token is renewed: twice the five minutes inside which Podster mints anew. */
+const RENEW_WITHIN_MS = 10 * 60_000;
+/**
+ * A token lives an hour, and a run whose waits run long can outlast it. Before each check, once the working token is
+ * within ten minutes of its expiry, it's asked for again: Podster returns the same one until five minutes before, then
+ * a new one. If that fails and the token has run out, the checks that need it say SKIP with this reason, not FAIL.
+ */
+async function keepWorkingToken() {
+  const bench = tasks.bench;
+  if (!bench?.token || bench.ended || !coder2 || !Number.isFinite(bench.expiresAt) || bench.expiresAt - Date.now() > RENEW_WITHIN_MS) return;
+  const again = await coder2.call("get_repo_access", bench.at).catch(() => null);
+  if (again?.ok && typeof again.data?.token === "string") {
+    Object.assign(bench, { token: secret(again.data.token, "a repository token"), expiresAt: again.data.expires_at });
+  } else if (bench.expiresAt - Date.now() < 60_000) {
+    Object.assign(bench, { token: null, spent: `the working token reached its hour's expiry, and asking again was refused ${again?.code ?? "with no answer"}` });
+  }
+}
 /** A task of the second coder's with a pull request, submitted. Reviewed by the room's admin, the second person. */
 async function submittedTask(name, extra = {}) {
   const task = await taskIn(first(), name, other);
@@ -612,8 +640,11 @@ function cleanUp() {
 }
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
-    console.error(`\nStopped by ${signal}.`);
-    cleanUp().finally(() => process.exit(130));
+    console.error(`\nStopped by ${signal}. Waiting for the step in hand to end, then cleaning up.`);
+    // The flow stops first, so nothing it was about to do, a demotion or a grant, can land after clean-up has looked.
+    // A request in hand is bounded at 30 seconds; two minutes is the longest this waits before cleaning up anyway.
+    stopping = true;
+    Promise.race([flowDone, sleep(120_000)]).then(() => cleanUp()).finally(() => process.exit(130));
   });
 }
 
@@ -1184,7 +1215,7 @@ try {
 
   await check("M5-06f", async () => {
     after("M5-S1", "M5-03b");
-    const bench = tasks.bench;
+    const bench = { ...tasks.bench, token: benchToken() };
     const tip = await tipOf(repoB.defaultBranch, repoB);
     const made = await github(`/repos/${repoB.full}/git/refs`, { token: bench.token, method: "POST", body: { ref: "refs/heads/e2e/intruder", sha: tip } });
     refusedBy(made.status, [403, 404], "creating a branch in the second room's repository");
@@ -1198,7 +1229,7 @@ try {
 
   await check("M5-06g", async () => {
     after("M5-S1");
-    const bench = tasks.bench;
+    const bench = { ...tasks.bench, token: benchToken() };
     const call = (method, path, body) => github(`/repos/${repo.full}${path}`, { token: bench.token, method, body });
     const seen = [];
     const refusedHere = (label, status, allowed) => {
@@ -1375,19 +1406,19 @@ try {
     logged();
     const { task, next } = have(advance, "there's no watched change to send a delivery about");
     const body = deliveryBody({ repositoryId: repo.id, number: task.pr, head: next, nonce: randomUUID() });
-    const before = await changeOf(task.id);
     const one = await deliver(body, { secret: key });
     eq([one.status, one.accepted], [202, true], "the first delivery");
+    // The API's own word that the room took it. A read of the pull request soon after proves nothing: the routine
+    // poll reads it too.
     eq(await outcomeOf(one.id), "nudged", "what the API logged for the first delivery");
-    // A delivery is a nudge: Podster reads the pull request itself once one is taken.
-    const { value: read, seconds } = await within(120, "Podster reading the pull request again after the delivery", () => changeOf(task.id), (c) => c.pr_observed_at > before.pr_observed_at);
+    const read = await changeOf(task.id);
     const sameId = await deliver(body, { id: one.id, secret: key });
     const newId = await deliver(body, { secret: key });
     eq([sameId.status, sameId.accepted, newId.status, newId.accepted], [202, true, 202, true], "the same delivery again, and its body under a new ID");
     // Each line is written once the room has answered, so by then a replay has done whatever it was going to do.
     eq([await outcomeOf(one.id, 2), await outcomeOf(newId.id)], ["nudged,replayed", "replayed"], "what the API logged for the delivery's ID, twice, and for the new ID");
     eq(JSON.stringify(steady(await changeOf(task.id))), JSON.stringify(steady(read)), "the task's change after both");
-    return `read again ${seconds} s after the first; the API logged nudged, then replayed twice`;
+    return "the API logged nudged, then replayed twice";
   });
 
   await check("M5-16b", async () => {
@@ -1466,7 +1497,6 @@ try {
     await ask(merger, clash, "the second");
     await ask(watcher, waiting.revoked, "the third");
     const took = await owner.dash("DELETE", `${grantsPath}/${watcherGrant.id}`, { policy_version: await owner.policyVersion(room) });
-    if (took.ok) ledger.settle(watcherGrant.id);
     await ask(second2, waiting.demoted, "the fourth");
     const down = await owner.dash("POST", `/v1/workspaces/${room}/members/${other.id}/role`, { role: "member", policy_version: await owner.policyVersion(room) });
     // From here clean-up makes them the room's admin again, whatever stops the run.
@@ -1476,17 +1506,25 @@ try {
     // What the job had and hadn't reached once all three had lost their authority: read after the last answer.
     const then = {};
     for (const [label, task] of Object.entries({ clash, ...waiting })) then[label] = (await changeOf(task.id)).merge_state;
-    eq([took.status, took.body?.state, down.status, out.status], [200, "revoked", 200, 200], "the grant taken back, the admin demoted and the agent removed");
-    // The demotion and the removal ended the grants that rested on them, in the same change.
-    for (const id of [adminGrant.id, thirdGrant.id]) ledger.settle(id);
+    // Kept from here, so whatever finishes can still be judged if one merge never ends within its wait.
     const ends = {};
-    for (const [label, task] of Object.entries({ land, clash, ...waiting })) ends[label] = await settledMerge(task);
-    // When Podster recorded each authority ending, by its own clock: the room's audit log, by the grant that ended.
-    const ended = new Map((await owner.audit(room)).filter((entry) => entry.action === "repo_grant.revoked").map((entry) => [entry.target_id, entry.created_at]));
-    const lost = { revoked: ended.get(watcherGrant.id), demoted: ended.get(adminGrant.id), removed: ended.get(thirdGrant.id) };
-    // The job hadn't reached a merge if the one ahead of all three was still waiting, and so was it.
     const held = Object.fromEntries(["revoked", "demoted", "removed"].map((label) => [label, then.clash === "requested" && then[label] === "requested"]));
-    batch = { land, clash, ...waiting, tip, ends, lost, held, then, watcherBody, watcherKey, watcherGrant, adminGrant, thirdGrant, second2, third };
+    batch = { land, clash, ...waiting, tip, ends, lost: {}, held, then, watcherBody, watcherKey, watcherGrant, adminGrant, thirdGrant, second2, third };
+    eq([took.status, took.body?.state, down.status, out.status], [200, "revoked", 200, 200], "the grant taken back, the admin demoted and the agent removed");
+    const late = [];
+    for (const [label, task] of Object.entries({ land, clash, ...waiting })) {
+      try {
+        ends[label] = await settledMerge(task);
+      } catch (error) {
+        late.push(`${label}: ${cause(error)}`);
+      }
+    }
+    // When Podster recorded each authority ending, by its own clock: the room's audit log, by the grant that ended.
+    // A grant is taken off clean-up's list only once the log shows it ended, never on the word of the call that should have ended it.
+    const ended = new Map((await owner.audit(room)).filter((entry) => entry.action === "repo_grant.revoked").map((entry) => [entry.target_id, entry.created_at]));
+    Object.assign(batch.lost, { revoked: ended.get(watcherGrant.id), demoted: ended.get(adminGrant.id), removed: ended.get(thirdGrant.id) });
+    for (const id of [watcherGrant.id, adminGrant.id, thirdGrant.id]) if (ended.has(id)) ledger.settle(id);
+    ok(late.length === 0, `not every merge ended within the wait: ${late.join("; ")}`);
     eq([ends.land.merge_state, ends.land.merge_reason, ends.land.pr_state, ends.land.merge_requested_by], ["succeeded", null, "merged", merger.id], "the first merge");
     ok(isCommitSha(ends.land.merge_sha), "the first merge records no merge commit");
     const problems = mergeCommitProblems(await publicRead(`/repos/${repo.full}/commits/${ends.land.merge_sha}`, "the first merge's commit"), { tipBefore: tip, reviewed: land.head });
@@ -1496,7 +1534,7 @@ try {
 
   await check("M5-12b", async () => {
     const b = have(batch, "the five merges weren't asked for");
-    const ended = b.ends.clash;
+    const ended = have(b.ends.clash, "the second merge didn't end within the wait");
     eq([ended.merge_state, ended.merge_reason, ended.merge_sha ?? null, ended.pr_state], ["failed", "provider_refused", null, "open"], "the change GitHub couldn't merge");
     const status = await owner.dash("GET", `/v1/workspaces/${room}/tasks/${b.clash.id}/release-status`);
     eq(status.status, 200, "its release status");
@@ -1513,6 +1551,7 @@ try {
   await check("AC-16", async () => {
     after("M5-03a", "M5-12b");
     const b = batch;
+    have(b.ends.land, "the first merge didn't end within the wait");
     // The merge GitHub refused landed nothing: its pull request is open, and its commit isn't in the default branch.
     const pull = await pullOnGithub(b.clash);
     eq([pull?.merged, pull?.state, pull?.head?.sha], [false, "open", b.clash.head], "the refused pull request on GitHub");
@@ -1528,6 +1567,7 @@ try {
   const lostAuthority = (id, label, reason) =>
     check(id, async () => {
       const b = have(batch, "the five merges weren't asked for");
+      have(b.ends[label], "this merge didn't end within the wait");
       const pull = await pullOnGithub(b[label]);
       const mergedAt = typeof pull?.merged_at === "string" ? Date.parse(pull.merged_at) : undefined;
       const ending = lostAuthorityEnding(b.ends[label], reason, { lostAt: b.lost[label], mergedAt, held: b.held[label] });
@@ -1658,21 +1698,28 @@ try {
     const live = tasks["second-2"];
     eq((await github(`/repos/${repoB.full}`, { token: live.token })).status, 200, "the token before the agent is disconnected");
     eq((await other.must("POST", `/agents/${coderB.id}/disconnect`, undefined, asSelf())).status, "disconnected", "the agent's connection");
+    // A disconnect ends the agent's credential itself: the gateway revokes its OAuth grant and drops its link. So the
+    // call is refused before any tool runs, as a transport's 401 or as an agent nobody has claimed, and which of the
+    // two isn't Podster's promise. What is: no answer, and no token. The refusal is printed, scrubbed.
     const answer = await coderB.call("get_repo_access", live.at);
-    refusedCode(answer, "agent_disconnected", "a disconnected agent asking again");
-    tokenless(answer, "a disconnected agent asking again");
+    ok(!answer.ok, "a disconnected agent's call was answered");
+    tokenless(answer, "a disconnected agent's call");
+    say(`     the disconnected agent's call was refused: ${String(answer.code ?? "with no code").slice(0, 80)}`);
     return refusedByGithub(live.token, live.expiresAt, repoB, "GitHub refusing the disconnected agent's token");
   });
 
   await check("M5-07d", async () => {
     after("M5-S1");
     const bench = tasks.bench;
-    eq((await github(`/repos/${repo.full}`, { token: bench.token })).status, 200, "the token before the agent is removed");
+    const held = benchToken();
+    eq((await github(`/repos/${repo.full}`, { token: held })).status, 200, "the token before the agent is removed");
+    // From here the working token is meant to be refused: nothing renews it.
+    bench.ended = true;
     await owner.revoke(room, coder2.id);
     const answer = await coder2.call("get_repo_access", bench.at);
     refusedCode(answer, "access_revoked", "a removed agent asking again");
     tokenless(answer, "a removed agent asking again");
-    return refusedByGithub(bench.token, bench.expiresAt, repo, "GitHub refusing the removed agent's token");
+    return refusedByGithub(held, bench.expiresAt, repo, "GitHub refusing the removed agent's token");
   });
 
   say("\n## what podsterdev gained, and the logs");
@@ -1705,9 +1752,13 @@ try {
     return `${tails.map((tail) => `${tail.app} ${tail.stream.values.length} events`).join(", ")}; ${needles.filter((n) => typeof n.value === "string" && n.value.length >= 8).length} strings looked for. What this can't see: lines before a tail connected (${late.length ? `${late.join(", ")} wasn't shown connected until after the first sign-up` : "all three were connected before the first sign-up"}), whether wrangler tail dropped any event by sampling under load, which nothing here can tell, and podster-scanner, which isn't tailed`;
   });
 } catch (error) {
-  stopped = error instanceof Stop ? error.message : `the run broke: ${cause(error)}`;
+  stopped = error instanceof Stop || error instanceof Halt ? error.message : `the run broke: ${cause(error)}`;
   console.error(scrub(`\nStopped: ${stopped}`, secrets));
+} finally {
+  flowEnded();
 }
+// Stopped by a signal: its handler cleans up and exits. Nothing more is done here.
+if (stopping) await new Promise(() => {});
 
 tally.skipRest(stopped ? "not reached: the run stopped" : "not reached");
 // What the room holds now, whatever the checks made of it: a retried setup would carry a name of the server's own.

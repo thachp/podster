@@ -2259,7 +2259,10 @@ mod queries {
                 "guest_can_create": int(&m["guest_can_create"]) != 0,
             });
             if told_join_source {
-                entry["public_claim"] = json!(m["joined_via"].as_str() == Some("public"));
+                // The same predicate the grant's refusal uses, so the form hides exactly who the API would refuse.
+                let principal = m["principal_id"].as_str().unwrap_or_default();
+                entry["public_claim"] =
+                    json!(public_claims::is_public_participant(sql, principal)?);
             }
             // Someone's scopes are for them and those who manage access.
             let id = m["principal_id"].as_str().unwrap_or_default();

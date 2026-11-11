@@ -418,6 +418,23 @@ describe("who is told how each participant joined", () => {
     for (const member of (await api(ADMIN, "GET", `/v1/workspaces/${id}`)).body.members) expect(member).not.toHaveProperty("public_claim");
   });
 
+  it("uses the refusal's own predicate: a public joiner the owner gave another role is neither flagged nor refused", async () => {
+    const id = await room();
+    // Not reachable through today's commands, which clear joined_via on such a change; written here to pin the rule.
+    await inRoom(id, (sql) => sql.exec("UPDATE member SET role = 'member' WHERE principal_id = ?", PUBLIC_AGENT.id));
+    const told = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.members.find((m: any) => m.principal_id === PUBLIC_AGENT.id);
+    expect(told.public_claim).toBe(false);
+    expect((await give(id, PUBLIC_AGENT.id, "push")).status).toBe(200);
+  });
+
+  it("is told whether managed repositories are switched on or off", async () => {
+    const id = await room();
+    await inRoom(id, (sql) => sql.exec("DROP TABLE test_managed_repositories_on"));
+    expect((await api(OWNER, "GET", `${grants(id)}`)).code).toBe("not_found");
+    const told = Object.fromEntries((await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.members.map((m: any) => [m.principal_id, m.public_claim]));
+    expect(told).toMatchObject({ [PUBLIC_AGENT.id]: true, [AGENT.id]: false });
+  });
+
   it("authorizes nothing: the grant is still refused from the room's own row", async () => {
     const id = await room();
     const refused = await give(id, PUBLIC_AGENT.id, "push");

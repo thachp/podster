@@ -463,32 +463,41 @@ export function leaks(text, needles) {
 
 /** How long after authority ended a merge may still land and be the job's last, already-checked call. Past it, it isn't. */
 export const LATE_MERGE_MS = 5000;
+/** How far GitHub's clock and staging's are allowed to differ when one's time is set against the other's. */
+export const CLOCK_SKEW_MS = 2000;
+
+const seconds = (ms) => `${Math.round(Math.abs(ms) / 100) / 10} s ${ms < 0 ? "before" : "after"}`;
 
 /**
  * How a merge ended that the run asked for and then took the authority for away, while it waited for the job.
  *
- * The job must end it with that authority's own code and merge nothing: `shown`. A merge that succeeded is judged by
- * when, never waved through:
- * - `lostAt` is when Podster recorded the authority ending, by its own clock, from the room's audit log.
- * - `finishedAt` is when Podster recorded the merge finished, by the same clock. `mergedAt` is GitHub's time for the
- *   merge, to the second, by GitHub's clock.
- * - `held` says the run saw, after the authority had ended, that the job hadn't got to this merge yet: the merge
- *   ahead of it in the job's order was still waiting, and so was this one.
+ * The job must end it with that authority's own code and merge nothing: `shown`. A merge that succeeded is never
+ * waved through:
  *
- * Merged before the authority ended, by either clock: the run lost the race, nothing was shown, a skip. Merged after it
- * while the run had seen the job not yet there, or more than LATE_MERGE_MS after it: the job merged without the
- * authority, a failure. Merged within LATE_MERGE_MS after it, with nothing seen: the job's call may already have been
- * checked and on its way, which is the product working, so it can't be told, a skip. Without the times it's a failure.
+ * - **`held`:** the run itself saw the order. After the authority had ended, the merge ahead of this one in the job's
+ *   order was still waiting, and so was this one. Then any merge is the job merging without authority: a failure,
+ *   whatever any clock says.
+ * - **Not held:** only times are left. `lostAt` is when Podster recorded the authority ending, from the room's audit
+ *   log, and `finishedAt` when it recorded the merge finished, by the same clock. `mergedAt` is GitHub's time for the
+ *   merge, by GitHub's clock, cut to the second.
+ *   - Finished before the authority ended by Podster's own clock, or merged more than a second and CLOCK_SKEW_MS
+ *     before it by GitHub's: the race was lost. `race_lost`, a skip.
+ *   - Merged more than LATE_MERGE_MS and CLOCK_SKEW_MS after it: the job merged without authority. A failure.
+ *   - Anything between, from CLOCK_SKEW_MS + 1 s before to LATE_MERGE_MS + CLOCK_SKEW_MS after: the job's call may
+ *     have been checked and on its way, or the clocks may differ. `cannot_tell`, a skip counted apart.
+ *   - A time that can't be read: a failure.
  */
 export function lostAuthorityEnding(change, reason, { lostAt, mergedAt, held } = {}) {
   if (change?.merge_state === "failed" && change.merge_reason === reason && (change.merge_sha ?? null) === null) return { shown: true };
   if (change?.merge_state !== "succeeded") return { problem: `the merge ended ${change?.merge_state ?? "in no state"} with ${change?.merge_reason ?? "no reason"}, not failed with ${reason}` };
-  if (!Number.isFinite(lostAt) || !Number.isFinite(mergedAt)) return { problem: "the merge succeeded, and when the authority ended or when GitHub merged couldn't be read, so it can't be shown to have come first" };
+  const timed = Number.isFinite(lostAt) && Number.isFinite(mergedAt);
+  if (held === true) return { problem: `the merge succeeded, and the run had seen the job not yet reach it once the authority had ended: it merged without authority${timed ? ` (GitHub's time for the merge is ${seconds(mergedAt - lostAt)} Podster's for the authority ending)` : ""}` };
+  if (!timed) return { problem: "the merge succeeded, and when the authority ended or when GitHub merged couldn't be read, so it can't be shown to have come first" };
   const finishedAt = Number.isFinite(change.merge_finished_at) ? change.merge_finished_at : null;
-  if ((finishedAt !== null && finishedAt < lostAt) || mergedAt + 1000 <= lostAt) return { shown: false, why: `the race was lost: the merge landed ${Math.round((lostAt - mergedAt) / 100) / 10} s before the authority ended, so this run shows nothing either way` };
-  if (held === true) return { problem: `the merge succeeded ${Math.round((mergedAt - lostAt) / 100) / 10} s after the authority ended, and the job hadn't reached it when the authority ended: it merged without authority` };
-  if (mergedAt >= lostAt + LATE_MERGE_MS) return { problem: `the merge succeeded ${Math.round((mergedAt - lostAt) / 100) / 10} s after the authority ended: it merged without authority` };
-  return { shown: false, why: `it can't be told: the merge landed within ${LATE_MERGE_MS / 1000} s after the authority ended, and the run hadn't seen the job still waiting, so the job's call may have been checked before` };
+  const gap = mergedAt - lostAt;
+  if ((finishedAt !== null && finishedAt < lostAt) || gap + 1000 + CLOCK_SKEW_MS <= 0) return { shown: false, kind: "race_lost", why: `the race was lost: the merge landed ${seconds(finishedAt !== null && finishedAt < lostAt ? finishedAt - lostAt : gap)} the authority ended, so this run shows nothing either way` };
+  if (gap >= LATE_MERGE_MS + CLOCK_SKEW_MS) return { problem: `the merge succeeded ${seconds(gap)} the authority ended, by GitHub's time against Podster's: it merged without authority` };
+  return { shown: false, kind: "cannot_tell", why: `it can't be told: GitHub's time for the merge is ${seconds(gap)} Podster's for the authority ending, inside the window from ${(CLOCK_SKEW_MS + 1000) / 1000} s before to ${(LATE_MERGE_MS + CLOCK_SKEW_MS) / 1000} s after where the job's call may already have been checked, or the two clocks may differ; and the run hadn't seen the job still waiting` };
 }
 
 /** Whether a value is a full commit ID, before it goes into a path. */
@@ -501,6 +510,44 @@ export const isCommitSha = (value) => typeof value === "string" && /^[0-9a-f]{40
 export function worstCaseSeconds(options) {
   const fixed = { tails: 60 + 120 + 60, retry: 180, expiries: 90 + 90, publicRoom: 60, deliveries: 120 + 5 * 60, githubHeads: 3 * 60 };
   return 3 * options.setupWait + 7 * options.mergeWait + options.observeWait + 7 * options.revokeWait + Object.values(fixed).reduce((sum, seconds) => sum + seconds, 0);
+}
+
+/** A log line's own name for what it records, if it has one that is plainly a name: never free text, which could hold what's looked for. */
+function eventName(part) {
+  let line = part;
+  if (typeof part === "string") {
+    try {
+      line = JSON.parse(part);
+    } catch {
+      return "a line with no event name";
+    }
+  }
+  const name = line && typeof line === "object" ? (line.at ?? line.event) : undefined;
+  return typeof name === "string" && /^[A-Za-z0-9_.:-]{1,64}$/.test(name) ? name : "a line with no event name";
+}
+
+/**
+ * Where the Workers logged something of the run's own: for each tail, each log line or exception that holds one of the
+ * needles, or anything shaped like a GitHub token or a private key. A hit names the Worker, the line's event name and
+ * the kind of string, and never the string or the line. A needle under 8 characters isn't looked for.
+ */
+export function logHits(tails, needles) {
+  const hits = new Map();
+  const note = (app, event, kind) => hits.set(`${app}\n${event}\n${kind}`, { app, event, kind });
+  const wanted = needles.filter(({ value }) => typeof value === "string" && value.length >= 8);
+  for (const { app, events } of tails) {
+    for (const event of events) {
+      const parts = [...logged(event).map((part) => [eventName(part), typeof part === "string" ? part : JSON.stringify(part ?? null)]), ...(Array.isArray(event?.exceptions) ? event.exceptions : []).map((thrown) => ["an exception", JSON.stringify(thrown ?? null)])];
+      for (const [given, text] of parts) {
+        // A name that holds one of the strings isn't printed either.
+        const name = wanted.some(({ value }) => given.includes(value)) || /gh[a-z]_/.test(given) ? "a line with no event name" : given;
+        for (const { label, value } of wanted) if (text.includes(value)) note(app, name, label);
+        if (/gh[a-z]_[A-Za-z0-9_]{16,}/.test(text)) note(app, name, "something shaped like a GitHub token");
+        if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(text)) note(app, name, "key material");
+      }
+    }
+  }
+  return [...hits.values()];
 }
 
 /**

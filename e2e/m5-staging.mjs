@@ -55,7 +55,7 @@ import { fileURLToPath } from "node:url";
 import { parseJsonc } from "./jsonc.mjs";
 import { missingWranglers, TAILED_APPS } from "./m4-staging-lib.mjs";
 import {
-  absentId, ASKPASS_SCRIPT, cloneUrlProblem, deliveryBody, isCommitSha, worstCaseSeconds, deliveryOutcomes, GrantLedger, gitEnv, leaks, loggedText, lostAuthorityEnding, MERGE_APP_SLUG, mergeCommitProblems, movedHeadEnding,
+  absentId, ASKPASS_SCRIPT, cloneUrlProblem, deliveryBody, isCommitSha, logHits, worstCaseSeconds, deliveryOutcomes, GrantLedger, gitEnv, lostAuthorityEnding, MERGE_APP_SLUG, mergeCommitProblems, movedHeadEnding,
   parseArgs, PLAN, releaseStatusProblems, repositoryOrgProblem, requesterProblem, reviewStatusProblems, rulesetProblems, scrub, secretProblem, SIGN_UPS, signDelivery, STAGING, STAGING_APP,
   stagingConfig, STATUS_CONTEXT, steady, tailEnv, Tally, USAGE, WEBHOOK_PATH, WEBHOOK_SECRET_ENV, webhookSecretProblem,
 } from "./m5-staging-lib.mjs";
@@ -121,8 +121,22 @@ const { eq, key, McpAgent, ok, Person, sleep, Target } = await import("./lib.mjs
 const POLL_MS = 2000;
 const target = new Target(STAGING, { pollMs: POLL_MS });
 const RUN = `M5 staging ${new Date().toISOString().slice(0, 16)}`;
-/** Nothing here may reach the output: the sign-up secret, the webhook secret, every session and every repository token. */
-const secrets = [signupSecret, webhookSecret].filter(Boolean);
+/**
+ * Nothing here may reach the output: every credential the run handles, each with the kind it is. The kind is what
+ * M5-13 prints if it finds one in a log, never the value.
+ */
+const secrets = [];
+const kinds = new Map();
+/** Keeps a credential out of the run's output, and on the list M5-13 looks for in the logs. Answers it. */
+const secret = (value, kind) => {
+  if (typeof value === "string" && value.length >= 8 && !kinds.has(value)) {
+    secrets.push(value);
+    kinds.set(value, kind);
+  }
+  return value;
+};
+secret(signupSecret, "the sign-up secret");
+secret(webhookSecret, "the webhook secret");
 /** The run's own mark, in every note it submits, so M5-13 can look for a note in the Workers' logs. */
 const MARK = randomBytes(8).toString("hex");
 const NOTE = `Ready for review (${MARK}).`;
@@ -196,23 +210,28 @@ async function signUpCookie(label, body) {
   signUpsTaken++;
   const cookie = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
   // The whole cookie and each value in it long enough to be a secret, so a short value can't blank ordinary output.
-  secrets.push(cookie, ...cookie.split("; ").map((part) => part.slice(part.indexOf("=") + 1)).filter((value) => value.length >= 16));
+  for (const value of [cookie, ...cookie.split("; ").map((part) => part.slice(part.indexOf("=") + 1)).filter((value) => value.length >= 16)]) secret(value, "a session cookie");
   sessions.push(cookie);
   return cookie;
 }
 const person = async (label) => Person.fromCookie(target, label, await signUpCookie(label));
-/** Keeps a credential the run was handed out of its output, and on the list M5-13 looks for in the logs. Answers it. */
-const secret = (value) => {
-  if (typeof value === "string" && value.length >= 8 && !secrets.includes(value)) secrets.push(value);
-  return value;
-};
-async function agentOf(owner, label) {
-  const agent = await McpAgent.connect(target, owner, `${RUN} ${label}`);
+async function agentOf(linker, label) {
+  const agent = await McpAgent.connect(target, linker, `${RUN} ${label}`);
   agents.push(agent);
-  // The agent's own credential: its OAuth access token, and the refresh token beside it.
-  const held = agent.provider?.tokens?.() ?? {};
-  secret(held.access_token);
-  secret(held.refresh_token);
+  // The agent's own credential: its OAuth access token and the refresh token beside it, now and each time the SDK
+  // saves new ones after a refresh.
+  const keep = (held) => {
+    secret(held?.access_token, "an agent's OAuth access token");
+    secret(held?.refresh_token, "an agent's OAuth refresh token");
+  };
+  keep(agent.provider?.tokens?.());
+  const save = agent.provider?.saveTokens;
+  if (typeof save === "function") {
+    agent.provider.saveTokens = (held) => {
+      keep(held);
+      return save(held);
+    };
+  }
   return agent;
 }
 
@@ -345,6 +364,10 @@ function gave(grant, what, home = undefined) {
 }
 /** Set while the second person is demoted in the first room, so clean-up makes them its admin again. */
 let demoted = false;
+/** Every merge the extended checks asked for, so clean-up names any the job hasn't ended. */
+const mergesAsked = [];
+/** The skips that aren't "couldn't run": a race the run lost, and one it can't tell about. Counted apart at the end. */
+const unshown = { race_lost: [], cannot_tell: [] };
 const give = async (principal, action, extra = {}) => gave(await owner.must("POST", `/v1/workspaces/${room}/repository/grants`, { policy_version: await owner.policyVersion(room), principal_id: principal.id, action, ...extra }), `${action} grant to ${principal.id}`);
 const listedGrant = async (id) => (await owner.must("GET", `/v1/workspaces/${room}/repository/grants`)).grants.find((g) => g.id === id);
 const askMerge = (agent, task) => agent.call("merge_task", { ...task.at, submission_no: 1, commit_sha: task.head, idempotency_key: key() });
@@ -365,7 +388,7 @@ async function newTask(name, reviewer = other) {
 async function tokenFor(task) {
   const access = await coder.must("get_repo_access", task.at, false);
   ok(typeof access?.token === "string" && access.token.length >= 20, "the answer carried no token");
-  secrets.push(access.token);
+  secret(access.token, "a repository token");
   task.token = access.token;
   return access;
 }
@@ -411,7 +434,7 @@ async function taskIn(ctx, name, reviewer) {
 async function tokenIn(ctx, task) {
   const access = await ctx.agent.must("get_repo_access", task.at, false);
   ok(typeof access?.token === "string" && access.token.length >= 20, "the answer carried no token");
-  secrets.push(access.token);
+  secret(access.token, "a repository token");
   Object.assign(task, { token: access.token, expiresAt: access.expires_at, permissions: access.permissions });
   return access;
 }
@@ -565,6 +588,19 @@ function cleanUp() {
       say("\nClean-up could NOT take these grants back. The room's owner takes them back on Team:");
       for (const line of undone) say(`  - ${line}`);
     }
+    // A merge still waiting for the job. Nothing takes a request back: the job ends it, and with its grant gone it
+    // ends failed. Named here so nobody is surprised by a `merge.failed` after the run.
+    const waiting = [];
+    for (const { id, what } of mergesAsked) {
+      const read = await owner.dash("GET", `/v1/workspaces/${room}/tasks/${id}`).catch(() => null);
+      const state = read?.body?.change?.merge_state;
+      if (!read?.ok) waiting.push(`task ${id}, ${what}: its state couldn't be read (${read ? `HTTP ${read.status}` : "no answer"})`);
+      else if (!["succeeded", "failed", "not_requested"].includes(state)) waiting.push(`task ${id}, ${what}: ${state}`);
+    }
+    if (waiting.length) {
+      say(`\nMerges this run asked for that the job hasn't ended, in ${room}. The job ends each by itself; nothing can take a request back:`);
+      for (const line of waiting) say(`  - ${line}`);
+    }
     for (const agent of agents) await agent.close().catch(() => null);
     for (const cookie of sessions.splice(0)) {
       await target.http("/api/auth/sign-out", { method: "POST", headers: { cookie, origin: target.base, "content-type": "application/json" }, body: "{}" }).catch(() => null);
@@ -644,7 +680,7 @@ try {
   try {
     other = await person("Second person");
     const invited = await owner.must("POST", `/orgs/${team}/invitations`, { role: "member" });
-    await other.must("POST", "/org-invitations/accept", { token: secret(invited.token) });
+    await other.must("POST", "/org-invitations/accept", { token: secret(invited.token, "an invitation token") });
     await owner.must("POST", `/v1/workspaces/${room}/members`, { principal_id: other.id, kind: "person", org_id: team, role: "admin", policy_version: await owner.policyVersion(room) });
     say(`     second person ${other.id}, a member of ${team} and an admin of the room`);
   } catch (error) {
@@ -743,9 +779,9 @@ try {
     watcher = await agentOf(other, "watcher");
     guest = await agentOf(other, "guest");
     const asMembers = await owner.invite(room, other.org, { role: "member" });
-    eq([...((await other.accept(secret(asMembers.token), other.org, [merger, watcher])).body?.agents ?? [])].sort(), [merger.id, watcher.id].sort(), "the second person's agents joining as members");
+    eq([...((await other.accept(secret(asMembers.token, "an invitation token"), other.org, [merger, watcher])).body?.agents ?? [])].sort(), [merger.id, watcher.id].sort(), "the second person's agents joining as members");
     const asGuest = await owner.invite(room, other.org);
-    eq((await other.accept(secret(asGuest.token), other.org, [guest])).body?.agents, [guest.id], "the second person's guest joining");
+    eq((await other.accept(secret(asGuest.token, "an invitation token"), other.org, [guest])).body?.agents, [guest.id], "the second person's guest joining");
     say(`     coder ${coder.id}; merger ${merger.id}; watcher ${watcher.id}; guest ${guest.id}`);
     await newTask("change-1");
   } catch (error) {
@@ -784,7 +820,7 @@ try {
     eq(Object.entries(access.permissions ?? {}).sort(), [["contents", "write"], ["metadata", "read"], ["pull_requests", "write"]], "the token's permissions");
     ok(access.expires_at > Date.now() && access.expires_at <= Date.now() + 61 * 60_000, "the token doesn't expire within the hour");
     const again = await coder.must("get_repo_access", t1.at, false);
-    secrets.push(again.token);
+    secret(again.token, "a repository token");
     eq(digest(again.token), digest(access.token), "asking again, by the token's hash");
     return `expires ${new Date(access.expires_at).toISOString()}`;
   });
@@ -1141,7 +1177,7 @@ try {
     after("M5-S1");
     const bench = tasks.bench;
     const again = await coder2.must("get_repo_access", bench.at, false);
-    secrets.push(again.token);
+    secret(again.token, "a repository token");
     eq([digest(again.token), again.expires_at, JSON.stringify(again.permissions)], [digest(bench.token), bench.expiresAt, JSON.stringify(bench.permissions)], "asking again: the token by its hash, its expiry and its permissions");
     return `it still expires ${new Date(bench.expiresAt).toISOString()}`;
   });
@@ -1380,6 +1416,7 @@ try {
     const next = await commitIn(task.dir, "late-later");
     // The push, and at once the request: before a delivery or a poll can have shown Podster the new head.
     await mustGit(["push", "-q", "origin", task.branch], { cwd: task.dir, credential: benchToken() }, "pushing a later commit to the reviewed branch");
+    mergesAsked.push({ id: task.id, what: `the one asked for right after a push, by ${merger.id}` });
     const asked = await merger.call("merge_task", { ...task.at, submission_no: 1, commit_sha: task.head, idempotency_key: key() });
     const change = asked.ok ? await settledMerge(task) : null;
     if (change?.merge_state === "succeeded") ok(isCommitSha(change.merge_sha), "the change records no merge commit");
@@ -1403,7 +1440,7 @@ try {
     // Two more agents of the second person's, who controls nothing the submitter's person does.
     const [second2, third] = [await agentOf(other, "merger-2"), await agentOf(other, "merger-3")];
     const invited = await owner.invite(room, other.org, { role: "member" });
-    eq([...((await other.accept(secret(invited.token), other.org, [second2, third])).body?.agents ?? [])].sort(), [second2.id, third.id].sort(), "the two agents joining as members");
+    eq([...((await other.accept(secret(invited.token, "an invitation token"), other.org, [second2, third])).body?.agents ?? [])].sort(), [second2.id, third.id].sort(), "the two agents joining as members");
     // Three merge grants: the watcher's from the owner, sent with a key the run keeps; one from the room's admin; one from the owner.
     const watcherBody = { policy_version: await owner.policyVersion(room), principal_id: watcher.id, action: "merge" };
     const watcherKey = key();
@@ -1414,37 +1451,42 @@ try {
     // Five approved tasks. The first two change the same file, so GitHub can't merge the second once the first has landed.
     const land = await approvedTask("land", { file: "shared.txt", content: "land\n" });
     const clash = await approvedTask("clash", { file: "shared.txt", content: "clash\n" });
-    const [revoked, demoted, removed] = [await approvedTask("revoked"), await approvedTask("demoted"), await approvedTask("removed")];
+    // Named as one object: a `demoted` of this block's own would hide the run's flag of that name.
+    const waiting = { revoked: await approvedTask("revoked"), demoted: await approvedTask("demoted"), removed: await approvedTask("removed") };
     const tip = await tipOf(repo.defaultBranch);
-    const ask = async (agent, task, label) => eq((await agent.must("merge_task", { ...task.at, submission_no: 1, commit_sha: task.head })).merge_state, "requested", `the request for ${label}`);
+    const ask = async (agent, task, label) => {
+      // Noted before it's sent, so clean-up names it if the run stops while it still waits for the job.
+      mergesAsked.push({ id: task.id, what: `${label} of the five, asked for by ${agent.id}` });
+      eq((await agent.must("merge_task", { ...task.at, submission_no: 1, commit_sha: task.head })).merge_state, "requested", `the request for ${label}`);
+    };
     // The job takes two merges a pass, oldest first, one after the other. So the last three wait behind two passes
     // that each talk to GitHub several times, and each loses its authority as soon as its request is in: about one
     // round trip later, where the two passes ahead take seconds.
     await ask(merger, land, "the first");
     await ask(merger, clash, "the second");
-    await ask(watcher, revoked, "the third");
+    await ask(watcher, waiting.revoked, "the third");
     const took = await owner.dash("DELETE", `${grantsPath}/${watcherGrant.id}`, { policy_version: await owner.policyVersion(room) });
     if (took.ok) ledger.settle(watcherGrant.id);
-    await ask(second2, demoted, "the fourth");
+    await ask(second2, waiting.demoted, "the fourth");
     const down = await owner.dash("POST", `/v1/workspaces/${room}/members/${other.id}/role`, { role: "member", policy_version: await owner.policyVersion(room) });
     // From here clean-up makes them the room's admin again, whatever stops the run.
     if (down.ok) demoted = true;
-    await ask(third, removed, "the fifth");
+    await ask(third, waiting.removed, "the fifth");
     const out = await owner.dash("DELETE", `/v1/workspaces/${room}/members/${third.id}`, { policy_version: await owner.policyVersion(room) });
     // What the job had and hadn't reached once all three had lost their authority: read after the last answer.
     const then = {};
-    for (const [label, task] of Object.entries({ clash, revoked, demoted, removed })) then[label] = (await changeOf(task.id)).merge_state;
+    for (const [label, task] of Object.entries({ clash, ...waiting })) then[label] = (await changeOf(task.id)).merge_state;
     eq([took.status, took.body?.state, down.status, out.status], [200, "revoked", 200, 200], "the grant taken back, the admin demoted and the agent removed");
     // The demotion and the removal ended the grants that rested on them, in the same change.
     for (const id of [adminGrant.id, thirdGrant.id]) ledger.settle(id);
     const ends = {};
-    for (const [label, task] of Object.entries({ land, clash, revoked, demoted, removed })) ends[label] = await settledMerge(task);
+    for (const [label, task] of Object.entries({ land, clash, ...waiting })) ends[label] = await settledMerge(task);
     // When Podster recorded each authority ending, by its own clock: the room's audit log, by the grant that ended.
     const ended = new Map((await owner.audit(room)).filter((entry) => entry.action === "repo_grant.revoked").map((entry) => [entry.target_id, entry.created_at]));
     const lost = { revoked: ended.get(watcherGrant.id), demoted: ended.get(adminGrant.id), removed: ended.get(thirdGrant.id) };
     // The job hadn't reached a merge if the one ahead of all three was still waiting, and so was it.
     const held = Object.fromEntries(["revoked", "demoted", "removed"].map((label) => [label, then.clash === "requested" && then[label] === "requested"]));
-    batch = { land, clash, revoked, demoted, removed, tip, ends, lost, held, then, watcherBody, watcherKey, watcherGrant, adminGrant, thirdGrant, second2, third };
+    batch = { land, clash, ...waiting, tip, ends, lost, held, then, watcherBody, watcherKey, watcherGrant, adminGrant, thirdGrant, second2, third };
     eq([ends.land.merge_state, ends.land.merge_reason, ends.land.pr_state, ends.land.merge_requested_by], ["succeeded", null, "merged", merger.id], "the first merge");
     ok(isCommitSha(ends.land.merge_sha), "the first merge records no merge commit");
     const problems = mergeCommitProblems(await publicRead(`/repos/${repo.full}/commits/${ends.land.merge_sha}`, "the first merge's commit"), { tipBefore: tip, reviewed: land.head });
@@ -1491,7 +1533,10 @@ try {
       const ending = lostAuthorityEnding(b.ends[label], reason, { lostAt: b.lost[label], mergedAt, held: b.held[label] });
       ok(!ending.problem, ending.problem);
       eq((await taskRead(owner, b[label].id)).task.status, "completed", "the task's status");
-      if (!ending.shown) throw new Skip(`not shown by this run: ${ending.why}`);
+      if (!ending.shown) {
+        unshown[ending.kind].push(id);
+        throw new Skip(`not shown by this run: ${ending.why}`);
+      }
       eq([pull?.merged, pull?.state, pull?.head?.sha], [false, "open", b[label].head], "the pull request on GitHub");
       return `the job ended it ${reason}, and the pull request is open. When the authority ended, ${b.held[label] ? "the run saw the job hadn't reached it" : `the job was already past the merge ahead of it (${b.then.clash}), so it was a closer race`}`;
     });
@@ -1652,13 +1697,12 @@ try {
     for (const tail of tails) ok(!(tail.error ?? tail.stream.error), `the ${tail.app}'s tail: ${tail.error ?? tail.stream.error}`);
     const ids = [room, roomB].filter(Boolean);
     for (const tail of tails.filter((t) => t.app !== "web")) ok(tailText(tail).some((text) => ids.some((id) => text.includes(id))), `the ${tail.app}'s tail holds none of this run's own requests`);
-    const text = tails.map((tail) => loggedText(tail.stream.values)).join("\n");
-    const needles = [...secrets.map((value) => ({ label: "a secret, a session or a token", value })), ...chosen, { label: "the run's name, which every title carries", value: RUN }, { label: "a submission's note", value: MARK }];
-    eq(leaks(text, needles), [], "the run's own strings in what the Workers logged");
-    ok(!/gh[a-z]_[A-Za-z0-9_]{16,}/.test(text), "something shaped like a GitHub token is in what the Workers logged");
-    ok(!/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(text), "key material is in what the Workers logged");
+    const needles = [...[...kinds].map(([value, kind]) => ({ label: kind, value })), ...chosen, { label: "the run's name, which every title carries", value: RUN }, { label: "a submission's note", value: MARK }];
+    // A hit is named by the Worker, the log line's own event name and the kind of string it held: never the string.
+    const hits = logHits(tails.map((tail) => ({ app: tail.app, events: tail.stream.values })), needles);
+    ok(hits.length === 0, `the Workers logged what they mustn't: ${hits.map((hit) => `${hit.app}, in ${hit.event}: ${hit.kind}`).join("; ")}`);
     const late = TAILED_APPS.filter((app) => !tailsBefore.includes(app));
-    return `${tails.map((tail) => `${tail.app} ${tail.stream.values.length} events`).join(", ")}; ${needles.filter((n) => typeof n.value === "string" && n.value.length >= 8).length} strings looked for. What this can't see: lines before a tail connected (${late.length ? `${late.join(", ")} wasn't shown connected until after the first sign-up` : "all three were connected before the first sign-up"}), any event wrangler tail dropped by sampling under load, and podster-scanner, which isn't tailed`;
+    return `${tails.map((tail) => `${tail.app} ${tail.stream.values.length} events`).join(", ")}; ${needles.filter((n) => typeof n.value === "string" && n.value.length >= 8).length} strings looked for. What this can't see: lines before a tail connected (${late.length ? `${late.join(", ")} wasn't shown connected until after the first sign-up` : "all three were connected before the first sign-up"}), whether wrangler tail dropped any event by sampling under load, which nothing here can tell, and podster-scanner, which isn't tailed`;
   });
 } catch (error) {
   stopped = error instanceof Stop ? error.message : `the run broke: ${cause(error)}`;
@@ -1692,6 +1736,8 @@ const failed = tally.ids("fail");
 const skipped = tally.ids("skip");
 if (failed.length) say(`\nFailed: ${failed.join(", ")}`);
 if (skipped.length) say(`Skipped: ${skipped.join(", ")}`);
+if (unshown.race_lost.length) say(`  of those, a race the run lost, with the merge landing before the authority ended: ${unshown.race_lost.join(", ")}`);
+if (unshown.cannot_tell.length) say(`  of those, where it can't be told which came first: ${unshown.cannot_tell.join(", ")}`);
 const exitCode = stopped || left ? 1 : tally.exitCode();
 say(`\nM5 on staging: ${tally.summary()}${stopped ? "; the run stopped early" : ""}${left ? "; a room was left public" : ""}. Exit ${exitCode}.`);
 process.exit(exitCode);

@@ -68,8 +68,9 @@ person_only:
   # M5 step 2. get_repo_access, merge_task and get_task_release_status aren't listed anywhere yet: each arrives with the
   # step that builds it, so no agent sees a merge tool before the merge path exists (AC-17).
   - getRepository
-  # M5 step 4: the room's owner asks for the repository and retries its setup, and a Podster operator gives an
-  # organization the provisioning delegation. No agent asks for, retries or delegates anything.
+  # M5 step 4: a person who is the room's owner or a room admin asks for the repository and retries its setup. Every
+  # organization holds the provisioning delegation unless a Podster operator took it back (the owner's decision of
+  # 2026-11-11). No agent asks for, retries or delegates anything.
   - requestRepository
   - retryRepositorySetup
   - getProvisioningDelegation

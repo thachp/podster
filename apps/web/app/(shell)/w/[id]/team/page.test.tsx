@@ -89,4 +89,23 @@ describe("repository access on Team", () => {
     expect(screen.getByRole("button", { name: "Grant" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Take back" })).toBeInTheDocument();
   });
+
+  it("offers an admin who isn't the owner the same form and take-back, and someone who manages nothing neither", async () => {
+    const linked = { ok: true, data: { request: null, repository: { id: "rl_1", provider: "github", provider_repo_id: 1, full_name: "podsterdev/x", visibility: "public", default_branch: "main", status: "ready", status_reason: null, created_at: 1, verified_at: 1, updated_at: 1 } } };
+    // The viewer isn't the owner. The room shows them its policy version, as it does only to those who manage it.
+    const room = state.room as { owner: string; policy_version: number | null; members: unknown[] };
+    room.owner = "per_else";
+    room.members = [...room.members, { principal_id: "per_owner", kind: "person", org_id: "org_a", role: "admin" }];
+    state.grants = { ok: true, data: { grants: [{ ...grant, delegated_by: "per_else" }] } };
+    state.repository = linked;
+    const first = await show();
+    expect(screen.getByRole("button", { name: "Grant" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Take back" })).toBeInTheDocument();
+    first.unmount();
+    // A plain member: no policy version, and nothing to grant or take back with.
+    room.policy_version = null;
+    await show();
+    expect(screen.queryByRole("button", { name: "Grant" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Take back" })).toBeNull();
+  });
 });

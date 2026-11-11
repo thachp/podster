@@ -4,7 +4,7 @@ import { explainRefusal } from "../team/model";
 /** M5 managed repositories (ADR 0009). Every field here is what the room's read said; none of it decides anything. */
 export type RepoRequest = { id: string; state: "pending" | "ready" | "failed" | "uncertain"; name: string; visibility: "public" | "private"; reason: string | null; requested_by: string; requested_at: number; updated_at: number; attempts_left: number };
 export type RepoLink = { id: string; provider: "github"; provider_repo_id: number; full_name: string; visibility: "public" | "private"; default_branch: string; status: "ready" | "degraded" | "suspended"; status_reason: string | null; created_at: number; verified_at: number | null; updated_at: number };
-/** `delegated` is present only for the room's owner, and only when the API could read it. Display only: the request command decides. */
+/** `delegated` is present only for the room's owner and admins, and only when the API could read it. Display only: the request command decides. */
 export type RoomRepository = { request: RepoRequest | null; repository: RepoLink | null; delegated?: boolean };
 
 /** Display only. The API checks every grant again, from current authority, at each use; `state` can lag. */
@@ -53,10 +53,11 @@ const REASONS: Record<string, string> = {
   managed_repositories_off: "Podster had switched repositories off when setup ran.",
   provisioning_not_configured: "Podster's GitHub setup wasn't complete when this ran.",
   token_refused: "GitHub refused Podster's access when setup started.",
-  not_delegated: "This workroom's organization didn't hold the delegation a Podster operator gives.",
+  not_delegated: "A Podster operator had taken managed repositories away from this workroom's organization.",
   delegation_unavailable: "Podster couldn't confirm this workroom's organization holds the delegation.",
   room_archived: "The workroom was archived before setup ran.",
   requester_not_owner: "The person who asked was no longer this workroom's owner when setup ran.",
+  requester_lost_authority: "The person who asked was no longer this workroom's owner or an admin when setup ran.",
   name_taken: "A repository with that name already exists in Podster's GitHub organization.",
   provider_refused: "GitHub refused to create the repository.",
   wrong_owner: "GitHub created it somewhere other than Podster's organization, so it wasn't linked.",
@@ -110,7 +111,9 @@ export function explainRepositoryRefusal(code: string, status = 400) {
     case "name_reserved":
       return "That name is reserved, because it would read as Podster's own. Choose another. Nothing was created.";
     case "not_delegated":
-      return "This workroom's organization doesn't hold the delegation for managed repositories, which a Podster operator gives. Nothing was created.";
+      return "A Podster operator has taken managed repositories away from this workroom's organization. Nothing was created.";
+    case "repository_request_limit":
+      return "That's the limit for today: five repository requests in 24 hours for an organization, and the same for one person. Try again tomorrow. Nothing was created.";
     case "private_unavailable":
       return "Private repositories aren't available yet. Nothing was created.";
     case "repo_request_exists":
@@ -126,7 +129,7 @@ export function explainRepositoryRefusal(code: string, status = 400) {
     case "already_ready":
       return "The repository is already set up. Reload to see it.";
     case "not_allowed":
-      return "Only this workroom's owner can do this. Nothing changed.";
+      return "Only this workroom's owner and admins can do this. Nothing changed.";
     case "not_found":
       return "Repositories aren't available right now. Nothing changed.";
     default:
@@ -136,8 +139,6 @@ export function explainRepositoryRefusal(code: string, status = 400) {
 
 export function explainGrantRefusal(code: string, status = 400) {
   switch (code) {
-    case "no_provider_delegation":
-      return "Only this workroom's owner can grant repository access: admins can't. Nothing changed.";
     case "grantee_not_participant":
       return "They're no longer in this workroom, so they can't hold repository access. Nothing changed.";
     case "grantee_public":
@@ -149,7 +150,7 @@ export function explainGrantRefusal(code: string, status = 400) {
     case "invalid_argument":
       return "Check the expiry: it must be after now and at most a year ahead. Nothing changed.";
     case "not_allowed":
-      return "You can't do this. Nothing changed.";
+      return "Only this workroom's owner and admins can grant repository access, and take back another's. Nothing changed.";
     case "not_found":
       return "Repositories aren't available right now. Nothing changed.";
     default:

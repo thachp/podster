@@ -15,7 +15,7 @@ export type GrantsProps = {
   /** Whether the room has a linked repository, from the repository read; null when this viewer can't read it. */
   linked: boolean | null;
   /** Hints only: the API decides who may give and take back each grant. */
-  isOwner: boolean;
+  runsRepository: boolean;
   /** Administers the room's organization and is in the room: may take any grant back. */
   isOrgAdmin: boolean;
   viewerId: string;
@@ -31,7 +31,7 @@ export type GrantsProps = {
  * managed repositories switched off nothing here renders. Each grant's `state` is the API's display value: it decides
  * nothing here, and every use of a grant is checked again from current authority.
  */
-export function RepositoryGrants({ roomId, grants, linked, isOwner, isOrgAdmin, viewerId, policyVersion, archived, members, names }: GrantsProps) {
+export function RepositoryGrants({ roomId, grants, linked, runsRepository, isOrgAdmin, viewerId, policyVersion, archived, members, names }: GrantsProps) {
   const commands = useCommands(policyVersion);
   const { send, clear } = commands;
   const ids = { who: useId(), action: useId(), expiry: useId(), expiryHint: useId(), merge: useId() };
@@ -43,7 +43,7 @@ export function RepositoryGrants({ roomId, grants, linked, isOwner, isOrgAdmin, 
   const base = `/api/v1/workspaces/${encodeURIComponent(roomId)}/repository/grants`;
   const label = (id: string) => (id === viewerId ? "You" : plainName(names[id] ?? id));
   const expiry = expiryFromDay(day, Date.now());
-  const mayGrant = isOwner && linked === true && !archived && policyVersion !== null;
+  const mayGrant = runsRepository && linked === true && !archived && policyVersion !== null;
 
   const give = async () => {
     if (pending || !who || expiry.problem) return;
@@ -57,7 +57,7 @@ export function RepositoryGrants({ roomId, grants, linked, isOwner, isOrgAdmin, 
   const take = (grant: RepoGrant) => send(`${base}/${encodeURIComponent(grant.id)}`, {}, "Grant taken back.", { method: "DELETE", explain: explainGrantRefusal });
 
   // Taking back needs the room's policy version, which the API sends only to those who manage access.
-  const mayTake = (grant: RepoGrant) => policyVersion !== null && (isOwner || isOrgAdmin || grant.principal_id === viewerId);
+  const mayTake = (grant: RepoGrant) => policyVersion !== null && (runsRepository || isOrgAdmin || grant.principal_id === viewerId);
 
   return (
     <section aria-labelledby={`${ids.who}-title`} className="max-w-3xl space-y-3">
@@ -67,7 +67,7 @@ export function RepositoryGrants({ roomId, grants, linked, isOwner, isOrgAdmin, 
       <div ref={after} tabIndex={-1} className="outline-none">
         <CommandNotice commands={commands} />
       </div>
-      <p className="text-sm text-muted-foreground">Push lets an agent get a short-lived token for its own tasks. Merge lets a participant ask Podster to merge an approved task. Only this workroom&apos;s owner grants either.</p>
+      <p className="text-sm text-muted-foreground">Push lets an agent get a short-lived token for its own tasks. Merge lets a participant ask Podster to merge an approved task. Only this workroom&apos;s owner and admins grant either, and a grant counts only while whoever gave it still is one.</p>
       <p id={ids.merge} className="text-sm text-muted-foreground">
         A merge grant never lets anyone merge work they control: the person behind a task&apos;s submitter can&apos;t merge that task.
       </p>
@@ -158,8 +158,8 @@ export function RepositoryGrants({ roomId, grants, linked, isOwner, isOrgAdmin, 
           </Button>
         </form>
       ) : null}
-      {isOwner && linked === false ? <p className="text-sm text-muted-foreground">Grants can be given once this workroom&apos;s repository is set up, in Settings.</p> : null}
-      {!isOwner && policyVersion !== null ? <p className="text-sm text-muted-foreground">Only this workroom&apos;s owner can grant repository access. The owner, an admin of this workroom&apos;s organization or the holder can take a grant back.</p> : null}
+      {runsRepository && linked === false ? <p className="text-sm text-muted-foreground">Grants can be given once this workroom&apos;s repository is set up, in Settings.</p> : null}
+      {!runsRepository && policyVersion !== null ? <p className="text-sm text-muted-foreground">Only this workroom&apos;s owner and admins can grant repository access. They, an admin of this workroom&apos;s organization or the holder can take a grant back.</p> : null}
     </section>
   );
 }

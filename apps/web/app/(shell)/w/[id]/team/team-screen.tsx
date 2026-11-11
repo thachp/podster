@@ -99,7 +99,7 @@ export function TeamScreen(props: TeamProps) {
                       label="Make admin"
                       describedBy={nameId}
                       title={<>Make “{name}” an admin of “{room}”?</>}
-                      description="Admins manage agents' access in this workroom. They can't appoint other admins or grant GitHub, merge or deployment access."
+                      description="Admins manage agents' access in this workroom. They can also set up this workroom's repository and grant push or merge on it. They can't appoint other admins."
                       confirm="Make admin"
                       focusAfter={noticeRef}
                       action={() => send(`${base}/members/${encodeURIComponent(member.principal_id)}/role`, { role: "admin" }, "They're now an admin of this workroom.")}

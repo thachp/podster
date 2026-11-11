@@ -1,3 +1,4 @@
+import type { PullRequestChange } from "./task-change";
 import { authoritySoundingName, chosenNameLabel, plainName, truncate } from "@/components/agent-content/text";
 
 /** What the API returns for tasks, and the wording the design spec gives it. Nothing here decides anything: Rust does. */
@@ -50,7 +51,8 @@ export type HistoryEvent = { id: string; type: string; from: From; external: boo
 export type TaskVisibility = { submissions: "all" | "own"; conversation: boolean };
 /** The expected output a task works toward. `removed` means it was removed since the task named it. */
 export type TaskOutput = { id: string; title: string; removed: boolean };
-export type TaskDetail = { task: Task; expected_output?: TaskOutput | null; submissions: Submission[]; artifacts: Artifact[]; files?: TaskFile[]; messages: Message[]; history: HistoryEvent[]; visible?: TaskVisibility };
+/** `change` is absent while managed repositories are switched off, and null for a task with none or a viewer not shown it. */
+export type TaskDetail = { task: Task; expected_output?: TaskOutput | null; change?: PullRequestChange | null; submissions: Submission[]; artifacts: Artifact[]; files?: TaskFile[]; messages: Message[]; history: HistoryEvent[]; visible?: TaskVisibility };
 
 export type Member = { principal_id: string; kind: string; org_id: string; role: string; access?: { review: string; artifacts: string } };
 export type Room = { id: string; name: string; owner: string; status?: string; require_person_review?: boolean; owner_left_at?: number | null; members?: Member[] };

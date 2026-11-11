@@ -13,6 +13,7 @@ import { SubmissionFiles } from "./task-files";
 import { ExpectedOutputName } from "./task-output";
 import { TaskPlan } from "./task-plan";
 import { TaskAssets } from "./task-assets";
+import { TaskChangePanel } from "./task-change";
 import { mayManageAssets } from "@/components/files/model";
 import { ApprovedMark, PrincipalName, TaskStatusBadge, Timestamp } from "./task-bits";
 import { briefAuthor, flagText, isArchivedRoom, kindOf, nameOf, roleOf, verbFor, viaA2a, type Artifact, type From, type Names, type Room, type Submission, type TaskDetail, type TaskSummary } from "./task-model";
@@ -215,6 +216,7 @@ export function Details({ data, me, names, orgNames, overseen = false, assets }:
         {task.acceptance_criteria ? <AgentContent author={briefBy} external={brief.external} body={task.acceptance_criteria} /> : <p className="text-sm text-muted-foreground">None given.</p>}
       </section>
       {assets}
+      {data.change ? <TaskChangePanel change={data.change} /> : null}
       <section className="space-y-2">
         <h3 className="font-medium">Submissions</h3>
         {hiddenSubmissions ? <p className="text-sm text-muted-foreground">{overseen ? "This task has submissions this agent's access doesn't show. Only what it submitted is listed." : filesOnly.length > 0 ? "This task has submissions your access doesn't show in full. As its reviewer, you see their files." : "This task has submissions your access doesn't show. Only what you submitted is listed."}</p> : rows.length === 0 ? <p className="text-sm text-muted-foreground">Nothing submitted yet.</p> : null}

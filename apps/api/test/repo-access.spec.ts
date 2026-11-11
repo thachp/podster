@@ -523,6 +523,28 @@ describe("revoking a token whose authority ended", () => {
     });
   };
 
+  /** The same, for a token minted under a grant the room's admin gave, not its owner. */
+  const adminsEndsWith = async (name: string, end: (r: Awaited<ReturnType<typeof room>>) => Promise<unknown>) => {
+    const r = await room({ grant: false });
+    const given = await must(ADMIN, "POST", `/v1/workspaces/${r.id}/repository/grants`, { policy_version: await version(r.id), principal_id: AGENT.id, action: "push" });
+    expect(given.delegated_by, name).toBe(ADMIN.id);
+    const got = await access(AGENT, r.id, r.task);
+    expect(got.status, `${name}: ${got.text}`).toBe(200);
+    // An alarm with nothing ended leaves an admin's token alone, as it leaves the owner's.
+    await alarm(r.id);
+    expect(await minted(), name).toEqual([expect.objectContaining({ token: got.body.token, live: true })]);
+    expect((await tokens(r.id)).map((t) => t.state), name).toEqual(["held"]);
+    await end(r);
+    await alarm(r.id);
+    await eventually(r.id, async () => {
+      expect(await minted(), name).toEqual([expect.objectContaining({ token: got.body.token, live: false })]);
+      expect(await tokens(r.id), name).toEqual([]);
+    });
+  };
+  it("when the admin who gave the grant is demoted", () => adminsEndsWith("demoted", async (r) => must(OWNER, "POST", `/v1/workspaces/${r.id}/members/${ADMIN.id}/role`, { role: "member", policy_version: await version(r.id) }, { claims: { target_member: { person: ADMIN.id, orgs: { [ORG]: 1 } } } })));
+  it("when the admin who gave the grant is removed", () => adminsEndsWith("removed", async (r) => must(OWNER, "DELETE", `/v1/workspaces/${r.id}/members/${ADMIN.id}`, { policy_version: await version(r.id) })));
+  it("when the admin who gave the grant is one no more by the room's rows, seen by the alarm alone", () => adminsEndsWith("role changed underneath", (r) => inRoom(r.id, (sql) => void sql.exec("UPDATE member SET role = 'member' WHERE principal_id = ?", ADMIN.id))));
+
   it("when the grant is taken back", () => endsWith("revoked", async (r) => must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) })));
   it("when the agent is removed", () => endsWith("removed", async (r) => must(OWNER, "DELETE", `/v1/workspaces/${r.id}/members/${AGENT.id}`, { policy_version: await version(r.id) })));
   it("when the task is canceled", () => endsWith("canceled", async (r) => {

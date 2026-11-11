@@ -822,7 +822,8 @@ pub fn transaction_sync(state: &State, f: impl FnOnce() -> R<()> + 'static) -> R
 }
 
 /// Marks every agent repository token the room holds whose authority has ended, so the room's alarm revokes it (M5 step 6).
-/// Runs inside the transaction of whatever ended it: a grant revoked or left without its giver, the agent removed or
+/// Runs inside the transaction of whatever ended it: a grant revoked, or one whose giver the room no longer records as a
+/// person who is its owner or an admin (as `repositories::recorded_giver` reads it), the agent removed or
 /// disconnected, the task ended or given to someone else, the link no longer ready, or the room archived. It reads only
 /// current state, never a list's display field, and touches no token: a sealed copy stays sealed. Cheap, since a room
 /// holds at most one token per agent and task.
@@ -838,7 +839,10 @@ pub fn mark_stale_repo_tokens(sql: &SqlStorage, now: i64) -> R<()> {
            OR NOT EXISTS (SELECT 1 FROM provider_grant g WHERE g.id = repo_token.grant_id AND g.principal_id = repo_token.agent_id
              AND g.action = 'push' AND g.revoked_at IS NULL AND (g.expires_at IS NULL OR g.expires_at > ?1)
              AND g.provider_repo_id = repo_token.provider_repo_id
-             AND g.delegated_by = (SELECT owner_person_id FROM workspace WHERE owner_left_at IS NULL AND status != 'archived'))
+             AND EXISTS (SELECT 1 FROM workspace WHERE status != 'archived')
+             AND (g.delegated_by = (SELECT owner_person_id FROM workspace WHERE owner_left_at IS NULL)
+               OR EXISTS (SELECT 1 FROM member a WHERE a.principal_id = g.delegated_by AND a.kind = 'person'
+                 AND a.role IN ('owner', 'admin') AND a.revoked_at IS NULL)))
            OR NOT EXISTS (SELECT 1 FROM repo_link l WHERE l.provider_repo_id = repo_token.provider_repo_id AND l.status = 'ready'))",
         vec![now.into()],
     )

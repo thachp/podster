@@ -525,6 +525,13 @@ fn m5_10_a_merger_controlled_by_the_submitters_person_is_refused() {
             Err(RepoDenial::SelfMerge),
         ),
         (
+            // A room admin who controls the submitting agent may give grants, and still can't merge that work.
+            "a room admin who owns the submitting agent",
+            caller("p-sub", Person, Role::Admin),
+            Some("p-sub"),
+            Err(RepoDenial::SelfMerge),
+        ),
+        (
             "another agent of that owner",
             caller("sibling", Agent, Role::Member),
             Some("p-sub"),

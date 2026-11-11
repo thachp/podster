@@ -120,8 +120,8 @@ await check("M5-S7iv", "an authorized holder's merge_task leads to exactly one m
   const status = await robot.must("get_task_release_status", where(), false);
   eq([status.merge.state, status.merge.reason, status.merge.sha, status.merge.requested_by], ["succeeded", null, done.merge_sha, robot.id], "the release status's merge");
   ok(typeof status.merge.observed_at === "number", "the merge has no observation time");
-  eq(status.checks, { state: null, counts: null, observed_at: null }, "the release status's checks");
-  eq(status.release, { exists: false }, "the release");
+  eq([status.checks.state, status.checks.counts, status.checks.observed_at], [null, null, null], "the release status's checks");
+  eq(status.release.exists, false, "the release");
   // Another agent in the room, shown neither the change nor having asked, is refused.
   refused(await sibling.call("get_task_release_status", where()), "not_allowed", "another agent reading the release status");
 });

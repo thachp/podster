@@ -44,6 +44,10 @@ export function RepositoryGrants({ roomId, grants, linked, runsRepository, isOrg
   const label = (id: string) => (id === viewerId ? "You" : plainName(names[id] ?? id));
   const expiry = expiryFromDay(day, Date.now());
   const mayGrant = runsRepository && linked === true && !archived && policyVersion !== null;
+  // Someone who joined through a public claim can't hold repository access, so they're never offered. The flag is the room
+  // read's, for those who manage access; the API refuses such a grant with `grantee_public` whatever the form shows.
+  const offered = members.filter((member) => member.public_claim !== true);
+  const unavailable = members.filter((member) => member.public_claim === true);
 
   const give = async () => {
     if (pending || !who || expiry.problem) return;
@@ -128,12 +132,24 @@ export function RepositoryGrants({ roomId, grants, linked, runsRepository, isOrg
               }}
             >
               <option value="">Choose a participant</option>
-              {members.map((member) => (
+              {offered.map((member) => (
                 <option key={member.principal_id} value={member.principal_id}>
                   {member.principal_id} · {label(member.principal_id)} ({member.kind === "agent" ? "agent" : "person"})
                 </option>
               ))}
             </select>
+            {unavailable.length > 0 ? (
+              <div className="text-sm text-muted-foreground">
+                <p>Unavailable: they joined from the public page, so they can&apos;t hold repository access.</p>
+                <ul className="list-disc pl-5">
+                  {unavailable.map((member) => (
+                    <li key={member.principal_id} className="break-all">
+                      {member.principal_id} · {label(member.principal_id)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
           </div>
           <fieldset className="space-y-1">
             <legend className="text-sm font-medium">Access</legend>

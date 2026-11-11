@@ -915,3 +915,25 @@ fn a_release_status_is_for_those_shown_the_change_and_for_whoever_asked_for_the_
         Err(RepoDenial::NotParticipant)
     );
 }
+
+#[test]
+fn only_those_who_manage_access_are_told_how_each_participant_joined() {
+    for (role, told) in [
+        (Role::Owner, true),
+        (Role::Admin, true),
+        (Role::Member, false),
+        (Role::Guest, false),
+        (Role::None, false),
+    ] {
+        assert_eq!(
+            sees_join_source(&caller("p", Person, role)),
+            told,
+            "{role:?}"
+        );
+        // An agent never manages access, whatever role its row says.
+        assert!(
+            !sees_join_source(&caller("a", Agent, role)),
+            "agent {role:?}"
+        );
+    }
+}

@@ -40,7 +40,7 @@ Severity is the reviewer's. Where two reviewers reported the same thing, it's on
 
 | ID | Severity | Finding | Where | Checked | Disposition |
 | --- | --- | --- | --- | --- | --- |
-| A-1 | Medium (design) | Review independence is by principal ID only. The submitter's own controlling person, or their second agent, can be the reviewer who approves. Only the merge compares people | `crates/core/src/lib.rs:835`, `crates/policy/src/lib.rs:646-648`, `apps/api/src/workspace/changes.rs:249-252` | test | Owner |
+| A-1 | Medium (design) | Review independence is by principal ID only. The submitter's own controlling person, or their second agent, can be the reviewer who approves. Only the merge compares people | `crates/core/src/lib.rs:835`, `crates/policy/src/lib.rs:646-648`, `apps/api/src/workspace/changes.rs:249-252` | test | Owner. **Decided 2026-11-11, assigned:** a commit is merged only after a review independent of the submitter's person; the task's own review is unchanged ([decision 195](../spec/PRODUCT.md#decisions-needed)). Built on `fix/m5-review-authority`, not merged |
 | A-2 | Low | "Controlling person" is whoever linked the credential a request came with: per credential, and frozen at submission and at the merge request. It isn't a property of the agent | `apps/api/src/workspace/changes.rs:160-166`, `:487-489`, `apps/gateway/src/index.ts:271-281`, `apps/api/src/workspace/merges.rs:326` | reading | Owner |
 | A-3 | Low | The merge job re-runs core on each pass and never policy, and asks less about the requester than token issuing does. A requester whose access was narrowed after asking, an agent whose linker has left, and a person who left their organization after asking still get their merge. The window is one request's passes | `apps/api/src/workspace/merges.rs:428-499`, against `apps/api/src/workspace/repo_tokens.rs:773-780` | reading | Assigned: the job re-runs policy each pass |
 | A-4 | Low (fails closed) | An organization's admin with no place in the room can't take a grant back, though AC-11 and the policy say they can. The caller is resolved as a room member before the route is reached | `apps/api/src/workspace.rs:4116`, `:4835-4861`, `crates/policy/src/repositories.rs:115-143` | reading | Assigned: the admin may take a grant back, as AC-11 says |
@@ -113,6 +113,8 @@ As the architect ruled on 2026-11-11. None is on `main` yet, apart from O-1's in
 Each is stated as the review found it. None is decided here.
 
 ### Whether a review by a principal the submitter's person controls should count (A-1)
+
+**Decided by the owner on 2026-11-11 and assigned** ([decision 195](../spec/PRODUCT.md#decisions-needed)). The recommendation: a commit can be merged into a managed repository only if the review that approved it came from someone not controlled by the submitter's person; ordinary task review stays as it is. The owner's reply: "i agreed with your recommendation". Being built on `fix/m5-review-authority` as `self_review` (403). It compares Podster accounts: one human with two accounts isn't detectable. A-2 stays as it is.
 
 Today review compares principal IDs: the reviewer mustn't be the assignee. Only the merge compares controlling people, and only the submitter's against the merger's. The reviewer's sequence, with one person A who is a room admin and any second person B who holds a merge grant:
 

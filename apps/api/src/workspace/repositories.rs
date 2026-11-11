@@ -606,11 +606,22 @@ fn linked_repo(sql: &SqlStorage) -> R<Option<(String, i64)>> {
     .and_then(|link| Some((text(&link["provider"])?, link["provider_repo_id"].as_i64()?))))
 }
 
+/// `self_review`'s message when the approving review came from someone the submitter's person controls. The contract
+/// names it, and the web app shows its own sentence for it.
+pub(crate) const SELF_REVIEW_MESSAGE: &str = "This commit needs an approving review from someone other than the person who controls its submitter, or another agent that person controls, before it can be merged.";
+/// `self_review`'s message for an approval recorded before Podster kept who gave it: the review may have been
+/// independent, so the commit is to be reviewed again, not by someone else.
+pub(crate) const REVIEW_AGAIN_MESSAGE: &str = "This commit was approved before Podster recorded who reviews a commit, so it needs to be reviewed again before it can be merged.";
+
 /// A refusal from the policy, as the API answers it.
 pub(super) fn denied(denial: RepoDenial) -> ApiError {
     match denial {
         RepoDenial::Grant(refusal) => refused(refusal),
         RepoDenial::Hidden => ApiError::task_not_found(),
+        RepoDenial::SelfReview => ApiError::explained(403, denial.code(), SELF_REVIEW_MESSAGE),
+        RepoDenial::ReviewUnrecorded => {
+            ApiError::explained(403, denial.code(), REVIEW_AGAIN_MESSAGE)
+        }
         RepoDenial::GranteeNotParticipant | RepoDenial::GranteePublic => {
             ApiError::api(400, denial.code())
         }

@@ -11,7 +11,7 @@
 //! | Take a grant back | The room's owner or a room admin, as a person; a person who administers the room's organization, so a grant can be pulled when the owner has left; and the grant's holder, for their own. Nobody else, and an agent never takes back another's |
 //! | Receive a grant | A current participant, person or agent, who isn't there through a public claim |
 //! | Ask for a repository token | The agent the task is assigned to, not there through a public claim, with a `push` grant that counts |
-//! | Ask for a merge | A person or agent who can see the task, isn't there through a public claim, holds a `merge` grant that counts, and isn't controlled by the person who controls the submitter |
+//! | Ask for a merge | A person or agent who can see the task, isn't there through a public claim, holds a `merge` grant that counts, and isn't controlled by the person who controls the submitter; and the commit's approving review came from someone the submitter's person doesn't control ([`independent_review`]) |
 //! | See the room's repository and its state | A person who sees the whole room |
 //! | See who holds grants | A human owner or admin, and each participant their own |
 //! | See a task's change and merge state | Whoever can see the task |
@@ -52,6 +52,13 @@ pub enum RepoDenial {
     PublicParticipant,
     /// `self_merge`: nobody merges work that the person controlling them also controls the submitter of.
     SelfMerge,
+    /// `self_review`: the commit's approving review came from someone the submitter's own person controls, or from
+    /// someone whose controlling person the room didn't record. It needs an independent review before it's merged.
+    SelfReview,
+    /// `self_review` as well, for an approval recorded before the room kept who gave it: the review may well have been
+    /// independent, and nothing says so, so the commit needs to be reviewed again before it's merged. Its own variant so
+    /// the answer can say that rather than ask for someone else.
+    ReviewUnrecorded,
     /// `grant_required`, `grant_expired` or `grant_stale`
     Grant(GrantRefusal),
 }
@@ -65,6 +72,7 @@ impl RepoDenial {
             RepoDenial::Hidden => MergeRefusal::TaskHidden,
             RepoDenial::PublicParticipant => MergeRefusal::PublicParticipant,
             RepoDenial::SelfMerge => MergeRefusal::SelfMerge,
+            RepoDenial::SelfReview | RepoDenial::ReviewUnrecorded => MergeRefusal::SelfReview,
             RepoDenial::Grant(refusal) => MergeRefusal::Grant(refusal),
             RepoDenial::NotAllowed
             | RepoDenial::GranteeNotParticipant
@@ -81,6 +89,7 @@ impl RepoDenial {
             RepoDenial::GranteePublic => "grantee_public",
             RepoDenial::PublicParticipant => "public_participant",
             RepoDenial::SelfMerge => "self_merge",
+            RepoDenial::SelfReview | RepoDenial::ReviewUnrecorded => "self_review",
             RepoDenial::Grant(refusal) => refusal.code(),
         }
     }
@@ -284,6 +293,29 @@ pub fn authorize_merge(
         return Err(RepoDenial::SelfMerge);
     }
     check_standing(caller, GrantAction::Merge, standing)
+}
+
+/// Whether the review that made a task's commit the reviewed one counts for a merge into a managed repository: the
+/// owner's decision of 2026-11-11 on review A1. It must come from someone independent of the submitter, which means the
+/// reviewer's controlling person differs from the submitter's: a person is their own, and an agent's is whoever linked
+/// the credential it came with, per credential and as recorded when it approved, as [`authorize_merge`] reads the
+/// merger's. A person or an agent may review, and a person or an agent may merge. A controlling person the room didn't
+/// record, on either side, refuses, as `self_merge` does: an approval recorded before the room kept its reviewer is one.
+///
+/// `reviewer` is `None` only when no approval with a reviewed commit is on record, and then this says nothing: the core
+/// decision refuses that as `not_approved` or `review_required`. Ordinary task review isn't touched: the submitter's own
+/// person may still approve the task, and only its merge is refused. Run after [`authorize_merge`] allows, so a caller
+/// who may not merge learns nothing about the review. It compares Podster accounts: one human with two accounts isn't
+/// something it can see.
+pub fn independent_review(reviewer: Option<&Actor>, submitter: &Actor) -> Result<(), RepoDenial> {
+    match reviewer {
+        // Who approved, or the person who controlled them then, wasn't recorded: reviewed again, it's known.
+        Some(reviewer) if reviewer.id.is_empty() || reviewer.person.is_none() => {
+            Err(RepoDenial::ReviewUnrecorded)
+        }
+        Some(reviewer) if same_controller(reviewer, submitter) => Err(RepoDenial::SelfReview),
+        _ => Ok(()),
+    }
 }
 
 /// Who sees the room's repository, its request and its state: a person who sees the whole room, as the read that M5

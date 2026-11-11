@@ -64,6 +64,10 @@ pub enum MergeRefusal {
     /// `self_merge`: nobody merges work that the person controlling them also controls the submitter of, with a grant or
     /// without.
     SelfMerge,
+    /// `self_review`: the commit's approving review came from someone the submitter's person controls, or whose
+    /// controlling person isn't on record (the owner's decision of 2026-11-11 on review A1). Decided by
+    /// `podster_policy::repositories::independent_review`, and recorded here when the job's recheck finds it.
+    SelfReview,
     /// `grant_required`, `grant_expired` or `grant_stale`
     Grant(GrantRefusal),
     /// `invalid_argument`: the commit isn't a full commit ID.
@@ -100,6 +104,7 @@ impl MergeRefusal {
             MergeRefusal::TaskNotLinked => "task_not_linked",
             MergeRefusal::RepoNotReady => "repo_not_ready",
             MergeRefusal::SelfMerge => "self_merge",
+            MergeRefusal::SelfReview => "self_review",
             MergeRefusal::Grant(refusal) => refusal.code(),
             MergeRefusal::InvalidCommit => "invalid_argument",
             MergeRefusal::NotApproved => "not_approved",

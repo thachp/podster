@@ -1130,14 +1130,13 @@ fn a_tokens_events_are_for_those_who_see_the_holders_grant() {
     }
 }
 
-/// A1, for the owner to rule on: review independence is by principal, not by person. Today the person who controls the
-/// submitting agent may be the reviewer who approves, and a second person with a merge grant may then merge it without
-/// having reviewed anything. The specs ask only that the reviewer isn't the assignee (AC-17, decision 186). This pins
-/// today's behaviour so that a ruling which compares controlling people at review changes it on purpose.
+/// A1, decided by the owner on 2026-11-11: a commit is merged into a managed repository only if the review that approved
+/// it came from someone not controlled by the submitter's person. Ordinary task review stays as it is: the submitter's
+/// own person may still approve the task, and only the merge is refused.
 #[test]
-fn a1_today_the_submitters_own_person_may_approve_and_another_person_may_merge() {
+fn a1_the_submitters_own_person_may_still_approve_but_their_review_merges_nothing() {
     let task = task();
-    // `rev`, the reviewer, is the person who controls `asg`, the submitting agent. Nothing here can know that.
+    // `rev`, the reviewer, is the person who controls `asg`, the submitting agent. The task's review allows it, as before.
     let reviewer = caller("rev", Person, Role::Member);
     assert_eq!(
         authorize_task(&reviewer, &task, TaskAction::Verify),
@@ -1147,19 +1146,7 @@ fn a1_today_the_submitters_own_person_may_approve_and_another_person_may_merge()
         id: "asg",
         person: Some("rev"),
     };
-    // The merge compares people, so the reviewer can't merge it...
-    let merge = grant("rev", GrantAction::Merge);
-    assert_eq!(
-        authorize_merge(
-            &reviewer,
-            Some("rev"),
-            &task,
-            &submitter,
-            &standing(Some(&merge))
-        ),
-        Err(RepoDenial::SelfMerge)
-    );
-    // ...and a different person with a merge grant can, though they reviewed nothing.
+    // A different person with a merge grant may ask, and the review isn't independent, so it's refused.
     let other = caller("p-other", Person, Role::Member);
     let theirs = grant("p-other", GrantAction::Merge);
     assert_eq!(
@@ -1171,5 +1158,128 @@ fn a1_today_the_submitters_own_person_may_approve_and_another_person_may_merge()
             &standing(Some(&theirs))
         ),
         Ok(())
+    );
+    let review = Actor {
+        id: "rev",
+        person: Some("rev"),
+    };
+    assert_eq!(
+        independent_review(Some(&review), &submitter),
+        Err(RepoDenial::SelfReview)
+    );
+    assert_eq!(RepoDenial::SelfReview.code(), "self_review");
+}
+
+#[test]
+fn a1_only_an_independent_review_lets_a_commit_be_merged_whoever_merges() {
+    let task = task();
+    // The submitter is `asg`, an agent `p-sub` controls.
+    let reviewers: [(&str, Option<Actor>, bool); 7] = [
+        (
+            "the submitter's person",
+            Some(Actor {
+                id: "p-sub",
+                person: Some("p-sub"),
+            }),
+            false,
+        ),
+        (
+            "another agent of the submitter's person",
+            Some(Actor {
+                id: "sibling",
+                person: Some("p-sub"),
+            }),
+            false,
+        ),
+        (
+            "the submitter itself",
+            Some(Actor {
+                id: "asg",
+                person: Some("p-sub"),
+            }),
+            false,
+        ),
+        (
+            "another person",
+            Some(Actor {
+                id: "p-rev",
+                person: Some("p-rev"),
+            }),
+            true,
+        ),
+        (
+            "another person's agent",
+            Some(Actor {
+                id: "agt-rev",
+                person: Some("p-rev"),
+            }),
+            true,
+        ),
+        (
+            "someone whose person wasn't recorded",
+            Some(Actor {
+                id: "agt-old",
+                person: None,
+            }),
+            false,
+        ),
+        (
+            "nobody recorded, from before the room kept reviewers",
+            Some(Actor {
+                id: "",
+                person: None,
+            }),
+            false,
+        ),
+    ];
+    // Mergers: a person, an agent of another person, the reviewer itself, and the submitter's person.
+    let mergers: [(&str, &'static str, PrincipalKind, Option<&str>); 4] = [
+        ("another person", "p-merge", Person, Some("p-merge")),
+        (
+            "another person's agent",
+            "agt-merge",
+            Agent,
+            Some("p-merge"),
+        ),
+        ("the reviewer's person", "p-rev", Person, Some("p-rev")),
+        ("the submitter's person", "p-sub", Person, Some("p-sub")),
+    ];
+    for (merger_name, id, kind, merger_person) in &mergers {
+        let merger = caller(id, *kind, Role::Member);
+        let merge = grant(id, GrantAction::Merge);
+        let allowed = authorize_merge(
+            &merger,
+            *merger_person,
+            &task,
+            &SUBMITTER,
+            &standing(Some(&merge)),
+        );
+        for (reviewer_name, reviewer, independent) in &reviewers {
+            let label = format!("{merger_name} merging after {reviewer_name}");
+            let decided = allowed.and_then(|()| independent_review(reviewer.as_ref(), &SUBMITTER));
+            let expected = if *merger_person == Some("p-sub") {
+                Err(RepoDenial::SelfMerge)
+            } else if *independent {
+                Ok(())
+            } else if reviewer.as_ref().is_some_and(|r| r.person.is_none()) {
+                // The same code, said as "review it again": nothing shows the review wasn't independent.
+                Err(RepoDenial::ReviewUnrecorded)
+            } else {
+                Err(RepoDenial::SelfReview)
+            };
+            assert_eq!(decided, expected, "{label}");
+        }
+    }
+    // With no approval on record this says nothing, and core refuses it as `not_approved` or `review_required`.
+    assert_eq!(independent_review(None, &SUBMITTER), Ok(()));
+    // A merge refused for it in the job keeps its code.
+    assert_eq!(
+        RepoDenial::SelfReview.as_merge_refusal().code(),
+        "self_review"
+    );
+    assert_eq!(RepoDenial::ReviewUnrecorded.code(), "self_review");
+    assert_eq!(
+        RepoDenial::ReviewUnrecorded.as_merge_refusal().code(),
+        "self_review"
     );
 }

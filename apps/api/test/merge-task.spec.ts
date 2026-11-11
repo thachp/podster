@@ -161,8 +161,8 @@ async function room(options: { switchedOn?: boolean } = {}) {
 }
 
 /** A linked task the agent submitted on pull request 7 at `HEAD`. The owner is its reviewer. */
-async function submitted(id: string, number = 7) {
-  const made = await must(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Code", instructions: "Change the code", assignee: AGENT.id });
+async function submitted(id: string, number = 7, reviewer?: Who) {
+  const made = await must(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Code", instructions: "Change the code", assignee: AGENT.id, ...(reviewer ? { reviewer: reviewer.id } : {}) });
   const accepted = await must(AGENT, "POST", `/v1/workspaces/${id}/tasks/${made.id}/accept`, { version: made.version });
   await must(AGENT, "POST", `/v1/workspaces/${id}/tasks/${made.id}/submit`, { version: accepted.version, note: "Done", commit_sha: HEAD, pr_number: number });
   return made.id as string;
@@ -324,7 +324,8 @@ describe("asking for a merge", () => {
     const kept = await change(r.id, r.task);
     await inRoom(r.id, (sql) => sql.exec("DELETE FROM task_change WHERE task_id = ?", r.task));
     await refused([403, "self_merge"]);
-    await inRoom(r.id, (sql) => sql.exec("INSERT INTO task_change (task_id, provider_repo_id, pr_number, submission_no, reviewed_commit_sha, reviewed_base_sha, observed_head_sha, pr_state, pr_draft, pr_observed_at, read_at, created_at, updated_at, submitter_id, submitter_person) VALUES (?, ?, 7, 1, ?, ?, ?, 'open', 0, ?, ?, 1, 1, ?, ?)", r.task, REPO_ID, HEAD, BASE, HEAD, kept.pr_observed_at, kept.read_at, AGENT.id, LINKER.id));
+    // Approved by the owner, who controls neither party: an independent review, as the owner's decision on A1 asks.
+    await inRoom(r.id, (sql) => sql.exec("INSERT INTO task_change (task_id, provider_repo_id, pr_number, submission_no, reviewed_commit_sha, reviewed_base_sha, observed_head_sha, pr_state, pr_draft, pr_observed_at, read_at, created_at, updated_at, submitter_id, submitter_person, reviewer_id, reviewer_person) VALUES (?, ?, 7, 1, ?, ?, ?, 'open', 0, ?, ?, 1, 1, ?, ?, ?, ?)", r.task, REPO_ID, HEAD, BASE, HEAD, kept.pr_observed_at, kept.read_at, AGENT.id, LINKER.id, OWNER.id, OWNER.id));
     // The grant has run out, or was taken back.
     await inRoom(r.id, (sql) => sql.exec("UPDATE provider_grant SET expires_at = ? WHERE id = ?", Date.now() - 1, r.grant));
     await refused([403, "grant_expired"]);
@@ -374,6 +375,78 @@ describe("asking for a merge", () => {
   });
 });
 
+describe("an independent review (the owner's decision of 2026-11-11 on review A1)", () => {
+  /** A room whose task `reviewer` approved at `HEAD`, with a merge grant for `MERGER` and the job held. */
+  async function approvedBy(reviewer: Who) {
+    const id = await room();
+    const task = await submitted(id, 7, reviewer);
+    const done = await api(reviewer, "POST", `/v1/workspaces/${id}/tasks/${task}/verify`, { submission_no: 1, commit_sha: HEAD });
+    expect(done.status, done.text).toBe(200);
+    await grant(id, MERGER);
+    await alarm(id);
+    await hold(id);
+    return { id, task };
+  }
+
+  it("refuses to merge a commit its submitter's own person approved, or another of their agents did, though the task's review completes as before", async () => {
+    for (const reviewer of [LINKER, SIBLING]) {
+      REPO_ID = ++nextRepo;
+      await fake({});
+      await ready();
+      const r = await approvedBy(reviewer);
+      // Ordinary review is unchanged: the task is approved, at the reviewed commit, by the submitter's own controller.
+      expect(await taskRow(r.id, r.task), reviewer.id).toEqual({ status: "completed", approved_submission_no: 1 });
+      expect(await change(r.id, r.task), reviewer.id).toMatchObject({ reviewed_commit_sha: HEAD, reviewer_id: reviewer.id, reviewer_person: LINKER.id });
+      // Only the merge is refused, with its own code, and nothing is recorded or asked of GitHub.
+      const refused = await merge(MERGER, r.id, r.task);
+      expect([refused.status, refused.code], reviewer.id).toEqual([403, "self_review"]);
+      // It asks for someone else's review.
+      expect(refused.body.error.message, reviewer.id).toMatch(/someone other than the person who controls its submitter/);
+      expect(await change(r.id, r.task), reviewer.id).toMatchObject({ merge_state: "not_requested", merge_requested_by: null });
+      expect(await events(r.id), reviewer.id).toEqual([]);
+      expect((await github()).calls, reviewer.id).toEqual([]);
+    }
+  });
+
+  it("merges a commit another person's agent approved, and one a person who controls no party approved", async () => {
+    for (const reviewer of [ROBOT, ADMIN]) {
+      REPO_ID = ++nextRepo;
+      await fake({});
+      await ready();
+      await pull(7);
+      const r = await approvedBy(reviewer);
+      const asked = await merge(MERGER, r.id, r.task);
+      expect(asked.status, `${reviewer.id} ${asked.text}`).toBe(200);
+      await pass(r.id);
+      expect((await change(r.id, r.task)).merge_state, reviewer.id).toBe("succeeded");
+    }
+  });
+
+  it("refuses an approval the room recorded before it kept its reviewer, rather than guess who gave it", async () => {
+    const r = await approved();
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE task_change SET reviewer_id = NULL, reviewer_person = NULL"));
+    const refused = await merge(MERGER, r.id, r.task);
+    expect([refused.status, refused.code]).toEqual([403, "self_review"]);
+    // The same code, saying the commit needs reviewing again, not that someone else must review: the earlier approval
+    // may well have been independent, and simply wasn't recorded.
+    expect(refused.body.error.message).toMatch(/needs to be reviewed again/);
+    expect(refused.body.error.message).not.toMatch(/someone other than/);
+    // An agent whose controlling person wasn't recorded counts as not independent too.
+    await inRoom(r.id, (sql) => void sql.exec("UPDATE task_change SET reviewer_id = ?, reviewer_person = NULL", ROBOT.id));
+    expect((await merge(MERGER, r.id, r.task)).code).toBe("self_review");
+  });
+
+  it("tells a caller who may not merge nothing about the review", async () => {
+    const r = await approvedBy(LINKER);
+    // No grant: the grant's refusal, not the review's.
+    const robot = await merge(ROBOT, r.id, r.task);
+    expect([robot.status, robot.code]).toEqual([403, "grant_required"]);
+    // The submitter's own person: `self_merge`, as before.
+    expect((await merge(LINKER, r.id, r.task)).code).toBe("self_merge");
+  });
+
+});
+
 describe("the job checks everything again", () => {
   it("ends the merge when the requester's authority is gone by the time it runs, and marks nothing", async () => {
     for (const [what, lose, reason] of [
@@ -388,6 +461,8 @@ describe("the job checks everything again", () => {
       // who is now in the room through a public claim, are refused as the request would refuse them.
       ["requester's access narrowed", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE access_grant SET tasks = 'own' WHERE principal_id = ?", MERGER.id)), "task_not_found"],
       ["requester now there through a public claim", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE member SET joined_via = 'public', role = 'guest' WHERE principal_id = ?", MERGER.id)), "public_participant"],
+      // The approving review, as the room's record has it, turns out not to be independent of the submitter (A1).
+      ["review not independent", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE task_change SET reviewer_person = ?", LINKER.id)), "self_review"],
       // The owner, who gave the grant, has left the organization, and the room hasn't been told. Last, since it's the owner's own record.
       ["grant gone stale", async (r: any) => {
         await must(OWNER, "POST", "/v1/org-departures", {}, { claims: { departure: { person: OWNER.id, org: ORG, left_at: Date.now() } } });
@@ -831,13 +906,31 @@ describe("with managed repositories switched off again", () => {
 });
 
 describe("the room migration", () => {
+  it("migrates a room with a submission approved before it kept reviewers, and refuses its merge until it's reviewed again (A1)", async () => {
+    const r = await approved();
+    const newest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
+    await inRoom(r.id, (sql) => {
+      for (const column of ["reviewer_person", "reviewer_id"]) sql.exec(`ALTER TABLE task_change DROP COLUMN ${column}`);
+      sql.exec("UPDATE schema_version SET version = version - 1");
+    });
+    await must(OWNER, "GET", `/v1/workspaces/${r.id}`);
+    expect(await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(newest);
+    // The approval stays, its reviewer unknown: nothing is guessed, and its merge is refused until it's reviewed again.
+    expect(await change(r.id, r.task)).toMatchObject({ reviewed_commit_sha: HEAD, reviewer_id: null, reviewer_person: null });
+    expect(await taskRow(r.id, r.task)).toEqual({ status: "completed", approved_submission_no: 1 });
+    const got = await merge(MERGER, r.id, r.task);
+    expect([got.status, got.code]).toEqual([403, "self_review"]);
+    expect(got.body.error.message).toMatch(/needs to be reviewed again/);
+  });
+
   it("adds the merge bookkeeping to a room made before it, and keeps what was there", async () => {
     const r = await approved();
     const newest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
     await inRoom(r.id, (sql) => {
       sql.exec("DROP TABLE merge_request");
-      for (const column of ["merge_finished_at", "merge_called_at", "merge_mark_set_at", "merge_marked_at", "merge_step", "merge_next_at", "merge_attempts", "merge_requester_person", "submitter_person", "submitter_id"]) sql.exec(`ALTER TABLE task_change DROP COLUMN ${column}`);
-      sql.exec("UPDATE schema_version SET version = version - 1");
+      // The step after this one, which keeps an approval's reviewer (A1), goes too: a room this old has neither.
+      for (const column of ["reviewer_person", "reviewer_id", "merge_finished_at", "merge_called_at", "merge_mark_set_at", "merge_marked_at", "merge_step", "merge_next_at", "merge_attempts", "merge_requester_person", "submitter_person", "submitter_id"]) sql.exec(`ALTER TABLE task_change DROP COLUMN ${column}`);
+      sql.exec("UPDATE schema_version SET version = version - 2");
     });
     await must(OWNER, "GET", `/v1/workspaces/${r.id}`);
     expect(await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version)).toBe(newest);

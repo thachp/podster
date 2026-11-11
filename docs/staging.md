@@ -279,6 +279,8 @@ cd apps/api && npx wrangler secret put A2A_TOKEN_KEY --env staging
 
 ## Managed repositories on staging
 
+**Re-approve before merging, once the independent-review change is deployed** ([decision 195](spec/PRODUCT.md#decisions-needed), 2026-11-11). From that deploy on, the room records who approved a reviewed commit and the person who controlled them, and a merge needs that person to differ from the submitter's. A submission approved on staging before that deploy has no reviewer on record, so `merge_task` refuses it `self_review`, with a message saying it needs to be reviewed again. Its task stays completed and approved, and a completed task can't be approved a second time, so re-approving it means a follow-up task ([decision 25](spec/PRODUCT.md#decisions-needed)) whose submission someone the submitter's person doesn't control approves; that commit can then be merged. Nothing is guessed about who approved the earlier one.
+
 **Switched off again, 2026-11-11 UTC, as an interim tightening.** Ruled by the architect, 2026-11-11; the owner approved switching staging on, and this pause is for the owner to review. What happened that day:
 
 - **05:39Z:** staging was switched on (PR #268), on the owner's word, "let's unblock m5 staging".

@@ -45,7 +45,7 @@ use podster_core::repo_merge::{
 };
 use podster_core::repositories::{GrantAction, LinkStatus, MergeState, RequestState};
 use podster_core::task_change::{pull_state_name, PullSeen};
-use podster_policy::repositories::{authorize_merge, GrantStanding};
+use podster_policy::repositories::{authorize_merge, independent_review, GrantStanding};
 
 const HOUR_MS: i64 = 60 * 60 * 1000;
 /// How many merges one alarm works on. The rest wait for the next alarm.
@@ -65,6 +65,7 @@ fn refused(refusal: MergeRefusal) -> ApiError {
         MergeRefusal::TaskHidden => ApiError::task_not_found(),
         MergeRefusal::Grant(_)
         | MergeRefusal::SelfMerge
+        | MergeRefusal::SelfReview
         | MergeRefusal::ControllerDeparted
         | MergeRefusal::PublicParticipant
         | MergeRefusal::NotAllowed => refuse(403, refusal.code()),
@@ -180,6 +181,18 @@ impl Inputs {
         )
     }
 
+    /// Who approved the reviewed commit, and the person who controlled them then, from the room's own record of the
+    /// approval. `None` with no reviewed commit on record, which core refuses. An approval recorded before the room kept
+    /// its reviewer names nobody, and the review counts as not independent: nothing is guessed.
+    fn reviewer(&self) -> Option<(String, Option<String>)> {
+        let row = self.change.as_ref()?;
+        row["reviewed_commit_sha"].as_str()?;
+        Some((
+            text(&row["reviewer_id"]).unwrap_or_default(),
+            text(&row["reviewer_person"]).filter(|_| row["reviewer_id"].is_string()),
+        ))
+    }
+
     fn standing(&self) -> ChangeStanding<'_> {
         let row = self.change.as_ref();
         ChangeStanding {
@@ -250,19 +263,28 @@ fn decide_merge<T>(
         through_public_claim: public_claims::is_public_participant(sql, &caller.id)?,
         now,
     };
-    if let Err(denial) = authorize_merge(
+    match authorize_merge(
         caller,
         requester.person,
         &inputs.task,
         &submitter,
         &standing,
     ) {
-        // An unlinked room's grant check would say `repo_not_linked`, which the core decision says better.
-        if !(link_repo_id.is_none()
-            && matches!(denial, podster_policy::repositories::RepoDenial::Grant(_)))
-        {
-            return Ok(Err(Denied::Policy(denial)));
+        // The approving review must be independent of the submitter (review A1), decided only for a caller who may
+        // otherwise merge, so nobody else learns anything about the review.
+        Ok(()) => {
+            let reviewer = inputs.reviewer();
+            let reviewer = reviewer.as_ref().map(|(id, person)| Actor {
+                id,
+                person: person.as_deref(),
+            });
+            if let Err(denial) = independent_review(reviewer.as_ref(), &submitter) {
+                return Ok(Err(Denied::Policy(denial)));
+            }
         }
+        // An unlinked room's grant check would say `repo_not_linked`, which the core decision says better.
+        Err(podster_policy::repositories::RepoDenial::Grant(_)) if link_repo_id.is_none() => {}
+        Err(denial) => return Ok(Err(Denied::Policy(denial))),
     }
     let (submission_no, commit_sha) = named()?;
     // The room resolved a current participant, or found none. A disconnected agent is removed from the room, so being

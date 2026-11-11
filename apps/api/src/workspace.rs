@@ -4640,18 +4640,16 @@ impl Workspace {
             ),
             // The room's repository (M5 step 4). The organization's delegation is asked first, outside the transaction, and
             // counts for nothing unless the caller is the room's owner or an admin. A request the room would record is
-            // counted against the organization's and the asker's daily caps in that same call, and the places are given
-            // back if the room then records nothing. A stored answer goes only to someone who may still ask.
+            // counted against the organization's and the asker's daily caps in that same call, and stays counted
+            // whatever becomes of it. A stored answer goes only to someone who may still ask.
             (Method::Post, ["repository"]) => {
                 let switched_on = provisioning::enabled(&self.env, &sql)?;
                 let (delegated, counted) = if switched_on {
-                    self.count_repository_request(&identity, key.as_deref(), &hash, &body)
-                        .await?
+                    self.count_repository_request(&identity, &body).await?
                 } else {
                     (false, None)
                 };
                 let counted_for = counted.clone();
-                let (call_key, call_hash) = (key.clone().unwrap_or_default(), hash.clone());
                 let recorded = self.command_checked(
                     &identity,
                     key,
@@ -4671,16 +4669,7 @@ impl Workspace {
                         )
                     },
                 );
-                // A command that recorded nothing gives this call's own claims back, and no other's. One that recorded
-                // the request, or replayed its answer, has them kept for good.
-                match (&recorded, &counted) {
-                    (Err(_), Some(counted)) => {
-                        self.uncount_repository_request(counted, &identity, &call_key, &call_hash)
-                            .await
-                    }
-                    (Ok(_), Some(counted)) => self.keep_repository_request(counted).await,
-                    _ => {}
-                }
+                // Nothing is given back, whatever the command came to: the room's place in each count stays.
                 recorded
             }
             (Method::Post, ["repository", "retry"]) => {

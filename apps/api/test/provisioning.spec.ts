@@ -102,12 +102,12 @@ async function roomOf(owner: Who) {
   await inRoom(id, (sql) => sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)"));
   return { id, org: owner.org, owner };
 }
-const CLAIMS = "CREATE TABLE IF NOT EXISTS repo_request_claim (workspace_id TEXT NOT NULL, claimant TEXT NOT NULL, call_id TEXT NOT NULL, at INTEGER NOT NULL, accepted INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (workspace_id, claimant, call_id))";
-/** Every claim an organization's object, or a person's, holds: the room, who asked, and whether its request was recorded. */
-const claims = (holder: string) => runInDurableObject(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(holder)), (_: any, state: any) => {
-  state.storage.sql.exec(CLAIMS);
-  return state.storage.sql.exec("SELECT workspace_id, claimant, accepted FROM repo_request_claim ORDER BY at, workspace_id, call_id").toArray() as { workspace_id: string; claimant: string; accepted: number }[];
-}) as Promise<{ workspace_id: string; claimant: string; accepted: number }[]>;
+const PLACES = "CREATE TABLE IF NOT EXISTS repo_request_room (workspace_id TEXT PRIMARY KEY, at INTEGER NOT NULL)";
+/** When a room's place in an organization's count, or a person's, was last stamped, or null if it holds none. */
+const stampOf = (holder: string, room: string) => runInDurableObject(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(holder)), (_: any, state: any) => {
+  state.storage.sql.exec(PLACES);
+  return (state.storage.sql.exec("SELECT at FROM repo_request_room WHERE workspace_id = ?", room).toArray()[0]?.at ?? null) as number | null;
+}) as Promise<number | null>;
 /** Holds calls in room `id` at the fake's gate: `counted` once both caps counted them, `uncounted` once they decided not to count. */
 const holdAt = async (id: string, where: "counted" | "uncounted") => {
   const gate = 900_000 + Math.floor(Math.random() * 90_000);
@@ -124,15 +124,15 @@ const holdAt = async (id: string, where: "counted" | "uncounted") => {
     letGo: () => letGo(gate),
   };
 };
-/** The rooms whose request an organization's object, or a person's, has counted. */
+/** The rooms that hold a place in an organization's count, or a person's. */
 const counted = (holder: string) => runInDurableObject(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(holder)), (_: any, state: any) => {
-  state.storage.sql.exec(CLAIMS);
-  return state.storage.sql.exec("SELECT workspace_id, min(at) AS at FROM repo_request_claim GROUP BY workspace_id ORDER BY at, workspace_id").toArray().map((row: any) => row.workspace_id as string);
+  state.storage.sql.exec(PLACES);
+  return state.storage.sql.exec("SELECT workspace_id FROM repo_request_room ORDER BY at, workspace_id").toArray().map((row: any) => row.workspace_id as string);
 }) as Promise<string[]>;
-/** Makes one counted request `ms` older, as if it had been accepted that much earlier. */
+/** Makes a room's place `ms` older, as if it had been stamped that much earlier. */
 const age = (holder: string, room: string, ms: number) => runInDurableObject(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(holder)), (_: any, state: any) =>
-  void state.storage.sql.exec("UPDATE repo_request_claim SET at = at - ? WHERE workspace_id = ?", ms, room));
-/** Asks an organization's object, or a person's, to count a room's request for one caller, or to give that caller's place back. */
+  void state.storage.sql.exec("UPDATE repo_request_room SET at = at - ? WHERE workspace_id = ?", ms, room));
+/** Asks an organization's object, or a person's, directly, as a room does. */
 const principalCall = async (holder: string, path: string, body: object) =>
   (await BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(holder)).fetch(`https://principal/internal/${path}`, { method: "POST", body: JSON.stringify(body) })).json() as Promise<any>;
 /** How many calls wait at the fake's gate of that number, and letting them go. */
@@ -333,13 +333,14 @@ describe("asking for the room's repository", () => {
     // A different person asks in each room, so only the organization's count can be what refuses.
     for (let i = 0; i < 7; i++) rooms.push(await roomOf({ id: `per_pv_cap_${tag}_${i}`, kind: "person", org, adminOrgs: [org] }));
     const body = (i: number) => ({ name: `cap-${i}`, visibility: "public" });
-    // A request whose transaction fails is given its place back.
-    expect((await ask(rooms[0], body(0), { fail: true })).status).toBe(500);
-    expect(await counted(org)).toEqual([]);
     // One the room refuses for itself is never counted.
     expect((await ask(rooms[0], { name: "podster", visibility: "public" })).code).toBe("name_reserved");
     expect((await ask(rooms[0], { name: "cap-0", visibility: "private" })).code).toBe("private_unavailable");
     expect(await counted(org)).toEqual([]);
+    // A request whose transaction fails leaves its room counted: nothing is ever given back. It's the same room's place
+    // when that room asks again, so it costs no second one.
+    expect((await ask(rooms[0], body(0), { fail: true })).status).toBe(500);
+    expect([await counted(org), await counted(rooms[0].owner.id)]).toEqual([[rooms[0].id], [rooms[0].id]]);
     for (let i = 0; i < 5; i++) {
       const accepted = await ask(rooms[i], body(i), { key: `cap-${tag}-${i}` });
       expect(accepted.status, `${i}: ${accepted.text}`).toBe(200);
@@ -371,13 +372,13 @@ describe("asking for the room's repository", () => {
     expect((await ask(rooms[6], body(6))).code).toBe("repository_request_limit");
   });
 
-  it("holds the same cap for one person across organizations, in the person's own record", async () => {
+  it("holds the same cap for one person across organizations, in the person's own record and by its own clock", async () => {
     await fake("/reset", {});
     const tag = crypto.randomUUID().slice(0, 8);
     const person = `per_pv_many_${tag}`;
     const rooms = [];
     // One person, an organization of their own making for each room.
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 7; i++) {
       const org = `org_pv_many_${tag}_${i}`;
       rooms.push(await roomOf({ id: person, kind: "person", org, adminOrgs: [org] }));
     }
@@ -386,15 +387,23 @@ describe("asking for the room's repository", () => {
     const sixth = await ask(rooms[5], { name: "many-5", visibility: "public" });
     expect([sixth.status, sixth.code]).toEqual([429, "repository_request_limit"]);
     expect(await rowsOf(rooms[5].id, "repo_request")).toEqual([]);
-    // The sixth organization's own count was given back: it has accepted nothing.
-    expect(await counted(rooms[5].org)).toEqual([]);
-    // Someone else in that organization's room isn't held by this person's count.
+    // The sixth organization's own place for that room stays: it was asked first, and nothing is given back.
+    expect(await counted(rooms[5].org)).toEqual([rooms[5].id]);
+    expect(await counted(person)).toHaveLength(5);
+    // Someone else in that organization's room isn't held by this person's count, and the room's place is the one it has.
     const policy = (await api(rooms[5].owner, "GET", `/v1/workspaces/${rooms[5].id}`)).body.policy_version;
     const admin: Who = { id: `per_pv_many_admin_${tag}`, kind: "person", org: rooms[5].org, adminOrgs: [] };
     const added = await api(rooms[5].owner, "POST", `/v1/workspaces/${rooms[5].id}/members`, { principal_id: admin.id, kind: "person", org_id: admin.org, role: "admin", policy_version: policy }, { claims: { target_member: { person: admin.id, orgs: { [admin.org]: 1 } } } });
     expect(added.status, added.text).toBe(200);
     expect((await ask(rooms[5], { name: "many-5", visibility: "public" }, { who: admin })).status).toBe(200);
-    expect(await counted(admin.id)).toEqual([rooms[5].id]);
+    expect([await counted(admin.id), await counted(rooms[5].org)]).toEqual([[rooms[5].id], [rooms[5].id]]);
+    // The person's window rolls by their own object's stamps: one place a second short of a day old still counts, and
+    // a day old doesn't.
+    await age(person, rooms[0].id, 86_400_000 - 1_000);
+    expect((await ask(rooms[6], { name: "many-6", visibility: "public" })).code).toBe("repository_request_limit");
+    await age(person, rooms[0].id, 1_000);
+    expect((await ask(rooms[6], { name: "many-6", visibility: "public" })).status).toBe(200);
+    expect(await counted(person)).toHaveLength(5);
   });
 
   it("records nothing for someone made an admin after the call looked and before its transaction: neither cap was asked for them", async () => {
@@ -423,96 +432,106 @@ describe("asking for the room's repository", () => {
     expect([await counted(r.org), await counted(late.id)]).toEqual([[r.id], [r.id]]);
   });
 
-  it("keeps each call's claim its own: giving one back never frees a room another call counted, and an accepted one is never given back", async () => {
-    const holder = `org_pv_claims_${crypto.randomUUID().slice(0, 8)}`;
-    const reserve = (workspace: string, claimant: string, call = "c1") => principalCall(holder, "repo-request-reserve", { provider: "github", workspace, claimant, call, delegation: true });
-    const release = (workspace: string, claimant: string, call = "c1") => principalCall(holder, "repo-request-release", { workspace, claimant, call });
-    const accept = (workspace: string, claimant: string, call = "c1") => principalCall(holder, "repo-request-accept", { workspace, claimant, call });
-    // Two admins ask for one room at once. Both are counted for it, and it's one room.
-    expect(await reserve("ws_one", "per_a")).toEqual({ granted: true, allowed: true });
-    expect(await reserve("ws_one", "per_b")).toEqual({ granted: true, allowed: true });
+  it("holds one place for each room, never gives it back, and stamps it again each time it's asked for", async () => {
+    const holder = `org_pv_places_${crypto.randomUUID().slice(0, 8)}`;
+    const reserve = (workspace: string) => principalCall(holder, "repo-request-reserve", { provider: "github", workspace, delegation: true });
+    // A room takes a place, and asking again keeps the one it has: one room, however many calls.
+    expect(await reserve("ws_one")).toEqual({ granted: true, held: true });
+    expect(await reserve("ws_one")).toEqual({ granted: true, held: true });
     expect(await counted(holder)).toEqual(["ws_one"]);
-    // One of them is refused elsewhere and gives their claim back. The other's stands, so the room is still counted.
-    await release("ws_one", "per_b");
+    // There is nothing to give a place back with: the release and accept of earlier drafts don't exist.
+    for (const path of ["repo-request-release", "repo-request-accept"]) {
+      const gone = await BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(holder)).fetch(`https://principal/internal/${path}`, { method: "POST", body: JSON.stringify({ workspace: "ws_one" }) });
+      expect(gone.status, path).toBeGreaterThanOrEqual(400);
+      await gone.text();
+    }
     expect(await counted(holder)).toEqual(["ws_one"]);
-    // Giving back a claim that was never taken frees nothing either: another person's, or another call's by the same person.
-    await release("ws_one", "per_stranger");
-    await release("ws_one", "per_a", "c2");
-    expect(await counted(holder)).toEqual(["ws_one"]);
-    // The same person asks again for the same room in a second call. It's that call's own claim, and it's one room.
-    expect((await reserve("ws_one", "per_a", "c2")).allowed).toBe(true);
-    expect((await claims(holder)).map((c) => [c.workspace_id, c.claimant, c.accepted])).toEqual([["ws_one", "per_a", 0], ["ws_one", "per_a", 0]]);
-    // The first call's request is recorded: its claim is accepted. The second call, refused, gives back its own alone.
-    await accept("ws_one", "per_a", "c1");
-    await release("ws_one", "per_a", "c2");
-    expect((await claims(holder)).map((c) => [c.workspace_id, c.claimant, c.accepted])).toEqual([["ws_one", "per_a", 1]]);
-    // An accepted claim is never given back, whoever asks, however often.
-    await release("ws_one", "per_a", "c1");
-    await release("ws_one", "per_a", "c1");
-    expect((await claims(holder)).map((c) => [c.workspace_id, c.accepted])).toEqual([["ws_one", 1]]);
-    // Four more rooms reach the cap, by rooms, not by claims.
-    for (const room of ["ws_two", "ws_three", "ws_four", "ws_five"]) expect((await reserve(room, "per_a")).allowed, room).toBe(true);
-    expect(await reserve("ws_six", "per_b")).toEqual({ granted: true, allowed: false });
-    // A room already counted takes another call's claim at the cap, since it adds no room.
-    expect((await reserve("ws_two", "per_b")).allowed).toBe(true);
+    // Four more rooms reach the cap, and a sixth is refused with nothing taken.
+    for (const room of ["ws_two", "ws_three", "ws_four", "ws_five"]) expect((await reserve(room)).held, room).toBe(true);
+    expect(await reserve("ws_six")).toEqual({ granted: true, held: false });
     expect(await counted(holder)).toHaveLength(5);
-    // Only when the last claim on a room is given back is its place free.
-    await release("ws_two", "per_a");
-    expect(await counted(holder)).toHaveLength(5);
-    await release("ws_two", "per_b");
-    expect(await counted(holder)).toHaveLength(4);
-    expect((await reserve("ws_six", "per_b")).allowed).toBe(true);
-    // A claim that names no call is never taken: it couldn't be given back by name.
-    const nameless = await BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(holder)).fetch("https://principal/internal/repo-request-reserve", { method: "POST", body: JSON.stringify({ provider: "github", workspace: "ws_seven", claimant: "per_a", delegation: true }) });
+    // A room that holds a place keeps it at the cap, and is stamped again with now.
+    await age(holder, "ws_one", 60_000);
+    const before = (await stampOf(holder, "ws_one"))!;
+    expect((await reserve("ws_one")).held).toBe(true);
+    expect((await stampOf(holder, "ws_one"))!).toBeGreaterThanOrEqual(before + 60_000);
+    // The window is this object's own clock on its own stamps: a second short of a day still counts, a day doesn't.
+    await age(holder, "ws_two", 86_400_000 - 1_000);
+    expect((await reserve("ws_six")).held).toBe(false);
+    await age(holder, "ws_two", 1_000);
+    expect((await reserve("ws_six")).held).toBe(true);
+    expect((await counted(holder)).sort()).toEqual(["ws_five", "ws_four", "ws_one", "ws_six", "ws_three"]);
+    // A room whose own place aged out is asked as a new one, and refused at the cap.
+    expect((await reserve("ws_two")).held).toBe(false);
+    // A place with no room is never taken.
+    const nameless = await BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(holder)).fetch("https://principal/internal/repo-request-reserve", { method: "POST", body: JSON.stringify({ provider: "github", delegation: true }) });
     expect(nameless.status).toBe(400);
     await nameless.text();
   });
 
-  it("counts a room exactly once when one person asks for it twice at once under different keys, whichever call records", async () => {
+  it("keeps the room counted when one of two copies of the same call fails alone and the other records", async () => {
+    // The sequence that left a recorded request uncounted: the same key and body twice at once; the first copy fails
+    // alone, because the caller was demoted and then made an admin again between the two transactions; the second records.
+    const r = await room();
+    const policy = async () => (await api(r.owner, "GET", `/v1/workspaces/${r.id}`)).body.policy_version;
+    const admin: Who = { id: `per_pv_copies_${crypto.randomUUID().slice(0, 8)}`, kind: "person", org: r.org, adminOrgs: [] };
+    const target = { claims: { target_member: { person: admin.id, orgs: { [r.org]: 1 } } } };
+    const setRole = async (role: string) => expect((await api(r.owner, "POST", `/v1/workspaces/${r.id}/members/${admin.id}/role`, { role, policy_version: await policy() }, target)).status).toBe(200);
+    expect((await api(r.owner, "POST", `/v1/workspaces/${r.id}/members`, { principal_id: admin.id, kind: "person", org_id: r.org, role: "admin", policy_version: await policy() }, target)).status).toBe(200);
+    const key = `pv-copies-${r.id}`;
+    const body = { name: "engineering", visibility: "public" };
+    const one = await holdAt(r.id, "counted");
+    const first = ask(r, body, { who: admin, key });
+    await one.reached();
+    const two = await holdAt(r.id, "counted");
+    const second = ask(r, body, { who: admin, key });
+    await two.reached();
+    expect([await counted(r.org), await counted(admin.id)]).toEqual([[r.id], [r.id]]);
+    // Demoted: the first copy's transaction refuses it. Nothing is given back.
+    await setRole("member");
+    await one.letGo();
+    const refused = await first;
+    expect([refused.status, refused.code]).toEqual([403, "not_allowed"]);
+    expect([await counted(r.org), await counted(admin.id)]).toEqual([[r.id], [r.id]]);
+    // An admin again: the second copy's transaction resolves the same person in the same organization, and records.
+    await setRole("admin");
+    await two.letGo();
+    expect((await second).status).toBe(200);
+    expect((await rowsOf(r.id, "repo_request")).map((row) => row.requested_by)).toEqual([admin.id]);
+    // The recorded request is counted, in both objects.
+    expect([await counted(r.org), await counted(admin.id)]).toEqual([[r.id], [r.id]]);
+  });
+
+  it("counts a room once when one person asks for it twice at once under different keys, and when two people do", async () => {
+    // One person, two keys.
     const r = await room();
     const body = { name: "engineering", visibility: "public" };
-    // Both calls are counted against both caps and held there, before either one's transaction.
     const held = await holdAt(r.id, "counted");
     const first = ask(r, body, { key: `pv-twice-a-${r.id}` });
     const second = ask(r, body, { key: `pv-twice-b-${r.id}` });
     await held.reached(2);
-    expect((await claims(r.org)).map((c) => [c.workspace_id, c.claimant, c.accepted])).toEqual([[r.id, r.owner.id, 0], [r.id, r.owner.id, 0]]);
     await held.letGo();
     const answers = [await first, await second];
-    // One records. The other is told the room has its request, and gives back its own claim, never the recorded one's.
     expect(answers.map((a) => a.status).sort()).toEqual([200, 409]);
     expect(answers.find((a) => a.status === 409)?.code).toBe("repo_request_exists");
     expect(await rowsOf(r.id, "repo_request")).toHaveLength(1);
-    for (const holder of [r.org, r.owner.id]) {
-      expect((await claims(holder)).map((c) => [c.workspace_id, c.claimant, c.accepted]), holder).toEqual([[r.id, r.owner.id, 1]]);
-      expect(await counted(holder), holder).toEqual([r.id]);
-    }
+    expect([await counted(r.org), await counted(r.owner.id)]).toEqual([[r.id], [r.id]]);
+    // Two people, one room: the owner and an admin at once.
+    const shared = await room();
+    const admin: Who = { id: `per_pv_pair_${crypto.randomUUID().slice(0, 8)}`, kind: "person", org: shared.org, adminOrgs: [] };
+    const policy = (await api(shared.owner, "GET", `/v1/workspaces/${shared.id}`)).body.policy_version;
+    expect((await api(shared.owner, "POST", `/v1/workspaces/${shared.id}/members`, { principal_id: admin.id, kind: "person", org_id: shared.org, role: "admin", policy_version: policy }, { claims: { target_member: { person: admin.id, orgs: { [shared.org]: 1 } } } })).status).toBe(200);
+    const both = await holdAt(shared.id, "counted");
+    const theirs = [ask(shared, body), ask(shared, body, { who: admin })];
+    await both.reached(2);
+    await both.letGo();
+    expect((await Promise.all(theirs)).map((a) => a.status).sort()).toEqual([200, 409]);
+    // The organization counts the room once. Each person's own count holds it: the one who didn't record is counted
+    // one room too many until it ages out, never one too few.
+    expect([await counted(shared.org), await counted(shared.owner.id), await counted(admin.id)]).toEqual([[shared.id], [shared.id], [shared.id]]);
   });
 
-  it("counts a room exactly once when the second of two calls at once reuses the first one's key for another request", async () => {
-    const r = await room();
-    const key = `pv-mismatch-${r.id}`;
-    const held = await holdAt(r.id, "counted");
-    const first = ask(r, { name: "engineering", visibility: "public" }, { key });
-    await held.reached(1);
-    // The second is held too, under the same key with a different request, so it's a call of its own.
-    const again = await holdAt(r.id, "counted");
-    const second = ask(r, { name: "another-name", visibility: "public" }, { key });
-    await again.reached(1);
-    expect(await claims(r.org)).toHaveLength(2);
-    await held.letGo();
-    expect((await first).status).toBe(200);
-    await again.letGo();
-    const refused = await second;
-    expect([refused.status, refused.code]).toEqual([422, "idempotency_mismatch"]);
-    expect((await rowsOf(r.id, "repo_request")).map((row) => row.name)).toEqual(["engineering"]);
-    for (const holder of [r.org, r.owner.id]) expect((await claims(holder)).map((c) => [c.workspace_id, c.accepted]), holder).toEqual([[r.id, 1]]);
-    // A plain repeat of the recorded call is its stored answer, and changes no count.
-    expect((await ask(r, { name: "engineering", visibility: "public" }, { key })).status).toBe(200);
-    for (const holder of [r.org, r.owner.id]) expect((await claims(holder)).map((c) => [c.workspace_id, c.accepted]), holder).toEqual([[r.id, 1]]);
-  });
-
-  it("leaves nothing counted for someone demoted after both caps counted their call and before its transaction", async () => {
+  it("refuses someone demoted after both caps counted their call, and leaves the room counted", async () => {
     const r = await room();
     const policy = async () => (await api(r.owner, "GET", `/v1/workspaces/${r.id}`)).body.policy_version;
     const admin: Who = { id: `per_pv_out_${crypto.randomUUID().slice(0, 8)}`, kind: "person", org: r.org, adminOrgs: [] };
@@ -521,17 +540,20 @@ describe("asking for the room's repository", () => {
     const held = await holdAt(r.id, "counted");
     const asking = ask(r, undefined, { who: admin });
     await held.reached();
-    expect([await counted(r.org), await counted(admin.id)]).toEqual([[r.id], [r.id]]);
     // The owner demotes them while their call waits, counted.
     expect((await api(r.owner, "POST", `/v1/workspaces/${r.id}/members/${admin.id}/role`, { role: "member", policy_version: await policy() }, target)).status).toBe(200);
     await held.letGo();
     const refused = await asking;
     expect([refused.status, refused.code]).toEqual([403, "not_allowed"]);
     expect(await rowsOf(r.id, "repo_request")).toEqual([]);
-    expect([await claims(r.org), await claims(admin.id)]).toEqual([[], []]);
+    // Too high, not too low: the room and the person stay counted for the day, with no request.
+    expect([await counted(r.org), await counted(admin.id)]).toEqual([[r.id], [r.id]]);
+    // The owner then asks for the same room: it's the place the room already holds.
+    expect((await ask(r)).status).toBe(200);
+    expect(await counted(r.org)).toEqual([r.id]);
   });
 
-  it("gives the organization's claim back when the person's own count refuses or can't answer", async () => {
+  it("leaves the organization's place where it is when the person's own count refuses or can't answer", async () => {
     const r = await room();
     const policy = async () => (await api(r.owner, "GET", `/v1/workspaces/${r.id}`)).body.policy_version;
     const person = async (id: string) => {
@@ -539,28 +561,49 @@ describe("asking for the room's repository", () => {
       expect((await api(r.owner, "POST", `/v1/workspaces/${r.id}/members`, { principal_id: id, kind: "person", org_id: r.org, role: "admin", policy_version: await policy() }, { claims: { target_member: { person: id, orgs: { [r.org]: 1 } } } })).status).toBe(200);
       return who;
     };
-    // The person's own count can't answer: refused as retryable, with nothing left in the organization's.
+    // The person's own count can't answer, after the organization's took the room: refused as retryable, nothing recorded.
     const unreachable = await person(`per_unavailable_pv_${crypto.randomUUID().slice(0, 8)}`);
     const unknown = await ask(r, undefined, { who: unreachable });
     expect([unknown.status, unknown.code]).toEqual([503, "delegation_unavailable"]);
-    expect(await claims(r.org)).toEqual([]);
-    // The person is at their own cap, from five other rooms: refused by name, with nothing left in the organization's.
+    expect(await rowsOf(r.id, "repo_request")).toEqual([]);
+    expect(await counted(r.org)).toEqual([r.id]);
+    // The person is at their own cap, from five other rooms: refused by name, and the organization's place still stands.
     const capped = await person(`per_pv_capped_${crypto.randomUUID().slice(0, 8)}`);
-    for (let n = 0; n < 5; n++) expect((await principalCall(capped.id, "repo-request-reserve", { provider: "github", workspace: `ws_elsewhere_${n}`, claimant: capped.id, call: "c", delegation: false })).allowed).toBe(true);
+    for (let n = 0; n < 5; n++) expect((await principalCall(capped.id, "repo-request-reserve", { provider: "github", workspace: `ws_elsewhere_${n}`, delegation: false })).held).toBe(true);
     const over = await ask(r, undefined, { who: capped });
     expect([over.status, over.code]).toEqual([429, "repository_request_limit"]);
-    expect(await claims(r.org)).toEqual([]);
     expect(await rowsOf(r.id, "repo_request")).toEqual([]);
-    // Another admin's call that is waiting, counted, keeps its claim through both refusals, and records.
-    const held = await holdAt(r.id, "counted");
-    const asking = ask(r);
-    await held.reached();
-    expect((await ask(r, undefined, { who: capped })).code).toBe("repository_request_limit");
-    expect((await ask(r, undefined, { who: unreachable })).code).toBe("delegation_unavailable");
-    expect((await claims(r.org)).map((c) => [c.claimant, c.accepted])).toEqual([[r.owner.id, 0]]);
-    await held.letGo();
-    expect((await asking).status).toBe(200);
-    expect((await claims(r.org)).map((c) => [c.claimant, c.accepted])).toEqual([[r.owner.id, 1]]);
+    expect(await counted(r.org)).toEqual([r.id]);
+    expect(await counted(capped.id)).toHaveLength(5);
+    // The owner asks, in the place the room already holds, and records.
+    expect((await ask(r)).status).toBe(200);
+    expect([await counted(r.org), await counted(r.owner.id)]).toEqual([[r.id], [r.id]]);
+  });
+
+  it("stamps a place left by a failed attempt again when the request is recorded, so it counts for a day from then", async () => {
+    const r = await room();
+    // A first attempt fails after it was counted, and its place sits for 23 hours.
+    expect((await ask(r, undefined, { fail: true })).status).toBe(500);
+    for (const holder of [r.org, r.owner.id]) await age(holder, r.id, 23 * 3_600_000);
+    const stale = (await stampOf(r.org, r.id))!;
+    // The request is then recorded: both places are stamped with now, not left at the first attempt's time.
+    expect((await ask(r)).status).toBe(200);
+    for (const holder of [r.org, r.owner.id]) expect((await stampOf(holder, r.id))!, holder).toBeGreaterThanOrEqual(stale + 23 * 3_600_000);
+    // A second short of a day after the record it still counts, where the first attempt's stamp would be long gone.
+    for (const holder of [r.org, r.owner.id]) await age(holder, r.id, 86_400_000 - 1_000);
+    expect((await principalCall(r.org, "repo-request-reserve", { provider: "github", workspace: "ws_another", delegation: true })).held).toBe(true);
+    expect((await counted(r.org)).sort()).toEqual([r.id, "ws_another"].sort());
+    // A replay of the recorded request, and asking again, reserve nothing: the stamp is where the record left it.
+    const key = `pv-replay-${r.id}`;
+    const fresh = await room();
+    const recorded = await ask(fresh, undefined, { key });
+    expect(recorded.status).toBe(200);
+    await age(fresh.org, fresh.id, 3_600_000);
+    await age(fresh.owner.id, fresh.id, 3_600_000);
+    const stamps = [await stampOf(fresh.org, fresh.id), await stampOf(fresh.owner.id, fresh.id)];
+    expect((await ask(fresh, undefined, { key })).body).toEqual(recorded.body);
+    expect((await ask(fresh)).code).toBe("repo_request_exists");
+    expect([await stampOf(fresh.org, fresh.id), await stampOf(fresh.owner.id, fresh.id)]).toEqual(stamps);
   });
 
   it("gives a public-claim participant nothing: it can't ask for the repository or retry its setup (AC-10)", async () => {

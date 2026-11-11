@@ -132,32 +132,17 @@ fn request_row(sql: &SqlStorage) -> R<Option<Value>> {
     .next())
 }
 
-/// What a request was counted as, before the command's transaction: for which person, in which organization, and whose
-/// counts hold a place for it. Never taken from the request.
+/// For whom this call got "held" from both counts, before the command's transaction: which person, in which
+/// organization. Never taken from the request.
 #[derive(Clone, Debug)]
 pub(super) struct Counted {
     pub(super) person: String,
     pub(super) org: String,
-    /// This call's own ID in both counts: what it gives back, or keeps, is the claim under this ID and no other.
-    pub(super) call: String,
-    /// The organization and, once theirs is taken too, the person: whose places to give back.
-    pub(super) holders: Vec<String>,
 }
 
 /// `delegation_unavailable`: the organization's answer and the caps' counts aren't in hand for this caller, as the room
 /// resolves them now. Nothing was recorded, and asking again is safe.
 const NOT_COUNTED: &str = "delegation_unavailable";
-
-/// Whether the room holds the answer stored for exactly this caller, key and request: the command that made this call's
-/// request committed.
-fn recorded_under(sql: &SqlStorage, actor: &str, key: &str, hash: &str) -> bool {
-    rows(
-        sql,
-        "SELECT 1 FROM idempotency WHERE actor_id = ? AND key = ? AND request_hash = ?",
-        vec![actor.into(), key.into(), hash.into()],
-    )
-    .is_ok_and(|found| !found.is_empty())
-}
 
 /// The organization the room is in now.
 fn room_org(sql: &SqlStorage) -> R<Option<String>> {
@@ -168,7 +153,7 @@ fn room_org(sql: &SqlStorage) -> R<Option<String>> {
 
 /// `POST repository { name, visibility }`: records the room's one request for a repository. `delegated` is what the
 /// organization's `Principal` said just before this transaction, and the job asks again before it calls the provider.
-/// `counted` is what that same call counted against the daily caps. A request is recorded only if it was counted for
+/// `counted` says for whom that same call got "held" from both daily counts. A request is recorded only if that is
 /// exactly the caller this transaction resolved, in the organization the room is in now: someone who came to hold
 /// authority, or a room that changed hands, between the count and here records nothing, and asks again.
 pub(super) fn request(
@@ -194,9 +179,7 @@ pub(super) fn request(
     }
     // Last, and in this transaction: both caps were asked for this caller and this organization, by this very call.
     let org = room_org(sql)?;
-    if !counted.is_some_and(|c| {
-        c.person == who.caller.id && Some(&c.org) == org.as_ref() && c.holders.len() == 2
-    }) {
+    if !counted.is_some_and(|c| c.person == who.caller.id && Some(&c.org) == org.as_ref()) {
         return refuse(503, NOT_COUNTED);
     }
     let id = format!("rr_{}", uuid::Uuid::new_v4().simple());
@@ -492,29 +475,24 @@ impl Workspace {
     }
 
     /// Before a request for the room's repository is recorded: asks the room's organization whether it holds the
-    /// delegation and, in that same call, has the request counted against the organization's daily cap; then against the
-    /// asker's own. Returns whether the organization holds the delegation, and what was counted, for whom. The command's
-    /// transaction records a request only if this call counted it for the caller it resolves and the organization the
-    /// room is in then: what this decides, outside the transaction, is only whether to count. A request the room would
-    /// refuse anyway, or one for a room that already has its request, is never counted: so a replay, and asking again,
-    /// count once. At either cap it's refused here, by name.
+    /// delegation and, in that same transaction of the organization's, has the room hold a place in its daily count; then
+    /// the same in the asker's own object. Returns whether the organization holds the delegation, and for whom both
+    /// places are held. The command's transaction records a request only if this call got "held" from both for the
+    /// caller it resolves and the organization the room is in then: what this decides, outside the transaction, is only
+    /// whether to ask. A request the room would refuse anyway, or one for a room that already has its request, asks
+    /// nothing: so a replay, and asking again, count once. At either cap it's refused here, by name.
     ///
-    /// Each count is this call's own claim, under an ID made here from the caller, the idempotency key and the request
-    /// itself. The key is only ever an opaque part of that ID. So what this call gives back is its own claim alone.
+    /// **Nothing is ever given back.** A place is the room's, one per room in each object, stamped when it was last
+    /// asked for. A call that fails after it leaves the room counted until the stamp ages out, in the organization's
+    /// object and, if it got that far, the person's. So the counts can only be too high.
     pub(super) async fn count_repository_request(
         &self,
         identity: &Identity,
-        key: Option<&str>,
-        hash: &str,
         body: &Value,
     ) -> R<(bool, Option<Counted>)> {
         let sql = self.state.storage().sql();
-        // Whoever the command would refuse costs no count. The command refuses them itself, in its transaction. So
-        // does a call with no idempotency key, which the command refuses before it reads anything.
+        // Whoever the command would refuse costs no count. The command refuses them itself, in its transaction.
         let Ok(who) = resolve_caller(&sql, identity) else {
-            return Ok((false, None));
-        };
-        let Some(key) = key.filter(|key| !key.is_empty()) else {
             return Ok((false, None));
         };
         if !matches!(worth_counting(&sql, &who, body), Ok(true)) {
@@ -539,115 +517,28 @@ impl Workspace {
             return Ok((false, None));
         };
         let person = who.caller.id.clone();
-        let call = format!(
-            "{:x}",
-            Sha256::digest(format!("repository-request\n{person}\n{key}\n{hash}").as_bytes())
-        );
-        let claim = principal::RepoClaim {
-            workspace: &room,
-            claimant: &person,
-            call: &call,
-        };
         let limit = || ApiError::api(429, RequestLimitReached.code());
-        // An organization that can't answer is one that didn't say yes, as it was before the caps.
-        let Ok(said) = principal::reserve_repo_request(&self.env, &org, claim, true).await else {
+        // The organization first. One that can't answer is one that didn't say yes, as it was before the caps.
+        let Ok(said) = principal::reserve_repo_request(&self.env, &org, &room, true).await else {
             return Ok((false, None));
         };
         if !said.granted {
             return Ok((false, None));
         }
-        if !said.allowed {
+        if !said.held {
             return Err(limit());
         }
-        // One person can make any number of organizations, so the same cap holds for whoever asks, in their own object.
-        let mut counted = Counted {
-            person: person.clone(),
-            org: org.clone(),
-            call: call.clone(),
-            holders: vec![org],
-        };
-        match principal::reserve_repo_request(&self.env, &person, claim, false).await {
-            Ok(theirs) if theirs.allowed => {
-                counted.holders.push(person);
+        // Then the person: one person can make any number of organizations, so the same cap holds for whoever asks, in
+        // their own object. If it refuses or can't answer, the organization's place for this room stays where it is.
+        match principal::reserve_repo_request(&self.env, &person, &room, false).await {
+            Ok(theirs) if theirs.held => {
                 // A test holds this call here, counted against both caps, to change the room before its transaction.
                 #[cfg(feature = "failpoints")]
                 self.test_hold(&sql, "test_hold_counted").await;
-                Ok((true, Some(counted)))
+                Ok((true, Some(Counted { person, org })))
             }
-            Ok(_) => {
-                self.uncount_repository_request(&counted, identity, key, hash)
-                    .await;
-                Err(limit())
-            }
-            Err(_) => {
-                self.uncount_repository_request(&counted, identity, key, hash)
-                    .await;
-                Err(ApiError::api(503, NOT_COUNTED))
-            }
-        }
-    }
-
-    /// Gives back the claims [`Workspace::count_repository_request`] took for this call, when the command recorded no
-    /// request. Only this call's own: another call's claim for the same room stays, the same person's included.
-    ///
-    /// If the room holds the answer this very call was stored under, its request is recorded, and the call that erred
-    /// is a repeat of it, refused for something else: the claim is the recorded request's, and is kept. An accepted
-    /// claim is never given back by the objects that hold it, whatever asks.
-    pub(super) async fn uncount_repository_request(
-        &self,
-        counted: &Counted,
-        identity: &Identity,
-        key: &str,
-        hash: &str,
-    ) {
-        let sql = self.state.storage().sql();
-        if recorded_under(&sql, &identity.id, key, hash) {
-            return;
-        }
-        let Ok(room) = objects::room_id(&sql) else {
-            return;
-        };
-        let claim = principal::RepoClaim {
-            workspace: &room,
-            claimant: &counted.person,
-            call: &counted.call,
-        };
-        for holder in &counted.holders {
-            if principal::release_repo_request(&self.env, holder, claim)
-                .await
-                .is_err()
-            {
-                console_error!(
-                    "{}",
-                    json!({ "at": "provision.count_not_released", "room": room })
-                );
-            }
-        }
-    }
-
-    /// Once the command has recorded the request, or replayed its recorded answer: marks this call's claims accepted,
-    /// in the organization's object and the person's, so nothing gives them back. If one can't be reached the claim
-    /// stays as it is, counted, and is only ever given back by this same call, which [`recorded_under`] then refuses.
-    pub(super) async fn keep_repository_request(&self, counted: &Counted) {
-        let sql = self.state.storage().sql();
-        let Ok(room) = objects::room_id(&sql) else {
-            return;
-        };
-        let claim = principal::RepoClaim {
-            workspace: &room,
-            claimant: &counted.person,
-            call: &counted.call,
-        };
-        for holder in &counted.holders {
-            if principal::accept_repo_request(&self.env, holder, claim)
-                .await
-                .is_err()
-            {
-                console_error!(
-                    "{}",
-                    json!({ "at": "provision.count_not_accepted", "room": room })
-                );
-            }
+            Ok(_) => Err(limit()),
+            Err(_) => Err(ApiError::api(503, NOT_COUNTED)),
         }
     }
 

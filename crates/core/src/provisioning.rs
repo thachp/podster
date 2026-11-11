@@ -907,6 +907,14 @@ pub fn repository_request_allowed(
     }
 }
 
+/// Whether a room holds a place in one count, an organization's or a person's, after asking now. `holds` says the room
+/// already has a place there that hasn't left the window: it keeps it, whatever the count, since it adds no room.
+/// Otherwise it takes one only if [`repository_request_allowed`] allows, on the stamps of the other rooms' places. A
+/// place is never given back, so this only ever errs towards refusing.
+pub fn repository_place_held(holds: bool, others_stamped_at: &[i64], now: i64) -> bool {
+    holds || repository_request_allowed(others_stamped_at, now).is_ok()
+}
+
 /// Whether an organization holds the provisioning delegation, from what its record says: held unless an operator
 /// explicitly took it back. No record means held.
 pub fn organization_delegated(recorded: Option<bool>) -> bool {

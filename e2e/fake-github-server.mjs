@@ -30,8 +30,10 @@ const server = createServer(async (req, res) => {
     res.writeHead(answer.status, { "content-type": answer.headers.get("content-type") ?? "application/json" });
     res.end(Buffer.from(await answer.arrayBuffer()));
   } catch (error) {
+    // What went wrong stays in this process's own output. The answer says only that the fake failed.
+    console.error("the fake GitHub failed on", req.method, control ? "a control call" : "a call", error);
     res.writeHead(500, { "content-type": "application/json" });
-    res.end(JSON.stringify({ message: String(error) }));
+    res.end(JSON.stringify({ message: "the fake GitHub failed" }));
   }
 });
 server.listen(Number(port), "127.0.0.1", () => {

@@ -57,6 +57,8 @@ type AgentScript = {
   /** A commit's checks, for the server's own read (M5 step 8): commit status states, and check runs as [status, conclusion]. `checksRead` is a status for that read, if not 200. */
   checks?: { statuses?: string[]; runs?: [string, string | null][] };
   checksRead?: number;
+  /** A status for reading the repository itself, and with it its default branch, if not 200. */
+  describe?: number;
   /** The default branch the agent-token and merge Apps are told, if not the repository's own. */
   defaultBranch?: string;
   /** How the merge call goes: ok; lost (merges, then answers 500); error (answers 500, merges nothing); refuse (405, as the rules would); moved (the head changes first, so 409); merged_by_other (someone merges another head first, so 200). */
@@ -452,7 +454,7 @@ function mergeCall(request: Request, path: string, bearer: string, body: any): R
   const script = agentRepos.get(repo) ?? {};
   const defaultBranch = script.defaultBranch ?? repos.get(repo)?.defaultBranch ?? readyRepos.get(repo)?.defaultBranch ?? "main";
   // The repository itself, for its default branch. Not counted among the calls a test lists.
-  if (describing) return json({ id: repo, default_branch: defaultBranch, description: "SECRET-DESCRIPTION" });
+  if (describing) return script.describe && script.describe !== 200 ? json({ message: "SECRET-PROVIDER-TEXT" }, script.describe) : json({ id: repo, default_branch: defaultBranch, description: "SECRET-DESCRIPTION" });
   // A commit's statuses or check runs, for a token that may read them. Their names and text are theirs, and Podster keeps none.
   if (checking) {
     const needs = checking[3] === "status" ? "statuses" : "checks";
@@ -504,6 +506,8 @@ function mergeCall(request: Request, path: string, bearer: string, body: any): R
     agentRepos.set(repo, { ...script, has: [...(script.has ?? []), pull.head_sha] });
     // The repository's default branch is changed a moment after the merge lands.
     if (script.merge === "default_moves") agentRepos.set(repo, { ...agentRepos.get(repo), defaultBranch: "trunk" });
+    // The repository can't be read for a moment after the merge lands, so its default branch isn't known.
+    if (script.merge === "default_unreadable") agentRepos.set(repo, { ...agentRepos.get(repo), describe: 503 });
     if (script.merge === "lost") return answer({ message: "SECRET-PROVIDER-TEXT" }, 500);
     return answer({ sha: pull.merge_commit_sha, merged: true, message: "Pull Request successfully merged" });
   }

@@ -645,3 +645,25 @@ pub fn merge_call(status: Option<u16>) -> MergeCall {
         Some(other) => MergeCall::Refused(other),
     }
 }
+
+/// How many times the job reads again for a merge whose outcome isn't known, before it stops. Proposed.
+pub const MAX_UNKNOWN_READS: u32 = 12;
+const UNKNOWN_READ_MIN_MS: i64 = 15 * 60 * 1000;
+const UNKNOWN_READ_MAX_MS: i64 = 6 * 60 * 60 * 1000;
+
+/// How long to wait before the next read of a merge whose outcome isn't known, having tried this many times: fifteen
+/// minutes, doubling to six hours. Proposed.
+pub fn unknown_read_wait_ms(reads_made: u32) -> i64 {
+    UNKNOWN_READ_MIN_MS
+        .checked_shl(reads_made.min(16))
+        .map_or(UNKNOWN_READ_MAX_MS, |wait| {
+            wait.clamp(UNKNOWN_READ_MIN_MS, UNKNOWN_READ_MAX_MS)
+        })
+}
+
+/// Whether the job reads again for a merge whose outcome isn't known. Never in a room that's archived or suspended,
+/// and not past the cap. After that the outcome stays recorded as unknown until a person asks for the merge again,
+/// which begins with a read.
+pub fn unknown_read_allowed(reads_made: u32, room_open: bool) -> bool {
+    room_open && reads_made < MAX_UNKNOWN_READS
+}

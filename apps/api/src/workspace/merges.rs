@@ -37,9 +37,10 @@ use podster_core::provisioning::{
 use podster_core::repo_grants::Grant;
 use podster_core::repo_merge::{
     check_change_standing, check_merge_authority, decide_merge_request, decide_merge_step,
-    merge_attempt_allowed, merge_call, merge_request_allowed, merge_transition, Actor, Change,
-    ChangeStanding, MergeAuthority, MergeAuthorized, MergeEvent, MergeFailure, MergeObserved,
-    MergeRefusal, MergeStep, PullObservation, PullState, ReviewedBase,
+    merge_attempt_allowed, merge_call, merge_request_allowed, merge_transition,
+    unknown_read_allowed, unknown_read_wait_ms, Actor, Change, ChangeStanding, MergeAuthority,
+    MergeAuthorized, MergeEvent, MergeFailure, MergeObserved, MergeRefusal, MergeStep,
+    PullObservation, PullState, ReviewedBase,
 };
 use podster_core::repositories::{GrantAction, LinkStatus, MergeState, RequestState};
 use podster_core::task_change::{pull_state_name, PullSeen};
@@ -285,7 +286,12 @@ pub(super) fn request(
         provider_repo_id: int(&row["provider_repo_id"]),
         submission_no: u32::try_from(int(&row["submission_no"])).unwrap_or(0),
         reviewed_commit_sha: row["reviewed_commit_sha"].as_str(),
-        merge_state: inputs.merge_state(),
+        // One whose outcome the job stopped reading for may be asked for again: that request's first pass reads.
+        merge_state: if row["merge_step"].as_str() == Some(UNKNOWN_FINAL) {
+            MergeState::Failed
+        } else {
+            inputs.merge_state()
+        },
         merge_reason: merge_reason.as_deref(),
     });
     decide_merge_request(&authority, change.as_ref()).map_err(refused)?;
@@ -678,8 +684,8 @@ impl From<MergeFailure> for Ending {
     }
 }
 
-/// How long between reads of a merge whose outcome isn't known yet. They go on until one settles it.
-const UNKNOWN_READ_EVERY_MS: i64 = 15 * 60 * 1000;
+/// The step recorded once the job has stopped reading for a merge whose outcome isn't known.
+const UNKNOWN_FINAL: &str = "outcome_unknown_final";
 
 /// Records that a merge call went out, the merge was about to end as `pending`, and GitHub couldn't be read to see what
 /// the call did. Not an end: the job keeps reading, and the first read that works settles it, as succeeded if the call
@@ -694,21 +700,38 @@ fn finish_unknown(
     let from = merge_state_of(sql, task_id)?;
     match from.and_then(|from| merge_transition(task_id, from, &MergeEvent::OutcomeUnknown)) {
         Some(MergeState::OutcomeUnknown) => {}
-        // Already unknown: only the next read's time moves.
+        // Already unknown, and another read couldn't be made: it's counted, the next one waits longer, and past the
+        // cap, or in a room that's archived or suspended, the job stops reading. The outcome stays recorded as
+        // unknown, and a person asking for the merge again begins with a read.
         _ => {
-            return exec(
+            let reads = rows(
                 sql,
-                "UPDATE task_change SET merge_next_at = ? WHERE task_id = ? AND merge_state = 'outcome_unknown'",
-                vec![(now + UNKNOWN_READ_EVERY_MS).into(), task_id.into()],
-            )
+                "SELECT merge_attempts FROM task_change WHERE task_id = ? AND merge_state = 'outcome_unknown'",
+                vec![task_id.into()],
+            )?
+            .first()
+            .map_or(0, |row| int(&row["merge_attempts"]).clamp(0, 64) as u32)
+            .saturating_add(1);
+            if unknown_read_allowed(reads, room_open(sql)?) {
+                return exec(
+                    sql,
+                    "UPDATE task_change SET merge_attempts = ?, merge_next_at = ? WHERE task_id = ? AND merge_state = 'outcome_unknown'",
+                    vec![
+                        i64::from(reads).into(),
+                        (now + unknown_read_wait_ms(reads)).into(),
+                        task_id.into(),
+                    ],
+                );
+            }
+            return end_unknown_reads(sql, room, task_id, now);
         }
     }
     exec(
         sql,
-        "UPDATE task_change SET merge_state = 'outcome_unknown', merge_reason = ?1, merge_next_at = ?2, merge_step = 'outcome_unknown', updated_at = ?3 WHERE task_id = ?4",
+        "UPDATE task_change SET merge_state = 'outcome_unknown', merge_reason = ?1, merge_attempts = 0, merge_next_at = ?2, merge_step = 'outcome_unknown', updated_at = ?3 WHERE task_id = ?4",
         vec![
             pending.code.as_str().into(),
-            (now + UNKNOWN_READ_EVERY_MS).into(),
+            (now + unknown_read_wait_ms(0)).into(),
             now.into(),
             task_id.into(),
         ],
@@ -727,6 +750,43 @@ fn finish_unknown(
     console_log!(
         "{}",
         json!({ "event": "merge.outcome_unknown", "ws": room, "task": task_id })
+    );
+    Ok(())
+}
+
+/// Whether the room is neither archived nor suspended.
+fn room_open(sql: &SqlStorage) -> R<bool> {
+    Ok(
+        rows(sql, "SELECT status, suspended_at FROM workspace", vec![])?
+            .first()
+            .is_some_and(|room| {
+                room["status"].as_str() != Some(ARCHIVED) && room["suspended_at"].is_null()
+            }),
+    )
+}
+
+/// Stops the job reading for a merge whose outcome isn't known: no next read, the step says so, and one event. The
+/// state stays `outcome_unknown`. Nothing is claimed either way.
+fn end_unknown_reads(sql: &SqlStorage, room: &str, task_id: &str, now: i64) -> R<()> {
+    exec(
+        sql,
+        "UPDATE task_change SET merge_next_at = NULL, merge_step = ?, updated_at = ? WHERE task_id = ? AND merge_state = 'outcome_unknown' AND merge_step <> ?",
+        vec![UNKNOWN_FINAL.into(), now.into(), task_id.into(), UNKNOWN_FINAL.into()],
+    )?;
+    let requester = requester_of(sql, task_id)?;
+    store::record_event_about(
+        sql,
+        "merge.outcome_unknown_final",
+        SYSTEM,
+        Some(&requester),
+        Some(task_id),
+        &Transition::NONE,
+        told_of_outcome(sql, &requester)?,
+        now,
+    )?;
+    console_log!(
+        "{}",
+        json!({ "event": "merge.outcome_unknown_final", "ws": room, "task": task_id })
     );
     Ok(())
 }
@@ -1231,6 +1291,11 @@ impl Workspace {
         let (Some(row), Some(target)) = (pending.first(), target(&sql, task_id)?) else {
             return Ok(());
         };
+        // A room that's archived or suspended asks GitHub nothing more, reads included.
+        if !room_open(&sql)? {
+            let (room, task) = (room.to_string(), task_id.to_string());
+            return self.in_transaction(move |sql| end_unknown_reads(sql, &room, &task, now_ms()));
+        }
         let ending = Ending {
             code: text(&row["merge_reason"]).unwrap_or_else(|| "merge_outcome_unknown".to_string()),
             follow_up: false,

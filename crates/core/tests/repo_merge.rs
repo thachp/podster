@@ -1342,3 +1342,17 @@ fn merge_caps_and_the_new_failure_codes() {
         assert!(!failure.needs_follow_up());
     }
 }
+
+#[test]
+fn reads_of_an_unknown_outcome_back_off_and_stop() {
+    use podster_core::repo_merge::{unknown_read_allowed, unknown_read_wait_ms, MAX_UNKNOWN_READS};
+    assert_eq!(unknown_read_wait_ms(0), 15 * 60 * 1000);
+    assert_eq!(unknown_read_wait_ms(1), 30 * 60 * 1000);
+    assert_eq!(unknown_read_wait_ms(4), 4 * 60 * 60 * 1000);
+    assert_eq!(unknown_read_wait_ms(5), 6 * 60 * 60 * 1000);
+    assert_eq!(unknown_read_wait_ms(u32::MAX), 6 * 60 * 60 * 1000);
+    assert!(unknown_read_allowed(MAX_UNKNOWN_READS - 1, true));
+    assert!(!unknown_read_allowed(MAX_UNKNOWN_READS, true));
+    // Nothing is read for a room that's archived or suspended, however few reads were made.
+    assert!(!unknown_read_allowed(0, false));
+}

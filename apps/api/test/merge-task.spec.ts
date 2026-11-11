@@ -1058,6 +1058,102 @@ describe("the review's findings (M5 step 7b)", () => {
     expect(await change(open.id, open.task)).toMatchObject({ merge_state: "failed", merge_reason: "grant_required", merge_sha: null });
   });
 
+  it("records a landed merge only once the default branch has been read, and waits until then", async () => {
+    const r = await requested();
+    // The merge lands, and the read that follows can't say what the default branch is.
+    await fake({ merge: "default_unreadable" });
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "requested", merge_step: "merge", merge_sha: null });
+    expect(await merges()).toHaveLength(1);
+    // Still unreadable: still not recorded, and no second merge call.
+    await pass(r.id);
+    expect((await change(r.id, r.task)).merge_state).toBe("requested");
+    expect(await merges()).toHaveLength(1);
+    // Readable, and the same branch: recorded as the merge it was.
+    await fake({ merge: "ok", describe: 200 });
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED });
+    expect(await link(r.id)).toEqual({ status: "ready", status_reason: null });
+    expect(await merges()).toHaveLength(1);
+  });
+
+  it("stops reading for an unknown outcome after twelve tries, waiting longer each time, and at once in a room that's closed", async () => {
+    const unknown = async () => {
+      await fresh();
+      const r = await requested();
+      await dies(r.id, "after_merge_call");
+      await pass(r.id);
+      await dies(r.id, null);
+      await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) });
+      await fake({ mergeMint: 500 });
+      await pass(r.id);
+      expect(await change(r.id, r.task)).toMatchObject({ merge_state: "outcome_unknown", merge_attempts: 0, merge_step: "outcome_unknown" });
+      return r;
+    };
+    const r = await unknown();
+    const waits: number[] = [];
+    for (let n = 1; n <= 11; n++) {
+      const before = Date.now();
+      await pass(r.id);
+      const row = await change(r.id, r.task);
+      expect(row, String(n)).toMatchObject({ merge_state: "outcome_unknown", merge_attempts: n, merge_step: "outcome_unknown" });
+      waits.push(Math.round((row.merge_next_at - before) / 60_000));
+    }
+    // Thirty minutes, an hour, two, four, and then six hours each time.
+    expect(waits).toEqual([30, 60, 120, 240, 360, 360, 360, 360, 360, 360, 360]);
+    // The twelfth try is the last: no next read, said once, and the outcome still isn't claimed either way.
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "outcome_unknown", merge_step: "outcome_unknown_final", merge_next_at: null, merge_finished_at: null });
+    const tokens = (await minted()).length;
+    await alarm(r.id, 3);
+    expect((await minted()).length).toBe(tokens);
+    expect((await events(r.id)).filter((e) => e.type === "merge.outcome_unknown_final")).toEqual([{ type: "merge.outcome_unknown_final", actor_id: "system", subject_id: MERGER.id, task_id: r.task, reason: null }]);
+    // A person asking again begins with a read, and with GitHub readable the merge the first call made is recorded.
+    await fake({ mergeMint: 201 });
+    await grant(r.id, MERGER);
+    expect((await merge(MERGER, r.id, r.task)).status).toBe(200);
+    await pass(r.id);
+    expect(await change(r.id, r.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED });
+    expect(await merges()).toHaveLength(1);
+    // In a room archived, or suspended, after the outcome became unknown: the job stops at once, and asks GitHub nothing.
+    for (const close of [
+      async (room: any) => void (await must(OWNER, "POST", `/v1/workspaces/${room.id}/archive`, { policy_version: await version(room.id) })),
+      (room: any) => inRoom(room.id, (sql) => void sql.exec("UPDATE workspace SET suspended_at = 5, suspension_reason = 'test'")),
+    ]) {
+      const closed = await unknown();
+      await close(closed);
+      await fake({ mergeMint: 201 });
+      const before = (await minted()).length;
+      await pass(closed.id);
+      expect(await change(closed.id, closed.task)).toMatchObject({ merge_state: "outcome_unknown", merge_step: "outcome_unknown_final", merge_next_at: null });
+      expect((await minted()).length).toBe(before);
+    }
+  });
+
+  it("asks the owner's standing again before the mark and before the merge, not once a pass", async () => {
+    // The owner leaves the organization while GitHub is answering, and the room hasn't been told: the grant they gave
+    // counts for nothing by the time the next intent is recorded. Rooms made after this aren't reached by it.
+    for (const point of ["before the mark", "between the mark and the merge"] as const) {
+      await fresh();
+      const r = await requested();
+      await fake({ mode: "gate" });
+      const running = pass(r.id);
+      await minting();
+      if (point === "between the mark and the merge") {
+        await release();
+        await minting();
+      }
+      await must(OWNER, "POST", "/v1/org-departures", {}, { claims: { departure: { person: OWNER.id, org: ORG, left_at: Date.now() } } });
+      await inRoom(r.id, (sql) => void sql.exec("UPDATE workspace SET owner_left_at = NULL"));
+      await fake({ mode: "ok" });
+      await release();
+      await running;
+      expect(await change(r.id, r.task), point).toMatchObject({ merge_state: "failed", merge_reason: "grant_stale", merge_called_at: null });
+      expect(await merges(), point).toEqual([]);
+      expect((await github()).statuses.length, point).toBe(point === "before the mark" ? 0 : 1);
+    }
+  });
+
   it("keeps an earlier pass's call on record when a later pass can't get a token to call with (L6)", async () => {
     const r = await requested();
     // A first call that GitHub answered 500 to, and didn't merge: it's on record.

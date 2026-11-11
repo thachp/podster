@@ -25,24 +25,62 @@ use worker::*;
 type R<T> = std::result::Result<T, ApiError>;
 
 /// How long an attempt may go with no bytes arriving, and how long it may take at all. 100 MB in 30 minutes is about 55 KB/s. These
-/// are what stop a stalled sender holding an attempt open, and a test build shortens them so they can be run.
-const IDLE_LIMIT_MS: u64 = if cfg!(feature = "failpoints") {
-    3_000
-} else {
-    60_000
-};
-pub(crate) const TOTAL_LIMIT_MS: u64 = if cfg!(feature = "failpoints") {
-    8_000
-} else {
-    30 * 60 * 1000
-};
-const DEADLINE_CHECK_MS: u64 = IDLE_LIMIT_MS / 4;
+/// are what stop a stalled sender holding an attempt open. Test builds wait as long: a shorter wait there turned any step a busy
+/// machine was slow to take, while a test's bytes were held, into a timed-out upload. A test that means a limit to run out sets
+/// that one limit for its own request (see `Limits::for_request`).
+const IDLE_LIMIT_MS: u64 = 60_000;
+pub(crate) const TOTAL_LIMIT_MS: u64 = 30 * 60 * 1000;
 /// How long the room gets to answer, since a stuck room shouldn't hold a finished upload open for ever.
-const ROOM_ANSWER_LIMIT_MS: u64 = if cfg!(feature = "failpoints") {
-    3_000
-} else {
-    30_000
-};
+const ROOM_ANSWER_LIMIT_MS: u64 = 30_000;
+
+/// The waits one upload gets: on the sender, and on the room before and after the bytes.
+#[derive(Clone, Copy)]
+struct Limits {
+    idle_ms: u64,
+    total_ms: u64,
+    begin_ms: u64,
+    complete_ms: u64,
+}
+
+impl Limits {
+    /// Production's waits. Only a test build reads `x-test-upload-limits` (`idle=…,total=…,begin=…,complete=…`, each in ms),
+    /// so a test that means one of them to run out shortens just that one, and only for its own request.
+    fn for_request(req: &Request) -> Self {
+        let mut limits = Limits {
+            idle_ms: IDLE_LIMIT_MS,
+            total_ms: TOTAL_LIMIT_MS,
+            begin_ms: ROOM_ANSWER_LIMIT_MS,
+            complete_ms: ROOM_ANSWER_LIMIT_MS,
+        };
+        if !cfg!(feature = "failpoints") {
+            return limits;
+        }
+        let Ok(Some(given)) = req.headers().get("x-test-upload-limits") else {
+            return limits;
+        };
+        for part in given.split(',') {
+            let Some((name, ms)) = part.split_once('=') else {
+                continue;
+            };
+            let Ok(ms) = ms.trim().parse::<u64>() else {
+                continue;
+            };
+            match name.trim() {
+                "idle" => limits.idle_ms = ms,
+                "total" => limits.total_ms = ms,
+                "begin" => limits.begin_ms = ms,
+                "complete" => limits.complete_ms = ms,
+                _ => {}
+            }
+        }
+        limits
+    }
+
+    /// How often the sender's two limits are checked.
+    fn check_ms(&self) -> u64 {
+        (self.idle_ms.min(self.total_ms) / 4).max(1)
+    }
+}
 
 pub const BUCKET: &str = "ASSETS";
 
@@ -169,10 +207,11 @@ async fn within_deadlines<T>(
     arrived: &Rc<RefCell<Arrived>>,
     announced_size: u64,
     started: u64,
+    limits: Limits,
 ) -> Option<T> {
     let mut put = Box::pin(put);
     loop {
-        let tick = Box::pin(Delay::from(Duration::from_millis(DEADLINE_CHECK_MS)));
+        let tick = Box::pin(Delay::from(Duration::from_millis(limits.check_ms())));
         match select(put, tick).await {
             Either::Left((done, _)) => return Some(done),
             Either::Right((_, still_going)) => put = still_going,
@@ -182,8 +221,8 @@ async fn within_deadlines<T>(
             let seen = arrived.borrow();
             (seen.bytes, seen.last_chunk_at)
         };
-        let idle = bytes < announced_size && now.saturating_sub(last) > IDLE_LIMIT_MS;
-        if idle || now.saturating_sub(started) > TOTAL_LIMIT_MS {
+        let idle = bytes < announced_size && now.saturating_sub(last) > limits.idle_ms;
+        if idle || now.saturating_sub(started) > limits.total_ms {
             return None;
         }
     }
@@ -191,8 +230,12 @@ async fn within_deadlines<T>(
 
 /// Waits for a call for only so long. `None` means nobody knows yet how it went.
 async fn within_room_limit<T>(call: impl std::future::Future<Output = T>) -> Option<T> {
+    within(ROOM_ANSWER_LIMIT_MS, call).await
+}
+
+async fn within<T>(limit_ms: u64, call: impl std::future::Future<Output = T>) -> Option<T> {
     let call = Box::pin(call);
-    let limit = Box::pin(Delay::from(Duration::from_millis(ROOM_ANSWER_LIMIT_MS)));
+    let limit = Box::pin(Delay::from(Duration::from_millis(limit_ms)));
     match select(call, limit).await {
         Either::Left((done, _)) => Some(done),
         Either::Right(_) => None,
@@ -327,13 +370,17 @@ pub async fn stream_upload(mut req: Request, env: Env, room: &str, id: &str) -> 
         return Err(upload_not_found());
     }
     let token = bearer(&req)?;
+    let limits = Limits::for_request(&req);
     let started = Date::now().as_millis();
-    let mut begun = within_room_limit(ask_room(
-        &env,
-        room,
-        crate::INTERNAL_UPLOAD_BEGIN,
-        &json!({ "id": id, "token": token }),
-    ))
+    let mut begun = within(
+        limits.begin_ms,
+        ask_room(
+            &env,
+            room,
+            crate::INTERNAL_UPLOAD_BEGIN,
+            &json!({ "id": id, "token": token }),
+        ),
+    )
     .await
     .ok_or(ApiError::api(504, "room_unavailable"))??;
     if begun.status_code() >= 400 {
@@ -341,6 +388,13 @@ pub async fn stream_upload(mut req: Request, env: Env, room: &str, id: &str) -> 
     }
     let begun: Value = begun.json().await?;
     uploader_still_here(&env, &begun).await?;
+    // Test builds tell the test runtime's outbound fake when an attempt is past the room's begin step and the uploader's first
+    // check, so a test acts while its bytes arrive, not after a guess at how long getting here takes. Nothing else answers it.
+    if cfg!(feature = "failpoints") {
+        if let Ok(url) = Url::parse(&format!("https://upload-gate.example.com/receiving/{id}")) {
+            let _ = Fetch::Url(url).send().await;
+        }
+    }
     let key = begun["key"].as_str().unwrap_or_default().to_string();
     let attempt = begun["attempt"].as_str().unwrap_or_default().to_string();
     let announced_sha256 = begun["sha256"].as_str().unwrap_or_default().to_string();
@@ -366,7 +420,7 @@ pub async fn stream_upload(mut req: Request, env: Env, room: &str, id: &str) -> 
                 .sha256(unhex(&announced_sha256))
                 .execute();
             let both = join(put, pump(body, &writer, &arrived, announced_size));
-            match within_deadlines(both, &arrived, announced_size, started).await {
+            match within_deadlines(both, &arrived, announced_size, started, limits).await {
                 Some((result, ())) => result.map(|_| ()).map_err(|_| ()),
                 None => {
                     // Dropping the write above left R2 waiting on this stream, and this ends it with nothing kept.
@@ -440,13 +494,16 @@ pub async fn stream_upload(mut req: Request, env: Env, room: &str, id: &str) -> 
         log("upload.refused", "uploader_gone");
         return Err(refused);
     }
-    let asked = within_room_limit(ask_room(
-        &env,
-        room,
-        crate::INTERNAL_UPLOAD_COMPLETE,
-        &json!({ "id": id, "attempt": attempt, "size": seen.bytes, "sha256": received_sha256,
+    let asked = within(
+        limits.complete_ms,
+        ask_room(
+            &env,
+            room,
+            crate::INTERNAL_UPLOAD_COMPLETE,
+            &json!({ "id": id, "attempt": attempt, "size": seen.bytes, "sha256": received_sha256,
                  "media_type": completed.kind.media_type() }),
-    ))
+        ),
+    )
     .await;
     // The room may have accepted the file without saying so, and deleting the bytes then would lose a file it holds. If it didn't,
     // these bytes stay unreferenced until the sweep in step 8, and the sender's retry starts a new attempt.

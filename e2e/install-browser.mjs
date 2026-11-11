@@ -8,22 +8,25 @@
 //
 //   1. The browser itself comes from Playwright's own download host, with no apt.
 //   2. The system packages are tried up to three times, each attempt bounded, because a mirror that doesn't resolve
-//      makes apt wait ten minutes before it gives up.
-//   3. Whatever happened, the browser is started once (browser-launch-check.mjs). If it can't start, this fails with its
-//      error.
-//   4. If the packages couldn't be installed, this goes on only if the browser has a real glyph for each script the
-//      accessibility run times (Arabic, Thai, Hebrew). Those checks put an upper bound on how long the main thread is
-//      blocked laying such text out, and text drawn as "missing" boxes is never shaped, so it would pass having measured
-//      nothing. Without the glyphs this fails and names them. With them it prints WARNING_MARK and goes on.
+//      makes apt wait ten minutes before it gives up. If they install, that's the normal path and nothing below changes
+//      what the run uses.
+//   3. Whatever happened, the browser is started once (browser-launch-check.mjs), which says which font draws each
+//      script the accessibility run times (Arabic, Thai, Hebrew). If it can't start, this fails with its error.
+//   4. THE FALLBACK, only if the packages couldn't be installed. Those accessibility checks put an upper bound on how
+//      long the main thread is blocked laying such text out, and text drawn as "missing" boxes is never shaped, so it
+//      would pass having measured nothing. For a script with no font, the font pinned in package-lock.json (PINNED) is
+//      copied into the user's font folder and the browser is started again. If every script is then drawn, this prints
+//      WARNING_MARK, naming where each font came from, and goes on. If one still isn't, this fails and names it.
 //
 // The decision is `install` below, with what it does passed in, so install-browser-selftest.mjs runs it with no network.
 import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { childEnv } from "./child-env.mjs";
 
-/** The line to search a run's log for: the run used the runner image's own libraries and fonts. */
+/** The line to search a run's log for: the run used the runner image's own libraries and fonts, and any pinned ones. */
 export const WARNING_MARK = "WARNING browser-system-packages-not-installed";
 export const ATTEMPTS = 3;
 /** One attempt at the packages takes about 8 seconds when the mirror answers. */
@@ -31,13 +34,28 @@ export const DEPS_SECONDS = 90;
 export const backoffMs = (attempt) => attempt * 5_000;
 /** What `playwright install-deps chromium` adds to GitHub's Ubuntu 24.04 image, as of 2026-11-11: fonts only. */
 export const FONT_PACKAGES = "fonts-freefont-ttf fonts-ipafont-gothic fonts-tlwg-loma-otf fonts-unifont fonts-wqy-zenhei xfonts-cyrillic xfonts-scalable";
+/**
+ * A font for each script GitHub's image has none for, from a devDependency pinned in package-lock.json. Static TrueType
+ * files under the SIL Open Font License, used on the test machine only and never put in anything Podster ships.
+ * On 2026-11-11 the image drew Arabic in DejaVu Sans and Hebrew in Liberation Serif, and had nothing for Thai.
+ */
+export const PINNED = { Thai: { package: "@expo-google-fonts/noto-sans-thai", file: "400Regular/NotoSansThai_400Regular.ttf", licence: "LICENSE_FONT" } };
+
+/** "Arabic in DejaVu Sans (runner image), Thai in Noto Sans Thai (pinned package)" */
+const table = (found, pinned = null) =>
+  Object.keys(found.glyphs ?? found.fonts ?? {})
+    .map((name) => {
+      const where = found.glyphs && !found.glyphs[name] ? " (NO GLYPH: drawn as a box)" : pinned ? ` (${pinned.includes(name) ? "pinned package" : "runner image"})` : "";
+      return `${name} in ${found.fonts?.[name] || "an unnamed font"}${where}`;
+    })
+    .join(", ");
 
 /**
- * Installs and decides. `download()` and `deps()` answer `{ ok, why }`, `check()` answers what browser-launch-check.mjs
- * printed, or `{ started: false, error }`. Answers `{ code, path }`, where path is "packages", "fallback" or "no-packages"
- * (not Linux, where there are none to install).
+ * Installs and decides. `download()`, `deps()` and `pin(scripts)` answer `{ ok, why }`, `check()` answers what
+ * browser-launch-check.mjs printed, or `{ started: false, error }`. Answers `{ code, path }`, where path is "packages",
+ * "fallback" or "no-packages" (not Linux, where there are none to install).
  */
-export async function install({ platform, download, deps, check, sleep, say }) {
+export async function install({ platform, download, deps, pin, check, sleep, say }) {
   const tried = async (what, attempt) => {
     let last;
     for (let n = 1; n <= ATTEMPTS; n++) {
@@ -60,28 +78,38 @@ export async function install({ platform, download, deps, check, sleep, say }) {
     path = packages.ok ? "packages" : "fallback";
     why = packages.why ?? "";
   }
-  const found = await check();
-  if (!found?.started) {
+  let found = await check();
+  const cantStart = () => {
     say(`FAIL the browser can't start${path === "fallback" ? `, and its system packages couldn't be installed (${why})` : ""}:\n${found?.error ?? "no answer from browser-launch-check.mjs"}`);
     return { code: 1, path };
-  }
-  const fonts = Object.entries(found.fonts ?? {}).map(([name, font]) => `${name} in ${font || "no font"}`).join(", ");
-  say(`the browser starts: ${found.version}${fonts ? `; it draws ${fonts}` : ""}`);
+  };
+  if (!found?.started) return cantStart();
   if (path !== "fallback") {
+    say(`the browser starts: ${found.version}; it draws ${table(found)}`);
     say(path === "packages" ? "ok   the browser and its system packages are installed" : `ok   the browser is installed (no system packages to install on ${platform})`);
     return { code: 0, path };
   }
   // Without the packages, the checks that time these scripts are only real if the text is really drawn.
-  if (!found.glyphs) {
-    say(`FAIL the browser's system packages couldn't be installed (${why}), and it can't be told here whether the browser has a font for the scripts the accessibility run times. That run's checks on unbroken Arabic, Thai and Hebrew text would mean nothing if it doesn't, so this stops. The packages are: ${FONT_PACKAGES}`);
+  const stop = (reason) => {
+    say(`FAIL the browser's system packages couldn't be installed (${why}), and ${reason}. The accessibility run's checks on that unbroken text would time boxes, not text, and pass having measured nothing, so this stops. The packages are: ${FONT_PACKAGES}`);
     return { code: 1, path };
+  };
+  const without = () => Object.entries(found.glyphs).filter(([, has]) => !has).map(([name]) => name);
+  if (!found.glyphs) return stop("it can't be told here whether the browser has a font for the scripts the accessibility run times");
+  say(`the browser starts with the runner image's own fonts: ${found.version}; it draws ${table(found, [])}`);
+  const wanted = without();
+  const unpinned = wanted.filter((name) => !PINNED[name]);
+  if (unpinned.length) return stop(`the runner image has no font for ${unpinned.join(", ")}, and none is pinned for it in e2e/install-browser.mjs`);
+  if (wanted.length) {
+    const copied = await pin(wanted);
+    if (!copied.ok) return stop(`the runner image has no font for ${wanted.join(", ")}, and the pinned one couldn't be installed (${copied.why})`);
+    say(`installed the pinned font for ${wanted.join(", ")}: ${wanted.map((name) => PINNED[name].package).join(", ")}`);
+    found = await check();
+    if (!found?.started) return cantStart();
+    if (!found.glyphs) return stop("it can't be told here whether the browser has a font for the scripts the accessibility run times");
+    if (without().length) return stop(`the browser still has no font for ${without().join(", ")} after the pinned one was installed; it draws ${table(found)}`);
   }
-  const missing = Object.entries(found.glyphs).filter(([, has]) => !has).map(([name]) => name);
-  if (missing.length) {
-    say(`FAIL the browser's system packages couldn't be installed (${why}), and without them it has no font for ${missing.join(", ")}. The accessibility run's checks on unbroken ${missing.join(", ")} text would time boxes, not text, and pass having measured nothing, so this stops. The packages are: ${FONT_PACKAGES}`);
-    return { code: 1, path };
-  }
-  say(`${WARNING_MARK}: tried ${ATTEMPTS} times (${why}). The browser starts and has a font for ${Object.keys(found.glyphs).join(", ")}, so the run goes on with the runner image's own libraries and fonts, not the ones Playwright installs (${FONT_PACKAGES}). Every check still runs; text may be drawn in other fonts than on a run without this line.`);
+  say(`${WARNING_MARK}: tried ${ATTEMPTS} times (${why}). The browser starts and draws ${table(found, wanted)}. The run goes on with the runner image's own libraries and fonts${wanted.length ? " plus the pinned package's" : ""}, not the ones apt installs (${FONT_PACKAGES}). Every check still runs and shapes real text; it is drawn in other fonts than on a run without this line.`);
   return { code: 0, path };
 }
 
@@ -92,7 +120,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.exit(2);
   }
   const here = dirname(fileURLToPath(import.meta.url));
-  const cli = join(dirname(createRequire(import.meta.url).resolve("playwright/package.json")), "cli.js");
+  const require = createRequire(import.meta.url);
+  const cli = join(dirname(require.resolve("playwright/package.json")), "cli.js");
   // Playwright's installer and the browser are someone else's programs: the allow-listed environment, and where the
   // browsers are kept if that was moved.
   const env = childEnv(Object.fromEntries(["PLAYWRIGHT_BROWSERS_PATH", "CI"].filter((name) => process.env[name] !== undefined).map((name) => [name, process.env[name]])));
@@ -111,6 +140,22 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       const bounded = ["timeout", "-k", "10", String(DEPS_SECONDS), process.execPath, cli, "install-deps", browserName];
       const { ok, why, result } = process.getuid?.() === 0 ? ran(bounded[0], bounded.slice(1)) : ran("sudo", ["-n", ...bounded]);
       return { ok, why: result.status === 124 || result.status === 137 ? `no answer in ${DEPS_SECONDS} seconds` : why };
+    },
+    // Into the user's own font folder, which fontconfig reads and the browser's allow-listed environment (HOME) reaches.
+    pin: (scripts) => {
+      try {
+        if (!process.env.HOME) return { ok: false, why: "HOME isn't set" };
+        const folder = join(process.env.HOME, ".local/share/fonts/podster-e2e");
+        mkdirSync(folder, { recursive: true });
+        for (const name of scripts) {
+          const from = dirname(require.resolve(`${PINNED[name].package}/package.json`));
+          copyFileSync(join(from, PINNED[name].file), join(folder, PINNED[name].file.split("/").at(-1)));
+        }
+        const cached = ran("fc-cache", ["-f", folder], { timeout: 60_000 });
+        return cached.ok ? { ok: true } : { ok: false, why: `fc-cache: ${cached.why}` };
+      } catch (error) {
+        return { ok: false, why: String(error?.message ?? error) };
+      }
     },
     check: () => {
       const { ok, result } = ran(process.execPath, [join(here, "browser-launch-check.mjs"), `--browser=${browserName}`], { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8", timeout: 90_000 });

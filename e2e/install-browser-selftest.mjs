@@ -2,7 +2,7 @@
 //
 //   node install-browser-selftest.mjs
 import { readFileSync } from "node:fs";
-import { ATTEMPTS, backoffMs, FONT_PACKAGES, install, WARNING_MARK } from "./install-browser.mjs";
+import { ATTEMPTS, backoffMs, FONT_PACKAGES, install, PINNED, WARNING_MARK } from "./install-browser.mjs";
 
 let failed = 0;
 const check = (passed, title) => {
@@ -11,10 +11,14 @@ const check = (passed, title) => {
 };
 
 const ALL = { Arabic: true, Thai: true, Hebrew: true };
-const starts = (glyphs = ALL) => ({ started: true, version: "chromium 1", glyphs, fonts: { Arabic: "DejaVu Sans" } });
+const starts = (glyphs = ALL, thai = "Liberation Serif") => ({ started: true, version: "chromium 1", glyphs, fonts: { Arabic: "DejaVu Sans", Thai: thai, Hebrew: "Liberation Serif" } });
+const NO_THAI = starts({ Arabic: true, Thai: false, Hebrew: true });
+const PINNED_THAI = starts(ALL, "Noto Sans Thai");
 /** One run of `install`, with each step answering from a list in turn (its last answer repeats). */
-async function run({ platform = "linux", download = [true], deps = [true], found = starts() }) {
-  const calls = { download: 0, deps: 0, check: 0, slept: [] };
+async function run({ platform = "linux", download = [true], deps = [true], pin = [true], found = starts() }) {
+  const calls = { download: 0, deps: 0, pin: 0, check: 0, slept: [], pinned: [] };
+  // What the browser shows each time it's started: one answer every time, or a list in turn.
+  const shows = Array.isArray(found) ? found : [found];
   const lines = [];
   const answer = (name, list) => async () => {
     const ok = list[Math.min(calls[name]++, list.length - 1)];
@@ -24,7 +28,8 @@ async function run({ platform = "linux", download = [true], deps = [true], found
     platform,
     download: answer("download", download),
     deps: answer("deps", deps),
-    check: async () => (calls.check++, found),
+    pin: async (scripts) => (calls.pinned.push(scripts.join()), answer("pin", pin)()),
+    check: async () => shows[Math.min(calls.check++, shows.length - 1)],
     sleep: async (ms) => void calls.slept.push(ms),
     say: (line) => lines.push(line),
   });
@@ -46,7 +51,7 @@ async function run({ platform = "linux", download = [true], deps = [true], found
 {
   const r = await run({ deps: [false] });
   check(r.calls.deps === ATTEMPTS && ATTEMPTS === 3, "the packages are tried three times and no more");
-  check(r.code === 0 && r.path === "fallback", "packages never installed, the browser starts and has every font: the run goes on");
+  check(r.code === 0 && r.path === "fallback" && r.calls.pin === 0, "packages never installed, the browser starts and has every font: the run goes on, with no font installed");
   check(r.lines.filter((line) => line.startsWith(WARNING_MARK)).length === 1, "with the warning line, once, at the start of a line");
   check(r.text.includes("deps said no") && r.text.includes("runner image's own libraries and fonts"), "which says why and what the run is using");
 }
@@ -59,9 +64,31 @@ async function run({ platform = "linux", download = [true], deps = [true], found
   check(r.code === 1 && r.text.includes("Executable doesn't exist"), "a browser that can't start fails even when the packages installed");
 }
 {
-  const r = await run({ deps: [false], found: starts({ Arabic: true, Thai: false, Hebrew: true }) });
-  check(r.code === 1 && !r.text.includes(WARNING_MARK), "packages never installed and one script has no font: fails");
-  check(/no font for Thai\b/.test(r.text) && r.text.includes(FONT_PACKAGES) && !/no font for [^.]*Arabic/.test(r.text), "naming that script and the packages");
+  const r = await run({ deps: [false], found: [NO_THAI, PINNED_THAI] });
+  check(r.code === 0 && r.path === "fallback" && r.calls.pinned.join("|") === "Thai" && r.calls.check === 2, "packages never installed and one script has no font: its pinned font is installed and the browser started again");
+  const warning = r.lines.filter((line) => line.startsWith(WARNING_MARK));
+  check(warning.length === 1 && warning[0].includes("Thai in Noto Sans Thai (pinned package)") && warning[0].includes("Arabic in DejaVu Sans (runner image)") && warning[0].includes("Hebrew in Liberation Serif (runner image)"), "and the warning says which font drew each script and where it came from");
+  check(r.text.includes("Thai in Liberation Serif (NO GLYPH: drawn as a box)"), "after saying which script was drawn as a box before");
+}
+{
+  const r = await run({ deps: [false], found: [NO_THAI, NO_THAI] });
+  check(r.code === 1 && !r.text.includes(WARNING_MARK) && /still has no font for Thai\b/.test(r.text) && r.text.includes(FONT_PACKAGES), "a script still drawn as a box after its pinned font was installed: fails, naming it and the packages");
+}
+{
+  const r = await run({ deps: [false], pin: [false], found: [NO_THAI, PINNED_THAI] });
+  check(r.code === 1 && r.calls.check === 1 && !r.text.includes(WARNING_MARK) && r.text.includes("pin said no"), "a pinned font that can't be installed: fails with why");
+}
+{
+  const r = await run({ deps: [false], found: starts({ Arabic: false, Thai: false, Hebrew: true }) });
+  check(r.code === 1 && r.calls.pin === 0 && !r.text.includes(WARNING_MARK) && /no font for Arabic,/.test(r.text) && !PINNED.Arabic, "a script with no font and none pinned for it: fails, naming it, without installing anything");
+}
+{
+  const r = await run({ deps: [false], found: [NO_THAI, { started: false, error: "it crashed" }] });
+  check(r.code === 1 && r.text.includes("it crashed") && !r.text.includes(WARNING_MARK), "a browser that stops starting once the pinned font is in: fails with its error");
+}
+{
+  const r = await run({ found: NO_THAI });
+  check(r.code === 0 && r.path === "packages" && r.calls.pin === 0, "the pinned font is never installed when the packages were");
 }
 {
   const r = await run({ deps: [false], found: starts(null) });
@@ -87,6 +114,22 @@ const text = (file) => readFileSync(new URL(file, import.meta.url), "utf8");
 const letters = [...text("./browser-launch-check.mjs").match(/export const SCRIPTS = \{([^}]*)\}/)[1].matchAll(/"([^"]+)"/g)].map((found) => found[1]);
 const seeded = text("./a11y.mjs").match(/const scripts = \[([^\]]*)\];/)?.[1] ?? "";
 check(letters.length === 3 && letters.every((letter) => seeded.includes(`byBytes("${letter}`)), `the scripts asked about are the ones a11y.mjs seeds (${letters.join(" ")})`);
+// The pinned fonts: an exact version with its hash in the lockfile, a development dependency only, and the file and its
+// licence really in the package.
+const manifest = JSON.parse(text("./package.json"));
+const lock = JSON.parse(text("./package-lock.json"));
+for (const [name, font] of Object.entries(PINNED)) {
+  const locked = lock.packages[`node_modules/${font.package}`];
+  check(/^\d+\.\d+\.\d+$/.test(manifest.devDependencies?.[font.package] ?? "") && !manifest.dependencies[font.package], `${name}'s font is a development dependency at an exact version`);
+  check(locked?.version === manifest.devDependencies?.[font.package] && /^sha512-/.test(locked?.integrity ?? "") && locked.dev === true && !locked.hasInstallScript && !locked.dependencies, "the lockfile holds that version's hash, and the package runs nothing on install and brings nothing else");
+  const inPackage = (file) => readFileSync(new URL(`./node_modules/${font.package}/${file}`, import.meta.url));
+  let shipped = false;
+  try {
+    // A static TrueType file as shipped, which fontconfig reads, and the Open Font License beside it.
+    shipped = inPackage(font.file).subarray(0, 4).equals(Buffer.from([0, 1, 0, 0])) && inPackage(font.licence).includes("SIL OPEN FONT LICENSE Version 1.1");
+  } catch {}
+  check(shipped, `the package has ${font.file} as TrueType and its Open Font License`);
+}
 // And CI installs the browser this way and no other.
 const workflow = text("../.github/workflows/ci.yml");
 check(/- run: node install-browser\.mjs\n\s+working-directory: e2e/.test(workflow), "ci.yml installs the browser with install-browser.mjs");

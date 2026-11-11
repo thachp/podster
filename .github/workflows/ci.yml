@@ -112,7 +112,8 @@ jobs:
         working-directory: e2e
       # The browser from Playwright's own host, then its system packages from apt with bounded retries. If the runner's
       # package mirror is down, the job goes on only when the browser starts and has a font for each script the
-      # accessibility run times, and the log then has a line starting "WARNING browser-system-packages-not-installed".
+      # accessibility run times, using the Thai font pinned in e2e/package-lock.json, which the image lacks. The log
+      # then has a line starting "WARNING browser-system-packages-not-installed".
       # Why, in e2e/install-browser.mjs and docs/m0-gate.md.
       - run: node install-browser.mjs
         working-directory: e2e

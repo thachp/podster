@@ -1200,6 +1200,82 @@ describe("the review's findings (M5 step 7b)", () => {
     }
   });
 
+  it("ends a merge whose call went out by the same decision as the pass that made it: no success without the default branch, and a changed one degrades", async () => {
+    const lostAfterCall = async () => {
+      await fresh();
+      const r = await requested();
+      await dies(r.id, "after_merge_call");
+      await pass(r.id);
+      await dies(r.id, null);
+      await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) });
+      return r;
+    };
+    // The merge landed, authority has gone, and the read can't say what the default branch is: not a success yet.
+    const unread = await lostAfterCall();
+    await fake({ describe: 503 });
+    await pass(unread.id);
+    expect(await change(unread.id, unread.task)).toMatchObject({ merge_state: "outcome_unknown", merge_reason: "grant_required", merge_sha: null });
+    await fake({ describe: 200 });
+    await pass(unread.id);
+    expect(await change(unread.id, unread.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED });
+    expect(await link(unread.id)).toEqual({ status: "ready", status_reason: null });
+    // The default branch was changed after the merge landed: recorded as the merge it was, and the link is degraded.
+    const changed = await lostAfterCall();
+    await fake({ defaultBranch: "trunk" });
+    await pass(changed.id);
+    expect(await change(changed.id, changed.task)).toMatchObject({ merge_state: "succeeded", merge_sha: MERGED });
+    expect(await link(changed.id)).toEqual({ status: "degraded", status_reason: "default_branch_changed" });
+    expect(await merges()).toHaveLength(1);
+  });
+
+  it("lets the ordinary watch settle a merge the job stopped reading for, with no merge call and no token of the merge App's", async () => {
+    /** A merge whose outcome the job stopped reading for, with the merge call made (and merged) or only recorded. */
+    const finalUnknown = async (at: "after_merge_call" | "before_merge_call") => {
+      await fresh();
+      const r = await requested();
+      await dies(r.id, at);
+      await pass(r.id);
+      await dies(r.id, null);
+      await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) });
+      await fake({ mergeMint: 500 });
+      await pass(r.id);
+      await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET merge_attempts = 11"));
+      await pass(r.id);
+      expect(await change(r.id, r.task)).toMatchObject({ merge_state: "outcome_unknown", merge_step: "outcome_unknown_final", merge_next_at: null });
+      return r;
+    };
+    /** The change's own watch reads the pull request, as a delivery about it would make it. */
+    const watch = async (id: string) => {
+      await inRoom(id, (sql) => void sql.exec("UPDATE task_change SET nudged_at = ?, read_at = 1, read_failures = 0", Date.now() + 1));
+      await alarm(id);
+    };
+    const mergeTokens = async () => (await minted()).filter((t) => t.permissions.statuses === "write" || t.permissions.contents).length;
+    // The call had merged the reviewed commit: the watch's read of the pull request says so, and that's this request's success.
+    const merged = await finalUnknown("after_merge_call");
+    const before = await mergeTokens();
+    await watch(merged.id);
+    expect(await change(merged.id, merged.task)).toMatchObject({ merge_state: "succeeded", merge_reason: null, merge_sha: MERGED, pr_state: "merged" });
+    expect((await events(merged.id)).at(-1)).toMatchObject({ type: "merge.succeeded", subject_id: MERGER.id });
+    expect(await merges()).toHaveLength(1);
+    expect(await mergeTokens()).toBe(before);
+    // The call never went out, and the pull request is closed unmerged: failed, with the reason it was about to end with.
+    const closed = await finalUnknown("before_merge_call");
+    await watch(closed.id);
+    expect((await change(closed.id, closed.task)).merge_state).toBe("outcome_unknown");
+    await pull(7, { state: "closed" });
+    await watch(closed.id);
+    expect(await change(closed.id, closed.task)).toMatchObject({ merge_state: "failed", merge_reason: "grant_required", merge_sha: null });
+    expect(await merges()).toEqual([]);
+    // Merged by someone at another commit: not the reviewed commit, so not this request's success. The request is
+    // failed, and what the watch saw is recorded as what it is: a merge of a commit nobody reviewed.
+    const other = await finalUnknown("before_merge_call");
+    await pull(7, { head_sha: HEAD2, merged: true, merge_commit_sha: "8d".repeat(20), merged_by: 31337 });
+    await watch(other.id);
+    expect(await change(other.id, other.task)).toMatchObject({ merge_state: "failed", merge_reason: "unreviewed_merge", merged_by_id: 31337 });
+    expect((await change(other.id, other.task)).merge_observed_at).toBeGreaterThan(0);
+    expect((await events(other.id)).map((e) => e.type).slice(-1)).toEqual(["merge.failed"]);
+  });
+
   it("keeps an earlier pass's call on record when a later pass can't get a token to call with (L6)", async () => {
     const r = await requested();
     // A first call that GitHub answered 500 to, and didn't merge: it's on record.

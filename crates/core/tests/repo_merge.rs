@@ -1356,3 +1356,125 @@ fn reads_of_an_unknown_outcome_back_off_and_stop() {
     // Nothing is read for a room that's archived or suspended, however few reads were made.
     assert!(!unknown_read_allowed(0, false));
 }
+
+#[test]
+fn a_read_after_a_recorded_call_is_decided_one_way_everywhere() {
+    use podster_core::repo_merge::{decide_landed, Landed};
+    let auth = MergeAuthorized::when_called("t", REPO, ABC);
+    let reviewed = ReviewedBase {
+        default_branch: "main",
+        base_sha: Some(BASE),
+    };
+    let seen = |state, head: &'static str, has| PullObservation {
+        state,
+        base_ref: "main",
+        base_sha: BASE,
+        head_repo_id: Some(REPO),
+        head_sha: head,
+        default_branch_has_reviewed: has,
+    };
+    // Merged, the reviewed commit, on the default branch, and the default branch read: landed.
+    let merged = seen(PullState::Merged, ABC, Some(true));
+    assert!(matches!(
+        decide_landed(&auth, &reviewed, &merged, None, Some("main")),
+        Landed::Merged {
+            default_branch_differs: false,
+            ..
+        }
+    ));
+    // The default branch has since been changed: still the merge it was, and the caller degrades the link.
+    assert!(matches!(
+        decide_landed(&auth, &reviewed, &merged, None, Some("trunk")),
+        Landed::Merged {
+            default_branch_differs: true,
+            ..
+        }
+    ));
+    // The default branch couldn't be read: nothing is recorded without the comparison.
+    assert_eq!(
+        decide_landed(&auth, &reviewed, &merged, None, None),
+        Landed::DefaultBranchUnread
+    );
+    // Not merged, or not yet on the default branch, or another commit: it didn't land.
+    assert!(matches!(
+        decide_landed(
+            &auth,
+            &reviewed,
+            &seen(PullState::Open, ABC, Some(false)),
+            None,
+            Some("main")
+        ),
+        Landed::No(MergeStep::MarkAndMerge { .. })
+    ));
+    assert_eq!(
+        decide_landed(
+            &auth,
+            &reviewed,
+            &seen(PullState::Merged, ABC, None),
+            None,
+            Some("main")
+        ),
+        Landed::No(MergeStep::ReadAgain)
+    );
+    assert_eq!(
+        decide_landed(
+            &auth,
+            &reviewed,
+            &seen(PullState::Merged, DEF, Some(true)),
+            None,
+            Some("main")
+        ),
+        Landed::No(MergeStep::Failed(MergeFailure::CommitChanged))
+    );
+    assert_eq!(
+        decide_landed(
+            &auth,
+            &reviewed,
+            &seen(PullState::Closed, ABC, Some(false)),
+            None,
+            None
+        ),
+        Landed::No(MergeStep::Failed(MergeFailure::PullClosed))
+    );
+}
+
+#[test]
+fn a_final_unknown_may_be_asked_for_again_and_the_watch_settles_it() {
+    use podster_core::repo_merge::{requestable_state, settle_unknown_from_watch, WatchSettles};
+    assert_eq!(
+        requestable_state(MergeState::OutcomeUnknown, true),
+        MergeState::Failed
+    );
+    assert_eq!(
+        requestable_state(MergeState::OutcomeUnknown, false),
+        MergeState::OutcomeUnknown
+    );
+    for state in [
+        MergeState::NotRequested,
+        MergeState::Requested,
+        MergeState::Succeeded,
+        MergeState::Failed,
+    ] {
+        assert_eq!(requestable_state(state, true), state);
+    }
+    let auth = MergeAuthorized::when_called("t", REPO, ABC);
+    let reviewed = ReviewedBase {
+        default_branch: "main",
+        base_sha: Some(BASE),
+    };
+    let settle = |state, head: &'static str, base: &'static str| {
+        settle_unknown_from_watch(&auth, &reviewed, state, head, Some(REPO), base, BASE)
+    };
+    assert!(matches!(
+        settle(PullState::Merged, ABC, "main"),
+        WatchSettles::Merged(_)
+    ));
+    assert_eq!(settle(PullState::Open, ABC, "main"), WatchSettles::NotYet);
+    assert_eq!(settle(PullState::Closed, ABC, "main"), WatchSettles::Failed);
+    // Merged at another commit, or into another branch: not the reviewed commit on the default branch.
+    assert_eq!(settle(PullState::Merged, DEF, "main"), WatchSettles::Failed);
+    assert_eq!(
+        settle(PullState::Merged, ABC, "release"),
+        WatchSettles::Failed
+    );
+}

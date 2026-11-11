@@ -36,11 +36,12 @@ use podster_core::provisioning::{
 };
 use podster_core::repo_grants::Grant;
 use podster_core::repo_merge::{
-    check_change_standing, check_merge_authority, decide_merge_request, decide_merge_step,
-    merge_attempt_allowed, merge_call, merge_request_allowed, merge_transition,
-    unknown_read_allowed, unknown_read_wait_ms, Actor, Change, ChangeStanding, MergeAuthority,
-    MergeAuthorized, MergeEvent, MergeFailure, MergeObserved, MergeRefusal, MergeStep,
-    PullObservation, PullState, ReviewedBase,
+    check_change_standing, check_merge_authority, decide_landed, decide_merge_request,
+    decide_merge_step, merge_attempt_allowed, merge_call, merge_request_allowed, merge_transition,
+    requestable_state, settle_unknown_from_watch, unknown_read_allowed, unknown_read_wait_ms,
+    Actor, Change, ChangeStanding, Landed, MergeAuthority, MergeAuthorized, MergeEvent,
+    MergeFailure, MergeObserved, MergeRefusal, MergeStep, PullObservation, PullState, ReviewedBase,
+    WatchSettles,
 };
 use podster_core::repositories::{GrantAction, LinkStatus, MergeState, RequestState};
 use podster_core::task_change::{pull_state_name, PullSeen};
@@ -286,12 +287,11 @@ pub(super) fn request(
         provider_repo_id: int(&row["provider_repo_id"]),
         submission_no: u32::try_from(int(&row["submission_no"])).unwrap_or(0),
         reviewed_commit_sha: row["reviewed_commit_sha"].as_str(),
-        // One whose outcome the job stopped reading for may be asked for again: that request's first pass reads.
-        merge_state: if row["merge_step"].as_str() == Some(UNKNOWN_FINAL) {
-            MergeState::Failed
-        } else {
-            inputs.merge_state()
-        },
+        // One whose outcome the job stopped reading for may be asked for again, as core has it.
+        merge_state: requestable_state(
+            inputs.merge_state(),
+            row["merge_step"].as_str() == Some(UNKNOWN_FINAL),
+        ),
         merge_reason: merge_reason.as_deref(),
     });
     decide_merge_request(&authority, change.as_ref()).map_err(refused)?;
@@ -1256,28 +1256,46 @@ impl Workspace {
             default_branch: &target.default_branch,
             base_sha: target.reviewed_base_sha.as_deref(),
         };
-        let merged = match seen.pull {
+        // The same decision the pass that made the call would take, from core, so the two can't drift.
+        let landed = match seen.pull {
             PullAnswer::Found(pull)
                 if pull.number == target.number && pull.repo_id == Some(target.repo_id) =>
             {
-                let step = decide_merge_step(
+                let decided = decide_landed(
                     &recorded,
                     &reviewed,
                     &observation(&pull, seen.default_branch_has),
                     None,
+                    seen.default_branch.as_deref(),
                 );
-                match step {
-                    MergeStep::Succeeded(proof) => Some((proof, pull)),
-                    _ => None,
-                }
+                Some((decided, pull))
             }
             _ => None,
         };
-        let (room, task) = (room.to_string(), task_id.to_string());
-        self.in_transaction(move |sql| match merged {
-            Some((proof, pull)) => finish_succeeded(sql, &room, &task, proof, &pull, now_ms()),
-            None => fail_with(sql, &room, &task, &failure, now_ms()),
-        })
+        let (room_id, task, repo_id) = (room.to_string(), task_id.to_string(), target.repo_id);
+        match landed {
+            Some((
+                Landed::Merged {
+                    proof,
+                    default_branch_differs,
+                },
+                pull,
+            )) => self.in_transaction(move |sql| {
+                let now = now_ms();
+                if default_branch_differs {
+                    degrade(sql, repo_id, DEFAULT_BRANCH_CHANGED, now)?;
+                }
+                finish_succeeded(sql, &room_id, &task, proof, &pull, now)
+            }),
+            // Merged, and the default branch couldn't be read: that's GitHub not read, so the outcome isn't known yet.
+            Some((Landed::DefaultBranchUnread, _)) => {
+                self.log_waiting(room, task_id, "default_branch", 0);
+                unknown(failure)
+            }
+            _ => {
+                self.in_transaction(move |sql| fail_with(sql, &room_id, &task, &failure, now_ms()))
+            }
+        }
     }
 
     /// A pass at a merge whose outcome isn't known: it only reads, and the read settles it.
@@ -1540,35 +1558,39 @@ impl Workspace {
             default_branch: &target.default_branch,
             base_sha: target.reviewed_base_sha.as_deref(),
         };
-        let default_differs = seen
-            .default_branch
-            .as_deref()
-            .is_some_and(|reported| reported != target.default_branch);
-        // Once a merge call is on record, what became of it comes first. A merge that landed is recorded as merged even
-        // if the default branch was changed between the check before the call and this read. The link is still
-        // degraded for that, so nothing more is merged until an operator has looked.
-        // Only with the default branch read: without that comparison nothing is recorded as merged, and the next pass
-        // reads again.
-        if (pass.called || call.is_some())
-            && pull.state == PullState::Merged
-            && seen.default_branch.is_some()
-        {
-            let landed = decide_merge_step(
+        // Once a merge call is on record, what became of it comes first, by the one decision core has for it. A merge
+        // that landed is recorded as merged even if the default branch was changed between the check before the call and
+        // this read, and then the link is degraded, so nothing more is merged until an operator has looked. Without the
+        // default branch read, nothing is recorded, and the next pass reads again.
+        if pass.called || call.is_some() {
+            let landed = decide_landed(
                 &pass.authorized,
                 &reviewed,
                 &observation(&pull, seen.default_branch_has),
                 call.map(merge_call),
+                seen.default_branch.as_deref(),
             );
-            if let MergeStep::Succeeded(proof) = landed {
-                let (room, task, repo_id) = (room.to_string(), task_id.to_string(), target.repo_id);
-                self.in_transaction(move |sql| {
-                    let now = now_ms();
-                    if default_differs {
-                        degrade(sql, repo_id, DEFAULT_BRANCH_CHANGED, now)?;
-                    }
-                    finish_succeeded(sql, &room, &task, proof, &pull, now)
-                })?;
-                return Ok(None);
+            match landed {
+                Landed::Merged {
+                    proof,
+                    default_branch_differs,
+                } => {
+                    let (room, task, repo_id) =
+                        (room.to_string(), task_id.to_string(), target.repo_id);
+                    self.in_transaction(move |sql| {
+                        let now = now_ms();
+                        if default_branch_differs {
+                            degrade(sql, repo_id, DEFAULT_BRANCH_CHANGED, now)?;
+                        }
+                        finish_succeeded(sql, &room, &task, proof, &pull, now)
+                    })?;
+                    return Ok(None);
+                }
+                Landed::DefaultBranchUnread => {
+                    self.log_waiting(room, task_id, "default_branch", 0);
+                    return Ok(None);
+                }
+                Landed::No(_) => {}
             }
         }
         // The default branch GitHub reports, read with the pull request, must be the one the link holds: before the mark,
@@ -1626,5 +1648,52 @@ impl Pass {
             target: self.target.clone(),
             called: self.called,
         }
+    }
+}
+
+/// Settles a merge whose outcome the job stopped reading for, from the ordinary watch's read of the pull request (M5
+/// step 7a's refresh), in the caller's transaction. Only for a change in that state. `core::settle_unknown_from_watch`
+/// decides: merged with the reviewed commit into the default branch is this request's success, closed unmerged or
+/// merged at another commit is its failure, with the reason it was about to end with. Nothing more is read and no call
+/// is made for it.
+pub(super) fn settle_from_watch(
+    sql: &SqlStorage,
+    room: &str,
+    task_id: &str,
+    pull: &PullSeen,
+    now: i64,
+) -> R<()> {
+    let held = rows(
+        sql,
+        "SELECT merge_reason FROM task_change WHERE task_id = ? AND merge_state = 'outcome_unknown' AND merge_step = ?",
+        vec![task_id.into(), UNKNOWN_FINAL.into()],
+    )?;
+    let (Some(row), Some(target)) = (held.first(), target(sql, task_id)?) else {
+        return Ok(());
+    };
+    let recorded = MergeAuthorized::when_called(task_id, target.repo_id, &target.commit);
+    let reviewed = ReviewedBase {
+        default_branch: &target.default_branch,
+        base_sha: target.reviewed_base_sha.as_deref(),
+    };
+    match settle_unknown_from_watch(
+        &recorded,
+        &reviewed,
+        pull.state,
+        &pull.head_sha,
+        pull.head_repo_id,
+        pull.base_ref.as_deref().unwrap_or_default(),
+        &pull.base_sha,
+    ) {
+        WatchSettles::Merged(proof) => finish_succeeded(sql, room, task_id, proof, pull, now),
+        WatchSettles::Failed => {
+            let ending = Ending {
+                code: text(&row["merge_reason"])
+                    .unwrap_or_else(|| "merge_outcome_unknown".to_string()),
+                follow_up: false,
+            };
+            fail_with(sql, room, task_id, &ending, now)
+        }
+        WatchSettles::NotYet => Ok(()),
     }
 }

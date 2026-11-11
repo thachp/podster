@@ -891,7 +891,16 @@ fn a_release_status_is_for_those_shown_the_change_and_for_whoever_asked_for_the_
         caller("asg", Agent, Role::Guest),
         caller("rev", Person, Role::Guest),
     ] {
-        assert_eq!(authorize_release_status(&who, &t, false), Ok(()), "{who:?}");
+        assert_eq!(
+            authorize_release_status(&who, &t, false),
+            Ok(ReleaseView::Whole),
+            "{who:?}"
+        );
+        assert_eq!(
+            authorize_release_status(&who, &t, true),
+            Ok(ReleaseView::Whole),
+            "{who:?}"
+        );
     }
     // Another agent that reads the task: only if it asked for the merge.
     let other = caller("other", Agent, Role::Member);
@@ -899,7 +908,11 @@ fn a_release_status_is_for_those_shown_the_change_and_for_whoever_asked_for_the_
         authorize_release_status(&other, &t, false),
         Err(RepoDenial::NotAllowed)
     );
-    assert_eq!(authorize_release_status(&other, &t, true), Ok(()));
+    // And then only the merge: never more than its view of the change shows.
+    assert_eq!(
+        authorize_release_status(&other, &t, true),
+        Ok(ReleaseView::MergeOnly)
+    );
     // Having asked doesn't show a task that's hidden, and nobody outside the room is told anything.
     let guest = caller("stranger", Agent, Role::Guest);
     assert!(!can_see_task(&guest, &t));

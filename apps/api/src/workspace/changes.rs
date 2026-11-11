@@ -469,7 +469,10 @@ pub(super) fn record(
              observed_base_sha = excluded.observed_base_sha, pr_state = excluded.pr_state, pr_draft = 0, pr_observed_at = excluded.pr_observed_at,
              read_at = excluded.read_at, unchanged_reads = 0, read_failures = 0, not_found_reads = 0, unwatched_at = NULL,
              reviewed_commit_sha = NULL, reviewed_base_sha = NULL, updated_at = excluded.updated_at,
-             submitter_id = excluded.submitter_id, submitter_person = excluded.submitter_person",
+             submitter_id = excluded.submitter_id, submitter_person = excluded.submitter_person,
+             checks_state = CASE WHEN task_change.observed_head_sha IS excluded.observed_head_sha THEN checks_state ELSE NULL END,
+             checks_json = CASE WHEN task_change.observed_head_sha IS excluded.observed_head_sha THEN checks_json ELSE NULL END,
+             checks_observed_at = CASE WHEN task_change.observed_head_sha IS excluded.observed_head_sha THEN checks_observed_at ELSE NULL END",
         vec![
             task.id.as_str().into(),
             repo_id.into(),
@@ -803,6 +806,16 @@ fn apply_read(
             watch.task_id.as_str().into(),
         ],
     )?;
+    // A merge whose outcome the merge job stopped reading for is settled by this read, if it says enough.
+    merges::settle_from_watch(sql, room, &watch.task_id, &seen, now)?;
+    // Checks were read for one commit. Once the head is another, they aren't this head's, and aren't kept as if they were.
+    if held.head_sha != Some(seen.head_sha.as_str()) {
+        exec(
+            sql,
+            "UPDATE task_change SET checks_state = NULL, checks_json = NULL, checks_observed_at = NULL WHERE task_id = ?",
+            vec![watch.task_id.as_str().into()],
+        )?;
+    }
     if observation.changed {
         // The state as people would say it: an open pull request marked as a draft is a draft.
         let said = if seen.state == PullState::Open && seen.draft {
@@ -939,7 +952,10 @@ impl Workspace {
                 let head = change_row(&sql, &task_id)?
                     .filter(|row| row["pr_state"].as_str() == Some("open"))
                     .and_then(|row| text(&row["observed_head_sha"]));
-                if let Some(head) = head {
+                // It counts against the repository's hourly read cap like any read. Over it, the checks wait.
+                let counted = head.is_some()
+                    && self.in_transaction(move |sql| count_read(sql, None, now_ms()))?;
+                if let Some(head) = head.filter(|_| counted) {
                     let read = reader.read_checks(repo_id, &head).await;
                     if !read.revoked {
                         console_error!(
@@ -1006,7 +1022,8 @@ fn apply_checks(sql: &SqlStorage, task_id: &str, head: &str, seen: &ChecksSeen, 
         "UPDATE task_change SET checks_state = ?, checks_json = ?, checks_observed_at = ? WHERE task_id = ?",
         vec![
             state.name().into(),
-            json!({ "success": counts.success, "failure": counts.failure, "pending": counts.pending })
+            // With the commit they were read for, so they're never shown beside another.
+            json!({ "sha": head, "success": counts.success, "failure": counts.failure, "pending": counts.pending })
                 .to_string()
                 .into(),
             now.into(),
@@ -1039,10 +1056,20 @@ pub(super) fn release_status(sql: &SqlStorage, who: &Participant, task_id: &str)
     let asked = row
         .as_ref()
         .is_some_and(|row| row["merge_requested_by"].as_str() == Some(who.caller.id.as_str()));
-    podster_policy::repositories::authorize_release_status(&who.caller, &task, asked)
+    let view = podster_policy::repositories::authorize_release_status(&who.caller, &task, asked)
         .map_err(repositories::denied)?;
+    let whole = view == podster_policy::repositories::ReleaseView::Whole;
+    // Checks are reported only for the commit they were read for. If the head is another now, they're unobserved.
+    let stored = row
+        .as_ref()
+        .and_then(|row| row["checks_json"].as_str())
+        .and_then(|stored| serde_json::from_str::<Value>(stored).ok());
+    let checks_sha = stored.as_ref().and_then(|stored| text(&stored["sha"]));
+    let for_this_head = row.as_ref().is_some_and(|row| {
+        checks_sha.is_some() && checks_sha.as_deref() == row["observed_head_sha"].as_str()
+    });
     let held = row.as_ref().map(|row| podster_core::release_status::Held {
-        checks_state: row["checks_state"].as_str(),
+        checks_state: row["checks_state"].as_str().filter(|_| for_this_head),
         checks_observed_at: row["checks_observed_at"].as_i64(),
         merge_state: row["merge_state"].as_str(),
         merge_reason: row["merge_reason"].as_str(),
@@ -1053,16 +1080,12 @@ pub(super) fn release_status(sql: &SqlStorage, who: &Participant, task_id: &str)
     let (checks, merge) = report(held.as_ref());
     let checks = match checks {
         ChecksReport::Unobserved => {
-            json!({ "state": Value::Null, "counts": Value::Null, "observed_at": Value::Null })
+            json!({ "state": Value::Null, "counts": Value::Null, "observed_at": Value::Null, "commit_sha": Value::Null })
         }
         ChecksReport::Observed { state, at } => {
             // The counts are Podster's own, written with the state. Anything else in that column isn't shown.
-            let counts = row
-                .as_ref()
-                .and_then(|row| row["checks_json"].as_str())
-                .and_then(|stored| serde_json::from_str::<Value>(stored).ok())
-                .map(|stored| json!({ "success": stored["success"].as_u64().unwrap_or(0), "failure": stored["failure"].as_u64().unwrap_or(0), "pending": stored["pending"].as_u64().unwrap_or(0) }));
-            json!({ "state": state.name(), "counts": counts, "observed_at": at })
+            let counts = stored.as_ref().map(|stored| json!({ "success": stored["success"].as_u64().unwrap_or(0), "failure": stored["failure"].as_u64().unwrap_or(0), "pending": stored["pending"].as_u64().unwrap_or(0) }));
+            json!({ "state": state.name(), "counts": counts, "observed_at": at, "commit_sha": checks_sha })
         }
     };
     let pull = row.as_ref().map_or(Value::Null, |row| {
@@ -1072,6 +1095,13 @@ pub(super) fn release_status(sql: &SqlStorage, who: &Participant, task_id: &str)
             "head_observed_at": row["head_observed_at"], "commit_changed": row["commit_changed_at"].as_i64().is_some(),
         })
     });
+    // Whoever asked for the merge and isn't shown the task's change gets how the merge went, and nothing of the pull
+    // request or its checks: never more than their view of the change shows.
+    let (pull, checks) = if whole {
+        (pull, checks)
+    } else {
+        (Value::Null, Value::Null)
+    };
     Ok(json!({
         "task_id": task.id,
         "linked": task.has_linked_repository,

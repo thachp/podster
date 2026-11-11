@@ -821,7 +821,7 @@ paths:
     get:
       operationId: getTaskReleaseStatus
       tags: [queries]
-      summary: "A task's checks and its merge, each as Podster last observed it on GitHub and with the time of that observation, and that no release exists (M5 step 8, ADR 0009, proposed). Exists only while managed repositories are switched on: otherwise `not_found` (404), as for any route that doesn't exist. Nothing is fetched on this read: checks are what the room's refresh job last read for the pull request's head, and a merge is what the merge job and the refresh job recorded. The two are reported apart, and neither is inferred from the other. `checks.state` is null until Podster has read the head commit's checks, which it does only where the App that reads has been given statuses and checks, and null says nothing about whether any pass. Only states and counts are kept: no check's name, context or text. For a person or an agent shown the task's change (people in the room other than guests, and the task's assignee and reviewer) and for whoever asked for the merge: `not_allowed` (403) for anyone else who can read the task, and `task_not_found` (404) for anyone who can't. A task with no pull request on record answers with nulls and `merge.state: not_requested`"
+      summary: "A task's checks and its merge, each as Podster last observed it on GitHub and with the time of that observation, and that no release exists (M5 step 8, ADR 0009, proposed). Exists only while managed repositories are switched on: otherwise `not_found` (404), as for any route that doesn't exist. Nothing is fetched on this read: checks are what the room's refresh job last read for the pull request's head, and a merge is what the merge job and the refresh job recorded. The two are reported apart, and neither is inferred from the other. `checks.state` is null until Podster has read the head commit's checks, which it does only where the App that reads has been given statuses and checks, and null says nothing about whether any pass. Only states and counts are kept: no check's name, context or text. It shows exactly what the caller's view of the task's `change` shows and no more. A person or an agent shown the change (people in the room other than guests, and the task's assignee and reviewer) gets all of it. Whoever asked for the merge and isn't shown the change gets the merge alone, with `pull_request` and `checks` null. Anyone else who can read the task gets `not_allowed` (403), the same whether or not the task has a pull request on record, and anyone who can't read it gets `task_not_found` (404). A task with no pull request on record answers with nulls and `merge.state: not_requested`"
       responses: { "200": { description: The task's release status, content: { application/json: { schema: { $ref: "#/components/schemas/TaskReleaseStatus" } } } }, default: { $ref: "#/components/responses/Error" } }
   /v1/provider/github/deliveries:
     post:
@@ -1068,7 +1068,7 @@ components:
         linked: { type: boolean, description: "Whether the task has a linked repository." }
         pull_request:
           type: [object, "null"]
-          description: "The task's pull request as last read, or null if it has none on record."
+          description: "The task's pull request as last read, or null if it has none on record or the caller isn't shown the task's change."
           additionalProperties: false
           required: [pr_number, pr_state, pr_observed_at, reviewed_commit_sha, observed_head_sha, head_observed_at, commit_changed]
           properties:
@@ -1080,10 +1080,12 @@ components:
             head_observed_at: { type: [integer, "null"] }
             commit_changed: { type: boolean }
         checks:
-          type: object
+          type: [object, "null"]
+          description: "Null for a caller who isn't shown the task's change."
           additionalProperties: false
-          required: [state, counts, observed_at]
+          required: [state, counts, observed_at, commit_sha]
           properties:
+            commit_sha: { type: [string, "null"], description: "The commit these checks were read for. Checks are never reported beside a commit they weren't read for: once the head is another, they're unobserved until read again." }
             state: { type: [string, "null"], enum: [success, failure, pending, none, null], description: "What the head commit's statuses and check runs come to together: `failure` if any failed, else `pending` if any is unfinished, else `success`, or `none` if it has none. Null if Podster hasn't read them." }
             counts: { type: [object, "null"], additionalProperties: false, required: [success, failure, pending], properties: { success: { type: integer }, failure: { type: integer }, pending: { type: integer } } }
             observed_at: { type: [integer, "null"], description: "When the checks were read." }

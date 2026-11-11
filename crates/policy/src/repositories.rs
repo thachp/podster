@@ -288,16 +288,28 @@ pub fn authorize_release_status(
     caller: &Caller,
     task: &Task,
     asked_for_its_merge: bool,
-) -> Result<(), RepoDenial> {
+) -> Result<ReleaseView, RepoDenial> {
     if caller.role == Role::None {
         return Err(RepoDenial::NotParticipant);
     }
     if !can_see_task(caller, task) {
         return Err(RepoDenial::Hidden);
     }
-    if sees_task_change(caller, task) || asked_for_its_merge {
-        Ok(())
+    if sees_task_change(caller, task) {
+        Ok(ReleaseView::Whole)
+    } else if asked_for_its_merge {
+        Ok(ReleaseView::MergeOnly)
     } else {
         Err(RepoDenial::NotAllowed)
     }
+}
+
+/// How much of a release status a caller is shown. Never more than their view of the task's change shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaseView {
+    /// The pull request, the checks and the merge: for those shown the task's change.
+    Whole,
+    /// The merge alone, for whoever asked for it and isn't shown the change: how their request ended, and nothing
+    /// of the pull request or its checks.
+    MergeOnly,
 }

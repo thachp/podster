@@ -667,3 +667,99 @@ pub fn unknown_read_wait_ms(reads_made: u32) -> i64 {
 pub fn unknown_read_allowed(reads_made: u32, room_open: bool) -> bool {
     room_open && reads_made < MAX_UNKNOWN_READS
 }
+
+/// What a read made after a merge call was recorded says became of that call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Landed {
+    /// The pull request reads as merged, with the reviewed commit, and the default branch holds it. The proof moves
+    /// the merge to succeeded. `default_branch_differs` says the provider's default branch isn't the link's any more:
+    /// the merge is still recorded as the merge it was, and the link is degraded so nothing more is merged.
+    Merged {
+        proof: MergeObserved,
+        default_branch_differs: bool,
+    },
+    /// The pull request reads as merged and the provider's default branch couldn't be read. Nothing is recorded
+    /// without that comparison: read again.
+    DefaultBranchUnread,
+    /// It didn't land as this request's merge. The step says what the read comes to otherwise.
+    No(MergeStep),
+}
+
+/// Decides what a read made after a recorded merge call means. The one decision for every place that asks, so the
+/// pass that made the call and a later pass that only reads can't come to different answers.
+pub fn decide_landed(
+    authorized: &MergeAuthorized,
+    reviewed: &ReviewedBase,
+    observed: &PullObservation,
+    call: Option<MergeCall>,
+    reported_default_branch: Option<&str>,
+) -> Landed {
+    let step = decide_merge_step(authorized, reviewed, observed, call);
+    if observed.state != PullState::Merged {
+        return Landed::No(step);
+    }
+    match (step, reported_default_branch) {
+        (MergeStep::Succeeded(_), None) => Landed::DefaultBranchUnread,
+        (MergeStep::Succeeded(proof), Some(reported)) => Landed::Merged {
+            proof,
+            default_branch_differs: reported != reviewed.default_branch,
+        },
+        (other, _) => Landed::No(other),
+    }
+}
+
+/// The state a new merge request is decided from. A merge whose outcome the job has stopped reading for may be asked
+/// for again, as a failed one may: that request's first pass begins with a read. While the job is still reading, it
+/// may not.
+pub fn requestable_state(state: MergeState, unknown_reads_ended: bool) -> MergeState {
+    match state {
+        MergeState::OutcomeUnknown if unknown_reads_ended => MergeState::Failed,
+        other => other,
+    }
+}
+
+/// How the ordinary watch of a task's change settles a merge whose outcome the job stopped reading for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WatchSettles {
+    /// The pull request is merged with the reviewed commit as its head, into the default branch.
+    Merged(MergeObserved),
+    /// The pull request is closed and not merged, or merged at another commit: the recorded call didn't merge the
+    /// reviewed commit.
+    Failed,
+    /// Still open, or not enough read to say.
+    NotYet,
+}
+
+/// Decides, from the watch's own read of the pull request, what became of a merge call whose outcome was left unknown.
+/// The watch reads the pull request and nothing else, so "the default branch holds the commit" is the pull request
+/// itself saying it merged into its base, with that base being the default branch. No call is made and nothing more
+/// is read for this.
+pub fn settle_unknown_from_watch(
+    authorized: &MergeAuthorized,
+    reviewed: &ReviewedBase,
+    state: PullState,
+    head_sha: &str,
+    head_repo_id: Option<i64>,
+    base_ref: &str,
+    base_sha: &str,
+) -> WatchSettles {
+    let observed = PullObservation {
+        state,
+        base_ref,
+        base_sha,
+        head_repo_id,
+        head_sha,
+        default_branch_has_reviewed: Some(
+            state == PullState::Merged && base_ref == reviewed.default_branch,
+        ),
+    };
+    match (
+        state,
+        decide_merge_step(authorized, reviewed, &observed, None),
+    ) {
+        (PullState::Open, _) => WatchSettles::NotYet,
+        (PullState::Merged, MergeStep::Succeeded(proof)) => WatchSettles::Merged(proof),
+        (PullState::Merged, MergeStep::ReadAgain) => WatchSettles::NotYet,
+        _ => WatchSettles::Failed,
+    }
+}

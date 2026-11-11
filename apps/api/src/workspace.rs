@@ -4642,11 +4642,13 @@ impl Workspace {
             (Method::Post, ["repository"]) => {
                 let switched_on = provisioning::enabled(&self.env, &sql)?;
                 let (delegated, counted) = if switched_on {
-                    self.count_repository_request(&identity, &body).await?
+                    self.count_repository_request(&identity, key.as_deref(), &hash, &body)
+                        .await?
                 } else {
                     (false, None)
                 };
                 let counted_for = counted.clone();
+                let (call_key, call_hash) = (key.clone().unwrap_or_default(), hash.clone());
                 let recorded = self.command_checked(
                     &identity,
                     key,
@@ -4666,9 +4668,15 @@ impl Workspace {
                         )
                     },
                 );
-                // A command that recorded nothing gives this caller's places back, and nobody else's.
-                if let (Err(_), Some(counted)) = (&recorded, &counted) {
-                    self.uncount_repository_request(counted).await;
+                // A command that recorded nothing gives this call's own claims back, and no other's. One that recorded
+                // the request, or replayed its answer, has them kept for good.
+                match (&recorded, &counted) {
+                    (Err(_), Some(counted)) => {
+                        self.uncount_repository_request(counted, &identity, &call_key, &call_hash)
+                            .await
+                    }
+                    (Ok(_), Some(counted)) => self.keep_repository_request(counted).await,
+                    _ => {}
                 }
                 recorded
             }

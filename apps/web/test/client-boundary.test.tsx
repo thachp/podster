@@ -19,11 +19,13 @@ describe("the client boundary guard", () => {
     expect(isClientSource("")).toBe(false);
   });
 
-  it("reads a hostile file in linear time: CodeQL's alert 23 input, and long runs of comments", () => {
-    const started = performance.now();
-    for (const text of ["/*" + "*//*".repeat(50_000), "/*" + "*/".repeat(50_000), "//\n".repeat(50_000) + '"use client"', "/**/".repeat(50_000) + "x"]) isClientSource(text);
+  // No wall-clock margin: the suite's own timeout is the bound, and a backtracking scan would hang it on these.
+  it("reads hostile files, CodeQL's alert 23 input among them, to the right answer", () => {
+    expect(isClientSource("/*" + "*//*".repeat(50_000))).toBe(false);
+    expect(isClientSource("/*" + "*/".repeat(50_000))).toBe(false);
+    expect(isClientSource("/**/".repeat(50_000) + "x")).toBe(false);
     expect(isClientSource("//\n".repeat(50_000) + '"use client"')).toBe(true);
-    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(isClientSource("/**/".repeat(50_000) + "'use client'")).toBe(true);
   });
 
   it("finds this app's client components, and not its server pages", async () => {

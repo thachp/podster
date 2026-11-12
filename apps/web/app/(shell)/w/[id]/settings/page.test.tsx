@@ -3,7 +3,7 @@ import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setUrl } from "@/test/next-navigation";
 
-const state = vi.hoisted(() => ({ room: null as unknown, me: "per_owner", asked: [] as string[], repository: { ok: false, status: 404, code: "not_found" } as unknown }));
+const state = vi.hoisted(() => ({ room: null as unknown, me: "per_owner", asked: [] as string[], repository: { ok: false, status: 404, code: "not_found" } as unknown, release: { ok: false, status: 404, code: "not_found" } as unknown, hostname: { ok: true, data: { request: null } } as unknown, visibility: { ok: false, status: 404, code: "not_found" } as unknown }));
 vi.mock("react", async (original) => ({ ...(await original<object>()), cache: <T,>(fn: T) => fn }));
 vi.mock("@/lib/gateway/server", () => ({
   gatewayQuery: async (path: string) => {
@@ -11,6 +11,9 @@ vi.mock("@/lib/gateway/server", () => ({
     if (path === "/api/v1/workspaces/ws_1") return { ok: true, data: state.room };
     if (path.includes("/audit")) return { ok: true, data: { audit: [], next_cursor: null } };
     if (path === "/api/v1/workspaces/ws_1/repository") return state.repository;
+    if (path === "/api/v1/workspaces/ws_1/release-config") return state.release;
+    if (path === "/api/v1/workspaces/ws_1/app-hostname") return state.hostname;
+    if (path === "/api/v1/workspaces/ws_1/visibility") return state.visibility;
     if (path === "/api/orgs/org_a/members") return { ok: true, data: { members: [{ person_id: "per_heir", name: "Heir" }] } };
     return { ok: false, status: 404, code: "not_found" };
   },
@@ -116,5 +119,77 @@ describe("workroom settings' repository section", () => {
     await show();
     expect(screen.getByRole("heading", { name: "Repository" })).toBeInTheDocument();
     expect(screen.queryByText("Not connected")).toBeNull();
+  });
+});
+
+describe("workroom settings' release section", () => {
+  const releaseConfig = (over: object = {}) => ({ enabled: false, approval_policy: "person", environments: ["production"], default_host: null, custom_host: null, version: 2, set_by: null, updated_at: null, ...over });
+  const visibilityRead = (visibility: "public" | "private") => ({
+    ok: true,
+    data: { visibility, public_handle: null, published_at: null, published_on: null, topic: null, public_claims_paused: false, suspension: null, public_rooms_enabled: true, view_hash: "a".repeat(64), preview: { archived: false, context: null, goal: null, name: "Launch room", openings: [], outputs: [], participant_count: 1, person_review: true, topic: null, workflow: "general" } },
+  });
+  const readyRepository = { ok: true, data: { request: null, repository: { id: "rl_1", provider: "github", provider_repo_id: 1, full_name: "podsterdev/x", visibility: "public", default_branch: "main", status: "ready", status_reason: null, created_at: 1, verified_at: 1, updated_at: 1 }, delegated: true } };
+
+  beforeEach(() => {
+    setUrl("/w/ws_1/settings");
+    state.me = "per_owner";
+    state.asked.length = 0;
+    state.room = { id: "ws_1", name: "Launch room", owner: "per_owner", owner_org: "org_a", status: "active", policy_version: 3, members: [] };
+    state.repository = { ok: false, status: 404, code: "not_found" };
+    state.release = { ok: false, status: 404, code: "not_found" };
+    state.hostname = { ok: true, data: { request: null } };
+    state.visibility = visibilityRead("private");
+  });
+
+  it("with release switched off, as on every deployment today, shows it as Unavailable rather than an error, and reads no custom domain", async () => {
+    state.repository = readyRepository;
+    await show();
+    const section = screen.getByRole("region", { name: "Release" });
+    expect(section).toHaveTextContent("Unavailable");
+    expect(section).toHaveTextContent("Release isn't available on this Podster deployment");
+    expect(screen.queryByText("Couldn't refresh.")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Switch release/ })).toBeNull();
+    expect(state.asked).toContain("/api/v1/workspaces/ws_1/release-config");
+    expect(state.asked).not.toContain("/api/v1/workspaces/ws_1/app-hostname");
+  });
+
+  it("with repositories and release both off, keeps the one section it had before them", async () => {
+    await show();
+    expect(screen.getByRole("heading", { name: "Repository and release" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Release" })).toBeNull();
+  });
+
+  it("with release on, a private room's owner sees Needs approval with the reason, and the custom domain is read", async () => {
+    state.repository = readyRepository;
+    state.release = { ok: true, data: releaseConfig() };
+    await show();
+    const section = screen.getByRole("region", { name: "Release" });
+    expect(section).toHaveTextContent("Needs approval");
+    expect(section).toHaveTextContent("The workroom has to be public.");
+    expect(screen.getByRole("button", { name: "Switch release on" })).toBeDisabled();
+    expect(state.asked).toContain("/api/v1/workspaces/ws_1/app-hostname");
+  });
+
+  it("with release on, a public room with a ready repository is Not configured until switched on, then Ready", async () => {
+    state.repository = readyRepository;
+    state.visibility = visibilityRead("public");
+    state.release = { ok: true, data: releaseConfig() };
+    const first = await show();
+    expect(screen.getByRole("region", { name: "Release" })).toHaveTextContent("Not configured");
+    expect(screen.getByRole("button", { name: "Switch release on" })).toBeEnabled();
+    first.unmount();
+    state.release = { ok: true, data: releaseConfig({ enabled: true }) };
+    await show();
+    expect(screen.getByRole("region", { name: "Release" })).toHaveTextContent("Ready");
+    expect(screen.getByRole("button", { name: "Switch release off" })).toBeInTheDocument();
+  });
+
+  it("a release read that fails says so, rather than Unavailable", async () => {
+    state.repository = readyRepository;
+    state.release = { ok: false, status: 500, code: "error" };
+    await show();
+    const section = screen.getByRole("region", { name: "Release" });
+    expect(section).toHaveTextContent("Couldn't refresh.");
+    expect(section).not.toHaveTextContent("Unavailable");
   });
 });

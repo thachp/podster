@@ -11,6 +11,7 @@ Every claim carries one of these labels:
 - **Proposed:** the architect's proposal in this ADR.
 - **Ruled:** the architect's ruling on the independent review.
 - **Assumed, for the owner:** a working assumption for a question the architect can't answer. If the owner answers otherwise, the section changes.
+- **Decided on the owner's behalf:** on 2026-11-12 the owner wrote "you should make decision on my behalf you are the chief of staff", and under that the architect decided three of those questions for them, as [decisions 213 to 215](../spec/PRODUCT.md#decisions-needed), each for the owner to review. The rest stay the owner's.
 - **Spike:** not known, and a spike has to find out.
 
 Nothing in this ADR is **verified**. No call was made to Cloudflare or to GitHub for it.
@@ -35,11 +36,11 @@ Podster's rules hold throughout: Rust decides authority; a public Worker authent
 - **The commit** is one that Podster's own merge job put on the default branch and confirmed there. A task branch's head, a commit pushed any other way, and a commit in another repository are never releasable.
 - **The directory** has one fixed name, the same in every room. A room can't choose it and the repository can't rename it.
 - **Nothing is built.** Podster runs no agent-written build step, and GitHub Actions stay off, as [ADR 0009 proposes](0009-managed-repositories.md#actions-and-workflows). What the agent committed in that directory is what is served.
-- **Assumed, for the owner:** static files only, with no agent-written code on the server. Everything below assumes it. If the owner allows server code, the sections on what content can reach and on budgets must be redone, and Podster would be running code an agent wrote.
+- **Decided on the owner's behalf** ([decision 214](../spec/PRODUCT.md#decisions-needed)): static files only, with no agent-written code on the server; one environment, `production`, of merged and reviewed code; and no preview of unmerged code. Everything below rests on it. If that were ever reversed, the sections on what content can reach and on budgets must be redone, and Podster would be running code an agent wrote.
 
 ### Only a public room releases
 
-**Ruled, and assumed for the owner.** In M6 a release can be asked for only in a public room. That private rooms get no app narrows the product, so it is in [the owner's table](../m6-plan.md#for-the-owner): this is what holds until the owner answers, as for who configures release and what happens when an owner leaves.
+**Ruled, and decided on the owner's behalf** ([decision 213](../spec/PRODUCT.md#decisions-needed)). In M6 a release can be asked for only in a public room. A public room's app is public, and a private room's app isn't served at all. That narrows the product, which is why it was put to the owner; on 2026-11-12 it was decided for them, to review. What happens when an owner leaves is still in [the owner's table](../m6-plan.md#for-the-owner), and what this ADR says of it holds until the owner answers.
 
 - **A private room's request is refused,** with the code `release_needs_public_room`, at the command. Nothing is queued and nothing is stored to run later, so making the room public afterwards releases nothing by itself.
 - **Why:** the content Worker can't tell who is asking, and a Podster session on the content domain is exactly what the separate domain exists to prevent. So a private room's app could only be served to everyone, which would publish a private room's work. An unguessable address is never the control: addresses leak through browser history and sync, and through certificate-transparency logs for a custom hostname.
@@ -243,7 +244,7 @@ A client never names an account, a namespace, a script or a host label. All four
 
 **Ruled** ([decisions 199 and 200](../spec/PRODUCT.md#m6-decisions-november-12-2026)).
 
-- **Who configures release, and who approves one. Assumed, for the owner:** the room's owner only, as a person, until the owner answers. Everywhere this ADR says someone "may approve" or "configures", that is who it means meanwhile. The architect recommends the room's owner and admins as people, agents never, to match what the owner decided for repositories in [decision 194](../spec/PRODUCT.md#decisions-needed). The first draft cited decision 18's owner-only form, which 194 replaced for repositories; who it is for deployment was never asked.
+- **Who configures release, and who approves one. Decided on the owner's behalf** ([decision 215](../spec/PRODUCT.md#decisions-needed)): the room's owner and its admins, as people; an agent never. Everywhere this ADR says someone "may approve" or "configures", that is who it means. It matches what the owner decided for repositories in [decision 194](../spec/PRODUCT.md#decisions-needed). Until 2026-11-12 the interim rule here was the room's owner only.
 - **Only in a public Engineering room** with a ready repository, and only where the deployment's own configuration allows release at all.
 - **Who asks for a release:** someone who may release now, which means holding a `provider_grant` with a `deploy` action that is live and whose giver still holds authority. Approval of a task and a merge grant give nothing (AC-17). An agent may hold the grant and ask; an agent never approves.
 - **The approval policy has one value in M6: `person`.** A person who may approve, approves each release. The first draft also had `on_merge`, under which a merge would start a release; with releases only in public rooms, where a person must approve, it could never publish anything, so it is dropped.

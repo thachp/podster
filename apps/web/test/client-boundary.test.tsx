@@ -12,6 +12,18 @@ describe("the client boundary guard", () => {
     expect(isClientSource('"use client";\nimport x from "y";')).toBe(true);
     expect(isClientSource("// a note\n'use client';")).toBe(true);
     expect(isClientSource('import x from "y";\n"use client";')).toBe(false);
+    expect(isClientSource('/* a\n block */\n// line\n\uFEFF  "use client"')).toBe(true);
+    expect(isClientSource('/* "use client" */ import x from "y";')).toBe(false);
+    expect(isClientSource("/* never closed")).toBe(false);
+    expect(isClientSource('"use server";')).toBe(false);
+    expect(isClientSource("")).toBe(false);
+  });
+
+  it("reads a hostile file in linear time: CodeQL's alert 23 input, and long runs of comments", () => {
+    const started = performance.now();
+    for (const text of ["/*" + "*//*".repeat(50_000), "/*" + "*/".repeat(50_000), "//\n".repeat(50_000) + '"use client"', "/**/".repeat(50_000) + "x"]) isClientSource(text);
+    expect(isClientSource("//\n".repeat(50_000) + '"use client"')).toBe(true);
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
 
   it("finds this app's client components, and not its server pages", async () => {

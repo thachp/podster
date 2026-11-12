@@ -16,8 +16,30 @@ import { isValidElement, type ReactElement } from "react";
 const sources = import.meta.glob<string>(["/app/**/*.tsx", "/components/**/*.tsx", "!/**/*.test.tsx"], { query: "?raw", import: "default", eager: true });
 const loaders = import.meta.glob<Record<string, unknown>>(["/app/**/*.tsx", "/components/**/*.tsx", "!/**/*.test.tsx"]);
 
-const USE_CLIENT = /^\s*(?:\/\/[^\n]*\n\s*|\/\*[\s\S]*?\*\/\s*)*["']use client["']/;
-export const isClientSource = (text: string) => USE_CLIENT.test(text);
+/**
+ * Whether a module's first statement is the "use client" directive. One pass from the start, with no regular expression:
+ * whitespace and comments are skipped by `indexOf`, so the time is linear in the file's length whatever it holds.
+ */
+export function isClientSource(text: string): boolean {
+  let at = 0;
+  while (at < text.length) {
+    const char = text[at]!;
+    if (char === " " || char === "\t" || char === "\n" || char === "\r" || char === "\uFEFF") {
+      at += 1;
+    } else if (text.startsWith("//", at)) {
+      const end = text.indexOf("\n", at + 2);
+      if (end === -1) return false;
+      at = end + 1;
+    } else if (text.startsWith("/*", at)) {
+      const end = text.indexOf("*/", at + 2);
+      if (end === -1) return false;
+      at = end + 2;
+    } else {
+      return text.startsWith('"use client"', at) || text.startsWith("'use client'", at);
+    }
+  }
+  return false;
+}
 
 /** Every exported component of every client module, by reference, with a name for messages. */
 export async function clientComponents(): Promise<Map<unknown, string>> {

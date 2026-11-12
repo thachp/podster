@@ -1,0 +1,3 @@
+/hdr.html
+  Set-Cookie: spike_hdr=1; Domain=opster.dev; Path=/; Secure
+  X-Spike-From-Headers: 1

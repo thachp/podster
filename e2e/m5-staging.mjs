@@ -55,7 +55,7 @@ import { fileURLToPath } from "node:url";
 import { parseJsonc } from "./jsonc.mjs";
 import { missingWranglers, TAILED_APPS } from "./m4-staging-lib.mjs";
 import {
-  absentId, ASKPASS_SCRIPT, cloneUrlProblem, deliveryBody, deliveryProblem, deliveryTrace, isCommitSha, logHits, worstCaseSeconds, GrantLedger, gitEnv, lostAuthorityEnding, MERGE_APP_SLUG, mergeCommitProblems, movedHeadEnding,
+  absentId, ASKPASS_SCRIPT, cloneUrlProblem, deliveryBody, deliveryProblem, deliveryTrace, gatewaySaid, stopWaiting, isCommitSha, logHits, worstCaseSeconds, GrantLedger, gitEnv, lostAuthorityEnding, MERGE_APP_SLUG, mergeCommitProblems, movedHeadEnding,
   parseArgs, PLAN, releaseStatusProblems, repositoryOrgProblem, requesterProblem, reviewStatusProblems, rulesetProblems, scrub, secretProblem, SIGN_UPS, signDelivery, STAGING, STAGING_APP,
   stagingConfig, STATUS_CONTEXT, steady, Tally, USAGE, WEBHOOK_PATH, WEBHOOK_SECRET_ENV, webhookSecretProblem,
 } from "./m5-staging-lib.mjs";
@@ -402,7 +402,7 @@ let demoted = false;
 /** Every merge the extended checks asked for, so clean-up names any the job hasn't ended. */
 const mergesAsked = [];
 /** The skips that aren't "couldn't run": a race the run lost, and one it can't tell about. Counted apart at the end. */
-const unshown = { race_lost: [], cannot_tell: [] };
+const unshown = { race_lost: [], cannot_tell: [], tail_lost: [] };
 const give = async (principal, action, extra = {}) => gave(await owner.must("POST", `/v1/workspaces/${room}/repository/grants`, { policy_version: await owner.policyVersion(room), principal_id: principal.id, action, ...extra }), `${action} grant to ${principal.id}`);
 const listedGrant = async (id) => (await owner.must("GET", `/v1/workspaces/${room}/repository/grants`)).grants.find((g) => g.id === id);
 const askMerge = (agent, task) => agent.call("merge_task", { ...task.at, submission_no: 1, commit_sha: task.head, idempotency_key: key() });
@@ -578,30 +578,28 @@ async function markerInEveryTail(seconds) {
   return missing.length ? `the marker never arrived in the tail of ${missing.join(", ")} within ${seconds} s` : null;
 }
 /**
- * What the API's tail holds of a delivery once it holds `lines` lines for it, or after a minute: `{ outcomes }`, or
- * `{ problem, lost }` saying what was there instead. A line with a missing or malformed outcome ends the wait at once
- * and is said as that. With no line, it says whether the tail holds the API's own request for the delivery.
+ * What the API's tail holds of a delivery once it holds `lines` lines for it: `{ outcomes }`, or `{ problem, lost }`
+ * saying what was there instead once `stopWaiting` says to stop. A line with a missing or malformed outcome is said as
+ * that. With too few lines, it says whether the tail holds the API's own requests for the delivery, and what the
+ * gateway's tail says of it.
  */
 async function traced(deliveryId, lines = 1) {
-  const api = tails.find((tail) => tail.app === "api");
-  ok(api && tally.passed("M5-13a"), "the API's log isn't tailed");
-  const deadline = Date.now() + 60_000;
+  const [api, gateway] = ["api", "gateway"].map((app) => tails.find((tail) => tail.app === app));
+  ok(api && gateway && tally.passed("M5-13a"), "the API's and the gateway's logs aren't tailed");
+  const began = Date.now();
   for (;;) {
     ok(!stopping, "the run was told to stop");
     const trace = deliveryTrace(api.stream.values, deliveryId);
-    const problem = deliveryProblem(trace, lines);
-    if (!problem) return { outcomes: trace.outcomes.join(",") };
-    if (trace.odd.length || Date.now() > deadline) return { problem: `for delivery ${deliveryId}, after ${trace.odd.length ? "its line arrived" : "60 s"}, ${problem.text}`, lost: problem.lost };
+    const accepted = gatewaySaid(gateway.stream.values, deliveryId).filter((outcome) => outcome === "accepted").length;
+    const problem = deliveryProblem(trace, lines, accepted);
+    const waited = Date.now() - began;
+    if (stopWaiting(trace, problem, { waited, accepted, lines })) {
+      if (!problem) return { outcomes: trace.outcomes.join(",") };
+      return { problem: `for delivery ${deliveryId}, after ${trace.odd.length ? "its line arrived" : `${Math.round(waited / 1000)} s`}, ${problem.text}`, lost: problem.lost };
+    }
     await sleep(2000);
   }
 }
-/** The API's own word for what became of a delivery. Throws what the tail held instead, if it wasn't that many lines. */
-async function outcomeOf(deliveryId, lines = 1) {
-  const found = await traced(deliveryId, lines);
-  ok(!found.problem, found.problem);
-  return found.outcomes;
-}
-
 // ---- clean-up ----
 
 let cleaned = null;
@@ -1429,20 +1427,50 @@ try {
     const key = have(webhookSecret, `${WEBHOOK_SECRET_ENV} isn't set, so no delivery can be signed`);
     logged();
     const { task, next } = have(advance, "there's no watched change to send a delivery about");
-    const body = deliveryBody({ repositoryId: repo.id, number: task.pr, head: next, nonce: randomUUID() });
-    const one = await deliver(body, { secret: key });
-    eq([one.status, one.accepted], [202, true], "the first delivery");
-    // The API's own word that the room took it. A read of the pull request soon after proves nothing: the routine
-    // poll reads it too.
-    eq(await outcomeOf(one.id), "nudged", "what the API logged for the first delivery");
-    const read = await changeOf(task.id);
-    const sameId = await deliver(body, { id: one.id, secret: key });
-    const newId = await deliver(body, { secret: key });
-    eq([sameId.status, sameId.accepted, newId.status, newId.accepted], [202, true, 202, true], "the same delivery again, and its body under a new ID");
-    // Each line is written once the room has answered, so by then a replay has done whatever it was going to do.
-    eq([await outcomeOf(one.id, 2), await outcomeOf(newId.id)], ["nudged,replayed", "replayed"], "what the API logged for the delivery's ID, twice, and for the new ID");
-    eq(JSON.stringify(steady(await changeOf(task.id))), JSON.stringify(steady(read)), "the task's change after both");
-    return "the API logged nudged, then replayed twice";
+    /**
+     * One attempt: a new delivery, the same delivery again, and its body under a new ID. Each line is judged by itself.
+     * A wrong outcome, or a request of the API's with no line, throws: that is the product's. A line the tail never
+     * delivered ends the attempt and is answered as `lost`, naming which delivery it was: nothing is concluded from it.
+     */
+    const attempt = async () => {
+      const body = deliveryBody({ repositoryId: repo.id, number: task.pr, head: next, nonce: randomUUID() });
+      const judge = async (what, id, lines, wanted) => {
+        const found = await traced(id, lines);
+        if (found.problem && found.lost) return `${what}: ${found.problem}`;
+        ok(!found.problem, `${what}: ${found.problem}`);
+        eq(found.outcomes, wanted, `what the API logged for ${what}`);
+        return null;
+      };
+      const one = await deliver(body, { secret: key });
+      eq([one.status, one.accepted], [202, true], "the first delivery");
+      // The API's own word that the room took it. A read of the pull request soon after proves nothing: the routine
+      // poll reads it too.
+      let lost = await judge("the first delivery", one.id, 1, "nudged");
+      if (lost) return { lost };
+      const read = await changeOf(task.id);
+      const sameId = await deliver(body, { id: one.id, secret: key });
+      eq([sameId.status, sameId.accepted], [202, true], "the same delivery again");
+      // Each line is written once the room has answered, so by then a replay has done whatever it was going to do.
+      lost = await judge("the same delivery sent again under its ID", one.id, 2, "nudged,replayed");
+      if (lost) return { lost };
+      const newId = await deliver(body, { secret: key });
+      eq([newId.status, newId.accepted], [202, true], "its body under a new ID");
+      lost = await judge("its body sent under a new ID", newId.id, 1, "replayed");
+      if (lost) return { lost };
+      eq(JSON.stringify(steady(await changeOf(task.id))), JSON.stringify(steady(read)), "the task's change after both");
+      return {};
+    };
+    // Sending a lost delivery again can't show what it was: once taken, it answers `replayed`, never `nudged`. So a
+    // lost line ends its attempt, and a whole new one is made, with a new body, at most once more. Only an attempt
+    // whose three lines were all seen passes. Two attempts each missing a line show nothing, and say SKIP.
+    const first = await attempt();
+    if (!first.lost) return "the API logged nudged, then replayed twice";
+    const second = await attempt();
+    if (second.lost) {
+      unshown.tail_lost.push("M5-16a");
+      throw new Skip(`not shown by this run: the tail lost a line in each of two attempts, and nothing that did arrive contradicted. First, ${first.lost}. Then, ${second.lost}`);
+    }
+    return `the API logged nudged, then replayed twice, at the second attempt. The first attempt showed nothing: ${first.lost}`;
   });
 
   await check("M5-16b", async () => {
@@ -1462,6 +1490,7 @@ try {
     eq(cases.flatMap((one) => [one.sent.status, one.sent.accepted]), [202, true, 202, true], "both deliveries");
     const problems = [];
     const notes = [];
+    const lostTwice = [];
     for (const one of cases) {
       let found = await traced(one.sent.id);
       // Only when the tail holds nothing of it at all, not even the API's request: another is sent, once, as a new
@@ -1472,10 +1501,16 @@ try {
         notes.push(`${one.what} was sent again once: ${found.problem}`);
         found = await traced(again.id);
       }
-      if (found.problem) problems.push(`${one.what}: ${found.problem}`);
+      // Lost twice: nothing was seen of it either time. That shows nothing, and isn't the product's failure.
+      if (found.problem && found.lost) lostTwice.push(`${one.what}: ${found.problem}`);
+      else if (found.problem) problems.push(`${one.what}: ${found.problem}`);
       else if (found.outcomes !== one.wanted) problems.push(`${one.what}: the API logged ${found.outcomes}, not ${one.wanted}`);
     }
-    ok(problems.length === 0, [...problems, ...notes].join("; "));
+    ok(problems.length === 0, [...problems, ...lostTwice, ...notes].join("; "));
+    if (lostTwice.length) {
+      unshown.tail_lost.push("M5-16b");
+      throw new Skip(`not shown by this run: the tail lost a line twice, and nothing that did arrive contradicted. ${[...lostTwice, ...notes].join("; ")}`);
+    }
     eq([JSON.stringify(steady(await changeOf(task.id))), await secondRoomNow()], [before, theirs], "the first room's change, and the second room, afterwards");
     return `the API logged unknown_change for the second room's repository, and no_room for nobody's${notes.length ? `. ${notes.join("; ")}` : ""}`;
   });
@@ -1840,6 +1875,7 @@ if (failed.length) say(`\nFailed: ${failed.join(", ")}`);
 if (skipped.length) say(`Skipped: ${skipped.join(", ")}`);
 if (unshown.race_lost.length) say(`  of those, a race the run lost, with the merge landing before the authority ended: ${unshown.race_lost.join(", ")}`);
 if (unshown.cannot_tell.length) say(`  of those, where it can't be told which came first: ${unshown.cannot_tell.join(", ")}`);
+if (unshown.tail_lost.length) say(`  of those, where the log tail lost a line in each of two attempts: ${unshown.tail_lost.join(", ")}`);
 const exitCode = stopped || left ? 1 : tally.exitCode();
 say(`\nM5 on staging: ${tally.summary()}${stopped ? "; the run stopped early" : ""}${left ? "; a room was left public" : ""}. Exit ${exitCode}.`);
 process.exit(exitCode);

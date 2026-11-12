@@ -565,8 +565,12 @@ fn a_release_never_writes_to_a_cleared_or_suspended_custom_host() {
     let back = set_back(&second, &mark, "lab.rel_2");
     assert_eq!(scripts(&back.state), [Some("lab.rel_1"), None]);
     assert_eq!(back.reverted, [0]);
-    // Only a new claim, active at Cloudflare, opens it again, with the release last confirmed served.
-    let Some(reopened) = open_host(&second, 1, Some("lab.rel_2")) else {
+    // Only a new claim, active at Cloudflare, opens it again, on the release last confirmed served.
+    let Some(confirmed) = confirm_served(&second, &mark, "lab.rel_2") else {
+        unreachable!("not confirmed");
+    };
+    assert_eq!(confirmed.caught_up, Vec::<usize>::new());
+    let Some(reopened) = open_host(&confirmed.state, 1, None) else {
         unreachable!("no host");
     };
     assert_eq!(scripts(&reopened), [Some("lab.rel_2"), Some("lab.rel_2")]);
@@ -574,36 +578,93 @@ fn a_release_never_writes_to_a_cleared_or_suspended_custom_host() {
     assert_eq!(open_host(&second, 2, None), None);
 }
 
-#[test]
-fn a_host_opened_between_a_commit_and_its_marker_never_takes_the_unconfirmed_script() {
-    // The first release is served on the default host; the custom host is closed.
+/// The first release confirmed served on the default host, with a closed custom host, then a second release committed
+/// and waiting for its marker.
+fn second_in_flight() -> (ServeState, CommitMark) {
     let Ok((live, _)) = commit_live(&serving(None, 2, 4), 4, "lab.rel_1") else {
         unreachable!("refused");
     };
     let Some(closed) = clear_host(&live, 1) else {
         unreachable!("no host");
     };
-    // A second release commits; its marker hasn't come back.
-    let Ok((second, mark)) = commit_live(&closed, 4, "lab.rel_2") else {
+    let Ok(second) = commit_live(&closed, 4, "lab.rel_2") else {
         unreachable!("refused");
     };
-    // A new claim goes active in that window: the host opens on the release last confirmed served, not the second.
-    let Some(opened) = open_host(&second, 1, Some("lab.rel_1")) else {
+    second
+}
+
+#[test]
+fn a_host_opened_mid_flight_catches_up_when_the_marker_comes_back() {
+    let (second, mark) = second_in_flight();
+    // Opened in the window: the release last confirmed, never the unconfirmed one.
+    let Some(opened) = open_host(&second, 1, Some(&mark)) else {
         unreachable!("no host");
     };
     assert_eq!(scripts(&opened), [Some("lab.rel_2"), Some("lab.rel_1")]);
-    // The marker never comes back: the default host is set back, the opened host stays where it is, and the failed
-    // script is named by nothing, so it may be deleted.
+    // The marker comes back: the opened host moves to the confirmed release in the same decision.
+    let Some(confirmed) = confirm_served(&opened, &mark, "lab.rel_2") else {
+        unreachable!("not confirmed");
+    };
+    assert_eq!(
+        scripts(&confirmed.state),
+        [Some("lab.rel_2"), Some("lab.rel_2")]
+    );
+    assert_eq!(confirmed.caught_up, [1]);
+    assert_eq!(confirmed.state.kept_previous.as_deref(), Some("lab.rel_1"));
+    // So a rollback switches every host back, and isn't refused as already live.
+    let Ok((rolled, _)) = rollback(&confirmed.state, 4, true) else {
+        unreachable!("refused");
+    };
+    assert_eq!(scripts(&rolled), [Some("lab.rel_1"), Some("lab.rel_1")]);
+    // A confirmation after an unpublish confirms nothing.
+    let (down, _) = unpublish(&opened, Some(&mark));
+    assert_eq!(confirm_served(&down, &mark, "lab.rel_2"), None);
+}
+
+#[test]
+fn a_host_opened_mid_flight_stays_on_the_confirmed_release_when_the_marker_fails() {
+    let (second, mark) = second_in_flight();
+    let Some(opened) = open_host(&second, 1, Some(&mark)) else {
+        unreachable!("no host");
+    };
     let back = set_back(&opened, &mark, "lab.rel_2");
     assert_eq!(scripts(&back.state), [Some("lab.rel_1"), Some("lab.rel_1")]);
     assert_eq!(back.reverted, [0]);
     assert!(back.delete_script);
-    // With nothing ever served, it opens on nothing.
-    let Some(empty) = open_host(&second, 1, None) else {
+}
+
+#[test]
+fn a_host_opened_after_an_unpublish_serves_nothing() {
+    let (second, mark) = second_in_flight();
+    let (down, delete) = unpublish(&second, Some(&mark));
+    assert!(delete.contains(&"lab.rel_1".to_owned()));
+    // Whether or not the caller still holds the old mark, nothing queued for deletion is served.
+    for in_flight in [None, Some(&mark)] {
+        let Some(opened) = open_host(&down, 1, in_flight) else {
+            unreachable!("no host");
+        };
+        assert_eq!(scripts(&opened), [None, None], "{in_flight:?}");
+    }
+    assert_eq!(confirmed_script(&down, Some(&mark)), None);
+}
+
+#[test]
+fn a_host_opened_before_any_release_was_served_serves_nothing() {
+    let state = serving(None, 2, 1);
+    let Some(opened) = open_host(&state, 1, None) else {
         unreachable!("no host");
     };
-    assert_eq!(scripts(&empty), [Some("lab.rel_2"), None]);
-    assert!(set_back(&empty, &mark, "lab.rel_2").delete_script);
+    assert_eq!(scripts(&opened), [None, None]);
+    // Nor during the very first release's flight.
+    let Ok((first, mark)) = commit_live(&state, 1, "lab.rel_1") else {
+        unreachable!("refused");
+    };
+    let Some(mid) = open_host(&first, 1, Some(&mark)) else {
+        unreachable!("no host");
+    };
+    assert_eq!(scripts(&mid), [Some("lab.rel_1"), None]);
+    assert_eq!(confirmed_script(&first, Some(&mark)), None);
+    assert_eq!(confirmed_script(&first, None), Some("lab.rel_1".to_owned()));
 }
 
 #[test]

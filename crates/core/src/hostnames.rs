@@ -132,6 +132,8 @@ fn is_number(label: &str) -> bool {
 /// beginning `//` are skipped, and a rule is read up to the first whitespace. Pass what this returns to [`mappable`]: a
 /// comment or blank line passed to it as a rule fails closed, like anything else it can't read.
 pub fn public_suffix_rules(list: &str) -> Vec<&str> {
+    // A byte-order mark at the start is a common form of the file, not part of its first line.
+    let list = list.strip_prefix('\u{FEFF}').unwrap_or(list);
     list.lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with("//"))
@@ -153,7 +155,18 @@ fn suffix_rule(rule: &str) -> Option<SuffixRule> {
     let labels = |body: &str| -> Option<Vec<String>> {
         // Each label as a hostname's: 1 to 63 letters, digits and hyphens after IDNA. A comment, a blank, or any other
         // text isn't a rule, and fails closed.
-        if body.is_empty() || body.chars().any(char::is_whitespace) {
+        // Nothing IDNA would quietly map away or drop: no whitespace, no control or format character, and no ASCII but
+        // letters, digits, hyphens and dots.
+        if body.is_empty()
+            || body.chars().any(|c| {
+                c.is_whitespace()
+                    || c.is_control()
+                    || c == '\u{FEFF}'
+                    || c == '\u{AD}'
+                    || ('\u{200B}'..='\u{200F}').contains(&c)
+                    || (c.is_ascii() && !(c.is_ascii_alphanumeric() || c == '-' || c == '.'))
+            })
+        {
             return None;
         }
         let ascii = idna::domain_to_ascii(body).ok()?;
@@ -308,6 +321,8 @@ pub struct HostnameRecord<'a> {
     /// When the name was last suspended. Every request and challenge made at or before it is void: after a lift, a
     /// fresh request is needed.
     pub last_suspended_at: Option<i64>,
+    /// When the name's suspension was last lifted. Only a request made after it counts.
+    pub last_lifted_at: Option<i64>,
 }
 
 /// A room's ask for the claim, after its proof matched.
@@ -381,6 +396,9 @@ pub fn decide_claim(record: &HostnameRecord, ask: &ClaimAsk, now: i64) -> ClaimD
         || record
             .last_suspended_at
             .is_some_and(|suspended| ask.requested_at <= suspended)
+        || record
+            .last_lifted_at
+            .is_some_and(|lifted| ask.requested_at <= lifted)
     {
         return ClaimDecision::StaleChallenge;
     }
@@ -553,7 +571,9 @@ pub fn suspend<'a>(record: &HostnameRecord<'a>, now: i64) -> (HostnameRecord<'a>
             ending: record.claim.is_some(),
             suspended: true,
             last_freed_at: record.last_freed_at,
-            last_suspended_at: Some(now),
+            // Only ever forward: a suspension with an earlier clock can't reopen requests a later one voided.
+            last_suspended_at: Some(record.last_suspended_at.map_or(now, |at| at.max(now))),
+            last_lifted_at: record.last_lifted_at,
         },
         SuspendPlan {
             tell_room: record.claim.map(|c| c.room),
@@ -561,10 +581,13 @@ pub fn suspend<'a>(record: &HostnameRecord<'a>, now: i64) -> (HostnameRecord<'a>
     )
 }
 
-/// Lifting a suspension restores nothing: no claim comes back, and a room must challenge anew.
-pub fn lift<'a>(record: &HostnameRecord<'a>) -> HostnameRecord<'a> {
+/// Lifting a suspension at `now` restores nothing: no claim comes back, and only a request made after the lift counts,
+/// decided from the record's own `last_lifted_at`, not from the caller. While suspended, every request is refused
+/// `Suspended` and nothing is recorded as pending; the caller records nothing for a refused request.
+pub fn lift<'a>(record: &HostnameRecord<'a>, now: i64) -> HostnameRecord<'a> {
     HostnameRecord {
         suspended: false,
+        last_lifted_at: Some(record.last_lifted_at.map_or(now, |at| at.max(now))),
         ..*record
     }
 }
@@ -578,5 +601,6 @@ pub fn free<'a>(record: &HostnameRecord<'a>, now: i64) -> HostnameRecord<'a> {
         suspended: record.suspended,
         last_freed_at: Some(now),
         last_suspended_at: record.last_suspended_at,
+        last_lifted_at: record.last_lifted_at,
     }
 }

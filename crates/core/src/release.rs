@@ -711,15 +711,35 @@ pub fn clear_host(state: &ServeState, host: usize) -> Option<ServeState> {
     })
 }
 
-/// A custom hostname newly claimed and reported `active` (`hostnames::routing_may_start`): that host opens, and serves
-/// `last_served`, the script of the release the room last confirmed served by its marker, or nothing. Never the script
-/// the default host names now: between a commit and its marker that is unconfirmed, and a set-back would leave the new
-/// host on a failed release. The host follows the next commit as any open host does. `None` if there's no such host, or
-/// its version can't go up.
-pub fn open_host(state: &ServeState, host: usize, last_served: Option<&str>) -> Option<ServeState> {
+/// The script the room last confirmed served, from its own state: the default host's script as the release before an
+/// in-flight commit left it (`in_flight`, that commit's mark, while its marker hasn't come back), or the default host's
+/// script now when nothing is in flight. Nothing when the room is unpublished, or no release was ever confirmed. A mark
+/// from before an unpublish (its epoch no longer the room's) counts as nothing in flight.
+pub fn confirmed_script(state: &ServeState, in_flight: Option<&CommitMark>) -> Option<String> {
+    match in_flight.filter(|mark| mark.epoch == state.epoch) {
+        Some(mark) => mark.before.first().cloned().flatten(),
+        None => state
+            .hosts
+            .first()
+            .filter(|h| !h.closed)
+            .and_then(|h| h.script.clone()),
+    }
+}
+
+/// A custom hostname newly claimed and reported `active` (`hostnames::routing_may_start`): that host opens on the
+/// release the room last confirmed served ([`confirmed_script`]), or nothing. It takes no script from its caller: what it
+/// serves comes from the room's state and the in-flight commit's mark, so an unpublished room opens it on nothing, and
+/// between a commit and its marker it never takes the unconfirmed script. When that marker comes back,
+/// [`confirm_served`] moves it to the confirmed release with every other open host; if it doesn't, the set-back leaves
+/// it where it is. `None` if there's no such host, or its version can't go up.
+pub fn open_host(
+    state: &ServeState,
+    host: usize,
+    in_flight: Option<&CommitMark>,
+) -> Option<ServeState> {
     let target = state.hosts.get(host)?;
     let version = bump(target.version)?;
-    let live = last_served.map(str::to_owned);
+    let live = confirmed_script(state, in_flight);
     Some(ServeState {
         epoch: state.epoch,
         hosts: state
@@ -739,6 +759,53 @@ pub fn open_host(state: &ServeState, host: usize, last_served: Option<&str>) -> 
             })
             .collect(),
         kept_previous: state.kept_previous.clone(),
+    })
+}
+
+/// What a release's marker coming back does, in one room decision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Confirmed {
+    pub state: ServeState,
+    /// The open hosts moved to the release here, the ones opened while it was in flight.
+    pub caught_up: Vec<usize>,
+    /// The kept script and the one to delete, as [`after_served`] decides them.
+    pub after: AfterServed,
+}
+
+/// A release's marker came back: it is confirmed served. Under the commit's own epoch, every open host that doesn't
+/// name the release yet, which is one opened while it was in flight, moves to it (the catch-up); the release before it
+/// becomes the kept one, and the one kept before that is to be deleted ([`after_served`]). `None` if the epoch moved
+/// since the commit, when nothing is confirmed: an unpublish spoke, and the room serves nothing. A closed host is never
+/// written.
+pub fn confirm_served(state: &ServeState, mark: &CommitMark, script: &str) -> Option<Confirmed> {
+    if state.epoch != mark.epoch || state.epoch == u64::MAX {
+        return None;
+    }
+    let mut caught_up = Vec::new();
+    let mut hosts = Vec::with_capacity(state.hosts.len());
+    for (i, host) in state.hosts.iter().enumerate() {
+        if host.closed || host.script.as_deref() == Some(script) {
+            hosts.push(host.clone());
+            continue;
+        }
+        let version = bump(host.version)?;
+        caught_up.push(i);
+        hosts.push(DesiredServe {
+            script: Some(script.to_owned()),
+            version,
+            closed: false,
+        });
+    }
+    let previous = mark.before.first().cloned().flatten();
+    let after = after_served(state, previous.as_deref(), script);
+    Some(Confirmed {
+        state: ServeState {
+            epoch: state.epoch,
+            hosts,
+            kept_previous: after.kept_previous.clone(),
+        },
+        caught_up,
+        after,
     })
 }
 

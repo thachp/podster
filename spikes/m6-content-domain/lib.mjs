@@ -98,7 +98,10 @@ export const EMPTY_SCRIPT = 'export default { fetch() { return new Response("not
  * Returns each call's status and errors, and timing in milliseconds. `assetsOnly` sends no module.
  */
 export async function uploadApp(script, dir, { assetsOnly = false, headersInConfig = false } = {}) {
-  const files = readApp(dir);
+  const all = readApp(dir);
+  // As wrangler does (spike A): _headers and _redirects go into the metadata's assets.config, never into the manifest.
+  const special = ["/_headers", "/_redirects"];
+  const files = headersInConfig ? Object.fromEntries(Object.entries(all).filter(([p]) => !special.includes(p))) : all;
   const byHash = new Map(Object.values(files).map((f) => [f.hash, f]));
   const base = `/accounts/${ACCOUNT}/workers/dispatch/namespaces/${NAMESPACE}/scripts/${script}`;
   const report = { script, files: Object.keys(files).length, calls: [] };
@@ -118,9 +121,8 @@ export async function uploadApp(script, dir, { assetsOnly = false, headersInConf
     if (up.body.result?.jwt) completion = up.body.result.jwt;
   }
 
-  const metadata = { compatibility_date: COMPATIBILITY_DATE, assets: { jwt: completion }, bindings: [] };
-  // Wrangler sends _headers and _redirects as text in the assets config, not only as files; spike A says which counts.
-  if (headersInConfig && files["/_headers"]) metadata.assets.config = { _headers: Buffer.from(files["/_headers"].base64, "base64").toString("utf8") };
+  const metadata = { compatibility_date: COMPATIBILITY_DATE, compatibility_flags: [], assets: { jwt: completion, config: {} }, bindings: [] };
+  for (const p of special) if (headersInConfig && all[p]) metadata.assets.config[p.slice(1)] = Buffer.from(all[p].base64, "base64").toString("utf8");
   const form = new FormData();
   if (!assetsOnly) {
     metadata.main_module = "worker.js";
@@ -141,7 +143,11 @@ export async function namespaceScripts() {
   return { status: res.status, errors: errorsOf(res.body), names };
 }
 
-export const deleteScript = (script) => api("DELETE", `/accounts/${ACCOUNT}/workers/dispatch/namespaces/${NAMESPACE}/scripts/${script}`);
+export const deleteScript = (script) => {
+  if (!isSpikeName(script)) throw new Error("refusing to delete a script this spike didn't make");
+  return deleteScriptUnchecked(script);
+};
+const deleteScriptUnchecked = (script) => api("DELETE", `/accounts/${ACCOUNT}/workers/dispatch/namespaces/${NAMESPACE}/scripts/${script}?force=true`);
 
 export async function zoneRoutes() {
   const res = await api("GET", `/zones/${ZONE_ID}/workers/routes`);
@@ -150,4 +156,8 @@ export async function zoneRoutes() {
 
 export const deleteRoute = (id) => api("DELETE", `/zones/${ZONE_ID}/workers/routes/${id}`);
 export const accountScript = (name) => api("GET", `/accounts/${ACCOUNT}/workers/scripts/${name}/settings`);
-export const deleteAccountScript = (name) => api("DELETE", `/accounts/${ACCOUNT}/workers/scripts/${name}?force=true`);
+export const deleteAccountScript = (name) => {
+  if (name !== DISPATCH) throw new Error("refusing to delete a Worker this spike didn't make");
+  return deleteAccountScriptUnchecked(name);
+};
+const deleteAccountScriptUnchecked = (name) => api("DELETE", `/accounts/${ACCOUNT}/workers/scripts/${name}?force=true`);

@@ -14,17 +14,19 @@ export const ZONE = "opster.dev";
 export const SCRIPT_PREFIX = "spike-m6-c-";
 export const LABEL = /^[a-z0-9]{1,20}$/;
 
-export const SANDBOX_CSP = [
-  "sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads",
-  "default-src 'self' data: blob:",
-  "script-src 'self'",
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data:",
-  "connect-src 'self'",
-  "frame-ancestors 'none'",
-  "form-action 'self'",
-  "base-uri 'none'",
-].join("; ");
+// The host is named rather than 'self': a sandboxed page's origin is null, and WebKit then matches 'self' to nothing.
+export const sandboxCsp = (origin) =>
+  [
+    "sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads",
+    `default-src ${origin} data: blob:`,
+    `script-src ${origin}`,
+    `style-src ${origin} 'unsafe-inline'`,
+    `img-src ${origin} data:`,
+    `connect-src ${origin}`,
+    "frame-ancestors 'none'",
+    `form-action ${origin}`,
+    "base-uri 'none'",
+  ].join("; ");
 
 export const CLEAR_SITE_DATA = '"cache", "cookies", "storage"';
 
@@ -66,15 +68,18 @@ export function preflight(target, { method, pathname, serviceWorker, cookie }) {
 }
 
 /** The headers the dispatch Worker sets on the app's answer, last, overriding the app. */
-export function headerChanges(mode) {
+export function headerChanges(mode, origin) {
   if (mode !== "hardened") return { remove: [], set: {} };
   return {
     remove: ["set-cookie"],
     set: {
-      "content-security-policy": SANDBOX_CSP,
+      "content-security-policy": sandboxCsp(origin),
       "referrer-policy": "no-referrer",
       "x-content-type-options": "nosniff",
-      "cache-control": "public, max-age=60",
+      // no-transform: asks Cloudflare not to inject its Web Analytics beacon into the app's HTML (M4's fix).
+      "cache-control": "public, max-age=60, no-transform",
+      // A sandboxed page's origin is null, so its module scripts and fetches are cross-origin and need CORS.
+      "access-control-allow-origin": "*",
     },
   };
 }

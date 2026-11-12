@@ -15,4 +15,5 @@ await step("history", () => { history.replaceState({}, "", "/?step=1"); return l
 await step("style", () => getComputedStyle(document.querySelector("h1")).color);
 await step("image", () => new Promise((resolve) => { const i = document.getElementById("logo"); i.complete ? resolve(i.naturalWidth > 0) : (i.onload = () => resolve(true), i.onerror = () => resolve(false)); }));
 window.plainResult = out;
+document.getElementById("result").textContent = JSON.stringify(out);
 document.getElementById("status").textContent = "done";

@@ -1,0 +1,14 @@
+{"at":"2026-11-12T09:28:03.624Z","action":"created","kind":"worker","name":"spike-m6-c-dispatch","version":"2b5e41fd-a0ad-48db-ac3c-d7a9c69fcf54"}
+{"at":"2026-11-12T09:28:04.653Z","action":"created","kind":"route","name":"*.opster.dev/*","id":"cca5e9fcf7ea494b9d67c1c14fe2e0c4"}
+{"at":"2026-11-12T09:28:15.184Z","action":"created","kind":"namespace script","name":"spike-m6-c-a"}
+{"at":"2026-11-12T09:28:19.877Z","action":"created","kind":"namespace script","name":"spike-m6-c-b"}
+{"at":"2026-11-12T09:28:24.703Z","action":"created","kind":"namespace script","name":"spike-m6-c-plain"}
+{"at":"2026-11-12T09:28:45.313Z","action":"created","kind":"namespace script","name":"spike-m6-c-a"}
+{"at":"2026-11-12T09:28:47.305Z","action":"created","kind":"namespace script","name":"spike-m6-c-b"}
+{"at":"2026-11-12T09:31:02.827Z","action":"created","kind":"namespace script","name":"spike-m6-c-plain"}
+{"at": "2026-11-12T09:31:30Z", "action": "note", "kind": "worker and route", "name": "spike-m6-c-dispatch", "detail": "redeployed twice, as versions 0fb7fbeb-4152-4499-bb2d-135ff813f2cc and bda214b0-09f2-438d-93c0-9560ebc5df73; each deploy replaced the route, so its ID changed from cca5e9fcf7ea494b9d67c1c14fe2e0c4 to 9691d560a94e4e779bbfddd381a2e3cc, the one clean-up deleted"}
+{"at":"2026-11-12T09:31:57.104Z","action":"deleted","kind":"route","name":"*.opster.dev/*","id":"9691d560a94e4e779bbfddd381a2e3cc"}
+{"at":"2026-11-12T09:31:57.361Z","action":"deleted","kind":"namespace script","name":"spike-m6-c-a"}
+{"at":"2026-11-12T09:31:57.601Z","action":"deleted","kind":"namespace script","name":"spike-m6-c-b"}
+{"at":"2026-11-12T09:31:57.838Z","action":"deleted","kind":"namespace script","name":"spike-m6-c-plain"}
+{"at":"2026-11-12T09:31:58.175Z","action":"deleted","kind":"worker","name":"spike-m6-c-dispatch"}

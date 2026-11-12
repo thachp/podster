@@ -42,7 +42,10 @@ async function open(context, host, path = "/") {
 const browser = await playwright[browserName].launch({ env: childEnv() });
 const fresh = () => browser.newContext({ ignoreHTTPSErrors: false });
 
+// --plain-only reruns just step 6, after a change to the hardened headers.
+const plainOnly = process.argv.includes("--plain-only");
 try {
+  if (!plainOnly) {
   // 1. podster.dev's cookies: seeded into this browser's jar, never readable or settable from an opster.dev page.
   {
     const ctx = await fresh();
@@ -79,10 +82,10 @@ try {
     note("hardened h-a localStorage", { result: await run(h.page, "setLocal") });
     note("hardened h-a caches", { result: await run(h.page, "cachePut") });
     note("hardened h-a registers a service worker", { result: await run(h.page, "registerSW") });
-    await h.page.goto(url("h-a", "/hdr.html"));
-    note("cookies after hardened h-a/hdr.html (its _headers asks for Set-Cookie)", { names: (await ctx.cookies(url("b"))).map((c) => c.name).sort() });
-    await h.page.goto(url("a", "/hdr.html"));
-    note("cookies after raw a/hdr.html", { names: (await ctx.cookies(url("b"))).map((c) => c.name).sort() });
+    await h.page.goto(url("h-a", "/hdr"));
+    note("cookies after hardened h-a/hdr (its _headers asks for Set-Cookie)", { names: (await ctx.cookies(url("b"))).map((c) => c.name).sort() });
+    await h.page.goto(url("a", "/hdr"));
+    note("cookies after raw a/hdr", { names: (await ctx.cookies(url("b"))).map((c) => c.name).sort() });
     await ctx.close();
   }
 
@@ -120,6 +123,8 @@ try {
     await ctx.close();
   }
 
+  }
+
   // 6. An ordinary static app, with and without the sandboxing CSP.
   for (const host of ["plain", "h-plain"]) {
     const ctx = await fresh();
@@ -127,8 +132,10 @@ try {
     const page = await ctx.newPage();
     page.on("console", (m) => { if (m.type() === "error") errors.push(m.text().slice(0, 160)); });
     const res = await page.goto(url(host), { waitUntil: "load" });
-    await page.waitForFunction("document.getElementById('status')?.textContent === 'done'", null, { timeout: 5000 }).catch(() => {});
-    note(`plain app on ${host}`, { status: res?.status() ?? null, result: await page.evaluate("window.plainResult ?? null"), consoleErrors: errors.length, firstErrors: errors.slice(0, 3) });
+    // Read as text, not by evaluating script: the sandbox's CSP blocks Playwright's eval in some browsers.
+    const done = await page.locator("#status", { hasText: "done" }).waitFor({ timeout: 8000 }).then(() => true, () => false);
+    const text = done ? await page.locator("#result").textContent() : null;
+    note(`plain app on ${host}`, { status: res?.status() ?? null, ran: done, result: text ? JSON.parse(text) : null, consoleErrors: errors.length, firstErrors: errors.slice(0, 3) });
     await ctx.close();
   }
 } finally {
@@ -136,4 +143,4 @@ try {
 }
 
 mkdirSync(join(import.meta.dirname, "results"), { recursive: true });
-writeFileSync(join(import.meta.dirname, "results", `browser-${browserName}.json`), JSON.stringify({ at: new Date().toISOString(), browser: browserName, results }, null, 2) + "\n");
+writeFileSync(join(import.meta.dirname, "results", `browser-${browserName}${plainOnly ? "-plain-2" : ""}.json`), JSON.stringify({ at: new Date().toISOString(), browser: browserName, results }, null, 2) + "\n");

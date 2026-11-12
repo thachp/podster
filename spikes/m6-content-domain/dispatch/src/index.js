@@ -23,7 +23,7 @@ export default {
     }
 
     const out = new Response(res.body, res);
-    const { remove, set } = headerChanges(target.mode);
+    const { remove, set } = headerChanges(target.mode, url.origin);
     for (const name of remove) out.headers.delete(name);
     for (const [name, value] of Object.entries(set)) out.headers.set(name, value);
     out.headers.set("x-spike-mode", target.mode);

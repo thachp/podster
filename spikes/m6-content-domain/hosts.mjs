@@ -41,7 +41,7 @@ for (const host of [`${random()}.${ZONE}`, `a.${ZONE}`, `h-a.${ZONE}`, `x.${rand
 // 2. The wildcard route reaches the dispatch Worker on arbitrary hosts; an unknown label and a bad label.
 for (const host of [`a.${ZONE}`, `plain.${ZONE}`, `${random().slice(0, 8)}.${ZONE}`, `bad_label.${ZONE}`]) note("route", { host, ...(await get(`https://${host}/`)) });
 // 3. _headers' Set-Cookie and header, raw and hardened.
-for (const host of [`a.${ZONE}`, `h-a.${ZONE}`, `w-a.${ZONE}`]) note("_headers page", { host, ...(await get(`https://${host}/hdr.html`)) });
+for (const host of [`a.${ZONE}`, `h-a.${ZONE}`, `w-a.${ZONE}`]) note("_headers page", { host, ...(await get(`https://${host}/hdr`)) });
 // 4. The hardened modes' refusals.
 note("service-worker script, raw", await get(`https://a.${ZONE}/sw.js`, { headers: { "service-worker": "script" } }));
 note("service-worker script, w-", await get(`https://w-a.${ZONE}/sw.js`, { headers: { "service-worker": "script" } }));

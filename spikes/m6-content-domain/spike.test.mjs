@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CLEAR_SITE_DATA, SANDBOX_CSP, cookieNames, headerChanges, parseHost, preflight } from "./dispatch/src/route.js";
+import { CLEAR_SITE_DATA, cookieNames, headerChanges, parseHost, preflight, sandboxCsp } from "./dispatch/src/route.js";
 import { assetHash, isSpikeName, manifestOf, readApp, scriptFor } from "./lib.mjs";
 
 const HERE = import.meta.dirname;
@@ -44,12 +44,14 @@ test("the dispatch Worker's own answers, by mode", () => {
 test("only the hardened mode changes the app's headers, and it strips Set-Cookie and sandboxes", () => {
   assert.deepEqual(headerChanges("raw"), { remove: [], set: {} });
   assert.deepEqual(headerChanges("workers"), { remove: [], set: {} });
-  const h = headerChanges("hardened");
+  const h = headerChanges("hardened", "https://h-a.opster.dev");
+  const csp = sandboxCsp("https://h-a.opster.dev");
   assert.deepEqual(h.remove, ["set-cookie"]);
-  assert.equal(h.set["content-security-policy"], SANDBOX_CSP);
-  assert.match(SANDBOX_CSP, /^sandbox /);
-  assert.doesNotMatch(SANDBOX_CSP, /allow-same-origin/);
-  assert.doesNotMatch(SANDBOX_CSP, /allow-popups-to-escape-sandbox/);
+  assert.equal(h.set["content-security-policy"], csp);
+  assert.match(csp, /^sandbox /);
+  assert.match(csp, /connect-src https:\/\/h-a\.opster\.dev;/);
+  assert.doesNotMatch(csp, /'self'|allow-same-origin|allow-popups-to-escape-sandbox/);
+  assert.match(h.set["cache-control"], /no-transform/);
 });
 
 test("cookie names never carry values", () => {

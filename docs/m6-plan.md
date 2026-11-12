@@ -366,6 +366,75 @@ The architect proposes the gate call, for the owner to review.
 | 23 | Calling M6's gate | The architect proposes it after the staging run and the security review, for the owner to review. Test people count, as decision 79 says; real people stay owed before production. | |
 | 24 | Which reading of criterion 8 does M6's gate use? | **Owner only.** The milestone table gives M6 the whole criterion. Proposed: the whole of it, with upload permissions, retention and public-room abuse controls shown again by rerunning the M2 and M4 staging scripts at the gate's commit. | Only the custom-domain, export or transfer and release-approval parts, resting on M2's and M4's own gates for the others. |
 
+## Spike C results
+
+**Run on 2026-11-12, 09:28 to 09:32 UTC, and cleaned up.** The content domain is `opster.dev`, on the same Cloudflare account as `podster.dev` and on the Free plan, with the owner's proxied wildcard record. One dispatch Worker on the route `*.opster.dev/*` served three apps uploaded assets-only into `podster-staging-apps`, building on [spike A](../spikes/m6-namespace-app/README.md). Each app was served three ways: as it was, with service workers refused, and with the headers ADR 0010 proposes plus a sandboxing CSP. The code, every recorded answer and the resource ledger are in [`spikes/m6-content-domain`](../spikes/m6-content-domain/README.md). It answers risks 6 (except the Public Suffix List's own questions), 12 (the wildcard half; custom hostnames are spike D) and 13.
+
+### The answers
+
+**Shown in a browser,** in Playwright's own Chromium, Firefox and WebKit, headless:
+
+- **A page on the content domain can't read, receive or set a `podster.dev` cookie.** A `podster.dev` cookie in the browser's jar wasn't visible or sent on `a.opster.dev`, and a script setting one for `podster.dev` was silently ignored. All three browsers.
+- **Without the Public Suffix List entry, one room's app reads, receives and overwrites another's cookies.** A cookie set by script on `a.opster.dev` for `opster.dev` was read and sent on `b.opster.dev`, and `b` overwrote it. `localStorage` stayed per host. All three browsers.
+- **A sandboxing CSP without `allow-same-origin` closes that.** The page's origin is `null`, and `document.cookie`, `localStorage`, the Cache API and service-worker registration are each refused with `SecurityError`. With the dispatch Worker stripping `Set-Cookie`, the app's own `_headers` couldn't set one either. All three browsers.
+- **The sandbox costs an app all its storage.** An ordinary static app's module script, `fetch`, CSS, image and `history` worked only once the CSP named the host instead of `'self'` and the answer carried `Access-Control-Allow-Origin: *`. A sandboxed page is cross-origin to its own host, and WebKit matched `'self'` to nothing. `localStorage`, `sessionStorage` and IndexedDB were refused in all three.
+- **Refusing a service worker's script stops registration.** The dispatch Worker answered 403 to `Service-Worker: script`, and registration failed in all three. On a host that allowed it, a service worker registered in all three, and was seen serving the next load in Chromium and WebKit.
+- **`Clear-Site-Data` on the not-found answer doesn't do the same thing in each browser:**
+  - all three cleared the host's own cookie, `localStorage` and Cache API;
+  - **WebKit left the service worker registered and serving;**
+  - Firefox and WebKit kept a cookie set for `opster.dev`;
+  - **Chromium also cleared the sibling host's own cookies,** so one host's answer reaches every room's app there.
+
+**Shown by headers only,** with Node's `fetch` and TLS:
+
+- **One wildcard certificate and one route serve every first-level host.** Let's Encrypt, naming only `*.opster.dev` and `opster.dev`, so no room's host is named in it. A second-level host failed the TLS handshake.
+- **The dispatch Worker's own refusals worked:** a service worker's script 403, `POST` 405, and the not-found answer with `Clear-Site-Data`.
+- **A request carrying a Podster-looking session cookie and an `Authorization` header got the same answer as without.**
+- **Removing a header by name leaves the rest.** With `Set-Cookie` removed, the app's own `X-Spike-From-Headers`, from `_headers` in `assets.config`, still reached the visitor. A `_headers` rule matches the served path (`/hdr`), not the file's name (`/hdr.html`).
+- **Cloudflare injects its Web Analytics beacon into every app's HTML on `opster.dev`,** when the request accepts `text/html` as browsers do: the zone behaviour M4 found on `podster.dev`. With `no-transform` in `Cache-Control` it wasn't injected. The sandbox's CSP also refused the beacon in all three browsers.
+- **Files aren't shared between scripts.** A second script with the same files had to upload all of them. The same files again to the same script needed none, and took two calls and about 2 seconds. A first upload of 4 or 5 files took about 5 seconds.
+- **A replace was seen within about 2 seconds,** on every check this run made. Spike A once saw 74 seconds, so the run waited by polling.
+
+### What each would change in ADR 0010
+
+Proposed, for the architect to accept or not. None is written into the ADR.
+
+1. **"What content can reach", another room's app:** the content Worker sets the sandboxing CSP on every answer: no `allow-same-origin`, every source naming the request's own host and never `'self'`, and `Access-Control-Allow-Origin: *` beside it. Shown in three browsers, this keeps rooms' apps from each other's cookies and storage without waiting for the Public Suffix List. The list's entry is still wanted for reputation. **The owner should know the cost:** an app gets no cookies, no `localStorage` or `sessionStorage`, no IndexedDB, no Cache API and no service worker.
+2. **The content Worker allow-lists the app's headers.** It passes `Content-Type`, `Content-Length`, `ETag`, `Last-Modified` and nothing else, then sets its own, instead of removing named ones. Shown: a header it didn't name reached the visitor. An app's `Clear-Site-Data` reaching Chromium would clear every room's cookies.
+3. **`Cache-Control` on every answer includes `no-transform`,** or the owner turns the zone's Web Analytics off. Otherwise Cloudflare adds a third-party script to every app.
+4. **Service workers: refusing the script is the control, not `Clear-Site-Data`.** The ADR's "the not-found answer carries `Clear-Site-Data`" stays as a best effort. It shouldn't be counted on to remove a service worker (WebKit kept one) or an app's cookies (Firefox and WebKit kept one set for the domain).
+5. **A missing script is not-found,** at the content Worker. `fetch` rejects with "Worker not found.", which the content Worker must catch, as spike A also found.
+6. **Per-room hosts are one level deep,** confirmed: a deeper host has no certificate.
+7. **Each release uploads all its files,** since one script's files don't serve another's. That's 300 files at most a release under the ADR's cap.
+8. **The content Worker's route is replaced on every deploy, under a new ID,** so nothing should keep a route's ID.
+
+### What stays unknown after spike C
+
+- Branded Chrome, Firefox and Safari, and mobile browsers. Only Playwright's builds ran, headless.
+- Whether a sandboxed page's own `fetch` sends the domain's cookies. The spike's echo path had no CORS header, so the test couldn't see it.
+- Why Firefox's service worker wasn't seen serving the next load. It may be Playwright's Firefox.
+- Whether turning off the zone's Web Analytics, instead of `no-transform`, is possible on the Free plan. That would be the owner's setting, and it wasn't looked at.
+- What else the sandbox breaks: forms, downloads, popups, `window.open` back to the app, fonts, frames. Only the plain app's seven steps ran.
+- The Public Suffix List's guidelines and timing, which still weren't read.
+- Custom hostnames, which are spike D's.
+- The cost of a request, as in spike A.
+
+### Resources
+
+- **Created and deleted:**
+  - the Worker `spike-m6-c-dispatch`, three versions;
+  - its route `*.opster.dev/*`, replaced on each redeploy;
+  - the namespace scripts `spike-m6-c-a`, `spike-m6-c-b` and `spike-m6-c-plain`.
+
+  All were created from 09:28 UTC and deleted at 09:31:58 UTC.
+- **Confirmed by listing afterwards:**
+  - the namespace's list held no `spike-m6-c-` script, and its `script_count` was 0;
+  - the zone had no Worker route;
+  - the account's Workers were Podster's six, and none was `spike-m6`;
+  - the hosts answered 522 again.
+- **Left:** the owner's wildcard DNS record on `opster.dev`, and the namespace `podster-staging-apps`.
+- **Not touched:** anything on `podster.dev`, Podster's own Workers, D1, KV, queues, R2 and secrets. No API token was made. The calls used wrangler's existing login, and its log sanitizing stayed on.
+
 ## Risks to test
 
 The spikes at step 1 answer these before any feature code. None has run.

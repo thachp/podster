@@ -1,0 +1,348 @@
+{
+  "at": "2026-11-12T09:31:48.261Z",
+  "browser": "webkit",
+  "results": [
+    {
+      "name": "podster.dev cookie visible on a.opster.dev",
+      "status": 200,
+      "cookies": {
+        "ok": true,
+        "value": ""
+      },
+      "echo": {
+        "ok": true,
+        "value": []
+      }
+    },
+    {
+      "name": "set a podster.dev cookie from a.opster.dev",
+      "result": {
+        "ok": true,
+        "value": ""
+      }
+    },
+    {
+      "name": "podster.dev cookies in the jar afterwards",
+      "names": [
+        "spike_pd"
+      ]
+    },
+    {
+      "name": "raw a sets a cookie on opster.dev",
+      "result": {
+        "ok": true,
+        "value": "spike_sib=from-a"
+      }
+    },
+    {
+      "name": "raw b reads it",
+      "cookies": {
+        "ok": true,
+        "value": "spike_sib=from-a"
+      },
+      "sentToServer": {
+        "ok": true,
+        "value": [
+          "spike_sib"
+        ]
+      }
+    },
+    {
+      "name": "raw b overwrites it",
+      "result": {
+        "ok": true,
+        "value": "spike_sib=from-b"
+      }
+    },
+    {
+      "name": "raw a now reads",
+      "cookies": {
+        "ok": true,
+        "value": "spike_sib=from-b"
+      }
+    },
+    {
+      "name": "raw a's localStorage",
+      "set": {
+        "ok": true,
+        "value": [
+          "spike"
+        ]
+      }
+    },
+    {
+      "name": "raw b's localStorage",
+      "keys": {
+        "ok": true,
+        "value": []
+      }
+    },
+    {
+      "name": "hardened h-b: origin, cookie read, cookie sent",
+      "status": 200,
+      "origin": {
+        "ok": true,
+        "value": "null"
+      },
+      "cookies": {
+        "ok": false,
+        "error": "SecurityError"
+      },
+      "sentToServer": {
+        "ok": false,
+        "error": "TypeError"
+      }
+    },
+    {
+      "name": "hardened h-a sets a cookie on opster.dev",
+      "status": 200,
+      "result": {
+        "ok": false,
+        "error": "SecurityError"
+      }
+    },
+    {
+      "name": "hardened h-a localStorage",
+      "result": {
+        "ok": false,
+        "error": "SecurityError"
+      }
+    },
+    {
+      "name": "hardened h-a caches",
+      "result": {
+        "ok": false,
+        "error": "SecurityError"
+      }
+    },
+    {
+      "name": "hardened h-a registers a service worker",
+      "result": {
+        "ok": false,
+        "error": "SecurityError"
+      }
+    },
+    {
+      "name": "cookies after hardened h-a/hdr (its _headers asks for Set-Cookie)",
+      "names": []
+    },
+    {
+      "name": "cookies after raw a/hdr",
+      "names": [
+        "spike_hdr"
+      ]
+    },
+    {
+      "name": "raw a registers a service worker",
+      "result": {
+        "ok": true,
+        "value": "https://a.opster.dev/"
+      }
+    },
+    {
+      "name": "raw a is controlled by it",
+      "marker": {
+        "ok": true,
+        "value": "200:from-sw"
+      }
+    },
+    {
+      "name": "w-a registers a service worker",
+      "result": {
+        "ok": false,
+        "error": "TypeError"
+      },
+      "count": {
+        "ok": true,
+        "value": 0
+      }
+    },
+    {
+      "name": "Clear-Site-Data on a/__gone",
+      "serviceWorker": {
+        "ok": true,
+        "value": "https://a.opster.dev/"
+      },
+      "goneStatus": 404,
+      "before": {
+        "cookies": {
+          "ok": true,
+          "value": "spike_parent=1; spike_own=1"
+        },
+        "local": {
+          "ok": true,
+          "value": [
+            "spike"
+          ]
+        },
+        "caches": {
+          "ok": true,
+          "value": [
+            "spike"
+          ]
+        },
+        "sw": {
+          "ok": true,
+          "value": 1
+        },
+        "marker": {
+          "ok": true,
+          "value": "200:from-sw"
+        },
+        "siblingCookies": {
+          "ok": true,
+          "value": "spike_parent=1; spike_sibling_own=1"
+        }
+      },
+      "after": {
+        "cookies": {
+          "ok": true,
+          "value": "spike_parent=1"
+        },
+        "local": {
+          "ok": true,
+          "value": []
+        },
+        "caches": {
+          "ok": true,
+          "value": []
+        },
+        "sw": {
+          "ok": true,
+          "value": 1
+        },
+        "marker": {
+          "ok": true,
+          "value": "200:from-sw"
+        },
+        "siblingCookies": {
+          "ok": true,
+          "value": "spike_parent=1; spike_sibling_own=1"
+        }
+      }
+    },
+    {
+      "name": "Clear-Site-Data on w-a/__gone",
+      "serviceWorker": null,
+      "goneStatus": 404,
+      "before": {
+        "cookies": {
+          "ok": true,
+          "value": "spike_parent=1; spike_own=1"
+        },
+        "local": {
+          "ok": true,
+          "value": [
+            "spike"
+          ]
+        },
+        "caches": {
+          "ok": true,
+          "value": [
+            "spike"
+          ]
+        },
+        "sw": null,
+        "marker": null,
+        "siblingCookies": {
+          "ok": true,
+          "value": "spike_sibling_own=1; spike_parent=1"
+        }
+      },
+      "after": {
+        "cookies": {
+          "ok": true,
+          "value": "spike_parent=1"
+        },
+        "local": {
+          "ok": true,
+          "value": []
+        },
+        "caches": {
+          "ok": true,
+          "value": []
+        },
+        "sw": null,
+        "marker": null,
+        "siblingCookies": {
+          "ok": true,
+          "value": "spike_sibling_own=1; spike_parent=1"
+        }
+      }
+    },
+    {
+      "name": "plain app on plain",
+      "status": 200,
+      "ran": true,
+      "result": {
+        "fetchJson": {
+          "ok": true,
+          "value": 3
+        },
+        "localStorage": {
+          "ok": true,
+          "value": 1
+        },
+        "sessionStorage": {
+          "ok": true,
+          "value": 1
+        },
+        "indexedDB": {
+          "ok": true,
+          "value": true
+        },
+        "history": {
+          "ok": true,
+          "value": "?step=1"
+        },
+        "style": {
+          "ok": true,
+          "value": "rgb(0, 128, 0)"
+        },
+        "image": {
+          "ok": true,
+          "value": true
+        }
+      },
+      "consoleErrors": 0,
+      "firstErrors": []
+    },
+    {
+      "name": "plain app on h-plain",
+      "status": 200,
+      "ran": true,
+      "result": {
+        "fetchJson": {
+          "ok": true,
+          "value": 3
+        },
+        "localStorage": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "sessionStorage": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "indexedDB": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "history": {
+          "ok": true,
+          "value": "?step=1"
+        },
+        "style": {
+          "ok": true,
+          "value": "rgb(0, 128, 0)"
+        },
+        "image": {
+          "ok": true,
+          "value": true
+        }
+      },
+      "consoleErrors": 0,
+      "firstErrors": []
+    }
+  ]
+}

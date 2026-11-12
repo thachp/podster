@@ -7,11 +7,13 @@ mod a2a_out;
 mod downloads;
 mod error;
 mod github;
+mod hostname_claim;
 mod moderation;
 mod objects;
 mod principal;
 mod provider;
 mod public;
+mod releases;
 mod store;
 mod wake;
 mod workspace;
@@ -426,6 +428,13 @@ async fn route(
         None
     };
 
+    // M6's routes (step 2): none is built. Switched off, which is everywhere, none is looked at here at all, so each is
+    // answered exactly where an unknown path is: by the match below, or by the room it names.
+    if let Some(audience) = releases::route(&method, &parts) {
+        if releases::switched_on(&env).await {
+            return releases::refuse(&env, &caller, audience);
+        }
+    }
     let (workspace_id, forward_path) = match parts.as_slice() {
         ["v1", "me"] if method == Method::Get => return me(&env, &caller).await,
         ["v1", "files", ws, id] if method == Method::Get => {

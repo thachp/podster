@@ -1208,6 +1208,9 @@ describe("the room migration", () => {
     const newest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
     await inRoom(r.id, (sql) => {
       // The newest step, the M5 security review's two columns, comes off first.
+      // M6 step 2's release tables, the newest migration, come off first.
+      for (const table of ["release_config", "serve_state", "unpublish", "release", "app_label", "hostname_request"]) sql.exec(`DROP TABLE ${table}`);
+      sql.exec("UPDATE schema_version SET version = version - 1");
       for (const [table, column] of [["repo_link", "gone_seen_at"], ["repo_request", "limited_since"], ["repo_request", "limited_call"]]) sql.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
       sql.exec("UPDATE schema_version SET version = version - 1");
       // The step that keeps an approval's reviewer (A1, decision 195) comes off next.

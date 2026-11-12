@@ -1,3 +1,4 @@
+import { coreSets } from "../../packages/contracts/core-sets.mjs";
 import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
@@ -194,10 +195,13 @@ export default defineConfig({
             withoutList: stagingRequestersProblem(readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8").replace(/^\s*"REPOSITORY_REQUESTERS":.*\n/m, "")),
             valid: Object.fromEntries(["operators,test-people", "test-people", "per_owner1", "", "operators,", "everyone"].map((value) => [value, validRequesters(value)])),
           }),
-          TEST_D1_SCHEMA: ["0001_membership_index.sql", "0002_room_status.sql", "0003_membership_by_org.sql", "0004_ownerless_rooms.sql", "0005_public_workroom_index.sql", "0006_public_explore_order.sql", "0007_repo_room_index.sql"].map((name) => readFileSync(new URL(`./migrations/${name}`, import.meta.url), "utf8")).join("\n").replace(/--.*$/gm, ""),
+          TEST_D1_SCHEMA: ["0001_membership_index.sql", "0002_room_status.sql", "0003_membership_by_org.sql", "0004_ownerless_rooms.sql", "0005_public_workroom_index.sql", "0006_public_explore_order.sql", "0007_repo_room_index.sql", "0008_app_label_index.sql"].map((name) => readFileSync(new URL(`./migrations/${name}`, import.meta.url), "utf8")).join("\n").replace(/--.*$/gm, ""),
           TEST_SIGNING_JWK: JSON.stringify(privateKey.export({ format: "jwk" })),
           // Every route the contract lists, for the route-list test (M4 step 7), and the public view's schema.
           TEST_API_ROUTES: JSON.stringify(contractRoutes()),
+          // The closed sets crates/core defines for release (M6 step 2), read by the contract package's own reader, so a
+          // test can show the room's columns take exactly those.
+          TEST_CORE_SETS: JSON.stringify(coreSets(new URL("../../", import.meta.url))),
           TEST_PUBLIC_VIEW_SCHEMA: readFileSync(new URL("../../packages/contracts/public-workroom-view.schema.json", import.meta.url), "utf8"),
         },
       },

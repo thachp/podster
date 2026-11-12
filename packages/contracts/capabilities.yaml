@@ -77,6 +77,23 @@ person_only:
   - setProvisioningDelegation
   # M5 step 5b. Grants on the room's repository are given and taken back by people. An agent learns of its grant only
   # through a token, from step 6.
+  # M6 step 2 (ADR 0010): the contract and the state only. Every one answers as a missing route while release is switched
+  # off, which is everywhere. deploy_release isn't listed anywhere yet, and get_task_release_status gains nothing: each
+  # arrives with the step that builds it, so no agent sees a deploy tool before the release path exists (AC-17).
+  - getReleaseConfig
+  - setReleaseConfig
+  - approveRelease
+  - declineRelease
+  - getAppHostname
+  - requestAppHostname
+  - removeAppHostname
+  - createAppReport
+  - suspendApp
+  - liftAppSuspension
+  - suspendAppHost
+  - liftAppHostSuspension
+  - stopContentDomain
+  - resumeContentDomain
   - listRepositoryGrants
   - grantRepositoryAction
   - revokeRepositoryGrant

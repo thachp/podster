@@ -740,6 +740,80 @@ paths:
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/RequiredReason" } } } }
       responses: { "200": { $ref: "#/components/responses/Task" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/release-config:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    get:
+      operationId: getReleaseConfig
+      tags: [queries]
+      summary: "The room's release configuration (M6, ADR 0010): whether release is switched on for the room, its one approval policy, its one environment, the app's default host and its custom hostname if one is claimed. For a person who is the room's owner or one of its admins (decision 215). An agent gets `not_allowed`. A read: it grants nothing. **Not built (M6 step 2 adds the contract and the state only).** While release is switched off, which is every deployment, this can't be told from a path nobody defined: it is answered where an unknown path is, so `not_found` (404), or for a room's route whatever that room answers that caller for an unknown route (`workspace_not_found`, `access_revoked`, `invalid_argument`). Switched on, it answers `release_not_available` (409) until its step builds it"
+      responses: { "200": { description: "The room's release configuration", content: { application/json: { schema: { $ref: "#/components/schemas/ReleaseConfig" } } } }, default: { $ref: "#/components/responses/Error" } }
+    put:
+      operationId: setReleaseConfig
+      tags: [commands]
+      summary: "Switch release on or off for the room (M6, ADR 0010). Only the room's owner or one of its admins, as a person, and never an agent (decision 215); only in a public Engineering room with a ready managed repository, or `release_needs_public_room` for a private one once built; and only under a deployment delegation. Off is the default and publishes nothing. Switching it off unpublishes the room's app and raises the room's release epoch in the same transaction. `expected_version` is the configuration's version the caller read, and a stale one is refused. **Not built (M6 step 2 adds the contract and the state only).** While release is switched off, which is every deployment, this can't be told from a path nobody defined: it is answered where an unknown path is, so `not_found` (404), or for a room's route whatever that room answers that caller for an unknown route (`workspace_not_found`, `access_revoked`, `invalid_argument`). Switched on, it answers `release_not_available` (409) until its step builds it"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SetReleaseConfig" } } } }
+      responses: { "200": { description: "The room's release configuration, as changed", content: { application/json: { schema: { $ref: "#/components/schemas/ReleaseConfig" } } } }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/releases/{release}/approve:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: release, in: path, required: true, schema: { type: string, pattern: "^rel_[0-9a-f]{32}$" } }]
+    post:
+      operationId: approveRelease
+      tags: [commands]
+      summary: "A person approves one release that is awaiting approval (M6, ADR 0010, decision 199). The approval policy has one value, `person`: every release needs this. Only the room's owner or one of its admins, as a person; an agent never approves, whatever its role is called (decision 215). The person who asked for a release may approve it themselves. Approval starts the release job, which reruns policy and rechecks the requester's and the approver's standing on every pass. Asking for a release is its own command, which arrives with the step that builds it. **Not built (M6 step 2 adds the contract and the state only).** While release is switched off, which is every deployment, this can't be told from a path nobody defined: it is answered where an unknown path is, so `not_found` (404), or for a room's route whatever that room answers that caller for an unknown route (`workspace_not_found`, `access_revoked`, `invalid_argument`). Switched on, it answers `release_not_available` (409) until its step builds it"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      responses: { "200": { description: "The release, approved", content: { application/json: { schema: { $ref: "#/components/schemas/Release" } } } }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/releases/{release}/decline:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: release, in: path, required: true, schema: { type: string, pattern: "^rel_[0-9a-f]{32}$" } }]
+    post:
+      operationId: declineRelease
+      tags: [commands]
+      summary: "A person declines one release that is awaiting approval (M6, ADR 0010, decision 199). It ends `declined` and nothing is uploaded; the app goes on serving whatever it served. Only the room's owner or one of its admins, as a person; an agent never. A release that isn't awaiting approval is refused. **Not built (M6 step 2 adds the contract and the state only).** While release is switched off, which is every deployment, this can't be told from a path nobody defined: it is answered where an unknown path is, so `not_found` (404), or for a room's route whatever that room answers that caller for an unknown route (`workspace_not_found`, `access_revoked`, `invalid_argument`). Switched on, it answers `release_not_available` (409) until its step builds it"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      responses: { "200": { description: "The release, declined", content: { application/json: { schema: { $ref: "#/components/schemas/Release" } } } }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/app-hostname:
+    parameters: [{ $ref: "#/components/parameters/ws" }]
+    get:
+      operationId: getAppHostname
+      tags: [queries]
+      summary: "The room's request to map a custom hostname to its app (M6, ADR 0010, decision 207), or null. While `pending` it carries the TXT record the room's owner publishes: its name, `_podster-challenge.<hostname>`, and its value, made for this request alone. For the room's owner or one of its admins, as a person. **Not built (M6 step 2 adds the contract and the state only).** While release is switched off, which is every deployment, this can't be told from a path nobody defined: it is answered where an unknown path is, so `not_found` (404), or for a room's route whatever that room answers that caller for an unknown route (`workspace_not_found`, `access_revoked`, `invalid_argument`). Switched on, it answers `release_not_available` (409) until its step builds it"
+      responses: { "200": { description: "The room's hostname request, or null", content: { application/json: { schema: { $ref: "#/components/schemas/AppHostname" } } } }, default: { $ref: "#/components/responses/Error" } }
+    put:
+      operationId: requestAppHostname
+      tags: [commands]
+      summary: "Ask to map a custom hostname to the room's app (M6, ADR 0010, decisions 201 and 207). The name is normalized first; `podster.dev`, the content domain, a subdomain of either, an IP address, a single-label name, a wildcard name, a public suffix and a name an operator suspended are refused. The room gets a challenge and nothing else: a pending request reserves nothing, and is gone after 72 hours. The claim is given only once the room's own challenge is read from DNS, and one hostname has one room. One custom hostname a room. Only the room's owner or one of its admins, as a person. **Not built (M6 step 2 adds the contract and the state only).** While release is switched off, which is every deployment, this can't be told from a path nobody defined: it is answered where an unknown path is, so `not_found` (404), or for a room's route whatever that room answers that caller for an unknown route (`workspace_not_found`, `access_revoked`, `invalid_argument`). Switched on, it answers `release_not_available` (409) until its step builds it"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/SetAppHostname" } } } }
+      responses: { "200": { description: "The room's hostname request", content: { application/json: { schema: { $ref: "#/components/schemas/AppHostname" } } } }, default: { $ref: "#/components/responses/Error" } }
+    delete:
+      operationId: removeAppHostname
+      tags: [commands]
+      summary: "Remove the room's custom hostname or drop its pending request (M6, ADR 0010). The room stops serving on the name first; the custom hostname is then deleted at Cloudflare and read until gone before the claim is freed. A claim never transfers: any later claim, by anyone, needs a new challenge. Only the room's owner or one of its admins, as a person. **Not built (M6 step 2 adds the contract and the state only).** While release is switched off, which is every deployment, this can't be told from a path nobody defined: it is answered where an unknown path is, so `not_found` (404), or for a room's route whatever that room answers that caller for an unknown route (`workspace_not_found`, `access_revoked`, `invalid_argument`). Switched on, it answers `release_not_available` (409) until its step builds it"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      responses: { "200": { description: "The room's hostname request, ending or null", content: { application/json: { schema: { $ref: "#/components/schemas/AppHostname" } } } }, default: { $ref: "#/components/responses/Error" } }
+  /v1/app-reports:
+    post:
+      operationId: createAppReport
+      tags: [commands]
+      summary: "Report a deployed app by its address (M6, ADR 0010, decision 205). `address` is the app's host as the reporter saw it, a default host or a custom hostname, or a URL on it; nothing but its host is kept. `reason` and `note` are as `createReport`'s. Signed-in people only: an agent gets `not_allowed`. It counts against the same 10 a day per person. Reports go to Podster's operators, who can suspend the app by its label or its host and read nothing private. Answers `{ id, created_at }`. **Not built (M6 step 2 adds the contract and the state only).** While release is switched off, which is every deployment, this can't be told from a path nobody defined: it is answered where an unknown path is, so `not_found` (404), or for a room's route whatever that room answers that caller for an unknown route (`workspace_not_found`, `access_revoked`, `invalid_argument`). Switched on, it answers `release_not_available` (409) until its step builds it"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: false, required: [address, reason], properties: { address: { type: string, maxLength: 2048 }, reason: { type: string, enum: [spam, abuse, illegal, impersonation, privacy, other] }, note: { type: [string, "null"], maxLength: 1024 } } } } } }
+      responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } }
+  /v1/moderation/apps/{label}/suspend:
+    parameters: [{ $ref: "#/components/parameters/appLabel" }]
+    post: { operationId: suspendApp, tags: [commands], summary: "An operator stops a room's app from serving, `{ reason }` (M6, ADR 0010, decision 205). Keyed by the app's host label, never by a room's public handle. The room records it, sets what each of its hosts should serve to nothing and raises its release epoch in one transaction, and its owner can't release while it holds. An operator reads nothing private. Operators only, or `not_allowed`. Answers `{ label, suspended, reason, at }`. Asking again changes nothing. **Not built (M6 step 2 adds the contract and the state only).** While release is switched off, which is every deployment, this can't be told from a path nobody defined: it is answered where an unknown path is, so `not_found` (404), or for a room's route whatever that room answers that caller for an unknown route (`workspace_not_found`, `access_revoked`, `invalid_argument`). Switched on, it answers `release_not_available` (409) until its step builds it", requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/OperatorReason" } } } }, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/moderation/apps/{label}/lift:
+    parameters: [{ $ref: "#/components/parameters/appLabel" }]
+    post: { operationId: liftAppSuspension, tags: [commands], summary: "An operator lifts an app's suspension, `{ reason }` (M6, ADR 0010). Lifting restores nothing: the host goes on answering not-found until the room releases again, by a new request and a new approval. Operators only. Asking again changes nothing. **Not built (M6 step 2 adds the contract and the state only).** While release is switched off, which is every deployment, this can't be told from a path nobody defined: it is answered where an unknown path is, so `not_found` (404), or for a room's route whatever that room answers that caller for an unknown route (`workspace_not_found`, `access_revoked`, `invalid_argument`). Switched on, it answers `release_not_available` (409) until its step builds it", requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/OperatorReason" } } } }, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/moderation/app-hosts/{host}/suspend:
+    parameters: [{ $ref: "#/components/parameters/appHost" }]
+    post: { operationId: suspendAppHost, tags: [commands], summary: "An operator suspends one host of an app, `{ reason }` (M6, ADR 0010, decision 205): a default host, which suspends that app, or a custom hostname. A custom hostname's suspension lives with the hostname and outlives any room's claim to it: while it holds, no room can claim the name or start a challenge for it, and if a room holds it now, serving on it ends and the claim ends. The room's app keeps its default host unless the app is suspended too. Operators only. Answers `{ host, suspended, reason, at }`. Asking again changes nothing. **Not built (M6 step 2 adds the contract and the state only).** While release is switched off, which is every deployment, this can't be told from a path nobody defined: it is answered where an unknown path is, so `not_found` (404), or for a room's route whatever that room answers that caller for an unknown route (`workspace_not_found`, `access_revoked`, `invalid_argument`). Switched on, it answers `release_not_available` (409) until its step builds it", requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/OperatorReason" } } } }, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/moderation/app-hosts/{host}/lift:
+    parameters: [{ $ref: "#/components/parameters/appHost" }]
+    post: { operationId: liftAppHostSuspension, tags: [commands], summary: "An operator lifts a host's suspension, `{ reason }` (M6, ADR 0010). Nothing is restored: a custom hostname needs a new challenge and a new claim, and an app a new release. Operators only. Asking again changes nothing. **Not built (M6 step 2 adds the contract and the state only).** While release is switched off, which is every deployment, this can't be told from a path nobody defined: it is answered where an unknown path is, so `not_found` (404), or for a room's route whatever that room answers that caller for an unknown route (`workspace_not_found`, `access_revoked`, `invalid_argument`). Switched on, it answers `release_not_available` (409) until its step builds it", requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/OperatorReason" } } } }, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/moderation/content-domain/stop:
+    post: { operationId: stopContentDomain, tags: [commands], summary: "An operator stops the whole content domain, `{ reason }` (M6, ADR 0010, decision 205): every app's host answers not-found until it is resumed. For a compromise of the namespace or of a publishing credential, or a block of the whole domain. No room's state changes. Operators only. Answers `{ stopped, reason, at }`. Asking again changes nothing. **Not built (M6 step 2 adds the contract and the state only).** While release is switched off, which is every deployment, this can't be told from a path nobody defined: it is answered where an unknown path is, so `not_found` (404), or for a room's route whatever that room answers that caller for an unknown route (`workspace_not_found`, `access_revoked`, `invalid_argument`). Switched on, it answers `release_not_available` (409) until its step builds it", requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/OperatorReason" } } } }, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
+  /v1/moderation/content-domain/resume:
+    post: { operationId: resumeContentDomain, tags: [commands], summary: "An operator lifts the stop for the whole content domain, `{ reason }` (M6, ADR 0010). Each app serves again only what its room's own state says it should. Operators only. Asking again changes nothing. **Not built (M6 step 2 adds the contract and the state only).** While release is switched off, which is every deployment, this can't be told from a path nobody defined: it is answered where an unknown path is, so `not_found` (404), or for a room's route whatever that room answers that caller for an unknown route (`workspace_not_found`, `access_revoked`, `invalid_argument`). Switched on, it answers `release_not_available` (409) until its step builds it", requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/OperatorReason" } } } }, responses: { "200": { $ref: "#/components/responses/Json" }, default: { $ref: "#/components/responses/Error" } } }
   /v1/workspaces/{ws}/repository:
     parameters: [{ $ref: "#/components/parameters/ws" }]
     get:
@@ -888,6 +962,8 @@ components:
     assertion: { type: apiKey, in: header, name: X-Podster-Assertion, description: "Ed25519-signed gateway assertion, valid for 60 seconds. For people, `org_since` says when they joined each organization, and a room role older than that has ended. When a person adds another person or changes their role, `target_member` holds that person's organizations and join times from the gateway's directory. Neither grants anything by itself. `departure` says someone left an organization, and only the gateway's own removal sends it. Agents carry their connection generation, and `linker`: who linked the credential the request came with, and when, which an A2A endpoint set records. People carry orgs and admin_orgs." }
     providerDelivery: { type: apiKey, in: header, name: X-Podster-Assertion, description: "The gateway's assertion for one provider webhook delivery whose signature it verified, valid for 60 seconds: `kind: provider_delivery`, `provider`, `delivery` (the provider's delivery ID) and `body_sha256` (lowercase hex SHA-256 of the exact body sent), with `jti`, `iat`, `exp`, `aud` and `iss` and nothing else. It names no person, agent or organization, so it authorizes nothing. Only `receiveGithubDelivery` takes it, and that route takes nothing else." }
   parameters:
+    appLabel: { name: label, in: path, required: true, description: "An app's host label (M6, ADR 0010): at most 26 lower-case letters and digits, generated by the server and never used again.", schema: { type: string, pattern: "^[a-z0-9]{1,26}$" } }
+    appHost: { name: host, in: path, required: true, description: "One host of an app (M6, ADR 0010): a default host on the content domain, or a custom hostname.", schema: { type: string, maxLength: 253 } }
     ws: { name: ws, in: path, required: true, schema: { type: string } }
     t: { name: t, in: path, required: true, schema: { type: string } }
     idempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 1 } }
@@ -1222,6 +1298,73 @@ components:
       required: [grants]
       properties:
         grants: { type: array, items: { $ref: "#/components/schemas/RepoGrant" } }
+    ReleaseConfig:
+      type: object
+      description: "A room's release configuration (M6, ADR 0010). The room's own state. `enabled` is off by default. `approval_policy` has one value. `environments` has one entry. `default_host` is the app's host on the content domain, whose label the server generates and never uses again; null until the room first has one. `version` goes up on every change, and a release remembers the version it was asked under."
+      additionalProperties: false
+      required: [enabled, approval_policy, environments, default_host, custom_host, version, set_by, updated_at]
+      properties:
+        enabled: { type: boolean }
+        approval_policy: { type: string, enum: [person], description: "A person who may approve, approves each release (decision 199)." }
+        environments: { type: array, minItems: 1, maxItems: 1, items: { type: string, enum: [production] }, description: "One environment, of merged and reviewed code; no preview (decision 214)." }
+        default_host: { type: [string, "null"] }
+        custom_host: { type: [string, "null"], description: "The custom hostname the room holds a live claim to, if any." }
+        version: { type: integer }
+        set_by: { type: [string, "null"], description: "Who last changed it; null if it was never set." }
+        updated_at: { type: [integer, "null"], description: "Milliseconds, as every time here." }
+    SetReleaseConfig:
+      type: object
+      additionalProperties: false
+      required: [enabled, expected_version]
+      properties:
+        enabled: { type: boolean }
+        expected_version: { type: integer, description: "The configuration's `version` as the caller read it; 0 if it was never set." }
+    Release:
+      type: object
+      description: "One attempt to release a room's app (M6, ADR 0010, decision 197): a copy of one fixed directory of the room's repository at one commit that Podster's own merge put on the default branch and confirmed. Each attempt is its own record, kept apart from the task's state and the merge's. Its states are the release rules' own (`podster_core::release::ReleaseState`), by the names they give: `awaiting_approval` until a person approves or declines it; `queued`, then `uploading` while its job reads and uploads it; `uncertain` when an upload's answer was lost; `live` once the room committed it and set its hosts to it; `served` once its marker came back through the host, which is the only state shown as live to a reader (UI-02); `replaced` when a later release is served in its place; `unpublished`; `declined`; and `failed`, with a reason, which leaves an earlier release serving."
+      additionalProperties: false
+      required: [id, commit_sha, environment, state, requested_by, requested_at, approved_by, approved_at, declined_by, declined_at, result_url, failure_code, finished_at]
+      properties:
+        id: { type: string, pattern: "^rel_[0-9a-f]{32}$" }
+        commit_sha: { type: string, pattern: "^[0-9a-f]{40}$" }
+        environment: { type: string, enum: [production] }
+        state: { type: string, enum: [awaiting_approval, queued, uploading, uncertain, live, served, replaced, unpublished, declined, failed] }
+        requested_by: { type: string }
+        requested_at: { type: integer }
+        approved_by: { type: [string, "null"] }
+        approved_at: { type: [integer, "null"] }
+        declined_by: { type: [string, "null"], description: "Who declined it, if someone did. Never both approved and declined." }
+        declined_at: { type: [integer, "null"] }
+        result_url: { type: [string, "null"], description: "The app's address, only while this release is the one served." }
+        failure_code: { type: [string, "null"], description: "A reason code while `failed`. Never a provider's message text." }
+        finished_at: { type: [integer, "null"] }
+    AppHostnameRequest:
+      type: object
+      description: "A room's request to map a custom hostname to its app (M6, ADR 0010, decision 207). Its states are the rules' own (`podster_core::hostname_requests::HostnameRequestState`): `pending` holds nothing and expires at `expires_at`, 72 hours after it was made; `claimed` once the room's challenge was read from DNS and the hostname's own object gave this room the claim; `ending` while a claim is being ended, which still counts as the room's one hostname until Cloudflare reports the custom hostname gone; `refused` when the hostname's object refused the claim; `expired`; and `ended`. The challenge is a TXT record, which is public once published, so it isn't a secret."
+      additionalProperties: false
+      required: [id, hostname, state, challenge_name, challenge_value, requested_by, requested_at, expires_at, end_reason]
+      properties:
+        id: { type: string }
+        hostname: { type: string, description: "Normalized: lower case, no trailing dot, international names in their ASCII form." }
+        state: { type: string, enum: [pending, claimed, ending, refused, expired, ended] }
+        challenge_name: { type: string, description: "`_podster-challenge.<hostname>`." }
+        challenge_value: { type: string }
+        requested_by: { type: string }
+        requested_at: { type: integer }
+        expires_at: { type: integer }
+        end_reason: { type: [string, "null"], description: "A reason code while `refused`, `expired` or `ended`." }
+    AppHostname:
+      type: object
+      additionalProperties: false
+      required: [request]
+      properties:
+        request: { oneOf: [{ $ref: "#/components/schemas/AppHostnameRequest" }, { type: "null" }] }
+    SetAppHostname:
+      type: object
+      additionalProperties: false
+      required: [hostname]
+      properties:
+        hostname: { type: string, maxLength: 253 }
     RoomRepository:
       type: object
       additionalProperties: false
@@ -1244,5 +1387,5 @@ components:
           properties:
             code:
               type: string
-              enum: [plan_conflict, dependency_cycle, relationship_exists, relationship_not_found, role_not_found, role_full, already_claimed, lead_exists, invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, workspace_archived, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox, too_many_artifacts, duplicate_file, file_not_found, file_not_ready, file_removed, file_changed, files_not_checked, too_many_outputs, output_in_use, output_not_found, invalid_endpoint_url, token_storage_unavailable, public_claims_not_allowed, public_rooms_disabled, room_suspended, person_review_required, public_claims_paused, public_claims_suspended, not_delegated, repository_requests_closed, repository_request_limit, delegation_unavailable, private_unavailable, repo_request_exists, repo_request_not_found, setup_in_progress, already_ready, name_reused, name_reserved, retry_limit_reached, retry_too_soon, organization_not_found, pull_request_not_found, pull_request_from_fork, pull_request_wrong_base, pull_request_not_open, pull_request_in_use, pull_request_changed, pull_request_unread, pull_request_draft, change_not_found, repo_not_ready, provider_unavailable, repo_access_unavailable, rate_limited, review_required, change_unwatched, merge_unavailable, merge_already_requested, already_merged, self_merge, self_review, controller_departed, not_approved, task_not_linked, standing_unknown, grant_required, grant_expired, grant_stale, public_participant, merge_request_limit, file_not_available, provider_mismatch, repo_access_busy, room_migration_pending, room_unavailable, storage_unavailable, task_closed, upload_not_found, upload_outcome_unknown, upload_timed_out, file_too_large, room_quota_exceeded, participant_quota_exceeded, invalid_file_name, executable_refused, password_protected_refused, macro_file_refused, file_not_inspectable, file_type_refused, upload_mismatch, task_not_active, deadline_passed, deadline_unknown, budget_exhausted, budget_unknown, repo_not_linked, grant_not_found, grantee_not_participant, grantee_public, force_approval_not_supported, capabilities_required, invalid_jwt, jwks_url_not_supported, invalid_public_key, upstream_unavailable, sign_in_unavailable, invalid_request, invalid_client, already_linked, host_owned_by_another_person, sign_in_required, invalid_credential, insufficient_scope, https_required, temporarily_unavailable, agent_unclaimed, last_admin, personal_organization]
+              enum: [plan_conflict, dependency_cycle, relationship_exists, relationship_not_found, role_not_found, role_full, already_claimed, lead_exists, invalid_wake_url, jwt_replay, agent_not_found, invitation_not_found, invitation_required, not_in_organization, credential_owner_left, already_member, limit_exceeded, invalid_assertion, idempotency_key_required, not_found, internal_error, workspace_not_found, access_revoked, agent_disconnected, not_a_participant, not_allowed, task_not_found, invalid_transition, workspace_archived, version_conflict, commit_changed, submission_mismatch, self_sign_off, invalid_argument, idempotency_mismatch, ack_beyond_inbox, too_many_artifacts, duplicate_file, file_not_found, file_not_ready, file_removed, file_changed, files_not_checked, too_many_outputs, output_in_use, output_not_found, invalid_endpoint_url, token_storage_unavailable, public_claims_not_allowed, public_rooms_disabled, room_suspended, person_review_required, public_claims_paused, public_claims_suspended, not_delegated, repository_requests_closed, repository_request_limit, delegation_unavailable, private_unavailable, repo_request_exists, repo_request_not_found, setup_in_progress, already_ready, name_reused, name_reserved, retry_limit_reached, retry_too_soon, organization_not_found, pull_request_not_found, pull_request_from_fork, pull_request_wrong_base, pull_request_not_open, pull_request_in_use, pull_request_changed, pull_request_unread, pull_request_draft, change_not_found, repo_not_ready, provider_unavailable, repo_access_unavailable, rate_limited, review_required, change_unwatched, merge_unavailable, merge_already_requested, already_merged, self_merge, self_review, controller_departed, not_approved, task_not_linked, standing_unknown, grant_required, grant_expired, grant_stale, public_participant, merge_request_limit, file_not_available, provider_mismatch, repo_access_busy, room_migration_pending, room_unavailable, storage_unavailable, task_closed, upload_not_found, upload_outcome_unknown, upload_timed_out, file_too_large, room_quota_exceeded, participant_quota_exceeded, invalid_file_name, executable_refused, password_protected_refused, macro_file_refused, file_not_inspectable, file_type_refused, upload_mismatch, task_not_active, deadline_passed, deadline_unknown, budget_exhausted, budget_unknown, repo_not_linked, grant_not_found, grantee_not_participant, grantee_public, force_approval_not_supported, capabilities_required, invalid_jwt, jwks_url_not_supported, invalid_public_key, upstream_unavailable, sign_in_unavailable, invalid_request, invalid_client, already_linked, host_owned_by_another_person, sign_in_required, invalid_credential, insufficient_scope, https_required, temporarily_unavailable, agent_unclaimed, last_admin, personal_organization, release_not_available]
             message: { type: string }

@@ -765,25 +765,35 @@ The architect proposes the gate call, for the owner to review.
 - `--dry-run` sends nothing;
 - results are tallied as PASS, FAIL and SKIP;
 - output is scrubbed of every credential it handles;
-- waits and requests are bounded and paced.
+- requests are paced and every loop is bounded;
+- Ctrl-C stops it at the next request, and it still cleans up.
 
-It takes 2 test sign-ups, switches nothing on, and calls no Cloudflare API.
+It takes 2 test sign-ups, switches nothing on, and calls no Cloudflare API. Before any sign-up, two signed-out reads show staging answers as expected. A failed preflight exits 2 with no sign-up taken. The second sign-up is taken only once the owner's organization, room and agent are made.
 
-**What it checks today.** Release is switched off on staging, where `RELEASES` is set nowhere, so today's checks are the "switched off" ones. They show two things on staging that `apps/api/test/releases.spec.ts` shows locally: M6 can't be detected, and the room schema step harmed nothing. The M6 operations are read from `packages/contracts/openapi.yaml` at run time, so the list can't go stale.
+**When it counts as passed.** It exits 0 only when nothing failed and every check that needs staging passed. Two checks are exceptions:
+- M6-S00 reads this checkout only, so its pass never counts as the run having shown anything.
+- M6-S04 may say SKIP.
+
+Otherwise the run exits 1 and names each check it didn't show, so a run whose setup failed can't read as a pass.
+
+**What it checks today.** Release is switched off on staging, where `RELEASES` is set nowhere, so today's checks are the "switched off" ones. They show two things on staging that `apps/api/test/releases.spec.ts` shows locally: M6 can't be detected, and the room schema step harmed nothing in a fresh room. The M6 operations and fields are read from `packages/contracts/openapi.yaml` at run time, so neither list can go stale. Two names are kept by hand, and the self-test pins each to the files it comes from:
+- the planned tool `deploy_release`, pinned to the capability list and ADR 0010;
+- the pattern for M6 event types, pinned to every event name the API and core write today.
 
 | ID | What it shows |
 | --- | --- |
-| M6-S00 | The contract marks its M6 operations, each is listed person-only in `capabilities.yaml`, and none is an agent capability |
-| M6-S01a | Switched off, each M6 route answers the room's owner exactly as an invented neighbouring path does: status, error code, body, content type and security headers |
-| M6-S01b | The same for a second person who isn't in the room |
+| M6-S00 | The contract marks its M6 operations, each is listed person-only in `capabilities.yaml`, and none is an agent capability. Reads this checkout only |
+| M6-S01a | Switched off, each M6 route gives the room's owner the API's own answer for a missing route, exactly as an invented neighbouring path does: status, error code, body and a named list of headers (content type, cache control, the security headers and the product's own). A pair that differs is asked once more before it fails. A pair that is alike but is a refusal by the gateway or the edge, such as a 401, a limit or a 5xx, fails: it shows nothing |
 | M6-S01c | The same for a room that doesn't exist |
 | M6-S01d | The same for a member sending a body that isn't JSON, on every M6 write |
-| M6-S01e | An agent through `/mcp` lists no M6 tool, and calling an M6 operation's name answers exactly as an invented tool name does, by HTTP and through the MCP SDK |
-| M6-S03 | A room made after the deploy runs one ordinary task end to end: create, assign to an agent, accept, submit, review |
+| M6-S01b | The same for a second person who isn't in the room |
+| M6-S01e | An agent through `/mcp`: an M6 operation's name answers HTTP 200 with a JSON-RPC error, exactly as an invented tool name does, by HTTP and through the MCP SDK |
+| M6-S03 | A room made after the deploy runs one ordinary task end to end: create, assign to an agent, accept, submit, review. **A fresh room only** |
 | M6-S02a | The room read and the task read, as the owner and as the agent, carry no M6 field |
-| M6-S02b | Capabilities discovery and the agent's tool list carry no M6 capability or tool |
+| M6-S02b | The agent's MCP tool list names tools, and no M6 tool |
+| M6-S02d | Capabilities discovery, every page of `/api/auth/capability/list`, names capabilities, and no M6 capability |
 | M6-S02c | No M6 event type is in the room's events after every call above |
-| M6-S04 | The same task flow in a room made before the deploy. **Says SKIP:** such a room belongs to an earlier run's test people, whose sessions no run keeps |
+| M6-S04 | The same task in a room made before the deploy, which is where the room schema step's migration could really harm a room. **Says SKIP unless such a room is reachable,** and today it isn't: such a room belongs to an earlier run's test people, whose sessions no run keeps |
 
 **Which acceptance rows it covers.** None of M6-01 to M6-28 yet. Every one of them needs release switched on, or a merge in a managed repository, which these checks don't make. Some are partly near: M6-01's "the room has no host", M6-12's "no M6 cookie" and M6-21. Even those are shown only with release off, which isn't what their rows ask.
 
@@ -794,6 +804,13 @@ It takes 2 test sign-ups, switches nothing on, and calls no Cloudflare API.
 - M6-14 and M6-26, only with a domain whose DNS the script may edit, or they stay gaps;
 - M6-22, only with access to the Workers' logs, as M5's run had.
 
+**Left behind by a run:**
+- the two test people;
+- the organization made for the run;
+- the room and its task;
+- the agent.
+
+The agent is disconnected at the end, which ends its OAuth credential; the output says if that failed. Every session is signed out.
 ## Threat model
 
 **Draft, to be walked against the built system at step 11.** *Where a row and [ADR 0010](adr/0010-release-and-the-content-domain.md) differ, the ADR is the later word: rows written on 2026-11-10 still speak of a private room's app and of the Public Suffix List as defence in depth.* "Unverified" means nothing has tested it. "From M5's spike" means the M5 spike saw the GitHub half once; the M6 half is still unverified.

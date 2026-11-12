@@ -2,25 +2,34 @@
 // (`RELEASES` is set nowhere), so today it shows two things only:
 //
 // - M6 can't be detected there. Every M6 operation the contract lists, read from it at run time, answers each kind of
-//   caller exactly as an invented neighbouring path does; an agent through /mcp has no M6 tool, and calling one answers
-//   as an invented tool does; no read, capability list or event names anything of M6's.
-// - The room schema step that build step 2 added harmed nothing: a room made after the deploy runs one ordinary task
-//   end to end. A room made before the deploy isn't reachable with test people, who are new on every run, so that half
-//   says SKIP and why.
+//   caller with the API's own answer for a missing route, exactly as an invented neighbouring path does. An agent
+//   through /mcp gets the same JSON-RPC error for an M6 tool name as for an invented one. No read, tool list, capability
+//   list or event names anything of M6's.
+// - The room schema step that build step 2 added harmed nothing in a room made after the deploy: one ordinary task runs
+//   end to end there. A room made before the deploy, where a migration could really harm one, isn't reachable with test
+//   people, who are new on every run, so M6-S04 says SKIP and why.
 //
 //   node m6-staging.mjs --base-url https://gateway-staging.podster.dev [--dry-run]
 //
-// Staging's gateway is the only base URL it accepts. People: two takes of staging's test sign-up, of its 6 a minute and
-// 40 a day; the agent is made under the owner and takes none. It switches nothing on and calls no Cloudflare API. Output
-// carries IDs, statuses and error codes only, and every credential it handles is scrubbed from it. Exit codes: 0 when
-// nothing failed, 1 when a check failed or nothing passed, 2 for a refused configuration.
+// Staging's gateway is the only base URL it accepts. Before any sign-up, two signed-out reads show staging answers as
+// expected. People: two takes of staging's test sign-up, of its 6 a minute and 40 a day: the owner's first, and the
+// second person's only once the owner's organization, room and agent are made. The agent is made under the owner and
+// takes none. It switches nothing on and calls no Cloudflare API. Output carries IDs, statuses and error codes only,
+// and every credential it handles is scrubbed from it.
 //
-// Clean-up: the rooms, the task and the people stay, as every staging run's do. Every test session is signed out.
+// Exit codes: 0 only when nothing failed and every check that needs staging passed (M6-S04 may say SKIP; M6-S00 reads
+// this checkout only and never counts as shown); 1 otherwise, the output naming what wasn't shown; 2 for a refused
+// configuration or a failed preflight, with no sign-up taken.
+//
+// Left behind, as every staging run's are: the two test people, the owner's organization made for the run, the room,
+// its task, and the agent. The agent is disconnected at the end, which ends its OAuth credential; the output says if
+// that failed, and then its credential stays valid until it expires. Every test session is signed out. Ctrl-C stops
+// the run at its next request and still cleans up.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  ABSENT_ROOM, agentCapabilities, answerShape, differences, fillPath, m6EventTypes, m6Fields, m6Names, m6Operations, neighbour, operationsProblem, parseArgs, personOnly, PLAN, scrub, secretProblem, SIGN_UPS, snake, STAGING, Tally, toolAnswer, USAGE,
+  ABSENT_ROOM, agentCapabilities, answerShape, CALLERS, differences, expectedAnswer, fillPath, m6EventTypes, m6Fields, m6Keys, m6Names, m6Operations, mcpErrorProblem, neighbour, operationsProblem, pairProblem, parseArgs, personOnly, PLAN, runOutcome, scrub, secretProblem, SIGN_UPS, snake, STAGING, Tally, toolAnswer, USAGE,
 } from "./m6-staging-lib.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -48,7 +57,8 @@ const read = (file) => {
 const contractText = read(options.contract ?? join(here, "../packages/contracts/openapi.yaml"));
 const capabilitiesText = read(options.capabilities ?? join(here, "../packages/contracts/capabilities.yaml"));
 const operations = contractText ? m6Operations(contractText) : [];
-const contractProblem = !contractText ? "the contract couldn't be read" : !capabilitiesText ? "the capability list couldn't be read" : operationsProblem(operations, personOnly(capabilitiesText), agentCapabilities(capabilitiesText));
+const fieldKeys = contractText ? m6Keys(contractText) : [];
+const contractProblem = !contractText ? "the contract couldn't be read" : !capabilitiesText ? "the capability list couldn't be read" : operationsProblem(operations, personOnly(capabilitiesText), agentCapabilities(capabilitiesText)) ?? (fieldKeys.length ? null : "the contract gives no M6 field to look for");
 {
   const problems = [secretProblem(signupSecret), contractProblem].filter(Boolean);
   console.log(`M6's staging run, switched off, against ${STAGING}${options.dryRun ? " (dry run: nothing is sent)" : ""}`);
@@ -56,9 +66,10 @@ const contractProblem = !contractText ? "the contract couldn't be read" : !capab
   for (const { who, why } of SIGN_UPS) console.log(`  - ${who}: ${why}`);
   console.log(`\nM6 operations, read from the contract: ${operations.length}.`);
   for (const op of operations) console.log(`  ${op.method.padEnd(6)} ${op.path}  ${op.operation}`);
+  console.log(`M6 fields, derived from the contract's M6 schemas: ${fieldKeys.join(", ") || "none"}.`);
   if (options.dryRun) {
     console.log(`\nThe ${PLAN.length} checks, in order:`);
-    for (const { id, title } of PLAN) console.log(`  ${id.padEnd(8)} ${title}`);
+    for (const { id, title, offline, maySkip } of PLAN) console.log(`  ${id.padEnd(8)} ${title}${offline ? " [reads this checkout only]" : ""}${maySkip ? " [may say SKIP]" : ""}`);
   }
   for (const problem of problems) console.error(`\nRefused: ${problem}.`);
   if (problems.length) process.exit(2);
@@ -72,7 +83,7 @@ const contractProblem = !contractText ? "the contract couldn't be read" : !capab
 const { eq, key, McpAgent, ok, Person, sleep, Target } = await import("./lib.mjs");
 
 const POLL_MS = 2000;
-/** Between two requests of one person's: the gateway allows a person 120 a minute, and this keeps well under it. */
+/** Between two requests of one caller's: the gateway allows a person 120 a minute, and this keeps well under it. */
 const PACE_MS = 600;
 const target = new Target(STAGING, { pollMs: POLL_MS });
 const RUN = `M6 staging ${new Date().toISOString().slice(0, 16)}`;
@@ -84,37 +95,66 @@ const secret = (value) => {
 const say = (line = "") => console.log(scrub(line, secrets));
 const tally = new Tally(PLAN, say);
 
+/** A check that can't run here, with why. */
 class Skip extends Error {}
+/** The run was told to stop. Not a check's failure: it ends the flow. */
+class Halt extends Error {}
+let stopping = false;
+process.on("SIGINT", () => {
+  if (stopping) process.exit(130);
+  stopping = true;
+  console.log("\nStopping at the next request; clean-up follows. Press Ctrl-C again to quit at once, without it.");
+});
 const cause = (error) => [error?.code, error?.message].filter(Boolean).join(" ") || String(error);
 async function check(id, run) {
+  if (stopping) throw new Halt("stopped by a signal");
   try {
     tally.add(id, "pass", (await run()) ?? "");
     return true;
   } catch (error) {
+    if (error instanceof Halt) throw error;
     tally.add(id, error instanceof Skip ? "skip" : "fail", cause(error));
     return false;
   }
 }
-const after = (...ids) => {
-  const missing = ids.filter((id) => !tally.passed(id));
-  if (missing.length) throw new Skip(`not run: it needs ${missing.join(" and ")} to have passed`);
+const pause = async (ms) => {
+  if (stopping) throw new Halt("stopped by a signal");
+  await sleep(ms);
 };
+
+/**
+ * One request, retried once on a transport error, as the run's other staging scripts do. Target already waits out a
+ * 429 twice, after the wait the gateway names (at most 70 s), before it gives the 429 back. Throws naming the request.
+ */
+async function send(label, path, init) {
+  for (let attempt = 1; ; attempt++) {
+    await pause(PACE_MS);
+    try {
+      return await target.http(path, init);
+    } catch (error) {
+      if (attempt >= 2) throw new Error(`${label}: the request failed twice in transport (${cause(error.cause ?? error)})`);
+    }
+  }
+}
 
 // ---- people and the agent ----
 
 const sessions = [];
 const agents = [];
+const leftBehind = [];
 async function person(label) {
-  const res = await target.http("/api/auth/sign-up/e2e", { method: "POST", headers: { authorization: `Bearer ${signupSecret}` } });
+  const res = await send(`the test sign-up for ${label}`, "/api/auth/sign-up/e2e", { method: "POST", headers: { authorization: `Bearer ${signupSecret}` } });
   ok(res.status === 200, `the test sign-up for ${label} answered ${res.status}. A 404 means it's off on staging, or PODSTER_E2E_SIGNUP_SECRET is wrong.`);
   const cookie = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
   for (const value of [cookie, ...cookie.split("; ").map((part) => part.slice(part.indexOf("=") + 1)).filter((value) => value.length >= 16)]) secret(value);
   sessions.push(cookie);
-  return Person.fromCookie(target, label, cookie);
+  const made = await Person.fromCookie(target, label, cookie);
+  leftBehind.push(`${label} ${made.id}`);
+  return made;
 }
 async function agentOf(linker, label) {
   const made = await McpAgent.connect(target, linker, `${RUN} ${label}`);
-  agents.push(made);
+  agents.push({ agent: made, linker });
   const keep = (held) => {
     secret(held?.access_token);
     secret(held?.refresh_token);
@@ -130,14 +170,10 @@ async function agentOf(linker, label) {
   return made;
 }
 
-/**
- * One request of a person's through the gateway, exactly as the dashboard sends it, with `raw` as the body when given.
- * Answers its shape for comparing. Paced, so the person's limit is never what an answer shows.
- */
+/** One request of a person's through the gateway, exactly as the dashboard sends it, with `raw` as the body. Answers its shape. */
 async function personAnswer(who, method, path, raw) {
-  await sleep(PACE_MS);
   const hasBody = method !== "GET" && method !== "HEAD";
-  const res = await target.http(`/api${path}`, {
+  const res = await send(`${method} ${path} as ${who.label}`, `/api${path}`, {
     method,
     headers: { cookie: who.cookie, origin: target.base, ...(who.actingOrg ? { "x-podster-org": who.actingOrg } : {}), ...(hasBody ? { "content-type": "application/json", "idempotency-key": key() } : {}) },
     body: hasBody ? raw : undefined,
@@ -147,8 +183,7 @@ async function personAnswer(who, method, path, raw) {
 
 /** One JSON-RPC call to /mcp with the agent's own access token, as any MCP client sends it. Answers its shape. */
 async function mcpAnswer(caller, name) {
-  await sleep(PACE_MS);
-  const res = await target.http("/mcp", {
+  const res = await send(`tools/call ${name}`, "/mcp", {
     method: "POST",
     headers: { authorization: `Bearer ${caller.accessToken()}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: {} } }),
@@ -157,30 +192,41 @@ async function mcpAnswer(caller, name) {
 }
 
 /**
- * Every M6 operation for one kind of caller, each against its invented neighbour. Answers the differences, each naming
- * the route and the caller, and the answers seen, as `status code` pairs.
+ * Every M6 operation for one kind of caller, each against its invented neighbour. A pair that differs is asked once
+ * more, so one odd answer doesn't fail the run; a pair that still differs, or that is alike and isn't the API's own
+ * answer for a missing route for that caller, fails, naming the route and the caller.
  */
-async function compareAll(label, who, where, { raw = '{"reason":"abuse"}', writesOnly = false } = {}) {
+async function compareAll(caller, who, where, { raw = '{"reason":"abuse"}', writesOnly = false } = {}) {
   const found = [];
   const seen = new Set();
+  let asked = 0;
+  let again = 0;
   for (const op of operations) {
     if (writesOnly && op.method === "GET") continue;
     const path = fillPath(op.path, where);
-    const real = await personAnswer(who, op.method, path, raw);
-    const unknown = await personAnswer(who, op.method, neighbour(path), raw);
-    const diff = differences(real, unknown);
-    if (diff.length) found.push(`${op.method} ${op.path} (${op.operation}) for ${label}: ${diff.join("; ")}`);
+    let real = await personAnswer(who, op.method, path, raw);
+    let unknown = await personAnswer(who, op.method, neighbour(path), raw);
+    if (differences(real, unknown).length) {
+      again++;
+      real = await personAnswer(who, op.method, path, raw);
+      unknown = await personAnswer(who, op.method, neighbour(path), raw);
+    }
+    asked++;
+    const problem = pairProblem(real, unknown, expectedAnswer(caller, op));
+    if (problem) found.push(`${op.method} ${op.path} (${op.operation}) for ${CALLERS[caller].label}: ${problem}`);
     seen.add(`${real.status} ${real.code}`);
   }
+  ok(asked > 0, "no route was asked");
   ok(found.length === 0, found.join("\n             "));
-  return `${writesOnly ? operations.filter((op) => op.method !== "GET").length : operations.length} routes, each answered as its neighbour: ${[...seen].sort().join(", ")}`;
+  return `${asked} routes, each the API's answer for a missing route and alike with its neighbour: ${[...seen].sort().join(", ")}${again ? `; ${again} pair(s) asked again after a first difference` : ""}`;
 }
 
-/** Every event in the room, from the start. */
+/** Every event in the room, from the start. Bounded at 100 pages. */
 async function roomEvents(reader, where) {
   const events = [];
   let afterSeq = 0;
   for (let pages = 0; pages < 100; pages++) {
+    await pause(PACE_MS);
     const page = await reader.must("GET", `/v1/workspaces/${where}/events?after=${afterSeq}`);
     if (!page.events?.length) return events;
     events.push(...page.events);
@@ -189,7 +235,33 @@ async function roomEvents(reader, where) {
   throw new Error("the room's events ran past 100 pages");
 }
 
+/** Every capability name capabilities discovery lists, page by page, bounded at 20 pages. */
+async function discoveredCapabilities() {
+  const names = [];
+  let cursor = 0;
+  for (let pages = 0; pages < 20; pages++) {
+    const res = await send("capabilities discovery", `/api/auth/capability/list?limit=100&cursor=${cursor}`, { headers: { accept: "application/json" } });
+    ok(res.status === 200, `capabilities discovery answered ${res.status}`);
+    const body = JSON.parse(await res.text());
+    ok(Array.isArray(body?.capabilities), "capabilities discovery answered without a list of capabilities");
+    names.push(...body.capabilities.map((c) => c?.name).filter((name) => typeof name === "string"));
+    if (!body.has_more) return names;
+    ok(body.capabilities.length > 0, "capabilities discovery says there is more and gave an empty page");
+    cursor += body.capabilities.length;
+  }
+  throw new Error("capabilities discovery ran past 20 pages");
+}
+
 // ---- the run ----
+
+/** Two signed-out reads before any sign-up: staging is reachable, and the gateway answers as it should. */
+async function preflight() {
+  const card = await send("the agent configuration", "/.well-known/agent-configuration", { headers: { accept: "application/json" } });
+  ok(card.status === 200 && /json/.test(card.headers.get("content-type") ?? ""), `staging's agent configuration answered ${card.status}, not 200 with JSON`);
+  const signedOut = await send("a signed-out room list", "/api/v1/workspaces", { headers: { origin: target.base } });
+  const body = await signedOut.json().catch(() => null);
+  ok(signedOut.status === 401 && body?.error?.code === "sign_in_required", `a signed-out request answered ${signedOut.status} ${body?.error?.code ?? ""}, not 401 sign_in_required`);
+}
 
 let owner;
 let outsider;
@@ -198,48 +270,63 @@ let room;
 let task;
 
 async function main() {
-  await check("M6-S00", async () => `${operations.length} operations: ${operations.map((op) => op.operation).join(", ")}`);
+  await check("M6-S00", async () => `${operations.length} operations: ${operations.map((op) => op.operation).join(", ")}. Read from this checkout: it shows nothing on staging`);
 
-  say("\n## people, the room and the agent");
+  say("\n## the owner, the room and the agent");
   try {
     owner = await person("the room's owner");
-    outsider = await person("a second person");
     await owner.useNewOrg(`${RUN} team`);
+    leftBehind.push(`the run's organization ${owner.actingOrg}`);
     room = await owner.createRoom(`${RUN} room`);
+    leftBehind.push(`room ${room}`);
     agent = await agentOf(owner, "worker");
+    leftBehind.push(`agent ${agent.id}`);
     await owner.addAgent(room, agent);
-    say(`     owner ${owner.id}; second person ${outsider.id}; room ${room}; agent ${agent.id}`);
+    say(`     owner ${owner.id}; organization ${owner.actingOrg}; room ${room}; agent ${agent.id}`);
   } catch (error) {
+    if (error instanceof Halt) throw error;
     say(`     setup failed: ${cause(error)}`);
-    tally.skipRest("not run: the run's people, room or agent couldn't be set up");
+    tally.skipRest("not run: the owner, the room or the agent couldn't be set up, so the second sign-up wasn't taken");
     return;
   }
 
   say("\n## switched off: every M6 route, as an invented one");
-  await check("M6-S01a", () => compareAll("the room's owner", owner, room));
-  await check("M6-S01b", () => compareAll("a second person outside the room", outsider, room));
-  await check("M6-S01c", () => compareAll("the owner, for a room that doesn't exist", owner, ABSENT_ROOM));
-  await check("M6-S01d", () => compareAll("the owner, a member, with a body that isn't JSON", owner, room, { raw: "{", writesOnly: true }));
+  await check("M6-S01a", () => compareAll("owner", owner, room));
+  await check("M6-S01c", () => compareAll("absent", owner, ABSENT_ROOM));
+  await check("M6-S01d", () => compareAll("malformed", owner, room, { raw: "{", writesOnly: true }));
+  try {
+    outsider = await person("a second person");
+    say(`     second person ${outsider.id}`);
+  } catch (error) {
+    if (error instanceof Halt) throw error;
+    say(`     the second sign-up failed: ${cause(error)}`);
+  }
+  await check("M6-S01b", async () => {
+    if (!outsider) throw new Skip("not run: the second person's sign-up failed");
+    return compareAll("outsider", outsider, room);
+  });
   await check("M6-S01e", async () => {
-    const listed = m6Names(await agent.tools(), operations);
-    ok(listed.length === 0, `the agent's tool list has M6 tools: ${listed.join(", ")}`);
     const found = [];
     for (const op of operations) {
       const name = snake(op.operation);
       const invented = `${name}_x`;
       const [real, unknown] = [await mcpAnswer(agent, name), await mcpAnswer(agent, invented)];
+      const shape = mcpErrorProblem(real);
+      if (shape) found.push(`tools/call ${name} for an agent: ${shape}`);
       const diff = differences(real, unknown);
-      if (diff.length) found.push(`tools/call ${name} for an agent: ${diff.join("; ")}`);
+      if (diff.length) found.push(`tools/call ${name} for an agent, beside an invented tool: ${diff.join("; ")}`);
+      await pause(PACE_MS);
       const [sdkReal, sdkUnknown] = [await agent.call(name, {}), await agent.call(invented, {})];
-      if (sdkReal.ok || toolAnswer(sdkReal.code, name) !== toolAnswer(sdkUnknown.code, invented)) found.push(`tools/call ${name} through the MCP SDK answered other than an invented tool`);
+      if (sdkReal.ok || sdkUnknown.ok || toolAnswer(sdkReal.code, name) !== toolAnswer(sdkUnknown.code, invented)) found.push(`tools/call ${name} through the MCP SDK answered other than an invented tool`);
     }
     ok(found.length === 0, found.join("\n             "));
-    return `${operations.length} M6 names, each answered as an invented tool, by HTTP and through the SDK`;
+    return `${operations.length} M6 names, each a JSON-RPC error with HTTP 200, alike with an invented tool, by HTTP and through the SDK`;
   });
 
-  say("\n## the room schema step harmed nothing");
+  say("\n## the room schema step harmed nothing, in a room made after the deploy");
   await check("M6-S03", async () => {
     const made = await owner.must("POST", `/v1/workspaces/${room}/tasks`, { title: `${RUN} ordinary task`, instructions: "Write a short note.", assignee: agent.id }, { idempotencyKey: key() });
+    leftBehind.push(`task ${made.id}`);
     const at = { workspace_id: room, task_id: made.id };
     const accepted = await agent.must("accept_task", { ...at, version: made.version });
     const submitted = await agent.must("submit_task", { ...at, version: accepted.version, note: "Done." });
@@ -247,64 +334,67 @@ async function main() {
     const final = await owner.must("GET", `/v1/workspaces/${room}/tasks/${made.id}`);
     eq([made.status, accepted.status, submitted.status, reviewed.status ?? reviewed.task?.status, final.task.status], ["offered", "accepted", "submitted", "completed", "completed"], "the task's status at each step");
     task = made.id;
-    return `task ${made.id}: offered, accepted, submitted, completed`;
+    return `task ${made.id}: offered, accepted, submitted, completed. A fresh room only: a room made before the deploy is M6-S04`;
   });
 
   say("\n## nothing new is visible");
   await check("M6-S02a", async () => {
     const reads = [["the owner's room read", await owner.must("GET", `/v1/workspaces/${room}`)], ["the agent's room read", await agent.must("get_workspace", { workspace_id: room }, false)]];
-    if (task) reads.push(["the owner's task read", await owner.must("GET", `/v1/workspaces/${room}/tasks/${task}`)], ["the agent's task read", await agent.must("get_task", { workspace_id: room, task_id: task }, false)]);
-    const found = reads.flatMap(([label, body]) => m6Fields(body).map((field) => `${label}: ${field}`));
+    ok(task, "no task read: M6-S03 made no task");
+    reads.push(["the owner's task read", await owner.must("GET", `/v1/workspaces/${room}/tasks/${task}`)], ["the agent's task read", await agent.must("get_task", { workspace_id: room, task_id: task }, false)]);
+    const found = reads.flatMap(([label, body]) => m6Fields(body, fieldKeys).map((field) => `${label}: ${field}`));
     ok(found.length === 0, `M6 fields: ${found.join(", ")}`);
-    return `${reads.length} reads${task ? "" : " (no task read: M6-S03 made no task)"}, no M6 field`;
+    return `${reads.length} reads, no M6 field of ${fieldKeys.length} looked for`;
   });
   await check("M6-S02b", async () => {
-    const lists = [];
     const tools = await agent.tools();
-    lists.push(["the agent's MCP tool list", tools]);
-    for (const path of ["/.well-known/agent-configuration", "/api/auth/capability/list"]) {
-      const res = await target.http(path, { headers: { accept: "application/json" } });
-      let body = null;
-      try {
-        body = JSON.parse(await res.text());
-      } catch {
-        // Not JSON: no names from it.
-      }
-      const names = [];
-      const walk = (value) => {
-        if (Array.isArray(value)) value.forEach(walk);
-        else if (value && typeof value === "object") for (const [name, inner] of Object.entries(value)) name === "capabilities" && Array.isArray(inner) ? names.push(...inner.map((c) => (typeof c === "string" ? c : c?.name)).filter((n) => typeof n === "string")) : walk(inner);
-      };
-      walk(body);
-      lists.push([`${path} (HTTP ${res.status})`, names]);
-    }
-    const found = lists.flatMap(([label, names]) => m6Names(names, operations).map((name) => `${label}: ${name}`));
-    ok(found.length === 0, `M6 names: ${found.join(", ")}`);
-    const listing = lists.filter(([, names]) => names.length > 0);
-    ok(listing.length > 0, "nothing listed any capability or tool, so the absence of M6's shows nothing");
-    return lists.map(([label, names]) => `${label}: ${names.length} names`).join("; ");
+    ok(tools.length > 0, "the agent's tool list is empty, so the absence of M6's shows nothing");
+    const listed = m6Names(tools, operations);
+    ok(listed.length === 0, `the agent's tool list has M6 tools: ${listed.join(", ")}`);
+    return `${tools.length} tools, none M6's`;
+  });
+  await check("M6-S02d", async () => {
+    const names = await discoveredCapabilities();
+    ok(names.length > 0, "capabilities discovery listed nothing, so the absence of M6's shows nothing");
+    const listed = m6Names(names, operations);
+    ok(listed.length === 0, `capabilities discovery lists M6 capabilities: ${listed.join(", ")}`);
+    return `${names.length} capabilities, none M6's`;
   });
   await check("M6-S02c", async () => {
     const events = await roomEvents(owner, room);
+    ok(events.length > 0, "the room has no events, so the absence of M6's shows nothing");
     const types = m6EventTypes(events);
     ok(types.length === 0, `M6 event types: ${types.join(", ")}`);
     return `${events.length} events, types ${[...new Set(events.map((e) => e.type))].sort().join(", ")}`;
   });
 
   await check("M6-S04", async () => {
-    throw new Skip("not shown: a room made before the deploy belongs to an earlier run's test people, whose sessions no run keeps, so no test person can reach one");
+    throw new Skip("not shown: a room made before the deploy, where the room schema step's migration could really harm one, belongs to an earlier run's test people, whose sessions no run keeps. M6-S03 shows a fresh room only");
   });
 }
 
 const started = Date.now();
 try {
+  await preflight();
+} catch (error) {
+  console.error(scrub(`\nRefused: the signed-out preflight failed: ${cause(error)}.\nNo sign-up was taken.`, secrets));
+  process.exit(2);
+}
+try {
   await main();
 } catch (error) {
   say(`\nThe run stopped: ${cause(error)}`);
 } finally {
-  tally.skipRest("not run: the run stopped before it");
-  for (const each of agents) await each.close().catch(() => null);
+  tally.skipRest(stopping ? "not run: the run was stopped by a signal" : "not run: the run stopped before it");
+  for (const { agent: each, linker } of agents) {
+    await each.close().catch(() => null);
+    const res = await linker.dash("POST", `/agents/${each.id}/disconnect`, {}).catch((error) => ({ status: cause(error) }));
+    say(`Agent ${each.id}: ${res.status === 200 ? "disconnected, so its OAuth credential no longer works" : `the disconnect answered ${res.status}: its OAuth credential stays valid until it expires`}.`);
+  }
   for (const cookie of sessions) await target.http("/api/auth/sign-out", { method: "POST", headers: { cookie, origin: target.base, "content-type": "application/json" }, body: "{}" }).catch(() => null);
 }
-say(`\n${tally.summary()}, in ${Math.round((Date.now() - started) / 1000)} s. Sign-ups taken: ${sessions.length}.`);
-process.exit(tally.exitCode());
+const outcome = runOutcome(tally);
+say(`\n${tally.summary()}, in ${Math.round((Date.now() - started) / 1000)} s. Sign-ups taken: ${sessions.length}. Checks shown on staging: ${outcome.shownOnStaging}.`);
+if (outcome.unshown.length) say(`Not shown on staging, so the run doesn't count as passed: ${outcome.unshown.join(", ")}.`);
+say(`Left behind on staging: ${leftBehind.length ? leftBehind.join("; ") : "nothing"}. Every test session was signed out.`);
+process.exit(outcome.code);

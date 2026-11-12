@@ -282,38 +282,41 @@ ALTER TABLE repo_request ADD COLUMN limited_call TEXT;
 ", "
 CREATE TABLE app_label (label TEXT PRIMARY KEY CHECK (length(label) BETWEEN 1 AND 26 AND label NOT GLOB '*[^a-z0-9]*'), current INTEGER UNIQUE CHECK (current = 1),
   created_at INTEGER NOT NULL, retired_at INTEGER, indexed_at INTEGER, suspended_at INTEGER, suspension_reason TEXT,
-  CHECK ((current IS NULL) = (retired_at IS NOT NULL)), CHECK ((suspended_at IS NULL) = (suspension_reason IS NULL))) WITHOUT ROWID;
+  CHECK ((current IS NULL) = (retired_at IS NOT NULL)), CHECK ((suspended_at IS NULL) = (suspension_reason IS NULL)), UNIQUE (label, current)) WITHOUT ROWID;
 CREATE TABLE release (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE CHECK (length(id) = 36 AND id GLOB 'rel_*' AND substr(id, 5) NOT GLOB '*[^0-9a-f]*'),
   commit_sha TEXT NOT NULL CHECK (length(commit_sha) = 40 AND commit_sha NOT GLOB '*[^0-9a-f]*'), environment TEXT NOT NULL DEFAULT 'production' CHECK (environment = 'production'), task_id TEXT,
   state TEXT NOT NULL CHECK (state IN ('awaiting_approval', 'queued', 'uploading', 'uncertain', 'live', 'served', 'replaced', 'unpublished', 'declined', 'failed')),
-  label TEXT NOT NULL REFERENCES app_label (label), config_version INTEGER NOT NULL CHECK (config_version >= 1), release_epoch INTEGER NOT NULL CHECK (release_epoch >= 0),
+  label TEXT NOT NULL REFERENCES app_label (label), config_version INTEGER NOT NULL CHECK (typeof(config_version) = 'integer' AND config_version >= 1), release_epoch INTEGER NOT NULL CHECK (typeof(release_epoch) = 'integer' AND release_epoch >= 0),
   script_name TEXT, script_release_id TEXT REFERENCES release (id),
-  requested_by TEXT NOT NULL, requested_at INTEGER NOT NULL, approved_by TEXT, approved_at INTEGER, declined_by TEXT, declined_at INTEGER, result_url TEXT, failure_code TEXT,
-  finished_at INTEGER, served_at INTEGER, updated_at INTEGER NOT NULL,
+  requested_by TEXT NOT NULL CHECK (length(requested_by) BETWEEN 1 AND 128), requested_at INTEGER NOT NULL, approved_by TEXT, approved_at INTEGER, declined_by TEXT, declined_at INTEGER,
+  upload_started_at INTEGER, result_url TEXT, failure_code TEXT CHECK (failure_code IS NULL OR length(failure_code) BETWEEN 1 AND 64), finished_at INTEGER, served_at INTEGER, updated_at INTEGER NOT NULL,
   CHECK (length(label) BETWEEN 1 AND 26 AND label NOT GLOB '*[^a-z0-9]*'), CHECK ((script_name IS NULL) = (script_release_id IS NULL)),
   CHECK (script_name IS NULL OR script_name = label || '.' || script_release_id),
   CHECK ((approved_by IS NULL) = (approved_at IS NULL)), CHECK ((declined_by IS NULL) = (declined_at IS NULL)), CHECK (approved_by IS NULL OR declined_by IS NULL),
+  CHECK ((state = 'declined') = (declined_by IS NOT NULL)),
   CHECK (state NOT IN ('live', 'served') OR (script_name IS NOT NULL AND approved_by IS NOT NULL)));
 CREATE INDEX release_by_state ON release (state, requested_at);
 CREATE TABLE release_config (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
   environments_json TEXT NOT NULL DEFAULT '[\"production\"]' CHECK (environments_json = '[\"production\"]'), approval_policy TEXT NOT NULL DEFAULT 'person' CHECK (approval_policy = 'person'),
-  version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1), release_epoch INTEGER NOT NULL DEFAULT 0 CHECK (release_epoch >= 0), set_by TEXT NOT NULL, set_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-  kept_previous TEXT, in_flight_release TEXT REFERENCES release (id), in_flight_script TEXT, in_flight_epoch INTEGER CHECK (in_flight_epoch >= 0),
-  CHECK ((in_flight_release IS NULL) = (in_flight_script IS NULL)), CHECK ((in_flight_release IS NULL) = (in_flight_epoch IS NULL)),
+  version INTEGER NOT NULL DEFAULT 1 CHECK (typeof(version) = 'integer' AND version >= 1), release_epoch INTEGER NOT NULL DEFAULT 0 CHECK (typeof(release_epoch) = 'integer' AND release_epoch >= 0), set_by TEXT NOT NULL, set_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  kept_previous TEXT, in_flight_release TEXT REFERENCES release (id), in_flight_script TEXT, in_flight_epoch INTEGER CHECK (in_flight_epoch IS NULL OR (typeof(in_flight_epoch) = 'integer' AND in_flight_epoch >= 0)), in_flight_at INTEGER,
+  CHECK ((in_flight_release IS NULL) = (in_flight_script IS NULL)), CHECK ((in_flight_release IS NULL) = (in_flight_epoch IS NULL)), CHECK ((in_flight_release IS NULL) = (in_flight_at IS NULL)),
   CHECK (kept_previous IS NULL OR (length(kept_previous) BETWEEN 38 AND 63 AND substr(kept_previous, -37, 4) = '.rel' AND substr(kept_previous, -33, 1) = '_' AND substr(kept_previous, -32) NOT GLOB '*[^0-9a-f]*' AND substr(kept_previous, 1, length(kept_previous) - 37) NOT GLOB '*[^a-z0-9]*')),
   CHECK (in_flight_script IS NULL OR (length(in_flight_script) BETWEEN 38 AND 63 AND substr(in_flight_script, -37, 4) = '.rel' AND substr(in_flight_script, -33, 1) = '_' AND substr(in_flight_script, -32) NOT GLOB '*[^0-9a-f]*' AND substr(in_flight_script, 1, length(in_flight_script) - 37) NOT GLOB '*[^a-z0-9]*')));
-CREATE TABLE serve_state (host TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('default', 'custom')), label TEXT REFERENCES app_label (label), release_id TEXT REFERENCES release (id), script_name TEXT,
-  version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1), closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0, 1)), flight_version INTEGER CHECK (flight_version >= 1), flight_before TEXT, updated_at INTEGER NOT NULL,
+CREATE TABLE serve_state (host TEXT PRIMARY KEY CHECK (length(host) BETWEEN 1 AND 253), kind TEXT NOT NULL CHECK (kind IN ('default', 'custom')), label TEXT, label_current INTEGER CHECK (label_current = 1),
+  release_id TEXT REFERENCES release (id), script_name TEXT,
+  version INTEGER NOT NULL DEFAULT 1 CHECK (typeof(version) = 'integer' AND version >= 1), closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0, 1)), flight_version INTEGER CHECK (flight_version IS NULL OR (typeof(flight_version) = 'integer' AND flight_version >= 1)), flight_before TEXT, updated_at INTEGER NOT NULL,
+  FOREIGN KEY (label, label_current) REFERENCES app_label (label, current), CHECK ((label IS NULL) = (label_current IS NULL)),
   CHECK ((script_name IS NULL) = (release_id IS NULL)), CHECK ((script_name IS NULL) = (label IS NULL)), CHECK (script_name IS NULL OR script_name = label || '.' || release_id),
   CHECK (kind = 'custom' OR closed = 0), CHECK (closed = 0 OR script_name IS NULL),
   CHECK (flight_before IS NULL OR (length(flight_before) BETWEEN 38 AND 63 AND substr(flight_before, -37, 4) = '.rel' AND substr(flight_before, -33, 1) = '_' AND substr(flight_before, -32) NOT GLOB '*[^0-9a-f]*' AND substr(flight_before, 1, length(flight_before) - 37) NOT GLOB '*[^a-z0-9]*'))) WITHOUT ROWID;
 CREATE UNIQUE INDEX serve_state_default ON serve_state (kind) WHERE kind = 'default';
 CREATE TABLE unpublish (seq INTEGER PRIMARY KEY AUTOINCREMENT,
   cause TEXT NOT NULL CHECK (cause IN ('release_off', 'release_off_for_deployment', 'workspace_archived', 'workspace_deleted', 'release_needs_public_room', 'organization_deleted', 'public_surface_suspended', 'app_suspended', 'release_not_delegated', 'repo_not_ready', 'no_releaser')),
-  label TEXT REFERENCES app_label (label), release_epoch INTEGER NOT NULL UNIQUE CHECK (release_epoch >= 1), at INTEGER NOT NULL, scripts_gone_at INTEGER);
+  label TEXT REFERENCES app_label (label), release_epoch INTEGER NOT NULL UNIQUE CHECK (typeof(release_epoch) = 'integer' AND release_epoch >= 1), at INTEGER NOT NULL, scripts_gone_at INTEGER);
 CREATE TABLE hostname_request (id TEXT PRIMARY KEY, hostname TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('pending', 'claimed', 'ending', 'refused', 'expired', 'ended')),
-  open INTEGER UNIQUE CHECK (open = 1), challenge TEXT NOT NULL CHECK (length(challenge) = 64 AND challenge NOT GLOB '*[^0-9a-f]*'), generation INTEGER NOT NULL CHECK (generation >= 0),
-  requested_by TEXT NOT NULL, requested_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, claimed_at INTEGER, proved_at INTEGER, checked_at INTEGER, definite_no_since INTEGER,
+  open INTEGER UNIQUE CHECK (open = 1), challenge TEXT NOT NULL CHECK (length(challenge) = 64 AND challenge NOT GLOB '*[^0-9a-f]*'), generation INTEGER NOT NULL CHECK (typeof(generation) = 'integer' AND generation >= 0),
+  requested_by TEXT NOT NULL CHECK (length(requested_by) BETWEEN 1 AND 128), requested_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, claimed_at INTEGER, proved_at INTEGER, checked_at INTEGER, definite_no_since INTEGER,
   ended_at INTEGER, end_reason TEXT, updated_at INTEGER NOT NULL,
   CHECK (length(hostname) BETWEEN 4 AND 253 AND hostname NOT GLOB '*[^a-z0-9.-]*' AND hostname GLOB '*?.?*' AND hostname NOT GLOB '.*' AND hostname NOT GLOB '*.' AND hostname NOT GLOB '*..*'),
   CHECK ((open IS NOT NULL) = (state IN ('pending', 'claimed', 'ending'))));

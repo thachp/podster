@@ -30,7 +30,7 @@ type R<T> = std::result::Result<T, ApiError>;
 /// Forward-only, as the room's are: a change is a new entry, never an edit.
 const MIGRATIONS: &[&str] = &["
 CREATE TABLE hostname (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), name TEXT NOT NULL, created_at INTEGER NOT NULL,
-  generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0), last_freed_at INTEGER, last_suspended_at INTEGER, last_lifted_at INTEGER);
+  generation INTEGER NOT NULL DEFAULT 0 CHECK (typeof(generation) = 'integer' AND generation >= 0), last_freed_at INTEGER, last_suspended_at INTEGER, last_lifted_at INTEGER);
 CREATE TABLE claim (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, request_id TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('live', 'ending', 'ended')),
   held INTEGER UNIQUE CHECK (held = 1), claimed_at INTEGER NOT NULL, proved_at INTEGER, ended_at INTEGER, end_reason TEXT, updated_at INTEGER NOT NULL,
   CHECK ((held IS NOT NULL) = (state IN ('live', 'ending'))), UNIQUE (workspace_id, request_id));

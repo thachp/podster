@@ -169,7 +169,11 @@ describe("the room's release state (M6 step 2)", () => {
     expect(await config(room)).toBe(false);
     expect(await one(room, "SELECT * FROM release_config")).toMatchObject({ enabled: 0, approval_policy: "person", environments_json: '["production"]', version: 1, release_epoch: 0, kept_previous: null, in_flight_release: null, in_flight_script: null, in_flight_epoch: null });
     expect(await run(room, "INSERT INTO release_config (singleton, set_by, set_at, updated_at) VALUES (2, 'per_rl_owner', 1, 1)")).toBe(true);
-    for (const bad of ["approval_policy = 'on_merge'", "enabled = 2", "release_epoch = -1", "version = 0", "version = -1", "in_flight_epoch = -1",
+    // Only an integer is ever stored: SQLite turns text that is a whole number into one before the check, and refuses the rest.
+    expect(await run(room, "UPDATE release_config SET release_epoch = '3'")).toBe(false);
+    expect(await one(room, "SELECT release_epoch, typeof(release_epoch) AS stored FROM release_config")).toEqual({ release_epoch: 3, stored: "integer" });
+    expect(await run(room, "UPDATE release_config SET release_epoch = 0")).toBe(false);
+    for (const bad of ["approval_policy = 'on_merge'", "enabled = 2", "release_epoch = -1", "version = 0", "version = -1", "in_flight_epoch = -1", "release_epoch = 'x'", "release_epoch = 1.5", "version = 'x'", "version = 2.5",
       `environments_json = '["preview","x"]'`, `environments_json = '["preview"]'`, "environments_json = '[]'", `environments_json = '["production","preview"]'`]) {
       expect(await run(room, `UPDATE release_config SET ${bad}`), bad).toBe(true);
     }
@@ -207,7 +211,9 @@ describe("the room's release state (M6 step 2)", () => {
     // A label the room doesn't hold, and one out of form.
     expect(await release(room, OLD, { label: LABEL })).toBe(true);
     for (const bad of ["Abc", "a".repeat(27), "a.b", ""]) expect(await release(room, OLD, { label: bad }), JSON.stringify(bad)).toBe(true);
-    for (const bad of [{ release_epoch: -1 }, { config_version: 0 }, { config_version: -1 }]) expect(await release(room, OLD, { label: LONG, ...bad }), JSON.stringify(bad)).toBe(true);
+    for (const bad of [{ release_epoch: -1 }, { config_version: 0 }, { config_version: -1 }, { release_epoch: "x" }, { release_epoch: 1.5 }, { config_version: "x" }, { config_version: 2.5 },
+      { requested_by: "" }, { requested_by: "p".repeat(129) }, { failure_code: "" }, { failure_code: "f".repeat(65) }]) expect(await release(room, OLD, { label: LONG, ...bad }), JSON.stringify(bad)).toBe(true);
+    expect(await release(room, OLD, { label: LONG, requested_by: "p".repeat(128), state: "failed", failure_code: "f".repeat(64) })).toBe(false);
     expect((await one(room, "SELECT environment FROM release WHERE id = ?", REL)).environment).toBe("production");
   });
 
@@ -237,19 +243,29 @@ describe("the room's release state (M6 step 2)", () => {
     let n = 0;
     const scripted = (release_id: string) => ({ script_name: scriptOf(release_id), script_release_id: release_id });
     const approved = { approved_by: "per_rl_owner", approved_at: 2 };
-    for (const state of core.releaseStates) {
+    const declined = { declined_by: "per_rl_owner", declined_at: 2 };
+    for (const state of core.releaseStates.filter((name) => name !== "declined")) {
       const serving = core.servingReleaseStates.includes(state);
       const [bare, noApprover, noScript, whole] = [id(++n), id(++n), id(++n), id(++n)];
       expect(await release(room, bare, { state }), `${state}, bare`).toBe(serving);
       expect(await release(room, noApprover, { state, ...scripted(noApprover) }), `${state}, no approver`).toBe(serving);
       expect(await release(room, noScript, { state, ...approved }), `${state}, no script`).toBe(serving);
       expect(await release(room, whole, { state, ...approved, ...scripted(whole) }), `${state}, whole`).toBe(false);
+      // Nobody declined a release that isn't declined.
+      expect(await release(room, id(++n), { state, ...declined }), `${state}, declined by someone`).toBe(true);
     }
-    // Who and when go together, and a release is never both approved and declined.
+    // A declined release names who declined it, and was never approved.
+    expect(await release(room, id(++n), { state: "declined" })).toBe(true);
+    expect(await release(room, id(++n), { state: "declined", ...approved })).toBe(true);
+    expect(await release(room, id(++n), { state: "declined", ...approved, ...declined })).toBe(true);
+    expect(await release(room, id(++n), { state: "declined", declined_by: "per_rl_owner" })).toBe(true);
+    expect(await release(room, id(++n), { state: "declined", ...declined })).toBe(false);
+    // Who and when go together.
     expect(await release(room, id(++n), { approved_by: "per_rl_owner" })).toBe(true);
     expect(await release(room, id(++n), { declined_at: 2 })).toBe(true);
-    expect(await release(room, id(++n), { state: "declined", declined_by: "per_rl_owner", declined_at: 2 })).toBe(false);
-    expect(await release(room, id(++n), { ...approved, declined_by: "per_rl_owner", declined_at: 3 })).toBe(true);
+    // When its upload began is the release's own, for the reconcile's exemption of a script in flight.
+    expect(await release(room, id(++n), { state: "uploading", ...approved, upload_started_at: 7 })).toBe(false);
+    expect((await one(room, "SELECT upload_started_at FROM release WHERE state = 'uploading' AND upload_started_at IS NOT NULL")).upload_started_at).toBe(7);
   });
 
   it("holds what each host should serve: one default host, never closed; a script of the room's own label and release, or nothing", async () => {
@@ -260,7 +276,7 @@ describe("the room's release state (M6 step 2)", () => {
       const row = { host: name, kind, updated_at: 1, ...extra };
       sql.exec(`INSERT INTO serve_state (${Object.keys(row).join(", ")}) VALUES (${Object.keys(row).map(() => "?").join(", ")})`, ...Object.values(row));
     }));
-    const serving = { label: LABEL, release_id: REL, script_name: scriptOf(REL) };
+    const serving = { label: LABEL, label_current: 1, release_id: REL, script_name: scriptOf(REL) };
     expect(await host(LABEL, "default", serving)).toBe(false);
     expect(await host("app.example.com", "custom")).toBe(false);
     expect(await one(room, "SELECT version, closed, flight_version, flight_before FROM serve_state WHERE host = ?", LABEL)).toEqual({ version: 1, closed: 0, flight_version: null, flight_before: null });
@@ -270,16 +286,27 @@ describe("the room's release state (M6 step 2)", () => {
     expect(await host("other", "preview")).toBe(true);
     // A custom host can be closed, and then it names nothing.
     expect(await run(room, "UPDATE serve_state SET closed = 1 WHERE kind = 'custom'")).toBe(false);
-    expect(await run(room, "UPDATE serve_state SET label = ?, release_id = ?, script_name = ? WHERE kind = 'custom'", LABEL, REL, scriptOf(REL))).toBe(true);
+    expect(await run(room, "UPDATE serve_state SET label = ?, label_current = 1, release_id = ?, script_name = ? WHERE kind = 'custom'", LABEL, REL, scriptOf(REL))).toBe(true);
     expect(await run(room, "UPDATE serve_state SET closed = 2 WHERE kind = 'custom'")).toBe(true);
     await inRoom(room, (sql) => sql.exec("DELETE FROM serve_state WHERE kind = 'custom'"));
     // A script under a label the room doesn't own, of a release it never had, misnamed, or half said.
-    expect(await host("c1.example.com", "custom", { label: "nolabel", release_id: REL, script_name: scriptOf(REL, "nolabel") })).toBe(true);
-    expect(await host("c1.example.com", "custom", { label: LABEL, release_id: OLD, script_name: scriptOf(OLD) })).toBe(true);
+    expect(await host("c1.example.com", "custom", { label: "nolabel", label_current: 1, release_id: REL, script_name: scriptOf(REL, "nolabel") })).toBe(true);
+    expect(await host("c1.example.com", "custom", { ...serving, release_id: OLD, script_name: scriptOf(OLD) })).toBe(true);
     for (const bad of [`${LABEL}_${REL}`, scriptOf(OLD), `${scriptOf(REL)}x`, REL]) expect(await host("c1.example.com", "custom", { ...serving, script_name: bad }), bad).toBe(true);
-    for (const missing of ["label", "release_id", "script_name"]) expect(await host("c1.example.com", "custom", { ...serving, [missing]: null }), missing).toBe(true);
-    for (const bad of ["version = 0", "version = -1", "flight_version = 0", "flight_version = -3", "flight_before = 'k3v9q2'"]) expect(await run(room, `UPDATE serve_state SET ${bad}`), bad).toBe(true);
+    for (const missing of ["label", "label_current", "release_id", "script_name"]) expect(await host("c1.example.com", "custom", { ...serving, [missing]: null }), missing).toBe(true);
+    expect(await host("c1.example.com", "custom", { ...serving, label_current: 2 })).toBe(true);
+    for (const bad of ["version = 0", "version = -1", "version = 'x'", "version = 2.5", "flight_version = 0", "flight_version = -3", "flight_version = 'x'", "flight_version = 2.5", "flight_before = 'k3v9q2'"]) expect(await run(room, `UPDATE serve_state SET ${bad}`), bad).toBe(true);
+    expect(await host("", "custom")).toBe(true);
+    expect(await host(`${"h".repeat(250)}.com`, "custom")).toBe(true);
     expect(await host("c1.example.com", "custom", serving)).toBe(false);
+    // What a host should serve is under the room's current label, always: while any host names a script under it, the
+    // label can't be retired, and a host can't be given a script under a retired one. A release keeps its label for
+    // good, as the record of what was released, which is why retired labels stay in the table.
+    expect(await run(room, "UPDATE app_label SET current = NULL, retired_at = 9 WHERE label = ?", LABEL)).toBe(true);
+    await inRoom(room, (sql) => sql.exec("UPDATE serve_state SET label = NULL, label_current = NULL, release_id = NULL, script_name = NULL"));
+    expect(await run(room, "UPDATE app_label SET current = NULL, retired_at = 9 WHERE label = ?", LABEL)).toBe(false);
+    expect(await host("c2.example.com", "custom", serving)).toBe(true);
+    expect((await one(room, "SELECT COUNT(*) AS n FROM release WHERE label = ?", LABEL)).n).toBe(1);
   });
 
   it("can hold the one commit in flight: its release, its script and epoch with the room, and what it wrote and found on each host", async () => {
@@ -288,14 +315,19 @@ describe("the room's release state (M6 step 2)", () => {
     await config(room);
     await release(room, OLD, { script_name: scriptOf(OLD), script_release_id: OLD });
     await release(room, REL, { script_name: scriptOf(REL), script_release_id: REL });
-    await inRoom(room, (sql) => sql.exec("INSERT INTO serve_state (host, kind, label, release_id, script_name, updated_at) VALUES (?, 'default', ?, ?, ?, 1)", LABEL, LABEL, REL, scriptOf(REL)));
+    await inRoom(room, (sql) => sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, updated_at) VALUES (?, 'default', ?, 1, ?, ?, 1)", LABEL, LABEL, REL, scriptOf(REL)));
     const set = (assignments: string, ...values: unknown[]) => run(room, `UPDATE release_config SET ${assignments}`, ...values);
-    // A flight has its release, its script and the epoch its commit wrote, or none of them.
+    // A flight has its release, its script, the epoch its commit wrote and when it committed, or none of them.
     expect(await set("in_flight_script = ?", scriptOf(REL))).toBe(true);
     expect(await set("in_flight_epoch = 3")).toBe(true);
     expect(await set("in_flight_release = ?", REL)).toBe(true);
+    expect(await set("in_flight_at = 8")).toBe(true);
     expect(await set("in_flight_script = ?, in_flight_epoch = 3", scriptOf(REL))).toBe(true);
-    expect(await set("in_flight_release = ?, in_flight_script = ?, in_flight_epoch = 3, kept_previous = ?", REL, scriptOf(REL), scriptOf(OLD))).toBe(false);
+    expect(await set("in_flight_release = ?, in_flight_script = ?, in_flight_epoch = 3", REL, scriptOf(REL))).toBe(true);
+    for (const bad of ["'x'", "3.5"]) expect(await set(`in_flight_release = ?, in_flight_script = ?, in_flight_epoch = ${bad}, in_flight_at = 8`, REL, scriptOf(REL)), bad).toBe(true);
+    expect(await set("in_flight_release = ?, in_flight_script = ?, in_flight_epoch = 3, in_flight_at = 8, kept_previous = ?", REL, scriptOf(REL), scriptOf(OLD))).toBe(false);
+    // The marker's wait is measured from the commit's own time.
+    expect((await one(room, "SELECT in_flight_at FROM release_config")).in_flight_at).toBe(8);
     // A rollback in flight: its own release, and the kept script, which names the earlier one.
     expect(await set("in_flight_release = ?, in_flight_script = ?", REL, scriptOf(OLD))).toBe(false);
     // The flight's release is one of the room's.
@@ -307,7 +339,7 @@ describe("the room's release state (M6 step 2)", () => {
     // The commit wrote version 2 to the default host, which served the earlier script.
     expect(await run(room, "UPDATE serve_state SET flight_version = 2, flight_before = ?", scriptOf(OLD))).toBe(false);
     // The flight ends: everything it held is cleared.
-    expect(await set("in_flight_release = NULL, in_flight_script = NULL, in_flight_epoch = NULL")).toBe(false);
+    expect(await set("in_flight_release = NULL, in_flight_script = NULL, in_flight_epoch = NULL, in_flight_at = NULL")).toBe(false);
     expect(await run(room, "UPDATE serve_state SET flight_version = NULL, flight_before = NULL")).toBe(false);
   });
 
@@ -322,6 +354,8 @@ describe("the room's release state (M6 step 2)", () => {
     expect(await add(3, "nolabel")).toBe(true);
     expect(await add(0, LABEL)).toBe(true);
     expect(await add(-1, LABEL)).toBe(true);
+    expect(await run(room, "INSERT INTO unpublish (cause, release_epoch, at) VALUES ('release_off', 'x', 1)")).toBe(true);
+    expect(await run(room, "INSERT INTO unpublish (cause, release_epoch, at) VALUES ('release_off', 5.5, 1)")).toBe(true);
     expect((await one(room, "SELECT scripts_gone_at FROM unpublish WHERE release_epoch = 1")).scripts_gone_at).toBeNull();
   });
 
@@ -338,8 +372,8 @@ describe("the room's release state (M6 step 2)", () => {
     const room = await newRoom();
     await label(room);
     let n = 0;
-    const whole = (release_id: string) => ({ approved_by: "per_rl_owner", approved_at: 2, script_name: scriptOf(release_id), script_release_id: release_id });
-    for (const state of core.releaseStates) { const at = id(++n); expect(await release(room, at, { state, ...whole(at) }), state).toBe(false); }
+    const whole = (release_id: string, state = "") => ({ ...(state === "declined" ? { declined_by: "per_rl_owner", declined_at: 2 } : { approved_by: "per_rl_owner", approved_at: 2 }), script_name: scriptOf(release_id), script_release_id: release_id });
+    for (const state of core.releaseStates) { const at = id(++n); expect(await release(room, at, { state, ...whole(at, state) }), state).toBe(false); }
     // The names an earlier draft of the contract had, another casing, and nothing at all.
     for (const state of ["waiting_for_approval", "deploying", "ended", "Live", "LIVE", "", "pending"]) { const at = id(++n); expect(await release(room, at, { state, ...whole(at) }), JSON.stringify(state)).toBe(true); }
     for (const state of core.hostnameRequestStates) {
@@ -373,7 +407,8 @@ describe("the room's release state (M6 step 2)", () => {
     const closed = { state: "ended", open: null };
     // The generation is the name's own when the request was made: a request can't be stored without one.
     expect(await inRoom(room, (sql) => refuses(() => sql.exec("INSERT INTO hostname_request (id, hostname, state, challenge, requested_by, requested_at, expires_at, updated_at) VALUES ('hnr_none', 'app.example.com', 'ended', ?, 'per_rl_owner', 1, 2, 1)", CHALLENGE)))).toBe(true);
-    expect(await request(room, ++n, { ...closed, generation: -1 })).toBe(true);
+    for (const bad of [-1, "x", 3.5]) expect(await request(room, ++n, { ...closed, generation: bad }), JSON.stringify(bad)).toBe(true);
+    for (const bad of ["", "p".repeat(129)]) expect(await request(room, ++n, { ...closed, requested_by: bad }), JSON.stringify(bad)).toBe(true);
     expect(await request(room, ++n, { ...closed, generation: 7 })).toBe(false);
     for (const bad of ["App.Example.com", "example", "a.b", ".example.com", "example.com.", "app..example.com", "*.example.com", "app_x.example.com", "app example.com", "", `${"a".repeat(250)}.com`]) expect(await request(room, ++n, { ...closed, hostname: bad }), JSON.stringify(bad)).toBe(true);
     for (const good of ["xn--bcher-kva.example", `${"a".repeat(249)}.com`, "a-1.b2.example.co.uk"]) expect(await request(room, ++n, { ...closed, hostname: good }), good).toBe(false);
@@ -430,7 +465,7 @@ describe("the hostname-claim object (M6 step 2)", () => {
     // The name's generation, which a suspend, a lift and a free each advance, and never below 0.
     await inClaim(hostname, (sql) => sql.exec("INSERT INTO hostname (singleton, name, created_at) VALUES (1, ?, 1)", hostname));
     expect(await inClaim(hostname, (sql) => sql.exec("SELECT generation, last_freed_at, last_suspended_at, last_lifted_at FROM hostname").one())).toEqual({ generation: 0, last_freed_at: null, last_suspended_at: null, last_lifted_at: null });
-    expect(await inClaim(hostname, (sql) => refuses(() => sql.exec("UPDATE hostname SET generation = -1")))).toBe(true);
+    for (const bad of ["-1", "'x'", "2.5"]) expect(await inClaim(hostname, (sql) => refuses(() => sql.exec(`UPDATE hostname SET generation = ${bad}`))), bad).toBe(true);
     expect(await inClaim(hostname, (sql) => refuses(() => sql.exec("UPDATE hostname SET generation = generation + 1, last_suspended_at = 3, last_lifted_at = 4")))).toBe(false);
     // Its states are the rules' own.
     const core = JSON.parse(BINDINGS.TEST_CORE_SETS) as { hostnameClaimStates: string[]; holdingHostnameClaimStates: string[] };

@@ -150,6 +150,8 @@ const ties = [
 for (const [what, source, pattern, expected] of ties) {
   if (listed(source.match(pattern)?.[1]) !== expected.join()) problems.push(`${what}: must be tied to exactly core's ${expected.join()}`);
 }
+// A release is declined exactly when someone declined it. The state's name is core's.
+if (!core.releaseStates.includes("declined") || !store.includes("CHECK ((state = 'declined') = (declined_by IS NOT NULL))")) problems.push("release.declined_by: must be set exactly in core's declined state");
 if (!store.includes(`environments_json = '[\\"${core.environment}\\"]'`)) problems.push(`release_config.environments_json: must be exactly the one environment, ${core.environment}`);
 if (api.components.schemas.Release?.properties?.commit_sha?.pattern !== "^[0-9a-f]{40}$") problems.push("Release.commit_sha: must be 40 lower-case hexadecimal characters");
 for (const [what, text] of [["approval policy", `approval_policy = '${core.approvalPolicies.join()}'`], ["environment", `environment = '${core.environment}'`], ["release ID's prefix", `id GLOB '${core.releaseIdPrefix}*'`], ["release ID's length", `length(id) = ${core.idLen}`], ["label's length", `length(label) BETWEEN 1 AND ${core.maxLabelLen}`]]) {

@@ -76,6 +76,10 @@ type App = { room: string; label: string; host: string; served: string; kept: st
  */
 async function app(opts: { plain?: boolean; epoch?: number; index?: boolean } = {}): Promise<App> {
   const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+  // Making a room sets its alarm a moment ahead. It is run out and cleared here, before any row is written, so no run
+  // of it can land between the rows below or between a test's next steps: nothing is set or running after this, and
+  // only a command or a test's own pass runs one.
+  await alarmQuiet(stub(room));
   const label = newLabel();
   const host = `${label}.${FAKE.domain}`;
   const script = (id: string) => `${label}.${id}`;
@@ -100,9 +104,9 @@ async function app(opts: { plain?: boolean; epoch?: number; index?: boolean } = 
         epoch, kept, rel(3), flight, epoch);
       sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, flight_version, flight_before, updated_at) VALUES (?, 'default', ?, 1, ?, ?, 6, 6, ?, 1)", host, label, rel(3), flight, served);
     }
+    // The applier's own record of the entry it last wrote, so a pass has nothing to do until the room changes its mind.
+    sql.exec("INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, ?, ?, 1, 1)", host, opts.plain ? 5 : 6, opts.plain ? served : flight);
   });
-  // The applier's own record of the entry it last wrote, so a pass has nothing to do until the room changes its mind.
-  await inRoom(room, (sql) => sql.exec("INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, ?, ?, 1, 1)", host, opts.plain ? 5 : 6, opts.plain ? served : flight));
   if (opts.index !== false) await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, 1)").bind(label, room).run();
   // What the provider holds for it: the three scripts, and the entry the applier last wrote.
   await fake("/seed", { scripts: opts.plain ? [kept, served] : [kept, served, flight], entries: { [host]: opts.plain ? served : flight } });
@@ -325,6 +329,7 @@ describe("an operator's suspension of an app", () => {
 
   it("suspends a label whose room never configured release, with nothing to unpublish", async () => {
     const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Bare" })).body.id;
+    await alarmQuiet(stub(room));
     const label = newLabel();
     await inRoom(room, (sql) => sql.exec("INSERT INTO app_label (label, current, created_at) VALUES (?, 1, 1)", label));
     await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, 1)").bind(label, room).run();
@@ -544,6 +549,8 @@ describe("the room's applier and its delete job", () => {
     expect(await applyRows(a.room)).toEqual([{ host: a.host, applied_version: 6, applied_script: null, attempts: 0, last_code: null }]);
     expect(state.scripts).toEqual([]);
     // A failure at the new version starts its own count, from the shortest wait.
+    // Nothing is set or running from here: the rows changed next are met first by the pass below, not by a stray alarm.
+    await alarmQuiet(stub(a.room));
     await inRoom(a.room, (sql) => { sql.exec("UPDATE serve_apply SET attempts = 9, attempt_version = 6, next_attempt_at = ?", far); sql.exec("UPDATE serve_state SET version = version + 1"); });
     await fault({ op: "entry.delete", times: 1, status: 500 });
     await fault({ op: "entry.get", times: 1, status: 500 });
@@ -600,6 +607,7 @@ describe("the room's applier and its delete job", () => {
     // The room's own host, under a label it retired, asked to serve a script under its current label: the labels
     // differ, so nothing is written, and what the host had is removed.
     const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Two labels" })).body.id;
+    await alarmQuiet(stub(room));
     const [old, current] = [newLabel(), newLabel()];
     const [host, script] = [`${old}.${FAKE.domain}`, `${current}.${rel(2)}`];
     await inRoom(room, (sql) => {
@@ -634,6 +642,8 @@ describe("the room's applier and its delete job", () => {
     expect(state.entries[a.host]).toBe(a.served);
     expect(await applyRows(a.room)).toEqual([{ host: a.host, applied_version: 5, applied_script: a.served, attempts: 0, last_code: null }]);
     // A write the provider accepted counts only once the entry reads back as that script.
+    // Nothing is set or running from here: the rows changed next are met first by the pass below, not by a stray alarm.
+    await alarmQuiet(stub(a.room));
     await inRoom(a.room, (sql) => sql.exec("UPDATE serve_state SET version = version + 1 WHERE kind = 'default'"));
     await fault({ op: "entry.get", times: 1, stale: true });
     await pass(a.room);
@@ -641,6 +651,7 @@ describe("the room's applier and its delete job", () => {
     await due(a.room);
     await pass(a.room);
     expect((await applyRows(a.room))[0]).toMatchObject({ applied_version: 6, attempts: 0, last_code: null });
+    await alarmQuiet(stub(a.room));
     // A custom hostname that wants a script: its claim can't be asked yet, so nothing is written for it, and an entry
     // that is somehow there is removed, since nothing can confirm it.
     await fake("/seed", { entries: { "app.example.org": a.served } });
@@ -652,6 +663,8 @@ describe("the room's applier and its delete job", () => {
     expect((await applyRows(a.room)).find((row: any) => row.host === "app.example.org")).toMatchObject({ applied_version: null, last_code: "claim_check_not_built" });
     // A state that names a script while the app is suspended is a fault no command makes. Even so, nothing is written,
     // and the entry that is there comes out.
+    // Nothing is set or running from here: the rows changed next are met first by the pass below, not by a stray alarm.
+    await alarmQuiet(stub(a.room));
     expect(state.entries[a.host]).toBe(a.served);
     await inRoom(a.room, (sql) => { sql.exec("UPDATE app_label SET suspended_at = 1, suspension_reason = 'abuse'"); sql.exec("UPDATE serve_state SET version = version + 1 WHERE kind = 'default'"); });
     const before = (await held()).calls.length;
@@ -665,6 +678,8 @@ describe("the room's applier and its delete job", () => {
     await pass(a.room);
     expect([(await held()).calls.length, await nextAlarm(stub(a.room))]).toEqual([state.calls.length, null]);
     // If a removal fails, the record says the entry remains, and that is retried.
+    // Nothing is set or running from here: the rows changed next are met first by the pass below, not by a stray alarm.
+    await alarmQuiet(stub(a.room));
     await inRoom(a.room, (sql) => sql.exec("UPDATE serve_state SET version = version + 1"));
     await fake("/seed", { entries: { [a.host]: a.served } });
     // Both hosts are due, so both removals fail.

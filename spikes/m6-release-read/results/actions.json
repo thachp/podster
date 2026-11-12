@@ -1,0 +1,129 @@
+{
+  "repo": "podsterdev/e2e-m5-202611120015-ae33-7c9b19",
+  "run_at": "2026-11-12T09:06:31.278Z",
+  "tokens": {
+    "provisioning_administration_read": {
+      "asked": {
+        "administration": "read"
+      },
+      "status": 201,
+      "granted": {
+        "administration": "read",
+        "metadata": "read"
+      },
+      "repository_selection": "selected",
+      "repositories": [
+        "e2e-m5-202611120015-ae33",
+        "e2e-m5-202611120015-ae33-7c9b19"
+      ],
+      "lifetime_minutes": 60
+    },
+    "agent_contents_write": {
+      "asked": {
+        "contents": "write"
+      },
+      "status": 201,
+      "granted": {
+        "contents": "write",
+        "metadata": "read"
+      },
+      "repository_selection": "selected",
+      "repositories": [
+        "e2e-m5-202611120015-ae33-7c9b19"
+      ],
+      "lifetime_minutes": 60
+    }
+  },
+  "settings": {
+    "e2e-m5-202611120015-ae33-7c9b19": {
+      "actions_permissions": {
+        "status": 200,
+        "enabled": false
+      },
+      "workflow_permissions": {
+        "status": 200,
+        "default_workflow_permissions": "read",
+        "can_approve_pull_request_reviews": false
+      },
+      "default_branch_has_dot_github": {
+        "status": 200,
+        "found": false
+      }
+    },
+    "e2e-m5-202611120015-ae33": {
+      "actions_permissions": {
+        "status": 200,
+        "enabled": false
+      },
+      "workflow_permissions": {
+        "status": 200,
+        "default_workflow_permissions": "read",
+        "can_approve_pull_request_reviews": false
+      },
+      "default_branch_has_dot_github": {
+        "status": 200,
+        "found": false
+      }
+    }
+  },
+  "organization_setting": {
+    "status": 403,
+    "message": "Resource not accessible by integration"
+  },
+  "before": {
+    "workflows": {
+      "status": 200,
+      "total_count": 0
+    },
+    "runs": {
+      "status": 200,
+      "total_count": 0
+    }
+  },
+  "attempts": {
+    "contents_api_on_the_fixture_branch": {
+      "status": 403,
+      "message": "Resource not accessible by integration"
+    },
+    "git_data_api": {
+      "blob": {
+        "status": 201,
+        "sha": "9fe951acd4190ad4a9469a2e24bfd2393504416c"
+      },
+      "tree": {
+        "status": 403,
+        "message": "Resource not accessible by integration"
+      },
+      "commit": "not tried",
+      "ref": "not tried"
+    },
+    "git_push": {
+      "commit": "441cb38ea46a7e7c5b82dc3683d0e9119b997007",
+      "branch": "spike/m6-actions-off-git",
+      "exit": 1,
+      "said": [
+        "! [remote rejected] 441cb38ea46a7e7c5b82dc3683d0e9119b997007 -> spike/m6-actions-off-git (refusing to allow a GitHub App to create or update workflow `.github/workflows/m6-spike-f.yml` without `workflows` permission)",
+        "error: failed to push some refs to 'https://github.com/podsterdev/e2e-m5-202611120015-ae33-7c9b19.git'"
+      ]
+    }
+  },
+  "dispatch": {
+    "status": 403,
+    "message": "Resource not accessible by integration"
+  },
+  "after_45_seconds": {
+    "workflows": {
+      "status": 200,
+      "total_count": 0
+    },
+    "runs": {
+      "status": 200,
+      "total_count": 0
+    }
+  },
+  "branches_now": [
+    "e2e/second-1",
+    "main",
+    "spike/m6-release-read"
+  ]
+}

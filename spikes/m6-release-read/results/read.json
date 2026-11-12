@@ -1,0 +1,783 @@
+{
+  "repo": "podsterdev/e2e-m5-202611120015-ae33-7c9b19",
+  "commit": "ccf4bc6f1a0753c563d7b2283ff1f25da9720ea9",
+  "run_at": "2026-11-12T09:13:06.527Z",
+  "tokens": {
+    "contents_read": {
+      "asked": {
+        "contents": "read"
+      },
+      "status": 201,
+      "granted": {
+        "contents": "read",
+        "metadata": "read"
+      },
+      "repository_selection": "selected",
+      "repositories": [
+        "e2e-m5-202611120015-ae33-7c9b19"
+      ],
+      "lifetime_minutes": 60
+    },
+    "metadata_only": {
+      "asked": {
+        "metadata": "read"
+      },
+      "status": 201,
+      "granted": {
+        "metadata": "read"
+      },
+      "repository_selection": "selected",
+      "repositories": [
+        "e2e-m5-202611120015-ae33-7c9b19"
+      ],
+      "lifetime_minutes": 60
+    }
+  },
+  "rate_limit_at_start": {
+    "limit": 5000,
+    "used": 46,
+    "remaining": 4954,
+    "reset": 1794475278
+  },
+  "q1": {
+    "with_contents_read": {
+      "commit": {
+        "status": 200,
+        "tree_matches": true
+      },
+      "tree_by_commit_sha": {
+        "status": 200,
+        "sha_answered": "ccf4bc6f1a0753c563d7b2283ff1f25da9720ea9",
+        "entries": [
+          "040000 tree m6-spike-e"
+        ]
+      },
+      "tree_by_commit_and_path": {
+        "status": 200,
+        "is_the_directorys_tree": true,
+        "entries": 34
+      },
+      "tree_by_commit_and_path_of_a_symlink": {
+        "status": 422,
+        "message": "Invalid object requested. SHA must identify a commit or a tree."
+      },
+      "tree_by_commit_and_path_of_a_submodule": {
+        "status": 200,
+        "sha_answered": "02d57b4077c86f5c5aef6973809e58d4e6e4ef5e",
+        "entries": [
+          "README.md"
+        ]
+      },
+      "tree_by_commit_and_path_of_a_file": {
+        "status": 422,
+        "message": "Invalid object requested. SHA must identify a commit or a tree."
+      },
+      "tree_by_commit_and_path_missing": {
+        "status": 404,
+        "message": "Not Found"
+      },
+      "release_directory_recursive": {
+        "status": 200,
+        "truncated": false,
+        "entries": 34
+      },
+      "blob_json": {
+        "status": 200,
+        "encoding": "base64",
+        "size": 39
+      },
+      "blob_raw": {
+        "status": 200,
+        "content_type": "text/plain; charset=utf-8",
+        "bytes": 39,
+        "git_sha_matches_tree": true
+      },
+      "repository_itself": {
+        "status": 200
+      },
+      "installation_repositories": {
+        "status": 200,
+        "total_count": 1,
+        "names": [
+          "e2e-m5-202611120015-ae33-7c9b19"
+        ]
+      },
+      "write_a_blob": {
+        "status": 403,
+        "message": "Resource not accessible by integration"
+      },
+      "write_a_ref": {
+        "status": 403,
+        "message": "Resource not accessible by integration"
+      },
+      "pulls": {
+        "status": 200
+      },
+      "actions_permissions": {
+        "status": 403,
+        "message": "Resource not accessible by integration"
+      },
+      "rulesets": {
+        "status": 200
+      }
+    },
+    "with_metadata_only": {
+      "tree": {
+        "status": 200
+      },
+      "blob": {
+        "status": 200
+      },
+      "write_a_blob": {
+        "status": 403,
+        "message": "Resource not accessible by integration"
+      }
+    },
+    "with_no_credential": {
+      "tree": {
+        "status": 200
+      },
+      "blob": {
+        "status": 200
+      }
+    },
+    "another_repository_with_this_token": {
+      "which": "e2e-m5-202611120015-ae33",
+      "repository": {
+        "status": 200
+      },
+      "tree": {
+        "status": 200
+      },
+      "write_a_blob": {
+        "status": 403,
+        "message": "Resource not accessible by integration"
+      }
+    }
+  },
+  "q4": {
+    "entries": [
+      {
+        "path": " lead and trail ",
+        "mode": "100644",
+        "type": "blob",
+        "size": 2,
+        "rule": null
+      },
+      {
+        "path": "-dash",
+        "mode": "100644",
+        "type": "blob",
+        "size": 2,
+        "rule": null
+      },
+      {
+        "path": "...",
+        "mode": "100644",
+        "type": "blob",
+        "size": 2,
+        "rule": null
+      },
+      {
+        "path": ".hidden",
+        "mode": "100644",
+        "type": "blob",
+        "size": 2,
+        "rule": null
+      },
+      {
+        "path": ".well-known",
+        "mode": "040000",
+        "type": "tree",
+        "rule": null
+      },
+      {
+        "path": ".well-known/podster-release.json",
+        "mode": "100644",
+        "type": "blob",
+        "size": 3,
+        "rule": null
+      },
+      {
+        "path": "Case.txt",
+        "mode": "100644",
+        "type": "blob",
+        "size": 2,
+        "rule": null
+      },
+      {
+        "path": "_headers",
+        "mode": "100644",
+        "type": "blob",
+        "size": 16,
+        "rule": null
+      },
+      {
+        "path": "a?b#c%20d&e.txt",
+        "mode": "100644",
+        "type": "blob",
+        "size": 2,
+        "rule": null
+      },
+      {
+        "path": "back\\slash.txt",
+        "mode": "100644",
+        "type": "blob",
+        "size": 2,
+        "rule": "backslash"
+      },
+      {
+        "path": "café.txt",
+        "mode": "100644",
+        "type": "blob",
+        "size": 2,
+        "rule": null
+      },
+      {
+        "path": "café.txt",
+        "mode": "100644",
+        "type": "blob",
+        "size": 2,
+        "rule": null
+      },
+      {
+        "path": "case.txt",
+        "mode": "100644",
+        "type": "blob",
+        "size": 2,
+        "rule": null
+      },
+      {
+        "path": "deep",
+        "mode": "040000",
+        "type": "tree",
+        "rule": null
+      },
+      {
+        "path": "deep/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "mode": "040000",
+        "type": "tree",
+        "rule": null
+      },
+      {
+        "path": "deep/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "mode": "040000",
+        "type": "tree",
+        "rule": null
+      },
+      {
+        "path": "deep/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "mode": "040000",
+        "type": "tree",
+        "rule": null
+      },
+      {
+        "path": "deep/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "mode": "040000",
+        "type": "tree",
+        "rule": null
+      },
+      {
+        "path": "deep/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "mode": "040000",
+        "type": "tree",
+        "rule": null
+      },
+      {
+        "path": "deep/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/f.txt",
+        "mode": "100644",
+        "type": "blob",
+        "size": 2,
+        "rule": "path_too_long"
+      },
+      {
+        "path": "emptydir",
+        "mode": "040000",
+        "type": "tree",
+        "rule": null
+      },
+      {
+        "path": "index.html",
+        "mode": "100644",
+        "type": "blob",
+        "size": 39,
+        "rule": null
+      },
+      {
+        "path": "latin1-�.txt",
+        "mode": "100644",
+        "type": "blob",
+        "size": 2,
+        "rule": "not_utf8"
+      },
+      {
+        "path": "link",
+        "mode": "120000",
+        "type": "blob",
+        "size": 10,
+        "rule": "symlink"
+      },
+      {
+        "path": "link-out",
+        "mode": "120000",
+        "type": "blob",
+        "size": 22,
+        "rule": "symlink"
+      },
+      {
+        "path": "new\nline.txt",
+        "mode": "100644",
+        "type": "blob",
+        "size": 2,
+        "rule": "control_character"
+      },
+      {
+        "path": "run.sh",
+        "mode": "100755",
+        "type": "blob",
+        "size": 18,
+        "rule": null
+      },
+      {
+        "path": "sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+        "mode": "100644",
+        "type": "blob",
+        "size": 2,
+        "rule": null
+      },
+      {
+        "path": "sub",
+        "mode": "160000",
+        "type": "commit",
+        "rule": "submodule"
+      },
+      {
+        "path": "tab\there.txt",
+        "mode": "100644",
+        "type": "blob",
+        "size": 2,
+        "rule": "control_character"
+      },
+      {
+        "path": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+        "mode": "100644",
+        "type": "blob",
+        "size": 2,
+        "rule": "segment_too_long"
+      },
+      {
+        "path": "with space.txt",
+        "mode": "100644",
+        "type": "blob",
+        "size": 2,
+        "rule": null
+      },
+      {
+        "path": "ünï",
+        "mode": "040000",
+        "type": "tree",
+        "rule": null
+      },
+      {
+        "path": "ünï/文件.txt",
+        "mode": "100644",
+        "type": "blob",
+        "size": 2,
+        "rule": null
+      }
+    ],
+    "symlink_blob": {
+      "status": 200,
+      "bytes_are_the_target_path": "../../../../etc/passwd"
+    },
+    "contents_api_on_a_symlink": {
+      "status": 200,
+      "type": "file",
+      "path_answered": "m6-spike-e/app/link",
+      "size": 39
+    },
+    "contents_api_on_a_symlink_raw": {
+      "status": 200,
+      "bytes": 39,
+      "text": "<!doctype html><title>m6 spike</title>\n"
+    },
+    "contents_api_on_a_submodule": {
+      "status": 200,
+      "type": "submodule"
+    },
+    "submodule_sha_as_a_blob": {
+      "status": 404,
+      "message": "Not Found"
+    }
+  },
+  "q2": {
+    "recursive_by_size": {
+      "10 directories of 1200": {
+        "status": 200,
+        "truncated": false,
+        "entries": 12010,
+        "blobs": 12000,
+        "bytes": 2942468,
+        "ms": 849,
+        "first": "d000",
+        "last": "d009/f1199.txt"
+      },
+      "20 directories of 1200": {
+        "status": 200,
+        "truncated": false,
+        "entries": 24020,
+        "blobs": 24000,
+        "bytes": 5884728,
+        "ms": 603,
+        "first": "d000",
+        "last": "d019/f1199.txt"
+      },
+      "30 directories of 1200": {
+        "status": 200,
+        "truncated": false,
+        "entries": 36030,
+        "blobs": 36000,
+        "bytes": 8826988,
+        "ms": 860,
+        "first": "d000",
+        "last": "d029/f1199.txt"
+      },
+      "40 directories of 1200": {
+        "status": 200,
+        "truncated": false,
+        "entries": 48040,
+        "blobs": 48000,
+        "bytes": 11769248,
+        "ms": 804,
+        "first": "d000",
+        "last": "d039/f1199.txt"
+      },
+      "60 directories of 1200": {
+        "status": 200,
+        "truncated": false,
+        "entries": 72060,
+        "blobs": 72000,
+        "bytes": 17653768,
+        "ms": 1432,
+        "first": "d000",
+        "last": "d059/f1199.txt"
+      }
+    },
+    "big_recursive": {
+      "status": 200,
+      "truncated": true,
+      "entries": 96643,
+      "blobs": 96562,
+      "bytes": 23676203,
+      "ms": 1226,
+      "first": "d000",
+      "last": "d080/f0561.txt"
+    },
+    "big_recursive_again": {
+      "status": 200,
+      "truncated": true,
+      "entries": 96643,
+      "blobs": 96562,
+      "bytes": 23676203,
+      "ms": 3549,
+      "first": "d000",
+      "last": "d080/f0561.txt"
+    },
+    "whole_commit_recursive": {
+      "status": 200,
+      "truncated": true,
+      "entries": 80653,
+      "blobs": 80572,
+      "bytes": 20973799,
+      "ms": 1667,
+      "first": "m6-spike-e",
+      "last": "m6-spike-e/big/d067/f0147.txt"
+    },
+    "whole_commit_recursive_again": {
+      "status": 200,
+      "truncated": true,
+      "entries": 80653,
+      "blobs": 80572,
+      "bytes": 20973799,
+      "ms": 1536,
+      "first": "m6-spike-e",
+      "last": "m6-spike-e/big/d067/f0147.txt"
+    },
+    "flat_not_recursive": {
+      "status": 200,
+      "truncated": false,
+      "entries": 40000,
+      "blobs": 40000,
+      "bytes": 9640208,
+      "ms": 688,
+      "first": "f00000.txt",
+      "last": "f39999.txt"
+    },
+    "flat_recursive": {
+      "status": 200,
+      "truncated": false,
+      "entries": 40000,
+      "blobs": 40000,
+      "bytes": 9640208,
+      "ms": 783,
+      "first": "f00000.txt",
+      "last": "f39999.txt"
+    },
+    "one_subdirectory_not_recursive": {
+      "status": 200,
+      "truncated": false,
+      "entries": 1200,
+      "blobs": 1200,
+      "bytes": 288208,
+      "ms": 332,
+      "first": "f0000.txt",
+      "last": "f1199.txt"
+    },
+    "contents_api_listing_1200_files": {
+      "status": 200,
+      "entries": 1000,
+      "bytes": 1201001
+    },
+    "walk_big_one_read_a_directory": {
+      "requests": 102,
+      "directories": 101,
+      "files": 121200,
+      "any_truncated": false,
+      "statuses": [
+        200
+      ],
+      "ms": 4657,
+      "at_once": 8
+    }
+  },
+  "q3": {
+    "tree_sizes": {
+      "1k.bin": 1024,
+      "1m.bin": 1048576,
+      "25m.bin": 26214400,
+      "5m-plus-1.bin": 5242881,
+      "5m.bin": 5242880,
+      "99m.bin": 103809024,
+      "empty.bin": 0
+    },
+    "blobs": {
+      "empty.bin": {
+        "size": 0,
+        "json": {
+          "status": 200,
+          "response_bytes": 305,
+          "over_size": null,
+          "encoding": "base64",
+          "content_has_newlines": null,
+          "decodes_to_the_file": true,
+          "ms": 298
+        },
+        "raw": {
+          "status": 200,
+          "content_type": "text/plain; charset=utf-8",
+          "response_bytes": 0,
+          "is_the_file": true,
+          "ms": 275
+        }
+      },
+      "1k.bin": {
+        "size": 1024,
+        "json": {
+          "status": 200,
+          "response_bytes": 1722,
+          "over_size": 1.6816,
+          "encoding": "base64",
+          "content_has_newlines": true,
+          "decodes_to_the_file": true,
+          "ms": 267
+        },
+        "raw": {
+          "status": 200,
+          "content_type": "application/octet-stream",
+          "response_bytes": 1024,
+          "is_the_file": true,
+          "ms": 324
+        }
+      },
+      "1m.bin": {
+        "size": 1048576,
+        "json": {
+          "status": 200,
+          "response_bytes": 1445019,
+          "over_size": 1.3781,
+          "encoding": "base64",
+          "content_has_newlines": true,
+          "decodes_to_the_file": true,
+          "ms": 546
+        },
+        "raw": {
+          "status": 200,
+          "content_type": "application/octet-stream",
+          "response_bytes": 1048576,
+          "is_the_file": true,
+          "ms": 406
+        }
+      },
+      "5m.bin": {
+        "size": 5242880,
+        "json": {
+          "status": 200,
+          "response_bytes": 7223837,
+          "over_size": 1.3778,
+          "encoding": "base64",
+          "content_has_newlines": true,
+          "decodes_to_the_file": true,
+          "ms": 686
+        },
+        "raw": {
+          "status": 200,
+          "content_type": "text/plain; charset=utf-16be",
+          "response_bytes": 5242880,
+          "is_the_file": true,
+          "ms": 400
+        }
+      },
+      "5m-plus-1.bin": {
+        "size": 5242881,
+        "json": {
+          "status": 200,
+          "response_bytes": 7223837,
+          "over_size": 1.3778,
+          "encoding": "base64",
+          "content_has_newlines": true,
+          "decodes_to_the_file": true,
+          "ms": 793
+        },
+        "raw": {
+          "status": 200,
+          "content_type": "application/octet-stream",
+          "response_bytes": 5242881,
+          "is_the_file": true,
+          "ms": 1173
+        }
+      },
+      "25m.bin": {
+        "size": 26214400,
+        "json": {
+          "status": 200,
+          "response_bytes": 36117934,
+          "over_size": 1.3778,
+          "encoding": "base64",
+          "content_has_newlines": true,
+          "decodes_to_the_file": true,
+          "ms": 1546
+        },
+        "raw": {
+          "status": 200,
+          "content_type": "application/octet-stream",
+          "response_bytes": 26214400,
+          "is_the_file": true,
+          "ms": 1646
+        }
+      },
+      "99m.bin": {
+        "size": 103809024,
+        "json": {
+          "status": 200,
+          "response_bytes": 143026081,
+          "over_size": 1.3778,
+          "encoding": "not parsed: streamed and counted",
+          "content_has_newlines": null,
+          "decodes_to_the_file": "not decoded: streamed and counted",
+          "ms": 6291
+        },
+        "raw": {
+          "status": 200,
+          "content_type": "application/octet-stream",
+          "response_bytes": 103809024,
+          "is_the_file": true,
+          "ms": 5331
+        }
+      }
+    },
+    "contents_api_5m": {
+      "status": 200,
+      "encoding": "none",
+      "content_length": 0,
+      "size": 5242880
+    },
+    "missing_blob": {
+      "status": 404,
+      "message": "Not Found"
+    }
+  },
+  "q5": {
+    "release_of_300_ten_at_once": {
+      "files": 300,
+      "at_once": 10,
+      "requests_made": 301,
+      "used_before": 1656,
+      "used_after": 1957,
+      "used_rose_by": 301,
+      "statuses": {
+        "200": 300
+      },
+      "all_match_the_tree": true,
+      "retry_after_seen": false,
+      "ms": 9197,
+      "slowest_ms": 556
+    },
+    "release_of_300_thirty_at_once": {
+      "files": 300,
+      "at_once": 30,
+      "requests_made": 301,
+      "used_before": 1957,
+      "used_after": 2258,
+      "used_rose_by": 301,
+      "statuses": {
+        "200": 300
+      },
+      "all_match_the_tree": true,
+      "retry_after_seen": false,
+      "ms": 3901,
+      "slowest_ms": 739
+    },
+    "conditional_reread": {
+      "first": 200,
+      "etag_given": true,
+      "again": 304,
+      "used_first": 2259,
+      "used_again": 2259
+    },
+    "two_tokens_of_one_installation": {
+      "this_token": {
+        "limit": 5000,
+        "used": 2259,
+        "remaining": 2741,
+        "reset": 1794477820
+      },
+      "the_other_token": {
+        "limit": 5000,
+        "used": 2259,
+        "remaining": 2741,
+        "reset": 1794477820
+      },
+      "one_count": true
+    },
+    "tarball_of_the_commit": {
+      "status": 302,
+      "to_host": "codeload.github.com",
+      "note": "not downloaded: it is the whole repository at the commit, not a directory"
+    },
+    "last_headers": {
+      "limit": 5000,
+      "remaining": 2741,
+      "used": 2259,
+      "resource": "core",
+      "reset": 1794477819,
+      "retry_after": null
+    }
+  },
+  "rate_limit_at_end": {
+    "limit": 5000,
+    "used": 2259,
+    "remaining": 2741,
+    "reset": 1794477820
+  },
+  "requests_made_by_this_run": 779
+}

@@ -305,7 +305,7 @@ describe("a delivery as a nudge", () => {
     const old = deliveryId();
     const nudge = { delivery_id: old, body_sha256: bodyHash(), event: "pull_request", repository_id: repo, pull_requests: [7], head_sha: HEAD };
     expect((await deliver(nudge)).status).toBe(202);
-    // One second short of seven days, it's still a replay.
+    // A minute short of seven days, it's still a replay.
     await inRoom(id, (sql) => sql.exec("UPDATE provider_delivery SET received_at = received_at - ?, expires_at = expires_at - ?", 7 * DAY - 60_000, 7 * DAY - 60_000));
     await inRoom(id, (sql) => sql.exec("UPDATE task_change SET nudged_at = 5"));
     expect((await deliver(nudge)).status).toBe(202);

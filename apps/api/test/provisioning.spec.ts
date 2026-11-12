@@ -135,16 +135,17 @@ const counted = (holder: string) => runInDurableObject(BINDINGS.PRINCIPAL.get(BI
   state.storage.sql.exec(PLACES);
   return state.storage.sql.exec("SELECT workspace_id FROM repo_request_room ORDER BY at, workspace_id").toArray().map((row: any) => row.workspace_id as string);
 }) as Promise<string[]>;
-/** Makes a room's place `ms` older, as if it had been stamped that much earlier. */
 /**
  * How far inside the 24-hour window a place is aged to show it still counts. A place is stamped by the object's own
  * clock when it's asked for, and that clock runs while the test does, so the margin must outlast everything between
  * that stamp and the check, on the slowest runner. A second didn't (CI, 2026-11-12: a test of 1.8 s). An hour does,
  * and the exact edge, refused a millisecond inside the window and allowed at it, is pinned by the pure rule's own tests
- * in crates/core/tests/repository_requests.rs (`only_requests_inside_the_window_count`).
+ * in crates/core/tests/repository_requests.rs (`only_requests_inside_the_window_count`, and
+ * `the_window_starts_at_one_edge`, for the bound the Principal's SQL uses).
  */
 const INSIDE = 3_600_000;
 const DAY = 86_400_000;
+/** Makes a room's place `ms` older, as if it had been stamped that much earlier. */
 const age = (holder: string, room: string, ms: number) => runInDurableObject(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(holder)), (_: any, state: any) =>
   void state.storage.sql.exec("UPDATE repo_request_room SET at = at - ? WHERE workspace_id = ?", ms, room));
 /** Asks an organization's object, or a person's, directly, as a room does. */

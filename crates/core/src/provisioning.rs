@@ -1440,6 +1440,14 @@ impl RequestLimitReached {
     }
 }
 
+/// The oldest stamp still inside the window at `now`: a request stamped at it or later counts, and one stamped earlier
+/// has left. The one edge of the window: [`repository_request_allowed`] counts by it, and the Principal deletes the
+/// places stamped before it.
+pub fn repository_request_window_start(now: i64) -> i64 {
+    now.saturating_sub(REPOSITORY_REQUEST_WINDOW_MS)
+        .saturating_add(1)
+}
+
 /// Whether one more request for a repository is accepted. `accepted_at` are the times of the requests already
 /// accepted for other rooms, for the organization or for the person, whichever is being counted; one from this room is
 /// never among them, so asking again for the same room is always allowed here. Only those inside the window count.
@@ -1447,10 +1455,8 @@ pub fn repository_request_allowed(
     accepted_at: &[i64],
     now: i64,
 ) -> Result<(), RequestLimitReached> {
-    let recent = accepted_at
-        .iter()
-        .filter(|at| now.saturating_sub(**at) < REPOSITORY_REQUEST_WINDOW_MS)
-        .count();
+    let start = repository_request_window_start(now);
+    let recent = accepted_at.iter().filter(|at| **at >= start).count();
     if recent as i64 >= MAX_REPOSITORY_REQUESTS_PER_DAY {
         Err(RequestLimitReached)
     } else {

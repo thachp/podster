@@ -1,7 +1,8 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setUrl } from "@/test/next-navigation";
+import { boundaryProblems, clientComponents } from "@/test/client-boundary";
 
 const state = vi.hoisted(() => ({ room: null as unknown, me: "per_owner", asked: [] as string[], repository: { ok: false, status: 404, code: "not_found" } as unknown, release: { ok: false, status: 404, code: "not_found" } as unknown, hostname: { ok: true, data: { request: null } } as unknown, visibility: { ok: false, status: 404, code: "not_found" } as unknown }));
 vi.mock("react", async (original) => ({ ...(await original<object>()), cache: <T,>(fn: T) => fn }));
@@ -11,8 +12,14 @@ vi.mock("@/lib/gateway/server", () => ({
     if (path === "/api/v1/workspaces/ws_1") return { ok: true, data: state.room };
     if (path.includes("/audit")) return { ok: true, data: { audit: [], next_cursor: null } };
     if (path === "/api/v1/workspaces/ws_1/repository") return state.repository;
-    if (path === "/api/v1/workspaces/ws_1/release-config") return state.release;
-    if (path === "/api/v1/workspaces/ws_1/app-hostname") return state.hostname;
+    if (path === "/api/v1/workspaces/ws_1/release-config") {
+      if (state.release === "throw") throw new Error("connection lost");
+      return state.release;
+    }
+    if (path === "/api/v1/workspaces/ws_1/app-hostname") {
+      if (state.hostname === "throw") throw new Error("connection lost");
+      return state.hostname;
+    }
     if (path === "/api/v1/workspaces/ws_1/visibility") return state.visibility;
     if (path === "/api/orgs/org_a/members") return { ok: true, data: { members: [{ person_id: "per_heir", name: "Heir" }] } };
     return { ok: false, status: 404, code: "not_found" };
@@ -23,7 +30,8 @@ vi.mock("@/lib/gateway/server", () => ({
 }));
 
 const { default: Settings } = await import("./page");
-const show = async () => render((await Settings({ params: Promise.resolve({ id: "ws_1" }), searchParams: Promise.resolve({}) })) as ReactElement);
+const page = () => Settings({ params: Promise.resolve({ id: "ws_1" }), searchParams: Promise.resolve({}) });
+const show = async () => render((await page()) as ReactElement);
 const member = (principal_id: string, kind: string, role: string, org_id = "org_a") => ({ principal_id, kind, role, org_id });
 
 describe("workroom settings' ownership section", () => {
@@ -166,7 +174,7 @@ describe("workroom settings' release section", () => {
     const section = screen.getByRole("region", { name: "Release" });
     expect(section).toHaveTextContent("Needs approval");
     expect(section).toHaveTextContent("The workroom has to be public.");
-    expect(screen.getByRole("button", { name: "Switch release on" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Switch release on" })).toHaveAttribute("aria-disabled", "true");
     expect(state.asked).toContain("/api/v1/workspaces/ws_1/app-hostname");
   });
 
@@ -191,5 +199,75 @@ describe("workroom settings' release section", () => {
     const section = screen.getByRole("region", { name: "Release" });
     expect(section).toHaveTextContent("Couldn't refresh.");
     expect(section).not.toHaveTextContent("Unavailable");
+  });
+  it("reads 409 release_not_available as Unavailable, like the 404", async () => {
+    state.repository = readyRepository;
+    state.release = { ok: false, status: 409, code: "release_not_available" };
+    await show();
+    expect(screen.getByRole("region", { name: "Release" })).toHaveTextContent("Unavailable");
+    expect(state.asked).not.toContain("/api/v1/workspaces/ws_1/app-hostname");
+  });
+
+  it("a release read that throws fails only its own section, and the page still renders", async () => {
+    state.repository = readyRepository;
+    state.release = "throw";
+    await show();
+    const section = screen.getByRole("region", { name: "Release" });
+    expect(section).toHaveTextContent("Couldn't refresh.");
+    expect(section).not.toHaveTextContent("Unavailable");
+    expect(screen.getByRole("heading", { name: "Ownership" })).toBeInTheDocument();
+  });
+
+  it("a hostname read that throws fails only the custom domain", async () => {
+    state.repository = readyRepository;
+    state.release = { ok: true, data: releaseConfig({ enabled: true }) };
+    state.hostname = "throw";
+    await show();
+    const section = screen.getByRole("region", { name: "Release" });
+    expect(section).toHaveTextContent("Ready");
+    expect(section).toHaveTextContent("Couldn't refresh.");
+    expect(screen.queryByLabelText("Hostname")).toBeNull();
+  });
+
+  it("an admin who is a person is offered the controls; a member, or an owner who left the organization, sees the state and none", async () => {
+    state.repository = readyRepository;
+    state.visibility = visibilityRead("public");
+    state.release = { ok: true, data: releaseConfig() };
+    state.me = "per_admin";
+    (state.room as { members: unknown[] }).members = [member("per_admin", "person", "admin"), member("per_member", "person", "member")];
+    const admin = await show();
+    expect(screen.getByRole("button", { name: "Switch release on" })).toBeInTheDocument();
+    admin.unmount();
+    state.me = "per_member";
+    const plain = await show();
+    const section = screen.getByRole("region", { name: "Release" });
+    expect(section).toHaveTextContent("Not configured");
+    expect(within(section).queryByRole("button")).toBeNull();
+    expect(within(section).queryByLabelText("Hostname")).toBeNull();
+    expect(section).toHaveTextContent("Only this workroom's owner and admins can change release.");
+    plain.unmount();
+    state.me = "per_owner";
+    (state.room as { owner_left_at: number }).owner_left_at = 1;
+    await show();
+    expect(within(screen.getByRole("region", { name: "Release" })).queryByRole("button")).toBeNull();
+  });
+
+  it("names who last changed release from the viewer's organizations, and never shows a bare ID", async () => {
+    state.repository = readyRepository;
+    state.release = { ok: true, data: releaseConfig({ enabled: true, set_by: "per_heir", updated_at: Date.UTC(2026, 10, 12) }) };
+    await show();
+    expect(screen.getByText("2026-11-12 by Heir")).toBeInTheDocument();
+    expect(state.asked).toContain("/api/orgs/org_a/members");
+  });
+  // Rendering in jsdom never serializes a client component's props, so a function prop passes here and fails for real
+  // with a 500. This walks what the page returns, as React would send it, for each state that renders the section.
+  it("sends its client components only props React can serialize, in every release state", async () => {
+    const clients = await clientComponents();
+    state.repository = readyRepository;
+    state.hostname = { ok: true, data: { request: { id: "hr_1", hostname: "app.example.com", state: "pending", challenge_name: "_podster-challenge.app.example.com", challenge_value: "v", requested_by: "per_heir", requested_at: 1, expires_at: 2, end_reason: null } } };
+    for (const release of [{ ok: false, status: 404, code: "not_found" }, { ok: true, data: releaseConfig() }, { ok: true, data: releaseConfig({ enabled: true, set_by: "per_heir", updated_at: 1 }) }, { ok: false, status: 500, code: "error" }]) {
+      state.release = release;
+      expect(boundaryProblems(await page(), clients)).toEqual([]);
+    }
   });
 });

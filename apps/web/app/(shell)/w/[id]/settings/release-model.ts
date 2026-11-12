@@ -1,5 +1,6 @@
+import type { GatewayResult } from "@/lib/gateway/result";
 import { explainRefusal } from "../team/model";
-import type { Availability } from "./repository-model";
+import { availability, type Availability } from "./repository-model";
 
 /**
  * M6 release (ADR 0010), as the room's reads give it. Every field is what the server said, and none of it decides
@@ -18,6 +19,16 @@ export type ReleaseConfig = {
   set_by: string | null;
   updated_at: number | null;
 };
+
+/**
+ * What the configuration read says about release. Off for the deployment, its routes answer as routes that don't exist;
+ * switched on where its step isn't built, which only a test build can be, they answer 409 `release_not_available`. Both
+ * are Unavailable. Anything else that isn't an answer is a read failure.
+ */
+export function releaseAvailability(result: GatewayResult<ReleaseConfig>): Availability<ReleaseConfig> {
+  if (!result.ok && result.status === 409 && result.code === "release_not_available") return { kind: "off" };
+  return availability(result);
+}
 
 export type HostnameRequest = {
   id: string;

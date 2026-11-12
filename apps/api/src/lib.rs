@@ -4,6 +4,7 @@
 #![allow(clippy::indexing_slicing)]
 
 mod a2a_out;
+mod content_provider;
 mod downloads;
 mod error;
 mod github;
@@ -428,11 +429,11 @@ async fn route(
         None
     };
 
-    // M6's routes (step 2): none is built. Switched off, which is everywhere, none is looked at here at all, so each is
+    // M6's routes (steps 2 and 4(a)). Switched off, which is everywhere, none is looked at here at all, so each is
     // answered exactly where an unknown path is: by the match below, or by the room it names.
     if let Some(audience) = releases::route(&method, &parts) {
         if releases::switched_on(&env).await {
-            return releases::refuse(&env, &caller, audience);
+            return releases::answer(&env, &caller, audience, &parts, body.as_deref()).await;
         }
     }
     let (workspace_id, forward_path) = match parts.as_slice() {

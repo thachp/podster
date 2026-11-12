@@ -389,6 +389,9 @@ describe("a room from before this", () => {
       // M5 step 7b's merge bookkeeping, the newest migration, comes off first.
       // The newest step, the M5 security review's two columns, comes off first.
       // M6 step 2's release tables, the newest migration, come off first.
+      // M6 step 4(a)'s applier and script-delete tables, the newest migration, come off first.
+      for (const table of ["serve_apply", "script_delete"]) sql.exec(`DROP TABLE ${table}`);
+      sql.exec("UPDATE schema_version SET version = version - 1");
       for (const table of ["release_config", "serve_state", "unpublish", "release", "app_label", "hostname_request"]) sql.exec(`DROP TABLE ${table}`);
       sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("ALTER TABLE repo_link DROP COLUMN gone_seen_at");

@@ -124,7 +124,10 @@ describe("M6's routes, none of them built", () => {
         const path = fill(route.path, room);
         const as = async (who: Who) => { const answer = await api(who, route.method, path, { reason: "abuse" }); return [answer.status, answer.code]; };
         expect(await as(AGENT), `${route.operation} as an agent`).toEqual([403, "not_allowed"]);
-        expect(await as(OPERATOR), `${route.operation} as an operator`).toEqual([409, "release_not_available"]);
+        // Step 4(a) built an app's suspension and its lifting: an operator asking about a label no room has is told it
+        // isn't found. Everything else still isn't built. A host that isn't an app's default host is the next PR's.
+        const built = route.operation === "suspendApp" || route.operation === "liftAppSuspension";
+        expect(await as(OPERATOR), `${route.operation} as an operator`).toEqual(built ? [404, "not_found"] : [409, "release_not_available"]);
         expect(await as(OWNER), `${route.operation} as the owner`).toEqual(M6[route.operation] === "operator" ? [403, "not_allowed"] : [409, "release_not_available"]);
       }
       // A neighbouring path the contract doesn't list is no M6 route: the room answers it as it always did.

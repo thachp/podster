@@ -92,12 +92,14 @@ mod repo_tokens;
 mod repositories;
 mod roles;
 mod submission_files;
+mod takedown;
 mod visibility;
 
 pub(crate) use merges::INTERNAL_REPOSITORY_RECHECK;
 pub(crate) use moderation::INTERNAL_SUSPENSION;
 pub(crate) use public::{INTERNAL_EXPLORE_ENTRY, INTERNAL_PUBLIC_PAGE};
 pub(crate) use public_claims::{INTERNAL_PUBLIC_CLAIM, INTERNAL_PUBLIC_CLAIM_STATUS};
+pub(crate) use takedown::INTERNAL_APP_SUSPENSION;
 pub(crate) use visibility::public_rooms_enabled;
 
 /// The room's own answer to whether managed repositories are switched on for it, for routes the Worker answers outside
@@ -3816,6 +3818,14 @@ impl Workspace {
             let next = next.max(now + 10);
             due = Some(due.map_or(next, |d| d.min(next)));
         }
+        // A serve entry to write or remove, or a script to delete (M6 step 4(a)). Nothing while no provider is configured.
+        if let Some(next) = migrated
+            .then(|| takedown::next_due(&sql, &self.env, now))
+            .transpose()?
+            .flatten()
+        {
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
         // The oldest webhook delivery ID, when it's time to forget it.
         if let Some(next) = migrated
             .then(|| repositories::next_delivery_expiry(&sql, now))
@@ -4104,6 +4114,9 @@ impl Workspace {
         }
         if req.path() == merges::INTERNAL_REPOSITORY_RECHECK {
             return self.operator_recheck(req).await;
+        }
+        if req.path() == takedown::INTERNAL_APP_SUSPENSION {
+            return self.app_suspension(req).await;
         }
         #[cfg(feature = "failpoints")]
         if req.path() == INTERNAL_MANAGED_SWITCH {
@@ -5107,6 +5120,10 @@ impl DurableObject for Workspace {
             {
                 console_error!("couldn't schedule the denial record: {:?}", error);
             }
+        }
+        // A takedown's serve entries first, before anything slower: the applier never waits behind a job (ADR 0010).
+        if let Err(error) = takedown::upkeep(&self.state, &self.env).await {
+            console_error!("takedown upkeep failed: {:?}", error.code());
         }
         let index = self.drain_index().await;
         if let Err(error) = &index {

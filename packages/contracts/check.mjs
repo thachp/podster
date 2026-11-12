@@ -107,8 +107,12 @@ for (const [id, params] of Object.entries(releaseOperations)) {
   if (!found) problems.push(`${id}: the release operation is missing`);
   else {
     if ([...found.path.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).join() !== params) problems.push(`${id}: its path may name only ${params || "nothing"}`);
-    // Each says it isn't built, so a reader of the contract isn't told release works.
-    if (!found.op.summary?.includes("`release_not_available`") || !found.op.summary.includes("`not_found`")) problems.push(`${id}: its summary must say what it answers while it isn't built`);
+    // Each says what it answers switched off. One that isn't built, or is built in part, says what it answers then, so
+    // a reader of the contract isn't told release works. Step 4(a) built an app's suspension and its lifting whole,
+    // and a host's for an app's default host only.
+    const built = ["suspendApp", "liftAppSuspension"].includes(id);
+    if (!found.op.summary?.includes("`not_found`")) problems.push(`${id}: its summary must say what it answers while release is switched off`);
+    if (built ? found.op.summary?.includes("Not built") || found.op.summary?.includes("`release_not_available`") : !found.op.summary?.includes("`release_not_available`")) problems.push(`${id}: its summary must say ${built ? "it is built, and not that it isn't" : "what it answers while it isn't built"}`);
   }
   if (!personOnly.includes(id)) problems.push(`${id}: must be person_only`);
 }

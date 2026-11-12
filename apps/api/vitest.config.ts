@@ -1,8 +1,9 @@
 import { coreSets } from "../../packages/contracts/core-sets.mjs";
 import { generateKeyPairSync } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
+import { FAKE_CONTENT, fakeContent, GATE_LIMIT_MS } from "./test/fake-content.ts";
 import { FAKE_AGENT_KEY_PEM, FAKE_APP_KEY_PEM, FAKE_GITHUB, FAKE_MERGE_KEY_PEM, fakeGithub } from "./test/fake-github.ts";
 import { stagingRequestersProblem, validRequesters } from "../../scripts/requesters-rule.mjs";
 
@@ -77,6 +78,9 @@ async function fakeHook(request: Request) {
   // stay out of the hook log.
   const github = await fakeGithub(request);
   if (github) return github;
+  // The provider that serves rooms' apps (M6 step 4(a)): a stand-in, so nothing ever reaches Cloudflare's API.
+  const content = await fakeContent(request);
+  if (content) return content;
   const url = new URL(request.url);
   if (url.hostname === "upload-gate.example.com") return uploadGate(url);
   if (url.hostname === "hook-log.example.com") return new Response(JSON.stringify(hookRequests));
@@ -183,6 +187,22 @@ export default defineConfig({
           GITHUB_MERGE_INSTALLATION_ID: String(FAKE_GITHUB.mergeInstallationId),
           GITHUB_MERGE_APP_KEY: FAKE_MERGE_KEY_PEM,
           TEST_FAKE_GITHUB: JSON.stringify(FAKE_GITHUB),
+          // The content provider's configuration (M6 step 4(a)), pointing at the stand-in. Test values: no environment
+          // binds any of these names, and the real ones are the owner's to set.
+          CONTENT_ACCOUNT_ID: FAKE_CONTENT.account,
+          CONTENT_DISPATCH_NAMESPACE: FAKE_CONTENT.namespace,
+          CONTENT_KV_NAMESPACE_ID: FAKE_CONTENT.kvNamespace,
+          CONTENT_DOMAIN: FAKE_CONTENT.domain,
+          CONTENT_SCRIPTS_TOKEN: FAKE_CONTENT.scriptsToken,
+          CONTENT_ROUTING_TOKEN: FAKE_CONTENT.routingToken,
+          TEST_FAKE_CONTENT: JSON.stringify(FAKE_CONTENT),
+          TEST_GATE_LIMIT_MS: GATE_LIMIT_MS,
+          // The provider module's source, for the test that reads its settings' names and shows no environment binds one.
+          // Every Rust source file of the API, by its path under src, and its Cargo.toml, for the test that shows no
+          // test-only switch is in a deployment's build.
+          TEST_API_SOURCES: JSON.stringify(Object.fromEntries((readdirSync(new URL("./src", import.meta.url), { recursive: true }) as string[]).filter((name) => name.endsWith(".rs")).sort().map((name) => [name.split("\\").join("/"), readFileSync(new URL(`./src/${name}`, import.meta.url), "utf8")]))),
+          TEST_API_CARGO: readFileSync(new URL("./Cargo.toml", import.meta.url), "utf8"),
+          TEST_CONTENT_PROVIDER_SOURCE: readFileSync(new URL("./src/content_provider.rs", import.meta.url), "utf8"),
           // Set only by e2e/run-langgraph-check.mjs. Empty, a2a-langgraph.spec.ts skips.
           TEST_LANGGRAPH_ASSISTANT: process.env.PODSTER_LANGGRAPH_URL ? (process.env.PODSTER_LANGGRAPH_ASSISTANT ?? "") : "",
           // Set only by e2e/run-fasta2a-check.mjs: the agent's run time in seconds. Empty, a2a-fasta2a.spec.ts skips.

@@ -363,7 +363,10 @@ async fn call(
 
 /// Reads at most `max_bytes` of an answer, stopping there and never buffering more (the M5 security review's F5). `None`
 /// for a longer one, whether its length says so up front or it only shows while reading.
-async fn bounded_body(response: &mut Response, max_bytes: usize) -> Result<Option<Vec<u8>>> {
+pub(crate) async fn bounded_body(
+    response: &mut Response,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>> {
     let declared = response
         .headers()
         .get("content-length")?

@@ -15,8 +15,11 @@
 //!
 //! Who may configure or approve a release, and everything else about authority, is decided in `podster_policy` and
 //! `podster_core` by the steps that build each route. Nothing here reads or writes state, and nothing is logged.
+use crate::content_provider::Provider;
 use crate::error::ApiError;
 use crate::{moderation, Caller};
+use podster_core::release::is_label;
+use serde_json::{json, Value};
 use worker::*;
 
 type R<T> = std::result::Result<T, ApiError>;
@@ -86,13 +89,96 @@ fn release_not_available() -> ApiError {
     ApiError::api(409, "release_not_available")
 }
 
-/// The answer to any M6 route while release is switched on: see the module's note.
-pub(crate) fn refuse(env: &Env, caller: &Caller, audience: Audience) -> R<Response> {
+/// Which room a label's app belongs to, by the lookup table. It only routes the question: the room itself says whether
+/// the label is its own, and acts only then.
+async fn room_for_label(env: &Env, label: &str) -> R<Option<String>> {
+    let found = env
+        .d1("DB")?
+        .prepare("SELECT workspace_id FROM app_label_index WHERE label = ?")
+        .bind(&[label.into()])?
+        .first::<Value>(None)
+        .await?;
+    Ok(found.and_then(|row| row["workspace_id"].as_str().map(str::to_owned)))
+}
+
+/// An operator suspends an app, or lifts that, by its label (M6 step 4(a)). The operator was checked before this. An
+/// unknown label is `not_found`, and so is one the lookup table names for a room that says it isn't its own.
+async fn app_suspension(
+    env: &Env,
+    caller: &Caller,
+    label: &str,
+    suspended: bool,
+    body: Option<&str>,
+) -> R<std::result::Result<Value, Response>> {
+    let reason = moderation::reason_of(body)?;
+    if !is_label(label) {
+        return Err(ApiError::not_found());
+    }
+    let Some(workspace) = room_for_label(env, label).await? else {
+        return Err(ApiError::not_found());
+    };
+    let request = json!({ "label": label, "suspended": suspended, "reason": reason.name() });
+    moderation::room_action(
+        env,
+        &caller.id,
+        &workspace,
+        crate::workspace::INTERNAL_APP_SUSPENSION,
+        request,
+        "app",
+        label,
+        suspended,
+        reason,
+    )
+    .await
+}
+
+/// The answer to an M6 route while release is switched on, which only a test build can be. An agent is refused
+/// first, by its kind, and an operator's route refuses anyone who isn't a configured operator: who is asking is
+/// settled before anything is said about what exists or is built.
+///
+/// Built (step 4(a)): an operator's suspension of an app and its lifting, by the app's label, and by its default
+/// host, which is the same act. Everything else answers `release_not_available`: a custom hostname's suspension and
+/// the stop for the whole content domain are the next PR's, and with no content domain configured no host is anyone's
+/// default host.
+pub(crate) async fn answer(
+    env: &Env,
+    caller: &Caller,
+    audience: Audience,
+    parts: &[&str],
+    body: Option<&str>,
+) -> R<Response> {
     if caller.kind != "person" {
         return Err(ApiError::not_allowed());
     }
     if audience == Audience::Operator {
         moderation::require_operator(env, caller)?;
     }
-    Err(release_not_available())
+    let done = match parts {
+        ["v1", "moderation", "apps", label, verb] => {
+            app_suspension(env, caller, label, *verb == "suspend", body).await?
+        }
+        ["v1", "moderation", "app-hosts", host, verb] => {
+            let label = Provider::from_env(env)
+                .and_then(|provider| provider.default_host_label(host).map(str::to_owned));
+            let Some(label) = label else {
+                return Err(release_not_available());
+            };
+            app_suspension(env, caller, &label, *verb == "suspend", body)
+                .await?
+                .map(|mut answer| {
+                    // Asked by the host, answered by the host. The label is the host's first part, which the
+                    // operator already has.
+                    if let Some(fields) = answer.as_object_mut() {
+                        fields.remove("label");
+                        fields.insert("host".into(), json!(host));
+                    }
+                    answer
+                })
+        }
+        _ => return Err(release_not_available()),
+    };
+    match done {
+        Ok(answer) => Ok(Response::from_json(&answer)?),
+        Err(refused) => Ok(refused),
+    }
 }

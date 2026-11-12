@@ -16,6 +16,8 @@ import { TransferOwnership } from "./transfer-ownership";
 import { VisibilityControls } from "./visibility-controls";
 import { RepositorySection } from "./repository-section";
 import { availability, type RoomRepository } from "./repository-model";
+import { ReleaseSection } from "./release-section";
+import { releaseView, type AppHostname, type ReleaseConfig } from "./release-model";
 import type { RoomVisibility } from "./visibility-model";
 
 const Section = ({ id, title, children }: { id: string; title: string; children: React.ReactNode }) => (
@@ -35,13 +37,22 @@ export default async function Settings({ params, searchParams }: { params: Promi
   const after = pageAfter(query.after);
   // The repository read is also how this page learns whether managed repositories are switched on: off, it answers as a
   // route that doesn't exist, and the page stays as it was before them.
-  const [identity, audit, visibility, repositoryRead] = await Promise.all([
+  // Release's configuration read says the same of release (M6): off, it answers as a route that doesn't exist.
+  const [identity, audit, visibility, repositoryRead, releaseRead] = await Promise.all([
     getIdentity(),
     gatewayQuery<{ audit: AuditRow[]; next_cursor: number | null }>(`/api/v1/workspaces/${id}/audit?after=${after}`),
     gatewayQuery<RoomVisibility>(`/api/v1/workspaces/${id}/visibility`),
     gatewayQuery<RoomRepository>(`/api/v1/workspaces/${id}/repository`),
+    gatewayQuery<ReleaseConfig>(`/api/v1/workspaces/${id}/release-config`),
   ]);
   const repository = availability(repositoryRead);
+  const release = releaseView(availability(releaseRead), {
+    isPublic: visibility.ok ? visibility.data.visibility === "public" : null,
+    repositoryReady: repository.kind === "on" ? repository.data.repository?.status === "ready" : null,
+  });
+  // The custom domain is read only where release answers at all.
+  const hostnameRead = release.state === "unavailable" || release.state === "failed" ? null : await gatewayQuery<AppHostname>(`/api/v1/workspaces/${id}/app-hostname`);
+  const hostname = hostnameRead === null ? null : hostnameRead.ok ? hostnameRead.data : "failed";
   const admins = membersOf(room).filter((member) => member.role === "admin");
   const isOwner = identity.ok && identity.data.id === room.owner;
   // Only what to offer. Rust checks all of this again when asked.
@@ -110,7 +121,7 @@ export default async function Settings({ params, searchParams }: { params: Promi
         <TransferOwnership roomId={id} name={room.name} policyVersion={room.policy_version} archived={isArchived(room)} isOwner={isOwner} candidates={candidates} />
       </Section>
 
-      {repository.kind === "off" ? (
+      {repository.kind === "off" && release.state === "unavailable" ? (
         <Section id="settings-services" title="Repository and release">
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant="outline">Not connected</Badge>
@@ -118,9 +129,22 @@ export default async function Settings({ params, searchParams }: { params: Promi
           </div>
         </Section>
       ) : (
-        <Section id="settings-repository" title="Repository">
-          {repository.kind === "on" ? <RepositorySection roomId={id} state={repository.data} runsRepository={!isOwner || typeof room.owner_left_at !== "number"} archived={isArchived(room)} /> : <ReadFailure />}
-        </Section>
+        <>
+          <Section id="settings-repository" title="Repository">
+            {repository.kind === "on" ? <RepositorySection roomId={id} state={repository.data} runsRepository={!isOwner || typeof room.owner_left_at !== "number"} archived={isArchived(room)} /> : null}
+            {repository.kind === "failed" ? <ReadFailure /> : null}
+            {repository.kind === "off" ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="outline">Not connected</Badge>
+                <span className="text-sm text-muted-foreground">Podster doesn't connect repositories yet, so nothing in this workroom grants one.</span>
+              </div>
+            ) : null}
+          </Section>
+          <Section id="settings-release" title="Release">
+            {/* This page is the owner's and admins' alone, and agents have no dashboard, so whoever reads it may configure; Rust checks again. */}
+            <ReleaseSection roomId={id} view={release} hostname={hostname} mayConfigure archived={isArchived(room)} />
+          </Section>
+        </>
       )}
 
       <Section id="settings-history" title="Access history">

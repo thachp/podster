@@ -11,6 +11,7 @@ import { TEXTAREA } from "../../w/[id]/settings/brief-controls";
 import { FIELD, MOBILE_TARGET } from "../../w/[id]/team/field";
 import { canBePublic, PRESET_LABELS, presetOptions, roleFitsLimits } from "../../w/[id]/team/model";
 import { PublicClaimToggle } from "../../w/[id]/team/public-claim-toggle";
+import { StateBadge } from "../../w/[id]/settings/state-badge";
 
 const MAX_NAME_BYTES = 200;
 const MAX_GOAL_BYTES = 2048;
@@ -285,6 +286,16 @@ export function CreateWorkroomForm({ organization, personal = false }: { organiz
           </p>
         ) : null}
       </fieldset>
+      <section aria-labelledby="create-release" className="space-y-1">
+        <h2 id="create-release" className="font-medium">
+          Release
+        </h2>
+        <div className="flex flex-wrap items-center gap-2">
+          <StateBadge label="Not configured" tone="neutral" />
+          <span className="text-sm">A new workroom starts with release off, which publishes nothing.</span>
+        </div>
+        <p className="text-sm text-muted-foreground">Where this Podster deployment offers release, the owner or an admin can switch it on in the workroom&apos;s Settings once it&apos;s public and its repository is ready. Each release still needs their approval.</p>
+      </section>
       <p className="text-sm text-muted-foreground">{organization ? <>Owned by {plainName(organization)}. You can switch organization from your profile menu. You'll be its owner.</> : "Owned by your current organization. You'll be its owner."}</p>
       {personal ? <p className="text-sm text-muted-foreground">This is your personal organization, so nobody can take this workroom over if you can't get back into your account. Use a team organization if it may need a successor.</p> : null}
       <div ref={noticeRef} tabIndex={-1} className="space-y-2 outline-none">

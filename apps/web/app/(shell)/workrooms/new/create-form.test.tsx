@@ -34,6 +34,16 @@ describe("creating a workroom", () => {
     await vi.waitFor(() => expect(currentUrl()).toBe("/w/ws_1/overview"));
   });
 
+  it("shows release as Not configured, never assuming it's available, and offers no release control or link", () => {
+    render(<CreateWorkroomForm organization="Org A" />);
+    const release = screen.getByRole("region", { name: "Release" });
+    expect(release).toHaveTextContent("Not configured");
+    expect(release).toHaveTextContent("A new workroom starts with release off, which publishes nothing.");
+    expect(release).toHaveTextContent("Where this Podster deployment offers release");
+    expect(within(release).queryByRole("button")).toBeNull();
+    expect(within(release).queryByRole("link")).toBeNull();
+  });
+
   it("says a workroom in a personal organization has no successor, and only there", () => {
     const { unmount } = render(<CreateWorkroomForm organization="Pat" personal />);
     expect(screen.getByText(/nobody can take this workroom over/)).toBeInTheDocument();

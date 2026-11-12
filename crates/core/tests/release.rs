@@ -565,13 +565,62 @@ fn a_release_never_writes_to_a_cleared_or_suspended_custom_host() {
     let back = set_back(&second, &mark, "lab.rel_2");
     assert_eq!(scripts(&back.state), [Some("lab.rel_1"), None]);
     assert_eq!(back.reverted, [0]);
-    // Only a new claim, active at Cloudflare, opens it again, with the script the default host serves.
-    let Some(reopened) = open_host(&second, 1) else {
+    // Only a new claim, active at Cloudflare, opens it again, with the release last confirmed served.
+    let Some(reopened) = open_host(&second, 1, Some("lab.rel_2")) else {
         unreachable!("no host");
     };
     assert_eq!(scripts(&reopened), [Some("lab.rel_2"), Some("lab.rel_2")]);
     assert!(reopened.hosts.iter().all(|h| !h.closed));
-    assert_eq!(open_host(&second, 2), None);
+    assert_eq!(open_host(&second, 2, None), None);
+}
+
+#[test]
+fn a_host_opened_between_a_commit_and_its_marker_never_takes_the_unconfirmed_script() {
+    // The first release is served on the default host; the custom host is closed.
+    let Ok((live, _)) = commit_live(&serving(None, 2, 4), 4, "lab.rel_1") else {
+        unreachable!("refused");
+    };
+    let Some(closed) = clear_host(&live, 1) else {
+        unreachable!("no host");
+    };
+    // A second release commits; its marker hasn't come back.
+    let Ok((second, mark)) = commit_live(&closed, 4, "lab.rel_2") else {
+        unreachable!("refused");
+    };
+    // A new claim goes active in that window: the host opens on the release last confirmed served, not the second.
+    let Some(opened) = open_host(&second, 1, Some("lab.rel_1")) else {
+        unreachable!("no host");
+    };
+    assert_eq!(scripts(&opened), [Some("lab.rel_2"), Some("lab.rel_1")]);
+    // The marker never comes back: the default host is set back, the opened host stays where it is, and the failed
+    // script is named by nothing, so it may be deleted.
+    let back = set_back(&opened, &mark, "lab.rel_2");
+    assert_eq!(scripts(&back.state), [Some("lab.rel_1"), Some("lab.rel_1")]);
+    assert_eq!(back.reverted, [0]);
+    assert!(back.delete_script);
+    // With nothing ever served, it opens on nothing.
+    let Some(empty) = open_host(&second, 1, None) else {
+        unreachable!("no host");
+    };
+    assert_eq!(scripts(&empty), [Some("lab.rel_2"), None]);
+    assert!(set_back(&empty, &mark, "lab.rel_2").delete_script);
+}
+
+#[test]
+fn an_unpublish_keeps_closed_hosts_closed() {
+    let Some(state) = clear_host(&serving(Some("lab.rel_1"), 2, 1), 1) else {
+        unreachable!("no host");
+    };
+    let (down, _) = unpublish(&state, None);
+    assert_eq!(
+        down.hosts.iter().map(|h| h.closed).collect::<Vec<_>>(),
+        [false, true]
+    );
+    // So a release committed after it, under the new epoch, still doesn't write to the closed host.
+    let Ok((after, _)) = commit_live(&down, down.epoch, "lab.rel_2") else {
+        unreachable!("refused");
+    };
+    assert_eq!(scripts(&after), [Some("lab.rel_2"), None]);
 }
 
 #[test]

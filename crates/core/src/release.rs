@@ -712,15 +712,14 @@ pub fn clear_host(state: &ServeState, host: usize) -> Option<ServeState> {
 }
 
 /// A custom hostname newly claimed and reported `active` (`hostnames::routing_may_start`): that host opens, and serves
-/// the script the default host serves now, if any. `None` if there's no such host, or its version can't go up.
-pub fn open_host(state: &ServeState, host: usize) -> Option<ServeState> {
+/// `last_served`, the script of the release the room last confirmed served by its marker, or nothing. Never the script
+/// the default host names now: between a commit and its marker that is unconfirmed, and a set-back would leave the new
+/// host on a failed release. The host follows the next commit as any open host does. `None` if there's no such host, or
+/// its version can't go up.
+pub fn open_host(state: &ServeState, host: usize, last_served: Option<&str>) -> Option<ServeState> {
     let target = state.hosts.get(host)?;
     let version = bump(target.version)?;
-    let live = state
-        .hosts
-        .first()
-        .filter(|h| !h.closed)
-        .and_then(|h| h.script.clone());
+    let live = last_served.map(str::to_owned);
     Some(ServeState {
         epoch: state.epoch,
         hosts: state

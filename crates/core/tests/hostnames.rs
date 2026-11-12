@@ -27,6 +27,7 @@ const EMPTY: HostnameRecord = HostnameRecord {
     ending: false,
     suspended: false,
     last_freed_at: None,
+    last_suspended_at: None,
 };
 
 fn map(name: &str) -> Result<String, HostnameRefusal> {
@@ -360,7 +361,7 @@ fn a_custom_host_serves_only_on_a_live_unsuspended_claim_its_room_holds() {
     assert!(!custom_host_may_serve(false, &held, "ws_a"));
     assert!(!custom_host_may_serve(true, &held, "ws_b"));
     assert!(!custom_host_may_serve(true, &EMPTY, "ws_a"));
-    let (suspended, _) = suspend(&held);
+    let (suspended, _) = suspend(&held, NOW);
     assert!(suspended.claim.is_some());
     assert!(!custom_host_may_serve(true, &suspended, "ws_a"));
     assert!(!custom_host_may_serve(true, &end_claim(&held), "ws_a"));
@@ -372,9 +373,13 @@ fn a_custom_host_serves_only_on_a_live_unsuspended_claim_its_room_holds() {
         },
         "ws_a"
     ));
-    assert!(routing_may_start(true, "active"));
-    assert!(!routing_may_start(true, "pending"));
-    assert!(!routing_may_start(false, "active"));
+    assert!(routing_may_start(&held, "ws_a", "active"));
+    assert!(!routing_may_start(&held, "ws_a", "pending"));
+    assert!(!routing_may_start(&held, "ws_b", "active"));
+    assert!(!routing_may_start(&EMPTY, "ws_a", "active"));
+    // An ending or suspended claim can't start routing, though `claim.room` still names the room.
+    assert!(!routing_may_start(&end_claim(&held), "ws_a", "active"));
+    assert!(!routing_may_start(&suspend(&held, NOW).0, "ws_a", "active"));
     assert_eq!(cloudflare_status_ends_claim("moved"), Some(ClaimEnd::Moved));
     assert_eq!(cloudflare_status_ends_claim("active"), None);
 }
@@ -453,7 +458,7 @@ fn suspension_ends_the_claim_outlives_it_and_lifting_it_restores_nothing() {
         }),
         ..EMPTY
     };
-    let (suspended, plan) = suspend(&held);
+    let (suspended, plan) = suspend(&held, NOW);
     assert!(suspended.suspended);
     assert!(suspended.ending, "suspending a hostname ends its claim");
     assert_eq!(plan.tell_room, Some("ws_a"));
@@ -499,6 +504,77 @@ fn suspension_ends_the_claim_outlives_it_and_lifting_it_restores_nothing() {
         decide_claim(&lifted, &b, NOW + 3 * HOUR),
         ClaimDecision::Granted
     );
-    assert_eq!(suspend(&lifted).1.tell_room, None);
-    assert!(!suspend(&lifted).0.ending);
+    assert_eq!(suspend(&lifted, NOW).1.tell_room, None);
+    assert!(!suspend(&lifted, NOW).0.ending);
+}
+
+#[test]
+fn a_suspension_voids_every_pending_request_for_the_name() {
+    // A request made before the suspension of a name nobody had claimed yet.
+    let pending = ClaimAsk {
+        room: "ws_a",
+        request: "hr_a",
+        requested_at: NOW,
+        proof_matched: true,
+    };
+    let (suspended, plan) = suspend(&EMPTY, NOW + HOUR);
+    assert_eq!(plan.tell_room, None);
+    assert_eq!(
+        decide_claim(&suspended, &pending, NOW + 2 * HOUR),
+        ClaimDecision::Suspended
+    );
+    // Lifted: that request is void; a fresh one made after the suspension is granted.
+    let lifted = lift(&suspended);
+    assert_eq!(
+        decide_claim(&lifted, &pending, NOW + 3 * HOUR),
+        ClaimDecision::StaleChallenge
+    );
+    let at = ClaimAsk {
+        requested_at: NOW + HOUR,
+        ..pending
+    };
+    assert_eq!(
+        decide_claim(&lifted, &at, NOW + 3 * HOUR),
+        ClaimDecision::StaleChallenge
+    );
+    let fresh = ClaimAsk {
+        request: "hr_a2",
+        requested_at: NOW + HOUR + 1,
+        ..pending
+    };
+    assert_eq!(
+        decide_claim(&lifted, &fresh, NOW + 3 * HOUR),
+        ClaimDecision::Granted
+    );
+    // Freeing a claim later keeps the suspension's mark.
+    assert_eq!(
+        free(&lifted, NOW + 4 * HOUR).last_suspended_at,
+        Some(NOW + HOUR)
+    );
+}
+
+#[test]
+fn comment_and_blank_lines_are_skipped_by_the_lists_format_and_refused_as_rules() {
+    let list = "// ===BEGIN ICANN DOMAINS===\n\ncom\n// a comment\n  co.uk  \n*.ck\n!www.ck\nio extra words\n";
+    assert_eq!(
+        public_suffix_rules(list),
+        ["com", "co.uk", "*.ck", "!www.ck", "io"]
+    );
+    let rules = public_suffix_rules(list);
+    assert!(mappable("app.example.com", CONTENT, &rules, false, 0).is_ok());
+    // Passed straight in as a rule, a comment or a blank isn't read silently: it fails closed.
+    for bad in ["// a comment", "", " ", "com // trailing", "a b"] {
+        assert_eq!(
+            mappable("app.example.com", CONTENT, &["com", bad], false, 0),
+            Err(HostnameRefusal::Unclassified),
+            "{bad:?}"
+        );
+    }
+}
+
+#[test]
+fn full_width_digits_are_still_an_address_after_idna() {
+    for ip in ["a.１２３", "１.２.３.４", "１９２.１６８.０.１", "a.０ｘ４"] {
+        assert_eq!(normalize(ip), Err(HostnameRefusal::IpAddress), "{ip}");
+    }
 }

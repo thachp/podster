@@ -402,6 +402,9 @@ pub struct ServeState {
 /// only for exactly this.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InFlight {
+    /// The release record the flight is for: a commit's own release, or the rollback's own record, never the release
+    /// the rolled-back script came from. Added after the review of PR #312.
+    pub release_id: String,
     pub script: String,
     pub mark: CommitMark,
 }
@@ -474,23 +477,33 @@ fn bump(version: u64) -> Option<u64> {
 ///
 /// `release` is the release's own state, from its record: core refuses to commit one that isn't uploading, so a release
 /// that ended (failed after its set-back among them) never goes live again, whatever the serve state says.
+///
+/// `release_id` is the release record asking: the release's own, or a rollback's own. A retry of the commit in flight is
+/// recognised only when the record, the script and the epoch are all the flight's, and its record says live or still
+/// uploading; then it replays the first answer, so a retried job is never told to fail and delete its own script. An
+/// ended record asking for the flight's script is refused `release_ended`, a record at any other step
+/// `release_not_uploading`, and anything else while a flight is open `release_in_flight`.
 pub fn commit_live(
     state: &ServeState,
     release_epoch: u64,
     script: &str,
+    release_id: &str,
     release: ReleaseState,
 ) -> Result<(ServeState, CommitMark), CommitLiveRefusal> {
-    // A retried job asking again for the commit in flight gets the first answer, before anything else is checked, so it
-    // is never told to fail and delete its own script. Its record says live, or still uploading if it was read first.
     if let Some(flight) = &state.in_flight {
-        if flight.script == script
-            && matches!(release, ReleaseState::Live | ReleaseState::Uploading)
-        {
-            return Ok((state.clone(), flight.mark.clone()));
+        if flight.script == script && release.is_final() {
+            return Err(CommitLiveRefusal::ReleaseEnded);
         }
-        if flight.script != script {
+        if flight.release_id != release_id || flight.script != script {
             return Err(CommitLiveRefusal::InFlight);
         }
+        if flight.mark.epoch != release_epoch {
+            return Err(CommitLiveRefusal::EpochMoved);
+        }
+        if !matches!(release, ReleaseState::Live | ReleaseState::Uploading) {
+            return Err(CommitLiveRefusal::ReleaseNotUploading);
+        }
+        return Ok((state.clone(), flight.mark.clone()));
     }
     if release.is_final() {
         return Err(CommitLiveRefusal::ReleaseEnded);
@@ -538,6 +551,7 @@ pub fn commit_live(
             hosts,
             kept_previous: state.kept_previous.clone(),
             in_flight: Some(InFlight {
+                release_id: release_id.to_owned(),
                 script: script.to_owned(),
                 mark: mark.clone(),
             }),
@@ -662,15 +676,20 @@ impl RollbackRefusal {
 /// `release` is the rollback's own release state, as for [`commit_live`]. While a flight is open, the same rollback
 /// asked again (the flight's script is the kept one) is a retry, and replays its first answer; anything else in flight
 /// refuses it.
+///
+/// `release_id` is the rollback's own record. While a flight to the kept script is open, only that same record's retry,
+/// under the flight's epoch, replays; another rollback record is refused `release_in_flight`, and an ended one
+/// `release_ended`, as [`commit_live`] decides.
 pub fn rollback(
     state: &ServeState,
     release_epoch: u64,
     kept_exists: bool,
+    release_id: &str,
     release: ReleaseState,
 ) -> Result<(ServeState, CommitMark), RollbackRefusal> {
     if let Some(flight) = &state.in_flight {
         if state.kept_previous.as_deref() == Some(flight.script.as_str()) {
-            return commit_live(state, release_epoch, &flight.script, release)
+            return commit_live(state, release_epoch, &flight.script, release_id, release)
                 .map_err(RollbackRefusal::Commit);
         }
         return Err(RollbackRefusal::Commit(CommitLiveRefusal::InFlight));
@@ -680,7 +699,7 @@ pub fn rollback(
         .clone()
         .filter(|_| kept_exists)
         .ok_or(RollbackRefusal::NotKept)?;
-    commit_live(state, release_epoch, &kept, release).map_err(RollbackRefusal::Commit)
+    commit_live(state, release_epoch, &kept, release_id, release).map_err(RollbackRefusal::Commit)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -756,6 +775,8 @@ pub fn unpublish(state: &ServeState) -> (ServeState, Vec<String>) {
     delete.extend(state.kept_previous.clone());
     if let Some(flight) = &state.in_flight {
         delete.extend(flight.mark.before.iter().flatten().cloned());
+        // The flight's own script, whatever the hosts name now, so it never outlives the unpublish.
+        delete.push(flight.script.clone());
     }
     delete.sort();
     delete.dedup();
@@ -838,6 +859,11 @@ pub fn confirmed_script(state: &ServeState) -> Option<String> {
 /// [`confirm_served`] moves it to the confirmed release with every other open host; if it doesn't, the set-back leaves
 /// it where it is. `None` if there's no such host, or its version can't go up.
 pub fn open_host(state: &ServeState, host: usize) -> Option<ServeState> {
+    // The default host isn't a custom hostname: it is never opened, as it is never cleared. Opening it mid-flight would
+    // put it back on the confirmed release and make the flight's own confirm stale.
+    if host == 0 {
+        return None;
+    }
     let target = state.hosts.get(host)?;
     let version = bump(target.version)?;
     let live = confirmed_script(state);

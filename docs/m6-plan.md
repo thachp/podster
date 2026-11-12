@@ -689,6 +689,26 @@ The architect proposes the gate call, for the owner to review.
 - **One error code,** `release_not_available`. The rules' refusal codes, `release_needs_public_room` among them, join `Error.code` with the handler that answers each: that list is checked against what the API and the gateway actually answer, and core marks its own as reasons until a route does.
 - **Not decided in step 2:** who may do what. With the switch on, which only a test build can be, an agent is refused by its kind and an operator's route refuses anyone who isn't an operator; every other caller is told release isn't available. Owner-or-admin, the grant and the room's visibility are step 3's decisions and the later steps' handlers.
 
+#### The first staging run, 2026-11-12
+
+**Step 2 was run against staging once, switched off, and passed.** This is a record of that run, as the architect reported it. The run's log was a scratch file and isn't in the repository, so the numbers below can't be checked against anything kept here.
+
+- **What ran:** [`e2e/m6-staging.mjs`](../e2e/m6-staging.mjs) at main `b4a408811a72d8ae3f48a5db00f3c2e504686ddd`, once, against staging deployed at `7a98bce`, step 2's merge, with `RELEASES` unset.
+- **Result:** exit 0. 11 passed, 0 failed, 1 skipped, in 159 s. 2 sign-ups asked, 2 answered. 10 checks were shown on staging; the eleventh pass, M6-S00, reads the checkout only.
+- **Passed,** by [the script's IDs](#staging-script):
+  - M6-S00, offline, 14 operations.
+  - M6-S01a, 14 routes, each `404 not_found`; M6-S01b; M6-S01c; M6-S01d, 12 writes; M6-S01e, 14 tool names, "tool not found" over HTTP and through the SDK.
+  - M6-S02a, 4 reads, none of 19 M6 fields; M6-S02b, 47 tools; M6-S02c, 6 events, none M6's; M6-S02d, 47 capabilities.
+  - M6-S03: a task offered, accepted, submitted and completed in a fresh room, which shows the room schema step on a new room.
+- **Skipped by design:** M6-S04, the same task in a room made before the deploy.
+
+**Still unshown after this run, and owed before `RELEASES` is switched on anywhere:**
+
+- **A room made before the deploy.** M6-S04 has never run, so the room schema step's migration is shown only on a room that began with it.
+- **That the `HostnameClaim` class can be instantiated.** Nothing reaches it while the switch is off, so the run couldn't show it.
+
+**Left on staging:** the two test people, the organization, the room, the agent and the task. Every session was signed out.
+
 **Side by side.** After step 2: steps 3, 4(a) and 10(a). Step 4(b) after 4(a). After steps 2 and 4: steps 8 and 9. Steps 5, 6 and 7 follow in that order.
 
 **What doesn't wait for unfinished M5 behaviour:** step 1; and, once step 2 has merged, step 4, exercised with a test app a script uploads; step 8; step 4(a)'s suspension; and step 10(a). Step 2 waits only for M5's contract and migration PRs to merge. Steps 3, 5, 6, 7 and 10(b) each wait for the M5 step named.
@@ -766,7 +786,7 @@ The architect proposes the gate call, for the owner to review.
 
 ## Staging script
 
-**Started on 2026-11-12, at build step 2; not yet run against staging.** [`e2e/m6-staging.mjs`](../e2e/m6-staging.mjs), with its lib and a self-test that CI runs, follows `e2e/m5-staging.mjs`:
+**Started on 2026-11-12, at build step 2; not yet run against staging.** *Later that day it ran once and passed: [the first staging run](#the-first-staging-run-2026-11-12).* [`e2e/m6-staging.mjs`](../e2e/m6-staging.mjs), with its lib and a self-test that CI runs, follows `e2e/m5-staging.mjs`:
 - it accepts only staging's gateway;
 - an unknown flag or a missing value is an error, so nothing is guessed;
 - `--dry-run` sends nothing;

@@ -417,11 +417,25 @@ fn serving(script: Option<&str>, hosts: usize, epoch: u64) -> ServeState {
         epoch,
         hosts: (0..hosts).map(|i| host(script, 10 + i as u64)).collect(),
         kept_previous: None,
+        awaiting_marker: false,
     }
 }
 
 fn scripts(state: &ServeState) -> Vec<Option<&str>> {
     state.hosts.iter().map(|h| h.script.as_deref()).collect()
+}
+
+/// A release committed and then confirmed served by its marker, as the room's state is once it is live: no commit in
+/// flight.
+fn served_live(
+    state: &ServeState,
+    epoch: u64,
+    script: &str,
+) -> Result<(ServeState, CommitMark), CommitLiveRefusal> {
+    let (committed, mark) = commit_live(state, epoch, script)?;
+    let confirmed =
+        confirm_served(&committed, &mark, script).ok_or(CommitLiveRefusal::EpochMoved)?;
+    Ok((confirmed.state, mark))
 }
 
 fn versions(state: &ServeState) -> Vec<u64> {
@@ -457,7 +471,15 @@ fn a_live_commit_sets_every_open_host_under_its_own_epoch_only() {
 
 #[test]
 fn a_repeated_commit_is_refused_by_the_function_itself() {
-    let Ok((live, _)) = commit_live(&serving(None, 2, 1), 1, "lab.rel_a") else {
+    let Ok((committed, _)) = commit_live(&serving(None, 2, 1), 1, "lab.rel_a") else {
+        unreachable!("refused");
+    };
+    // While its marker is awaited, any second commit is refused as in flight.
+    assert_eq!(
+        commit_live(&committed, 1, "lab.rel_a"),
+        Err(CommitLiveRefusal::InFlight)
+    );
+    let Ok((live, _)) = served_live(&serving(None, 2, 1), 1, "lab.rel_a") else {
         unreachable!("refused");
     };
     assert_eq!(
@@ -541,7 +563,7 @@ fn a_room_made_private_mid_publish_never_goes_live() {
 #[test]
 fn a_release_never_writes_to_a_cleared_or_suspended_custom_host() {
     // The default host and a custom host both serve the first release.
-    let Ok((live, _)) = commit_live(&serving(None, 2, 7), 7, "lab.rel_1") else {
+    let Ok((live, _)) = served_live(&serving(None, 2, 7), 7, "lab.rel_1") else {
         unreachable!("refused");
     };
     // An operator suspends the custom hostname, or its claim starts ending: the room clears and closes that host.
@@ -555,21 +577,21 @@ fn a_release_never_writes_to_a_cleared_or_suspended_custom_host() {
     assert_eq!(scripts(&second), [Some("lab.rel_2"), None]);
     assert!(second.hosts.get(1).is_some_and(|h| h.closed));
     assert_eq!(mark.versions.get(1), Some(&None));
-    // A rollback doesn't reopen it either, and a set-back leaves it alone.
-    let mut kept = second.clone();
-    kept.kept_previous = Some("lab.rel_1".into());
-    let Ok((rolled, _)) = rollback(&kept, 7, true) else {
-        unreachable!("refused");
-    };
-    assert_eq!(scripts(&rolled), [Some("lab.rel_1"), None]);
+    // A set-back leaves it alone.
     let back = set_back(&second, &mark, "lab.rel_2");
     assert_eq!(scripts(&back.state), [Some("lab.rel_1"), None]);
     assert_eq!(back.reverted, [0]);
-    // Only a new claim, active at Cloudflare, opens it again, on the release last confirmed served.
+    // Confirmed instead, the catch-up leaves it alone, and so does a rollback.
     let Some(confirmed) = confirm_served(&second, &mark, "lab.rel_2") else {
         unreachable!("not confirmed");
     };
     assert_eq!(confirmed.caught_up, Vec::<usize>::new());
+    assert_eq!(confirmed.state.kept_previous.as_deref(), Some("lab.rel_1"));
+    let Ok((rolled, _)) = rollback(&confirmed.state, 7, true) else {
+        unreachable!("refused");
+    };
+    assert_eq!(scripts(&rolled), [Some("lab.rel_1"), None]);
+    // Only a new claim, active at Cloudflare, opens it again, on the release last confirmed served.
     let Some(reopened) = open_host(&confirmed.state, 1, None) else {
         unreachable!("no host");
     };
@@ -581,7 +603,7 @@ fn a_release_never_writes_to_a_cleared_or_suspended_custom_host() {
 /// The first release confirmed served on the default host, with a closed custom host, then a second release committed
 /// and waiting for its marker.
 fn second_in_flight() -> (ServeState, CommitMark) {
-    let Ok((live, _)) = commit_live(&serving(None, 2, 4), 4, "lab.rel_1") else {
+    let Ok((live, _)) = served_live(&serving(None, 2, 4), 4, "lab.rel_1") else {
         unreachable!("refused");
     };
     let Some(closed) = clear_host(&live, 1) else {
@@ -687,7 +709,7 @@ fn an_unpublish_keeps_closed_hosts_closed() {
 #[test]
 fn a_second_release_failing_after_the_first_is_live_leaves_the_first_serving() {
     let first = "lab.rel_1";
-    let Ok((live, _)) = commit_live(&serving(None, 1, 2), 2, first) else {
+    let Ok((live, _)) = served_live(&serving(None, 1, 2), 2, first) else {
         unreachable!("first refused");
     };
     assert_eq!(scripts(&live), [Some(first)]);
@@ -740,6 +762,7 @@ fn a_set_back_needs_the_commits_epoch() {
         epoch: 9,
         hosts: vec![host(Some("lab.rel_2"), 11)],
         kept_previous: None,
+        awaiting_marker: true,
     };
     let mark = CommitMark {
         epoch: 8,
@@ -771,10 +794,11 @@ fn a_set_back_after_an_unpublish_changes_nothing() {
         unreachable!("no host");
     };
     assert_eq!(set_back(&cleared, &mark, "lab.rel_2").reverted, [0]);
-    let Ok((other, _)) = commit_live(&live, 3, "lab.rel_3") else {
-        unreachable!("refused");
-    };
-    assert!(set_back(&other, &mark, "lab.rel_2").reverted.is_empty());
+    // Another commit can't land in between: it is refused while this one is in flight.
+    assert_eq!(
+        commit_live(&live, 3, "lab.rel_3"),
+        Err(CommitLiveRefusal::InFlight)
+    );
     let short = CommitMark {
         versions: vec![],
         before: vec![],
@@ -813,9 +837,13 @@ fn a_late_or_duplicated_job_changes_nothing() {
     };
     assert_eq!(
         commit_live(&live, 6, "lab.rel_a"),
-        Err(CommitLiveRefusal::AlreadyLive)
+        Err(CommitLiveRefusal::InFlight)
     );
-    let Ok((newer, _)) = commit_live(&live, 6, "lab.rel_b") else {
+    // Confirmed, then a newer release served: a late set-back of the first changes nothing.
+    let Some(confirmed) = confirm_served(&live, &mark, "lab.rel_a") else {
+        unreachable!("not confirmed");
+    };
+    let Ok((newer, _)) = served_live(&confirmed.state, 6, "lab.rel_b") else {
         unreachable!("refused");
     };
     assert!(set_back(&newer, &mark, "lab.rel_a").reverted.is_empty());
@@ -1248,4 +1276,121 @@ fn the_hourly_reconcile_deletes_only_what_fits_the_rule_and_no_room_claims() {
         );
     }
     assert!(is_release_id(ID3));
+}
+
+#[test]
+fn a_late_success_after_a_set_back_confirms_nothing() {
+    // Default A; B commits; a host opens; B's marker fails and B is set back and ordered deleted.
+    let (second, mark) = second_in_flight();
+    let Some(opened) = open_host(&second, 1, Some(&mark)) else {
+        unreachable!("no host");
+    };
+    let back = set_back(&opened, &mark, "lab.rel_2");
+    assert!(back.delete_script);
+    assert_eq!(scripts(&back.state), [Some("lab.rel_1"), Some("lab.rel_1")]);
+    // A late or duplicated success: nothing is confirmed, so no host goes to the script being deleted.
+    assert_eq!(confirm_served(&back.state, &mark, "lab.rel_2"), None);
+}
+
+#[test]
+fn a_stale_success_after_a_later_release_confirms_nothing() {
+    // B served, then C served; then B's old marker success arrives.
+    let Ok((b, mark_b)) = served_live(&serving(Some("lab.rel_1"), 1, 2), 2, "lab.rel_2") else {
+        unreachable!("refused");
+    };
+    let Ok((c, _)) = served_live(&b, 2, "lab.rel_3") else {
+        unreachable!("refused");
+    };
+    assert_eq!(scripts(&c), [Some("lab.rel_3")]);
+    assert_eq!(confirm_served(&c, &mark_b, "lab.rel_2"), None);
+}
+
+#[test]
+fn a_repeated_confirmation_changes_nothing_more() {
+    let (second, mark) = second_in_flight();
+    let Some(opened) = open_host(&second, 1, Some(&mark)) else {
+        unreachable!("no host");
+    };
+    let Some(first) = confirm_served(&opened, &mark, "lab.rel_2") else {
+        unreachable!("not confirmed");
+    };
+    let Some(again) = confirm_served(&first.state, &mark, "lab.rel_2") else {
+        unreachable!("not confirmed again");
+    };
+    assert_eq!(again.state, first.state);
+    assert!(again.caught_up.is_empty());
+    assert_eq!(again.after.delete, None);
+}
+
+#[test]
+fn one_release_in_flight_at_a_time_enforced_in_core() {
+    let (second, mark) = second_in_flight();
+    assert!(second.awaiting_marker);
+    // A second commit and a rollback are refused while the marker is awaited.
+    assert_eq!(
+        commit_live(&second, 4, "lab.rel_3"),
+        Err(CommitLiveRefusal::InFlight)
+    );
+    let mut kept = second.clone();
+    kept.kept_previous = Some("lab.rel_0".into());
+    assert_eq!(
+        rollback(&kept, 4, true),
+        Err(RollbackRefusal::Commit(CommitLiveRefusal::InFlight))
+    );
+    assert_eq!(CommitLiveRefusal::InFlight.code(), "release_in_flight");
+    // Each way the flight ends clears it.
+    let Some(confirmed) = confirm_served(&second, &mark, "lab.rel_2") else {
+        unreachable!("not confirmed");
+    };
+    assert!(!confirmed.state.awaiting_marker);
+    assert!(commit_live(&confirmed.state, 4, "lab.rel_3").is_ok());
+    let back = set_back(&second, &mark, "lab.rel_2");
+    assert!(!back.state.awaiting_marker);
+    assert!(commit_live(&back.state, 4, "lab.rel_3").is_ok());
+    let (down, _) = unpublish(&second, Some(&mark));
+    assert!(!down.awaiting_marker);
+    assert!(commit_live(&down, down.epoch, "lab.rel_3").is_ok());
+}
+
+#[test]
+fn a_failed_rollback_never_orders_the_kept_script_deleted() {
+    // B served with A kept; a rollback to A commits; its marker fails.
+    let Ok((a, _)) = served_live(&serving(None, 1, 3), 3, "lab.rel_1") else {
+        unreachable!("refused");
+    };
+    let Ok((b, _)) = served_live(&a, 3, "lab.rel_2") else {
+        unreachable!("refused");
+    };
+    assert_eq!(b.kept_previous.as_deref(), Some("lab.rel_1"));
+    let Ok((rolled, mark)) = rollback(&b, 3, true) else {
+        unreachable!("refused");
+    };
+    let back = set_back(&rolled, &mark, "lab.rel_1");
+    assert_eq!(scripts(&back.state), [Some("lab.rel_2")]);
+    // A is no longer served, but it is still the kept script, so it isn't deleted.
+    assert_eq!(back.state.kept_previous.as_deref(), Some("lab.rel_1"));
+    assert!(!back.delete_script);
+}
+
+#[test]
+fn opening_a_host_and_catching_it_up_each_move_its_version() {
+    let (second, mark) = second_in_flight();
+    let before = second.hosts.get(1).map(|h| h.version);
+    let Some(opened) = open_host(&second, 1, Some(&mark)) else {
+        unreachable!("no host");
+    };
+    let opened_version = opened.hosts.get(1).map(|h| h.version);
+    assert_eq!(opened_version, before.map(|v| v + 1));
+    let Some(confirmed) = confirm_served(&opened, &mark, "lab.rel_2") else {
+        unreachable!("not confirmed");
+    };
+    assert_eq!(
+        confirmed.state.hosts.get(1).map(|h| h.version),
+        opened_version.map(|v| v + 1)
+    );
+    // The default host, already on the release, keeps its version.
+    assert_eq!(
+        confirmed.state.hosts.first().map(|h| h.version),
+        opened.hosts.first().map(|h| h.version)
+    );
 }

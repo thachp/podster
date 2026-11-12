@@ -379,11 +379,18 @@ pub struct DesiredServe {
 /// The room's release state that decides serving: its epoch, which only goes up, and each host's desired serve state,
 /// the default host first and a custom hostname after it. Only room transactions change it, through the functions here.
 #[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// **One release in flight at a time, enforced here.** A commit or a rollback sets `awaiting_marker`; its marker's
+/// confirmation ([`confirm_served`]), its set-back ([`set_back`]) or an unpublish clears it; and while it is set
+/// [`commit_live`] and [`rollback`] refuse `release_in_flight`. So a commit's `before` can never hold an unconfirmed
+/// script. The room also runs its release jobs one at a time, in order, but core doesn't rely on that.
 pub struct ServeState {
     pub epoch: u64,
     pub hosts: Vec<DesiredServe>,
     /// The script of the release before the live one, kept for a rollback. Forgotten by an unpublish.
     pub kept_previous: Option<String>,
+    /// A commit or rollback is waiting for its marker. Added after the second review of PR #311.
+    pub awaiting_marker: bool,
 }
 
 /// What a live commit wrote, which a later set-back compares host by host, and an unpublish reads for the script that
@@ -406,6 +413,9 @@ pub enum CommitLiveRefusal {
     AlreadyLive,
     /// `release_epoch_exhausted`: the epoch or a version can't go up again. Fails closed: nothing goes live.
     Exhausted,
+    /// `release_in_flight`: another commit or rollback is still waiting for its marker. Added after the second review of
+    /// PR #311.
+    InFlight,
 }
 
 impl CommitLiveRefusal {
@@ -415,6 +425,7 @@ impl CommitLiveRefusal {
             CommitLiveRefusal::EpochMoved => "release_epoch_moved",
             CommitLiveRefusal::AlreadyLive => "release_already_live",
             CommitLiveRefusal::Exhausted => "release_epoch_exhausted",
+            CommitLiveRefusal::InFlight => "release_in_flight",
         }
     }
 }
@@ -438,6 +449,9 @@ pub fn commit_live(
     }
     if state.epoch != release_epoch {
         return Err(CommitLiveRefusal::EpochMoved);
+    }
+    if state.awaiting_marker {
+        return Err(CommitLiveRefusal::InFlight);
     }
     if state
         .hosts
@@ -472,6 +486,7 @@ pub fn commit_live(
             epoch: state.epoch,
             hosts,
             kept_previous: state.kept_previous.clone(),
+            awaiting_marker: true,
         },
         mark,
     ))
@@ -541,12 +556,19 @@ pub fn set_back(state: &ServeState, mark: &CommitMark, script: &str) -> SetBack 
             }
         })
         .collect();
-    let delete_script = !hosts.iter().any(|h| h.script.as_deref() == Some(script));
+    // Never while a host names it, nor while it is the kept script, which a failed rollback's script is.
+    let delete_script = !hosts.iter().any(|h| h.script.as_deref() == Some(script))
+        && state.kept_previous.as_deref() != Some(script);
     SetBack {
         state: ServeState {
             epoch: state.epoch,
             hosts,
             kept_previous: state.kept_previous.clone(),
+            awaiting_marker: if epoch_holds {
+                false
+            } else {
+                state.awaiting_marker
+            },
         },
         reverted,
         delete_script,
@@ -679,6 +701,7 @@ pub fn unpublish(state: &ServeState, in_flight: Option<&CommitMark>) -> (ServeSt
                 })
                 .collect(),
             kept_previous: None,
+            awaiting_marker: false,
         },
         delete,
     )
@@ -708,6 +731,7 @@ pub fn clear_host(state: &ServeState, host: usize) -> Option<ServeState> {
             })
             .collect(),
         kept_previous: state.kept_previous.clone(),
+        awaiting_marker: state.awaiting_marker,
     })
 }
 
@@ -759,6 +783,7 @@ pub fn open_host(
             })
             .collect(),
         kept_previous: state.kept_previous.clone(),
+        awaiting_marker: state.awaiting_marker,
     })
 }
 
@@ -776,9 +801,19 @@ pub struct Confirmed {
 /// name the release yet, which is one opened while it was in flight, moves to it (the catch-up); the release before it
 /// becomes the kept one, and the one kept before that is to be deleted ([`after_served`]). `None` if the epoch moved
 /// since the commit, when nothing is confirmed: an unpublish spoke, and the room serves nothing. A closed host is never
-/// written.
+/// written. Only while the default host still holds the version and the script the commit wrote; otherwise `None`.
 pub fn confirm_served(state: &ServeState, mark: &CommitMark, script: &str) -> Option<Confirmed> {
     if state.epoch != mark.epoch || state.epoch == u64::MAX {
+        return None;
+    }
+    // Only while the default host is still exactly what this commit wrote: a late success after a set-back, or a stale
+    // one after a later release, confirms nothing. A repeated confirm finds it unchanged, and changes nothing more.
+    let default_holds = matches!(
+        (state.hosts.first(), mark.versions.first()),
+        (Some(host), Some(Some(version)))
+            if host.version == *version && !host.closed && host.script.as_deref() == Some(script)
+    );
+    if !default_holds {
         return None;
     }
     let mut caught_up = Vec::new();
@@ -803,6 +838,7 @@ pub fn confirm_served(state: &ServeState, mark: &CommitMark, script: &str) -> Op
             epoch: state.epoch,
             hosts,
             kept_previous: after.kept_previous.clone(),
+            awaiting_marker: false,
         },
         caught_up,
         after,

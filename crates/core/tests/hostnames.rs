@@ -29,6 +29,7 @@ const EMPTY: HostnameRecord = HostnameRecord {
     last_freed_at: None,
     last_suspended_at: None,
     last_lifted_at: None,
+    generation: 0,
 };
 
 fn map(name: &str) -> Result<String, HostnameRefusal> {
@@ -231,6 +232,7 @@ fn a_pending_request_holds_nothing_and_is_gone_after_72_hours() {
             request: "hr_1",
             requested_at: NOW,
             proof_matched: false,
+            generation: 0,
         };
         assert_eq!(
             decide_claim(&EMPTY, &unproven, NOW + HOUR),
@@ -242,6 +244,7 @@ fn a_pending_request_holds_nothing_and_is_gone_after_72_hours() {
         request: "hr_1",
         requested_at: NOW,
         proof_matched: true,
+        generation: 0,
     };
     assert_eq!(
         decide_claim(&EMPTY, &late, NOW + 72 * HOUR),
@@ -256,12 +259,14 @@ fn one_hostname_one_room_and_asking_again_gets_the_same_answer() {
         request: "hr_a",
         requested_at: NOW,
         proof_matched: true,
+        generation: 0,
     };
     let b = ClaimAsk {
         room: "ws_b",
         request: "hr_b",
         requested_at: NOW,
         proof_matched: true,
+        generation: 0,
     };
     assert_eq!(decide_claim(&EMPTY, &a, NOW + 1), ClaimDecision::Granted);
     let held = HostnameRecord {
@@ -314,6 +319,7 @@ fn a_claim_never_transfers_and_is_freed_only_when_cloudflare_says_gone() {
         request: "hr_b",
         requested_at: freed_at - 1,
         proof_matched: true,
+        generation: 0,
     };
     assert_eq!(
         decide_claim(&freed, &stale, freed_at + 1),
@@ -332,6 +338,7 @@ fn a_claim_never_transfers_and_is_freed_only_when_cloudflare_says_gone() {
         request: "hr_a",
         requested_at: NOW,
         proof_matched: true,
+        generation: 0,
     };
     assert_eq!(
         decide_claim(&freed, &same_room, freed_at + 1),
@@ -342,6 +349,7 @@ fn a_claim_never_transfers_and_is_freed_only_when_cloudflare_says_gone() {
         request: "hr_b2",
         requested_at: freed_at + 1,
         proof_matched: true,
+        generation: freed.generation,
     };
     assert_eq!(
         decide_claim(&freed, &fresh, freed_at + 2),
@@ -468,6 +476,7 @@ fn suspension_ends_the_claim_outlives_it_and_lifting_it_restores_nothing() {
         request: "hr_a",
         requested_at: NOW,
         proof_matched: true,
+        generation: 0,
     };
     assert_eq!(
         decide_claim(&suspended, &a, NOW + 1),
@@ -489,6 +498,7 @@ fn suspension_ends_the_claim_outlives_it_and_lifting_it_restores_nothing() {
         request: "hr_b",
         requested_at: NOW + 2 * HOUR,
         proof_matched: true,
+        generation: 0,
     };
     assert_eq!(
         decide_claim(&freed, &b, NOW + 3 * HOUR),
@@ -509,6 +519,7 @@ fn suspension_ends_the_claim_outlives_it_and_lifting_it_restores_nothing() {
     let after = ClaimAsk {
         request: "hr_b2",
         requested_at: NOW + 3 * HOUR + 1,
+        generation: lifted.generation,
         ..b
     };
     assert_eq!(
@@ -527,6 +538,7 @@ fn a_suspension_voids_every_pending_request_for_the_name() {
         request: "hr_a",
         requested_at: NOW,
         proof_matched: true,
+        generation: 0,
     };
     let (suspended, plan) = suspend(&EMPTY, NOW + HOUR);
     assert_eq!(plan.tell_room, None);
@@ -551,6 +563,7 @@ fn a_suspension_voids_every_pending_request_for_the_name() {
     let fresh = ClaimAsk {
         request: "hr_a2",
         requested_at: NOW + 2 * HOUR + 1,
+        generation: lifted.generation,
         ..pending
     };
     assert_eq!(
@@ -592,13 +605,14 @@ fn full_width_digits_are_still_an_address_after_idna() {
 
 #[test]
 fn a_request_made_while_suspended_never_counts_and_the_marks_only_move_forward() {
-    // Suspended at 100, a request stamped at 150, lifted at 200, proof at 300: refused, not granted.
+    // Suspended at 100, a request stamped at 150 under the suspended generation, lifted at 200, proof at 300: refused.
     let (suspended, _) = suspend(&EMPTY, 100);
     let during = ClaimAsk {
         room: "ws_a",
         request: "hr_a",
         requested_at: 150,
         proof_matched: true,
+        generation: suspended.generation,
     };
     assert_eq!(
         decide_claim(&suspended, &during, 160),
@@ -610,30 +624,83 @@ fn a_request_made_while_suspended_never_counts_and_the_marks_only_move_forward()
         decide_claim(&lifted, &during, 300),
         ClaimDecision::StaleChallenge
     );
-    let at_lift = ClaimAsk {
-        requested_at: 200,
-        ..during
-    };
-    assert_eq!(
-        decide_claim(&lifted, &at_lift, 300),
-        ClaimDecision::StaleChallenge
-    );
+    // Only a request made under the lift's generation counts.
     let after = ClaimAsk {
         requested_at: 201,
+        generation: lifted.generation,
         ..during
     };
     assert_eq!(decide_claim(&lifted, &after, 300), ClaimDecision::Granted);
-    // A second suspension with an earlier clock can't move either mark back.
+    // The timestamps only move forward, and are kept for the record.
     let (again, _) = suspend(&lifted, 50);
     assert_eq!(again.last_suspended_at, Some(100));
     let relifted = lift(&again, 120);
     assert_eq!(relifted.last_lifted_at, Some(200));
-    assert_eq!(
-        decide_claim(&relifted, &during, 300),
-        ClaimDecision::StaleChallenge
-    );
     let (later, _) = suspend(&lifted, 400);
     assert_eq!(later.last_suspended_at, Some(400));
+}
+
+#[test]
+fn a_clock_running_backwards_never_revives_a_request() {
+    // The review's case: lift at 200, a request at 201, then a suspension stamped 150 and a lift stamped 180.
+    let (suspended, _) = suspend(&EMPTY, 100);
+    let lifted = lift(&suspended, 200);
+    let request = ClaimAsk {
+        room: "ws_a",
+        request: "hr_a",
+        requested_at: 201,
+        proof_matched: true,
+        generation: lifted.generation,
+    };
+    assert_eq!(decide_claim(&lifted, &request, 202), ClaimDecision::Granted);
+    let (again, _) = suspend(&lifted, 150);
+    let relifted = lift(&again, 180);
+    assert_eq!(
+        decide_claim(&relifted, &request, 300),
+        ClaimDecision::StaleChallenge
+    );
+    // Each suspend, lift and free advances the generation.
+    assert_eq!(
+        [
+            suspended.generation,
+            lifted.generation,
+            again.generation,
+            relifted.generation
+        ],
+        [1, 2, 3, 4]
+    );
+    assert_eq!(free(&relifted, 0).generation, 5);
+    // A request under the newest generation is granted, whatever its clock says.
+    let fresh = ClaimAsk {
+        requested_at: 0,
+        request: "hr_a2",
+        generation: relifted.generation,
+        ..request
+    };
+    assert_eq!(decide_claim(&relifted, &fresh, 300), ClaimDecision::Granted);
+}
+
+#[test]
+fn code_points_idna_drops_are_refused_in_names_and_rules() {
+    for c in [
+        '\u{2060}',
+        '\u{180E}',
+        '\u{FE0F}',
+        '\u{034F}',
+        '\u{00AD}',
+        '\u{200B}',
+        '\u{FEFF}',
+        '\u{1D173}',
+    ] {
+        let name = format!("app.exa{c}mple.com");
+        assert_eq!(normalize(&name), Err(HostnameRefusal::Invalid), "{c:?}");
+        let rule = format!("c{c}om");
+        assert_eq!(
+            mappable("app.example.com", CONTENT, &[&rule], false, 0),
+            Err(HostnameRefusal::Unclassified),
+            "{c:?}"
+        );
+    }
 }
 
 #[test]

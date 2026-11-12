@@ -15,7 +15,7 @@ import { missingWranglers } from "./m4-staging-lib.mjs";
 import { probeArgs } from "./m5-delivery-probe.mjs";
 import { ACCOUNT_ENV, closeTails, downWithin, openTail, refusalLines, requestHolds, STAY_UP_SECONDS, TAIL_ARGS, tailEnv, tailFault, without, wranglerReason } from "./m5-tails.mjs";
 import {
-  absentId, ASKPASS_SCRIPT, cloneUrlProblem, CREDENTIAL_ENV, deliveryBody, deliveryOutcomes, deliveryProblem, deliveryTrace, requestIsFor, GrantLedger, gitEnv, isCommitSha, LATE_MERGE_MS, CLOCK_SKEW_MS, leaks, loggedText, logHits, lostAuthorityEnding, worstCaseSeconds, mergeCommitProblems, movedHeadEnding, parseArgs, PLAN,
+  absentId, ASKPASS_SCRIPT, cloneUrlProblem, CREDENTIAL_ENV, deliveryBody, deliveryOutcomes, deliveryProblem, deliveryTrace, gatewaySaid, LINE_WAIT_MS, LOST_AFTER_MS, requestIsFor, stopWaiting, GrantLedger, gitEnv, isCommitSha, LATE_MERGE_MS, CLOCK_SKEW_MS, leaks, loggedText, logHits, lostAuthorityEnding, worstCaseSeconds, mergeCommitProblems, movedHeadEnding, parseArgs, PLAN,
   releaseStatusProblems, repositoryOrgProblem, requesterProblem, reviewStatusProblems, rulesetProblems, scrub, secretProblem, SIGN_UPS, signDelivery, STAGING, STAGING_APP, STAGING_ORG, stagingConfig, stagingOnly,
   STEADY, steady, Tally, WEBHOOK_PATH, WEBHOOK_SECRET_ENV, webhookSecretProblem,
 } from "./m5-staging-lib.mjs";
@@ -213,7 +213,7 @@ check(!webhookSecretProblem("zq9-zq9").includes("zq9"), "a refused webhook secre
   }
   // No line: whether the API's request is in the tail decides what it means.
   const ran = deliveryProblem(deliveryTrace([request("d-1", [{ at: "something.else" }], "canceled"), request("d-2", [line("d-2", "no_room")])], "d-1"));
-  check(ran.lost === false && ran.text.includes("holds no line for it, though it holds the API's own request for it (ended canceled, 1 line(s) logged)") && ran.text.includes("the API ran, and the line isn't there"), "no line, with the API's request for it in the tail: the API ran and logged no line, which is never sent again");
+  check(ran.lost === false && ran.text.includes("holds no line for it, though it holds 1 of the API's own requests for it (ended canceled, 1 line(s) logged)") && ran.text.includes("the API ran, and a line isn't there"), "no line, with the API's request for it in the tail: the API ran and logged no line, which is never sent again");
   const gone = deliveryProblem(deliveryTrace([request("d-2", [line("d-2", "no_room")]), { logs: null }, {}], "d-1"));
   check(gone.lost === true && gone.text.includes("no request of the API's for it either: the tail never delivered that event"), "no line and no request: the tail never delivered it, the one case where another delivery is sent");
   check(JSON.stringify(deliveryOutcomes([request("d-1", [line("d-1", "nudged")]), request("d-1", [line("d-1", "replayed")])], "d-1")) === JSON.stringify(["nudged", "replayed"]) && deliveryTrace([request("d-1", [line("d-1", "nudged")]), request("d-1", [line("d-1", "replayed")])], "d-1").requests.length === 2, "a delivery sent twice has two lines and two requests, in order");
@@ -221,7 +221,56 @@ check(!webhookSecretProblem("zq9-zq9").includes("zq9"), "a refused webhook secre
   const body = source.slice(source.indexOf('check("M5-16b"'), source.indexOf("await check(", source.indexOf('check("M5-16b"') + 1));
   check(body.indexOf("for (const one of cases) one.sent = await send(one.repositoryId);") > 0 && body.indexOf("const problems = [];") < body.indexOf("let found = await traced(one.sent.id);") && body.indexOf("ok(problems.length === 0") > body.lastIndexOf("problems.push("), "M5-16b looks for each delivery's line by itself, and fails once at the end with both");
   check(body.includes("if (found.problem && found.lost) {") && (body.match(/await send\(/g) ?? []).length === 2 && body.includes("notes.push("), "it sends another only when the tail holds nothing of the first, once, and says that it did");
-  check(source.includes("if (trace.odd.length || Date.now() > deadline) return { problem:"), "a line with a wrong outcome ends the wait at once");
+  check(source.includes("if (stopWaiting(trace, problem, { waited, accepted, lines })) {"), "the script stops waiting by the one rule tested below");
+  // Two requests under one ID, as M5-16a sends: which is missing decides what it means.
+  {
+    const two = (events) => deliveryTrace(events, "d-1");
+    const both = two([request("d-1", [line("d-1", "nudged")]), request("d-1", [line("d-1", "replayed")])]);
+    check(deliveryProblem(both, 2) === null, "two lines where two are wanted is no problem");
+    const oneLost = deliveryProblem(two([request("d-1", [line("d-1", "nudged")])]), 2);
+    check(oneLost.lost === true && oneLost.text.includes("only 1 of 2 lines (nudged)") && oneLost.text.includes("only 1 of 2 of the API's requests for it") && oneLost.text.includes("the tail never delivered that event"), "one request and its line where two are wanted: the tail lost the other event, which is said as lost");
+    const unlined = deliveryProblem(two([request("d-1", [line("d-1", "nudged")]), request("d-1", [])]), 2);
+    check(unlined.lost === false && unlined.text.includes("holds 2 of the API's own requests for it") && unlined.text.includes("the API ran, and a line isn't there"), "two requests and one line: the API ran twice and logged once, which is the product's and never lost");
+    const noneLost = deliveryProblem(two([]), 2);
+    check(noneLost.lost === true && noneLost.text.includes("the tail never delivered those events"), "nothing at all where two are wanted is lost, both");
+  }
+  // The gateway's own tail, beside the API's: it logs `accepted` only once the API has answered 202.
+  {
+    const gatewayLine = (delivery, outcome) => ({ logs: [{ message: [JSON.stringify({ at: "github.webhook", delivery, outcome })] }], exceptions: [] });
+    const events = [gatewayLine("d-1", "accepted"), gatewayLine("d-2", "accepted"), gatewayLine("d-1", "accepted"), gatewayLine("d-3", "upstream_refused"), request("d-1", [line("d-1", "nudged")]), { logs: [{ message: ["not json"] }] }, {}];
+    check(JSON.stringify(gatewaySaid(events, "d-1")) === JSON.stringify(["accepted", "accepted"]) && gatewaySaid(events, "d-3").join() === "upstream_refused" && gatewaySaid(events, "d-9").length === 0 && gatewaySaid([], "d-1").length === 0, "the gateway's lines for a delivery are read from its own log, and the API's line isn't taken for one");
+    const none = deliveryTrace([], "d-1");
+    const corroborated = deliveryProblem(none, 1, 1);
+    check(corroborated.lost === true && corroborated.text.includes("The gateway's tail holds its own line for it, 1 time(s) accepted") && corroborated.text.includes("so the API ran, and its tail lost the event"), "no API event, with the gateway's accepted line: the API ran and its tail lost the event, said with the gateway's word");
+    const alone = deliveryProblem(none, 1, 0);
+    check(alone.lost === true && alone.text.includes("The gateway's tail holds 0 accepted line(s) for it, not 1, so it doesn't settle whether the API ran"), "no API event and no gateway line: still lost, and said as not settled by the gateway");
+    check(!deliveryProblem(none, 1).text.includes("gateway") && deliveryProblem(deliveryTrace([request("d-1", [])], "d-1"), 1, 1).lost === false, "with no gateway tail it isn't mentioned, and the gateway's word never turns a request with no line into a lost one");
+    // When to stop waiting.
+    const lost = deliveryProblem(none, 1, 1);
+    const at = (waited, accepted = 1, problem = lost, trace = none) => stopWaiting(trace, problem, { waited, accepted, lines: 1 });
+    check(LINE_WAIT_MS === 60_000 && LOST_AFTER_MS === 25_000 && stopWaiting(deliveryTrace([request("d-1", [line("d-1", "nudged")])], "d-1"), null, { waited: 0, accepted: 0, lines: 1 }), "the wait ends as soon as the lines are there");
+    check(!at(24_000) && at(25_001) && !at(25_001, 0) && !at(59_000, 0) && at(60_001, 0), "a lost line ends the wait after 25 s once the gateway has said the API answered, and after a minute without that");
+    const odd = deliveryTrace([request("d-1", [line("d-1", null)])], "d-1");
+    check(stopWaiting(odd, deliveryProblem(odd), { waited: 0, accepted: 0, lines: 1 }), "a line with a wrong outcome ends the wait at once");
+    const unlinedTrace = deliveryTrace([request("d-1", [])], "d-1");
+    check(!stopWaiting(unlinedTrace, deliveryProblem(unlinedTrace, 1, 1), { waited: 30_000, accepted: 1, lines: 1 }) && stopWaiting(unlinedTrace, deliveryProblem(unlinedTrace, 1, 1), { waited: 60_001, accepted: 1, lines: 1 }), "a request with no line is never cut short as lost: it's given the whole minute");
+  }
+  // M5-16a: each line judged by itself, a lost line ending its attempt, and a pass only for an attempt seen whole.
+  {
+    const body = source.slice(source.indexOf('check("M5-16a"'), source.indexOf('await check("M5-16b"'));
+    check((body.match(/await judge\(/g) ?? []).length === 3 && body.includes('if (found.problem && found.lost) return `${what}: ${found.problem}`;') && body.includes("ok(!found.problem, `${what}: ${found.problem}`);") && body.indexOf("ok(!found.problem") < body.indexOf("eq(found.outcomes, wanted"), "M5-16a judges each of its three deliveries: lost ends the attempt, a request with no line or a wrong outcome fails");
+    check(body.includes('["the first delivery", "the same delivery sent again under its ID", "its body sent under a new ID"]') || ["the first delivery", "the same delivery sent again under its ID", "its body sent under a new ID"].every((what) => body.includes(`"${what}"`)), "and names which delivery it was");
+    check((body.match(/await attempt\(\)/g) ?? []).length === 2 && body.indexOf("const second = await attempt();") > body.indexOf('if (!first.lost) return "the API logged nudged, then replayed twice";') && body.includes("nonce: randomUUID()") && body.indexOf("const body = deliveryBody(") > body.indexOf("const attempt = async () => {"), "after a lost line it makes one more attempt, whole and with a new body, since a taken delivery sent again answers replayed and never nudged");
+    check(body.includes("if (second.lost) {") && body.includes('unshown.tail_lost.push("M5-16a");') && body.includes("throw new Skip(`not shown by this run: the tail lost a line in each of two attempts") && !/return [^;]*lost[^;]*passed/.test(body), "two attempts each missing a line are a SKIP that names both, never a pass");
+    check(body.includes("at the second attempt. The first attempt showed nothing: ${first.lost}"), "a pass at the second attempt says so, and what the first one lost");
+    const other = source.slice(source.indexOf('check("M5-16b"'), source.indexOf("await check(", source.indexOf('check("M5-16b"') + 1));
+    check(other.includes("if (found.problem && found.lost) lostTwice.push(") && other.includes('unshown.tail_lost.push("M5-16b");') && other.indexOf("ok(problems.length === 0") < other.indexOf("if (lostTwice.length) {"), "M5-16b fails on what the product did first, and only then says SKIP for a line lost twice");
+    check(source.includes("where the log tail lost a line in each of two attempts") && !source.includes("async function outcomeOf"), "skips for a lost tail line are counted apart at the end");
+    const tallyAt = source.indexOf("say(`\\nM5 on staging: ${tally.summary()}");
+    const notShown = source.indexOf("if (unshown.tail_lost.length) say(`NOT SHOWN by this run: ${unshown.tail_lost.join(\", \")}.");
+    check(tallyAt > 0 && notShown > tallyAt && notShown - tallyAt < 400 && source.slice(notShown, notShown + 500).includes("exit 0 says only that: this run is no evidence for") && source.indexOf("process.exit(exitCode);") > notShown, "right after the tally, a run that left a delivery check unshown says so, and that exit 0 isn't evidence for it");
+    check(source.includes("const exitCode = stopped || left ? 1 : tally.exitCode();") && !/exitCode[^;\n]*tail_lost/.test(source), "the exit code is still the tally's own: a skip doesn't change it");
+  }
   // The probe's arguments.
   check(JSON.stringify(probeArgs([]).options) === JSON.stringify({ pull: 999999, count: 3 }) && probeArgs(["--repository", "1454615252", "--pull", "5", "--count", "10"]).options.repository === 1454615252 && probeArgs(["--count", "10"]).options.count === 10, "the probe takes a repository, a pull request number and a count");
   for (const bad of [["--count", "11"], ["--count", "0"], ["--repository"], ["--repository", "abc"], ["--pull", "-1"], ["--base-url", "https://example.test"], ["--secret", "x"]]) check(Boolean(probeArgs(bad).error), `the probe refuses ${bad.join(" ")}`);
@@ -370,15 +419,15 @@ check(absentId("tsk_aa") === null && absentId("nounderscore") === null, "an ID t
   check(section("M5-07d").includes("bench.ended = true;") && section("M5-07d").indexOf("bench.ended = true;") < section("M5-07d").indexOf("owner.revoke(room, coder2.id)") && source.includes("bench.ended ||"), "nothing renews it once the check that ends it has begun");
   // A signal stops the flow before clean-up looks at anything.
   check(source.includes("if (stopping) throw new Halt(") && source.indexOf("if (stopping) throw new Halt(") < source.indexOf("  try {\n    tally.add(id, \"pass\"") && source.includes("Promise.race([flowDone, sleep(120_000)]).then(() => cleanUp())") && source.includes("} finally {\n  flowEnded();\n}") && source.includes("ok(!stopping, `${label}: the run was told to stop`);"), "on a signal the run halts at its next check or wait, and clean-up starts only once the flow has ended");
-  check(section("M5-16a").includes('eq(await outcomeOf(one.id), "nudged"') && !section("M5-16a").includes("pr_observed_at"), "M5-16a is judged on the API's nudged line, not on a read that the routine poll makes too");
-  for (const [id, read] of [["M5-16a", "await outcomeOf("], ["M5-16b", "await traced("]]) check(section(id).includes("logged();") && !section(id).includes("sleep(") && section(id).includes(read) && !section(id).includes("!== null"), `${id} needs the API's log, waits on its lines and on nothing fixed, and never passes without them`);
+  check(section("M5-16a").includes('await judge("the first delivery", one.id, 1, "nudged")') && !section("M5-16a").includes("pr_observed_at"), "M5-16a is judged on the API's nudged line, not on a read that the routine poll makes too");
+  for (const [id, read] of [["M5-16a", "await traced("], ["M5-16b", "await traced("]]) check(section(id).includes("logged();") && !section(id).includes("sleep(") && section(id).includes(read) && !section(id).includes("!== null"), `${id} needs the API's log, waits on its lines and on nothing fixed, and never passes without them`);
   check(source.includes('have(options.logs && tally.passed("M5-13a")'), "without a connected tail the two delivery checks are skipped, by name");
   const reads = [...source.matchAll(/publicRead\(`\/repos\/\$\{repo\.full\}\/commits\/\$\{([a-zA-Z.]+)\.merge_sha\}/g)].map((found) => found[1]);
   check(reads.length === 3 && reads.every((name) => source.includes(`ok(isCommitSha(${name}.merge_sha), `)), "a merge commit from Podster is checked to be 40 hex digits before it goes into a path to GitHub");
   check(isCommitSha("a".repeat(40)) && !["a".repeat(39), "A".repeat(40), `${"a".repeat(40)}/../x`, "", undefined, 7].some(isCommitSha), "only 40 lower-case hex digits are a commit ID");
   check(section("M5-07f").includes('refusedCode(answer, "grant_expired"') && section("M5-07f").includes("listed?.state === \"expired\"") && section("M5-07f").includes("refusedByGithub("), "M5-07f waits for the API to list the push grant expired, wants grant_expired, and times GitHub's refusal");
   const base = parseArgs(["--base-url", STAGING], {}).options;
-  check(worstCaseSeconds(base) === 3 * 240 + 7 * 180 + 2 * 420 + 7 * 180 + 1150 && Math.round(worstCaseSeconds(base) / 60) === 87 && worstCaseSeconds({ ...base, observeWait: 10 }) === worstCaseSeconds(base) - 2 * 410 && worstCaseSeconds({ ...base, mergeWait: 10 }) === worstCaseSeconds(base) - 7 * 170, "the worst case is every bounded wait at its limit, and follows the flags");
+  check(worstCaseSeconds(base) === 3 * 240 + 7 * 180 + 2 * 420 + 7 * 180 + 1450 && Math.round(worstCaseSeconds(base) / 60) === 92 && worstCaseSeconds({ ...base, observeWait: 10 }) === worstCaseSeconds(base) - 2 * 410 && worstCaseSeconds({ ...base, mergeWait: 10 }) === worstCaseSeconds(base) - 7 * 170, "the worst case is every bounded wait at its limit, and follows the flags");
 }
 
 // ---- the log tails, against stand-ins for wrangler ----

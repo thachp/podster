@@ -81,7 +81,7 @@ export const PLAN = [
   ["AC-05d", "a submission naming another room's commit, or a pull request number only another room's repository has, is refused as a made-up one is"],
   ["AC-05e", "none of that changed anything in the second room: its grants, its task and its change read as before"],
   ["M5-11b", "a delivery signed with the wrong key, or with a malformed signature, is refused 401 invalid_signature and changes nothing"],
-  ["M5-16a", "a correctly signed delivery is taken once, by the API's log: nudged the first time, and replayed when sent again under the same ID and under a new one, each answering 202"],
+  ["M5-16a", "a correctly signed delivery is taken once, by the API's log: nudged the first time, and replayed when sent again under the same ID and under a new one, each answering 202; all three lines seen in one attempt"],
   ["M5-16b", "a signed delivery about this room's pull request naming the second room's repository, or one no room has, answers 202, and the API logs unknown_change and no_room"],
   ["M5-09f", "a merge asked for before Podster has seen a moved head is ended by the job: merge failed commit_changed, and the task stays completed"],
   ["M5-09g", "five merges asked for at once: the first lands exactly its reviewed commit"],
@@ -486,15 +486,66 @@ export function deliveryTrace(events, deliveryId) {
 export const deliveryOutcomes = (events, deliveryId) => deliveryTrace(events, deliveryId).outcomes;
 
 /**
- * Why a delivery's line can't be read as `lines` outcomes, or null when it can. `lost` says the tail holds nothing of
- * the delivery, which is the one case where sending another can show anything.
+ * What the gateway's own log says of a delivery: the outcome of each of its `github.webhook` lines for it, in order.
+ * The gateway logs `accepted` only once the API has answered 202, so its line for a delivery says the API ran for it,
+ * whatever the API's own tail holds.
  */
-export function deliveryProblem(trace, lines = 1) {
+export function gatewaySaid(events, deliveryId) {
+  const said = [];
+  for (const event of events) {
+    for (const part of logged(event)) {
+      let line = part;
+      if (typeof part === "string") {
+        try {
+          line = JSON.parse(part);
+        } catch {
+          continue;
+        }
+      }
+      if (line && typeof line === "object" && line.at === "github.webhook" && line.delivery === deliveryId) said.push(String(line.outcome));
+    }
+  }
+  return said;
+}
+
+/**
+ * Why a delivery's lines can't be read as `lines` outcomes, or null when they can.
+ *
+ * `lost` says the only thing wrong is that the tail holds too few events for it: every request of the API's for it that
+ * the tail does hold has its line, and some are simply not there. That is a tail that didn't deliver, and it's the one
+ * case where trying again can show anything. A request the tail holds with no line for the delivery is the API not
+ * logging, which is never `lost`. `accepted`, when given, is how many times the gateway's own tail says the API
+ * answered 202 for it: with it at `lines` or more, the API certainly ran that often, so a missing event is the tail's.
+ */
+export function deliveryProblem(trace, lines = 1, accepted = undefined) {
   if (trace.odd.length) return { text: `the API logged ${trace.odd.join(", and ")} for it`, lost: false };
   if (trace.outcomes.length >= lines) return null;
   const had = trace.outcomes.length ? `only ${trace.outcomes.length} of ${lines} lines (${trace.outcomes.join(", ")})` : "no line";
-  if (trace.requests.length) return { text: `the API's tail holds ${had} for it, though it holds the API's own request for it ${trace.requests.map((request) => `(ended ${request.ended}, ${request.lines} line(s) logged)`).join(" ")}: the API ran, and the line isn't there`, lost: false };
-  return { text: `the API's tail holds ${had} for it, and no request of the API's for it either: the tail never delivered that event`, lost: trace.outcomes.length === 0 };
+  // A total, not a pairing: how many more requests the tail holds than lines, across every event for the delivery.
+  // It can misread one narrow case. A request is counted only if its assertion decodes, and a line is counted
+  // wherever it is. So a request with no line can be hidden by a line that sits in an event whose assertion didn't
+  // decode: the totals then match, and a request with no line reads as a lost event. That ends in another attempt or a
+  // SKIP, which shows nothing. It can never end in a pass: a pass needs every wanted line, with its outcome.
+  const unlined = trace.requests.length - trace.outcomes.length;
+  if (unlined > 0) return { text: `the API's tail holds ${had} for it, though it holds ${trace.requests.length} of the API's own requests for it ${trace.requests.map((request) => `(ended ${request.ended}, ${request.lines} line(s) logged)`).join(" ")}: the API ran, and a line isn't there`, lost: false };
+  const gateway = accepted === undefined ? "" : accepted >= lines ? `. The gateway's tail holds its own line for it, ${accepted} time(s) accepted, and it logs that only once the API has answered 202: so the API ran, and its tail lost the event` : `. The gateway's tail holds ${accepted} accepted line(s) for it, not ${lines}, so it doesn't settle whether the API ran`;
+  return { text: `the API's tail holds ${had} for it, and ${trace.requests.length ? `only ${trace.requests.length} of ${lines} of the API's requests for it` : "no request of the API's for it either"}: the tail never delivered ${lines - trace.outcomes.length === 1 ? "that event" : "those events"}${gateway}`, lost: true };
+}
+
+/** How long a delivery's lines are waited for at most, and how long once the gateway's tail says the API answered. */
+export const LINE_WAIT_MS = 60_000;
+export const LOST_AFTER_MS = 25_000;
+
+/**
+ * Whether to stop waiting for a delivery's lines: `problem` is `deliveryProblem`'s answer now, `waited` how long it has
+ * been, and `accepted` how often the gateway's tail says the API answered for it. It stops when the lines are there;
+ * at once for a line with a wrong outcome; after a minute whatever is missing; and after 25 seconds when the only
+ * thing wrong is a missing event and the gateway has already logged that the API answered that often. Lines arrive in
+ * a few seconds, so that one is a tail that lost it.
+ */
+export function stopWaiting(trace, problem, { waited, accepted, lines }) {
+  if (!problem || trace.odd.length > 0 || waited > LINE_WAIT_MS) return true;
+  return problem.lost && accepted >= lines && waited > LOST_AFTER_MS;
 }
 
 /** What the Workers themselves logged in these events, and their exceptions, as text to search. Never the request's own headers. */
@@ -557,8 +608,8 @@ export const isCommitSha = (value) => typeof value === "string" && /^[0-9a-f]{40
  * between them. A run that passes takes a small part of this.
  */
 export function worstCaseSeconds(options) {
-  // Five waits of a minute for the API's log line on a delivery, and nothing else for deliveries.
-  const fixed = { tails: 10 + 60 + 120 + 60, retry: 180, expiries: 90 + 90, publicRoom: 60, deliveries: 5 * 60, githubHeads: 3 * 60 };
+  // Up to ten waits of a minute for the API's log line on a delivery: each delivery check may try twice.
+  const fixed = { tails: 10 + 60 + 120 + 60, retry: 180, expiries: 90 + 90, publicRoom: 60, deliveries: 10 * 60, githubHeads: 3 * 60 };
   // A moved head is waited for twice: once after review (M5-11a), once after a submission (M5-08b).
   return 3 * options.setupWait + 7 * options.mergeWait + 2 * options.observeWait + 7 * options.revokeWait + Object.values(fixed).reduce((sum, seconds) => sum + seconds, 0);
 }

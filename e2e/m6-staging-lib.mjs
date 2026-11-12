@@ -1,0 +1,408 @@
+// The parts of m6-staging.mjs that touch nothing: its arguments, the one host it accepts, the plan of checks and the
+// run's exit code, which operations and fields the contract says are M6's, and how two answers are compared. Kept apart
+// so m6-staging-selftest.mjs can check them without a network, a secret or the e2e packages.
+//
+// M6 is switched off on staging (RELEASES is set nowhere). Today's checks show it can't be detected there and that the
+// room schema step M6 build step 2 added harmed nothing. The checks that need release switched on come later.
+export { scrub, secretProblem, stagingOnly, STAGING, Tally } from "./m5-staging-lib.mjs";
+import { STAGING, stagingOnly } from "./m5-staging-lib.mjs";
+
+/** The test sign-up's takes one run spends, of 6 a minute and 40 a day across every run. The agent is made under the owner and takes none. */
+export const SIGN_UPS = [
+  { who: "the room's owner", why: "owns the room, links the agent, and calls every M6 route as the owner, for a room that doesn't exist, and with a body that isn't JSON. Taken only after the signed-out preflight" },
+  { who: "a second person", why: "is in no room of the run's, and calls every M6 route on the owner's room. Taken only once the owner's organization, room and agent are made" },
+];
+
+/**
+ * Every check, in the order it runs. "S" for switched off: none needs release switched on. `offline` checks read only
+ * this checkout, so a pass of theirs never counts as the run having shown anything on staging. `maySkip` is a check
+ * that says SKIP, with why, when what it needs can't be reached; every other staging check must pass for exit 0.
+ */
+export const PLAN = [
+  ["M6-S00", "the contract marks its M6 operations, each is listed person-only, and none is an agent capability", { offline: true }],
+  ["M6-S01a", "switched off, each M6 route answers the room's owner with the API's own answer for a missing route, exactly as an invented neighbouring path does: status, error code, body and the compared headers"],
+  ["M6-S01c", "the same for a room that doesn't exist"],
+  ["M6-S01d", "the same for a member sending a body that isn't JSON, on every M6 write"],
+  ["M6-S01b", "the same for a second person who isn't in the room, signed up only once the owner's room works"],
+  ["M6-S01e", "an agent through /mcp: calling an M6 operation's name answers 200 with a JSON-RPC error, exactly as an invented tool name does, by HTTP and through the MCP SDK"],
+  ["M6-S03", "a room made after the deploy runs one ordinary task end to end: create, assign to an agent, accept, submit, review. A fresh room only: the pre-deploy room is M6-S04"],
+  ["M6-S02a", "the room read and the task read, as the owner and as the agent, carry no M6 field"],
+  ["M6-S02b", "the agent's MCP tool list names tools, and no M6 tool"],
+  ["M6-S02d", "capabilities discovery, every page of /api/auth/capability/list, names capabilities, and no M6 capability"],
+  ["M6-S02c", "no M6 event type is in the room's events after every call above"],
+  ["M6-S04", "a room that existed before the deploy runs the same task: where the room schema step's migration could really harm a room", { maySkip: true }],
+].map(([id, title, flags = {}]) => ({ id, title, offline: Boolean(flags.offline), maySkip: Boolean(flags.maySkip) }));
+
+/**
+ * The run's exit code, and what it didn't show. 0 only when nothing failed and every check that needs staging passed,
+ * except one that may say SKIP. An offline check's pass never counts as the run having shown something.
+ */
+export function runOutcome(tally, plan = PLAN) {
+  const results = new Map(tally.results.map((r) => [r.id, r.status]));
+  const failed = plan.filter((entry) => results.get(entry.id) === "fail").map((entry) => entry.id);
+  const unshown = plan.filter((entry) => !entry.offline && !entry.maySkip && results.get(entry.id) !== "pass").map((entry) => entry.id);
+  const shownOnStaging = plan.filter((entry) => !entry.offline && results.get(entry.id) === "pass").length;
+  return { code: failed.length || unshown.length || shownOnStaging === 0 ? 1 : 0, failed, unshown, shownOnStaging };
+}
+
+export const USAGE = `node m6-staging.mjs --base-url ${STAGING} [--dry-run] [--contract FILE] [--capabilities FILE]
+
+  --dry-run         check the configuration, read the contract and print the plan. Sends staging nothing.
+  --contract        the OpenAPI contract the M6 operations are read from. Defaults to packages/contracts/openapi.yaml.
+  --capabilities    the agent capability list. Defaults to packages/contracts/capabilities.yaml.
+
+  PODSTER_E2E_SIGNUP_SECRET     staging's test sign-up secret. Needed, and passed by the runner. Never printed.
+
+  It takes 2 test sign-ups, the first only after a signed-out preflight and the second only once the first's room
+  works. It switches nothing on and calls no Cloudflare API. Exit 0 only when every check that needs staging passed.`;
+
+/** The arguments, or why they're refused. Nothing is guessed: an unknown flag or a missing value is an error. */
+export function parseArgs(argv, env = {}) {
+  const options = { base: undefined, dryRun: false, help: false, contract: undefined, capabilities: undefined };
+  for (let at = 0; at < argv.length; at++) {
+    const flag = argv[at];
+    if (flag === "--dry-run") options.dryRun = true;
+    else if (flag === "--help" || flag === "-h") options.help = true;
+    else if (flag === "--base-url" || flag === "--contract" || flag === "--capabilities") {
+      const value = argv[++at];
+      if (value === undefined || value.startsWith("--")) return { error: `${flag} needs a value` };
+      options[{ "--base-url": "base", "--contract": "contract", "--capabilities": "capabilities" }[flag]] = value;
+    } else return { error: `unknown argument ${flag}` };
+  }
+  if (options.help) return { options };
+  options.base ??= env.PODSTER_E2E_BASE_URL;
+  if (!options.base) return { error: "pass --base-url, or set PODSTER_E2E_BASE_URL" };
+  const refusal = stagingOnly(options.base);
+  if (refusal) return { error: refusal };
+  options.base = STAGING;
+  return { options };
+}
+
+// ---- reading the contract ----
+
+const METHODS = ["get", "put", "post", "patch", "delete"];
+const M6_MARK = "(M6, ADR 0010";
+
+/**
+ * Every operation in the contract, as `{ operation, method, path, text, m6 }`, in the contract's order. `m6` is whether
+ * its own summary marks it M6's. The reader knows the contract's layout: a path at two spaces, a method at four, written
+ * either as a block or inline.
+ */
+export function allOperations(openapi) {
+  const lines = String(openapi).split("\n");
+  const found = [];
+  let path = null;
+  let current = null;
+  const close = () => {
+    const id = current?.text.match(/operationId:\s*([A-Za-z0-9_]+)/)?.[1];
+    if (id) found.push({ operation: id, method: current.method.toUpperCase(), path: current.path, text: current.text, m6: current.text.includes(M6_MARK) });
+    current = null;
+  };
+  for (const line of lines) {
+    const pathLine = line.match(/^ {2}(\/[^\s:]*):\s*$/);
+    if (pathLine) {
+      close();
+      path = pathLine[1];
+      continue;
+    }
+    if (/^\S/.test(line)) {
+      close();
+      path = null;
+      continue;
+    }
+    const methodLine = path && line.match(/^ {4}([a-z]+):(.*)$/);
+    if (methodLine && METHODS.includes(methodLine[1])) {
+      close();
+      current = { method: methodLine[1], path, text: methodLine[2] };
+      continue;
+    }
+    if (current && /^ {5,}/.test(line)) current.text += `\n${line}`;
+    else if (current && /^ {4}\S/.test(line)) close();
+  }
+  close();
+  return found;
+}
+
+/** The M6 operations alone, as `{ operation, method, path }`. Read from the file at run time, so the list can't go stale. */
+export const m6Operations = (openapi) => allOperations(openapi).filter((op) => op.m6).map(({ operation, method, path }) => ({ operation, method, path }));
+
+/** The keys at the top level of the flow mapping that starts at `text[open]`, which is `{`. */
+function flowKeys(text, open) {
+  const keys = [];
+  let depth = 0;
+  let quote = null;
+  let token = "";
+  for (let at = open; at < text.length; at++) {
+    const ch = text[at];
+    if (quote) {
+      if (ch === quote && text[at - 1] !== "\\") quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === "{" || ch === "[") {
+      depth++;
+      token = "";
+    } else if (ch === "}" || ch === "]") {
+      depth--;
+      if (depth === 0) break;
+    } else if (depth === 1 && ch === ":" && /^[A-Za-z0-9_]+$/.test(token.trim())) {
+      keys.push(token.trim());
+      token = "";
+    } else if (depth === 1 && ch === ",") token = "";
+    else if (depth === 1) token += ch;
+  }
+  return keys;
+}
+
+/** The contract's schemas, as `{ name, text, properties }`: each schema's own text and its properties' names. */
+export function schemas(openapi) {
+  const lines = String(openapi).split("\n");
+  const start = lines.findIndex((line) => /^ {2}schemas:\s*$/.test(line));
+  if (start < 0) return [];
+  const found = [];
+  let current = null;
+  for (let at = start + 1; at < lines.length && !/^ {0,2}\S/.test(lines[at]); at++) {
+    const head = lines[at].match(/^ {4}([A-Za-z0-9_]+):(.*)$/);
+    if (head) {
+      current = { name: head[1], text: head[2] };
+      found.push(current);
+    } else if (current) current.text += `\n${lines[at]}`;
+  }
+  return found.map(({ name, text }) => {
+    const properties = new Set();
+    const inline = text.indexOf("properties: {");
+    if (inline >= 0) for (const key of flowKeys(text, inline + "properties: ".length)) properties.add(key);
+    const block = text.split("\n");
+    const at = block.findIndex((line) => /^ {6}properties:\s*$/.test(line));
+    if (at >= 0) for (let i = at + 1; i < block.length && /^ {8}/.test(block[i]); i++) {
+      const key = block[i].match(/^ {8}([A-Za-z0-9_]+):/)?.[1];
+      if (key) properties.add(key);
+    }
+    return { name, text, properties: [...properties] };
+  });
+}
+
+/** `ReleaseConfig` is `release_config`; `getReleaseConfig` is `get_release_config`. */
+export const snake = (name) => name.replace(/^[A-Z]/, (letter) => letter.toLowerCase()).replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+
+/**
+ * The fields that are M6's, derived from the contract. A schema is M6's when its own description marks it, or when only
+ * M6 operations (and M6 schemas) refer to it. Its name, as a field would carry it, is one; and so is each of its
+ * properties whose name appears nowhere else in the contract. `release` is left to `m6Fields`, which tells M5's `release: { exists: false }`
+ * from an M6 release.
+ */
+export function m6Keys(openapi) {
+  const all = schemas(openapi);
+  const ops = allOperations(openapi);
+  const refersTo = (text, name) => text.includes(`#/components/schemas/${name}"`);
+  const isM6 = (schema) => {
+    if (schema.text.includes(M6_MARK)) return true;
+    const users = ops.filter((op) => refersTo(op.text, schema.name));
+    const viaSchemas = all.filter((other) => other.name !== schema.name && refersTo(other.text, schema.name));
+    return users.length + viaSchemas.length > 0 && users.every((op) => op.m6) && viaSchemas.every((other) => other.text.includes(M6_MARK));
+  };
+  const ours = all.filter(isM6);
+  // Everything of the contract's that isn't M6's: a property named anywhere in it isn't distinctive enough to count.
+  let rest = String(openapi);
+  for (const text of [...ours.map((schema) => schema.text), ...ops.filter((op) => op.m6).map((op) => op.text)]) rest = rest.split(text).join("");
+  const elsewhere = (name) => new RegExp(`\\b${name}\\b`).test(rest);
+  const keys = new Set(ours.map((schema) => snake(schema.name)));
+  for (const schema of ours) for (const property of schema.properties) if (!elsewhere(property)) keys.add(property);
+  keys.delete("release");
+  return [...keys].sort();
+}
+
+/** The operations capabilities.yaml lists under `person_only:`: those no agent may be given. */
+export function personOnly(capabilities) {
+  const lines = String(capabilities).split("\n");
+  const start = lines.findIndex((line) => /^person_only:\s*$/.test(line));
+  if (start < 0) return [];
+  const listed = [];
+  for (let at = start + 1; at < lines.length && !/^\S/.test(lines[at]); at++) {
+    const item = lines[at].match(/^\s*-\s*([A-Za-z0-9_]+)\s*$/);
+    if (item) listed.push(item[1]);
+  }
+  return listed;
+}
+
+/** The capability names the agent capability list gives to agents, `name: { kind, operation }` at two spaces. */
+export function agentCapabilities(capabilities) {
+  return [...String(capabilities).matchAll(/^ {2}([a-z0-9_]+):\s*\{[^}]*operation:\s*([A-Za-z0-9_]+)/gm)].map(([, name, operation]) => ({ name, operation }));
+}
+
+/** Why the contract's M6 operations can't be trusted, or null: each must be person-only, and none an agent capability. */
+export function operationsProblem(operations, personOnlyList, capabilities = []) {
+  const ids = operations.map((op) => op.operation);
+  if (ids.length === 0) return "the contract marks no operation as M6's";
+  if (new Set(ids).size !== ids.length) return "the contract names an M6 operation twice";
+  const unlisted = ids.filter((id) => !personOnlyList.includes(id));
+  if (unlisted.length) return `capabilities.yaml doesn't list ${unlisted.join(", ")} under person_only`;
+  const given = capabilities.filter((c) => ids.includes(c.operation)).map((c) => c.name);
+  return given.length ? `capabilities.yaml gives agents ${given.join(", ")}, for M6 operations` : null;
+}
+
+// ---- paths, callers and the answers they must get ----
+
+/** A release ID of the contract's shape that names nothing, a host label, and a host. */
+export const FILL = { release: `rel_${"a1".repeat(16)}`, label: "k3v9q2", host: "app.example.com" };
+
+/** The path with its parameters filled in: the room, and fixed values for the rest. An unknown parameter is refused. */
+export function fillPath(path, room) {
+  return path.replace(/\{([a-z]+)\}/g, (_, name) => {
+    if (name === "ws") return room;
+    if (name in FILL) return FILL[name];
+    throw new Error(`the contract has a parameter the script doesn't know: {${name}}`);
+  });
+}
+
+/** The invented neighbour: the same path with one more character on its last segment, which no route has. */
+export const neighbour = (path) => `${path}x`;
+
+/** A room ID of the API's shape that names nothing. */
+export const ABSENT_ROOM = `ws_${"0".repeat(32)}`;
+
+/**
+ * The kinds of caller the comparison runs as, and the API's own answer each gets for a missing route in a room, from
+ * apps/api/test/releases.spec.ts. Outside a room's routes an unknown path is the Worker's, `404 not_found`, for everyone.
+ */
+export const CALLERS = {
+  owner: { label: "the room's owner", room: [404, "not_found"] },
+  outsider: { label: "a second person outside the room", room: [404, "workspace_not_found"] },
+  absent: { label: "the owner, for a room that doesn't exist", room: [404, "workspace_not_found"] },
+  malformed: { label: "the owner, a member, with a body that isn't JSON", room: [400, "invalid_argument"] },
+};
+
+/** The answer the API gives this caller for a missing route at this operation's path. */
+export function expectedAnswer(caller, op) {
+  const kind = CALLERS[caller];
+  if (!kind) throw new Error(`no such caller: ${caller}`);
+  return op.path.startsWith("/v1/workspaces/{ws}") ? kind.room : [404, "not_found"];
+}
+
+/**
+ * Whether an answer is a refusal by the gateway or Cloudflare's edge, before the API could answer: a sign-in, a limit,
+ * an access refusal, an error of the edge's or the Worker's, or an answer that isn't JSON. Two of these alike show nothing.
+ */
+export function edgeRefusal(shape) {
+  if (shape.status === 429 || shape.status === 401 || shape.status >= 500) return `HTTP ${shape.status}${shape.code ? ` ${shape.code}` : ""}`;
+  if (shape.status === 403 && shape.code !== "access_revoked") return `HTTP 403${shape.code ? ` ${shape.code}` : ""}`;
+  if (!/json/.test(shape.headers["content-type"] ?? "")) return `HTTP ${shape.status} that isn't JSON`;
+  return null;
+}
+
+/**
+ * The headers compared, by name: the ones that matter for telling a route apart. Anything else, such as an edge's
+ * occasional header, isn't compared. `x-podster-*` headers are the product's, and compared too.
+ */
+export const COMPARED_HEADERS = [
+  "content-type", "cache-control", "content-security-policy", "strict-transport-security", "x-content-type-options", "x-frame-options", "referrer-policy", "permissions-policy",
+  "cross-origin-opener-policy", "cross-origin-resource-policy", "cross-origin-embedder-policy", "access-control-allow-origin", "access-control-allow-credentials", "vary", "allow", "www-authenticate", "location", "set-cookie",
+];
+
+/** What one answer is, for comparing: status, error code, body, and the compared headers. `headers` is a list of [name, value]. */
+export function answerShape(status, headers, text) {
+  let code = null;
+  try {
+    code = JSON.parse(text)?.error?.code ?? null;
+  } catch {
+    // Not JSON: the body is compared as text.
+  }
+  const kept = {};
+  for (const [name, value] of headers) {
+    const lower = name.toLowerCase();
+    if (COMPARED_HEADERS.includes(lower) || lower.startsWith("x-podster-")) kept[lower] = lower === "set-cookie" ? "(set)" : value;
+  }
+  return { status, code, body: text, headers: kept };
+}
+
+/** How two answers differ, each as a short phrase, or an empty list. */
+export function differences(real, unknown) {
+  const out = [];
+  if (real.status !== unknown.status) out.push(`status ${real.status}, not ${unknown.status}`);
+  if (real.code !== unknown.code) out.push(`error code ${real.code}, not ${unknown.code}`);
+  if (real.body !== unknown.body) out.push("a different body");
+  for (const name of [...new Set([...Object.keys(real.headers), ...Object.keys(unknown.headers)])].sort()) {
+    if (!(name in unknown.headers)) out.push(`${name} only on the M6 route`);
+    else if (!(name in real.headers)) out.push(`${name} only on the invented one`);
+    else if (real.headers[name] !== unknown.headers[name]) out.push(`${name} differs`);
+  }
+  return out;
+}
+
+/**
+ * What a pair of answers shows for one route and one caller, after any second asking: null when the M6 route answered
+ * as the invented one did and that answer is the API's own for a missing route; otherwise why not.
+ */
+export function pairProblem(real, unknown, expected) {
+  const diff = differences(real, unknown);
+  if (diff.length) return diff.join("; ");
+  if (real.status === expected[0] && real.code === expected[1]) return null;
+  const refusal = edgeRefusal(real);
+  if (refusal) return `both answered ${refusal}: a gateway or edge refusal before the API, which shows nothing`;
+  return `both answered ${real.status} ${real.code}, not the API's ${expected[0]} ${expected[1]} for a missing route`;
+}
+
+// ---- MCP ----
+
+/** A tool's answer with its own name taken out, so an M6 name and an invented one can be compared. */
+export const toolAnswer = (text, name) => String(text ?? "").split(name).join("<tool>");
+
+/** Why a raw /mcp answer to tools/call isn't a JSON-RPC "tool not found" error with HTTP 200, or null. Its body has been through toolAnswer. */
+export function mcpErrorProblem(shape) {
+  if (shape.status !== 200) return `HTTP ${shape.status}, not 200`;
+  if (!/application\/json/.test(shape.headers["content-type"] ?? "")) return `content type ${shape.headers["content-type"] ?? "none"}, not JSON`;
+  let body;
+  try {
+    body = JSON.parse(shape.body);
+  } catch {
+    return "a body that isn't JSON";
+  }
+  if (body?.jsonrpc !== "2.0") return "not a JSON-RPC answer";
+  const rpcError = Number.isInteger(body?.error?.code);
+  if (!rpcError && body?.result?.isError !== true) return "a JSON-RPC answer that isn't an error";
+  const text = (rpcError ? body.error.message : body.result.content?.[0]?.text) ?? "";
+  return toolNotFound(text) ? null : `an error other than "tool not found": ${String(text).slice(0, 80)}`;
+}
+
+/**
+ * Whether an error's text, with the tool's own name taken out by toolAnswer, is the MCP SDK's "tool not found". The
+ * SDK's server sends it as `MCP error -32602: Tool <name> not found`, in a result marked isError.
+ */
+export const toolNotFound = (text) => /^(MCP error -32602: )?Tool <tool> not found$/.test(String(text ?? "").trim());
+
+// ---- what counts as M6's ----
+
+/**
+ * Tool names M6 will add that the contract doesn't list yet, by hand. Each is pinned by the self-test to the text of
+ * capabilities.yaml and ADR 0010, so a renamed one fails there.
+ */
+export const PLANNED_TOOLS = ["deploy_release"];
+
+/** A capability or tool name that is M6's: one of the M6 operations, as a tool, or a planned one. */
+export function m6Names(names, operations) {
+  const ours = new Set([...operations.map((op) => snake(op.operation)), ...PLANNED_TOOLS]);
+  return names.filter((name) => ours.has(name));
+}
+
+/** Keys that are M6's, anywhere in a read. M5's `release: { exists: false }` isn't one: it has said so since M5. */
+export function m6Fields(value, keys, at = "") {
+  const found = [];
+  if (Array.isArray(value)) value.forEach((item, index) => found.push(...m6Fields(item, keys, `${at}[${index}]`)));
+  else if (value && typeof value === "object") {
+    for (const [name, inner] of Object.entries(value)) {
+      const here = at ? `${at}.${name}` : name;
+      const m5Release = name === "release" && JSON.stringify(inner) === JSON.stringify({ exists: false });
+      if (keys.includes(name) || (name === "release" && !m5Release)) found.push(here);
+      found.push(...m6Fields(inner, keys, here));
+    }
+  }
+  return found;
+}
+
+/**
+ * An event type that is M6's. By hand, since core names no M6 event yet: a release, a deploy, an app, a hostname, the
+ * content domain or an app's report. The self-test pins it against every event type the API and core name today, none
+ * of which it may match.
+ */
+export const M6_EVENT = /^(release|deploy|deployment|app|app_hostname|hostname|content_domain|app_report)[._]/;
+export const m6EventTypes = (events) => [...new Set(events.map((event) => event?.type).filter((type) => typeof type === "string" && M6_EVENT.test(type)))];

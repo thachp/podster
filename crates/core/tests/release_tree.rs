@@ -423,3 +423,32 @@ fn twins_are_found_by_full_case_folding_after_nfkc() {
     }
     assert_ne!(fold("a.txt"), fold("b.txt"));
 }
+
+#[test]
+fn a_path_is_folded_before_html_is_stripped() {
+    for twin in [
+        ".well-known/podster-release.json.HTML",
+        ".well-known/podster-release.json.ｈｔｍｌ",
+        ".well-known/podster-release.json.Html",
+    ] {
+        let found = problems(&[file(twin, 1)]);
+        assert!(
+            found.contains(&ContentProblem::SameAddress(
+                MARKER_PATH.into(),
+                twin.into()
+            )),
+            "{twin}: {found:?}"
+        );
+    }
+    // And between two files of the repository.
+    let found = problems(&[file("page.HTML", 1), file("page", 1)]);
+    assert!(
+        found.iter().any(|p| p.code() == "release_path_collision"),
+        "{found:?}"
+    );
+    let found = problems(&[file("page.ｈｔｍｌ", 1), file("page.html", 1)]);
+    assert!(
+        found.iter().any(|p| p.code() == "release_path_collision"),
+        "{found:?}"
+    );
+}

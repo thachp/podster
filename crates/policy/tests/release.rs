@@ -41,15 +41,20 @@ fn standing<'a>(grant: Option<&'a DeployGrant<'a>>) -> ReleaseStanding<'a> {
 
 /// Each of the room's facts that stops release, with the code it answers.
 type RoomChange = fn(&mut ReleaseRoom);
-const ROOM_CHANGES: [(RoomChange, ReleaseDenial); 6] = [
+const ROOM_CHANGES: [(RoomChange, ReleaseDenial); 10] = [
     (
         |r| r.deployment_allows_release = false,
         ReleaseDenial::OffForDeployment,
     ),
     (
+        |r| r.organization_exists = false,
+        ReleaseDenial::OrganizationDeleted,
+    ),
+    (
         |r| r.organization_may_release = false,
         ReleaseDenial::NotDelegated,
     ),
+    (|r| r.deleted = true, ReleaseDenial::Deleted),
     (|r| r.public = false, ReleaseDenial::NeedsPublicRoom),
     (|r| r.archived = true, ReleaseDenial::Archived),
     (
@@ -57,6 +62,8 @@ const ROOM_CHANGES: [(RoomChange, ReleaseDenial); 6] = [
         ReleaseDenial::PublicSurfaceSuspended,
     ),
     (|r| r.app_suspended = true, ReleaseDenial::AppSuspended),
+    (|r| r.repository_ready = false, ReleaseDenial::RepoNotReady),
+    (|r| r.release_on_in_room = false, ReleaseDenial::ReleaseOff),
 ];
 
 #[test]
@@ -81,13 +88,32 @@ fn the_rooms_facts_refuse_with_the_adrs_codes_in_order() {
         codes,
         [
             "release_off_for_deployment",
+            "organization_deleted",
             "release_not_delegated",
+            "workspace_deleted",
             "release_needs_public_room",
             "workspace_archived",
             "public_surface_suspended",
-            "app_suspended"
+            "app_suspended",
+            "repo_not_ready",
+            "release_off"
         ]
     );
+}
+
+#[test]
+fn every_unpublish_trigger_but_the_callers_own_test_has_its_refusal_at_the_command() {
+    use podster_core::release::UnpublishTrigger as T;
+    let codes: Vec<&str> = ROOM_CHANGES.iter().map(|(_, d)| d.code()).collect();
+    for trigger in T::ALL {
+        if trigger == T::NoReleaserLeft {
+            continue; // the caller's own `may_release_now`
+        }
+        assert!(
+            codes.contains(&trigger.code()),
+            "{trigger:?} has no refusal at the command"
+        );
+    }
 }
 
 #[test]
@@ -130,9 +156,15 @@ fn configuring_and_approving_refuse_where_release_cant_happen_but_switching_off_
     for (change, denial) in ROOM_CHANGES {
         let mut room = ReleaseRoom::OPEN;
         change(&mut room);
+        // Switching release on is what changes the room's own switch, so that fact alone doesn't refuse it.
+        let turn_on = if denial == ReleaseDenial::ReleaseOff {
+            Ok(())
+        } else {
+            Err(denial)
+        };
         assert_eq!(
             authorize_release_config(&owner, true, &room, ConfigChange::TurnOn),
-            Err(denial),
+            turn_on,
             "{denial:?}"
         );
         assert_eq!(
@@ -480,5 +512,52 @@ fn each_kind_of_caller_sees_only_its_share_of_release_state() {
     assert_eq!(
         view(Person, Role::None, false, false, false),
         ReleaseView::Nothing
+    );
+}
+
+#[test]
+fn declining_is_allowed_wherever_the_room_can_still_be_acted_on() {
+    let owner = caller("per_owner", Person, Role::Owner);
+    for (change, denial) in ROOM_CHANGES {
+        let mut room = ReleaseRoom::OPEN;
+        change(&mut room);
+        let expected = match denial {
+            ReleaseDenial::Deleted | ReleaseDenial::OrganizationDeleted => Err(denial),
+            _ => Ok(()),
+        };
+        assert_eq!(
+            authorize_decline(&owner, true, &room),
+            expected,
+            "{denial:?}"
+        );
+    }
+    // Who may decline is who may approve: never an agent, a member, or a lapsed owner.
+    assert_eq!(
+        authorize_decline(
+            &caller("agt_a", Agent, Role::Owner),
+            true,
+            &ReleaseRoom::OPEN
+        ),
+        Err(ReleaseDenial::NotAllowed)
+    );
+    assert_eq!(
+        authorize_decline(
+            &caller("per_m", Person, Role::Member),
+            true,
+            &ReleaseRoom::OPEN
+        ),
+        Err(ReleaseDenial::NotAllowed)
+    );
+    assert_eq!(
+        authorize_decline(&owner, false, &ReleaseRoom::OPEN),
+        Err(ReleaseDenial::NotAllowed)
+    );
+    assert_eq!(
+        authorize_decline(
+            &caller("per_x", Person, Role::None),
+            true,
+            &ReleaseRoom::OPEN
+        ),
+        Err(ReleaseDenial::NotParticipant)
     );
 }

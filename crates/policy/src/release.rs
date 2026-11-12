@@ -5,7 +5,8 @@
 //! | --- | --- |
 //! | Switch release on or off, set its configuration | A person who is the room's owner or a room admin, with that authority holding; switching on or changing it only where release may happen at all ([`release_room_allows`]). Never an agent (decision 215, AC-10, AC-11) |
 //! | Ask for a release (`deploy_release`) | Someone who may release now: a current participant, not there through a public claim, holding a live `deploy` grant on the room's repository whose giver still holds authority; for an agent, also its connection and the person who linked it still in the organization (AC-17). Only where release may happen at all, a public room first (decision 213) |
-//! | Approve or decline a release | A person who is the room's owner or a room admin, with that authority holding, where release may happen at all. Never an agent, whatever role is stored for it, and the grant doesn't matter. Self-approval is allowed (decided by the architect, for the owner to review) |
+//! | Approve a release | A person who is the room's owner or a room admin, with that authority holding, where release may happen at all. Never an agent, whatever role is stored for it, and the grant doesn't matter. Self-approval is allowed (decided by the architect, for the owner to review) |
+//! | Decline a release | The same people, wherever they may still act on the room: only a deleted room or organization refuses ([`authorize_decline`]) |
 //! | See the room's release configuration and every release | A human owner or admin |
 //! | See a task's release status | Whoever can see the task |
 //! | See an app's label, hosts and suspension | A Podster operator, as a person, and nothing private (decision 205) |
@@ -40,6 +41,15 @@ pub enum ReleaseDenial {
     NotDelegated,
     /// `release_off_for_deployment`: the deployment's own configuration doesn't allow release.
     OffForDeployment,
+    /// `release_off`: release is switched off in the room. Added after the second review of PR #309.
+    ReleaseOff,
+    /// `workspace_deleted`. Added after the second review of PR #309.
+    Deleted,
+    /// `organization_deleted`. Added after the second review of PR #309.
+    OrganizationDeleted,
+    /// `repo_not_ready`: the room's repository is stopped, gone, or its link isn't ready. Added after the second review
+    /// of PR #309.
+    RepoNotReady,
     /// `grant_required`, `grant_expired` or `grant_stale`
     Grant(GrantRefusal),
 }
@@ -58,6 +68,10 @@ impl ReleaseDenial {
             ReleaseDenial::AppSuspended => "app_suspended",
             ReleaseDenial::NotDelegated => "release_not_delegated",
             ReleaseDenial::OffForDeployment => "release_off_for_deployment",
+            ReleaseDenial::ReleaseOff => "release_off",
+            ReleaseDenial::Deleted => "workspace_deleted",
+            ReleaseDenial::OrganizationDeleted => "organization_deleted",
+            ReleaseDenial::RepoNotReady => "repo_not_ready",
             ReleaseDenial::Grant(refusal) => refusal.code(),
         }
     }
@@ -70,7 +84,12 @@ pub fn holds_release_authority(kind: PrincipalKind, role: Role, authority_holds:
 }
 
 /// What the room and its deployment say, now, about whether release may happen there at all. Read from the room's
-/// current state and its organization's, never from a caller.
+/// current state and its organization's, never from a caller. Every `podster_core::release::UnpublishTrigger` but
+/// `NoReleaserLeft` has its field here, so each is refused at the command; "nobody may release" is the caller's own
+/// test, [`may_release_now`].
+///
+/// **Step 2 must also call `podster_core::release::recheck` at the command,** with the same facts it will pass the
+/// job, so a command and the job's first pass can't disagree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReleaseRoom {
     pub deployment_allows_release: bool,
@@ -79,6 +98,14 @@ pub struct ReleaseRoom {
     pub archived: bool,
     pub public_surface_suspended: bool,
     pub app_suspended: bool,
+    /// Added after the second review of PR #309.
+    pub release_on_in_room: bool,
+    /// Added after the second review of PR #309.
+    pub deleted: bool,
+    /// Added after the second review of PR #309.
+    pub organization_exists: bool,
+    /// Added after the second review of PR #309.
+    pub repository_ready: bool,
 }
 
 impl ReleaseRoom {
@@ -90,31 +117,39 @@ impl ReleaseRoom {
         archived: false,
         public_surface_suspended: false,
         app_suspended: false,
+        release_on_in_room: true,
+        deleted: false,
+        organization_exists: true,
+        repository_ready: true,
     };
 }
 
-/// Whether release may happen in the room at all, with the ADR's code for the first reason it can't, in the recheck's
-/// order: the deployment, the organization, the room's visibility, archiving, then the two suspensions.
+/// Whether release may happen in the room at all, with the ADR's code for the first reason it can't, in the job's
+/// recheck order (`podster_core::release::recheck`): the deployment, the organization gone, the organization's ability,
+/// the room deleted, private, archived, its public surface and app suspended, its repository, and release in the room.
 pub fn release_room_allows(room: &ReleaseRoom) -> Result<(), ReleaseDenial> {
-    if !room.deployment_allows_release {
-        return Err(ReleaseDenial::OffForDeployment);
+    let checks = [
+        (
+            room.deployment_allows_release,
+            ReleaseDenial::OffForDeployment,
+        ),
+        (room.organization_exists, ReleaseDenial::OrganizationDeleted),
+        (room.organization_may_release, ReleaseDenial::NotDelegated),
+        (!room.deleted, ReleaseDenial::Deleted),
+        (room.public, ReleaseDenial::NeedsPublicRoom),
+        (!room.archived, ReleaseDenial::Archived),
+        (
+            !room.public_surface_suspended,
+            ReleaseDenial::PublicSurfaceSuspended,
+        ),
+        (!room.app_suspended, ReleaseDenial::AppSuspended),
+        (room.repository_ready, ReleaseDenial::RepoNotReady),
+        (room.release_on_in_room, ReleaseDenial::ReleaseOff),
+    ];
+    match checks.into_iter().find(|(holds, _)| !holds) {
+        Some((_, denial)) => Err(denial),
+        None => Ok(()),
     }
-    if !room.organization_may_release {
-        return Err(ReleaseDenial::NotDelegated);
-    }
-    if !room.public {
-        return Err(ReleaseDenial::NeedsPublicRoom);
-    }
-    if room.archived {
-        return Err(ReleaseDenial::Archived);
-    }
-    if room.public_surface_suspended {
-        return Err(ReleaseDenial::PublicSurfaceSuspended);
-    }
-    if room.app_suspended {
-        return Err(ReleaseDenial::AppSuspended);
-    }
-    Ok(())
 }
 
 /// A change to the room's release configuration.
@@ -143,14 +178,18 @@ pub fn authorize_release_config(
     if !holds_release_authority(caller.kind, caller.role, authority_holds) {
         return Err(ReleaseDenial::NotAllowed);
     }
-    if change == ConfigChange::TurnOff {
-        return Ok(());
+    match change {
+        ConfigChange::TurnOff => Ok(()),
+        // Switching it on is what changes `release_on_in_room`, so that one fact doesn't refuse it.
+        ConfigChange::TurnOn => release_room_allows(&ReleaseRoom {
+            release_on_in_room: true,
+            ..*room
+        }),
+        ConfigChange::Change => release_room_allows(room),
     }
-    release_room_allows(room)
 }
 
-/// Who may approve or decline a release, and where: the same people as configure it (decision 215), where release may
-/// happen now. Holding the deployment grant gives nothing here, and isn't needed: an agent never approves. A person who
+/// Who may approve a release, and where: the same people as configure it (decision 215), where release may happen now. Holding the deployment grant gives nothing here, and isn't needed: an agent never approves. A person who
 /// may approve may approve a release they asked for, or that an agent they control asked for (decided by the architect
 /// on the review of PR #309, for the owner to review): the commit was already merged under decision 195's independent
 /// review.
@@ -160,6 +199,30 @@ pub fn authorize_approval(
     room: &ReleaseRoom,
 ) -> Result<(), ReleaseDenial> {
     authorize_release_config(caller, authority_holds, room, ConfigChange::Change)
+}
+
+/// Who may decline a release, and where: the same people as approve it, wherever they may still act on the room at all.
+/// Declining only ever reduces what is published, so a private, archived or suspended room, a repository not ready,
+/// release switched off in the room or for the deployment, and an organization whose ability was taken back all allow
+/// it. Only a deleted room or a deleted organization refuses, because then there is no room left to act on.
+pub fn authorize_decline(
+    caller: &Caller,
+    authority_holds: bool,
+    room: &ReleaseRoom,
+) -> Result<(), ReleaseDenial> {
+    if caller.role == Role::None {
+        return Err(ReleaseDenial::NotParticipant);
+    }
+    if !holds_release_authority(caller.kind, caller.role, authority_holds) {
+        return Err(ReleaseDenial::NotAllowed);
+    }
+    if !room.organization_exists {
+        return Err(ReleaseDenial::OrganizationDeleted);
+    }
+    if room.deleted {
+        return Err(ReleaseDenial::Deleted);
+    }
+    Ok(())
 }
 
 /// One `deploy` grant row, as far as the decision needs it. The room's own row, never a caller's.

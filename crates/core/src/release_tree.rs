@@ -218,7 +218,9 @@ pub fn fold(path: &str) -> String {
     compatible.to_lowercase().to_uppercase().to_lowercase()
 }
 
-/// The address a file is served at under the platform's default HTML handling, which a release is uploaded with:
+/// The address a file is served at under the platform's default HTML handling, which a release is uploaded with. When
+/// two paths are compared it is given the folded path ([`fold`]), so `.HTML` and a full-width `ｈｔｍｌ` are stripped
+/// like `.html`:
 /// `x/index.html` at `x/` (the root's at `/`), `x.html` at `x`, and anything else at its own path. Seen in spike A:
 /// `/index.html` answered 307 to `/`, and `page.html` was served at `/page`.
 pub fn served_address(path: &str) -> String {
@@ -277,7 +279,7 @@ pub fn check_release_tree(
     let mut folded: BTreeMap<String, &str> = BTreeMap::new();
     // The marker's own address is taken before any file's, so nothing in the repository is served where it is.
     let mut addresses: BTreeMap<String, &str> =
-        BTreeMap::from([(fold(&served_address(MARKER_PATH)), MARKER_PATH)]);
+        BTreeMap::from([(served_address(&fold(MARKER_PATH)), MARKER_PATH)]);
     for entry in entries {
         let path = entry.path.to_owned();
         if let Err(problem) = check_path(entry.path) {
@@ -299,7 +301,7 @@ pub fn check_release_tree(
                 if size > MAX_FILE_BYTES {
                     problems.push(ContentProblem::FileTooLarge(path.clone()));
                 }
-                if let Some(other) = addresses.insert(fold(&served_address(entry.path)), entry.path)
+                if let Some(other) = addresses.insert(served_address(&fold(entry.path)), entry.path)
                 {
                     problems.push(ContentProblem::SameAddress(other.to_owned(), path.clone()));
                 }

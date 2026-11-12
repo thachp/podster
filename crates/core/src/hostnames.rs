@@ -6,6 +6,17 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
+use icu_properties::props::DefaultIgnorableCodePoint;
+use icu_properties::CodePointSetData;
+
+/// Whether text holds a code point IDNA drops without a trace (Unicode's Default_Ignorable_Code_Point: U+00AD, U+034F,
+/// U+180E, U+200B to U+200F, U+2060, U+FE00 to U+FE0F, U+FEFF and the rest). Such a name or rule is refused before
+/// mapping, so it can't read as another. Added after the second review of PR #311.
+fn has_ignorable(text: &str) -> bool {
+    let ignorable = CodePointSetData::new::<DefaultIgnorableCodePoint>();
+    text.chars().any(|c| ignorable.contains(c))
+}
+
 /// The longest hostname, in its ASCII form.
 pub const MAX_HOSTNAME_LEN: usize = 253;
 /// The longest label of a hostname.
@@ -73,7 +84,10 @@ pub fn normalize(input: &str) -> Result<String, HostnameRefusal> {
     if input.contains('*') {
         return Err(HostnameRefusal::Wildcard);
     }
-    if input.is_empty() || input.chars().any(|c| c.is_whitespace() || c.is_control()) {
+    if input.is_empty()
+        || input.chars().any(|c| c.is_whitespace() || c.is_control())
+        || has_ignorable(input)
+    {
         return Err(HostnameRefusal::Invalid);
     }
     let trimmed = input.strip_suffix('.').unwrap_or(input);
@@ -128,6 +142,19 @@ fn is_number(label: &str) -> bool {
     label.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// The rules in the Public Suffix List's own text, line by line, as its format defines: a blank line and a line
+/// beginning `//` are skipped, and a rule is read up to the first whitespace. Pass what this returns to [`mappable`]: a
+/// comment or blank line passed to it as a rule fails closed, like anything else it can't read.
+pub fn public_suffix_rules(list: &str) -> Vec<&str> {
+    // A byte-order mark at the start is a common form of the file, not part of its first line.
+    let list = list.strip_prefix('\u{FEFF}').unwrap_or(list);
+    list.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("//"))
+        .filter_map(|line| line.split_whitespace().next())
+        .collect()
+}
+
 /// One rule of the Public Suffix List, as the deployment holds it: a plain rule (`co.uk`), a wildcard (`*.ck`), or an
 /// exception (`!www.ck`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,9 +167,30 @@ enum SuffixRule {
 /// A rule's labels, normalized like a hostname. `None` for a rule that can't be read.
 fn suffix_rule(rule: &str) -> Option<SuffixRule> {
     let labels = |body: &str| -> Option<Vec<String>> {
+        // Each label as a hostname's: 1 to 63 letters, digits and hyphens after IDNA. A comment, a blank, or any other
+        // text isn't a rule, and fails closed.
+        // Nothing IDNA would quietly map away or drop: no whitespace, no control or format character, and no ASCII but
+        // letters, digits, hyphens and dots.
+        if body.is_empty()
+            || has_ignorable(body)
+            || body.chars().any(|c| {
+                c.is_whitespace()
+                    || c.is_control()
+                    || c == '\u{FEFF}'
+                    || c == '\u{AD}'
+                    || ('\u{200B}'..='\u{200F}').contains(&c)
+                    || (c.is_ascii() && !(c.is_ascii_alphanumeric() || c == '-' || c == '.'))
+            })
+        {
+            return None;
+        }
         let ascii = idna::domain_to_ascii(body).ok()?;
-        (!ascii.is_empty() && ascii.split('.').all(|l| !l.is_empty()))
-            .then(|| ascii.split('.').map(str::to_owned).collect())
+        let ok = ascii.split('.').all(|l| {
+            (1..=MAX_HOSTNAME_LABEL_LEN).contains(&l.len())
+                && l.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        });
+        ok.then(|| ascii.split('.').map(str::to_owned).collect())
     };
     if let Some(body) = rule.strip_prefix('!') {
         return labels(body)
@@ -285,6 +333,15 @@ pub struct HostnameRecord<'a> {
     pub suspended: bool,
     /// When the last claim was freed, after Cloudflare reported its custom hostname gone.
     pub last_freed_at: Option<i64>,
+    /// When the name was last suspended. Every request and challenge made at or before it is void: after a lift, a
+    /// fresh request is needed.
+    pub last_suspended_at: Option<i64>,
+    /// When the name's suspension was last lifted. Kept for the record; decisions use `generation`.
+    pub last_lifted_at: Option<i64>,
+    /// Advanced by every suspend, lift and free. A request is honoured only under the generation it was made under, so
+    /// no clock decides whether a suspension, a lift or a freed claim came before it. Added after the second review of
+    /// PR #311.
+    pub generation: u64,
 }
 
 /// A room's ask for the claim, after its proof matched.
@@ -296,6 +353,9 @@ pub struct ClaimAsk<'a> {
     pub requested_at: i64,
     /// The proof matched, just now, for this request's own value.
     pub proof_matched: bool,
+    /// The name's `generation` when the request was made, read from its record. Added after the second review of PR
+    /// #311.
+    pub generation: u64,
 }
 
 /// The claim object's answer.
@@ -355,6 +415,7 @@ pub fn decide_claim(record: &HostnameRecord, ask: &ClaimAsk, now: i64) -> ClaimD
     if record
         .last_freed_at
         .is_some_and(|freed| ask.requested_at <= freed)
+        || ask.generation != record.generation
     {
         return ClaimDecision::StaleChallenge;
     }
@@ -498,9 +559,11 @@ pub fn cloudflare_status_ends_claim(status: &str) -> Option<ClaimEnd> {
     (status == "moved").then_some(ClaimEnd::Moved)
 }
 
-/// Whether the host may start serving: the room holds the claim and Cloudflare reports the hostname `active`.
-pub fn routing_may_start(room_holds_claim: bool, cloudflare_status: &str) -> bool {
-    room_holds_claim && cloudflare_status == "active"
+/// Whether the host may start serving: the hostname's own record shows `room` holding a live claim on a name that isn't
+/// suspended (as [`custom_host_may_serve`] reads it), and Cloudflare reports the hostname `active`. It takes the record,
+/// not a flag, so no caller can reopen an ending or suspended host from `claim.room` alone.
+pub fn routing_may_start(record: &HostnameRecord, room: &str, cloudflare_status: &str) -> bool {
+    custom_host_may_serve(true, record, room) && cloudflare_status == "active"
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -515,16 +578,20 @@ pub struct SuspendPlan<'a> {
     pub tell_room: Option<&'a str>,
 }
 
-/// Suspending a hostname: it stays suspended through and after any claim, its live claim starts ending at once, and the
-/// room holding it is told. Ruled on the review of PR #309: suspension ends the claim, and after a lift the name needs a
-/// fresh challenge.
-pub fn suspend<'a>(record: &HostnameRecord<'a>) -> (HostnameRecord<'a>, SuspendPlan<'a>) {
+/// Suspending a hostname at `now`: it stays suspended through and after any claim, its live claim starts ending at once,
+/// the room holding it is told, and every pending request and challenge for the name is void: the generation advances. Ruled on
+/// the reviews of PR #309: suspension ends the claim, and after a lift the name needs a fresh request.
+pub fn suspend<'a>(record: &HostnameRecord<'a>, now: i64) -> (HostnameRecord<'a>, SuspendPlan<'a>) {
     (
         HostnameRecord {
             claim: record.claim,
             ending: record.claim.is_some(),
             suspended: true,
             last_freed_at: record.last_freed_at,
+            // Kept for the record, only ever forward; the generation is what decides.
+            last_suspended_at: Some(record.last_suspended_at.map_or(now, |at| at.max(now))),
+            last_lifted_at: record.last_lifted_at,
+            generation: record.generation.saturating_add(1),
         },
         SuspendPlan {
             tell_room: record.claim.map(|c| c.room),
@@ -532,10 +599,14 @@ pub fn suspend<'a>(record: &HostnameRecord<'a>) -> (HostnameRecord<'a>, SuspendP
     )
 }
 
-/// Lifting a suspension restores nothing: no claim comes back, and a room must challenge anew.
-pub fn lift<'a>(record: &HostnameRecord<'a>) -> HostnameRecord<'a> {
+/// Lifting a suspension at `now` restores nothing: no claim comes back, and only a request made after the lift counts,
+/// decided by the record's own `generation`, which the lift advances, not by any clock. While suspended, every request is refused
+/// `Suspended` and nothing is recorded as pending; the caller records nothing for a refused request.
+pub fn lift<'a>(record: &HostnameRecord<'a>, now: i64) -> HostnameRecord<'a> {
     HostnameRecord {
         suspended: false,
+        last_lifted_at: Some(record.last_lifted_at.map_or(now, |at| at.max(now))),
+        generation: record.generation.saturating_add(1),
         ..*record
     }
 }
@@ -548,5 +619,8 @@ pub fn free<'a>(record: &HostnameRecord<'a>, now: i64) -> HostnameRecord<'a> {
         ending: false,
         suspended: record.suspended,
         last_freed_at: Some(now),
+        last_suspended_at: record.last_suspended_at,
+        last_lifted_at: record.last_lifted_at,
+        generation: record.generation.saturating_add(1),
     }
 }

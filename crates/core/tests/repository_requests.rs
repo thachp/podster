@@ -2,8 +2,9 @@
 //! which is proposed; the owner's decision of 2026-11-11, "No gate, with limits").
 
 use podster_core::provisioning::{
-    organization_delegated, repository_place_held, repository_request_allowed, RequestLimitReached,
-    MAX_REPOSITORY_REQUESTS_PER_DAY, REPOSITORY_REQUEST_WINDOW_MS,
+    organization_delegated, repository_place_held, repository_request_allowed,
+    repository_request_window_start, RequestLimitReached, MAX_REPOSITORY_REQUESTS_PER_DAY,
+    REPOSITORY_REQUEST_WINDOW_MS,
 };
 
 const NOW: i64 = 10 * REPOSITORY_REQUEST_WINDOW_MS;
@@ -124,4 +125,45 @@ fn a_room_that_holds_a_place_keeps_it_at_the_cap_and_a_new_room_is_refused_there
     assert!(!repository_place_held(false, &full, NOW));
     assert!(repository_place_held(false, &full[..4], NOW));
     assert!(repository_place_held(false, &[], NOW));
+}
+
+#[test]
+fn the_window_starts_at_one_edge() {
+    // The Principal deletes places stamped before this value and keeps the rest, so it must be exactly the oldest stamp
+    // the count still counts: a day less a millisecond old.
+    let start = repository_request_window_start(NOW);
+    assert_eq!(start, NOW - REPOSITORY_REQUEST_WINDOW_MS + 1);
+    assert_eq!(
+        repository_request_allowed(&[start; 5], NOW),
+        Err(RequestLimitReached)
+    );
+    assert_eq!(repository_request_allowed(&[start - 1; 5], NOW), Ok(()));
+    // The count and the bound agree on every stamp near the edge, and far from it.
+    for at in [
+        start - 2,
+        start - 1,
+        start,
+        start + 1,
+        NOW,
+        NOW + 1,
+        i64::MIN,
+        0,
+    ] {
+        let kept = at >= start;
+        assert_eq!(
+            repository_request_allowed(&[at; 5], NOW).is_err(),
+            kept,
+            "{at}"
+        );
+        assert_eq!(repository_place_held(false, &[at; 5], NOW), !kept, "{at}");
+    }
+    // At the ends of the clock it saturates rather than wrapping.
+    assert_eq!(
+        repository_request_window_start(i64::MIN),
+        i64::MIN.saturating_add(1)
+    );
+    assert_eq!(
+        repository_request_window_start(i64::MAX),
+        i64::MAX - REPOSITORY_REQUEST_WINDOW_MS + 1
+    );
 }

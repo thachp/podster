@@ -1569,11 +1569,12 @@ impl Principal {
                     let now = now_ms();
                     exec(&state, REPO_REQUESTS_SCHEMA, vec![])?;
                     // Places that left the window count for nothing, this room's own included: it's then asked as new.
+                    // The window's one edge is crates/core's, as the count uses it.
                     exec(
                         &state,
-                        "DELETE FROM repo_request_room WHERE at <= ?",
+                        "DELETE FROM repo_request_room WHERE at < ?",
                         vec![
-                            (now - podster_core::provisioning::REPOSITORY_REQUEST_WINDOW_MS).into(),
+                            podster_core::provisioning::repository_request_window_start(now).into(),
                         ],
                     )?;
                     let holds = !rows(

@@ -956,6 +956,9 @@ describe("the room migration", () => {
     const newest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
     await inRoom(r.id, (sql) => {
       // The newest step, the M5 security review's two columns, comes off first.
+      // M6 step 2's release tables, the newest migration, come off first.
+      for (const table of ["release_config", "app_label", "release", "serve_state", "hostname_request"]) sql.exec(`DROP TABLE ${table}`);
+      sql.exec("UPDATE schema_version SET version = version - 1");
       for (const [table, column] of [["repo_link", "gone_seen_at"], ["repo_request", "limited_since"], ["repo_request", "limited_call"]]) sql.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
       sql.exec("UPDATE schema_version SET version = version - 1");
       for (const column of ["reviewer_person", "reviewer_id"]) sql.exec(`ALTER TABLE task_change DROP COLUMN ${column}`);
@@ -976,6 +979,9 @@ describe("the room migration", () => {
     const newest = await inRoom(r.id, (sql) => sql.exec("SELECT version FROM schema_version").one().version as number);
     await inRoom(r.id, (sql) => {
       // The newest step, the M5 security review's two columns, comes off first.
+      // M6 step 2's release tables, the newest migration, come off first.
+      for (const table of ["release_config", "app_label", "release", "serve_state", "hostname_request"]) sql.exec(`DROP TABLE ${table}`);
+      sql.exec("UPDATE schema_version SET version = version - 1");
       for (const [table, column] of [["repo_link", "gone_seen_at"], ["repo_request", "limited_since"], ["repo_request", "limited_call"]]) sql.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
       sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("DROP TABLE merge_request");

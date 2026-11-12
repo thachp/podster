@@ -279,6 +279,23 @@ ALTER TABLE task_change ADD COLUMN reviewer_person TEXT;
 ALTER TABLE repo_link ADD COLUMN gone_seen_at INTEGER;
 ALTER TABLE repo_request ADD COLUMN limited_since INTEGER;
 ALTER TABLE repo_request ADD COLUMN limited_call TEXT;
+", "
+CREATE TABLE release_config (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+  environments_json TEXT NOT NULL DEFAULT '[\"production\"]', approval_policy TEXT NOT NULL DEFAULT 'person' CHECK (approval_policy = 'person'),
+  version INTEGER NOT NULL DEFAULT 1, release_epoch INTEGER NOT NULL DEFAULT 0, set_by TEXT NOT NULL, set_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE app_label (label TEXT PRIMARY KEY CHECK (length(label) BETWEEN 1 AND 26 AND label NOT GLOB '*[^a-z0-9]*'), current INTEGER UNIQUE CHECK (current = 1),
+  created_at INTEGER NOT NULL, retired_at INTEGER, indexed_at INTEGER, CHECK ((current IS NULL) = (retired_at IS NOT NULL))) WITHOUT ROWID;
+CREATE TABLE release (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE CHECK (length(id) = 36 AND id GLOB 'rel_*' AND substr(id, 5) NOT GLOB '*[^0-9a-f]*'),
+  commit_sha TEXT NOT NULL, environment TEXT NOT NULL DEFAULT 'production' CHECK (environment = 'production'), state TEXT NOT NULL, task_id TEXT,
+  label TEXT NOT NULL, config_version INTEGER NOT NULL, release_epoch INTEGER NOT NULL, script_name TEXT CHECK (script_name IS NULL OR length(script_name) <= 63),
+  requested_by TEXT NOT NULL, requested_at INTEGER NOT NULL, approved_by TEXT, approved_at INTEGER, result_url TEXT, failure_code TEXT, finished_at INTEGER,
+  served_at INTEGER, updated_at INTEGER NOT NULL);
+CREATE INDEX release_by_state ON release (state, requested_at);
+CREATE TABLE serve_state (host TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('default', 'custom')), release_id TEXT, script_name TEXT, version INTEGER NOT NULL DEFAULT 1,
+  updated_at INTEGER NOT NULL, CHECK ((release_id IS NULL) = (script_name IS NULL))) WITHOUT ROWID;
+CREATE TABLE hostname_request (id TEXT PRIMARY KEY, hostname TEXT NOT NULL, state TEXT NOT NULL, open INTEGER UNIQUE CHECK (open = 1), challenge TEXT NOT NULL,
+  requested_by TEXT NOT NULL, requested_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, claimed_at INTEGER, proved_at INTEGER, ended_at INTEGER, end_reason TEXT,
+  updated_at INTEGER NOT NULL);
 "];
 
 pub fn int(value: &Value) -> i64 {

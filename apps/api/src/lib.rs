@@ -7,11 +7,13 @@ mod a2a_out;
 mod downloads;
 mod error;
 mod github;
+mod hostname_claim;
 mod moderation;
 mod objects;
 mod principal;
 mod provider;
 mod public;
+mod releases;
 mod store;
 mod wake;
 mod workspace;
@@ -426,6 +428,10 @@ async fn route(
         None
     };
 
+    // M6's routes (step 2): none is built, and none exists while release is switched off.
+    if let Some(audience) = releases::route(&method, &parts) {
+        return releases::answer(&env, &caller, audience).await;
+    }
     let (workspace_id, forward_path) = match parts.as_slice() {
         ["v1", "me"] if method == Method::Get => return me(&env, &caller).await,
         ["v1", "files", ws, id] if method == Method::Get => {

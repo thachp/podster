@@ -845,7 +845,7 @@ The first four were made before the fixes were deployed, with GitHub's default s
 | M5-04 | **In full.** A request naming an organization or an installation refused | The first runs | Nothing |
 | M5-05 | **In part.** Refused `grant_required`, no token in the answer | The first runs | That no token was asked of GitHub |
 | M5-06 | **In part.** A push and a pull request; the default branch refused by `git push`, a forced push, a commit, a ref update and a merge; the review status, settings, a workflow file, rulesets, Actions permissions and the default branch refused; another repository refused | The first runs; E1, E2, E3 | A marked commit refused by the rules alone; auto-merge for the token |
-| M5-07 | **In full, for what exists.** A removed agent, a disconnected one, a canceled and a completed task, an expired grant: renewal refused, and GitHub refusing the held token within 0.2 s, measured | The first runs; E1, E2, E3 | A task's own deadline, which the product doesn't have |
+| M5-07 | **In part.** Renewal refused for a removed agent (`access_revoked`), a disconnected one, a canceled and a completed task (`task_not_active`), and an expired grant (`grant_expired`). **GitHub's refusal of the held token, as each run logged it:** E1, 0.1 to 0.2 s for all six; E2, 0.1 to 0.3 s; E3, 0.1 to 0.3 s for five, and **5.5 s for the canceled task's**. Where the run printed it, the token was disclosed to live 55 to 60 minutes more | The first runs for an ended task and a grant taken back; E1, E2, E3 for the rest | **"The deadline passes":** a task has no server-side deadline, so no run shows it. What a token can still do in the seconds before GitHub refuses it wasn't tried, only how long that was |
 | M5-08 | **In full.** The submission records its commit; approval after the branch advances is `409 commit_changed` | The first runs; E1, E2, E3 | Nothing |
 | M5-09 | **In full.** The reviewed commit merged; a moved head refused at the request; `merge.failed` with `commit_changed` recorded by the job | The first runs; E1, E2, E3 | Nothing |
 | M5-10 | **In full,** with `self_review` | The first runs from the third on | Nothing |
@@ -856,23 +856,23 @@ The first four were made before the fixes were deployed, with GitHub's default s
 | M5-15 | **In part.** A failed setup blocks that room's coding tasks and nothing else; no other organization, nothing deleted | E1, E2, E3 | `repo_not_ready` for a task already linked; the operator's reset, which doesn't exist |
 | M5-16 | **In part, and never whole in one run.** A replayed delivery (M5-16a) passed in E2. A misdirected one (M5-16b) passed in E3. In E2 the misdirected one failed, and in E3 the replayed one did, each time because the log tail lost one event | E2 for the replay; E3 for the misdirection | Both halves in a single run |
 
-So of 16 rows: 7 in full (M5-01, M5-02, M5-04, M5-07 for what exists, M5-08, M5-09, M5-10), 9 in part, and none with no staging evidence. Before the extended script it was 3, 9 and 4.
+So of 16 rows: 6 in full (M5-01, M5-02, M5-04, M5-08, M5-09, M5-10), 10 in part, and none with no staging evidence. Before the extended script it was 3, 9 and 4. Of the five access tests below: 1 in full (AC-31), 4 in part, none unshown. **Each row is read against its own text in [the acceptance table](#acceptance-tests) and in ACCESS-CONTROL.md, strictly:** a row whose text names something no run showed is "in part", even where the product has nothing to show for it.
 
 **(ii) The access tests the gate names.** AC-10, AC-11 and AC-17 are the ones the first 33 checks map to: M5-01, M5-A1 and M5-G2; M5-10a to M5-10e and M5-10d. Those are still partial on staging: the caps, the take-back and the unlisted person of AC-10, and AC-11's organization admin, operator and other room's admin, are local. The other five, each with its local tests named in [the extended script's table](#step-10-the-staging-script-extended-2026-11-11):
 
 | Test | On staging | In which run | Still not on staging |
 | --- | --- | --- | --- |
-| AC-05 | **In full, for provider-resource IDs.** Another room's grant, task, repository, commit and pull request number each answered as an ID that names nothing, with nothing changed there | E1, E2, E3 | Nothing |
+| AC-05 | **In part.** For provider-resource IDs: another room's grant, task, repository, commit and pull request number each answered as an ID that names nothing, with nothing changed there | E1, E2, E3 | Another organization's, agent's and asset's ID, and the bulk paths: those rest on the journey's `AC-05`, which passed on staging on 2026-11-09 before M5, with managed repositories off |
 | AC-13 | **In part.** A grant taken back, its giver demoted and its requester removed, each while a merge waited for the job: ended `grant_required`, `grant_required`, `access_revoked`, merging nothing. In every run the script saw the job hadn't reached the merge, so none rested on timestamps and none was skipped. A replayed grant restored nothing | E1, E2, E3 | A cached assertion; a stale settings form, which the journey showed before M5 |
 | AC-16 | **In part.** GitHub's refusal of a name and of a merge, each recorded as a failure, with nothing landed | E1, E2, E3 | A failed write rolling back: failpoints never ship |
-| AC-27 | **In full, for what exists.** As M5-07, and a job queued before the revocation as AC-13 | The first runs; E1, E2, E3 | A task's own deadline |
+| AC-27 | **In part.** A revoked agent's issued token refused; renewal refused after the task ends and after an approved grant's time runs out; renewal neither extending nor widening; a job queued before a revocation ended without merging (AC-13). The token's residual lifetime disclosed as `expires_at`, with GitHub's refusal measured as M5-07's row has it | The first runs; E1, E2, E3 | A task's own time running out, which doesn't exist. What the token can still do before GitHub refuses it |
 | AC-31 | **In full.** Approval after the branch advances can't bind to the new commit, and a moved head isn't merged | The first runs for the merge half; E1, E2, E3 for both | Nothing |
 
 No other staging script reaches these: `e2e/m2-staging.mjs`, `e2e/m4-staging.mjs` and `e2e/a2a-staging.mjs` name none of the five, and no recorded run of theirs is cited for them.
 
 The gate's other three parts: the token boundary on GitHub is shown on staging with `git push` and with another repository; the security review is done and written up, though no reviewer walked every row of the threat model; and expanded criterion 7 is shown for a linked repository, a reported merge and a failed merge, and **not for a failed check**.
 
-**So calling the gate met on this evidence accepts, on local tests alone or on nothing:** the right-hand column of the two tables. Its heaviest items are a failed check (M5-12, criterion 7), a timed-out or uncertain setup (M5-03), a lost webhook repaired by polling (M5-11), the operator's take-back and the daily caps (M5-14), a failed write rolling back (AC-16), and that M5-16's two halves were never shown in one run. That is still short of the gate's own wording, "all of these pass on staging", and no extended run exited 0. M3's gate was called with local runs accepted for four items ([decision 193](spec/PRODUCT.md#decisions-needed)); that was the owner's choice then and is the owner's here.
+**So calling the gate met on this evidence accepts, on local tests alone or on nothing:** the right-hand column of the two tables. Its heaviest items are a failed check (M5-12, criterion 7), a timed-out or uncertain setup (M5-03), a lost webhook repaired by polling (M5-11), the operator's take-back and the daily caps (M5-14), a failed write rolling back (AC-16), a deadline (M5-07, AC-27), the parts of AC-05 that aren't provider resources, and that M5-16's two halves were never shown in one run. That is still short of the gate's own wording, "all of these pass on staging", and no extended run exited 0. M3's gate was called with local runs accepted for four items ([decision 193](spec/PRODUCT.md#decisions-needed)); that was the owner's choice then and is the owner's here.
 
 **Owed before production,** whatever the owner decides about the gate. The list is [above](#owed-before-production) and in [the review](security/m5-review.md#owed-before-production-not-before-the-gate), and isn't repeated here. Its heaviest items: Podster can't stop a repository, so a takedown is by hand; Podster's reads need a separate read-only App, so agents can't starve them; there's no GitHub budget across the deployment; an agent's token can write any branch but the default, and tags and releases; there's no inventory; there's no global or lifetime cap across sign-ups; production's value for `REPOSITORY_REQUESTERS` is undecided; and the token-sealing key's value wasn't kept by the setup script. The first, the cap and the key were added to the table today.
 
@@ -986,7 +986,7 @@ Each gap is one of two things: **(1)** a check in the script, with the exact ans
 | M5-03 | A refused setup, no adoption, a retry under a new name, nothing deleted | A timeout, an uncertain request |
 | M5-05 | The refusal | That no token was asked of GitHub |
 | M5-06 | Everything the row lists, and another repository | A marked commit refused by the rules alone; auto-merge for the token |
-| M5-07 | A removed and a disconnected agent, an ended task, an expired grant, each measured | A task's own deadline, which doesn't exist |
+| M5-07 | A removed and a disconnected agent, an ended task, an expired grant, each measured | A task's own deadline, which doesn't exist: the row is in part |
 | M5-08 | Yes | Nothing |
 | M5-09 | Yes, the job's `merge.failed` included | Nothing |
 | M5-11 | A moved head seen; an unsigned and a badly signed delivery refused | A lost webhook repaired by polling |
@@ -995,10 +995,10 @@ Each gap is one of two things: **(1)** a check in the script, with the exact ans
 | M5-14 | The new rule | An operator's take-back, the daily caps |
 | M5-15 | A failed setup blocking only that room's coding tasks | `repo_not_ready` for a linked task; the operator's reset |
 | M5-16 | **No** | All of it |
-| AC-05 | Yes, for provider-resource IDs | Nothing |
+| AC-05 | In part: provider-resource IDs | Organization, agent and asset IDs and bulk paths, which rest on the journey before M5 |
 | AC-13 | A grant taken back, a giver demoted and a requester removed, each with a merge waiting; a replay restoring nothing | A cached assertion |
 | AC-16 | GitHub's refusal of a name and of a merge, recorded as failures | A failed write rolling back |
-| AC-27 | Yes | A task's own deadline |
+| AC-27 | In part: everything but a deadline | A task's own deadline |
 | AC-31 | Yes, both halves | Nothing |
 
 **It left** `podsterdev/e2e-m5-202611112253-a5aa` and `podsterdev/e2e-m5-202611112253-a5aa-f5b05a` for the owner to archive or delete, and the rooms `ws_dba7d5add22146119309c953ccad67a5`, `ws_4bc7d0856de84056921a4e2b8ebe0808` and `ws_ee4e08eb9fc440a7a8f6c224e90f1c37`.

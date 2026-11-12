@@ -521,6 +521,11 @@ export function deliveryProblem(trace, lines = 1, accepted = undefined) {
   if (trace.odd.length) return { text: `the API logged ${trace.odd.join(", and ")} for it`, lost: false };
   if (trace.outcomes.length >= lines) return null;
   const had = trace.outcomes.length ? `only ${trace.outcomes.length} of ${lines} lines (${trace.outcomes.join(", ")})` : "no line";
+  // A total, not a pairing: how many more requests the tail holds than lines, across every event for the delivery.
+  // It can misread one narrow case. A request is counted only if its assertion decodes, and a line is counted
+  // wherever it is. So a request with no line can be hidden by a line that sits in an event whose assertion didn't
+  // decode: the totals then match, and a request with no line reads as a lost event. That ends in another attempt or a
+  // SKIP, which shows nothing. It can never end in a pass: a pass needs every wanted line, with its outcome.
   const unlined = trace.requests.length - trace.outcomes.length;
   if (unlined > 0) return { text: `the API's tail holds ${had} for it, though it holds ${trace.requests.length} of the API's own requests for it ${trace.requests.map((request) => `(ended ${request.ended}, ${request.lines} line(s) logged)`).join(" ")}: the API ran, and a line isn't there`, lost: false };
   const gateway = accepted === undefined ? "" : accepted >= lines ? `. The gateway's tail holds its own line for it, ${accepted} time(s) accepted, and it logs that only once the API has answered 202: so the API ran, and its tail lost the event` : `. The gateway's tail holds ${accepted} accepted line(s) for it, not ${lines}, so it doesn't settle whether the API ran`;

@@ -266,6 +266,10 @@ check(!webhookSecretProblem("zq9-zq9").includes("zq9"), "a refused webhook secre
     const other = source.slice(source.indexOf('check("M5-16b"'), source.indexOf("await check(", source.indexOf('check("M5-16b"') + 1));
     check(other.includes("if (found.problem && found.lost) lostTwice.push(") && other.includes('unshown.tail_lost.push("M5-16b");') && other.indexOf("ok(problems.length === 0") < other.indexOf("if (lostTwice.length) {"), "M5-16b fails on what the product did first, and only then says SKIP for a line lost twice");
     check(source.includes("where the log tail lost a line in each of two attempts") && !source.includes("async function outcomeOf"), "skips for a lost tail line are counted apart at the end");
+    const tallyAt = source.indexOf("say(`\\nM5 on staging: ${tally.summary()}");
+    const notShown = source.indexOf("if (unshown.tail_lost.length) say(`NOT SHOWN by this run: ${unshown.tail_lost.join(\", \")}.");
+    check(tallyAt > 0 && notShown > tallyAt && notShown - tallyAt < 400 && source.slice(notShown, notShown + 500).includes("exit 0 says only that: this run is no evidence for") && source.indexOf("process.exit(exitCode);") > notShown, "right after the tally, a run that left a delivery check unshown says so, and that exit 0 isn't evidence for it");
+    check(source.includes("const exitCode = stopped || left ? 1 : tally.exitCode();") && !/exitCode[^;\n]*tail_lost/.test(source), "the exit code is still the tally's own: a skip doesn't change it");
   }
   // The probe's arguments.
   check(JSON.stringify(probeArgs([]).options) === JSON.stringify({ pull: 999999, count: 3 }) && probeArgs(["--repository", "1454615252", "--pull", "5", "--count", "10"]).options.repository === 1454615252 && probeArgs(["--count", "10"]).options.count === 10, "the probe takes a repository, a pull request number and a count");

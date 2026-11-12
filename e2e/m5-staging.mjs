@@ -1878,4 +1878,6 @@ if (unshown.cannot_tell.length) say(`  of those, where it can't be told which ca
 if (unshown.tail_lost.length) say(`  of those, where the log tail lost a line in each of two attempts: ${unshown.tail_lost.join(", ")}`);
 const exitCode = stopped || left ? 1 : tally.exitCode();
 say(`\nM5 on staging: ${tally.summary()}${stopped ? "; the run stopped early" : ""}${left ? "; a room was left public" : ""}. Exit ${exitCode}.`);
+// A skip isn't a failure, so a run can exit 0 with a check unshown. Said here, beside the tally, where it can't be missed.
+if (unshown.tail_lost.length) say(`NOT SHOWN by this run: ${unshown.tail_lost.join(", ")}. The log tail lost a line in each of two attempts, so ${unshown.tail_lost.length === 1 ? "it was" : "they were"} skipped.${failed.length ? "" : " Nothing failed, and exit 0 says only that: this run is no evidence for " + (unshown.tail_lost.length === 1 ? "that check" : "those checks") + "."}`);
 process.exit(exitCode);

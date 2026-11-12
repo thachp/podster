@@ -432,10 +432,18 @@ fn served_live(
     epoch: u64,
     script: &str,
 ) -> Result<(ServeState, CommitMark), CommitLiveRefusal> {
-    let (committed, mark) = commit_live(state, epoch, script)?;
+    let (committed, mark) = commit_live(state, epoch, script, ReleaseState::Uploading)?;
     let confirmed =
         confirm_served(&committed, &mark, script).map_err(|_| CommitLiveRefusal::EpochMoved)?;
     Ok((confirmed.state, mark))
+}
+
+/// A set-back the test expects to happen: the commit in flight's own failure.
+fn applied(state: &ServeState, mark: &CommitMark, script: &str) -> SetBack {
+    let Ok(back) = set_back(state, mark, script) else {
+        unreachable!("stale set-back");
+    };
+    back
 }
 
 fn versions(state: &ServeState) -> Vec<u64> {
@@ -445,7 +453,7 @@ fn versions(state: &ServeState) -> Vec<u64> {
 #[test]
 fn a_live_commit_sets_every_open_host_under_its_own_epoch_only() {
     let state = serving(None, 2, 4);
-    let Ok((after, mark)) = commit_live(&state, 4, "lab.rel_a") else {
+    let Ok((after, mark)) = commit_live(&state, 4, "lab.rel_a", ReleaseState::Uploading) else {
         unreachable!("refused");
     };
     assert_eq!(scripts(&after), [Some("lab.rel_a"), Some("lab.rel_a")]);
@@ -460,32 +468,40 @@ fn a_live_commit_sets_every_open_host_under_its_own_epoch_only() {
         }
     );
     assert_eq!(
-        commit_live(&state, 3, "lab.rel_a"),
+        commit_live(&state, 3, "lab.rel_a", ReleaseState::Uploading),
         Err(CommitLiveRefusal::EpochMoved)
     );
     assert_eq!(
-        commit_live(&state, 5, "lab.rel_a"),
+        commit_live(&state, 5, "lab.rel_a", ReleaseState::Uploading),
         Err(CommitLiveRefusal::EpochMoved)
     );
 }
 
 #[test]
 fn a_repeated_commit_is_refused_by_the_function_itself() {
-    let first = commit_live(&serving(None, 2, 1), 1, "lab.rel_a");
+    let first = commit_live(
+        &serving(None, 2, 1),
+        1,
+        "lab.rel_a",
+        ReleaseState::Uploading,
+    );
     let Ok((committed, _)) = first.clone() else {
         unreachable!("refused");
     };
     // While its marker is awaited, the same commit again is a replay of the first answer, and another is refused.
-    assert_eq!(commit_live(&committed, 1, "lab.rel_a"), first);
     assert_eq!(
-        commit_live(&committed, 1, "lab.rel_b"),
+        commit_live(&committed, 1, "lab.rel_a", ReleaseState::Uploading),
+        first
+    );
+    assert_eq!(
+        commit_live(&committed, 1, "lab.rel_b", ReleaseState::Uploading),
         Err(CommitLiveRefusal::InFlight)
     );
     let Ok((live, _)) = served_live(&serving(None, 2, 1), 1, "lab.rel_a") else {
         unreachable!("refused");
     };
     assert_eq!(
-        commit_live(&live, 1, "lab.rel_a"),
+        commit_live(&live, 1, "lab.rel_a", ReleaseState::Uploading),
         Err(CommitLiveRefusal::AlreadyLive)
     );
     assert_eq!(
@@ -501,14 +517,14 @@ fn a_repeated_commit_is_refused_by_the_function_itself() {
             closed: true,
         };
     }
-    assert!(commit_live(&closed, 1, "lab.rel_a").is_ok());
+    assert!(commit_live(&closed, 1, "lab.rel_a", ReleaseState::Uploading).is_ok());
 }
 
 #[test]
 fn the_epoch_and_versions_fail_closed_at_their_limits() {
     let spent = serving(None, 1, u64::MAX);
     assert_eq!(
-        commit_live(&spent, u64::MAX, "lab.rel_a"),
+        commit_live(&spent, u64::MAX, "lab.rel_a", ReleaseState::Uploading),
         Err(CommitLiveRefusal::Exhausted)
     );
     let mut full = serving(None, 1, 3);
@@ -516,21 +532,21 @@ fn the_epoch_and_versions_fail_closed_at_their_limits() {
         h.version = u64::MAX - 1;
     }
     assert_eq!(
-        commit_live(&full, 3, "lab.rel_a"),
+        commit_live(&full, 3, "lab.rel_a", ReleaseState::Uploading),
         Err(CommitLiveRefusal::Exhausted)
     );
     // An unpublish never fails: at the limit it pins the epoch, which no commit accepts again.
-    let (down, _) = unpublish(&spent, None);
+    let (down, _) = unpublish(&spent);
     assert_eq!(down.epoch, u64::MAX);
     assert_eq!(
-        commit_live(&down, u64::MAX, "lab.rel_a"),
+        commit_live(&down, u64::MAX, "lab.rel_a", ReleaseState::Uploading),
         Err(CommitLiveRefusal::Exhausted)
     );
-    let (down, _) = unpublish(&serving(Some("lab.rel_a"), 1, u64::MAX - 1), None);
+    let (down, _) = unpublish(&serving(Some("lab.rel_a"), 1, u64::MAX - 1));
     assert_eq!(down.epoch, u64::MAX);
     assert_eq!(scripts(&down), [None]);
     assert_eq!(
-        rollback(&down, u64::MAX, true),
+        rollback(&down, u64::MAX, true, ReleaseState::Uploading),
         Err(RollbackRefusal::NotKept)
     );
 }
@@ -539,12 +555,12 @@ fn the_epoch_and_versions_fail_closed_at_their_limits() {
 fn a_room_made_private_mid_publish_never_goes_live() {
     let started = 4;
     let state = serving(Some("lab.rel_old"), 1, started);
-    let (after, delete) = unpublish(&state, None);
+    let (after, delete) = unpublish(&state);
     assert_eq!(after.epoch, 5);
     assert_eq!(scripts(&after), [None]);
     assert_eq!(delete, ["lab.rel_old"]);
     assert_eq!(
-        commit_live(&after, started, "lab.rel_new"),
+        commit_live(&after, started, "lab.rel_new", ReleaseState::Uploading),
         Err(CommitLiveRefusal::EpochMoved)
     );
     let commit = MERGED;
@@ -573,14 +589,14 @@ fn a_release_never_writes_to_a_cleared_or_suspended_custom_host() {
         unreachable!("no host");
     };
     // A release already uploading commits: the default host switches, the closed custom host stays at nothing.
-    let Ok((second, mark)) = commit_live(&cleared, 7, "lab.rel_2") else {
+    let Ok((second, mark)) = commit_live(&cleared, 7, "lab.rel_2", ReleaseState::Uploading) else {
         unreachable!("refused");
     };
     assert_eq!(scripts(&second), [Some("lab.rel_2"), None]);
     assert!(second.hosts.get(1).is_some_and(|h| h.closed));
     assert_eq!(mark.versions.get(1), Some(&None));
     // A set-back leaves it alone.
-    let back = set_back(&second, &mark, "lab.rel_2");
+    let back = applied(&second, &mark, "lab.rel_2");
     assert_eq!(scripts(&back.state), [Some("lab.rel_1"), None]);
     assert_eq!(back.reverted, [0]);
     // Confirmed instead, the catch-up leaves it alone, and so does a rollback.
@@ -589,17 +605,17 @@ fn a_release_never_writes_to_a_cleared_or_suspended_custom_host() {
     };
     assert_eq!(confirmed.caught_up, Vec::<usize>::new());
     assert_eq!(confirmed.state.kept_previous.as_deref(), Some("lab.rel_1"));
-    let Ok((rolled, _)) = rollback(&confirmed.state, 7, true) else {
+    let Ok((rolled, _)) = rollback(&confirmed.state, 7, true, ReleaseState::Uploading) else {
         unreachable!("refused");
     };
     assert_eq!(scripts(&rolled), [Some("lab.rel_1"), None]);
     // Only a new claim, active at Cloudflare, opens it again, on the release last confirmed served.
-    let Some(reopened) = open_host(&confirmed.state, 1, None) else {
+    let Some(reopened) = open_host(&confirmed.state, 1) else {
         unreachable!("no host");
     };
     assert_eq!(scripts(&reopened), [Some("lab.rel_2"), Some("lab.rel_2")]);
     assert!(reopened.hosts.iter().all(|h| !h.closed));
-    assert_eq!(open_host(&second, 2, None), None);
+    assert_eq!(open_host(&second, 2), None);
 }
 
 /// The first release confirmed served on the default host, with a closed custom host, then a second release committed
@@ -611,7 +627,7 @@ fn second_in_flight() -> (ServeState, CommitMark) {
     let Some(closed) = clear_host(&live, 1) else {
         unreachable!("no host");
     };
-    let Ok(second) = commit_live(&closed, 4, "lab.rel_2") else {
+    let Ok(second) = commit_live(&closed, 4, "lab.rel_2", ReleaseState::Uploading) else {
         unreachable!("refused");
     };
     second
@@ -621,7 +637,7 @@ fn second_in_flight() -> (ServeState, CommitMark) {
 fn a_host_opened_mid_flight_catches_up_when_the_marker_comes_back() {
     let (second, mark) = second_in_flight();
     // Opened in the window: the release last confirmed, never the unconfirmed one.
-    let Some(opened) = open_host(&second, 1, Some(&mark)) else {
+    let Some(opened) = open_host(&second, 1) else {
         unreachable!("no host");
     };
     assert_eq!(scripts(&opened), [Some("lab.rel_2"), Some("lab.rel_1")]);
@@ -636,12 +652,12 @@ fn a_host_opened_mid_flight_catches_up_when_the_marker_comes_back() {
     assert_eq!(confirmed.caught_up, [1]);
     assert_eq!(confirmed.state.kept_previous.as_deref(), Some("lab.rel_1"));
     // So a rollback switches every host back, and isn't refused as already live.
-    let Ok((rolled, _)) = rollback(&confirmed.state, 4, true) else {
+    let Ok((rolled, _)) = rollback(&confirmed.state, 4, true, ReleaseState::Uploading) else {
         unreachable!("refused");
     };
     assert_eq!(scripts(&rolled), [Some("lab.rel_1"), Some("lab.rel_1")]);
     // A confirmation after an unpublish confirms nothing.
-    let (down, _) = unpublish(&opened, Some(&mark));
+    let (down, _) = unpublish(&opened);
     assert_eq!(
         confirm_served(&down, &mark, "lab.rel_2"),
         Err(StaleCompletion)
@@ -651,10 +667,10 @@ fn a_host_opened_mid_flight_catches_up_when_the_marker_comes_back() {
 #[test]
 fn a_host_opened_mid_flight_stays_on_the_confirmed_release_when_the_marker_fails() {
     let (second, mark) = second_in_flight();
-    let Some(opened) = open_host(&second, 1, Some(&mark)) else {
+    let Some(opened) = open_host(&second, 1) else {
         unreachable!("no host");
     };
-    let back = set_back(&opened, &mark, "lab.rel_2");
+    let back = applied(&opened, &mark, "lab.rel_2");
     assert_eq!(scripts(&back.state), [Some("lab.rel_1"), Some("lab.rel_1")]);
     assert_eq!(back.reverted, [0]);
     assert!(back.delete_script);
@@ -662,36 +678,41 @@ fn a_host_opened_mid_flight_stays_on_the_confirmed_release_when_the_marker_fails
 
 #[test]
 fn a_host_opened_after_an_unpublish_serves_nothing() {
-    let (second, mark) = second_in_flight();
-    let (down, delete) = unpublish(&second, Some(&mark));
+    let (second, _) = second_in_flight();
+    let (down, delete) = unpublish(&second);
+    // The unpublish takes the flight's mark from the state, so the release live before the commit is deleted too.
     assert!(delete.contains(&"lab.rel_1".to_owned()));
-    // Whether or not the caller still holds the old mark, nothing queued for deletion is served.
-    for in_flight in [None, Some(&mark)] {
-        let Some(opened) = open_host(&down, 1, in_flight) else {
-            unreachable!("no host");
-        };
-        assert_eq!(scripts(&opened), [None, None], "{in_flight:?}");
-    }
-    assert_eq!(confirmed_script(&down, Some(&mark)), None);
+    assert!(delete.contains(&"lab.rel_2".to_owned()));
+    let Some(opened) = open_host(&down, 1) else {
+        unreachable!("no host");
+    };
+    assert_eq!(scripts(&opened), [None, None]);
+    assert_eq!(confirmed_script(&down), None);
 }
 
 #[test]
 fn a_host_opened_before_any_release_was_served_serves_nothing() {
     let state = serving(None, 2, 1);
-    let Some(opened) = open_host(&state, 1, None) else {
+    let Some(opened) = open_host(&state, 1) else {
         unreachable!("no host");
     };
     assert_eq!(scripts(&opened), [None, None]);
     // Nor during the very first release's flight.
-    let Ok((first, mark)) = commit_live(&state, 1, "lab.rel_1") else {
+    let Ok((first, mark)) = commit_live(&state, 1, "lab.rel_1", ReleaseState::Uploading) else {
         unreachable!("refused");
     };
-    let Some(mid) = open_host(&first, 1, Some(&mark)) else {
+    let Some(mid) = open_host(&first, 1) else {
         unreachable!("no host");
     };
     assert_eq!(scripts(&mid), [Some("lab.rel_1"), None]);
-    assert_eq!(confirmed_script(&first, Some(&mark)), None);
-    assert_eq!(confirmed_script(&first, None), Some("lab.rel_1".to_owned()));
+    assert_eq!(confirmed_script(&first), None);
+    let Ok(confirmed) = confirm_served(&first, &mark, "lab.rel_1") else {
+        unreachable!("not confirmed");
+    };
+    assert_eq!(
+        confirmed_script(&confirmed.state),
+        Some("lab.rel_1".to_owned())
+    );
 }
 
 #[test]
@@ -699,13 +720,14 @@ fn an_unpublish_keeps_closed_hosts_closed() {
     let Some(state) = clear_host(&serving(Some("lab.rel_1"), 2, 1), 1) else {
         unreachable!("no host");
     };
-    let (down, _) = unpublish(&state, None);
+    let (down, _) = unpublish(&state);
     assert_eq!(
         down.hosts.iter().map(|h| h.closed).collect::<Vec<_>>(),
         [false, true]
     );
     // So a release committed after it, under the new epoch, still doesn't write to the closed host.
-    let Ok((after, _)) = commit_live(&down, down.epoch, "lab.rel_2") else {
+    let Ok((after, _)) = commit_live(&down, down.epoch, "lab.rel_2", ReleaseState::Uploading)
+    else {
         unreachable!("refused");
     };
     assert_eq!(scripts(&after), [Some("lab.rel_2"), None]);
@@ -722,14 +744,14 @@ fn a_second_release_failing_after_the_first_is_live_leaves_the_first_serving() {
         next_state(ReleaseState::Uploading, ReleaseEvent::Fail),
         Ok(ReleaseState::Failed)
     );
-    let Ok((second, mark)) = commit_live(&live, 2, "lab.rel_2") else {
+    let Ok((second, mark)) = commit_live(&live, 2, "lab.rel_2", ReleaseState::Uploading) else {
         unreachable!("second refused");
     };
     assert_eq!(
         marker_outcome(None, "rel_2", MARKER_WAIT_MS),
         MarkerOutcome::Failed
     );
-    let back = set_back(&second, &mark, "lab.rel_2");
+    let back = applied(&second, &mark, "lab.rel_2");
     assert_eq!(scripts(&back.state), [Some(first)]);
     assert_eq!(back.reverted, [0]);
     assert!(back.delete_script);
@@ -745,7 +767,12 @@ fn a_second_release_failing_after_the_first_is_live_leaves_the_first_serving() {
 
 #[test]
 fn a_set_back_is_host_by_host_and_keeps_a_script_something_still_serves() {
-    let Ok((live, mark)) = commit_live(&serving(Some("lab.rel_1"), 2, 3), 3, "lab.rel_2") else {
+    let Ok((live, mark)) = commit_live(
+        &serving(Some("lab.rel_1"), 2, 3),
+        3,
+        "lab.rel_2",
+        ReleaseState::Uploading,
+    ) else {
         unreachable!("refused");
     };
     // The custom host changed since the commit: here, opened again after a claim, still naming the failed script.
@@ -753,7 +780,7 @@ fn a_set_back_is_host_by_host_and_keeps_a_script_something_still_serves() {
     if let Some(h) = changed.hosts.get_mut(1) {
         h.version += 1;
     }
-    let back = set_back(&changed, &mark, "lab.rel_2");
+    let back = applied(&changed, &mark, "lab.rel_2");
     assert_eq!(back.reverted, [0]);
     assert_eq!(scripts(&back.state), [Some("lab.rel_1"), Some("lab.rel_2")]);
     // So its script is still served, and the caller mustn't delete it.
@@ -778,14 +805,13 @@ fn a_set_back_needs_the_commits_epoch() {
             mark: mark.clone(),
         }),
     };
-    let back = set_back(&state, &mark, "lab.rel_2");
+    let back = applied(&state, &mark, "lab.rel_2");
     assert_eq!(
         (back.state.epoch, &back.state.hosts),
         (state.epoch, &state.hosts)
     );
     assert!(back.reverted.is_empty());
     assert!(!back.delete_script);
-    assert!(!back.stale);
     // The same with the epoch right sets it back.
     let same = CommitMark { epoch: 9, ..mark };
     let right = ServeState {
@@ -795,31 +821,33 @@ fn a_set_back_needs_the_commits_epoch() {
         }),
         ..state
     };
-    assert_eq!(set_back(&right, &same, "lab.rel_2").reverted, [0]);
+    assert_eq!(applied(&right, &same, "lab.rel_2").reverted, [0]);
 }
 
 #[test]
 fn a_set_back_after_an_unpublish_changes_nothing() {
-    let Ok((live, mark)) = commit_live(&serving(Some("lab.rel_1"), 2, 3), 3, "lab.rel_2") else {
+    let Ok((live, mark)) = commit_live(
+        &serving(Some("lab.rel_1"), 2, 3),
+        3,
+        "lab.rel_2",
+        ReleaseState::Uploading,
+    ) else {
         unreachable!("refused");
     };
-    let (down, delete) = unpublish(&live, Some(&mark));
+    let (down, delete) = unpublish(&live);
     // The unpublish deletes the failed release's script and the one live before it, which sat only in the mark.
     assert_eq!(delete, ["lab.rel_1", "lab.rel_2"]);
     // The unpublish ended the flight: the set-back is stale, changes nothing and orders nothing deleted; the unpublish's
     // own list already holds the script.
-    let back = set_back(&down, &mark, "lab.rel_2");
-    assert!(back.stale);
-    assert!(back.reverted.is_empty());
-    assert_eq!(scripts(&back.state), [None, None]);
-    assert!(!back.delete_script);
+    assert_eq!(set_back(&down, &mark, "lab.rel_2"), Err(StaleCompletion));
+    assert_eq!(scripts(&down), [None, None]);
     let Some(cleared) = clear_host(&live, 1) else {
         unreachable!("no host");
     };
-    assert_eq!(set_back(&cleared, &mark, "lab.rel_2").reverted, [0]);
+    assert_eq!(applied(&cleared, &mark, "lab.rel_2").reverted, [0]);
     // Another commit can't land in between: it is refused while this one is in flight.
     assert_eq!(
-        commit_live(&live, 3, "lab.rel_3"),
+        commit_live(&live, 3, "lab.rel_3", ReleaseState::Uploading),
         Err(CommitLiveRefusal::InFlight)
     );
     let short = CommitMark {
@@ -827,15 +855,16 @@ fn a_set_back_after_an_unpublish_changes_nothing() {
         before: vec![],
         ..mark.clone()
     };
-    assert!(set_back(&live, &short, "lab.rel_2").reverted.is_empty());
+    // A mark that isn't the flight's is stale, and sets nothing back.
+    assert_eq!(set_back(&live, &short, "lab.rel_2"), Err(StaleCompletion));
 }
 
 #[test]
 fn a_late_or_duplicated_job_changes_nothing() {
     let state = serving(None, 1, 6);
-    let (down, _) = unpublish(&state, None);
+    let (down, _) = unpublish(&state);
     assert_eq!(
-        commit_live(&down, 6, "lab.rel_late"),
+        commit_live(&down, 6, "lab.rel_late", ReleaseState::Uploading),
         Err(CommitLiveRefusal::EpochMoved)
     );
     for done in [
@@ -855,11 +884,11 @@ fn a_late_or_duplicated_job_changes_nothing() {
     }
     assert!(next_state(ReleaseState::Live, ReleaseEvent::CommitLive).is_err());
     assert!(next_state(ReleaseState::Served, ReleaseEvent::MarkerSeen).is_err());
-    let Ok((live, mark)) = commit_live(&state, 6, "lab.rel_a") else {
+    let Ok((live, mark)) = commit_live(&state, 6, "lab.rel_a", ReleaseState::Uploading) else {
         unreachable!("refused");
     };
     assert_eq!(
-        commit_live(&live, 6, "lab.rel_a"),
+        commit_live(&live, 6, "lab.rel_a", ReleaseState::Uploading),
         Ok((live.clone(), mark.clone()))
     );
     // Confirmed, then a newer release served: a late set-back of the first changes nothing.
@@ -869,7 +898,7 @@ fn a_late_or_duplicated_job_changes_nothing() {
     let Ok((newer, _)) = served_live(&confirmed.state, 6, "lab.rel_b") else {
         unreachable!("refused");
     };
-    assert!(set_back(&newer, &mark, "lab.rel_a").reverted.is_empty());
+    assert_eq!(set_back(&newer, &mark, "lab.rel_a"), Err(StaleCompletion));
     assert_eq!(
         next_state(ReleaseState::Uploading, ReleaseEvent::UploadUnknown),
         Ok(ReleaseState::Uncertain)
@@ -911,14 +940,20 @@ fn a_served_release_keeps_the_one_before_and_deletes_the_one_before_that() {
 #[test]
 fn a_rollback_switches_only_to_a_kept_script_cloudflare_says_exists() {
     let mut state = serving(Some("lab.rel_2"), 2, 9);
-    assert_eq!(rollback(&state, 9, true), Err(RollbackRefusal::NotKept));
-    state.kept_previous = Some("lab.rel_1".into());
-    assert_eq!(rollback(&state, 9, false), Err(RollbackRefusal::NotKept));
     assert_eq!(
-        rollback(&state, 8, true),
+        rollback(&state, 9, true, ReleaseState::Uploading),
+        Err(RollbackRefusal::NotKept)
+    );
+    state.kept_previous = Some("lab.rel_1".into());
+    assert_eq!(
+        rollback(&state, 9, false, ReleaseState::Uploading),
+        Err(RollbackRefusal::NotKept)
+    );
+    assert_eq!(
+        rollback(&state, 8, true, ReleaseState::Uploading),
         Err(RollbackRefusal::Commit(CommitLiveRefusal::EpochMoved))
     );
-    let Ok((back, mark)) = rollback(&state, 9, true) else {
+    let Ok((back, mark)) = rollback(&state, 9, true, ReleaseState::Uploading) else {
         unreachable!("refused");
     };
     assert_eq!(scripts(&back), [Some("lab.rel_1"), Some("lab.rel_1")]);
@@ -926,10 +961,10 @@ fn a_rollback_switches_only_to_a_kept_script_cloudflare_says_exists() {
         mark.before,
         [Some("lab.rel_2".to_owned()), Some("lab.rel_2".to_owned())]
     );
-    let (down, _) = unpublish(&state, None);
+    let (down, _) = unpublish(&state);
     assert_eq!(down.kept_previous, None);
     assert_eq!(
-        rollback(&down, down.epoch, true),
+        rollback(&down, down.epoch, true, ReleaseState::Uploading),
         Err(RollbackRefusal::NotKept)
     );
     assert_eq!(RollbackRefusal::NotKept.code(), "rollback_not_kept");
@@ -946,13 +981,13 @@ type RecheckChange = fn(&mut Recheck);
 fn an_unpublish_raises_the_epoch_clears_every_host_and_forgets_the_kept_script() {
     let mut state = serving(Some("lab.rel_2"), 2, 4);
     state.kept_previous = Some("lab.rel_1".into());
-    let (after, delete) = unpublish(&state, None);
+    let (after, delete) = unpublish(&state);
     assert_eq!(after.epoch, 5);
     assert_eq!(scripts(&after), [None, None]);
     assert_eq!(versions(&after), [11, 12]);
     assert_eq!(after.kept_previous, None);
     assert_eq!(delete, ["lab.rel_1", "lab.rel_2"]);
-    let (quiet, none) = unpublish(&serving(None, 1, 0), None);
+    let (quiet, none) = unpublish(&serving(None, 1, 0));
     assert_eq!((quiet.epoch, none.len()), (1, 0));
 }
 
@@ -1305,10 +1340,10 @@ fn the_hourly_reconcile_deletes_only_what_fits_the_rule_and_no_room_claims() {
 fn a_late_success_after_a_set_back_confirms_nothing() {
     // Default A; B commits; a host opens; B's marker fails and B is set back and ordered deleted.
     let (second, mark) = second_in_flight();
-    let Some(opened) = open_host(&second, 1, Some(&mark)) else {
+    let Some(opened) = open_host(&second, 1) else {
         unreachable!("no host");
     };
-    let back = set_back(&opened, &mark, "lab.rel_2");
+    let back = applied(&opened, &mark, "lab.rel_2");
     assert!(back.delete_script);
     assert_eq!(scripts(&back.state), [Some("lab.rel_1"), Some("lab.rel_1")]);
     // A late or duplicated success: nothing is confirmed, so no host goes to the script being deleted.
@@ -1337,7 +1372,7 @@ fn a_stale_success_after_a_later_release_confirms_nothing() {
 #[test]
 fn a_repeated_confirmation_changes_nothing_more() {
     let (second, mark) = second_in_flight();
-    let Some(opened) = open_host(&second, 1, Some(&mark)) else {
+    let Some(opened) = open_host(&second, 1) else {
         unreachable!("no host");
     };
     let Ok(first) = confirm_served(&opened, &mark, "lab.rel_2") else {
@@ -1348,10 +1383,10 @@ fn a_repeated_confirmation_changes_nothing_more() {
         confirm_served(&first.state, &mark, "lab.rel_2"),
         Err(StaleCompletion)
     );
-    let back = set_back(&first.state, &mark, "lab.rel_2");
-    assert!(back.stale);
-    assert_eq!(back.state, first.state);
-    assert!(!back.delete_script);
+    assert_eq!(
+        set_back(&first.state, &mark, "lab.rel_2"),
+        Err(StaleCompletion)
+    );
 }
 
 #[test]
@@ -1360,13 +1395,13 @@ fn one_release_in_flight_at_a_time_enforced_in_core() {
     assert!(second.in_flight.is_some());
     // A second commit and a rollback are refused while the marker is awaited.
     assert_eq!(
-        commit_live(&second, 4, "lab.rel_3"),
+        commit_live(&second, 4, "lab.rel_3", ReleaseState::Uploading),
         Err(CommitLiveRefusal::InFlight)
     );
     let mut kept = second.clone();
     kept.kept_previous = Some("lab.rel_0".into());
     assert_eq!(
-        rollback(&kept, 4, true),
+        rollback(&kept, 4, true, ReleaseState::Uploading),
         Err(RollbackRefusal::Commit(CommitLiveRefusal::InFlight))
     );
     assert_eq!(CommitLiveRefusal::InFlight.code(), "release_in_flight");
@@ -1375,13 +1410,13 @@ fn one_release_in_flight_at_a_time_enforced_in_core() {
         unreachable!("not confirmed");
     };
     assert!(confirmed.state.in_flight.is_none());
-    assert!(commit_live(&confirmed.state, 4, "lab.rel_3").is_ok());
-    let back = set_back(&second, &mark, "lab.rel_2");
+    assert!(commit_live(&confirmed.state, 4, "lab.rel_3", ReleaseState::Uploading).is_ok());
+    let back = applied(&second, &mark, "lab.rel_2");
     assert!(back.state.in_flight.is_none());
-    assert!(commit_live(&back.state, 4, "lab.rel_3").is_ok());
-    let (down, _) = unpublish(&second, Some(&mark));
+    assert!(commit_live(&back.state, 4, "lab.rel_3", ReleaseState::Uploading).is_ok());
+    let (down, _) = unpublish(&second);
     assert!(down.in_flight.is_none());
-    assert!(commit_live(&down, down.epoch, "lab.rel_3").is_ok());
+    assert!(commit_live(&down, down.epoch, "lab.rel_3", ReleaseState::Uploading).is_ok());
 }
 
 #[test]
@@ -1394,10 +1429,10 @@ fn a_failed_rollback_never_orders_the_kept_script_deleted() {
         unreachable!("refused");
     };
     assert_eq!(b.kept_previous.as_deref(), Some("lab.rel_1"));
-    let Ok((rolled, mark)) = rollback(&b, 3, true) else {
+    let Ok((rolled, mark)) = rollback(&b, 3, true, ReleaseState::Uploading) else {
         unreachable!("refused");
     };
-    let back = set_back(&rolled, &mark, "lab.rel_1");
+    let back = applied(&rolled, &mark, "lab.rel_1");
     assert_eq!(scripts(&back.state), [Some("lab.rel_2")]);
     // A is no longer served, but it is still the kept script, so it isn't deleted.
     assert_eq!(back.state.kept_previous.as_deref(), Some("lab.rel_1"));
@@ -1408,7 +1443,7 @@ fn a_failed_rollback_never_orders_the_kept_script_deleted() {
 fn opening_a_host_and_catching_it_up_each_move_its_version() {
     let (second, mark) = second_in_flight();
     let before = second.hosts.get(1).map(|h| h.version);
-    let Some(opened) = open_host(&second, 1, Some(&mark)) else {
+    let Some(opened) = open_host(&second, 1) else {
         unreachable!("no host");
     };
     let opened_version = opened.hosts.get(1).map(|h| h.version);
@@ -1433,31 +1468,31 @@ fn a_duplicated_failure_never_frees_a_newer_flight() {
     let Ok((a, _)) = served_live(&serving(None, 1, 5), 5, "lab.rel_a") else {
         unreachable!("refused");
     };
-    let Ok((b, mark_b)) = commit_live(&a, 5, "lab.rel_b") else {
+    let Ok((b, mark_b)) = commit_live(&a, 5, "lab.rel_b", ReleaseState::Uploading) else {
         unreachable!("refused");
     };
-    let back_b = set_back(&b, &mark_b, "lab.rel_b");
+    let back_b = applied(&b, &mark_b, "lab.rel_b");
     assert_eq!(scripts(&back_b.state), [Some("lab.rel_a")]);
     assert!(back_b.state.in_flight.is_none());
     // C commits: it is the flight now.
-    let Ok((c, mark_c)) = commit_live(&back_b.state, 5, "lab.rel_c") else {
+    let Ok((c, mark_c)) = commit_live(&back_b.state, 5, "lab.rel_c", ReleaseState::Uploading)
+    else {
         unreachable!("refused");
     };
     // A duplicated failure for B arrives: stale. Nothing changes, and C's flight stays.
-    let dup = set_back(&c, &mark_b, "lab.rel_b");
-    assert!(dup.stale);
-    assert_eq!(dup.state, c);
-    assert!(!dup.delete_script);
+    assert_eq!(set_back(&c, &mark_b, "lab.rel_b"), Err(StaleCompletion));
+    let dup = c.clone();
     // So D is refused while C flies, and can't record an unconfirmed C as its `before`.
     assert_eq!(
-        commit_live(&dup.state, 5, "lab.rel_d"),
+        commit_live(&dup, 5, "lab.rel_d", ReleaseState::Uploading),
         Err(CommitLiveRefusal::InFlight)
     );
     // C's marker fails: back to A, and C may be deleted. Then D commits on A, the confirmed release.
-    let back_c = set_back(&dup.state, &mark_c, "lab.rel_c");
+    let back_c = applied(&dup, &mark_c, "lab.rel_c");
     assert_eq!(scripts(&back_c.state), [Some("lab.rel_a")]);
     assert!(back_c.delete_script);
-    let Ok((_, mark_d)) = commit_live(&back_c.state, 5, "lab.rel_d") else {
+    let Ok((_, mark_d)) = commit_live(&back_c.state, 5, "lab.rel_d", ReleaseState::Uploading)
+    else {
         unreachable!("refused");
     };
     assert_eq!(mark_d.before, [Some("lab.rel_a".to_owned())]);
@@ -1472,7 +1507,7 @@ fn a_stale_success_during_a_rollback_to_the_same_release_confirms_nothing() {
     let Ok((c, _)) = served_live(&b, 2, "lab.rel_c") else {
         unreachable!("refused");
     };
-    let Ok((rolling, mark_r)) = rollback(&c, 2, true) else {
+    let Ok((rolling, mark_r)) = rollback(&c, 2, true, ReleaseState::Uploading) else {
         unreachable!("refused");
     };
     assert_eq!(scripts(&rolling), [Some("lab.rel_b")]);
@@ -1491,7 +1526,7 @@ fn clearing_or_opening_a_host_mid_flight_leaves_the_flight_alone() {
     let (second, mark) = second_in_flight();
     let flight = second.in_flight.clone();
     assert!(flight.is_some());
-    let Some(opened) = open_host(&second, 1, Some(&mark)) else {
+    let Some(opened) = open_host(&second, 1) else {
         unreachable!("no host");
     };
     assert_eq!(opened.in_flight, flight);
@@ -1505,19 +1540,143 @@ fn clearing_or_opening_a_host_mid_flight_leaves_the_flight_alone() {
 #[test]
 fn a_retried_commit_is_replayed_and_never_told_to_fail() {
     let state = serving(Some("lab.rel_a"), 2, 3);
-    let first = commit_live(&state, 3, "lab.rel_b");
+    let first = commit_live(&state, 3, "lab.rel_b", ReleaseState::Uploading);
     let Ok((committed, mark)) = first.clone() else {
         unreachable!("refused");
     };
     // Asked again, even under an epoch the job got wrong, the same commit gets the same answer.
-    assert_eq!(commit_live(&committed, 3, "lab.rel_b"), first);
-    assert_eq!(commit_live(&committed, 2, "lab.rel_b"), first);
+    assert_eq!(
+        commit_live(&committed, 3, "lab.rel_b", ReleaseState::Uploading),
+        first
+    );
+    assert_eq!(
+        commit_live(&committed, 2, "lab.rel_b", ReleaseState::Uploading),
+        first
+    );
     // A rollback is refused while anything is in flight.
     let mut kept = committed.clone();
     kept.kept_previous = Some("lab.rel_a".into());
     assert_eq!(
-        rollback(&kept, 3, true),
+        rollback(&kept, 3, true, ReleaseState::Uploading),
         Err(RollbackRefusal::Commit(CommitLiveRefusal::InFlight))
     );
     assert!(confirm_served(&committed, &mark, "lab.rel_b").is_ok());
+}
+
+#[test]
+fn a_release_that_ended_never_goes_live_again() {
+    // B commits, its marker fails, and it is set back; its record is now failed.
+    let Ok((a, _)) = served_live(&serving(None, 1, 2), 2, "lab.rel_a") else {
+        unreachable!("refused");
+    };
+    let Ok((b, mark_b)) = commit_live(&a, 2, "lab.rel_b", ReleaseState::Uploading) else {
+        unreachable!("refused");
+    };
+    let back = applied(&b, &mark_b, "lab.rel_b");
+    assert!(back.delete_script);
+    let failed = next_state(ReleaseState::Live, ReleaseEvent::Fail).unwrap_or(ReleaseState::Live);
+    // The same release asked again is refused by core itself, so no host goes to the script being deleted.
+    assert_eq!(
+        commit_live(&back.state, 2, "lab.rel_b", failed),
+        Err(CommitLiveRefusal::ReleaseEnded)
+    );
+    for ended in [
+        ReleaseState::Failed,
+        ReleaseState::Declined,
+        ReleaseState::Replaced,
+        ReleaseState::Unpublished,
+    ] {
+        assert_eq!(
+            commit_live(&back.state, 2, "lab.rel_b", ended),
+            Err(CommitLiveRefusal::ReleaseEnded),
+            "{ended:?}"
+        );
+    }
+    for early in [
+        ReleaseState::AwaitingApproval,
+        ReleaseState::Queued,
+        ReleaseState::Uncertain,
+        ReleaseState::Served,
+        ReleaseState::Live,
+    ] {
+        assert_eq!(
+            commit_live(&back.state, 2, "lab.rel_c", early),
+            Err(CommitLiveRefusal::ReleaseNotUploading),
+            "{early:?}"
+        );
+    }
+    assert_eq!(CommitLiveRefusal::ReleaseEnded.code(), "release_ended");
+    assert_eq!(
+        CommitLiveRefusal::ReleaseNotUploading.code(),
+        "release_not_uploading"
+    );
+    // A rollback is refused the same way.
+    let Ok((c, _)) = served_live(&back.state, 2, "lab.rel_c") else {
+        unreachable!("refused");
+    };
+    assert_eq!(
+        rollback(&c, 2, true, ReleaseState::Failed),
+        Err(RollbackRefusal::Commit(CommitLiveRefusal::ReleaseEnded))
+    );
+}
+
+#[test]
+fn the_default_host_is_never_cleared() {
+    let (second, mark) = second_in_flight();
+    assert_eq!(clear_host(&second, 0), None);
+    // So the flight's own confirmation still finds the default host as it wrote it.
+    assert!(confirm_served(&second, &mark, "lab.rel_2").is_ok());
+}
+
+#[test]
+fn a_retried_rollback_is_replayed_and_a_rollback_is_refused_during_another_flight() {
+    let Ok((a, _)) = served_live(&serving(None, 1, 3), 3, "lab.rel_a") else {
+        unreachable!("refused");
+    };
+    let Ok((b, _)) = served_live(&a, 3, "lab.rel_b") else {
+        unreachable!("refused");
+    };
+    let first = rollback(&b, 3, true, ReleaseState::Uploading);
+    let Ok((rolling, _)) = first.clone() else {
+        unreachable!("refused");
+    };
+    // The same rollback asked again, its record live, gets its first answer.
+    assert_eq!(rollback(&rolling, 3, true, ReleaseState::Live), first);
+    // During another release's flight, a rollback is refused.
+    let Ok((c_flight, _)) = commit_live(&b, 3, "lab.rel_c", ReleaseState::Uploading) else {
+        unreachable!("refused");
+    };
+    assert_eq!(
+        rollback(&c_flight, 3, true, ReleaseState::Uploading),
+        Err(RollbackRefusal::Commit(CommitLiveRefusal::InFlight))
+    );
+}
+
+#[test]
+fn a_stale_failure_with_an_old_mark_for_the_flights_own_script_leaves_the_flight() {
+    // B served, then C served with B kept; a rollback to B is in flight with its own mark.
+    let Ok((b, mark_b)) = served_live(&serving(Some("lab.rel_a"), 1, 4), 4, "lab.rel_b") else {
+        unreachable!("refused");
+    };
+    let Ok((c, _)) = served_live(&b, 4, "lab.rel_c") else {
+        unreachable!("refused");
+    };
+    let Ok((rolling, mark_r)) = rollback(&c, 4, true, ReleaseState::Uploading) else {
+        unreachable!("refused");
+    };
+    // B's old failure arrives, naming the same script with an old mark: stale, and the flight stays.
+    assert_eq!(
+        set_back(&rolling, &mark_b, "lab.rel_b"),
+        Err(StaleCompletion)
+    );
+    assert!(rolling
+        .in_flight
+        .as_ref()
+        .is_some_and(|f| f.is(&mark_r, "lab.rel_b")));
+    assert!(!rolling
+        .in_flight
+        .as_ref()
+        .is_some_and(|f| f.is(&mark_b, "lab.rel_b")));
+    // Only the rollback's own failure sets it back.
+    assert!(set_back(&rolling, &mark_r, "lab.rel_b").is_ok());
 }

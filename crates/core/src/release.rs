@@ -440,6 +440,12 @@ pub enum CommitLiveRefusal {
     /// `release_in_flight`: another commit or rollback is still waiting for its marker. Added after the second review of
     /// PR #311.
     InFlight,
+    /// `release_ended`: the release already ended (failed, declined, replaced or unpublished). It can never go live, even
+    /// if the same script is asked for again after its set-back. Added after the review of PR #311.
+    ReleaseEnded,
+    /// `release_not_uploading`: the release isn't at the step that commits it live: still awaiting approval or queued,
+    /// its upload uncertain, or already served. Added after the review of PR #311.
+    ReleaseNotUploading,
 }
 
 impl CommitLiveRefusal {
@@ -450,6 +456,8 @@ impl CommitLiveRefusal {
             CommitLiveRefusal::AlreadyLive => "release_already_live",
             CommitLiveRefusal::Exhausted => "release_epoch_exhausted",
             CommitLiveRefusal::InFlight => "release_in_flight",
+            CommitLiveRefusal::ReleaseEnded => "release_ended",
+            CommitLiveRefusal::ReleaseNotUploading => "release_not_uploading",
         }
     }
 }
@@ -463,18 +471,32 @@ fn bump(version: u64) -> Option<u64> {
 /// open hosts. Each open host goes to the release's script; a closed host is left exactly as it is. It returns the mark a
 /// set-back and an unpublish read. The previous live script becomes the kept one only once this release is served
 /// ([`after_served`]).
+///
+/// `release` is the release's own state, from its record: core refuses to commit one that isn't uploading, so a release
+/// that ended (failed after its set-back among them) never goes live again, whatever the serve state says.
 pub fn commit_live(
     state: &ServeState,
     release_epoch: u64,
     script: &str,
+    release: ReleaseState,
 ) -> Result<(ServeState, CommitMark), CommitLiveRefusal> {
     // A retried job asking again for the commit in flight gets the first answer, before anything else is checked, so it
-    // is never told to fail and delete its own script.
+    // is never told to fail and delete its own script. Its record says live, or still uploading if it was read first.
     if let Some(flight) = &state.in_flight {
-        if flight.script == script {
+        if flight.script == script
+            && matches!(release, ReleaseState::Live | ReleaseState::Uploading)
+        {
             return Ok((state.clone(), flight.mark.clone()));
         }
-        return Err(CommitLiveRefusal::InFlight);
+        if flight.script != script {
+            return Err(CommitLiveRefusal::InFlight);
+        }
+    }
+    if release.is_final() {
+        return Err(CommitLiveRefusal::ReleaseEnded);
+    }
+    if release != ReleaseState::Uploading {
+        return Err(CommitLiveRefusal::ReleaseNotUploading);
     }
     if state.epoch == u64::MAX {
         return Err(CommitLiveRefusal::Exhausted);
@@ -555,23 +577,20 @@ pub struct SetBack {
     /// that changed since still serves it, and the caller must not delete it; the script-delete job runs when the last
     /// host stops naming it.
     pub delete_script: bool,
-    /// The set-back wasn't for the commit in flight: a late, repeated or stale failure. Nothing changed, and nothing is
-    /// to be deleted. Added in the reviews of PR #311.
-    pub stale: bool,
 }
 
 /// The set-back after a release's marker never came back, **host by host**: a host goes back to what it served before
 /// only if the epoch is still the commit's and that host's own version is still exactly what the commit wrote. A host
 /// that changed since, or was closed, stays as it is. An unpublish since moved the epoch, so nothing is set back.
-pub fn set_back(state: &ServeState, mark: &CommitMark, script: &str) -> SetBack {
-    // Only the failure of the commit in flight sets anything back, or ends the flight.
+/// Only the failure of the commit in flight does anything; for any other mark the answer is [`StaleCompletion`], which
+/// changes nothing and orders nothing deleted, and can't be mistaken for a set-back that happened.
+pub fn set_back(
+    state: &ServeState,
+    mark: &CommitMark,
+    script: &str,
+) -> Result<SetBack, StaleCompletion> {
     if !state.in_flight.as_ref().is_some_and(|f| f.is(mark, script)) {
-        return SetBack {
-            state: state.clone(),
-            reverted: Vec::new(),
-            delete_script: false,
-            stale: true,
-        };
+        return Err(StaleCompletion);
     }
     let epoch_holds = state.epoch == mark.epoch && state.epoch != u64::MAX;
     let mut reverted = Vec::new();
@@ -603,7 +622,7 @@ pub fn set_back(state: &ServeState, mark: &CommitMark, script: &str) -> SetBack 
     // Never while a host names it, nor while it is the kept script, which a failed rollback's script is.
     let delete_script = !hosts.iter().any(|h| h.script.as_deref() == Some(script))
         && state.kept_previous.as_deref() != Some(script);
-    SetBack {
+    Ok(SetBack {
         state: ServeState {
             epoch: state.epoch,
             hosts,
@@ -612,8 +631,7 @@ pub fn set_back(state: &ServeState, mark: &CommitMark, script: &str) -> SetBack 
         },
         reverted,
         delete_script,
-        stale: false,
-    }
+    })
 }
 
 /// Why a rollback can't switch.
@@ -640,13 +658,21 @@ impl RollbackRefusal {
 /// started under, and only once Cloudflare's own answer says that script still exists (`kept_exists`). Closed hosts are
 /// left as they are, as for a commit. It returns the new state and the mark: the rollback is its own release, and waits
 /// for its marker like any other.
+///
+/// `release` is the rollback's own release state, as for [`commit_live`]. While a flight is open, the same rollback
+/// asked again (the flight's script is the kept one) is a retry, and replays its first answer; anything else in flight
+/// refuses it.
 pub fn rollback(
     state: &ServeState,
     release_epoch: u64,
     kept_exists: bool,
+    release: ReleaseState,
 ) -> Result<(ServeState, CommitMark), RollbackRefusal> {
-    // Refused while anything is in flight, even a rollback to the same script: core never replays a rollback.
-    if state.in_flight.is_some() {
+    if let Some(flight) = &state.in_flight {
+        if state.kept_previous.as_deref() == Some(flight.script.as_str()) {
+            return commit_live(state, release_epoch, &flight.script, release)
+                .map_err(RollbackRefusal::Commit);
+        }
         return Err(RollbackRefusal::Commit(CommitLiveRefusal::InFlight));
     }
     let kept = state
@@ -654,7 +680,7 @@ pub fn rollback(
         .clone()
         .filter(|_| kept_exists)
         .ok_or(RollbackRefusal::NotKept)?;
-    commit_live(state, release_epoch, &kept).map_err(RollbackRefusal::Commit)
+    commit_live(state, release_epoch, &kept, release).map_err(RollbackRefusal::Commit)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -716,20 +742,20 @@ impl UnpublishTrigger {
 /// The trigger's own change to the room's serve state: the epoch up by one, every host to nothing with its version up,
 /// and the kept script forgotten, so nothing can be rolled back to afterwards. The scripts to delete are what the hosts
 /// served, what was kept, and, when an unpublish lands between a commit and its marker, what was live before that
-/// commit (`in_flight`, the commit's mark). An unpublish of a room serving nothing still raises the epoch, so a release in
+/// commit, from the state's own flight. An unpublish of a room serving nothing still raises the epoch, so a release in
 /// flight can't go live after it.
 ///
 /// **It never fails.** If the epoch can't go up it is set to `u64::MAX`, which [`commit_live`] and [`rollback`] refuse
 /// for ever, so the room fails closed; a version that can't go up stays at `u64::MAX`, which no commit writes.
-pub fn unpublish(state: &ServeState, in_flight: Option<&CommitMark>) -> (ServeState, Vec<String>) {
+pub fn unpublish(state: &ServeState) -> (ServeState, Vec<String>) {
     let mut delete: Vec<String> = state
         .hosts
         .iter()
         .filter_map(|h| h.script.clone())
         .collect();
     delete.extend(state.kept_previous.clone());
-    if let Some(mark) = in_flight {
-        delete.extend(mark.before.iter().flatten().cloned());
+    if let Some(flight) = &state.in_flight {
+        delete.extend(flight.mark.before.iter().flatten().cloned());
     }
     delete.sort();
     delete.dedup();
@@ -756,6 +782,11 @@ pub fn unpublish(state: &ServeState, in_flight: Option<&CommitMark>) -> (ServeSt
 /// and is closed, first, so its applier removes the entry before the hostname is deleted at Cloudflare, and no commit,
 /// rollback or set-back writes to it again. The epoch doesn't move. `None` if there's no such host.
 pub fn clear_host(state: &ServeState, host: usize) -> Option<ServeState> {
+    // The default host isn't a custom hostname: it never closes. Clearing it mid-flight would make the flight's own
+    // confirm stale and leave the flight open.
+    if host == 0 {
+        return None;
+    }
     state.hosts.get(host)?;
     Some(ServeState {
         epoch: state.epoch,
@@ -781,12 +812,16 @@ pub fn clear_host(state: &ServeState, host: usize) -> Option<ServeState> {
 }
 
 /// The script the room last confirmed served, from its own state: the default host's script as the release before an
-/// in-flight commit left it (`in_flight`, that commit's mark, while its marker hasn't come back), or the default host's
-/// script now when nothing is in flight. Nothing when the room is unpublished, or no release was ever confirmed. A mark
-/// from before an unpublish (its epoch no longer the room's) counts as nothing in flight.
-pub fn confirmed_script(state: &ServeState, in_flight: Option<&CommitMark>) -> Option<String> {
-    match in_flight.filter(|mark| mark.epoch == state.epoch) {
-        Some(mark) => mark.before.first().cloned().flatten(),
+/// in-flight commit left it (the state's own flight's mark, while its marker hasn't come back), or the default host's
+/// script now when nothing is in flight. Nothing when the room is unpublished, or no release was ever confirmed. No mark
+/// is taken from the caller, so a stale one can't mislead it.
+pub fn confirmed_script(state: &ServeState) -> Option<String> {
+    match state
+        .in_flight
+        .as_ref()
+        .filter(|flight| flight.mark.epoch == state.epoch)
+    {
+        Some(flight) => flight.mark.before.first().cloned().flatten(),
         None => state
             .hosts
             .first()
@@ -797,18 +832,15 @@ pub fn confirmed_script(state: &ServeState, in_flight: Option<&CommitMark>) -> O
 
 /// A custom hostname newly claimed and reported `active` (`hostnames::routing_may_start`): that host opens on the
 /// release the room last confirmed served ([`confirmed_script`]), or nothing. It takes no script from its caller: what it
-/// serves comes from the room's state and the in-flight commit's mark, so an unpublished room opens it on nothing, and
+/// serves comes from the room's state and its own flight, never a mark from the caller, so an unpublished room opens it
+/// on nothing, and
 /// between a commit and its marker it never takes the unconfirmed script. When that marker comes back,
 /// [`confirm_served`] moves it to the confirmed release with every other open host; if it doesn't, the set-back leaves
 /// it where it is. `None` if there's no such host, or its version can't go up.
-pub fn open_host(
-    state: &ServeState,
-    host: usize,
-    in_flight: Option<&CommitMark>,
-) -> Option<ServeState> {
+pub fn open_host(state: &ServeState, host: usize) -> Option<ServeState> {
     let target = state.hosts.get(host)?;
     let version = bump(target.version)?;
-    let live = confirmed_script(state, in_flight);
+    let live = confirmed_script(state);
     Some(ServeState {
         epoch: state.epoch,
         hosts: state

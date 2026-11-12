@@ -1,0 +1,244 @@
+{
+  "repo": "podsterdev/e2e-m5-202611120015-ae33-7c9b19",
+  "written_at": "2026-11-12T09:07:50.921Z",
+  "write_token": {
+    "asked": {
+      "contents": "write"
+    },
+    "status": 201,
+    "granted": {
+      "contents": "write",
+      "metadata": "read"
+    },
+    "repository_selection": "selected",
+    "repositories": [
+      "e2e-m5-202611120015-ae33-7c9b19"
+    ],
+    "lifetime_minutes": 60
+  },
+  "default_branch_head_at_the_time": "02d57b4077c86f5c5aef6973809e58d4e6e4ef5e",
+  "pushes": [
+    {
+      "branch": "spike/m6-release-read",
+      "commit": "ccf4bc6f1a0753c563d7b2283ff1f25da9720ea9",
+      "exit": 0,
+      "said": []
+    },
+    {
+      "branch": "spike/m6-refused-dot-dot",
+      "commit": "f9e46288f1afaeeeb08698d1266890303e885776",
+      "expected": "refused",
+      "exit": 1,
+      "said": [
+        "remote: error: object 53a575b7748218c39f6b6473fd8a571fe424655d: hasDotdot: contains '..'",
+        "remote: fatal: fsck error in packed object",
+        "error: remote unpack failed: index-pack failed",
+        "! [remote rejected] f9e46288f1afaeeeb08698d1266890303e885776 -> spike/m6-refused-dot-dot (failed)",
+        "error: failed to push some refs to 'https://github.com/podsterdev/e2e-m5-202611120015-ae33-7c9b19.git'"
+      ]
+    },
+    {
+      "branch": "spike/m6-refused-dot",
+      "commit": "c787f99d6276b163f87480d444702b81e89b0abd",
+      "expected": "refused",
+      "exit": 1,
+      "said": [
+        "remote: error: object 1b8fba0c894288026a55a1872c984cb0f1c0c551: hasDot: contains '.'",
+        "remote: fatal: fsck error in packed object",
+        "error: remote unpack failed: index-pack failed",
+        "! [remote rejected] c787f99d6276b163f87480d444702b81e89b0abd -> spike/m6-refused-dot (failed)",
+        "error: failed to push some refs to 'https://github.com/podsterdev/e2e-m5-202611120015-ae33-7c9b19.git'"
+      ]
+    },
+    {
+      "branch": "spike/m6-refused-dot-git",
+      "commit": "6c0cd75fe079a72f54196c274c66a3a71ec1eba9",
+      "expected": "refused",
+      "exit": 1,
+      "said": [
+        "remote: error: object 4a8d15c7018efc56ebe8001fdba820e458a4b9d8: hasDotgit: contains '.git'",
+        "remote: fatal: fsck error in packed object",
+        "error: remote unpack failed: index-pack failed",
+        "! [remote rejected] 6c0cd75fe079a72f54196c274c66a3a71ec1eba9 -> spike/m6-refused-dot-git (failed)",
+        "error: failed to push some refs to 'https://github.com/podsterdev/e2e-m5-202611120015-ae33-7c9b19.git'"
+      ]
+    },
+    {
+      "branch": "spike/m6-refused-dot-git-upper",
+      "commit": "fdcf0aa192c723e846b5c1e6365ec367013bc215",
+      "expected": "refused",
+      "exit": 1,
+      "said": [
+        "remote: error: object 1221248447b81b5a2bfb7e55ece9b5d1ab25364c: hasDotgit: contains '.git'",
+        "remote: fatal: fsck error in packed object",
+        "error: remote unpack failed: index-pack failed",
+        "! [remote rejected] fdcf0aa192c723e846b5c1e6365ec367013bc215 -> spike/m6-refused-dot-git-upper (failed)",
+        "error: failed to push some refs to 'https://github.com/podsterdev/e2e-m5-202611120015-ae33-7c9b19.git'"
+      ]
+    },
+    {
+      "branch": "spike/m6-refused-slash-in-name",
+      "commit": "1bc4e7cd0326376ad187faeafe1c6c3ba4a115ce",
+      "expected": "refused",
+      "exit": 1,
+      "said": [
+        "remote: error: object 0333d56da6a1ff9ca799f28561ff94ebf402e992: fullPathname: contains full pathnames",
+        "remote: fatal: fsck error in packed object",
+        "error: remote unpack failed: index-pack failed",
+        "! [remote rejected] 1bc4e7cd0326376ad187faeafe1c6c3ba4a115ce -> spike/m6-refused-slash-in-name (failed)",
+        "error: failed to push some refs to 'https://github.com/podsterdev/e2e-m5-202611120015-ae33-7c9b19.git'"
+      ]
+    },
+    {
+      "branch": "spike/m6-refused-empty-name",
+      "commit": "034e567386c66fefc6895f12ebcc6fe7afea6f8e",
+      "expected": "refused",
+      "exit": 1,
+      "said": [
+        "fatal: empty filename in tree entry",
+        "fatal: the remote end hung up unexpectedly",
+        "fatal: the remote end hung up unexpectedly",
+        "error: failed to push some refs to 'https://github.com/podsterdev/e2e-m5-202611120015-ae33-7c9b19.git'"
+      ]
+    },
+    {
+      "branch": "spike/m6-refused-same-name-twice",
+      "commit": "d249a8469541cf2500ecd4e7c1134aafb0651a3a",
+      "expected": "refused",
+      "exit": 1,
+      "said": [
+        "remote: error: object 6d7d83662a5ed46644371ee8fe05b60b9dfb593a: duplicateEntries: contains duplicate file entries",
+        "remote: fatal: fsck error in packed object",
+        "error: remote unpack failed: index-pack failed",
+        "! [remote rejected] d249a8469541cf2500ecd4e7c1134aafb0651a3a -> spike/m6-refused-same-name-twice (failed)",
+        "error: failed to push some refs to 'https://github.com/podsterdev/e2e-m5-202611120015-ae33-7c9b19.git'"
+      ]
+    },
+    {
+      "branch": "spike/m6-refused-gitmodules-symlink",
+      "commit": "cb98b8b2eefc3fc9a30d68142e7801e80b8170ad",
+      "expected": "refused",
+      "exit": 1,
+      "said": [
+        "remote: error: object 71cef943521d2960a0ad2c3926ea81d4fe5dbd72: gitmodulesSymlink: .gitmodules is a symbolic link",
+        "remote: fatal: fsck error in packed object",
+        "error: remote unpack failed: index-pack failed",
+        "! [remote rejected] cb98b8b2eefc3fc9a30d68142e7801e80b8170ad -> spike/m6-refused-gitmodules-symlink (failed)",
+        "error: failed to push some refs to 'https://github.com/podsterdev/e2e-m5-202611120015-ae33-7c9b19.git'"
+      ]
+    },
+    {
+      "branch": "spike/m6-refused-file-over-100-mb",
+      "commit": "7a374ec7be8832fdf0f9bef8a78cdc7e33aef459",
+      "expected": "refused",
+      "exit": 1,
+      "said": [
+        "remote: error: Trace: 2473ef781e6809db4527781bebad1e9aba3b1d5881a57d69680e6bfbb41e73f9",
+        "remote: error: See https://gh.io/lfs for more information.",
+        "remote: error: File m6-spike-e/101m.bin is 101.00 MB; this exceeds GitHub's file size limit of 100.00 MB",
+        "remote: error: GH001: Large files detected. You may want to try Git Large File Storage - https://git-lfs.github.com.",
+        "remote: pre-receive hook declined",
+        "! [remote rejected] 7a374ec7be8832fdf0f9bef8a78cdc7e33aef459 -> spike/m6-refused-file-over-100-mb (pre-receive hook declined)",
+        "error: failed to push some refs to 'https://github.com/podsterdev/e2e-m5-202611120015-ae33-7c9b19.git'"
+      ]
+    }
+  ],
+  "api_trees": {
+    "..": {
+      "status": 422,
+      "message": "tree.path contains a malformed path component"
+    },
+    "a/../b": {
+      "status": 422,
+      "message": "tree.path contains a malformed path component"
+    },
+    ".git/config": {
+      "status": 422,
+      "message": "tree.path contains a malformed path component"
+    },
+    "./a": {
+      "status": 422,
+      "message": "tree.path contains a malformed path component"
+    },
+    "a//b": {
+      "status": 422,
+      "message": "tree.path contains a malformed path component"
+    },
+    "ok/fine.txt": {
+      "status": 201,
+      "made_tree": "baf0e26c83bbef9db36ee148454f868f8d094423",
+      "entries": [
+        "ok"
+      ]
+    }
+  },
+  "fixture": {
+    "branch": "spike/m6-release-read",
+    "commit": "ccf4bc6f1a0753c563d7b2283ff1f25da9720ea9",
+    "root_tree": "0cad8e75d194531c3ff27ae23e582ce117b8a3dc",
+    "trees": {
+      "app": "7f67b0f449abedf3dc05437c2fb05c95d4db2f9d",
+      "rel300": "5261ffbd9c88cb36b06033f4e31bfffab12f597b",
+      "big": "70bd1d1c7d7cb2b02404245c99ec8595a7a0839f",
+      "steps": "da75ed64d28588561e12233cbf0919a56bab7646",
+      "flat": "81b1b247c3b8f7aea27f82ab47d8f18d5cab42b4",
+      "files": "16678fcce40696ed64db03daed6e887efef164bb",
+      "big_subdirectory": "2444e015c1287312b08f8e76cbf044ee304119c7"
+    },
+    "files": [
+      {
+        "name": "empty.bin",
+        "length": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "sha": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+      },
+      {
+        "name": "1k.bin",
+        "length": 1024,
+        "sha256": "70d5e95467163a97e3d90e775e81654020a30d9f096aa9e3a0a71a8a582b419c",
+        "sha": "6e19d0f55f6975f0a551798e5df87afddc9f2314"
+      },
+      {
+        "name": "1m.bin",
+        "length": 1048576,
+        "sha256": "52cff229ac9a2a504db1a68a9e61a7ca596e2edab81d7199bf714aa8d67ca28d",
+        "sha": "7eb30a6bcf793c2c394601197e174ab875ae1997"
+      },
+      {
+        "name": "5m.bin",
+        "length": 5242880,
+        "sha256": "a5a0eb6436212f6241b996f56bea3b95f84da22d47e5560b2d220afe0a354632",
+        "sha": "666ea2f8ce1bbafa253944490a9ca12358b39e05"
+      },
+      {
+        "name": "5m-plus-1.bin",
+        "length": 5242881,
+        "sha256": "029ff37192fd2bf0fe91fc8042221be89aee5145a3dbc79a93f1c1d202a9835b",
+        "sha": "b5085a5191f005b4d13f77b5f1eff0d4a144dcf9"
+      },
+      {
+        "name": "25m.bin",
+        "length": 26214400,
+        "sha256": "e770ed40be1228e78871969f6ca2e11632e7cc479e378ec77f17f450322f6b8d",
+        "sha": "48a75497be6248cbf4ae28b797a3787b8be4926c"
+      },
+      {
+        "name": "99m.bin",
+        "length": 103809024,
+        "sha256": "890c80b96c5cf1ad0664f945c48fc4f1e8abf7d12937d9115f5b4022eabb1f09",
+        "sha": "8a14cb7b58c143a48b203ad250ae4c973be962cb"
+      }
+    ],
+    "shape": {
+      "big": "101 directories of 1200 files",
+      "steps": [
+        10,
+        20,
+        30,
+        40,
+        60
+      ],
+      "flat": 40000
+    }
+  }
+}

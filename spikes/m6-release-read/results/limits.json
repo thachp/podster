@@ -1,0 +1,201 @@
+{
+  "run_at": "2026-11-12T09:15:31.339Z",
+  "tokens": {
+    "agent_contents_read_one_repository": {
+      "at_once": {
+        "limit": 5000,
+        "used": 60,
+        "remaining": 4940,
+        "reset": 1794475278
+      },
+      "after_5_seconds": {
+        "limit": 5000,
+        "used": 2259,
+        "remaining": 2741,
+        "reset": 1794477820
+      },
+      "one_read": {
+        "limit": 5000,
+        "remaining": 2740,
+        "used": 2260,
+        "resource": "core",
+        "reset": 1794477819,
+        "retry_after": null
+      },
+      "after_the_read": {
+        "limit": 5000,
+        "used": 2260,
+        "remaining": 2740,
+        "reset": 1794477820
+      }
+    },
+    "agent_metadata_only_one_repository": {
+      "at_once": {
+        "limit": 5000,
+        "used": 60,
+        "remaining": 4940,
+        "reset": 1794475278
+      },
+      "after_5_seconds": {
+        "limit": 5000,
+        "used": 2260,
+        "remaining": 2740,
+        "reset": 1794477820
+      },
+      "one_read": {
+        "limit": 5000,
+        "remaining": 2739,
+        "used": 2261,
+        "resource": "core",
+        "reset": 1794477819,
+        "retry_after": null
+      },
+      "after_the_read": {
+        "limit": 5000,
+        "used": 2261,
+        "remaining": 2739,
+        "reset": 1794477820
+      }
+    },
+    "agent_contents_read_one_repository_again": {
+      "at_once": {
+        "limit": 5000,
+        "used": 60,
+        "remaining": 4940,
+        "reset": 1794475278
+      },
+      "after_5_seconds": {
+        "limit": 5000,
+        "used": 2261,
+        "remaining": 2739,
+        "reset": 1794477820
+      },
+      "one_read": {
+        "limit": 5000,
+        "remaining": 2738,
+        "used": 2262,
+        "resource": "core",
+        "reset": 1794477819,
+        "retry_after": null
+      },
+      "after_the_read": {
+        "limit": 5000,
+        "used": 2262,
+        "remaining": 2738,
+        "reset": 1794477820
+      }
+    },
+    "agent_contents_read_the_other_repository": {
+      "at_once": {
+        "limit": 5000,
+        "used": 60,
+        "remaining": 4940,
+        "reset": 1794475278
+      },
+      "after_5_seconds": {
+        "limit": 5000,
+        "used": 2262,
+        "remaining": 2738,
+        "reset": 1794477820
+      },
+      "one_read": {
+        "limit": 5000,
+        "remaining": 2737,
+        "used": 2263,
+        "resource": "core",
+        "reset": 1794477819,
+        "retry_after": null
+      },
+      "after_the_read": {
+        "limit": 5000,
+        "used": 2263,
+        "remaining": 2737,
+        "reset": 1794477820
+      }
+    },
+    "agent_contents_read_both_repositories": {
+      "at_once": {
+        "limit": 5000,
+        "used": 60,
+        "remaining": 4940,
+        "reset": 1794475278
+      },
+      "after_5_seconds": {
+        "limit": 5000,
+        "used": 2263,
+        "remaining": 2737,
+        "reset": 1794477820
+      },
+      "one_read": {
+        "limit": 5000,
+        "remaining": 2736,
+        "used": 2264,
+        "resource": "core",
+        "reset": 1794477819,
+        "retry_after": null
+      },
+      "after_the_read": {
+        "limit": 5000,
+        "used": 2264,
+        "remaining": 2736,
+        "reset": 1794477820
+      }
+    },
+    "provisioning_metadata_only_one_repository": {
+      "at_once": {
+        "limit": 5000,
+        "used": 7,
+        "remaining": 4993,
+        "reset": 1794477993
+      },
+      "after_5_seconds": {
+        "limit": 5000,
+        "used": 3,
+        "remaining": 4997,
+        "reset": 1794478265
+      },
+      "one_read": {
+        "limit": 5000,
+        "remaining": 4996,
+        "used": 4,
+        "resource": "core",
+        "reset": 1794478264,
+        "retry_after": null
+      },
+      "after_the_read": {
+        "limit": 5000,
+        "used": 4,
+        "remaining": 4996,
+        "reset": 1794478265
+      }
+    },
+    "provisioning_metadata_only_both_repositories": {
+      "at_once": {
+        "limit": 5000,
+        "used": 7,
+        "remaining": 4993,
+        "reset": 1794477993
+      },
+      "after_5_seconds": {
+        "limit": 5000,
+        "used": 4,
+        "remaining": 4996,
+        "reset": 1794478265
+      },
+      "one_read": {
+        "limit": 5000,
+        "remaining": 4995,
+        "used": 5,
+        "resource": "core",
+        "reset": 1794478264,
+        "retry_after": null
+      },
+      "after_the_read": {
+        "limit": 5000,
+        "used": 5,
+        "remaining": 4995,
+        "reset": 1794478265
+      }
+    }
+  }
+}

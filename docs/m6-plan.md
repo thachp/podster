@@ -7,7 +7,8 @@
 - **The questions only the owner can answer are in [the table below](#for-the-owner),** undecided.
 - **The platform facts this plan called unverified were read** in Cloudflare's and GitHub's own documentation on 2026-11-12: [what was found](#platform-facts-from-the-documentation). Read, not tried. Several findings changed a proposed answer.
 - **The owner said on 2026-11-12 that they have enabled Workers for Platforms on Cloudflare.** Which account it is on isn't confirmed: a read-only check of the account that holds `podster.dev`, at 01:33 UTC, was refused with Cloudflare's code 10121, no access to dispatch namespaces. Nothing has been created.
-- **No contract, migration, code or spike exists for M6, and Podster has created no cloud resource for it.**
+- **Spikes E and F ran on 2026-11-12,** with the existing staging Apps, on the architect's ruling: [spike E results](#spike-e-results), [spike F results](#spike-f-results). The other five haven't.
+- **No contract, migration or code exists for M6, and Podster has created no cloud resource for it.**
 
 *As first written on 2026-11-10: the architect drafted this plan from the specs while the owner was away.* Items marked **owner's yes** create an account or a cloud resource, cost money, set a secret, are legal text, or loosen a security stance, so the architect can't settle them alone. [How far this was checked](#how-far-this-was-checked) says what was read.
 
@@ -116,7 +117,7 @@
 
 ## The spikes
 
-**None has run.** Each stays in `spikes/` and nothing builds on it. "Needs" is what must exist first, and so what waits for the owner.
+**E and F ran on 2026-11-12: [spike E results](#spike-e-results), [spike F results](#spike-f-results). The rest haven't.** Each stays in `spikes/` and nothing builds on it. "Needs" is what must exist first, and so what waits for the owner.
 
 | Spike | What it proves | Needs, and so waits for | What can be learned with no resource |
 | --- | --- | --- | --- |
@@ -129,6 +130,119 @@
 | **F. Actions switched off** | From ADR 0009, still open: whether a workflow already in a repository can run with Actions off for it (risk 14) | Nothing new: the staging organization and Apps exist | It may already be answered by M5's runs; that wasn't checked for this plan |
 
 **In order, if the owner says yes in steps:** E and F need nothing bought. A, B and G need Workers for Platforms. C needs the domain. D needs the domain, custom hostnames and a second domain.
+
+## Spike E results
+
+**Run on 2026-11-12 UTC, three times, against one public test repository, `podsterdev/e2e-m5-202611120015-ae33-7c9b19`, a leftover of M5's acceptance run.** The script, its results and exactly what it wrote are in [`spikes/m6-release-read/`](../spikes/m6-release-read/README.md). The read token was the staging agent App's, cut down when minted to Contents `read` on that one repository; no fourth App exists. Every number below is from the last run unless it says otherwise. Each was seen on this one repository on this one day.
+
+**What wasn't shown, first:**
+
+- **A private repository.** None exists to read and making one is outside what was allowed. Managed repositories are public, so this is the case M6 has.
+- **So what Contents `read` unlocks wasn't shown at all.** On a public repository nothing that was read is refused without it: see answer 1.
+- **A Worker's memory.** The reads ran in Node on a laptop. Whether 5 MB and a batch fit a Worker is still spike G's.
+- **A secondary rate limit.** None was hit and none was provoked, since the installation is staging's.
+- **The fourth App's own limit,** and the higher limit GitHub documents past 20 repositories.
+
+### The answers
+
+**1. Contents `read` alone reads a tree and its blobs at an exact commit.**
+
+- Asked for `{"contents":"read"}`, the token came back with `contents: read` and `metadata: read`: **Metadata `read` is added by GitHub without being asked for.** A token asked for `{"metadata":"read"}` alone got only that. Both lasted 60 minutes and listed the one repository.
+- With it: the commit `200`, the tree by the commit's sha `200`, the release directory's tree with `recursive=1` `200`, a blob as JSON and as raw bytes `200`. All 300 files of a 300-file directory, fetched raw, hashed to the shas the tree gave.
+- **Refused with it,** each `403` "Resource not accessible by integration": making a blob, making a branch, and reading the Actions setting.
+- **On a public repository the permission isn't what allows the reads.** The Metadata-only token read the same tree and blob, `200`. So did a request with no credential. The Contents-read token, limited to one repository, also read the other test repository's tree, `200`, and was refused only when it tried to write there, `403`. What the token gives on a public repository is the installation's request allowance in place of the 60 an hour an address gets; the limit to one repository confines writes, which this token has none of, and reads of private repositories, which wasn't shown.
+- **`GET /git/trees/{commit}:{path}` works, and follows a submodule entry.** For the release directory it answered `200` with that directory's tree. For a symlink or a file it answered `422`, "SHA must identify a commit or a tree"; for a missing path `404`. **For a submodule entry whose commit is in the same repository it answered `200` with that other commit's tree.**
+
+**2. A large directory.**
+
+- **`truncated` didn't come at 7 MB of answer, nor at 100,000 entries.** A recursive tree of 72,060 entries came back whole in 17.7 MB. Truncation came at 96,643 entries and 23.7 MB where paths were 14 bytes long, and at 80,653 entries and 21.0 MB where they were 29, the same on each of three runs. Both fit a limit of 7 MiB counted as about each path's length plus 62 bytes, not the JSON's size. That is two points and an inference.
+- **A truncated answer stops mid-directory:** the first ended at `d080/f0561.txt`, with status `200` and nothing else to mark it.
+- **Not recursive, one directory of 40,000 files came back whole,** in 9.6 MB. A directory of 1,200 files: 1,200 entries, 288 KB.
+- **Walking without `recursive`** costs one read a directory: 102 reads listed all 121,200 files of 101 directories in 4.7 seconds, eight at a time, none truncated.
+- **The Contents API listed 1,000 of a directory's 1,200 files,** status `200`, with nothing to say the rest were missing.
+
+**3. A large file.**
+
+- **The limit is 100 MB, at the push.** A 99 MiB file was pushed with a warning that GitHub recommends at most 50 MB. A 101 MiB file was refused: "exceeds GitHub's file size limit of 100.00 MB". So no blob over 100 MB can be in a repository to ask for.
+- **The blob API answered every size it was asked,** `200`, as JSON and as raw bytes: 0 bytes, 1 KiB, 1 MiB, 5 MiB, 25 MiB and 99 MiB.
+- **As JSON a file is 1.378 times its size,** not four thirds: the base64 has a line break every 60 characters, escaped in the JSON. 5 MiB was 7.22 MB, 25 MiB was 36.1 MB, 99 MiB was 143 MB.
+- **`Accept: application/vnd.github.raw+json` avoids base64 entirely:** the answer is the file's bytes, exactly its size, the same sha256, at every size. 5 MiB took 0.4 seconds, 25 MiB 1.6, 99 MiB 5.3.
+- **The raw answer's `Content-Type` is GitHub's guess:** `application/octet-stream` for most, `text/plain; charset=utf-8` for the HTML file and the empty one, and `text/plain; charset=utf-16be` for the 5 MiB file of patterned bytes.
+- **The tree gives each file's size exactly,** including 5 MiB and 5 MiB and one byte, so the cap can be applied before anything is fetched.
+- The Contents API, asked for the 5 MiB file as JSON, answered `200` with an empty `content` and `encoding: "none"`.
+
+**4. Symlinks, submodules, modes and odd paths.**
+
+- **A symlink is `mode 120000`, `type blob`,** with a size that is the length of its target. Its blob is the target's path, `../../../../etc/passwd` for the one that points outside.
+- **A submodule is `mode 160000`, `type commit`,** with no size. Asked for as a blob its sha is `404`.
+- **A directory is `mode 040000`, `type tree`, with no size.** An empty directory can exist and shows as one.
+- **An executable file is `mode 100755`;** an ordinary one `100644`.
+- **The Contents API follows a symlink inside the repository:** asked for the symlink it answered `type: file`, size 39, and the target's content. Trees and blobs follow nothing.
+- **Paths that can exist, and came back as written:** a space, leading and trailing spaces, a tab, a newline, a backslash, a leading dot, `...`, a leading dash, `a?b#c%20d&e.txt`, non-ASCII letters, the same name composed and decomposed as two entries, two names differing only by case, a segment of 300 bytes, a path of 1,265 bytes, `_headers`, and `.well-known/podster-release.json`.
+- **A name that isn't UTF-8 can exist, and arrives with U+FFFD in place of the bad byte.** The tree's JSON can't show which byte it was.
+- **Paths that can't exist.** `git push` was refused for a tree holding `..`, `.`, `.git`, `.GIT`, a name with a slash in it, the same name twice, and `.gitmodules` as a symlink, each by GitHub's own check of the pushed objects. The git data API refused `..`, `a/../b`, `.git/config`, `./a` and `a//b`, each `422`. An empty name never left the laptop: git itself refused to send it.
+
+**5. Rate limits.**
+
+- **A release of 300 files cost 301 requests, and the count rose by exactly 301:** one tree and 300 blobs. Ten at a time it took 9.2 seconds; thirty at a time, 3.9. Every answer was `200`, with no `retry-after`.
+- **Read as answer 1 says it must be, a release costs *n* + 2:** the commit's top tree, the directory's tree, and the files.
+- **The installation's limit is 5,000 an hour, by its headers,** `x-ratelimit-limit: 5000`, resource `core`. After the three runs it showed 2,264 used.
+- **One count for the installation.** Five tokens of the agent App, for one repository, the other, and both, with different permissions, each moved the same count by one. The provisioning App's installation has its own.
+- **A reread with `If-None-Match` answered `304` and cost nothing.** `GET /rate_limit` cost nothing.
+- **A second count, not explained.** A token read within a moment of being minted reported a different count with a different reset, 60 used where the other said 2,259, and five seconds later reported the main one. Between 14 and 24 of each run's first requests went to it.
+- **A tarball of the commit** is one request, `302` to `codeload.github.com`. It is the whole repository, not a directory, and wasn't downloaded.
+
+**6. A private repository can't be shown,** as above.
+
+### What each changes in ADR 0010
+
+Proposals for the architect. None rewrites a decision.
+
+1. **How the tree is read. "Read the tree of the release directory at that exact commit" should say how:** read the commit's top tree by its sha, not recursive; require the release directory's entry to be `mode 040000`, `type tree`; then read that tree's sha with `recursive=1`. **Never `{commit}:{path}`,** which follows a submodule entry to a commit nobody confirmed. So a release costs *n* + 2 reads, not *n* + 1: 302 at the cap.
+2. **Cap the bytes of a tree answer before parsing it.** The ADR relies on `truncated` to stop a large directory. A tree isn't marked truncated until its answer is past 20 MB, and a directory that isn't recursive came back at 9.6 MB unmarked. A release of 300 files with 1,024-byte paths is under 400 KB of JSON. **Proposed: read at most 1 MB of either tree answer and fail the release past it,** and cap entries of every kind, since directories, empty ones included, are entries the file count doesn't see. `truncated` still fails the release.
+3. **"GitHub marks a recursive tree `truncated` past 100,000 entries or 7 MB" isn't what was seen.** Proposed wording: truncation was seen at 80,653 and 96,643 entries, in answers of 21 and 24 MB.
+4. **"An entry with no size fails the release" must mean a file's entry.** Directories and submodules never carry one.
+5. **"Valid UTF-8" can't be checked from the tree.** Proposed: a path holding U+FFFD fails the release.
+6. **Add a rule beside the case rule:** two paths that are the same after Unicode normalization fail the release. And say which modes pass: `100644` and `100755` for a file, `040000` for a directory, anything else refused. An executable file is published as an ordinary one.
+7. **Check each fetched file against the tree:** its length against the tree's size and its git blob sha against the tree's sha. Shown on 300 of 300.
+8. **Never pass on GitHub's `Content-Type`** for a raw blob. It is a guess, and was `utf-16be` once.
+9. **The reason for raw bytes is the Worker, not GitHub.** GitHub answered a 25 MiB file as 36 MB of JSON. The ADR's "which a 25 MB file wouldn't fit" is about a Worker's memory, which spike G tests. The overhead to state is 1.378, not a third.
+10. **Why trees and blobs gains a reason:** the Contents API follows symlinks, and lists 1,000 files of more with no sign.
+11. **The 300-file cap fits, and should stay.** 302 reads is 6% of the hour. The budget of 3,000 an hour is nine releases of that size, not ten. "A few at a time" can be ten: 9 seconds a release, far from the 100 at once GitHub allows.
+12. **Podster must count its own reads.** The headers are one count for the installation, as the ADR assumes, but a new token's first requests are counted elsewhere, and a `304` isn't counted. The header is a check on Podster's count and not the count.
+13. **The permissions stand:** Contents `read`, with Metadata `read` arriving by itself. The ADR should say that on a public repository the token isn't what confines the job to one repository or one directory: the job's own requests are.
+14. **The path rules stand,** and each forbidden thing that can exist was seen to exist: backslash, tab, newline, over-long segments and paths, `_headers`, a file at the marker's path. `.` and `..` can't be pushed; the rule against them costs nothing and stays.
+
+### Still unknown
+
+- Everything about a private repository, and so what a token without Contents `read` is refused.
+- Whether truncation really is 7 MiB of path plus 62 bytes: two points fit it.
+- What the second request count is.
+- Secondary limits: where they start for this kind of read.
+- Whether GitHub ever omits a file's `size`. It didn't here; its schema doesn't require it.
+- A Worker's memory with a 5 MB file and a batch.
+
+## Spike F results
+
+**Run once, on 2026-11-12 UTC, on the same test repository. The question isn't answered: no credential the spike was allowed can put a workflow file into a repository, so none was there to run.** What was learned is that the way in is shut for every token Podster gives out.
+
+**M5's evidence doesn't answer it either.** M5-06g showed the agent's token refused a workflow file by the Contents API and by `git push`, and refused the Actions setting, each `403` ([the run record](m5-plan.md)). Provisioning's read-back requires Actions off before a link is ready. Neither had a workflow file in a repository.
+
+**What this run saw:**
+
+- **Actions are off on both test repositories.** The provisioning App's token, cut down to Administration `read`, read `enabled: false` on each, `200`, and default workflow permissions `read` with no approving of pull requests. The organization's setting: `403`, as before. Neither default branch holds a `.github` directory.
+- **The agent App's token, with Contents `write`, was refused a workflow file three ways:** by the Contents API on a non-default branch, `403`; by the git data API, which made the blob, `201`, and refused the tree that would have named it `.github/workflows/m6-spike-f.yml`, `403`; and by `git push` to a new branch, "refusing to allow a GitHub App to create or update workflow … without `workflows` permission". The first and third repeat M5-06g; the second is new.
+- **Starting a workflow by the API:** `403`.
+- **Workflows listed: 0. Runs: 0,** before the attempts and 45 seconds after.
+- **Nothing was written but one blob on no branch,** and no setting was changed.
+
+**What it changes.** Nothing in ADR 0010. For ADR 0009's "Unverified: whether a workflow already in a repository can be abused", the proposed wording is: no token Podster mints can add one, by three routes, and the question of one that is already there stays untested.
+
+**Still unknown, and what would settle it:**
+
+- **Whether a workflow file in a repository runs with Actions off.** GitHub's documentation wasn't reread for this. Settling it needs a workflow file put in by something that can: an App with the Workflows permission, which no App here may be given, or a person with write access to a test repository. A person pushing one workflow file to a test repository's branch, then reading the runs, is the whole test.
+- **Whether the merge App can merge a pull request that adds a workflow file,** from a fork for instance. It holds no Workflows permission, so GitHub may refuse; not tried, since it needs a second account and a merge to a default branch.
+- **Workflows on pull requests from forks with Actions off.**
 
 
 It covers [M6 Release](spec/PRODUCT.md#product-direction-and-delivery-scope), which the milestone table gives one line: "Workroom-level deployment, separate content domain, custom domains". Its gate in that table is "Expanded criteria 7 and 8" of the [expanded workroom acceptance criteria](spec/PRODUCT.md#expanded-workroom-acceptance-criteria). It starts from the [release and deployment design](spec/ARCHITECTURE.md#release-and-deployment-m6), which is four bullets and two record shapes, and from [decision 11](spec/PRODUCT.md#decisions-needed), which is a recommendation and not decided.
@@ -363,7 +477,7 @@ The architect proposes the gate call, for the owner to review.
 
 ## Risks to test
 
-The spikes at step 1 answer these before any feature code. None has run.
+The spikes at step 1 answer these before any feature code. Only E and F have run: 10 and 11 are answered for a public repository in [spike E results](#spike-e-results), and 14 isn't answered, for the reason in [spike F results](#spike-f-results).
 
 1. Does a user Worker in a dispatch namespace, in untrusted mode, have no access to the account's other Workers, KV, D1, R2 or caches? What does it share?
 2. Can a namespace hold a static-files-only app, and how is one uploaded? What are the size and file limits?
@@ -394,4 +508,4 @@ The spikes at step 1 answer these before any feature code. None has run.
 - **Parts of this plan written on 2026-11-10 weren't all rewritten.** The questions table, the threat model and the acceptance tests carry dated notes where the review changed them; where one still differs from ADR 0010, the ADR is the later word.
 - **Not found in the specs:** any policy document for custom domains, release approvals, or export and transfer; any definition of an environment, the approval policy's values, the release states, or the budget caps.
 - **Not read:** the code. This plan doesn't claim what `apps/api`, `apps/gateway` or `apps/web` hold today beyond what the plans and specs say.
-- **Run:** nothing. No code, contract, migration, spike or cloud resource was created or changed.
+- **Run:** nothing when this plan was written. **Since, on 2026-11-12:** spikes E and F, which wrote one branch and two loose objects to one test repository and changed nothing else; their sections say what was and wasn't shown.

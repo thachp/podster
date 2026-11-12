@@ -64,6 +64,37 @@ impl HostnameRequestState {
     }
 }
 
+/// Where a claim stands in the hostname's own object, which keeps every claim there has been. Core's
+/// [`crate::hostnames::HostnameRecord`] is what the object decides from: `Live` and `Ending` are its `claim` with
+/// `ending` false and true, and `Ended` is a claim that was freed and holds nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostnameClaimState {
+    Live,
+    Ending,
+    Ended,
+}
+
+impl HostnameClaimState {
+    pub fn name(self) -> &'static str {
+        match self {
+            HostnameClaimState::Live => "live",
+            HostnameClaimState::Ending => "ending",
+            HostnameClaimState::Ended => "ended",
+        }
+    }
+
+    pub const ALL: [HostnameClaimState; 3] = [
+        HostnameClaimState::Live,
+        HostnameClaimState::Ending,
+        HostnameClaimState::Ended,
+    ];
+
+    /// Whether the claim holds the name: nobody else is given it until it is freed.
+    pub fn holds(self) -> bool {
+        matches!(self, HostnameClaimState::Live | HostnameClaimState::Ending)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::HostnameRequestState;
@@ -83,6 +114,17 @@ mod tests {
         }
         assert_eq!(HostnameRequestState::parse("Pending"), None);
         assert_eq!(HostnameRequestState::parse(""), None);
+    }
+
+    #[test]
+    fn a_claim_holds_the_name_until_it_is_ended() {
+        use super::HostnameClaimState;
+        let holding: Vec<&str> = HostnameClaimState::ALL
+            .iter()
+            .filter(|state| state.holds())
+            .map(|state| state.name())
+            .collect();
+        assert_eq!(holding, ["live", "ending"]);
     }
 
     #[test]

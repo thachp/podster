@@ -1323,16 +1323,18 @@ components:
       type: object
       description: "One attempt to release a room's app (M6, ADR 0010, decision 197): a copy of one fixed directory of the room's repository at one commit that Podster's own merge put on the default branch and confirmed. Each attempt is its own record, kept apart from the task's state and the merge's. Its states are the release rules' own (`podster_core::release::ReleaseState`), by the names they give: `awaiting_approval` until a person approves or declines it; `queued`, then `uploading` while its job reads and uploads it; `uncertain` when an upload's answer was lost; `live` once the room committed it and set its hosts to it; `served` once its marker came back through the host, which is the only state shown as live to a reader (UI-02); `replaced` when a later release is served in its place; `unpublished`; `declined`; and `failed`, with a reason, which leaves an earlier release serving."
       additionalProperties: false
-      required: [id, commit_sha, environment, state, requested_by, requested_at, approved_by, approved_at, result_url, failure_code, finished_at]
+      required: [id, commit_sha, environment, state, requested_by, requested_at, approved_by, approved_at, declined_by, declined_at, result_url, failure_code, finished_at]
       properties:
         id: { type: string, pattern: "^rel_[0-9a-f]{32}$" }
-        commit_sha: { type: string }
+        commit_sha: { type: string, pattern: "^[0-9a-f]{40}$" }
         environment: { type: string, enum: [production] }
         state: { type: string, enum: [awaiting_approval, queued, uploading, uncertain, live, served, replaced, unpublished, declined, failed] }
         requested_by: { type: string }
         requested_at: { type: integer }
         approved_by: { type: [string, "null"] }
         approved_at: { type: [integer, "null"] }
+        declined_by: { type: [string, "null"], description: "Who declined it, if someone did. Never both approved and declined." }
+        declined_at: { type: [integer, "null"] }
         result_url: { type: [string, "null"], description: "The app's address, only while this release is the one served." }
         failure_code: { type: [string, "null"], description: "A reason code while `failed`. Never a provider's message text." }
         finished_at: { type: [integer, "null"] }

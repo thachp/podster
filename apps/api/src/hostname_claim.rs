@@ -9,7 +9,9 @@
 //! leaves no state behind. Custom domains (M6 step 8) add the commands: giving a claim to the first room whose proof
 //! passed, ending one, and suspending a name.
 //!
-//! - `hostname`: the name this object is for, written once.
+//! - `hostname`: the name this object is for, with the name's `generation`, which core's `suspend`, `lift` and `free`
+//!   each advance (`podster_core::hostnames::HostnameRecord`), and when it was last freed, suspended and lifted. A
+//!   request is honoured only under the generation it was made under, which the room keeps with the request.
 //! - `claim`: every claim there has been. `held` is 1 while a claim is `live` or `ending` and null once `ended`, and it
 //!   is unique, so two claims can't hold the name at once. A claim that is `ending` still holds the name: it is freed
 //!   only after the custom hostname is read as gone at Cloudflare.
@@ -27,10 +29,11 @@ type R<T> = std::result::Result<T, ApiError>;
 
 /// Forward-only, as the room's are: a change is a new entry, never an edit.
 const MIGRATIONS: &[&str] = &["
-CREATE TABLE hostname (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), name TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE hostname (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), name TEXT NOT NULL, created_at INTEGER NOT NULL,
+  generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0), last_freed_at INTEGER, last_suspended_at INTEGER, last_lifted_at INTEGER);
 CREATE TABLE claim (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, request_id TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('live', 'ending', 'ended')),
   held INTEGER UNIQUE CHECK (held = 1), claimed_at INTEGER NOT NULL, proved_at INTEGER, ended_at INTEGER, end_reason TEXT, updated_at INTEGER NOT NULL,
-  CHECK ((state = 'ended') = (held IS NULL)), UNIQUE (workspace_id, request_id));
+  CHECK ((held IS NOT NULL) = (state IN ('live', 'ending'))), UNIQUE (workspace_id, request_id));
 CREATE TABLE suspension (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), reason TEXT NOT NULL, suspended_at INTEGER NOT NULL, lifted_at INTEGER);
 CREATE TABLE notice (seq INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, claim_id TEXT NOT NULL, kind TEXT NOT NULL, created_at INTEGER NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER, answered_at INTEGER);

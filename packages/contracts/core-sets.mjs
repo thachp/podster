@@ -38,20 +38,34 @@ export function constant(source, name) {
   return found;
 }
 
+/** The names of the variants a `pub fn question(self) -> bool { matches!(self, X::A | X::B) }` of `type` names, in declaration order. */
+export function subset(source, type, question, names) {
+  const body = source.match(new RegExp(`pub enum ${type} \\{([^}]*)\\}`))?.[1];
+  const variants = [...(body ?? "").matchAll(/^\s*([A-Z]\w*)\s*(?:\([^)]*\))?\s*,/gm)].map((m) => m[1]);
+  // The question that asks about this type: several types may have one of the same name.
+  const found = [...source.matchAll(new RegExp(`pub fn ${question}\\(self\\) -> bool \\{([\\s\\S]*?)\\n    \\}`, "g"))].map((m) => m[1]).find((text) => text.includes(`${type}::`));
+  if (!found || !/^\s*matches!\(\s*self,[\s\S]*\)\s*$/.test(found)) throw new Error(`${type}: no ${question}() that is one matches! on self`);
+  const named = variants.flatMap((variant, at) => (new RegExp(`${type}::${variant}\\b`).test(found) ? [names[at]] : []));
+  if (!named.length || named.length !== (found.match(new RegExp(`${type}::`, "g")) ?? []).length) throw new Error(`${type}: ${question}() names something that isn't a variant`);
+  return named;
+}
+
 /** Every closed set and fixed value the contract and the room's tables must equal. `root` is the repository's URL. */
 export function coreSets(root) {
   const release = read(root, "crates/core/src/release.rs");
   const requests = read(root, "crates/core/src/hostname_requests.rs");
   const requestStates = enumNames(requests, "HostnameRequestState", "name");
-  const open = requests.match(/pub fn is_open\(self\) -> bool \{([\s\S]*?)\n    \}/)?.[1];
-  if (!open) throw new Error("HostnameRequestState: no is_open()");
-  const variants = [...requests.match(/pub enum HostnameRequestState \{([^}]*)\}/)[1].matchAll(/^\s*([A-Z]\w*),/gm)].map((m) => m[1]);
+  const releaseStates = enumNames(release, "ReleaseState", "name");
+  const claimStates = enumNames(requests, "HostnameClaimState", "name");
   return {
-    releaseStates: enumNames(release, "ReleaseState", "name"),
+    releaseStates,
+    servingReleaseStates: subset(release, "ReleaseState", "serves", releaseStates),
+    hostnameClaimStates: claimStates,
+    holdingHostnameClaimStates: subset(requests, "HostnameClaimState", "holds", claimStates),
     unpublishCauses: enumNames(release, "UnpublishTrigger", "code"),
     approvalPolicies: enumNames(release, "ApprovalPolicy", "name"),
     hostnameRequestStates: requestStates,
-    openHostnameRequestStates: variants.flatMap((variant, at) => (new RegExp(`HostnameRequestState::${variant}\\b`).test(open) ? [requestStates[at]] : [])),
+    openHostnameRequestStates: subset(requests, "HostnameRequestState", "is_open", requestStates),
     environment: constant(release, "ENVIRONMENT"),
     releaseIdPrefix: constant(release, "RELEASE_ID_PREFIX"),
     maxLabelLen: Number(constant(release, "MAX_LABEL_LEN")),
@@ -62,7 +76,7 @@ export function coreSets(root) {
 
 /** The values of a `column … CHECK (column IN ('a', 'b'))` in the room's migrations, in order. */
 export function columnCheck(store, table, column) {
-  const create = store.match(new RegExp(`CREATE TABLE ${table} \\(([\\s\\S]*?)\\);\\n`))?.[1];
+  const create = store.match(new RegExp(`CREATE TABLE ${table} \\(([\\s\\S]*?)\\)(?: WITHOUT ROWID)?;\\n`))?.[1];
   if (create === undefined) throw new Error(`${table}: no such table in the room's migrations`);
   const found = [...create.matchAll(new RegExp(`CHECK \\(${column} IN \\(([^)]*)\\)\\)`, "g"))];
   if (found.length !== 1) throw new Error(`${table}.${column}: ${found.length} closed checks, not one`);

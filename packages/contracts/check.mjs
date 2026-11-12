@@ -133,9 +133,25 @@ for (const [at, expected] of Object.entries(columns)) {
     if (columnCheck(store, table, column).join() !== expected.join()) problems.push(`${at}: the room's column check must be exactly core's ${expected.join()}`);
   } catch (error) { problems.push(error.message); }
 }
-// A request is open, and holds the room's one hostname, in exactly the states core's `is_open` names.
-const openStates = store.match(/CHECK \(\(open IS NOT NULL\) = \(state IN \(([^)]*)\)\)\)/)?.[1]?.split(",").map((value) => value.trim().replace(/^'|'$/g, "")).join();
-if (openStates !== core.openHostnameRequestStates.join()) problems.push(`hostname_request.open: must be tied to exactly core's open states, ${core.openHostnameRequestStates.join()}`);
+// The claim object's own table takes its states from core too.
+const claims = readFileSync(new URL("apps/api/src/hostname_claim.rs", root), "utf8");
+try {
+  if (columnCheck(claims, "claim", "state").join() !== core.hostnameClaimStates.join()) problems.push(`claim.state: the claim object's column check must be exactly core's ${core.hostnameClaimStates.join()}`);
+} catch (error) { problems.push(error.message); }
+// A request is open, and holds the room's one hostname, in exactly the states core's `is_open` names; a claim holds its
+// name in exactly the states `holds` names; and a release must have its script and its approver in exactly the states
+// `serves` names.
+const listed = (text) => text?.split(",").map((value) => value.trim().replace(/^'|'$/g, "")).join();
+const ties = [
+  ["hostname_request.open", store, /CHECK \(\(open IS NOT NULL\) = \(state IN \(([^)]*)\)\)\)/, core.openHostnameRequestStates],
+  ["claim.held", claims, /CHECK \(\(held IS NOT NULL\) = \(state IN \(([^)]*)\)\)\)/, core.holdingHostnameClaimStates],
+  ["release's script and approver", store, /CHECK \(state NOT IN \(([^)]*)\) OR \(script_name IS NOT NULL AND approved_by IS NOT NULL\)\)/, core.servingReleaseStates],
+];
+for (const [what, source, pattern, expected] of ties) {
+  if (listed(source.match(pattern)?.[1]) !== expected.join()) problems.push(`${what}: must be tied to exactly core's ${expected.join()}`);
+}
+if (!store.includes(`environments_json = '[\\"${core.environment}\\"]'`)) problems.push(`release_config.environments_json: must be exactly the one environment, ${core.environment}`);
+if (api.components.schemas.Release?.properties?.commit_sha?.pattern !== "^[0-9a-f]{40}$") problems.push("Release.commit_sha: must be 40 lower-case hexadecimal characters");
 for (const [what, text] of [["approval policy", `approval_policy = '${core.approvalPolicies.join()}'`], ["environment", `environment = '${core.environment}'`], ["release ID's prefix", `id GLOB '${core.releaseIdPrefix}*'`], ["release ID's length", `length(id) = ${core.idLen}`], ["label's length", `length(label) BETWEEN 1 AND ${core.maxLabelLen}`]]) {
   if (!store.includes(text)) problems.push(`the room's tables don't hold the ${what} as core has it: ${text}`);
 }

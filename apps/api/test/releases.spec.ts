@@ -150,158 +150,237 @@ describe("M6's routes, none of them built", () => {
 });
 
 describe("the room's release state (M6 step 2)", () => {
-  it("holds one configuration, whose only approval policy is a person and whose epoch starts at 0", async () => {
-    const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
-    const row = await inRoom(room, (sql) => {
-      sql.exec("INSERT INTO release_config (singleton, set_by, set_at, updated_at) VALUES (1, 'per_rl_owner', 1, 1)");
-      return sql.exec("SELECT * FROM release_config").one();
-    });
-    expect(row).toMatchObject({ enabled: 0, approval_policy: "person", environments_json: '["production"]', version: 1, release_epoch: 0 });
-    expect(await inRoom(room, (sql) => refuses(() => sql.exec("INSERT INTO release_config (singleton, set_by, set_at, updated_at) VALUES (2, 'per_rl_owner', 1, 1)")))).toBe(true);
-    expect(await inRoom(room, (sql) => refuses(() => sql.exec("UPDATE release_config SET approval_policy = 'on_merge'")))).toBe(true);
-    expect(await inRoom(room, (sql) => refuses(() => sql.exec("UPDATE release_config SET enabled = 2")))).toBe(true);
+  const LABEL = "k3v9q2";
+  const OLD = `rel_${"b2".repeat(16)}`;
+  const scriptOf = (release: string, label = LABEL) => `${label}.${release}`;
+  const newRoom = async () => (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id as string;
+  const run = (room: string, query: string, ...values: unknown[]) => inRoom(room, (sql) => refuses(() => sql.exec(query, ...values)));
+  const one = (room: string, query: string, ...values: unknown[]) => inRoom(room, (sql) => sql.exec(query, ...values).one());
+  const label = (room: string, name = LABEL, current: number | null = 1, retired: number | null = null) => run(room, "INSERT INTO app_label (label, current, created_at, retired_at) VALUES (?, ?, 1, ?)", name, current, retired);
+  const release = (room: string, id: string, extra: Record<string, unknown> = {}) => inRoom(room, (sql) => refuses(() => {
+    const row = { id, commit_sha: "c".repeat(40), state: "awaiting_approval", label: LABEL, config_version: 1, release_epoch: 0, requested_by: "per_rl_owner", requested_at: 1, updated_at: 1, ...extra };
+    sql.exec(`INSERT INTO release (${Object.keys(row).join(", ")}) VALUES (${Object.keys(row).map(() => "?").join(", ")})`, ...Object.values(row));
+  }));
+  const config = (room: string) => run(room, "INSERT INTO release_config (singleton, set_by, set_at, updated_at) VALUES (1, 'per_rl_owner', 1, 1)");
+  const id = (n: number) => `rel_${n.toString(16).padStart(32, "0")}`;
+
+  it("holds one configuration: a person approves, one environment, and an epoch and version that only count up from 0 and 1", async () => {
+    const room = await newRoom();
+    expect(await config(room)).toBe(false);
+    expect(await one(room, "SELECT * FROM release_config")).toMatchObject({ enabled: 0, approval_policy: "person", environments_json: '["production"]', version: 1, release_epoch: 0, kept_previous: null, in_flight_release: null, in_flight_script: null, in_flight_epoch: null });
+    expect(await run(room, "INSERT INTO release_config (singleton, set_by, set_at, updated_at) VALUES (2, 'per_rl_owner', 1, 1)")).toBe(true);
+    for (const bad of ["approval_policy = 'on_merge'", "enabled = 2", "release_epoch = -1", "version = 0", "version = -1", "in_flight_epoch = -1",
+      `environments_json = '["preview","x"]'`, `environments_json = '["preview"]'`, "environments_json = '[]'", `environments_json = '["production","preview"]'`]) {
+      expect(await run(room, `UPDATE release_config SET ${bad}`), bad).toBe(true);
+    }
   });
 
-  it("keeps a label to 26 lower-case letters and digits, one current at a time, and never lets one be used twice", async () => {
-    const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
-    const add = (label: string, current: number | null, retired: number | null) => inRoom(room, (sql) => refuses(() => sql.exec("INSERT INTO app_label (label, current, created_at, retired_at) VALUES (?, ?, 1, ?)", label, current, retired)));
-    expect(await add("a".repeat(26), 1, null)).toBe(false);
-    for (const bad of ["a".repeat(27), "", "Abc", "a_b", "a.b", "a-b", "é"]) expect(await add(bad, null, 2), JSON.stringify(bad)).toBe(true);
+  it("keeps a label to 26 lower-case letters and digits, one current at a time, never used twice, with the app's suspension", async () => {
+    const room = await newRoom();
+    expect(await label(room, "a".repeat(26))).toBe(false);
+    for (const bad of ["a".repeat(27), "", "Abc", "a_b", "a.b", "a-b", "é"]) expect(await label(room, bad, null, 2), JSON.stringify(bad)).toBe(true);
     // A second current label is refused, and so is one that is neither current nor retired, or both.
-    expect(await add("second", 1, null)).toBe(true);
-    expect(await add("neither", null, null)).toBe(true);
-    expect(await add("both", 1, 2)).toBe(true);
+    expect(await label(room, "second")).toBe(true);
+    expect(await label(room, "neither", null, null)).toBe(true);
+    expect(await label(room, "both", 1, 2)).toBe(true);
     // Retired, a label stays in the table, so the same room can't take it again.
     await inRoom(room, (sql) => sql.exec("UPDATE app_label SET current = NULL, retired_at = 2"));
-    expect(await add("a".repeat(26), 1, null)).toBe(true);
-    expect(await add("second", 1, null)).toBe(false);
+    expect(await label(room, "a".repeat(26))).toBe(true);
+    expect(await label(room, "second")).toBe(false);
     // An operator's suspension of the app is the room's state, kept with the label: a time and a reason, or neither.
-    expect(await inRoom(room, (sql) => refuses(() => sql.exec("UPDATE app_label SET suspended_at = 5 WHERE label = 'second'")))).toBe(true);
-    expect(await inRoom(room, (sql) => refuses(() => sql.exec("UPDATE app_label SET suspension_reason = 'abuse' WHERE label = 'second'")))).toBe(true);
-    expect(await inRoom(room, (sql) => refuses(() => sql.exec("UPDATE app_label SET suspended_at = 5, suspension_reason = 'abuse' WHERE label = 'second'")))).toBe(false);
+    expect(await run(room, "UPDATE app_label SET suspended_at = 5 WHERE label = 'second'")).toBe(true);
+    expect(await run(room, "UPDATE app_label SET suspension_reason = 'abuse' WHERE label = 'second'")).toBe(true);
+    expect(await run(room, "UPDATE app_label SET suspended_at = 5, suspension_reason = 'abuse' WHERE label = 'second'")).toBe(false);
   });
 
-  it("keeps a release's ID, commit, label and script name in their forms, and its label one of the room's own", async () => {
-    const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
-    const LABEL = "a".repeat(26);
-    await inRoom(room, (sql) => sql.exec("INSERT INTO app_label (label, current, created_at) VALUES (?, 1, 1)", LABEL));
-    const add = (id: string, extra: Record<string, unknown> = {}) => inRoom(room, (sql) => refuses(() => {
-      const row = { id, commit_sha: "c".repeat(40), state: "awaiting_approval", label: LABEL, config_version: 1, release_epoch: 0, requested_by: "per_rl_owner", requested_at: 1, updated_at: 1, ...extra };
-      sql.exec(`INSERT INTO release (${Object.keys(row).join(", ")}) VALUES (${Object.keys(row).map(() => "?").join(", ")})`, ...Object.values(row));
-    }));
+  it("keeps a release's ID, commit and label in their forms, its label one of the room's own, and its counters from 0 and 1", async () => {
+    const room = await newRoom();
+    const LONG = "a".repeat(26);
+    await label(room, LONG);
     // The longest name the rule allows: a 26-character label, a `.`, and the 36-character ID.
-    const longest = `${LABEL}.${REL}`;
-    expect(longest).toHaveLength(63);
-    expect(await add(REL, { script_name: longest })).toBe(false);
-    expect(await add(REL)).toBe(true);
-    const OTHER = `rel_${"b2".repeat(16)}`;
-    for (const bad of [`rel_${"a1".repeat(15)}`, `rel_${"A1".repeat(16)}`, `rel_${"g1".repeat(16)}`, `tsk_${"a1".repeat(16)}`, `rel_${"a1".repeat(16)}0`]) expect(await add(bad), bad).toBe(true);
-    expect(await add(OTHER, { environment: "preview" })).toBe(true);
-    // A script's name is exactly the label, a `.` and this release's ID: not another release's, another label's or another separator.
-    for (const bad of [`${LABEL}.${REL}`, `${LABEL}_${OTHER}`, `${"b".repeat(26)}.${OTHER}`, `${LABEL}.${OTHER}x`, OTHER, ""]) expect(await add(OTHER, { script_name: bad }), bad).toBe(true);
-    for (const bad of ["c".repeat(39), "c".repeat(41), "C".repeat(40), "g".repeat(40), "main"]) expect(await add(OTHER, { commit_sha: bad }), bad).toBe(true);
+    expect(scriptOf(REL, LONG)).toHaveLength(63);
+    expect(await release(room, REL, { label: LONG, script_name: scriptOf(REL, LONG), script_release_id: REL })).toBe(false);
+    expect(await release(room, REL, { label: LONG })).toBe(true);
+    for (const bad of [`rel_${"a1".repeat(15)}`, `rel_${"A1".repeat(16)}`, `rel_${"g1".repeat(16)}`, `tsk_${"a1".repeat(16)}`, `rel_${"a1".repeat(16)}0`]) expect(await release(room, bad, { label: LONG }), bad).toBe(true);
+    expect(await release(room, OLD, { label: LONG, environment: "preview" })).toBe(true);
+    for (const bad of ["c".repeat(39), "c".repeat(41), "C".repeat(40), "g".repeat(40), "main"]) expect(await release(room, OLD, { label: LONG, commit_sha: bad }), bad).toBe(true);
     // A label the room doesn't hold, and one out of form.
-    expect(await add(OTHER, { label: "k3v9q2" })).toBe(true);
-    for (const bad of ["Abc", "a".repeat(27), "a.b", ""]) expect(await add(OTHER, { label: bad }), JSON.stringify(bad)).toBe(true);
-    expect(await add(OTHER, { script_name: `${LABEL}.${OTHER}` })).toBe(false);
-    expect(await inRoom(room, (sql) => sql.exec("SELECT environment FROM release WHERE id = ?", REL).one().environment)).toBe("production");
+    expect(await release(room, OLD, { label: LABEL })).toBe(true);
+    for (const bad of ["Abc", "a".repeat(27), "a.b", ""]) expect(await release(room, OLD, { label: bad }), JSON.stringify(bad)).toBe(true);
+    for (const bad of [{ release_epoch: -1 }, { config_version: 0 }, { config_version: -1 }]) expect(await release(room, OLD, { label: LONG, ...bad }), JSON.stringify(bad)).toBe(true);
+    expect((await one(room, "SELECT environment FROM release WHERE id = ?", REL)).environment).toBe("production");
   });
 
-  it("holds what each host should serve, a script named for its release or nothing, with a version", async () => {
-    const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
-    const add = (host: string, kind: string, release: string | null, script: string | null) => inRoom(room, (sql) => refuses(() => sql.exec("INSERT INTO serve_state (host, kind, release_id, script_name, updated_at) VALUES (?, ?, ?, ?, 1)", host, kind, release, script)));
-    expect(await add("k3v9q2", "default", REL, `k3v9q2.${REL}`)).toBe(false);
-    expect(await add("app.example.com", "custom", null, null)).toBe(false);
-    expect(await add("longest", "default", REL, `${"a".repeat(26)}.${REL}`)).toBe(false);
-    expect(await add("k3v9q2", "default", null, null)).toBe(true);
-    expect(await add("other", "preview", null, null)).toBe(true);
-    expect(await add("half", "default", REL, null)).toBe(true);
-    expect(await add("half", "default", null, `half.${REL}`)).toBe(true);
-    const OTHER = `rel_${"b2".repeat(16)}`;
-    for (const bad of [`k3v9q2.${OTHER}`, `k3v9q2_${REL}`, `K3V.${REL}`, `k3.v9.${REL}`, `.${REL}`, `${"a".repeat(27)}.${REL}`, REL]) expect(await add("form", "default", REL, bad), bad).toBe(true);
-    expect(await add("form", "default", "rel_nope", "k3v9q2.rel_nope")).toBe(true);
-    expect(await inRoom(room, (sql) => sql.exec("SELECT version FROM serve_state WHERE host = 'k3v9q2'").one().version)).toBe(1);
+  it("names the script a release serves: its own, or for a rollback an earlier release's of this room, under the room's label", async () => {
+    const room = await newRoom();
+    await label(room);
+    expect(await release(room, OLD, { script_name: scriptOf(OLD), script_release_id: OLD })).toBe(false);
+    // A rollback is its own release, serving the kept script, which names the earlier release.
+    expect(await release(room, REL, { script_name: scriptOf(OLD), script_release_id: OLD })).toBe(false);
+    expect(await one(room, "SELECT id, script_name, script_release_id FROM release WHERE id = ?", REL)).toEqual({ id: REL, script_name: scriptOf(OLD), script_release_id: OLD });
+    const other = id(7);
+    // A script of a release this room never had, of another label, with another separator, or with only half of it said.
+    expect(await release(room, other, { script_name: scriptOf(id(8)), script_release_id: id(8) })).toBe(true);
+    expect(await release(room, other, { script_name: scriptOf(OLD, "other"), script_release_id: OLD })).toBe(true);
+    expect(await release(room, other, { script_name: `${LABEL}_${OLD}`, script_release_id: OLD })).toBe(true);
+    expect(await release(room, other, { script_name: `${scriptOf(OLD)}x`, script_release_id: OLD })).toBe(true);
+    expect(await release(room, other, { script_name: scriptOf(OLD) })).toBe(true);
+    expect(await release(room, other, { script_release_id: OLD })).toBe(true);
+    expect(await release(room, other, { script_name: scriptOf(REL), script_release_id: OLD })).toBe(true);
   });
 
-  it("can hold the one commit in flight: its script and epoch with the room, and what it wrote and found on each host", async () => {
-    const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
-    const PREVIOUS = `k3v9q2.rel_${"b2".repeat(16)}`;
-    await inRoom(room, (sql) => {
-      sql.exec("INSERT INTO release_config (singleton, set_by, set_at, updated_at) VALUES (1, 'per_rl_owner', 1, 1)");
-      sql.exec("INSERT INTO serve_state (host, kind, release_id, script_name, updated_at) VALUES ('k3v9q2', 'default', ?, ?, 1)", REL, `k3v9q2.${REL}`);
-      sql.exec("INSERT INTO serve_state (host, kind, updated_at) VALUES ('app.example.com', 'custom', 1)");
-    });
-    expect(await inRoom(room, (sql) => sql.exec("SELECT kept_previous, in_flight_script, in_flight_epoch FROM release_config").one())).toEqual({ kept_previous: null, in_flight_script: null, in_flight_epoch: null });
-    expect(await inRoom(room, (sql) => sql.exec("SELECT closed, flight_version, flight_before FROM serve_state WHERE host = 'k3v9q2'").one())).toEqual({ closed: 0, flight_version: null, flight_before: null });
-    const config = (set: string, ...values: unknown[]) => inRoom(room, (sql) => refuses(() => sql.exec(`UPDATE release_config SET ${set}`, ...values)));
-    // A flight has a script and the epoch its commit wrote, or neither.
-    expect(await config("in_flight_script = ?", `k3v9q2.${REL}`)).toBe(true);
-    expect(await config("in_flight_epoch = 3")).toBe(true);
-    expect(await config("in_flight_script = ?, in_flight_epoch = 3, kept_previous = ?", `k3v9q2.${REL}`, PREVIOUS)).toBe(false);
-    for (const bad of ["k3v9q2", `k3v9q2_${REL}`, `K3.${REL}`, `k3v9q2.rel_${"zz".repeat(16)}`, `${"a".repeat(27)}.${REL}`]) {
-      expect(await config("kept_previous = ?", bad), bad).toBe(true);
-      expect(await config("in_flight_script = ?", bad), bad).toBe(true);
+  it("won't call a release live or served without its script and its approver, and keeps who approved or declined it", async () => {
+    const core = JSON.parse(BINDINGS.TEST_CORE_SETS) as { releaseStates: string[]; servingReleaseStates: string[] };
+    expect(core.servingReleaseStates).toEqual(["live", "served"]);
+    const room = await newRoom();
+    await label(room);
+    let n = 0;
+    const scripted = (release_id: string) => ({ script_name: scriptOf(release_id), script_release_id: release_id });
+    const approved = { approved_by: "per_rl_owner", approved_at: 2 };
+    for (const state of core.releaseStates) {
+      const serving = core.servingReleaseStates.includes(state);
+      const [bare, noApprover, noScript, whole] = [id(++n), id(++n), id(++n), id(++n)];
+      expect(await release(room, bare, { state }), `${state}, bare`).toBe(serving);
+      expect(await release(room, noApprover, { state, ...scripted(noApprover) }), `${state}, no approver`).toBe(serving);
+      expect(await release(room, noScript, { state, ...approved }), `${state}, no script`).toBe(serving);
+      expect(await release(room, whole, { state, ...approved, ...scripted(whole) }), `${state}, whole`).toBe(false);
     }
-    const host = (name: string, set: string, ...values: unknown[]) => inRoom(room, (sql) => refuses(() => sql.exec(`UPDATE serve_state SET ${set} WHERE host = ?`, ...values, name)));
-    // The commit wrote version 2 to the default host, which served the previous script, and nothing to a closed custom one.
-    expect(await host("k3v9q2", "flight_version = 2, flight_before = ?", PREVIOUS)).toBe(false);
-    expect(await host("app.example.com", "closed = 1")).toBe(false);
-    expect(await host("app.example.com", "closed = 2")).toBe(true);
-    expect(await host("k3v9q2", "flight_before = 'k3v9q2'")).toBe(true);
+    // Who and when go together, and a release is never both approved and declined.
+    expect(await release(room, id(++n), { approved_by: "per_rl_owner" })).toBe(true);
+    expect(await release(room, id(++n), { declined_at: 2 })).toBe(true);
+    expect(await release(room, id(++n), { state: "declined", declined_by: "per_rl_owner", declined_at: 2 })).toBe(false);
+    expect(await release(room, id(++n), { ...approved, declined_by: "per_rl_owner", declined_at: 3 })).toBe(true);
+  });
+
+  it("holds what each host should serve: one default host, never closed; a script of the room's own label and release, or nothing", async () => {
+    const room = await newRoom();
+    await label(room);
+    await release(room, REL);
+    const host = (name: string, kind: string, extra: Record<string, unknown> = {}) => inRoom(room, (sql) => refuses(() => {
+      const row = { host: name, kind, updated_at: 1, ...extra };
+      sql.exec(`INSERT INTO serve_state (${Object.keys(row).join(", ")}) VALUES (${Object.keys(row).map(() => "?").join(", ")})`, ...Object.values(row));
+    }));
+    const serving = { label: LABEL, release_id: REL, script_name: scriptOf(REL) };
+    expect(await host(LABEL, "default", serving)).toBe(false);
+    expect(await host("app.example.com", "custom")).toBe(false);
+    expect(await one(room, "SELECT version, closed, flight_version, flight_before FROM serve_state WHERE host = ?", LABEL)).toEqual({ version: 1, closed: 0, flight_version: null, flight_before: null });
+    // One default host, and it is never closed.
+    expect(await host("second", "default")).toBe(true);
+    expect(await run(room, "UPDATE serve_state SET closed = 1 WHERE kind = 'default'")).toBe(true);
+    expect(await host("other", "preview")).toBe(true);
+    // A custom host can be closed, and then it names nothing.
+    expect(await run(room, "UPDATE serve_state SET closed = 1 WHERE kind = 'custom'")).toBe(false);
+    expect(await run(room, "UPDATE serve_state SET label = ?, release_id = ?, script_name = ? WHERE kind = 'custom'", LABEL, REL, scriptOf(REL))).toBe(true);
+    expect(await run(room, "UPDATE serve_state SET closed = 2 WHERE kind = 'custom'")).toBe(true);
+    await inRoom(room, (sql) => sql.exec("DELETE FROM serve_state WHERE kind = 'custom'"));
+    // A script under a label the room doesn't own, of a release it never had, misnamed, or half said.
+    expect(await host("c1.example.com", "custom", { label: "nolabel", release_id: REL, script_name: scriptOf(REL, "nolabel") })).toBe(true);
+    expect(await host("c1.example.com", "custom", { label: LABEL, release_id: OLD, script_name: scriptOf(OLD) })).toBe(true);
+    for (const bad of [`${LABEL}_${REL}`, scriptOf(OLD), `${scriptOf(REL)}x`, REL]) expect(await host("c1.example.com", "custom", { ...serving, script_name: bad }), bad).toBe(true);
+    for (const missing of ["label", "release_id", "script_name"]) expect(await host("c1.example.com", "custom", { ...serving, [missing]: null }), missing).toBe(true);
+    for (const bad of ["version = 0", "version = -1", "flight_version = 0", "flight_version = -3", "flight_before = 'k3v9q2'"]) expect(await run(room, `UPDATE serve_state SET ${bad}`), bad).toBe(true);
+    expect(await host("c1.example.com", "custom", serving)).toBe(false);
+  });
+
+  it("can hold the one commit in flight: its release, its script and epoch with the room, and what it wrote and found on each host", async () => {
+    const room = await newRoom();
+    await label(room);
+    await config(room);
+    await release(room, OLD, { script_name: scriptOf(OLD), script_release_id: OLD });
+    await release(room, REL, { script_name: scriptOf(REL), script_release_id: REL });
+    await inRoom(room, (sql) => sql.exec("INSERT INTO serve_state (host, kind, label, release_id, script_name, updated_at) VALUES (?, 'default', ?, ?, ?, 1)", LABEL, LABEL, REL, scriptOf(REL)));
+    const set = (assignments: string, ...values: unknown[]) => run(room, `UPDATE release_config SET ${assignments}`, ...values);
+    // A flight has its release, its script and the epoch its commit wrote, or none of them.
+    expect(await set("in_flight_script = ?", scriptOf(REL))).toBe(true);
+    expect(await set("in_flight_epoch = 3")).toBe(true);
+    expect(await set("in_flight_release = ?", REL)).toBe(true);
+    expect(await set("in_flight_script = ?, in_flight_epoch = 3", scriptOf(REL))).toBe(true);
+    expect(await set("in_flight_release = ?, in_flight_script = ?, in_flight_epoch = 3, kept_previous = ?", REL, scriptOf(REL), scriptOf(OLD))).toBe(false);
+    // A rollback in flight: its own release, and the kept script, which names the earlier one.
+    expect(await set("in_flight_release = ?, in_flight_script = ?", REL, scriptOf(OLD))).toBe(false);
+    // The flight's release is one of the room's.
+    expect(await set("in_flight_release = ?", id(9))).toBe(true);
+    for (const bad of [LABEL, `${LABEL}_${REL}`, `K3.${REL}`, `${LABEL}.rel_${"zz".repeat(16)}`, `${"a".repeat(27)}.${REL}`]) {
+      expect(await set("kept_previous = ?", bad), bad).toBe(true);
+      expect(await set("in_flight_script = ?", bad), bad).toBe(true);
+    }
+    // The commit wrote version 2 to the default host, which served the earlier script.
+    expect(await run(room, "UPDATE serve_state SET flight_version = 2, flight_before = ?", scriptOf(OLD))).toBe(false);
     // The flight ends: everything it held is cleared.
-    expect(await config("in_flight_script = NULL, in_flight_epoch = NULL")).toBe(false);
-    expect(await host("k3v9q2", "flight_version = NULL, flight_before = NULL")).toBe(false);
+    expect(await set("in_flight_release = NULL, in_flight_script = NULL, in_flight_epoch = NULL")).toBe(false);
+    expect(await run(room, "UPDATE serve_state SET flight_version = NULL, flight_before = NULL")).toBe(false);
   });
 
   it("records each unpublish with the epoch it raised to, once", async () => {
-    const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
-    await inRoom(room, (sql) => sql.exec("INSERT INTO app_label (label, current, created_at) VALUES ('k3v9q2', 1, 1)"));
-    const add = (epoch: number, label: string | null) => inRoom(room, (sql) => refuses(() => sql.exec("INSERT INTO unpublish (cause, label, release_epoch, at) VALUES ('release_off', ?, ?, 1)", label, epoch)));
-    expect(await add(1, "k3v9q2")).toBe(false);
-    // A room with no app yet can still record a trigger, and each epoch has one.
+    const room = await newRoom();
+    await label(room);
+    const add = (epoch: number, of: string | null) => run(room, "INSERT INTO unpublish (cause, label, release_epoch, at) VALUES ('release_off', ?, ?, 1)", of, epoch);
+    expect(await add(1, LABEL)).toBe(false);
+    // A room with no app yet can still record a trigger, and each epoch has one. An unpublish raises the epoch, so never to 0.
     expect(await add(2, null)).toBe(false);
-    expect(await add(2, "k3v9q2")).toBe(true);
+    expect(await add(2, LABEL)).toBe(true);
     expect(await add(3, "nolabel")).toBe(true);
-    expect(await inRoom(room, (sql) => sql.exec("SELECT scripts_gone_at FROM unpublish WHERE release_epoch = 1").one().scripts_gone_at)).toBeNull();
+    expect(await add(0, LABEL)).toBe(true);
+    expect(await add(-1, LABEL)).toBe(true);
+    expect((await one(room, "SELECT scripts_gone_at FROM unpublish WHERE release_epoch = 1")).scripts_gone_at).toBeNull();
   });
 
+  const CHALLENGE = "5e".repeat(32);
+  const request = (room: string, n: number, extra: Record<string, unknown> = {}) => inRoom(room, (sql) => refuses(() => {
+    const row = { id: `hnr_${n}`, hostname: "app.example.com", state: "pending", open: 1, challenge: CHALLENGE, generation: 0, requested_by: "per_rl_owner", requested_at: 1, expires_at: 2, updated_at: 1, ...extra };
+    sql.exec(`INSERT INTO hostname_request (${Object.keys(row).join(", ")}) VALUES (${Object.keys(row).map(() => "?").join(", ")})`, ...Object.values(row));
+  }));
+
   it("takes exactly the rules' own names for a release's state, a hostname request's state and an unpublish's cause", async () => {
-    const core = JSON.parse(BINDINGS.TEST_CORE_SETS) as { releaseStates: string[]; hostnameRequestStates: string[]; openHostnameRequestStates: string[]; unpublishCauses: string[] };
+    const core = JSON.parse(BINDINGS.TEST_CORE_SETS) as { releaseStates: string[]; servingReleaseStates: string[]; hostnameRequestStates: string[]; openHostnameRequestStates: string[]; unpublishCauses: string[] };
     expect(core.releaseStates).toContain("awaiting_approval");
     expect(core.unpublishCauses).toContain("repo_not_ready");
-    const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
-    await inRoom(room, (sql) => sql.exec("INSERT INTO app_label (label, current, created_at) VALUES ('k3v9q2', 1, 1)"));
-    const release = (n: number, state: string) => inRoom(room, (sql) => refuses(() => sql.exec("INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, requested_by, requested_at, updated_at) VALUES (?, ?, ?, 'k3v9q2', 1, 0, 'per_rl_owner', 1, 1)", `rel_${n.toString(16).padStart(32, "0")}`, "c".repeat(40), state)));
-    const request = (n: number, state: string, open: number | null) => inRoom(room, (sql) => refuses(() => {
-      sql.exec("DELETE FROM hostname_request");
-      sql.exec("INSERT INTO hostname_request (id, hostname, state, open, challenge, requested_by, requested_at, expires_at, updated_at) VALUES (?, 'app.example.com', ?, ?, 'v', 'per_rl_owner', 1, 2, 1)", `hnr_${n}`, state, open);
-    }));
-    const unpublish = (n: number, cause: string) => inRoom(room, (sql) => refuses(() => sql.exec("INSERT INTO unpublish (cause, release_epoch, at) VALUES (?, ?, 1)", cause, n)));
+    const room = await newRoom();
+    await label(room);
     let n = 0;
-    for (const state of core.releaseStates) expect(await release(++n, state), state).toBe(false);
+    const whole = (release_id: string) => ({ approved_by: "per_rl_owner", approved_at: 2, script_name: scriptOf(release_id), script_release_id: release_id });
+    for (const state of core.releaseStates) { const at = id(++n); expect(await release(room, at, { state, ...whole(at) }), state).toBe(false); }
     // The names an earlier draft of the contract had, another casing, and nothing at all.
-    for (const state of ["waiting_for_approval", "deploying", "ended", "Live", "LIVE", "", "pending"]) expect(await release(++n, state), JSON.stringify(state)).toBe(true);
+    for (const state of ["waiting_for_approval", "deploying", "ended", "Live", "LIVE", "", "pending"]) { const at = id(++n); expect(await release(room, at, { state, ...whole(at) }), JSON.stringify(state)).toBe(true); }
     for (const state of core.hostnameRequestStates) {
       const open = core.openHostnameRequestStates.includes(state);
+      await inRoom(room, (sql) => sql.exec("DELETE FROM hostname_request"));
       // Open exactly in the states the rules call open: the other way round is refused.
-      expect(await request(++n, state, open ? 1 : null), state).toBe(false);
-      expect(await request(++n, state, open ? null : 1), `${state}, the other way`).toBe(true);
+      expect(await request(room, ++n, { state, open: open ? null : 1 }), `${state}, the other way`).toBe(true);
+      expect(await request(room, ++n, { state, open: open ? 1 : null }), state).toBe(false);
     }
-    for (const state of ["active", "Pending", "", "live"]) expect(await request(++n, state, null), JSON.stringify(state)).toBe(true);
+    await inRoom(room, (sql) => sql.exec("DELETE FROM hostname_request"));
+    for (const state of ["active", "Pending", "", "live"]) expect(await request(room, ++n, { state, open: null }), JSON.stringify(state)).toBe(true);
+    const unpublish = (epoch: number, cause: string) => run(room, "INSERT INTO unpublish (cause, release_epoch, at) VALUES (?, ?, 1)", cause, epoch);
     for (const cause of core.unpublishCauses) expect(await unpublish(++n, cause), cause).toBe(false);
     for (const cause of ["ReleaseOffInRoom", "release_off_in_room", "", "other"]) expect(await unpublish(++n, cause), JSON.stringify(cause)).toBe(true);
   });
 
   it("lets a room have one open hostname request, and keeps the ended ones", async () => {
-    const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
-    const add = (id: string, open: number | null) => inRoom(room, (sql) => refuses(() => sql.exec("INSERT INTO hostname_request (id, hostname, state, open, challenge, requested_by, requested_at, expires_at, updated_at) VALUES (?, 'app.example.com', ?, ?, 'v', 'per_rl_owner', 1, 2, 1)", id, open ? "pending" : "ended", open)));
-    expect(await add("hnr_1", 1)).toBe(false);
-    expect(await add("hnr_2", 1)).toBe(true);
-    expect(await add("hnr_2", 2)).toBe(true);
+    const room = await newRoom();
+    expect(await request(room, 1)).toBe(false);
+    expect(await request(room, 2)).toBe(true);
+    expect(await request(room, 2, { open: 2 })).toBe(true);
     await inRoom(room, (sql) => sql.exec("UPDATE hostname_request SET state = 'expired', open = NULL"));
-    expect(await add("hnr_2", 1)).toBe(false);
-    expect(await add("hnr_3", null)).toBe(false);
-    expect(await inRoom(room, (sql) => sql.exec("SELECT COUNT(*) AS n FROM hostname_request").one().n)).toBe(3);
+    expect(await request(room, 2)).toBe(false);
+    expect(await request(room, 3, { state: "ended", open: null })).toBe(false);
+    expect((await one(room, "SELECT COUNT(*) AS n FROM hostname_request")).n).toBe(3);
+  });
+
+  it("keeps a request's hostname and challenge in their forms, the generation it was made under, and its proof history", async () => {
+    const room = await newRoom();
+    let n = 0;
+    const closed = { state: "ended", open: null };
+    // The generation is the name's own when the request was made: a request can't be stored without one.
+    expect(await inRoom(room, (sql) => refuses(() => sql.exec("INSERT INTO hostname_request (id, hostname, state, challenge, requested_by, requested_at, expires_at, updated_at) VALUES ('hnr_none', 'app.example.com', 'ended', ?, 'per_rl_owner', 1, 2, 1)", CHALLENGE)))).toBe(true);
+    expect(await request(room, ++n, { ...closed, generation: -1 })).toBe(true);
+    expect(await request(room, ++n, { ...closed, generation: 7 })).toBe(false);
+    for (const bad of ["App.Example.com", "example", "a.b", ".example.com", "example.com.", "app..example.com", "*.example.com", "app_x.example.com", "app example.com", "", `${"a".repeat(250)}.com`]) expect(await request(room, ++n, { ...closed, hostname: bad }), JSON.stringify(bad)).toBe(true);
+    for (const good of ["xn--bcher-kva.example", `${"a".repeat(249)}.com`, "a-1.b2.example.co.uk"]) expect(await request(room, ++n, { ...closed, hostname: good }), good).toBe(false);
+    for (const bad of ["5e".repeat(31), "5e".repeat(33), "5E".repeat(32), "zz".repeat(32), ""]) expect(await request(room, ++n, { ...closed, challenge: bad }), JSON.stringify(bad)).toBe(true);
+    // The recheck's history: the last match, when it was last checked, and the first definite no since the match.
+    expect(await request(room, ++n, { state: "claimed", claimed_at: 5, proved_at: 5, checked_at: 9, definite_no_since: 9 })).toBe(false);
+    expect(await one(room, "SELECT generation, proved_at, checked_at, definite_no_since FROM hostname_request WHERE open = 1")).toEqual({ generation: 0, proved_at: 5, checked_at: 9, definite_no_since: 9 });
   });
 });
 
@@ -348,6 +427,14 @@ describe("the hostname-claim object (M6 step 2)", () => {
     expect((await state(hostname)).suspended).toBe(true);
     await inClaim(hostname, (sql) => sql.exec("UPDATE suspension SET lifted_at = 4"));
     expect((await state(hostname)).suspended).toBe(false);
+    // The name's generation, which a suspend, a lift and a free each advance, and never below 0.
+    await inClaim(hostname, (sql) => sql.exec("INSERT INTO hostname (singleton, name, created_at) VALUES (1, ?, 1)", hostname));
+    expect(await inClaim(hostname, (sql) => sql.exec("SELECT generation, last_freed_at, last_suspended_at, last_lifted_at FROM hostname").one())).toEqual({ generation: 0, last_freed_at: null, last_suspended_at: null, last_lifted_at: null });
+    expect(await inClaim(hostname, (sql) => refuses(() => sql.exec("UPDATE hostname SET generation = -1")))).toBe(true);
+    expect(await inClaim(hostname, (sql) => refuses(() => sql.exec("UPDATE hostname SET generation = generation + 1, last_suspended_at = 3, last_lifted_at = 4")))).toBe(false);
+    // Its states are the rules' own.
+    const core = JSON.parse(BINDINGS.TEST_CORE_SETS) as { hostnameClaimStates: string[]; holdingHostnameClaimStates: string[] };
+    expect([core.hostnameClaimStates, core.holdingHostnameClaimStates]).toEqual([["live", "ending", "ended"], ["live", "ending"]]);
     // Another hostname is another object.
     expect(await state("other.example.com")).toEqual({ claim: null, suspended: false });
   });

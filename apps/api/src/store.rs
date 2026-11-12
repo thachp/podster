@@ -282,7 +282,10 @@ ALTER TABLE repo_request ADD COLUMN limited_call TEXT;
 ", "
 CREATE TABLE release_config (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
   environments_json TEXT NOT NULL DEFAULT '[\"production\"]', approval_policy TEXT NOT NULL DEFAULT 'person' CHECK (approval_policy = 'person'),
-  version INTEGER NOT NULL DEFAULT 1, release_epoch INTEGER NOT NULL DEFAULT 0, set_by TEXT NOT NULL, set_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+  version INTEGER NOT NULL DEFAULT 1, release_epoch INTEGER NOT NULL DEFAULT 0, set_by TEXT NOT NULL, set_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  kept_previous TEXT, in_flight_script TEXT, in_flight_epoch INTEGER, CHECK ((in_flight_script IS NULL) = (in_flight_epoch IS NULL)),
+  CHECK (kept_previous IS NULL OR (length(kept_previous) BETWEEN 38 AND 63 AND substr(kept_previous, -37, 4) = '.rel' AND substr(kept_previous, -33, 1) = '_' AND substr(kept_previous, -32) NOT GLOB '*[^0-9a-f]*' AND substr(kept_previous, 1, length(kept_previous) - 37) NOT GLOB '*[^a-z0-9]*')),
+  CHECK (in_flight_script IS NULL OR (length(in_flight_script) BETWEEN 38 AND 63 AND substr(in_flight_script, -37, 4) = '.rel' AND substr(in_flight_script, -33, 1) = '_' AND substr(in_flight_script, -32) NOT GLOB '*[^0-9a-f]*' AND substr(in_flight_script, 1, length(in_flight_script) - 37) NOT GLOB '*[^a-z0-9]*')));
 CREATE TABLE app_label (label TEXT PRIMARY KEY CHECK (length(label) BETWEEN 1 AND 26 AND label NOT GLOB '*[^a-z0-9]*'), current INTEGER UNIQUE CHECK (current = 1),
   created_at INTEGER NOT NULL, retired_at INTEGER, indexed_at INTEGER, suspended_at INTEGER, suspension_reason TEXT,
   CHECK ((current IS NULL) = (retired_at IS NOT NULL)), CHECK ((suspended_at IS NULL) = (suspension_reason IS NULL))) WITHOUT ROWID;
@@ -295,7 +298,8 @@ CREATE TABLE release (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UN
   CHECK (length(label) BETWEEN 1 AND 26 AND label NOT GLOB '*[^a-z0-9]*'), CHECK (script_name IS NULL OR script_name = label || '.' || id));
 CREATE INDEX release_by_state ON release (state, requested_at);
 CREATE TABLE serve_state (host TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('default', 'custom')), release_id TEXT, script_name TEXT, version INTEGER NOT NULL DEFAULT 1,
-  updated_at INTEGER NOT NULL, CHECK ((release_id IS NULL) = (script_name IS NULL)),
+  closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0, 1)), flight_version INTEGER, flight_before TEXT, updated_at INTEGER NOT NULL,
+  CHECK (flight_before IS NULL OR (length(flight_before) BETWEEN 38 AND 63 AND substr(flight_before, -37, 4) = '.rel' AND substr(flight_before, -33, 1) = '_' AND substr(flight_before, -32) NOT GLOB '*[^0-9a-f]*' AND substr(flight_before, 1, length(flight_before) - 37) NOT GLOB '*[^a-z0-9]*')), CHECK ((release_id IS NULL) = (script_name IS NULL)),
   CHECK (release_id IS NULL OR (length(release_id) = 36 AND release_id GLOB 'rel_*' AND substr(release_id, 5) NOT GLOB '*[^0-9a-f]*')),
   CHECK (script_name IS NULL OR (length(script_name) BETWEEN 38 AND 63 AND substr(script_name, -37) = '.' || release_id
     AND substr(script_name, 1, length(script_name) - 37) NOT GLOB '*[^a-z0-9]*'))) WITHOUT ROWID;

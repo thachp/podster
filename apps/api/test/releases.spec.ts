@@ -223,6 +223,36 @@ describe("the room's release state (M6 step 2)", () => {
     expect(await inRoom(room, (sql) => sql.exec("SELECT version FROM serve_state WHERE host = 'k3v9q2'").one().version)).toBe(1);
   });
 
+  it("can hold the one commit in flight: its script and epoch with the room, and what it wrote and found on each host", async () => {
+    const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+    const PREVIOUS = `k3v9q2.rel_${"b2".repeat(16)}`;
+    await inRoom(room, (sql) => {
+      sql.exec("INSERT INTO release_config (singleton, set_by, set_at, updated_at) VALUES (1, 'per_rl_owner', 1, 1)");
+      sql.exec("INSERT INTO serve_state (host, kind, release_id, script_name, updated_at) VALUES ('k3v9q2', 'default', ?, ?, 1)", REL, `k3v9q2.${REL}`);
+      sql.exec("INSERT INTO serve_state (host, kind, updated_at) VALUES ('app.example.com', 'custom', 1)");
+    });
+    expect(await inRoom(room, (sql) => sql.exec("SELECT kept_previous, in_flight_script, in_flight_epoch FROM release_config").one())).toEqual({ kept_previous: null, in_flight_script: null, in_flight_epoch: null });
+    expect(await inRoom(room, (sql) => sql.exec("SELECT closed, flight_version, flight_before FROM serve_state WHERE host = 'k3v9q2'").one())).toEqual({ closed: 0, flight_version: null, flight_before: null });
+    const config = (set: string, ...values: unknown[]) => inRoom(room, (sql) => refuses(() => sql.exec(`UPDATE release_config SET ${set}`, ...values)));
+    // A flight has a script and the epoch its commit wrote, or neither.
+    expect(await config("in_flight_script = ?", `k3v9q2.${REL}`)).toBe(true);
+    expect(await config("in_flight_epoch = 3")).toBe(true);
+    expect(await config("in_flight_script = ?, in_flight_epoch = 3, kept_previous = ?", `k3v9q2.${REL}`, PREVIOUS)).toBe(false);
+    for (const bad of ["k3v9q2", `k3v9q2_${REL}`, `K3.${REL}`, `k3v9q2.rel_${"zz".repeat(16)}`, `${"a".repeat(27)}.${REL}`]) {
+      expect(await config("kept_previous = ?", bad), bad).toBe(true);
+      expect(await config("in_flight_script = ?", bad), bad).toBe(true);
+    }
+    const host = (name: string, set: string, ...values: unknown[]) => inRoom(room, (sql) => refuses(() => sql.exec(`UPDATE serve_state SET ${set} WHERE host = ?`, ...values, name)));
+    // The commit wrote version 2 to the default host, which served the previous script, and nothing to a closed custom one.
+    expect(await host("k3v9q2", "flight_version = 2, flight_before = ?", PREVIOUS)).toBe(false);
+    expect(await host("app.example.com", "closed = 1")).toBe(false);
+    expect(await host("app.example.com", "closed = 2")).toBe(true);
+    expect(await host("k3v9q2", "flight_before = 'k3v9q2'")).toBe(true);
+    // The flight ends: everything it held is cleared.
+    expect(await config("in_flight_script = NULL, in_flight_epoch = NULL")).toBe(false);
+    expect(await host("k3v9q2", "flight_version = NULL, flight_before = NULL")).toBe(false);
+  });
+
   it("records each unpublish with the epoch it raised to, once", async () => {
     const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
     await inRoom(room, (sql) => sql.exec("INSERT INTO app_label (label, current, created_at) VALUES ('k3v9q2', 1, 1)"));

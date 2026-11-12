@@ -44,6 +44,9 @@ pub enum HostnameRefusal {
     Suspended,
     /// `hostname_limit`: the room already has its one custom hostname, pending or claimed.
     RoomLimit,
+    /// `hostname_unavailable`: the deployment's own configuration can't classify the name: the content domain or the
+    /// Public Suffix List rules are missing or malformed, or no rule covers the name's top-level label. Fails closed.
+    Unclassified,
 }
 
 impl HostnameRefusal {
@@ -58,6 +61,7 @@ impl HostnameRefusal {
             HostnameRefusal::PublicSuffix => "hostname_public_suffix",
             HostnameRefusal::Suspended => "hostname_suspended",
             HostnameRefusal::RoomLimit => "hostname_limit",
+            HostnameRefusal::Unclassified => "hostname_unavailable",
         }
     }
 }
@@ -100,16 +104,89 @@ pub fn normalize(input: &str) -> Result<String, HostnameRefusal> {
     Ok(ascii)
 }
 
-/// An IPv4 address in any spelling `std` reads, an IPv6 address bare or in brackets, or a name whose last label is all
-/// digits, which some resolvers read as an address.
+/// An IP literal (IPv4 in any spelling `std` reads, IPv6 bare or in brackets), or a name whose last label looks like a
+/// number in any base: all decimal digits, or `0x` followed by hexadecimal digits, or `0` followed by octal digits.
+/// Browsers and resolvers read such names as addresses (`0x4`, `1.2.3.0x4`). Ruled on the review of PR #309.
 fn is_ip_address(name: &str) -> bool {
     let bare = name.trim_start_matches('[').trim_end_matches(']');
     bare.parse::<IpAddr>().is_ok()
         || bare.parse::<Ipv4Addr>().is_ok()
-        || name
-            .rsplit('.')
-            .next()
-            .is_some_and(|last| !last.is_empty() && last.bytes().all(|b| b.is_ascii_digit()))
+        || name.rsplit('.').next().is_some_and(is_number)
+}
+
+/// A label that reads as a number: decimal, `0x`/`0X` hexadecimal (an empty tail included), or octal.
+fn is_number(label: &str) -> bool {
+    if label.is_empty() {
+        return false;
+    }
+    if let Some(hex) = label
+        .strip_prefix("0x")
+        .or_else(|| label.strip_prefix("0X"))
+    {
+        return hex.bytes().all(|b| b.is_ascii_hexdigit());
+    }
+    label.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// One rule of the Public Suffix List, as the deployment holds it: a plain rule (`co.uk`), a wildcard (`*.ck`), or an
+/// exception (`!www.ck`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SuffixRule {
+    Plain(Vec<String>),
+    Wildcard(Vec<String>),
+    Exception(Vec<String>),
+}
+
+/// A rule's labels, normalized like a hostname. `None` for a rule that can't be read.
+fn suffix_rule(rule: &str) -> Option<SuffixRule> {
+    let labels = |body: &str| -> Option<Vec<String>> {
+        let ascii = idna::domain_to_ascii(body).ok()?;
+        (!ascii.is_empty() && ascii.split('.').all(|l| !l.is_empty()))
+            .then(|| ascii.split('.').map(str::to_owned).collect())
+    };
+    if let Some(body) = rule.strip_prefix('!') {
+        return labels(body)
+            .filter(|l| l.len() >= 2)
+            .map(SuffixRule::Exception);
+    }
+    if let Some(body) = rule.strip_prefix("*.") {
+        return labels(body).map(SuffixRule::Wildcard);
+    }
+    if rule.contains('*') || rule.contains('!') {
+        return None;
+    }
+    labels(rule).map(SuffixRule::Plain)
+}
+
+/// How many of a name's labels, from the right, are its public suffix under these rules, by the list's algorithm: the
+/// longest matching rule prevails, an exception rule prevails over all and stands for one label fewer, and a wildcard
+/// stands for one label more. `None` when the rules can't be read, or no rule covers the name's top-level label, which
+/// fails closed rather than falling back to the list's default rule.
+fn public_suffix_len(name: &[&str], rules: &[SuffixRule]) -> Option<usize> {
+    let ends_with = |labels: &[String]| {
+        labels.len() <= name.len()
+            && name
+                .iter()
+                .rev()
+                .zip(labels.iter().rev())
+                .all(|(n, r)| n == r)
+    };
+    let mut best: Option<usize> = None;
+    for rule in rules {
+        match rule {
+            SuffixRule::Exception(labels) if ends_with(labels) => return Some(labels.len() - 1),
+            SuffixRule::Plain(labels) if ends_with(labels) => best = best.max(Some(labels.len())),
+            SuffixRule::Wildcard(labels) if ends_with(labels) && name.len() > labels.len() => {
+                best = best.max(Some(labels.len() + 1));
+            }
+            // A wildcard whose base is the whole name covers the name's top-level label without matching it.
+            SuffixRule::Wildcard(labels) if ends_with(labels) => {
+                best = best.max(Some(labels.len()))
+            }
+            _ => {}
+        }
+    }
+    best
 }
 
 /// Whether `name` is `domain` or under it.
@@ -117,14 +194,15 @@ fn is_or_under(name: &str, domain: &str) -> bool {
     name == domain || name.ends_with(&format!(".{domain}"))
 }
 
-/// A hostname a room may ask to map, normalized. `content_domain` is the deployment's, from its configuration.
-/// `public_suffixes` are the suffixes the deployment holds from the Public Suffix List, normalized; a name equal to one
-/// is refused. `suspended` is the hostname's own claim object's answer. `room_hostnames` is how many the room has,
-/// pending or claimed.
+/// A hostname a room may ask to map, normalized. `content_domain` is the deployment's, from its configuration, and is
+/// normalized here too; an empty or malformed one fails closed. `public_suffix_rules` are the Public Suffix List's rules
+/// the deployment holds, as the list writes them (`co.uk`, `*.ck`, `!www.ck`); a name that is itself a public suffix
+/// under them, a wildcard rule's included, is refused, and so is a name no rule covers. `suspended` is the hostname's
+/// own claim object's answer. `room_hostnames` is how many the room has, pending or claimed.
 pub fn mappable(
     input: &str,
     content_domain: &str,
-    public_suffixes: &[&str],
+    public_suffix_rules: &[&str],
     suspended: bool,
     room_hostnames: usize,
 ) -> Result<String, HostnameRefusal> {
@@ -132,10 +210,21 @@ pub fn mappable(
     if !name.contains('.') {
         return Err(HostnameRefusal::SingleLabel);
     }
-    if is_or_under(&name, PODSTER_DOMAIN) || is_or_under(&name, content_domain) {
+    let content = normalize(content_domain).map_err(|_| HostnameRefusal::Unclassified)?;
+    if !content.contains('.') {
+        return Err(HostnameRefusal::Unclassified);
+    }
+    if is_or_under(&name, PODSTER_DOMAIN) || is_or_under(&name, &content) {
         return Err(HostnameRefusal::Reserved);
     }
-    if public_suffixes.iter().any(|suffix| *suffix == name) {
+    let rules: Option<Vec<SuffixRule>> =
+        public_suffix_rules.iter().map(|r| suffix_rule(r)).collect();
+    let rules = rules
+        .filter(|r| !r.is_empty())
+        .ok_or(HostnameRefusal::Unclassified)?;
+    let labels: Vec<&str> = name.split('.').collect();
+    let suffix = public_suffix_len(&labels, &rules).ok_or(HostnameRefusal::Unclassified)?;
+    if suffix >= labels.len() {
         return Err(HostnameRefusal::PublicSuffix);
     }
     if suspended {
@@ -190,6 +279,9 @@ pub struct Claim<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HostnameRecord<'a> {
     pub claim: Option<Claim<'a>>,
+    /// The claim is ending: by its recheck, Cloudflare's `moved`, the room unpublishing or unmapping, or suspension. It
+    /// serves nothing from here, and holds the name until Cloudflare reports the custom hostname gone and it is freed.
+    pub ending: bool,
     pub suspended: bool,
     /// When the last claim was freed, after Cloudflare reported its custom hostname gone.
     pub last_freed_at: Option<i64>,
@@ -222,6 +314,9 @@ pub enum ClaimDecision {
     StaleChallenge,
     /// `hostname_request_expired`: the request is past its 72 hours.
     Expired,
+    /// `hostname_claim_ending`: the claim is ending, and is never granted again, not even to its own room and request.
+    /// Once it is freed, any claim needs a new challenge.
+    Ending,
 }
 
 impl ClaimDecision {
@@ -234,6 +329,7 @@ impl ClaimDecision {
             ClaimDecision::Unproven => "hostname_unproven",
             ClaimDecision::StaleChallenge => "hostname_challenge_stale",
             ClaimDecision::Expired => "hostname_request_expired",
+            ClaimDecision::Ending => "hostname_claim_ending",
         }
     }
 }
@@ -245,7 +341,9 @@ pub fn decide_claim(record: &HostnameRecord, ask: &ClaimAsk, now: i64) -> ClaimD
         return ClaimDecision::Suspended;
     }
     if let Some(claim) = record.claim {
-        return if claim.room == ask.room && claim.request == ask.request {
+        return if record.ending {
+            ClaimDecision::Ending
+        } else if claim.room == ask.room && claim.request == ask.request {
             ClaimDecision::Granted
         } else {
             ClaimDecision::HeldElsewhere
@@ -273,9 +371,27 @@ pub fn may_free_claim(serve_cleared: bool, cloudflare_reports_gone: bool) -> boo
 }
 
 /// Whether a host may be served on a custom hostname: the room's desired state names a script for it, and the claim
-/// object says that room holds it. Both must agree; the applier asks both before it writes, and the reconcile too.
-pub fn custom_host_may_serve(room_wants_a_script: bool, claim: Option<Claim>, room: &str) -> bool {
-    room_wants_a_script && claim.is_some_and(|c| c.room == room)
+/// object says that room holds a live claim on a name that isn't suspended. A claim that is ending serves nothing. Both
+/// sides must agree; the applier asks both before it writes, and the reconcile too.
+pub fn custom_host_may_serve(
+    room_wants_a_script: bool,
+    record: &HostnameRecord,
+    room: &str,
+) -> bool {
+    room_wants_a_script
+        && !record.suspended
+        && !record.ending
+        && record.claim.is_some_and(|c| c.room == room)
+}
+
+/// The claim starts ending, for any reason in [`ClaimEnd`]: the room clears and closes that host
+/// (`release::clear_host`), the custom hostname is deleted at Cloudflare and read until gone, and only then is the claim
+/// freed ([`may_free_claim`], [`free`]).
+pub fn end_claim<'a>(record: &HostnameRecord<'a>) -> HostnameRecord<'a> {
+    HostnameRecord {
+        ending: record.claim.is_some(),
+        ..*record
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -399,11 +515,14 @@ pub struct SuspendPlan<'a> {
     pub tell_room: Option<&'a str>,
 }
 
-/// Suspending a hostname: it stays suspended through and after any claim, and the room holding one is told.
+/// Suspending a hostname: it stays suspended through and after any claim, its live claim starts ending at once, and the
+/// room holding it is told. Ruled on the review of PR #309: suspension ends the claim, and after a lift the name needs a
+/// fresh challenge.
 pub fn suspend<'a>(record: &HostnameRecord<'a>) -> (HostnameRecord<'a>, SuspendPlan<'a>) {
     (
         HostnameRecord {
             claim: record.claim,
+            ending: record.claim.is_some(),
             suspended: true,
             last_freed_at: record.last_freed_at,
         },
@@ -416,9 +535,8 @@ pub fn suspend<'a>(record: &HostnameRecord<'a>) -> (HostnameRecord<'a>, SuspendP
 /// Lifting a suspension restores nothing: no claim comes back, and a room must challenge anew.
 pub fn lift<'a>(record: &HostnameRecord<'a>) -> HostnameRecord<'a> {
     HostnameRecord {
-        claim: record.claim,
         suspended: false,
-        last_freed_at: record.last_freed_at,
+        ..*record
     }
 }
 
@@ -427,6 +545,7 @@ pub fn lift<'a>(record: &HostnameRecord<'a>) -> HostnameRecord<'a> {
 pub fn free<'a>(record: &HostnameRecord<'a>, now: i64) -> HostnameRecord<'a> {
     HostnameRecord {
         claim: None,
+        ending: false,
         suspended: record.suspended,
         last_freed_at: Some(now),
     }

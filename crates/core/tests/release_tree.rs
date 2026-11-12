@@ -252,7 +252,10 @@ fn a_file_needs_a_size_and_a_directory_never_has_one() {
 fn case_twins_and_two_files_at_one_address_fail() {
     assert_eq!(
         problems(&[file("A.html", 1), file("a.html", 1)]),
-        [ContentProblem::CaseTwins("A.html".into(), "a.html".into())]
+        [
+            ContentProblem::CaseTwins("A.html".into(), "a.html".into()),
+            ContentProblem::SameAddress("A.html".into(), "a.html".into())
+        ]
     );
     // Full case folding: ß and SS are one name.
     assert!(problems(&[file("straße.txt", 1), file("STRASSE.txt", 1)])
@@ -357,4 +360,66 @@ fn a_fetched_file_matches_its_entry_by_length_and_blob_sha() {
         Err(FetchMismatch::Sha)
     );
     assert_eq!(FetchMismatch::Sha.code(), "release_file_mismatch");
+}
+
+#[test]
+fn nothing_is_served_at_the_markers_address() {
+    // `.html` stripped, this would be served exactly where the job's marker is.
+    let twin = ".well-known/podster-release.json.html";
+    assert!(!refused_name(twin));
+    let found = problems(&[dir(".well-known"), file(twin, 1), file("index.html", 1)]);
+    assert!(
+        found.contains(&ContentProblem::SameAddress(
+            MARKER_PATH.into(),
+            twin.into()
+        )),
+        "{found:?}"
+    );
+    // And in another case, since addresses are compared folded.
+    let upper = ".WELL-KNOWN/podster-release.json.html";
+    assert!(problems(&[file(upper, 1)])
+        .iter()
+        .any(|p| p.code() == "release_path_collision"));
+    // Its own directory index would be too.
+    let index = ".well-known/podster-release.json/index.html";
+    assert!(refused_name(index));
+}
+
+#[test]
+fn invisible_characters_are_refused() {
+    for path in [
+        "a\u{202E}b.html", // right-to-left override (Cf)
+        "a\u{200B}b.html", // zero-width space (Cf)
+        "a\u{200D}b.html", // zero-width joiner (Cf)
+        "a\u{FEFF}b.html", // byte-order mark (Cf)
+        "a\u{2066}b.html", // left-to-right isolate (Cf)
+        "a\u{2028}b.html", // line separator (Zl)
+        "a\u{2029}b.html", // paragraph separator (Zp)
+        "a\u{00A0}b.html", // no-break space
+        "a\u{3000}b.html", // ideographic space
+        "a\u{2009}b.html", // thin space
+    ] {
+        assert_eq!(check_path(path), Err(PathProblem::Invisible), "{path:?}");
+    }
+    assert_eq!(check_path("a b.html"), Ok(()));
+}
+
+#[test]
+fn twins_are_found_by_full_case_folding_after_nfkc() {
+    for (a, b) in [
+        ("ẞ.txt", "ß.txt"),
+        ("ß.txt", "ss.txt"),
+        ("ﬁle.txt", "file.txt"),
+        ("Ａ.txt", "a.txt"),
+        ("ǅ.txt", "dž.txt"),
+        ("Σ.txt", "ς.txt"),
+    ] {
+        assert_eq!(fold(a), fold(b), "{a} {b}");
+        let found = problems(&[file(a, 1), file(b, 1)]);
+        assert!(
+            found.iter().any(|p| p.code() == "release_path_collision"),
+            "{a} {b}: {found:?}"
+        );
+    }
+    assert_ne!(fold("a.txt"), fold("b.txt"));
 }

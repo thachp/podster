@@ -231,8 +231,8 @@ fn a_label_is_one_to_twenty_six_lower_case_letters_and_digits() {
 }
 
 #[test]
-fn an_id_is_three_letters_an_underscore_and_thirty_two_lower_hex() {
-    assert!(is_podster_id(ID));
+fn a_release_id_is_exactly_rel_and_thirty_two_lower_hex() {
+    assert!(is_release_id(ID));
     for bad in [
         "rel_0123456789abcdef0123456789abcde",   // 35
         "rel_0123456789abcdef0123456789abcdef0", // 37
@@ -242,9 +242,21 @@ fn an_id_is_three_letters_an_underscore_and_thirty_two_lower_hex() {
         "rel-0123456789abcdef0123456789abcdef",
         "re1_0123456789abcdef0123456789abcdef",
         "rel.0123456789abcdef0123456789abcdef",
+        "rls_0123456789abcdef0123456789abcdef",
+        "tsk_0123456789abcdef0123456789abcdef",
         "",
     ] {
-        assert!(!is_podster_id(bad), "{bad}");
+        assert!(!is_release_id(bad), "{bad}");
+        assert_eq!(
+            script_name("abc", bad),
+            Err(ScriptNameRefusal::BadReleaseId),
+            "{bad}"
+        );
+        assert_eq!(
+            script_owner(&format!("abc.{bad}")),
+            ScriptOwner::Foreign,
+            "{bad}"
+        );
     }
 }
 
@@ -263,6 +275,22 @@ fn a_script_name_is_the_label_a_dot_and_the_id_and_at_most_sixty_three_character
         Err(ScriptNameRefusal::BadReleaseId)
     );
     assert_eq!(script_name("abc", ""), Err(ScriptNameRefusal::BadReleaseId));
+}
+
+#[test]
+fn no_name_over_sixty_three_characters_is_podsters() {
+    // The cap is implied by the parts' own rules, 26 + 1 + 36, and kept as a guard: every longer name is foreign,
+    // whatever it holds.
+    let mut state = 0x63_u64;
+    for extra in 1..=40 {
+        let label = "a".repeat(26);
+        let longer = format!("{label}.{ID}{}", "0".repeat(extra));
+        assert_eq!(script_owner(&longer), ScriptOwner::Foreign, "{extra}");
+        let id = made_id(&mut state);
+        let name = format!("{}.{id}", "b".repeat(26));
+        assert_eq!(name.len(), MAX_SCRIPT_NAME_LEN);
+        assert!(matches!(script_owner(&name), ScriptOwner::Podster { .. }));
+    }
 }
 
 #[test]
@@ -374,17 +402,20 @@ fn a_label_is_made_from_128_random_bits_and_checked_before_use() {
     assert!(!label_acceptable("ABC", &[]));
 }
 
-// --- the release epoch and the desired serve state ------------------------------------------------------------------
+// --- the release epoch and the desired serve state ---------------------------------------------------------------
+
+fn host(script: Option<&str>, version: u64) -> DesiredServe {
+    DesiredServe {
+        script: script.map(str::to_owned),
+        version,
+        closed: false,
+    }
+}
 
 fn serving(script: Option<&str>, hosts: usize, epoch: u64) -> ServeState {
     ServeState {
         epoch,
-        hosts: (0..hosts)
-            .map(|i| DesiredServe {
-                script: script.map(str::to_owned),
-                version: 10 + i as u64,
-            })
-            .collect(),
+        hosts: (0..hosts).map(|i| host(script, 10 + i as u64)).collect(),
         kept_previous: None,
     }
 }
@@ -393,23 +424,24 @@ fn scripts(state: &ServeState) -> Vec<Option<&str>> {
     state.hosts.iter().map(|h| h.script.as_deref()).collect()
 }
 
+fn versions(state: &ServeState) -> Vec<u64> {
+    state.hosts.iter().map(|h| h.version).collect()
+}
+
 #[test]
-fn a_live_commit_sets_every_host_under_its_own_epoch_only() {
+fn a_live_commit_sets_every_open_host_under_its_own_epoch_only() {
     let state = serving(None, 2, 4);
     let Ok((after, mark)) = commit_live(&state, 4, "lab.rel_a") else {
         unreachable!("refused");
     };
     assert_eq!(scripts(&after), [Some("lab.rel_a"), Some("lab.rel_a")]);
-    assert_eq!(
-        after.hosts.iter().map(|h| h.version).collect::<Vec<_>>(),
-        [11, 12]
-    );
+    assert_eq!(versions(&after), [11, 12]);
     assert_eq!(after.epoch, 4);
     assert_eq!(
         mark,
         CommitMark {
             epoch: 4,
-            versions: vec![11, 12],
+            versions: vec![Some(11), Some(12)],
             before: vec![None, None]
         }
     );
@@ -424,21 +456,73 @@ fn a_live_commit_sets_every_host_under_its_own_epoch_only() {
 }
 
 #[test]
+fn a_repeated_commit_is_refused_by_the_function_itself() {
+    let Ok((live, _)) = commit_live(&serving(None, 2, 1), 1, "lab.rel_a") else {
+        unreachable!("refused");
+    };
+    assert_eq!(
+        commit_live(&live, 1, "lab.rel_a"),
+        Err(CommitLiveRefusal::AlreadyLive)
+    );
+    assert_eq!(
+        CommitLiveRefusal::AlreadyLive.code(),
+        "release_already_live"
+    );
+    // A closed host naming it doesn't count: only an open host serves.
+    let mut closed = serving(None, 2, 1);
+    if let Some(h) = closed.hosts.get_mut(1) {
+        *h = DesiredServe {
+            script: Some("lab.rel_a".into()),
+            version: 5,
+            closed: true,
+        };
+    }
+    assert!(commit_live(&closed, 1, "lab.rel_a").is_ok());
+}
+
+#[test]
+fn the_epoch_and_versions_fail_closed_at_their_limits() {
+    let spent = serving(None, 1, u64::MAX);
+    assert_eq!(
+        commit_live(&spent, u64::MAX, "lab.rel_a"),
+        Err(CommitLiveRefusal::Exhausted)
+    );
+    let mut full = serving(None, 1, 3);
+    if let Some(h) = full.hosts.first_mut() {
+        h.version = u64::MAX - 1;
+    }
+    assert_eq!(
+        commit_live(&full, 3, "lab.rel_a"),
+        Err(CommitLiveRefusal::Exhausted)
+    );
+    // An unpublish never fails: at the limit it pins the epoch, which no commit accepts again.
+    let (down, _) = unpublish(&spent, None);
+    assert_eq!(down.epoch, u64::MAX);
+    assert_eq!(
+        commit_live(&down, u64::MAX, "lab.rel_a"),
+        Err(CommitLiveRefusal::Exhausted)
+    );
+    let (down, _) = unpublish(&serving(Some("lab.rel_a"), 1, u64::MAX - 1), None);
+    assert_eq!(down.epoch, u64::MAX);
+    assert_eq!(scripts(&down), [None]);
+    assert_eq!(
+        rollback(&down, u64::MAX, true),
+        Err(RollbackRefusal::NotKept)
+    );
+}
+
+#[test]
 fn a_room_made_private_mid_publish_never_goes_live() {
-    // The release passed its recheck under epoch 4 and is fetching files.
     let started = 4;
     let state = serving(Some("lab.rel_old"), 1, started);
-    // The room is made private: the trigger's own transaction raises the epoch and clears every host.
-    let (after, delete) = unpublish(&state);
+    let (after, delete) = unpublish(&state, None);
     assert_eq!(after.epoch, 5);
     assert_eq!(scripts(&after), [None]);
     assert_eq!(delete, ["lab.rel_old"]);
-    // The upload lands and the job returns to the room: the commit is refused, and nothing serves.
     assert_eq!(
         commit_live(&after, started, "lab.rel_new"),
         Err(CommitLiveRefusal::EpochMoved)
     );
-    // And the job's own recheck says why, with the trigger's code, before anything else.
     let commit = MERGED;
     let mut check = open_recheck(&commit);
     check.room.public = false;
@@ -455,35 +539,67 @@ fn a_room_made_private_mid_publish_never_goes_live() {
 }
 
 #[test]
+fn a_release_never_writes_to_a_cleared_or_suspended_custom_host() {
+    // The default host and a custom host both serve the first release.
+    let Ok((live, _)) = commit_live(&serving(None, 2, 7), 7, "lab.rel_1") else {
+        unreachable!("refused");
+    };
+    // An operator suspends the custom hostname, or its claim starts ending: the room clears and closes that host.
+    let Some(cleared) = clear_host(&live, 1) else {
+        unreachable!("no host");
+    };
+    // A release already uploading commits: the default host switches, the closed custom host stays at nothing.
+    let Ok((second, mark)) = commit_live(&cleared, 7, "lab.rel_2") else {
+        unreachable!("refused");
+    };
+    assert_eq!(scripts(&second), [Some("lab.rel_2"), None]);
+    assert!(second.hosts.get(1).is_some_and(|h| h.closed));
+    assert_eq!(mark.versions.get(1), Some(&None));
+    // A rollback doesn't reopen it either, and a set-back leaves it alone.
+    let mut kept = second.clone();
+    kept.kept_previous = Some("lab.rel_1".into());
+    let Ok((rolled, _)) = rollback(&kept, 7, true) else {
+        unreachable!("refused");
+    };
+    assert_eq!(scripts(&rolled), [Some("lab.rel_1"), None]);
+    let back = set_back(&second, &mark, "lab.rel_2");
+    assert_eq!(scripts(&back.state), [Some("lab.rel_1"), None]);
+    assert_eq!(back.reverted, [0]);
+    // Only a new claim, active at Cloudflare, opens it again, with the script the default host serves.
+    let Some(reopened) = open_host(&second, 1) else {
+        unreachable!("no host");
+    };
+    assert_eq!(scripts(&reopened), [Some("lab.rel_2"), Some("lab.rel_2")]);
+    assert!(reopened.hosts.iter().all(|h| !h.closed));
+    assert_eq!(open_host(&second, 2), None);
+}
+
+#[test]
 fn a_second_release_failing_after_the_first_is_live_leaves_the_first_serving() {
     let first = "lab.rel_1";
     let Ok((live, _)) = commit_live(&serving(None, 1, 2), 2, first) else {
         unreachable!("first refused");
     };
-    // Failing before its commit: the room's state is untouched, and only the second's own script is deleted.
     assert_eq!(scripts(&live), [Some(first)]);
     assert_eq!(
         next_state(ReleaseState::Uploading, ReleaseEvent::Fail),
         Ok(ReleaseState::Failed)
     );
-    // Failing after its commit, when its marker never comes back: set back to the first, since nothing spoke since.
     let Ok((second, mark)) = commit_live(&live, 2, "lab.rel_2") else {
         unreachable!("second refused");
     };
-    assert_eq!(scripts(&second), [Some("lab.rel_2")]);
     assert_eq!(
         marker_outcome(None, "rel_2", MARKER_WAIT_MS),
         MarkerOutcome::Failed
     );
-    let Some(back) = set_back(&second, &mark) else {
-        unreachable!("no set-back");
-    };
-    assert_eq!(scripts(&back), [Some(first)]);
-    assert!(back
-        .hosts
-        .iter()
-        .zip(&second.hosts)
-        .all(|(b, s)| b.version == s.version + 1));
+    let back = set_back(&second, &mark, "lab.rel_2");
+    assert_eq!(scripts(&back.state), [Some(first)]);
+    assert_eq!(back.reverted, [0]);
+    assert!(back.delete_script);
+    assert_eq!(
+        versions(&back.state),
+        versions(&second).iter().map(|v| v + 1).collect::<Vec<_>>()
+    );
     assert_eq!(
         next_state(ReleaseState::Live, ReleaseEvent::Fail),
         Ok(ReleaseState::Failed)
@@ -491,43 +607,80 @@ fn a_second_release_failing_after_the_first_is_live_leaves_the_first_serving() {
 }
 
 #[test]
+fn a_set_back_is_host_by_host_and_keeps_a_script_something_still_serves() {
+    let Ok((live, mark)) = commit_live(&serving(Some("lab.rel_1"), 2, 3), 3, "lab.rel_2") else {
+        unreachable!("refused");
+    };
+    // The custom host changed since the commit: here, opened again after a claim, still naming the failed script.
+    let mut changed = live.clone();
+    if let Some(h) = changed.hosts.get_mut(1) {
+        h.version += 1;
+    }
+    let back = set_back(&changed, &mark, "lab.rel_2");
+    assert_eq!(back.reverted, [0]);
+    assert_eq!(scripts(&back.state), [Some("lab.rel_1"), Some("lab.rel_2")]);
+    // So its script is still served, and the caller mustn't delete it.
+    assert!(!back.delete_script);
+}
+
+#[test]
+fn a_set_back_needs_the_commits_epoch() {
+    // Hand-built: the epoch moved but every version is still what the commit wrote. Nothing is set back.
+    let state = ServeState {
+        epoch: 9,
+        hosts: vec![host(Some("lab.rel_2"), 11)],
+        kept_previous: None,
+    };
+    let mark = CommitMark {
+        epoch: 8,
+        versions: vec![Some(11)],
+        before: vec![Some("lab.rel_1".into())],
+    };
+    let back = set_back(&state, &mark, "lab.rel_2");
+    assert_eq!(back.state, state);
+    assert!(back.reverted.is_empty());
+    assert!(!back.delete_script);
+    // The same with the epoch right sets it back.
+    let same = CommitMark { epoch: 9, ..mark };
+    assert_eq!(set_back(&state, &same, "lab.rel_2").reverted, [0]);
+}
+
+#[test]
 fn a_set_back_after_an_unpublish_changes_nothing() {
     let Ok((live, mark)) = commit_live(&serving(Some("lab.rel_1"), 2, 3), 3, "lab.rel_2") else {
         unreachable!("refused");
     };
-    // An unpublish speaks while the release waits for its marker.
-    let (down, _) = unpublish(&live);
-    // The marker never came back: the set-back finds the epoch and versions moved, and leaves the room at nothing.
-    assert_eq!(set_back(&down, &mark), None);
-    assert_eq!(scripts(&down), [None, None]);
-    // Any other change since the commit stops it too: a custom host cleared, or another commit.
+    let (down, delete) = unpublish(&live, Some(&mark));
+    // The unpublish deletes the failed release's script and the one live before it, which sat only in the mark.
+    assert_eq!(delete, ["lab.rel_1", "lab.rel_2"]);
+    let back = set_back(&down, &mark, "lab.rel_2");
+    assert!(back.reverted.is_empty());
+    assert_eq!(scripts(&back.state), [None, None]);
+    assert!(back.delete_script);
     let Some(cleared) = clear_host(&live, 1) else {
         unreachable!("no host");
     };
-    assert_eq!(set_back(&cleared, &mark), None);
+    assert_eq!(set_back(&cleared, &mark, "lab.rel_2").reverted, [0]);
     let Ok((other, _)) = commit_live(&live, 3, "lab.rel_3") else {
         unreachable!("refused");
     };
-    assert_eq!(set_back(&other, &mark), None);
-    // A mark for another number of hosts never applies.
+    assert!(set_back(&other, &mark, "lab.rel_2").reverted.is_empty());
     let short = CommitMark {
         versions: vec![],
         before: vec![],
         ..mark.clone()
     };
-    assert_eq!(set_back(&live, &short), None);
+    assert!(set_back(&live, &short, "lab.rel_2").reverted.is_empty());
 }
 
 #[test]
 fn a_late_or_duplicated_job_changes_nothing() {
-    // A duplicated commit with the release's own epoch after an unpublish: refused.
     let state = serving(None, 1, 6);
-    let (down, _) = unpublish(&state);
+    let (down, _) = unpublish(&state, None);
     assert_eq!(
         commit_live(&down, 6, "lab.rel_late"),
         Err(CommitLiveRefusal::EpochMoved)
     );
-    // A late event on a release that already ended: refused, and the record doesn't move.
     for done in [
         ReleaseState::Failed,
         ReleaseState::Unpublished,
@@ -543,18 +696,19 @@ fn a_late_or_duplicated_job_changes_nothing() {
             "{done:?}"
         );
     }
-    // A second commit of a release already live, or a second marker: refused.
     assert!(next_state(ReleaseState::Live, ReleaseEvent::CommitLive).is_err());
     assert!(next_state(ReleaseState::Served, ReleaseEvent::MarkerSeen).is_err());
-    // A late set-back after the release was confirmed served and a newer one committed: refused by its condition.
     let Ok((live, mark)) = commit_live(&state, 6, "lab.rel_a") else {
         unreachable!("refused");
     };
+    assert_eq!(
+        commit_live(&live, 6, "lab.rel_a"),
+        Err(CommitLiveRefusal::AlreadyLive)
+    );
     let Ok((newer, _)) = commit_live(&live, 6, "lab.rel_b") else {
         unreachable!("refused");
     };
-    assert_eq!(set_back(&newer, &mark), None);
-    // A job retried after a lost answer settles by Cloudflare's own answer, never by guessing.
+    assert!(set_back(&newer, &mark, "lab.rel_a").reverted.is_empty());
     assert_eq!(
         next_state(ReleaseState::Uploading, ReleaseEvent::UploadUnknown),
         Ok(ReleaseState::Uncertain)
@@ -570,29 +724,22 @@ fn a_late_or_duplicated_job_changes_nothing() {
 fn a_served_release_keeps_the_one_before_and_deletes_the_one_before_that() {
     let mut state = serving(Some("lab.rel_2"), 1, 1);
     state.kept_previous = Some("lab.rel_1".into());
-    let after = after_served(&state, Some("lab.rel_2"), "lab.rel_3");
     assert_eq!(
-        after,
+        after_served(&state, Some("lab.rel_2"), "lab.rel_3"),
         AfterServed {
             kept_previous: Some("lab.rel_2".into()),
             delete: Some("lab.rel_1".into())
         }
     );
-    // The first release keeps nothing and deletes nothing.
-    let first = after_served(&serving(None, 1, 1), None, "lab.rel_1");
     assert_eq!(
-        first,
+        after_served(&serving(None, 1, 1), None, "lab.rel_1"),
         AfterServed {
             kept_previous: None,
             delete: None
         }
     );
-    // A rollback to the kept script, once served, never deletes the script now live.
-    let mut rolled = serving(Some("lab.rel_2"), 1, 1);
-    rolled.kept_previous = Some("lab.rel_1".into());
-    let back = after_served(&rolled, Some("lab.rel_2"), "lab.rel_1");
     assert_eq!(
-        back,
+        after_served(&state, Some("lab.rel_2"), "lab.rel_1"),
         AfterServed {
             kept_previous: Some("lab.rel_2".into()),
             delete: None
@@ -606,7 +753,10 @@ fn a_rollback_switches_only_to_a_kept_script_cloudflare_says_exists() {
     assert_eq!(rollback(&state, 9, true), Err(RollbackRefusal::NotKept));
     state.kept_previous = Some("lab.rel_1".into());
     assert_eq!(rollback(&state, 9, false), Err(RollbackRefusal::NotKept));
-    assert_eq!(rollback(&state, 8, true), Err(RollbackRefusal::EpochMoved));
+    assert_eq!(
+        rollback(&state, 8, true),
+        Err(RollbackRefusal::Commit(CommitLiveRefusal::EpochMoved))
+    );
     let Ok((back, mark)) = rollback(&state, 9, true) else {
         unreachable!("refused");
     };
@@ -615,8 +765,7 @@ fn a_rollback_switches_only_to_a_kept_script_cloudflare_says_exists() {
         mark.before,
         [Some("lab.rel_2".to_owned()), Some("lab.rel_2".to_owned())]
     );
-    // After an unpublish there is nothing to switch back to.
-    let (down, _) = unpublish(&state);
+    let (down, _) = unpublish(&state, None);
     assert_eq!(down.kept_previous, None);
     assert_eq!(
         rollback(&down, down.epoch, true),
@@ -630,36 +779,35 @@ type FactFlip = fn(&mut RoomReleaseFacts);
 /// A change to the recheck's inputs that fails it one way.
 type RecheckChange = fn(&mut Recheck);
 
-// --- unpublishing ----------------------------------------------------------------------------------------------------
+// --- unpublishing ------------------------------------------------------------------------------------------------
 
 #[test]
 fn an_unpublish_raises_the_epoch_clears_every_host_and_forgets_the_kept_script() {
     let mut state = serving(Some("lab.rel_2"), 2, 4);
     state.kept_previous = Some("lab.rel_1".into());
-    let (after, delete) = unpublish(&state);
+    let (after, delete) = unpublish(&state, None);
     assert_eq!(after.epoch, 5);
     assert_eq!(scripts(&after), [None, None]);
-    assert_eq!(
-        after.hosts.iter().map(|h| h.version).collect::<Vec<_>>(),
-        [11, 12]
-    );
+    assert_eq!(versions(&after), [11, 12]);
     assert_eq!(after.kept_previous, None);
     assert_eq!(delete, ["lab.rel_1", "lab.rel_2"]);
-    // A room serving nothing still raises its epoch, so nothing in flight goes live after it.
-    let (quiet, none) = unpublish(&serving(None, 1, 0));
+    let (quiet, none) = unpublish(&serving(None, 1, 0), None);
     assert_eq!((quiet.epoch, none.len()), (1, 0));
 }
 
 #[test]
-fn a_claim_ending_clears_its_host_alone() {
+fn a_claim_ending_clears_and_closes_its_host_alone() {
     let state = serving(Some("lab.rel_1"), 2, 3);
     let Some(cleared) = clear_host(&state, 1) else {
         unreachable!("no host");
     };
     assert_eq!(scripts(&cleared), [Some("lab.rel_1"), None]);
     assert_eq!(cleared.epoch, 3);
-    assert_eq!(cleared.hosts.first().map(|h| h.version), Some(10));
-    assert_eq!(cleared.hosts.get(1).map(|h| h.version), Some(12));
+    assert_eq!(versions(&cleared), [10, 12]);
+    assert_eq!(
+        cleared.hosts.iter().map(|h| h.closed).collect::<Vec<_>>(),
+        [false, true]
+    );
     assert_eq!(clear_host(&state, 2), None);
 }
 
@@ -989,5 +1137,5 @@ fn the_hourly_reconcile_deletes_only_what_fits_the_rule_and_no_room_claims() {
             ScriptReconcile::ReportForeign
         );
     }
-    assert!(is_podster_id(ID3));
+    assert!(is_release_id(ID3));
 }

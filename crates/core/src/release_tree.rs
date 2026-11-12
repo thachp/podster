@@ -9,6 +9,8 @@
 use std::collections::BTreeMap;
 
 use icu_normalizer::ComposingNormalizerBorrowed;
+use icu_properties::props::GeneralCategory;
+use icu_properties::CodePointMapData;
 
 /// The fixed name of the release directory, the same in every room. A room can't choose it.
 pub const RELEASE_DIRECTORY: &str = "site";
@@ -92,7 +94,7 @@ pub enum ContentProblem {
     BadPath(String, PathProblem),
     /// `release_path_collision`: two paths the same after case folding.
     CaseTwins(String, String),
-    /// `release_path_collision`: two paths served at one address.
+    /// `release_path_collision`: two paths served at one address, or a path served at the marker's.
     SameAddress(String, String),
 }
 
@@ -132,6 +134,10 @@ pub enum PathProblem {
     ReplacementCharacter,
     NotNfc,
     EdgeSpace,
+    /// A format character (general category Cf, such as a bidi override or a zero-width character), a line or paragraph
+    /// separator (Zl, Zp), or any whitespace outside ASCII. Ruled on the review of PR #309: such a path can show as
+    /// another, or as nothing.
+    Invisible,
 }
 
 /// The release directory's entry in the commit's top tree, which must be a directory: its sha is then read recursively.
@@ -179,6 +185,17 @@ pub fn check_path(path: &str) -> Result<(), PathProblem> {
     if path.chars().any(char::is_control) {
         return Err(PathProblem::ControlCharacter);
     }
+    let categories = CodePointMapData::<GeneralCategory>::new();
+    if path.chars().any(|c| {
+        matches!(
+            categories.get(c),
+            GeneralCategory::Format
+                | GeneralCategory::LineSeparator
+                | GeneralCategory::ParagraphSeparator
+        ) || (!c.is_ascii() && c.is_whitespace())
+    }) {
+        return Err(PathProblem::Invisible);
+    }
     if path.contains('\\') {
         return Err(PathProblem::Backslash);
     }
@@ -191,9 +208,14 @@ pub fn check_path(path: &str) -> Result<(), PathProblem> {
     Ok(())
 }
 
-/// A path case-folded for comparison: upper-cased then lower-cased, which folds `ß` with `ss` as well as `A` with `a`.
+/// A path as two paths are compared for twins: its compatibility form (NFKC), then lower-cased, upper-cased and
+/// lower-cased again. So `ẞ`, `ß` and `ss` are one, as are `A` and `a`, and a ligature and its letters. Ruled on the
+/// review of PR #309 as full Unicode case folding after NFKC; Rust's standard library has no case-folding table, so this
+/// is the round trip through its case mappings, which puts in one class every pair the folding table does that was
+/// tried, and may put a few more together, which only refuses more.
 pub fn fold(path: &str) -> String {
-    path.to_uppercase().to_lowercase()
+    let compatible = ComposingNormalizerBorrowed::new_nfkc().normalize(path);
+    compatible.to_lowercase().to_uppercase().to_lowercase()
 }
 
 /// The address a file is served at under the platform's default HTML handling, which a release is uploaded with:
@@ -253,7 +275,9 @@ pub fn check_release_tree(
     let mut problems = Vec::new();
     let mut files = Vec::new();
     let mut folded: BTreeMap<String, &str> = BTreeMap::new();
-    let mut addresses: BTreeMap<String, &str> = BTreeMap::new();
+    // The marker's own address is taken before any file's, so nothing in the repository is served where it is.
+    let mut addresses: BTreeMap<String, &str> =
+        BTreeMap::from([(fold(&served_address(MARKER_PATH)), MARKER_PATH)]);
     for entry in entries {
         let path = entry.path.to_owned();
         if let Err(problem) = check_path(entry.path) {
@@ -275,7 +299,8 @@ pub fn check_release_tree(
                 if size > MAX_FILE_BYTES {
                     problems.push(ContentProblem::FileTooLarge(path.clone()));
                 }
-                if let Some(other) = addresses.insert(served_address(entry.path), entry.path) {
+                if let Some(other) = addresses.insert(fold(&served_address(entry.path)), entry.path)
+                {
                     problems.push(ContentProblem::SameAddress(other.to_owned(), path.clone()));
                 }
                 files.push(PlannedFile {

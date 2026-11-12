@@ -1,13 +1,37 @@
-//! A custom hostname (ADR 0010, custom domains): normalization, refusals, the challenge, one claim per hostname that
-//! never transfers, the recheck's two ways of failing, and suspension outliving claims.
+//! A custom hostname (ADR 0010, custom domains): normalization, refusals, the Public Suffix List's rules, the challenge,
+//! one claim per hostname that never transfers, the recheck's two ways of failing, and suspension ending a claim and
+//! outliving it.
 
 use podster_core::hostnames::*;
 
 const CONTENT: &str = "opster.dev";
-const SUFFIXES: &[&str] = &["com", "co.uk", "github.io", "dev"];
+/// Enough of the list's shape: plain rules, a wildcard and its exception.
+const RULES: &[&str] = &[
+    "com",
+    "uk",
+    "co.uk",
+    "io",
+    "github.io",
+    "dev",
+    "example",
+    "ck",
+    "*.ck",
+    "!www.ck",
+];
 const HOUR: i64 = 60 * 60 * 1000;
 const DAY: i64 = 24 * HOUR;
 const NOW: i64 = 1_000 * DAY;
+
+const EMPTY: HostnameRecord = HostnameRecord {
+    claim: None,
+    ending: false,
+    suspended: false,
+    last_freed_at: None,
+};
+
+fn map(name: &str) -> Result<String, HostnameRefusal> {
+    mappable(name, CONTENT, RULES, false, 0)
+}
 
 #[test]
 fn every_spelling_of_a_name_is_one_name() {
@@ -33,7 +57,6 @@ fn what_isnt_a_hostname_is_refused() {
         normalize(&format!("{}.com", "a".repeat(64))),
         Err(HostnameRefusal::Invalid)
     );
-    // 253 characters in all, and not one more.
     let long = format!("{l}.{l}.{l}.{}", "a".repeat(61), l = label63);
     assert_eq!(long.len(), 253);
     assert!(normalize(&long).is_ok());
@@ -66,15 +89,25 @@ fn what_isnt_a_hostname_is_refused() {
             "{wildcard}"
         );
     }
+}
+
+#[test]
+fn ip_literals_and_names_that_read_as_numbers_are_refused() {
     for ip in [
         "192.168.0.1",
         "192.168.0.1.",
-        "[::1]",
-        "::1",
-        "10.0.0.256",
-        "example.123",
         "1.2.3.4",
+        "example.123",
+        "0x4",
+        "1.2.3.0x4",
+        "a.0X1F",
+        "a.0x",
+        "a.017",
+        "a.0",
     ] {
+        assert_eq!(normalize(ip), Err(HostnameRefusal::IpAddress), "{ip}");
+    }
+    for ip in ["[::1]", "::1", "10.0.0.256"] {
         let found = normalize(ip);
         assert!(
             matches!(
@@ -84,13 +117,13 @@ fn what_isnt_a_hostname_is_refused() {
             "{ip}: {found:?}"
         );
     }
-    assert_eq!(normalize("192.168.0.1"), Err(HostnameRefusal::IpAddress));
-    assert_eq!(normalize("example.123"), Err(HostnameRefusal::IpAddress));
+    for name in ["a.0xg", "a.1a", "0x4.example.com", "a.x0"] {
+        assert!(normalize(name).is_ok(), "{name}");
+    }
 }
 
 #[test]
-fn podsters_own_names_the_content_domain_and_public_suffixes_are_refused() {
-    let map = |name: &str| mappable(name, CONTENT, SUFFIXES, false, 0);
+fn podsters_own_names_and_the_content_domain_are_refused_and_a_bad_content_domain_fails_closed() {
     for reserved in [
         "podster.dev",
         "app.podster.dev",
@@ -102,25 +135,69 @@ fn podsters_own_names_the_content_domain_and_public_suffixes_are_refused() {
     ] {
         assert_eq!(map(reserved), Err(HostnameRefusal::Reserved), "{reserved}");
     }
-    for suffix in ["co.uk", "github.io", "CO.UK."] {
-        assert_eq!(map(suffix), Err(HostnameRefusal::PublicSuffix), "{suffix}");
+    assert_eq!(map("notpodster.dev"), Ok("notpodster.dev".to_owned()));
+    assert_eq!(map("myopster.dev"), Ok("myopster.dev".to_owned()));
+    assert_eq!(
+        mappable("room.opster.dev", "OPSTER.DEV.", RULES, false, 0),
+        Err(HostnameRefusal::Reserved)
+    );
+    for bad in ["", "dev", "*.opster.dev", "opster..dev", " opster.dev"] {
+        assert_eq!(
+            mappable("app.example.com", bad, RULES, false, 0),
+            Err(HostnameRefusal::Unclassified),
+            "{bad:?}"
+        );
     }
     for single in ["localhost", "example", "dev"] {
         assert_eq!(map(single), Err(HostnameRefusal::SingleLabel), "{single}");
     }
-    // A name that only ends like Podster's isn't under it.
-    assert_eq!(map("notpodster.dev"), Ok("notpodster.dev".to_owned()));
-    assert_eq!(map("myopster.dev"), Ok("myopster.dev".to_owned()));
-    assert_eq!(map("app.example.co.uk"), Ok("app.example.co.uk".to_owned()));
     assert_eq!(
-        mappable("app.example.com", CONTENT, SUFFIXES, true, 0),
+        mappable("app.example.com", CONTENT, RULES, true, 0),
         Err(HostnameRefusal::Suspended)
     );
     assert_eq!(
-        mappable("app.example.com", CONTENT, SUFFIXES, false, 1),
+        mappable("app.example.com", CONTENT, RULES, false, 1),
         Err(HostnameRefusal::RoomLimit)
     );
-    assert_eq!(HostnameRefusal::Reserved.code(), "hostname_reserved");
+    assert_eq!(HostnameRefusal::Unclassified.code(), "hostname_unavailable");
+}
+
+#[test]
+fn the_public_suffix_lists_plain_wildcard_and_exception_rules_hold() {
+    for suffix in ["co.uk", "github.io", "CO.UK.", "foo.ck", "bar.ck"] {
+        assert_eq!(map(suffix), Err(HostnameRefusal::PublicSuffix), "{suffix}");
+    }
+    for ok in [
+        "app.example.co.uk",
+        "me.github.io",
+        "www.ck",
+        "a.www.ck",
+        "app.foo.ck",
+        "example.com",
+    ] {
+        assert!(map(ok).is_ok(), "{ok}");
+    }
+    assert_eq!(map("app.example.zz"), Err(HostnameRefusal::Unclassified));
+    assert_eq!(
+        mappable("app.example.com", CONTENT, &[], false, 0),
+        Err(HostnameRefusal::Unclassified)
+    );
+    for bad in [
+        &["com", "a..b"][..],
+        &["com", "!x"][..],
+        &["com", "a.*.b"][..],
+        &["com", "*"][..],
+    ] {
+        assert_eq!(
+            mappable("app.example.com", CONTENT, bad, false, 0),
+            Err(HostnameRefusal::Unclassified),
+            "{bad:?}"
+        );
+    }
+    assert_eq!(
+        HostnameRefusal::PublicSuffix.code(),
+        "hostname_public_suffix"
+    );
 }
 
 #[test]
@@ -146,12 +223,6 @@ fn the_challenge_is_a_room_bound_value_any_one_of_which_proves() {
 fn a_pending_request_holds_nothing_and_is_gone_after_72_hours() {
     assert!(!pending_expired(NOW, NOW + 72 * HOUR - 1));
     assert!(pending_expired(NOW, NOW + 72 * HOUR));
-    // Any number of rooms may be pending: the hostname's object holds no pending request, so none blocks another.
-    let empty = HostnameRecord {
-        claim: None,
-        suspended: false,
-        last_freed_at: None,
-    };
     for room in ["ws_a", "ws_b", "ws_c"] {
         let unproven = ClaimAsk {
             room,
@@ -160,7 +231,7 @@ fn a_pending_request_holds_nothing_and_is_gone_after_72_hours() {
             proof_matched: false,
         };
         assert_eq!(
-            decide_claim(&empty, &unproven, NOW + HOUR),
+            decide_claim(&EMPTY, &unproven, NOW + HOUR),
             ClaimDecision::Unproven
         );
     }
@@ -171,18 +242,13 @@ fn a_pending_request_holds_nothing_and_is_gone_after_72_hours() {
         proof_matched: true,
     };
     assert_eq!(
-        decide_claim(&empty, &late, NOW + 72 * HOUR),
+        decide_claim(&EMPTY, &late, NOW + 72 * HOUR),
         ClaimDecision::Expired
     );
 }
 
 #[test]
 fn one_hostname_one_room_and_asking_again_gets_the_same_answer() {
-    let empty = HostnameRecord {
-        claim: None,
-        suspended: false,
-        last_freed_at: None,
-    };
     let a = ClaimAsk {
         room: "ws_a",
         request: "hr_a",
@@ -195,20 +261,19 @@ fn one_hostname_one_room_and_asking_again_gets_the_same_answer() {
         requested_at: NOW,
         proof_matched: true,
     };
-    assert_eq!(decide_claim(&empty, &a, NOW + 1), ClaimDecision::Granted);
+    assert_eq!(decide_claim(&EMPTY, &a, NOW + 1), ClaimDecision::Granted);
     let held = HostnameRecord {
         claim: Some(Claim {
             room: "ws_a",
             request: "hr_a",
         }),
-        ..empty
+        ..EMPTY
     };
     assert_eq!(decide_claim(&held, &a, NOW + 2), ClaimDecision::Granted);
     assert_eq!(
         decide_claim(&held, &b, NOW + 2),
         ClaimDecision::HeldElsewhere
     );
-    // The same room under another request doesn't get a second claim.
     let again = ClaimAsk {
         request: "hr_a2",
         ..a
@@ -217,28 +282,31 @@ fn one_hostname_one_room_and_asking_again_gets_the_same_answer() {
         decide_claim(&held, &again, NOW + 2),
         ClaimDecision::HeldElsewhere
     );
+    let ending = end_claim(&held);
+    assert!(ending.ending);
+    assert_eq!(decide_claim(&ending, &a, NOW + 3), ClaimDecision::Ending);
+    assert_eq!(decide_claim(&ending, &b, NOW + 3), ClaimDecision::Ending);
+    assert!(!end_claim(&EMPTY).ending);
     assert_eq!(ClaimDecision::HeldElsewhere.code(), "hostname_claimed");
 }
 
 #[test]
 fn a_claim_never_transfers_and_is_freed_only_when_cloudflare_says_gone() {
-    // Room A's claim ends: its host is cleared first, then the custom hostname is read until gone.
     assert!(!may_free_claim(false, true));
     assert!(!may_free_claim(true, false));
     assert!(!may_free_claim(false, false));
     assert!(may_free_claim(true, true));
-    let held = HostnameRecord {
+    let held = end_claim(&HostnameRecord {
         claim: Some(Claim {
             room: "ws_a",
             request: "hr_a",
         }),
-        suspended: false,
-        last_freed_at: None,
-    };
+        ..EMPTY
+    });
     let freed_at = NOW + 10 * HOUR;
     let freed = free(&held, freed_at);
     assert_eq!(freed.claim, None);
-    // Room B, whose DNS record still points at Podster from before, has a challenge from before the free: refused.
+    assert!(!freed.ending);
     let stale = ClaimAsk {
         room: "ws_b",
         request: "hr_b",
@@ -257,7 +325,6 @@ fn a_claim_never_transfers_and_is_freed_only_when_cloudflare_says_gone() {
         decide_claim(&freed, &at_free, freed_at + 1),
         ClaimDecision::StaleChallenge
     );
-    // The same room is no different: a later claim needs a new challenge with a new value.
     let same_room = ClaimAsk {
         room: "ws_a",
         request: "hr_a",
@@ -281,15 +348,30 @@ fn a_claim_never_transfers_and_is_freed_only_when_cloudflare_says_gone() {
 }
 
 #[test]
-fn a_custom_host_serves_only_when_the_room_and_the_claim_agree() {
-    let claim = Some(Claim {
-        room: "ws_a",
-        request: "hr_a",
-    });
-    assert!(custom_host_may_serve(true, claim, "ws_a"));
-    assert!(!custom_host_may_serve(false, claim, "ws_a"));
-    assert!(!custom_host_may_serve(true, claim, "ws_b"));
-    assert!(!custom_host_may_serve(true, None, "ws_a"));
+fn a_custom_host_serves_only_on_a_live_unsuspended_claim_its_room_holds() {
+    let held = HostnameRecord {
+        claim: Some(Claim {
+            room: "ws_a",
+            request: "hr_a",
+        }),
+        ..EMPTY
+    };
+    assert!(custom_host_may_serve(true, &held, "ws_a"));
+    assert!(!custom_host_may_serve(false, &held, "ws_a"));
+    assert!(!custom_host_may_serve(true, &held, "ws_b"));
+    assert!(!custom_host_may_serve(true, &EMPTY, "ws_a"));
+    let (suspended, _) = suspend(&held);
+    assert!(suspended.claim.is_some());
+    assert!(!custom_host_may_serve(true, &suspended, "ws_a"));
+    assert!(!custom_host_may_serve(true, &end_claim(&held), "ws_a"));
+    assert!(!custom_host_may_serve(
+        true,
+        &HostnameRecord {
+            suspended: true,
+            ..held
+        },
+        "ws_a"
+    ));
     assert!(routing_may_start(true, "active"));
     assert!(!routing_may_start(true, "pending"));
     assert!(!routing_may_start(false, "active"));
@@ -303,8 +385,7 @@ fn the_recheck_keeps_a_definite_no_apart_from_a_resolver_error() {
         last_success_at: NOW,
         definite_no_since: None,
     };
-    let keep = |h| RecheckDecision::Keep(h);
-    // A match resets both clocks.
+    let keep = RecheckDecision::Keep;
     let mid = ProofHistory {
         last_success_at: NOW,
         definite_no_since: Some(NOW + DAY),
@@ -316,7 +397,6 @@ fn the_recheck_keeps_a_definite_no_apart_from_a_resolver_error() {
             definite_no_since: None
         })
     );
-    // One definite no starts the span; a second less than 24 hours later doesn't end it, one 24 hours later does.
     let first = recheck_claim(fresh, RecheckOutcome::DefiniteNo, NOW + DAY);
     let started = ProofHistory {
         last_success_at: NOW,
@@ -331,12 +411,15 @@ fn the_recheck_keeps_a_definite_no_apart_from_a_resolver_error() {
         recheck_claim(started, RecheckOutcome::DefiniteNo, NOW + 2 * DAY),
         RecheckDecision::End(ClaimEnd::ChallengeRemoved)
     );
-    // A resolver error in between neither resets nor ends it.
+    // A resolver error neither counts as a no nor resets the count: two noes a day apart end it with errors between.
+    assert_eq!(
+        recheck_claim(started, RecheckOutcome::ResolverError, NOW + DAY + HOUR),
+        keep(started)
+    );
     assert_eq!(
         recheck_claim(started, RecheckOutcome::ResolverError, NOW + 2 * DAY),
         keep(started)
     );
-    // Resolver errors alone never end a claim inside 7 days, and do at 7 days with no success.
     let mut history = fresh;
     for day in 1..7 {
         match recheck_claim(history, RecheckOutcome::ResolverError, NOW + day * DAY) {
@@ -344,6 +427,7 @@ fn the_recheck_keeps_a_definite_no_apart_from_a_resolver_error() {
             ended => unreachable!("day {day}: {ended:?}"),
         }
     }
+    assert_eq!(history.definite_no_since, None);
     assert_eq!(
         recheck_claim(history, RecheckOutcome::ResolverError, NOW + 7 * DAY - 1),
         keep(history)
@@ -361,19 +445,18 @@ fn the_recheck_keeps_a_definite_no_apart_from_a_resolver_error() {
 }
 
 #[test]
-fn suspension_outlives_every_claim_and_lifting_it_restores_nothing() {
+fn suspension_ends_the_claim_outlives_it_and_lifting_it_restores_nothing() {
     let held = HostnameRecord {
         claim: Some(Claim {
             room: "ws_a",
             request: "hr_a",
         }),
-        suspended: false,
-        last_freed_at: None,
+        ..EMPTY
     };
     let (suspended, plan) = suspend(&held);
     assert!(suspended.suspended);
+    assert!(suspended.ending, "suspending a hostname ends its claim");
     assert_eq!(plan.tell_room, Some("ws_a"));
-    // While suspended nobody gets a claim, not even the room that had it, and nobody may start a challenge.
     let a = ClaimAsk {
         room: "ws_a",
         request: "hr_a",
@@ -385,13 +468,16 @@ fn suspension_outlives_every_claim_and_lifting_it_restores_nothing() {
         ClaimDecision::Suspended
     );
     assert_eq!(
-        mappable("app.example.com", CONTENT, SUFFIXES, suspended.suspended, 0),
+        mappable("app.example.com", CONTENT, RULES, suspended.suspended, 0),
         Err(HostnameRefusal::Suspended)
     );
-    // The claim ends as any claim does; the suspension stays.
+    // Lifted before the claim was freed: the claim is still ending, and serves and grants nothing.
+    let early = lift(&suspended);
+    assert!(!early.suspended);
+    assert_eq!(decide_claim(&early, &a, NOW + 2), ClaimDecision::Ending);
+    assert!(!custom_host_may_serve(true, &early, "ws_a"));
     let freed = free(&suspended, NOW + HOUR);
     assert!(freed.suspended);
-    assert_eq!(freed.claim, None);
     let b = ClaimAsk {
         room: "ws_b",
         request: "hr_b",
@@ -402,7 +488,6 @@ fn suspension_outlives_every_claim_and_lifting_it_restores_nothing() {
         decide_claim(&freed, &b, NOW + 3 * HOUR),
         ClaimDecision::Suspended
     );
-    // Lifting it restores nothing: no claim comes back, and an old challenge is still stale.
     let lifted = lift(&freed);
     assert!(!lifted.suspended);
     assert_eq!(lifted.claim, None);
@@ -414,6 +499,6 @@ fn suspension_outlives_every_claim_and_lifting_it_restores_nothing() {
         decide_claim(&lifted, &b, NOW + 3 * HOUR),
         ClaimDecision::Granted
     );
-    // A hostname with no claim, suspended, tells no room.
     assert_eq!(suspend(&lifted).1.tell_room, None);
+    assert!(!suspend(&lifted).0.ending);
 }

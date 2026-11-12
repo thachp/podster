@@ -1,0 +1,6 @@
+{
+  // Static assets with _headers and _redirects at the directory's root.
+  "name": "spike-m6-a-headers",
+  "compatibility_date": "2026-11-01",
+  "assets": { "directory": "public" }
+}

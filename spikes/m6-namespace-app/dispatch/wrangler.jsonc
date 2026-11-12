@@ -1,0 +1,11 @@
+{
+  // The spike's dispatch Worker. Temporary: deleted when the spike ends.
+  "name": "spike-m6-dispatch",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "dispatch_namespaces": [
+    { "binding": "DISPATCH", "namespace": "podster-staging-apps" }
+  ]
+}

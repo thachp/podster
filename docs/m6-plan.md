@@ -6,9 +6,9 @@
 - **The questions the architect can answer are recorded** as [decisions 197 to 211](spec/PRODUCT.md#m6-decisions-november-12-2026), each for the owner to review. The reviews changed ten of them and had one, 210, withdrawn as the owner's.
 - **The questions only the owner can answer are in [the table below](#for-the-owner),** undecided. **On 2026-11-12 three of them were decided on the owner's behalf,** after the owner wrote "you should make decision on my behalf you are the chief of staff": who may open a deployed app, that an app is static files with no preview, and who may configure and approve release ([decisions 213 to 215](spec/PRODUCT.md#decisions-needed)). They are listed beneath the table.
 - **The platform facts this plan called unverified were read** in Cloudflare's and GitHub's own documentation on 2026-11-12: [what was found](#platform-facts-from-the-documentation). Read, not tried. Several findings changed a proposed answer.
-- **The owner said on 2026-11-12 that they have enabled Workers for Platforms on Cloudflare.** Which account it is on isn't confirmed: a read-only check of the account that holds `podster.dev`, at 01:33 UTC, was refused with Cloudflare's code 10121, no access to dispatch namespaces. Nothing has been created.
-- **Spikes E and F ran on 2026-11-12,** with the existing staging Apps, on the architect's ruling: [spike E results](#spike-e-results), [spike F results](#spike-f-results). The other five haven't.
-- **No contract, migration or code exists for M6, and Podster has created no cloud resource for it.**
+- **The owner said on 2026-11-12 that they have enabled Workers for Platforms on Cloudflare.** Which account it is on isn't confirmed: a read-only check of the account that holds `podster.dev`, at 01:33 UTC, was refused with Cloudflare's code 10121, no access to dispatch namespaces. Nothing has been created. *Later that day it was confirmed: the owner approved one dispatch namespace for staging on that account, and it exists ([Cloud resources](#cloud-resources)).*
+- **Spikes A, E and F ran on 2026-11-12.** Spike A ran on a dispatch namespace the owner approved for staging: [what it found](#spike-a-results). Everything it created is deleted, and the namespace is left empty. So Workers for Platforms is on the account that holds `podster.dev`. Spikes E and F ran with the existing staging Apps, on the architect's ruling: [spike E results](#spike-e-results), [spike F results](#spike-f-results). The other four haven't.
+- **No contract, migration or feature code exists for M6.** The cloud resources that exist for it are listed under [Cloud resources](#cloud-resources).
 
 *As first written on 2026-11-10: the architect drafted this plan from the specs while the owner was away.* Items marked **owner's yes** create an account or a cloud resource, cost money, set a secret, are legal text, or loosen a security stance, so the architect can't settle them alone. [How far this was checked](#how-far-this-was-checked) says what was read.
 
@@ -19,7 +19,7 @@
 | What | Why it's the owner's | What it would cost | The architect recommends |
 | --- | --- | --- | --- |
 | **A content domain.** A new registrable domain, used for nothing but apps that agents wrote, on Cloudflare | Money, a cloud resource and DNS. Its name is the owner's choice | A yearly registration. Cloudflare Registrar says it sells at what the registry and ICANN charge, with no markup ([Registrar](https://www.cloudflare.com/products/registrar/)). **No price for a `.com`, `.dev` or `.app` name was found on Cloudflare's own pages,** so no figure is given here. The zone can stay on Cloudflare's Free plan: proxied wildcard DNS records are on every plan ([wildcard DNS](https://developers.cloudflare.com/dns/manage-dns-records/reference/wildcard-dns-records/)) and the free certificate covers first-level subdomains ([Universal SSL](https://developers.cloudflare.com/ssl/edge-certificates/universal-ssl/limitations/)) | **Yes.** Nothing agent-written may be served from `podster.dev`, so release can't exist without it |
-| **Workers for Platforms.** Cloudflare's plan for running other parties' Workers, each isolated from the rest. It holds each room's app. **The owner said on 2026-11-12 that they have enabled it.** Which account it is on isn't confirmed: a read-only check of the account that holds `podster.dev`, at 01:33 UTC that day, was refused with Cloudflare's code 10121, no access to dispatch namespaces. Nothing has been created on it | A paid plan | **$25 a month,** including 20 million requests, 60 million CPU milliseconds and 1,000 scripts; then $0.30 a million requests, $0.02 a million CPU milliseconds and $0.02 a script. A room with an app uses up to three scripts, so the included 1,000 cover about 330 such rooms ([pricing](https://developers.cloudflare.com/cloudflare-for-platforms/workers-for-platforms/platform/pricing/)). Assume every visit to an app is one request | **Yes, and the owner has said it is done. Still to answer: which account.** The next row recommends a second one |
+| **Workers for Platforms.** Cloudflare's plan for running other parties' Workers, each isolated from the rest. It holds each room's app. **The owner said on 2026-11-12 that they have enabled it.** Which account it is on isn't confirmed: a read-only check of the account that holds `podster.dev`, at 01:33 UTC that day, was refused with Cloudflare's code 10121, no access to dispatch namespaces. *Later that day: it is on that account, and one dispatch namespace for staging exists there ([Cloud resources](#cloud-resources))* | A paid plan | **$25 a month,** including 20 million requests, 60 million CPU milliseconds and 1,000 scripts; then $0.30 a million requests, $0.02 a million CPU milliseconds and $0.02 a script. A room with an app uses up to three scripts, so the included 1,000 cover about 330 such rooms ([pricing](https://developers.cloudflare.com/cloudflare-for-platforms/workers-for-platforms/platform/pricing/)). Assume every visit to an app is one request | **Yes, and it is done.** It is on the account that holds `podster.dev`, confirmed on 2026-11-12 by a listing of the staging namespace, which answered empty. Whether release stays on that account is the next row, which recommends a second one |
 | **A second Cloudflare account,** holding the content domain and everything that serves apps, and nothing of Podster's own | An account creation | No charge for an account was found. The plans in this table would be bought on it | **Yes, unless a test finds a narrower credential.** The credential that publishes an app can write Workers scripts, and Cloudflare's documentation shows no way to limit that to one group of scripts ([API token permissions](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)). On Podster's own account it could replace Podster's API |
 | **Workers Paid on that second account** | A paid plan on a new account. Whether Workers for Platforms needs it first wasn't found | **$5 a month** at least, per account ([Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/)) | **Yes, if Cloudflare asks for it** when Workers for Platforms is bought there |
 | **How the second account is deployed to, and who holds its logins.** Podster's deploy script and CI use one account today | Credentials, and a change to how Podster deploys | None | **The owner holds its login. One more deploy credential, for the content Worker only,** added to the deploy script as its own step. To be designed with the owner before anything is deployed there |
@@ -122,7 +122,7 @@
 
 ## The spikes
 
-**E and F ran on 2026-11-12: [spike E results](#spike-e-results), [spike F results](#spike-f-results). The rest haven't.** Each stays in `spikes/` and nothing builds on it. "Needs" is what must exist first, and so what waits for the owner.
+**A, E and F ran on 2026-11-12: [spike A results](#spike-a-results), [spike E results](#spike-e-results), [spike F results](#spike-f-results). The rest haven't.** Each stays in `spikes/` and nothing builds on it. "Needs" is what must exist first, and so what waits for the owner.
 
 | Spike | What it proves | Needs, and so waits for | What can be learned with no resource |
 | --- | --- | --- | --- |
@@ -254,6 +254,70 @@ It covers [M6 Release](spec/PRODUCT.md#product-direction-and-delivery-scope), wh
 
 M6 is the first time Podster serves code and markup that agents wrote, to anyone on the internet, from infrastructure Podster pays for. So the plan settles where that content is served, what it can reach and who can stop it before any feature code.
 
+## Spike A results
+
+**Run once, on 2026-11-12 between 09:01 and 09:23 UTC, on staging's namespace `podster-staging-apps`. Everything it created is deleted.** The code, how to run it again and every observation are in [`spikes/m6-namespace-app`](../spikes/m6-namespace-app/README.md). This section gives the answers and what each would change in [ADR 0010](adr/0010-release-and-the-content-domain.md). **The changes are proposals: the ADR isn't edited here.**
+
+**What was tried.** A small dispatch Worker on a `workers.dev` address, in front of the namespace. Into the namespace went 38 short-lived test scripts: static files with a script, static files alone, static files with `_headers` and `_redirects`, a script that reports what it can reach, twelve rounds of upload, replace and delete, and eighteen odd names.
+
+**How it was run, and what that limits.** Every API call was made by a `wrangler` command under the existing login; no API token was made or read. So the calls seen are the ones wrangler 4.157.0 makes, and anything wrangler can't send [wasn't shown](#what-stays-unknown-after-spike-a). All requests came from one machine.
+
+### The answers
+
+| # | Question | Answer |
+| --- | --- | --- |
+| 1 | Does a user Worker with static files and no bindings serve them through a dispatch Worker? | **Yes.** Files came back 200 with the right type, `cache-control: public, max-age=0, must-revalidate` and an `etag`. The API listed the script's bindings as `[]`. `/index.html` answered 307 to `/`, and `page.html` was served at `/page`: the platform rewrites HTML paths by default |
+| 2 | Can it be assets only? | **Yes.** The upload carried no script at all. A path with no file got 404 with an empty body; a `POST` got 405 on a file |
+| 3 | Are `_headers` and `_redirects` honoured? | **Only when the uploader sends them.** Wrangler leaves both files out of the upload and sends their text as `assets.config._headers` and `assets.config._redirects`. Sent that way every rule applied: a header, a `Set-Cookie`, a Content Security Policy, a one-year cache lifetime, and a 302 to another site. A `_headers` file deeper in the directory was served as an ordinary file and set nothing |
+| 4 | What can the user Worker reach? | `env` was empty, `request.cf` undefined, and `caches.default` refused. **`fetch()` to the public internet worked,** and so did a TCP socket to a host not behind Cloudflare. A `fetch` to another Worker of the same account on `workers.dev` got 404, error 1042; to an IP address, 403, error 1003. **With an outbound Worker, every `fetch()` went to it,** which blocked, answered or passed each one, and sockets stopped working. The dispatch Worker served as its own outbound Worker, so nothing more was created |
+| 5 | The upload's calls | Three, as documented, with [their bodies recorded](../spikes/m6-namespace-app/README.md#5-the-uploads-calls). The session answers with a one-hour token and the hashes it wants, each once. Files go as base64 parts named by hash, answered 202 then 201 with a second one-hour token. The script's `PUT` carries only a `metadata` part naming that token. **A hash is 32 hexadecimal characters, and it comes back as the file's `etag`.** The hashes wrangler computed were accepted; whether Cloudflare checks a hash against the bytes, or accepts arbitrary values, wasn't tried |
+| 6 | How long until a change shows? | Over twelve rounds, measured from the API's answer: **an upload 0.5 to 2.5 s, a replace 0.6 to 74 s, a delete 0.4 to 6.1 s,** each with a median of 0.9 s. One replace served the old file for 74 seconds. One delete served the deleted file once more after the first not-found |
+| 7 | "Gone", and the list | **Reading a deleted script answers 200 with `"script": null`,** not 404. Deleting it again answers 404, code 10007. The namespace's scripts are listed by one `GET`, an array of objects with `id` and `tag`; the list's `has_assets` was wrong. The namespace's own read carries `script_count` |
+| 8 | Script-name rules | **No rule was met in the names tried:** lengths of 63, 64, 65, 100, 255, 256, 512, 1,024, 2,048 and 4,096 characters, and upper case, `_`, `--`, a trailing `-`, `.`, `~`, `:` and `+`. Each was accepted and served. `/`, `%`, a space and anything outside ASCII weren't tried. **Names are case-sensitive** |
+| 9 | A dispatch to a missing script | `env.DISPATCH.get(name)` returns without error. **`fetch()` on it rejects with an `Error` whose message is `Worker not found.`** The same for a deleted script |
+| 10 | What a request costs | **Not measured.** The login can't read billing or analytics. The documentation still says one request is charged for the whole chain, and still doesn't say static files are free under Workers for Platforms |
+
+### What each would change in ADR 0010
+
+**Proposed, for the architect.** Each names the ADR's section.
+
+1. **[Where content is served](adr/0010-release-and-the-content-domain.md#where-content-is-served): a release is assets only.** The ADR's fallback, "one fixed file of Podster's that serves nothing itself", isn't needed. With no script there is no code of anyone's in the namespace.
+2. **The same section: say which HTML handling a release is uploaded with.** By default `/index.html` redirects to `/` and `x.html` is served at `/x`. The content Worker must pass those redirects on, and their `Location` is a path, which is right on a host of the app's own. Two things follow for [what a release may contain](adr/0010-release-and-the-content-domain.md#the-release-job): `page.html` and `page/index.html` may now name one address, and the marker, being `.json`, is untouched. The alternative is `html_handling: "none"`, which wasn't tried.
+3. **[`_headers` and `_redirects`](adr/0010-release-and-the-content-domain.md#what-content-can-reach): the control is that the job never sends `assets.config._headers` or `assets.config._redirects`.** The platform doesn't read those files from the upload; the uploader hands their text over. The job writes that metadata itself and takes none of it from the repository. Refusing a release that holds either file stays as a second guard, and one test is owed: a root `_headers` sent as a plain file must come back as content with no effect.
+4. **[What content can reach](adr/0010-release-and-the-content-domain.md#what-content-can-reach): the content Worker builds its response headers from a short list it allows,** and doesn't only overwrite the ones it knows. A header it didn't name passed through the dispatch Worker in the spike. It also decides what to do with a 3xx whose `Location` is another site.
+5. **The same section, "The network, from the server":** the claim that server code could be fenced by an outbound Worker now has evidence, and so does the claim that without one a user Worker reaches the internet by `fetch` and by socket. It matters only if the owner allows server code. An outbound Worker that refuses everything could be added as a guard at no cost in resources, since the content Worker can be its own; that is a suggestion, not a need, while releases are assets only.
+6. **[The release job](adr/0010-release-and-the-content-domain.md#the-release-job), step 4: the manifest's hash should be derived from the content, and it is public.** It is served as the `etag`, and a browser's revalidation rests on it. So the hash must change when the bytes or the served type change. A truncated SHA-256 over the bytes and the content type would do; GitHub's blob SHA alone wouldn't cover the type. Files already sent for one script are asked for again under another name, so with one script for each release every release sends every file.
+7. **[The marker](adr/0010-release-and-the-content-domain.md#the-release-job) stays.** Nothing read back a script's files. A path under `.well-known` was uploaded and served.
+8. **The job's step 6, the marker's wait:** a new script showed within 2.5 seconds of the API's answer in twelve tries. A wait of 30 seconds is proposed, from twelve samples at one place; one replace took 74 s. The marker's wait is for a new script, and no new script took that long, but twelve tries from one machine don't show how long one can take.
+9. **[One script for each release](adr/0010-release-and-the-content-domain.md#publishing-and-unpublishing-in-order) is right, and now has a second reason:** replacing a script in place once left the old files served for 74 seconds after the API said it was done.
+10. **[Unpublishing](adr/0010-release-and-the-content-domain.md#unpublishing), step 3, and [rollback](adr/0010-release-and-the-content-domain.md#rollback): say what Cloudflare's "gone" is.** A script is gone when its read answers 200 with `"script": null`, or when a delete answers 404 with code 10007. A job that waits for a 404 on the read never finishes. Rollback's "the kept script still exists" is that same read answering with an object.
+11. **[Takedown](adr/0010-release-and-the-content-domain.md#takedown-and-how-fast-it-is): deleting a script isn't the fast path, as the ADR already has it.** A delete took up to 6.1 seconds to show and once went back to serving the file. Removing the serve entry stays the stop; spike G measures that.
+12. **The hourly reconcile can list the namespace,** with one `GET`. It should trust `id` and nothing else in the list, and its paging is still to be read.
+13. **[Script names](adr/0010-release-and-the-content-domain.md#where-content-is-served): no rule was met in the names tried, so the ADR must set its own.** The names tried were lengths of 63 to 4,096 characters, upper case, `_`, `--`, a trailing `-`, `.`, `~`, `:` and `+`; what Cloudflare refuses beyond those isn't known. Proposed: lower case only, since names are case-sensitive; a stated maximum length; and a separator such as `_` or `.`, with labels made only of characters that exclude it. The content Worker treats a rejected `fetch` with the message `Worker not found.` as not-found, and any other rejection as an error it doesn't serve.
+14. **[Budgets](adr/0010-release-and-the-content-domain.md#budgets-and-account-limits): nothing changes.** "Every request is probably billed" is still an assumption.
+15. **[What stays open for the spikes](adr/0010-release-and-the-content-domain.md#what-stays-open-for-the-spikes):** item 2 is answered. Item 1 is answered for what was tried: no bindings, no cache, and no path to the account's other Workers by `fetch`. Item 5's listing of scripts is answered; its serve-entry half is spike G's.
+
+### What stays unknown after spike A
+
+- **What a request is billed as.** It needs the dashboard or an analytics token.
+- **Whether Cloudflare checks a manifest's hash against the bytes,** and how it sizes a bucket. Wrangler computes its own hashes.
+- **A root `_headers` or `_redirects` sent as a plain file.** Wrangler never sends one.
+- **Whether the script's `PUT` needs wrangler's two query parameters,** `excludeScript=true` and `bindings_inherit=strict`.
+- **Timings from more than one place,** and for a release of 300 files or of 25 MB. Each test file was a few bytes.
+- **Why one replace took 74 seconds.** It happened once in twelve.
+- **How the list of scripts pages,** and names holding `/`, `%`, a space or anything outside ASCII.
+- **Per-request limits** on CPU and subrequests, which weren't tried.
+- **Whether a 5 MB file fits a Worker's memory** on the way from GitHub. The uploads here ran on a laptop.
+- **Everything about tokens.** That is spike B, and it needs the owner to make them.
+
+### Resources
+
+- **Created:** one Worker on the account, `spike-m6-dispatch`, on its `workers.dev` address, twice; and 38 scripts in `podster-staging-apps`, each named `spike-m6-…`.
+- **Deleted:** all of them. At 09:23 UTC the namespace's list answered `[]`, its `script_count` was 0, the account's list of Workers held Podster's six and nothing named `spike-m6`, and the `workers.dev` address answered 404.
+- **Left:** the namespace, empty, as it was found.
+- **Not created:** any KV namespace, custom hostname, API token, DNS record, route or secret. Nothing of Podster's own was changed, and nothing in `apps/` was deployed.
+- **Read and not changed:** the account's lists of Durable Object namespaces and of KV namespaces, which `wrangler delete` reads on every delete; and the account's list of Workers, once, to confirm the clean-up.
+
 ## What the specs say, and where they are thin
 
 Everything in this section is quoted or linked. The rest of the plan is the architect's proposal built on it.
@@ -373,6 +437,15 @@ The architect proposes the gate call, for the owner to review.
 ## Cloud resources
 
 **The proposal needs new billed resources, more than any earlier milestone.** This plan creates none.
+
+**What exists, as of 2026-11-12:**
+
+- **A dispatch namespace for staging exists since 2026-11-12, by the owner's yes.** Its name is `podster-staging-apps`, on the Cloudflare account that holds `podster.dev`. That account's ID stays out of this repository; scripts take it from `CLOUDFLARE_ACCOUNT_ID`. It holds no script: [spike A](#spike-a-results) put test scripts in it and deleted every one. Whether release ends up on this account or a second one is still [the owner's](#for-the-owner), and spike B's to inform.
+- **The owner named `opster.dev` as the content domain,** in these words: "i got opster.dev - i think u can use that domain". It is on the same Cloudflare account, as the zone `opster.dev`, on the Free plan. **No DNS record or route has been made on it.**
+- **The wildcard record waits for the owner:** an `AAAA` record for `*` pointing at `100::`, proxied. The login the architect's sessions use has no DNS scope, so it can't be made from here.
+- **For the owner, undecided: `opster.dev` is one letter from `podster.dev`.** A separate registrable domain is what the architecture asks for, and this is one. But an address that reads like Podster's own, serving pages agents wrote, is what a phishing page would want, and [the threat model](#threat-model) lists an app imitating Podster's sign-in. Whether that is acceptable is the owner's to say.
+
+**What the proposal still needs:**
 
 - **A domain,** registered and on Cloudflare, with a wildcard DNS record and a wildcard certificate for the per-room hosts. Billed yearly.
 - **A Workers for Platforms dispatch namespace** for staging. Believed billed. One namespace for staging; whether production gets its own is for before production.
@@ -513,4 +586,4 @@ The spikes at step 1 answer these before any feature code. Only E and F have run
 - **Parts of this plan written on 2026-11-10 weren't all rewritten.** The questions table, the threat model and the acceptance tests carry dated notes where the review changed them; where one still differs from ADR 0010, the ADR is the later word.
 - **Not found in the specs:** any policy document for custom domains, release approvals, or export and transfer; any definition of an environment, the approval policy's values, the release states, or the budget caps.
 - **Not read:** the code. This plan doesn't claim what `apps/api`, `apps/gateway` or `apps/web` hold today beyond what the plans and specs say.
-- **Run:** nothing when this plan was written. **Since, on 2026-11-12:** spikes E and F, which wrote one branch and two loose objects to one test repository and changed nothing else; their sections say what was and wasn't shown.
+- **Run:** nothing when this plan was written. **Since, on 2026-11-12:** spikes E and F, which wrote one branch and two loose objects to one test repository and changed nothing else; their sections say what was and wasn't shown. **Also on 2026-11-12, spike A,** which put test scripts and one Worker on staging's Cloudflare account and deleted every one: [its results](#spike-a-results) cover the dispatch namespace only.

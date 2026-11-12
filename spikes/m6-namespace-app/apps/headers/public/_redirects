@@ -1,0 +1,3 @@
+/go https://example.com/ 302
+/moved /target.html 301
+/rewritten /target.html 200

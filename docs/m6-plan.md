@@ -757,6 +757,43 @@ The architect proposes the gate call, for the owner to review.
 | M6-28 | Each unpublish trigger unpublishes: release switched off in the room, or for the whole deployment in Podster's configuration; the room archived, made private or deleted; its organization deleted; its public surface suspended; the ability taken from its organization; its repository stopped or lost; and the last person who may release now leaving. Each is confirmed by the provider's answer that the room's scripts are gone, and the host answers not-found. A release queued or uploading before any of them is never served, whichever of the two reaches Cloudflare first. |
 | M6-25 | The task Sheet shows Live only when a release record for that commit is live, and shows "Merged · Deployment failed" for M6-07, in a scripted browser. |
 
+## Staging script
+
+**Started on 2026-11-12, at build step 2; not yet run against staging.** [`e2e/m6-staging.mjs`](../e2e/m6-staging.mjs), with its lib and a self-test that CI runs, follows `e2e/m5-staging.mjs`:
+- it accepts only staging's gateway;
+- an unknown flag or a missing value is an error, so nothing is guessed;
+- `--dry-run` sends nothing;
+- results are tallied as PASS, FAIL and SKIP;
+- output is scrubbed of every credential it handles;
+- waits and requests are bounded and paced.
+
+It takes 2 test sign-ups, switches nothing on, and calls no Cloudflare API.
+
+**What it checks today.** Release is switched off on staging, where `RELEASES` is set nowhere, so today's checks are the "switched off" ones. They show two things on staging that `apps/api/test/releases.spec.ts` shows locally: M6 can't be detected, and the room schema step harmed nothing. The M6 operations are read from `packages/contracts/openapi.yaml` at run time, so the list can't go stale.
+
+| ID | What it shows |
+| --- | --- |
+| M6-S00 | The contract marks its M6 operations, each is listed person-only in `capabilities.yaml`, and none is an agent capability |
+| M6-S01a | Switched off, each M6 route answers the room's owner exactly as an invented neighbouring path does: status, error code, body, content type and security headers |
+| M6-S01b | The same for a second person who isn't in the room |
+| M6-S01c | The same for a room that doesn't exist |
+| M6-S01d | The same for a member sending a body that isn't JSON, on every M6 write |
+| M6-S01e | An agent through `/mcp` lists no M6 tool, and calling an M6 operation's name answers exactly as an invented tool name does, by HTTP and through the MCP SDK |
+| M6-S03 | A room made after the deploy runs one ordinary task end to end: create, assign to an agent, accept, submit, review |
+| M6-S02a | The room read and the task read, as the owner and as the agent, carry no M6 field |
+| M6-S02b | Capabilities discovery and the agent's tool list carry no M6 capability or tool |
+| M6-S02c | No M6 event type is in the room's events after every call above |
+| M6-S04 | The same task flow in a room made before the deploy. **Says SKIP:** such a room belongs to an earlier run's test people, whose sessions no run keeps |
+
+**Which acceptance rows it covers.** None of M6-01 to M6-28 yet. Every one of them needs release switched on, or a merge in a managed repository, which these checks don't make. Some are partly near: M6-01's "the room has no host", M6-12's "no M6 cookie" and M6-21. Even those are shown only with release off, which isn't what their rows ask.
+
+**What comes later,** as checks of the same script with their own IDs, each once its build step is on staging and release can be switched on there for test rooms:
+- M6-01 to M6-11;
+- M6-12 and M6-13, in a scripted browser, as spike C's `browser.mjs` did;
+- M6-15 to M6-21, and M6-23 to M6-28;
+- M6-14 and M6-26, only with a domain whose DNS the script may edit, or they stay gaps;
+- M6-22, only with access to the Workers' logs, as M5's run had.
+
 ## Threat model
 
 **Draft, to be walked against the built system at step 11.** *Where a row and [ADR 0010](adr/0010-release-and-the-content-domain.md) differ, the ADR is the later word: rows written on 2026-11-10 still speak of a private room's app and of the Public Suffix List as defence in depth.* "Unverified" means nothing has tested it. "From M5's spike" means the M5 spike saw the GitHub half once; the M6 half is still unverified.

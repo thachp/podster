@@ -113,21 +113,21 @@ async function person(label) {
   return Person.fromCookie(target, label, cookie);
 }
 async function agentOf(linker, label) {
-  const agent = await McpAgent.connect(target, linker, `${RUN} ${label}`);
-  agents.push(agent);
+  const made = await McpAgent.connect(target, linker, `${RUN} ${label}`);
+  agents.push(made);
   const keep = (held) => {
     secret(held?.access_token);
     secret(held?.refresh_token);
   };
-  keep(agent.provider?.tokens?.());
-  const save = agent.provider?.saveTokens;
+  keep(made.provider?.tokens?.());
+  const save = made.provider?.saveTokens;
   if (typeof save === "function") {
-    agent.provider.saveTokens = (held) => {
+    made.provider.saveTokens = (held) => {
       keep(held);
       return save(held);
     };
   }
-  return agent;
+  return made;
 }
 
 /**
@@ -146,11 +146,11 @@ async function personAnswer(who, method, path, raw) {
 }
 
 /** One JSON-RPC call to /mcp with the agent's own access token, as any MCP client sends it. Answers its shape. */
-async function mcpAnswer(agent, name) {
+async function mcpAnswer(caller, name) {
   await sleep(PACE_MS);
   const res = await target.http("/mcp", {
     method: "POST",
-    headers: { authorization: `Bearer ${agent.accessToken()}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+    headers: { authorization: `Bearer ${caller.accessToken()}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: {} } }),
   });
   return answerShape(res.status, [...res.headers], toolAnswer(await res.text(), name));
@@ -160,12 +160,12 @@ async function mcpAnswer(agent, name) {
  * Every M6 operation for one kind of caller, each against its invented neighbour. Answers the differences, each naming
  * the route and the caller, and the answers seen, as `status code` pairs.
  */
-async function compareAll(label, who, room, { raw = '{"reason":"abuse"}', writesOnly = false } = {}) {
+async function compareAll(label, who, where, { raw = '{"reason":"abuse"}', writesOnly = false } = {}) {
   const found = [];
   const seen = new Set();
   for (const op of operations) {
     if (writesOnly && op.method === "GET") continue;
-    const path = fillPath(op.path, room);
+    const path = fillPath(op.path, where);
     const real = await personAnswer(who, op.method, path, raw);
     const unknown = await personAnswer(who, op.method, neighbour(path), raw);
     const diff = differences(real, unknown);
@@ -177,11 +177,11 @@ async function compareAll(label, who, room, { raw = '{"reason":"abuse"}', writes
 }
 
 /** Every event in the room, from the start. */
-async function roomEvents(owner, room) {
+async function roomEvents(reader, where) {
   const events = [];
   let afterSeq = 0;
   for (let pages = 0; pages < 100; pages++) {
-    const page = await owner.must("GET", `/v1/workspaces/${room}/events?after=${afterSeq}`);
+    const page = await reader.must("GET", `/v1/workspaces/${where}/events?after=${afterSeq}`);
     if (!page.events?.length) return events;
     events.push(...page.events);
     afterSeq = page.events.at(-1).seq;

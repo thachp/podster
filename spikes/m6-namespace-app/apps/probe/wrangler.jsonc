@@ -1,0 +1,7 @@
+{
+  // A user Worker with code and no bindings, to see what code in the namespace can reach.
+  // ADR 0010 uploads no agent-written code; this is the spike's own.
+  "name": "spike-m6-a-probe",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-01"
+}

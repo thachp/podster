@@ -1,0 +1,16 @@
+{
+  // The same dispatch Worker, also named as the namespace binding's outbound Worker,
+  // so the outbound test needs no second Worker on the account.
+  "name": "spike-m6-dispatch",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "dispatch_namespaces": [
+    {
+      "binding": "DISPATCH",
+      "namespace": "podster-staging-apps",
+      "outbound": { "service": "spike-m6-dispatch", "parameters": ["spike_outbound"] }
+    }
+  ]
+}

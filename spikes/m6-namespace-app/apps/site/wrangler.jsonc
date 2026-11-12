@@ -1,0 +1,7 @@
+{
+  // A user Worker with static assets, a script and no bindings.
+  "name": "spike-m6-a-site",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-01",
+  "assets": { "directory": "public" }
+}

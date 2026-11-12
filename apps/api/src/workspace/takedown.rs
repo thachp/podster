@@ -351,7 +351,12 @@ fn provider(env: &Env, sql: &SqlStorage) -> Option<Provider> {
 }
 
 /// Hosts whose serve entry isn't known to match what the room wants: never applied, or applied at another version.
-const PENDING_HOSTS: &str = "FROM serve_state s LEFT JOIN serve_apply a ON a.host = s.host WHERE (a.applied_version IS NULL OR a.applied_version != s.version)";
+/// A host refused at the version it has now isn't one of them: there is nothing more the applier will do for it until
+/// the room moves its version, so it neither wakes the room nor holds the room's script deletes back.
+const PENDING_HOSTS: &str = "FROM serve_state s LEFT JOIN serve_apply a ON a.host = s.host WHERE (a.applied_version IS NULL OR a.applied_version != s.version) AND (a.refused_version IS NULL OR a.refused_version != s.version)";
+/// Scripts whose delete nothing in the room's own state forbids: no host, kept script or flight names them.
+const UNNAMED: &str = "NOT EXISTS (SELECT 1 FROM serve_state n WHERE n.script_name = d.script_name OR n.flight_before = d.script_name)
+    AND NOT EXISTS (SELECT 1 FROM release_config c WHERE c.kept_previous = d.script_name OR c.in_flight_script = d.script_name)";
 /// When a pending host is next due. A wait counts only for the version whose attempt failed: once the room has moved
 /// the host's version, whoever moved it and why, the host is due at once. So no writer has to remember to clear a
 /// wait, and a takedown never sits behind one left by an earlier failure.
@@ -369,18 +374,22 @@ pub(super) fn next_due(sql: &SqlStorage, env: &Env, now: i64) -> R<Option<i64>> 
         &format!("SELECT min({HOST_DUE}) AS due, count(*) AS n {PENDING_HOSTS}"),
         vec![],
     )?;
+    let pending = hosts.first().filter(|row| int(&row["n"]) > 0);
+    if let Some(pending) = pending {
+        // While any host is pending no script may be deleted, so the scripts ask for no wake of their own: the room
+        // sleeps until the earliest host is due, by that host's own backoff, and the scripts go in the pass that
+        // applies the last host.
+        return Ok(Some(int(&pending["due"]).max(now + 10)));
+    }
     let scripts = rows(
         sql,
-        "SELECT min(next_attempt_at) AS due, count(*) AS n FROM script_delete WHERE gone_at IS NULL",
+        &format!("SELECT min(d.next_attempt_at) AS due, count(*) AS n FROM script_delete d WHERE d.gone_at IS NULL AND {UNNAMED}"),
         vec![],
     )?;
-    let due = [hosts.first(), scripts.first()]
-        .into_iter()
-        .flatten()
+    Ok(scripts
+        .first()
         .filter(|row| int(&row["n"]) > 0)
-        .map(|row| int(&row["due"]).max(now + 10))
-        .min();
-    Ok(due)
+        .map(|row| int(&row["due"]).max(now + 10)))
 }
 
 struct Wanted {
@@ -409,7 +418,7 @@ fn applied(sql: &SqlStorage, host: &str, want: &Wanted, now: i64) -> R<()> {
         "INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, attempts, attempt_version, next_attempt_at, last_code, updated_at)
            VALUES (?, ?, ?, ?, 0, NULL, NULL, NULL, ?)
            ON CONFLICT (host) DO UPDATE SET applied_version = excluded.applied_version, applied_script = excluded.applied_script,
-             applied_at = excluded.applied_at, attempts = 0, attempt_version = NULL, next_attempt_at = NULL, last_code = NULL, updated_at = excluded.updated_at",
+             applied_at = excluded.applied_at, attempts = 0, attempt_version = NULL, next_attempt_at = NULL, refused_version = NULL, last_code = NULL, updated_at = excluded.updated_at",
         vec![
             host.into(),
             want.version.into(),
@@ -434,7 +443,7 @@ fn not_applied(sql: &SqlStorage, host: &str, version: i64, code: &str, now: i64)
         sql,
         "INSERT INTO serve_apply (host, attempts, attempt_version, next_attempt_at, last_code, updated_at) VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT (host) DO UPDATE SET attempts = excluded.attempts, attempt_version = excluded.attempt_version,
-             next_attempt_at = excluded.next_attempt_at, last_code = excluded.last_code, updated_at = excluded.updated_at",
+             next_attempt_at = excluded.next_attempt_at, refused_version = NULL, last_code = excluded.last_code, updated_at = excluded.updated_at",
         vec![
             host.into(),
             (attempts + 1).into(),
@@ -444,6 +453,34 @@ fn not_applied(sql: &SqlStorage, host: &str, version: i64, code: &str, now: i64)
             now.into(),
         ],
     )
+}
+
+/// Records that the applier will do nothing more for a host at `version`, and why: the host isn't this room's to
+/// touch, or what the room asks for it can't be confirmed and its entry is known to be absent. It counts no attempt
+/// and sets no wait. It is logged once for each version, by the room's ID and the code. Telling an operator is the
+/// reconcile's.
+fn refused(sql: &SqlStorage, host: &str, version: i64, code: &str, now: i64) -> R<()> {
+    let known = !rows(
+        sql,
+        "SELECT 1 AS known FROM serve_apply WHERE host = ? AND refused_version = ? AND last_code = ?",
+        vec![host.into(), version.into(), code.into()],
+    )?
+    .is_empty();
+    exec(
+        sql,
+        "INSERT INTO serve_apply (host, refused_version, last_code, updated_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT (host) DO UPDATE SET refused_version = excluded.refused_version, attempts = 0, attempt_version = NULL,
+             next_attempt_at = NULL, last_code = excluded.last_code, updated_at = excluded.updated_at",
+        vec![host.into(), version.into(), code.into(), now.into()],
+    )?;
+    if !known {
+        let room = rows(sql, "SELECT id FROM workspace", vec![])?
+            .first()
+            .and_then(|row| text(&row["id"]))
+            .unwrap_or_default();
+        console_error!("takedown: a host was refused: room={} code={}", room, code);
+    }
+    Ok(())
 }
 
 /// Removes a host's entry and reads it back. `true` only when the provider says the host has none.
@@ -463,7 +500,8 @@ fn host_label(
     custom: bool,
 ) -> R<Result<Option<String>, &'static str>> {
     if custom {
-        return Ok(if provider.default_host_label(host).is_some() {
+        // Nothing on the content domain is a custom hostname: not an app's host, not a deeper name, not the domain.
+        return Ok(if provider.on_content_domain(host) {
             Err("custom_host_on_content_domain")
         } else {
             Ok(None)
@@ -492,8 +530,8 @@ async fn apply_host(sql: &SqlStorage, provider: &Provider, host: &str, deadline:
         }
         let label = match host_label(sql, provider, host, want.custom)? {
             Ok(label) => label,
-            // Not this room's host to touch. No call is made.
-            Err(code) => return not_applied(sql, host, want.version, code, now_ms()),
+            // Not this room's host to touch. No call is made, and none will be until the room moves its version.
+            Err(code) => return refused(sql, host, want.version, code, now_ms()),
         };
         let outcome = match &want.script {
             // A custom hostname's entry needs its claim to agree, which this step can't ask yet. And the room's state
@@ -541,6 +579,12 @@ async fn apply_host(sql: &SqlStorage, provider: &Provider, host: &str, deadline:
             Some(again) if again.version == want.version => {
                 return match outcome {
                     Ok(()) => applied(sql, host, &want, now),
+                    // What the room asks can't be confirmed, and the host's entry is known to be absent: there is
+                    // nothing left to do or to retry for this version.
+                    Err(
+                        code
+                        @ ("claim_check_not_built" | "app_suspended" | "script_not_this_hosts"),
+                    ) => refused(sql, host, want.version, code, now),
                     Err(code) => not_applied(sql, host, want.version, code, now),
                 };
             }
@@ -603,11 +647,12 @@ async fn delete_script(sql: &SqlStorage, provider: &Provider, script: &str) -> R
         )
     };
     if !may_delete(sql, script)? {
-        // Nothing was asked of the provider, so no attempt is counted: it looks again shortly, with no growing wait.
+        // Nothing was asked of the provider, so no attempt is counted and no wait is set. It asks for no wake
+        // either ([`next_due`]): the pass that applies the last pending host deletes it.
         return exec(
             sql,
-            "UPDATE script_delete SET next_attempt_at = ?, last_code = 'entry_not_removed_yet' WHERE script_name = ?",
-            vec![(now_ms() + FIRST_WAIT_MS).into(), script.into()],
+            "UPDATE script_delete SET last_code = 'entry_not_removed_yet' WHERE script_name = ? AND gone_at IS NULL",
+            vec![script.into()],
         );
     }
     let deleted = provider.delete_script(script).await;
@@ -656,14 +701,17 @@ pub(super) async fn upkeep(state: &State, env: &Env) -> R<()> {
     .iter()
     .filter_map(|row| text(&row["host"]))
     .collect();
-    let scripts: Vec<String> = rows(
-        &sql,
-        "SELECT script_name FROM script_delete WHERE gone_at IS NULL AND next_attempt_at <= ? ORDER BY queued_at, script_name LIMIT ?",
-        vec![now.into(), (BATCH as i64).into()],
-    )?
-    .iter()
-    .filter_map(|row| text(&row["script_name"]))
-    .collect();
+    let due_scripts = |sql: &SqlStorage, now: i64| -> R<Vec<String>> {
+        Ok(rows(
+            sql,
+            "SELECT script_name FROM script_delete WHERE gone_at IS NULL AND next_attempt_at <= ? ORDER BY queued_at, script_name LIMIT ?",
+            vec![now.into(), (BATCH as i64).into()],
+        )?
+        .iter()
+        .filter_map(|row| text(&row["script_name"]))
+        .collect())
+    };
+    let scripts = due_scripts(&sql, now)?;
     if hosts.is_empty() && scripts.is_empty() {
         return Ok(());
     }
@@ -689,7 +737,8 @@ pub(super) async fn upkeep(state: &State, env: &Env) -> R<()> {
             );
         }
     }
-    for script in &scripts {
+    // Read again after the hosts: a script whose host was applied just now goes in this same pass.
+    for script in &due_scripts(&sql, now_ms())? {
         if now_ms() > deadline {
             break;
         }

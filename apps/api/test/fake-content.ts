@@ -40,21 +40,28 @@ let faults: Fault[] = [];
  * A gate holds the next call of one kind until the test lets it go, and tells the test when that call has arrived. So
  * a test can change the room while a call is out, at exactly that point, with no clock involved.
  */
-type Gate = { op: Op; taken: boolean; arrived: Promise<void>; markArrived: () => void; released: Promise<void>; release: () => void };
+type Gate = { op: Op; taken: boolean; expired: boolean; arrived: Promise<void>; markArrived: () => void; released: Promise<void>; release: () => void };
 let gates: Gate[] = [];
+/** Well under the provider module's call limit, `CALL_TIMEOUT_MS`, which a test pins against this. */
+export const GATE_LIMIT_MS = 2000;
 function newGate(op: Op): Gate {
   let markArrived = () => {};
   let release = () => {};
   const arrived = new Promise<void>((resolve) => { markArrived = resolve; });
   const released = new Promise<void>((resolve) => { release = resolve; });
-  return { op, taken: false, arrived, markArrived, released, release };
+  return { op, taken: false, expired: false, arrived, markArrived, released, release };
 }
 async function passGate(op: Op) {
   const gate = gates.find((g) => g.op === op && !g.taken);
   if (!gate) return;
   gate.taken = true;
   gate.markArrived();
-  await gate.released;
+  // A gate never holds a call as long as the caller's own 5-second limit: a test that forgot to let one go gets the
+  // call answered after 2 seconds, and the gate is marked, so the test can see it happened and fail on it.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<void>((resolve) => { timer = setTimeout(() => { gate.expired = true; resolve(); }, GATE_LIMIT_MS); });
+  await Promise.race([gate.released, expiry]);
+  clearTimeout(timer);
 }
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -105,7 +112,7 @@ export async function fakeContent(request: Request): Promise<Response | null> {
       gate.release();
       return json({ ok: true });
     }
-    if (url.pathname === "/state") return json({ scripts: [...scripts].sort(), entries: Object.fromEntries([...entries].sort()), calls });
+    if (url.pathname === "/state") return json({ scripts: [...scripts].sort(), entries: Object.fromEntries([...entries].sort()), calls, expiredGates: gates.filter((gate) => gate.expired).length });
     return json({ error: "unknown" }, 404);
   }
   if (url.hostname !== "api.cloudflare.com") return null;

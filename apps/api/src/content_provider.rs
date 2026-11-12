@@ -187,6 +187,15 @@ impl Provider {
             .filter(|label| is_label(label))
     }
 
+    /// Whether a host is the content domain itself or anything under it, at any depth. Only `<label>.<content domain>`
+    /// is ever an app's host there ([`Provider::default_host_label`]); every other such name is nobody's.
+    pub(crate) fn on_content_domain(&self, host: &str) -> bool {
+        host == self.domain
+            || host
+                .strip_suffix(self.domain.as_str())
+                .is_some_and(|rest| rest.ends_with('.'))
+    }
+
     fn script_url(&self, name: &str) -> Option<String> {
         // Only a name Rust made: nothing else goes into the path, so nothing needs escaping.
         matches!(script_owner(name), ScriptOwner::Podster { .. }).then(|| {
@@ -255,7 +264,7 @@ impl Provider {
         };
         // A host on the content domain is one app's default host, and takes only that app's scripts: the label in
         // the host and the label in the script's name must be the same one. A host two labels deep is nobody's.
-        if host.ends_with(self.domain.as_str()) && self.default_host_label(host) != Some(label) {
+        if self.on_content_domain(host) && self.default_host_label(host) != Some(label) {
             return false;
         }
         let Some(url) = self.entry_url(host) else {

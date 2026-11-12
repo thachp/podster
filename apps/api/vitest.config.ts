@@ -3,7 +3,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
-import { FAKE_CONTENT, fakeContent } from "./test/fake-content.ts";
+import { FAKE_CONTENT, fakeContent, GATE_LIMIT_MS } from "./test/fake-content.ts";
 import { FAKE_AGENT_KEY_PEM, FAKE_APP_KEY_PEM, FAKE_GITHUB, FAKE_MERGE_KEY_PEM, fakeGithub } from "./test/fake-github.ts";
 import { stagingRequestersProblem, validRequesters } from "../../scripts/requesters-rule.mjs";
 
@@ -196,6 +196,7 @@ export default defineConfig({
           CONTENT_SCRIPTS_TOKEN: FAKE_CONTENT.scriptsToken,
           CONTENT_ROUTING_TOKEN: FAKE_CONTENT.routingToken,
           TEST_FAKE_CONTENT: JSON.stringify(FAKE_CONTENT),
+          TEST_GATE_LIMIT_MS: GATE_LIMIT_MS,
           // The provider module's source, for the test that reads its settings' names and shows no environment binds one.
           // Every Rust source file of the API, by its path under src, and its Cargo.toml, for the test that shows no
           // test-only switch is in a deployment's build.

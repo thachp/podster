@@ -54,7 +54,7 @@ async function switchedOn<T>(run: () => Promise<T>): Promise<T> {
 }
 
 const fake = (path: string, body?: unknown) => fetch(`https://content-fake.example.com${path}`, body === undefined ? undefined : { method: "POST", body: JSON.stringify(body) });
-type Held = { scripts: string[]; entries: Record<string, string>; calls: { op: string; name: string; status: number }[] };
+type Held = { scripts: string[]; entries: Record<string, string>; calls: { op: string; name: string; status: number }[]; expiredGates: number };
 const held = async () => (await (await fake("/state")).json()) as Held;
 const fault = (body: object) => fake("/fault", body);
 /** Holds the next call of one kind at the stand-in. `arrived` answers once that call is there; `release` lets it go. */
@@ -120,6 +120,19 @@ const deleteRows = (room: string) => all(room, "SELECT script_name, unpublish_ep
 const due = (room: string) => inRoom(room, (sql) => { sql.exec("UPDATE serve_apply SET next_attempt_at = 0 WHERE next_attempt_at IS NOT NULL"); sql.exec("UPDATE script_delete SET next_attempt_at = 0 WHERE gone_at IS NULL"); });
 const pass = (room: string) => alarmPass(stub(room));
 const callsFor = (state: Held, app: App) => state.calls.filter((call) => call.name === app.host || call.name.startsWith(`${app.label}.`)).map((call) => `${call.op} ${call.name === app.host ? "host" : call.name.slice(app.label.length + 1, app.label.length + 7)} ${call.status}`);
+
+/** A room whose app is down in its own state, with the entry still at the provider and the applier yet to run.
+ * No alarm is set or running when it returns, so what a test scripts next is what the next pass meets. */
+async function downButNotApplied() {
+  const a = await app({ plain: true });
+  await switchedOn(() => suspend(a.label));
+  await alarmQuiet(stub(a.room));
+  await fake("/reset", {});
+  await fake("/seed", { scripts: [a.kept, a.served], entries: { [a.host]: a.served } });
+  // As it was the moment the suspension committed: nothing applied, and both scripts still owed a delete.
+  await inRoom(a.room, (sql) => { sql.exec("DELETE FROM serve_apply"); sql.exec("UPDATE script_delete SET gone_at = NULL, attempts = 0, next_attempt_at = 0, last_code = NULL"); sql.exec("UPDATE unpublish SET scripts_gone_at = NULL"); });
+  return a;
+}
 
 beforeAll(async () => {
   key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
@@ -357,8 +370,7 @@ describe("the room's applier and its delete job", () => {
   });
 
   it("count a script gone only on one of the two answers that mean gone, and retry anything else", async () => {
-    const a = await app({ plain: true });
-    await switchedOn(() => suspend(a.label));
+    const a = await downButNotApplied();
     // Both deletes fail outright, and the scripts are still there: a read that finds one is not "gone".
     await fault({ op: "script.delete", times: 2, status: 500 });
     const started = Date.now();
@@ -390,30 +402,37 @@ describe("the room's applier and its delete job", () => {
   });
 
   it("delete no script while a serve entry might still name it", async () => {
-    const a = await app({ plain: true });
-    await switchedOn(() => suspend(a.label));
+    const a = await downButNotApplied();
     // The entry's removal fails: it is still there, so no script is touched.
     await fault({ op: "entry.delete", times: 1, status: 500 });
     await pass(a.room);
     let state = await held();
     expect(callsFor(state, a)).toEqual(["entry.delete host 500", "entry.get host 200"]);
     expect([state.entries[a.host], state.scripts]).toEqual([a.served, [a.kept, a.served].sort()]);
-    expect(await applyRows(a.room)).toEqual([{ host: a.host, applied_version: 5, applied_script: a.served, attempts: 1, last_code: "delete_not_confirmed" }]);
-    // The scripts wait for the entry. Nothing was asked of the provider for them, so no attempt is counted.
+    expect(await applyRows(a.room)).toEqual([{ host: a.host, applied_version: null, applied_script: null, attempts: 1, last_code: "delete_not_confirmed" }]);
+    // The scripts wait for the entry. Nothing was asked of the provider for them, so no attempt is counted, and their
+    // own due time is left as it was: they go as soon as the entry does.
+    expect((await all(a.room, "SELECT next_attempt_at FROM script_delete")).map((row: any) => row.next_attempt_at)).toEqual([0, 0]);
     expect((await deleteRows(a.room)).map((row: any) => [row.attempts, row.last_code])).toEqual([[0, "entry_not_removed_yet"], [0, "entry_not_removed_yet"]]);
     // The removal goes through, but the read-back still shows the entry, as a cache that lags would: not applied yet.
     await due(a.room);
     await fault({ op: "entry.get", times: 1, stale: true });
     await pass(a.room);
     state = await held();
-    expect((await applyRows(a.room))[0]).toMatchObject({ applied_version: 5, attempts: 2, last_code: "read_back_differs" });
+    expect((await applyRows(a.room))[0]).toMatchObject({ applied_version: null, attempts: 2, last_code: "read_back_differs" });
     expect(state.scripts).toEqual([a.kept, a.served].sort());
     // A read-back that answers 404 without the code for a missing key, as a wrong namespace would, isn't "absent".
     await due(a.room);
     await fault({ op: "entry.get", times: 1, status: 404 });
     await pass(a.room);
-    expect((await applyRows(a.room))[0]).toMatchObject({ applied_version: 5, attempts: 3, last_code: "read_back_differs" });
+    expect((await applyRows(a.room))[0]).toMatchObject({ applied_version: null, attempts: 3, last_code: "read_back_differs" });
     expect((await held()).scripts).toEqual([a.kept, a.served].sort());
+    // The scripts ask for no wake of their own while the host is pending: the room's next alarm is the host's, by its
+    // own backoff (5 s, 10 s, then 20 s after the third failure), and not a fixed few seconds.
+    const wait = (await waitRows(a.room))[0] as any;
+    expect(wait.next_attempt_at - (await one(a.room, "SELECT updated_at FROM serve_apply")).updated_at).toBe(20000);
+    expect((await deleteRows(a.room)).map((row: any) => [row.attempts, row.last_code])).toEqual([[0, "entry_not_removed_yet"], [0, "entry_not_removed_yet"]]);
+    expect(await nextAlarm(stub(a.room))).toBe(wait.next_attempt_at);
     // A removal whose answer was lost, read back as absent: applied, because absent is the point. Then the scripts go.
     await due(a.room);
     await fake("/seed", { entries: { [a.host]: a.served } });
@@ -437,18 +456,6 @@ describe("the room's applier and its delete job", () => {
     await alarmQuiet(stub(a.room));
   });
 
-  /** A room whose app is down in its own state, with the entry still at the provider and the applier yet to run. */
-  async function downButNotApplied() {
-    const a = await app({ plain: true });
-    await switchedOn(() => suspend(a.label));
-    await alarmQuiet(stub(a.room));
-    await fake("/reset", {});
-    await fake("/seed", { scripts: [a.kept, a.served], entries: { [a.host]: a.served } });
-    // As it was the moment the suspension committed: nothing applied, and both scripts still owed a delete.
-    await inRoom(a.room, (sql) => { sql.exec("DELETE FROM serve_apply"); sql.exec("UPDATE script_delete SET gone_at = NULL, attempts = 0, next_attempt_at = 0, last_code = NULL"); sql.exec("UPDATE unpublish SET scripts_gone_at = NULL"); });
-    return a;
-  }
-
   it("start over when the room changes its mind while the provider is being asked", async () => {
     const a = await downButNotApplied();
     // The first removal is held at the provider. While it is out, the host's version moves, as a second change in the
@@ -463,6 +470,7 @@ describe("the room's applier and its delete job", () => {
     const state = await held();
     expect(callsFor(state, a).filter((call) => call.startsWith("entry."))).toEqual(["entry.delete host 200", "entry.get host 404", "entry.delete host 200", "entry.get host 404"]);
     expect((await applyRows(a.room))[0]).toMatchObject({ applied_version: 7, attempts: 0 });
+    expect(state.expiredGates).toBe(0);
   });
 
   it("take an entry back out when the app is suspended while its write is out", async () => {
@@ -484,6 +492,7 @@ describe("the room's applier and its delete job", () => {
     expect(callsFor(state, a).filter((call) => call.startsWith("entry.")).slice(0, 4)).toEqual(["entry.put host 200", "entry.get host 200", "entry.delete host 200", "entry.get host 404"]);
     expect(state.entries[a.host]).toBeUndefined();
     expect(await applyRows(a.room)).toEqual([{ host: a.host, applied_version: 6, applied_script: null, attempts: 0, last_code: null }]);
+    expect(state.expiredGates).toBe(0);
     await alarmQuiet(stub(a.room));
     expect((await held()).scripts).toEqual([]);
   });
@@ -506,6 +515,7 @@ describe("the room's applier and its delete job", () => {
     expect(state.entries[a.host]).toBeUndefined();
     expect(await applyRows(a.room)).toEqual([{ host: a.host, applied_version: null, applied_script: null, attempts: 1, last_code: "version_kept_moving" }]);
     expect((await waitRows(a.room))[0]).toMatchObject({ attempts: 1, attempt_version: 9 });
+    expect(state.expiredGates).toBe(0);
     expect(state.scripts).toEqual([a.kept, a.served].sort());
     await pass(a.room);
     expect((await held()).calls.length).toBe(state.calls.length);
@@ -557,12 +567,30 @@ describe("the room's applier and its delete job", () => {
     let state = await held();
     expect(state.calls).toEqual([]);
     expect(state.entries[victim]).toBe("victim.rel_" + "9".repeat(32));
-    expect(await applyRows(wrong.room)).toEqual([{ host: victim, applied_version: null, applied_script: null, attempts: 1, last_code: "host_not_this_rooms" }]);
+    expect(await applyRows(wrong.room)).toEqual([{ host: victim, applied_version: null, applied_script: null, attempts: 0, last_code: "host_not_this_rooms" }]);
+    // It is recorded as refused at the version it has, with no attempt and no wait. So it doesn't wake the room, and
+    // it doesn't hold the room's script deletes back: one that is owed goes on the next pass.
+    expect(await all(wrong.room, "SELECT refused_version, attempt_version, next_attempt_at FROM serve_apply")).toEqual([{ refused_version: 5, attempt_version: null, next_attempt_at: null }]);
+    expect(await nextAlarm(stub(wrong.room))).toBeNull();
+    const owed = `${wrong.label}.${rel(7)}`;
+    await fake("/seed", { scripts: [owed] });
+    await inRoom(wrong.room, (sql) => sql.exec("INSERT INTO script_delete (script_name, label, queued_at, next_attempt_at) VALUES (?, ?, 1, 0)", owed, wrong.label));
+    await pass(wrong.room);
+    expect((await held()).scripts).toEqual([wrong.served]);
+    expect((await deleteRows(wrong.room)).map((row: any) => row.gone)).toEqual([1]);
+    expect(await nextAlarm(stub(wrong.room))).toBeNull();
+    await fake("/reset", {});
+    await fake("/seed", { entries: { [victim]: "victim.rel_" + "9".repeat(32) } });
     // The same for a removal, and for a host that is no app's default host at all.
     await inRoom(wrong.room, (sql) => sql.exec("UPDATE serve_state SET label = NULL, label_current = NULL, release_id = NULL, script_name = NULL, version = version + 1"));
     await pass(wrong.room);
     expect([(await held()).calls, (await applyRows(wrong.room))[0].last_code]).toEqual([[], "host_not_this_rooms"]);
-    for (const [host, kind, code] of [[`deep.${wrong.host}`, "default", "host_not_a_default_host"], ["app.example.org", "default", "host_not_a_default_host"], [`${wrong.label}.${FAKE.domain}`, "custom", "custom_host_on_content_domain"]]) {
+    // Nor a custom row for anything on the content domain: an app's host, a deeper name, or the domain itself.
+    const refusedHosts = [
+      [`deep.${wrong.host}`, "default", "host_not_a_default_host"], ["app.example.org", "default", "host_not_a_default_host"], [FAKE.domain, "default", "host_not_a_default_host"],
+      [`${wrong.label}.${FAKE.domain}`, "custom", "custom_host_on_content_domain"], [`deep.${wrong.host}`, "custom", "custom_host_on_content_domain"], [FAKE.domain, "custom", "custom_host_on_content_domain"],
+    ];
+    for (const [host, kind, code] of refusedHosts) {
       await inRoom(wrong.room, (sql) => { sql.exec("DELETE FROM serve_apply"); sql.exec("UPDATE serve_state SET host = ?, kind = ?, version = version + 1", host, kind); });
       await pass(wrong.room);
       expect([(await held()).calls, (await applyRows(wrong.room))[0].last_code], host).toEqual([[], code]);
@@ -586,7 +614,11 @@ describe("the room's applier and its delete job", () => {
     state = await held();
     expect(state.calls.map((call) => `${call.op} ${call.status}`)).toEqual(["entry.delete 200", "entry.get 404"]);
     expect(state.entries[host]).toBeUndefined();
-    expect(await applyRows(room)).toEqual([{ host, applied_version: null, applied_script: null, attempts: 1, last_code: "script_not_this_hosts" }]);
+    // Its entry is known to be gone and nothing more will be tried at this version: refused, not retried.
+    expect(await applyRows(room)).toEqual([{ host, applied_version: null, applied_script: null, attempts: 0, last_code: "script_not_this_hosts" }]);
+    const quiet = (await held()).calls.length;
+    await pass(room);
+    expect([(await held()).calls.length, await nextAlarm(stub(room))]).toEqual([quiet, null]);
     await alarmQuiet(stub(room));
   });
 
@@ -629,13 +661,16 @@ describe("the room's applier and its delete job", () => {
     expect(state.calls.some((call, index) => index >= before && call.op === "entry.put")).toBe(false);
     expect(state.entries[a.host]).toBeUndefined();
     expect((await applyRows(a.room)).find((row: any) => row.host === a.host)).toMatchObject({ applied_version: 6, last_code: "app_suspended" });
-    // If the removal fails, the record says the entry remains.
-    await due(a.room);
+    // Both are refused at their versions: no retry, no wake, and a pass asks nothing.
+    await pass(a.room);
+    expect([(await held()).calls.length, await nextAlarm(stub(a.room))]).toEqual([state.calls.length, null]);
+    // If a removal fails, the record says the entry remains, and that is retried.
+    await inRoom(a.room, (sql) => sql.exec("UPDATE serve_state SET version = version + 1"));
     await fake("/seed", { entries: { [a.host]: a.served } });
     // Both hosts are due, so both removals fail.
     await fault({ op: "entry.delete", times: 2, status: 500 });
     await pass(a.room);
-    expect((await applyRows(a.room)).find((row: any) => row.host === a.host)).toMatchObject({ last_code: "app_suspended_entry_remains" });
+    expect((await applyRows(a.room)).find((row: any) => row.host === a.host)).toMatchObject({ attempts: 1, last_code: "app_suspended_entry_remains" });
     await alarmQuiet(stub(a.room));
   });
 
@@ -670,10 +705,13 @@ describe("what step 4(a) adds to the room and the Worker", () => {
       refuses(() => sql.exec("INSERT INTO serve_apply (host, next_attempt_at, updated_at) VALUES (?, 5, 1)", a.host)),
       refuses(() => sql.exec("INSERT INTO serve_apply (host, attempts, updated_at) VALUES (?, 2, 1)", a.host)),
       refuses(() => sql.exec("INSERT INTO serve_apply (host, attempt_version, updated_at) VALUES (?, 2, 1)", a.host)),
+      // A refusal with no reason, and one that is also waiting to be tried again.
+      refuses(() => sql.exec("INSERT INTO serve_apply (host, refused_version, updated_at) VALUES (?, 2, 1)", a.host)),
+      refuses(() => sql.exec("INSERT INTO serve_apply (host, refused_version, last_code, attempts, attempt_version, updated_at) VALUES (?, 2, 'x', 1, 2, 1)", a.host)),
       // And the forms that are right are taken.
       refuses(() => sql.exec("INSERT INTO script_delete (script_name, label, queued_at, next_attempt_at) VALUES (?, ?, 1, 9e15)", `${a.label}.${rel(9)}`, a.label)),
       refuses(() => sql.exec("INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, 5, ?, 1, 1)", a.host, a.served)),
-    ])).toEqual([true, true, true, true, true, true, true, true, true, true, false, false]);
+    ])).toEqual([true, true, true, true, true, true, true, true, true, true, true, true, false, false]);
     await alarmQuiet(stub(a.room));
   });
 
@@ -723,6 +761,10 @@ describe("what step 4(a) adds to the room and the Worker", () => {
     expect(wrangler).not.toMatch(/CONTENT_/);
     for (const name of ["triggers", "crons", "dispatch_namespaces", "kv_namespaces"]) expect(wrangler, name).not.toContain(`"${name}"`);
     expect(JSON.parse(wrangler.replace(/^\s*\/\/.*$/gm, "")).build.command).toBe("worker-build --release");
+    // The stand-in never holds a call as long as the provider module waits for one.
+    const limit = Number((BINDINGS.TEST_CONTENT_PROVIDER_SOURCE as string).match(/const CALL_TIMEOUT_MS: u64 = ([0-9_]+);/)?.[1].replace(/_/g, ""));
+    expect(limit).toBe(5000);
+    expect(BINDINGS.TEST_GATE_LIMIT_MS).toBeLessThan(limit / 2 + 1);
     // The test Worker's values are the stand-in's, and no real account, namespace or token has their form's values.
     expect([FAKE.account, FAKE.kvNamespace]).toEqual(["c0".repeat(16), "d1".repeat(16)]);
     expect([FAKE.scriptsToken, FAKE.routingToken].every((token) => token.startsWith("test-"))).toBe(true);

@@ -136,6 +136,15 @@ const counted = (holder: string) => runInDurableObject(BINDINGS.PRINCIPAL.get(BI
   return state.storage.sql.exec("SELECT workspace_id FROM repo_request_room ORDER BY at, workspace_id").toArray().map((row: any) => row.workspace_id as string);
 }) as Promise<string[]>;
 /** Makes a room's place `ms` older, as if it had been stamped that much earlier. */
+/**
+ * How far inside the 24-hour window a place is aged to show it still counts. A place is stamped by the object's own
+ * clock when it's asked for, and that clock runs while the test does, so the margin must outlast everything between
+ * that stamp and the check, on the slowest runner. A second didn't (CI, 2026-11-12: a test of 1.8 s). An hour does,
+ * and the exact edge, refused a millisecond inside the window and allowed at it, is pinned by the pure rule's own tests
+ * in crates/core/tests/repository_requests.rs (`only_requests_inside_the_window_count`).
+ */
+const INSIDE = 3_600_000;
+const DAY = 86_400_000;
 const age = (holder: string, room: string, ms: number) => runInDurableObject(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(holder)), (_: any, state: any) =>
   void state.storage.sql.exec("UPDATE repo_request_room SET at = at - ? WHERE workspace_id = ?", ms, room));
 /** Asks an organization's object, or a person's, directly, as a room does. */
@@ -397,9 +406,9 @@ describe("asking for the room's repository", () => {
     const elsewhere = await room();
     expect((await ask(elsewhere)).status).toBe(200);
     // The window rolls: one request leaves it, and one more is accepted. Then the cap holds again.
-    await age(org, rooms[0].id, 86_400_000 - 1_000);
+    await age(org, rooms[0].id, DAY - INSIDE);
     expect((await ask(rooms[5], body(5))).code).toBe("repository_request_limit");
-    await age(org, rooms[0].id, 1_000);
+    await age(org, rooms[0].id, INSIDE);
     expect((await ask(rooms[5], body(5))).status).toBe(200);
     expect((await ask(rooms[6], body(6))).code).toBe("repository_request_limit");
   });
@@ -429,11 +438,11 @@ describe("asking for the room's repository", () => {
     expect(added.status, added.text).toBe(200);
     expect((await ask(rooms[5], { name: "many-5", visibility: "public" }, { who: admin })).status).toBe(200);
     expect([await counted(admin.id), await counted(rooms[5].org)]).toEqual([[rooms[5].id], [rooms[5].id]]);
-    // The person's window rolls by their own object's stamps: one place a second short of a day old still counts, and
+    // The person's window rolls by their own object's stamps: one place an hour short of a day old still counts, and
     // a day old doesn't.
-    await age(person, rooms[0].id, 86_400_000 - 1_000);
+    await age(person, rooms[0].id, DAY - INSIDE);
     expect((await ask(rooms[6], { name: "many-6", visibility: "public" })).code).toBe("repository_request_limit");
-    await age(person, rooms[0].id, 1_000);
+    await age(person, rooms[0].id, INSIDE);
     expect((await ask(rooms[6], { name: "many-6", visibility: "public" })).status).toBe(200);
     expect(await counted(person)).toHaveLength(5);
   });
@@ -487,10 +496,10 @@ describe("asking for the room's repository", () => {
     const before = (await stampOf(holder, "ws_one"))!;
     expect((await reserve("ws_one")).held).toBe(true);
     expect((await stampOf(holder, "ws_one"))!).toBeGreaterThanOrEqual(before + 60_000);
-    // The window is this object's own clock on its own stamps: a second short of a day still counts, a day doesn't.
-    await age(holder, "ws_two", 86_400_000 - 1_000);
+    // The window is this object's own clock on its own stamps: an hour short of a day still counts, a day doesn't.
+    await age(holder, "ws_two", DAY - INSIDE);
     expect((await reserve("ws_six")).held).toBe(false);
-    await age(holder, "ws_two", 1_000);
+    await age(holder, "ws_two", INSIDE);
     expect((await reserve("ws_six")).held).toBe(true);
     expect((await counted(holder)).sort()).toEqual(["ws_five", "ws_four", "ws_one", "ws_six", "ws_three"]);
     // A room whose own place aged out is asked as a new one, and refused at the cap.
@@ -621,8 +630,8 @@ describe("asking for the room's repository", () => {
     // The request is then recorded: both places are stamped with now, not left at the first attempt's time.
     expect((await ask(r)).status).toBe(200);
     for (const holder of [r.org, r.owner.id]) expect((await stampOf(holder, r.id))!, holder).toBeGreaterThanOrEqual(stale + 23 * 3_600_000);
-    // A second short of a day after the record it still counts, where the first attempt's stamp would be long gone.
-    for (const holder of [r.org, r.owner.id]) await age(holder, r.id, 86_400_000 - 1_000);
+    // An hour short of a day after the record it still counts, where the first attempt's stamp would be long gone.
+    for (const holder of [r.org, r.owner.id]) await age(holder, r.id, DAY - INSIDE);
     expect((await principalCall(r.org, "repo-request-reserve", { provider: "github", workspace: "ws_another", delegation: true })).held).toBe(true);
     expect((await counted(r.org)).sort()).toEqual([r.id, "ws_another"].sort());
     // A replay of the recorded request, and asking again, reserve nothing: the stamp is where the record left it.

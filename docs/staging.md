@@ -40,6 +40,17 @@ The steps below are what it follows. They stay here as the reference, and for re
 
 The configuration was unchanged throughout and the database read normally throughout. **The cause isn't established.**
 
+**Since PR `fix/deploy-staging-transient-retry`, the script retries those two refusals itself.**
+
+- **What it retries:** the one step that was refused, and only when that step's output carries exactly one Cloudflare error code, and it's 7403 or 10021. That covers the D1 migration list, applying migrations, and each Worker's upload.
+- **How:** at most 3 tries in all, waiting 30 s and then 90 s. Each retry prints a `RETRY` line saying what was refused, the code and the try. The last line counts the retries ("after 2 retries of a transient Cloudflare refusal … so not a clean run"), and so do the refused and stopped lines.
+- **What a retry repeats:**
+  - **Reading the list** changes nothing.
+  - **A Worker upload** that was refused made no version. One that did and was then refused only uploads the same commit again, as a newer version of the same code.
+  - **Applying migrations** is tried again only when a fresh list names exactly the migrations pending before that try, so nothing is applied twice. If some applied before the refusal, it stops (exit 3) and says what's still pending.
+- **What it doesn't retry:** any other code, or a refusal carrying two codes; `npm ci`; the web build and its staging check; the switch-on rule; main's CI run; a missing version ID; and the probes. The script sets no secrets, so there's nothing of that kind to repeat.
+- **What it doesn't cover:** a refusal that lasts longer than the two waits. On 2026-11-11, 10021 refused three runs between 12:44Z and 12:54Z, and only a run at 13:16Z went through. A 2-minute retry wouldn't have saved those runs, so a deploy that stops after 3 tries is still re-run by hand later.
+
 ## First deploy
 
 This has been done once for staging, so it's kept here for rebuilding it, and as the outline for production. To ship a change, apply any new migrations, then run `npx wrangler deploy --env staging` from the app that changed, with the API first if both did. Migrations always go first: for example, the API's webhook delivery route (M5 step 5) reads `repo_room_index`, so `0007_repo_room_index.sql` must be applied to `podster-api-staging` before that API is deployed, or the route fails closed.

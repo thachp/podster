@@ -30,6 +30,15 @@ It refuses, before changing anything, unless:
 
 It sets CI=true, so wrangler asks nothing, and runs `npm ci` in each app it deploys.
 
+Two refusals from Cloudflare that have gone away unchanged on a later try are retried inside the
+script, for the one step that was refused: code 7403 and code 10021 ("binding DB of type d1 failed
+to generate"), only when the step's output carries exactly one Cloudflare error code and it is one
+of those. At most 3 tries in all, 30 s and then 90 s apart. That covers listing D1 migrations,
+applying them (only when a fresh list shows nothing was applied), and each Worker upload. Nothing
+else is retried: npm ci, the build, the switch-on rule, CI's run and the probes fail as they did.
+Each retry prints a RETRY line, and the last line counts them, so a deploy that needed one doesn't
+read as clean.
+
 Exit codes: 0 deployed and every probe passed; 1 refused, nothing on staging changed; 2 wrong usage;
 3 stopped after it began changing staging (the output says where, and which Workers had already
 deployed, with their version IDs); 4 deployed, but a probe failed.
@@ -64,7 +73,15 @@ fi
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-refuse() { echo "REFUSE  $*"; echo "deploy-staging: refused, nothing on staging changed"; exit 1; }
+# Each retry of a transient Cloudflare refusal, one line each. A file, because some steps run in a subshell.
+retry_log=$(mktemp)
+trap 'rm -f "$retry_log"' EXIT
+retried() { # retried: " after N retries of Cloudflare's transient refusals (…)", or nothing when there were none
+  local n
+  n=$(grep -c . "$retry_log" || true)
+  if [ "$n" -gt 0 ]; then printf " after %s retr%s of a transient Cloudflare refusal (the RETRY lines above), so not a clean run" "$n" "$([ "$n" -eq 1 ] && echo y || echo ies)"; fi
+}
+refuse() { echo "REFUSE  $*"; echo "deploy-staging: refused, nothing on staging changed$(retried)"; exit 1; }
 # Each deployed Worker and its version ID, one per line, as they happen.
 versions=""
 show_versions() { printf '%s' "$versions" | while read -r worker version; do echo "version $worker $version"; done; }
@@ -77,10 +94,27 @@ stop() {
   else
     echo "no Worker was deployed before it stopped"
   fi
-  echo "deploy-staging: stopped part-way. Staging may have changed; read the output above."
+  echo "deploy-staging: stopped part-way. Staging may have changed; read the output above.$(retried)"
   exit 3
 }
 step() { echo; echo "== $*"; }
+
+# --- Cloudflare's transient refusals ---
+# The codes Cloudflare has refused a step with, and then not refused it with on a later try with nothing changed:
+# 7403 reading D1's migration list, and 10021, "binding DB of type d1 failed to generate", uploading a Worker.
+max_tries=3
+retry_waits=(30 90)
+transient_code() { # transient_code FILE...: prints the code when the files carry exactly one Cloudflare error code, 7403 or 10021
+  local found
+  found=$(cat "$@" 2> /dev/null | grep -o -E '\[code: [0-9]+\]' | grep -o -E '[0-9]+' | sort -u || true)
+  case "$found" in 7403 | 10021) echo "$found" ;; *) return 1 ;; esac
+}
+note_retry() { # note_retry WHAT CODE TRY: says the try was refused, and waits before the next
+  local wait=${retry_waits[$(($3 - 1))]}
+  echo "RETRY   $1: Cloudflare refused it with code $2 on try $3 of $max_tries; trying again in ${wait}s" >&2
+  echo "$1: code $2, try $3" >> "$retry_log"
+  sleep "$wait"
+}
 
 # --- what must hold before anything runs ---
 if ! [[ "${CLOUDFLARE_ACCOUNT_ID:-}" =~ ^[0-9a-f]{32}$ ]]; then
@@ -128,17 +162,32 @@ done
 # --- migrations ---
 # pending APP DATABASE: prints the file names wrangler lists as not yet applied, one per line.
 pending() {
-  local app=$1 database=$2 out names name status=0 errors
+  local app=$1 database=$2 out names name status errors try code="" seen
   local command="npx wrangler d1 migrations list $database --remote --env staging"
   errors=$(mktemp)
-  out=$(cd "apps/$app" && $command 2> "$errors") || status=$?
+  seen=$(mktemp)
+  # Reading the list changes nothing, so a transient refusal is simply asked again.
+  for try in $(seq 1 "$max_tries"); do
+    status=0
+    out=$(cd "apps/$app" && $command 2> "$errors") || status=$?
+    [ "$status" -ne 0 ] || break
+    printf '%s\n' "$out" > "$seen"
+    code=$(transient_code "$errors" "$seen") || code=""
+    if [ -z "$code" ] || [ "$try" -ge "$max_tries" ]; then break; fi
+    note_retry "listing $database's migrations" "$code" "$try"
+  done
+  rm -f "$seen"
   if [ "$status" -ne 0 ]; then
     # Why, in full, so "couldn't read the list" is never mistaken for "migrations are pending". Anything long enough
     # to be a credential is masked; account and database IDs are shorter and stay.
     {
       echo "        \`$command\`, run in apps/$app, exited with status $status. Its stderr:"
       if [ -s "$errors" ]; then tail -n 20 "$errors" | sed -E -e 's/[A-Za-z0-9_-]{40,}/[masked]/g' -e 's/^/        | /'; else echo "        | (empty)"; fi
-      echo "        This is a failure to read the list, not a list of pending migrations. Nothing was retried."
+      if [ -n "$code" ]; then
+        echo "        This is a failure to read the list, not a list of pending migrations. Cloudflare refused it with code $code on all $max_tries tries."
+      else
+        echo "        This is a failure to read the list, not a list of pending migrations. Nothing was retried."
+      fi
     } >&2
     rm -f "$errors"
     return 1
@@ -184,13 +233,23 @@ if [ "$all_pending" != "$all_named" ]; then
   refuse "--apply-migrations names $(echo $all_named), and the pending set is $(echo $all_pending). They must match exactly"
 fi
 
-apply() { # apply APP DATABASE
+apply() { # apply APP DATABASE PENDING
+  local try code now out
   step "applying migrations to $2"
-  (cd "apps/$1" && npx wrangler d1 migrations apply "$2" --remote --env staging) || stop "applying migrations to $2 failed"
+  out=$(mktemp)
+  for try in $(seq 1 "$max_tries"); do
+    if (cd "apps/$1" && npx wrangler d1 migrations apply "$2" --remote --env staging) 2>&1 | tee "$out"; then rm -f "$out"; return 0; fi
+    code=$(transient_code "$out") || { rm -f "$out"; stop "applying migrations to $2 failed"; }
+    if [ "$try" -ge "$max_tries" ]; then rm -f "$out"; stop "applying migrations to $2 failed: Cloudflare refused it with code $code on all $max_tries tries"; fi
+    # Tried again only if nothing was applied: a fresh list must name exactly what was pending before.
+    now=$(pending "$1" "$2") || { rm -f "$out"; stop "applying migrations to $2 was refused with code $code, and its list couldn't be read to see whether any had applied"; }
+    if [ "$now" != "$3" ]; then rm -f "$out"; stop "applying migrations to $2 was refused with code $code part-way, with $(echo ${now:-none}) still pending. Not tried again, since some had applied"; fi
+    note_retry "applying migrations to $2" "$code" "$try"
+  done
 }
 if [ -n "$all_pending" ]; then
-  if [ -n "$pending_api" ]; then apply api podster-api-staging; fi
-  if [ -n "$pending_gateway" ]; then apply gateway podster-gateway-staging; fi
+  if [ -n "$pending_api" ]; then apply api podster-api-staging "$pending_api"; fi
+  if [ -n "$pending_gateway" ]; then apply gateway podster-gateway-staging "$pending_gateway"; fi
   step "listing D1 migrations again"
   left_api=$(pending api podster-api-staging) || stop "could not read podster-api-staging's migrations after applying"
   left_gateway=$(pending gateway podster-gateway-staging) || stop "could not read podster-gateway-staging's migrations after applying"
@@ -206,12 +265,23 @@ record() { # record WORKER OUTPUT-FILE
   versions="$versions$1 $version"$'\n'
 }
 log=$(mktemp)
-trap 'rm -f "$log"' EXIT
+trap 'rm -f "$log" "$retry_log"' EXIT
+deploy_app() { (cd "apps/$1" && npx wrangler deploy --env staging); }
+deploy_web() { (cd apps/web && npx wrangler deploy --config dist/server/wrangler.json); }
+uploading() { # uploading WHAT WORKER COMMAND...: runs the deploy, again after a transient refusal, and records its version
+  local what=$1 worker=$2 try code
+  shift 2
+  for try in $(seq 1 "$max_tries"); do
+    if "$@" 2>&1 | tee "$log"; then record "$worker" "$log"; return 0; fi
+    code=$(transient_code "$log") || stop "$what failed"
+    if [ "$try" -ge "$max_tries" ]; then stop "$what failed: Cloudflare refused it with code $code on all $max_tries tries"; fi
+    note_retry "$what" "$code" "$try"
+  done
+}
 
 for app in api gateway; do
   step "deploying the $app"
-  (cd "apps/$app" && npx wrangler deploy --env staging) | tee "$log" || stop "deploying the $app failed"
-  record "podster-$app-staging" "$log"
+  uploading "deploying the $app" "podster-$app-staging" deploy_app "$app"
 done
 
 if [ "$web" = true ]; then
@@ -242,8 +312,7 @@ if [ "$web" = true ]; then
   ' "$built") || stop "could not read $built, so the web app wasn't deployed"
   if [ -n "$wrong" ]; then stop "$built isn't staging's ($wrong), so the web app wasn't deployed"; fi
   step "deploying the web app"
-  (cd apps/web && npx wrangler deploy --config dist/server/wrangler.json) | tee "$log" || stop "deploying the web app failed"
-  record podster-web-staging "$log"
+  uploading "deploying the web app" podster-web-staging deploy_web
 fi
 
 step "deployed $here"
@@ -253,7 +322,7 @@ step "signed-out probes"
 probes=("$root/scripts/staging-probes")
 if [ "$webhook_secret_set" = true ]; then probes+=(--webhook-secret-set); fi
 if ! "${probes[@]}"; then
-  echo "deploy-staging: deployed, but a probe FAILED"
+  echo "deploy-staging: deployed, but a probe FAILED$(retried)"
   exit 4
 fi
-echo "deploy-staging: deployed $here, and every probe passed"
+echo "deploy-staging: deployed $here, and every probe passed$(retried)"

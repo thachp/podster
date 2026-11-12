@@ -28,6 +28,12 @@ case "$*" in
 esac
 EOF
 
+# sleep, so a retry's wait is recorded and not slept.
+stub sleep <<'EOF'
+#!/usr/bin/env bash
+echo "sleep $*" >> "$(dirname "$0")/../fix/calls"
+EOF
+
 stub worker-build <<'EOF'
 #!/usr/bin/env bash
 cat "$(dirname "$0")/../fix/worker-build-version"
@@ -46,11 +52,34 @@ EOF
 
 # wrangler, as `npx wrangler ...`. A database's pending list is $fix/pending-<database> until a migration is applied
 # to it, then $fix/pending-after-<database>.
+# $fix/refuse-<list|apply|deploy>-<database or app> queues Cloudflare's refusals: each call takes the first line and
+# fails with those codes, as wrangler prints them. A line "partial" also marks the migrations applied before refusing.
 stub npx <<'EOF'
 #!/usr/bin/env bash
 fix="$(dirname "$0")/../fix"
 app=$(basename "$PWD")
 echo "npx $* [in $app] CI=${CI:-} account=${CLOUDFLARE_ACCOUNT_ID:-} CLOUDFLARE_ENV=${CLOUDFLARE_ENV:-}" >> "$fix/calls"
+case "$2 $3" in
+  "d1 migrations") queue="$fix/refuse-$4-$5" ;;
+  "deploy "*) queue="$fix/refuse-deploy-$app" ;;
+  *) queue="" ;;
+esac
+if [ -n "$queue" ] && [ -s "$queue" ]; then
+  line=$(sed -n 1p "$queue")
+  sed -i.bak 1d "$queue" && rm -f "$queue.bak"
+  if [ "${line%% *}" = partial ]; then touch "$fix/applied-$5"; line=${line#partial }; fi
+  echo "Uploading..."
+  for code in $line; do
+    case "$code" in
+      7403) echo "✘ [ERROR] A request to the Cloudflare API (/accounts/x/d1/database/y/query) failed." >&2
+            echo "  The given account is not valid or is not authorized to access this service [code: 7403]" >&2 ;;
+      10021) echo "✘ [ERROR] A request to the Cloudflare API (/accounts/x/workers/scripts/y/versions) failed." >&2
+             echo "  binding DB of type d1 failed to generate [code: 10021]" >&2 ;;
+      *) echo "✘ [ERROR] Something else went wrong [code: $code]" >&2 ;;
+    esac
+  done
+  exit 1
+fi
 case "$*" in
   "wrangler d1 migrations list "*" --remote --env staging")
     list="$fix/pending-$5"
@@ -492,6 +521,99 @@ check "--web with a failed build stops it, exit 3" deploy 3 --web
 check "  and the web app isn't deployed" never_called 'deploy --config'
 check "  and the API's and gateway's version IDs are given" test "$(grep -c -E '^version podster-(api|gateway)-staging ' "$tmp/out")" -eq 2
 fresh
+
+# --- Cloudflare's transient refusals: retried for the one step, at most 3 tries, 30 s then 90 s ---
+retries() { grep -c '^RETRY ' "$tmp/out" || true; }
+calls_of() { grep -c -E -- "$1" "$fix/calls" || true; }
+
+echo 10021 > "$fix/refuse-deploy-api"
+check "an API upload refused once with 10021 is tried again and deploys: exit 0" deploy 0
+check "  the API was uploaded twice, and the gateway once" test "$(calls_of 'wrangler deploy --env staging \[in api\]')$(calls_of 'wrangler deploy --env staging \[in gateway\]')" = 21
+check "  after waiting 30 s" test "$(grep '^sleep' "$fix/calls" | xargs)" = "sleep 30"
+check "  saying what was refused, the code and the try" said '^RETRY   deploying the api: Cloudflare refused it with code 10021 on try 1 of 3; trying again in 30s$'
+check "  with the version of the try that worked" said '^version podster-api-staging 5cb57391-a010-4425-afb4-091fa2644f67$'
+check "  and the last line counts the retry, so it isn't read as clean" said 'every probe passed after 1 retry of a transient Cloudflare refusal .*not a clean run$'
+fresh
+
+printf '7403\n7403\n' > "$fix/refuse-list-podster-gateway-staging"
+check "a migration list refused twice with 7403 is asked a third time and deploys: exit 0" deploy 0
+check "  three lists of the gateway's database" test "$(calls_of 'migrations list podster-gateway-staging')" -eq 3
+check "  waiting 30 s, then 90 s" test "$(grep '^sleep' "$fix/calls" | xargs)" = "sleep 30 sleep 90"
+check "  each retry said" test "$(retries)" -eq 2
+check "  and the second names try 2" said '^RETRY   listing podster-gateway-staging.s migrations: Cloudflare refused it with code 7403 on try 2 of 3'
+check "  and the last line counts both" said 'after 2 retries of a transient Cloudflare refusal'
+fresh
+
+printf '10021\n10021\n10021\n' > "$fix/refuse-deploy-api"
+check "an upload refused three times with 10021 stops it: exit 3" deploy 3
+check "  after exactly three tries" test "$(calls_of 'wrangler deploy --env staging \[in api\]')" -eq 3
+check "  and two waits" test "$(grep '^sleep' "$fix/calls" | xargs)" = "sleep 30 sleep 90"
+check "  saying so" said 'STOPPED deploying the api failed: Cloudflare refused it with code 10021 on all 3 tries'
+check "  and the gateway isn't deployed" never_called 'deploy --env staging \[in gateway\]'
+check "  and the stop counts the retries" said 'stopped part-way.*after 2 retries'
+check "  and the probes don't run" never_called '^curl '
+fresh
+
+printf '7403\n7403\n7403\n' > "$fix/refuse-list-podster-api-staging"
+check "a list refused three times with 7403 is refused: exit 1" deploy 1
+check "  after three lists" test "$(calls_of 'migrations list podster-api-staging')" -eq 3
+check "  saying so" said 'Cloudflare refused it with code 7403 on all 3 tries'
+check "  and nothing was applied or deployed" never_called "$changed_staging"
+fresh
+
+echo 10000 > "$fix/refuse-deploy-api"
+check "an upload refused with another code stops at once: exit 3" deploy 3
+check "  after one try" test "$(calls_of 'wrangler deploy --env staging \[in api\]')" -eq 1
+check "  with no wait and no retry" test "$(calls_of '^sleep')$(retries)" = 00
+fresh
+
+echo "7403 10000" > "$fix/refuse-deploy-api"
+check "a refusal carrying 7403 and another code isn't retried: exit 3" deploy 3
+check "  after one try" test "$(calls_of 'wrangler deploy --env staging \[in api\]')" -eq 1
+fresh
+
+echo 10000 > "$fix/refuse-list-podster-api-staging"
+check "a list refused with another code isn't retried: exit 1" deploy 1
+check "  after one list" test "$(calls_of 'migrations list podster-api-staging')" -eq 1
+check "  and says nothing was retried" said 'Nothing was retried\.'
+fresh
+
+table 0007_repo_room_index.sql > "$fix/pending-podster-api-staging"
+echo 7403 > "$fix/refuse-apply-podster-api-staging"
+check "an apply refused with 7403 before anything applied is tried again: exit 0" deploy 0 --apply-migrations 0007_repo_room_index.sql
+check "  two applies" test "$(calls_of 'migrations apply podster-api-staging')" -eq 2
+check "  after listing to see that nothing applied" before 'sleep 30' 'wrangler deploy'
+check "  and the retry is counted" said 'after 1 retry'
+fresh
+
+table 0007_repo_room_index.sql > "$fix/pending-podster-api-staging"
+echo "partial 7403" > "$fix/refuse-apply-podster-api-staging"
+table 0007_repo_room_index.sql 0008_next.sql > "$fix/pending-podster-api-staging"
+check "an apply refused after some migrations applied isn't tried again: exit 3" deploy 3 --apply-migrations 0007_repo_room_index.sql 0008_next.sql
+check "  one apply" test "$(calls_of 'migrations apply podster-api-staging')" -eq 1
+check "  saying it was refused part-way" said 'refused with code 7403 part-way'
+check "  and nothing deploys" never_called 'wrangler deploy'
+fresh
+
+touch "$fix/web-build-fails"
+check "a build that fails is ours, and isn't retried: exit 3" deploy 3 --web
+check "  with no wait" never_called '^sleep'
+fresh
+echo 200 > "$fix/me.status"
+check "a failed probe is ours, and isn't retried: exit 4" deploy 4
+check "  with no wait" never_called '^sleep'
+fresh
+with_api_config '"MANAGED_REPOSITORIES": "true"'
+check "a refused switch-on rule is ours, and isn't retried: exit 1" deploy 1
+check "  with no wait" never_called '^sleep'
+fresh
+
+echo 10021 > "$fix/refuse-deploy-web"
+check "a web upload refused once with 10021 is tried again: exit 0" deploy 0 --web
+check "  two web uploads" test "$(calls_of 'deploy --config dist/server/wrangler.json \[in web\]')" -eq 2
+fresh
+
+check "the only codes it retries are 7403 and 10021" test "$(grep -c -E '7403 \| 10021\)' "$scripts/deploy-staging")" -eq 1
 
 # --- usage, and what the script can't do at all ---
 check "an unknown option is refused, exit 2" deploy 2 --env

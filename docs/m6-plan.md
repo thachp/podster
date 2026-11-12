@@ -864,7 +864,45 @@ Otherwise the run exits 1 and names each check it didn't show, so a run whose se
 | M6-S02b | The agent's MCP tool list names tools, and no M6 tool |
 | M6-S02d | Capabilities discovery, every page of `/api/auth/capability/list`, names capabilities, and no M6 capability |
 | M6-S02c | No M6 event type is in the room's events after every call above |
-| M6-S04 | The same task in a room made before the deploy, which is where the room schema step's migration could really harm a room. **Says SKIP unless such a room is reachable,** and today it isn't: such a room belongs to an earlier run's test people, whose sessions no run keeps |
+| M6-S04 | The same task in a room made before the deploy, which is where the room schema step's migration could really harm a room. **Always says SKIP in the usual run,** with how to run [its two phases](#m6-s04-in-two-phases-around-a-deploy) instead: such a room needs a session kept across the deploy, and the usual run keeps none |
+
+#### M6-S04 in two phases, around a deploy
+
+Added on 2026-11-12; not yet run against staging. M6-S04 is two runs of its own, one before a deploy and one after it, each with its own checks and exit code, and none of their checks may say SKIP:
+
+```bash
+node e2e/m6-staging.mjs --base-url https://gateway-staging.podster.dev --before-deploy --deployed-commit <full sha staging is at>
+```
+
+```bash
+node e2e/m6-staging.mjs --base-url https://gateway-staging.podster.dev --after-deploy --deployed-commit <full sha scripts/deploy-staging deployed>
+```
+
+- **Staging doesn't say which commit it runs to a signed-out caller.** No route, header or probe of `scripts/staging-probes` names it, and the run calls no Cloudflare API. So the person running the phases names it with `--deployed-commit`, as `scripts/deploy-staging` printed it ("deploying SHA"). The second phase refuses the commit the first phase was given, so it can't run without a deploy named between them. It can't check that the named commit is really what staging runs. A signed-out build marker on the gateway, written by `scripts/deploy-staging` and read by the probes, would let it; that's a gateway, deploy-script and contract change of its own.
+- **Why a session is kept.** The test sign-up makes a new person each time and can't sign one in again. The one exception is the fixed test operator, which the API's `OPERATORS` names, so the phases never ask for it. The first phase therefore keeps the owner's test session.
+- **The kept file** is `~/.podster/m6-staging/s04.json`, outside the repository, in a directory at mode 0700 and itself at 0600. It's written once, never over another file and never through a link, and a file or directory others can read is refused. It holds the session, the IDs of the owner, organization, room and task, the commit the first phase was given, how many of the room's events it read, and when it goes stale. It never holds the sign-up secret, and neither phase prints the session or the file's full path.
+- **When it's stale.** A test session ends by itself 2 hours after its sign-up and isn't renewed, so the file is stale 105 minutes after the sign-up, leaving the second phase 15 minutes. The second phase refuses a stale file and deletes it. The first phase refuses while an earlier file is still usable, and deletes a stale one.
+
+| ID | Phase | What it shows |
+| --- | --- | --- |
+| M6-S04a | Before | One test sign-up, an organization, a room and an agent. A task is offered to the agent and accepted. The agent is disconnected, so by the departure rule the task is open again with no assignee: part-way through its life, with state and events written by the commit staging is at. Its events include `task.offered`, `task.accepted` and `task.assignee_departed`. The session is then kept |
+| M6-S04b | After | No sign-up. The room made before the deploy: its task is still open with no assignee. It's offered to a new agent, accepted, submitted and completed, as M6-S03 does in a fresh room |
+| M6-S04c | After | The older room's settings reads, the room, its visibility and its audit log, answer. They, the owner's task read and the agent's room and task reads carry no M6 field |
+| M6-S04d | After | Every M6 read on the older room answers its owner with the API's own answer for a missing route, exactly as an invented neighbouring path does, as in M6-S01a |
+| M6-S04e | After | The older room's events up to the last one the first phase read are exactly as many as it read, a `task.completed` for the task follows them, and none is an M6 event type |
+
+**Exit codes,** for each phase: 0 when all its checks passed; 1 otherwise; 2 when a refusal stops it before anything is sent. A refusal covers a missing, unusable or stale kept file, the same commit, and a failed preflight.
+
+**The second phase is one try.** Its writes can't be repeated on the same task, so its clean-up signs the kept session out and deletes the file whatever its checks found. A failed second phase means running both phases again around another deploy.
+
+**The self-test runs both phases** against `e2e/m6-staging-standin.mjs`, one process after the other, with the stand-in's state kept in a file between them as staging's would be across a deploy. It covers:
+- a pass of each phase;
+- each refusal;
+- a kept session the stand-in no longer accepts;
+- a stale file;
+- that neither the secret nor the session reaches the output.
+
+The stand-in makes the run's own pacing waits at once, so the self-test sleeps on nothing.
 
 **Which acceptance rows it covers.** None of M6-01 to M6-28 yet. Every one of them needs release switched on, or a merge in a managed repository, which these checks don't make. Some are partly near: M6-01's "the room has no host", M6-12's "no M6 cookie" and M6-21. Even those are shown only with release off, which isn't what their rows ask.
 
@@ -882,6 +920,8 @@ Otherwise the run exits 1 and names each check it didn't show, so a run whose se
 - the agent.
 
 The agent is disconnected at the end, which ends its OAuth credential; the output says if that failed. If the agent's connect fails after the consent made it, the run finds it by name in its organization and disconnects it, or lists it as left behind. Every session is signed out.
+
+**Left behind by M6-S04's phases:** one test person, an organization, the older room and its task, and two agents, both disconnected. The first phase signs out every session but the one it keeps. The second signs that one out, and deletes the kept file. A first phase that is never followed by a second leaves its session to end by itself, 2 hours after its sign-up.
 ## Threat model
 
 **Draft, to be walked against the built system at step 11.** *Where a row and [ADR 0010](adr/0010-release-and-the-content-domain.md) differ, the ADR is the later word: rows written on 2026-11-10 still speak of a private room's app and of the Public Suffix List as defence in depth.* "Unverified" means nothing has tested it. "From M5's spike" means the M5 spike saw the GitHub half once; the M6 half is still unverified.

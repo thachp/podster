@@ -626,6 +626,10 @@ dependencies = [
 [[package]]
 name = "podster-core"
 version = "0.0.0"
+dependencies = [
+ "icu_normalizer",
+ "idna",
+]
 
 [[package]]
 name = "podster-egress"

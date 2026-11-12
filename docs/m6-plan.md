@@ -715,8 +715,12 @@ The architect proposes the gate call, for the owner to review.
 
 - **An operator suspends an app, and lifts that,** by the app's label, and by its default host, which is the same act. Who is asking is settled first: an agent, then anyone who isn't an operator, is refused before anything is said about the app. The lookup table only finds the room to ask; the room acts only if the label is its own.
 - **Suspending unpublishes, in one room transaction.** `crates/core`'s `unpublish` runs on the room's own state, rebuilt from its rows: the release epoch goes up, every host goes to nothing with its version up, and the kept script and any commit in flight are forgotten. The same transaction records the trigger with the epoch it raised to, marks each release that was live or served as unpublished, and queues every script core names for deletion. Asking again changes nothing. Lifting clears the suspension and restores nothing.
-- **The room's applier,** the only writer of a serve entry, run from the room's alarm ahead of everything slower. For each host it writes or removes the entry, reads it back, and asks the room for the version again; if that moved, it starts over. It writes an entry only for a default host, and never while the app is suspended.
-- **The script-delete job.** It deletes no script until every host's entry is known to match what the room wants. A script counts as gone only on one of [the two answers that mean gone](adr/0010-release-and-the-content-domain.md#unpublishing); anything else is retried, waiting from 5 seconds up to 5 minutes, and it never gives up.
+- **The room's applier,** the only writer of a serve entry, run from the room's alarm ahead of everything else. For each host it writes or removes the entry, reads it back, and asks the room for the version again; if that moved, it starts over.
+  - **A wait after a failure belongs to the version that failed.** When a host's version moves, as a takedown moves it, the wait is void and the host is due at once, so a suspension never sits behind an earlier failure's backoff.
+  - **It writes only a default host's entry, only for a script under that host's own label, and only for a host whose label is the room's own.** A host that isn't the room's is never touched, for a write or a removal.
+  - **Where it won't write, it removes.** A script wanted while the app is suspended, a custom hostname's entry, and a script under another label are each never written, and whatever entry is there is taken out.
+  - **One pass is bounded.** It starts no new step after 10 seconds, and a provider call gives up after 5, so a slow provider holds the rest of the room's alarm for about 20 seconds at most. *This was the choice between bounding the pass and running the room's deliveries first: bounded, so a takedown still goes ahead of everything else.*
+- **The script-delete job.** It deletes no script until every host's entry is known to match what the room wants, and that waiting counts no attempt. A script counts as gone only on one of [the two answers that mean gone](adr/0010-release-and-the-content-domain.md#unpublishing); anything else is retried, waiting from 5 seconds up to 5 minutes, and it never gives up.
 - **One interface to the provider,** `apps/api/src/content_provider.rs`: read and delete a script, and write, delete and read a serve entry. It needs six settings, and no environment binds any of them. **With none, the applier and the job do nothing and say so:** the work stays recorded as owed, and one log line counts it.
 - **One room migration,** two tables: what the applier last confirmed for each host, and the scripts owed a delete.
 - **Two event types,** `app.suspended` and `app.suspension_lifted`, recorded as Podster's act and told to the room's managers. The operator's own ID stays in the operators' log.
@@ -728,6 +732,16 @@ The architect proposes the gate call, for the owner to review.
 **Left for the third PR:** the two scheduled reconciles, the provider's list calls, and reports to operators for an entry or a script with no room, or a name Podster didn't make.
 
 **Left for later steps:** the other ten unpublish triggers (step 6); and a release that was waiting, queued or uploading when its room was unpublished, which is left as it is here and failed by the job that owns it (step 5).
+
+**Owed, and not built here.** From the two in-depth reviews of 2026-11-12. None can be met while no provider is configured, and each must be closed before one is:
+
+- **A lost wake.** The suspension commits, then the room sets its alarm. If setting it fails the operator is told the command failed, and asking again arms it; nothing else corrects it until the reconcile (third PR).
+- **A delete that never succeeds** retries for ever, every 5 minutes, and nobody is told. Surfacing it to operators is the third PR's.
+- **An `uncertain` release with no commit in flight** may have a script in the namespace that no row names, so an unpublish queues no delete for it. The hourly reconcile finds it (third PR).
+- **The stop isn't read.** The applier writes a default host's entry without reading the stop for the whole content domain, which doesn't exist until the second PR. **No provider may be configured before that read is built.**
+- **Rooms with owed work aren't woken when a provider first appears.** With none, a room sets no alarm for this work, so a room nothing else wakes would go on owing it. Whoever configures the first provider must wake them, or the reconcile must (third PR).
+- **The provider's answers for a serve entry are unverified:** what a write and a delete answer, and what says a key is absent. Spike G.
+- **The pass's bound isn't shown by a test.** It reads the clock, and a test of it would have to wait it out.
 
 **Owed with the provider's configuration,** which is the owner's and waits on the second-account decision:
 

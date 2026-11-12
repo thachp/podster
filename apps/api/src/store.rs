@@ -323,8 +323,8 @@ CREATE TABLE hostname_request (id TEXT PRIMARY KEY, hostname TEXT NOT NULL, stat
 ", "
 CREATE TABLE serve_apply (host TEXT PRIMARY KEY REFERENCES serve_state (host),
   applied_version INTEGER CHECK (applied_version IS NULL OR (typeof(applied_version) = 'integer' AND applied_version >= 1)), applied_script TEXT, applied_at INTEGER,
-  attempts INTEGER NOT NULL DEFAULT 0 CHECK (typeof(attempts) = 'integer' AND attempts >= 0), next_attempt_at INTEGER, last_code TEXT CHECK (last_code IS NULL OR length(last_code) BETWEEN 1 AND 64), updated_at INTEGER NOT NULL,
-  CHECK ((applied_version IS NULL) = (applied_at IS NULL)), CHECK (applied_script IS NULL OR applied_version IS NOT NULL),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (typeof(attempts) = 'integer' AND attempts >= 0), attempt_version INTEGER CHECK (attempt_version IS NULL OR (typeof(attempt_version) = 'integer' AND attempt_version >= 1)), next_attempt_at INTEGER, last_code TEXT CHECK (last_code IS NULL OR length(last_code) BETWEEN 1 AND 64), updated_at INTEGER NOT NULL,
+  CHECK ((applied_version IS NULL) = (applied_at IS NULL)), CHECK ((attempts = 0) = (attempt_version IS NULL)), CHECK (next_attempt_at IS NULL OR attempt_version IS NOT NULL), CHECK (applied_script IS NULL OR applied_version IS NOT NULL),
   CHECK (applied_script IS NULL OR (length(applied_script) BETWEEN 38 AND 63 AND substr(applied_script, -37, 4) = '.rel' AND substr(applied_script, -33, 1) = '_' AND substr(applied_script, -32) NOT GLOB '*[^0-9a-f]*' AND substr(applied_script, 1, length(applied_script) - 37) NOT GLOB '*[^a-z0-9]*'))) WITHOUT ROWID;
 CREATE TABLE script_delete (script_name TEXT PRIMARY KEY, label TEXT NOT NULL REFERENCES app_label (label), unpublish_epoch INTEGER REFERENCES unpublish (release_epoch),
   queued_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0 CHECK (typeof(attempts) = 'integer' AND attempts >= 0), next_attempt_at INTEGER NOT NULL,

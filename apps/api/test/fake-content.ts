@@ -36,6 +36,26 @@ let scripts = new Set<string>();
 let entries = new Map<string, string>();
 let calls: { op: Op; name: string; status: number }[] = [];
 let faults: Fault[] = [];
+/**
+ * A gate holds the next call of one kind until the test lets it go, and tells the test when that call has arrived. So
+ * a test can change the room while a call is out, at exactly that point, with no clock involved.
+ */
+type Gate = { op: Op; taken: boolean; arrived: Promise<void>; markArrived: () => void; released: Promise<void>; release: () => void };
+let gates: Gate[] = [];
+function newGate(op: Op): Gate {
+  let markArrived = () => {};
+  let release = () => {};
+  const arrived = new Promise<void>((resolve) => { markArrived = resolve; });
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  return { op, taken: false, arrived, markArrived, released, release };
+}
+async function passGate(op: Op) {
+  const gate = gates.find((g) => g.op === op && !g.taken);
+  if (!gate) return;
+  gate.taken = true;
+  gate.markArrived();
+  await gate.released;
+}
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const envelope = (result: unknown) => ({ success: true, errors: [], messages: [], result });
@@ -58,6 +78,8 @@ export async function fakeContent(request: Request): Promise<Response | null> {
       entries = new Map();
       calls = [];
       faults = [];
+      for (const gate of gates) gate.release();
+      gates = [];
       return json({ ok: true });
     }
     if (url.pathname === "/seed") {
@@ -68,6 +90,19 @@ export async function fakeContent(request: Request): Promise<Response | null> {
     }
     if (url.pathname === "/fault") {
       faults.push((await request.json()) as Fault);
+      return json({ ok: true });
+    }
+    if (url.pathname === "/gate") {
+      gates.push(newGate(((await request.json()) as { op: Op }).op));
+      return json({ id: gates.length - 1 });
+    }
+    const gate = gates[Number(url.searchParams.get("id") ?? -1)];
+    if (url.pathname === "/arrived" && gate) {
+      await gate.arrived;
+      return json({ ok: true });
+    }
+    if (url.pathname === "/release" && gate) {
+      gate.release();
       return json({ ok: true });
     }
     if (url.pathname === "/state") return json({ scripts: [...scripts].sort(), entries: Object.fromEntries([...entries].sort()), calls });
@@ -89,6 +124,7 @@ export async function fakeContent(request: Request): Promise<Response | null> {
     if (!op) return failure(405, 10405, "Method not allowed");
     // The scripts token only: the routing token can't touch a script.
     if (bearer !== `Bearer ${FAKE_CONTENT.scriptsToken}`) return answer(op, name, failure(403, 10000, "Authentication error"));
+    await passGate(op);
     const fault = await takeFault(op);
     if (fault && !fault.lost) return answer(op, name, failure(fault.status ?? 500, 10001, "fault"));
     if (op === "script.get") {
@@ -107,6 +143,7 @@ export async function fakeContent(request: Request): Promise<Response | null> {
     if (!op) return failure(405, 10405, "Method not allowed");
     // The routing token only: the scripts token can't write what a host serves.
     if (bearer !== `Bearer ${FAKE_CONTENT.routingToken}`) return answer(op, host, failure(403, 10000, "Authentication error"));
+    await passGate(op);
     const fault = await takeFault(op);
     if (fault && !fault.lost && !fault.stale) return answer(op, host, failure(fault.status ?? 500, 10001, "fault"));
     if (op === "entry.put") {

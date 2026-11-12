@@ -30,7 +30,7 @@ use worker::*;
 
 const API: &str = "https://api.cloudflare.com/client/v4";
 /// How long one call may take. The room's alarm waits on it.
-const CALL_TIMEOUT_MS: u64 = 10_000;
+const CALL_TIMEOUT_MS: u64 = 5_000;
 /// No answer this module reads is longer: a script's read, an error, or a serve entry of at most 63 characters.
 const MAX_ANSWER_BYTES: usize = 64 * 1024;
 /// The code Cloudflare's delete gave for a script that isn't there, as spike A recorded it, is core's to judge. This
@@ -250,7 +250,12 @@ impl Provider {
 
     /// Writes a host's serve entry, naming one script. `true` only when the provider said it was written.
     pub(crate) async fn write_entry(&self, host: &str, script: &str) -> bool {
-        if !matches!(script_owner(script), ScriptOwner::Podster { .. }) {
+        let ScriptOwner::Podster { label, .. } = script_owner(script) else {
+            return false;
+        };
+        // A host on the content domain is one app's default host, and takes only that app's scripts: the label in
+        // the host and the label in the script's name must be the same one. A host two labels deep is nobody's.
+        if host.ends_with(self.domain.as_str()) && self.default_host_label(host) != Some(label) {
             return false;
         }
         let Some(url) = self.entry_url(host) else {

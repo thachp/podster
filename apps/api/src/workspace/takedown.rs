@@ -9,7 +9,12 @@
 //!   a new release is asked for and approved.
 //! - **The applier,** the only thing that writes or removes a serve entry. For each host it reads the desired state
 //!   and its version, writes or deletes the entry, reads it back, and asks the room for the version again; if it
-//!   moved, it starts over. It runs from the room's alarm and never behind a job.
+//!   moved, it starts over. It runs from the room's alarm and never behind a job. **A wait after a failure belongs to
+//!   the version that failed:** when a host's version moves, as a takedown moves it, the wait is void and the host is
+//!   due at once. A default host's entry is written only for a script under that host's own label.
+//! - **One pass is bounded.** The alarm runs this before everything else it does, so a provider that is slow must
+//!   not hold the room's deliveries: no new step starts once [`PASS_BUDGET_MS`] is spent, and what is left is due
+//!   again at once, after the rest of the alarm has had its turn.
 //! - **The script-delete job.** A script is deleted only once no host's entry can still name it, and counts as gone
 //!   only on one of the provider's two answers that mean gone (`podster_core::release::script_gone`). Anything else
 //!   is retried, with a wait that grows.
@@ -21,6 +26,8 @@
 //! - Only `app_suspended` unpublishes here. The other ten triggers are step 6's.
 //! - A custom hostname's entry is never written here, only removed: writing one needs the hostname's claim to agree,
 //!   and the stop for the whole content domain to be read first, which are the next PR's.
+//! - A default host's entry is written without reading the stop, which doesn't exist yet. The next PR adds that read,
+//!   and no provider may be configured before it.
 //! - A release that was still waiting, queued or uploading is left as it is. The epoch has moved, so it can never go
 //!   live, and the job that owns it (step 5) fails it on its next pass.
 //!
@@ -58,6 +65,9 @@ const APPLY_PASSES: usize = 3;
 /// Hosts and scripts handled in one alarm. A room has two hosts at most and three scripts.
 const BATCH: usize = 8;
 const FIRST_WAIT_MS: i64 = 5_000;
+/// How long one alarm's pass may go on starting new steps. A step is at most two provider calls of 5 seconds each, so
+/// a pass ends within about 20 seconds whatever the provider does.
+const PASS_BUDGET_MS: i64 = 10_000;
 const LONGEST_WAIT_MS: i64 = 5 * 60 * 1000;
 
 /// The wait before attempt `attempts + 1`: 5 seconds, doubling, to 5 minutes at most. It never gives up.
@@ -341,7 +351,12 @@ fn provider(env: &Env, sql: &SqlStorage) -> Option<Provider> {
 }
 
 /// Hosts whose serve entry isn't known to match what the room wants: never applied, or applied at another version.
-const PENDING_HOSTS: &str = "FROM serve_state s LEFT JOIN serve_apply a ON a.host = s.host WHERE a.applied_version IS NULL OR a.applied_version != s.version";
+const PENDING_HOSTS: &str = "FROM serve_state s LEFT JOIN serve_apply a ON a.host = s.host WHERE (a.applied_version IS NULL OR a.applied_version != s.version)";
+/// When a pending host is next due. A wait counts only for the version whose attempt failed: once the room has moved
+/// the host's version, whoever moved it and why, the host is due at once. So no writer has to remember to clear a
+/// wait, and a takedown never sits behind one left by an earlier failure.
+const HOST_DUE: &str =
+    "CASE WHEN a.attempt_version = s.version THEN coalesce(a.next_attempt_at, 0) ELSE 0 END";
 
 /// When the applier or the delete job next has something to do, or `None`: nothing is owed, or no provider is
 /// configured, in which case the work waits without waking the room.
@@ -351,9 +366,7 @@ pub(super) fn next_due(sql: &SqlStorage, env: &Env, now: i64) -> R<Option<i64>> 
     }
     let hosts = rows(
         sql,
-        &format!(
-            "SELECT min(coalesce(a.next_attempt_at, 0)) AS due, count(*) AS n {PENDING_HOSTS}"
-        ),
+        &format!("SELECT min({HOST_DUE}) AS due, count(*) AS n {PENDING_HOSTS}"),
         vec![],
     )?;
     let scripts = rows(
@@ -393,10 +406,10 @@ fn wanted(sql: &SqlStorage, host: &str) -> R<Option<Wanted>> {
 fn applied(sql: &SqlStorage, host: &str, want: &Wanted, now: i64) -> R<()> {
     exec(
         sql,
-        "INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, attempts, next_attempt_at, last_code, updated_at)
-           VALUES (?, ?, ?, ?, 0, NULL, NULL, ?)
+        "INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, attempts, attempt_version, next_attempt_at, last_code, updated_at)
+           VALUES (?, ?, ?, ?, 0, NULL, NULL, NULL, ?)
            ON CONFLICT (host) DO UPDATE SET applied_version = excluded.applied_version, applied_script = excluded.applied_script,
-             applied_at = excluded.applied_at, attempts = 0, next_attempt_at = NULL, last_code = NULL, updated_at = excluded.updated_at",
+             applied_at = excluded.applied_at, attempts = 0, attempt_version = NULL, next_attempt_at = NULL, last_code = NULL, updated_at = excluded.updated_at",
         vec![
             host.into(),
             want.version.into(),
@@ -407,21 +420,25 @@ fn applied(sql: &SqlStorage, host: &str, want: &Wanted, now: i64) -> R<()> {
     )
 }
 
-fn not_applied(sql: &SqlStorage, host: &str, code: &str, now: i64) -> R<()> {
+/// Records a failed attempt at `version`, and the wait before the next. Attempts are counted for one version: the
+/// first failure at a new version starts the count, and its wait, again.
+fn not_applied(sql: &SqlStorage, host: &str, version: i64, code: &str, now: i64) -> R<()> {
     let attempts = rows(
         sql,
-        "SELECT attempts FROM serve_apply WHERE host = ?",
-        vec![host.into()],
+        "SELECT attempts FROM serve_apply WHERE host = ? AND attempt_version = ?",
+        vec![host.into(), version.into()],
     )?
     .first()
     .map_or(0, |row| int(&row["attempts"]));
     exec(
         sql,
-        "INSERT INTO serve_apply (host, attempts, next_attempt_at, last_code, updated_at) VALUES (?, 1, ?, ?, ?)
-           ON CONFLICT (host) DO UPDATE SET attempts = attempts + 1, next_attempt_at = excluded.next_attempt_at,
-             last_code = excluded.last_code, updated_at = excluded.updated_at",
+        "INSERT INTO serve_apply (host, attempts, attempt_version, next_attempt_at, last_code, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT (host) DO UPDATE SET attempts = excluded.attempts, attempt_version = excluded.attempt_version,
+             next_attempt_at = excluded.next_attempt_at, last_code = excluded.last_code, updated_at = excluded.updated_at",
         vec![
             host.into(),
+            (attempts + 1).into(),
+            version.into(),
             (now + wait_ms(attempts)).into(),
             code.into(),
             now.into(),
@@ -429,17 +446,79 @@ fn not_applied(sql: &SqlStorage, host: &str, code: &str, now: i64) -> R<()> {
     )
 }
 
-/// One host, made to match what the room wants now. See the module's note for the four steps.
-async fn apply_host(sql: &SqlStorage, provider: &Provider, host: &str) -> R<()> {
+/// Removes a host's entry and reads it back. `true` only when the provider says the host has none.
+async fn remove_entry(provider: &Provider, host: &str) -> (bool, bool) {
+    let deleted = provider.delete_entry(host).await;
+    (deleted, provider.read_entry(host).await == Entry::Absent)
+}
+
+/// Whether this room's applier may touch a host's entry at all, and under which label a script may be written to it.
+/// A default host is `<label>.<content domain>` for a label that is the room's own, or it is refused outright: the
+/// room's rows alone never send a write or a delete to another app's host. A custom hostname has no label of its own
+/// and is only ever removed here.
+fn host_label(
+    sql: &SqlStorage,
+    provider: &Provider,
+    host: &str,
+    custom: bool,
+) -> R<Result<Option<String>, &'static str>> {
+    if custom {
+        return Ok(if provider.default_host_label(host).is_some() {
+            Err("custom_host_on_content_domain")
+        } else {
+            Ok(None)
+        });
+    }
+    let Some(label) = provider.default_host_label(host) else {
+        return Ok(Err("host_not_a_default_host"));
+    };
+    if !own_label(sql, label)? {
+        return Ok(Err("host_not_this_rooms"));
+    }
+    Ok(Ok(Some(label.to_owned())))
+}
+
+/// One host, made to match what the room wants now. See the module's note for the four steps. `deadline` is when the
+/// pass stops starting new steps.
+async fn apply_host(sql: &SqlStorage, provider: &Provider, host: &str, deadline: i64) -> R<()> {
+    let mut last = None;
     for _ in 0..APPLY_PASSES {
         let Some(want) = wanted(sql, host)? else {
             return Ok(());
         };
+        if now_ms() > deadline {
+            // Not an attempt: nothing was asked. The host stays due, for the next alarm.
+            return Ok(());
+        }
+        let label = match host_label(sql, provider, host, want.custom)? {
+            Ok(label) => label,
+            // Not this room's host to touch. No call is made.
+            Err(code) => return not_applied(sql, host, want.version, code, now_ms()),
+        };
         let outcome = match &want.script {
-            // A custom hostname's entry needs its claim to agree, which this step can't ask yet.
-            Some(_) if want.custom => Err("claim_check_not_built"),
-            // The room's state never names a script while its app is suspended. If it ever did, nothing is written.
-            Some(_) if app_suspended(sql)? => Err("app_suspended"),
+            // A custom hostname's entry needs its claim to agree, which this step can't ask yet. And the room's state
+            // never names a script while its app is suspended. In both cases nothing is written, and an entry that
+            // is there is removed: what can't be confirmed isn't left serving.
+            Some(_) if want.custom || app_suspended(sql)? => {
+                let (_, absent) = remove_entry(provider, host).await;
+                Err(match (want.custom, absent) {
+                    (true, true) => "claim_check_not_built",
+                    (true, false) => "claim_check_not_built_entry_remains",
+                    (false, true) => "app_suspended",
+                    (false, false) => "app_suspended_entry_remains",
+                })
+            }
+            // A default host serves only a script under its own label. Anything else is a fault in the room's rows:
+            // it is never written, and whatever the host has is removed.
+            Some(script) if !matches!(script_owner(script), ScriptOwner::Podster { label: l, .. } if Some(l) == label.as_deref()) =>
+            {
+                let (_, absent) = remove_entry(provider, host).await;
+                Err(if absent {
+                    "script_not_this_hosts"
+                } else {
+                    "script_not_this_hosts_entry_remains"
+                })
+            }
             Some(script) => {
                 let written = provider.write_entry(host, script).await;
                 match provider.read_entry(host).await {
@@ -448,15 +527,12 @@ async fn apply_host(sql: &SqlStorage, provider: &Provider, host: &str) -> R<()> 
                     _ => Err("read_back_differs"),
                 }
             }
-            None => {
-                let deleted = provider.delete_entry(host).await;
-                match provider.read_entry(host).await {
-                    // Absent is the point, whether this delete or an earlier one did it.
-                    Entry::Absent => Ok(()),
-                    _ if !deleted => Err("delete_not_confirmed"),
-                    _ => Err("read_back_differs"),
-                }
-            }
+            None => match remove_entry(provider, host).await {
+                // Absent is the point, whether this delete or an earlier one did it.
+                (_, true) => Ok(()),
+                (false, false) => Err("delete_not_confirmed"),
+                (true, false) => Err("read_back_differs"),
+            },
         };
         // The room may have changed its mind while the provider was asked. If it did, what was just written is
         // already stale: start over from what the room wants now.
@@ -465,14 +541,19 @@ async fn apply_host(sql: &SqlStorage, provider: &Provider, host: &str) -> R<()> 
             Some(again) if again.version == want.version => {
                 return match outcome {
                     Ok(()) => applied(sql, host, &want, now),
-                    Err(code) => not_applied(sql, host, code, now),
+                    Err(code) => not_applied(sql, host, want.version, code, now),
                 };
             }
-            Some(_) => continue,
+            Some(again) => last = Some(again.version),
             None => return Ok(()),
         }
     }
-    not_applied(sql, host, "version_kept_moving", now_ms())
+    // The version moved on every pass. What the entry holds now is unknown to the room, so nothing is recorded as
+    // applied, and the host is tried again after a wait counted against the version it has now.
+    match last {
+        Some(version) => not_applied(sql, host, version, "version_kept_moving", now_ms()),
+        None => Ok(()),
+    }
 }
 
 /// Whether a script may be deleted now: nothing in the room's state names it, and every host's entry is known to
@@ -522,7 +603,12 @@ async fn delete_script(sql: &SqlStorage, provider: &Provider, script: &str) -> R
         )
     };
     if !may_delete(sql, script)? {
-        return retry("entry_not_removed_yet");
+        // Nothing was asked of the provider, so no attempt is counted: it looks again shortly, with no growing wait.
+        return exec(
+            sql,
+            "UPDATE script_delete SET next_attempt_at = ?, last_code = 'entry_not_removed_yet' WHERE script_name = ?",
+            vec![(now_ms() + FIRST_WAIT_MS).into(), script.into()],
+        );
     }
     let deleted = provider.delete_script(script).await;
     let mut gone = deleted.is_some_and(script_gone);
@@ -562,7 +648,9 @@ pub(super) async fn upkeep(state: &State, env: &Env) -> R<()> {
     let now = now_ms();
     let hosts: Vec<String> = rows(
         &sql,
-        &format!("SELECT s.host AS host {PENDING_HOSTS} AND coalesce(a.next_attempt_at, 0) <= ? ORDER BY s.host LIMIT ?"),
+        &format!(
+            "SELECT s.host AS host {PENDING_HOSTS} AND {HOST_DUE} <= ? ORDER BY s.host LIMIT ?"
+        ),
         vec![now.into(), (BATCH as i64).into()],
     )?
     .iter()
@@ -592,8 +680,9 @@ pub(super) async fn upkeep(state: &State, env: &Env) -> R<()> {
         );
         return Ok(());
     };
+    let deadline = now + PASS_BUDGET_MS;
     for host in &hosts {
-        if let Err(error) = apply_host(&sql, &provider, host).await {
+        if let Err(error) = apply_host(&sql, &provider, host, deadline).await {
             console_error!(
                 "takedown: a host wasn't applied: code={}",
                 error.code().unwrap_or("internal_error")
@@ -601,6 +690,9 @@ pub(super) async fn upkeep(state: &State, env: &Env) -> R<()> {
         }
     }
     for script in &scripts {
+        if now_ms() > deadline {
+            break;
+        }
         if let Err(error) = delete_script(&sql, &provider, script).await {
             console_error!(
                 "takedown: a script wasn't deleted: code={}",
@@ -613,11 +705,12 @@ pub(super) async fn upkeep(state: &State, env: &Env) -> R<()> {
 
 impl Workspace {
     /// An operator suspends the room's app or lifts that (M6 step 4(a)). The Worker has checked the operator. The
-    /// applier is woken by the alarm this arms, so the entries go without waiting for anything else.
+    /// applier is woken by the alarm this arms, for now, so the entries go without waiting for anything else.
     pub(super) async fn app_suspension(&self, mut req: Request) -> R<Value> {
         let sql = self.state.storage().sql();
         if !store::is_initialized(&sql)? {
-            return Err(ApiError::workspace_not_found());
+            // The lookup table named a room that doesn't exist. To the operator that is a label no room has.
+            return Err(ApiError::not_found());
         }
         self.migrate_if_needed()?;
         let body: Value =
@@ -629,12 +722,10 @@ impl Workspace {
             *slot.borrow_mut() = Some(set(&store, &body, now_ms())?);
             Ok(())
         })?;
-        if let Err(error) = self.arm(false, false).await {
-            console_error!(
-                "takedown: couldn't wake the applier: code={}",
-                error.code().unwrap_or("internal_error")
-            );
-        }
+        // The transaction moved each host's version, which voids any wait, so the applier is due now. If the alarm
+        // can't be set the suspension has still committed, and the operator is told it failed: asking again changes
+        // nothing in the room and arms again. Nothing else corrects a lost wake until the reconcile exists.
+        self.arm(false, false).await?;
         let answer = out.borrow_mut().take();
         answer.ok_or_else(|| ApiError::internal("app suspension answered nothing"))
     }

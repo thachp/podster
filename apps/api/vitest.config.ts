@@ -1,6 +1,6 @@
 import { coreSets } from "../../packages/contracts/core-sets.mjs";
 import { generateKeyPairSync } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 import { FAKE_CONTENT, fakeContent } from "./test/fake-content.ts";
@@ -197,7 +197,10 @@ export default defineConfig({
           CONTENT_ROUTING_TOKEN: FAKE_CONTENT.routingToken,
           TEST_FAKE_CONTENT: JSON.stringify(FAKE_CONTENT),
           // The provider module's source, for the test that reads its settings' names and shows no environment binds one.
-          TEST_TAKEDOWN_SOURCE: readFileSync(new URL("./src/workspace/takedown.rs", import.meta.url), "utf8"),
+          // Every Rust source file of the API, by its path under src, and its Cargo.toml, for the test that shows no
+          // test-only switch is in a deployment's build.
+          TEST_API_SOURCES: JSON.stringify(Object.fromEntries((readdirSync(new URL("./src", import.meta.url), { recursive: true }) as string[]).filter((name) => name.endsWith(".rs")).sort().map((name) => [name.split("\\").join("/"), readFileSync(new URL(`./src/${name}`, import.meta.url), "utf8")]))),
+          TEST_API_CARGO: readFileSync(new URL("./Cargo.toml", import.meta.url), "utf8"),
           TEST_CONTENT_PROVIDER_SOURCE: readFileSync(new URL("./src/content_provider.rs", import.meta.url), "utf8"),
           // Set only by e2e/run-langgraph-check.mjs. Empty, a2a-langgraph.spec.ts skips.
           TEST_LANGGRAPH_ASSISTANT: process.env.PODSTER_LANGGRAPH_URL ? (process.env.PODSTER_LANGGRAPH_ASSISTANT ?? "") : "",

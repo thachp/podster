@@ -13,6 +13,11 @@ type Who = { id: string; kind?: "agent" | "person"; org: string; adminOrgs?: str
 const OWNER: Who = { id: "per_rl_owner", kind: "person", org: "org_rl", adminOrgs: ["org_rl"] };
 const AGENT: Who = { id: "agt_rl_agent", org: "org_rl" };
 const OPERATOR: Who = { id: "per_operator_one", kind: "person", org: "org_rl_ops" };
+const MEMBER: Who = { id: "agt_rl_member", org: "org_rl" };
+const REVOKED: Who = { id: "agt_rl_revoked", org: "org_rl" };
+const OUTSIDER: Who = { id: "per_rl_outsider", kind: "person", org: "org_rl_other", adminOrgs: ["org_rl_other"] };
+/** An admin of the room's organization who was never put in the room. */
+const ORG_ADMIN: Who = { id: "per_rl_org_admin", kind: "person", org: "org_rl", adminOrgs: ["org_rl"] };
 
 async function assertion(who: Who | "public") {
   const now = Math.floor(Date.now() / 1000);
@@ -27,21 +32,23 @@ async function assertion(who: Who | "public") {
 }
 
 let counter = 0;
-async function api(who: Who | "public" | null, method: string, path: string, body?: unknown) {
+async function api(who: Who | "public" | null, method: string, path: string, body?: unknown, raw?: string) {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (who) headers["x-podster-assertion"] = await assertion(who);
   if (method !== "GET") headers["idempotency-key"] = `rl-key-${++counter}`;
-  const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: method === "GET" ? undefined : JSON.stringify(body ?? {}) });
+  const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: method === "GET" ? undefined : raw ?? JSON.stringify(body ?? {}) });
   const text = await res.text();
   const parsed = text ? JSON.parse(text) : null;
-  return { status: res.status, body: parsed, code: parsed?.error?.code as string | undefined, text };
+  return { status: res.status, body: parsed, code: parsed?.error?.code as string | undefined, text, headers: [...res.headers.entries()].sort() };
 }
 
 beforeAll(async () => {
   key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
   for (const statement of BINDINGS.TEST_D1_SCHEMA.split(";").map((x: string) => x.trim()).filter(Boolean)) await BINDINGS.DB.prepare(statement).run();
-  const res = await SELF.fetch(`https://api.internal/v1/agents/${AGENT.id}`, { method: "PUT", headers: { "x-podster-assertion": await assertion(OWNER) }, body: JSON.stringify({ org_id: AGENT.org, name: AGENT.id }) });
-  if (res.status !== 200) throw new Error(`register ${AGENT.id}: ${res.status}`);
+  for (const who of [AGENT, MEMBER, REVOKED]) {
+    const res = await SELF.fetch(`https://api.internal/v1/agents/${who.id}`, { method: "PUT", headers: { "x-podster-assertion": await assertion(OWNER) }, body: JSON.stringify({ org_id: who.org, name: who.id }) });
+    if (res.status !== 200) throw new Error(`register ${who.id}: ${res.status}`);
+  }
 });
 
 const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
@@ -73,17 +80,41 @@ describe("M6's routes, none of them built", () => {
     expect(all.filter((route) => /deploy/i.test(route.path + route.operation))).toEqual([]);
   });
 
-  it("answer as routes that don't exist while release is switched off, to an owner, an agent and an operator alike", async () => {
+  it("can't be told from a path nobody defined while release is switched off, by anyone", async () => {
     const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+    const version = async () => (await api(OWNER, "GET", `/v1/workspaces/${room}`)).body.policy_version;
+    for (const who of [MEMBER, REVOKED]) expect((await api(OWNER, "POST", `/v1/workspaces/${room}/members`, { principal_id: who.id, kind: "agent", org_id: who.org, role: "member", policy_version: await version() })).status, who.id).toBe(200);
+    expect((await api(OWNER, "DELETE", `/v1/workspaces/${room}/members/${REVOKED.id}`, { policy_version: await version() })).status).toBe(200);
+    const missing = `ws_${"0".repeat(32)}`;
+    // What an unknown path answers each of them, so the comparison below isn't of one answer with itself.
+    const expected: [string, Who, string, string | undefined, [number, string]][] = [
+      ["the owner", OWNER, room, undefined, [404, "not_found"]],
+      ["a member", MEMBER, room, undefined, [404, "not_found"]],
+      ["a member, with a body that isn't JSON", MEMBER, room, "{", [400, "invalid_argument"]],
+      ["someone outside the room", OUTSIDER, room, undefined, [404, "workspace_not_found"]],
+      ["a room that doesn't exist", OWNER, missing, undefined, [404, "workspace_not_found"]],
+      ["a removed member", REVOKED, room, undefined, [403, "access_revoked"]],
+      ["an operator", OPERATOR, room, undefined, [404, "workspace_not_found"]],
+      ["an admin of the room's organization", ORG_ADMIN, room, undefined, [404, "workspace_not_found"]],
+    ];
+    const seen = new Set<string>();
     for (const route of contract()) {
-      for (const who of [OWNER, AGENT, OPERATOR]) {
-        const answer = await api(who, route.method, fill(route.path, room), { reason: "abuse" });
-        expect([answer.status, answer.code], `${route.operation} as ${who.id}`).toEqual([404, "not_found"]);
+      const roomRoute = route.path.startsWith("/v1/workspaces/");
+      for (const [what, who, where, raw, roomAnswer] of expected) {
+        const path = fill(route.path, where);
+        // The neighbour: the same path with one more character on its last segment, which no route has.
+        const [real, unknown] = [await api(who, route.method, path, { reason: "abuse" }, raw), await api(who, route.method, `${path}x`, { reason: "abuse" }, raw)];
+        expect([real.status, real.text, real.headers], `${route.operation} for ${what}`).toEqual([unknown.status, unknown.text, unknown.headers]);
+        // A GET sends no body, so a malformed one can't be told from none. Outside a room, an unknown path is the Worker's.
+        const want = !roomRoute ? [404, "not_found"] : raw && route.method === "GET" ? [404, "not_found"] : roomAnswer;
+        expect([real.status, real.code], `${route.operation} for ${what}`).toEqual(want);
+        seen.add(`${real.status} ${real.code}`);
       }
-      // No assertion, and the public page's assertion, are refused as on any route, before the switch is read.
+      // No assertion, and the public page's assertion, are refused as on any route.
       expect((await api(null, route.method, fill(route.path, room))).code, route.operation).toBe("invalid_assertion");
       expect((await api("public", route.method, fill(route.path, room))).code, route.operation).toBe("invalid_assertion");
     }
+    expect([...seen].sort()).toEqual(["400 invalid_argument", "403 access_revoked", "404 not_found", "404 workspace_not_found"]);
   });
 
   it("switched on, refuse an agent and a non-operator, and otherwise say release isn't available", async () => {
@@ -106,7 +137,7 @@ describe("M6's routes, none of them built", () => {
 
   it("change nothing in the room, switched on or off", async () => {
     const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
-    const counts = () => inRoom(room, (sql) => ["release_config", "release", "app_label", "serve_state", "hostname_request", "event", "outbox"].map((table) => sql.exec(`SELECT COUNT(*) AS n FROM ${table}`).one().n));
+    const counts = () => inRoom(room, (sql) => ["release_config", "release", "app_label", "serve_state", "hostname_request", "unpublish", "event", "outbox"].map((table) => sql.exec(`SELECT COUNT(*) AS n FROM ${table}`).one().n));
     const before = await counts();
     await switchedOn(async () => {
       await api(OWNER, "PUT", `/v1/workspaces/${room}/release-config`, { enabled: true, expected_version: 0 });
@@ -114,7 +145,7 @@ describe("M6's routes, none of them built", () => {
       await api(OWNER, "POST", `/v1/workspaces/${room}/releases/${REL}/approve`);
     });
     expect(await counts()).toEqual(before);
-    expect(before.slice(0, 5)).toEqual([0, 0, 0, 0, 0]);
+    expect(before.slice(0, 6)).toEqual([0, 0, 0, 0, 0, 0]);
   });
 });
 
@@ -144,35 +175,64 @@ describe("the room's release state (M6 step 2)", () => {
     await inRoom(room, (sql) => sql.exec("UPDATE app_label SET current = NULL, retired_at = 2"));
     expect(await add("a".repeat(26), 1, null)).toBe(true);
     expect(await add("second", 1, null)).toBe(false);
+    // An operator's suspension of the app is the room's state, kept with the label: a time and a reason, or neither.
+    expect(await inRoom(room, (sql) => refuses(() => sql.exec("UPDATE app_label SET suspended_at = 5 WHERE label = 'second'")))).toBe(true);
+    expect(await inRoom(room, (sql) => refuses(() => sql.exec("UPDATE app_label SET suspension_reason = 'abuse' WHERE label = 'second'")))).toBe(true);
+    expect(await inRoom(room, (sql) => refuses(() => sql.exec("UPDATE app_label SET suspended_at = 5, suspension_reason = 'abuse' WHERE label = 'second'")))).toBe(false);
   });
 
-  it("keeps a release's ID in the repository's ID form, its one environment, and a script name of at most 63 characters", async () => {
+  it("keeps a release's ID, commit, label and script name in their forms, and its label one of the room's own", async () => {
     const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+    const LABEL = "a".repeat(26);
+    await inRoom(room, (sql) => sql.exec("INSERT INTO app_label (label, current, created_at) VALUES (?, 1, 1)", LABEL));
     const add = (id: string, extra: Record<string, unknown> = {}) => inRoom(room, (sql) => refuses(() => {
-      const row = { id, commit_sha: "c".repeat(40), state: "waiting_for_approval", label: "k3v9q2", config_version: 1, release_epoch: 0, requested_by: "per_rl_owner", requested_at: 1, updated_at: 1, ...extra };
+      const row = { id, commit_sha: "c".repeat(40), state: "waiting_for_approval", label: LABEL, config_version: 1, release_epoch: 0, requested_by: "per_rl_owner", requested_at: 1, updated_at: 1, ...extra };
       sql.exec(`INSERT INTO release (${Object.keys(row).join(", ")}) VALUES (${Object.keys(row).map(() => "?").join(", ")})`, ...Object.values(row));
     }));
     // The longest name the rule allows: a 26-character label, a `.`, and the 36-character ID.
-    const longest = `${"a".repeat(26)}.${REL}`;
+    const longest = `${LABEL}.${REL}`;
     expect(longest).toHaveLength(63);
     expect(await add(REL, { script_name: longest })).toBe(false);
     expect(await add(REL)).toBe(true);
+    const OTHER = `rel_${"b2".repeat(16)}`;
     for (const bad of [`rel_${"a1".repeat(15)}`, `rel_${"A1".repeat(16)}`, `rel_${"g1".repeat(16)}`, `tsk_${"a1".repeat(16)}`, `rel_${"a1".repeat(16)}0`]) expect(await add(bad), bad).toBe(true);
-    expect(await add(`rel_${"b2".repeat(16)}`, { environment: "preview" })).toBe(true);
-    expect(await add(`rel_${"b2".repeat(16)}`, { script_name: `${longest}x` })).toBe(true);
-    expect(await inRoom(room, (sql) => sql.exec("SELECT environment FROM release").one().environment)).toBe("production");
+    expect(await add(OTHER, { environment: "preview" })).toBe(true);
+    // A script's name is exactly the label, a `.` and this release's ID: not another release's, another label's or another separator.
+    for (const bad of [`${LABEL}.${REL}`, `${LABEL}_${OTHER}`, `${"b".repeat(26)}.${OTHER}`, `${LABEL}.${OTHER}x`, OTHER, ""]) expect(await add(OTHER, { script_name: bad }), bad).toBe(true);
+    for (const bad of ["c".repeat(39), "c".repeat(41), "C".repeat(40), "g".repeat(40), "main"]) expect(await add(OTHER, { commit_sha: bad }), bad).toBe(true);
+    // A label the room doesn't hold, and one out of form.
+    expect(await add(OTHER, { label: "k3v9q2" })).toBe(true);
+    for (const bad of ["Abc", "a".repeat(27), "a.b", ""]) expect(await add(OTHER, { label: bad }), JSON.stringify(bad)).toBe(true);
+    expect(await add(OTHER, { script_name: `${LABEL}.${OTHER}` })).toBe(false);
+    expect(await inRoom(room, (sql) => sql.exec("SELECT environment FROM release WHERE id = ?", REL).one().environment)).toBe("production");
   });
 
-  it("holds what each host should serve, a script with its release or nothing, with a version", async () => {
+  it("holds what each host should serve, a script named for its release or nothing, with a version", async () => {
     const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
     const add = (host: string, kind: string, release: string | null, script: string | null) => inRoom(room, (sql) => refuses(() => sql.exec("INSERT INTO serve_state (host, kind, release_id, script_name, updated_at) VALUES (?, ?, ?, ?, 1)", host, kind, release, script)));
     expect(await add("k3v9q2", "default", REL, `k3v9q2.${REL}`)).toBe(false);
     expect(await add("app.example.com", "custom", null, null)).toBe(false);
+    expect(await add("longest", "default", REL, `${"a".repeat(26)}.${REL}`)).toBe(false);
     expect(await add("k3v9q2", "default", null, null)).toBe(true);
     expect(await add("other", "preview", null, null)).toBe(true);
     expect(await add("half", "default", REL, null)).toBe(true);
     expect(await add("half", "default", null, `half.${REL}`)).toBe(true);
+    const OTHER = `rel_${"b2".repeat(16)}`;
+    for (const bad of [`k3v9q2.${OTHER}`, `k3v9q2_${REL}`, `K3V.${REL}`, `k3.v9.${REL}`, `.${REL}`, `${"a".repeat(27)}.${REL}`, REL]) expect(await add("form", "default", REL, bad), bad).toBe(true);
+    expect(await add("form", "default", "rel_nope", "k3v9q2.rel_nope")).toBe(true);
     expect(await inRoom(room, (sql) => sql.exec("SELECT version FROM serve_state WHERE host = 'k3v9q2'").one().version)).toBe(1);
+  });
+
+  it("records each unpublish with the epoch it raised to, once", async () => {
+    const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+    await inRoom(room, (sql) => sql.exec("INSERT INTO app_label (label, current, created_at) VALUES ('k3v9q2', 1, 1)"));
+    const add = (epoch: number, label: string | null) => inRoom(room, (sql) => refuses(() => sql.exec("INSERT INTO unpublish (cause, label, release_epoch, at) VALUES ('release_off', ?, ?, 1)", label, epoch)));
+    expect(await add(1, "k3v9q2")).toBe(false);
+    // A room with no app yet can still record a trigger, and each epoch has one.
+    expect(await add(2, null)).toBe(false);
+    expect(await add(2, "k3v9q2")).toBe(true);
+    expect(await add(3, "nolabel")).toBe(true);
+    expect(await inRoom(room, (sql) => sql.exec("SELECT scripts_gone_at FROM unpublish WHERE release_epoch = 1").one().scripts_gone_at)).toBeNull();
   });
 
   it("lets a room have one open hostname request, and keeps the ended ones", async () => {

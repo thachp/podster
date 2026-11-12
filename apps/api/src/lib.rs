@@ -428,9 +428,12 @@ async fn route(
         None
     };
 
-    // M6's routes (step 2): none is built, and none exists while release is switched off.
+    // M6's routes (step 2): none is built. Switched off, which is everywhere, none is looked at here at all, so each is
+    // answered exactly where an unknown path is: by the match below, or by the room it names.
     if let Some(audience) = releases::route(&method, &parts) {
-        return releases::answer(&env, &caller, audience).await;
+        if releases::switched_on(&env).await {
+            return releases::refuse(&env, &caller, audience);
+        }
     }
     let (workspace_id, forward_path) = match parts.as_slice() {
         ["v1", "me"] if method == Method::Get => return me(&env, &caller).await,

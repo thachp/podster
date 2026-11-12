@@ -388,7 +388,7 @@ describe("the discovery index (step 6)", () => {
       // M5 step 7b's merge bookkeeping, the newest migration, comes off first.
       // The newest step, the M5 security review's two columns, comes off first.
       // M6 step 2's release tables, the newest migration, come off first.
-      for (const table of ["release_config", "app_label", "release", "serve_state", "hostname_request"]) sql.exec(`DROP TABLE ${table}`);
+      for (const table of ["release_config", "release", "unpublish", "app_label", "serve_state", "hostname_request"]) sql.exec(`DROP TABLE ${table}`);
       sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("ALTER TABLE repo_link DROP COLUMN gone_seen_at");
       sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");
@@ -462,7 +462,7 @@ describe("the discovery index (step 6)", () => {
       // M5 step 7b's merge bookkeeping, the newest migration, comes off first.
       // The newest step, the M5 security review's two columns, comes off first.
       // M6 step 2's release tables, the newest migration, come off first.
-      for (const table of ["release_config", "app_label", "release", "serve_state", "hostname_request"]) sql.exec(`DROP TABLE ${table}`);
+      for (const table of ["release_config", "release", "unpublish", "app_label", "serve_state", "hostname_request"]) sql.exec(`DROP TABLE ${table}`);
       sql.exec("UPDATE schema_version SET version = version - 1");
       sql.exec("ALTER TABLE repo_link DROP COLUMN gone_seen_at");
       sql.exec("ALTER TABLE repo_request DROP COLUMN limited_since");

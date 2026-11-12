@@ -1,6 +1,6 @@
 # ADR 0010: Release and the content domain
 
-**Status:** **Accepted** by the architect on 2026-11-12 UTC, after four independent reviews whose changes are applied ([what the reviews changed](#what-the-reviews-changed)). **Revised on 2026-11-12 after spikes A, C, E and F ran: [what the spikes changed](#what-the-spikes-changed) gives each change as what this ADR said, what was seen and what it says now. That revision hasn't been independently reviewed yet.** Spikes B, D and G haven't run, and spike F ran without answering its question, so the tokens, custom hostnames, the serve entry's speed and a workflow already in a repository are still untried ([what stays open](#what-stays-open-for-the-spikes)). Every item in [the owner's table](../m6-plan.md#for-the-owner) is still the owner's and undecided, one more is added to it by this revision, [the sandbox](#the-sandbox-an-open-choice-for-the-owner), and no M6 feature code, contract or migration exists. It answers what the [M6 plan](../m6-plan.md) and the [architecture](../spec/ARCHITECTURE.md#release-and-deployment-m6) leave "open for the ADR", and rests on [decisions 197 to 211](../spec/PRODUCT.md#m6-decisions-november-12-2026) and on working assumptions for the questions only the owner can answer.
+**Status:** **Accepted** by the architect on 2026-11-12 UTC, after four independent reviews whose changes are applied ([what the reviews changed](#what-the-reviews-changed)). **Revised on 2026-11-12 after spikes A, C, E and F ran: [what the spikes changed](#what-the-spikes-changed) gives each change as what this ADR said, what was seen and what it says now. That revision hasn't been independently reviewed yet.** Spikes B, D and G haven't run, and spike F ran without answering its question, so the tokens, custom hostnames, the serve entry's speed and a workflow already in a repository are still untried ([what stays open](#what-stays-open-for-the-spikes)). Every item in [the owner's table](../m6-plan.md#for-the-owner) is still the owner's and undecided, one more is added to it by this revision, [the sandbox](#the-sandbox-an-open-choice-for-the-owner), and no M6 feature code, contract or migration exists. **Revised again on 2026-11-12: the content domain is `podster.site`,** by the owner's word, in place of `opster.dev`, which the owner named first that day and on which spike C ran ([the content domain's name](#the-content-domains-name)). *Since then M6's step 2 has merged: contracts and state, with nothing that serves.* It answers what the [M6 plan](../m6-plan.md) and the [architecture](../spec/ARCHITECTURE.md#release-and-deployment-m6) leave "open for the ADR", and rests on [decisions 197 to 211](../spec/PRODUCT.md#m6-decisions-november-12-2026) and on working assumptions for the questions only the owner can answer.
 
 ## How to read this
 
@@ -13,7 +13,7 @@ Every claim carries one of these labels:
 - **Assumed, for the owner:** a working assumption for a question the architect can't answer. If the owner answers otherwise, the section changes.
 - **Decided on the owner's behalf:** on 2026-11-12 the owner wrote "you should make decision on my behalf you are the chief of staff", and under that the architect decided three of those questions for them, as [decisions 213 to 215](../spec/PRODUCT.md#decisions-needed), each for the owner to review. The rest stay the owner's.
 - **Spike:** not known, and a spike has to find out.
-- **Seen in spike A, C or E:** seen on 2026-11-12 in that spike's one run, on staging's namespace, on `opster.dev` or on one public test repository. Each is one observation from one machine on one day, and the spike's section in the [M6 plan](../m6-plan.md#the-spikes) says how it was made. It isn't a test of anything built.
+- **Seen in spike A, C or E:** seen on 2026-11-12 in that spike's one run, on staging's namespace, on `opster.dev` or on one public test repository. Each is one observation from one machine on one day, and the spike's section in the [M6 plan](../m6-plan.md#the-spikes) says how it was made. It isn't a test of anything built. *Spike C's `opster.dev` was the content domain when it ran; the domain is now `podster.site`, and [what carries over](#the-content-domains-name) is said there.*
 
 Nothing in this ADR is **verified** in the sense CLAUDE.md gives the word: nothing built from it has run against a deployment. Until 2026-11-12 no call had been made to Cloudflare or GitHub for it; since then spikes A, C, E and F have made the calls their sections record.
 
@@ -64,6 +64,32 @@ What Cloudflare's documentation says of these:
 - **A wildcard route and a wildcard proxied DNS record** put every per-room host on the content Worker: a route pattern whose hostname begins with `*.` matches every subhost, and proxied wildcard records are available on every plan ([routes](https://developers.cloudflare.com/workers/configuration/routing/routes/), [wildcard DNS records](https://developers.cloudflare.com/dns/manage-dns-records/reference/wildcard-dns-records/)).
 - **Universal SSL covers the root and first-level subdomains** of a zone on a full setup, and not deeper levels ([limitations](https://developers.cloudflare.com/ssl/edge-certificates/universal-ssl/limitations/)). So per-room hosts are one level deep, and need no certificate of their own. One certificate for all of them also keeps a room's host out of certificate-transparency logs. **Seen in spike C,** on `opster.dev`: one route, `*.opster.dev/*`, and one certificate naming only `*.opster.dev` and `opster.dev` served every first-level host tried, and a second-level host failed the TLS handshake. The route was replaced under a new ID on each deploy of the Worker, so nothing keeps a route's ID.
 
+#### The content domain's name
+
+**The content domain is `podster.site`. The owner's choice, on 2026-11-12,** in these words: "i actually would like to use podster.site domain iinsite". It replaces `opster.dev`, which the owner named first the same day ("i got opster.dev - i think u can use that domain"). Spikes A to C ran before the change, and spike C ran on `opster.dev`. Their write-ups and recorded results stay as they are: they record what ran. Everywhere this ADR says "seen in spike C" on `opster.dev`, that is where it was seen.
+
+**Checked read-only by the architect, not by this ADR's author:** `podster.site` resolves to Cloudflare's nameservers, the same pair as `podster.dev`. It has no wildcard record, and nothing has been made on it.
+
+**What carries over from the spikes, and what doesn't:**
+
+- **The cookie results carry over by reasoning, not by a rerun.** What spike C saw rests on two facts about the domain: it is a different registrable domain from `podster.dev`, and it isn't on the Public Suffix List. Both are as true of `podster.site`. So a page there can't read or set a `podster.dev` cookie, sibling hosts share cookies set for the whole domain, and the sandbox closes that at the cost of an app's storage.
+- **Owed before anything is served on `podster.site`:** a short rerun of spike C's header and cookie checks there, to confirm it. Not run.
+- **Spikes A and E don't depend on the domain's name.** Spike A used a `workers.dev` address, and spike E read from GitHub.
+- **The wildcard certificate and route are per zone,** so "one certificate naming only the wildcard and the apex" is to be seen again on `podster.site` in that rerun.
+
+**One real difference: `.dev` forces HTTPS in every browser, and `.site` doesn't.** `.dev` is on browsers' HSTS preload list as a whole top-level domain, so no browser ever makes a plain-HTTP request to a name under it. `.site` isn't. So, **proposed:**
+
+- **The content Worker sends `Strict-Transport-Security` on every response,** with a lifetime of a year and `includeSubDomains`.
+- **The zone redirects HTTP to HTTPS,** which is a zone setting and so the owner's to switch on.
+- **A first plain-HTTP request is still possible,** from a visitor whose browser has never seen that header for the host: a typed address or an `http://` link. Someone on the network path can answer it in the app's place. The redirect and the header shorten that to the first visit; only preloading removes it.
+- **Open:** whether to ask for `podster.site` to be HSTS-preloaded. It would need the header on the apex with `includeSubDomains` and `preload`, is slow to undo, and commits every future name under `podster.site` to HTTPS. Not decided.
+
+**The name carries Podster's own. A note for the owner, not a decision.** `opster.dev` was one letter from `podster.dev`. `podster.site` says "Podster" outright, so whatever an agent wrote and a room published is served under Podster's brand, on a site a visitor will take for Podster's. That is the owner's choice. What follows from it:
+
+- **Takedown speed and the report route matter more:** a bad page reads as Podster's own while it is up.
+- **A page should say plainly whose it is.** Proposed for the public surfaces Podster controls, the room's page and the release panel: that an app is a room's work and not Podster's. The content Worker serves a room's files as they are and adds nothing visible to them, so this is said beside the link, not on the app.
+- **An app imitating Podster's sign-in is more convincing here,** which the [threat model](../m6-plan.md#threat-model) lists. The label stays random and never holds a room's or Podster's name; the domain now does.
+
 **How HTML paths are served. Seen in spike A, and proposed as it was seen.** With the platform's default handling, `/index.html` answered 307 to `/`, and `page.html` was served at `/page`. A release is uploaded with that default, the only handling tried. The content Worker passes on a redirect whose `Location` is a path on the same host and no other ([below](#what-content-can-reach)). Two files that would be served at one address fail the release ([what a release may contain](#the-release-job)). Uploading with `html_handling: "none"` wasn't tried and is open.
 
 #### Script names
@@ -102,7 +128,7 @@ What Cloudflare's documentation says of these:
 
 - **From the app's response it passes only these:** `Content-Type`, `Content-Length`, `ETag` and `Last-Modified`. And `Location`, on a 3xx only, when its value is a path on the same host; a 3xx with any other `Location` is answered not-found.
 - **Everything else is dropped. `Set-Cookie` never passes,** whatever its attributes, and neither does an app's `Clear-Site-Data`, `Content-Security-Policy`, `Cache-Control` or `Access-Control-*`.
-- **It then sets its own:** `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, and `Cache-Control` with a lifetime of 60 seconds and `no-transform`. If the owner chooses the sandbox, its headers are set here too.
+- **It then sets its own:** `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Strict-Transport-Security` with a lifetime of a year and `includeSubDomains` (added on 2026-11-12 with the move to `podster.site`, [above](#the-content-domains-name)), and `Cache-Control` with a lifetime of 60 seconds and `no-transform`. If the owner chooses the sandbox, its headers are set here too.
 - **Why `no-transform`. Seen in spike C:** Cloudflare injected its Web Analytics beacon, a third-party script, into every app's HTML on `opster.dev` when the request accepted `text/html`, and didn't when the response's `Cache-Control` carried `no-transform`. **Open:** whether the beacon can be switched off for the zone, which would be the owner's setting and wasn't looked at.
 
 **Without the Public Suffix List entry, the whole content domain shares one reputation.** Browsers' and mail providers' blocklists, and Safe Browsing, treat hosts under one registrable domain together unless the list says otherwise. So one room's phishing page can get every room's app flagged or blocked. M6's answers are: a release only of reviewed, merged code that a person approved, in a public room; a report route that can name an app; an operator's suspension and a domain-wide stop, [built before anything is served](#takedown-and-how-fast-it-is); and per-room hosts with random labels, so a block of one host is at least possible. None of those prevents it. It is a **consequence** the owner accepts with the content domain.
@@ -439,6 +465,8 @@ What Cloudflare's documentation adds:
 - **A new public Worker** that must never grow a binding to Podster's data. A test should fail if its configuration gains one.
 - **A release is only what was committed,** and at most 300 files. An app that needs a build step must commit its built files. That is a real limit on "a working web application", and the owner's to accept.
 - **Private rooms get no app** in M6.
+- **Apps are served under Podster's name,** on `podster.site`, by the owner's choice. A visitor will take the domain for Podster's.
+- **HTTPS isn't forced by the browser for `.site`** as it is for `.dev`, so a visitor's first request to a host can be plain HTTP unless the domain is preloaded.
 - **If the owner chooses the sandbox, an app has no storage in the browser** at all ([the sandbox](#the-sandbox-an-open-choice-for-the-owner)). If not, rooms' apps can interfere through domain cookies until the Public Suffix List entry ships.
 - **Every release uploads all its files,** since one script's files don't serve another's.
 - **An app can't set a response header or a redirect of its own,** and its HTML paths are served as the platform's default handling serves them.
@@ -478,6 +506,8 @@ What Cloudflare's documentation adds:
 20. Where GitHub's truncation starts for other path lengths, what its second request count is, and where its secondary limits start for these reads.
 21. Path characters. `%`, `?`, `#`, a space inside a segment and letters outside ASCII were only seen stored by GitHub. None was uploaded to Cloudflare or served by it, so how the platform and the content Worker treat a file with such a name isn't known, and the path rule's "they pass" rests on GitHub alone.
 22. From ADR 0009, and unanswered by spike F: whether a workflow file already in a repository runs with Actions off. No credential the spike was allowed could put one there. A person with write access pushing one workflow file to a test repository's branch, then reading the runs, is the whole test.
+23. A short rerun of spike C's header and cookie checks on `podster.site`, owed before anything is served there. The results on `opster.dev` carry over by reasoning only.
+24. Whether to ask for `podster.site` to be HSTS-preloaded, and that the zone's redirect from HTTP to HTTPS is on.
 
 ## What an independent review should attack
 
@@ -595,6 +625,6 @@ Everything in [the M6 plan's table](../m6-plan.md#for-the-owner). This ADR creat
 
 - **Documentation,** read on 2026-11-12 through a page reader, in some cases as a summary of a long page and not word for word: Cloudflare's API token permissions page, its Workers for Platforms API reference, and GitHub's permissions table.
 - **A spike's one run,** on 2026-11-12. Spike A: staging's namespace, 38 short-lived scripts, every call made by wrangler 4.157.0 from one machine. Spike C: `opster.dev`, three apps, Playwright's headless Chromium, Firefox and WebKit, one pair of sibling hosts. Spike E: one public test repository, read in Node on a laptop with the staging agent App's token cut down. Each is a few observations, and the plan's sections say what each didn't show.
-- **Nothing yet:** the two Cloudflare tokens, custom hostnames, the serve entry and KV, resolving TXT from a Worker, a Worker's memory, billing, a private repository, and the fourth App. Spikes B, D and G haven't run.
+- **Nothing yet:** the two Cloudflare tokens, custom hostnames, the serve entry and KV, resolving TXT from a Worker, a Worker's memory, billing, a private repository, and the fourth App. Spikes B, D and G haven't run. **And nothing at all on `podster.site`:** no record, route, certificate or request. That it resolves to Cloudflare's nameservers is as the architect reported.
 
 **The takedown time is still arithmetic on documented numbers, one of which is "or more".** The revision of 2026-11-12 after the spikes hasn't been independently reviewed.

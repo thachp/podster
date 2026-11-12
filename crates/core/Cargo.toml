@@ -7,3 +7,10 @@ license.workspace = true
 
 [lints]
 workspace = true
+
+# All three are already in the lockfile through crates/egress's `url`: IDNA for custom hostnames, NFC and NFKC for
+# release paths, and general categories for refusing invisible characters in them.
+[dependencies]
+idna = "1.1"
+icu_normalizer = { version = "2.4", default-features = false, features = ["compiled_data"] }
+icu_properties = { version = "2.4", default-features = false, features = ["compiled_data"] }

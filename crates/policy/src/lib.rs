@@ -9,6 +9,7 @@ pub mod files;
 pub mod moderation;
 pub mod outputs;
 pub mod public;
+pub mod release;
 pub mod repositories;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

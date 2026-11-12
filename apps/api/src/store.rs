@@ -287,7 +287,8 @@ CREATE TABLE app_label (label TEXT PRIMARY KEY CHECK (length(label) BETWEEN 1 AN
   created_at INTEGER NOT NULL, retired_at INTEGER, indexed_at INTEGER, suspended_at INTEGER, suspension_reason TEXT,
   CHECK ((current IS NULL) = (retired_at IS NOT NULL)), CHECK ((suspended_at IS NULL) = (suspension_reason IS NULL))) WITHOUT ROWID;
 CREATE TABLE release (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE CHECK (length(id) = 36 AND id GLOB 'rel_*' AND substr(id, 5) NOT GLOB '*[^0-9a-f]*'),
-  commit_sha TEXT NOT NULL CHECK (length(commit_sha) = 40 AND commit_sha NOT GLOB '*[^0-9a-f]*'), environment TEXT NOT NULL DEFAULT 'production' CHECK (environment = 'production'), state TEXT NOT NULL, task_id TEXT,
+  commit_sha TEXT NOT NULL CHECK (length(commit_sha) = 40 AND commit_sha NOT GLOB '*[^0-9a-f]*'), environment TEXT NOT NULL DEFAULT 'production' CHECK (environment = 'production'), task_id TEXT,
+  state TEXT NOT NULL CHECK (state IN ('awaiting_approval', 'queued', 'uploading', 'uncertain', 'live', 'served', 'replaced', 'unpublished', 'declined', 'failed')),
   label TEXT NOT NULL REFERENCES app_label (label), config_version INTEGER NOT NULL, release_epoch INTEGER NOT NULL, script_name TEXT,
   requested_by TEXT NOT NULL, requested_at INTEGER NOT NULL, approved_by TEXT, approved_at INTEGER, result_url TEXT, failure_code TEXT, finished_at INTEGER,
   served_at INTEGER, updated_at INTEGER NOT NULL,
@@ -298,11 +299,14 @@ CREATE TABLE serve_state (host TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind 
   CHECK (release_id IS NULL OR (length(release_id) = 36 AND release_id GLOB 'rel_*' AND substr(release_id, 5) NOT GLOB '*[^0-9a-f]*')),
   CHECK (script_name IS NULL OR (length(script_name) BETWEEN 38 AND 63 AND substr(script_name, -37) = '.' || release_id
     AND substr(script_name, 1, length(script_name) - 37) NOT GLOB '*[^a-z0-9]*'))) WITHOUT ROWID;
-CREATE TABLE unpublish (seq INTEGER PRIMARY KEY AUTOINCREMENT, cause TEXT NOT NULL, label TEXT REFERENCES app_label (label), release_epoch INTEGER NOT NULL UNIQUE,
+CREATE TABLE unpublish (seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  cause TEXT NOT NULL CHECK (cause IN ('release_off', 'release_off_for_deployment', 'workspace_archived', 'workspace_deleted', 'release_needs_public_room', 'organization_deleted', 'public_surface_suspended', 'app_suspended', 'release_not_delegated', 'repo_not_ready', 'no_releaser')),
+  label TEXT REFERENCES app_label (label), release_epoch INTEGER NOT NULL UNIQUE,
   at INTEGER NOT NULL, scripts_gone_at INTEGER);
-CREATE TABLE hostname_request (id TEXT PRIMARY KEY, hostname TEXT NOT NULL, state TEXT NOT NULL, open INTEGER UNIQUE CHECK (open = 1), challenge TEXT NOT NULL,
+CREATE TABLE hostname_request (id TEXT PRIMARY KEY, hostname TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('pending', 'claimed', 'ending', 'refused', 'expired', 'ended')),
+  open INTEGER UNIQUE CHECK (open = 1), challenge TEXT NOT NULL,
   requested_by TEXT NOT NULL, requested_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, claimed_at INTEGER, proved_at INTEGER, ended_at INTEGER, end_reason TEXT,
-  updated_at INTEGER NOT NULL);
+  updated_at INTEGER NOT NULL, CHECK ((open IS NOT NULL) = (state IN ('pending', 'claimed', 'ending'))));
 "];
 
 pub fn int(value: &Value) -> i64 {

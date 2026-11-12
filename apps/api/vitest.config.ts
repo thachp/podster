@@ -1,3 +1,4 @@
+import { coreSets } from "../../packages/contracts/core-sets.mjs";
 import { generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
@@ -198,6 +199,9 @@ export default defineConfig({
           TEST_SIGNING_JWK: JSON.stringify(privateKey.export({ format: "jwk" })),
           // Every route the contract lists, for the route-list test (M4 step 7), and the public view's schema.
           TEST_API_ROUTES: JSON.stringify(contractRoutes()),
+          // The closed sets crates/core defines for release (M6 step 2), read by the contract package's own reader, so a
+          // test can show the room's columns take exactly those.
+          TEST_CORE_SETS: JSON.stringify(coreSets(new URL("../../", import.meta.url))),
           TEST_PUBLIC_VIEW_SCHEMA: readFileSync(new URL("../../packages/contracts/public-workroom-view.schema.json", import.meta.url), "utf8"),
         },
       },

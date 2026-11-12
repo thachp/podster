@@ -41,7 +41,9 @@ pub(crate) fn route(method: &Method, parts: &[&str]) -> Option<Audience> {
     let delete = *method == Method::Delete;
     match parts {
         ["v1", "workspaces", _, "release-config"] if get || put => Some(Audience::Person),
-        ["v1", "workspaces", _, "releases", _, "approve"] if post => Some(Audience::Person),
+        ["v1", "workspaces", _, "releases", _, "approve" | "decline"] if post => {
+            Some(Audience::Person)
+        }
         ["v1", "workspaces", _, "app-hostname"] if get || put || delete => Some(Audience::Person),
         ["v1", "app-reports"] if post => Some(Audience::Person),
         ["v1", "moderation", "apps", _, "suspend" | "lift"] if post => Some(Audience::Operator),

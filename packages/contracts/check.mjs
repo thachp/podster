@@ -3,6 +3,7 @@
 // scan of the API and the gateway finds (error-codes.mjs, which says what that scan can't see).
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
+import { columnCheck, coreSets } from "./core-sets.mjs";
 import { collectErrorCodes, compareExcluded, compareWithEnum, readSources } from "./error-codes.mjs";
 
 const api = parse(readFileSync(new URL("openapi.yaml", import.meta.url), "utf8"));
@@ -98,7 +99,7 @@ for (const schema of ["RepoRequest", "RepoLink", "RoomRepository", "RepoGrant", 
 // names only what its path may. No capability reaches one: no agent sees a deploy tool before the release path exists
 // (AC-17), so `deploy_release` and anything else that names a release or a deployment is in no agent's list.
 const releaseOperations = {
-  getReleaseConfig: "ws", setReleaseConfig: "ws", approveRelease: "ws,release", getAppHostname: "ws", requestAppHostname: "ws", removeAppHostname: "ws",
+  getReleaseConfig: "ws", setReleaseConfig: "ws", approveRelease: "ws,release", declineRelease: "ws,release", getAppHostname: "ws", requestAppHostname: "ws", removeAppHostname: "ws",
   createAppReport: "", suspendApp: "label", liftAppSuspension: "label", suspendAppHost: "host", liftAppHostSuspension: "host", stopContentDomain: "", resumeContentDomain: "",
 };
 for (const [id, params] of Object.entries(releaseOperations)) {
@@ -115,19 +116,43 @@ for (const [name, cap] of Object.entries(capabilities)) {
   const found = operations.get(cap.operation);
   if (/deploy|release[-_]?config|app[-_]?host|content[-_]?domain/i.test(`${name} ${cap.operation} ${found?.path ?? ""}`) || /\/releases\//.test(found?.path ?? "")) problems.push(`${name}: no capability may reach a release, a deployment or an app's hosts yet`);
 }
+// The closed sets are `crates/core`'s, never restated here: core-sets.mjs reads them from its source, and the contract's
+// enums and the room's column checks must each equal them, value for value and in core's order. So a state, a trigger or
+// a policy added to the rules fails this until the contract and a new migration say the same.
+const root = new URL("../../", import.meta.url);
+const core = coreSets(root);
 const releaseEnums = {
-  "ReleaseConfig.approval_policy": "person", "Release.environment": "production", "Release.state": "waiting_for_approval,deploying,live,failed,ended",
-  "AppHostnameRequest.state": "pending,claimed,refused,expired,ended",
+  "ReleaseConfig.approval_policy": core.approvalPolicies.join(), "Release.environment": core.environment, "Release.state": core.releaseStates.join(),
+  "AppHostnameRequest.state": core.hostnameRequestStates.join(),
 };
+const store = readFileSync(new URL("apps/api/src/store.rs", root), "utf8");
+const columns = { "release.state": core.releaseStates, "hostname_request.state": core.hostnameRequestStates, "unpublish.cause": core.unpublishCauses };
+for (const [at, expected] of Object.entries(columns)) {
+  const [table, column] = at.split(".");
+  try {
+    if (columnCheck(store, table, column).join() !== expected.join()) problems.push(`${at}: the room's column check must be exactly core's ${expected.join()}`);
+  } catch (error) { problems.push(error.message); }
+}
+// A request is open, and holds the room's one hostname, in exactly the states core's `is_open` names.
+const openStates = store.match(/CHECK \(\(open IS NOT NULL\) = \(state IN \(([^)]*)\)\)\)/)?.[1]?.split(",").map((value) => value.trim().replace(/^'|'$/g, "")).join();
+if (openStates !== core.openHostnameRequestStates.join()) problems.push(`hostname_request.open: must be tied to exactly core's open states, ${core.openHostnameRequestStates.join()}`);
+for (const [what, text] of [["approval policy", `approval_policy = '${core.approvalPolicies.join()}'`], ["environment", `environment = '${core.environment}'`], ["release ID's prefix", `id GLOB '${core.releaseIdPrefix}*'`], ["release ID's length", `length(id) = ${core.idLen}`], ["label's length", `length(label) BETWEEN 1 AND ${core.maxLabelLen}`]]) {
+  if (!store.includes(text)) problems.push(`the room's tables don't hold the ${what} as core has it: ${text}`);
+}
+if (core.maxLabelLen + 1 + core.idLen !== core.maxScriptNameLen) problems.push("core: a label, a separator and an ID no longer make the longest script name");
 for (const [at, expected] of Object.entries(releaseEnums)) {
   const [schema, field] = at.split(".");
   if (api.components.schemas[schema]?.properties?.[field]?.enum?.join() !== expected) problems.push(`${at}: must be exactly ${expected}`);
 }
-if (api.components.schemas.ReleaseConfig?.properties?.environments?.items?.enum?.join() !== "production" || api.components.schemas.ReleaseConfig?.properties?.environments?.maxItems !== 1) problems.push("ReleaseConfig.environments: must be exactly one, production");
+if (api.components.schemas.ReleaseConfig?.properties?.environments?.items?.enum?.join() !== core.environment || api.components.schemas.ReleaseConfig?.properties?.environments?.maxItems !== 1) problems.push("ReleaseConfig.environments: must be exactly one, production");
 // A release's ID is the repository's ID form, and an app's label is at most 26 lower-case letters and digits, so a script's
 // name, the label, a `.` and the ID, is at most 63 characters (ADR 0010, "Script names").
-if (api.components.schemas.Release?.properties?.id?.pattern !== "^rel_[0-9a-f]{32}$") problems.push("Release.id: must be rel_ and 32 hexadecimal characters");
-if (api.components.parameters.appLabel?.schema?.pattern !== "^[a-z0-9]{1,26}$") problems.push("appLabel: must be at most 26 lower-case letters and digits");
+const idPattern = `^${core.releaseIdPrefix}[0-9a-f]{${core.idLen - core.releaseIdPrefix.length}}$`;
+if (api.components.schemas.Release?.properties?.id?.pattern !== idPattern) problems.push(`Release.id: must be ${idPattern}`);
+for (const id of ["approveRelease", "declineRelease"]) {
+  if (operations.get(id)?.path && api.paths[operations.get(id).path].parameters?.find((p) => p.name === "release")?.schema?.pattern !== idPattern) problems.push(`${id}: its release parameter must be ${idPattern}`);
+}
+if (api.components.parameters.appLabel?.schema?.pattern !== `^[a-z0-9]{1,${core.maxLabelLen}}$`) problems.push(`appLabel: must be at most ${core.maxLabelLen} lower-case letters and digits`);
 for (const schema of ["ReleaseConfig", "SetReleaseConfig", "Release", "AppHostnameRequest", "AppHostname", "SetAppHostname"]) {
   const found = api.components.schemas[schema];
   if (found?.additionalProperties !== false) problems.push(`${schema}: isn't closed`);

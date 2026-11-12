@@ -759,9 +759,17 @@ paths:
     post:
       operationId: approveRelease
       tags: [commands]
-      summary: "A person approves one release that is waiting for approval (M6, ADR 0010, decision 199). The approval policy has one value, `person`: every release needs this. Only the room's owner or one of its admins, as a person; an agent never approves, whatever its role is called (decision 215). Approval starts the release job, which reruns policy and rechecks the requester's and the approver's standing on every pass. Asking for a release is its own command, which arrives with the step that builds it. **Not built (M6 step 2 adds the contract and the state only).** While release is switched off, which is every deployment, this can't be told from a path nobody defined: it is answered where an unknown path is, so `not_found` (404), or for a room's route whatever that room answers that caller for an unknown route (`workspace_not_found`, `access_revoked`, `invalid_argument`). Switched on, it answers `release_not_available` (409) until its step builds it"
+      summary: "A person approves one release that is awaiting approval (M6, ADR 0010, decision 199). The approval policy has one value, `person`: every release needs this. Only the room's owner or one of its admins, as a person; an agent never approves, whatever its role is called (decision 215). The person who asked for a release may approve it themselves. Approval starts the release job, which reruns policy and rechecks the requester's and the approver's standing on every pass. Asking for a release is its own command, which arrives with the step that builds it. **Not built (M6 step 2 adds the contract and the state only).** While release is switched off, which is every deployment, this can't be told from a path nobody defined: it is answered where an unknown path is, so `not_found` (404), or for a room's route whatever that room answers that caller for an unknown route (`workspace_not_found`, `access_revoked`, `invalid_argument`). Switched on, it answers `release_not_available` (409) until its step builds it"
       parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
       responses: { "200": { description: "The release, approved", content: { application/json: { schema: { $ref: "#/components/schemas/Release" } } } }, default: { $ref: "#/components/responses/Error" } }
+  /v1/workspaces/{ws}/releases/{release}/decline:
+    parameters: [{ $ref: "#/components/parameters/ws" }, { name: release, in: path, required: true, schema: { type: string, pattern: "^rel_[0-9a-f]{32}$" } }]
+    post:
+      operationId: declineRelease
+      tags: [commands]
+      summary: "A person declines one release that is awaiting approval (M6, ADR 0010, decision 199). It ends `declined` and nothing is uploaded; the app goes on serving whatever it served. Only the room's owner or one of its admins, as a person; an agent never. A release that isn't awaiting approval is refused. **Not built (M6 step 2 adds the contract and the state only).** While release is switched off, which is every deployment, this can't be told from a path nobody defined: it is answered where an unknown path is, so `not_found` (404), or for a room's route whatever that room answers that caller for an unknown route (`workspace_not_found`, `access_revoked`, `invalid_argument`). Switched on, it answers `release_not_available` (409) until its step builds it"
+      parameters: [{ $ref: "#/components/parameters/idempotencyKey" }]
+      responses: { "200": { description: "The release, declined", content: { application/json: { schema: { $ref: "#/components/schemas/Release" } } } }, default: { $ref: "#/components/responses/Error" } }
   /v1/workspaces/{ws}/app-hostname:
     parameters: [{ $ref: "#/components/parameters/ws" }]
     get:
@@ -1313,14 +1321,14 @@ components:
         expected_version: { type: integer, description: "The configuration's `version` as the caller read it; 0 if it was never set." }
     Release:
       type: object
-      description: "One attempt to release a room's app (M6, ADR 0010, decision 197): a copy of one fixed directory of the room's repository at one commit that Podster's own merge put on the default branch and confirmed. Each attempt is its own record, kept apart from the task's state and the merge's. `live` is set only after the room committed it and what its host serves was confirmed; a failed release never shows as live (UI-02). `ended` is a release that was live and no longer is."
+      description: "One attempt to release a room's app (M6, ADR 0010, decision 197): a copy of one fixed directory of the room's repository at one commit that Podster's own merge put on the default branch and confirmed. Each attempt is its own record, kept apart from the task's state and the merge's. Its states are the release rules' own (`podster_core::release::ReleaseState`), by the names they give: `awaiting_approval` until a person approves or declines it; `queued`, then `uploading` while its job reads and uploads it; `uncertain` when an upload's answer was lost; `live` once the room committed it and set its hosts to it; `served` once its marker came back through the host, which is the only state shown as live to a reader (UI-02); `replaced` when a later release is served in its place; `unpublished`; `declined`; and `failed`, with a reason, which leaves an earlier release serving."
       additionalProperties: false
       required: [id, commit_sha, environment, state, requested_by, requested_at, approved_by, approved_at, result_url, failure_code, finished_at]
       properties:
         id: { type: string, pattern: "^rel_[0-9a-f]{32}$" }
         commit_sha: { type: string }
         environment: { type: string, enum: [production] }
-        state: { type: string, enum: [waiting_for_approval, deploying, live, failed, ended] }
+        state: { type: string, enum: [awaiting_approval, queued, uploading, uncertain, live, served, replaced, unpublished, declined, failed] }
         requested_by: { type: string }
         requested_at: { type: integer }
         approved_by: { type: [string, "null"] }
@@ -1330,13 +1338,13 @@ components:
         finished_at: { type: [integer, "null"] }
     AppHostnameRequest:
       type: object
-      description: "A room's request to map a custom hostname to its app (M6, ADR 0010, decision 207). `pending` holds nothing and expires at `expires_at`, 72 hours after it was made; `claimed` once the room's challenge was read from DNS and the hostname's own object gave this room the claim; `refused` when another room holds the name; `expired`; and `ended` when the claim ended, for any reason. The challenge is a TXT record, which is public once published, so it isn't a secret."
+      description: "A room's request to map a custom hostname to its app (M6, ADR 0010, decision 207). Its states are the rules' own (`podster_core::hostname_requests::HostnameRequestState`): `pending` holds nothing and expires at `expires_at`, 72 hours after it was made; `claimed` once the room's challenge was read from DNS and the hostname's own object gave this room the claim; `ending` while a claim is being ended, which still counts as the room's one hostname until Cloudflare reports the custom hostname gone; `refused` when the hostname's object refused the claim; `expired`; and `ended`. The challenge is a TXT record, which is public once published, so it isn't a secret."
       additionalProperties: false
       required: [id, hostname, state, challenge_name, challenge_value, requested_by, requested_at, expires_at, end_reason]
       properties:
         id: { type: string }
         hostname: { type: string, description: "Normalized: lower case, no trailing dot, international names in their ASCII form." }
-        state: { type: string, enum: [pending, claimed, refused, expired, ended] }
+        state: { type: string, enum: [pending, claimed, ending, refused, expired, ended] }
         challenge_name: { type: string, description: "`_podster-challenge.<hostname>`." }
         challenge_value: { type: string }
         requested_by: { type: string }

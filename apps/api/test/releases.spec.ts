@@ -65,7 +65,7 @@ async function switchedOn<T>(run: () => Promise<T>): Promise<T> {
 const REL = `rel_${"a1".repeat(16)}`;
 /** Every M6 operation the contract lists, with whose it is. */
 const M6: Record<string, "person" | "operator"> = {
-  getReleaseConfig: "person", setReleaseConfig: "person", approveRelease: "person", getAppHostname: "person", requestAppHostname: "person", removeAppHostname: "person",
+  getReleaseConfig: "person", setReleaseConfig: "person", approveRelease: "person", declineRelease: "person", getAppHostname: "person", requestAppHostname: "person", removeAppHostname: "person",
   createAppReport: "person", suspendApp: "operator", liftAppSuspension: "operator", suspendAppHost: "operator", liftAppHostSuspension: "operator",
   stopContentDomain: "operator", resumeContentDomain: "operator",
 };
@@ -186,7 +186,7 @@ describe("the room's release state (M6 step 2)", () => {
     const LABEL = "a".repeat(26);
     await inRoom(room, (sql) => sql.exec("INSERT INTO app_label (label, current, created_at) VALUES (?, 1, 1)", LABEL));
     const add = (id: string, extra: Record<string, unknown> = {}) => inRoom(room, (sql) => refuses(() => {
-      const row = { id, commit_sha: "c".repeat(40), state: "waiting_for_approval", label: LABEL, config_version: 1, release_epoch: 0, requested_by: "per_rl_owner", requested_at: 1, updated_at: 1, ...extra };
+      const row = { id, commit_sha: "c".repeat(40), state: "awaiting_approval", label: LABEL, config_version: 1, release_epoch: 0, requested_by: "per_rl_owner", requested_at: 1, updated_at: 1, ...extra };
       sql.exec(`INSERT INTO release (${Object.keys(row).join(", ")}) VALUES (${Object.keys(row).map(() => "?").join(", ")})`, ...Object.values(row));
     }));
     // The longest name the rule allows: a 26-character label, a `.`, and the 36-character ID.
@@ -233,6 +233,33 @@ describe("the room's release state (M6 step 2)", () => {
     expect(await add(2, "k3v9q2")).toBe(true);
     expect(await add(3, "nolabel")).toBe(true);
     expect(await inRoom(room, (sql) => sql.exec("SELECT scripts_gone_at FROM unpublish WHERE release_epoch = 1").one().scripts_gone_at)).toBeNull();
+  });
+
+  it("takes exactly the rules' own names for a release's state, a hostname request's state and an unpublish's cause", async () => {
+    const core = JSON.parse(BINDINGS.TEST_CORE_SETS) as { releaseStates: string[]; hostnameRequestStates: string[]; openHostnameRequestStates: string[]; unpublishCauses: string[] };
+    expect(core.releaseStates).toContain("awaiting_approval");
+    expect(core.unpublishCauses).toContain("repo_not_ready");
+    const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+    await inRoom(room, (sql) => sql.exec("INSERT INTO app_label (label, current, created_at) VALUES ('k3v9q2', 1, 1)"));
+    const release = (n: number, state: string) => inRoom(room, (sql) => refuses(() => sql.exec("INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, requested_by, requested_at, updated_at) VALUES (?, ?, ?, 'k3v9q2', 1, 0, 'per_rl_owner', 1, 1)", `rel_${n.toString(16).padStart(32, "0")}`, "c".repeat(40), state)));
+    const request = (n: number, state: string, open: number | null) => inRoom(room, (sql) => refuses(() => {
+      sql.exec("DELETE FROM hostname_request");
+      sql.exec("INSERT INTO hostname_request (id, hostname, state, open, challenge, requested_by, requested_at, expires_at, updated_at) VALUES (?, 'app.example.com', ?, ?, 'v', 'per_rl_owner', 1, 2, 1)", `hnr_${n}`, state, open);
+    }));
+    const unpublish = (n: number, cause: string) => inRoom(room, (sql) => refuses(() => sql.exec("INSERT INTO unpublish (cause, release_epoch, at) VALUES (?, ?, 1)", cause, n)));
+    let n = 0;
+    for (const state of core.releaseStates) expect(await release(++n, state), state).toBe(false);
+    // The names an earlier draft of the contract had, another casing, and nothing at all.
+    for (const state of ["waiting_for_approval", "deploying", "ended", "Live", "LIVE", "", "pending"]) expect(await release(++n, state), JSON.stringify(state)).toBe(true);
+    for (const state of core.hostnameRequestStates) {
+      const open = core.openHostnameRequestStates.includes(state);
+      // Open exactly in the states the rules call open: the other way round is refused.
+      expect(await request(++n, state, open ? 1 : null), state).toBe(false);
+      expect(await request(++n, state, open ? null : 1), `${state}, the other way`).toBe(true);
+    }
+    for (const state of ["active", "Pending", "", "live"]) expect(await request(++n, state, null), JSON.stringify(state)).toBe(true);
+    for (const cause of core.unpublishCauses) expect(await unpublish(++n, cause), cause).toBe(false);
+    for (const cause of ["ReleaseOffInRoom", "release_off_in_room", "", "other"]) expect(await unpublish(++n, cause), JSON.stringify(cause)).toBe(true);
   });
 
   it("lets a room have one open hostname request, and keeps the ended ones", async () => {

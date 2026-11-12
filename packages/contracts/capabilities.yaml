@@ -83,6 +83,7 @@ person_only:
   - getReleaseConfig
   - setReleaseConfig
   - approveRelease
+  - declineRelease
   - getAppHostname
   - requestAppHostname
   - removeAppHostname

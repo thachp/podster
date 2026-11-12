@@ -1,0 +1,6 @@
+/*
+  X-Spike-Header: set-by-_headers
+  Set-Cookie: spike=1; Path=/
+  Content-Security-Policy: default-src 'none'
+/index.html
+  Cache-Control: public, max-age=31536000

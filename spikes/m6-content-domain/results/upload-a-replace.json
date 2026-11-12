@@ -1,0 +1,21 @@
+{
+  "script": "spike-m6-c-a",
+  "files": 4,
+  "calls": [
+    {
+      "call": "assets-upload-session",
+      "status": 200,
+      "errors": [],
+      "buckets": []
+    },
+    {
+      "call": "script PUT",
+      "status": 200,
+      "errors": [],
+      "assetsOnly": true,
+      "headersInConfig": true
+    }
+  ],
+  "ms": 2067,
+  "ok": true
+}

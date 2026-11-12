@@ -1,0 +1,209 @@
+{
+  "at": "2026-11-12T09:31:27.661Z",
+  "results": [
+    {
+      "name": "certificate",
+      "host": "922a4c08ab21.opster.dev",
+      "authorized": true,
+      "error": null,
+      "issuer": "Let's Encrypt",
+      "subjectAltNames": "DNS:*.opster.dev, DNS:opster.dev",
+      "validTo": "Feb  4 12:55:30 2027 GMT"
+    },
+    {
+      "name": "certificate",
+      "host": "a.opster.dev",
+      "authorized": true,
+      "error": null,
+      "issuer": "Let's Encrypt",
+      "subjectAltNames": "DNS:*.opster.dev, DNS:opster.dev",
+      "validTo": "Feb  4 12:55:30 2027 GMT"
+    },
+    {
+      "name": "certificate",
+      "host": "h-a.opster.dev",
+      "authorized": true,
+      "error": null,
+      "issuer": "Let's Encrypt",
+      "subjectAltNames": "DNS:*.opster.dev, DNS:opster.dev",
+      "validTo": "Feb  4 12:55:30 2027 GMT"
+    },
+    {
+      "name": "certificate",
+      "host": "x.9cffce24e3f0.opster.dev",
+      "authorized": false,
+      "error": "ERR_SSL_SSL/TLS_ALERT_HANDSHAKE_FAILURE"
+    },
+    {
+      "name": "route",
+      "host": "a.opster.dev",
+      "status": 200,
+      "ms": 168,
+      "headers": {
+        "cache-control": "public, max-age=0, must-revalidate",
+        "cf-ray": "<id>",
+        "content-type": "text/html",
+        "server": "cloudflare",
+        "x-spike-mode": "raw"
+      },
+      "bodyStart": "<!doctype html>\n<meta charset=\"utf-8\">\n<title>spike-m6 probe</title>\n<p id=\"status\">loading</p>\n<script src=\"/probe.js\">"
+    },
+    {
+      "name": "route",
+      "host": "plain.opster.dev",
+      "status": 200,
+      "ms": 127,
+      "headers": {
+        "cache-control": "public, max-age=0, must-revalidate",
+        "cf-ray": "<id>",
+        "content-type": "text/html",
+        "server": "cloudflare",
+        "x-spike-mode": "raw"
+      },
+      "bodyStart": "<!doctype html>\n<meta charset=\"utf-8\">\n<title>spike-m6 plain app</title>\n<link rel=\"stylesheet\" href=\"/style.css\">\n<h1>P"
+    },
+    {
+      "name": "route",
+      "host": "239a7343.opster.dev",
+      "status": 502,
+      "ms": 292,
+      "headers": {
+        "cf-ray": "<id>",
+        "content-type": "application/json",
+        "server": "cloudflare"
+      },
+      "bodyStart": "{\"dispatchError\":true,\"name\":\"Error\",\"message\":\"Worker not found.\"}"
+    },
+    {
+      "name": "route",
+      "host": "bad_label.opster.dev",
+      "status": 404,
+      "ms": 120,
+      "headers": {
+        "cf-ray": "<id>",
+        "content-type": "text/plain;charset=UTF-8",
+        "server": "cloudflare"
+      },
+      "bodyStart": "not found\n"
+    },
+    {
+      "name": "_headers page",
+      "host": "a.opster.dev",
+      "status": 200,
+      "ms": 62,
+      "headers": {
+        "cache-control": "public, max-age=0, must-revalidate",
+        "cf-ray": "<id>",
+        "content-type": "text/html",
+        "server": "cloudflare",
+        "set-cookie": "spike_hdr=<value>",
+        "x-spike-from-headers": "1",
+        "x-spike-mode": "raw"
+      },
+      "bodyStart": "<!doctype html>\n<meta charset=\"utf-8\">\n<title>spike-m6 _headers check</title>\n<p>The _headers file asks for a Set-Cookie"
+    },
+    {
+      "name": "_headers page",
+      "host": "h-a.opster.dev",
+      "status": 200,
+      "ms": 123,
+      "headers": {
+        "cache-control": "public, max-age=60, no-transform",
+        "cf-ray": "<id>",
+        "content-security-policy": "sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads; default-src https://h-a.opster.dev data: blob:; script-src https://h-a.opster.dev; style-src https://h-a.opster.dev 'unsafe-inline'; img-src https://h-a.opster.dev data:; connect-src https://h-a.opster.dev; frame-ancestors 'none'; form-action https://h-a.opster.dev; base-uri 'none'",
+        "content-type": "text/html",
+        "referrer-policy": "no-referrer",
+        "server": "cloudflare",
+        "x-content-type-options": "nosniff",
+        "x-spike-from-headers": "1",
+        "x-spike-mode": "hardened"
+      },
+      "bodyStart": "<!doctype html>\n<meta charset=\"utf-8\">\n<title>spike-m6 _headers check</title>\n<p>The _headers file asks for a Set-Cookie"
+    },
+    {
+      "name": "_headers page",
+      "host": "w-a.opster.dev",
+      "status": 200,
+      "ms": 139,
+      "headers": {
+        "cache-control": "public, max-age=0, must-revalidate",
+        "cf-ray": "<id>",
+        "content-type": "text/html",
+        "server": "cloudflare",
+        "set-cookie": "spike_hdr=<value>",
+        "x-spike-from-headers": "1",
+        "x-spike-mode": "workers"
+      },
+      "bodyStart": "<!doctype html>\n<meta charset=\"utf-8\">\n<title>spike-m6 _headers check</title>\n<p>The _headers file asks for a Set-Cookie"
+    },
+    {
+      "name": "service-worker script, raw",
+      "status": 200,
+      "ms": 42,
+      "headers": {
+        "cache-control": "public, max-age=0, must-revalidate",
+        "cf-ray": "<id>",
+        "content-type": "application/javascript",
+        "server": "cloudflare",
+        "x-spike-mode": "raw"
+      },
+      "bodyStart": "// Spike only. A service worker that passes every request to the network, except one marker path it answers itself,\n// s"
+    },
+    {
+      "name": "service-worker script, w-",
+      "status": 403,
+      "ms": 28,
+      "headers": {
+        "cf-ray": "<id>",
+        "content-type": "text/plain",
+        "server": "cloudflare",
+        "x-spike-mode": "workers"
+      },
+      "bodyStart": "no service workers\n"
+    },
+    {
+      "name": "service-worker script, w-, without the header",
+      "status": 200,
+      "ms": 112,
+      "headers": {
+        "cache-control": "public, max-age=0, must-revalidate",
+        "cf-ray": "<id>",
+        "content-type": "application/javascript",
+        "server": "cloudflare",
+        "x-spike-mode": "workers"
+      },
+      "bodyStart": "// Spike only. A service worker that passes every request to the network, except one marker path it answers itself,\n// s"
+    },
+    {
+      "name": "POST, hardened",
+      "status": 405,
+      "ms": 61,
+      "headers": {
+        "cf-ray": "<id>",
+        "content-type": "text/plain;charset=UTF-8",
+        "server": "cloudflare",
+        "x-spike-mode": "hardened"
+      },
+      "bodyStart": "method\n"
+    },
+    {
+      "name": "not-found answer",
+      "status": 404,
+      "ms": 123,
+      "headers": {
+        "cache-control": "no-store",
+        "cf-ray": "<id>",
+        "clear-site-data": "\"cache\", \"cookies\", \"storage\"",
+        "content-type": "text/plain; charset=utf-8",
+        "server": "cloudflare",
+        "x-spike-mode": "hardened"
+      },
+      "bodyStart": "not found\n"
+    },
+    {
+      "name": "credentials ignored",
+      "same": true,
+      "status": 200
+    }
+  ]
+}

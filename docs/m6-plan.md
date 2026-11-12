@@ -7,7 +7,7 @@
 - **The questions only the owner can answer are in [the table below](#for-the-owner),** undecided. **On 2026-11-12 three of them were decided on the owner's behalf,** after the owner wrote "you should make decision on my behalf you are the chief of staff": who may open a deployed app, that an app is static files with no preview, and who may configure and approve release ([decisions 213 to 215](spec/PRODUCT.md#decisions-needed)). They are listed beneath the table.
 - **The platform facts this plan called unverified were read** in Cloudflare's and GitHub's own documentation on 2026-11-12: [what was found](#platform-facts-from-the-documentation). Read, not tried. Several findings changed a proposed answer.
 - **The owner said on 2026-11-12 that they have enabled Workers for Platforms on Cloudflare.** Which account it is on isn't confirmed: a read-only check of the account that holds `podster.dev`, at 01:33 UTC, was refused with Cloudflare's code 10121, no access to dispatch namespaces. Nothing has been created. *Later that day it was confirmed: the owner approved one dispatch namespace for staging on that account, and it exists ([Cloud resources](#cloud-resources)).*
-- **Spikes A, C, E and F ran on 2026-11-12.** Spike C ran on `opster.dev`, the content domain, and everything it created is deleted: [what it found](#spike-c-results). Spike A ran on a dispatch namespace the owner approved for staging: [what it found](#spike-a-results). Everything it created is deleted, and the namespace is left empty. So Workers for Platforms is on the account that holds `podster.dev`. Spikes E and F ran with the existing staging Apps, on the architect's ruling: [spike E results](#spike-e-results), [spike F results](#spike-f-results). **B, D and G haven't run,** so the publishing tokens, custom hostnames, the serve entry's speed, resolving a TXT record and a Worker's memory are untried. **Spike F ran and didn't answer its question:** no credential it was allowed could put a workflow file in a repository. Answering it takes a person with write access pushing one workflow file to a test repository's branch and reading the runs. *(This line said "The other four haven't", which miscounted: seven spikes are listed.)*
+- **Spikes A, B, C, E and F ran on 2026-11-12.** Spike C ran on `opster.dev`, the content domain, and everything it created is deleted: [what it found](#spike-c-results). Spike A ran on a dispatch namespace the owner approved for staging: [what it found](#spike-a-results). Everything it created is deleted, and the namespace is left empty. So Workers for Platforms is on the account that holds `podster.dev`. Spikes E and F ran with the existing staging Apps, on the architect's ruling: [spike E results](#spike-e-results), [spike F results](#spike-f-results). Spike B ran with three short-lived tokens the owner made, and everything it created is deleted: [what it found](#spike-b-results). It found no token that can publish to the namespace and can't also replace the account's other Workers, so it proposes keeping the second account. **D and G haven't run,** so the routing token, custom hostnames, the serve entry's speed, resolving a TXT record and a Worker's memory are untried. **Spike F ran and didn't answer its question:** no credential it was allowed could put a workflow file in a repository. Answering it takes a person with write access pushing one workflow file to a test repository's branch and reading the runs. *(This line said "The other four haven't", which miscounted: seven spikes are listed.)*
 - **No contract, migration or feature code exists for M6.** The cloud resources that exist for it are listed under [Cloud resources](#cloud-resources).
 
 *As first written on 2026-11-10: the architect drafted this plan from the specs while the owner was away.* Items marked **owner's yes** create an account or a cloud resource, cost money, set a secret, are legal text, or loosen a security stance, so the architect can't settle them alone. [How far this was checked](#how-far-this-was-checked) says what was read.
@@ -123,7 +123,7 @@
 
 ## The spikes
 
-**A, C, E and F ran on 2026-11-12: [spike A results](#spike-a-results), [spike C results](#spike-c-results), [spike E results](#spike-e-results), [spike F results](#spike-f-results). B, D and G haven't. F ran without answering its question.** What the four changed in ADR 0010 is [what became of each proposal](#what-the-spikes-changed-in-adr-0010). Each stays in `spikes/` and nothing builds on it. "Needs" is what must exist first, and so what waits for the owner.
+**A, B, C, E and F ran on 2026-11-12: [spike A results](#spike-a-results), [spike B results](#spike-b-results), [spike C results](#spike-c-results), [spike E results](#spike-e-results), [spike F results](#spike-f-results). D and G haven't. F ran without answering its question.** What the four changed in ADR 0010 is [what became of each proposal](#what-the-spikes-changed-in-adr-0010). Each stays in `spikes/` and nothing builds on it. "Needs" is what must exist first, and so what waits for the owner.
 
 | Spike | What it proves | Needs, and so waits for | What can be learned with no resource |
 | --- | --- | --- | --- |
@@ -387,6 +387,113 @@ Proposed, for the architect to accept or not. None is written into the ADR. *Dis
   - the hosts answered 522 again.
 - **Left:** the owner's wildcard DNS record on `opster.dev`, and the namespace `podster-staging-apps`.
 - **Not touched:** anything on `podster.dev`, Podster's own Workers, D1, KV, queues, R2 and secrets. No API token was made. The calls used wrangler's existing login, and its log sanitizing stayed on.
+
+## Spike B results
+
+**Run on 2026-11-12, 11:21 to 11:24 UTC, on the Cloudflare account that holds `podster.dev`, with three short-lived API tokens the owner made for it. Everything it created is deleted.** The code, every recorded call and how to run it again are in [`spikes/m6-publishing-token`](../spikes/m6-publishing-token/README.md). This section gives the answers and a recommendation on one account or two. **The recommendation is a proposal: [ADR 0010](adr/0010-release-and-the-content-domain.md) and [the owner's table](#for-the-owner) aren't edited here.**
+
+**What was tried.** Each token was asked to do the same things: publish to and unpublish from `podster-staging-apps`; read, replace and delete a canary, which is an ordinary Worker on the account made for the test; create a new ordinary Worker; and read, with GET only, what else the account holds.
+
+**How it was run, and what that limits.**
+
+- **No write was sent to anything of Podster's.** One function sends every request, and it refuses anything but a GET unless the request names a script matching `^spike-m6-b-[a-z0-9-]{1,40}$`. So what a token can do to Podster's Workers is **inferred from the canary**, not observed on them.
+- **The tokens:** `edit` has Account → Workers Scripts → Edit. `read` has Workers Scripts → Read, as the control. `narrow` has a narrower permission the dashboard offered, whose name the owner typed as "developer platform". **Its exact name isn't known:** no token could read its own permissions, and the login couldn't either.
+- **Run twice. Only the second run's results are recorded,** in `results/results.jsonl`. The first run's weren't kept, so that the two agreed rests on a comparison made at the time.
+
+### The answers
+
+Status, and Cloudflare's error code in brackets where there was one. "none" is a refusal with the message `No access to the specified resource.` and no code. The full table, 47 calls for each token, is in [the spike's README](../spikes/m6-publishing-token/README.md#what-was-observed).
+
+| Operation | `read` | `narrow` | `edit` |
+| --- | --- | --- | --- |
+| `GET /user/tokens/verify` | 200, active, expiry set | 200, active, expiry set | 200, active, expiry set |
+| **Namespace:** read it, list its scripts, read a script and its code | 200 | 200 | 200 |
+| **Namespace:** start an assets upload session | 403 (none) | 403 (none) | **200** |
+| **Namespace:** upload a script, and replace one that exists | 403 (none) | 403 (none) | **200** |
+| **Namespace:** delete a script | 403 (none) | 403 (none) | **200** |
+| **Canary:** read settings, code, versions, cron triggers and secrets' names | 200 | 200 | 200 |
+| **Canary:** replace its code | 403 (none) | **200** | **200** |
+| **Canary:** delete it | 403 (none) | 403 (none) | **200** |
+| **Account:** create a new Worker, then delete it | 403 (none) | 403 (none) | **200** |
+| List the account's Workers | 200 | 200 | 200 |
+| `podster-api-staging`: settings, secrets' names, code | 200 | 200 | 200 |
+| Workers routes on `podster.dev` | 403 (none) | 200 | 200 |
+| Workers routes on `opster.dev` | 403 (none) | 200 | 403 (none) |
+| DNS records and custom hostnames, either zone | 403 (10000) | 403 (10000) | 403 (10000) |
+| D1 databases, KV namespaces | 401 (10000) | 401 (10000) | 401 (10000) |
+| R2 buckets | 403 (10000) | 403 (10000) | 403 (10000) |
+| Queues, Durable Object namespaces, Workers custom domains, the `workers.dev` subdomain, zones, the account | 200 | 200 | 200 |
+| Dispatch namespaces | 200 | 200 | 200 |
+| API tokens, `/user/tokens` | 403 (9109) | 403 (9109) | 403 (9109) |
+
+For Podster's own data only the status was kept: no secret's name, setting or code was recorded.
+
+**The narrowest token that can publish and unpublish: Workers Scripts Edit.** Of the three it is the only one that could.
+
+- Its upload answered 200 and the code read back was its own.
+- Its delete answered 200, and the namespace's `script_count` was 0 afterwards.
+- It may also start an assets upload session.
+- The narrower token was refused every write in the namespace, whether the script existed or not.
+
+**What else that token can do.**
+
+- **Replace, delete and create any ordinary Worker on the account.** It replaced the canary's code, which the login then read back as the token's. It deleted the canary. It created a new Worker and deleted it. Cloudflare's answers made no difference between a script in the namespace and a Worker on the account.
+- **So, by inference, it could replace or delete Podster's API, gateway and web Workers.** A replaced API Worker runs with that Worker's bindings: its Durable Objects, D1, R2, queues and secrets.
+- **Read every Worker's settings, code and the names of its secrets.** Observed on `podster-api-staging` as a 200, with nothing kept.
+- **Read** the account's list of Workers, queues, Durable Object namespaces, Workers custom domains, its `workers.dev` subdomain, its zones, its dispatch namespaces and the Workers routes on `podster.dev`.
+- **Not read:** D1, KV, R2, DNS records, custom hostnames, the account's members and API tokens.
+- **Not tried, because the spike sends no such write:** a Worker's secrets, settings, cron triggers, routes, custom domains and `workers.dev` address.
+
+**The narrower token is no help.** It can't publish, and it still replaced the canary's code: the login read back `replaced-by-narrow`. It couldn't create or delete. Whatever its permission is called, it is neither a publishing token nor a safe one.
+
+**The control reads a great deal.** Workers Scripts Read alone answered 200 for `podster-api-staging`'s code, settings and secrets' names. That matters for [the reconcile](adr/0010-release-and-the-content-domain.md#credentials): a read-only token for it is still a token that reads Podster's code if it is on Podster's account.
+
+### One account or two
+
+**Recommended: two. Keep ADR 0010's working assumption of a second Cloudflare account,** and make it a condition of storing any publishing token. The owner's table says yes "unless a test finds a narrower credential". This test found none.
+
+- **The token that publishes can rewrite Podster.** On one account, the secret the private API Worker would hold for release is a token that can replace that same API Worker, the gateway and the web app. One leaked or misused secret would be the whole of Podster, where today it would be the apps.
+- **Nothing narrower worked.** The only narrower permission the owner found can't write to the namespace. No API call was tried that asks whether a permission can be limited to one namespace, and Cloudflare's documentation, read earlier, shows permissions divided by account, zone and user only.
+- **On a second account the same token reaches only what serves apps:** the namespace's scripts and the content Worker. ADR 0010 already says so plainly, with what limits the damage.
+- **Reading argues the same way.** Any Workers Scripts token on Podster's account reads Podster's code and the names of its secrets.
+- **Until the second account exists, propose:** no Workers Scripts Edit token for the account that holds `podster.dev` is stored as a Worker's secret, on staging either. The staging namespace on that account stays for spikes run under a person's login.
+- **What it costs** is in [the owner's table](#for-the-owner): an account, and Workers for Platforms and perhaps Workers Paid bought on it.
+
+**What would change this:** a permission, or a resource choice, that limits Workers Scripts Edit to one dispatch namespace. Only the dashboard can show whether one exists. **For the owner to look at,** on the page that makes a custom token:
+
+- **the exact name of the permission** the `narrow` token was given, and its group;
+- **under Account Resources,** whether anything narrower than one account is offered once Workers Scripts is chosen, such as a dispatch namespace or a script;
+- **in the list of permissions,** anything named for Workers for Platforms or dispatch namespaces;
+- **each token's Zone Resources,** which would explain why the three read different zones' routes;
+- **whether an account-owned token,** made under Manage Account, offers anything a user token doesn't.
+
+### What it would change in ADR 0010
+
+| ADR 0010 says | Spike B found | Proposed change |
+| --- | --- | --- |
+| The only permission found for the scripts token is Workers Scripts Edit, and the permission the namespace's upload needs isn't stated | Workers Scripts Edit uploads, replaces, reads and deletes in the namespace, and starts an upload session. Workers Scripts Read and the narrower token can't write there | State it as tried |
+| Nothing scoped to one namespace was found | The same token replaced, deleted and created ordinary Workers | State it as tried: the scripts token is account-wide |
+| The working assumption is a second account | No narrower credential was found | Keep it, and drop "working assumption" once the owner decides |
+| The reconcile reads the content Worker's deployed version | Workers Scripts Read reads versions, settings and code of any Worker on its account | If the reconcile gets its own read-only token, it belongs on the second account too |
+| The routing token writes KV and custom hostnames | None of the three could read KV or custom hostnames | Nothing yet. A Workers Scripts token read neither, which fits two separate tokens. The routing token's own permissions are still a spike |
+
+### What stays unknown after spike B
+
+- **The narrow permission's exact name,** and whether the dashboard can scope a token to one namespace. Both need the owner's eyes on the dashboard.
+- **What the tokens can write besides a script:** secrets, settings, cron triggers, routes, custom domains and the `workers.dev` address weren't tried.
+- **Whether the narrow token can replace a Worker that has bindings.** The canary has none.
+- **Why the three tokens read different zones' Workers routes.**
+- **Account-owned tokens,** and a token limited by client IP address.
+- **The routing token:** which permissions custom hostnames and KV writes need. Risk 3's second half.
+- **How long a deleted or expired token keeps working.**
+
+### Resources
+
+- **Created, in each of two runs:** the Worker `spike-m6-b-canary`; the namespace scripts `spike-m6-b-read`, `spike-m6-b-narrow` and `spike-m6-b-edit`; the Worker `spike-m6-b-new-edit`; and one assets upload session, to which nothing was sent.
+- **Deleted:** all of them. Confirmed by listing at 11:23:32 UTC, and again at 11:26:05: the namespace's list was empty and its `script_count` was 0, and the account held six Workers, each named `podster-…` and none named `spike-m6`.
+- **Left:** the namespace `podster-staging-apps`, empty; and the owner's three tokens and the file that holds them, **which the owner must now delete**.
+- **Not created:** any namespace, KV namespace, D1 database, custom hostname, DNS record, route or secret. Nothing in `apps/` was deployed.
+- **Read and not changed:** the lists and the one Worker's settings, secrets' names and code named above, with GET, keeping the status only.
 
 ## What the spikes changed in ADR 0010
 
@@ -701,11 +808,11 @@ The architect proposes the gate call, for the owner to review.
 
 ## Risks to test
 
-The spikes at step 1 answer these before any feature code. **A, C, E and F have run; B, D and G haven't.** Answered for what was tried: 1, 2, 4 and 5's namespace half by [spike A](#spike-a-results); 6's browser half, 12's wildcard half and 13 by [spike C](#spike-c-results); 10 and 11 for a public repository by [spike E](#spike-e-results). Not answered: 3 (spike B); 5 for a serve entry (spike G); 6 for the Public Suffix List's own questions; 7, 8 and 12's custom-hostname half (spike D); 9, which spike A couldn't measure; and 14, for the reason in [spike F results](#spike-f-results).
+The spikes at step 1 answer these before any feature code. **A, B, C, E and F have run; D and G haven't.** Answered for what was tried: 1, 2, 4 and 5's namespace half by [spike A](#spike-a-results); 6's browser half, 12's wildcard half and 13 by [spike C](#spike-c-results); 10 and 11 for a public repository by [spike E](#spike-e-results); 3's upload half by [spike B](#spike-b-results). Not answered: 3's custom-hostname half; 5 for a serve entry (spike G); 6 for the Public Suffix List's own questions; 7, 8 and 12's custom-hostname half (spike D); 9, which spike A couldn't measure; and 14, for the reason in [spike F results](#spike-f-results).
 
 1. Does a user Worker in a dispatch namespace, in untrusted mode, have no access to the account's other Workers, KV, D1, R2 or caches? What does it share?
 2. Can a namespace hold a static-files-only app, and how is one uploaded? What are the size and file limits?
-3. What is the narrowest API token that can upload to one namespace and manage custom hostnames on one zone? Can it touch the account's other Workers?
+3. What is the narrowest API token that can upload to one namespace and manage custom hostnames on one zone? Can it touch the account's other Workers? *The upload half is answered in [spike B results](#spike-b-results): Workers Scripts Edit, and yes. The custom-hostname half isn't.*
 4. Can an upload be read back, so the job can confirm which commit is being served?
 5. How long after an upload or a delete does the host serve the new state?
 6. What does the Public Suffix List ask of a new entry, how long does acceptance take, and how long until browsers ship it? Whether anything waits for it is the owner's. Either way: what can one room's app do to another's without the entry, and does a sandboxing Content Security Policy close that without breaking ordinary static apps?
@@ -733,4 +840,4 @@ The spikes at step 1 answer these before any feature code. **A, C, E and F have 
 - **Not found in the specs:** any policy document for custom domains, release approvals, or export and transfer; any definition of an environment, the approval policy's values, the release states, or the budget caps.
 - **Not read:** the code. This plan doesn't claim what `apps/api`, `apps/gateway` or `apps/web` hold today beyond what the plans and specs say.
 - **After the spikes, 2026-11-12:** ADR 0010 and this plan were revised from the four spike sections in this file as they stand on `main`. **The spikes' recorded results in `spikes/` weren't reread for that revision,** and nothing was run for it. In the write-ups, five passages that said more than was seen are marked "Tightened", one that sat under the wrong heading is marked "Corrected", and one figure the committed results can't check is withdrawn. The revision hasn't been independently reviewed.
-- **Run:** nothing when this plan was written. **Since, on 2026-11-12:** spikes E and F, which wrote one branch and two loose objects to one test repository and changed nothing else; their sections say what was and wasn't shown. **Also on 2026-11-12, spike A,** which put test scripts and one Worker on staging's Cloudflare account and deleted every one: [its results](#spike-a-results) cover the dispatch namespace only. **And spike C,** which made one Worker, one route on `opster.dev` and three namespace scripts, and deleted them: [its results](#spike-c-results).
+- **Run:** nothing when this plan was written. **Since, on 2026-11-12:** spikes E and F, which wrote one branch and two loose objects to one test repository and changed nothing else; their sections say what was and wasn't shown. **Also on 2026-11-12, spike A,** which put test scripts and one Worker on staging's Cloudflare account and deleted every one: [its results](#spike-a-results) cover the dispatch namespace only. **And spike C,** which made one Worker, one route on `opster.dev` and three namespace scripts, and deleted them: [its results](#spike-c-results). **And spike B,** which made and deleted five test scripts on that account with three tokens the owner made, and sent Podster's own Workers nothing but reads: [its results](#spike-b-results).

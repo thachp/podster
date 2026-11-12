@@ -49,7 +49,7 @@ import {
   ABSENT_ROOM, agentCapabilities, answerShape, CALLERS, differences, expectedAnswer, fillPath, keptFile, KEPT_MARGIN_SECONDS, keptProblem, keptRecord, m6EventTypes, m6Fields, m6Keys, m6Names, m6Operations, mcpErrorProblem, neighbour, operationsProblem, pairProblem, parseArgs, personOnly, PHASE_SIGN_UPS, planFor, runOutcome, scrub,
   secretProblem, SESSION_SECONDS, SIGN_UPS, snake, STAGING, Tally, toolAnswer, toolNotFound, USAGE,
 } from "./m6-staging-lib.mjs";
-import { readKept, removeKept, writeKept } from "./m6-staging-kept.mjs";
+import { keptDirectoryProblem, readKept, removeKept, writeKept } from "./m6-staging-kept.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const parsed = parseArgs(process.argv.slice(2), process.env);
@@ -105,32 +105,55 @@ const contractProblem = !contractText ? "the contract couldn't be read" : !capab
   }
 }
 
-// ---- M6-S04's kept file, before anything is sent ----
+// ---- M6-S04's kept file: every local check, before anything is sent ----
+
+/**
+ * Signs a stale kept session out, before its file is deleted, so a session that hadn't quite ended ends now. The one
+ * request it sends; it never prints the session. Says how that went.
+ */
+async function endStaleSession(session) {
+  try {
+    const res = await fetch(`${STAGING}/api/auth/sign-out`, { method: "POST", redirect: "manual", headers: { cookie: session, origin: STAGING, "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(15_000) });
+    return `its session's sign-out answered ${res.status}`;
+  } catch {
+    return "its session's sign-out failed in transport";
+  }
+}
 
 /** The second phase's record, once it's shown usable. */
 let kept = null;
 if (phase) {
-  const refuse = (why) => {
-    console.error(`\nRefused: ${why}.\nNothing was sent to staging.`);
+  const refuse = (why, sent = "Nothing was sent to staging.") => {
+    console.error(`\nRefused: ${why}.\n${sent}`);
     process.exit(2);
   };
+  // The first phase's file must be writable where it goes, so a directory that would refuse it never costs a sign-up.
+  if (phase === "before") {
+    const problem = keptDirectoryProblem(keptAt);
+    if (problem) refuse(`the kept file couldn't be written: ${problem} (${KEPT_SHOWN})`);
+  }
   const found = readKept(keptAt);
   if (found.problem) refuse(`${found.problem} (${KEPT_SHOWN}). Look at it, and delete it if it isn't needed`);
   const now = Date.now();
+  // Asked with a commit no record can name, so the answer is null for a usable file of this script's, the stale
+  // refusal for a stale one, and anything else for a file that isn't this script's or is out of shape.
+  const standing = found.record ? keptProblem(found.record, { now, commit: null }) : null;
+  const stale = typeof standing === "string" && standing.startsWith("the kept file is stale");
   if (phase === "before" && found.record) {
-    if (Number.isSafeInteger(found.record.stale_at) && now >= found.record.stale_at) {
-      if (!removeKept(keptAt)) refuse(`an earlier first phase's kept file is stale and couldn't be deleted (${KEPT_SHOWN})`);
-      console.log(`\nAn earlier first phase's kept file was stale, so its test session had ended or was about to: it was deleted. Its room is left behind.`);
-    } else refuse(`an earlier first phase's kept file is still usable (${KEPT_SHOWN}): run --after-deploy after the deploy, or wait until it's stale`);
+    if (standing && !stale) refuse(`a file is at ${KEPT_SHOWN} that isn't a kept file of this script's (${standing}). Look at it, and delete it if it isn't needed`);
+    if (!stale) refuse(`an earlier first phase's kept file is still usable (${KEPT_SHOWN}): run --after-deploy after the deploy, or wait until it's stale`);
+    const ended = await endStaleSession(found.record.session);
+    if (!removeKept(keptAt)) refuse(`an earlier first phase's kept file is stale and couldn't be deleted (${KEPT_SHOWN}); ${ended}`, "Only that sign-out was sent to staging.");
+    console.log(`\nAn earlier first phase's kept file was stale, so its test session had ended or was about to: ${ended}, and the file was deleted. Its room is left behind.`);
   }
   if (phase === "after") {
     if (found.missing) refuse(`no kept file at ${KEPT_SHOWN}: run --before-deploy before the deploy first`);
-    const problem = keptProblem(found.record, { now, commit: options.deployedCommit });
-    // Only a file that is the script's in every other way is deleted for being stale: its session has ended.
-    if (problem?.startsWith("the kept file is stale")) {
+    if (stale) {
+      const ended = await endStaleSession(found.record.session);
       removeKept(keptAt);
-      refuse(`${problem}. The file was deleted; its room is left behind. Run both phases again`);
+      refuse(`${standing}. ${ended[0].toUpperCase()}${ended.slice(1)}, and the file was deleted; its room is left behind. Run both phases again`, "Only that sign-out was sent to staging.");
     }
+    const problem = keptProblem(found.record, { now, commit: options.deployedCommit });
     if (problem) refuse(`${problem} (${KEPT_SHOWN})`);
     kept = found.record;
   }
@@ -521,12 +544,13 @@ async function beforeDeploy() {
     leftBehind.push(`task ${made.id}`);
     const accepted = await first.must("accept_task", { workspace_id: room, task_id: made.id, version: made.version });
     eq([made.status, accepted.status], ["offered", "accepted"], "the task's status before the disconnect");
-    // The disconnect ends the agent's credential, and its removal from the room releases the task it accepted.
+    // The disconnect ends the agent's credential, and its removal from the room releases the task it accepted. Only once
+    // it has answered 200 is the agent off the clean-up list; otherwise the clean-up disconnects it again.
+    await first.close().catch(() => null);
+    const gone = await owner.dash("POST", `/agents/${first.id}/disconnect`, {}).catch((error) => ({ status: cause(error) }));
+    ok(gone.status === 200, `the disconnect of agent ${first.id} answered ${gone.status} ${gone.code ?? ""}`);
     const listed = agents.findIndex((each) => each.agent === first);
     if (listed >= 0) agents.splice(listed, 1);
-    await first.close().catch(() => null);
-    const gone = await owner.dash("POST", `/agents/${first.id}/disconnect`, {});
-    ok(gone.status === 200, `the disconnect of agent ${first.id} answered ${gone.status} ${gone.code ?? ""}`);
     let released;
     for (let reads = 0; reads < 15; reads++) {
       released = await taskRead(room, made.id);

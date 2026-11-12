@@ -9,7 +9,10 @@
 // - phases: enough of staging for M6-S04's two phases: sessions, organizations, rooms, tasks and their events, the
 //   departure rule, MCP's OAuth and tool calls, and the API's 404 for every other route. Its state is kept in the file
 //   M6_STANDIN_STATE, so a second process sees what the first made, as staging would across a deploy. With
-//   M6_STANDIN_FORGET=1 it forgets every session first, as staging does once a test session ends.
+//   M6_STANDIN_FORGET=1 it forgets every session first, as staging does once a test session ends. With
+//   M6_STANDIN_DISCONNECT_FAIL=1 an agent's first disconnect answers 503. With M6_STANDIN_SIGINT_AT set, the first
+//   request whose method and path, as "POST /api/v1/...", contain it sends this process SIGINT, as Ctrl-C would, and is
+//   then answered as usual.
 //
 // Waits of the run's own pacing, half a second to five seconds, are made at once, so the self-test sleeps on nothing.
 import { readFileSync, writeFileSync } from "node:fs";
@@ -20,7 +23,9 @@ if (!["drop-signup", "edge-down", "phases"].includes(mode)) throw new Error(`M6_
 const realTimeout = globalThis.setTimeout;
 globalThis.setTimeout = (run, ms, ...rest) => realTimeout(run, ms >= 500 && ms <= 5000 ? 0 : ms, ...rest);
 
-const counts = { requests: 0, signUps: 0, signOuts: 0 };
+const counts = { requests: 0, signUps: 0, signOuts: 0, disconnects: 0 };
+let disconnectFails = process.env.M6_STANDIN_DISCONNECT_FAIL === "1";
+let interruptAt = process.env.M6_STANDIN_SIGINT_AT || null;
 const json = (status, body, headers = {}) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 const notFound = () => json(404, { error: { code: "not_found", message: "not_found" } });
 
@@ -86,6 +91,11 @@ function dashboard(method, path, headers, body) {
   }
   const agentDisconnect = path.match(/^\/api\/agents\/([^/]+)\/disconnect$/);
   if (agentDisconnect && method === "POST") {
+    counts.disconnects++;
+    if (disconnectFails) {
+      disconnectFails = false;
+      return json(503, { error: { code: "unavailable" } });
+    }
     const agent = state.agents[agentDisconnect[1]];
     if (!agent || agent.owner !== person.id) return json(404, { error: { code: "agent_not_found" } });
     agent.disconnected = true;
@@ -212,6 +222,10 @@ globalThis.fetch = async (input, init = {}) => {
   const method = (init.method ?? request?.method ?? "GET").toUpperCase();
   const headers = new Headers(init.headers ?? request?.headers);
   if (path === "/api/auth/sign-up/e2e") counts.signUps++;
+  if (interruptAt && `${method} ${path}`.includes(interruptAt)) {
+    interruptAt = null;
+    process.kill(process.pid, "SIGINT");
+  }
   if (mode === "edge-down") return new Response("<html>502 Bad Gateway</html>", { status: 502, headers: { "content-type": "text/html" } });
   if (path === "/.well-known/agent-configuration") return json(200, { version: "stand-in" });
   if (mode === "drop-signup") {
@@ -235,5 +249,5 @@ globalThis.fetch = async (input, init = {}) => {
 console.log(`stand-in for staging: ${mode}; nothing leaves this machine`);
 process.on("exit", () => {
   if (mode === "phases") writeFileSync(stateFile, JSON.stringify(state));
-  console.log(`stand-in counted: ${counts.requests} requests, ${counts.signUps} test sign-ups, ${counts.signOuts} sign-outs`);
+  console.log(`stand-in counted: ${counts.requests} requests, ${counts.signUps} test sign-ups, ${counts.signOuts} sign-outs, ${counts.disconnects} agent disconnects`);
 });

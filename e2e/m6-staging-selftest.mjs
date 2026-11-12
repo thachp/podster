@@ -1,17 +1,17 @@
 // Checks the parts of M6's staging run that need no network: which host it accepts, its arguments, its exit code, which
 // operations and fields it reads from the contract as M6's, how two answers are compared and what the API must have
-// answered, and what counts as an M6 name or event. Then the script itself, as a dry run, which sends nothing, and what
-// its source does and doesn't do.
+// answered, and what counts as an M6 name or event. Then the script itself: as a dry run, which sends nothing; against
+// m6-staging-standin.mjs, which answers every request on this machine; and what its source does and doesn't do.
 //
 //   node m6-staging-selftest.mjs
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   ABSENT_ROOM, agentCapabilities, answerShape, CALLERS, COMPARED_HEADERS, differences, edgeRefusal, expectedAnswer, fillPath, M6_EVENT, m6EventTypes, m6Fields, m6Keys, m6Names, m6Operations, mcpErrorProblem, neighbour, operationsProblem, pairProblem,
-  parseArgs, personOnly, PLAN, PLANNED_TOOLS, runOutcome, schemas, scrub, secretProblem, SIGN_UPS, snake, STAGING, stagingOnly, Tally, toolAnswer,
+  parseArgs, personOnly, PLAN, PLANNED_TOOLS, runOutcome, schemas, scrub, secretProblem, SIGN_UPS, snake, STAGING, stagingOnly, Tally, toolAnswer, toolNotFound,
 } from "./m6-staging-lib.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -160,7 +160,16 @@ check(snake("getReleaseConfig") === "get_release_config" && snake("ReleaseConfig
 check(toolAnswer('{"error":"Tool get_release_config not found"}', "get_release_config") === toolAnswer('{"error":"Tool get_release_config_x not found"}', "get_release_config_x"), "a tool's own name is taken out of its answer before comparing");
 {
   const rpc = (status, body, type = "application/json") => answerShape(status, [["content-type", type]], typeof body === "string" ? body : JSON.stringify(body));
-  check(mcpErrorProblem(rpc(200, { jsonrpc: "2.0", id: 1, error: { code: -32602, message: "Tool <tool> not found" } })) === null && mcpErrorProblem(rpc(200, { jsonrpc: "2.0", id: 1, result: { isError: true, content: [] } })) === null, "a JSON-RPC error, or a result marked isError, with HTTP 200, is an MCP refusal");
+  const sdkNotFound = { jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "MCP error -32602: Tool <tool> not found" }], isError: true } };
+  check(mcpErrorProblem(rpc(200, sdkNotFound)) === null && mcpErrorProblem(rpc(200, { jsonrpc: "2.0", id: 1, error: { code: -32602, message: "Tool <tool> not found" } })) === null, "\"tool not found\" with HTTP 200, as the SDK's server sends it in a result marked isError, or as a JSON-RPC error, is the expected refusal");
+  for (const [label, body] of [
+    ["a result marked isError with no text", { jsonrpc: "2.0", id: 1, result: { isError: true, content: [] } }],
+    ["a disabled tool", { jsonrpc: "2.0", id: 1, result: { isError: true, content: [{ type: "text", text: "MCP error -32602: Tool <tool> disabled" }] } }],
+    ["a known tool's refusal", { jsonrpc: "2.0", id: 1, result: { isError: true, content: [{ type: "text", text: "access_revoked" }] } }],
+    ["an invalid argument", { jsonrpc: "2.0", id: 1, result: { isError: true, content: [{ type: "text", text: "MCP error -32602: Input validation error: Invalid arguments for tool <tool>" }] } }],
+    ["an internal error", { jsonrpc: "2.0", id: 1, error: { code: -32603, message: "Internal error" } }],
+  ]) check(/other than "tool not found"/.test(mcpErrorProblem(rpc(200, body)) ?? ""), `${label} isn't "tool not found", so it fails M6-S01e`);
+  check(toolNotFound(toolAnswer("MCP error -32602: Tool get_release_config not found", "get_release_config")) && toolNotFound("Tool <tool> not found") && !toolNotFound("Tool get_release_config not found") && !toolNotFound("MCP error -32602: Tool <tool> not found, and more"), "\"tool not found\" is matched only whole, with the tool's own name taken out");
   for (const [label, shape] of [["a 401", rpc(401, { error: "invalid_token" })], ["a 429", rpc(429, { error: { code: "rate_limited" } })], ["a 200 that isn't JSON-RPC", rpc(200, { ok: true })], ["a JSON-RPC success", rpc(200, { jsonrpc: "2.0", id: 1, result: { content: [] } })], ["an HTML page", rpc(200, "<html>", "text/html")]]) check(mcpErrorProblem(shape) !== null, `${label} isn't counted as an MCP refusal`);
 }
 
@@ -187,7 +196,18 @@ check(/process\.on\("SIGINT"/.test(source) && /if \(stopping\) throw new Halt/.t
 check(/\/disconnect`/.test(source) && /leftBehind/.test(source) && /Left behind on staging/.test(source), "the agent is disconnected at the end, and what's left behind is printed");
 check(/again\+\+/.test(source) && /pairProblem\(real, unknown, expectedAnswer\(caller, op\)\)/.test(source), "a differing pair is asked once more, and every pair must be the API's own answer");
 check(/attempt >= 2/.test(source), "a transport error is retried once, then fails naming the request");
-check(/mcpErrorProblem\(real\)/.test(source), "M6-S01e checks the raw /mcp answer's status and error shape");
+{
+  const signUp = source.slice(source.indexOf("async function person"), source.indexOf("/** Disconnects an agent"));
+  check(/"\/api\/auth\/sign-up\/e2e"[^\n]*\{ retry: false \}\)/.test(signUp) && /signUpUnknown = true/.test(signUp) && /ok\(!signUpUnknown/.test(signUp), "the sign-up is never retried in transport, and after one whose outcome is unknown no further sign-up is asked for");
+  check(!/sign-up\/e2e/.test(source.replace(signUp, "")), "nothing else in the script sends the test sign-up");
+}
+check(/mcpErrorProblem\(shape\)/.test(source) && /toolNotFound\(sdkRealText\)/.test(source), "M6-S01e requires \"tool not found\" from the raw /mcp answer and through the SDK");
+check(/again\+\+;\s*problems = await askTool\(name\)/.test(source), "M6-S01e asks a name once more after a first problem, as the routes are");
+{
+  const connect = source.slice(source.indexOf("async function agentOf"), source.indexOf("/** One request of a person's"));
+  const failure = connect.slice(connect.indexOf("} catch (error) {"));
+  check(/dash\("GET", "\/agents"\)/.test(failure) && /await disconnect\(linker, each\.id\)/.test(failure) && /if \(!halfMade\) leftBehind\.push/.test(failure) && /throw error;/.test(failure), "an agent whose connect failed midway is found by name and disconnected, or listed as left behind");
+}
 check(!/\bconst after = /.test(source), "no unused helper is left");
 for (const { id } of PLAN) check(source.includes(`"${id}"`), `${id} has a check in the script`);
 check((source.match(/await person\(/g) ?? []).length === SIGN_UPS.length, "the script signs up exactly the people the plan lists");
@@ -206,6 +226,22 @@ try {
   writeFileSync(empty, "paths: {}\n");
   check(run(["--base-url", STAGING, "--dry-run", "--contract", empty], { PODSTER_E2E_SIGNUP_SECRET: secret }).status === 2, "a contract with no M6 operation exits 2");
   check(run(["--base-url", STAGING, "--dry-run", "--contract", join(work, "missing.yaml")], { PODSTER_E2E_SIGNUP_SECRET: secret }).status === 2, "a contract that can't be read exits 2");
+
+  // The real script, not a dry run, against m6-staging-standin.mjs, which replaces fetch before the script loads, so
+  // nothing leaves this machine. A stand-in that didn't load stops node before the script starts.
+  const standIn = (mode) => {
+    const res = spawnSync(process.execPath, ["--import", pathToFileURL(join(here, "m6-staging-standin.mjs")).href, join(here, "m6-staging.mjs"), "--base-url", STAGING], { env: { PATH: process.env.PATH, HOME: process.env.HOME, PODSTER_E2E_SIGNUP_SECRET: secret, M6_STANDIN: mode }, encoding: "utf8", timeout: 60_000 });
+    const counted = /stand-in counted: (\d+) requests, (\d+) test sign-ups/.exec(res.stdout);
+    const loaded = res.stdout.startsWith(`stand-in for staging: ${mode}; nothing leaves this machine`);
+    return { ...res, loaded, requests: counted ? Number(counted[1]) : NaN, signUps: counted ? Number(counted[2]) : NaN };
+  };
+  const dropped = standIn("drop-signup");
+  check(dropped.loaded && dropped.signUps === 1, `a sign-up whose answer is lost in transport is sent once, not again: ${dropped.signUps} sign-up request(s)`);
+  check(dropped.status === 1, `a run whose first sign-up's outcome is unknown exits 1, not ${dropped.status}`);
+  check(/Whether staging took that sign-up is unknown/.test(dropped.stdout) && /Sign-ups asked for: 1, answered with a session: 0/.test(dropped.stdout) && /Checks shown on staging: 0/.test(dropped.stdout), "it says the sign-up's outcome is unknown, counts it, and shows nothing on staging");
+  check(!dropped.stdout.includes(secret) && !dropped.stderr.includes(secret), "it never prints the secret");
+  const down = standIn("edge-down");
+  check(down.loaded && down.status === 2 && down.signUps === 0 && /No sign-up was taken/.test(down.stderr), `an edge that answers 502 fails the preflight: exit ${down.status}, ${down.signUps} sign-up request(s)`);
 } finally {
   rmSync(work, { recursive: true, force: true });
 }

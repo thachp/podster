@@ -347,7 +347,7 @@ export function pairProblem(real, unknown, expected) {
 /** A tool's answer with its own name taken out, so an M6 name and an invented one can be compared. */
 export const toolAnswer = (text, name) => String(text ?? "").split(name).join("<tool>");
 
-/** Why a raw /mcp answer to tools/call isn't a JSON-RPC error, or null. */
+/** Why a raw /mcp answer to tools/call isn't a JSON-RPC "tool not found" error with HTTP 200, or null. Its body has been through toolAnswer. */
 export function mcpErrorProblem(shape) {
   if (shape.status !== 200) return `HTTP ${shape.status}, not 200`;
   if (!/application\/json/.test(shape.headers["content-type"] ?? "")) return `content type ${shape.headers["content-type"] ?? "none"}, not JSON`;
@@ -358,10 +358,17 @@ export function mcpErrorProblem(shape) {
     return "a body that isn't JSON";
   }
   if (body?.jsonrpc !== "2.0") return "not a JSON-RPC answer";
-  if (Number.isInteger(body?.error?.code)) return null;
-  if (body?.result?.isError === true) return null;
-  return "a JSON-RPC answer that isn't an error";
+  const rpcError = Number.isInteger(body?.error?.code);
+  if (!rpcError && body?.result?.isError !== true) return "a JSON-RPC answer that isn't an error";
+  const text = (rpcError ? body.error.message : body.result.content?.[0]?.text) ?? "";
+  return toolNotFound(text) ? null : `an error other than "tool not found": ${String(text).slice(0, 80)}`;
 }
+
+/**
+ * Whether an error's text, with the tool's own name taken out by toolAnswer, is the MCP SDK's "tool not found". The
+ * SDK's server sends it as `MCP error -32602: Tool <name> not found`, in a result marked isError.
+ */
+export const toolNotFound = (text) => /^(MCP error -32602: )?Tool <tool> not found$/.test(String(text ?? "").trim());
 
 // ---- what counts as M6's ----
 

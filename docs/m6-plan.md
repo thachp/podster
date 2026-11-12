@@ -768,7 +768,7 @@ The architect proposes the gate call, for the owner to review.
 - requests are paced and every loop is bounded;
 - Ctrl-C stops it at the next request, and it still cleans up.
 
-It takes 2 test sign-ups, switches nothing on, and calls no Cloudflare API. Before any sign-up, two signed-out reads show staging answers as expected. A failed preflight exits 2 with no sign-up taken. The second sign-up is taken only once the owner's organization, room and agent are made.
+It takes 2 test sign-ups, switches nothing on, and calls no Cloudflare API. Before any sign-up, two signed-out reads show staging answers as expected. A failed preflight exits 2 with no sign-up taken. The second sign-up is taken only once the owner's organization, room and agent are made. A sign-up is never sent twice: if its answer is lost in transport it may still have been taken, so the run asks for no further sign-up, says the outcome is unknown, and exits 1.
 
 **When it counts as passed.** It exits 0 only when nothing failed and every check that needs staging passed. Two checks are exceptions:
 - M6-S00 reads this checkout only, so its pass never counts as the run having shown anything.
@@ -787,7 +787,7 @@ Otherwise the run exits 1 and names each check it didn't show, so a run whose se
 | M6-S01c | The same for a room that doesn't exist |
 | M6-S01d | The same for a member sending a body that isn't JSON, on every M6 write |
 | M6-S01b | The same for a second person who isn't in the room |
-| M6-S01e | An agent through `/mcp`: an M6 operation's name answers HTTP 200 with a JSON-RPC error, exactly as an invented tool name does, by HTTP and through the MCP SDK |
+| M6-S01e | An agent through `/mcp`: an M6 operation's name answers HTTP 200 with the MCP SDK's "tool not found" error, exactly as an invented tool name does, by HTTP and through the MCP SDK. A name with a problem is asked once more |
 | M6-S03 | A room made after the deploy runs one ordinary task end to end: create, assign to an agent, accept, submit, review. **A fresh room only** |
 | M6-S02a | The room read and the task read, as the owner and as the agent, carry no M6 field |
 | M6-S02b | The agent's MCP tool list names tools, and no M6 tool |
@@ -810,7 +810,7 @@ Otherwise the run exits 1 and names each check it didn't show, so a run whose se
 - the room and its task;
 - the agent.
 
-The agent is disconnected at the end, which ends its OAuth credential; the output says if that failed. Every session is signed out.
+The agent is disconnected at the end, which ends its OAuth credential; the output says if that failed. If the agent's connect fails after the consent made it, the run finds it by name in its organization and disconnects it, or lists it as left behind. Every session is signed out.
 ## Threat model
 
 **Draft, to be walked against the built system at step 11.** *Where a row and [ADR 0010](adr/0010-release-and-the-content-domain.md) differ, the ADR is the later word: rows written on 2026-11-10 still speak of a private room's app and of the Public Suffix List as defence in depth.* "Unverified" means nothing has tested it. "From M5's spike" means the M5 spike saw the GitHub half once; the M6 half is still unverified.

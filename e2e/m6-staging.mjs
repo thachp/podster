@@ -13,8 +13,9 @@
 //
 // Staging's gateway is the only base URL it accepts. Before any sign-up, two signed-out reads show staging answers as
 // expected. People: two takes of staging's test sign-up, of its 6 a minute and 40 a day: the owner's first, and the
-// second person's only once the owner's organization, room and agent are made. The agent is made under the owner and
-// takes none. It switches nothing on and calls no Cloudflare API. Output carries IDs, statuses and error codes only,
+// second person's only once the owner's organization, room and agent are made. A sign-up is never sent twice: one whose
+// answer is lost in transport may have been taken, so the run stops asking for sign-ups and fails, saying its outcome is
+// unknown. The agent is made under the owner and takes none. It switches nothing on and calls no Cloudflare API. Output carries IDs, statuses and error codes only,
 // and every credential it handles is scrubbed from it.
 //
 // Exit codes: 0 only when nothing failed and every check that needs staging passed (M6-S04 may say SKIP; M6-S00 reads
@@ -23,13 +24,14 @@
 //
 // Left behind, as every staging run's are: the two test people, the owner's organization made for the run, the room,
 // its task, and the agent. The agent is disconnected at the end, which ends its OAuth credential; the output says if
-// that failed, and then its credential stays valid until it expires. Every test session is signed out. Ctrl-C stops
+// that failed, and then its credential stays valid until it expires. An agent whose connect failed after the consent
+// made it is found by name and disconnected then, or listed as left behind. Every test session is signed out. Ctrl-C stops
 // the run at its next request and still cleans up.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  ABSENT_ROOM, agentCapabilities, answerShape, CALLERS, differences, expectedAnswer, fillPath, m6EventTypes, m6Fields, m6Keys, m6Names, m6Operations, mcpErrorProblem, neighbour, operationsProblem, pairProblem, parseArgs, personOnly, PLAN, runOutcome, scrub, secretProblem, SIGN_UPS, snake, STAGING, Tally, toolAnswer, USAGE,
+  ABSENT_ROOM, agentCapabilities, answerShape, CALLERS, differences, expectedAnswer, fillPath, m6EventTypes, m6Fields, m6Keys, m6Names, m6Operations, mcpErrorProblem, neighbour, operationsProblem, pairProblem, parseArgs, personOnly, PLAN, runOutcome, scrub, secretProblem, SIGN_UPS, snake, STAGING, Tally, toolAnswer, toolNotFound, USAGE,
 } from "./m6-staging-lib.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -123,15 +125,17 @@ const pause = async (ms) => {
 };
 
 /**
- * One request, retried once on a transport error, as the run's other staging scripts do. Target already waits out a
- * 429 twice, after the wait the gateway names (at most 70 s), before it gives the 429 back. Throws naming the request.
+ * One request, retried once on a transport error, as the run's other staging scripts do, unless `retry` is false.
+ * Target already waits out a 429 twice, after the wait the gateway names (at most 70 s), before it gives the 429 back.
+ * Throws naming the request.
  */
-async function send(label, path, init) {
+async function send(label, path, init, { retry = true } = {}) {
   for (let attempt = 1; ; attempt++) {
     await pause(PACE_MS);
     try {
       return await target.http(path, init);
     } catch (error) {
+      if (!retry) throw new Error(`${label}: the request failed in transport (${cause(error.cause ?? error)})`);
       if (attempt >= 2) throw new Error(`${label}: the request failed twice in transport (${cause(error.cause ?? error)})`);
     }
   }
@@ -142,8 +146,23 @@ async function send(label, path, init) {
 const sessions = [];
 const agents = [];
 const leftBehind = [];
+let signUpsAsked = 0;
+let signUpUnknown = false;
+/**
+ * One take of the test sign-up. Never sent twice: a sign-up whose answer was lost in transport may have been taken, so
+ * it isn't asked again, and no later sign-up is asked for either. The run then fails, saying the outcome is unknown.
+ */
 async function person(label) {
-  const res = await send(`the test sign-up for ${label}`, "/api/auth/sign-up/e2e", { method: "POST", headers: { authorization: `Bearer ${signupSecret}` } });
+  ok(!signUpUnknown, `the test sign-up for ${label} wasn't asked for: an earlier sign-up's outcome is unknown`);
+  signUpsAsked++;
+  let res;
+  try {
+    res = await send(`the test sign-up for ${label}`, "/api/auth/sign-up/e2e", { method: "POST", headers: { authorization: `Bearer ${signupSecret}` } }, { retry: false });
+  } catch (error) {
+    if (error instanceof Halt) throw error;
+    signUpUnknown = true;
+    throw new Error(`${cause(error)}. Whether staging took that sign-up is unknown, so it wasn't asked again`);
+  }
   ok(res.status === 200, `the test sign-up for ${label} answered ${res.status}. A 404 means it's off on staging, or PODSTER_E2E_SIGNUP_SECRET is wrong.`);
   const cookie = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
   for (const value of [cookie, ...cookie.split("; ").map((part) => part.slice(part.indexOf("=") + 1)).filter((value) => value.length >= 16)]) secret(value);
@@ -152,8 +171,31 @@ async function person(label) {
   leftBehind.push(`${label} ${made.id}`);
   return made;
 }
+/** Disconnects an agent, which ends its OAuth credential, and says how that went. */
+async function disconnect(linker, id) {
+  const res = await linker.dash("POST", `/agents/${id}/disconnect`, {}).catch((error) => ({ status: cause(error) }));
+  say(`Agent ${id}: ${res.status === 200 ? "disconnected, so its OAuth credential no longer works" : `the disconnect answered ${res.status}: its OAuth credential stays valid until it expires`}.`);
+}
+
+/**
+ * An agent under `linker`, through the MCP SDK and the consent form. If the connect fails midway, after the consent
+ * made the agent, the agent is found by its name in the run's organization and disconnected, or listed as left behind.
+ */
 async function agentOf(linker, label) {
-  const made = await McpAgent.connect(target, linker, `${RUN} ${label}`);
+  const name = `${RUN} ${label}`;
+  let made;
+  try {
+    made = await McpAgent.connect(target, linker, name);
+  } catch (error) {
+    const listed = await linker.dash("GET", "/agents").catch(() => null);
+    const halfMade = listed?.ok && Array.isArray(listed.body?.agents) ? listed.body.agents.filter((each) => each.org_id === linker.actingOrg && each.name === name && !each.revoked_at) : null;
+    if (!halfMade) leftBehind.push(`possibly an agent named "${name}", made before its connect failed: the agent list couldn't be read, so it wasn't disconnected`);
+    for (const each of halfMade ?? []) {
+      leftBehind.push(`agent ${each.id}, made before its connect failed`);
+      await disconnect(linker, each.id);
+    }
+    throw error;
+  }
   agents.push({ agent: made, linker });
   const keep = (held) => {
     secret(held?.access_token);
@@ -306,21 +348,36 @@ async function main() {
     return compareAll("outsider", outsider, room);
   });
   await check("M6-S01e", async () => {
-    const found = [];
-    for (const op of operations) {
-      const name = snake(op.operation);
+    /** What's wrong with one M6 name's answers, by HTTP and through the SDK, beside an invented tool's. */
+    const askTool = async (name) => {
       const invented = `${name}_x`;
+      const problems = [];
       const [real, unknown] = [await mcpAnswer(agent, name), await mcpAnswer(agent, invented)];
-      const shape = mcpErrorProblem(real);
-      if (shape) found.push(`tools/call ${name} for an agent: ${shape}`);
+      for (const [which, shape] of [["", real], [", an invented tool", unknown]]) {
+        const problem = mcpErrorProblem(shape);
+        if (problem) problems.push(`tools/call ${name} for an agent${which}: ${problem}`);
+      }
       const diff = differences(real, unknown);
-      if (diff.length) found.push(`tools/call ${name} for an agent, beside an invented tool: ${diff.join("; ")}`);
+      if (diff.length) problems.push(`tools/call ${name} for an agent, beside an invented tool: ${diff.join("; ")}`);
       await pause(PACE_MS);
       const [sdkReal, sdkUnknown] = [await agent.call(name, {}), await agent.call(invented, {})];
-      if (sdkReal.ok || sdkUnknown.ok || toolAnswer(sdkReal.code, name) !== toolAnswer(sdkUnknown.code, invented)) found.push(`tools/call ${name} through the MCP SDK answered other than an invented tool`);
+      const [sdkRealText, sdkUnknownText] = [toolAnswer(sdkReal.code, name), toolAnswer(sdkUnknown.code, invented)];
+      if (sdkReal.ok || sdkUnknown.ok || !toolNotFound(sdkRealText) || sdkRealText !== sdkUnknownText) problems.push(`tools/call ${name} through the MCP SDK wasn't "tool not found" alike with an invented tool`);
+      return problems;
+    };
+    const found = [];
+    let again = 0;
+    for (const op of operations) {
+      const name = snake(op.operation);
+      let problems = await askTool(name);
+      if (problems.length) {
+        again++;
+        problems = await askTool(name);
+      }
+      found.push(...problems);
     }
     ok(found.length === 0, found.join("\n             "));
-    return `${operations.length} M6 names, each a JSON-RPC error with HTTP 200, alike with an invented tool, by HTTP and through the SDK`;
+    return `${operations.length} M6 names, each "tool not found" as a JSON-RPC error with HTTP 200, alike with an invented tool, by HTTP and through the SDK${again ? `; ${again} name(s) asked again after a first problem` : ""}`;
   });
 
   say("\n## the room schema step harmed nothing, in a room made after the deploy");
@@ -388,13 +445,13 @@ try {
   tally.skipRest(stopping ? "not run: the run was stopped by a signal" : "not run: the run stopped before it");
   for (const { agent: each, linker } of agents) {
     await each.close().catch(() => null);
-    const res = await linker.dash("POST", `/agents/${each.id}/disconnect`, {}).catch((error) => ({ status: cause(error) }));
-    say(`Agent ${each.id}: ${res.status === 200 ? "disconnected, so its OAuth credential no longer works" : `the disconnect answered ${res.status}: its OAuth credential stays valid until it expires`}.`);
+    await disconnect(linker, each.id);
   }
   for (const cookie of sessions) await target.http("/api/auth/sign-out", { method: "POST", headers: { cookie, origin: target.base, "content-type": "application/json" }, body: "{}" }).catch(() => null);
 }
 const outcome = runOutcome(tally);
-say(`\n${tally.summary()}, in ${Math.round((Date.now() - started) / 1000)} s. Sign-ups taken: ${sessions.length}. Checks shown on staging: ${outcome.shownOnStaging}.`);
+say(`\n${tally.summary()}, in ${Math.round((Date.now() - started) / 1000)} s. Sign-ups asked for: ${signUpsAsked}, answered with a session: ${sessions.length}. Checks shown on staging: ${outcome.shownOnStaging}.`);
+if (signUpUnknown) say("A sign-up's answer was lost in transport: whether staging took it is unknown, and it wasn't asked again.");
 if (outcome.unshown.length) say(`Not shown on staging, so the run doesn't count as passed: ${outcome.unshown.join(", ")}.`);
 say(`Left behind on staging: ${leftBehind.length ? leftBehind.join("; ") : "nothing"}. Every test session was signed out.`);
 process.exit(outcome.code);

@@ -243,7 +243,7 @@ pub async fn list_reports(env: &Env, caller: &Caller, url: &Url) -> R<Response> 
     call(env, &path, Method::Get, None).await
 }
 
-fn reason_of(body: Option<&str>) -> R<Reason> {
+pub(crate) fn reason_of(body: Option<&str>) -> R<Reason> {
     let fields = object(body)?;
     if fields.keys().any(|k| k != "reason") {
         return Err(ApiError::invalid_argument());
@@ -307,16 +307,44 @@ async fn suspend_room(
     suspended: bool,
     reason: Reason,
 ) -> R<std::result::Result<Value, Response>> {
+    let request = json!({ "suspended": suspended, "reason": reason.name(), "handle": handle });
+    room_action(
+        env,
+        operator,
+        workspace,
+        crate::workspace::INTERNAL_SUSPENSION,
+        request,
+        subject_kind,
+        subject,
+        suspended,
+        reason,
+    )
+    .await
+}
+
+/// An operator's suspension or lifting, asked of one room on one of its internal paths: recorded as intent first and
+/// its outcome after, so no action happens without a row. The room decides, and its refusal is answered as it is.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn room_action(
+    env: &Env,
+    operator: &str,
+    workspace: &str,
+    path: &str,
+    request: Value,
+    subject_kind: &str,
+    subject: &str,
+    suspended: bool,
+    reason: Reason,
+) -> R<std::result::Result<Value, Response>> {
     let action = if suspended { "suspend" } else { "lift" };
     let seq = begin(env, operator, subject_kind, subject, action, reason).await?;
-    let request = json!({ "suspended": suspended, "reason": reason.name(), "handle": handle });
     let stub = env
         .durable_object("WORKSPACE")?
         .id_from_name(workspace)?
         .get_stub()?;
     let answered = forward(
         stub,
-        crate::workspace::INTERNAL_SUSPENSION,
+        path,
         "",
         Headers::new(),
         Method::Post,

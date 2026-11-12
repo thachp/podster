@@ -23,8 +23,8 @@ pub(super) fn suspension(sql: &SqlStorage) -> R<Value> {
 
 /// Who the room records for an operator's action. The owner sees "Suspended by Podster" (decision 158), so the operator's
 /// own ID stays in the `Moderation` object's log and never reaches the room's events, inbox or audit.
-const PODSTER: &str = "podster";
-const PODSTER_KIND: &str = "system";
+pub(super) const PODSTER: &str = "podster";
+pub(super) const PODSTER_KIND: &str = "system";
 
 /// `{ suspended, reason, handle? }`: suspends or lifts, audited as Podster, with an event that marks the index row due and
 /// tells the room's managers. With `handle`, the room acts only if it's the room's handle now or its last published one, so

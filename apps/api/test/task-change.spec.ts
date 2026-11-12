@@ -1209,6 +1209,9 @@ describe("the room migration", () => {
     await inRoom(r.id, (sql) => {
       // The newest step, the M5 security review's two columns, comes off first.
       // M6 step 2's release tables, the newest migration, come off first.
+      // M6 step 4(a)'s applier and script-delete tables, the newest migration, come off first.
+      for (const table of ["serve_apply", "script_delete"]) sql.exec(`DROP TABLE ${table}`);
+      sql.exec("UPDATE schema_version SET version = version - 1");
       for (const table of ["release_config", "serve_state", "unpublish", "release", "app_label", "hostname_request"]) sql.exec(`DROP TABLE ${table}`);
       sql.exec("UPDATE schema_version SET version = version - 1");
       for (const [table, column] of [["repo_link", "gone_seen_at"], ["repo_request", "limited_since"], ["repo_request", "limited_call"]]) sql.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);

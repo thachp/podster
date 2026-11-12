@@ -7,9 +7,22 @@
 //   list or event names anything of M6's.
 // - The room schema step that build step 2 added harmed nothing in a room made after the deploy: one ordinary task runs
 //   end to end there. A room made before the deploy, where a migration could really harm one, isn't reachable with test
-//   people, who are new on every run, so M6-S04 says SKIP and why.
+//   people, who are new on every run, so the usual run's M6-S04 says SKIP and how to show it instead.
 //
 //   node m6-staging.mjs --base-url https://gateway-staging.podster.dev [--dry-run]
+//
+// M6-S04 is two runs of their own, around a deploy (docs/m6-plan.md, "Staging script"):
+//
+//   node m6-staging.mjs --base-url https://gateway-staging.podster.dev --before-deploy --deployed-commit SHA
+//   (deploy with scripts/deploy-staging)
+//   node m6-staging.mjs --base-url https://gateway-staging.podster.dev --after-deploy --deployed-commit SHA
+//
+// The first takes one test sign-up and makes a room with a task part-way through its life. The test sign-up can't sign a
+// test person in again, so it keeps the owner's test session, with IDs only beside it, in ~/.podster/m6-staging/s04.json
+// at mode 0600, never printed. The second takes no sign-up. It refuses unless that file is usable, isn't stale and names
+// another commit than the one it's told staging is at now; staging doesn't say its commit to a signed-out caller, so
+// --deployed-commit is what scripts/deploy-staging printed. It finishes the task in the older room, then signs the session
+// out and deletes the file, whatever its checks found.
 //
 // Staging's gateway is the only base URL it accepts. Before any sign-up, two signed-out reads show staging answers as
 // expected. People: two takes of staging's test sign-up, of its 6 a minute and 40 a day: the owner's first, and the
@@ -20,7 +33,8 @@
 //
 // Exit codes: 0 only when nothing failed and every check that needs staging passed (M6-S04 may say SKIP; M6-S00 reads
 // this checkout only and never counts as shown); 1 otherwise, the output naming what wasn't shown; 2 for a refused
-// configuration or a failed preflight, with no sign-up taken.
+// configuration, a kept file that can't be used, or a failed preflight, with no sign-up taken. Each phase is the same,
+// with its own checks, none of which may say SKIP.
 //
 // Left behind, as every staging run's are: the two test people, the owner's organization made for the run, the room,
 // its task, and the agent. The agent is disconnected at the end, which ends its OAuth credential; the output says if
@@ -28,11 +42,14 @@
 // made it is found by name and disconnected then, or listed as left behind. Every test session is signed out. Ctrl-C stops
 // the run at its next request and still cleans up.
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  ABSENT_ROOM, agentCapabilities, answerShape, CALLERS, differences, expectedAnswer, fillPath, m6EventTypes, m6Fields, m6Keys, m6Names, m6Operations, mcpErrorProblem, neighbour, operationsProblem, pairProblem, parseArgs, personOnly, PLAN, runOutcome, scrub, secretProblem, SIGN_UPS, snake, STAGING, Tally, toolAnswer, toolNotFound, USAGE,
+  ABSENT_ROOM, agentCapabilities, answerShape, CALLERS, differences, expectedAnswer, fillPath, keptFile, KEPT_MARGIN_SECONDS, keptProblem, keptRecord, m6EventTypes, m6Fields, m6Keys, m6Names, m6Operations, mcpErrorProblem, neighbour, operationsProblem, pairProblem, parseArgs, personOnly, PHASE_SIGN_UPS, planFor, runOutcome, scrub,
+  secretProblem, SESSION_SECONDS, SIGN_UPS, snake, STAGING, Tally, toolAnswer, toolNotFound, USAGE,
 } from "./m6-staging-lib.mjs";
+import { readKept, removeKept, writeKept } from "./m6-staging-kept.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const parsed = parseArgs(process.argv.slice(2), process.env);
@@ -46,6 +63,12 @@ if (options.help) {
   process.exit(0);
 }
 const signupSecret = process.env.PODSTER_E2E_SIGNUP_SECRET;
+const phase = options.phase;
+const PLAN = planFor(phase);
+const signUpsPlanned = phase ? PHASE_SIGN_UPS[phase] : SIGN_UPS;
+const keptAt = keptFile(homedir());
+/** Shown in place of the kept file's path, which names the runner's home. */
+const KEPT_SHOWN = "~/.podster/m6-staging/s04.json";
 
 // ---- the contract, the plan and the configuration, before anything is sent ----
 
@@ -62,10 +85,11 @@ const operations = contractText ? m6Operations(contractText) : [];
 const fieldKeys = contractText ? m6Keys(contractText) : [];
 const contractProblem = !contractText ? "the contract couldn't be read" : !capabilitiesText ? "the capability list couldn't be read" : operationsProblem(operations, personOnly(capabilitiesText), agentCapabilities(capabilitiesText)) ?? (fieldKeys.length ? null : "the contract gives no M6 field to look for");
 {
-  const problems = [secretProblem(signupSecret), contractProblem].filter(Boolean);
-  console.log(`M6's staging run, switched off, against ${STAGING}${options.dryRun ? " (dry run: nothing is sent)" : ""}`);
-  console.log(`\nSign-ups this run takes: ${SIGN_UPS.length}, of the test sign-up's 6 a minute and 40 a day.`);
-  for (const { who, why } of SIGN_UPS) console.log(`  - ${who}: ${why}`);
+  const problems = [signUpsPlanned.length ? secretProblem(signupSecret) : null, contractProblem].filter(Boolean);
+  const which = phase ? `, M6-S04's ${phase === "before" ? "first phase, before a deploy" : "second phase, after a deploy"}, with staging named at ${options.deployedCommit}` : "";
+  console.log(`M6's staging run, switched off, against ${STAGING}${which}${options.dryRun ? " (dry run: nothing is sent)" : ""}`);
+  console.log(`\nSign-ups this run takes: ${signUpsPlanned.length}, of the test sign-up's 6 a minute and 40 a day.`);
+  for (const { who, why } of signUpsPlanned) console.log(`  - ${who}: ${why}`);
   console.log(`\nM6 operations, read from the contract: ${operations.length}.`);
   for (const op of operations) console.log(`  ${op.method.padEnd(6)} ${op.path}  ${op.operation}`);
   console.log(`M6 fields, derived from the contract's M6 schemas: ${fieldKeys.join(", ") || "none"}.`);
@@ -76,8 +100,39 @@ const contractProblem = !contractText ? "the contract couldn't be read" : !capab
   for (const problem of problems) console.error(`\nRefused: ${problem}.`);
   if (problems.length) process.exit(2);
   if (options.dryRun) {
-    console.log("\nThe configuration is complete. Nothing was sent to staging.");
+    console.log(`\nThe configuration is complete. Nothing was sent to staging${phase ? `, and ${KEPT_SHOWN} wasn't read` : ""}.`);
     process.exit(0);
+  }
+}
+
+// ---- M6-S04's kept file, before anything is sent ----
+
+/** The second phase's record, once it's shown usable. */
+let kept = null;
+if (phase) {
+  const refuse = (why) => {
+    console.error(`\nRefused: ${why}.\nNothing was sent to staging.`);
+    process.exit(2);
+  };
+  const found = readKept(keptAt);
+  if (found.problem) refuse(`${found.problem} (${KEPT_SHOWN}). Look at it, and delete it if it isn't needed`);
+  const now = Date.now();
+  if (phase === "before" && found.record) {
+    if (Number.isSafeInteger(found.record.stale_at) && now >= found.record.stale_at) {
+      if (!removeKept(keptAt)) refuse(`an earlier first phase's kept file is stale and couldn't be deleted (${KEPT_SHOWN})`);
+      console.log(`\nAn earlier first phase's kept file was stale, so its test session had ended or was about to: it was deleted. Its room is left behind.`);
+    } else refuse(`an earlier first phase's kept file is still usable (${KEPT_SHOWN}): run --after-deploy after the deploy, or wait until it's stale`);
+  }
+  if (phase === "after") {
+    if (found.missing) refuse(`no kept file at ${KEPT_SHOWN}: run --before-deploy before the deploy first`);
+    const problem = keptProblem(found.record, { now, commit: options.deployedCommit });
+    // Only a file that is the script's in every other way is deleted for being stale: its session has ended.
+    if (problem?.startsWith("the kept file is stale")) {
+      removeKept(keptAt);
+      refuse(`${problem}. The file was deleted; its room is left behind. Run both phases again`);
+    }
+    if (problem) refuse(`${problem} (${KEPT_SHOWN})`);
+    kept = found.record;
   }
 }
 
@@ -89,12 +144,17 @@ const POLL_MS = 2000;
 const PACE_MS = 600;
 const target = new Target(STAGING, { pollMs: POLL_MS });
 const RUN = `M6 staging ${new Date().toISOString().slice(0, 16)}`;
-const secrets = [signupSecret];
+const secrets = [signupSecret, kept?.session].filter(Boolean);
 const secret = (value) => {
   if (typeof value === "string" && value.length >= 8 && !secrets.includes(value)) secrets.push(value);
   return value;
 };
 const say = (line = "") => console.log(scrub(line, secrets));
+/** A session cookie, and each value in it, are scrubbed from everything the run prints. */
+const secretCookie = (cookie) => {
+  for (const value of [cookie, ...cookie.split("; ").map((part) => part.slice(part.indexOf("=") + 1)).filter((value) => value.length >= 16)]) secret(value);
+};
+if (kept) secretCookie(kept.session);
 const tally = new Tally(PLAN, say);
 
 /** A check that can't run here, with why. */
@@ -147,6 +207,10 @@ const sessions = [];
 const agents = [];
 const leftBehind = [];
 let signUpsAsked = 0;
+let signUpsAnswered = 0;
+let signedUpAt = 0;
+/** The session the first phase keeps for the second, which the run then doesn't sign out. */
+let keptSession = null;
 let signUpUnknown = false;
 /**
  * One take of the test sign-up. Never sent twice: a sign-up whose answer was lost in transport may have been taken, so
@@ -155,6 +219,8 @@ let signUpUnknown = false;
 async function person(label) {
   ok(!signUpUnknown, `the test sign-up for ${label} wasn't asked for: an earlier sign-up's outcome is unknown`);
   signUpsAsked++;
+  // Before the request, so a kept session's end is never later than this says.
+  signedUpAt = Date.now();
   let res;
   try {
     res = await send(`the test sign-up for ${label}`, "/api/auth/sign-up/e2e", { method: "POST", headers: { authorization: `Bearer ${signupSecret}` } }, { retry: false });
@@ -165,8 +231,9 @@ async function person(label) {
   }
   ok(res.status === 200, `the test sign-up for ${label} answered ${res.status}. A 404 means it's off on staging, or PODSTER_E2E_SIGNUP_SECRET is wrong.`);
   const cookie = res.headers.getSetCookie().map((c) => c.split(";")[0]).join("; ");
-  for (const value of [cookie, ...cookie.split("; ").map((part) => part.slice(part.indexOf("=") + 1)).filter((value) => value.length >= 16)]) secret(value);
+  secretCookie(cookie);
   sessions.push(cookie);
+  signUpsAnswered++;
   const made = await Person.fromCookie(target, label, cookie);
   leftBehind.push(`${label} ${made.id}`);
   return made;
@@ -238,13 +305,13 @@ async function mcpAnswer(caller, name) {
  * more, so one odd answer doesn't fail the run; a pair that still differs, or that is alike and isn't the API's own
  * answer for a missing route for that caller, fails, naming the route and the caller.
  */
-async function compareAll(caller, who, where, { raw = '{"reason":"abuse"}', writesOnly = false } = {}) {
+async function compareAll(caller, who, where, { raw = '{"reason":"abuse"}', writesOnly = false, readsOnly = false } = {}) {
   const found = [];
   const seen = new Set();
   let asked = 0;
   let again = 0;
   for (const op of operations) {
-    if (writesOnly && op.method === "GET") continue;
+    if ((writesOnly && op.method === "GET") || (readsOnly && op.method !== "GET")) continue;
     const path = fillPath(op.path, where);
     let real = await personAnswer(who, op.method, path, raw);
     let unknown = await personAnswer(who, op.method, neighbour(path), raw);
@@ -426,7 +493,117 @@ async function main() {
   });
 
   await check("M6-S04", async () => {
-    throw new Skip("not shown: a room made before the deploy, where the room schema step's migration could really harm one, belongs to an earlier run's test people, whose sessions no run keeps. M6-S03 shows a fresh room only");
+    throw new Skip("not shown in this run: a room made before the deploy, where the room schema step's migration could really harm one, needs a session kept across the deploy. Run --before-deploy before a deploy and --after-deploy after it, each with --deployed-commit; M6-S03 shows a fresh room only");
+  });
+}
+
+// ---- M6-S04, in two phases around a deploy ----
+
+/** A task's current read, as the owner. */
+const taskRead = async (where, id) => (await owner.must("GET", `/v1/workspaces/${where}/tasks/${id}`)).task;
+
+/**
+ * The first phase, before a deploy: one sign-up, a room with an agent, and a task offered to it and accepted. The agent
+ * is then disconnected, so by the departure rule the task is open again with no assignee: part-way through its life,
+ * with state and events written by the commit staging is at now. The owner's session is kept for the second phase.
+ */
+async function beforeDeploy() {
+  await check("M6-S04a", async () => {
+    owner = await person("the older room's owner");
+    await owner.useNewOrg(`${RUN} team`);
+    leftBehind.push(`the run's organization ${owner.actingOrg}`);
+    room = await owner.createRoom(`${RUN} older room`);
+    leftBehind.push(`room ${room}`);
+    const first = await agentOf(owner, "worker before the deploy");
+    leftBehind.push(`agent ${first.id}`);
+    await owner.addAgent(room, first);
+    const made = await owner.must("POST", `/v1/workspaces/${room}/tasks`, { title: `${RUN} task across a deploy`, instructions: "Write a short note.", assignee: first.id }, { idempotencyKey: key() });
+    leftBehind.push(`task ${made.id}`);
+    const accepted = await first.must("accept_task", { workspace_id: room, task_id: made.id, version: made.version });
+    eq([made.status, accepted.status], ["offered", "accepted"], "the task's status before the disconnect");
+    // The disconnect ends the agent's credential, and its removal from the room releases the task it accepted.
+    const listed = agents.findIndex((each) => each.agent === first);
+    if (listed >= 0) agents.splice(listed, 1);
+    await first.close().catch(() => null);
+    const gone = await owner.dash("POST", `/agents/${first.id}/disconnect`, {});
+    ok(gone.status === 200, `the disconnect of agent ${first.id} answered ${gone.status} ${gone.code ?? ""}`);
+    let released;
+    for (let reads = 0; reads < 15; reads++) {
+      released = await taskRead(room, made.id);
+      if (released.status !== "accepted") break;
+      await pause(POLL_MS);
+    }
+    eq([released.status, released.assignee ?? null], ["open", null], "the task after its agent was disconnected");
+    const events = await roomEvents(owner, room);
+    const types = events.filter((event) => event.task_id === made.id).map((event) => event.type);
+    for (const type of ["task.offered", "task.accepted", "task.assignee_departed"]) ok(types.includes(type), `the room's events have no ${type} for the task`);
+    writeKept(keptAt, keptRecord({ commit: options.deployedCommit, signedUpAt, owner: owner.id, org: owner.actingOrg, room, task: made.id, eventsSeen: events.length, lastSeq: events.at(-1).seq }, owner.cookie));
+    keptSession = owner.cookie;
+    task = made.id;
+    return `room ${room}, task ${made.id}: offered, accepted, then open with no assignee once agent ${first.id} was disconnected; ${events.length} events. Kept for --after-deploy until ${new Date(signedUpAt + (SESSION_SECONDS - KEPT_MARGIN_SECONDS) * 1000).toISOString().slice(0, 16)} UTC`;
+  });
+}
+
+/**
+ * The second phase, after the deploy: no sign-up. The kept session finishes the task in the room made before the deploy,
+ * with a new agent, and reads the room's settings and M6's reads there.
+ */
+async function afterDeploy() {
+  try {
+    owner = await Person.fromCookie(target, "the older room's owner", kept.session);
+    ok(owner.id === kept.owner, "the kept session is someone other than the first phase's owner");
+  } catch (error) {
+    if (error instanceof Halt) throw error;
+    say(`     the kept session wasn't accepted: ${cause(error)}`);
+    tally.skipRest("not run: the kept session wasn't accepted, so nothing in the older room could be read");
+    return;
+  }
+  owner.org = owner.actingOrg = kept.org;
+  room = kept.room;
+  task = kept.task;
+  say(`     owner ${owner.id}; organization ${owner.actingOrg}; room ${room}; task ${task}; staging was at ${kept.deployed_commit}, now at ${options.deployedCommit}`);
+  leftBehind.push(`the first phase's test person ${owner.id}, organization ${owner.actingOrg}, room ${room} and task ${task}`);
+
+  say("\n## the room made before the deploy");
+  await check("M6-S04b", async () => {
+    const before = await taskRead(room, task);
+    eq([before.status, before.assignee ?? null], ["open", null], "the task as the first phase left it");
+    agent = await agentOf(owner, "worker after the deploy");
+    leftBehind.push(`agent ${agent.id}`);
+    await owner.addAgent(room, agent);
+    const at = { workspace_id: room, task_id: task };
+    const offered = await owner.must("POST", `/v1/workspaces/${room}/tasks/${task}/assign`, { version: before.version, assignee: agent.id });
+    const accepted = await agent.must("accept_task", { ...at, version: offered.version });
+    const submitted = await agent.must("submit_task", { ...at, version: accepted.version, note: "Done." });
+    const reviewed = await owner.must("POST", `/v1/workspaces/${room}/tasks/${task}/verify`, { submission_no: 1 });
+    const final = await taskRead(room, task);
+    eq([offered.status, accepted.status, submitted.status, reviewed.status ?? reviewed.task?.status, final.status], ["offered", "accepted", "submitted", "completed", "completed"], "the task's status at each step");
+    return `task ${task}, made before the deploy: offered to agent ${agent.id}, accepted, submitted, completed`;
+  });
+  await check("M6-S04c", async () => {
+    const audit = await owner.must("GET", `/v1/workspaces/${room}/audit?after=0`);
+    ok(Array.isArray(audit?.audit) && audit.audit.length > 0, "the room's audit log answered with no entries");
+    const reads = [
+      ["the owner's room read", await owner.must("GET", `/v1/workspaces/${room}`)],
+      ["the room's visibility", await owner.must("GET", `/v1/workspaces/${room}/visibility`)],
+      ["the room's audit log", audit],
+      ["the owner's task read", await owner.must("GET", `/v1/workspaces/${room}/tasks/${task}`)],
+    ];
+    ok(agent, "no agent read: M6-S04b connected no agent");
+    reads.push(["the agent's room read", await agent.must("get_workspace", { workspace_id: room }, false)], ["the agent's task read", await agent.must("get_task", { workspace_id: room, task_id: task }, false)]);
+    const found = reads.flatMap(([label, body]) => m6Fields(body, fieldKeys).map((field) => `${label}: ${field}`));
+    ok(found.length === 0, `M6 fields: ${found.join(", ")}`);
+    return `${reads.length} reads, no M6 field of ${fieldKeys.length} looked for`;
+  });
+  await check("M6-S04d", () => compareAll("owner", owner, room, { readsOnly: true }));
+  await check("M6-S04e", async () => {
+    const events = await roomEvents(owner, room);
+    const older = events.filter((event) => event.seq <= kept.last_seq);
+    ok(older.length === kept.events_seen, `the room has ${older.length} events up to ${kept.last_seq}, where the first phase read ${kept.events_seen}`);
+    ok(events.some((event) => event.seq > kept.last_seq && event.task_id === task && event.type === "task.completed"), "no task.completed for the task after the deploy");
+    const types = m6EventTypes(events);
+    ok(types.length === 0, `M6 event types: ${types.join(", ")}`);
+    return `${events.length} events, the first phase's ${kept.events_seen} still first; types ${[...new Set(events.map((e) => e.type))].sort().join(", ")}`;
   });
 }
 
@@ -437,8 +614,9 @@ try {
   console.error(scrub(`\nRefused: the signed-out preflight failed: ${cause(error)}.\nNo sign-up was taken.`, secrets));
   process.exit(2);
 }
+if (kept) sessions.push(kept.session);
 try {
-  await main();
+  await (phase === "before" ? beforeDeploy : phase === "after" ? afterDeploy : main)();
 } catch (error) {
   say(`\nThe run stopped: ${cause(error)}`);
 } finally {
@@ -447,11 +625,13 @@ try {
     await each.close().catch(() => null);
     await disconnect(linker, each.id);
   }
-  for (const cookie of sessions) await target.http("/api/auth/sign-out", { method: "POST", headers: { cookie, origin: target.base, "content-type": "application/json" }, body: "{}" }).catch(() => null);
+  for (const cookie of sessions) if (cookie !== keptSession) await target.http("/api/auth/sign-out", { method: "POST", headers: { cookie, origin: target.base, "content-type": "application/json" }, body: "{}" }).catch(() => null);
+  // The second phase is one try: its writes can't be repeated, so its file goes whatever its checks found.
+  if (phase === "after") say(removeKept(keptAt) ? `The kept file ${KEPT_SHOWN} was deleted.` : `The kept file ${KEPT_SHOWN} couldn't be deleted: delete it by hand. Its session was signed out.`);
 }
-const outcome = runOutcome(tally);
-say(`\n${tally.summary()}, in ${Math.round((Date.now() - started) / 1000)} s. Sign-ups asked for: ${signUpsAsked}, answered with a session: ${sessions.length}. Checks shown on staging: ${outcome.shownOnStaging}.`);
+const outcome = runOutcome(tally, PLAN);
+say(`\n${tally.summary()}, in ${Math.round((Date.now() - started) / 1000)} s. Sign-ups asked for: ${signUpsAsked}, answered with a session: ${signUpsAnswered}${kept ? "; the first phase's kept session was used instead" : ""}. Checks shown on staging: ${outcome.shownOnStaging}.`);
 if (signUpUnknown) say("A sign-up's answer was lost in transport: whether staging took it is unknown, and it wasn't asked again.");
 if (outcome.unshown.length) say(`Not shown on staging, so the run doesn't count as passed: ${outcome.unshown.join(", ")}.`);
-say(`Left behind on staging: ${leftBehind.length ? leftBehind.join("; ") : "nothing"}. Every test session was signed out.`);
+say(`Left behind on staging: ${leftBehind.length ? leftBehind.join("; ") : "nothing"}. ${keptSession ? `Every test session was signed out but the owner's, kept in ${KEPT_SHOWN} for --after-deploy; it ends by itself ${SESSION_SECONDS / 3600} hours after its sign-up.` : "Every test session was signed out."}`);
 process.exit(outcome.code);

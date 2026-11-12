@@ -1,18 +1,21 @@
 // Checks the parts of M6's staging run that need no network: which host it accepts, its arguments, its exit code, which
 // operations and fields it reads from the contract as M6's, how two answers are compared and what the API must have
 // answered, and what counts as an M6 name or event. Then the script itself: as a dry run, which sends nothing; against
-// m6-staging-standin.mjs, which answers every request on this machine; and what its source does and doesn't do.
+// m6-staging-standin.mjs, which answers every request on this machine; and what its source does and doesn't do. M6-S04's
+// two phases are checked the same way: their arguments, their kept file and its refusals, and both phases run against
+// the stand-in, one process after the other, as they'd run around a deploy.
 //
 //   node m6-staging-selftest.mjs
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  ABSENT_ROOM, agentCapabilities, answerShape, CALLERS, COMPARED_HEADERS, differences, edgeRefusal, expectedAnswer, fillPath, M6_EVENT, m6EventTypes, m6Fields, m6Keys, m6Names, m6Operations, mcpErrorProblem, neighbour, operationsProblem, pairProblem,
-  parseArgs, personOnly, PLAN, PLANNED_TOOLS, runOutcome, schemas, scrub, secretProblem, SIGN_UPS, snake, STAGING, stagingOnly, Tally, toolAnswer, toolNotFound,
+  ABSENT_ROOM, agentCapabilities, answerShape, CALLERS, COMPARED_HEADERS, differences, edgeRefusal, expectedAnswer, fillPath, KEPT_KIND, KEPT_MARGIN_SECONDS, keptFile, keptProblem, keptRecord, M6_EVENT, m6EventTypes, m6Fields, m6Keys, m6Names, m6Operations, mcpErrorProblem, neighbour,
+  operationsProblem, pairProblem, parseArgs, personOnly, PHASE_PLANS, PHASE_SIGN_UPS, PLAN, PLANNED_TOOLS, planFor, runOutcome, schemas, scrub, secretProblem, SESSION_SECONDS, SIGN_UPS, snake, STAGING, stagingOnly, Tally, toolAnswer, toolNotFound,
 } from "./m6-staging-lib.mjs";
+import { readKept, removeKept, writeKept } from "./m6-staging-kept.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 let failed = 0;
@@ -41,6 +44,78 @@ check(args("--base-url", STAGING, "--contract", "a.yaml", "--capabilities", "b.y
 check(args("--help").options?.help === true, "--help needs nothing else");
 check(secretProblem(undefined) !== null && secretProblem("short") !== null && secretProblem("x".repeat(32)) === null, "the sign-up secret must be set and at least 32 characters");
 check(SIGN_UPS.length === 2, "a run takes 2 test sign-ups, no more");
+
+// ---- M6-S04's two phases: arguments, plans and the kept record ----
+{
+  const commit = "c".repeat(40);
+  const before = args("--base-url", STAGING, "--before-deploy", "--deployed-commit", commit).options;
+  const after = args("--base-url", STAGING, "--after-deploy", "--deployed-commit", commit).options;
+  check(before?.phase === "before" && after?.phase === "after" && before.deployedCommit === commit && args("--base-url", STAGING).options.phase === null, "--before-deploy and --after-deploy pick a phase; the usual run has none");
+  check(Boolean(args("--base-url", STAGING, "--before-deploy").error) && Boolean(args("--base-url", STAGING, "--after-deploy").error), "a phase needs --deployed-commit");
+  check(Boolean(args("--base-url", STAGING, "--deployed-commit", commit).error), "--deployed-commit alone is refused");
+  check(Boolean(args("--base-url", STAGING, "--before-deploy", "--after-deploy", "--deployed-commit", commit).error), "both phases at once are refused");
+  for (const bad of ["c".repeat(7), "C".repeat(40), "g".repeat(40), "c".repeat(64), `${"c".repeat(40)} `]) check(Boolean(args("--base-url", STAGING, "--after-deploy", "--deployed-commit", bad).error), `--deployed-commit must be a full commit: refused ${JSON.stringify(bad.slice(0, 12))}`);
+  check(JSON.stringify(PHASE_SIGN_UPS.before.length) === "1" && PHASE_SIGN_UPS.after.length === 0, "the first phase takes 1 test sign-up and the second none");
+  const phaseIds = [...PHASE_PLANS.before, ...PHASE_PLANS.after].map((e) => e.id);
+  check(JSON.stringify(phaseIds) === JSON.stringify(["M6-S04a", "M6-S04b", "M6-S04c", "M6-S04d", "M6-S04e"]) && !phaseIds.some((id) => PLAN.some((entry) => entry.id === id)), "the phases' checks are M6-S04a to M6-S04e, none of them the usual run's");
+  check([...PHASE_PLANS.before, ...PHASE_PLANS.after].every((e) => !e.offline && !e.maySkip), "no phase check reads the checkout alone, and none may say SKIP");
+  check(planFor(null) === PLAN && planFor("before") === PHASE_PLANS.before && planFor("after") === PHASE_PLANS.after, "each run follows its own plan");
+  const phaseTally = (plan, results) => {
+    const tally = new Tally(plan, () => {});
+    for (const [id, status] of results) tally.add(id, status, "");
+    tally.skipRest("x");
+    return tally;
+  };
+  check(runOutcome(phaseTally(PHASE_PLANS.after, PHASE_PLANS.after.map((e) => [e.id, "pass"])), PHASE_PLANS.after).code === 0 && runOutcome(phaseTally(PHASE_PLANS.after, [["M6-S04b", "pass"]]), PHASE_PLANS.after).code === 1, "a phase exits 0 only when every one of its checks passed: a skip is unshown");
+  check(runOutcome(phaseTally(PHASE_PLANS.before, [["M6-S04a", "fail"]]), PHASE_PLANS.before).code === 1, "a first phase that failed exits 1");
+
+  const gateway = readFileSync(join(here, "../apps/gateway/src/test-people.ts"), "utf8");
+  check(/export const TEST_SESSION_SECONDS = 2 \* 60 \* 60;/.test(gateway) && SESSION_SECONDS === 2 * 60 * 60, "the kept session's life is the gateway's TEST_SESSION_SECONDS");
+  check(/So a test person can't be signed in to again/.test(gateway) && /stable === "operator"/.test(gateway), "the test sign-up signs no test person in again but the fixed operator, which the phases never ask for: so the first phase keeps its session");
+  check(keptFile("/home/x") === "/home/x/.podster/m6-staging/s04.json", "the kept file is under the runner's home, outside the repository");
+  const now = 1_800_000_000_000;
+  const fresh = keptRecord({ commit, signedUpAt: now - 60_000, owner: "per_a", org: "org_b", room: "ws_c", task: "tsk_d", eventsSeen: 4, lastSeq: 4 }, "__Secure-better-auth.session_token=abcdefghijklmnop");
+  const next = "d".repeat(40);
+  check(fresh.kind === KEPT_KIND && fresh.base === STAGING && fresh.stale_at === now - 60_000 + (SESSION_SECONDS - KEPT_MARGIN_SECONDS) * 1000, "the kept record names the script, staging, and when it goes stale");
+  check(!JSON.stringify(fresh).includes("s".repeat(32)) && Object.keys(fresh).sort().join() === "base,deployed_commit,events_seen,kind,last_seq,org,owner,room,session,signed_up_at,stale_at,task", "it holds the session, IDs, the commit, times and an event count, and nothing else");
+  check(keptProblem(fresh, { now, commit: next }) === null, "a fresh record, with staging at another commit, is usable");
+  check(/still at/.test(keptProblem(fresh, { now, commit }) ?? ""), "the same commit is refused: nothing was deployed");
+  check(/stale/.test(keptProblem(fresh, { now: fresh.stale_at, commit: next }) ?? "") && keptProblem(fresh, { now: fresh.stale_at - 1, commit: next }) === null, `it's stale ${KEPT_MARGIN_SECONDS / 60} minutes before the session ends`);
+  for (const [label, change] of [
+    ["another kind", { kind: "x" }], ["another host", { base: "https://gateway.podster.dev" }], ["a short commit", { deployed_commit: "abc" }], ["a moved stale time", { stale_at: fresh.stale_at + 1 }], ["a time in the future", { signed_up_at: now + 1000, stale_at: now + 1000 + (SESSION_SECONDS - KEPT_MARGIN_SECONDS) * 1000 }],
+    ["an ID out of shape", { room: "../x" }], ["no session", { session: "" }], ["no event count", { events_seen: 0 }], ["a sequence below the count", { last_seq: 1 }],
+  ]) check(typeof keptProblem({ ...fresh, ...change }, { now, commit: next }) === "string", `a kept record with ${label} is refused`);
+  check(typeof keptProblem(null, { now, commit: next }) === "string" && typeof keptProblem("x", { now, commit: next }) === "string", "something that isn't a record is refused");
+}
+
+// ---- the kept file, on disk ----
+{
+  const home = mkdtempSync(join(tmpdir(), "podster-m6-kept-"));
+  try {
+    const file = keptFile(home);
+    check(readKept(file).missing === true, "no file reads as missing");
+    writeKept(file, { a: 1 });
+    check((statSync(file).mode & 0o777) === 0o600 && (statSync(dirname(file)).mode & 0o777) === 0o700, "it's written at mode 0600, in a directory at 0700");
+    check(readKept(file).record?.a === 1, "and read back");
+    check(throws(() => writeKept(file, { a: 2 })) && readKept(file).record?.a === 1, "a file already there is never overwritten");
+    chmodSync(file, 0o644);
+    check(/read by others/.test(readKept(file).problem ?? ""), "a file others can read is refused");
+    chmodSync(file, 0o600);
+    chmodSync(dirname(file), 0o755);
+    check(/opened by others/.test(readKept(file).problem ?? "") && throws(() => writeKept(join(dirname(file), "other.json"), {})), "a directory others can open is refused, for reading and writing");
+    chmodSync(dirname(file), 0o700);
+    writeFileSync(join(dirname(file), "target.json"), "{}", { mode: 0o600 });
+    removeKept(file);
+    symlinkSync(join(dirname(file), "target.json"), file);
+    check(/link/.test(readKept(file).problem ?? "") && throws(() => writeKept(file, {})), "a link in its place is refused, and not written through");
+    removeKept(file);
+    writeFileSync(file, "not json", { mode: 0o600 });
+    check(/JSON/.test(readKept(file).problem ?? ""), "a file that isn't JSON is refused");
+    check(removeKept(file) && readKept(file).missing === true, "it's deleted");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
 
 // ---- the plan, the tally and the exit code ----
 const ids = PLAN.map((entry) => entry.id);
@@ -185,10 +260,14 @@ check(!/cloudflare\.com|CLOUDFLARE_|wrangler/i.test(code) && !/cloudflare\.com|C
 check(!/RELEASES|test_releases_on|managed-switch|"enabled":\s*true|enabled: true/.test(code), "the script switches nothing on: no switch is named outside its comments, and no body turns release on");
 check(!/spawn|exec(File)?Sync|child_process/.test(source), "the script starts no child process, so no environment is passed on");
 check(!/readFileSync\([^)]*(ecret|\.podster)/i.test(source) && source.includes("process.env.PODSTER_E2E_SIGNUP_SECRET"), "the sign-up secret comes from the environment only, and no file is read for it");
+{
+  const keptSource = readFileSync(join(here, "m6-staging-kept.mjs"), "utf8");
+  check(!/console\.|process\.std/.test(keptSource) && /O_EXCL/.test(keptSource) && /O_NOFOLLOW/.test(keptSource) && /0o600/.test(keptSource) && /0o700/.test(keptSource), "the kept-file module prints nothing, never overwrites, never follows a link, and writes at 0600 under 0700");
+}
 check(/const say = \(line = ""\) => console\.log\(scrub\(line, secrets\)\)/.test(source), "what the run prints goes through scrub");
 check(source.includes("PACE_MS") && /for \(let pages = 0; pages < 100/.test(source) && /for \(let pages = 0; pages < 20/.test(source), "requests are paced, and every loop over pages is bounded");
 check(/process\.exit\(outcome\.code\)/.test(source) && !/process\.exit\(tally\.exitCode\(\)\)/.test(source), "the exit code is the run's outcome, never the tally's alone: blocker 1");
-check(/await preflight\(\)[\s\S]*await main\(\)/.test(source) && source.indexOf("async function preflight") < source.indexOf("async function main") && !/preflight\(\)[\s\S]{0,400}person\(/.test(source.slice(source.indexOf("async function preflight"), source.indexOf("let owner;"))), "a signed-out preflight runs before main, and takes no sign-up");
+check(/await preflight\(\)[\s\S]*await \(phase === "before" \? beforeDeploy : phase === "after" \? afterDeploy : main\)\(\)/.test(source) && source.indexOf("async function preflight") < source.indexOf("async function main") && !/preflight\(\)[\s\S]{0,400}person\(/.test(source.slice(source.indexOf("async function preflight"), source.indexOf("let owner;"))), "a signed-out preflight runs before main, and takes no sign-up");
 {
   const body = source.slice(source.indexOf("async function main"));
   const first = body.indexOf('person("the room\'s owner")');
@@ -213,7 +292,21 @@ check(/again\+\+;\s*problems = await askTool\(name\)/.test(source), "M6-S01e ask
 }
 check(!/\bconst after = /.test(source), "no unused helper is left");
 for (const { id } of PLAN) check(source.includes(`"${id}"`), `${id} has a check in the script`);
-check((source.match(/await person\(/g) ?? []).length === SIGN_UPS.length, "the script signs up exactly the people the plan lists");
+check((source.match(/await person\(/g) ?? []).length === SIGN_UPS.length + PHASE_SIGN_UPS.before.length + PHASE_SIGN_UPS.after.length, "the script signs up exactly the people the plans list");
+for (const { id } of [...PHASE_PLANS.before, ...PHASE_PLANS.after]) check(source.includes(`"${id}"`), `${id} has a check in the script`);
+{
+  const before = source.slice(source.indexOf("async function beforeDeploy"), source.indexOf("async function afterDeploy"));
+  const after = source.slice(source.indexOf("async function afterDeploy"), source.indexOf("const started = Date.now()"));
+  check((before.match(/await person\(/g) ?? []).length === 1 && !/person\(/.test(after.replace(/Person\.fromCookie/g, "")), "the first phase signs up one person, and the second no one");
+  check(before.includes("writeKept(keptAt, keptRecord({ commit: options.deployedCommit,") && /\}, owner\.cookie\)\);/.test(before) && !/signupSecret/.test(before) && (source.match(/writeKept\(/g) ?? []).length === 1, "the kept file is written once, by the first phase, with the owner's session and never the sign-up secret");
+  check(before.indexOf("writeKept(") > before.indexOf("task.assignee_departed") && before.indexOf("keptSession = owner.cookie") > before.indexOf("writeKept("), "it's written only once the task is part-way, and the session is kept only once it's written");
+  check(/if \(cookie !== keptSession\) await target\.http\("\/api\/auth\/sign-out"/.test(source), "every session is signed out but the one kept for the second phase");
+  check(/if \(kept\) sessions\.push\(kept\.session\)/.test(source) && /if \(phase === "after"\) say\(removeKept\(keptAt\)/.test(source.slice(source.indexOf("} finally {"))), "the second phase signs the kept session out and deletes the file in its clean-up, whatever its checks found");
+  check(/readsOnly: true/.test(after) && /kept\.last_seq/.test(after) && /kept\.events_seen/.test(after), "the second phase compares M6's reads on the older room, and its events against the first phase's count");
+  check(source.indexOf("readKept(keptAt)") < source.indexOf("await preflight()") && source.indexOf("readKept(keptAt)") > source.indexOf("if (options.dryRun) {"), "the kept file is checked after a dry run would stop and before anything is sent");
+  check(/secretCookie\(kept\.session\)/.test(source) && /const secrets = \[signupSecret, kept\?\.session\]/.test(source), "the kept session is scrubbed from the output like any other");
+  check(/Run --before-deploy before a deploy and --after-deploy after it/.test(source), "the usual run's M6-S04 says how to run the two phases");
+}
 
 // ---- the script as a dry run ----
 const work = mkdtempSync(join(tmpdir(), "podster-m6-selftest-"));
@@ -245,6 +338,71 @@ try {
   check(!dropped.stdout.includes(secret) && !dropped.stderr.includes(secret), "it never prints the secret");
   const down = standIn("edge-down");
   check(down.loaded && down.status === 2 && down.signUps === 0 && /No sign-up was taken/.test(down.stderr), `an edge that answers 502 fails the preflight: exit ${down.status}, ${down.signUps} sign-up request(s)`);
+
+  // M6-S04's two phases, each a process of its own against the stand-in, which keeps its state in a file between them
+  // as staging would across a deploy. HOME is a directory of the self-test's, so the kept file is written there.
+  const home = join(work, "home");
+  mkdirSync(home);
+  const kept = keptFile(home);
+  const standinState = join(work, "standin.json");
+  const [atBefore, atAfter] = ["1".repeat(40), "2".repeat(40)];
+  const phaseRun = (which, commit, extraEnv = {}, extraArgs = []) => {
+    const res = spawnSync(process.execPath, ["--import", pathToFileURL(join(here, "m6-staging-standin.mjs")).href, join(here, "m6-staging.mjs"), "--base-url", STAGING, `--${which}-deploy`, "--deployed-commit", commit, ...extraArgs], {
+      env: { PATH: process.env.PATH, HOME: home, M6_STANDIN: "phases", M6_STANDIN_STATE: standinState, ...(which === "before" ? { PODSTER_E2E_SIGNUP_SECRET: secret } : {}), ...extraEnv },
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+    const counted = /stand-in counted: (\d+) requests, (\d+) test sign-ups, (\d+) sign-outs/.exec(res.stdout);
+    return { ...res, requests: counted ? Number(counted[1]) : NaN, signUps: counted ? Number(counted[2]) : NaN, signOuts: counted ? Number(counted[3]) : NaN, all: res.stdout + res.stderr };
+  };
+  const secretFree = (res, also = []) => ![secret, ...also].some((value) => res.all.includes(value));
+
+  const dryBefore = phaseRun("before", atBefore, {}, ["--dry-run"]);
+  check(dryBefore.status === 0 && dryBefore.requests === 0 && /M6-S04a/.test(dryBefore.stdout) && !/M6-S01a/.test(dryBefore.stdout) && !existsSync(kept), "a dry run of the first phase prints its plan, sends nothing and writes no file");
+  const dryAfter = phaseRun("after", atAfter, {}, ["--dry-run"]);
+  check(dryAfter.status === 0 && dryAfter.requests === 0 && /M6-S04e/.test(dryAfter.stdout) && /Sign-ups this run takes: 0/.test(dryAfter.stdout), "a dry run of the second phase needs no sign-up secret and sends nothing");
+  check(phaseRun("after", atAfter).status === 2 && /no kept file/.test(phaseRun("after", atAfter).stderr), "the second phase with no kept file is refused, exit 2");
+
+  const first = phaseRun("before", atBefore);
+  const record = readKept(kept).record;
+  check(first.status === 0 && first.signUps === 1 && first.signOuts === 0 && /PASS M6-S04a/.test(first.stdout), `the first phase passes with 1 sign-up and keeps its session signed in: exit ${first.status}, ${first.signUps} sign-up(s), ${first.signOuts} sign-out(s)`);
+  check(Boolean(record) && (statSync(kept).mode & 0o777) === 0o600 && record.deployed_commit === atBefore && /session_token=/.test(record.session ?? ""), "it keeps the session and the commit it was told, at mode 0600");
+  check(!readFileSync(kept, "utf8").includes(secret), "the kept file never holds the sign-up secret");
+  check(Boolean(record) && secretFree(first, [record.session, record.session.split("=")[1]]), "the first phase prints neither the secret nor the session");
+  check(/Every test session was signed out but the owner's, kept in ~\/\.podster\/m6-staging\/s04\.json/.test(first.stdout) && !first.all.includes(home), "it says the session is kept, and where, without naming the runner's home");
+  const again = phaseRun("before", atBefore);
+  check(again.status === 2 && again.requests === 0 && /still usable/.test(again.stderr) && JSON.stringify(readKept(kept).record) === JSON.stringify(record), "a second first phase while the kept file is usable is refused before anything is sent, and the file is untouched");
+  const same = phaseRun("after", atBefore);
+  check(same.status === 2 && same.requests === 0 && /deploy first/.test(same.stderr) && existsSync(kept), "the second phase at the same commit is refused before anything is sent, and the file is kept");
+  chmodSync(kept, 0o644);
+  const loose = phaseRun("after", atAfter);
+  check(loose.status === 2 && loose.requests === 0 && /read by others/.test(loose.stderr), "a kept file others can read is refused");
+  chmodSync(kept, 0o600);
+
+  const second = phaseRun("after", atAfter);
+  check(second.status === 0 && second.signUps === 0 && second.signOuts === 1 && ["M6-S04b", "M6-S04c", "M6-S04d", "M6-S04e"].every((id) => second.stdout.includes(`PASS ${id}`)), `the second phase passes with no sign-up, and signs the kept session out: exit ${second.status}, ${second.signUps} sign-up(s), ${second.signOuts} sign-out(s)`);
+  check(!existsSync(kept) && /The kept file ~\/\.podster\/m6-staging\/s04\.json was deleted/.test(second.stdout), "it deletes the kept file");
+  check(secretFree(second, [record.session, record.session.split("=")[1]]), "the second phase prints neither the secret nor the session");
+  check(/the first phase's 4 still first/.test(second.stdout) && /offered to agent agt_\w+, accepted, submitted, completed/.test(second.stdout), "the older room's task is finished, and its earlier events are read first");
+  check(phaseRun("after", atAfter).status === 2, "a second run of the second phase finds no file and is refused");
+
+  // A kept session staging no longer accepts: the phase fails, and still deletes the file.
+  check(phaseRun("before", atBefore).status === 0 && existsSync(kept), "the first phase runs again once the file is gone");
+  const forgot = phaseRun("after", atAfter, { M6_STANDIN_FORGET: "1" });
+  check(forgot.status === 1 && /the kept session wasn't accepted/.test(forgot.stdout) && /SKIP M6-S04b/.test(forgot.stdout) && !existsSync(kept), `a kept session that's no longer accepted fails the phase, exit ${forgot.status}, and the file is deleted`);
+
+  // A stale file: refused before anything is sent, and deleted, since its session has ended.
+  check(phaseRun("before", atBefore).status === 0, "the first phase runs once more");
+  const old = readKept(kept).record;
+  const shifted = { ...old, signed_up_at: old.signed_up_at - SESSION_SECONDS * 1000, stale_at: old.stale_at - SESSION_SECONDS * 1000 };
+  removeKept(kept);
+  writeKept(kept, shifted);
+  const stale = phaseRun("after", atAfter);
+  check(stale.status === 2 && stale.requests === 0 && /stale/.test(stale.stderr) && !existsSync(kept), "a stale kept file is refused before anything is sent, and deleted");
+  writeKept(kept, shifted);
+  const replaced = phaseRun("before", atBefore);
+  check(replaced.status === 0 && /was stale/.test(replaced.stdout) && readKept(kept).record?.signed_up_at > shifted.signed_up_at, "a first phase deletes a stale file and keeps its own");
+  removeKept(kept);
 } finally {
   rmSync(work, { recursive: true, force: true });
 }

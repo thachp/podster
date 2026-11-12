@@ -5,6 +5,7 @@
 // M6 is switched off on staging (RELEASES is set nowhere). Today's checks show it can't be detected there and that the
 // room schema step M6 build step 2 added harmed nothing. The checks that need release switched on come later.
 export { scrub, secretProblem, stagingOnly, STAGING, Tally } from "./m5-staging-lib.mjs";
+import { join } from "node:path";
 import { STAGING, stagingOnly } from "./m5-staging-lib.mjs";
 
 /** The test sign-up's takes one run spends, of 6 a minute and 40 a day across every run. The agent is made under the owner and takes none. */
@@ -12,6 +13,15 @@ export const SIGN_UPS = [
   { who: "the room's owner", why: "owns the room, links the agent, and calls every M6 route as the owner, for a room that doesn't exist, and with a body that isn't JSON. Taken only after the signed-out preflight" },
   { who: "a second person", why: "is in no room of the run's, and calls every M6 route on the owner's room. Taken only once the owner's organization, room and agent are made" },
 ];
+
+/**
+ * The test sign-ups of M6-S04's two phases, around a deploy. Only the first phase signs anyone up; the second uses the
+ * session the first kept, because the test sign-up can't sign a test person in again.
+ */
+export const PHASE_SIGN_UPS = {
+  before: [{ who: "the older room's owner", why: "makes the organization, the room, an agent and a task before the deploy, and keeps this session for the second phase. Taken only after the signed-out preflight" }],
+  after: [],
+};
 
 /**
  * Every check, in the order it runs. "S" for switched off: none needs release switched on. `offline` checks read only
@@ -34,6 +44,26 @@ export const PLAN = [
 ].map(([id, title, flags = {}]) => ({ id, title, offline: Boolean(flags.offline), maySkip: Boolean(flags.maySkip) }));
 
 /**
+ * M6-S04 in two phases, run apart, with a deploy between them. Each phase is a run of its own, with its own checks and
+ * exit code, and none may say SKIP.
+ */
+const phasePlan = (rows) => rows.map(([id, title]) => ({ id, title, offline: false, maySkip: false }));
+export const PHASE_PLANS = {
+  before: phasePlan([
+    ["M6-S04a", "before the deploy: a room with an agent, and a task offered to it and accepted; then the agent is disconnected, so by the departure rule the task is open again with no assignee, part-way through its life. The session is kept for the second phase"],
+  ]),
+  after: phasePlan([
+    ["M6-S04b", "after the deploy, the room made before it: its task is still open with no assignee, and is offered to a new agent, accepted, submitted and completed, as M6-S03 does in a fresh room"],
+    ["M6-S04c", "the older room's settings reads, the room, its visibility and its audit log, answer, and they and the task read, as the owner and as the agent, carry no M6 field"],
+    ["M6-S04d", "every M6 read on the older room answers its owner with the API's own answer for a missing route, exactly as an invented neighbouring path does"],
+    ["M6-S04e", "the older room's events still begin with the ones written before the deploy, and none is an M6 event type"],
+  ]),
+};
+
+/** The plan a run follows: the usual one, or one phase's. */
+export const planFor = (phase) => (phase ? PHASE_PLANS[phase] : PLAN);
+
+/**
  * The run's exit code, and what it didn't show. 0 only when nothing failed and every check that needs staging passed,
  * except one that may say SKIP. An offline check's pass never counts as the run having shown something.
  */
@@ -45,7 +75,49 @@ export function runOutcome(tally, plan = PLAN) {
   return { code: failed.length || unshown.length || shownOnStaging === 0 ? 1 : 0, failed, unshown, shownOnStaging };
 }
 
+// ---- M6-S04's kept file ----
+
+/** A commit as git names it in full. */
+export const FULL_COMMIT = /^[0-9a-f]{40}$/;
+/** The gateway's TEST_SESSION_SECONDS: a test session ends by itself this long after its sign-up, and isn't renewed. */
+export const SESSION_SECONDS = 2 * 60 * 60;
+/** The kept file is stale this long before the session ends, so the second phase has time to run. */
+export const KEPT_MARGIN_SECONDS = 15 * 60;
+export const KEPT_KIND = "podster-m6-staging-s04";
+/** Where the first phase keeps what the second needs: outside the repository, under the runner's home. */
+export const keptFile = (home) => join(home, ".podster", "m6-staging", "s04.json");
+const KEPT_FILE_SHOWN = "~/.podster/m6-staging/s04.json";
+const ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * What the first phase keeps: the owner's test session, the IDs, the commit staging was at, when it goes stale, and how
+ * many of the room's events it read, up to which sequence number.
+ */
+export function keptRecord({ commit, signedUpAt, owner, org, room, task, eventsSeen, lastSeq }, session) {
+  return { kind: KEPT_KIND, base: STAGING, deployed_commit: commit, signed_up_at: signedUpAt, stale_at: signedUpAt + (SESSION_SECONDS - KEPT_MARGIN_SECONDS) * 1000, owner, org, room, task, events_seen: eventsSeen, last_seq: lastSeq, session };
+}
+
+/**
+ * Why the second phase can't use a kept record, or null. It must be this script's, for staging, not stale, with every ID
+ * in shape and a session, and staging must be at another commit than the one the first phase saw.
+ */
+export function keptProblem(record, { now, commit }) {
+  if (!record || typeof record !== "object" || record.kind !== KEPT_KIND) return "the kept file isn't M6-S04's";
+  if (record.base !== STAGING) return "the kept file isn't for staging's gateway";
+  if (!FULL_COMMIT.test(record.deployed_commit ?? "")) return "the kept file names no full commit";
+  if (!Number.isSafeInteger(record.signed_up_at) || record.stale_at !== record.signed_up_at + (SESSION_SECONDS - KEPT_MARGIN_SECONDS) * 1000) return "the kept file's times aren't the ones this script writes";
+  if (!["owner", "org", "room", "task"].every((name) => ID.test(record[name] ?? ""))) return "the kept file's IDs aren't in shape";
+  if (!Number.isSafeInteger(record.events_seen) || record.events_seen < 1 || !Number.isSafeInteger(record.last_seq) || record.last_seq < record.events_seen) return "the kept file's count of the room's events isn't in shape";
+  if (typeof record.session !== "string" || record.session.length < 16) return "the kept file has no session";
+  if (record.signed_up_at > now) return "the kept file was written in the future";
+  if (now >= record.stale_at) return `the kept file is stale: its test session ends ${SESSION_SECONDS / 3600} hours after its sign-up, and the second phase must start at least ${KEPT_MARGIN_SECONDS / 60} minutes before that`;
+  if (record.deployed_commit === commit) return `staging is still at ${commit}, the commit the first phase saw: deploy first`;
+  return null;
+}
+
 export const USAGE = `node m6-staging.mjs --base-url ${STAGING} [--dry-run] [--contract FILE] [--capabilities FILE]
+node m6-staging.mjs --base-url ${STAGING} --before-deploy --deployed-commit SHA [--dry-run]
+node m6-staging.mjs --base-url ${STAGING} --after-deploy --deployed-commit SHA [--dry-run]
 
   --dry-run         check the configuration, read the contract and print the plan. Sends staging nothing.
   --contract        the OpenAPI contract the M6 operations are read from. Defaults to packages/contracts/openapi.yaml.
@@ -53,23 +125,41 @@ export const USAGE = `node m6-staging.mjs --base-url ${STAGING} [--dry-run] [--c
 
   PODSTER_E2E_SIGNUP_SECRET     staging's test sign-up secret. Needed, and passed by the runner. Never printed.
 
-  It takes 2 test sign-ups, the first only after a signed-out preflight and the second only once the first's room
-  works. It switches nothing on and calls no Cloudflare API. Exit 0 only when every check that needs staging passed.`;
+  The usual run takes 2 test sign-ups, the first only after a signed-out preflight and the second only once the first's
+  room works. It switches nothing on and calls no Cloudflare API. Exit 0 only when every check that needs staging
+  passed. M6-S04, a room made before a deploy, says SKIP there: it needs the two phases below, around a deploy.
+
+  --before-deploy   M6-S04's first phase, before a deploy: 1 test sign-up, a room, an agent and a task part-way
+                    through its life. It keeps the owner's test session, the IDs and the commit staging is at in
+                    ${KEPT_FILE_SHOWN}, mode 0600, until ${(SESSION_SECONDS - KEPT_MARGIN_SECONDS) / 60} minutes after the sign-up.
+                    It refuses while an earlier kept file is still usable, and deletes one that is stale.
+  --after-deploy    the second phase, after the deploy: no sign-up. It refuses unless the kept file is there, is
+                    staging's, isn't stale and names another commit. It finishes the task in that older room, reads
+                    its settings and M6's reads, then signs the session out and deletes the file, passed or not.
+  --deployed-commit the full commit staging is at, as scripts/deploy-staging printed it ("deploying SHA"). Staging
+                    doesn't say which commit it runs to a signed-out caller, so the person running the phases names it.`;
 
 /** The arguments, or why they're refused. Nothing is guessed: an unknown flag or a missing value is an error. */
 export function parseArgs(argv, env = {}) {
-  const options = { base: undefined, dryRun: false, help: false, contract: undefined, capabilities: undefined };
+  const options = { base: undefined, dryRun: false, help: false, contract: undefined, capabilities: undefined, phase: null, deployedCommit: undefined };
   for (let at = 0; at < argv.length; at++) {
     const flag = argv[at];
     if (flag === "--dry-run") options.dryRun = true;
     else if (flag === "--help" || flag === "-h") options.help = true;
-    else if (flag === "--base-url" || flag === "--contract" || flag === "--capabilities") {
+    else if (flag === "--before-deploy" || flag === "--after-deploy") {
+      const phase = flag === "--before-deploy" ? "before" : "after";
+      if (options.phase && options.phase !== phase) return { error: "--before-deploy and --after-deploy are two runs, apart: pass one" };
+      options.phase = phase;
+    } else if (flag === "--base-url" || flag === "--contract" || flag === "--capabilities" || flag === "--deployed-commit") {
       const value = argv[++at];
       if (value === undefined || value.startsWith("--")) return { error: `${flag} needs a value` };
-      options[{ "--base-url": "base", "--contract": "contract", "--capabilities": "capabilities" }[flag]] = value;
+      options[{ "--base-url": "base", "--contract": "contract", "--capabilities": "capabilities", "--deployed-commit": "deployedCommit" }[flag]] = value;
     } else return { error: `unknown argument ${flag}` };
   }
   if (options.help) return { options };
+  if (options.phase && options.deployedCommit === undefined) return { error: `--${options.phase}-deploy needs --deployed-commit, the full commit staging is at` };
+  if (!options.phase && options.deployedCommit !== undefined) return { error: "--deployed-commit is for --before-deploy or --after-deploy only" };
+  if (options.phase && !FULL_COMMIT.test(options.deployedCommit)) return { error: "--deployed-commit must be a full commit: 40 lowercase hex characters" };
   options.base ??= env.PODSTER_E2E_BASE_URL;
   if (!options.base) return { error: "pass --base-url, or set PODSTER_E2E_BASE_URL" };
   const refusal = stagingOnly(options.base);

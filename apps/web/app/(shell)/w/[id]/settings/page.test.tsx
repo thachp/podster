@@ -2,6 +2,7 @@ import { render, screen, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setUrl } from "@/test/next-navigation";
+import { boundaryProblems, clientComponents } from "@/test/client-boundary";
 
 const state = vi.hoisted(() => ({ room: null as unknown, me: "per_owner", asked: [] as string[], repository: { ok: false, status: 404, code: "not_found" } as unknown, release: { ok: false, status: 404, code: "not_found" } as unknown, hostname: { ok: true, data: { request: null } } as unknown, visibility: { ok: false, status: 404, code: "not_found" } as unknown }));
 vi.mock("react", async (original) => ({ ...(await original<object>()), cache: <T,>(fn: T) => fn }));
@@ -29,7 +30,8 @@ vi.mock("@/lib/gateway/server", () => ({
 }));
 
 const { default: Settings } = await import("./page");
-const show = async () => render((await Settings({ params: Promise.resolve({ id: "ws_1" }), searchParams: Promise.resolve({}) })) as ReactElement);
+const page = () => Settings({ params: Promise.resolve({ id: "ws_1" }), searchParams: Promise.resolve({}) });
+const show = async () => render((await page()) as ReactElement);
 const member = (principal_id: string, kind: string, role: string, org_id = "org_a") => ({ principal_id, kind, role, org_id });
 
 describe("workroom settings' ownership section", () => {
@@ -256,5 +258,16 @@ describe("workroom settings' release section", () => {
     await show();
     expect(screen.getByText("2026-11-12 by Heir")).toBeInTheDocument();
     expect(state.asked).toContain("/api/orgs/org_a/members");
+  });
+  // Rendering in jsdom never serializes a client component's props, so a function prop passes here and fails for real
+  // with a 500. This walks what the page returns, as React would send it, for each state that renders the section.
+  it("sends its client components only props React can serialize, in every release state", async () => {
+    const clients = await clientComponents();
+    state.repository = readyRepository;
+    state.hostname = { ok: true, data: { request: { id: "hr_1", hostname: "app.example.com", state: "pending", challenge_name: "_podster-challenge.app.example.com", challenge_value: "v", requested_by: "per_heir", requested_at: 1, expires_at: 2, end_reason: null } } };
+    for (const release of [{ ok: false, status: 404, code: "not_found" }, { ok: true, data: releaseConfig() }, { ok: true, data: releaseConfig({ enabled: true, set_by: "per_heir", updated_at: 1 }) }, { ok: false, status: 500, code: "error" }]) {
+      state.release = release;
+      expect(boundaryProblems(await page(), clients)).toEqual([]);
+    }
   });
 });

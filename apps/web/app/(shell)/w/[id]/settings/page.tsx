@@ -20,10 +20,10 @@ import { ReleaseSection } from "./release-section";
 import { releaseAvailability, releaseView, type AppHostname, type ReleaseConfig } from "./release-model";
 import { plainName } from "@/components/agent-content/text";
 import type { GatewayResult } from "@/lib/gateway/result";
+import type { RoomVisibility } from "./visibility-model";
 
 /** A read that threw, such as a lost connection, is a failed read: its section says so, and the page still renders. */
 const settled = <T,>(read: Promise<GatewayResult<T>>) => read.catch((): GatewayResult<T> => ({ ok: false, status: 0, code: "read_failed" }));
-import type { RoomVisibility } from "./visibility-model";
 
 const Section = ({ id, title, children }: { id: string; title: string; children: React.ReactNode }) => (
   <section aria-labelledby={id} className="space-y-2">
@@ -67,6 +67,7 @@ export default async function Settings({ params, searchParams }: { params: Promi
   const releaseNamed = release.state !== "unavailable" && release.state !== "failed" && (release.config.set_by !== null || (hostname !== null && hostname !== "failed" && hostname.request !== null));
   const organizations = (isOwner && heirs.length > 0) || releaseNamed ? await getOrganizations() : null;
   const names = organizations?.ok ? await loadPeopleNames(gatewayQuery, organizations.data.organizations) : {};
+  // Resolved here, on the server: a client component takes only serializable props, so the names cross as strings.
   const nameOf = (person: string | null) => (person === null ? null : identity.ok && person === identity.data.id ? "you" : names[person] ? plainName(names[person]) : null);
   // Who may configure release, as this page knows it: the owner, unless they've left the room's organization, or an admin who is a person. Display only: Rust decides.
   const mayConfigure = identity.ok && ((isOwner && typeof room.owner_left_at !== "number") || membersOf(room).some((member) => member.principal_id === identity.data.id && member.role === "admin" && member.kind === "person"));
@@ -151,7 +152,15 @@ export default async function Settings({ params, searchParams }: { params: Promi
             ) : null}
           </Section>
           <Section id="settings-release" title="Release">
-            <ReleaseSection roomId={id} view={release} hostname={hostname} mayConfigure={mayConfigure} archived={isArchived(room)} nameOf={nameOf} />
+            <ReleaseSection
+              roomId={id}
+              view={release}
+              hostname={hostname}
+              mayConfigure={mayConfigure}
+              archived={isArchived(room)}
+              setByName={release.state === "unavailable" || release.state === "failed" ? null : nameOf(release.config.set_by)}
+              requestedByName={hostname !== null && hostname !== "failed" && hostname.request ? nameOf(hostname.request.requested_by) : null}
+            />
           </Section>
         </>
       )}

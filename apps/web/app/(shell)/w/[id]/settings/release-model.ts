@@ -30,9 +30,6 @@ export function releaseAvailability(result: GatewayResult<ReleaseConfig>): Avail
   return availability(result);
 }
 
-/** A person named on this screen: "you", their name where the viewer's organizations give one, or nobody named. Never a bare ID. */
-export type Namer = (id: string | null) => string | null;
-
 export type HostnameRequest = {
   id: string;
   hostname: string;

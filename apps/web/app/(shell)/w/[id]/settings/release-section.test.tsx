@@ -34,8 +34,8 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-const show = (view: ReturnType<typeof releaseView>, { hostname = { request: null } as AppHostname | null | "failed", mayConfigure = true, archived = false, nameOf = (() => null) as (id: string | null) => string | null } = {}) =>
-  render(<ReleaseSection roomId="ws_1" view={view} hostname={hostname} mayConfigure={mayConfigure} archived={archived} nameOf={nameOf} />);
+const show = (view: ReturnType<typeof releaseView>, { hostname = { request: null } as AppHostname | null | "failed", mayConfigure = true, archived = false, setByName = null as string | null, requestedByName = null as string | null } = {}) =>
+  render(<ReleaseSection roomId="ws_1" view={view} hostname={hostname} mayConfigure={mayConfigure} archived={archived} setByName={setByName} requestedByName={requestedByName} />);
 
 const confirm = async (open: string, button: string) => {
   await userEvent.click(screen.getByRole("button", { name: open }));
@@ -265,9 +265,8 @@ describe("the hostname rules in words", () => {
 });
 
 describe("who is named", () => {
-  it("names who changed release and who asked for a hostname only as the page can name them, never by a bare ID", () => {
-    const named = { per_heir: "Heir", per_owner: "you" } as Record<string, string>;
-    const first = show(releaseView({ kind: "on", data: config({ enabled: true, set_by: "per_heir", updated_at: Date.UTC(2026, 10, 12) }) }, ready), { hostname: { request: request({ requested_by: "per_owner" }) }, nameOf: (id) => (id ? (named[id] ?? null) : null) });
+  it("names who changed release and who asked for a hostname only by the names the server resolved, never by a bare ID", () => {
+    const first = show(releaseView({ kind: "on", data: config({ enabled: true, set_by: "per_heir", updated_at: Date.UTC(2026, 10, 12) }) }, ready), { hostname: { request: request({ requested_by: "per_owner" }) }, setByName: "Heir", requestedByName: "you" });
     expect(screen.getByText("2026-11-12 by Heir")).toBeInTheDocument();
     expect(screen.getByText("2026-11-12 by you")).toBeInTheDocument();
     first.unmount();

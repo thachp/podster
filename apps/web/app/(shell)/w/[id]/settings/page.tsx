@@ -17,7 +17,12 @@ import { VisibilityControls } from "./visibility-controls";
 import { RepositorySection } from "./repository-section";
 import { availability, type RoomRepository } from "./repository-model";
 import { ReleaseSection } from "./release-section";
-import { releaseView, type AppHostname, type ReleaseConfig } from "./release-model";
+import { releaseAvailability, releaseView, type AppHostname, type ReleaseConfig } from "./release-model";
+import { plainName } from "@/components/agent-content/text";
+import type { GatewayResult } from "@/lib/gateway/result";
+
+/** A read that threw, such as a lost connection, is a failed read: its section says so, and the page still renders. */
+const settled = <T,>(read: Promise<GatewayResult<T>>) => read.catch((): GatewayResult<T> => ({ ok: false, status: 0, code: "read_failed" }));
 import type { RoomVisibility } from "./visibility-model";
 
 const Section = ({ id, title, children }: { id: string; title: string; children: React.ReactNode }) => (
@@ -43,23 +48,28 @@ export default async function Settings({ params, searchParams }: { params: Promi
     gatewayQuery<{ audit: AuditRow[]; next_cursor: number | null }>(`/api/v1/workspaces/${id}/audit?after=${after}`),
     gatewayQuery<RoomVisibility>(`/api/v1/workspaces/${id}/visibility`),
     gatewayQuery<RoomRepository>(`/api/v1/workspaces/${id}/repository`),
-    gatewayQuery<ReleaseConfig>(`/api/v1/workspaces/${id}/release-config`),
+    settled(gatewayQuery<ReleaseConfig>(`/api/v1/workspaces/${id}/release-config`)),
   ]);
   const repository = availability(repositoryRead);
-  const release = releaseView(availability(releaseRead), {
+  const release = releaseView(releaseAvailability(releaseRead), {
     isPublic: visibility.ok ? visibility.data.visibility === "public" : null,
     repositoryReady: repository.kind === "on" ? repository.data.repository?.status === "ready" : null,
   });
   // The custom domain is read only where release answers at all.
-  const hostnameRead = release.state === "unavailable" || release.state === "failed" ? null : await gatewayQuery<AppHostname>(`/api/v1/workspaces/${id}/app-hostname`);
+  const hostnameRead = release.state === "unavailable" || release.state === "failed" ? null : await settled(gatewayQuery<AppHostname>(`/api/v1/workspaces/${id}/app-hostname`));
   const hostname = hostnameRead === null ? null : hostnameRead.ok ? hostnameRead.data : "failed";
   const admins = membersOf(room).filter((member) => member.role === "admin");
   const isOwner = identity.ok && identity.data.id === room.owner;
   // Only what to offer. Rust checks all of this again when asked.
   const heirs = membersOf(room).filter((member) => member.role === "admin" && member.kind === "person" && member.org_id === room.owner_org);
   // Names are only worth a read for someone choosing one. A failure leaves IDs.
-  const organizations = isOwner && heirs.length > 0 ? await getOrganizations() : null;
+  // Release names who last changed it and who asked for a hostname; only then is a read of names worth it.
+  const releaseNamed = release.state !== "unavailable" && release.state !== "failed" && (release.config.set_by !== null || (hostname !== null && hostname !== "failed" && hostname.request !== null));
+  const organizations = (isOwner && heirs.length > 0) || releaseNamed ? await getOrganizations() : null;
   const names = organizations?.ok ? await loadPeopleNames(gatewayQuery, organizations.data.organizations) : {};
+  const nameOf = (person: string | null) => (person === null ? null : identity.ok && person === identity.data.id ? "you" : names[person] ? plainName(names[person]) : null);
+  // Who may configure release, as this page knows it: the owner, unless they've left the room's organization, or an admin who is a person. Display only: Rust decides.
+  const mayConfigure = identity.ok && ((isOwner && typeof room.owner_left_at !== "number") || membersOf(room).some((member) => member.principal_id === identity.data.id && member.role === "admin" && member.kind === "person"));
   const candidates = heirs.map((member) => ({ id: member.principal_id, name: names[member.principal_id] ?? null }));
   const now = Date.now();
   return (
@@ -141,8 +151,7 @@ export default async function Settings({ params, searchParams }: { params: Promi
             ) : null}
           </Section>
           <Section id="settings-release" title="Release">
-            {/* This page is the owner's and admins' alone, and agents have no dashboard, so whoever reads it may configure; Rust checks again. */}
-            <ReleaseSection roomId={id} view={release} hostname={hostname} mayConfigure archived={isArchived(room)} />
+            <ReleaseSection roomId={id} view={release} hostname={hostname} mayConfigure={mayConfigure} archived={isArchived(room)} nameOf={nameOf} />
           </Section>
         </>
       )}

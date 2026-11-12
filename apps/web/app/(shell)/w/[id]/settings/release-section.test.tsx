@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setUrl } from "@/test/next-navigation";
 import { ReleaseSection } from "./release-section";
-import { describeHostname, explainReleaseRefusal, holdsName, hostnameProblem, releaseView, UNAVAILABLE, type AppHostname, type HostnameRequest, type Prerequisites, type ReleaseConfig } from "./release-model";
+import { describeHostname, explainReleaseRefusal, holdsName, hostnameProblem, releaseAvailability, releaseView, UNAVAILABLE, type AppHostname, type HostnameRequest, type Prerequisites, type ReleaseConfig } from "./release-model";
 
 const config = (over: Partial<ReleaseConfig> = {}): ReleaseConfig => ({ enabled: false, approval_policy: "person", environments: ["production"], default_host: null, custom_host: null, version: 4, set_by: null, updated_at: null, ...over });
 const request = (over: Partial<HostnameRequest> = {}): HostnameRequest => ({
@@ -34,8 +34,8 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-const show = (view: ReturnType<typeof releaseView>, { hostname = { request: null } as AppHostname | null | "failed", mayConfigure = true, archived = false } = {}) =>
-  render(<ReleaseSection roomId="ws_1" view={view} hostname={hostname} mayConfigure={mayConfigure} archived={archived} />);
+const show = (view: ReturnType<typeof releaseView>, { hostname = { request: null } as AppHostname | null | "failed", mayConfigure = true, archived = false, nameOf = (() => null) as (id: string | null) => string | null } = {}) =>
+  render(<ReleaseSection roomId="ws_1" view={view} hostname={hostname} mayConfigure={mayConfigure} archived={archived} nameOf={nameOf} />);
 
 const confirm = async (open: string, button: string) => {
   await userEvent.click(screen.getByRole("button", { name: open }));
@@ -46,6 +46,12 @@ describe("the section's state, from the server's reads", () => {
   it("is Unavailable while the deployment answers release's routes as missing ones, and a failed read is a failure, not off", () => {
     expect(releaseView({ kind: "off" }, ready)).toMatchObject({ state: "unavailable", label: "Unavailable", text: UNAVAILABLE });
     expect(releaseView({ kind: "failed" }, ready)).toEqual({ state: "failed" });
+  });
+
+  it("reads 409 release_not_available as Unavailable, like the missing route's 404, and nothing else that isn't an answer", () => {
+    expect(releaseAvailability({ ok: false, status: 409, code: "release_not_available" })).toEqual({ kind: "off" });
+    expect(releaseAvailability({ ok: false, status: 404, code: "not_found" })).toEqual({ kind: "off" });
+    for (const failure of [{ status: 409, code: "version_conflict" }, { status: 404, code: "workspace_not_found" }, { status: 403, code: "access_revoked" }, { status: 0, code: "read_failed" }]) expect(releaseAvailability({ ok: false, ...failure }).kind).toBe("failed");
   });
 
   it("is Not configured when release is off and nothing the page read stands in its way", () => {
@@ -100,12 +106,17 @@ describe("switching release on and off", () => {
     expect(sent[0]?.key).toMatch(/^[0-9a-f-]{36}$/);
   });
 
-  it("Needs approval offers the control disabled, described by what's missing, and sends nothing", async () => {
+  it("Needs approval marks the control disabled but keeps it focusable, described by what's missing, and it opens nothing and sends nothing", async () => {
     show(releaseView({ kind: "on", data: config() }, { isPublic: false, repositoryReady: true }));
     const button = screen.getByRole("button", { name: "Switch release on" });
-    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).not.toHaveAttribute("disabled");
     expect(button).toHaveAccessibleDescription(/The workroom has to be public/);
+    await userEvent.tab();
+    expect(button).toHaveFocus();
     await userEvent.click(button);
+    await userEvent.keyboard("{Enter}");
+    expect(screen.queryByRole("alertdialog")).toBeNull();
     expect(sent).toHaveLength(0);
   });
 
@@ -174,6 +185,7 @@ describe("the custom domain", () => {
     await userEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Ask for the record" }));
     await waitFor(() => expect(sent).toHaveLength(1));
     expect(sent[0]).toMatchObject({ method: "PUT", url: "/api/v1/workspaces/ws_1/app-hostname", body: { hostname: "app.example.com" } });
+    expect(sent[0]?.key).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   it("explains the hostname rules' own refusals", async () => {
@@ -195,6 +207,7 @@ describe("the custom domain", () => {
     await confirm("Drop this request", "Drop the request");
     await waitFor(() => expect(sent).toHaveLength(1));
     expect(sent[0]).toMatchObject({ method: "DELETE", url: "/api/v1/workspaces/ws_1/app-hostname" });
+    expect(sent[0]?.key).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   it("claimed: says so, hides the record, and removing says serving stops first", async () => {
@@ -248,5 +261,18 @@ describe("the hostname rules in words", () => {
     expect(["pending", "claimed", "ending"].map((state) => holdsName(request({ state: state as HostnameRequest["state"] })))).toEqual([true, true, true]);
     expect(["refused", "expired", "ended"].map((state) => holdsName(request({ state: state as HostnameRequest["state"] })))).toEqual([false, false, false]);
     expect(holdsName(null)).toBe(false);
+  });
+});
+
+describe("who is named", () => {
+  it("names who changed release and who asked for a hostname only as the page can name them, never by a bare ID", () => {
+    const named = { per_heir: "Heir", per_owner: "you" } as Record<string, string>;
+    const first = show(releaseView({ kind: "on", data: config({ enabled: true, set_by: "per_heir", updated_at: Date.UTC(2026, 10, 12) }) }, ready), { hostname: { request: request({ requested_by: "per_owner" }) }, nameOf: (id) => (id ? (named[id] ?? null) : null) });
+    expect(screen.getByText("2026-11-12 by Heir")).toBeInTheDocument();
+    expect(screen.getByText("2026-11-12 by you")).toBeInTheDocument();
+    first.unmount();
+    show(releaseView({ kind: "on", data: config({ enabled: true, set_by: "per_stranger", updated_at: Date.UTC(2026, 10, 12) }) }, ready), { hostname: { request: request({ requested_by: "per_stranger" }) } });
+    expect(screen.queryByText(/per_stranger/)).toBeNull();
+    expect(screen.getAllByText("2026-11-12")).toHaveLength(2);
   });
 });

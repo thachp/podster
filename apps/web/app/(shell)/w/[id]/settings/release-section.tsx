@@ -8,8 +8,11 @@ import { visibleText } from "@/lib/public/visible-text";
 import { CommandNotice, useCommands } from "../team/commands";
 import { ConfirmAction } from "../team/confirm-action";
 import { FIELD, MOBILE_TARGET } from "../team/field";
-import { dayOf, describeHostname, explainReleaseRefusal, holdsName, hostnameProblem, releaseConflict, type AppHostname, type HostnameRequest, type ReleaseView } from "./release-model";
+import { dayOf, describeHostname, explainReleaseRefusal, holdsName, hostnameProblem, releaseConflict, type AppHostname, type HostnameRequest, type Namer, type ReleaseView } from "./release-model";
 import { StateBadge } from "./state-badge";
+
+/** A day, and who, only where they can be named. */
+const byWhom = (day: string, who: string | null) => (who ? `${day} by ${who}` : day);
 
 const Row = ({ term, children, mono = false }: { term: string; children: React.ReactNode; mono?: boolean }) => (
   <>
@@ -24,7 +27,7 @@ const Row = ({ term, children, mono = false }: { term: string; children: React.R
  * release's routes as routes that don't exist, and then nothing here offers anything. No address here is a link: whether a
  * release is served isn't in these reads, and a live link shows only where it is real.
  */
-export function ReleaseSection({ roomId, view, hostname, mayConfigure, archived }: { roomId: string; view: ReleaseView; hostname: AppHostname | null | "failed"; mayConfigure: boolean; archived: boolean }) {
+export function ReleaseSection({ roomId, view, hostname, mayConfigure, archived, nameOf = () => null }: { roomId: string; view: ReleaseView; hostname: AppHostname | null | "failed"; mayConfigure: boolean; archived: boolean; nameOf?: Namer }) {
   const commands = useCommands(null);
   const { send, retrying } = commands;
   const after = useRef<HTMLDivElement>(null);
@@ -72,7 +75,7 @@ export function ReleaseSection({ roomId, view, hostname, mayConfigure, archived 
           {config.default_host ? visibleText(config.default_host) : <span className="font-sans text-muted-foreground">None yet. Podster gives the app its address.</span>}
         </Row>
         {config.default_host ? <Row term="Live">Not shown here. An address is live only once a release is served there.</Row> : null}
-        <Row term="Last changed">{config.updated_at === null ? "Never" : `${dayOf(config.updated_at)}${config.set_by ? ` by ${config.set_by}` : ""}`}</Row>
+        <Row term="Last changed">{config.updated_at === null ? "Never" : byWhom(dayOf(config.updated_at), nameOf(config.set_by))}</Row>
       </dl>
 
       {controls && view.state === "not-configured" ? (
@@ -92,7 +95,8 @@ export function ReleaseSection({ roomId, view, hostname, mayConfigure, archived 
         />
       ) : null}
       {controls && view.state === "needs-approval" ? (
-        <Button type="button" size="sm" variant="outline" disabled aria-describedby={reasonId} className={MOBILE_TARGET}>
+        // Marked, not really disabled, so it can take focus and its reasons are read with it. Clicking does nothing.
+        <Button type="button" size="sm" variant="outline" aria-disabled aria-describedby={reasonId} className={`${MOBILE_TARGET} aria-disabled:cursor-not-allowed aria-disabled:opacity-50`} onClick={(event) => event.preventDefault()}>
           Switch release on
         </Button>
       ) : null}
@@ -113,14 +117,14 @@ export function ReleaseSection({ roomId, view, hostname, mayConfigure, archived 
       {!mayConfigure ? <p className="text-sm text-muted-foreground">Only this workroom&apos;s owner and admins can change release.</p> : null}
 
       <h3 className="pt-2 font-medium">Custom domain</h3>
-      {hostname === "failed" ? <ReadFailure /> : <CustomDomain roomId={roomId} request={hostname?.request ?? null} controls={controls} />}
+      {hostname === "failed" ? <ReadFailure /> : <CustomDomain roomId={roomId} request={hostname?.request ?? null} controls={controls} nameOf={nameOf} />}
 
       <p className="text-sm text-muted-foreground">Switching release on grants nobody a deployment. The owner and admins give a deployment grant to a named participant, and an agent can hold one but never approves. Release doesn&apos;t serve a private workroom&apos;s app.</p>
     </div>
   );
 }
 
-function CustomDomain({ roomId, request, controls }: { roomId: string; request: HostnameRequest | null; controls: boolean }) {
+function CustomDomain({ roomId, request, controls, nameOf }: { roomId: string; request: HostnameRequest | null; controls: boolean; nameOf: Namer }) {
   const commands = useCommands(null);
   const { send, clear, retrying } = commands;
   const after = useRef<HTMLDivElement>(null);
@@ -163,7 +167,7 @@ function CustomDomain({ roomId, request, controls }: { roomId: string; request: 
                 <Row term="Ends">{`${new Date(request.expires_at).toISOString().slice(0, 16).replace("T", " ")} UTC, if the record isn't read by then`}</Row>
               </>
             ) : null}
-            <Row term="Asked on">{`${dayOf(request.requested_at)} by ${request.requested_by}`}</Row>
+            <Row term="Asked on">{byWhom(dayOf(request.requested_at), nameOf(request.requested_by))}</Row>
           </dl>
         </>
       ) : null}

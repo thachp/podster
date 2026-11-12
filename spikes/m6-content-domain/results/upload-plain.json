@@ -1,0 +1,46 @@
+{
+  "script": "spike-m6-c-plain",
+  "files": 5,
+  "calls": [
+    {
+      "call": "assets-upload-session",
+      "status": 200,
+      "errors": [],
+      "buckets": [
+        2,
+        2,
+        1
+      ]
+    },
+    {
+      "call": "assets/upload",
+      "status": 202,
+      "errors": [],
+      "files": 2,
+      "completed": false
+    },
+    {
+      "call": "assets/upload",
+      "status": 202,
+      "errors": [],
+      "files": 2,
+      "completed": false
+    },
+    {
+      "call": "assets/upload",
+      "status": 201,
+      "errors": [],
+      "files": 1,
+      "completed": true
+    },
+    {
+      "call": "script PUT",
+      "status": 200,
+      "errors": [],
+      "assetsOnly": true,
+      "headersInConfig": true
+    }
+  ],
+  "ms": 4737,
+  "ok": true
+}

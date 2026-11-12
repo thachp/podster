@@ -1,0 +1,12 @@
+// Spike only: M6 spike C's dispatch Worker, on every first-level host of opster.dev.
+// Deployed by hand during the spike and deleted by ../cleanup.mjs after it. Not a product Worker.
+// The account comes from CLOUDFLARE_ACCOUNT_ID: the Cloudflare account that holds podster.dev. No ID is kept here.
+{
+  "name": "spike-m6-c-dispatch",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "*.opster.dev/*", "zone_name": "opster.dev" }],
+  "dispatch_namespaces": [{ "binding": "NS", "namespace": "podster-staging-apps" }]
+}

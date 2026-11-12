@@ -444,7 +444,9 @@ cd e2e && PODSTER_E2E_SIGNUP_SECRET="$(cat ~/.podster/e2e-signup-secret.staging)
 
 `node m5-staging-selftest.mjs` checks its pure parts and its dry run, and CI runs it.
 
-**Extended on 2026-11-11, and run once since:** 64 passed, 1 failed, 3 skipped, in 7 minutes 23 seconds. The failure was the script's log tails, which also skipped M5-13, M5-16a and M5-16b; [the M5 plan](m5-plan.md#step-10-the-extended-run-on-staging-2026-11-11) has the run and the fix. The script now has 68 checks: the 33 above and 35 for what the three runs left unshown, listed with each one's exact assertion in the [M5 plan](m5-plan.md#step-10-the-staging-script-extended-2026-11-11). What changes for whoever runs it:
+**Run a second time that night, at `772fb42`: 67 passed, 1 failed, 0 skipped.** The log checks and the replayed delivery passed. M5-16b, a misdirected delivery, failed with no log line found for it, and [the cause isn't known yet](m5-plan.md#step-10-the-second-extended-run-on-staging-2026-11-11). `e2e/m5-delivery-probe.mjs` reproduces it with no sign-up: it needs `PODSTER_M5_WEBHOOK_SECRET` and `CLOUDFLARE_ACCOUNT_ID` set, and takes `--repository` and `--pull`.
+
+**Extended on 2026-11-11, and run once before that:** 64 passed, 1 failed, 3 skipped, in 7 minutes 23 seconds. The failure was the script's log tails, which also skipped M5-13, M5-16a and M5-16b; [the M5 plan](m5-plan.md#step-10-the-extended-run-on-staging-2026-11-11) has the run and the fix. The script now has 68 checks: the 33 above and 35 for what the three runs left unshown, listed with each one's exact assertion in the [M5 plan](m5-plan.md#step-10-the-staging-script-extended-2026-11-11). What changes for whoever runs it:
 
 - **Still 2 sign-ins.** The second person also owns a second room.
 - **It leaves 2 public repositories,** not 1: `e2e-m5-<time>-<4 hex>` and `e2e-m5-<time>-<4 hex>-<6 hex>`. It prints both.

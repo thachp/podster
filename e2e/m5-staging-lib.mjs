@@ -431,12 +431,38 @@ function logged(event) {
   return (Array.isArray(event?.logs) ? event.logs : []).flatMap((entry) => (Array.isArray(entry?.message) ? entry.message : [entry?.message]));
 }
 
+/** Whether a value, or anything inside it, is exactly this string. */
+function holds(value, wanted) {
+  if (value === wanted) return true;
+  return Boolean(value) && typeof value === "object" && Object.values(value).some((inner) => holds(inner, wanted));
+}
+
 /**
- * What the API's log says became of a delivery: every `provider.delivery` line for that ID, in order, by its outcome.
- * The API logs one line a delivery, of IDs and a fixed code.
+ * Whether a tail event is the API's own request for this delivery. The delivery's ID isn't in the request's URL: it's
+ * in the assertion the gateway signed for it, whose claims are read here, unverified, only to tell which request this
+ * is. Nothing of the assertion is kept or printed.
  */
-export function deliveryOutcomes(events, deliveryId) {
-  const outcomes = [];
+export function requestIsFor(event, deliveryId) {
+  const assertion = event?.event?.request?.headers?.["x-podster-assertion"];
+  if (typeof assertion !== "string" || typeof deliveryId !== "string" || !deliveryId) return false;
+  try {
+    return holds(JSON.parse(Buffer.from(assertion.split(".")[1] ?? "", "base64url").toString("utf8")), deliveryId);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Everything the API's tail holds about one delivery:
+ * - `outcomes`: the outcome of each `provider.delivery` line for it, in order. The API logs one line a delivery.
+ * - `odd`: each such line whose outcome isn't a word, said as what it was. Such a line is a finding, never a wait.
+ * - `requests`: each of the API's own requests for it, by how the invocation ended and how many lines it logged.
+ *
+ * With no line, `requests` tells two things apart that a wait alone can't: the API ran and the tail holds its request
+ * with no line for the delivery, or the tail holds nothing for it at all.
+ */
+export function deliveryTrace(events, deliveryId) {
+  const trace = { outcomes: [], odd: [], requests: [] };
   for (const event of events) {
     for (const part of logged(event)) {
       let line = part;
@@ -447,10 +473,28 @@ export function deliveryOutcomes(events, deliveryId) {
           continue;
         }
       }
-      if (line && typeof line === "object" && line.at === "provider.delivery" && line.delivery === deliveryId) outcomes.push(String(line.outcome));
+      if (!line || typeof line !== "object" || line.at !== "provider.delivery" || line.delivery !== deliveryId) continue;
+      if (typeof line.outcome === "string" && /^[a-z_]{1,40}$/.test(line.outcome)) trace.outcomes.push(line.outcome);
+      else trace.odd.push(line.outcome === undefined ? "a line with no outcome" : line.outcome === null ? "a line whose outcome is null" : `a line whose outcome is ${typeof line.outcome === "string" ? "not a code" : `a ${typeof line.outcome}`}`);
     }
+    if (requestIsFor(event, deliveryId)) trace.requests.push({ ended: typeof event?.outcome === "string" ? event.outcome : "unknown", lines: logged(event).length });
   }
-  return outcomes;
+  return trace;
+}
+
+/** The outcomes alone. */
+export const deliveryOutcomes = (events, deliveryId) => deliveryTrace(events, deliveryId).outcomes;
+
+/**
+ * Why a delivery's line can't be read as `lines` outcomes, or null when it can. `lost` says the tail holds nothing of
+ * the delivery, which is the one case where sending another can show anything.
+ */
+export function deliveryProblem(trace, lines = 1) {
+  if (trace.odd.length) return { text: `the API logged ${trace.odd.join(", and ")} for it`, lost: false };
+  if (trace.outcomes.length >= lines) return null;
+  const had = trace.outcomes.length ? `only ${trace.outcomes.length} of ${lines} lines (${trace.outcomes.join(", ")})` : "no line";
+  if (trace.requests.length) return { text: `the API's tail holds ${had} for it, though it holds the API's own request for it ${trace.requests.map((request) => `(ended ${request.ended}, ${request.lines} line(s) logged)`).join(" ")}: the API ran, and the line isn't there`, lost: false };
+  return { text: `the API's tail holds ${had} for it, and no request of the API's for it either: the tail never delivered that event`, lost: trace.outcomes.length === 0 };
 }
 
 /** What the Workers themselves logged in these events, and their exceptions, as text to search. Never the request's own headers. */

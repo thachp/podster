@@ -12,9 +12,10 @@ import { createHmac } from "node:crypto";
 import { childEnv, forbidden } from "./child-env.mjs";
 import { parseJsonc } from "./jsonc.mjs";
 import { missingWranglers } from "./m4-staging-lib.mjs";
+import { probeArgs } from "./m5-delivery-probe.mjs";
 import { ACCOUNT_ENV, closeTails, downWithin, openTail, refusalLines, requestHolds, STAY_UP_SECONDS, TAIL_ARGS, tailEnv, tailFault, without, wranglerReason } from "./m5-tails.mjs";
 import {
-  absentId, ASKPASS_SCRIPT, cloneUrlProblem, CREDENTIAL_ENV, deliveryBody, deliveryOutcomes, GrantLedger, gitEnv, isCommitSha, LATE_MERGE_MS, CLOCK_SKEW_MS, leaks, loggedText, logHits, lostAuthorityEnding, worstCaseSeconds, mergeCommitProblems, movedHeadEnding, parseArgs, PLAN,
+  absentId, ASKPASS_SCRIPT, cloneUrlProblem, CREDENTIAL_ENV, deliveryBody, deliveryOutcomes, deliveryProblem, deliveryTrace, requestIsFor, GrantLedger, gitEnv, isCommitSha, LATE_MERGE_MS, CLOCK_SKEW_MS, leaks, loggedText, logHits, lostAuthorityEnding, worstCaseSeconds, mergeCommitProblems, movedHeadEnding, parseArgs, PLAN,
   releaseStatusProblems, repositoryOrgProblem, requesterProblem, reviewStatusProblems, rulesetProblems, scrub, secretProblem, SIGN_UPS, signDelivery, STAGING, STAGING_APP, STAGING_ORG, stagingConfig, stagingOnly,
   STEADY, steady, Tally, WEBHOOK_PATH, WEBHOOK_SECRET_ENV, webhookSecretProblem,
 } from "./m5-staging-lib.mjs";
@@ -195,6 +196,39 @@ check(!webhookSecretProblem("zq9-zq9").includes("zq9"), "a refused webhook secre
   check(deliveryOutcomes(events, "d-3").length === 0 && deliveryOutcomes([], "d-1").length === 0, "a delivery the log doesn't hold has no outcome, and the gateway's line isn't taken for the API's");
 }
 
+// ---- a delivery with no line: what the tail held instead ----
+{
+  // The API's own request for a delivery, as its tail shows it: the ID is in the gateway's assertion, not the URL.
+  const assertion = (claims) => `${Buffer.from('{"alg":"EdDSA"}').toString("base64url")}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.c2ln`;
+  const request = (delivery, lines = [], ended = "ok") => ({ outcome: ended, logs: lines.map((fields) => ({ message: [JSON.stringify(fields)] })), exceptions: [], event: { request: { url: "https://api.internal/v1/provider/github/deliveries", method: "POST", headers: { "x-podster-assertion": assertion({ typ: "provider_delivery", provider: "github", delivery, body_sha256: "ab".repeat(32) }) } } } });
+  const line = (delivery, outcome) => ({ at: "provider.delivery", delivery, room: "ws_1", ...(outcome === undefined ? {} : { outcome }) });
+  check(requestIsFor(request("d-1"), "d-1") && !requestIsFor(request("d-1"), "d-2") && !requestIsFor(request("d-12"), "d-1") && !requestIsFor({ event: { request: { headers: { "x-podster-assertion": "not.a-token" } } } }, "d-1") && !requestIsFor({ event: { rpcMethod: "x" } }, "d-1") && !requestIsFor(request("d-1"), ""), "the API's request for a delivery is told by the ID in its assertion, exactly, and by nothing else");
+  const good = deliveryTrace([request("d-1", [line("d-1", "unknown_change")])], "d-1");
+  check(JSON.stringify(good) === JSON.stringify({ outcomes: ["unknown_change"], odd: [], requests: [{ ended: "ok", lines: 1 }] }) && deliveryProblem(good) === null && deliveryProblem(good, 2).text.includes("only 1 of 2 lines (unknown_change)"), "a line with an outcome is read, with the request it came in; one line where two are wanted is said as that");
+  // A wrong value must never look like a wait: each is a finding, said as what it was.
+  for (const [title, outcome, said] of [["no outcome", undefined, "a line with no outcome"], ["a null outcome", null, "a line whose outcome is null"], ["a number", 7, "a line whose outcome is a number"], ["an object", { code: "x" }, "a line whose outcome is a object"], ["text that isn't a code", "Unknown Change!", "a line whose outcome is not a code"], ["an empty outcome", "", "a line whose outcome is not a code"]]) {
+    const trace = deliveryTrace([request("d-1", [line("d-1", outcome)])], "d-1");
+    const problem = deliveryProblem(trace);
+    check(trace.outcomes.length === 0 && trace.odd.join() === said && problem.text === `the API logged ${said} for it` && problem.lost === false, `a line with ${title} is reported as that, and isn't a line that never came`);
+  }
+  // No line: whether the API's request is in the tail decides what it means.
+  const ran = deliveryProblem(deliveryTrace([request("d-1", [{ at: "something.else" }], "canceled"), request("d-2", [line("d-2", "no_room")])], "d-1"));
+  check(ran.lost === false && ran.text.includes("holds no line for it, though it holds the API's own request for it (ended canceled, 1 line(s) logged)") && ran.text.includes("the API ran, and the line isn't there"), "no line, with the API's request for it in the tail: the API ran and logged no line, which is never sent again");
+  const gone = deliveryProblem(deliveryTrace([request("d-2", [line("d-2", "no_room")]), { logs: null }, {}], "d-1"));
+  check(gone.lost === true && gone.text.includes("no request of the API's for it either: the tail never delivered that event"), "no line and no request: the tail never delivered it, the one case where another delivery is sent");
+  check(JSON.stringify(deliveryOutcomes([request("d-1", [line("d-1", "nudged")]), request("d-1", [line("d-1", "replayed")])], "d-1")) === JSON.stringify(["nudged", "replayed"]) && deliveryTrace([request("d-1", [line("d-1", "nudged")]), request("d-1", [line("d-1", "replayed")])], "d-1").requests.length === 2, "a delivery sent twice has two lines and two requests, in order");
+  const source = readFileSync(join(here, "m5-staging.mjs"), "utf8");
+  const body = source.slice(source.indexOf('check("M5-16b"'), source.indexOf("await check(", source.indexOf('check("M5-16b"') + 1));
+  check(body.indexOf("for (const one of cases) one.sent = await send(one.repositoryId);") > 0 && body.indexOf("const problems = [];") < body.indexOf("let found = await traced(one.sent.id);") && body.indexOf("ok(problems.length === 0") > body.lastIndexOf("problems.push("), "M5-16b looks for each delivery's line by itself, and fails once at the end with both");
+  check(body.includes("if (found.problem && found.lost) {") && (body.match(/await send\(/g) ?? []).length === 2 && body.includes("notes.push("), "it sends another only when the tail holds nothing of the first, once, and says that it did");
+  check(source.includes("if (trace.odd.length || Date.now() > deadline) return { problem:"), "a line with a wrong outcome ends the wait at once");
+  // The probe's arguments.
+  check(JSON.stringify(probeArgs([]).options) === JSON.stringify({ pull: 999999, count: 3 }) && probeArgs(["--repository", "1454615252", "--pull", "5", "--count", "10"]).options.repository === 1454615252 && probeArgs(["--count", "10"]).options.count === 10, "the probe takes a repository, a pull request number and a count");
+  for (const bad of [["--count", "11"], ["--count", "0"], ["--repository"], ["--repository", "abc"], ["--pull", "-1"], ["--base-url", "https://example.test"], ["--secret", "x"]]) check(Boolean(probeArgs(bad).error), `the probe refuses ${bad.join(" ")}`);
+  const probe = readFileSync(join(here, "m5-delivery-probe.mjs"), "utf8");
+  check(probe.includes("fetch(`${STAGING}${WEBHOOK_PATH}`") && (probe.match(/fetch\(/g) ?? []).length === 1 && !/readFileSync|writeFileSync|\.podster\//.test(probe) && probe.includes("const secret = process.env[WEBHOOK_SECRET_ENV] || undefined;"), "the probe sends to staging's webhook route and nowhere else, reads the secret from the environment and no file, and writes nothing");
+}
+
 // ---- what the Workers logged ----
 {
   const event = { outcome: "ok", event: { request: { url: "https://gateway-staging.podster.dev/api/v1/workspaces/ws_1", headers: { cookie: "session-cookie-value-123" } } }, logs: [{ message: ['{"event":"merge.pass_failed","ws":"ws_1","task":"tsk_1","code":"provider_unavailable"}'] }], exceptions: [] };
@@ -337,7 +371,7 @@ check(absentId("tsk_aa") === null && absentId("nounderscore") === null, "an ID t
   // A signal stops the flow before clean-up looks at anything.
   check(source.includes("if (stopping) throw new Halt(") && source.indexOf("if (stopping) throw new Halt(") < source.indexOf("  try {\n    tally.add(id, \"pass\"") && source.includes("Promise.race([flowDone, sleep(120_000)]).then(() => cleanUp())") && source.includes("} finally {\n  flowEnded();\n}") && source.includes("ok(!stopping, `${label}: the run was told to stop`);"), "on a signal the run halts at its next check or wait, and clean-up starts only once the flow has ended");
   check(section("M5-16a").includes('eq(await outcomeOf(one.id), "nudged"') && !section("M5-16a").includes("pr_observed_at"), "M5-16a is judged on the API's nudged line, not on a read that the routine poll makes too");
-  for (const id of ["M5-16a", "M5-16b"]) check(section(id).includes("logged();") && !section(id).includes("sleep(") && section(id).includes("await outcomeOf(") && !section(id).includes("!== null"), `${id} needs the API's log, waits on its lines and on nothing fixed, and never passes without them`);
+  for (const [id, read] of [["M5-16a", "await outcomeOf("], ["M5-16b", "await traced("]]) check(section(id).includes("logged();") && !section(id).includes("sleep(") && section(id).includes(read) && !section(id).includes("!== null"), `${id} needs the API's log, waits on its lines and on nothing fixed, and never passes without them`);
   check(source.includes('have(options.logs && tally.passed("M5-13a")'), "without a connected tail the two delivery checks are skipped, by name");
   const reads = [...source.matchAll(/publicRead\(`\/repos\/\$\{repo\.full\}\/commits\/\$\{([a-zA-Z.]+)\.merge_sha\}/g)].map((found) => found[1]);
   check(reads.length === 3 && reads.every((name) => source.includes(`ok(isCommitSha(${name}.merge_sha), `)), "a merge commit from Podster is checked to be 40 hex digits before it goes into a path to GitHub");

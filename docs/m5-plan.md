@@ -1010,6 +1010,32 @@ Each gap is one of two things: **(1)** a check in the script, with the exact ans
 - **Checked against staging, read-only, on 2026-11-11:** with no account named, wrangler exits 1 in under a second with the message the run saw; with the right account all three tails stay up; with `--format json` wrangler prints nothing on connecting; a public page that doesn't exist showed in the API's and the web app's tails after about 3 s, and a request to the gateway in its tail after about 5 s; told to stop, each exits 0. **A dry run of the script itself was run for real three ways:** no account (refused, exit 2), a wrong account (refused, exit 2, "This Worker does not exist on your account"), and the right one (exit 0).
 - **Not checked:** the full run. M5-13, M5-16a and M5-16b have still never executed against a connected tail, and nor has the refusal for a tail that is up and holds no marker.
 
+### Step 10: the second extended run on staging, 2026-11-11
+
+**Recorded from the run's own log.** The extended script ran a second time, starting at about 23:33Z on 2026-11-11, at `772fb42`, with the log tails fixed: **67 passed, 1 failed, 0 skipped, with 2 sign-ups.** Its exit code was 1.
+
+**Shown on staging for the first time:**
+
+- **The Workers' logs** (M5-13a, M5-13): all three tails held a request of the run's own before the first sign-up and at the end. The API's held 1155 events, the gateway's 442 and the web app's 4, and what those Workers logged held none of the 67 strings looked for: no credential the run handled, and no repository name, branch name, pull request title or note of its. This is "in part", for the reasons [the table](#step-10-the-staging-script-extended-2026-11-11) gives: the scanner isn't tailed, and sampling can't be seen.
+- **A replayed delivery** (M5-16a): a signed delivery for a watched change was `202` and the API logged `nudged`; the same delivery ID again, and the same body under a new ID, were each `202`, and the API logged `replayed` for each.
+
+**The one failure, M5-16b: a misdirected delivery, and its cause isn't known yet.** Both deliveries were answered `202`. The script then found no `provider.delivery` line in the API's tail, within 60 seconds, for the first of them: the one naming the second room's repository with the first room's pull request number and head. It never looked for the second, the one naming a repository no room has. **So misdirected deliveries (the second half of M5-16) are still not shown on staging.**
+
+**What is known about it, and what isn't:**
+
+- **By the source, the API logs a line for every delivery it answers `202`,** and the gateway answers `202` only when the API did. `apps/api/src/provider.rs` logs `outcome: "no_room"` when no room has the repository, and otherwise the room's own word. The room, `nudge` in `apps/api/src/workspace/repositories.rs`, always answers `{ "outcome": <code> }` with a code from a fixed list, and for a pull request and head it doesn't watch in its own repository that code is `unknown_change`. A room's refusal or silence would make the API answer `502` or `504`, not `202`. Nothing in the source yields a `202` with no line, or a line with a null or missing outcome.
+- **The script would have reported a wrong outcome as a wrong outcome,** except that a line whose outcome wasn't a string would have been read as the text "undefined" or "null" and failed the comparison, not timed out. So the timeout means no line for that delivery was in what the tail delivered and the script parsed.
+- **Tail loss wasn't seen when looked for:** with a tail on the API and the web app, 40 requests with no credential, sent in pairs back to back as M5-16b sends its two, each showed in both tails: 40 of 40. That makes a dropped event unlikely as a matter of course. It doesn't exclude one.
+- **Not reproduced.** Reproducing it needs a signed delivery, which needs staging's webhook secret. I didn't read it from the owner's files: `e2e/m5-delivery-probe.mjs` does the reproduction for whoever sets the secret for it.
+
+**The script's part, fixed** (`fix/m5-16b`), whatever the cause turns out to be:
+
+- **A delivery with no line now says what the tail held instead.** The tail shows the API's own request for a delivery, and the delivery's ID is in the assertion that request carries. So the check can tell "the API ran, its request is in the tail, and there's no line for the delivery" from "the tail holds nothing of it". Before, both were a timeout.
+- **A line whose outcome is missing, null or not a code ends the wait at once** and is reported as that.
+- **M5-16b judges its two deliveries separately,** so one run answers both, and fails once with everything it found.
+- **Only when the tail holds nothing at all of a delivery** does M5-16b send another, once, as a new delivery, and judge that one's line. Its result says that it did. A request the tail does hold is never sent again.
+- **`e2e/m5-delivery-probe.mjs`** sends signed deliveries with a tail attached and prints, for each, the gateway's answer and line and everything the API's tail holds of it. It takes no sign-up, makes no room and asks GitHub nothing.
+
 ### Self-serve repositories: what was built
 
 **Built, 2026-11-11, from the owner's decision that day ([decision 194](spec/PRODUCT.md#decisions-needed)).** The owner's words: "who are the operators? an admin of a workroom should be able to connect to repo .. it doesn't have to be only an operators somewehre". Asked two questions, the owner chose "No gate, with limits" for an operator's approval of an organization, and "Owner and admins" for who in a workroom asks for the repository and gives grants. This replaces step 4's ruling of 2026-11-10 that only an operator gives the delegation. Everything is still behind `MANAGED_REPOSITORIES`.

@@ -49,6 +49,8 @@ const ASKED = "x-content-browser-run-url";
 const local = `http://127.0.0.1:${port}/`;
 /** How long the browser is given to do anything more after an action was taken. See `nothingMore`. */
 const NOTHING_MORE_MS = 1500;
+/** How often the run asks whether the Worker is listening yet. See `ready`. */
+const READY_POLL_MS = 200;
 
 // ---- the Worker, under wrangler dev, local only ----
 const home = mkdtempSync(join(tmpdir(), "content-sandbox-home-"));
@@ -69,6 +71,12 @@ async function ask(url, init = {}) {
   const response = await fetch(local, { ...init, headers: { ...(init.headers ?? {}), [ASKED]: url }, redirect: "manual" });
   return { status: response.status, headers: Object.fromEntries(response.headers.entries()), setCookie: response.headers.getSetCookie(), body: Buffer.from(await response.arrayBuffer()) };
 }
+/** How many of the app's answers the Worker has received with a `Set-Cookie`, since it started. */
+async function appSetCookies() {
+  const answer = await fetch(local);
+  if (answer.headers.get(RUN_ID) !== runId) throw new Error("the Worker on this port isn't this run's");
+  return Number(answer.headers.get("x-content-browser-run-app-set-cookies"));
+}
 async function ready() {
   for (let tries = 0; tries < 150; tries++) {
     if (dev.exitCode !== null) throw new Error(`wrangler dev exited with ${dev.exitCode}:\n${devLog.join("")}`);
@@ -80,7 +88,8 @@ async function ready() {
     } catch (error) {
       if (String(error?.message).includes("another run")) throw error;
     }
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // The second place time is used: the Worker has no event for "listening", so the run asks every 200 ms.
+    await new Promise((resolve) => setTimeout(resolve, READY_POLL_MS));
   }
   throw new Error(`wrangler dev never answered:\n${devLog.join("")}`);
 }
@@ -120,6 +129,7 @@ async function inBrowser(name, control = false) {
   }
   try {
     const context = await browser.newContext();
+    const appSetCookiesBefore = await appSetCookies();
     // No step waits long: a step a browser never finishes is recorded as that, and the run goes on.
     context.setDefaultTimeout(8000);
     context.setDefaultNavigationTimeout(15_000);
@@ -226,6 +236,7 @@ async function inBrowser(name, control = false) {
       cookiesInTheBrowsersJar: jar.map((cookie) => `${cookie.name} for ${cookie.domain}`),
       requestsThatCarriedACookie: asked.filter((request) => request.cookie).length,
       answersWithSetCookie,
+      appAnswersWithSetCookie: (await appSetCookies()) - appSetCookiesBefore,
       requestsToOtherHosts: [...new Set(asked.filter((request) => !new URL(request.url).hostname.endsWith(`.${DOMAIN}`)).map((request) => request.url))],
       requestsMade: asked.length,
       stepsThatDidNotFinish: failed,
@@ -266,5 +277,7 @@ const text = `${JSON.stringify(report, null, 2)}\n`;
 if (out) writeFileSync(out, text); else process.stdout.write(text);
 const failures = report.assertions.failed;
 for (const failure of failures) console.error(`content sandbox: FAILED ${failure}`);
+// A browser that isn't installed is skipped, never downloaded, and said plainly: what it would show isn't shown.
+for (const name of report.assertions.notInstalled) console.error(`content sandbox: NOT SHOWN ${name}: not installed on this machine, so nothing is shown for it`);
 console.error(`content sandbox: ${report.assertions.browsersRun.length} browser(s) run, ${failures.length} assertion(s) failed`);
 process.exit(failures.length === 0 ? 0 : 1);

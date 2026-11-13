@@ -5,7 +5,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { judge, verdict } from "./content-sandbox-judge.mjs";
+import { judge, REFUSED, verdict } from "./content-sandbox-judge.mjs";
 
 const docs = join(dirname(fileURLToPath(import.meta.url)), "../docs");
 const recorded = readdirSync(docs).filter((name) => /^m6-content-sandbox-run-.*\.json$/.test(name)).sort().pop();
@@ -26,13 +26,38 @@ const broken = (change, says) => {
   check(failed.some((line) => line.includes(says)), `fails when ${says}: ${failed.length} failure(s)`);
 };
 broken((pass) => { pass.results.origin.value = `https://appa.${DOMAIN}`; }, "the page's origin is `null`");
-for (const probe of ["cookieWrite", "cookieWriteForDomain", "cookieRead", "localStorage", "sessionStorage", "indexedDB", "cacheApi", "serviceWorker"]) broken((pass) => { pass.results[probe] = { ok: true, value: "worked" }; }, `${probe} is refused`);
+check(JSON.stringify(REFUSED) === JSON.stringify(["cookieWrite", "cookieWriteForDomain", "cookieRead", "localStorage", "sessionStorage", "indexedDB", "cacheApi"]), "the asserted refusals are the seven the control can show working");
+for (const probe of REFUSED) {
+  broken((pass) => { pass.results[probe] = { ok: true, value: "worked" }; }, `${probe} is refused`);
+  // An error that isn't the sandbox's is no refusal: a harness fault mustn't pass as one.
+  for (const error of ["TypeError", "NetworkError", "Error", ""]) broken((pass) => { pass.results[probe] = { ok: false, error }; }, `${probe} is refused with SecurityError`);
+}
+// A service worker's registration is recorded, never asserted: it fails in the control too, for the harness's reason.
+{
+  const pass = copy(run.browsers.chromium);
+  pass.results.serviceWorker = { ok: true, value: "registered" };
+  check(judge("chromium", pass, DOMAIN).length === 0 && run.browsers.chromium.withoutThePolicy.results.serviceWorker.ok === false, "a service worker's registration isn't asserted, since the control can't register one either");
+}
 broken((pass) => { delete pass.results.indexedDB; }, "indexedDB is refused");
 broken((pass) => { pass.sibling.cookieRead = { ok: true, value: "shared=1" }; }, "a sibling host can't read a cookie");
+broken((pass) => { pass.sibling.cookieRead = { ok: false, error: "TypeError" }; }, "a sibling host can't read a cookie");
 broken((pass) => { pass.sibling.cookieWriteForDomain = { ok: true, value: "shared=1" }; }, "a sibling host can't write a cookie");
 broken((pass) => { pass.requestsThatCarriedACookie = 1; }, "no request carries a cookie");
 broken((pass) => { pass.requestsMade = 0; }, "no request carries a cookie");
 broken((pass) => { pass.answersWithSetCookie = 1; }, "`Set-Cookie` never reaches the browser");
+// "Never reaches the browser" must not be true only because the app sent none.
+broken((pass) => { pass.appAnswersWithSetCookie = 0; }, "the test app sent `Set-Cookie`");
+broken((pass) => { delete pass.appAnswersWithSetCookie; }, "the test app sent `Set-Cookie`");
+broken((pass) => { pass.withoutThePolicy.appAnswersWithSetCookie = 0; }, "in the control too, an app's `Set-Cookie` is sent");
+// "No request carries a cookie" means something only where the control shows one. It does in Chromium and Firefox.
+broken((pass) => { pass.withoutThePolicy.requestsThatCarriedACookie = 0; }, "in the control requests carry the cookie");
+{
+  const firefox = copy(run.browsers.firefox);
+  firefox.withoutThePolicy.requestsThatCarriedACookie = 0;
+  check(judge("firefox", firefox, DOMAIN).some((line) => line.includes("in the control requests carry the cookie")), "and the same for Firefox");
+  // WebKit's control shows none on any intercepted request, so that row isn't asserted for WebKit.
+  check(run.browsers.webkit.withoutThePolicy.requestsThatCarriedACookie === 0 && judge("webkit", copy(run.browsers.webkit), DOMAIN).length === 0, "WebKit's control shows no cookie on a request, and the run doesn't claim otherwise");
+}
 broken((pass) => { pass.cookiesInTheBrowsersJar = ["from-app for .sandbox-test.example"]; }, "`Set-Cookie` never reaches the browser");
 // A harness that could see nothing would pass the rows above. The control is what shows it could.
 broken((pass) => { pass.withoutThePolicy.shown = false; }, "the control ran");

@@ -6,15 +6,21 @@ use podster_core::release::{script_owner, ScriptOwner};
 const FIXTURE: &str = include_str!("../../../packages/contracts/serve-entry.fixture.json");
 
 /// The strings of one array in the fixture. The fixture promises no string holds a quote or a backslash, so a string
-/// is whatever sits between two quotes.
+/// is whatever sits between two quotes. An array that isn't there reads as empty, which each test below refuses.
 fn strings(name: &str) -> Vec<&'static str> {
-    let start = FIXTURE
-        .find(&format!("\"{name}\": ["))
-        .unwrap_or_else(|| panic!("the fixture has no {name}"));
-    let rest = &FIXTURE[start..];
-    let open = rest.find('[').expect("an array");
-    let close = rest.find(']').expect("the array's end");
-    rest[open + 1..close].split('"').skip(1).step_by(2).collect()
+    let Some(start) = FIXTURE.find(&format!("\"{name}\": [")) else {
+        return Vec::new();
+    };
+    let rest = FIXTURE.get(start..).unwrap_or_default();
+    let (Some(open), Some(close)) = (rest.find('['), rest.find(']')) else {
+        return Vec::new();
+    };
+    rest.get(open + 1..close)
+        .unwrap_or_default()
+        .split('"')
+        .skip(1)
+        .step_by(2)
+        .collect()
 }
 
 #[test]

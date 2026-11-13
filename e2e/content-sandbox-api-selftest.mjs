@@ -65,12 +65,13 @@ broken((pass) => { pass.withoutThePolicy.pages.own.page.calls.none.putJson = { o
 // A browser that is installed and didn't run fails the run; one that isn't installed doesn't.
 check(verdict({ browsers: { chromium: { shown: false, why: "it crashed" } } }, ["chromium"]).failed.length === 1, "an installed browser that didn't run fails the run");
 check(verdict(run, []).failed.length === 1, "no installed browser at all fails the run");
-// What the run observes and never asserts stays out of the judge: a page that could do nothing at all still passes
-// if the properties hold, so "a todo app works" is read from the record, not from the exit code.
+// What the run observes and never asserts stays out of the judge: a page whose every write failed still passes if
+// the properties hold, so "a todo app works" is read from the record, not from the exit code. One read is asserted,
+// where the API allows any origin, only to show the page reaches the API at all.
 {
   const pass = copy(run.browsers.chromium);
-  for (const mode of ["star", "null"]) for (const call of CALLS) pass.pages.own.page.calls[mode][call] = { ok: false, error: "TypeError" };
-  check(judge("chromium", pass).length === 0, "whether the app's own calls work is an observation: the judge doesn't assert it");
+  for (const mode of ["star", "null"]) for (const call of ["postJson", "putJson", "postText", "deleteJson"]) pass.pages.own.page.calls[mode][call] = { ok: false, error: "TypeError" };
+  check(judge("chromium", pass).length === 0, "whether the app's own writes work is an observation: the judge doesn't assert it");
 }
 console.log(failures === 0 ? "\nsandbox api self-test: all passed" : `\nsandbox api self-test: ${failures} FAILED`);
 process.exit(failures === 0 ? 0 : 1);

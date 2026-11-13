@@ -197,7 +197,27 @@ The content Worker today passes `GET` and `HEAD`, forwards `Accept`, `If-None-Ma
 
 **So a todo demo must avoid:** forms, client-side routes, inline scripts, and anything kept in the browser. That rules out Remix, Next and React Router as they build by default, and fits a client-rendered page from Vite with React, Vue or Svelte.
 
-**A spike settles it, proposed:** in the existing browser run, `e2e/content-sandbox.mjs`, in the three browsers: a `POST` with a JSON body from the sandboxed page to its own host through the handler, with the preflight; a submit handler on a form; and navigation by the address's fragment. It needs no deployment.
+**The spike has run: [the report](../m6-sandbox-api-report.md), 2026-11-13.** In Chromium, Firefox and WebKit, a page whose origin is `null` read and changed a list on its own host with `GET`, `POST`, `PUT` and `DELETE` and a JSON body, when the API allowed any origin or the origin `null` and answered the preflight. **So a todo app can work under `sandbox allow-scripts` as it stands, with no change to the sandbox.** A form's submit handler and navigation by the address's fragment are still not shown.
+
+#### What the spike means for the design
+
+**Proposed, for the owner's question 5, the content Worker taking writes for a host whose release has code.** The report recommends nothing; this is this document's reading of it.
+
+**(a) A write must be JSON, and a simple cross-site write is refused.** *Seen:* a plain-text `POST` reached the API and changed the list from every page elsewhere, however the API answered, even with no cross-origin header at all. A browser sends it without asking leave, and the headers only decide whether the page may read the answer. *So:* before it dispatches, the content Worker refuses any `POST`, `PUT`, `PATCH` or `DELETE` whose `Content-Type` isn't `application/json`. A JSON body is what makes a browser ask leave first, so every write a browser sends has passed a preflight the content Worker answered. The app's code never sees a write that didn't.
+
+**(b) The answer allows the origin `null`, not any origin.** *Seen:* with `null`, an ordinary page on another site could read nothing and its JSON writes never reached the API, while the app's own sandboxed page did everything. *So:* the content Worker answers `Access-Control-Allow-Origin: null` for an app with code. **The residual, said plainly: every sandboxed page anywhere has the origin `null`,** and the sandboxed page on another domain did everything the app's own page did. Any site can put the same calls in a sandboxed frame or page of its own. `null` keeps out a page that hasn't bothered to; it is no boundary. *Today's answers to static files allow any origin, which the first browser run needed for an app's own scripts and data; whether those change too is open.*
+
+**(c) The preflight is answered only for a host whose release has code,** and only for the write methods and the `Content-Type` header. For a static app the content Worker answers as now.
+
+**What an outsider can still do to a todo app with no login, under (a), (b) and (c):**
+
+- **Read and change the list from a command line, or from any program that isn't a browser.** No cross-origin rule applies to it. This needs only the address.
+- **Read and change the list from any web page that sandboxes itself,** and so make every visitor of that page do it, from each visitor's own address. This is why a limit for each address won't hold a write budget, and why the budget is for the app ([the summary's 4a](#stage-1-one-todo-app)).
+- **Not possible:** a write from an ordinary page on another site, or from a form on one; a read by one. **Not relevant:** a cookie, since none exists and none was sent even when the API offered one.
+
+**So (a), (b) and (c) narrow who can write by accident or with no effort, and change nothing about who can write on purpose.** With no login the list is public to read and to change. That is the owner's question 2, unchanged.
+
+**Still to show, in the same local run:** a submit handler on a form, and navigation by the address's fragment. And, once the content Worker's own changes are written, the same calls through the real handler and not a test API.
 
 ### 3.6 Limits and outbound
 

@@ -1,6 +1,6 @@
 {
-  "ranAt": "2026-11-13T16:13:27.688Z",
-  "commit": "f841383aeb178a551ca22757380c8f80a8086576",
+  "ranAt": "2026-11-13T16:19:51.266Z",
+  "commit": "3181055f87838e1307c534beba7e86bb7a95f1e7",
   "wrangler": "4.157.0",
   "playwright": "1.64.1",
   "pages": {
@@ -264,7 +264,26 @@
               "null"
             ],
             "withACookie": 0,
-            "requests": 36
+            "answersThatSetACookie": 21,
+            "requests": 36,
+            "handedToTheBrowser": {
+              "none": {
+                "readsAnswered200": 2
+              },
+              "star": {
+                "readsAnswered200": 2
+              },
+              "null": {
+                "readsAnswered200": 2
+              },
+              "star-nopre": {
+                "readsAnswered200": 2
+              },
+              "null-nopre": {
+                "readsAnswered200": 2
+              }
+            },
+            "harnessErrors": 0
           }
         },
         "sibling": {
@@ -456,7 +475,26 @@
             },
             "origins": [],
             "withACookie": 0,
-            "requests": 0
+            "answersThatSetACookie": 0,
+            "requests": 0,
+            "handedToTheBrowser": {
+              "none": {
+                "readsAnswered200": 0
+              },
+              "star": {
+                "readsAnswered200": 0
+              },
+              "null": {
+                "readsAnswered200": 0
+              },
+              "star-nopre": {
+                "readsAnswered200": 0
+              },
+              "null-nopre": {
+                "readsAnswered200": 0
+              }
+            },
+            "harnessErrors": 0
           }
         },
         "boxedElsewhere": {
@@ -702,7 +740,26 @@
               "null"
             ],
             "withACookie": 0,
-            "requests": 36
+            "answersThatSetACookie": 21,
+            "requests": 36,
+            "handedToTheBrowser": {
+              "none": {
+                "readsAnswered200": 2
+              },
+              "star": {
+                "readsAnswered200": 2
+              },
+              "null": {
+                "readsAnswered200": 2
+              },
+              "star-nopre": {
+                "readsAnswered200": 2
+              },
+              "null-nopre": {
+                "readsAnswered200": 2
+              }
+            },
+            "harnessErrors": 0
           }
         },
         "plainElsewhere": {
@@ -927,7 +984,26 @@
               "https://plain.elsewhere-test.example"
             ],
             "withACookie": 0,
-            "requests": 31
+            "answersThatSetACookie": 18,
+            "requests": 31,
+            "handedToTheBrowser": {
+              "none": {
+                "readsAnswered200": 2
+              },
+              "star": {
+                "readsAnswered200": 2
+              },
+              "null": {
+                "readsAnswered200": 2
+              },
+              "star-nopre": {
+                "readsAnswered200": 2
+              },
+              "null-nopre": {
+                "readsAnswered200": 2
+              }
+            },
+            "harnessErrors": 0
           }
         }
       },
@@ -1207,8 +1283,27 @@
                 null,
                 "https://appa.sandbox-test.example"
               ],
-              "withACookie": 0,
-              "requests": 30
+              "withACookie": 29,
+              "answersThatSetACookie": 30,
+              "requests": 30,
+              "handedToTheBrowser": {
+                "none": {
+                  "readsAnswered200": 2
+                },
+                "star": {
+                  "readsAnswered200": 2
+                },
+                "null": {
+                  "readsAnswered200": 2
+                },
+                "star-nopre": {
+                  "readsAnswered200": 2
+                },
+                "null-nopre": {
+                  "readsAnswered200": 2
+                }
+              },
+              "harnessErrors": 0
             }
           },
           "sibling": {
@@ -1433,7 +1528,26 @@
                 "https://appb.sandbox-test.example"
               ],
               "withACookie": 0,
-              "requests": 31
+              "answersThatSetACookie": 18,
+              "requests": 31,
+              "handedToTheBrowser": {
+                "none": {
+                  "readsAnswered200": 2
+                },
+                "star": {
+                  "readsAnswered200": 2
+                },
+                "null": {
+                  "readsAnswered200": 2
+                },
+                "star-nopre": {
+                  "readsAnswered200": 2
+                },
+                "null-nopre": {
+                  "readsAnswered200": 2
+                }
+              },
+              "harnessErrors": 0
             }
           }
         },
@@ -1687,7 +1801,26 @@
               "null"
             ],
             "withACookie": 0,
-            "requests": 32
+            "answersThatSetACookie": 21,
+            "requests": 32,
+            "handedToTheBrowser": {
+              "none": {
+                "readsAnswered200": 2
+              },
+              "star": {
+                "readsAnswered200": 2
+              },
+              "null": {
+                "readsAnswered200": 2
+              },
+              "star-nopre": {
+                "readsAnswered200": 2
+              },
+              "null-nopre": {
+                "readsAnswered200": 2
+              }
+            },
+            "harnessErrors": 0
           }
         },
         "sibling": {
@@ -1879,7 +2012,26 @@
             },
             "origins": [],
             "withACookie": 0,
-            "requests": 0
+            "answersThatSetACookie": 0,
+            "requests": 0,
+            "handedToTheBrowser": {
+              "none": {
+                "readsAnswered200": 0
+              },
+              "star": {
+                "readsAnswered200": 0
+              },
+              "null": {
+                "readsAnswered200": 0
+              },
+              "star-nopre": {
+                "readsAnswered200": 0
+              },
+              "null-nopre": {
+                "readsAnswered200": 0
+              }
+            },
+            "harnessErrors": 0
           }
         },
         "boxedElsewhere": {
@@ -2125,7 +2277,26 @@
               "null"
             ],
             "withACookie": 0,
-            "requests": 32
+            "answersThatSetACookie": 21,
+            "requests": 32,
+            "handedToTheBrowser": {
+              "none": {
+                "readsAnswered200": 2
+              },
+              "star": {
+                "readsAnswered200": 2
+              },
+              "null": {
+                "readsAnswered200": 2
+              },
+              "star-nopre": {
+                "readsAnswered200": 2
+              },
+              "null-nopre": {
+                "readsAnswered200": 2
+              }
+            },
+            "harnessErrors": 0
           }
         },
         "plainElsewhere": {
@@ -2350,7 +2521,26 @@
               "https://plain.elsewhere-test.example"
             ],
             "withACookie": 0,
-            "requests": 31
+            "answersThatSetACookie": 18,
+            "requests": 31,
+            "handedToTheBrowser": {
+              "none": {
+                "readsAnswered200": 2
+              },
+              "star": {
+                "readsAnswered200": 2
+              },
+              "null": {
+                "readsAnswered200": 2
+              },
+              "star-nopre": {
+                "readsAnswered200": 2
+              },
+              "null-nopre": {
+                "readsAnswered200": 2
+              }
+            },
+            "harnessErrors": 0
           }
         }
       },
@@ -2630,8 +2820,27 @@
                 null,
                 "https://appa.sandbox-test.example"
               ],
-              "withACookie": 0,
-              "requests": 30
+              "withACookie": 29,
+              "answersThatSetACookie": 30,
+              "requests": 30,
+              "handedToTheBrowser": {
+                "none": {
+                  "readsAnswered200": 2
+                },
+                "star": {
+                  "readsAnswered200": 2
+                },
+                "null": {
+                  "readsAnswered200": 2
+                },
+                "star-nopre": {
+                  "readsAnswered200": 2
+                },
+                "null-nopre": {
+                  "readsAnswered200": 2
+                }
+              },
+              "harnessErrors": 0
             }
           },
           "sibling": {
@@ -2856,7 +3065,26 @@
                 "https://appb.sandbox-test.example"
               ],
               "withACookie": 0,
-              "requests": 31
+              "answersThatSetACookie": 18,
+              "requests": 31,
+              "handedToTheBrowser": {
+                "none": {
+                  "readsAnswered200": 2
+                },
+                "star": {
+                  "readsAnswered200": 2
+                },
+                "null": {
+                  "readsAnswered200": 2
+                },
+                "star-nopre": {
+                  "readsAnswered200": 2
+                },
+                "null-nopre": {
+                  "readsAnswered200": 2
+                }
+              },
+              "harnessErrors": 0
             }
           }
         },
@@ -3110,7 +3338,26 @@
               "null"
             ],
             "withACookie": 0,
-            "requests": 32
+            "answersThatSetACookie": 21,
+            "requests": 32,
+            "handedToTheBrowser": {
+              "none": {
+                "readsAnswered200": 2
+              },
+              "star": {
+                "readsAnswered200": 2
+              },
+              "null": {
+                "readsAnswered200": 2
+              },
+              "star-nopre": {
+                "readsAnswered200": 2
+              },
+              "null-nopre": {
+                "readsAnswered200": 2
+              }
+            },
+            "harnessErrors": 0
           }
         },
         "sibling": {
@@ -3333,7 +3580,26 @@
             },
             "origins": [],
             "withACookie": 0,
-            "requests": 0
+            "answersThatSetACookie": 0,
+            "requests": 0,
+            "handedToTheBrowser": {
+              "none": {
+                "readsAnswered200": 0
+              },
+              "star": {
+                "readsAnswered200": 0
+              },
+              "null": {
+                "readsAnswered200": 0
+              },
+              "star-nopre": {
+                "readsAnswered200": 0
+              },
+              "null-nopre": {
+                "readsAnswered200": 0
+              }
+            },
+            "harnessErrors": 0
           }
         },
         "boxedElsewhere": {
@@ -3579,7 +3845,26 @@
               "null"
             ],
             "withACookie": 0,
-            "requests": 32
+            "answersThatSetACookie": 21,
+            "requests": 32,
+            "handedToTheBrowser": {
+              "none": {
+                "readsAnswered200": 2
+              },
+              "star": {
+                "readsAnswered200": 2
+              },
+              "null": {
+                "readsAnswered200": 2
+              },
+              "star-nopre": {
+                "readsAnswered200": 2
+              },
+              "null-nopre": {
+                "readsAnswered200": 2
+              }
+            },
+            "harnessErrors": 0
           }
         },
         "plainElsewhere": {
@@ -3804,7 +4089,26 @@
               "https://plain.elsewhere-test.example"
             ],
             "withACookie": 0,
-            "requests": 31
+            "answersThatSetACookie": 18,
+            "requests": 31,
+            "handedToTheBrowser": {
+              "none": {
+                "readsAnswered200": 2
+              },
+              "star": {
+                "readsAnswered200": 2
+              },
+              "null": {
+                "readsAnswered200": 2
+              },
+              "star-nopre": {
+                "readsAnswered200": 2
+              },
+              "null-nopre": {
+                "readsAnswered200": 2
+              }
+            },
+            "harnessErrors": 0
           }
         }
       },
@@ -4084,8 +4388,27 @@
                 null,
                 "https://appa.sandbox-test.example"
               ],
-              "withACookie": 0,
-              "requests": 30
+              "withACookie": 29,
+              "answersThatSetACookie": 30,
+              "requests": 30,
+              "handedToTheBrowser": {
+                "none": {
+                  "readsAnswered200": 2
+                },
+                "star": {
+                  "readsAnswered200": 2
+                },
+                "null": {
+                  "readsAnswered200": 2
+                },
+                "star-nopre": {
+                  "readsAnswered200": 2
+                },
+                "null-nopre": {
+                  "readsAnswered200": 2
+                }
+              },
+              "harnessErrors": 0
             }
           },
           "sibling": {
@@ -4310,7 +4633,26 @@
                 "https://appb.sandbox-test.example"
               ],
               "withACookie": 0,
-              "requests": 31
+              "answersThatSetACookie": 18,
+              "requests": 31,
+              "handedToTheBrowser": {
+                "none": {
+                  "readsAnswered200": 2
+                },
+                "star": {
+                  "readsAnswered200": 2
+                },
+                "null": {
+                  "readsAnswered200": 2
+                },
+                "star-nopre": {
+                  "readsAnswered200": 2
+                },
+                "null-nopre": {
+                  "readsAnswered200": 2
+                }
+              },
+              "harnessErrors": 0
             }
           }
         },
@@ -4320,7 +4662,7 @@
   },
   "wranglerDev": {
     "mentionedLoginOrAccount": false,
-    "listening": "http://127.0.0.1:51445",
+    "listening": "http://127.0.0.1:53288",
     "exitedEarly": false
   },
   "assertions": {

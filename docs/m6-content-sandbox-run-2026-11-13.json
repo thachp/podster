@@ -1,6 +1,6 @@
 {
-  "ranAt": "2026-11-13T08:10:57.230Z",
-  "commit": "a53062c53d8835248168c4ed043b20a57842c644",
+  "ranAt": "2026-11-13T08:32:41.483Z",
+  "commit": "c2df699b57b57782c13b925c7bbb44ba73165f6c",
   "wrangler": "4.157.0",
   "playwright": "1.64.1",
   "workerd": {
@@ -196,6 +196,7 @@
       "cookiesInTheBrowsersJar": [],
       "requestsThatCarriedACookie": 0,
       "answersWithSetCookie": 0,
+      "appAnswersWithSetCookie": 16,
       "requestsToOtherHosts": [],
       "requestsMade": 18,
       "stepsThatDidNotFinish": [],
@@ -341,6 +342,7 @@
         ],
         "requestsThatCarriedACookie": 12,
         "answersWithSetCookie": 0,
+        "appAnswersWithSetCookie": 16,
         "requestsToOtherHosts": [
           "https://elsewhere.example/pixel.png",
           "https://elsewhere.example/data.json"
@@ -492,6 +494,7 @@
       "cookiesInTheBrowsersJar": [],
       "requestsThatCarriedACookie": 0,
       "answersWithSetCookie": 0,
+      "appAnswersWithSetCookie": 16,
       "requestsToOtherHosts": [],
       "requestsMade": 18,
       "stepsThatDidNotFinish": [
@@ -639,6 +642,7 @@
         ],
         "requestsThatCarriedACookie": 11,
         "answersWithSetCookie": 0,
+        "appAnswersWithSetCookie": 17,
         "requestsToOtherHosts": [
           "https://elsewhere.example/pixel.png",
           "https://elsewhere.example/data.json"
@@ -790,6 +794,7 @@
       "cookiesInTheBrowsersJar": [],
       "requestsThatCarriedACookie": 0,
       "answersWithSetCookie": 0,
+      "appAnswersWithSetCookie": 16,
       "requestsToOtherHosts": [],
       "requestsMade": 18,
       "stepsThatDidNotFinish": [],
@@ -933,6 +938,7 @@
         ],
         "requestsThatCarriedACookie": 0,
         "answersWithSetCookie": 0,
+        "appAnswersWithSetCookie": 16,
         "requestsToOtherHosts": [
           "https://elsewhere.example/pixel.png",
           "https://elsewhere.example/data.json"
@@ -947,7 +953,7 @@
   "nothingMoreMs": 1500,
   "wranglerDev": {
     "mentionedLoginOrAccount": false,
-    "listening": "http://127.0.0.1:49414",
+    "listening": "http://127.0.0.1:50100",
     "portChosenAtStart": true,
     "answeredWithThisRunsMark": true,
     "exitedEarly": false

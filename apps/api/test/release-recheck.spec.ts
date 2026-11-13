@@ -89,7 +89,7 @@ const recheck = (room: string, release: string = REL) =>
   stub(room).fetch("https://do/internal/release-recheck", { method: "POST", body: JSON.stringify({ release_id: release }) }).then(async (r: Response) => ({ status: r.status, body: (await r.json()) as any }));
 const row = (room: string) => inRoom(room, (sql) => sql.exec("SELECT state, failure_code, finished_at IS NOT NULL AS finished FROM release WHERE id = ?", REL).one());
 const trail = (room: string) => inRoom(room, (sql) => ({
-  events: sql.exec("SELECT type, actor_id FROM event WHERE type LIKE 'release.%' ORDER BY seq").toArray(),
+  events: sql.exec("SELECT type, actor_id, subject_id, reason FROM event WHERE type LIKE 'release.%' ORDER BY seq").toArray(),
   audit: sql.exec("SELECT actor_id, action, target_id, prior_json, new_json FROM audit_event WHERE action LIKE 'release.%' ORDER BY seq").toArray(),
 }));
 const HOLDS = { status: 200, body: { release_id: REL, state: "queued", rechecked: true, reason: null } };
@@ -123,7 +123,8 @@ describe("the room's recheck of a release", () => {
     expect(failed).toEqual({ status: 200, body: { release_id: REL, state: "failed", rechecked: true, reason: "release_off" } });
     expect(await row(h.room)).toEqual({ state: "failed", failure_code: "release_off", finished: 1 });
     const after = await trail(h.room);
-    expect(after.events).toEqual([{ type: "release.failed", actor_id: "podster" }]);
+    // The event names the release it is about, by its ID, and why, by the code.
+    expect(after.events).toEqual([{ type: "release.failed", actor_id: "podster", subject_id: REL, reason: "release_off" }]);
     expect(after.audit.map((a: any) => [a.actor_id, a.action, a.target_id, JSON.parse(a.prior_json), JSON.parse(a.new_json)])).toEqual([["podster", "release.failed", REL, { state: "queued" }, { state: "failed", reason: "release_off" }]]);
     // A release that has ended takes no event: a second pass finds it failed and changes nothing, whatever is so now.
     await inRoom(h.room, (sql) => sql.exec("UPDATE release_config SET enabled = 1"));
@@ -174,6 +175,9 @@ describe("the room's recheck of a release", () => {
       });
     }],
     // The room's reviewer rule, as it is now.
+    ["the room requiring a person as reviewer when no reviewer is on record", "reviewer_rule_changed", async (h) => {
+      await inRoom(h.room, (s) => { s.exec("UPDATE workspace SET require_person_review = 1"); s.exec("UPDATE task_change SET reviewer_id = NULL"); });
+    }],
     ["the room requiring a person as reviewer when the task's reviewer was an agent", "reviewer_rule_changed", async (h) => {
       await inRoom(h.room, (s) => { s.exec("UPDATE workspace SET require_person_review = 1"); s.exec("UPDATE task_change SET reviewer_id = 'agt_rr_reviewer'"); });
     }],
@@ -211,7 +215,15 @@ describe("the room's recheck of a release", () => {
     await alarmQuiet(stub(h.room));
   });
 
-  it("fails while the whole content domain is stopped, and when the stop can't be read", async () => {
+  /** Nothing was decided: the pass was refused as retryable, and the release, its events and its audit are as they were. */
+  const undecided = async (h: Healthy, what: string) => {
+    const answer = await switchedOn(() => recheck(h.room));
+    expect([answer.status, answer.body?.error?.code], what).toEqual([503, "standing_unknown"]);
+    expect(await row(h.room), what).toEqual({ state: "queued", failure_code: null, finished: 0 });
+    expect(await trail(h.room), what).toEqual({ events: [], audit: [] });
+  };
+
+  it("fails while the whole content domain is stopped, and decides nothing when the stop can't be read", async () => {
     const stopped = await healthy();
     const unreadable = await healthy();
     // The stop's home is the Moderation object. Its table is made on its first call.
@@ -220,12 +232,36 @@ describe("the room's recheck of a release", () => {
       await inModeration((s) => void s.exec("INSERT INTO content_stop (singleton, stopped, reason, at, version, updated_at) VALUES (1, 1, 'illegal', 1, 1, 1) ON CONFLICT (singleton) DO UPDATE SET stopped = 1, reason = 'illegal', at = 1, version = version + 1"));
       expect((await switchedOn(() => recheck(stopped.room))).body).toMatchObject({ state: "failed", reason: "release_stopped" });
       await inModeration((s) => { s.exec("UPDATE content_stop SET stopped = 0, reason = NULL, at = NULL, version = version + 1"); s.exec("CREATE TABLE test_stop_unreadable (x INTEGER)"); });
-      // Unreadable is never clear: it fails closed.
-      expect((await switchedOn(() => recheck(unreadable.room))).body).toMatchObject({ state: "failed", reason: "release_stopped" });
+      // A stop that can't be read is a fact that wasn't read. Failing a release can't be undone, so nothing is
+      // decided on it: the pass is refused, to be tried again, and nothing is written.
+      await undecided(unreadable, "the stop unreadable");
     } finally {
       await inModeration((s) => { s.exec("DROP TABLE IF EXISTS test_stop_unreadable"); s.exec("UPDATE content_stop SET stopped = 0, reason = NULL, at = NULL, version = version + 1"); });
     }
+    // Readable again and clear, the same release holds.
+    expect(await switchedOn(() => recheck(unreadable.room))).toEqual(HOLDS);
     for (const h of [stopped, unreadable]) await alarmQuiet(stub(h.room));
+  });
+
+  it("decides nothing when the organization's delegation can't be read, or isn't a yes or a no", async () => {
+    // Test builds only: the answer the organization's object is taken to have given.
+    for (const answer of ["not json at all", "{}", '{"granted":"yes"}', '{"granted":1}', '{"granted":null}', "null"]) {
+      const h = await healthy();
+      await inRoom(h.room, (s) => { s.exec("CREATE TABLE test_release_delegation_answer (answer TEXT)"); s.exec("INSERT INTO test_release_delegation_answer (answer) VALUES (?)", answer); });
+      await undecided(h, answer);
+      // A clear no is a fact that was read: it fails the release.
+      await inRoom(h.room, (s) => void s.exec("UPDATE test_release_delegation_answer SET answer = ?", '{"granted":false}'));
+      expect((await switchedOn(() => recheck(h.room))).body, answer).toMatchObject({ state: "failed", reason: "release_not_delegated" });
+      await alarmQuiet(stub(h.room));
+    }
+  });
+
+  it("uses the requester's grant on the room's own repository, whatever other grants they hold", async () => {
+    const h = await healthy();
+    // An older live `deploy` grant on another repository, from someone who gave nothing that counts.
+    await inRoom(h.room, (s) => void s.exec("INSERT INTO provider_grant (id, principal_id, provider, provider_repo_id, action, delegated_by, created_at) VALUES ('pgr_older', ?, 'github', ?, 'deploy', ?, 0)", h.requester.id, REPO_ID + 5, h.requester.id));
+    expect(await switchedOn(() => recheck(h.room))).toEqual(HOLDS);
+    await alarmQuiet(stub(h.room));
   });
 
   it("fails once an operator has taken the provisioning delegation from the room's organization", async () => {
@@ -282,6 +318,8 @@ describe("the room's recheck of a release", () => {
       ["the grant's giver", (h) => [`UPDATE provider_grant SET delegated_by = '${h.admin.id}'`]],
       ["the grant itself, gone", () => ["DELETE FROM provider_grant"]],
       ["the room's organization", () => ["UPDATE workspace SET owner_org_id = 'org_rr_other'"]],
+      // The delegation is held for a provider. What was read for one says nothing of another.
+      ["the provider the room's repository is with", () => ["UPDATE repo_link SET provider = 'another'"]],
     ];
     for (const [what, statements] of changes) {
       const h = await healthy();
@@ -293,6 +331,24 @@ describe("the room's recheck of a release", () => {
       expect(await trail(h.room), what).toEqual({ events: [], audit: [] });
       await alarmQuiet(stub(h.room));
     }
+    // Someone the room's rows made not worth asking about when the questions were asked, and do by the transaction:
+    // nothing is known of them, so nothing is decided. They aren't failed for not having been asked.
+    const promoted: [string, (h: Healthy) => Promise<unknown>, (h: Healthy) => string[]][] = [
+      ["the approver made an admin in between", (h) => inRoom(h.room, (s) => void s.exec("UPDATE release SET approved_by = ?", h.requester.id)), (h) => [`UPDATE member SET role = 'admin' WHERE principal_id = '${h.requester.id}'`]],
+      ["the grant's giver made an admin in between", (h) => inRoom(h.room, (s) => void s.exec("UPDATE provider_grant SET delegated_by = ?", h.requester.id)), (h) => [`UPDATE member SET role = 'admin' WHERE principal_id = '${h.requester.id}'`]],
+      ["the requester added to the room in between", (h) => inRoom(h.room, (s) => { s.exec("UPDATE release SET requested_by = 'per_rr_late'"); s.exec("UPDATE provider_grant SET principal_id = 'per_rr_late'"); }),
+        (h) => [`INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at) VALUES ('per_rr_late', 'person', '${h.org}', 'member', '${OWNER.id}', 1)`]],
+      // With no repository linked, the organization was asked nothing, since there was no provider to name.
+      ["a repository linked in between", (h) => inRoom(h.room, (s) => void s.exec("DELETE FROM repo_link")),
+        () => [`INSERT INTO repo_link (id, request_id, provider, provider_repo_id, provider_org_id, full_name, visibility, default_branch, status, created_by, created_at, verified_at, updated_at) VALUES ('rl_1', 'rr_1', 'github', ${REPO_ID}, 4242, 'podsterx/release', 'public', 'main', 'ready', '${OWNER.id}', 1, 1, 1)`]],
+    ];
+    for (const [what, before, statements] of promoted) {
+      const h = await healthy();
+      await before(h);
+      await between(h.room, ...statements(h));
+      await undecided(h, what);
+      await alarmQuiet(stub(h.room));
+    }
     // A fact of the room's own that changes at that same point is simply read as it now is, inside the transaction.
     const h = await healthy();
     await between(h.room, "UPDATE release_config SET enabled = 0");
@@ -302,15 +358,15 @@ describe("the room's recheck of a release", () => {
 
   it("decides nothing when someone's own record can't answer", async () => {
     // A person whose Principal doesn't answer the departure question (test builds: an ID with this prefix).
-    for (const column of ["approved_by", "requested_by"]) {
+    // The approver's, the requester's, and the grant's giver's.
+    for (const statement of ["UPDATE release SET approved_by = 'per_unavailable_rr'", "UPDATE release SET requested_by = 'per_unavailable_rr'", "UPDATE provider_grant SET delegated_by = 'per_unavailable_rr'"]) {
       const h = await healthy();
       await inRoom(h.room, (s) => {
         s.exec("INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at) VALUES ('per_unavailable_rr', 'person', ?, 'admin', ?, 1)", h.org, OWNER.id);
-        s.exec(`UPDATE release SET ${column} = 'per_unavailable_rr'`);
+        s.exec(statement);
+        if (statement.includes("requested_by")) s.exec("UPDATE provider_grant SET principal_id = 'per_unavailable_rr'");
       });
-      const answer = await switchedOn(() => recheck(h.room));
-      expect([answer.status, answer.body?.error?.code], column).toEqual([503, "standing_unknown"]);
-      expect(await row(h.room), column).toEqual({ state: "queued", failure_code: null, finished: 0 });
+      await undecided(h, statement);
       await alarmQuiet(stub(h.room));
     }
   });

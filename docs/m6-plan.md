@@ -1115,10 +1115,13 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 - **Where each fact is read:**
   - *The room's own rows, inside the transaction:* archived, public, the public surface's and the app's suspension, release on in the room, the configuration's version, the epoch, the repository's link, the commit against the room's own merge record and its task, the reviewer rule, the requester's and the approver's place in the room, and the requester's `deploy` grant.
   - *Another object, asked before the transaction:* the stop, from the `Moderation` object; the organization's provisioning delegation, from the organization's own object; and from each person's own `Principal`, whether the approver, the requester and the grant's giver have left the organization their place here is held in. And the deployment's switch.
-  - *Checked again inside:* each of those answers is about a named person or organization. If the room's rows name someone else by the time of the transaction, nothing is decided, and the pass answers `standing_unknown`, as it does when someone's record can't answer.
+  - *Checked again inside:* each of those answers is about a named person or organization. If the room's rows name someone else by the time of the transaction, nothing is decided, and the pass answers `standing_unknown`.
+  - **A fact that couldn't be read is undecided, never failed.** *From the reviews.* Only a fact that was read and doesn't hold fails a release, which can't be undone. The stop unreadable, an organization's or a person's record that doesn't answer, an answer that isn't a yes or a no, and someone the rows make worth asking about now who wasn't when the questions were asked, as when they were made an admin in between: each answers `standing_unknown`, which the job retries, and writes nothing.
   - **Nothing is read from D1 or any read model.**
-- **`organization_may_release` is the organization's provisioning delegation** ([decision 218](spec/PRODUCT.md#decisions-needed), the architect's ruling, for the owner to review).
-- **A commit counts** when the room's merge record for the release's task says Podster's merge job called the merge and read it back, with that commit, in the room's linked repository, and the task is completed.
+- **`organization_may_release` is the organization's provisioning delegation** ([decision 218](spec/PRODUCT.md#decisions-needed), the architect's ruling, for the owner to review). It only refuses; it unpublishes nothing. **"No record means granted" is M5's default,** restated here as such: an organization nobody has set it for holds it. The delegation is held for a provider, which the room's linked repository names; with none linked nothing is asked, and the release fails for having no repository.
+- **A commit counts** when the room's merge record for the release's task says Podster's merge job called the merge and read it back, with that commit, in the room's linked repository, and the task is completed. "Merged by Podster" is two things in that record: `succeeded`, which only Podster's merge job writes, on core's proof, and the time that job called the merge. A merge someone else made is recorded with neither. Who the provider says merged isn't compared: the room keeps no ID of the merge App's own account.
+- **The requester's grant is the one on the room's linked repository,** not the oldest they hold.
+- **The event names the release it is about,** by its ID, with the reason's code.
 - **The internal path is reached by nothing:** no route forwards to it, and a test shows no client path does.
 - **The two test gaps in `crates/core/src/release.rs` are closed,** in `crates/core/tests/release.rs`: a retry under a higher epoch is refused, and the flight's own release asking for another script is refused. Both were still open; each change the mutation pass had found now fails that test.
 
@@ -1132,9 +1135,18 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 **Owed to step 6:**
 
 - **Who may give a `deploy` grant, and the route that gives one.** The grants table takes any action's name, so tests seed `deploy`; **no route gives one today,** and a test holds the grant route to M5's two actions.
-- **Whether an operator taking the delegation back unpublishes what is live.** The architect's ruling and ADR 0010's list of unpublish triggers disagree; decision 218 records both and chooses neither.
+- **The dedicated release switch for operators,** which is what fires ADR 0010's unpublish trigger for an operator taking the ability to release from an organization. Owed before `RELEASES` is on anywhere ([decision 218](spec/PRODUCT.md#decisions-needed)). The provisioning delegation read here is not wired to that trigger.
 
 **Left for the second PR:** starting an upload, committing live, failing an upload past its hour, the delete job's recheck of the upload exemption, and the interleavings.
+
+**Binding the second PR,** from the reviews of the first:
+
+- **It does its own outside reads in the same command as its transaction.** A commit never trusts an earlier pass that held: `rechecked: true` from this command is an answer about then.
+- **Identity alone is not enough before something goes live.** For the stop, the delegation and departures, the commit compares a version or a generation inside its transaction, or reads again after it, so a change in the window between the reads and the transaction is caught before anything is served. This PR's check, that an answer is about who the rows name now, catches a change of who; it doesn't catch the same person leaving, or the stop being set, in that window. Here that can only let a pass hold that a later pass fails, which is harmless when nothing goes live on it.
+- **Failing an `uploading` or `uncertain` release queues its script for deletion and clears `in_flight_release`.** This PR's fail changes the release's row and nothing else, which is right only while nothing has uploaded.
+- **Releases still `awaiting_approval` at an unpublish:** this command leaves them alone, since there is no approver to ask about. What ends them is the second PR's, or step 6's, to say.
+- **The reviewer rule differs from ADR 0010's "where the release's task was reviewed under that".** It is checked as the room has it now. Recording, with the request, whether the rule was on is owed to step 6.
+- **The organization-exists fact is hard-coded true.** It needs a source before a commit rests on it.
 
 **Side by side.** After step 2: steps 3, 4(a) and 10(a). Step 4(b) after 4(a). After steps 2 and 4: steps 8 and 9. Steps 5, 6 and 7 follow in that order.
 

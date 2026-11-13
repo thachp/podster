@@ -288,7 +288,7 @@ Those four are every writer. Each is a room transaction, and each but the unpubl
 - the room's organization deleted;
 - the room's public surface suspended by an operator (M4);
 - the app suspended by an operator;
-- an operator taking the ability to release from the room's organization;
+- an operator taking the ability to release from the room's organization. *Noted on 2026-11-13, with [decision 218](../spec/PRODUCT.md#decisions-needed): this stands. It belongs to a dedicated release switch for operators, which isn't built; nothing fires this trigger until it is, and it is owed before `RELEASES` is switched on anywhere. Until then the release job reads the organization's provisioning delegation, which only refuses new releases and commits and unpublishes nothing: the owner confirmed for M5 that taking provisioning back stops new requests only.*;
 - **the room's repository stopped or lost:** an operator suspends it, it is found gone, or its link is no longer ready. The app comes down with the reason `repo_not_ready`. A release is a copy of that repository's reviewed work; with the repository stopped, nobody can say the copy should still be up;
 - **Assumed, for the owner:** nobody who may release now remaining in the room. "May release now" is the test the job itself uses: a grant dies with its giver, so holding one isn't enough.
 

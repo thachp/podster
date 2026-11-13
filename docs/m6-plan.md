@@ -1216,6 +1216,7 @@ Otherwise the run exits 1 and names each check it didn't show, so a run whose se
 | M6-S02b | The agent's MCP tool list names tools, and no M6 tool |
 | M6-S02d | Capabilities discovery, every page of `/api/auth/capability/list`, names capabilities, and no M6 capability |
 | M6-S02c | No M6 event type is in the room's events after every call above |
+| M6-S02e | *Added 2026-11-13, after step 9.* The operators' report list answers the run's test people, who aren't operators, `403 not_allowed` as in M4, and the refusal carries no report and neither of step 9's keys, `kind` and `host`. **Not shown on staging:** the operator's own view, which with release switched off must stay M4's shape. Test people can't ask for it, and the run never uses the fixed test operator, so only the API's tests show it |
 | M6-S04 | The same task in a room made before the deploy, which is where the room schema step's migration could really harm a room. **Always says SKIP in the usual run,** with how to run [its two phases](#m6-s04-in-two-phases-around-a-deploy) instead: such a room needs a session kept across the deploy, and the usual run keeps none |
 
 #### M6-S04 in two phases, around a deploy

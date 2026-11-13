@@ -153,6 +153,8 @@ async function inBrowser(name, control = false) {
     const downloads = [];
     /** Pages the browser opened by itself: every page of the context but the ones this run opens. */
     let pagesOpened = 0;
+    /** Called when the browser does something an action can cause. Set by `something`, below. */
+    let onSomething = () => {};
     context.on("page", () => { pagesOpened += 1; onSomething(); });
 
     const page = await context.newPage();
@@ -174,7 +176,6 @@ async function inBrowser(name, control = false) {
     // gives the browser this long to do anything more, and what it has seen by then is the result.
     const nothingMore = () => new Promise((resolve) => setTimeout(resolve, NOTHING_MORE_MS));
     /** Resolves when the browser does something an action can cause: a page, a dialog, a download, a navigation. */
-    let onSomething = () => {};
     const something = () => new Promise((resolve) => { onSomething = resolve; });
 // A click doesn't wait for whatever it starts: under the sandbox it may start nothing at all.
     // The page asks for a marker once its own handler has taken the action, whether that settled or threw. The

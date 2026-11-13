@@ -250,6 +250,9 @@ jobs:
       - run: scripts/test/merge-gate-selftest
       - run: scripts/test/deploy-staging-selftest
       - run: scripts/test/staging-probes-selftest
+      # The content Worker's deploy (M6 step 4(b)): every refusal makes no changing call, the token is in no argument
+      # or output, and --deploy needs a terminal. It deploys nothing.
+      - run: scripts/test/deploy-content-selftest
       - run: node run-local.mjs
         working-directory: e2e
       # Staging's setup and the test sign-up, with nothing remote.

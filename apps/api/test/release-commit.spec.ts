@@ -1,6 +1,6 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { alarmPass, alarmQuiet } from "./alarm";
 
 // M6 step 5, the second PR: starting a release's upload, committing it live, and ending one that can't go on (ADR
@@ -59,6 +59,8 @@ const REPO_ID = 987650001;
 const TASK = "tsk_rc_1";
 const HOUR = 60 * 60 * 1000;
 let rooms = 0;
+/** Every room a test made, so each is left with no alarm run under way and none to come, pass or fail. */
+const made: string[] = [];
 
 type Healthy = { room: string; requester: Who; admin: Who; org: string; label: string; host: string; script: string; prev: string };
 /**
@@ -70,6 +72,7 @@ async function healthy(opts: { org?: string; state?: string } = {}): Promise<Hea
   const org = opts.org ?? ORG;
   const owner = { ...OWNER, org, adminOrgs: [org] };
   const room: string = (await api(owner, "POST", "/v1/workspaces", { name: "Release" })).body.id;
+  made.push(room);
   await alarmQuiet(stub(room));
   const n = ++rooms;
   const requester: Who = { id: `per_rc_req_${n}`, kind: "person", org };
@@ -137,6 +140,37 @@ const everything = async (room: string) => {
   ]));
 };
 const pass = (room: string) => alarmPass(stub(room));
+const FAR = () => Date.now() + 24 * 60 * 60 * 1000;
+/** One pass of the room's alarm with a provider, and in the same turn every wait it left is put far ahead and the provider switched off again: no later run tries anything by itself, however long the test takes. */
+const passWithProvider = (room: string) => runInDurableObject(stub(room), async (instance: any, state: any) => {
+  await state.storage.deleteAlarm();
+  state.storage.sql.exec("DROP TABLE IF EXISTS test_content_provider_off");
+  state.storage.sql.exec("UPDATE serve_apply SET next_attempt_at = 0 WHERE next_attempt_at IS NOT NULL");
+  try { await instance.alarm(); } finally {
+    state.storage.sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
+    state.storage.sql.exec("UPDATE serve_apply SET next_attempt_at = ? WHERE next_attempt_at IS NOT NULL", FAR());
+    await state.storage.deleteAlarm();
+  }
+});
+/** The room's clock for release commands, set by the test (test builds only), so a bound is shown at its exact edge. */
+const T = 1_800_000_000_000;
+const clock = (room: string, now: number) => inRoom(room, (sql) => { sql.exec("CREATE TABLE IF NOT EXISTS test_release_clock (now INTEGER)"); sql.exec("DELETE FROM test_release_clock"); sql.exec("INSERT INTO test_release_clock (now) VALUES (?)", now); });
+/**
+ * Holds a command at the point between its outside reads and its transaction (test builds only), runs `during`
+ * while it is held there, lets it go, and answers what the command answered.
+ */
+async function heldBetween(room: string, run: () => Promise<Answer>, during: () => Promise<unknown>): Promise<Answer> {
+  await inRoom(room, (sql) => { sql.exec("CREATE TABLE test_release_hold (arrived INTEGER)"); sql.exec("INSERT INTO test_release_hold (arrived) VALUES (0)"); });
+  const answer = run();
+  try {
+    for (let i = 0; i < 2000 && !(await inRoom(room, (sql) => sql.exec("SELECT arrived FROM test_release_hold").one().arrived)); i += 1) await new Promise((next) => setTimeout(next, 5));
+    expect(await inRoom(room, (sql) => sql.exec("SELECT arrived FROM test_release_hold").one().arrived)).toBe(1);
+    await during();
+  } finally {
+    await inRoom(room, (sql) => void sql.exec("DROP TABLE test_release_hold"));
+  }
+  return answer;
+}
 const departs = (who: Who) => api({ ...who, departure: { person: who.id, org: who.org, left_at: Date.now() } }, "POST", "/v1/org-departures", {});
 const between = (room: string, ...statements: string[]) => inRoom(room, (sql) => {
   sql.exec("CREATE TABLE test_release_between_reads (statement TEXT)");
@@ -161,6 +195,7 @@ async function withStop<T>(how: "set" | "unreadable", run: (clear: () => Promise
 const before = (h: Healthy, version: number) => ({ script_name: h.prev, release_id: PREV, version, flight_version: null, flight_before: null });
 const NO_FLIGHT = { in_flight_release: null, in_flight_script: null, in_flight_epoch: null, at: 0, release_epoch: 2 };
 
+afterEach(async () => { for (const room of made.splice(0)) await alarmQuiet(stub(room)); });
 beforeAll(async () => {
   key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
   for (const statement of BINDINGS.TEST_D1_SCHEMA.split(";").map((x: string) => x.trim()).filter(Boolean)) await BINDINGS.DB.prepare(statement).run();
@@ -181,7 +216,6 @@ describe("starting a release's upload", () => {
     const all = await everything(h.room);
     expect((await start(h.room)).body).toEqual(started.body);
     expect(await everything(h.room)).toBe(all);
-    await alarmQuiet(stub(h.room));
   });
 
   it("fails the release with core's reason where the recheck doesn't hold, and names no script", async () => {
@@ -191,7 +225,6 @@ describe("starting a release's upload", () => {
     expect(await row(h.room)).toEqual({ state: "failed", failure_code: "release_off", script_name: null, started: 0 });
     // It never had a script, so there is none to delete.
     expect(await queued(h.room)).toEqual([]);
-    await alarmQuiet(stub(h.room));
   });
 
   it("decides nothing when a fact can't be read, and writes nothing", async () => {
@@ -199,7 +232,6 @@ describe("starting a release's upload", () => {
     const all = await everything(h.room);
     await withStop("unreadable", async () => expect(refused(await start(h.room))).toEqual(UNKNOWN));
     expect(await everything(h.room)).toBe(all);
-    await alarmQuiet(stub(h.room));
   });
 
   it("answers a release that isn't the job's as it is, and changes nothing", async () => {
@@ -208,7 +240,6 @@ describe("starting a release's upload", () => {
       const all = await everything(h.room);
       expect((await start(h.room)).body, state).toEqual({ release_id: REL, state, rechecked: false, reason: null, script: null });
       expect(await everything(h.room), state).toBe(all);
-      await alarmQuiet(stub(h.room));
     }
   });
 });
@@ -231,7 +262,6 @@ describe("committing a release live", () => {
     const all = await everything(h.room);
     expect((await commit(h.room)).body).toEqual({ release_id: REL, state: "live", rechecked: false, reason: null });
     expect(await everything(h.room)).toBe(all);
-    await alarmQuiet(stub(h.room));
   });
 
   it("leaves a staged release unserved until it is confirmed, however often it is asked and the applier runs", async () => {
@@ -248,11 +278,10 @@ describe("committing a release live", () => {
       expect((await trail(h.room)).events).toEqual([]);
       // The applier runs, with a provider, twice. For a release that isn't recorded live it stops before it asks the
       // provider anything, and records the host as waiting: what it last applied is still the earlier release.
-      await inRoom(h.room, (s) => void s.exec("DROP TABLE test_content_provider_off"));
-      await pass(h.room);
-      await inRoom(h.room, (s) => void s.exec("UPDATE serve_apply SET next_attempt_at = 0 WHERE next_attempt_at IS NOT NULL"));
-      await pass(h.room);
-      await inRoom(h.room, (s) => void s.exec("CREATE TABLE test_content_provider_off (x INTEGER)"));
+      // Each pass here is one whole run with every wait over, and leaves every wait far ahead: exactly two attempts,
+      // whatever the clock does between them.
+      await passWithProvider(h.room);
+      await passWithProvider(h.room);
       expect(await applied(h.room)).toEqual({ applied_version: 5, applied_script: h.prev, attempts: 2, last_code: "release_not_confirmed" });
       // Asked again while still unreadable: still undecided, and the stage isn't made twice.
       expect(refused(await commit(h.room))).toEqual(UNKNOWN);
@@ -263,7 +292,6 @@ describe("committing a release live", () => {
       expect(await applied(h.room)).toEqual({ applied_version: 5, applied_script: h.prev, attempts: 0, last_code: null });
       expect(await all(h.room, "SELECT attempt_version, next_attempt_at FROM serve_apply")).toEqual([{ attempt_version: null, next_attempt_at: null }]);
     });
-    await alarmQuiet(stub(h.room));
   });
 
   // A pass that held is an answer about then. Each of these happens after the recheck and the start both held, and
@@ -294,7 +322,6 @@ describe("committing a release live", () => {
       expect((await trail(h.room)).events.at(-1)).toEqual({ type: "release.failed", actor_id: "podster", subject_id: REL, reason });
       // It was never recorded live, so the applier never had it to write: what it last applied is the earlier release.
       expect(await applied(h.room)).toMatchObject({ applied_version: 5, applied_script: h.prev });
-      await alarmQuiet(stub(h.room));
     });
   }
 
@@ -305,7 +332,6 @@ describe("committing a release live", () => {
     // Never staged: the host's version didn't move.
     expect([await hostRow(h.room), await flight(h.room)]).toEqual([before(h, 5), NO_FLIGHT]);
     expect((await queued(h.room)).map((q: any) => q.script_name)).toEqual([h.script]);
-    await alarmQuiet(stub(h.room));
   });
 
   it("decides between its reads and its confirm from the room's rows as they are by then", async () => {
@@ -322,7 +348,6 @@ describe("committing a release live", () => {
     expect(await row(who.room)).toMatchObject({ state: "uploading" });
     expect((await hostRow(who.room)).script_name).toBe(who.script);
     expect((await commit(who.room)).body).toMatchObject({ state: "live", rechecked: true });
-    for (const h of [own, who]) await alarmQuiet(stub(h.room));
   });
 
   it("commits nothing on a stage that isn't its own any more, and is set back when another command fails it", async () => {
@@ -341,9 +366,118 @@ describe("committing a release live", () => {
       expect((await ask(h.room)).body).toMatchObject({ state: "failed", reason: "release_off" });
       expect([await hostRow(h.room), await flight(h.room)]).toEqual([before(h, 7), NO_FLIGHT]);
       expect((await queued(h.room)).map((q: any) => q.script_name)).toEqual([h.script]);
-      await alarmQuiet(stub(h.room));
     }
-    await alarmQuiet(stub(gone.room));
+  });
+
+  it("decides nothing on outside reads older than five seconds at its confirm, by the clock passed in", async () => {
+    // At the bound exactly, the reads still count.
+    const at = await healthy({ state: "uploading" });
+    await clock(at.room, T);
+    await inRoom(at.room, (s) => void s.exec("UPDATE release SET upload_started_at = ? WHERE id = ?", T, REL));
+    await between(at.room, "UPDATE test_release_clock SET now = now + 5000");
+    expect((await commit(at.room)).body).toMatchObject({ state: "live", rechecked: true });
+    // One millisecond past it, nothing is decided and nothing is written beyond the stage, which stays unserved.
+    const past = await healthy({ state: "uploading" });
+    await clock(past.room, T);
+    await inRoom(past.room, (s) => void s.exec("UPDATE release SET upload_started_at = ? WHERE id = ?", T, REL));
+    const record = await recorded(past.room);
+    await between(past.room, "UPDATE test_release_clock SET now = now + 5001");
+    expect(refused(await commit(past.room))).toEqual(UNKNOWN);
+    expect(await row(past.room)).toMatchObject({ state: "uploading", failure_code: null });
+    expect(await recorded(past.room)).toBe(record);
+    // Asked again, the reads are made again, and it goes live.
+    expect((await commit(past.room)).body).toMatchObject({ state: "live", rechecked: true });
+    const source = (JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>)["workspace/release_commit.rs"];
+    expect(source).toMatch(/const MAX_READ_AGE_MS: i64 = 5_000;/);
+  });
+
+  // The window the architect accepted (2026-11-13): a fact in another object that changes after the commit read it
+  // and before its confirm. The command is held at exactly that point, the fact is changed through its own object,
+  // and the command is let go. Each has the outcome the plan documents, which is that of a commit made a moment
+  // before the change.
+  it("goes live when the stop is set between its read and its confirm, and the applier, which asks again, writes nothing", async () => {
+    const h = await healthy({ state: "uploading" });
+    await moderation().fetch("https://do/content-stop");
+    const clear = () => inModeration((s) => void s.exec("UPDATE content_stop SET stopped = 0, reason = NULL, at = NULL, version = version + 1"));
+    try {
+      const answer = await heldBetween(h.room, () => commit(h.room), () => inModeration((s) => void s.exec("INSERT INTO content_stop (singleton, stopped, reason, at, version, updated_at) VALUES (1, 1, 'illegal', 1, 1, 1) ON CONFLICT (singleton) DO UPDATE SET stopped = 1, reason = 'illegal', at = 1, version = version + 1")));
+      expect(answer.body).toEqual({ release_id: REL, state: "live", rechecked: true, reason: null });
+      // The applier asks the stop's own home before it writes. It is set: nothing is written, and the host waits.
+      await passWithProvider(h.room);
+      expect(await applied(h.room)).toEqual({ applied_version: 5, applied_script: h.prev, attempts: 1, last_code: "content_domain_stopped" });
+    } finally { await clear(); }
+  });
+
+  it("goes live, and stays live, when the delegation is taken back or the requester leaves between its read and its confirm", async () => {
+    const changes: [string, (h: Healthy) => Promise<unknown>, (h: Healthy) => Promise<unknown>][] = [
+      ["the delegation taken back", (h) => api(OPERATOR, "PUT", `/v1/orgs/${h.org}/provisioning-delegation`, { granted: false }), (h) => api(OPERATOR, "PUT", `/v1/orgs/${h.org}/provisioning-delegation`, { granted: true })],
+      ["the requester having left", (h) => departs(h.requester), async () => {}],
+    ];
+    for (const [what, change, undo] of changes) {
+      const h = await healthy({ org: `org_rc_window_${rooms}`, state: "uploading" });
+      try {
+        const answer = await heldBetween(h.room, () => commit(h.room), () => change(h));
+        expect(answer.body, what).toEqual({ release_id: REL, state: "live", rechecked: true, reason: null });
+        // Nothing reverses it: a release that is live isn't the recheck's, and the delegation only refuses new ones.
+        expect((await recheck(h.room)).body, what).toEqual({ release_id: REL, state: "live", rechecked: false, reason: null });
+        expect((await hostRow(h.room)).script_name, what).toBe(h.script);
+        // The same change a moment earlier, before the read, fails the next release in that room's organization.
+        const next = await healthy({ org: h.org, state: "uploading" });
+        if (what === "the delegation taken back") expect((await commit(next.room)).body, what).toMatchObject({ state: "failed", reason: "release_not_delegated" });
+      } finally { await undo(h); }
+    }
+  });
+
+  it("answers as it is a release that stopped uploading between its reads and its confirm, and commits nothing", async () => {
+    const h = await healthy({ state: "uploading" });
+    await between(h.room, `UPDATE release SET state = 'failed', failure_code = 'release_off', finished_at = 5 WHERE id = '${REL}'`);
+    expect((await commit(h.room)).body).toEqual({ release_id: REL, state: "failed", rechecked: false, reason: "release_off" });
+    expect((await trail(h.room)).events).toEqual([]);
+  });
+
+  it("never goes live under another epoch than the room's, a higher one included", async () => {
+    for (const epoch of [1, 3]) {
+      const h = await healthy({ state: "uploading" });
+      await inRoom(h.room, (s) => void s.exec("UPDATE release SET release_epoch = ? WHERE id = ?", epoch, REL));
+      // A lower one is a release the room has since left behind, ended as such by any command. A higher one is one
+      // the room never reached.
+      expect((await commit(h.room)).body, String(epoch)).toMatchObject({ state: "failed", reason: "release_epoch_moved" });
+      expect([await hostRow(h.room), await flight(h.room)], String(epoch)).toEqual([before(h, 5), NO_FLIGHT]);
+    }
+  });
+
+  it("commits only a release's own script: a record naming another release's script is refused, and nothing changes", async () => {
+    // As a rollback's own record will (step 6), which must go through core's rollback and its kept-exists check.
+    const h = await healthy({ state: "uploading" });
+    await inRoom(h.room, (s) => void s.exec("UPDATE release SET script_name = ?, script_release_id = ? WHERE id = ?", h.prev, PREV, REL));
+    const all = await everything(h.room);
+    expect((await commit(h.room)).status).toBe(500);
+    expect(await everything(h.room)).toBe(all);
+  });
+
+  it("fails a release whose label the room has retired, at the start and at the commit, and sets no host to a script under a retired label", async () => {
+    const retire = (h: Healthy) => inRoom(h.room, (s) => {
+      s.exec("UPDATE serve_state SET label = NULL, label_current = NULL, release_id = NULL, script_name = NULL");
+      s.exec("UPDATE app_label SET current = NULL, retired_at = 5 WHERE label = ?", h.label);
+      s.exec("INSERT INTO app_label (label, current, created_at) VALUES (?, 1, 5)", `new${h.label}`.slice(0, 26));
+    });
+    const queuedOne = await healthy();
+    await retire(queuedOne);
+    expect((await start(queuedOne.room)).body).toEqual({ release_id: REL, state: "failed", rechecked: true, reason: "release_label_retired", script: null });
+    const uploading = await healthy({ state: "uploading" });
+    await retire(uploading);
+    expect((await commit(uploading.room)).body).toEqual({ release_id: REL, state: "failed", rechecked: true, reason: "release_label_retired" });
+    expect((await hostRow(uploading.room)).script_name).toBeNull();
+    // A set-back that would put a host back on a script under a label that isn't current: the host serves nothing.
+    const back = await healthy({ state: "uploading" });
+    await withStop("unreadable", async () => expect(refused(await commit(back.room))).toEqual(UNKNOWN));
+    await inRoom(back.room, (s) => {
+      s.exec("INSERT INTO app_label (label, created_at, retired_at) VALUES ('rcretired', 1, 2)");
+      s.exec("UPDATE serve_state SET flight_before = ?", `rcretired.${PREV}`);
+      s.exec("UPDATE release_config SET enabled = 0");
+    });
+    expect((await recheck(back.room)).body).toMatchObject({ state: "failed", reason: "release_off" });
+    expect([await hostRow(back.room), await flight(back.room)]).toEqual([{ script_name: null, release_id: null, version: 7, flight_version: null, flight_before: null }, NO_FLIGHT]);
   });
 
   it("is ended by an unpublish that lands between its stage and its confirm, and never comes back", async () => {
@@ -361,7 +495,6 @@ describe("committing a release live", () => {
     const all = await everything(h.room);
     expect((await commit(h.room)).body).toEqual({ release_id: REL, state: "failed", rechecked: false, reason: "release_epoch_moved" });
     expect(await everything(h.room)).toBe(all);
-    await alarmQuiet(stub(h.room));
   });
 
   it("waits while another release's flight is open, and decides nothing", async () => {
@@ -378,7 +511,6 @@ describe("committing a release live", () => {
     expect((await commit(h.room)).body).toMatchObject({ state: "live" });
     expect((await commit(h.room, OTHER)).body).toMatchObject({ state: "uploading", waiting: "release_in_flight" });
     expect(await row(h.room, OTHER)).toMatchObject({ state: "uploading", failure_code: null });
-    await alarmQuiet(stub(h.room));
   });
 
   it("never commits a script that was queued for deletion, gone or not", async () => {
@@ -387,7 +519,6 @@ describe("committing a release live", () => {
       await inRoom(h.room, (s) => void s.exec("INSERT INTO script_delete (script_name, label, queued_at, next_attempt_at, gone_at) VALUES (?, ?, 2, 2, ?)", h.script, h.label, gone));
       expect((await commit(h.room)).body, String(gone)).toEqual({ release_id: REL, state: "failed", rechecked: true, reason: "release_script_deleted" });
       expect([await hostRow(h.room), await flight(h.room)], String(gone)).toEqual([before(h, 5), NO_FLIGHT]);
-      await alarmQuiet(stub(h.room));
     }
   });
 
@@ -401,7 +532,6 @@ describe("committing a release live", () => {
         expect((await ask(h.room)).body, state).toMatchObject({ release_id: REL, state, rechecked: false, reason: null });
       }
       expect([await everything(h.room), await betweenLeft(h.room)], state).toEqual([all, true]);
-      await alarmQuiet(stub(h.room));
     }
   });
 });
@@ -432,7 +562,6 @@ describe("what is read first", () => {
       s.exec("UPDATE release SET approved_by = 'per_unavailable_rc' WHERE id = ?", REL);
     });
     expect((await recheck(demoted.room)).body).toMatchObject({ state: "failed", reason: "approver_lost_authority" });
-    for (const h of [down, person, demoted]) await alarmQuiet(stub(h.room));
   });
 
   it("commits nothing while the organization's object doesn't answer", async () => {
@@ -444,7 +573,6 @@ describe("what is read first", () => {
     // Staged in the room, and not recorded live: the applier has nothing it may write.
     expect((await hostRow(h.room)).script_name).toBe(h.script);
     expect((await trail(h.room)).events).toEqual([]);
-    await alarmQuiet(stub(h.room));
   });
 });
 
@@ -462,30 +590,33 @@ describe("a release that can't go on", () => {
         // A commit answers a release that isn't uploading as it is, before any transaction: it ends nothing.
         if (state === "uncertain" && what === "the commit") continue;
         const h = await healthy({ state });
-        // A moment inside the hour: nothing ends.
-        await inRoom(h.room, (s) => void s.exec("UPDATE release SET upload_started_at = ? WHERE id = ?", Date.now() - HOUR + 60_000, REL));
-        await check(h.room, { kind: "wake" });
+        // The room's clock is the test's. One millisecond inside the hour, nothing ends, whoever asks.
+        await clock(h.room, T);
+        await inRoom(h.room, (s) => void s.exec("UPDATE release SET upload_started_at = ? WHERE id = ?", T - HOUR + 1, REL));
+        // (A commit inside the hour would go live, which is its own test: here the reconcile asks in its place.)
+        await (what === "the commit" ? check(h.room, { kind: "wake" }) : ask(h));
         expect((await row(h.room)).state, `${state} ${what}`).toBe(state);
-        await inRoom(h.room, (s) => void s.exec("UPDATE release SET upload_started_at = ? WHERE id = ?", Date.now() - HOUR, REL));
+        // At the hour exactly, it ends.
+        await clock(h.room, T + 1);
         await ask(h);
         expect(await row(h.room), `${state} ${what}`).toMatchObject({ state: "failed", failure_code: "release_upload_expired" });
         expect((await queued(h.room)).map((q: any) => q.script_name), `${state} ${what}`).toEqual([h.script]);
         expect((await trail(h.room)).events, `${state} ${what}`).toEqual([{ type: "release.failed", actor_id: "podster", subject_id: REL, reason: "release_upload_expired" }]);
         // Ended before anything was staged: the host never moved.
         expect(await hostRow(h.room), `${state} ${what}`).toEqual(before(h, 5));
-        await alarmQuiet(stub(h.room));
       }
     }
   });
 
   it("is set back when it expires while staged and unconfirmed", async () => {
     const h = await healthy({ state: "uploading" });
+    await clock(h.room, T);
+    await inRoom(h.room, (s) => void s.exec("UPDATE release SET upload_started_at = ? WHERE id = ?", T - HOUR + 1, REL));
     await withStop("unreadable", async () => expect(refused(await commit(h.room))).toEqual(UNKNOWN));
-    await inRoom(h.room, (s) => void s.exec("UPDATE release SET upload_started_at = ? WHERE id = ?", Date.now() - HOUR, REL));
+    await clock(h.room, T + 1);
     expect((await commit(h.room)).body).toEqual({ release_id: REL, state: "failed", rechecked: false, reason: "release_upload_expired" });
     expect(await row(h.room)).toMatchObject({ state: "failed", failure_code: "release_upload_expired" });
     expect([await hostRow(h.room), await flight(h.room)]).toEqual([before(h, 7), NO_FLIGHT]);
-    await alarmQuiet(stub(h.room));
   });
 
   it("has its script queued when the recheck fails it while uploading, which isn't told to operators as a reconcile's deletion", async () => {
@@ -497,7 +628,6 @@ describe("a release that can't go on", () => {
     // A script a pass queues itself is still told, as before.
     const stray = `${h.label}.${OTHER}`;
     expect((await check(h.room, { kind: "script", script: stray })).findings).toEqual([{ code: "script_delete_queued", subject: stray, detail: "queued" }]);
-    await alarmQuiet(stub(h.room));
   });
 
   it("queues only a script named after itself: a record that names an earlier release's script leaves that script alone", async () => {
@@ -506,7 +636,6 @@ describe("a release that can't go on", () => {
     await inRoom(h.room, (s) => { s.exec("UPDATE release SET script_name = ?, script_release_id = ? WHERE id = ?", h.prev, PREV, REL); s.exec("UPDATE release_config SET enabled = 0"); });
     expect((await recheck(h.room)).body).toMatchObject({ state: "failed", reason: "release_off" });
     expect(await queued(h.room)).toEqual([]);
-    await alarmQuiet(stub(h.room));
   });
 
   it("ends with an unpublish if it hadn't gone live: awaiting approval, queued, uploading or uncertain", async () => {
@@ -520,7 +649,6 @@ describe("a release that can't go on", () => {
       const scripts = (await queued(h.room)).map((q: any) => [q.script_name, q.unpublish_epoch]);
       expect(scripts, state).toEqual((["uploading", "uncertain"].includes(state) ? [h.prev, h.script].sort() : [h.prev]).map((name) => [name, 3]));
       expect((await trail(h.room)).events, state).toEqual([{ type: "release.failed", actor_id: "podster", subject_id: REL, reason: "release_epoch_moved" }]);
-      await alarmQuiet(stub(h.room));
     }
   });
 
@@ -540,7 +668,48 @@ describe("a release that can't go on", () => {
       await check(h.room, { kind: "wake" });
     } finally { await api(OPERATOR, "PUT", `/v1/orgs/${org}/provisioning-delegation`, { granted: true }); }
     expect(await everything(h.room)).toBe(all);
-    await alarmQuiet(stub(h.room));
+  });
+});
+
+describe("the gate on the release path", () => {
+  it("refuses every release command where release is switched on and a provider is configured, and writes nothing", async () => {
+    const h = await healthy({ state: "uploading" });
+    const all = await everything(h.room);
+    // This room's provider is configured, as the test Worker's is, and release is switched on for the command.
+    await inRoom(h.room, (s) => void s.exec("DROP TABLE test_content_provider_off"));
+    try {
+      for (const ask of [recheck, start, commit]) expect(refused(await ask(h.room))).toEqual([409, "release_not_available"]);
+      // With release switched off, which is every deployment, the commands answer: nothing can be served.
+      const off = await stub(h.room).fetch("https://do/internal/release-recheck", { method: "POST", body: JSON.stringify({ release_id: PREV }) });
+      expect([off.status, ((await off.json()) as any).state]).toEqual([200, "served"]);
+    } finally { await inRoom(h.room, (s) => void s.exec("CREATE TABLE test_content_provider_off (x INTEGER)")); }
+    expect(await everything(h.room)).toBe(all);
+    // One constant, false, set in one place.
+    const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
+    expect(sources["workspace/release_commit.rs"]).toMatch(/pub\(crate\) const RELEASE_PATH_COMPLETE: bool = false;/);
+    expect(Object.values(sources).join("\n").match(/RELEASE_PATH_COMPLETE: bool/g)).toHaveLength(1);
+  });
+});
+
+describe("a takedown and release bookkeeping", () => {
+  it("commits a suspension though ending the unfinished releases fails, and they are ended later", async () => {
+    const h = await healthy();
+    // Test builds only: release bookkeeping fails in this room.
+    await inRoom(h.room, (s) => void s.exec("CREATE TABLE test_release_bookkeeping_fails (x INTEGER)"));
+    expect((await switchedOn(() => api(OPERATOR, "POST", `/v1/moderation/apps/${h.label}/suspend`, { reason: "abuse" }))).status).toBe(200);
+    // The app is unpublished: the epoch up, the host at nothing, the served release unpublished, its script queued.
+    expect(await flight(h.room)).toEqual({ ...NO_FLIGHT, release_epoch: 3 });
+    expect(await hostRow(h.room)).toEqual({ script_name: null, release_id: null, version: 6, flight_version: null, flight_before: null });
+    expect((await row(h.room, PREV)).state).toBe("unpublished");
+    expect((await queued(h.room)).map((q: any) => [q.script_name, q.unpublish_epoch])).toEqual([[h.prev, 3]]);
+    // The queued release wasn't ended. It can't go live: the epoch it started under is gone.
+    expect(await row(h.room)).toMatchObject({ state: "queued", failure_code: null });
+    // The reconcile's question is answered all the same.
+    expect((await check(h.room, { kind: "wake" })).known).toBe(true);
+    await inRoom(h.room, (s) => void s.exec("DROP TABLE test_release_bookkeeping_fails"));
+    // The next thing that asks the room ends it.
+    await check(h.room, { kind: "wake" });
+    expect(await row(h.room)).toMatchObject({ state: "failed", failure_code: "release_epoch_moved" });
   });
 });
 
@@ -563,7 +732,6 @@ describe("the two paths", () => {
     expect(naming).toEqual(["workspace.rs", "workspace/release_commit.rs"]);
     // And neither reads a read model.
     expect(sources["workspace/release_commit.rs"]).not.toMatch(/\.d1\(|"DB"|_index\b/);
-    await alarmQuiet(stub(h.room));
   });
 
   it("answer only for a release the room has, by a well-formed ID", async () => {
@@ -573,6 +741,5 @@ describe("the two paths", () => {
       for (const id of ["rel_short", "", `rel_${"ZZ".repeat(16)}`]) expect((await ask(h.room, id)).status, id).toBe(400);
     }
     expect(await row(h.room)).toMatchObject({ state: "queued" });
-    await alarmQuiet(stub(h.room));
   });
 });

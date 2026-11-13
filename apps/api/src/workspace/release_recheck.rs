@@ -81,6 +81,9 @@ pub(super) struct Asked {
 /// read,** and the reads never stop at the first that couldn't: a fact that was read and fails still fails the
 /// release, whatever else gave no answer.
 pub(super) struct Reads {
+    /// When the first of these was asked, by the room's clock. A commit's confirm refuses reads older than
+    /// `release_commit::MAX_READ_AGE_MS`.
+    read_at: i64,
     deployment_on: Option<bool>,
     /// The stop, as the `Moderation` object said it.
     stopped: Option<bool>,
@@ -105,6 +108,7 @@ impl Reads {
             holds: None,
         };
         Reads {
+            read_at: i64::MIN,
             deployment_on: None,
             stopped: None,
             org: String::new(),
@@ -115,6 +119,35 @@ impl Reads {
             giver: nobody(),
         }
     }
+}
+
+impl Reads {
+    /// How long ago the first of these was asked, at `now`.
+    pub(super) fn age(&self, now: i64) -> i64 {
+        now.saturating_sub(self.read_at)
+    }
+}
+
+/// The time a release command decides by: the clock. Test builds read it from a table a test makes in the room,
+/// `test_release_clock`, when there is one, so a bound can be shown at exactly its edge and without waiting.
+pub(super) fn release_now(sql: &SqlStorage) -> i64 {
+    #[cfg(feature = "failpoints")]
+    if rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_release_clock'",
+        vec![],
+    )
+    .is_ok_and(|found| !found.is_empty())
+    {
+        if let Some(now) = rows(sql, "SELECT now FROM test_release_clock", vec![])
+            .ok()
+            .and_then(|found| found.first().map(|row| int(&row["now"])))
+        {
+            return now;
+        }
+    }
+    let _ = sql;
+    now_ms()
 }
 
 /// What one pass concludes. `Unknown` only when every fact that was read holds and at least one that matters wasn't.
@@ -531,7 +564,7 @@ pub(super) fn judge(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) 
 /// that has ended, or isn't at a step the job owns, is left exactly as it is. `standing_unknown` when nothing failed
 /// and a fact that matters couldn't be read. Answers `{ release_id, state, rechecked, reason }`.
 pub(super) fn pass(sql: &SqlStorage, release_id: &str, reads: &Reads, now: i64) -> R<Value> {
-    release_commit::expire_uploads(sql, now)?;
+    release_commit::end_stale(sql, now)?;
     let release = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
     let state = state_of(&release)?;
     if !job_owns(state) {
@@ -592,7 +625,8 @@ impl Workspace {
     /// said.
     pub(super) async fn release_reads(&self, release_id: &str) -> R<Reads> {
         let sql = self.state.storage().sql();
-        let people = people(&sql, release_id, now_ms())?.ok_or_else(ApiError::not_found)?;
+        let read_at = release_now(&sql);
+        let people = people(&sql, release_id, read_at)?.ok_or_else(ApiError::not_found)?;
         let org = room_owner_org(&sql)?;
         // The delegation is held for a provider, and the room's linked repository says which. With none linked there
         // is no provider to name: nothing is asked, and the room's own rows fail the release for having no repository.
@@ -638,6 +672,7 @@ impl Workspace {
             None => Some(true),
         };
         Ok(Reads {
+            read_at,
             deployment_on,
             stopped,
             org,
@@ -657,6 +692,7 @@ impl Workspace {
             return Err(ApiError::not_found());
         }
         self.migrate_if_needed()?;
+        self.release_path_open().await?;
         let body: Value =
             serde_json::from_str(&req.text().await?).map_err(|_| ApiError::invalid_argument())?;
         let release_id = body["release_id"]
@@ -668,10 +704,37 @@ impl Workspace {
         Ok((release_id, release))
     }
 
+    /// **The gate on the release path** (`release_commit::RELEASE_PATH_COMPLETE`). Until the path is complete, a
+    /// deployment that has release switched on and a provider configured refuses every release command, exactly as a
+    /// route that isn't built, and says so in one log line by its code. With either missing nothing can be served,
+    /// which is every deployment today, and the commands answer.
+    async fn release_path_open(&self) -> R<()> {
+        if release_commit::RELEASE_PATH_COMPLETE {
+            return Ok(());
+        }
+        let sql = self.state.storage().sql();
+        if takedown::provider(&self.env, &sql).is_some()
+            && crate::releases::switched_on(&self.env).await
+        {
+            let room = rows(&sql, "SELECT id FROM workspace", vec![])?
+                .first()
+                .and_then(|row| text(&row["id"]))
+                .unwrap_or_default();
+            console_error!(
+                "release: a release command was refused: room={} code=release_path_incomplete",
+                room
+            );
+            return Err(crate::releases::release_not_available());
+        }
+        Ok(())
+    }
+
     /// Test builds only: a test changes the room between what was read outside and the transaction, at exactly this
-    /// point, by leaving statements for the room to run here.
+    /// point, by leaving statements for the room to run here. And a test holds the command here, by a table it makes,
+    /// `test_release_hold`: the room marks that it has arrived and waits until the table is gone, so the test can
+    /// change a fact in another object at exactly this point, through that object's own commands.
     #[cfg(feature = "failpoints")]
-    pub(super) fn test_between_reads(&self) -> R<()> {
+    pub(super) async fn test_between_reads(&self) -> R<()> {
         let sql = self.state.storage().sql();
         if !rows(
             &sql,
@@ -688,6 +751,24 @@ impl Workspace {
                 exec(&sql, row["statement"].as_str().unwrap_or_default(), vec![])?;
             }
             exec(&sql, "DROP TABLE test_release_between_reads", vec![])?;
+        }
+        let held = |sql: &SqlStorage| -> R<bool> {
+            Ok(!rows(
+                sql,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_release_hold'",
+                vec![],
+            )?
+            .is_empty())
+        };
+        if held(&sql)? {
+            exec(&sql, "UPDATE test_release_hold SET arrived = 1", vec![])?;
+            // At most 20 seconds, so a test that forgets to let go fails and doesn't hang.
+            for _ in 0..4000 {
+                if !held(&sql)? {
+                    break;
+                }
+                worker::Delay::from(std::time::Duration::from_millis(5)).await;
+            }
         }
         Ok(())
     }
@@ -723,8 +804,8 @@ impl Workspace {
         }
         let reads = self.release_reads(&release_id).await?;
         #[cfg(feature = "failpoints")]
-        self.test_between_reads()?;
-        self.release_transaction(move |sql| pass(sql, &release_id, &reads, now_ms()))
+        self.test_between_reads().await?;
+        self.release_transaction(move |sql| pass(sql, &release_id, &reads, release_now(sql)))
             .await
     }
 }

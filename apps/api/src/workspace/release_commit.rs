@@ -35,6 +35,14 @@
 //!   two that nothing asks again last, so each one's window is as wide as the reads after it. **So `RELEASES` and a
 //!   provider must not both be configured before step 6 has merged** (`docs/m6-plan.md`).
 //!
+//!   **The window between the outside reads and the confirm is accepted as built** (the architect's ruling,
+//!   2026-11-13). No transaction spans two objects, so some window always exists. The stop is covered: the applier
+//!   asks it again before every entry it writes. The delegation, or a departure, changing in the window gives the
+//!   same result as a commit made a moment before the change, which nothing would reverse either: the delegation
+//!   only refuses new releases and commits (decision 218), and a demotion is a room row, read again inside the
+//!   confirm. **The reads' age is bounded:** more than [`MAX_READ_AGE_MS`] old at the confirm, by the room's clock,
+//!   and the confirm decides nothing and writes nothing.
+//!
 //!   **The stage writes no event and no audit record.** It is half of one command: it ends as `release.live` or as
 //!   `release.failed`, and until then it is in the room's serve state and nowhere else.
 //!
@@ -53,7 +61,7 @@
 //!
 //! Logs carry the room's and the release's IDs and codes.
 use super::release_recheck::{
-    answer, job_owns, judge, release_row, standing_unknown, state_of, Reads, Verdict,
+    answer, job_owns, judge, release_now, release_row, standing_unknown, state_of, Reads, Verdict,
 };
 use super::*;
 use podster_core::release::{
@@ -65,6 +73,16 @@ use podster_core::release::{
 pub(crate) const INTERNAL_RELEASE_START_UPLOAD: &str = "/internal/release-start-upload";
 /// The room's path for committing a release live. Nothing outside the Worker reaches it, and nothing calls it yet.
 pub(crate) const INTERNAL_RELEASE_COMMIT_LIVE: &str = "/internal/release-commit-live";
+
+/// **Whether the release path is complete.** False until the PR that completes it flips this, and that is the only
+/// place it is set. While false, a deployment with release switched on and a provider configured refuses every
+/// release command (`Workspace::release_path_open`). What must be true before it is flipped is in `docs/m6-plan.md`,
+/// under "The gate on the release path".
+pub(crate) const RELEASE_PATH_COMPLETE: bool = false;
+
+/// How old a commit's outside reads may be when its confirm runs. Older, and the confirm decides nothing: the reads
+/// are an answer about too long ago, and the command asks again.
+pub(super) const MAX_READ_AGE_MS: i64 = 5_000;
 
 /// The applier's code for a host whose script belongs to a release the room hasn't recorded live.
 pub(super) const NOT_CONFIRMED: &str = "release_not_confirmed";
@@ -153,6 +171,15 @@ fn queue_script(sql: &SqlStorage, script: &str, under: Option<i64>, now: i64) ->
         console_error!("release: a release's script wasn't queued: code=foreign_script");
         return Ok(());
     };
+    if let Some(epoch) = under {
+        // That unpublish isn't done with its files until this one is gone too.
+        exec(
+            sql,
+            "UPDATE unpublish SET scripts_gone_at = NULL WHERE release_epoch = ?
+               AND NOT EXISTS (SELECT 1 FROM script_delete WHERE script_name = ?)",
+            vec![epoch.into(), script.into()],
+        )?;
+    }
     exec(
         sql,
         "INSERT INTO script_delete (script_name, label, unpublish_epoch, queued_at, next_attempt_at) VALUES (?, ?, ?, ?, ?)
@@ -271,8 +298,49 @@ pub(super) fn expire_uploads(sql: &SqlStorage, now: i64) -> R<usize> {
     Ok(ended)
 }
 
-/// Ends every release that hadn't gone live and started under an epoch below `epoch`, the one an unpublish just
-/// raised to: awaiting approval, queued, uploading or uncertain. None of them can ever be committed, so none is left
+/// **Release bookkeeping, all of it:** every upload past its hour ended, and every release that hadn't gone live and
+/// started under an epoch the room has since left ended. Run at the start of each release command's transaction.
+/// Around a takedown it runs in a transaction of its own ([`bookkeeping`]), never in the takedown's.
+pub(super) fn end_stale(sql: &SqlStorage, now: i64) -> R<()> {
+    // Test builds only: a test makes this fail, to show that no takedown fails or waits with it.
+    #[cfg(feature = "failpoints")]
+    if !rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_release_bookkeeping_fails'",
+        vec![],
+    )?
+    .is_empty()
+    {
+        return Err(ApiError::internal("test: release bookkeeping failed"));
+    }
+    expire_uploads(sql, now)?;
+    let epoch = rows(sql, "SELECT release_epoch FROM release_config", vec![])?
+        .first()
+        .map(|config| int(&config["release_epoch"]));
+    match epoch {
+        Some(epoch) => end_at_unpublish(sql, epoch, now),
+        None => Ok(()),
+    }
+}
+
+/// [`end_stale`] in a transaction of its own, from the room's takedown code: after an unpublish has committed, before
+/// the reconcile's question, and at the start of the room's alarm. **It never fails its caller and never holds it
+/// up:** an error is logged by its code and the caller goes on. A suspension has committed by then, and the applier
+/// and the delete job run all the same. What it would have ended is ended by the next run of it, and until then
+/// can't go live: the epoch has moved, which the recheck and core's `commit_live` both refuse.
+pub(super) fn bookkeeping(state: &State) {
+    let sql = state.storage().sql();
+    let now = release_now(&sql);
+    if let Err(error) = transaction_sync(state, move || end_stale(&sql, now)) {
+        console_error!(
+            "release: bookkeeping failed and was skipped: code={}",
+            error.code().unwrap_or("internal_error")
+        );
+    }
+}
+
+/// Ends every release that hadn't gone live and started under an epoch below `epoch`, the room's own now, which an
+/// unpublish raised it to: awaiting approval, queued, uploading or uncertain. None of them can ever be committed, so none is left
 /// for someone to approve or for a job that may never come back. A script one of them had is queued under this
 /// unpublish, so the unpublish isn't done with its files until that script is gone too.
 ///
@@ -282,14 +350,22 @@ pub(super) fn expire_uploads(sql: &SqlStorage, now: i64) -> R<usize> {
 /// **How many.** Each one ended writes an audit record and an event in the unpublish's own transaction. A room takes
 /// 20 requests a day (`MAX_RELEASES_PER_ROOM_PER_DAY`), which step 6 enforces where it takes them, and each is ended
 /// by the first unpublish after it, so one unpublish ends at most what was asked for since the last.
-pub(super) fn end_at_unpublish(sql: &SqlStorage, epoch: i64, now: i64) -> R<()> {
+fn end_at_unpublish(sql: &SqlStorage, epoch: i64, now: i64) -> R<()> {
+    // The unpublish that raised the room to this epoch, if its row is there: the scripts are queued under it.
+    let under = (!rows(
+        sql,
+        "SELECT 1 AS found FROM unpublish WHERE release_epoch = ?",
+        vec![epoch.into()],
+    )?
+    .is_empty())
+    .then_some(epoch);
     for release in rows(
         sql,
         "SELECT id FROM release WHERE state IN ('awaiting_approval', 'queued', 'uploading', 'uncertain') AND release_epoch < ? ORDER BY seq",
         vec![epoch.into()],
     )? {
         if let Some(id) = text(&release["id"]) {
-            fail(sql, &id, CommitLiveRefusal::EpochMoved.code(), Some(epoch), now)?;
+            fail(sql, &id, CommitLiveRefusal::EpochMoved.code(), under, now)?;
         }
     }
     Ok(())
@@ -335,7 +411,7 @@ pub(super) fn start_upload(
     reads: &Reads,
     now: i64,
 ) -> R<Value> {
-    expire_uploads(sql, now)?;
+    end_stale(sql, now)?;
     let release = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
     let state = state_of(&release)?;
     let with_script = |mut answer: Value, script: Option<String>| {
@@ -409,11 +485,18 @@ pub(super) enum Staged {
 ///   already open, changes nothing. While another release's flight is open the answer is `waiting`, and nothing is
 ///   decided: the job asks again. Any other refusal ends the release.
 pub(super) fn stage(sql: &SqlStorage, release_id: &str, now: i64) -> R<Staged> {
-    expire_uploads(sql, now)?;
+    end_stale(sql, now)?;
     let release = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
     let state = state_of(&release)?;
     if state != ReleaseState::Uploading {
         return Ok(Staged::Answer(answer(&release, false, None)));
+    }
+    // Only a release's own script is ever staged here. A rollback's record (step 6) names the script of the release
+    // it rolls back to, and must go through core's `rollback`, which asks whether that kept script still exists.
+    if release["script_release_id"].as_str() != Some(release_id) {
+        return Err(ApiError::internal(
+            "a release whose script isn't its own isn't committed here",
+        ));
     }
     if let Verdict::Fails(reason) = judge(sql, &release, &Reads::nothing(), now)? {
         return Ok(Staged::Answer(failed(sql, release_id, reason, now)?));
@@ -470,7 +553,7 @@ pub(super) fn stage(sql: &SqlStorage, release_id: &str, now: i64) -> R<Staged> {
 /// - **A fact that was read fails:** the release ends failed, and its hosts go back.
 /// - **Nothing fails and a fact couldn't be read:** `standing_unknown`. The stage stays, and nothing serves it.
 pub(super) fn confirm(sql: &SqlStorage, release_id: &str, reads: &Reads, now: i64) -> R<Value> {
-    expire_uploads(sql, now)?;
+    end_stale(sql, now)?;
     let release = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
     let state = state_of(&release)?;
     if state != ReleaseState::Uploading {
@@ -483,6 +566,10 @@ pub(super) fn confirm(sql: &SqlStorage, release_id: &str, reads: &Reads, now: i6
         })
     });
     if !staged {
+        return Err(standing_unknown());
+    }
+    // Reads older than the bound are an answer about too long ago: nothing is decided on them.
+    if reads.age(now) > MAX_READ_AGE_MS {
         return Err(standing_unknown());
     }
     match judge(sql, &release, reads, now)? {
@@ -530,9 +617,11 @@ impl Workspace {
         }
         let reads = self.release_reads(&release_id).await?;
         #[cfg(feature = "failpoints")]
-        self.test_between_reads()?;
-        self.release_transaction(move |sql| start_upload(sql, &release_id, &reads, now_ms()))
-            .await
+        self.test_between_reads().await?;
+        self.release_transaction(move |sql| {
+            start_upload(sql, &release_id, &reads, release_now(sql))
+        })
+        .await
     }
 
     /// `{ release_id }`: commits one release live (M6 step 5). Nothing calls it yet. See the module's note for the
@@ -540,13 +629,16 @@ impl Workspace {
     pub(super) async fn release_commit_live(&self, mut req: Request) -> R<Value> {
         let (release_id, release) = self.named_release(&mut req).await?;
         if state_of(&release)? != ReleaseState::Uploading {
+            // A retry may find the release already `live` with its hosts still owed, as when the alarm couldn't be
+            // set after the confirm committed. It needs nothing here: the room sets its alarm for whatever it owes
+            // after every command it is sent, this one included, whatever the command answers (`Workspace::fetch`).
             return Ok(answer(&release, false, None));
         }
         let staged: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
         let slot = staged.clone();
         let id = release_id.clone();
         self.release_transaction(move |sql| {
-            if let Staged::Answer(answer) = stage(sql, &id, now_ms())? {
+            if let Staged::Answer(answer) = stage(sql, &id, release_now(sql))? {
                 *slot.borrow_mut() = Some(answer);
             }
             Ok(Value::Null)
@@ -558,8 +650,8 @@ impl Workspace {
         // Asked only now, with the release already staged in the room's own state.
         let reads = self.release_reads(&release_id).await?;
         #[cfg(feature = "failpoints")]
-        self.test_between_reads()?;
-        self.release_transaction(move |sql| confirm(sql, &release_id, &reads, now_ms()))
+        self.test_between_reads().await?;
+        self.release_transaction(move |sql| confirm(sql, &release_id, &reads, release_now(sql)))
             .await
     }
 }

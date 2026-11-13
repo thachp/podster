@@ -1,6 +1,6 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { alarmQuiet } from "./alarm";
 
 // M6 step 5, the first PR: the room's recheck of a release (ADR 0010's "The release job", step 1). On every pass the
@@ -52,6 +52,8 @@ const SHA = "cd".repeat(20);
 const REPO_ID = 987654321;
 const TASK = "tsk_rr_1";
 let people = 0;
+/** Every room a test made, so each is left with no alarm run under way and none to come, pass or fail. */
+const made: string[] = [];
 
 type Healthy = { room: string; requester: Who; admin: Who; org: string };
 /**
@@ -64,6 +66,7 @@ async function healthy(opts: { org?: string; state?: string } = {}): Promise<Hea
   const org = opts.org ?? ORG;
   const owner = { ...OWNER, org, adminOrgs: [org] };
   const room: string = (await api(owner, "POST", "/v1/workspaces", { name: "Release" })).body.id;
+  made.push(room);
   await alarmQuiet(stub(room));
   const n = ++people;
   const requester: Who = { id: `per_rr_req_${n}`, kind: "person", org };
@@ -77,6 +80,9 @@ async function healthy(opts: { org?: string; state?: string } = {}): Promise<Hea
     sql.exec("INSERT INTO task (id, title, instructions, requester_id, reviewer_id, status, version, created_at, updated_at) VALUES (?, 'Ship it', 'x', ?, ?, 'completed', 1, 1, 1)", TASK, OWNER.id, admin.id);
     sql.exec("INSERT INTO task_change (task_id, provider_repo_id, pr_number, submission_no, merge_state, merge_sha, merge_called_at, merge_finished_at, reviewer_id, created_at, updated_at) VALUES (?, ?, 7, 1, 'succeeded', ?, 1, 1, ?, 1, 1)", TASK, REPO_ID, SHA, admin.id);
     sql.exec("INSERT INTO app_label (label, current, created_at) VALUES ('rrlabel', 1, 1)");
+    // No provider for this room: with one, and release switched on, the gate on the release path refuses every
+    // release command (`release-commit.spec.ts`).
+    sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
     sql.exec("INSERT INTO release_config (singleton, enabled, version, release_epoch, set_by, set_at, updated_at) VALUES (1, 1, 3, 2, ?, 1, 1)", OWNER.id);
     sql.exec(
       `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, task_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
@@ -102,6 +108,7 @@ const between = (room: string, ...statements: string[]) => inRoom(room, (sql) =>
   for (const statement of statements) sql.exec("INSERT INTO test_release_between_reads (statement) VALUES (?)", statement);
 });
 
+afterEach(async () => { for (const room of made.splice(0)) await alarmQuiet(stub(room)); });
 beforeAll(async () => {
   key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
   for (const statement of BINDINGS.TEST_D1_SCHEMA.split(";").map((x: string) => x.trim()).filter(Boolean)) await BINDINGS.DB.prepare(statement).run();
@@ -115,7 +122,6 @@ describe("the room's recheck of a release", () => {
     expect(await trail(h.room)).toEqual({ events: [], audit: [] });
     // And again: a pass that holds is a pass that can be run as often as the job likes.
     expect(await switchedOn(() => recheck(h.room))).toEqual(HOLDS);
-    await alarmQuiet(stub(h.room));
   });
 
   it("fails the release with core's reason, once, audited as Podster's act and told to the room's managers", async () => {
@@ -132,7 +138,6 @@ describe("the room's recheck of a release", () => {
     await inRoom(h.room, (sql) => sql.exec("UPDATE release_config SET enabled = 1"));
     expect((await switchedOn(() => recheck(h.room))).body).toEqual({ release_id: REL, state: "failed", rechecked: false, reason: "release_off" });
     expect(await trail(h.room)).toEqual(after);
-    await alarmQuiet(stub(h.room));
   });
 
   // Each of these changes one fact in a room where everything else holds, and names the reason core gives for it.
@@ -148,6 +153,7 @@ describe("the room's recheck of a release", () => {
     ["release switched off in the room", "release_off", sql("UPDATE release_config SET enabled = 0")],
     ["the room's release configuration changed since it was asked for", "release_config_changed", sql("UPDATE release_config SET version = version + 1")],
     ["the room unpublished since it started", "release_epoch_moved", sql("UPDATE release_config SET release_epoch = release_epoch + 1")],
+    ["the release naming a higher epoch than the room has reached", "release_epoch_moved", sql("UPDATE release SET release_epoch = release_epoch + 1")],
     // Whoever asked for it.
     ["the requester no longer in the room", "requester_lost_authority", (h) => inRoom(h.room, (s) => void s.exec("UPDATE member SET revoked_at = 2, revocation_reason = 'removed' WHERE principal_id = ?", h.requester.id))],
     ["the requester holding no deploy grant", "requester_lost_authority", sql("DELETE FROM provider_grant")],
@@ -198,9 +204,11 @@ describe("the room's recheck of a release", () => {
     it(`fails for ${what}, alone: ${reason}`, async () => {
       const h = await healthy();
       await change(h);
-      expect((await switchedOn(() => recheck(h.room))).body).toEqual({ release_id: REL, state: "failed", rechecked: true, reason });
+      // A release the room has since left behind is ended before the recheck runs, by the room's bookkeeping at the
+      // start of every release command: the same reason, and nothing was left to recheck.
+      const rechecked = what !== "the room unpublished since it started";
+      expect((await switchedOn(() => recheck(h.room))).body).toEqual({ release_id: REL, state: "failed", rechecked, reason });
       expect(await row(h.room)).toEqual({ state: "failed", failure_code: reason, finished: 1 });
-      await alarmQuiet(stub(h.room));
     });
   }
 
@@ -208,14 +216,12 @@ describe("the room's recheck of a release", () => {
     const h = await healthy();
     await inRoom(h.room, (s) => void s.exec("UPDATE workspace SET require_person_review = 1"));
     expect(await switchedOn(() => recheck(h.room))).toEqual(HOLDS);
-    await alarmQuiet(stub(h.room));
   });
 
   it("fails while release is switched off for the deployment, which is everywhere", async () => {
     const h = await healthy();
     // No switch: the deployment's own configuration doesn't allow release.
     expect((await recheck(h.room)).body).toEqual({ release_id: REL, state: "failed", rechecked: true, reason: "release_off_for_deployment" });
-    await alarmQuiet(stub(h.room));
   });
 
   /** Nothing was decided: the pass was refused as retryable, and the release, its events and its audit are as they were. */
@@ -246,7 +252,6 @@ describe("the room's recheck of a release", () => {
     }
     // Readable again and clear, the same release holds.
     expect(await switchedOn(() => recheck(unreadable.room))).toEqual(HOLDS);
-    for (const h of [stopped, unreadable]) await alarmQuiet(stub(h.room));
   });
 
   it("decides nothing when the organization's delegation can't be read, or isn't a yes or a no", async () => {
@@ -258,7 +263,6 @@ describe("the room's recheck of a release", () => {
       // A clear no is a fact that was read: it fails the release.
       await inRoom(h.room, (s) => void s.exec("UPDATE test_release_delegation_answer SET answer = ?", '{"granted":false}'));
       expect((await switchedOn(() => recheck(h.room))).body, answer).toMatchObject({ state: "failed", reason: "release_not_delegated" });
-      await alarmQuiet(stub(h.room));
     }
   });
 
@@ -267,7 +271,6 @@ describe("the room's recheck of a release", () => {
     // An older live `deploy` grant on another repository, from someone who gave nothing that counts.
     await inRoom(h.room, (s) => void s.exec("INSERT INTO provider_grant (id, principal_id, provider, provider_repo_id, action, delegated_by, created_at) VALUES ('pgr_older', ?, 'github', ?, 'deploy', ?, 0)", h.requester.id, REPO_ID + 5, h.requester.id));
     expect(await switchedOn(() => recheck(h.room))).toEqual(HOLDS);
-    await alarmQuiet(stub(h.room));
   });
 
   it("can't be given two unrevoked grants for one repository and action, so the live one is the only one", async () => {
@@ -281,7 +284,6 @@ describe("the room's recheck of a release", () => {
     await inRoom(h.room, (s) => void s.exec("UPDATE provider_grant SET revoked_at = 3, revoked_by = ?", OWNER.id));
     await second();
     expect(await switchedOn(() => recheck(h.room))).toEqual(HOLDS);
-    await alarmQuiet(stub(h.room));
   });
 
   it("fails once an operator has taken the provisioning delegation from the room's organization", async () => {
@@ -300,7 +302,6 @@ describe("the room's recheck of a release", () => {
     // Another organization's rooms are untouched by it.
     const other = await healthy();
     expect(await switchedOn(() => recheck(other.room))).toEqual(HOLDS);
-    for (const each of [h, before, other]) await alarmQuiet(stub(each.room));
   });
 
   it("rechecks a release the job owns, and leaves every other alone", async () => {
@@ -309,7 +310,6 @@ describe("the room's recheck of a release", () => {
       expect((await switchedOn(() => recheck(h.room))).body, state).toEqual({ release_id: REL, state, rechecked: true, reason: null });
       await inRoom(h.room, (s) => void s.exec("UPDATE release_config SET enabled = 0"));
       expect((await switchedOn(() => recheck(h.room))).body, state).toEqual({ release_id: REL, state: "failed", rechecked: true, reason: "release_off" });
-      await alarmQuiet(stub(h.room));
     }
     // Not yet approved, already committed live, or ended: nothing is rechecked and nothing changes, though release is
     // off in the room. Ending one that is live also sets its hosts back, which isn't this command's.
@@ -323,7 +323,6 @@ describe("the room's recheck of a release", () => {
       expect((await switchedOn(() => recheck(h.room))).body, state).toEqual({ release_id: REL, state, rechecked: false, reason: null });
       expect((await row(h.room)).state, state).toBe(state);
       expect(await trail(h.room)).toEqual({ events: [], audit: [] });
-      await alarmQuiet(stub(h.room));
     }
   });
 
@@ -344,7 +343,6 @@ describe("the room's recheck of a release", () => {
       await between(h.room, ...statements(h));
       // Nothing was decided: the release is as it was, and nothing was recorded.
       await undecided(h, what);
-      await alarmQuiet(stub(h.room));
     }
     // Where the change leaves someone failing on the room's own rows, that is a fact that was read: the release
     // fails, whoever the outside answers were about. Neither new requester holds a grant.
@@ -355,7 +353,6 @@ describe("the room's recheck of a release", () => {
       const h = await healthy();
       await between(h.room, ...statements(h));
       expect((await switchedOn(() => recheck(h.room))).body, what).toMatchObject({ state: "failed", reason: "requester_lost_authority" });
-      await alarmQuiet(stub(h.room));
     }
     // Someone the room's rows made not worth asking about when the questions were asked, and do by the transaction:
     // nothing is known of them, so nothing is decided. They aren't failed for not having been asked.
@@ -379,13 +376,11 @@ describe("the room's recheck of a release", () => {
       await before(h);
       await between(h.room, ...statements(h));
       await undecided(h, what);
-      await alarmQuiet(stub(h.room));
     }
     // A fact of the room's own that changes at that same point is simply read as it now is, inside the transaction.
     const h = await healthy();
     await between(h.room, "UPDATE release_config SET enabled = 0");
     expect((await switchedOn(() => recheck(h.room))).body).toMatchObject({ state: "failed", reason: "release_off" });
-    await alarmQuiet(stub(h.room));
   });
 
   it("decides nothing when someone's own record can't answer", async () => {
@@ -399,7 +394,6 @@ describe("the room's recheck of a release", () => {
         if (statement.includes("requested_by")) s.exec("UPDATE provider_grant SET principal_id = 'per_unavailable_rr'");
       });
       await undecided(h, statement);
-      await alarmQuiet(stub(h.room));
     }
   });
 
@@ -412,7 +406,6 @@ describe("the room's recheck of a release", () => {
       expect(none.status).toBe(400);
     });
     expect(await row(h.room)).toEqual({ state: "queued", failure_code: null, finished: 0 });
-    await alarmQuiet(stub(h.room));
   });
 
   it("can't be reached by any client: the Worker forwards no such path", async () => {
@@ -432,7 +425,6 @@ describe("the room's recheck of a release", () => {
     const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
     const naming = Object.entries(sources).filter(([, text]) => text.includes("release-recheck") || text.includes("INTERNAL_RELEASE_RECHECK")).map(([name]) => name).sort();
     expect(naming).toEqual(["workspace.rs", "workspace/release_recheck.rs"]);
-    await alarmQuiet(stub(h.room));
   });
 
   it("reads no read model: D1 holds nothing it decides from", async () => {
@@ -442,6 +434,5 @@ describe("the room's recheck of a release", () => {
     expect(await switchedOn(() => recheck(h.room))).toEqual(HOLDS);
     const source = (JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>)["workspace/release_recheck.rs"];
     expect(source).not.toMatch(/\.d1\(|"DB"|_index\b/);
-    await alarmQuiet(stub(h.room));
   });
 });

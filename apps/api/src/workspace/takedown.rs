@@ -31,9 +31,9 @@
 //!   transaction. The epoch doesn't move and the default host is untouched. The applier then removes the entry.
 //! - **Before it writes a default host's entry the applier asks the `Moderation` object whether the whole content
 //!   domain is stopped** (`content_stop`). Stopped, or no answer, and nothing is written. A removal never asks.
-//! - A release that was still waiting, queued or uploading ends with the unpublish, in the same transaction
-//!   (`release_commit::end_at_unpublish`, step 5): the epoch has moved, so it could never go live. *Before step 5 it
-//!   was left for the job's next pass.*
+//! - A release that was still waiting, queued or uploading ends right after the unpublish, in a transaction of its
+//!   own (`release_commit::bookkeeping`, step 5): the epoch has moved, so it could never go live. If that fails, the
+//!   unpublish has still committed. *Before step 5 it was left for the job's next pass.*
 //!
 //! Logs carry the room's ID, counts and codes. Never a host, a label or a script's name.
 use super::*;
@@ -197,9 +197,11 @@ pub(super) fn app_suspended(sql: &SqlStorage) -> R<bool> {
 /// Unpublishes the room's app, inside the caller's transaction: core's `unpublish` on the room's own state, written
 /// back whole. The epoch goes up, every host goes to nothing with its version up, the kept script and any commit in
 /// flight are forgotten, the trigger is recorded with the epoch it raised to, each release that was live or served
-/// becomes unpublished, every script core names is queued for deletion, and every release that hadn't gone live ends
-/// failed, its own script queued too. It never refuses: a room with no release configuration has nothing to
-/// unpublish, and that is all it does there.
+/// becomes unpublished, and every script core names is queued for deletion. It never refuses: a room with no release
+/// configuration has nothing to unpublish, and that is all it does there.
+///
+/// **Ending the releases that hadn't gone live is not done here.** It is release bookkeeping, and a takedown never
+/// fails or waits because of it: the caller runs `release_commit::bookkeeping` after this transaction has committed.
 fn unpublish_app(sql: &SqlStorage, trigger: UnpublishTrigger, label: &str, now: i64) -> R<()> {
     let Some(loaded) = load(sql)? else {
         return Ok(());
@@ -284,8 +286,7 @@ fn unpublish_app(sql: &SqlStorage, trigger: UnpublishTrigger, label: &str, now: 
             ],
         )?;
     }
-    // After the scripts above, so one the unpublish itself named keeps the unpublish it was queued under.
-    release_commit::end_at_unpublish(sql, epoch, now)
+    Ok(())
 }
 
 /// `{ label, suspended, reason }`: an operator suspends the room's app, or lifts that. The room acts only if the
@@ -666,9 +667,6 @@ fn check_script(sql: &SqlStorage, script: &str, now: i64) -> R<(bool, bool)> {
 /// inside the caller's transaction. Answers `{ known, changed, findings }`. The caller arms the room's alarm after it,
 /// whatever was asked, which is also what corrects a wake that was lost.
 pub(super) fn check(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
-    // Whatever was asked: a release past its upload's hour ends now, before its script is looked at, so the script a
-    // pass is about to delete never belongs to a release that could still go live.
-    release_commit::expire_uploads(sql, now)?;
     let (known, changed) = match body["kind"].as_str() {
         Some("wake") => (true, false),
         Some("entry") => check_entry(
@@ -694,7 +692,7 @@ pub(super) fn check(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
 
 /// The provider this room may use, or `None`. Test builds also read a table a test makes in one room,
 /// `test_content_provider_off`, so the unconfigured case can be shown beside the configured one.
-fn provider(env: &Env, sql: &SqlStorage) -> Option<Provider> {
+pub(super) fn provider(env: &Env, sql: &SqlStorage) -> Option<Provider> {
     #[cfg(feature = "failpoints")]
     if rows(
         sql,
@@ -1050,7 +1048,7 @@ async fn delete_script(sql: &SqlStorage, provider: &Provider, script: &str) -> R
             ],
         )
     };
-    if let Some(until) = upload_keeps_until(sql, script, now_ms())? {
+    if let Some(until) = upload_keeps_until(sql, script, release_recheck::release_now(sql))? {
         // Nothing was asked of the provider, so no attempt is counted. The row waits until the upload's hour is
         // over, by its own time, so the room isn't woken for it before then.
         return exec(
@@ -1105,13 +1103,9 @@ pub(super) async fn upkeep(state: &State, env: &Env) -> R<()> {
     }
     let now = now_ms();
     // A release whose upload is an hour old ends here too, so a release that was staged and then abandoned doesn't
-    // keep its host waiting, and every script delete in the room behind it, for longer than its hour.
-    {
-        let store = sql.clone();
-        transaction_sync(state, move || {
-            release_commit::expire_uploads(&store, now).map(|_| ())
-        })?;
-    }
+    // keep its host waiting, and every script delete in the room behind it, for longer than its hour. In a
+    // transaction of its own, and never in the way: if it fails, the applier and the delete job run all the same.
+    release_commit::bookkeeping(state);
     let hosts: Vec<String> = rows(
         &sql,
         &format!(
@@ -1184,6 +1178,10 @@ impl Workspace {
         self.migrate_if_needed()?;
         let body: Value =
             serde_json::from_str(&req.text().await?).map_err(|_| ApiError::invalid_argument())?;
+        // Whatever was asked: a release past its upload's hour ends first, before its script is looked at, so the
+        // script a pass is about to delete never belongs to a release that could still go live. In a transaction
+        // of its own: if it fails, the reconcile's question is answered all the same.
+        release_commit::bookkeeping(&self.state);
         let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
         let slot = out.clone();
         let store = sql.clone();
@@ -1248,6 +1246,9 @@ impl Workspace {
             *slot.borrow_mut() = Some(set(&store, &body, now_ms())?);
             Ok(())
         })?;
+        // The suspension has committed. Only now are the releases that hadn't gone live ended, in a transaction of
+        // their own, with nothing awaited between the two: whether or not that works, the app is unpublished.
+        release_commit::bookkeeping(&self.state);
         // The transaction moved each host's version, which voids any wait, so the applier is due now. If the alarm
         // can't be set the suspension has still committed, and the operator is told it failed: asking again changes
         // nothing in the room and arms again. Nothing else corrects a lost wake until the reconcile exists.

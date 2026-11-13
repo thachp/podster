@@ -2,7 +2,7 @@ import { createExecutionContext, createScheduledController, env, runInDurableObj
 // The Worker's own entry, as it is built: the scheduled handler is called on it directly, since no schedule calls it.
 import ApiWorker from "../build/index.js";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { alarmPass, alarmQuiet, nextAlarm } from "./alarm";
 
 // M6 step 4(a), the first of three PRs (ADR 0010's "Takedown"): an operator suspends a room's app and lifts that, the
@@ -76,8 +76,11 @@ type App = { room: string; label: string; host: string; served: string; kept: st
  * served before a third was committed live and is still waiting for its marker, and a fourth queued behind it.
  * `opts.plain` leaves out the commit in flight: the room just serves its second release.
  */
+/** Every room `app` made, so each is left with no alarm run under way and none to come, whether its test passed or failed. */
+const madeApps: string[] = [];
 async function app(opts: { plain?: boolean; epoch?: number; index?: boolean } = {}): Promise<App> {
   const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+  madeApps.push(room);
   // Making a room sets its alarm a moment ahead. It is run out and cleared here, before any row is written, so no run
   // of it can land between the rows below or between a test's next steps: nothing is set or running after this, and
   // only a command or a test's own pass runs one.
@@ -205,6 +208,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => { await fake("/reset", {}); });
+afterEach(async () => { for (const room of madeApps.splice(0)) await alarmQuiet(stub(room)); });
 
 describe("an operator's suspension of an app", () => {
   it("is nothing anyone can find while release is switched off", async () => {
@@ -324,6 +328,27 @@ describe("an operator's suspension of an app", () => {
     expect((await held()).calls.length).toBe(state.calls.length);
   });
 
+  it("removes the entries and the scripts though release bookkeeping fails on every pass, and a commit asked again sets the alarm for what is owed", async () => {
+    // Step 5's bookkeeping runs at the start of the alarm, in a transaction of its own. Test builds only: it fails here.
+    const a = await app();
+    await inRoom(a.room, (sql) => sql.exec("CREATE TABLE test_release_bookkeeping_fails (x INTEGER)"));
+    expect((await switchedOn(() => suspend(a.label))).status).toBe(200);
+    await pass(a.room);
+    const state = await held();
+    expect([state.entries[a.host], state.scripts.filter((name) => name.startsWith(`${a.label}.`))]).toEqual([undefined, []]);
+    // The queued release is left for a later run of the bookkeeping. Its epoch is gone, so it can never go live.
+    expect((await one(a.room, "SELECT state FROM release WHERE id = ?", rel(4))).state).toBe("queued");
+
+    // A commit that committed and couldn't set the alarm: asked again it finds the release live, and sets the alarm.
+    const b = await app();
+    await inRoom(b.room, (sql) => sql.exec("UPDATE serve_apply SET applied_version = 5"));
+    await runInDurableObject(stub(b.room), (_: any, s: any) => s.storage.deleteAlarm());
+    expect(await nextAlarm(stub(b.room))).toBeNull();
+    const again = await stub(b.room).fetch("https://do/internal/release-commit-live", { method: "POST", body: JSON.stringify({ release_id: rel(3) }) });
+    expect([again.status, ((await again.json()) as any).state]).toEqual([200, "live"]);
+    expect(await nextAlarm(stub(b.room))).not.toBeNull();
+  });
+
   it("lifts without restoring anything", async () => {
     const a = await app();
     await switchedOn(() => suspend(a.label));
@@ -431,9 +456,10 @@ describe("the room's applier and its delete job", () => {
       sql.exec("UPDATE release_config SET in_flight_release = ?, in_flight_script = ?, in_flight_epoch = 4, in_flight_at = 1", rel(5), staged);
     });
     await fake("/seed", { scripts: [staged] });
-    await pass(a.room);
+    // Two whole passes, each leaving its wait far ahead: exactly two attempts, whatever the clock does between them.
+    await passAndHold(a.room);
     await due(a.room);
-    await pass(a.room);
+    await passAndHold(a.room);
     let state = await held();
     expect([state.entries[a.host], callsFor(state, a)]).toEqual([a.served, []]);
     expect(await applyRows(a.room)).toEqual([{ host: a.host, applied_version: 5, applied_script: a.served, attempts: 2, last_code: "release_not_confirmed" }]);
@@ -896,6 +922,18 @@ describe("what step 4(a) adds to the room and the Worker", () => {
     expect(mentions).toContain("hostname_claim.rs:/internal/test-migrate");
     // And the reconciles' one: the time bounds a test sets, to show each without waiting it out.
     expect(mentions).toContain("reconcile.rs:test_reconcile_budget");
+    // Step 5's: what a test leaves for the room to run between a release command's reads and its transaction, the
+    // hold at that same point, the delegation's answer, the room's clock for release commands, and bookkeeping that fails.
+    for (const name of ["test_release_between_reads", "test_release_hold", "test_release_delegation_answer", "test_release_clock"]) expect(mentions).toContain(`workspace/release_recheck.rs:${name}`);
+    expect(mentions).toContain("workspace/release_commit.rs:test_release_bookkeeping_fails");
+    // And the two that are a prefix of an ID, not a table, which the pattern above doesn't read: each is under the
+    // feature, on the line before it.
+    for (const prefix of ["org_unavailable_", "per_unavailable_"]) {
+      const lines = sources["principal.rs"].split("\n");
+      const at = lines.map((line, i) => (line.includes(`"${prefix}"`) ? i : -1)).filter((i) => i >= 0);
+      expect(at.length, prefix).toBeGreaterThan(0);
+      for (const i of at) expect(lines.slice(Math.max(0, i - 12), i).some((line) => line.includes('feature = "failpoints"')), `${prefix} at ${i + 1}`).toBe(true);
+    }
     expect(BINDINGS.TEST_API_CARGO).toMatch(/\[features\][^\[]*\nfailpoints = \[\]/);
     expect(BINDINGS.TEST_API_CARGO).not.toMatch(/^default\s*=/m);
   });

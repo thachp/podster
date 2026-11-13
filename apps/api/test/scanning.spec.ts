@@ -1,6 +1,6 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { alarmPass, alarmQuiet } from "./alarm.ts";
 
 const BINDINGS = env as any;
@@ -35,8 +35,16 @@ const row = (id: string, object: string) => inRoom(id, (sql) => sql.exec("SELECT
 const DATA = new TextEncoder().encode("some notes\n".repeat(100));
 const sha256 = async (data: Uint8Array) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", data))].map((b) => b.toString(16).padStart(2, "0")).join("");
 
+/** Every room a test makes, quieted after it so that no alarm of it runs into the next test. */
+const madeRooms: string[] = [];
+afterEach(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
+
 async function room() {
-  return (await api("POST", "/v1/workspaces", { name: "Scans" })).body.id as string;
+  const id = (await api("POST", "/v1/workspaces", { name: "Scans" })).body.id as string;
+  madeRooms.push(id);
+  return id;
 }
 /** A stored file, waiting for its scan. */
 async function stored(id: string, name = "notes.txt") {

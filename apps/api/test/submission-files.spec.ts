@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { alarmQuiet } from "./alarm.ts";
 
 // Files on a submission (M2 step 6): uploading one for a task, submitting it, who sees it, and approving exactly what was pinned.
 
@@ -49,9 +50,16 @@ const TEXT = encoder.encode("The finished report.\n".repeat(40));
 const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)), (_: any, state: any) => fn(state.storage.sql));
 const setState = (id: string, object: string, state: string) => inRoom(id, (sql) => sql.exec("UPDATE stored_object SET state = ? WHERE id = ?", state, object));
 
+/** Every room a test makes, quieted after it so that no alarm of it runs into the next test. */
+const madeRooms: string[] = [];
+afterEach(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
+
 /** A room with a member and two guests, and a task the owner offered to GUEST, which GUEST accepted. */
 async function accepted() {
   const id: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Submissions" })).body.id;
+  madeRooms.push(id);
   for (const [who, role] of [[MEMBER, "member"], [OTHER_GUEST, "guest"], [ADMIN, "admin"]] as const) {
     // A person is added with the gateway's word that they're in the organization's directory.
     const claims = who.kind === "person" ? { target_member: { person: who.id, orgs: { [who.org]: 1 } } } : {};

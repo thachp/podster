@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
-import { alarmPass } from "./alarm.ts";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { alarmPass, alarmQuiet } from "./alarm.ts";
 
 // A room whose migration fails answers every request with an error. Removing someone's access still has to reach it: a
 // disconnect's fence and an organization departure are held, acknowledged, and applied before anything else once the room
@@ -47,9 +47,16 @@ const member = (id: string, who: Who) => inRoom(id, (sql) => sql.exec("SELECT re
 const held = (id: string) => inRoom(id, (sql) => sql.exec("SELECT kind FROM held_access ORDER BY seq").toArray().map((r: any) => r.kind));
 const failures = (id: string) => inRoom(id, (sql) => sql.exec("SELECT failures FROM migration_failure").toArray()[0]?.failures ?? 0);
 
+/** Every room a test makes, quieted after it so that no alarm of it runs into the next test. */
+const madeRooms: string[] = [];
+afterEach(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
+
 /** A room with an agent and another person of its organization, both in it. */
 async function room() {
   const id: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Held" })).body.id;
+  madeRooms.push(id);
   expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: AGENT.id, kind: "agent", org_id: AGENT.org, role: "member", policy_version: await version(id) })).status).toBe(200);
   const added = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: LEAVER.id, kind: "person", org_id: LEAVER.org, role: "member", policy_version: await version(id) }, { target_member: { person: LEAVER.id, orgs: { [LEAVER.org]: 1 } } });
   expect(added.status, JSON.stringify(added.body)).toBe(200);

@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
-import { alarmPass } from "./alarm.ts";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { alarmPass, alarmQuiet } from "./alarm.ts";
 
 // The public read surface (M4 step 7, ADR 0008): the room page, which is the only route that takes the public assertion,
 // and Explore, which needs sign-in. Its merge criteria are the canary test and the route-list test below.
@@ -66,9 +66,16 @@ const drain = async (id: string) => {
 const page = (handle: string, who: Who | "public" = "public", opts: Opts = {}) => api(who, "GET", `/v1/public/workrooms/${handle}`, undefined, { on: true, ...opts });
 const explore = (who: Who | "public", query = "", opts: Opts = {}) => api(who, "GET", `/v1/public/explore${query}`, undefined, { on: true, ...opts });
 
+/** Every room a test makes, quieted after it so that no alarm of it runs into the next test. */
+const madeRooms: string[] = [];
+afterEach(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
+
 /** A room with a human admin and a member agent, person review on, and a name of its own. */
 async function room(name = "Open research room") {
   const id: string = (await api(OWNER, "POST", "/v1/workspaces", { name, goal: "Map the reef", context: "Shared notes on the survey" })).body.id;
+  madeRooms.push(id);
   for (const [who, role] of [[ADMIN, "admin"], [AGENT, "member"]] as const) {
     const claims = who.kind === "person" ? { target_member: { person: who.id, orgs: { [who.org]: 1 } } } : {};
     const r = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: who.kind ?? "agent", org_id: who.org, role, policy_version: await version(id) }, { claims });

@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
-import { alarmPass } from "./alarm.ts";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { alarmPass, alarmQuiet } from "./alarm.ts";
 
 // M3 step 12: outbound offers (ADR 0007, decisions 117, 118, 122 and 129). An offer to an agent records an attempt with the
 // offer. The room's outbox puts it on the A2A queue with IDs only. The consumer asks the agent's Principal, then the room,
@@ -48,8 +48,15 @@ const version = async (room: string) => (await must(OWNER, "GET", `/v1/workspace
 const join = async (room: string, agent: Who, role = "member") =>
   must(OWNER, "POST", `/v1/workspaces/${room}/members`, { principal_id: agent.id, kind: "agent", org_id: agent.org, role, policy_version: await version(room) });
 
+/** Every room a test makes, quieted after it so that no alarm of it runs into the next test. */
+const madeRooms: string[] = [];
+afterEach(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
+
 async function newRoom() {
   const room = (await must(OWNER, "POST", "/v1/workspaces", { name: `Out ${++counter}` })).id as string;
+  madeRooms.push(room);
   await join(room, LEAD);
   return room;
 }

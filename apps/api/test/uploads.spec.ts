@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { alarmQuiet } from "./alarm.ts";
 
 const BINDINGS = env as any;
 let key: any;
@@ -52,8 +53,15 @@ beforeAll(async () => {
 });
 
 const version = async (id: string) => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
+/** Every room a test makes, quieted after it so that no alarm of it runs into the next test. */
+const madeRooms: string[] = [];
+afterEach(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
+
 async function room() {
   const id: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Files" })).body.id;
+  madeRooms.push(id);
   const add = async (who: Who, role: string) => {
     const r = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: who.kind ?? "agent", org_id: who.org, role, policy_version: await version(id) });
     expect(r.status, `add ${who.id}`).toBe(200);

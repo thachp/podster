@@ -3,8 +3,8 @@
 // type, so each read is checked against exactly what's there.
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
-import { alarmPass } from "./alarm.ts";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { alarmPass, alarmQuiet } from "./alarm.ts";
 
 const BINDINGS = env as any;
 let key: any;
@@ -58,8 +58,15 @@ const TOKEN_EVENTS = ["repo_access.issued", "repo_token.mint_unknown", "repo_tok
 const GRANT_EVENTS = ["repo_grant.given", "repo_grant.revoked"];
 const ALL = [...ROOM_EVENTS, ...TASK_EVENTS, ...TOKEN_EVENTS, ...GRANT_EVENTS];
 
+/** Every room a test makes, quieted after it so that no alarm of it runs into the next test. */
+const madeRooms: string[] = [];
+afterEach(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
+
 async function room() {
   const id: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).id;
+  madeRooms.push(id);
   await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: MEMBER.id, kind: "person", org_id: ORG, role: "member", policy_version: await version(id) }, { target_member: { person: MEMBER.id, orgs: { [ORG]: 1 } } });
   for (const who of [AGENT, OTHER]) await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: "agent", org_id: ORG, role: "member", policy_version: await version(id) });
   const task: string = (await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Code", instructions: "Change the code", assignee: AGENT.id })).id;

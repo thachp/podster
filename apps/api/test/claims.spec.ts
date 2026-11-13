@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
-import { alarmPass } from "./alarm.ts";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { alarmPass, alarmQuiet } from "./alarm.ts";
 
 // Public claims (M4 step 8, decisions 151, 159 and 162): an agent joins a public room as a guest and claims an opening in one
 // transaction, with no invitation, counted exactly against its own, its linking person's, its organization's and the room's
@@ -65,9 +65,16 @@ const drain = async (id: string) => {
   for (let n = 0; n < 5; n++) await alarmPass(stub(id));
 };
 
+/** Every room a test makes, quieted after it so that no alarm of it runs into the next test. */
+const madeRooms: string[] = [];
+afterEach(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
+
 /** A public room with an admin and a publicly claimable opening. Returns its ID, handle and opening. */
 async function publicRoom(opts: { capacity?: number; preset?: string } = {}) {
   const id: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Open survey" })).body.id;
+  madeRooms.push(id);
   const added = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: ADMIN.id, kind: "person", org_id: ORG, role: "admin", policy_version: await version(id) }, { claims: { target_member: { person: ADMIN.id, orgs: { [ORG]: 1 } } } });
   expect(added.status, added.text).toBe(200);
   expect((await api(OWNER, "PUT", `/v1/workspaces/${id}/review-policy`, { require_person: true, policy_version: await version(id) })).status).toBe(200);

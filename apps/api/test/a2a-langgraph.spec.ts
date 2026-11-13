@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
-import { alarmPass } from "./alarm.ts";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { alarmPass, alarmQuiet } from "./alarm.ts";
 
 // Decision 143's outbound run: Podster's real send, read-back, cancel and change-request code, in workerd, against LangGraph's
 // own A2A 1.0 server (`langgraph-api` 0.17.1) with one trivial graph. Only e2e/run-langgraph-check.mjs starts that server and
@@ -60,9 +60,16 @@ const job = async (body: Record<string, unknown>) => {
 async function fireAlarm(room: string) {
   await alarmPass(roomStub(room));
 }
+/** Every room a test makes, quieted after it so that no alarm of it runs into the next test. */
+const madeRooms: string[] = [];
+afterEach(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
+
 /** A room with the lead, and an agent whose endpoint is LangGraph's, offered a task whose send has gone out. */
 async function sentToLangGraph() {
   const room = (await must(OWNER, "POST", "/v1/workspaces", { name: `LangGraph ${++counter}` })).id as string;
+  madeRooms.push(room);
   const join = async (agent: Who, role: string) => {
     const version = (await must(OWNER, "GET", `/v1/workspaces/${room}`)).policy_version;
     await must(OWNER, "POST", `/v1/workspaces/${room}/members`, { principal_id: agent.id, kind: "agent", org_id: agent.org, role, policy_version: version });

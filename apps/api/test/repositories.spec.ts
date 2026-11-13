@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { alarmQuiet } from "./alarm.ts";
 
 // M5 step 2: the room's state for managed repositories, and the person-only read of it. Nothing here reaches a provider,
 // no token exists, and no token, merge or status route exists either. Rows are written straight into the room where a test needs one, because
@@ -48,9 +49,16 @@ beforeAll(async () => {
 const version = async (id: string) => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
 const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
 
+/** Every room a test makes, quieted after it so that no alarm of it runs into the next test. */
+const madeRooms: string[] = [];
+afterEach(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
+
 /** A room with a member who sees everything and two guests who see only their own tasks, one of them on the task. */
 async function room() {
   const id: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+  madeRooms.push(id);
   // Managed repositories switched on for this room. While they're off the read isn't there (see "while switched off").
   await inRoom(id, (sql) => sql.exec("CREATE TABLE test_managed_repositories_on (x INTEGER)"));
   for (const [who, role] of [[MEMBER, "member"], [ASSIGNEE, "guest"], [GUEST, "guest"]] as const) {

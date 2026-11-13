@@ -1,6 +1,7 @@
 import { env, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { alarmQuiet } from "./alarm.ts";
 
 /**
  * M3 step 9: a message the gateway marks `via: a2a` is refused once its task is finished (spec 3.1.1, ADR 0007), by
@@ -42,6 +43,12 @@ const cancel = async (t: { id: string; version: number }) => {
   expect(res.status, JSON.stringify(res.body)).toBe(200);
 };
 
+/** The room the file makes, quieted after its tests so that no alarm of it runs into the next file. */
+const madeRooms: string[] = [];
+afterAll(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
+
 beforeAll(async () => {
   key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
   for (const statement of BINDINGS.TEST_D1_SCHEMA.split(";").map((x: string) => x.trim()).filter(Boolean)) await BINDINGS.DB.prepare(statement).run();
@@ -50,6 +57,7 @@ beforeAll(async () => {
     if (res.status !== 200) throw new Error(`register ${who.id}: ${res.status}`);
   }
   room = (await api(OWNER, "POST", "/v1/workspaces", { name: "Via" })).body.id;
+  madeRooms.push(room);
   for (const [who, role] of [[MEMBER, "member"], [GUEST, "guest"]] as const) {
     const r = await api(OWNER, "POST", `/v1/workspaces/${room}/members`, { principal_id: who.id, kind: "agent", org_id: who.org, role, policy_version: await version() });
     expect(r.status, JSON.stringify(r.body)).toBe(200);

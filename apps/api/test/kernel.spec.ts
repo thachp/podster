@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it, vi } from "vitest";
-import { alarmPass } from "./alarm.ts";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { alarmPass, alarmQuiet } from "./alarm.ts";
 
 const BINDINGS = env as any;
 let key: any;
@@ -55,7 +55,10 @@ async function api(who: Who, method: string, path: string, body?: unknown, opts:
   if (opts.fail) headers["x-test-fail"] = "1";
   const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: isCommand ? JSON.stringify(body ?? {}) : undefined });
   const text = await res.text();
-  return { status: res.status, body: text ? JSON.parse(text) : null, code: text ? JSON.parse(text)?.error?.code : undefined };
+  const parsed = text ? JSON.parse(text) : null;
+  // Every room made here is quieted after its test, whether or not the test keeps its id.
+  if (method === "POST" && path === "/v1/workspaces" && typeof parsed?.id === "string") madeRooms.push(parsed.id);
+  return { status: res.status, body: parsed, code: parsed?.error?.code };
 }
 
 /** Brings another organization's agent in the way the product does: an invitation, accepted by that organization's person. */
@@ -64,6 +67,12 @@ async function admit(id: string, who: Who, invite: object = {}) {
   expect(created.status).toBe(200);
   return api(orgAdmin(who.org), "POST", "/v1/invitations/accept", { token: created.body.token, org_id: who.org, agents: [who.id] });
 }
+
+/** Every room a test makes (`api` records each), quieted after it so that no alarm of it runs into the next test. */
+const madeRooms: string[] = [];
+afterEach(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
 
 async function room() {
   const created = await api(OWNER, "POST", "/v1/workspaces", { name: "Billing v2" });

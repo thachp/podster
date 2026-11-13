@@ -101,6 +101,7 @@ for (const schema of ["RepoRequest", "RepoLink", "RoomRepository", "RepoGrant", 
 const releaseOperations = {
   getReleaseConfig: "ws", setReleaseConfig: "ws", approveRelease: "ws,release", declineRelease: "ws,release", getAppHostname: "ws", requestAppHostname: "ws", removeAppHostname: "ws",
   createAppReport: "", suspendApp: "label", liftAppSuspension: "label", suspendAppHost: "host", liftAppHostSuspension: "host", stopContentDomain: "", resumeContentDomain: "", listTakedownFindings: "",
+  getReleaseDelegation: "org", setReleaseDelegation: "org",
 };
 for (const [id, params] of Object.entries(releaseOperations)) {
   const found = operations.get(id);
@@ -112,7 +113,8 @@ for (const [id, params] of Object.entries(releaseOperations)) {
     // whole content domain, with their lifting, and the operator's read of what the reconciles found. A host's suspension still answers `release_not_available` while no
     // content domain is configured, and says so.
     // Step 9 built a person's report that names an app.
-    const built = ["suspendApp", "liftAppSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings", "createAppReport"].includes(id);
+    // Decision 218's PR B built the operator's release switch for an organization, read and set.
+    const built = ["suspendApp", "liftAppSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings", "createAppReport", "getReleaseDelegation", "setReleaseDelegation"].includes(id);
     if (!found.op.summary?.includes("`not_found`")) problems.push(`${id}: its summary must say what it answers while release is switched off`);
     if (built ? found.op.summary?.includes("Not built") || found.op.summary?.includes("`release_not_available`") : !found.op.summary?.includes("`release_not_available`")) problems.push(`${id}: its summary must say ${built ? "it is built, and not that it isn't" : "what it answers while it isn't built"}`);
   }

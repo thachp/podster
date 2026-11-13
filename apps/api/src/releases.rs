@@ -58,6 +58,9 @@ pub(crate) fn route(method: &Method, parts: &[&str]) -> Option<Audience> {
             Some(Audience::Operator)
         }
         ["v1", "moderation", "takedown-findings"] if get => Some(Audience::Operator),
+        // Decision 218's release switch: an operator sets it, and an operator or the organization's admin reads it, so
+        // who may is `podster_policy::release`'s, in the handler.
+        ["v1", "orgs", _, "release-delegation"] if get || put => Some(Audience::Person),
         _ => None,
     }
 }
@@ -211,7 +214,7 @@ async fn content_stop(
 /// Built (step 4(a)): an operator's suspension of an app and its lifting, by the app's label and by its default
 /// host, which is the same act; a custom hostname's suspension and its lifting; and the stop for the whole content
 /// domain and its lifting; and the operator's read of what the reconciles found. Built (step 9): a person's report that
-/// names an app by its address. Everything else answers `release_not_available`, and so does a host's route while no
+/// names an app by its address. Built (decision 218, PR B): an organization's release switch, read and set. Everything else answers `release_not_available`, and so does a host's route while no
 /// content domain is configured, since no host can then be told from another.
 pub(crate) async fn answer(
     env: &Env,
@@ -260,6 +263,11 @@ pub(crate) async fn answer(
         }
         ["v1", "moderation", "content-domain", verb] => {
             content_stop(env, caller, *verb == "stop", body).await?
+        }
+        // The operator's release switch for an organization (decision 218, PR B).
+        ["v1", "orgs", org, "release-delegation"] => {
+            let set = (req.method() == Method::Put).then_some(body.unwrap_or(""));
+            return crate::principal::release_delegation(env, caller, org, set).await;
         }
         // What the reconciles and the rooms found that needs an operator (third PR). A read: nothing is recorded.
         ["v1", "moderation", "takedown-findings"] => {

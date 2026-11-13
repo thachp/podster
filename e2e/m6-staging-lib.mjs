@@ -334,8 +334,8 @@ export function operationsProblem(operations, personOnlyList, capabilities = [])
 
 // ---- paths, callers and the answers they must get ----
 
-/** A release ID of the contract's shape that names nothing, a host label, and a host. */
-export const FILL = { release: `rel_${"a1".repeat(16)}`, label: "k3v9q2", host: "app.example.com" };
+/** A release ID of the contract's shape that names nothing, a host label, a host, and an organization ID that names nothing. */
+export const FILL = { release: `rel_${"a1".repeat(16)}`, label: "k3v9q2", host: "app.example.com", org: `org_${"0".repeat(32)}` };
 
 /** The path with its parameters filled in: the room, and fixed values for the rest. An unknown parameter is refused. */
 export function fillPath(path, room) {

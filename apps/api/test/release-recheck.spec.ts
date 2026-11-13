@@ -304,6 +304,78 @@ describe("the room's recheck of a release", () => {
     expect(await switchedOn(() => recheck(other.room))).toEqual(HOLDS);
   });
 
+  it("records which of the organization's two facts refused, for the same code on the wire", async () => {
+    // The provisioning delegation only refuses; decision 218's release switch is the unpublish trigger. Both answer
+    // `release_not_delegated`, and the audit record keeps which.
+    const audited = async (room: string) => (await trail(room)).audit.map((a: any) => JSON.parse(a.new_json));
+    const byDelegation = await healthy({ org: "org_rr_cause_p" });
+    const bySwitch = await healthy({ org: "org_rr_cause_s" });
+    expect((await api(OPERATOR, "PUT", "/v1/orgs/org_rr_cause_p/provisioning-delegation", { granted: false })).status).toBe(200);
+    try {
+      await switchedOn(async () => {
+        expect((await api(OPERATOR, "PUT", "/v1/orgs/org_rr_cause_s/release-delegation", { granted: false })).status).toBe(200);
+        for (const [h, cause] of [[byDelegation, "provisioning_delegation"], [bySwitch, "release_switch"]] as const) {
+          expect((await recheck(h.room)).body, cause).toEqual({ release_id: REL, state: "failed", rechecked: true, reason: "release_not_delegated" });
+          expect(await audited(h.room), cause).toEqual([{ state: "failed", reason: "release_not_delegated", cause }]);
+          // The event and the row carry the code alone, as for every reason.
+          expect((await trail(h.room)).events, cause).toEqual([{ type: "release.failed", actor_id: "podster", subject_id: REL, reason: "release_not_delegated" }]);
+          expect(await row(h.room), cause).toEqual({ state: "failed", failure_code: "release_not_delegated", finished: 1 });
+        }
+      });
+    } finally {
+      await api(OPERATOR, "PUT", "/v1/orgs/org_rr_cause_p/provisioning-delegation", { granted: true });
+    }
+    // Any other reason has no cause in its record.
+    const other = await healthy();
+    await inRoom(other.room, (sql) => sql.exec("UPDATE release_config SET enabled = 0"));
+    await switchedOn(() => recheck(other.room));
+    expect(await audited(other.room)).toEqual([{ state: "failed", reason: "release_off" }]);
+  });
+
+  it("refuses an organization's releases while its release switch is taken, and a room made after the take too", async () => {
+    const org = "org_rr_switch";
+    const before = await healthy({ org });
+    const other = await healthy();
+    await switchedOn(async () => {
+      expect(await recheck(before.room)).toEqual(HOLDS);
+      const taken = await api(OPERATOR, "PUT", `/v1/orgs/${org}/release-delegation`, { granted: false });
+      expect(taken.body).toMatchObject({ granted: false, generation: 1, last_take: 1, set_by: OPERATOR.id });
+      // A room made after the take is refused at its first recheck, like one made before.
+      const after = await healthy({ org });
+      for (const h of [before, after]) expect((await recheck(h.room)).body).toEqual({ release_id: REL, state: "failed", rechecked: true, reason: "release_not_delegated" });
+      // Another organization's rooms are untouched.
+      expect(await recheck(other.room)).toEqual(HOLDS);
+      // Given back: a new release holds again. The one that failed stays failed: nothing is restored.
+      const given = await api(OPERATOR, "PUT", `/v1/orgs/${org}/release-delegation`, { granted: true });
+      expect(given.body).toMatchObject({ granted: true, generation: 2, last_take: 1 });
+      const later = await healthy({ org });
+      expect(await recheck(later.room)).toEqual(HOLDS);
+      expect(await row(before.room)).toEqual({ state: "failed", failure_code: "release_not_delegated", finished: 1 });
+      // Take, give, take in quick succession ends taken, under the last generation, and refuses.
+      await api(OPERATOR, "PUT", `/v1/orgs/${org}/release-delegation`, { granted: false });
+      await api(OPERATOR, "PUT", `/v1/orgs/${org}/release-delegation`, { granted: true });
+      const last = await api(OPERATOR, "PUT", `/v1/orgs/${org}/release-delegation`, { granted: false });
+      expect(last.body).toMatchObject({ granted: false, generation: 5, last_take: 5 });
+      expect((await recheck(later.room)).body).toMatchObject({ state: "failed", reason: "release_not_delegated" });
+    });
+  });
+
+  it("decides nothing when the release switch can't be read, or isn't a well-formed switch", async () => {
+    // Test builds only: the answer the organization's object is taken to have given.
+    for (const answer of ["not json at all", "{}", "null", '{"granted":true}', '{"granted":"yes","generation":1,"last_take":0}',
+      '{"granted":false,"generation":2,"last_take":1}', '{"granted":true,"generation":1,"last_take":1}', '{"granted":false,"generation":0,"last_take":0}',
+      '{"granted":true,"generation":-1,"last_take":0}', '{"granted":true,"generation":1.5,"last_take":0}']) {
+      const h = await healthy();
+      await inRoom(h.room, (s) => { s.exec("CREATE TABLE test_release_switch_answer (answer TEXT)"); s.exec("INSERT INTO test_release_switch_answer (answer) VALUES (?)", answer); });
+      await undecided(h, answer);
+      // A well-formed take is a fact that was read: it fails the release.
+      await inRoom(h.room, (s) => void s.exec("UPDATE test_release_switch_answer SET answer = ?", '{"granted":true,"generation":4,"last_take":3}'));
+      expect(await switchedOn(() => recheck(h.room)), answer).toEqual(HOLDS);
+      await inRoom(h.room, (s) => void s.exec("UPDATE test_release_switch_answer SET answer = ?", '{"granted":false,"generation":5,"last_take":5}'));
+      expect((await switchedOn(() => recheck(h.room))).body, answer).toMatchObject({ state: "failed", reason: "release_not_delegated" });
+    }
+  });
+
   it("rechecks a release the job owns, and leaves every other alone", async () => {
     for (const state of ["queued", "uploading", "uncertain"]) {
       const h = await healthy({ state });
@@ -434,5 +506,48 @@ describe("the room's recheck of a release", () => {
     expect(await switchedOn(() => recheck(h.room))).toEqual(HOLDS);
     const source = (JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>)["workspace/release_recheck.rs"];
     expect(source).not.toMatch(/\.d1\(|"DB"|_index\b/);
+  });
+});
+
+describe("an organization's release switch, as its operator route answers (decision 218)", () => {
+  it("is held, unset, until an operator sets it; an operator and the organization's admin read it; only an operator sets it", async () => {
+    const org = "org_rr_route";
+    const h = await healthy({ org });
+    const admin: Who = { id: "per_rr_route_admin", kind: "person", org, adminOrgs: [org] };
+    const member: Who = { id: "per_rr_route_member", kind: "person", org };
+    const path = `/v1/orgs/${org}/release-delegation`;
+    await switchedOn(async () => {
+      const unset = { granted: true, generation: 0, last_take: 0, set_by: null, set_at: null };
+      expect((await api(OPERATOR, "GET", path)).body).toEqual(unset);
+      expect((await api(admin, "GET", path)).body).toEqual(unset);
+      expect([(await api(member, "GET", path)).status, (await api(member, "GET", path)).code]).toEqual([403, "not_allowed"]);
+      // The organization's own admin can't set it, either way.
+      for (const granted of [false, true]) expect((await api(admin, "PUT", path, { granted })).code, `${granted}`).toBe("not_allowed");
+      expect((await api(OPERATOR, "GET", path)).body).toEqual(unset);
+      // Only `{ granted }`, a boolean, is a set.
+      for (const body of [{}, { granted: "false" }, { granted: false, extra: 1 }, { reason: "abuse" }]) expect((await api(OPERATOR, "PUT", path, body)).code, JSON.stringify(body)).toBe("invalid_argument");
+      expect((await api(OPERATOR, "GET", path)).body).toEqual(unset);
+      // Every set raises the generation; a take is the last take, and a give-back keeps it.
+      const steps: [boolean, number, number][] = [[false, 1, 1], [false, 2, 2], [true, 3, 2], [true, 4, 2], [false, 5, 5]];
+      for (const [granted, generation, lastTake] of steps) {
+        const set = await api(OPERATOR, "PUT", path, { granted });
+        expect(set.body, `${granted} ${generation}`).toMatchObject({ granted, generation, last_take: lastTake, set_by: OPERATOR.id });
+        expect(typeof set.body.set_at).toBe("number");
+        expect((await api(admin, "GET", path)).body).toEqual(set.body);
+      }
+      // An organization the API has never seen a room of.
+      expect((await api(OPERATOR, "PUT", "/v1/orgs/org_rr_nobody/release-delegation", { granted: false })).code).toBe("organization_not_found");
+      expect((await api(OPERATOR, "GET", "/v1/orgs/org_rr_nobody/release-delegation")).body).toEqual(unset);
+    });
+    // Switched off, it is answered as a path nobody defined, operators included, and nothing changes.
+    for (const who of [OPERATOR, admin]) {
+      for (const method of ["GET", "PUT"]) {
+        const [real, unknown] = [await api(who, method, path, { granted: true }), await api(who, method, `${path}x`, { granted: true })];
+        expect([real.status, real.code], `${who.id} ${method}`).toEqual([404, "not_found"]);
+        expect([real.status, real.body], `${who.id} ${method}`).toEqual([unknown.status, unknown.body]);
+      }
+    }
+    expect((await switchedOn(() => api(OPERATOR, "GET", path))).body).toMatchObject({ granted: false, generation: 5, last_take: 5 });
+    expect(h.org).toBe(org);
   });
 });

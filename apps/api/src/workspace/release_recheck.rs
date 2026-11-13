@@ -361,13 +361,14 @@ fn gather(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) -> R<(Gath
     let about_this_room =
         reads.org == room_owner_org(sql)? && reads.provider == linked_provider(sql)?;
     let org_may_provision = or_assume(reads.org_may_provision.filter(|_| about_this_room), true);
-    // The release switch was read for an organization; read for another, it says nothing of this one. The room keeps
-    // no switch of its own yet (PR C), so what it applied is taken as unset, and the read decides: held or taken, or
-    // undecided when it couldn't be read or wasn't well formed.
+    // The release switch was read for an organization; read for another, it says nothing of this one. The newer of
+    // what the room last applied and what was read decides: held or taken, or undecided when it couldn't be read or
+    // either isn't well formed. By now the read has been applied (`release_reads`), so a take since what the room had
+    // applied has already unpublished it, in a transaction of its own, and moved the epoch.
     let about_this_org = reads.org == room_owner_org(sql)?;
     let org_may_release = or_assume(
         release_switch_now(
-            ReleaseSwitch::UNSET,
+            release_switch::applied(sql)?,
             reads.org_release.filter(|_| about_this_org),
         )
         .map(|switch| switch.granted),
@@ -716,6 +717,10 @@ impl Workspace {
                 .and_then(|answer| serde_json::from_str::<Value>(answer).ok())
                 .and_then(|answer| principal::release_switch_of(&answer)),
         };
+        // The room's own read, applied at once, before anything is decided from it (decision 218's backstop): a take
+        // since what the room applied unpublishes it here, exactly as a notice would, and ends what hadn't gone live.
+        // A commit staged before this read finds the epoch moved at its confirm.
+        self.apply_switch_read(org_release).await;
         Ok(Reads {
             read_at,
             deployment_on,

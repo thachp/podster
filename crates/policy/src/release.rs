@@ -207,6 +207,18 @@ pub fn authorize_release_switch_read(
     }
 }
 
+/// Whether a notice about an organization's release switch may act on a room: only one that names the organization
+/// that owns the room. Notices reach a room only over the Worker's internal binding, from the organization's own
+/// object; this is the room's own check that the organization named is its own, so a notice meant for another
+/// organization, or one naming none, never moves this room's applied switch. *Added in PR C of decision 218.*
+///
+/// What the room does with a notice it accepts, taking release away, is Podster's act, never the operator's: it is
+/// audited and told to the room's managers as Podster, and the operator who set the switch is in the operators' own
+/// record of the set.
+pub fn release_switch_notice_is_for_room(room_org: &str, notice_org: &str) -> bool {
+    !room_org.is_empty() && room_org == notice_org
+}
+
 /// A change to the room's release configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfigChange {

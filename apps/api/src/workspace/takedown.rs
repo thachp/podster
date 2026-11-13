@@ -23,7 +23,8 @@
 //! work stays recorded as owed, in `serve_apply` and `script_delete`, and one log line counts it.
 //!
 //! What this step leaves out, on purpose:
-//! - Only `app_suspended` unpublishes here. The other ten triggers are step 6's.
+//! - Only `app_suspended` unpublishes here. Decision 218's release switch unpublishes through [`unpublish_app`] from
+//!   `release_switch`. The other nine triggers are step 6's.
 //! - A custom hostname's entry is never written here, only removed: writing one needs the hostname's claim to agree,
 //!   and nothing makes a claim until custom domains are built (step 8), which adds that read.
 //! - **A custom hostname suspended while this room holds it** ([`hostname_suspended`]): the hostname's own object
@@ -207,13 +208,20 @@ pub(super) fn app_suspended(sql: &SqlStorage) -> R<bool> {
 /// back whole. The epoch goes up, every host goes to nothing with its version up, the kept script and any commit in
 /// flight are forgotten, the trigger is recorded with the epoch it raised to, each release that was live or served
 /// becomes unpublished, and every script core names is queued for deletion. It never refuses: a room with no release
-/// configuration has nothing to unpublish, and that is all it does there.
+/// configuration has nothing to unpublish, and that is all it does there. Answers whether there was a configuration to
+/// unpublish. `label` is the app's label the trigger is about, or none for a trigger about the whole room, such as
+/// decision 218's release switch.
 ///
 /// **Ending the releases that hadn't gone live is not done here.** It is release bookkeeping, and a takedown never
 /// fails or waits because of it: the caller runs `release_commit::bookkeeping` after this transaction has committed.
-fn unpublish_app(sql: &SqlStorage, trigger: UnpublishTrigger, label: &str, now: i64) -> R<()> {
+pub(super) fn unpublish_app(
+    sql: &SqlStorage,
+    trigger: UnpublishTrigger,
+    label: Option<&str>,
+    now: i64,
+) -> R<bool> {
     let Some(loaded) = load(sql)? else {
-        return Ok(());
+        return Ok(false);
     };
     let (after, delete) = unpublish(&loaded.state);
     let epoch = to_stored(after.epoch);
@@ -295,7 +303,7 @@ fn unpublish_app(sql: &SqlStorage, trigger: UnpublishTrigger, label: &str, now: 
             ],
         )?;
     }
-    Ok(())
+    Ok(true)
 }
 
 /// `{ label, suspended, reason }`: an operator suspends the room's app, or lifts that. The room acts only if the
@@ -334,7 +342,7 @@ pub(super) fn set(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
                 "UPDATE app_label SET suspended_at = ?, suspension_reason = ? WHERE label = ?",
                 vec![now.into(), reason.name().into(), label.into()],
             )?;
-            unpublish_app(sql, UnpublishTrigger::AppSuspended, label, now)?;
+            unpublish_app(sql, UnpublishTrigger::AppSuspended, Some(label), now)?;
         } else {
             exec(
                 sql,
@@ -1226,6 +1234,10 @@ impl Workspace {
         self.migrate_if_needed()?;
         let body: Value =
             serde_json::from_str(&req.text().await?).map_err(|_| ApiError::invalid_argument())?;
+        // Whatever was asked, the walk's wake included: the room reads its organization's release switch and applies
+        // it (decision 218's backstop, `release_switch`), so a room no notice reached comes down here. A read that
+        // fails changes nothing, and the question is answered all the same.
+        self.read_and_apply_switch().await;
         // Whatever was asked: a release past its upload's hour ends first, before its script is looked at, so the
         // script a pass is about to delete never belongs to a release that could still go live. In a transaction
         // of its own: if it fails, the reconcile's question is answered all the same, and the failure is kept in

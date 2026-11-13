@@ -624,3 +624,21 @@ fn an_operator_or_the_organizations_admin_reads_the_release_switch() {
         );
     }
 }
+
+#[test]
+fn a_switch_notice_acts_only_on_a_room_of_the_organization_it_names() {
+    assert!(release_switch_notice_is_for_room("org_a", "org_a"));
+    for (room, notice) in [
+        ("org_a", "org_b"),
+        ("org_a", ""),
+        ("", ""),
+        ("", "org_a"),
+        ("org_a", "org_a "),
+        ("org_a", "ORG_A"),
+    ] {
+        assert!(
+            !release_switch_notice_is_for_room(room, notice),
+            "{room:?} {notice:?}"
+        );
+    }
+}

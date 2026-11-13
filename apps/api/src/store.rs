@@ -337,6 +337,11 @@ CREATE INDEX script_delete_due ON script_delete (next_attempt_at) WHERE gone_at 
 CREATE TABLE release_bookkeeping (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), failures INTEGER NOT NULL CHECK (typeof(failures) = 'integer' AND failures >= 1),
   first_failed_at INTEGER NOT NULL, last_failed_at INTEGER NOT NULL, last_code TEXT NOT NULL CHECK (length(last_code) BETWEEN 1 AND 64),
   CHECK (first_failed_at <= last_failed_at));
+", "
+CREATE TABLE release_switch_applied (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), granted INTEGER NOT NULL DEFAULT 1 CHECK (granted IN (0, 1)),
+  generation INTEGER NOT NULL DEFAULT 0 CHECK (typeof(generation) = 'integer' AND generation >= 0),
+  last_take INTEGER NOT NULL DEFAULT 0 CHECK (typeof(last_take) = 'integer' AND last_take >= 0 AND last_take <= generation), applied_at INTEGER);
+INSERT INTO release_switch_applied (singleton) VALUES (1);
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

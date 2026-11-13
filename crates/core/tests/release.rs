@@ -2560,3 +2560,35 @@ fn an_upload_expires_exactly_when_the_reconcile_stops_keeping_its_script() {
         ]
     );
 }
+
+#[test]
+fn an_unanswered_switch_notice_waits_longer_each_time_and_is_told_from_the_twelfth_try_on() {
+    let waits: Vec<u64> = (1..=9)
+        .map(|tries| switch_notice_unanswered(tries).wait_ms)
+        .collect();
+    assert_eq!(
+        waits,
+        [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000, 300_000]
+    );
+    // A count of 0 is the first try's, and nothing overflows however long it goes on.
+    assert_eq!(switch_notice_unanswered(0), switch_notice_unanswered(1));
+    for tries in [33, 64, 65, u32::MAX] {
+        assert_eq!(
+            switch_notice_unanswered(tries).wait_ms,
+            SWITCH_NOTICE_MAX_WAIT_MS,
+            "{tries}"
+        );
+    }
+    // Operators are told at the twelfth unanswered try, and at every one after it: the notice is still sent.
+    let told: Vec<u32> = (0..=40)
+        .filter(|tries| switch_notice_unanswered(*tries).tell)
+        .collect();
+    assert_eq!(told, (12..=40).collect::<Vec<u32>>());
+    assert_eq!(SWITCH_NOTICE_TOLD_AFTER, 12);
+    assert!(switch_notice_unanswered(u32::MAX).tell);
+    // The first eleven waits add up to about half an hour before operators hear.
+    let before_told: u64 = (1..SWITCH_NOTICE_TOLD_AFTER)
+        .map(|tries| switch_notice_unanswered(tries).wait_ms)
+        .sum();
+    assert_eq!(before_told, 1_815_000);
+}

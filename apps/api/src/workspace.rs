@@ -89,6 +89,7 @@ mod public_claims;
 mod readiness_upkeep;
 mod release_commit;
 mod release_recheck;
+mod release_switch;
 mod removal;
 mod repo_tokens;
 mod repositories;
@@ -101,6 +102,7 @@ pub(crate) use merges::INTERNAL_REPOSITORY_RECHECK;
 pub(crate) use moderation::INTERNAL_SUSPENSION;
 pub(crate) use public::{INTERNAL_EXPLORE_ENTRY, INTERNAL_PUBLIC_PAGE};
 pub(crate) use public_claims::{INTERNAL_PUBLIC_CLAIM, INTERNAL_PUBLIC_CLAIM_STATUS};
+pub(crate) use release_switch::INTERNAL_RELEASE_SWITCH_NOTICE;
 pub(crate) use takedown::{
     INTERNAL_APP_SUSPENSION, INTERNAL_HOSTNAME_NOTICE, INTERNAL_TAKEDOWN_CHECK,
 };
@@ -3851,7 +3853,12 @@ impl Workspace {
         Ok(())
     }
 
-    fn init(&self, identity: &Identity, body: &Value) -> R<Value> {
+    fn init(
+        &self,
+        identity: &Identity,
+        body: &Value,
+        switch: podster_core::release::ReleaseSwitch,
+    ) -> R<Value> {
         let name = required(body, "name")?;
         let goal = field(body, "goal")?;
         let context = field(body, "context")?;
@@ -3871,6 +3878,7 @@ impl Workspace {
         transaction_sync(&self.state, move || {
             let now = now_ms();
             store::migrate(&sql)?;
+            release_switch::record(&sql, switch, now)?;
             // Owner authority lasts as long as the membership it began under.
             let since = id.org_since.get(&id.org).copied().unwrap_or(now);
             exec(&sql, "INSERT INTO workspace (id, name, goal, context, brief_by, owner_org_id, owner_person_id, status, created_at, owner_since) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)", vec![
@@ -4128,6 +4136,9 @@ impl Workspace {
         if req.path() == takedown::INTERNAL_TAKEDOWN_CHECK {
             return self.takedown_check(req).await;
         }
+        if req.path() == release_switch::INTERNAL_RELEASE_SWITCH_NOTICE {
+            return self.release_switch_notice(req).await;
+        }
         if req.path() == release_recheck::INTERNAL_RELEASE_RECHECK {
             return self.release_recheck(req).await;
         }
@@ -4201,7 +4212,13 @@ impl Workspace {
         if path == INTERNAL_INIT_PATH {
             let body: Value = serde_json::from_str(&req.text().await?)
                 .map_err(|_| ApiError::invalid_argument())?;
-            return self.init(&identity, &body);
+            // The organization's release switch as it is now, read before the room exists (decision 218): what the
+            // room starts from, so a take before it existed has nothing of its to unpublish. A read that fails starts
+            // it unset, which fails closed.
+            let switch = podster_core::release::ReleaseSwitch::start_for_room(
+                crate::principal::org_release_switch(&self.env, &identity.org).await,
+            );
+            return self.init(&identity, &body, switch);
         }
 
         // An unknown room answers from a read, so it stays empty.

@@ -20,7 +20,7 @@
 
 **What those words settle:** an app is a Worker, code included, in any language Workers for Platforms runs, and not only HTML (1, 2). **The target is a full framework app** (8), and **the first app published is one todo app** (9, 10). **What they don't settle, and stays the owner's to decide:** whether an app gets storage, of any kind; whether Podster builds; what an app may reach; the sandbox. Each is a row in [the summary](#1-summary-the-decisions-by-stage).
 
-**What this overrides:** [decision 214](../spec/PRODUCT.md#decisions-needed)'s "an app is static files: nothing an agent wrote runs on a server". **What it leaves, proposed:** one environment, `production`; no preview of unmerged code; only a public room releases ([decision 213](../spec/PRODUCT.md#decisions-needed)). **What it puts in question:** the strict sandbox ([decision 216](../spec/PRODUCT.md#decisions-needed)), which the owner confirmed again on 2026-11-13 before message 8. That conflict is [section 2](#2-the-sandbox-conflict).
+**What this overrides:** [decision 214](../spec/PRODUCT.md#decisions-needed)'s "an app is static files: nothing an agent wrote runs on a server". **What it leaves, proposed:** one environment, `production`; no preview of unmerged code; only a public room releases ([decision 213](../spec/PRODUCT.md#decisions-needed)). **What it puts in question:** the strict sandbox ([decision 216](../spec/PRODUCT.md#decisions-needed)), which the owner confirmed again on 2026-11-13, before message 8: the architect asked "Keep the sandbox as strict as it is? Forms, downloads and popups don't work under it. I'd keep it until real apps show what they need.", and the owner answered "2. per your recommendation". That conflict is [section 2](#2-the-sandbox-conflict).
 
 **What is built, and what is only in a pull request.** On `main`: steps 1 to 4 and 9, and the room's recheck of a release (step 5's first PR). **In PR #336, not yet merged:** starting an upload and committing live in the room, the file `apps/api/src/workspace/release_commit.rs`, the constant `RELEASE_PATH_COMPLETE` and the gate's list. Wherever this document relies on one of those, it says so.
 
@@ -46,7 +46,8 @@
 | 1 | **May an app have a store,** one for each app, made and owned by Podster in the second account? | **Needs a spike first.** Yes in principle; whether it is KV or D1 waits for the answer on tokens ([section 3.3](#33-its-store)) | KV: see [the cost table](#what-stage-1-can-cost). D1's prices weren't read | A todo app can't keep its items. Stage 1 is then a page that forgets everything on reload |
 | 2 | **May anyone who has the address read and change a demo's list,** since there is no login? | **Yes for a demo,** said plainly beside the link | None in money | The demo needs a session, which needs the sandbox decision first (stage 2). The demo waits for it |
 | 3 | **May a demo's built files be committed to the repository,** with Podster building nothing? | **Yes for the demo.** With a committed bundle nobody checks it matches the source, so approval rests on trusting its author | None | A build path comes first: a spike, a container image, a new billed resource and a change of stance ([section 5](#5-building)) |
-| 4 | **Is there a cap on what one app's writes can cost, and who pays past it?** Any website can make its visitors' browsers send writes to an app, since the content Worker must allow any origin ([section 3.5](#35-under-the-sandbox-as-it-stands)); a limit for each address won't hold, because the requests come from many visitors | **Needs a spike first.** A budget of write requests for each app, held by the content Worker, past which it answers its own refusal; and an alert on the account's bill. How the content Worker counts isn't designed | Without a cap: each million write requests is about $0.30 in requests and $5 in KV writes, plus CPU, with no ceiling. With one: the ceiling the owner names | Nothing with a store is released: the cap is on [the gate's list](#10-what-must-be-true-before-releases-is-on-anywhere) |
+| 4a | **Is there a cap on the write requests one app may take?** Any website can make its visitors' browsers send writes to an app, since the content Worker must allow any origin ([section 3.5](#35-under-the-sandbox-as-it-stands)); a limit for each address won't hold, because the requests come from many visitors | **Needs a spike first.** Yes: a budget of write requests for each app, held by the content Worker. How the content Worker counts isn't designed | **Podster pays for every request, capped or not.** Without a cap there is no ceiling: each million write requests is about $0.30 in requests and, **if each request makes one KV write,** $5 in writes, plus CPU. An app that writes more than once a request costs more | Nothing with a store is released: the cap is on [the gate's list](#10-what-must-be-true-before-releases-is-on-anywhere) |
+| 4b | **What happens to an app past its cap?** | The content Worker answers its own refusal to further writes until the budget's period ends; reads go on. And an alert on the account's bill, which is the owner's to set | **Podster pays up to the cap,** which is a figure the owner names, and nothing past it for writes | An app past its cap goes on costing Podster, as with no cap |
 | 5 | **May the content Worker take `POST`, `PUT`, `PATCH` and `DELETE` with a body, and answer the browser's preflight for any origin,** for an app whose release has code? | **Yes, for those hosts only.** It is a loosened stance: today it takes `GET` and `HEAD` and no body | None in money | No sandboxed page can change anything on a server. No todo app |
 | 6 | **May the publishing credential gain the permission to make and delete stores?** | **Yes, only if it can't then write serve entries.** That is the spike in row 1 | None in money. A wider credential | Each app's store is made by hand, by whoever holds the account |
 | 7 | **An app's data outlives an unpublish.** Who may delete it: only an operator, or also the room's owner or an admin, as a person? | **Both.** Otherwise a room's owner who unpublishes can't wipe what strangers wrote into their app | None in money. Two new commands, one a contract change | Only an operator can, and a room's owner must ask one |
@@ -82,7 +83,7 @@
 | Stage | Adds | The question for the owner | Recommended | Cost | If the answer is no |
 | --- | --- | --- | --- | --- | --- |
 | **2. Sessions and forms** | A login, cookies, form submission, server-rendered frameworks | **Which loosening of the sandbox,** which reopens decision 216 ([section 2](#2-the-sandbox-conflict)) | Forms and inline scripts yes; a session only on a room's own domain, until the content domain is on the Public Suffix List | None in money, unless Podster buys domains | Apps stay as stage 1's: script-driven pages that identify nobody |
-| **3. A build path** | TypeScript, bundlers and framework builds run by Podster | **May Podster run agent-written build scripts in a sandbox it starts?** A change of stance ([section 5](#5-building)) | Yes, after its spike | Containers' usage, **not read** | Every app's built files are committed, and approval rests on trusting their author |
+| **3. A build path** | TypeScript, bundlers and framework builds run by Podster | **May Podster run agent-written build scripts in a sandbox it starts, at Podster's expense?** A change of stance ([section 5](#5-building)) | Yes, after its spike | Containers' usage, **not read** | Every app's built files are committed, and approval rests on trusting their author |
 | **4. More to bind and reach** | A database (D1), files (R2); outbound requests to named hosts | **Each kind of resource, and whether data may leave** ([section 6](#6-what-an-apps-code-may-reach)) | Each on its own case. **No Durable Objects** until outbound from them can be refused | Each a billed resource, **not read** | Apps have one store and reach nothing |
 
 ### What the templates say people will want
@@ -140,7 +141,7 @@ Decision 216, as the owner confirmed it, gives every app `sandbox allow-scripts`
 
 - **A Worker entry,** JavaScript modules, that answers a small JSON API: list, add, change, remove.
 - **Static files** for the page: the framework's built output.
-- **One store,** a Workers KV namespace, bound to the Worker under a name Podster fixes.
+- **One store** (KV or D1, to be chosen by a spike), bound to the Worker under a name Podster fixes.
 - **A manifest** of a fixed name at the release directory's root, naming the entry module and saying the app wants a store. It is agent content, so it is data: Podster reads those fields, checks them against the tree, and takes nothing else.
 
 **Cloudflare's templates, the todo list on KV:** it is Remix on Vite, built to a Worker and a directory of client files, with one KV binding; it keeps the whole list as one JSON value under one key, read once for a view and read and written once for a change. *As read, every write also sets a five-minute expiry, so its list empties itself; and two writes at once overwrite each other.* **What Podster takes as an idea:** one namespace, one value, is enough for a demo. **What it can't take:** the app as written renders on the server.
@@ -299,7 +300,7 @@ Sources: [Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds
 
 **Said plainly:** under options 1 to 3, code an agent wrote, its build scripts and whatever its dependencies run at install, executes on infrastructure Podster pays for, before anyone but a reviewer has looked at it. A sandbox limits what it can reach; it doesn't change that Podster is running it. [CLAUDE.md](../../CLAUDE.md) says "Agents own execution, and Podster never hosts or runs them".
 
-- **The app itself running in the namespace is already that change,** and the owner has made it.
+- **The app itself running in the namespace is already code an agent wrote, running on a server Podster pays for.** The owner's words make an app a Worker; whether that is rightly said as "Podster hosts what a room published, and still runs no agent" is [the summary's question 10](#stage-1-one-todo-app), and is the owner's to answer.
 - **A build adds a second place,** with a different risk: a toolchain, for minutes, on files and possibly a network.
 - **With no build, the build still happens: on the agent's own machine,** which is where the product already says execution belongs.
 
@@ -394,7 +395,7 @@ Everything the gate on the release path lists, which is in PR #336 and not yet m
 
 ## The owner's decisions
 
-**They are [the summary](#1-summary-the-decisions-by-stage), and only there:** ten questions for stage 1, and one each for stages 2 to 4, each with what is recommended, what it costs and what a no means.
+**They are [the summary](#1-summary-the-decisions-by-stage), and only there:** eleven questions for stage 1, and one each for stages 2 to 4, each with what is recommended, what it costs and what a no means.
 
 ## Not verified
 

@@ -25,6 +25,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { childEnv } from "./child-env.mjs";
+import { verdict } from "./content-sandbox-judge.mjs";
 import * as playwright from "playwright";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -165,9 +166,7 @@ async function inBrowser(name, control = false) {
     const frameLoaded = requested("/frame.html");
     const framed = page.frames().length > 1 ? await step("look into the frame", () => page.frames()[1].locator("#framed").count(), 0) : 0;
 
-    // Each of these is something a visitor does. The app's own handler asks for a sentinel file when the action
-    // has been taken, so the run knows the browser has had its turn; then it gives the browser a moment, since
-    // "nothing was asked for" has no event of its own to wait on.
+    // Each of these is something a visitor does.
     // **The one place this run uses time.** When an action is stopped, nothing follows it: no request, no page, no
     // dialog, no download. There is no event for that. So after the page has said the action was taken, the run
     // gives the browser this long to do anything more, and what it has seen by then is the result.
@@ -238,29 +237,6 @@ async function inBrowser(name, control = false) {
   }
 }
 
-// ---- what decision 216 buys, as assertions ----
-// These fail the run. Everything else the run records is an observation of what an ordinary app can do.
-const REFUSED = ["cookieWrite", "cookieWriteForDomain", "cookieRead", "localStorage", "sessionStorage", "indexedDB", "cacheApi", "serviceWorker"];
-function judge(name, pass) {
-  const failed = [];
-  const expect = (holds, what) => { if (!holds) failed.push(`${name}: ${what}`); };
-  const refused = (result) => result !== undefined && result.ok === false;
-  expect(pass.results?.origin?.ok === true && pass.results.origin.value === "null", "under the policy the page's origin is `null`");
-  for (const probe of REFUSED) expect(refused(pass.results?.[probe]), `under the policy ${probe} is refused`);
-  expect(refused(pass.sibling?.cookieRead), "a sibling host can't read a cookie");
-  expect(refused(pass.sibling?.cookieWriteForDomain), "a sibling host can't write a cookie for the domain");
-  expect(pass.requestsMade > 0 && pass.requestsThatCarriedACookie === 0, "no request carries a cookie");
-  expect(pass.answersWithSetCookie === 0 && Array.isArray(pass.cookiesInTheBrowsersJar) && pass.cookiesInTheBrowsersJar.length === 0, "an app's `Set-Cookie` never reaches the browser");
-  // The control must show the opposite, or the rows above would hold for a harness that could see nothing.
-  const control = pass.withoutThePolicy ?? {};
-  expect(control.shown === true, "the control ran");
-  expect(control.results?.origin?.value === `https://appa.${DOMAIN}`, "in the control the page has its own origin");
-  expect(control.results?.cookieWrite?.ok === true && control.results?.localStorage?.ok === true, "in the control cookies and storage work");
-  expect(control.sibling?.cookieRead?.ok === true && String(control.sibling.cookieRead.value).includes("shared=1"), "in the control the sibling reads the first app's cookie");
-  expect(control.answersWithSetCookie === 0, "in the control too, an app's `Set-Cookie` never reaches the browser");
-  return failed;
-}
-
 let report;
 try {
   await ready();
@@ -285,14 +261,7 @@ try {
 // Every browser that is installed must have launched and run, and each must hold what decision 216 buys.
 const wanted = ["chromium", "firefox", "webkit"].filter((name) => !arg("--browser") || name === arg("--browser"));
 const installed = wanted.filter((name) => { try { return existsSync(playwright[name].executablePath()); } catch { return false; } });
-const failed = [];
-if (installed.length === 0) failed.push("no browser is installed for Playwright to launch");
-for (const name of installed) {
-  const pass = report.browsers[name];
-  if (!pass?.shown) failed.push(`${name}: installed, and it didn't run (${pass?.why ?? "no result"})`);
-  else failed.push(...judge(name, pass));
-}
-report.assertions = { browsersInstalled: installed, browsersRun: installed.filter((name) => report.browsers[name]?.shown), notInstalled: wanted.filter((name) => !installed.includes(name)), failed };
+report.assertions = { ...verdict(report, installed, DOMAIN), notInstalled: wanted.filter((name) => !installed.includes(name)) };
 const text = `${JSON.stringify(report, null, 2)}\n`;
 if (out) writeFileSync(out, text); else process.stdout.write(text);
 const failures = report.assertions.failed;

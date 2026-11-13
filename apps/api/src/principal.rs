@@ -99,6 +99,15 @@ const DISCONNECTING: &str = "disconnecting";
 const DISCONNECTED: &str = "disconnected";
 const RETRY_SECS: u64 = 5;
 
+fn has_table(sql: &SqlStorage, name: &str) -> R<bool> {
+    Ok(!rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        vec![name.into()],
+    )?
+    .is_empty())
+}
+
 fn is_initialized(sql: &SqlStorage) -> R<bool> {
     Ok(!rows(
         sql,
@@ -875,15 +884,30 @@ CREATE TABLE IF NOT EXISTS org_provider_delegation_log (seq INTEGER PRIMARY KEY 
 
 /// An organization's release switch (decision 218), in the `Principal` named for the organization: one row, as
 /// `podster_core::release::ReleaseSwitch` shapes it, written only through its `set`. Only a Podster operator sets it.
-/// Taking it away unpublishes every room's app in the organization; giving it back restores nothing. No row is
-/// `ReleaseSwitch::UNSET`: held, generation 0, never taken. Every change is kept in the log.
+/// No row is `ReleaseSwitch::UNSET`: held, generation 0, never taken. Every change is kept in the log.
+///
+/// **What a set does, by build.** From PR B on, a taken switch refuses the organization's releases at every release
+/// command's recheck. From PR C on, each set also writes a notice for every room in `org_room`, in the same transaction,
+/// which this object's alarm sends until the room acknowledges it (`org_release_notice`); a room that hears of a take
+/// since what it last applied unpublishes its app. A room the list doesn't name reads the switch itself at its release
+/// commands and whenever the reconcile asks it anything. Giving release back restores nothing, in every build.
+///
+/// **The generation's cap is `i64::MAX`, what storage holds,** where core's `set` would allow `u64::MAX`. A set past it
+/// is refused with `internal_error` and writes nothing: no switch, no log row, no notice. At one set a second that is
+/// about 292 billion years of sets, so it has no code of its own.
 const ORG_RELEASE_SWITCH_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS org_release_switch (id INTEGER PRIMARY KEY CHECK (id = 1), granted INTEGER NOT NULL CHECK (granted IN (0, 1)),
   generation INTEGER NOT NULL CHECK (generation >= 1), last_take INTEGER NOT NULL CHECK (last_take >= 0 AND last_take <= generation),
   set_by TEXT NOT NULL, set_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS org_release_switch_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, granted INTEGER NOT NULL, generation INTEGER NOT NULL,
   last_take INTEGER NOT NULL, set_by TEXT NOT NULL, set_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS org_release_notice (workspace_id TEXT PRIMARY KEY, org_id TEXT NOT NULL, generation INTEGER NOT NULL CHECK (generation >= 1),
+  tries INTEGER NOT NULL DEFAULT 0 CHECK (tries >= 0), next_attempt_at INTEGER NOT NULL);
 ";
+/// Notices sent in one alarm. An organization holds at most `MAX_ROOMS_PER_ORG` rooms, so one alarm sends them all.
+const RELEASE_NOTICE_CALLS: i64 = 50;
+/// The finding operators read for a notice no room acknowledged, by the organization it is about (decision 218).
+const RELEASE_NOTICE_UNANSWERED: &str = "release_switch_notice_unanswered";
 
 /// The switch as this object holds it, with who set it last and when: `ReleaseSwitch::UNSET` and nobody, with no row.
 /// A row that isn't well formed is an error, never read as held.
@@ -1058,6 +1082,33 @@ pub async fn release_delegation(
         json!({ "at": "org.release_switch_set", "org": org, "granted": granted, "generation": answer["generation"], "by": caller.id })
     );
     Ok(Response::from_json(&answer)?)
+}
+
+/// Rooms from before the limit are counted once, from the listing, into `org_room`. After that this table decides.
+async fn seed_org_rooms(env: &Env, sql: &SqlStorage, org: &str) -> R<()> {
+    exec(sql, ORG_ROOMS_SCHEMA, vec![])?;
+    if !rows(sql, "SELECT id FROM org_room_seeded", vec![])?.is_empty() {
+        return Ok(());
+    }
+    let existing = env
+        .d1("DB")?
+        .prepare("SELECT DISTINCT workspace_id FROM membership_index WHERE org_id = ? AND role = 'owner' LIMIT ?")
+        .bind(&[org.into(), ((MAX_ROOMS_PER_ORG + 1) as i32).into()])?
+        .all()
+        .await?
+        .results::<Value>()?;
+    for room in &existing {
+        exec(
+            sql,
+            "INSERT OR IGNORE INTO org_room (workspace_id) VALUES (?)",
+            vec![room["workspace_id"].as_str().unwrap_or_default().into()],
+        )?;
+    }
+    exec(
+        sql,
+        "INSERT OR IGNORE INTO org_room_seeded (id) VALUES (1)",
+        vec![],
+    )
 }
 
 /// Whether the API has seen a room of this organization: this object's own record of its rooms, and, for rooms from
@@ -1552,15 +1603,26 @@ impl Principal {
         applied
     }
 
-    /// Sets the alarm for whichever departure is due first, or clears it when none are left.
+    /// Sets the alarm for whichever departure or release switch notice is due first, or clears it when none are left.
     async fn arm_next_sweep(&self) -> R<()> {
         let sql = self.state.storage().sql();
-        let next = rows(
+        let mut due = vec![rows(
             &sql,
             "SELECT MIN(next_sweep_at) AS next FROM org_departure",
             vec![],
-        )?;
-        let Some(next) = next.first().and_then(|row| row["next"].as_i64()) else {
+        )?];
+        if has_table(&sql, "org_release_notice")? {
+            due.push(rows(
+                &sql,
+                "SELECT MIN(next_attempt_at) AS next FROM org_release_notice",
+                vec![],
+            )?);
+        }
+        let next = due
+            .iter()
+            .filter_map(|found| found.first().and_then(|row| row["next"].as_i64()))
+            .min();
+        let Some(next) = next else {
             self.state.storage().delete_alarm().await?;
             return Ok(());
         };
@@ -1572,6 +1634,121 @@ impl Principal {
         Ok(())
     }
 
+    /// Sends each release switch notice that is due (decision 218), from the alarm. A notice carries the switch as this
+    /// object holds it now, which is the newest. A room that answers 200 has applied it, or holds a newer one, or
+    /// doesn't exist: the notice is done. Any other answer, or none in time, is a try that failed: it is sent again,
+    /// later each time, by core's `switch_notice_unanswered`, and from the twelfth unanswered try on, operators are told
+    /// by a finding that names the organization, kept in their own record. If that telling fails, the next try tells
+    /// again. A notice is never given up.
+    async fn send_release_notices(&self) -> R<()> {
+        let sql = self.state.storage().sql();
+        if !has_table(&sql, "org_release_notice")? {
+            return self.arm_next_sweep().await;
+        }
+        let due = rows(
+            &sql,
+            "SELECT workspace_id, org_id, tries FROM org_release_notice WHERE next_attempt_at <= ? ORDER BY next_attempt_at, workspace_id LIMIT ?",
+            vec![now_ms().into(), RELEASE_NOTICE_CALLS.into()],
+        )?;
+        if !due.is_empty() {
+            self.state
+                .storage()
+                .set_alarm(Duration::from_secs(DEPARTURE_REARM_SECS))
+                .await?;
+        }
+        for notice in &due {
+            let (Some(workspace), Some(org)) =
+                (text(&notice["workspace_id"]), text(&notice["org_id"]))
+            else {
+                continue;
+            };
+            // Read for each notice, so one set made during these awaits is the one sent from then on.
+            let (switch, _, _) = release_switch_row(&sql)?;
+            let mut body = release_switch_json(switch, None, None);
+            body["org"] = Value::from(org.as_str());
+            let sent = i64::try_from(switch.generation).unwrap_or(i64::MAX);
+            if self.room_answered(&workspace, &body).await {
+                // Done, unless a newer set replaced it during the call: that one is still owed.
+                exec(
+                    &sql,
+                    "DELETE FROM org_release_notice WHERE workspace_id = ? AND generation <= ?",
+                    vec![workspace.as_str().into(), sent.into()],
+                )?;
+                continue;
+            }
+            let tries = int(&notice["tries"]).saturating_add(1);
+            let rule = podster_core::release::switch_notice_unanswered(
+                u32::try_from(tries).unwrap_or(u32::MAX),
+            );
+            let wait = i64::try_from(rule.wait_ms).unwrap_or(i64::MAX);
+            exec(
+                &sql,
+                "UPDATE org_release_notice SET tries = ?, next_attempt_at = ? WHERE workspace_id = ? AND generation <= ?",
+                vec![tries.into(), now_ms().saturating_add(wait).into(), workspace.as_str().into(), sent.into()],
+            )?;
+            console_error!(
+                "release switch: a room didn't acknowledge its notice: org={} room={} generation={} tries={}",
+                org,
+                workspace,
+                sent,
+                tries
+            );
+            if rule.tell {
+                let finding = json!({ "code": RELEASE_NOTICE_UNANSWERED, "subject": org });
+                let told = crate::moderation::call(
+                    &self.env,
+                    crate::reconcile::FINDING_PATH,
+                    Method::Post,
+                    Some(finding),
+                )
+                .await
+                .is_ok_and(|response| response.status_code() == 200);
+                if !told {
+                    console_error!(
+                        "release switch: operators weren't told of an unanswered notice: org={} code=finding_not_kept",
+                        org
+                    );
+                }
+            }
+        }
+        self.arm_next_sweep().await
+    }
+
+    /// Whether a room acknowledged a release switch notice in time. A hung room counts as a failure, so it can't hold
+    /// up the ones after it.
+    async fn room_answered(&self, workspace_id: &str, body: &Value) -> bool {
+        let Ok(namespace) = self.env.durable_object("WORKSPACE") else {
+            return false;
+        };
+        let Ok(stub) = namespace
+            .id_from_name(workspace_id)
+            .and_then(|id| id.get_stub())
+        else {
+            return false;
+        };
+        let mut init = RequestInit::new();
+        init.with_method(Method::Post)
+            .with_body(Some(body.to_string().into()));
+        let Ok(request) = Request::new_with_init(
+            &format!(
+                "https://workspace{}",
+                crate::workspace::INTERNAL_RELEASE_SWITCH_NOTICE
+            ),
+            &init,
+        ) else {
+            return false;
+        };
+        let call = Box::pin(stub.fetch_with_request(request));
+        let deadline = Box::pin(Delay::from(Duration::from_secs(
+            DEPARTURE_ROOM_TIMEOUT_SECS,
+        )));
+        let answered = match select(call, deadline).await {
+            Either::Left((Ok(response), _)) => response.status_code() == 200,
+            _ => false,
+        };
+        answered
+    }
+
     async fn dispatch(&self, mut req: Request) -> R<Value> {
         let sql = self.state.storage().sql();
         let path = req.path();
@@ -1580,28 +1757,7 @@ impl Principal {
                 let body: Value = req.json().await?;
                 let org = body["org"].as_str().unwrap_or_default().to_string();
                 let workspace = body["workspace"].as_str().unwrap_or_default().to_string();
-                exec(&sql, ORG_ROOMS_SCHEMA, vec![])?;
-                // Rooms from before this limit are counted once, from the listing. After that this table decides.
-                if rows(&sql, "SELECT id FROM org_room_seeded", vec![])?.is_empty() {
-                    let existing = self.env.d1("DB")?
-                        .prepare("SELECT DISTINCT workspace_id FROM membership_index WHERE org_id = ? AND role = 'owner' LIMIT ?")
-                        .bind(&[org.as_str().into(), ((MAX_ROOMS_PER_ORG + 1) as i32).into()])?
-                        .all()
-                        .await?
-                        .results::<Value>()?;
-                    for room in &existing {
-                        exec(
-                            &sql,
-                            "INSERT OR IGNORE INTO org_room (workspace_id) VALUES (?)",
-                            vec![room["workspace_id"].as_str().unwrap_or_default().into()],
-                        )?;
-                    }
-                    exec(
-                        &sql,
-                        "INSERT OR IGNORE INTO org_room_seeded (id) VALUES (1)",
-                        vec![],
-                    )?;
-                }
+                seed_org_rooms(&self.env, &sql, &org).await?;
                 let held = rows(&sql, "SELECT count(*) AS n FROM org_room", vec![])?
                     .first()
                     .map_or(0, |row| int(&row["n"]));
@@ -1638,6 +1794,13 @@ impl Principal {
                 {
                     return Err(ApiError::internal("test: the organization didn't answer"));
                 }
+                // Test builds only: this organization's switch alone doesn't answer, while its delegation does.
+                #[cfg(feature = "failpoints")]
+                if path == "/internal/org-release-switch"
+                    && has_table(&sql, "test_release_switch_unreadable")?
+                {
+                    return Err(ApiError::internal("test: the release switch didn't answer"));
+                }
                 exec(&sql, ORG_RELEASE_SWITCH_SCHEMA, vec![])?;
                 if path == "/internal/org-release-switch-set" {
                     let body: Value = req.json().await?;
@@ -1649,6 +1812,9 @@ impl Principal {
                         .as_bool()
                         .ok_or_else(ApiError::invalid_argument)?;
                     let by = body["by"].as_str().unwrap_or_default().to_string();
+                    // The rooms to tell are this object's list. Rooms from before it kept one are taken from the
+                    // listing once, as a room's creation does; a room missing from both reads the switch itself.
+                    seed_org_rooms(&self.env, &sql, &org).await?;
                     let state = self.state.storage().sql();
                     transaction_sync(&self.state, move || {
                         let (now_held, _, _) = release_switch_row(&state)?;
@@ -1669,8 +1835,21 @@ impl Principal {
                             set_by = excluded.set_by, set_at = excluded.set_at",
                             vec![i64::from(next.granted).into(), generation.into(), last_take.into(), by.as_str().into(), now.into()])?;
                         exec(&state, "INSERT INTO org_release_switch_log (granted, generation, last_take, set_by, set_at) VALUES (?, ?, ?, ?, ?)",
-                            vec![i64::from(next.granted).into(), generation.into(), last_take.into(), by.as_str().into(), now.into()])
+                            vec![i64::from(next.granted).into(), generation.into(), last_take.into(), by.as_str().into(), now.into()])?;
+                        // A notice for every room the list names, in this same transaction, due now. One owed for an
+                        // earlier set is replaced: the room acts only on the newest, and that carries every take.
+                        exec(&state, "INSERT INTO org_release_notice (workspace_id, org_id, generation, tries, next_attempt_at)
+                            SELECT workspace_id, ?, ?, 0, ? FROM org_room WHERE true
+                            ON CONFLICT (workspace_id) DO UPDATE SET org_id = excluded.org_id, generation = excluded.generation, tries = 0,
+                              next_attempt_at = excluded.next_attempt_at",
+                            vec![org.as_str().into(), generation.into(), now.into()])
                     })?;
+                    // The notices go from the alarm, straight away. If it can't be set, the set has still committed and
+                    // the operator is told it failed; asking again writes the notices again and arms again.
+                    self.state
+                        .storage()
+                        .set_alarm(Duration::from_millis(1))
+                        .await?;
                 }
                 let (switch, by, at) = release_switch_row(&sql)?;
                 return Ok(release_switch_json(switch, by, at));
@@ -1817,6 +1996,14 @@ impl Principal {
                     "DELETE FROM org_room WHERE workspace_id = ?",
                     vec![body["workspace"].as_str().unwrap_or_default().into()],
                 )?;
+                // A room whose creation was refused is owed no notice.
+                if has_table(&sql, "org_release_notice")? {
+                    exec(
+                        &sql,
+                        "DELETE FROM org_release_notice WHERE workspace_id = ?",
+                        vec![body["workspace"].as_str().unwrap_or_default().into()],
+                    )?;
+                }
                 return Ok(json!({ "released": true }));
             }
             "/internal/org-departure" => {
@@ -2352,7 +2539,12 @@ impl DurableObject for Principal {
         let outcome = if is_agent {
             self.fan_out().await
         } else {
-            self.sweep_departures().await
+            // An organization's object has release switch notices and no departures; a person's, the reverse. Each
+            // runs whatever it has, and the last arms for whichever of both is due first.
+            match self.sweep_departures().await {
+                Ok(()) => self.send_release_notices().await,
+                Err(error) => Err(error),
+            }
         };
         if let Err(error) = outcome {
             console_error!("alarm failed: {:?}", error);

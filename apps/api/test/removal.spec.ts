@@ -234,6 +234,9 @@ describe("the room's sweep", () => {
       // M6 step 2's release tables, the newest migration, come off first.
       // M6 step 4(a)'s applier and script-delete tables, the newest migration, come off first.
       // The record of release bookkeeping that keeps failing, the newest migration, comes off first.
+      // Decision 218's applied release switch, the newest migration, comes off first.
+      state.storage.sql.exec("DROP TABLE release_switch_applied");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP TABLE release_bookkeeping");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       for (const table of ["serve_apply", "script_delete"]) state.storage.sql.exec(`DROP TABLE ${table}`);
@@ -441,6 +444,9 @@ describe("the room's sweep", () => {
       // M6 step 2's release tables, the newest migration, come off first.
       // M6 step 4(a)'s applier and script-delete tables, the newest migration, come off first.
       // The record of release bookkeeping that keeps failing, the newest migration, comes off first.
+      // Decision 218's applied release switch, the newest migration, comes off first.
+      state.storage.sql.exec("DROP TABLE release_switch_applied");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP TABLE release_bookkeeping");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       for (const table of ["serve_apply", "script_delete"]) state.storage.sql.exec(`DROP TABLE ${table}`);
@@ -794,6 +800,9 @@ describe("removal by the rules, review fixes", () => {
       // M6 step 2's release tables, the newest migration, come off first.
       // M6 step 4(a)'s applier and script-delete tables, the newest migration, come off first.
       // The record of release bookkeeping that keeps failing, the newest migration, comes off first.
+      // Decision 218's applied release switch, the newest migration, comes off first.
+      state.storage.sql.exec("DROP TABLE release_switch_applied");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       state.storage.sql.exec("DROP TABLE release_bookkeeping");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       for (const table of ["serve_apply", "script_delete"]) state.storage.sql.exec(`DROP TABLE ${table}`);

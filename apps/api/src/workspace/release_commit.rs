@@ -27,8 +27,8 @@
 //!   the unpublish triggers' to act on: an unpublish clears the stage, and the stop is asked again by the applier
 //!   itself before each write.
 //!
-//!   **What that leaves is owed to step 6, and it is most of the list.** Only an operator's suspension of the app
-//!   unpublishes today. Until the other triggers are built, nothing acts on a change made after this command read
+//!   **What that leaves is owed to step 6, and it is most of the list.** Only an operator's suspension of the app,
+//!   and an operator's take of the organization's release switch (decision 218, `release_switch`), unpublish today. Until the other triggers are built, nothing acts on a change made after this command read
 //!   the fact, and nothing at all once the release is `live`: the room archived, made private or suspended; release
 //!   switched off; the repository's link lost; a grant revoked or a place in the room changed; a person's departure;
 //!   the organization's delegation taken back. The outside reads are made one after another, the stop first and the

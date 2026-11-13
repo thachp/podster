@@ -1125,6 +1125,40 @@ pub fn apply_release_switch(applied: ReleaseSwitch, seen: ReleaseSwitch) -> Swit
     }
 }
 
+/// How long an organization's object waits before it sends a notice about its release switch again to a room that
+/// didn't acknowledge it: this after the first unanswered try, doubling after each one, to at most
+/// [`SWITCH_NOTICE_MAX_WAIT_MS`]. *Added in PR C of decision 218.*
+pub const SWITCH_NOTICE_FIRST_WAIT_MS: u64 = 5_000;
+/// The longest wait between two tries of one notice.
+pub const SWITCH_NOTICE_MAX_WAIT_MS: u64 = 5 * 60 * 1000;
+/// Operators are told of a notice no room acknowledged once it has gone unanswered this many times, which with the
+/// waits is about half an hour, and again at every unanswered try after that. The notice is never given up: it is
+/// sent until the room acknowledges it or a newer one replaces it.
+pub const SWITCH_NOTICE_TOLD_AFTER: u32 = 12;
+
+/// What an organization's object does after a notice went unanswered for the `tries`th time, counting from 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NoticeUnanswered {
+    /// How long until it is sent again.
+    pub wait_ms: u64,
+    /// Whether operators are told, in their own record, by a finding that names the organization.
+    pub tell: bool,
+}
+
+/// The rule for a notice about the release switch that a room didn't acknowledge ([`NoticeUnanswered`]). A count of 0
+/// is taken as 1.
+pub fn switch_notice_unanswered(tries: u32) -> NoticeUnanswered {
+    let doublings = tries.saturating_sub(1).min(32);
+    let wait_ms = SWITCH_NOTICE_FIRST_WAIT_MS
+        .checked_shl(doublings)
+        .unwrap_or(u64::MAX)
+        .min(SWITCH_NOTICE_MAX_WAIT_MS);
+    NoticeUnanswered {
+        wait_ms,
+        tell: tries >= SWITCH_NOTICE_TOLD_AFTER,
+    }
+}
+
 /// The switch as the recheck takes it: the newer of what the room last applied and what it just read. `None` when the
 /// read couldn't be made, which is undecided, never "taken" and never "held": the pass answers `standing_unknown`. A read
 /// older than what the room applied, a reply overtaken by a newer notice, gives way to what the room applied. Two

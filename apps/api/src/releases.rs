@@ -57,6 +57,7 @@ pub(crate) fn route(method: &Method, parts: &[&str]) -> Option<Audience> {
         ["v1", "moderation", "content-domain", "stop" | "resume"] if post => {
             Some(Audience::Operator)
         }
+        ["v1", "moderation", "takedown-findings"] if get => Some(Audience::Operator),
         _ => None,
     }
 }
@@ -92,7 +93,7 @@ fn release_not_available() -> ApiError {
 
 /// Which room a label's app belongs to, by the lookup table. It only routes the question: the room itself says whether
 /// the label is its own, and acts only then.
-async fn room_for_label(env: &Env, label: &str) -> R<Option<String>> {
+pub(crate) async fn room_for_label(env: &Env, label: &str) -> R<Option<String>> {
     let found = env
         .d1("DB")?
         .prepare("SELECT workspace_id FROM app_label_index WHERE label = ?")
@@ -209,7 +210,7 @@ async fn content_stop(
 ///
 /// Built (step 4(a)): an operator's suspension of an app and its lifting, by the app's label and by its default
 /// host, which is the same act; a custom hostname's suspension and its lifting; and the stop for the whole content
-/// domain and its lifting. Everything else answers `release_not_available`, and so does a host's route while no
+/// domain and its lifting; and the operator's read of what the reconciles found. Everything else answers `release_not_available`, and so does a host's route while no
 /// content domain is configured, since no host can then be told from another.
 pub(crate) async fn answer(
     env: &Env,
@@ -254,6 +255,10 @@ pub(crate) async fn answer(
         }
         ["v1", "moderation", "content-domain", verb] => {
             content_stop(env, caller, *verb == "stop", body).await?
+        }
+        // What the reconciles and the rooms found that needs an operator (third PR). A read: nothing is recorded.
+        ["v1", "moderation", "takedown-findings"] => {
+            return moderation::call(env, crate::reconcile::FINDINGS_PATH, Method::Get, None).await;
         }
         _ => return Err(release_not_available()),
     };

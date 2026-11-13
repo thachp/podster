@@ -15,6 +15,7 @@ mod objects;
 mod principal;
 mod provider;
 mod public;
+mod reconcile;
 mod releases;
 mod store;
 mod wake;

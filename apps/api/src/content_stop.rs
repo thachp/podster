@@ -56,16 +56,43 @@ fn now_ms() -> i64 {
     Date::now().as_millis() as i64
 }
 
-/// The stop now: `{ stopped, reason, at }`. With no row, it was never set.
+/// The stop now: `{ stopped, reason, at, key_confirmed }`. With no row, it was never set. `key_confirmed` says whether
+/// the key at the provider is known to match the stop as it is now: written and read back for a stop, read as absent
+/// for a resume. It is `false` until the object's alarm has done that, so straight after a change, and for as long as
+/// no provider is configured or the provider keeps failing. An operator who asks again reads it again.
 pub(crate) fn read(sql: &SqlStorage) -> R<Value> {
     Ok(
-        rows(sql, "SELECT stopped, reason, at FROM content_stop", vec![])?
+        rows(sql, "SELECT stopped, reason, at, applied_version IS NOT NULL AND applied_version = version AS confirmed FROM content_stop", vec![])?
             .first()
             .map_or(
-                json!({ "stopped": false, "reason": null, "at": null }),
-                |row| json!({ "stopped": int(&row["stopped"]) == 1, "reason": row["reason"], "at": row["at"] }),
+                json!({ "stopped": false, "reason": null, "at": null, "key_confirmed": false }),
+                |row| json!({ "stopped": int(&row["stopped"]) == 1, "reason": row["reason"], "at": row["at"], "key_confirmed": int(&row["confirmed"]) == 1 }),
             ),
     )
+}
+
+/// The 5-minute reconcile read the serve entries' whole key list, and the stop key was in it (`seen`) or wasn't.
+/// If that differs from what this object last confirmed, the confirmation is forgotten, so the object's own alarm
+/// writes or removes the key again. A key that is there when no stop was ever set is only reported: it stops every
+/// host, which fails closed, and nothing here knows why it is there. Answers a code when something differed.
+pub(crate) fn recheck_key(sql: &SqlStorage, seen: bool) -> R<Option<&'static str>> {
+    let found = rows(
+        sql,
+        "SELECT stopped, applied_version IS NOT NULL AND applied_version = version AS confirmed FROM content_stop",
+        vec![],
+    )?;
+    let Some(row) = found.first() else {
+        return Ok(seen.then_some("stop_key_without_stop"));
+    };
+    if int(&row["confirmed"]) != 1 || (int(&row["stopped"]) == 1) == seen {
+        return Ok(None);
+    }
+    exec(
+        sql,
+        "UPDATE content_stop SET applied_version = NULL, applied_at = NULL",
+        vec![],
+    )?;
+    Ok(Some("stop_key_differs"))
 }
 
 /// `{ stopped, reason }`: sets the stop or lifts it, inside the caller's transaction. Doing what's already so
@@ -134,7 +161,7 @@ pub(crate) async fn read_from(env: &Env) -> Stop {
 
 /// The provider the object may use. Test builds also read a table a test makes in the object,
 /// `test_content_provider_off`, as a room does.
-fn provider(env: &Env, sql: &SqlStorage) -> Option<Provider> {
+pub(crate) fn provider(env: &Env, sql: &SqlStorage) -> Option<Provider> {
     #[cfg(feature = "failpoints")]
     if rows(
         sql,

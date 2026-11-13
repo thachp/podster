@@ -156,7 +156,7 @@ const contract = readFileSync(join(here, "../packages/contracts/openapi.yaml"), 
 const capabilities = readFileSync(join(here, "../packages/contracts/capabilities.yaml"), "utf8");
 const adr = readFileSync(join(here, "../docs/adr/0010-release-and-the-content-domain.md"), "utf8");
 const operations = m6Operations(contract);
-const want = ["getReleaseConfig", "setReleaseConfig", "approveRelease", "declineRelease", "getAppHostname", "requestAppHostname", "removeAppHostname", "createAppReport", "suspendApp", "liftAppSuspension", "suspendAppHost", "liftAppHostSuspension", "stopContentDomain", "resumeContentDomain"];
+const want = ["getReleaseConfig", "setReleaseConfig", "approveRelease", "declineRelease", "getAppHostname", "requestAppHostname", "removeAppHostname", "createAppReport", "suspendApp", "liftAppSuspension", "suspendAppHost", "liftAppHostSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings"];
 check(JSON.stringify(operations.map((op) => op.operation).sort()) === JSON.stringify([...want].sort()), `the contract's M6 operations are read, block and inline alike: ${operations.length}`);
 check(JSON.stringify(operations.find((op) => op.operation === "removeAppHostname")) === JSON.stringify({ operation: "removeAppHostname", method: "DELETE", path: "/v1/workspaces/{ws}/app-hostname" }) && operations.find((op) => op.operation === "suspendAppHost")?.path === "/v1/moderation/app-hosts/{host}/suspend", "each with its method and path");
 check(!operations.some((op) => ["releaseTask", "releaseRole", "getTaskReleaseStatus"].includes(op.operation)), "M5's release status and the task and role releases aren't M6's");

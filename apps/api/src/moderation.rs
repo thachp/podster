@@ -8,7 +8,7 @@
 //! Logs carry IDs and codes only, never a report's note.
 use crate::error::ApiError;
 use crate::store::{exec, int, rows, transaction_sync};
-use crate::{content_stop, forward, principal, valid_id, Caller};
+use crate::{content_stop, forward, principal, reconcile, valid_id, Caller};
 use podster_policy::moderation::{
     check_report, is_operator, parse_operators, Reason, REPORT_WINDOW_MS,
 };
@@ -45,7 +45,12 @@ pub(crate) fn moderation(env: &Env) -> R<Stub> {
         .get_stub()?)
 }
 
-async fn call(env: &Env, path: &str, method: Method, body: Option<Value>) -> R<Response> {
+pub(crate) async fn call(
+    env: &Env,
+    path: &str,
+    method: Method,
+    body: Option<Value>,
+) -> R<Response> {
     forward(
         moderation(env)?,
         path,
@@ -545,7 +550,28 @@ impl Moderation {
         let sql = self.state.storage().sql();
         exec(&sql, SCHEMA, vec![])?;
         exec(&sql, content_stop::SCHEMA, vec![])?;
+        exec(&sql, reconcile::SCHEMA, vec![])?;
         match (req.method(), req.path().as_str()) {
+            // The two reconciles (M6 step 4(a), third PR), each called by the Worker's scheduled handler. Each ends by
+            // setting this object's own alarm if the stop's key is owed, which is what corrects a wake that was lost
+            // and writes a key that was owed from before any provider was configured.
+            (Method::Post, reconcile::ENTRIES_PATH) => {
+                let done = reconcile::entries(&sql, &self.env).await?;
+                self.arm(&sql).await?;
+                Ok(done)
+            }
+            (Method::Post, reconcile::SCRIPTS_PATH) => {
+                let done = reconcile::scripts(&sql, &self.env).await?;
+                self.arm(&sql).await?;
+                Ok(done)
+            }
+            // Something an operator should know, from an object the reconciles don't walk: a hostname's claim object.
+            (Method::Post, reconcile::FINDING_PATH) => {
+                let body: Value = req.json().await?;
+                reconcile::keep(&sql, &body, now_ms())?;
+                Ok(json!({ "kept": true }))
+            }
+            (Method::Get, reconcile::FINDINGS_PATH) => reconcile::list(&sql),
             // The stop for the whole content domain (M6 step 4(a)): this object is its home. A room asks here before
             // it writes a default host's serve entry.
             (Method::Get, content_stop::PATH) => {

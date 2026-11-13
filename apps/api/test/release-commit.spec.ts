@@ -115,6 +115,11 @@ const hostRow = (room: string) => inRoom(room, (sql) => sql.exec("SELECT script_
 const flight = (room: string) => inRoom(room, (sql) => sql.exec("SELECT in_flight_release, in_flight_script, in_flight_epoch, in_flight_at IS NOT NULL AS at, release_epoch FROM release_config").one());
 const applied = (room: string) => inRoom(room, (sql) => sql.exec("SELECT applied_version, applied_script, attempts, last_code FROM serve_apply").one());
 const queued = (room: string) => all(room, "SELECT script_name, unpublish_epoch, gone_at IS NOT NULL AS gone, last_code FROM script_delete ORDER BY script_name");
+/** What a command leaves on record and owes to send: the events, the audit, and the outbox by what is still owed. */
+const recorded = async (room: string) => {
+  await alarmQuiet(stub(room));
+  return inRoom(room, (sql) => JSON.stringify([sql.exec("SELECT * FROM event").toArray(), sql.exec("SELECT * FROM audit_event").toArray(), sql.exec("SELECT event_id, recipient_principal_id FROM outbox ORDER BY event_id, recipient_principal_id").toArray()]));
+};
 const trail = (room: string) => inRoom(room, (sql) => ({
   events: sql.exec("SELECT type, actor_id, subject_id, reason FROM event WHERE type LIKE 'release.%' ORDER BY seq").toArray(),
   audit: sql.exec("SELECT actor_id, action, target_id, prior_json, new_json FROM audit_event WHERE action LIKE 'release.%' ORDER BY seq").toArray(),
@@ -231,9 +236,12 @@ describe("committing a release live", () => {
 
   it("leaves a staged release unserved until it is confirmed, however often it is asked and the applier runs", async () => {
     const h = await healthy({ state: "uploading" });
+    const record = await recorded(h.room);
     await withStop("unreadable", async (clear) => {
       // The stage is the room's own. The stop can't be read, so the commit is undecided: refused, to be asked again.
       expect(refused(await commit(h.room))).toEqual(UNKNOWN);
+      // The stage is recorded nowhere but the room's serve state: no event, no audit record, nothing owed to send.
+      expect(await recorded(h.room)).toBe(record);
       expect(await row(h.room)).toMatchObject({ state: "uploading", failure_code: null });
       expect(await hostRow(h.room)).toEqual({ script_name: h.script, release_id: REL, version: 6, flight_version: 6, flight_before: h.prev });
       expect((await flight(h.room)).in_flight_release).toBe(REL);
@@ -317,6 +325,27 @@ describe("committing a release live", () => {
     for (const h of [own, who]) await alarmQuiet(stub(h.room));
   });
 
+  it("commits nothing on a stage that isn't its own any more, and is set back when another command fails it", async () => {
+    // Between the commit's reads and its confirm the flight is gone, as nothing but an unpublish makes it, and an
+    // unpublish also ends the release. Shown alone: the confirm commits nothing on a host it didn't stage.
+    const gone = await healthy({ state: "uploading" });
+    await between(gone.room, "UPDATE release_config SET in_flight_release = NULL, in_flight_script = NULL, in_flight_epoch = NULL, in_flight_at = NULL");
+    expect(refused(await commit(gone.room))).toEqual(UNKNOWN);
+    expect(await row(gone.room)).toMatchObject({ state: "uploading", failure_code: null });
+    // A staged release that the recheck, or a start asked again, fails: its hosts go back all the same.
+    for (const ask of [recheck, start]) {
+      const h = await healthy({ state: "uploading" });
+      await withStop("unreadable", async () => expect(refused(await commit(h.room))).toEqual(UNKNOWN));
+      expect((await hostRow(h.room)).script_name).toBe(h.script);
+      await inRoom(h.room, (s) => void s.exec("UPDATE release_config SET enabled = 0"));
+      expect((await ask(h.room)).body).toMatchObject({ state: "failed", reason: "release_off" });
+      expect([await hostRow(h.room), await flight(h.room)]).toEqual([before(h, 7), NO_FLIGHT]);
+      expect((await queued(h.room)).map((q: any) => q.script_name)).toEqual([h.script]);
+      await alarmQuiet(stub(h.room));
+    }
+    await alarmQuiet(stub(gone.room));
+  });
+
   it("is ended by an unpublish that lands between its stage and its confirm, and never comes back", async () => {
     const h = await healthy({ state: "uploading" });
     await withStop("unreadable", async () => expect(refused(await commit(h.room))).toEqual(UNKNOWN));
@@ -330,7 +359,7 @@ describe("committing a release live", () => {
     expect((await queued(h.room)).map((q: any) => [q.script_name, q.unpublish_epoch])).toEqual([[h.prev, 3], [h.script, 3]].sort());
     // The commit asked again finds it ended, and changes nothing.
     const all = await everything(h.room);
-    expect((await commit(h.room)).body).toEqual({ release_id: REL, state: "failed", rechecked: false, reason: null });
+    expect((await commit(h.room)).body).toEqual({ release_id: REL, state: "failed", rechecked: false, reason: "release_epoch_moved" });
     expect(await everything(h.room)).toBe(all);
     await alarmQuiet(stub(h.room));
   });
@@ -408,7 +437,9 @@ describe("what is read first", () => {
 
   it("commits nothing while the organization's object doesn't answer", async () => {
     const h = await healthy({ org: "org_unavailable_rc_2", state: "uploading" });
+    const record = await recorded(h.room);
     expect(refused(await commit(h.room))).toEqual(UNKNOWN);
+    expect(await recorded(h.room)).toBe(record);
     expect(await row(h.room)).toMatchObject({ state: "uploading", failure_code: null });
     // Staged in the room, and not recorded live: the applier has nothing it may write.
     expect((await hostRow(h.room)).script_name).toBe(h.script);
@@ -423,6 +454,7 @@ describe("a release that can't go on", () => {
       ["the recheck", (h) => recheck(h.room)],
       ["the commit", (h) => commit(h.room)],
       ["the reconcile's wake", (h) => check(h.room, { kind: "wake" })],
+      ["the room's own alarm", (h) => pass(h.room)],
       ["the reconcile finding its script", (h) => check(h.room, { kind: "script", script: h.script })],
     ];
     for (const state of ["uploading", "uncertain"]) {
@@ -439,6 +471,8 @@ describe("a release that can't go on", () => {
         expect(await row(h.room), `${state} ${what}`).toMatchObject({ state: "failed", failure_code: "release_upload_expired" });
         expect((await queued(h.room)).map((q: any) => q.script_name), `${state} ${what}`).toEqual([h.script]);
         expect((await trail(h.room)).events, `${state} ${what}`).toEqual([{ type: "release.failed", actor_id: "podster", subject_id: REL, reason: "release_upload_expired" }]);
+        // Ended before anything was staged: the host never moved.
+        expect(await hostRow(h.room), `${state} ${what}`).toEqual(before(h, 5));
         await alarmQuiet(stub(h.room));
       }
     }
@@ -448,7 +482,7 @@ describe("a release that can't go on", () => {
     const h = await healthy({ state: "uploading" });
     await withStop("unreadable", async () => expect(refused(await commit(h.room))).toEqual(UNKNOWN));
     await inRoom(h.room, (s) => void s.exec("UPDATE release SET upload_started_at = ? WHERE id = ?", Date.now() - HOUR, REL));
-    expect((await commit(h.room)).body).toEqual({ release_id: REL, state: "failed", rechecked: false, reason: null });
+    expect((await commit(h.room)).body).toEqual({ release_id: REL, state: "failed", rechecked: false, reason: "release_upload_expired" });
     expect(await row(h.room)).toMatchObject({ state: "failed", failure_code: "release_upload_expired" });
     expect([await hostRow(h.room), await flight(h.room)]).toEqual([before(h, 7), NO_FLIGHT]);
     await alarmQuiet(stub(h.room));
@@ -466,6 +500,15 @@ describe("a release that can't go on", () => {
     await alarmQuiet(stub(h.room));
   });
 
+  it("queues only a script named after itself: a record that names an earlier release's script leaves that script alone", async () => {
+    // As a rollback's own record will (step 6): its script is the kept one of the release it rolls back to.
+    const h = await healthy({ state: "uploading" });
+    await inRoom(h.room, (s) => { s.exec("UPDATE release SET script_name = ?, script_release_id = ? WHERE id = ?", h.prev, PREV, REL); s.exec("UPDATE release_config SET enabled = 0"); });
+    expect((await recheck(h.room)).body).toMatchObject({ state: "failed", reason: "release_off" });
+    expect(await queued(h.room)).toEqual([]);
+    await alarmQuiet(stub(h.room));
+  });
+
   it("ends with an unpublish if it hadn't gone live: awaiting approval, queued, uploading or uncertain", async () => {
     for (const state of ["awaiting_approval", "queued", "uploading", "uncertain"]) {
       const h = await healthy({ state });
@@ -473,8 +516,9 @@ describe("a release that can't go on", () => {
       expect(await row(h.room), state).toMatchObject({ state: "failed", failure_code: "release_epoch_moved" });
       // The release that was served is unpublished, as before, and isn't failed.
       expect((await row(h.room, PREV)).state, state).toBe("unpublished");
-      const scripts = (await queued(h.room)).map((q: any) => q.script_name);
-      expect(scripts, state).toEqual(["uploading", "uncertain"].includes(state) ? [h.prev, h.script].sort() : [h.prev]);
+      // Its own script, if it had one, is queued under the unpublish, beside the one that was served.
+      const scripts = (await queued(h.room)).map((q: any) => [q.script_name, q.unpublish_epoch]);
+      expect(scripts, state).toEqual((["uploading", "uncertain"].includes(state) ? [h.prev, h.script].sort() : [h.prev]).map((name) => [name, 3]));
       expect((await trail(h.room)).events, state).toEqual([{ type: "release.failed", actor_id: "podster", subject_id: REL, reason: "release_epoch_moved" }]);
       await alarmQuiet(stub(h.room));
     }

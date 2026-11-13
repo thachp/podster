@@ -71,6 +71,9 @@ pub(super) fn standing_unknown() -> ApiError {
 pub(super) struct Asked {
     who: Option<String>,
     asked: bool,
+    /// The place the question was about: the organization their place in the room is held in, and since when. The
+    /// answer says nothing of any other place.
+    place: Option<(String, i64)>,
     holds: Option<bool>,
 }
 
@@ -98,6 +101,7 @@ impl Reads {
         let nobody = || Asked {
             who: None,
             asked: false,
+            place: None,
             holds: None,
         };
         Reads {
@@ -144,7 +148,7 @@ fn deploy_grant(sql: &SqlStorage, principal: &str, now: i64) -> R<Option<GrantRo
         Some(GrantRow {
             provider_repo_id: int(&row["provider_repo_id"]),
             delegated_by: text(&row["delegated_by"])?,
-            expires_at: row["expires_at"].as_i64(),
+            expires_at: (!row["expires_at"].is_null()).then(|| int(&row["expires_at"])),
         })
     }))
 }
@@ -256,8 +260,9 @@ fn as_u64(value: &Value) -> u64 {
 
 /// What an answer from outside says of whoever the room's rows name now: `Some` if it is about them and says whether
 /// they hold, `None` if it says nothing of them. It says nothing when it was about someone else, when their
-/// `Principal` gave no answer, and when they weren't asked though the rows make them worth asking about now, as someone
-/// made an admin, or added to the room, since the questions were asked.
+/// `Principal` gave no answer, when they weren't asked though the rows make them worth asking about now, as someone
+/// made an admin, or added to the room, since the questions were asked, and when the question was about another
+/// place than the one the rows give them now: another organization, or a place that began at another time.
 fn settled(
     sql: &SqlStorage,
     answer: &Asked,
@@ -271,13 +276,19 @@ fn settled(
         // Nobody to ask about, and nobody holds.
         return Ok(Some(false));
     };
+    let place = worth_asking(sql, who, authority_only)?.map(|record| (record.org, record.since));
     if !answer.asked {
-        return Ok(match worth_asking(sql, who, authority_only)? {
+        return Ok(match place {
             Some(_) => None,
             None => Some(false),
         });
     }
-    Ok(answer.holds)
+    // Asked about one place in the room. If the rows give them another now, or none, the answer isn't about it.
+    Ok(match place {
+        None => Some(false),
+        Some(place) if Some(&place) == answer.place.as_ref() => answer.holds,
+        Some(_) => None,
+    })
 }
 
 /// Gathers every fact, inside the room's transaction, from the room's rows now and what was read outside. The second
@@ -454,7 +465,7 @@ fn gather(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) -> R<(Gath
 }
 
 /// A release's row, as the commands here read it.
-pub(super) const RELEASE_COLUMNS: &str = "id, state, task_id, commit_sha, config_version, release_epoch, label, script_name, upload_started_at";
+pub(super) const RELEASE_COLUMNS: &str = "id, state, task_id, commit_sha, config_version, release_epoch, label, script_name, script_release_id, failure_code";
 
 pub(super) fn release_row(sql: &SqlStorage, release_id: &str) -> R<Option<Value>> {
     Ok(rows(
@@ -530,15 +541,17 @@ pub(super) fn pass(sql: &SqlStorage, release_id: &str, reads: &Reads, now: i64) 
         Verdict::Holds => Ok(answer(&release, true, None)),
         Verdict::Unknown => Err(standing_unknown()),
         Verdict::Fails(reason) => {
-            release_commit::fail(sql, release_id, reason, now)?;
+            release_commit::fail(sql, release_id, reason, None, now)?;
             let after = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
             Ok(answer(&after, true, Some(reason)))
         }
     }
 }
 
-/// `{ release_id, state, rechecked, reason }`, from the release's row.
+/// `{ release_id, state, rechecked, reason }`, from the release's row. A release that has failed answers with the
+/// reason on its row, whichever command ended it and whenever.
 pub(super) fn answer(release: &Value, rechecked: bool, reason: Option<&str>) -> Value {
+    let reason = reason.map_or_else(|| release["failure_code"].clone(), Value::from);
     json!({ "release_id": release["id"], "state": release["state"], "rechecked": rechecked, "reason": reason })
 }
 
@@ -552,13 +565,14 @@ impl Workspace {
             return Ok(Asked {
                 who: None,
                 asked: false,
+                place: None,
                 holds: Some(false),
             });
         };
         let sql = self.state.storage().sql();
         let record = worth_asking(&sql, who, authority_only)?;
         let asked = record.is_some();
-        let holds = match record {
+        let holds = match &record {
             Some(record) => principal::departed_since(&self.env, who, &record.org, record.since)
                 .await
                 .ok()
@@ -568,6 +582,7 @@ impl Workspace {
         Ok(Asked {
             who: Some(who.to_owned()),
             asked,
+            place: record.map(|record| (record.org, record.since)),
             holds,
         })
     }
@@ -582,6 +597,18 @@ impl Workspace {
         // The delegation is held for a provider, and the room's linked repository says which. With none linked there
         // is no provider to name: nothing is asked, and the room's own rows fail the release for having no repository.
         let provider = linked_provider(&sql)?;
+        // **The order.** The stop is asked first: the applier asks it again before every write, so its answer here may
+        // be the oldest. The facts nothing asks again are asked last, so their answers are as fresh as this can
+        // make them at the transaction: each person's record, and last the organization's delegation.
+        let stopped = match content_stop::read_from(&self.env).await {
+            Stop::Clear => Some(false),
+            Stop::Stopped => Some(true),
+            Stop::Unreadable => None,
+        };
+        let deployment_on = Some(crate::releases::switched_on(&self.env).await);
+        let approver = self.still_holds(people.approver.as_deref(), true).await?;
+        let requester = self.still_holds(Some(&people.requester), false).await?;
+        let giver = self.still_holds(people.giver.as_deref(), true).await?;
         let org_may_release = match &provider {
             Some(provider) => {
                 let delegation = principal::org_delegation(&self.env, &org, provider)
@@ -610,20 +637,15 @@ impl Workspace {
             }
             None => Some(true),
         };
-        let stopped = match content_stop::read_from(&self.env).await {
-            Stop::Clear => Some(false),
-            Stop::Stopped => Some(true),
-            Stop::Unreadable => None,
-        };
         Ok(Reads {
-            deployment_on: Some(crate::releases::switched_on(&self.env).await),
+            deployment_on,
             stopped,
             org,
             provider,
             org_may_release,
-            approver: self.still_holds(people.approver.as_deref(), true).await?,
-            requester: self.still_holds(Some(&people.requester), false).await?,
-            giver: self.still_holds(people.giver.as_deref(), true).await?,
+            approver,
+            requester,
+            giver,
         })
     }
 

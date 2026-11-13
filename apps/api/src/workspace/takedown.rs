@@ -43,7 +43,7 @@ use podster_core::hostname_requests::HostnameRequestState;
 use podster_core::release::{
     clear_host, next_state, reconcile_script, script_gone, script_owner, unpublish, upload_expired,
     CommitMark, DesiredServe, InFlight, ReleaseEvent, ReleaseState, RoomClaim, ScriptAnswer,
-    ScriptOwner, ScriptReconcile, ServeState, UnpublishTrigger,
+    ScriptOwner, ScriptReconcile, ServeState, UnpublishTrigger, IN_FLIGHT_EXEMPTION_MS,
 };
 
 /// The Worker's call, for a verified operator. Nothing outside the Worker reaches it.
@@ -987,24 +987,26 @@ fn release_confirmed(sql: &SqlStorage, script: &str) -> R<bool> {
     .is_empty())
 }
 
-/// Whether a script may be deleted now: nothing in the room's state names it, every host's entry is known to match
-/// what the room wants, so no entry can still name it, and **it isn't the script of a release still uploading within
-/// its hour.** The entry goes first; the files come behind.
-///
-/// The last is asked again here, at the moment of the delete, and not only when the script was queued: a script
-/// queued while its release's upload was uncertain may belong to a release that is uploading again by now. Such a
-/// release can't be committed either, since its script is queued, but the delete waits for the room to end it.
-fn may_delete(sql: &SqlStorage, script: &str, now: i64) -> R<bool> {
-    let uploading = rows(
+/// Until when a script is kept from the delete job because its release is still uploading within its hour, if it
+/// is. **Asked at the moment of the delete,** and not only when the script was queued: a script queued while its
+/// release's upload was uncertain may belong to a release that is uploading again by now. Such a release can't be
+/// committed either, since its script is queued, but the delete waits for its hour, or for the room to end it.
+fn upload_keeps_until(sql: &SqlStorage, script: &str, now: i64) -> R<Option<i64>> {
+    Ok(rows(
         sql,
         "SELECT coalesce(upload_started_at, updated_at) AS since FROM release WHERE script_name = ? AND state = ?",
         vec![script.into(), ReleaseState::Uploading.name().into()],
     )?
     .iter()
-    .any(|row| !upload_expired(int(&row["since"]), now));
-    if uploading {
-        return Ok(false);
-    }
+    .map(|row| int(&row["since"]))
+    .filter(|since| !upload_expired(*since, now))
+    .map(|since| since.saturating_add(IN_FLIGHT_EXEMPTION_MS))
+    .max())
+}
+
+/// Whether a script may be deleted now: nothing in the room's state names it, and every host's entry is known to
+/// match what the room wants, so no entry can still name it. The entry goes first; the files come behind.
+fn may_delete(sql: &SqlStorage, script: &str) -> R<bool> {
     let named = rows(
         sql,
         "SELECT 1 AS named FROM serve_state WHERE script_name = ?1 OR flight_before = ?1
@@ -1048,7 +1050,16 @@ async fn delete_script(sql: &SqlStorage, provider: &Provider, script: &str) -> R
             ],
         )
     };
-    if !may_delete(sql, script, now_ms())? {
+    if let Some(until) = upload_keeps_until(sql, script, now_ms())? {
+        // Nothing was asked of the provider, so no attempt is counted. The row waits until the upload's hour is
+        // over, by its own time, so the room isn't woken for it before then.
+        return exec(
+            sql,
+            "UPDATE script_delete SET next_attempt_at = ?, last_code = 'release_uploading' WHERE script_name = ? AND gone_at IS NULL",
+            vec![until.into(), script.into()],
+        );
+    }
+    if !may_delete(sql, script)? {
         // Nothing was asked of the provider, so no attempt is counted and no wait is set. It asks for no wake
         // either ([`next_due`]): the pass that applies the last pending host deletes it.
         return exec(
@@ -1093,6 +1104,14 @@ pub(super) async fn upkeep(state: &State, env: &Env) -> R<()> {
         return Ok(());
     }
     let now = now_ms();
+    // A release whose upload is an hour old ends here too, so a release that was staged and then abandoned doesn't
+    // keep its host waiting, and every script delete in the room behind it, for longer than its hour.
+    {
+        let store = sql.clone();
+        transaction_sync(state, move || {
+            release_commit::expire_uploads(&store, now).map(|_| ())
+        })?;
+    }
     let hosts: Vec<String> = rows(
         &sql,
         &format!(

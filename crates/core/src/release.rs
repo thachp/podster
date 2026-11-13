@@ -63,7 +63,9 @@ pub struct CommitRecord<'a> {
     pub sha: &'a str,
     /// The repository the merge was made in, by GitHub's ID.
     pub provider_repo_id: i64,
-    /// Podster's own merge job put it on the default branch.
+    /// Podster's own merge job called the merge of it. The room's record doesn't say whose call merged it: a person
+    /// who merges the same pull request by hand, after Podster's call was made and before its outcome was known,
+    /// leaves the same record. What is released is the reviewed commit either way.
     pub merged_by_podster: bool,
     /// And then confirmed it there.
     pub confirmed_on_default_branch: bool,
@@ -74,8 +76,8 @@ pub struct CommitRecord<'a> {
 /// Why a commit can't be released.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommitRefusal {
-    /// `commit_not_releasable`: not a commit Podster merged and confirmed on the room's own repository's default branch,
-    /// for a completed task. A task branch's head, a commit pushed any other way, and another repository's are never
+    /// `commit_not_releasable`: not a commit whose merge Podster called and then confirmed on the room's own
+    /// repository's default branch, for a completed task. A task branch's head, a commit pushed any other way, and another repository's are never
     /// releasable.
     NotReleasable,
     /// `invalid_argument`: an environment other than the one there is.

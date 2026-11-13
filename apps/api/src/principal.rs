@@ -1485,7 +1485,7 @@ impl Principal {
                         .name()
                         .is_some_and(|name| name.starts_with("org_unavailable_"))
                 {
-                    return Err(ApiError::api(503, "unavailable"));
+                    return Err(ApiError::internal("test: the organization didn't answer"));
                 }
                 exec(&sql, ORG_DELEGATION_SCHEMA, vec![])?;
                 if path == "/internal/org-delegation-set" {

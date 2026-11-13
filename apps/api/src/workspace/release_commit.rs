@@ -25,9 +25,18 @@
 //!   And every outside fact is read after that point and before anything is served. A change before the reads is seen
 //!   by them. A change after them is one that happened while the release was already staged in the room, which is
 //!   the unpublish triggers' to act on: an unpublish clears the stage, and the stop is asked again by the applier
-//!   itself before each write. **What that leaves is owed to step 6:** the triggers for a delegation taken back and
-//!   for a person's departure aren't built, so until they are, one of those landing after this command's reads and
-//!   before its confirm isn't acted on by anything.
+//!   itself before each write.
+//!
+//!   **What that leaves is owed to step 6, and it is most of the list.** Only an operator's suspension of the app
+//!   unpublishes today. Until the other triggers are built, nothing acts on a change made after this command read
+//!   the fact, and nothing at all once the release is `live`: the room archived, made private or suspended; release
+//!   switched off; the repository's link lost; a grant revoked or a place in the room changed; a person's departure;
+//!   the organization's delegation taken back. The outside reads are made one after another, the stop first and the
+//!   two that nothing asks again last, so each one's window is as wide as the reads after it. **So `RELEASES` and a
+//!   provider must not both be configured before step 6 has merged** (`docs/m6-plan.md`).
+//!
+//!   **The stage writes no event and no audit record.** It is half of one command: it ends as `release.live` or as
+//!   `release.failed`, and until then it is in the room's serve state and nowhere else.
 //!
 //!   A commit never trusts an earlier pass: `rechecked: true` from the recheck or from starting the upload is an
 //!   answer about then, and this command asks everything again itself.
@@ -39,7 +48,8 @@
 //! **What this leaves for the job's own PR:** reading the tree, fetching and uploading; an upload whose answer was
 //! lost and its settling (`uncertain`); waiting for the marker, recording a release served, and the set-back when the
 //! marker never comes; and running a room's release jobs one at a time. A release that is `live` and never confirmed
-//! served stays as it is until that is built or the room is unpublished.
+//! served stays as it is until that is built or the room is unpublished. A stage nobody comes back to is ended when
+//! its upload's hour is over, by the next release command, the reconcile's next question or the room's own alarm.
 //!
 //! Logs carry the room's and the release's IDs and codes.
 use super::release_recheck::{
@@ -136,18 +146,24 @@ fn write_state(sql: &SqlStorage, names: &[String], state: &ServeState, now: i64)
     }
 }
 
-/// Queues a release's own script for deletion, under no unpublish, at `now`. A script already queued stays as it was
-/// queued. Only a name Rust made is ever queued.
-fn queue_script(sql: &SqlStorage, script: &str, now: i64) -> R<()> {
+/// Queues a release's own script for deletion at `now`, under the unpublish that ended it if one did. A script
+/// already queued stays as it was queued. Only a name Rust made is ever queued.
+fn queue_script(sql: &SqlStorage, script: &str, under: Option<i64>, now: i64) -> R<()> {
     let ScriptOwner::Podster { label, .. } = script_owner(script) else {
         console_error!("release: a release's script wasn't queued: code=foreign_script");
         return Ok(());
     };
     exec(
         sql,
-        "INSERT INTO script_delete (script_name, label, unpublish_epoch, queued_at, next_attempt_at) VALUES (?, ?, NULL, ?, ?)
+        "INSERT INTO script_delete (script_name, label, unpublish_epoch, queued_at, next_attempt_at) VALUES (?, ?, ?, ?, ?)
            ON CONFLICT (script_name) DO NOTHING",
-        vec![script.into(), label.into(), now.into(), now.into()],
+        vec![
+            script.into(),
+            label.into(),
+            under.map_or(V::Null, V::from),
+            now.into(),
+            now.into(),
+        ],
     )
 }
 
@@ -158,12 +174,21 @@ fn queue_script(sql: &SqlStorage, script: &str, now: i64) -> R<()> {
 /// - **if it had been staged or committed,** which is when the room's flight is this release's: each host goes back to
 ///   what it served before, by core's `set_back`, host by host and only where the host is still what the commit
 ///   wrote, and the flight is closed;
-/// - **if it has a script,** which is from the moment its upload started: the script is queued for deletion, whether
-///   or not anything was ever uploaded under that name. The delete job waits for every host's entry to match first;
+/// - **if it has a script of its own,** which is from the moment its upload started: the script is queued for
+///   deletion, whether or not anything was ever uploaded under that name, under the unpublish that ended the release
+///   (`under`) if one did. The delete job waits for every host's entry to match first. **Only a script named after
+///   this release is queued:** a rollback's record (step 6) names the script of the release it rolls back to, which
+///   is the room's kept script and not the failed record's to delete, as core's `set_back` says of it;
 /// - an audit record and an event, `release.failed`, naming the release and the reason, as Podster's act.
 ///
 /// A release that has already ended is left as it is, and so is one that is served: neither can fail.
-pub(super) fn fail(sql: &SqlStorage, release_id: &str, reason: &str, now: i64) -> R<()> {
+pub(super) fn fail(
+    sql: &SqlStorage,
+    release_id: &str,
+    reason: &str,
+    under: Option<i64>,
+    now: i64,
+) -> R<()> {
     let release = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
     let state = state_of(&release)?;
     let Ok(failed) = next_state(state, ReleaseEvent::Fail) else {
@@ -194,7 +219,9 @@ pub(super) fn fail(sql: &SqlStorage, release_id: &str, reason: &str, now: i64) -
                 write_state(sql, &loaded.hosts, &back.state, now)?;
             }
         }
-        queue_script(sql, &script, now)?;
+        if release["script_release_id"].as_str() == Some(release_id) {
+            queue_script(sql, &script, under, now)?;
+        }
     }
     audit_as(
         sql,
@@ -237,7 +264,7 @@ pub(super) fn expire_uploads(sql: &SqlStorage, now: i64) -> R<usize> {
             continue;
         };
         if upload_expired(int(&release["since"]), now) {
-            fail(sql, &id, UploadFailure::Expired.code(), now)?;
+            fail(sql, &id, UploadFailure::Expired.code(), None, now)?;
             ended += 1;
         }
     }
@@ -246,7 +273,15 @@ pub(super) fn expire_uploads(sql: &SqlStorage, now: i64) -> R<usize> {
 
 /// Ends every release that hadn't gone live and started under an epoch below `epoch`, the one an unpublish just
 /// raised to: awaiting approval, queued, uploading or uncertain. None of them can ever be committed, so none is left
-/// for someone to approve or for a job that may never come back.
+/// for someone to approve or for a job that may never come back. A script one of them had is queued under this
+/// unpublish, so the unpublish isn't done with its files until that script is gone too.
+///
+/// **At the epoch's ceiling** the epoch can't go up, so a release started at the ceiling isn't ended here. It can
+/// never go live either: core refuses every commit at the ceiling.
+///
+/// **How many.** Each one ended writes an audit record and an event in the unpublish's own transaction. A room takes
+/// 20 requests a day (`MAX_RELEASES_PER_ROOM_PER_DAY`), which step 6 enforces where it takes them, and each is ended
+/// by the first unpublish after it, so one unpublish ends at most what was asked for since the last.
 pub(super) fn end_at_unpublish(sql: &SqlStorage, epoch: i64, now: i64) -> R<()> {
     for release in rows(
         sql,
@@ -254,7 +289,7 @@ pub(super) fn end_at_unpublish(sql: &SqlStorage, epoch: i64, now: i64) -> R<()> 
         vec![epoch.into()],
     )? {
         if let Some(id) = text(&release["id"]) {
-            fail(sql, &id, CommitLiveRefusal::EpochMoved.code(), now)?;
+            fail(sql, &id, CommitLiveRefusal::EpochMoved.code(), Some(epoch), now)?;
         }
     }
     Ok(())
@@ -285,7 +320,7 @@ fn record(sql: &SqlStorage, kind: &str, release_id: &str, from: &str, to: &str, 
 
 /// The answer after a failure, from the release's row as it now is.
 fn failed(sql: &SqlStorage, release_id: &str, reason: &str, now: i64) -> R<Value> {
-    fail(sql, release_id, reason, now)?;
+    fail(sql, release_id, reason, None, now)?;
     let after = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
     Ok(answer(&after, true, Some(reason)))
 }

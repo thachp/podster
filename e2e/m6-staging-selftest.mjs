@@ -234,7 +234,7 @@ check(m6Names(agentCapabilities(capabilities).map((c) => c.name), operations).le
   // holds, which is behind the switch. So on staging, where release is switched off, M6-S02c still must find none.
   // Any other is a new name to account for here.
   const BUILT_M6_EVENTS = ["app.suspended", "app.suspension_lifted", "app_hostname.suspended", "release.failed", "release.live", "release.upload_started"];
-  check(named.size > 20 && JSON.stringify(clash) === JSON.stringify(BUILT_M6_EVENTS), `the only M6 event names the API or core writes today are an app's suspension, its lifting and a hostname's suspension (${named.size} read): ${clash.join(", ") || "none"}`);
+  check(named.size > 20 && JSON.stringify(clash) === JSON.stringify(BUILT_M6_EVENTS), `the only M6 event names the API or core writes today are an app's suspension, its lifting, a hostname's suspension, and a release failed, started uploading and committed live (${named.size} read): ${clash.join(", ") || "none"}`);
 }
 check(JSON.stringify(m6EventTypes([{ type: "task.created" }, { type: "role.released" }, { type: "release.requested" }, { type: "deploy.started" }, { type: "app.suspended" }, { type: "release.requested" }])) === JSON.stringify(["release.requested", "deploy.started", "app.suspended"]), "M6 event types, deploy included, are found once each, and a role's release isn't one");
 

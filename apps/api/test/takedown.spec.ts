@@ -461,11 +461,18 @@ describe("the room's applier and its delete job", () => {
     await pass(b.room);
     state = await held();
     expect([state.scripts.includes(uploading), callsFor(state, b)]).toEqual([true, []]);
-    expect((await deleteRows(b.room)).map((row: any) => [row.attempts, row.last_code, row.gone])).toEqual([[0, "entry_not_removed_yet", 0]]);
-    // Past its hour the script is no longer kept, and goes.
-    await inRoom(b.room, (sql) => sql.exec("UPDATE release SET upload_started_at = ? WHERE id = ?", Date.now() - 60 * 60 * 1000, rel(5)));
+    expect((await deleteRows(b.room)).map((row: any) => [row.attempts, row.last_code, row.gone])).toEqual([[0, "release_uploading", 0]]);
+    // It waits for the upload's own hour, and no sooner: the room isn't woken for it again and again meanwhile.
+    const started: number = (await one(b.room, "SELECT upload_started_at FROM release WHERE id = ?", rel(5))).upload_started_at;
+    expect((await one(b.room, "SELECT next_attempt_at FROM script_delete")).next_attempt_at).toBe(started + 60 * 60 * 1000);
+    expect(await nextAlarm(stub(b.room))).toBeGreaterThanOrEqual(started + 60 * 60 * 1000);
+    await pass(b.room);
+    expect(callsFor(await held(), b)).toEqual([]);
+    // Past its hour the release is ended by the room's own pass, and the script goes.
+    await inRoom(b.room, (sql) => { sql.exec("UPDATE release SET upload_started_at = ? WHERE id = ?", Date.now() - 60 * 60 * 1000, rel(5)); sql.exec("UPDATE script_delete SET next_attempt_at = 0"); });
     await pass(b.room);
     expect((await held()).scripts).not.toContain(uploading);
+    expect(await one(b.room, "SELECT state, failure_code FROM release WHERE id = ?", rel(5))).toEqual({ state: "failed", failure_code: "release_upload_expired" });
     for (const room of [a.room, b.room]) await alarmQuiet(stub(room));
   });
 

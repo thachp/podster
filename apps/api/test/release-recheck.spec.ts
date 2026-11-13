@@ -130,7 +130,7 @@ describe("the room's recheck of a release", () => {
     expect(after.audit.map((a: any) => [a.actor_id, a.action, a.target_id, JSON.parse(a.prior_json), JSON.parse(a.new_json)])).toEqual([["podster", "release.failed", REL, { state: "queued" }, { state: "failed", reason: "release_off" }]]);
     // A release that has ended takes no event: a second pass finds it failed and changes nothing, whatever is so now.
     await inRoom(h.room, (sql) => sql.exec("UPDATE release_config SET enabled = 1"));
-    expect((await switchedOn(() => recheck(h.room))).body).toEqual({ release_id: REL, state: "failed", rechecked: false, reason: null });
+    expect((await switchedOn(() => recheck(h.room))).body).toEqual({ release_id: REL, state: "failed", rechecked: false, reason: "release_off" });
     expect(await trail(h.room)).toEqual(after);
     await alarmQuiet(stub(h.room));
   });
@@ -368,6 +368,12 @@ describe("the room's recheck of a release", () => {
       ["a repository linked in between", (h) => inRoom(h.room, (s) => void s.exec("DELETE FROM repo_link")),
         () => [`INSERT INTO repo_link (id, request_id, provider, provider_repo_id, provider_org_id, full_name, visibility, default_branch, status, created_by, created_at, verified_at, updated_at) VALUES ('rl_1', 'rr_1', 'github', ${REPO_ID}, 4242, 'podsterx/release', 'public', 'main', 'ready', '${OWNER.id}', 1, 1, 1)`]],
     ];
+    // Asked about one place in the room, and by the transaction the rows give them another: the same person, in
+    // another organization, or in a place that began at another time. The answer was about the first place.
+    promoted.push(
+      ["the approver's place moved to another organization in between", async () => {}, () => ["UPDATE workspace SET owner_org_id = 'org_rr_moved', created_at = created_at"]],
+      ["the requester's place begun again in between", async () => {}, (h) => [`UPDATE member SET added_at = added_at + 5 WHERE principal_id = '${h.requester.id}'`]],
+    );
     for (const [what, before, statements] of promoted) {
       const h = await healthy();
       await before(h);

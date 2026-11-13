@@ -98,6 +98,14 @@ check(SIGN_UPS.length === 2, "a run takes 2 test sign-ups, no more");
     check((statSync(file).mode & 0o777) === 0o600 && (statSync(dirname(file)).mode & 0o777) === 0o700, "it's written at mode 0600, in a directory at 0700");
     check(readKept(file).record?.a === 1, "and read back");
     check(throws(() => writeKept(file, { a: 2 })) && readKept(file).record?.a === 1, "a file already there is never overwritten");
+    let refusal = "";
+    try {
+      writeKept(file, { a: 3 });
+    } catch (error) {
+      refusal = String(error.message);
+    }
+    check(/a file is already there/.test(refusal) && !refusal.includes(home) && !refusal.includes(".podster"), `the refusal says why without naming the path: ${refusal}`);
+    check(JSON.stringify(readdirSync(dirname(file))) === JSON.stringify(["s04.json"]), "the temporary file is gone after a write, and after a refused one");
     chmodSync(file, 0o644);
     check(/read by others/.test(readKept(file).problem ?? ""), "a file others can read is refused");
     chmodSync(file, 0o600);
@@ -352,8 +360,8 @@ try {
       encoding: "utf8",
       timeout: 60_000,
     });
-    const counted = /stand-in counted: (\d+) requests, (\d+) test sign-ups, (\d+) sign-outs/.exec(res.stdout);
-    return { ...res, requests: counted ? Number(counted[1]) : NaN, signUps: counted ? Number(counted[2]) : NaN, signOuts: counted ? Number(counted[3]) : NaN, all: res.stdout + res.stderr };
+    const counted = /stand-in counted: (\d+) requests, (\d+) test sign-ups, (\d+) sign-outs, (\d+) agent disconnects/.exec(res.stdout);
+    return { ...res, requests: counted ? Number(counted[1]) : NaN, signUps: counted ? Number(counted[2]) : NaN, signOuts: counted ? Number(counted[3]) : NaN, disconnects: counted ? Number(counted[4]) : NaN, all: res.stdout + res.stderr };
   };
   const secretFree = (res, also = []) => ![secret, ...also].some((value) => res.all.includes(value));
 
@@ -398,11 +406,87 @@ try {
   removeKept(kept);
   writeKept(kept, shifted);
   const stale = phaseRun("after", atAfter);
-  check(stale.status === 2 && stale.requests === 0 && /stale/.test(stale.stderr) && !existsSync(kept), "a stale kept file is refused before anything is sent, and deleted");
+  check(stale.status === 2 && stale.requests === 1 && stale.signOuts === 1 && /stale/.test(stale.stderr) && /sign-out answered 200/.test(stale.stderr) && !existsSync(kept), `a stale kept file is refused, its session signed out first, the one request sent, and the file deleted: ${stale.requests} request(s), ${stale.signOuts} sign-out(s)`);
+  check(secretFree(stale, [shifted.session, shifted.session.split("=")[1]]), "that refusal prints neither the secret nor the session");
   writeKept(kept, shifted);
   const replaced = phaseRun("before", atBefore);
-  check(replaced.status === 0 && /was stale/.test(replaced.stdout) && readKept(kept).record?.signed_up_at > shifted.signed_up_at, "a first phase deletes a stale file and keeps its own");
+  check(replaced.status === 0 && /was stale, [^\n]*: its session's sign-out answered 200, and the file was deleted/.test(replaced.stdout) && readKept(kept).record?.signed_up_at > shifted.signed_up_at, "a first phase signs a stale file's session out, deletes the file and keeps its own");
+  check(secretFree(replaced, [shifted.session, shifted.session.split("=")[1]]), "and prints neither the secret nor the stale session");
   removeKept(kept);
+
+  // Every local check comes before any request, so none costs a sign-up or a room.
+  const foreign = { kind: "something else", session: "x".repeat(20) };
+  writeKept(kept, foreign);
+  const notOurs = phaseRun("before", atBefore);
+  check(notOurs.status === 2 && notOurs.requests === 0 && /isn't a kept file of this script's/.test(notOurs.stderr) && JSON.stringify(readKept(kept).record) === JSON.stringify(foreign), "a file at the kept path that isn't this script's is refused before any request, and never deleted");
+  const notOursAfter = phaseRun("after", atAfter);
+  check(notOursAfter.status === 2 && notOursAfter.requests === 0 && existsSync(kept), "the second phase refuses it too, and leaves it");
+  removeKept(kept);
+  chmodSync(dirname(kept), 0o755);
+  const openDir = phaseRun("before", atBefore);
+  check(openDir.status === 2 && openDir.requests === 0 && openDir.signUps === 0 && /opened by others/.test(openDir.stderr), "a kept directory others can open is refused before the sign-up");
+  chmodSync(dirname(kept), 0o700);
+  rmSync(dirname(kept), { recursive: true });
+  const elsewhere = join(work, "elsewhere");
+  mkdirSync(elsewhere, { mode: 0o700 });
+  symlinkSync(elsewhere, dirname(kept));
+  const linkedDir = phaseRun("before", atBefore);
+  check(linkedDir.status === 2 && linkedDir.requests === 0 && /link/.test(linkedDir.stderr) && readdirSync(elsewhere).length === 0, "a kept directory that is a link is refused before the sign-up, and nothing is written through it");
+  rmSync(dirname(kept));
+  check([openDir, linkedDir, notOurs].every((res) => !res.all.includes(home)), "no refusal names the runner's home");
+
+  // A kept file holding JSON that isn't an object is still a file there: refused before any request.
+  for (const text of ["null", "0", "false"]) {
+    mkdirSync(dirname(kept), { recursive: true, mode: 0o700 });
+    writeFileSync(kept, text, { mode: 0o600 });
+    const odd = phaseRun("before", atBefore);
+    check(odd.status === 2 && odd.requests === 0 && odd.signUps === 0 && readFileSync(kept, "utf8") === text, `a kept file holding ${text} is refused before any request, and left as it is`);
+    removeKept(kept);
+  }
+  // A directory the runner owns but can't write, which passes the mode check, fails the probe write before any request.
+  const root = typeof process.getuid === "function" && process.getuid() === 0;
+  if (!root) {
+    chmodSync(dirname(kept), 0o500);
+    const readOnly = phaseRun("before", atBefore);
+    check(readOnly.status === 2 && readOnly.requests === 0 && readOnly.signUps === 0 && /test write there failed/.test(readOnly.stderr), "a kept directory at 0500 fails the test write before any request");
+    chmodSync(dirname(kept), 0o700);
+  } else check(true, "a kept directory at 0500: not checked as root, which can write it");
+  check(readdirSync(dirname(kept)).length === 0, "the test write leaves nothing behind");
+
+  // Temporary files a killed run left are swept by either phase, after the directory checks; nothing else is.
+  const leftover = (hex) => join(dirname(kept), `.s04.json.${hex}.tmp`);
+  const unrelated = join(dirname(kept), ".s04.json.notours.tmp");
+  for (const [which, commit] of [["before", atBefore], ["after", atAfter]]) {
+    writeFileSync(leftover("0123456789abcdef"), JSON.stringify({ session: "x".repeat(20) }), { mode: 0o600 });
+    writeFileSync(unrelated, "keep", { mode: 0o600 });
+    const swept = phaseRun(which, commit);
+    check(!existsSync(leftover("0123456789abcdef")) && existsSync(unrelated) && /1 temporary file\(s\) a killed run left/.test(swept.stdout), `the ${which === "before" ? "first" : "second"} phase sweeps a leftover temporary file and nothing else`);
+    rmSync(unrelated);
+  }
+  removeKept(kept);
+
+  // The second phase says what happened to a stale file it couldn't delete.
+  if (!root) {
+    writeKept(kept, shifted);
+    chmodSync(dirname(kept), 0o500);
+    const stuck = phaseRun("after", atAfter);
+    chmodSync(dirname(kept), 0o700);
+    check(stuck.status === 2 && /couldn't be deleted: delete ~\/\.podster\/m6-staging\/s04\.json by hand/.test(stuck.stderr) && !/the file was deleted/.test(stuck.stderr) && existsSync(kept), "a stale file the second phase can't delete is reported as not deleted");
+    removeKept(kept);
+  }
+
+  // The disconnect in M6-S04a fails once: the agent stays on the clean-up list and is disconnected again.
+  const flaky = phaseRun("before", atBefore, { M6_STANDIN_DISCONNECT_FAIL: "1" });
+  check(flaky.status === 1 && flaky.disconnects === 2 && flaky.signOuts === 1 && !existsSync(kept) && /disconnected, so its OAuth credential no longer works/.test(flaky.stdout), `a failed disconnect fails M6-S04a, keeps the agent on the clean-up list, which disconnects it, and keeps nothing: exit ${flaky.status}, ${flaky.disconnects} disconnect(s)`);
+
+  // Ctrl-C in each phase: the run stops at its next request, and still cleans up.
+  const stopBefore = phaseRun("before", atBefore, { M6_STANDIN_SIGINT_AT: "POST /api/v1/workspaces/" });
+  check(stopBefore.status === 1 && /stopped by a signal/.test(stopBefore.stdout) && stopBefore.signOuts === 1 && stopBefore.disconnects >= 1 && !existsSync(kept), `Ctrl-C in the first phase keeps no file, signs its session out and disconnects its agent: exit ${stopBefore.status}, ${stopBefore.signOuts} sign-out(s), ${stopBefore.disconnects} disconnect(s)`);
+  check(phaseRun("before", atBefore).status === 0 && existsSync(kept), "the first phase runs again for the second's Ctrl-C");
+  const keptSessionNow = readKept(kept).record.session;
+  const stopAfter = phaseRun("after", atAfter, { M6_STANDIN_SIGINT_AT: "/assign" });
+  check(stopAfter.status === 1 && /stopped by a signal/.test(stopAfter.stdout) && stopAfter.signOuts === 1 && stopAfter.disconnects === 1 && !existsSync(kept), `Ctrl-C in the second phase still signs the kept session out, disconnects its agent and deletes the file: exit ${stopAfter.status}, ${stopAfter.signOuts} sign-out(s), ${stopAfter.disconnects} disconnect(s)`);
+  check(secretFree(stopAfter, [keptSessionNow, keptSessionNow.split("=")[1]]), "and prints neither the secret nor the session");
 } finally {
   rmSync(work, { recursive: true, force: true });
 }

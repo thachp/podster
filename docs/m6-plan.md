@@ -880,8 +880,8 @@ node e2e/m6-staging.mjs --base-url https://gateway-staging.podster.dev --after-d
 
 - **Staging doesn't say which commit it runs to a signed-out caller.** No route, header or probe of `scripts/staging-probes` names it, and the run calls no Cloudflare API. So the person running the phases names it with `--deployed-commit`, as `scripts/deploy-staging` printed it ("deploying SHA"). The second phase refuses the commit the first phase was given, so it can't run without a deploy named between them. It can't check that the named commit is really what staging runs. A signed-out build marker on the gateway, written by `scripts/deploy-staging` and read by the probes, would let it; that's a gateway, deploy-script and contract change of its own.
 - **Why a session is kept.** The test sign-up makes a new person each time and can't sign one in again. The one exception is the fixed test operator, which the API's `OPERATORS` names, so the phases never ask for it. The first phase therefore keeps the owner's test session.
-- **The kept file** is `~/.podster/m6-staging/s04.json`, outside the repository, in a directory at mode 0700 and itself at 0600. It's written once, never over another file and never through a link, and a file or directory others can read is refused. It holds the session, the IDs of the owner, organization, room and task, the commit the first phase was given, how many of the room's events it read, and when it goes stale. It never holds the sign-up secret, and neither phase prints the session or the file's full path.
-- **When it's stale.** A test session ends by itself 2 hours after its sign-up and isn't renewed, so the file is stale 105 minutes after the sign-up, leaving the second phase 15 minutes. The second phase refuses a stale file and deletes it. The first phase refuses while an earlier file is still usable, and deletes a stale one.
+- **The kept file** is `~/.podster/m6-staging/s04.json`, outside the repository, in a directory at mode 0700 and itself at 0600. It's written whole to a temporary file beside it and then published with a hard link, so it's never written over another file or through a link. A file or directory others can read, or a link in their place, is refused. The first phase checks the directory and any file already there before it sends anything, and proves the write with a probe file made the same way, so a refusal never costs a sign-up. Either phase first deletes temporary files of the script's naming that a killed run left, since one may hold a session. It holds the session, the IDs of the owner, organization, room and task, the commit the first phase was given, how many of the room's events it read, and when it goes stale. It never holds the sign-up secret, and neither phase prints the session or the file's full path.
+- **When it's stale.** A test session ends by itself 2 hours after its sign-up and isn't renewed, so the file is stale 105 minutes after the sign-up, leaving the second phase 15 minutes. Before deleting a stale file, either phase first sends its session's sign-out, the one request a refusal sends. The second phase then refuses. The first phase refuses while an earlier file is still usable, and never deletes a file that isn't one of this script's.
 
 | ID | Phase | What it shows |
 | --- | --- | --- |
@@ -897,7 +897,9 @@ node e2e/m6-staging.mjs --base-url https://gateway-staging.podster.dev --after-d
 
 **The self-test runs both phases** against `e2e/m6-staging-standin.mjs`, one process after the other, with the stand-in's state kept in a file between them as staging's would be across a deploy. It covers:
 - a pass of each phase;
-- each refusal;
+- each refusal, and that the first phase's come before any request;
+- an agent whose disconnect fails, which stays on the clean-up list;
+- Ctrl-C in each phase, which still signs out, disconnects and, in the second, deletes the file;
 - a kept session the stand-in no longer accepts;
 - a stale file;
 - that neither the secret nor the session reaches the output.

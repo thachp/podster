@@ -79,8 +79,8 @@ async function healthy(opts: { org?: string; state?: string } = {}): Promise<Hea
     sql.exec("INSERT INTO app_label (label, current, created_at) VALUES ('rrlabel', 1, 1)");
     sql.exec("INSERT INTO release_config (singleton, enabled, version, release_epoch, set_by, set_at, updated_at) VALUES (1, 1, 3, 2, ?, 1, 1)", OWNER.id);
     sql.exec(
-      `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, task_id, requested_by, requested_at, approved_by, approved_at, updated_at)
-         VALUES (?, ?, ?, 'rrlabel', 3, 2, ?, ?, 1, ?, 1, 1)`, REL, SHA, opts.state ?? "queued", TASK, requester.id, OWNER.id);
+      `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, task_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
+         VALUES (?, ?, ?, 'rrlabel', 3, 2, ?, ?, 1, ?, 1, ?, 1)`, REL, SHA, opts.state ?? "queued", TASK, requester.id, OWNER.id, Date.now());
   });
   return { room, requester, admin, org };
 }
@@ -92,6 +92,8 @@ const trail = (room: string) => inRoom(room, (sql) => ({
   events: sql.exec("SELECT type, actor_id, subject_id, reason FROM event WHERE type LIKE 'release.%' ORDER BY seq").toArray(),
   audit: sql.exec("SELECT actor_id, action, target_id, prior_json, new_json FROM audit_event WHERE action LIKE 'release.%' ORDER BY seq").toArray(),
 }));
+/** Everything a pass could write beside the release's own row, which each test reads by itself: the outbox included. */
+const written = (room: string) => inRoom(room, (sql) => JSON.stringify(["release_config", "serve_state", "script_delete", "event", "audit_event", "outbox"].map((table) => sql.exec(`SELECT * FROM ${table}`).toArray())));
 const HOLDS = { status: 200, body: { release_id: REL, state: "queued", rechecked: true, reason: null } };
 const departs = (who: Who) => api({ ...who, departure: { person: who.id, org: who.org, left_at: Date.now() } }, "POST", "/v1/org-departures", {});
 /** Leaves statements for the room to run between what it read outside and its transaction. Test builds only. */
@@ -153,6 +155,7 @@ describe("the room's recheck of a release", () => {
     ["the requester's grant past its expiry", "requester_lost_authority", sql("UPDATE provider_grant SET expires_at = 2")],
     ["the requester's grant being for another repository", "requester_lost_authority", sql("UPDATE provider_grant SET provider_repo_id = provider_repo_id + 1")],
     ["the requester's grant being for another action", "requester_lost_authority", sql("UPDATE provider_grant SET action = 'merge'")],
+    ["the requester's grant being with another provider than the room's repository", "requester_lost_authority", sql("UPDATE provider_grant SET provider = 'another'")],
     ["the requester there only through a public claim", "requester_lost_authority", (h) => inRoom(h.room, (s) => void s.exec("UPDATE member SET joined_via = 'public', role = 'guest' WHERE principal_id = ?", h.requester.id))],
     ["the requester having left their organization, before the room has heard", "requester_lost_authority", (h) => departs(h.requester)],
     ["the grant's giver no longer an owner or admin", "requester_lost_authority", (h) => inRoom(h.room, (s) => void s.exec("UPDATE provider_grant SET delegated_by = ?", h.requester.id))],
@@ -217,10 +220,13 @@ describe("the room's recheck of a release", () => {
 
   /** Nothing was decided: the pass was refused as retryable, and the release, its events and its audit are as they were. */
   const undecided = async (h: Healthy, what: string) => {
+    const before = await written(h.room);
     const answer = await switchedOn(() => recheck(h.room));
     expect([answer.status, answer.body?.error?.code], what).toEqual([503, "standing_unknown"]);
     expect(await row(h.room), what).toEqual({ state: "queued", failure_code: null, finished: 0 });
     expect(await trail(h.room), what).toEqual({ events: [], audit: [] });
+    // Nothing at all: no event, no audit record, nothing queued, and nothing left in the outbox to send.
+    expect(await written(h.room), what).toBe(before);
   };
 
   it("fails while the whole content domain is stopped, and decides nothing when the stop can't be read", async () => {
@@ -260,6 +266,20 @@ describe("the room's recheck of a release", () => {
     const h = await healthy();
     // An older live `deploy` grant on another repository, from someone who gave nothing that counts.
     await inRoom(h.room, (s) => void s.exec("INSERT INTO provider_grant (id, principal_id, provider, provider_repo_id, action, delegated_by, created_at) VALUES ('pgr_older', ?, 'github', ?, 'deploy', ?, 0)", h.requester.id, REPO_ID + 5, h.requester.id));
+    expect(await switchedOn(() => recheck(h.room))).toEqual(HOLDS);
+    await alarmQuiet(stub(h.room));
+  });
+
+  it("can't be given two unrevoked grants for one repository and action, so the live one is the only one", async () => {
+    // An expired grant beside a newer live one would have to be two unrevoked rows, which the room's own index
+    // refuses. A grant is replaced by revoking it, and a revoked one is never read.
+    const h = await healthy();
+    const second = () => inRoom(h.room, (s) => void s.exec("INSERT INTO provider_grant (id, principal_id, provider, provider_repo_id, action, delegated_by, created_at) VALUES ('pgr_second', ?, 'github', ?, 'deploy', ?, 5)", h.requester.id, REPO_ID, OWNER.id));
+    await inRoom(h.room, (s) => void s.exec("UPDATE provider_grant SET expires_at = 2"));
+    await expect(second()).rejects.toThrow();
+    // Revoked and expired, with a live one given after it: the live one is used.
+    await inRoom(h.room, (s) => void s.exec("UPDATE provider_grant SET revoked_at = 3, revoked_by = ?", OWNER.id));
+    await second();
     expect(await switchedOn(() => recheck(h.room))).toEqual(HOLDS);
     await alarmQuiet(stub(h.room));
   });
@@ -311,24 +331,30 @@ describe("the room's recheck of a release", () => {
     // Between the questions asked of the others and the room's transaction, the room changes who they were about.
     const changes: [string, (h: Healthy) => string[]][] = [
       ["the approver", (h) => [`UPDATE release SET approved_by = '${h.admin.id}'`]],
-      ["the requester", (h) => [`UPDATE release SET requested_by = '${h.admin.id}'`]],
       // The requester alone: the new one holds the same grant from the same giver, so nothing else was asked about
       // anyone different. What was learned of the first requester must not be taken as said of the second.
       ["the requester, with the grant moved to the new one", (h) => [`UPDATE release SET requested_by = '${h.admin.id}'`, `UPDATE provider_grant SET principal_id = '${h.admin.id}'`]],
       ["the grant's giver", (h) => [`UPDATE provider_grant SET delegated_by = '${h.admin.id}'`]],
-      ["the grant itself, gone", () => ["DELETE FROM provider_grant"]],
       ["the room's organization", () => ["UPDATE workspace SET owner_org_id = 'org_rr_other'"]],
       // The delegation is held for a provider. What was read for one says nothing of another.
-      ["the provider the room's repository is with", () => ["UPDATE repo_link SET provider = 'another'"]],
+      ["the provider the room's repository is with", () => ["UPDATE repo_link SET provider = 'another'", "UPDATE provider_grant SET provider = 'another'"]],
     ];
     for (const [what, statements] of changes) {
       const h = await healthy();
       await between(h.room, ...statements(h));
-      const answer = await switchedOn(() => recheck(h.room));
-      expect([answer.status, answer.body?.error?.code], what).toEqual([503, "standing_unknown"]);
       // Nothing was decided: the release is as it was, and nothing was recorded.
-      expect(await row(h.room), what).toEqual({ state: "queued", failure_code: null, finished: 0 });
-      expect(await trail(h.room), what).toEqual({ events: [], audit: [] });
+      await undecided(h, what);
+      await alarmQuiet(stub(h.room));
+    }
+    // Where the change leaves someone failing on the room's own rows, that is a fact that was read: the release
+    // fails, whoever the outside answers were about. Neither new requester holds a grant.
+    for (const [what, statements] of [
+      ["the requester, who holds no grant", (h: Healthy) => [`UPDATE release SET requested_by = '${h.admin.id}'`]],
+      ["the grant itself, gone", () => ["DELETE FROM provider_grant"]],
+    ] as [string, (h: Healthy) => string[]][]) {
+      const h = await healthy();
+      await between(h.room, ...statements(h));
+      expect((await switchedOn(() => recheck(h.room))).body, what).toMatchObject({ state: "failed", reason: "requester_lost_authority" });
       await alarmQuiet(stub(h.room));
     }
     // Someone the room's rows made not worth asking about when the questions were asked, and do by the transaction:

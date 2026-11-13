@@ -3,7 +3,7 @@
 //! "Rerun policy and recheck authority, on every pass, in the room's transaction, against current state": a job that
 //! passed once doesn't keep its permission. This is that recheck and nothing else. It gathers every fact
 //! `podster_core::release::recheck` asks for, from current state, runs it, and **fails the release when it doesn't
-//! hold,** with core's own reason. It starts no upload and commits nothing live: those come on top of it.
+//! hold,** with core's own reason. Starting an upload and committing live are [`release_commit`]'s, on top of it.
 //!
 //! **Where each fact is read.**
 //! - **The room's own rows, inside the transaction:** archived, public, the public surface's and the app's suspension,
@@ -15,14 +15,20 @@
 //!   organization's own object; and, from each person's own `Principal`, whether the approver, the requester and the
 //!   grant's giver have left the organization their place here is held in. And the deployment's switch.
 //! - **Checked again inside:** each of those answers is about a named organization or person. Inside the transaction
-//!   the room reads who they are now, and if any differs from who was asked about, nothing is decided: the answer is
-//!   `standing_unknown`, and the next pass asks again.
+//!   the room reads who they are now, and an answer about anyone else says nothing of them.
 //!
 //! **A fact that couldn't be read is undecided, never failed.** Only a fact that was read and doesn't hold fails a
 //! release, which can't be undone. The stop unreadable, an organization's or a person's record that doesn't answer,
-//! an answer that isn't the shape expected, and someone the rows make worth asking about now who wasn't when the
-//! questions were asked, as when they were made an admin in between: each answers `standing_unknown`, which the job
-//! retries, and writes nothing.
+//! an answer that isn't the shape expected, an answer about someone the rows no longer name, and someone the rows
+//! make worth asking about now who wasn't when the questions were asked, as when they were made an admin in between:
+//! each is a fact that wasn't read.
+//!
+//! **What is read first, and what one unread fact can hide: nothing** (second PR). The release's own state is read
+//! before anything is asked of anyone, so one that has ended answers as ended with no outside read. The outside reads
+//! never stop at the first that fails to answer. And inside the transaction every unread fact is taken as holding
+//! while core decides: a failure core then finds comes from a fact that was read, and ends the release whatever else
+//! is unread. Only when nothing fails does an unread fact that matters make the pass `standing_unknown`, which the
+//! job retries, and which writes nothing.
 //!
 //! **Nothing here reads D1 or any read model.**
 //!
@@ -43,8 +49,7 @@
 use super::*;
 use crate::content_stop::{self, Stop};
 use podster_core::release::{
-    is_release_id, next_state, recheck, CommitRecord, Recheck, ReleaseEvent, ReleaseState,
-    RoomReleaseFacts,
+    is_release_id, recheck, CommitRecord, Recheck, ReleaseState, RoomReleaseFacts,
 };
 use podster_policy::release::{
     authorize_approval, delegation_holder, may_release_now, DeployGrant, ReleaseRoom,
@@ -54,50 +59,85 @@ use podster_policy::release::{
 /// The room's path for one pass of the recheck. Nothing outside the Worker reaches it, and nothing calls it yet.
 pub(crate) const INTERNAL_RELEASE_RECHECK: &str = "/internal/release-recheck";
 
-fn standing_unknown() -> ApiError {
+pub(super) fn standing_unknown() -> ApiError {
     ApiError::api(503, "standing_unknown")
 }
 
-/// One question asked of someone's own `Principal` before the room's transaction: who it was about, and whether they
+/// One question asked of someone's own `Principal` outside the room's transaction: who it was about, and whether they
 /// still hold. `who` is `None` when there was nobody to ask about. `asked` is whether their `Principal` was asked at
-/// all: nobody is asked about someone the room's rows didn't make worth asking about, and then `holds` is false.
+/// all: nobody is asked about someone the room's rows didn't make worth asking about. `holds` is `None` when they were
+/// asked and gave no answer that says either.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Asked {
     who: Option<String>,
     asked: bool,
-    holds: bool,
+    holds: Option<bool>,
 }
 
-/// Everything the recheck learns outside the room, before its transaction. Never taken from a request.
+/// Everything a pass learns outside the room. Never taken from a request. **Each fact is `None` when it couldn't be
+/// read,** and the reads never stop at the first that couldn't: a fact that was read and fails still fails the
+/// release, whatever else gave no answer.
 pub(super) struct Reads {
-    deployment_on: bool,
-    /// The stop, as the `Moderation` object said it. One that couldn't be read never gets this far.
-    stopped: bool,
+    deployment_on: Option<bool>,
+    /// The stop, as the `Moderation` object said it.
+    stopped: Option<bool>,
     /// The organization the delegation was read for, the provider it was read for, and whether the organization
     /// holds it. With no repository linked there is no provider to ask about, and nothing was asked.
     org: String,
     provider: Option<String>,
-    org_may_release: bool,
+    org_may_release: Option<bool>,
     approver: Asked,
     requester: Asked,
     giver: Asked,
 }
 
-/// The requester's live `deploy` grant on the room's linked repository, as the room's row has it. A grant on any other
-/// repository isn't looked at: with no repository linked, there is none.
+impl Reads {
+    /// Nothing read at all: every outside fact unknown. A pass given this decides only from the room's own rows, and
+    /// can fail a release on them but never hold.
+    pub(super) fn nothing() -> Reads {
+        let nobody = || Asked {
+            who: None,
+            asked: false,
+            holds: None,
+        };
+        Reads {
+            deployment_on: None,
+            stopped: None,
+            org: String::new(),
+            provider: None,
+            org_may_release: None,
+            approver: nobody(),
+            requester: nobody(),
+            giver: nobody(),
+        }
+    }
+}
+
+/// What one pass concludes. `Unknown` only when every fact that was read holds and at least one that matters wasn't.
+pub(super) enum Verdict {
+    Holds,
+    Fails(&'static str),
+    Unknown,
+}
+
+/// The requester's live `deploy` grant on the room's linked repository, as the room's row has it: not revoked, not
+/// past its expiry at `now`, for the action, and for the repository and the provider the room's link names. A grant
+/// on any other repository isn't looked at: with no repository linked, there is none. The room keeps at most one
+/// unrevoked grant for a principal, a repository and an action, so there is one such row or none.
 struct GrantRow {
     provider_repo_id: i64,
     delegated_by: String,
     expires_at: Option<i64>,
 }
 
-fn deploy_grant(sql: &SqlStorage, principal: &str) -> R<Option<GrantRow>> {
+fn deploy_grant(sql: &SqlStorage, principal: &str, now: i64) -> R<Option<GrantRow>> {
     Ok(rows(
         sql,
-        "SELECT provider_repo_id, delegated_by, expires_at FROM provider_grant
-           WHERE principal_id = ? AND action = ? AND revoked_at IS NULL
-             AND provider_repo_id = (SELECT provider_repo_id FROM repo_link) ORDER BY created_at, id LIMIT 1",
-        vec![principal.into(), DEPLOY_ACTION.into()],
+        "SELECT g.provider_repo_id, g.delegated_by, g.expires_at FROM provider_grant g
+           JOIN repo_link l ON l.provider_repo_id = g.provider_repo_id AND l.provider = g.provider
+           WHERE g.principal_id = ? AND g.action = ? AND g.revoked_at IS NULL AND (g.expires_at IS NULL OR g.expires_at > ?)
+           ORDER BY g.created_at, g.id LIMIT 1",
+        vec![principal.into(), DEPLOY_ACTION.into(), now.into()],
     )?
     .first()
     .and_then(|row| {
@@ -137,7 +177,7 @@ struct People {
     giver: Option<String>,
 }
 
-fn people(sql: &SqlStorage, release: &str) -> R<Option<People>> {
+fn people(sql: &SqlStorage, release: &str, now: i64) -> R<Option<People>> {
     let found = rows(
         sql,
         "SELECT requested_by, approved_by FROM release WHERE id = ?",
@@ -147,7 +187,7 @@ fn people(sql: &SqlStorage, release: &str) -> R<Option<People>> {
         return Ok(None);
     };
     let requester = text(&row["requested_by"]).unwrap_or_default();
-    let giver = deploy_grant(sql, &requester)?.map(|grant| grant.delegated_by);
+    let giver = deploy_grant(sql, &requester, now)?.map(|grant| grant.delegated_by);
     Ok(Some(People {
         approver: text(&row["approved_by"]),
         requester,
@@ -156,7 +196,7 @@ fn people(sql: &SqlStorage, release: &str) -> R<Option<People>> {
 }
 
 /// What the room and the others say of whether release may happen here at all, for policy and for core alike.
-fn room_facts(sql: &SqlStorage, reads: &Reads) -> R<RoomReleaseFacts> {
+fn room_facts(sql: &SqlStorage, deployment_on: bool, org_may_release: bool) -> R<RoomReleaseFacts> {
     let room = rows(
         sql,
         "SELECT status, visibility, suspended_at FROM workspace",
@@ -177,16 +217,17 @@ fn room_facts(sql: &SqlStorage, reads: &Reads) -> R<RoomReleaseFacts> {
     .is_empty();
     Ok(RoomReleaseFacts {
         release_on_in_room: enabled,
-        deployment_allows_release: reads.deployment_on,
+        deployment_allows_release: deployment_on,
         archived: status == ARCHIVED,
         // Nothing deletes a room yet. A status that is neither of the two there are would be one that had been.
         deleted: status != ACTIVE_ROOM && status != ARCHIVED,
         public: room["visibility"].as_str() == Some("public"),
-        // Nothing deletes an organization yet.
+        // Nothing deletes an organization, so there is nothing that could say one was: no object records it and no
+        // command does it. Whatever first deletes one owes this fact its source, and the trigger that unpublishes.
         organization_exists: true,
         public_surface_suspended: !room["suspended_at"].is_null(),
         app_suspended: takedown::app_suspended(sql)?,
-        organization_may_release: reads.org_may_release,
+        organization_may_release: org_may_release,
         repository_ready,
         // Set by the caller, from the requester's own standing: see `gather`.
         someone_may_release: false,
@@ -213,38 +254,63 @@ fn as_u64(value: &Value) -> u64 {
     int(value).max(0) as u64
 }
 
-/// Gathers every fact, inside the room's transaction, from the room's rows now and what was read outside. `Err` with
-/// `standing_unknown` when what was read outside isn't about who the rows name now.
-fn gather(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) -> R<Gathered> {
+/// What an answer from outside says of whoever the room's rows name now: `Some` if it is about them and says whether
+/// they hold, `None` if it says nothing of them. It says nothing when it was about someone else, when their
+/// `Principal` gave no answer, and when they weren't asked though the rows make them worth asking about now, as someone
+/// made an admin, or added to the room, since the questions were asked.
+fn settled(
+    sql: &SqlStorage,
+    answer: &Asked,
+    now_who: Option<&str>,
+    authority_only: bool,
+) -> R<Option<bool>> {
+    if answer.who.as_deref() != now_who {
+        return Ok(None);
+    }
+    let Some(who) = now_who else {
+        // Nobody to ask about, and nobody holds.
+        return Ok(Some(false));
+    };
+    if !answer.asked {
+        return Ok(match worth_asking(sql, who, authority_only)? {
+            Some(_) => None,
+            None => Some(false),
+        });
+    }
+    Ok(answer.holds)
+}
+
+/// Gathers every fact, inside the room's transaction, from the room's rows now and what was read outside. The second
+/// value is whether a fact that matters is unknown.
+///
+/// **An unknown fact is taken as holding, and remembered.** Every unknown is assumed in the direction that lets the
+/// release go on, so a failure core then finds can only come from a fact that was read: it stands, whatever else is
+/// unknown. If core finds none, the remembered unknown makes the pass undecided. An unknown about a person is only
+/// remembered when it matters: someone who fails on the room's own rows fails, whatever their `Principal` would say.
+fn gather(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) -> R<(Gathered, bool)> {
     let id = release["id"].as_str().unwrap_or_default();
     let People {
         approver,
         requester,
         giver,
-    } = people(sql, id)?.ok_or_else(ApiError::not_found)?;
-    // Each answer from outside is about someone. If the rows name someone else now, it answers nothing.
-    if reads.approver.who != approver
-        || reads.requester.who.as_deref() != Some(requester.as_str())
-        || reads.giver.who != giver
-        || reads.org != room_owner_org(sql)?
-        || reads.provider != linked_provider(sql)?
-    {
-        return Err(standing_unknown());
-    }
-    // And each must have been asked, if the rows make them worth asking about now. Someone made an admin, or added
-    // to the room, since the questions were asked wasn't: what is known of them is nothing, which is undecided.
-    for (answer, authority_only) in [
-        (&reads.approver, true),
-        (&reads.requester, false),
-        (&reads.giver, true),
-    ] {
-        if let Some(who) = &answer.who {
-            if !answer.asked && worth_asking(sql, who, authority_only)?.is_some() {
-                return Err(standing_unknown());
-            }
-        }
-    }
-    let mut room = room_facts(sql, reads)?;
+    } = people(sql, id, now)?.ok_or_else(ApiError::not_found)?;
+    let mut unknown = false;
+    let mut or_assume = |fact: Option<bool>, assumed: bool| {
+        fact.unwrap_or_else(|| {
+            unknown = true;
+            assumed
+        })
+    };
+    let deployment_on = or_assume(reads.deployment_on, true);
+    let stopped = or_assume(reads.stopped, false);
+    // The delegation was read for an organization and a provider. Read for another, it says nothing of this one.
+    let about_this_room =
+        reads.org == room_owner_org(sql)? && reads.provider == linked_provider(sql)?;
+    let org_may_release = or_assume(reads.org_may_release.filter(|_| about_this_room), true);
+    let approver_holds = settled(sql, &reads.approver, approver.as_deref(), true)?;
+    let requester_holds = settled(sql, &reads.requester, Some(&requester), false)?;
+    let giver_holds = settled(sql, &reads.giver, giver.as_deref(), true)?;
+    let mut room = room_facts(sql, deployment_on, org_may_release)?;
     let link_repo_id = rows(sql, "SELECT provider_repo_id FROM repo_link", vec![])?
         .first()
         .map_or(0, |link| int(&link["provider_repo_id"]));
@@ -270,10 +336,10 @@ fn gather(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) -> R<Gathe
         .map_or((parse_kind_of(&requester), Role::None), |r| {
             (r.kind, r.role)
         });
-    let grant = deploy_grant(sql, &requester)?;
+    let grant = deploy_grant(sql, &requester, now)?;
     let holder = match (&grant, &giver) {
         (Some(_), Some(giver)) => repositories::recorded_giver(sql, giver)?
-            .and_then(|g| delegation_holder(giver, g.kind, g.role, reads.giver.holds)),
+            .and_then(|g| delegation_holder(giver, g.kind, g.role, giver_holds.unwrap_or(true))),
         _ => None,
     };
     let grant = grant.as_ref().map(|g| DeployGrant {
@@ -294,7 +360,11 @@ fn gather(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) -> R<Gathe
     };
     let requester_may_release_now = may_release_now(&requester, kind, role, &standing).is_ok()
         && kind == PrincipalKind::Person
-        && reads.requester.holds;
+        && requester_holds.unwrap_or(true);
+    // Unknown matters only where the answer would be yes on everything that is known.
+    if requester_may_release_now && (requester_holds.is_none() || giver_holds.is_none()) {
+        unknown = true;
+    }
     // The recheck asks whether anyone at all may release only after it has asked whether the requester may, so the
     // requester's own answer is the one that can matter here. Who else may is the unpublish trigger's question.
     room.someone_may_release = requester_may_release_now;
@@ -310,19 +380,31 @@ fn gather(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) -> R<Gathe
                 role: record.as_ref().map_or(Role::None, |r| r.role),
                 scopes: Scopes::PUBLIC_PARTICIPANT,
             };
-            authorize_approval(&caller, reads.approver.holds, &release_room).is_ok()
+            authorize_approval(&caller, approver_holds.unwrap_or(true), &release_room).is_ok()
         }
         None => false,
     };
+    if approver_may_approve_now && approver_holds.is_none() {
+        unknown = true;
+    }
 
     // The commit, by the room's own merge record for the release's task: Podster's merge job merged it and read it
     // back, in the repository that record names, and the task is completed.
     //
-    // "Merged by Podster" is two things in that record, and they suffice. `succeeded` is written in one place only,
-    // by Podster's merge job, on core's proof that it read the pull request back as merged with the default branch
-    // holding the reviewed commit. `merge_called_at` says that job itself called the merge: a merge someone else
-    // made is recorded by the watcher with neither. `merged_by_id` is who the provider says merged, and the room
-    // keeps no ID of the merge App's own account to compare it with, so it adds nothing here.
+    // "Merged by Podster" is two things in that record. `succeeded` is written in one place only, by Podster's merge
+    // job, on core's proof that it read the pull request back as merged with the default branch holding the reviewed
+    // commit. `merge_called_at` says that job itself called the merge.
+    //
+    // **What the two don't say is whose call merged it.** If Podster's call is on record but its outcome wasn't
+    // known, and a person then merged the same pull request by hand, the job reads it back as merged and records
+    // `succeeded` all the same: that reads here as merged by Podster. `merged_by_id` is who the provider says merged,
+    // and the room keeps no ID of the merge App's own account to compare it with.
+    //
+    // **A release doesn't need to care, and this doesn't.** What is released is the commit, and in that case it is
+    // still the one a reviewer accepted, on the default branch of the room's own repository, for a completed task,
+    // through a merge Podster itself decided to make and called, with every check it makes before calling. Whose
+    // request reached the provider first changes nothing that is published. A commit merged with no call of
+    // Podster's on record is refused, as before.
     let task = text(&release["task_id"]).unwrap_or_default();
     let change = rows(
         sql,
@@ -353,9 +435,9 @@ fn gather(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) -> R<Gathe
         vec![],
     )?;
     let config = config.first();
-    Ok(Gathered {
+    let gathered = Gathered {
         room,
-        domain_stopped: reads.stopped,
+        domain_stopped: stopped,
         config_version_now: config.map_or(0, |c| as_u64(&c["version"])),
         config_version_asked: as_u64(&release["config_version"]),
         requester_may_release_now,
@@ -367,33 +449,42 @@ fn gather(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) -> R<Gathe
         // An epoch the room doesn't have is never the one a release started under.
         epoch_now: config.map_or(u64::MAX, |c| as_u64(&c["release_epoch"])),
         epoch_at_start: as_u64(&release["release_epoch"]),
-    })
+    };
+    Ok((gathered, unknown))
 }
 
-/// One pass, inside the room's transaction: the release's state, every fact, core's recheck, and, if it doesn't hold,
-/// the release failed with core's reason, audited and told to the room's managers. A release that has ended, or isn't
-/// at a step the job owns, is left exactly as it is. Answers `{ release_id, state, rechecked, reason }`.
-pub(super) fn pass(sql: &SqlStorage, release_id: &str, reads: &Reads, now: i64) -> R<Value> {
-    let found = rows(
+/// A release's row, as the commands here read it.
+pub(super) const RELEASE_COLUMNS: &str = "id, state, task_id, commit_sha, config_version, release_epoch, label, script_name, upload_started_at";
+
+pub(super) fn release_row(sql: &SqlStorage, release_id: &str) -> R<Option<Value>> {
+    Ok(rows(
         sql,
-        "SELECT id, state, task_id, commit_sha, config_version, release_epoch FROM release WHERE id = ?",
+        &format!("SELECT {RELEASE_COLUMNS} FROM release WHERE id = ?"),
         vec![release_id.into()],
-    )?;
-    let release = found.first().ok_or_else(ApiError::not_found)?;
-    let state = release["state"]
+    )?
+    .into_iter()
+    .next())
+}
+
+pub(super) fn state_of(release: &Value) -> R<ReleaseState> {
+    release["state"]
         .as_str()
         .and_then(|name| ReleaseState::ALL.into_iter().find(|s| s.name() == name))
-        .ok_or_else(|| ApiError::internal("a release in no state"))?;
-    let unchanged = |rechecked: bool| json!({ "release_id": release_id, "state": state.name(), "rechecked": rechecked, "reason": Value::Null });
-    // The job owns a release once it is approved and until the room has committed it live. Before that there is no
-    // approver to ask about. After it, ending the release also means setting hosts back, which isn't this command's.
-    if !matches!(
+        .ok_or_else(|| ApiError::internal("a release in no state"))
+}
+
+/// Whether the job owns a release: once it is approved and until the room has committed it live. Before that there is
+/// no approver to ask about. After it, the release is the room's and its marker's.
+pub(super) fn job_owns(state: ReleaseState) -> bool {
+    matches!(
         state,
         ReleaseState::Queued | ReleaseState::Uploading | ReleaseState::Uncertain
-    ) {
-        return Ok(unchanged(false));
-    }
-    let facts = gather(sql, release, reads, now)?;
+    )
+}
+
+/// Every fact, and core's recheck of them, inside the room's transaction.
+pub(super) fn judge(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) -> R<Verdict> {
+    let (facts, unknown) = gather(sql, release, reads, now)?;
     let commit = facts.commit.as_ref().map(|c| CommitRecord {
         sha: &c.0,
         provider_repo_id: c.1,
@@ -401,87 +492,78 @@ pub(super) fn pass(sql: &SqlStorage, release_id: &str, reads: &Reads, now: i64) 
         confirmed_on_default_branch: c.3,
         task_completed: c.4,
     });
-    let failure = match recheck(&Recheck {
-        room: facts.room,
-        domain_stopped: facts.domain_stopped,
-        config_version_now: facts.config_version_now,
-        config_version_asked: facts.config_version_asked,
-        requester_may_release_now: facts.requester_may_release_now,
-        approver_may_approve_now: facts.approver_may_approve_now,
-        reviewer_rule_holds: facts.reviewer_rule_holds,
-        commit: commit.as_ref(),
-        asked_sha: &facts.asked_sha,
-        room_repo_id: facts.room_repo_id,
-        epoch_now: facts.epoch_now,
-        epoch_at_start: facts.epoch_at_start,
-    }) {
-        Ok(()) => return Ok(unchanged(true)),
-        Err(failure) => failure,
-    };
-    let failed = next_state(state, ReleaseEvent::Fail)
-        .map_err(|_| ApiError::internal("a release the job owns that can't fail"))?;
-    let reason = failure.code();
-    exec(
-        sql,
-        "UPDATE release SET state = ?, failure_code = ?, finished_at = ?, updated_at = ? WHERE id = ?",
-        vec![
-            failed.name().into(),
-            reason.into(),
-            now.into(),
-            now.into(),
-            release_id.into(),
-        ],
-    )?;
-    audit_as(
-        sql,
-        moderation::PODSTER,
-        moderation::PODSTER_KIND,
-        "release.failed",
-        release_id,
-        Some(json!({ "state": state.name() }).to_string()),
-        Some(json!({ "state": failed.name(), "reason": reason }).to_string()),
-        now,
-    )?;
-    // The event names the release it is about, by its ID, and the reason, by its code.
-    store::record_event_about(
-        sql,
-        "release.failed",
-        moderation::PODSTER,
-        Some(release_id),
-        None,
-        &Transition {
-            reason: Some(reason),
-            ..Transition::NONE
-        },
-        roles::room_managers(sql, moderation::PODSTER)?,
-        now,
-    )?;
     Ok(
-        json!({ "release_id": release_id, "state": failed.name(), "rechecked": true, "reason": reason }),
+        match recheck(&Recheck {
+            room: facts.room,
+            domain_stopped: facts.domain_stopped,
+            config_version_now: facts.config_version_now,
+            config_version_asked: facts.config_version_asked,
+            requester_may_release_now: facts.requester_may_release_now,
+            approver_may_approve_now: facts.approver_may_approve_now,
+            reviewer_rule_holds: facts.reviewer_rule_holds,
+            commit: commit.as_ref(),
+            asked_sha: &facts.asked_sha,
+            room_repo_id: facts.room_repo_id,
+            epoch_now: facts.epoch_now,
+            epoch_at_start: facts.epoch_at_start,
+        }) {
+            // A failure stands whatever is unknown: every unknown was taken as holding.
+            Err(failure) => Verdict::Fails(failure.code()),
+            Ok(()) if unknown => Verdict::Unknown,
+            Ok(()) => Verdict::Holds,
+        },
     )
+}
+
+/// One pass, inside the room's transaction: releases past their hour ended, then this release's state, every fact,
+/// core's recheck, and, if it doesn't hold, the release failed with core's reason ([`release_commit::fail`]). A release
+/// that has ended, or isn't at a step the job owns, is left exactly as it is. `standing_unknown` when nothing failed
+/// and a fact that matters couldn't be read. Answers `{ release_id, state, rechecked, reason }`.
+pub(super) fn pass(sql: &SqlStorage, release_id: &str, reads: &Reads, now: i64) -> R<Value> {
+    release_commit::expire_uploads(sql, now)?;
+    let release = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
+    let state = state_of(&release)?;
+    if !job_owns(state) {
+        return Ok(answer(&release, false, None));
+    }
+    match judge(sql, &release, reads, now)? {
+        Verdict::Holds => Ok(answer(&release, true, None)),
+        Verdict::Unknown => Err(standing_unknown()),
+        Verdict::Fails(reason) => {
+            release_commit::fail(sql, release_id, reason, now)?;
+            let after = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
+            Ok(answer(&after, true, Some(reason)))
+        }
+    }
+}
+
+/// `{ release_id, state, rechecked, reason }`, from the release's row.
+pub(super) fn answer(release: &Value, rechecked: bool, reason: Option<&str>) -> Value {
+    json!({ "release_id": release["id"], "state": release["state"], "rechecked": rechecked, "reason": reason })
 }
 
 impl Workspace {
     /// Asks one person's own `Principal` whether they have left the organization their place in this room is held in,
     /// since that place began. Nobody is asked about someone the room's rows don't record, about an agent, or, with
     /// `authority_only`, about a person who isn't the room's owner or an admin: none of them holds, whatever a
-    /// `Principal` would say. An answer that isn't a clear yes or no is `standing_unknown`.
+    /// `Principal` would say. An answer that isn't a clear yes or no is no answer: `holds` is `None`.
     async fn still_holds(&self, who: Option<&str>, authority_only: bool) -> R<Asked> {
         let Some(who) = who else {
             return Ok(Asked {
                 who: None,
                 asked: false,
-                holds: false,
+                holds: Some(false),
             });
         };
         let sql = self.state.storage().sql();
         let record = worth_asking(&sql, who, authority_only)?;
         let asked = record.is_some();
         let holds = match record {
-            Some(record) => !principal::departed_since(&self.env, who, &record.org, record.since)
+            Some(record) => principal::departed_since(&self.env, who, &record.org, record.since)
                 .await
-                .map_err(|_| standing_unknown())?,
-            None => false,
+                .ok()
+                .map(|departed| !departed),
+            None => Some(false),
         };
         Ok(Asked {
             who: Some(who.to_owned()),
@@ -490,11 +572,12 @@ impl Workspace {
         })
     }
 
-    /// Everything a pass asks outside the room, before its transaction. `not_found` for a release the room doesn't
-    /// have; `standing_unknown` if an organization or a person couldn't answer.
+    /// Everything a pass asks outside the room. `not_found` for a release the room doesn't have. **A fact that
+    /// couldn't be read is `None`, and the rest are still read:** one object that is down never hides what another
+    /// said.
     pub(super) async fn release_reads(&self, release_id: &str) -> R<Reads> {
         let sql = self.state.storage().sql();
-        let people = people(&sql, release_id)?.ok_or_else(ApiError::not_found)?;
+        let people = people(&sql, release_id, now_ms())?.ok_or_else(ApiError::not_found)?;
         let org = room_owner_org(&sql)?;
         // The delegation is held for a provider, and the room's linked repository says which. With none linked there
         // is no provider to name: nothing is asked, and the room's own rows fail the release for having no repository.
@@ -503,9 +586,9 @@ impl Workspace {
             Some(provider) => {
                 let delegation = principal::org_delegation(&self.env, &org, provider)
                     .await
-                    .map_err(|_| standing_unknown());
+                    .ok();
                 // Test builds only: a test gives the answer the organization's object is taken to have given, to
-                // show an answer that can't be read, or isn't a yes or a no, decides nothing.
+                // show an answer that isn't a yes or a no decides nothing.
                 #[cfg(feature = "failpoints")]
                 let delegation = match rows(
                     &sql,
@@ -518,26 +601,22 @@ impl Workspace {
                     false => rows(&sql, "SELECT answer FROM test_release_delegation_answer", vec![])?
                         .first()
                         .and_then(|row| row["answer"].as_str())
-                        .and_then(|answer| serde_json::from_str::<Value>(answer).ok())
-                        .ok_or_else(standing_unknown),
+                        .and_then(|answer| serde_json::from_str::<Value>(answer).ok()),
                 };
                 // An organization with no record of its own holds the delegation: that is M5's default, restated
                 // by the organization's object, which answers `granted: true` for one. Anything but a yes or a no
                 // is no answer.
-                delegation?["granted"]
-                    .as_bool()
-                    .ok_or_else(standing_unknown)?
+                delegation.and_then(|answer| answer["granted"].as_bool())
             }
-            None => true,
+            None => Some(true),
         };
-        // The stop that can't be read is undecided: the pass is refused and retried, and nothing is written.
         let stopped = match content_stop::read_from(&self.env).await {
-            Stop::Clear => false,
-            Stop::Stopped => true,
-            Stop::Unreadable => return Err(standing_unknown()),
+            Stop::Clear => Some(false),
+            Stop::Stopped => Some(true),
+            Stop::Unreadable => None,
         };
         Ok(Reads {
-            deployment_on: crate::releases::switched_on(&self.env).await,
+            deployment_on: Some(crate::releases::switched_on(&self.env).await),
             stopped,
             org,
             provider,
@@ -548,9 +627,9 @@ impl Workspace {
         })
     }
 
-    /// `{ release_id }`: one pass of the recheck for one release (M6 step 5). Nothing calls it yet: the release job
-    /// will, before each thing it does.
-    pub(super) async fn release_recheck(&self, mut req: Request) -> R<Value> {
+    /// The release a command names, and its state as it is before anything is asked of anyone: a release that has
+    /// ended, or isn't the job's, is answered as such with no outside read at all.
+    pub(super) async fn named_release(&self, req: &mut Request) -> R<(String, Value)> {
         let sql = self.state.storage().sql();
         if !store::is_initialized(&sql)? {
             return Err(ApiError::not_found());
@@ -563,10 +642,15 @@ impl Workspace {
             .filter(|id| is_release_id(id))
             .ok_or_else(ApiError::invalid_argument)?
             .to_owned();
-        let reads = self.release_reads(&release_id).await?;
-        // Test builds only: a test changes the room between what was read outside and the transaction, at exactly
-        // this point, by leaving statements for the room to run here.
-        #[cfg(feature = "failpoints")]
+        let release = release_row(&sql, &release_id)?.ok_or_else(ApiError::not_found)?;
+        Ok((release_id, release))
+    }
+
+    /// Test builds only: a test changes the room between what was read outside and the transaction, at exactly this
+    /// point, by leaving statements for the room to run here.
+    #[cfg(feature = "failpoints")]
+    pub(super) fn test_between_reads(&self) -> R<()> {
+        let sql = self.state.storage().sql();
         if !rows(
             &sql,
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_release_between_reads'",
@@ -583,15 +667,42 @@ impl Workspace {
             }
             exec(&sql, "DROP TABLE test_release_between_reads", vec![])?;
         }
+        Ok(())
+    }
+
+    /// Runs one release command's transaction, arms the room's alarm, and answers what the transaction did.
+    pub(super) async fn release_transaction(
+        &self,
+        run: impl FnOnce(&SqlStorage) -> R<Value> + 'static,
+    ) -> R<Value> {
         let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
         let slot = out.clone();
-        let store = sql.clone();
+        let store = self.state.storage().sql();
         transaction_sync(&self.state, move || {
-            *slot.borrow_mut() = Some(pass(&store, &release_id, &reads, now_ms())?);
+            *slot.borrow_mut() = Some(run(&store)?);
             Ok(())
         })?;
         self.arm(false, false).await?;
         let answer = out.borrow_mut().take();
-        answer.ok_or_else(|| ApiError::internal("release recheck answered nothing"))
+        answer.ok_or_else(|| ApiError::internal("a release command answered nothing"))
+    }
+
+    /// `{ release_id }`: one pass of the recheck for one release (M6 step 5). Nothing calls it yet: the release job
+    /// will, before each thing it does.
+    ///
+    /// **What is read first, and why.** The release's own state, from the room, before anything is asked of anyone:
+    /// one that has ended, or isn't the job's, answers as such at once. Then every outside fact, none of them stopping
+    /// the others. Then the room's transaction, where a fact that was read and fails ends the release whatever
+    /// couldn't be read; only when nothing fails does an unread fact make the pass undecided.
+    pub(super) async fn release_recheck(&self, mut req: Request) -> R<Value> {
+        let (release_id, release) = self.named_release(&mut req).await?;
+        if !job_owns(state_of(&release)?) {
+            return Ok(answer(&release, false, None));
+        }
+        let reads = self.release_reads(&release_id).await?;
+        #[cfg(feature = "failpoints")]
+        self.test_between_reads()?;
+        self.release_transaction(move |sql| pass(sql, &release_id, &reads, now_ms()))
+            .await
     }
 }

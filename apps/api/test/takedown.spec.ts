@@ -279,10 +279,11 @@ describe("an operator's suspension of an app", () => {
     expect(await serveRows(a.room)).toEqual([{ host: a.host, kind: "default", label: null, label_current: null, release_id: null, script_name: null, version: 7, closed: 0, flight_version: null, flight_before: null }]);
     expect(await all(a.room, "SELECT cause, label, release_epoch, scripts_gone_at FROM unpublish")).toEqual([{ cause: "app_suspended", label: a.label, release_epoch: 5, scripts_gone_at: null }]);
     expect(await one(a.room, "SELECT suspended_at IS NOT NULL AS suspended, suspension_reason FROM app_label")).toEqual({ suspended: 1, suspension_reason: "abuse" });
-    // The releases that were up are unpublished. The one still queued is left to the job that owns it: the epoch it
-    // started under is gone, so it can never go live.
-    expect(await all(a.room, "SELECT id, state, release_epoch FROM release ORDER BY id")).toEqual([
-      { id: rel(1), state: "replaced", release_epoch: 4 }, { id: rel(2), state: "unpublished", release_epoch: 4 }, { id: rel(3), state: "unpublished", release_epoch: 4 }, { id: rel(4), state: "queued", release_epoch: 4 },
+    // The releases that were up are unpublished. The one still queued ends failed in the same transaction (step 5):
+    // the epoch it started under is gone, so it could never go live.
+    expect(await all(a.room, "SELECT id, state, failure_code, release_epoch FROM release ORDER BY id")).toEqual([
+      { id: rel(1), state: "replaced", failure_code: null, release_epoch: 4 }, { id: rel(2), state: "unpublished", failure_code: null, release_epoch: 4 },
+      { id: rel(3), state: "unpublished", failure_code: null, release_epoch: 4 }, { id: rel(4), state: "failed", failure_code: "release_epoch_moved", release_epoch: 4 },
     ]);
     // Every script core names is owed a delete: what a host served, what was kept, and the flight's own and the one before it.
     expect(await deleteRows(a.room)).toEqual([a.kept, a.served, a.flight].sort().map((script_name) => ({ script_name, unpublish_epoch: 5, attempts: 0, last_code: null, gone: 0 })));
@@ -417,6 +418,57 @@ describe("an operator's suspension of an app", () => {
 });
 
 describe("the room's applier and its delete job", () => {
+  it("write no entry for a release the room hasn't recorded live, and keep an uploading release's script from the delete job", async () => {
+    // Step 5: a commit stages a release's script on the room's hosts first, and records it live only after it has
+    // asked everyone again. Until then the applier must ask the provider nothing for that host.
+    const a = await app({ plain: true });
+    const staged = `${a.label}.${rel(5)}`;
+    await inRoom(a.room, (sql) => {
+      sql.exec(
+        `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
+           VALUES (?, ?, 'uploading', ?, 1, 4, ?, ?, 'per_td_owner', 1, 'per_td_owner', 1, ?, 1)`, rel(5), SHA, a.label, staged, rel(5), Date.now());
+      sql.exec("UPDATE serve_state SET release_id = ?, script_name = ?, version = 6, flight_version = 6, flight_before = ?", rel(5), staged, a.served);
+      sql.exec("UPDATE release_config SET in_flight_release = ?, in_flight_script = ?, in_flight_epoch = 4, in_flight_at = 1", rel(5), staged);
+    });
+    await fake("/seed", { scripts: [staged] });
+    await pass(a.room);
+    await due(a.room);
+    await pass(a.room);
+    let state = await held();
+    expect([state.entries[a.host], callsFor(state, a)]).toEqual([a.served, []]);
+    expect(await applyRows(a.room)).toEqual([{ host: a.host, applied_version: 5, applied_script: a.served, attempts: 2, last_code: "release_not_confirmed" }]);
+    // Recorded live, as the commit's confirm records it, with the host's wait cleared: the next pass writes the entry.
+    await inRoom(a.room, (sql) => {
+      sql.exec("UPDATE release SET state = 'live' WHERE id = ?", rel(5));
+      sql.exec("UPDATE serve_apply SET attempts = 0, attempt_version = NULL, next_attempt_at = NULL, last_code = NULL");
+    });
+    await pass(a.room);
+    state = await held();
+    expect(state.entries[a.host]).toBe(staged);
+    expect(callsFor(state, a)).toEqual(["entry.put host 200", "entry.get host 200"]);
+
+    // The delete job, asked again at the delete itself: a script queued while its release was at another step, as a
+    // reconcile queues an uncertain release's, isn't deleted while that release is uploading within its hour.
+    const b = await app({ plain: true });
+    const uploading = `${b.label}.${rel(5)}`;
+    await inRoom(b.room, (sql) => {
+      sql.exec(
+        `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
+           VALUES (?, ?, 'uploading', ?, 1, 4, ?, ?, 'per_td_owner', 1, 'per_td_owner', 1, ?, 1)`, rel(5), SHA, b.label, uploading, rel(5), Date.now());
+      sql.exec("INSERT INTO script_delete (script_name, label, queued_at, next_attempt_at) VALUES (?, ?, 2, 2)", uploading, b.label);
+    });
+    await fake("/seed", { scripts: [uploading] });
+    await pass(b.room);
+    state = await held();
+    expect([state.scripts.includes(uploading), callsFor(state, b)]).toEqual([true, []]);
+    expect((await deleteRows(b.room)).map((row: any) => [row.attempts, row.last_code, row.gone])).toEqual([[0, "entry_not_removed_yet", 0]]);
+    // Past its hour the script is no longer kept, and goes.
+    await inRoom(b.room, (sql) => sql.exec("UPDATE release SET upload_started_at = ? WHERE id = ?", Date.now() - 60 * 60 * 1000, rel(5)));
+    await pass(b.room);
+    expect((await held()).scripts).not.toContain(uploading);
+    for (const room of [a.room, b.room]) await alarmQuiet(stub(room));
+  });
+
   it("do nothing with no provider configured, and leave the work recorded as owed", async () => {
     const a = await app();
     await inRoom(a.room, (sql) => sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)"));
@@ -1659,7 +1711,13 @@ describe("the two reconciles", () => {
     await fake("/reset", {});
     await fake("/seed", { scripts: seeded, entries: { [a.host]: a.served } });
     const summary = await reconcile("scripts");
-    expect(summary).toMatchObject({ ran: true, code: "ok", listed: 10, changed: 3, unanswered: 0 });
+    // One the pass itself started: the script no release names. The other two the room queued too, as its own act: at
+    // the pass's first question it ended the two releases whose uploads had outlived their hour (step 5), and a
+    // failed release's script is queued with it.
+    expect(summary).toMatchObject({ ran: true, code: "ok", listed: 10, changed: 1, unanswered: 0 });
+    expect(await all(a.room, "SELECT id, state, failure_code FROM release WHERE id IN (?, ?, ?) ORDER BY id", rel(6), rel(7), rel(8))).toEqual([
+      { id: rel(6), state: "failed", failure_code: "release_upload_expired" }, { id: rel(7), state: "failed", failure_code: "release_upload_expired" }, { id: rel(8), state: "uploading", failure_code: null },
+    ]);
     // The room queued exactly three, under no unpublish: the uncertain one, the upload that outlived its hour, and
     // the one no release names.
     expect((await deleteRows(a.room)).map((row: any) => [row.script_name, row.unpublish_epoch])).toEqual([script(6), script(7), script(9)].sort().map((name) => [name, null]));
@@ -1669,8 +1727,9 @@ describe("the two reconciles", () => {
     // Only those three were ever asked to be deleted, each by the room's own job.
     expect([...new Set(state.calls.filter((call) => call.op === "script.delete").map((call) => call.name))].sort()).toEqual([script(6), script(7), script(9)].sort());
     expect((await deleteRows(a.room)).map((row: any) => row.gone)).toEqual([1, 1, 1]);
-    // Each delete the pass started is on the operators' record, by the script's name, beside what was left alone.
-    const queued = [script(6), script(7), script(9)].map((name) => `script_delete_queued ${name}`);
+    // The delete the pass started is on the operators' record, by the script's name, beside what was left alone. The
+    // two failed releases' scripts aren't: each is on the room's own record, as its release's failure.
+    const queued = [script(9)].map((name) => `script_delete_queued ${name}`);
     expect(await found()).toEqual([...queued, ...foreign.map((name) => `script_foreign_name ${name}`), ...noRoom.map((name) => `script_without_room ${name}`)].sort());
     // A script the room counted as gone is in the namespace after all: it is owed again, and goes again.
     await fake("/seed", { scripts: [script(9)] });

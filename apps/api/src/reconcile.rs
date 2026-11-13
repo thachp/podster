@@ -65,9 +65,15 @@ CREATE TABLE IF NOT EXISTS reconcile_failure (kind TEXT NOT NULL CHECK (kind IN 
 const FAILURES_TOLD: i64 = 3;
 /// Keys and scripts whose failures are counted at once. Past it a new one isn't counted until one leaves.
 const MAX_FAILING: i64 = 1000;
-/// The one kind of finding with room of its own: a deletion a reconcile started. Whatever fills the rest of the
-/// record, an outage among it, can't keep one of these out.
-const QUEUED_CODE: &str = "script_delete_queued";
+/// The kinds of finding with room of their own, 1,000 rows each: a deletion a reconcile started, a host a room
+/// refused, and the stop key not as the stop says. Whatever fills the rest of the record, three passes of an outage
+/// that writes a thousand keys that keep failing among it, can't keep one of these out.
+const OWN_ROOM: [&str; 4] = [
+    "script_delete_queued",
+    "host_refused",
+    "stop_key_differs",
+    "stop_key_without_stop",
+];
 /// What a room that gave no answer is counted as, in this object's own record. It is no answer to any caller.
 const UNANSWERED: &str = "room_unanswered";
 
@@ -153,22 +159,27 @@ fn record(sql: &SqlStorage, code: &str, subject: &str, detail: Option<&str>, now
         vec![code.into(), subject.as_str().into()],
     )?
     .is_empty();
-    // Deletions a reconcile started have room of their own, and everything else shares the rest: each up to the cap.
-    let queued = i64::from(code == QUEUED_CODE);
-    let held = rows(
-        sql,
-        "SELECT count(*) AS n FROM takedown_finding WHERE (code = ?) = ?",
-        vec![QUEUED_CODE.into(), queued.into()],
-    )?
+    // A kind with room of its own is counted alone. Everything else shares the rest. Each up to the cap.
+    let own = OWN_ROOM.contains(&code);
+    let held = if own {
+        rows(
+            sql,
+            "SELECT count(*) AS n FROM takedown_finding WHERE code = ?",
+            vec![code.into()],
+        )?
+    } else {
+        rows(
+            sql,
+            "SELECT count(*) AS n FROM takedown_finding WHERE code NOT IN (?, ?, ?, ?)",
+            OWN_ROOM.iter().map(|code| (*code).into()).collect(),
+        )?
+    }
     .first()
     .map_or(0, |row| int(&row["n"]));
     let (code, subject, detail) = if !known && held >= MAX_FINDINGS {
-        let which = if queued == 1 { QUEUED_CODE } else { "other" };
-        (
-            "findings_full",
-            "takedown_finding".to_owned(),
-            Some(which.to_owned()),
-        )
+        // One row for each kind that is full, named by the kind, or `other` for the shared rest.
+        let which = if own { code } else { "other" };
+        ("findings_full", which.to_owned(), None)
     } else {
         (code, subject, detail)
     };

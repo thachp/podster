@@ -492,6 +492,23 @@ pub(super) fn hostname_suspended(sql: &SqlStorage, body: &Value, now: i64) -> R<
 /// delete can't be taken back, so its record must not depend on one answer arriving: if an answer is lost, or the
 /// operators' record couldn't keep it then, the next question to this room carries it again, whether or not the
 /// script is still there to be listed.
+///
+/// **The delete may run before its finding lands, and that is safe.** The row that says a reconcile started the
+/// deletion commits in the same transaction that queues it, before any call to the provider. The room's delete job
+/// may then run at once, ahead of the pass writing the finding down. Nothing is lost by that: the row stays, gone or
+/// not, and is what the room tells from, again and again, for 7 days.
+///
+/// Which rows are a reconcile's: one queued under no unpublish, or one queued later than its unpublish's own
+/// time, which is a script the room had counted gone and a pass found. An unpublish queues its scripts at its own
+/// time, in its own transaction, so the two times are equal for a row the unpublish queued.
+///
+/// **One exception, at the epoch's ceiling.** There the epoch can't go up, so a further unpublish adds no row of its
+/// own and its scripts are queued under the last one, later than that row's time. Those read here as a pass's and
+/// are told to operators as such. That errs toward telling, never toward silence, and a room reaches the ceiling
+/// only after about 9 * 10^15 unpublishes.
+///
+/// **Owed:** only the 32 newest are told in one answer. And a room is told from only while something asks it: one
+/// that leaves the lookup table, or that nothing asks for 7 days, never tells again.
 fn findings(sql: &SqlStorage, now: i64) -> R<Vec<Value>> {
     let mut found: Vec<Value> = rows(
         sql,
@@ -516,7 +533,8 @@ fn findings(sql: &SqlStorage, now: i64) -> R<Vec<Value>> {
         rows(
             sql,
             "SELECT script_name AS subject, CASE WHEN gone_at IS NULL THEN 'queued' ELSE 'gone' END AS detail FROM script_delete
-               WHERE unpublish_epoch IS NULL AND queued_at >= ? ORDER BY queued_at DESC, script_name LIMIT ?",
+               WHERE (unpublish_epoch IS NULL OR queued_at > (SELECT u.at FROM unpublish u WHERE u.release_epoch = script_delete.unpublish_epoch))
+                 AND queued_at >= ? ORDER BY queued_at DESC, script_name LIMIT ?",
             vec![(now - QUEUED_TOLD_MS).into(), QUEUED_FINDINGS.into()],
         )?
         .iter()
@@ -619,14 +637,20 @@ fn check_script(sql: &SqlStorage, script: &str, now: i64) -> R<(bool, bool)> {
         return Ok((true, false));
     }
     // Queued under no unpublish: nothing in the room's state named it. One the room had counted as gone is there
-    // after all, so it is owed again, and from now it is the reconcile's deletion, under no unpublish, so the room
-    // tells of it as one.
+    // after all, so it is owed again. It keeps the unpublish it was queued under, and that unpublish is no longer
+    // done with its files: "scripts gone" is taken back until this one is gone again, when the delete job sets it.
+    // Its `queued_at` moves to now, which is how the room knows to tell of it as a pass's deletion.
     exec(
         sql,
         "INSERT INTO script_delete (script_name, label, unpublish_epoch, queued_at, next_attempt_at) VALUES (?, ?, NULL, ?, ?)
            ON CONFLICT (script_name) DO UPDATE SET gone_at = NULL, next_attempt_at = excluded.next_attempt_at, last_code = 'reconcile_found',
-             unpublish_epoch = NULL, queued_at = excluded.queued_at",
+             queued_at = excluded.queued_at",
         vec![script.into(), label.into(), now.into(), now.into()],
+    )?;
+    exec(
+        sql,
+        "UPDATE unpublish SET scripts_gone_at = NULL WHERE release_epoch = (SELECT unpublish_epoch FROM script_delete WHERE script_name = ?)",
+        vec![script.into()],
     )?;
     Ok((true, true))
 }

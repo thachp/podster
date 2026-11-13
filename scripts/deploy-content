@@ -1,0 +1,374 @@
+#!/usr/bin/env bash
+# The one way to deploy the content Worker, apps/content, to the second Cloudflare account (M6 step 4(b), ADR 0010,
+# decision 217). It never uses apps/content/wrangler.jsonc's account or a wrangler login: the account, the content
+# domain and the two namespaces come from the owner's configuration file, and the token from the owner's token file.
+# docs/content-deploy.md is the guide.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/deploy-content --token-file <path> --config-file <path> [--deploy]
+
+Deploys the content Worker, apps/content, to the account that holds the content domain, and nowhere
+else. Without --deploy it only reports: it runs every check below, reads Cloudflare's API, and prints
+what it would deploy, changing nothing. With --deploy it also deploys, and then probes the content
+domain signed out.
+
+AGENTS run it only without --deploy, and only when the owner asks. --deploy needs a person at a
+terminal: stdin and stdout must be terminals, and the owner types the content domain to confirm.
+No flag or environment variable skips that.
+
+--token-file   a file holding the deploy token, one line, mode 0600, owned by you, not a link, in a
+               directory of mode 0700 that is in no git checkout. Only its path is ever an argument.
+--config-file  the deploy-time configuration, the same rules, as JSON with exactly these keys:
+               {"account_id": "<32 hex>", "content_domain": "<the content domain>",
+                "kv_namespace_id": "<32 hex>", "dispatch_namespace": "<name>"}
+
+The token is never an argument, never printed, and never written to a file by this script. curl
+reads it on stdin; wrangler gets it in its environment, which holds nothing of the caller's. If any
+child's output contains it, the output is redacted and the script fails.
+
+It refuses, before changing anything, unless:
+
+  - CLOUDFLARE_API_TOKEN and CLOUDFLARE_API_KEY are unset, so the file's token is the only one
+  - WRANGLER_LOG isn't debug
+  - both files pass the rules above, and the configuration is well formed. The content domain
+    isn't podster.dev or under it, and isn't the committed placeholder
+  - the configuration's account isn't CLOUDFLARE_ACCOUNT_ID, nor the account any wrangler login
+    has cached in this checkout's other apps (the cache holds an account's ID, not a token)
+  - the checkout is detached at origin/main's tip after a fetch, with nothing changed or untracked,
+    and ci.yml's run on main for that commit finished as success
+  - apps/content has no .wrangler/deploy/config.json, and its pinned wrangler is 4.157.0
+  - Cloudflare's API says, read with the token:
+      the token is active
+      the token can't read API tokens, its own included (a token that can is more than a deploy needs)
+      the token sees exactly one account, the configuration's
+      the token sees no zone named podster.dev
+      the content domain is one active zone, on that account
+      the dispatch namespace and the KV namespace exist on that account
+    Any error reading one of those refuses.
+
+After a deploy it probes a random host on the content domain, signed out: an unknown host gets the
+Worker's own not-found with its fixed headers; plain HTTP gets a 301 to HTTPS; a POST gets 405; a
+request with a Service-Worker header gets 403.
+
+Exit codes: 0 reported (no --deploy), or deployed and every probe passed; 1 refused, nothing changed;
+2 wrong usage; 3 the deploy failed part-way (the output says what wrangler said, redacted); 4
+deployed, but a probe failed: the Worker is deployed and not verified.
+EOF
+}
+
+token_file=""
+config_file=""
+deploy=false
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h | --help) usage; exit 0 ;;
+    --deploy) deploy=true ;;
+    --token-file | --config-file)
+      if [ $# -lt 2 ] || [ -z "$2" ] || [[ "$2" == -* ]]; then echo "deploy-content: $1 needs a path" >&2; usage >&2; exit 2; fi
+      if [ "$1" = --token-file ]; then token_file=$2; else config_file=$2; fi
+      shift
+      ;;
+    *) echo "deploy-content: unexpected argument $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+if [ -z "$token_file" ] || [ -z "$config_file" ]; then
+  echo "deploy-content: --token-file and --config-file are both needed" >&2
+  usage >&2
+  exit 2
+fi
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+work=$(mktemp -d)
+chmod 700 "$work"
+token=""
+trap 'token=""; rm -rf "$work"' EXIT
+
+refuse() { echo "REFUSE  $*"; echo "deploy-content: refused, nothing was deployed"; exit 1; }
+step() { echo; echo "== $*"; }
+
+# --- the caller's environment ---
+if [ -n "${CLOUDFLARE_API_TOKEN+x}" ]; then refuse "CLOUDFLARE_API_TOKEN is set in this shell. Unset it: the token file's is the only token this uses."; fi
+if [ -n "${CLOUDFLARE_API_KEY+x}" ]; then refuse "CLOUDFLARE_API_KEY is set in this shell. Unset it: the token file's is the only credential this uses."; fi
+if [ "${WRANGLER_LOG:-}" = debug ]; then refuse "WRANGLER_LOG is debug. Unset it: a debug log could hold a request's headers."; fi
+
+# --- the owner's two files ---
+uid=$(id -u)
+# private_file LABEL PATH: a regular file, not a link, mode 0600, the caller's, in a 0700 directory that is the
+# caller's, is no link and is in no git checkout.
+private_file() {
+  local label=$1 path=$2 dir
+  [ -e "$path" ] || [ -L "$path" ] || refuse "the $label doesn't exist"
+  [ ! -L "$path" ] || refuse "the $label is a link. Give the file itself."
+  [ -f "$path" ] || refuse "the $label isn't a regular file"
+  [ -n "$(find "$path" -maxdepth 0 -user "$uid" -perm 0600 2> /dev/null)" ] || refuse "the $label must be yours and mode 0600, readable by you alone"
+  dir=$(dirname "$path")
+  [ ! -L "$dir" ] || refuse "the $label's directory is a link"
+  [ -n "$(find "$dir" -maxdepth 0 -type d -user "$uid" -perm 0700 2> /dev/null)" ] || refuse "the $label's directory must be yours and mode 0700"
+  if git -C "$dir" rev-parse --is-inside-work-tree > /dev/null 2>&1; then refuse "the $label is inside a git checkout. Keep it outside every repository."; fi
+}
+private_file "token file" "$token_file"
+private_file "configuration file" "$config_file"
+
+# The token: one line of token characters. Read by the shell, never by a command whose arguments could show it.
+[ "$(wc -l < "$token_file" | tr -d ' ')" -le 1 ] || refuse "the token file must hold one line, the token alone"
+IFS= read -r token < "$token_file" || true
+[[ "$token" =~ ^[A-Za-z0-9_-]{30,200}$ ]] || { token=""; refuse "the token file doesn't hold a token: one line of letters, digits, - and _"; }
+
+# leaked FILE...: true when any of them holds the token. The comparison runs in the shell, never in a command.
+leaked() {
+  local file content
+  for file in "$@"; do
+    [ -f "$file" ] || continue
+    content=$(cat "$file")
+    if [[ "$content" == *"$token"* ]]; then return 0; fi
+  done
+  return 1
+}
+# redact FILE: replaces the token in it, in place.
+redact() {
+  local content
+  content=$(cat "$1")
+  printf '%s\n' "${content//"$token"/[redacted token]}" > "$1"
+}
+
+config=$(cat "$config_file")
+jq -e 'type == "object" and (keys == ["account_id", "content_domain", "dispatch_namespace", "kv_namespace_id"]) and all(.[]; type == "string")' <<< "$config" > /dev/null 2>&1 \
+  || refuse "the configuration must be a JSON object with exactly account_id, content_domain, dispatch_namespace and kv_namespace_id, each a string"
+account=$(jq -r .account_id <<< "$config")
+domain=$(jq -r .content_domain <<< "$config")
+kv=$(jq -r .kv_namespace_id <<< "$config")
+namespace=$(jq -r .dispatch_namespace <<< "$config")
+[[ "$account" =~ ^[0-9a-f]{32}$ ]] || refuse "account_id isn't an account's ID, 32 hexadecimal characters"
+[[ "$kv" =~ ^[0-9a-f]{32}$ ]] || refuse "kv_namespace_id isn't a KV namespace's ID, 32 hexadecimal characters"
+[[ "$namespace" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || refuse "dispatch_namespace isn't a namespace's name"
+[[ "$domain" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] && [ "${#domain}" -le 253 ] || refuse "content_domain isn't a domain name in lower case"
+case "$domain" in
+  podster.dev | *.podster.dev) refuse "content_domain is podster.dev's. The content domain is never Podster's own." ;;
+  content-domain.invalid) refuse "content_domain is the committed placeholder" ;;
+esac
+
+# --- the account isn't the one that holds podster.dev ---
+if [ "${CLOUDFLARE_ACCOUNT_ID:-}" = "$account" ]; then
+  refuse "the configuration's account is CLOUDFLARE_ACCOUNT_ID, the account this shell deploys staging to. The content Worker goes on the other account."
+fi
+# Wrangler caches the account a login chose, as {"account": {"id", "name"}}, beside each app's packages or in the
+# app's .wrangler/cache. That file holds no token. apps/content's own cache is skipped: it may rightly hold this account.
+while IFS= read -r cached; do
+  if [ "$(jq -r '.account.id // empty' "$cached" 2> /dev/null)" = "$account" ]; then
+    refuse "the configuration's account is the one a wrangler login used in ${cached#"$root"/}. The content Worker goes on an account no login here uses."
+  fi
+done < <(find "$root/apps" -mindepth 1 -maxdepth 5 -path "$root/apps/content" -prune -o \( -path '*/node_modules/.cache/wrangler/*' -o -path '*/.wrangler/cache/*' \) -name 'wrangler-account*.json' -type f -print 2> /dev/null)
+if [ -n "${WRANGLER_CACHE_DIR:-}" ]; then
+  for cached in "$WRANGLER_CACHE_DIR"/wrangler-account*.json; do
+    [ -f "$cached" ] || continue
+    if [ "$(jq -r '.account.id // empty' "$cached" 2> /dev/null)" = "$account" ]; then refuse "the configuration's account is the one cached in WRANGLER_CACHE_DIR by a wrangler login"; fi
+  done
+fi
+
+# --- the checkout ---
+git fetch --quiet origin || refuse "could not fetch origin"
+if git symbolic-ref -q HEAD > /dev/null; then
+  refuse "the checkout is on branch $(git symbolic-ref --short HEAD). Detach at main's tip: git checkout --detach origin/main"
+fi
+here=$(git rev-parse HEAD)
+tip=$(git rev-parse --verify --quiet origin/main) || refuse "origin/main doesn't exist"
+if [ "$here" != "$tip" ]; then refuse "the checkout is at $here, and origin/main is at $tip"; fi
+if [ -n "$(git status --porcelain)" ]; then refuse "the checkout has changed or untracked files"; fi
+ci=$(gh run list --workflow ci.yml --branch main --event push --commit "$here" --limit 1 --json status,conclusion \
+  --jq '.[] | [.status, (if (.conclusion // "") == "" then "none" else .conclusion end)] | @tsv') \
+  || refuse "could not read ci.yml's run on main for $here"
+if [ -z "$ci" ]; then refuse "ci.yml has no run on main for $here"; fi
+IFS=$'\t' read -r ci_status ci_conclusion <<< "$ci"
+if [ "$ci_status" != completed ]; then refuse "ci.yml's run on main for $here is still $ci_status"; fi
+if [ "$ci_conclusion" != success ]; then refuse "ci.yml's run on main for $here ended as $ci_conclusion, not success"; fi
+if [ -e apps/content/.wrangler/deploy/config.json ] || [ -L apps/content/.wrangler/deploy/config.json ]; then
+  refuse "apps/content/.wrangler/deploy/config.json exists: it would point wrangler at another configuration. Remove it."
+fi
+
+step "npm ci in apps/content"
+(cd apps/content && npm ci --ignore-scripts) || refuse "npm ci failed in apps/content"
+wrangler_version=$(cd apps/content && node_modules/.bin/wrangler --version 2> /dev/null | grep -o -E '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
+[ "$wrangler_version" = 4.157.0 ] || refuse "apps/content's wrangler is '${wrangler_version:-missing}', not 4.157.0"
+
+# --- Cloudflare's API, read with the token ---
+# cf PATH: GETs Cloudflare's API with the token, and sets $status. The header goes to curl on stdin, never as an
+# argument. The body is left in $work/body. Called directly, never in a subshell, so a refusal here ends the script.
+cf() {
+  : > "$work/body"
+  printf 'header = "Authorization: Bearer %s"\n' "$token" \
+    | curl --config - --silent --show-error --proto =https --max-time 30 -o "$work/body" -w '%{http_code}' \
+      "https://api.cloudflare.com/client/v4$1" > "$work/status" 2> "$work/curl.err" || echo 000 > "$work/status"
+  status=$(cat "$work/status")
+  [[ "$status" =~ ^[0-9]{3}$ ]] || status=000
+  if leaked "$work/body" "$work/curl.err" "$work/status"; then
+    redact "$work/body"
+    refuse "Cloudflare's answer to GET $1 held the token. It wasn't printed."
+  fi
+}
+ok_body() { jq -e '.success == true' "$work/body" > /dev/null 2>&1; }
+
+step "reading Cloudflare's API with the token"
+cf /user/tokens/verify
+token_scope=user
+if [ "$status" != 200 ] || ! ok_body; then
+  cf "/accounts/$account/tokens/verify"
+  token_scope=account
+  [ "$status" = 200 ] && ok_body || refuse "Cloudflare doesn't verify the token (HTTP $status)"
+fi
+[ "$(jq -r '.result.status // empty' "$work/body")" = active ] || refuse "the token isn't active"
+token_id=$(jq -r '.result.id // empty' "$work/body")
+[[ "$token_id" =~ ^[0-9a-f]{32}$ ]] || refuse "Cloudflare's verification didn't name the token"
+echo "ok   the token is active ($token_scope token)"
+
+if [ "$token_scope" = user ]; then cf "/user/tokens/$token_id"; else cf "/accounts/$account/tokens/$token_id"; fi
+case "$status" in
+  200) refuse "the token can read API tokens, its own included. That is more than a deploy needs: make one with only the permissions docs/content-deploy.md lists." ;;
+  401 | 403) echo "ok   the token can't read API tokens (HTTP $status). Its other permissions can't be read by the token itself: docs/content-deploy.md lists what to grant" ;;
+  *) refuse "asking whether the token can read API tokens answered HTTP $status, which says neither" ;;
+esac
+
+cf "/accounts?per_page=50"
+[ "$status" = 200 ] && ok_body || refuse "listing the accounts the token sees failed (HTTP $status)"
+seen=$(jq -r '[.result[].id] | join(" ")' "$work/body")
+seen_count=$(jq -r '.result | length' "$work/body")
+[ "$seen" = "$account" ] || refuse "the token must see exactly one account, the configuration's. It sees $seen_count account(s), and they aren't exactly that one."
+echo "ok   the token sees exactly one account, the configuration's"
+
+cf "/zones?name=podster.dev&per_page=50"
+[ "$status" = 200 ] && ok_body || refuse "asking whether the token sees podster.dev failed (HTTP $status)"
+[ "$(jq -r '.result | length' "$work/body")" = 0 ] || refuse "the token can see the zone podster.dev. A content Worker's token must see nothing of Podster's own."
+echo "ok   the token sees no zone named podster.dev"
+
+cf "/zones?name=$domain&per_page=50"
+[ "$status" = 200 ] && ok_body || refuse "reading the content domain's zone failed (HTTP $status)"
+[ "$(jq -r '.result | length' "$work/body")" = 1 ] || refuse "the token doesn't see the content domain as one zone"
+[ "$(jq -r '.result[0].account.id // empty' "$work/body")" = "$account" ] || refuse "the content domain's zone isn't on the configuration's account"
+[ "$(jq -r '.result[0].status // empty' "$work/body")" = active ] || refuse "the content domain's zone isn't active yet ($(jq -r '.result[0].status // "no status"' "$work/body"))"
+echo "ok   the content domain is an active zone on that account"
+
+cf "/accounts/$account/workers/dispatch/namespaces/$namespace"
+[ "$status" = 200 ] && ok_body || refuse "the dispatch namespace wasn't found on that account (HTTP $status)"
+echo "ok   the dispatch namespace exists"
+cf "/accounts/$account/storage/kv/namespaces/$kv"
+[ "$status" = 200 ] && ok_body || refuse "the KV namespace wasn't found on that account (HTTP $status)"
+echo "ok   the KV namespace exists"
+
+# --- what would be deployed ---
+# The committed file gives the Worker's name, entry point and compatibility date, and nothing else.
+committed=$(node --input-type=module -e '
+import { readFileSync } from "node:fs";
+import { parseJsonc } from "./e2e/jsonc.mjs";
+const c = parseJsonc(readFileSync("apps/content/wrangler.jsonc", "utf8"));
+process.stdout.write(JSON.stringify({ name: c.name, main: c.main, compatibility_date: c.compatibility_date }));
+') || refuse "couldn't read apps/content/wrangler.jsonc"
+[ "$(jq -r .name <<< "$committed")" = podster-content ] || refuse "apps/content/wrangler.jsonc doesn't name the Worker podster-content"
+route="*.$domain/*"
+jq -n --argjson c "$committed" --arg main "$root/apps/content/$(jq -r .main <<< "$committed")" --arg account "$account" \
+  --arg domain "$domain" --arg route "$route" --arg kv "$kv" --arg namespace "$namespace" '{
+    name: $c.name, main: $main, compatibility_date: $c.compatibility_date, account_id: $account,
+    workers_dev: false, preview_urls: false,
+    routes: [{ pattern: $route, zone_name: $domain }],
+    vars: { CONTENT_DOMAIN: $domain },
+    kv_namespaces: [{ binding: "SERVE", id: $kv }],
+    dispatch_namespaces: [{ binding: "APPS", namespace: $namespace }]
+  }' > "$work/wrangler.json"
+
+echo
+echo "would deploy podster-content at $here, origin/main's tip with ci.yml green, to the configuration's account,"
+echo "on the route $route, with the content domain $domain, its KV namespace and its dispatch namespace."
+echo "No other route, no workers.dev address and no preview address."
+
+if [ "$deploy" != true ]; then
+  echo
+  echo "deploy-content: every check passed. Nothing was deployed: this run had no --deploy."
+  exit 0
+fi
+
+# --- a person confirms ---
+if [ ! -t 0 ] || [ ! -t 1 ]; then
+  refuse "--deploy needs a person at a terminal: stdin and stdout must both be terminals. Agents run this without --deploy."
+fi
+printf '\nTo deploy, type the content domain (%s): ' "$domain"
+IFS= read -r typed || typed=""
+[ "$typed" = "$domain" ] || refuse "what was typed isn't the content domain"
+
+# --- the deploy ---
+step "wrangler deploy"
+mkdir -p "$work/home" "$work/logs" "$work/cache" "$work/xdg"
+deploy_status=0
+(
+  cd apps/content
+  # Nothing of the caller's environment reaches wrangler: every exported name is dropped, then only these are set.
+  # The token goes in by `export`, so it is in no command's arguments.
+  path=$PATH
+  while IFS= read -r name; do unset "$name" 2> /dev/null || true; done < <(compgen -e)
+  export PATH="$path" HOME="$work/home" XDG_CONFIG_HOME="$work/xdg" WRANGLER_CACHE_DIR="$work/cache" \
+    WRANGLER_LOG_PATH="$work/logs" WRANGLER_SEND_METRICS=false CI=true
+  export CLOUDFLARE_API_TOKEN="$token"
+  exec node_modules/.bin/wrangler deploy --config "$work/wrangler.json"
+) > "$work/deploy.out" 2>&1 || deploy_status=$?
+logs=$(find "$work/logs" -type f 2> /dev/null || true)
+# shellcheck disable=SC2086
+if leaked "$work/deploy.out" $logs; then
+  redact "$work/deploy.out"
+  sed 's/^/        | /' "$work/deploy.out"
+  echo
+  echo "STOPPED wrangler's output or its log held the token. It was redacted above and not printed."
+  echo "deploy-content: the Worker may or may not be deployed. Read wrangler's output above, and make a new token."
+  exit 3
+fi
+sed 's/^/        | /' "$work/deploy.out"
+if [ "$deploy_status" -ne 0 ]; then
+  echo
+  echo "STOPPED wrangler deploy exited with status $deploy_status"
+  echo "deploy-content: the deploy failed part-way. Read wrangler's output above for what changed."
+  exit 3
+fi
+version=$(grep -o -E 'Current Version ID: [0-9a-f-]{36}' "$work/deploy.out" | head -n 1 | sed 's/.*: //' || true)
+echo "version podster-content ${version:-not printed by wrangler}"
+
+# --- signed-out probes of the content domain ---
+step "probing $domain signed out"
+label=$(od -An -N13 -tx1 /dev/urandom | tr -d ' \n')
+host="$label.$domain"
+probe_failures=0
+pass() { echo "PASS    $*"; }
+fail() { echo "FAIL    $*"; probe_failures=$((probe_failures + 1)); }
+# fetch METHOD URL [HEADER]: leaves the headers in $work/h and the body in $work/b, and prints the status.
+fetch() {
+  local extra=()
+  [ -n "${3:-}" ] && extra=(-H "$3")
+  curl --silent --proto =https,http --max-time 30 -X "$1" ${extra[@]+"${extra[@]}"} -D "$work/h" -o "$work/b" -w '%{http_code}' "$2" 2> /dev/null || printf 000
+}
+header() { grep -i -E "^$1:" "$work/h" | head -n 1 | sed -E "s/^[^:]*:[[:space:]]*//" | tr -d '\r'; }
+fixed_headers() { # fixed_headers WHAT: the headers the Worker sets on every own answer
+  local missing=()
+  [ "$(header x-content-type-options)" = nosniff ] || missing+=(x-content-type-options)
+  [ "$(header referrer-policy)" = no-referrer ] || missing+=(referrer-policy)
+  [ "$(header strict-transport-security)" = "max-age=31536000; includeSubDomains" ] || missing+=(strict-transport-security)
+  [ "$(header cache-control)" = no-store ] || missing+=(cache-control)
+  [[ "$(header content-security-policy)" == "sandbox allow-scripts; "* ]] || missing+=(content-security-policy)
+  if [ "${#missing[@]}" -eq 0 ]; then return 0; fi
+  echo "        $1: missing or wrong: ${missing[*]}"
+  return 1
+}
+
+status=$(fetch GET "https://$host/")
+if [ "$status" = 404 ] && [ "$(cat "$work/b")" = not_found ] && fixed_headers "an unknown host"; then pass "an unknown host gets the Worker's own not-found, with its fixed headers"; else fail "an unknown host: HTTP $status"; fi
+status=$(fetch GET "http://$host/probe?x=1")
+if [ "$status" = 301 ] && [ "$(header location)" = "https://$host/probe?x=1" ]; then pass "plain HTTP gets a 301 to the same host and path over HTTPS"; else fail "plain HTTP: HTTP $status, Location '$(header location)'"; fi
+status=$(fetch POST "https://$host/")
+if [ "$status" = 405 ] && [ "$(header allow)" = "GET, HEAD" ]; then pass "a POST gets 405, allowing GET and HEAD"; else fail "a POST: HTTP $status"; fi
+status=$(fetch GET "https://$host/sw.js" "Service-Worker: script")
+if [ "$status" = 403 ] && [ "$(cat "$work/b")" = no_service_workers ]; then pass "a service worker's script gets 403"; else fail "a service worker's script: HTTP $status"; fi
+
+echo
+if [ "$probe_failures" -ne 0 ]; then
+  echo "deploy-content: deployed podster-content at $here (version ${version:-unknown}), but $probe_failures probe(s) failed: the Worker is deployed and NOT verified."
+  exit 4
+fi
+echo "deploy-content: deployed podster-content at $here (version ${version:-unknown}) to $domain, and every probe passed."

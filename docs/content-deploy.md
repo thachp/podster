@@ -4,6 +4,17 @@ The content Worker, `apps/content`, serves rooms' apps on the content domain ([A
 
 `scripts/deploy-staging` doesn't know this package, and `apps/content/wrangler.jsonc` can deploy nothing anywhere ([why](m6-plan.md#step-4b-the-content-worker-the-build-plan)).
 
+## What it defends against
+
+**Accidents in the owner's shell:**
+- a stray exported function or alias from dotfiles;
+- tracing left on;
+- a proxy variable or a `.curlrc`;
+- a leftover token variable;
+- the wrong account in the environment.
+
+**It does not defend against someone who already controls the owner's account, files or `PATH`.** Such a person can replace the programs this script runs, and no script can stop that.
+
 ## Who runs it
 
 - **Without `--deploy`,** it only reports. It runs every check below, reads Cloudflare's API with the token, prints what it would deploy, and changes nothing. **An agent runs it only like this, and only when the owner asks.**
@@ -32,7 +43,7 @@ Both live outside every repository, in a directory of mode 0700, each file of mo
 mkdir -p ~/.config/podster && chmod 700 ~/.config/podster
 ```
 
-- **`~/.config/podster/content-token`:** the token, exactly one line, with or without a final newline, and nothing after it. Write it with an editor or a paste into the file, never with `echo` on a command line, where it would land in the shell's history.
+- **`~/.config/podster/content-token`:** the token, exactly one line, with or without a final newline, and nothing after it. Every byte must be a letter, a digit, `-` or `_`: a NUL or a carriage return is refused. Write it with an editor or a paste into the file, never with `echo` on a command line, where it would land in the shell's history.
 
   ```bash
   touch ~/.config/podster/content-token && chmod 600 ~/.config/podster/content-token
@@ -75,7 +86,14 @@ The script builds wrangler's configuration from that file and from `apps/content
 
 - **No shell variable ever holds it.** The token is read from its file only where it is handed to a child, so a traced command has nothing to expand. It is never a command's argument, never printed, and never written to a file by the script.
 - **Bash only, 3.2 or later.** macOS's `/bin/bash` 3.2 is supported, and the self-test runs under it on macOS and under CI's bash on Linux. Run by `sh`, by `dash`, or by bash in POSIX mode, which is what `sh` is on macOS, it refuses with exit 2 before any of its bash-only lines.
-- **No exported shell function.** A function the caller exported, named `env`, `curl`, `jq` or anything else, would run in place of the command of that name. So the script refuses to start if the environment exports any function, and keeps no alias.
+- **A clean process first.** Before anything else, the script starts itself again as `/bin/bash` under `/usr/bin/env -i`.
+  - **What the new process has:** only `HOME`, `TERM`, `PATH`, `SSH_AUTH_SOCK` and a few results about the caller's environment. No exported function, alias, `BASH_ENV`, `SHELLOPTS`, `CLOUDFLARE_*` or proxy variable crosses.
+  - **Before that exec:** the script runs only what a function or alias can't replace. It sets `POSIXLY_CORRECT`, under which special builtins are found before functions. It uses `case` instead of `[`, and puts a backslash on each command word. It unsets any function named `echo`, the one ordinary command it uses there.
+  - **Results carried over:** whether a token or key variable was set, whether tracing or `BASH_ENV` was on, and `CLOUDFLARE_ACCOUNT_ID`, which is an ID and not a secret.
+  - **Checked after:** the new process confirms it holds exactly those variables and no function. A caller who sets the marker to skip the exec is refused.
+  - **It execs once.** A process that has the exec's results but not its marker refuses, exit 1, and never execs again. So a lost marker stops the script instead of making it start over and over.
+  - **Needs:** `/usr/bin/env` and `/bin/bash`. Missing either, the exec fails and nothing runs.
+  - **Owners who use `GH_TOKEN`:** it isn't carried over, so `gh` must be logged in under `HOME`. Otherwise the CI check fails and the script refuses.
 - **Tracing is refused.** The script stops before reading anything if it runs under `bash -x` or `-v`, if `SHELLOPTS` turns on `xtrace` or `verbose`, or if `BASH_ENV` is set. It then switches both off.
 - **curl** gets the `Authorization` header on stdin (`--config -`), built from the file inside the pipe. Every curl, the probes' included, runs with `-q` first, so no `.curlrc` is read, under `env -i` with only `PATH` and an empty home. So no proxy variable, no `CURL_HOME` and nothing else of the caller's reaches it.
 - **wrangler** runs under `env -i` with an allow-list: `PATH`, a temporary home, configuration, cache and log folder, `CI`, metrics off, and the token. A small shell reads the token on its stdin, from the file, and exports it to wrangler alone. So no wrangler login, no `CLOUDFLARE_ACCOUNT_ID`, no exported function and nothing else of the shell reaches it. The temporary folder is deleted when the script ends.

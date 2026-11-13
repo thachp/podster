@@ -4,30 +4,88 @@
 # domain and the two namespaces come from the owner's configuration file, and the token from the owner's token file.
 # docs/content-deploy.md is the guide.
 #
+# WHAT IT DEFENDS AGAINST: accidents in the owner's shell. A stray exported function or alias from dotfiles, tracing
+# left on, a proxy or a .curlrc, a leftover token variable, the wrong account in the environment. It does NOT defend
+# against someone who already controls the owner's account, files or PATH: such a person can replace the programs this
+# runs, and no script can stop that.
+#
 # No shell variable ever holds the token. It is read from its file only where it is handed to a child: into curl's
 # stdin, and into the stdin of the small shell that starts wrangler. Finding or redacting it in an output reads it from
 # the file too (`grep -f`, awk), so it is in no command's arguments either.
 
-# Bash only, and at least 3.2, which macOS ships: refused otherwise, in lines any POSIX shell reads, before any
-# syntax that is bash's own. `sh` on macOS is bash in POSIX mode, which is refused too.
-if [ -z "${BASH_VERSION:-}" ]; then echo "deploy-content: refused: run it with bash (scripts/deploy-content, or bash scripts/deploy-content), not sh. Nothing was run." >&2; exit 2; fi
-case ":${SHELLOPTS:-}:" in *:posix:*) echo "deploy-content: refused: bash is in POSIX mode, as when it runs as sh. Run it with bash. Nothing was run." >&2; exit 2 ;; esac
-case "$BASH_VERSION" in [012].* | 3.[01].*) echo "deploy-content: refused: it needs bash 3.2 or later, and this is $BASH_VERSION. Nothing was run." >&2; exit 2 ;; esac
+# ---- First, a clean process. ----
+# Until the `exec` below, only what a function or an alias can't replace runs. An assignment of POSIXLY_CORRECT puts
+# bash in POSIX mode, where special builtins (unset, exec, exit) are found before functions. A backslash keeps a word
+# from being read as an alias. Then echo, the one ordinary command used before the exec, loses any function of its name, and
+# the script runs again as `/bin/bash` under `/usr/bin/env -i`: no inherited function, alias, BASH_ENV, SHELLOPTS,
+# CLOUDFLARE_* or proxy variable. It keeps HOME, TERM, PATH and SSH_AUTH_SOCK, so git, gh and npm work as the owner's.
+# What it needs of the caller's environment it carries as results and IDs, never a secret.
+# These lines are POSIX, so sh and dash read them too and are refused.
+case "${DEPLOY_CONTENT_CLEAN:-}" in
+  1) ;;
+  *)
+    # The whole block is one `case`, read before any of it runs. Nothing in it is `[` or `test`, which a function may
+    # replace and which POSIX mode won't let `unset -f` remove. Each command word has a backslash, so no alias applies.
+    dc_flags=$-
+    dc_shellopts=${SHELLOPTS:-}
+    POSIXLY_CORRECT=1
+    \unset -f unalias
+    \unalias -a 2> /dev/null
+    \unset -f echo
+    dc_traced=0 dc_posix=0 dc_token=0 dc_key=0 dc_bash_env=0 dc_wrangler_debug=0
+    case "${BASH_VERSION:-}" in
+      "")
+        \echo "deploy-content: refused: run it with bash (scripts/deploy-content, or bash scripts/deploy-content), not sh. Nothing was run." >&2
+        \exit 2
+        ;;
+    esac
+    # A process the exec below started always has DC_CALLER_TRACED. Seeing it here means the marker was lost on the way,
+    # and running the exec again would loop for ever, so it stops instead. It never execs a second time.
+    case "${DC_CALLER_TRACED+x}" in
+      x)
+        \echo "deploy-content: refused: it started again without its clean-process marker, so it stops rather than start over. Nothing was read or changed." >&2
+        \exit 1
+        ;;
+    esac
+    case "$dc_flags" in *x* | *v*) dc_traced=1 ;; esac
+    case ":$dc_shellopts:" in *:xtrace:* | *:verbose:*) dc_traced=1 ;; esac
+    case ":$dc_shellopts:" in *:posix:*) dc_posix=1 ;; esac
+    case "${CLOUDFLARE_API_TOKEN+x}" in x) dc_token=1 ;; esac
+    case "${CLOUDFLARE_API_KEY+x}" in x) dc_key=1 ;; esac
+    case "${BASH_ENV:-}" in ?*) dc_bash_env=1 ;; esac
+    case "${WRANGLER_LOG:-}" in debug) dc_wrangler_debug=1 ;; esac
+    # If /usr/bin/env or /bin/bash is missing, this exec fails and, in POSIX mode, the shell exits non-zero with its own
+    # message: nothing else runs.
+    \exec /usr/bin/env -i HOME="${HOME:-}" TERM="${TERM:-dumb}" PATH="${PATH:-/usr/bin:/bin}" SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-}" DEPLOY_CONTENT_CLEAN=1 \
+      DC_CALLER_TRACED="$dc_traced" DC_CALLER_POSIX="$dc_posix" DC_CALLER_BASH_VERSION="${BASH_VERSION:-}" \
+      DC_CALLER_TOKEN="$dc_token" DC_CALLER_KEY="$dc_key" DC_CALLER_BASH_ENV="$dc_bash_env" DC_CALLER_WRANGLER_DEBUG="$dc_wrangler_debug" \
+      DC_CALLER_ACCOUNT="${CLOUDFLARE_ACCOUNT_ID:-}" DC_CALLER_CACHE_DIR="${WRANGLER_CACHE_DIR:-}" \
+      /bin/bash --noprofile --norc "$0" "$@"
+    ;;
+esac
 
-# Tracing would print what the script expands. Refused before anything is read, and switched off.
-case "$-" in *x* | *v*) echo "deploy-content: refused: it doesn't run under bash -x or -v, which would print what it does. Nothing was read or changed." >&2; exit 1 ;; esac
-case ":${SHELLOPTS:-}:" in *:xtrace:* | *:verbose:*) echo "deploy-content: refused: SHELLOPTS turns on xtrace or verbose. Unset it. Nothing was read or changed." >&2; exit 1 ;; esac
-if [ -n "${BASH_ENV:-}" ]; then echo "deploy-content: refused: BASH_ENV is set, so a file ran before this script did. Unset it. Nothing was read or changed." >&2; exit 1; fi
-set +xv
-# A function the caller exported would be called in place of the command of its name, `env` and `curl` included, so
-# a child could get the caller's environment or the token. Any exported function is refused before any command runs.
-# No function of the script's own is defined yet, so every one listed here came from the environment. Aliases aren't
-# expanded in a script, and none is kept.
-if [ -n "$(declare -F)" ]; then
-  echo "deploy-content: refused: the environment exports a shell function ($(declare -F | sed 's/^declare -f[x]* //' | tr '\n' ' ')), which would run in place of a command. Unset it (unset -f NAME). Nothing was read or changed." >&2
+# ---- From here, a clean /bin/bash. ----
+# It must hold exactly the variables the exec gave it, and no function: a caller who set DEPLOY_CONTENT_CLEAN to skip
+# the exec is refused here.
+set +o posix 2> /dev/null || true
+unset POSIXLY_CORRECT
+started_clean=true
+for name in $(compgen -e); do
+  case "$name" in
+    HOME | TERM | PATH | SSH_AUTH_SOCK | PWD | SHLVL | OLDPWD | _ | DEPLOY_CONTENT_CLEAN | DC_CALLER_*) ;;
+    *) started_clean=false ;;
+  esac
+done
+if [ "$started_clean" != true ] || [ -n "$(declare -F)" ]; then
+  echo "deploy-content: refused: it didn't start in the clean process it makes for itself. Run scripts/deploy-content as it is. Nothing was read or changed." >&2
   exit 1
 fi
-unalias -a 2> /dev/null || true
+if [ "$DC_CALLER_POSIX" = 1 ]; then echo "deploy-content: refused: bash was in POSIX mode, as when it runs as sh. Run it with bash. Nothing was run." >&2; exit 2; fi
+case "$DC_CALLER_BASH_VERSION" in [012].* | 3.[01].*) echo "deploy-content: refused: it needs bash 3.2 or later, and the caller's is $DC_CALLER_BASH_VERSION. Nothing was run." >&2; exit 2 ;; esac
+case "$BASH_VERSION" in [012].* | 3.[01].*) echo "deploy-content: refused: /bin/bash is $BASH_VERSION, and it needs 3.2 or later. Nothing was run." >&2; exit 2 ;; esac
+if [ "$DC_CALLER_BASH_ENV" = 1 ]; then echo "deploy-content: refused: BASH_ENV is set, so a file ran in the shell that started this. Unset it. Nothing was read or changed." >&2; exit 1; fi
+if [ "$DC_CALLER_TRACED" = 1 ]; then echo "deploy-content: refused: it doesn't run under bash -x or -v, or with SHELLOPTS turning on xtrace or verbose, which would print what it does. Nothing was read or changed." >&2; exit 1; fi
+set +xv
 set -euo pipefail
 
 usage() {
@@ -144,9 +202,9 @@ step() { echo; echo "== $*"; }
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 # --- the caller's environment ---
-if [ -n "${CLOUDFLARE_API_TOKEN+x}" ]; then refuse "CLOUDFLARE_API_TOKEN is set in this shell. Unset it: the token file's is the only token this uses."; fi
-if [ -n "${CLOUDFLARE_API_KEY+x}" ]; then refuse "CLOUDFLARE_API_KEY is set in this shell. Unset it: the token file's is the only credential this uses."; fi
-if [ "${WRANGLER_LOG:-}" = debug ]; then refuse "WRANGLER_LOG is debug. Unset it: a debug log could hold a request's headers."; fi
+if [ "$DC_CALLER_TOKEN" = 1 ]; then refuse "CLOUDFLARE_API_TOKEN is set in this shell. Unset it: the token file's is the only token this uses."; fi
+if [ "$DC_CALLER_KEY" = 1 ]; then refuse "CLOUDFLARE_API_KEY is set in this shell. Unset it: the token file's is the only credential this uses."; fi
+if [ "$DC_CALLER_WRANGLER_DEBUG" = 1 ]; then refuse "WRANGLER_LOG is debug. Unset it: a debug log could hold a request's headers."; fi
 
 # --- the owner's two files ---
 uid=$(id -u)
@@ -169,7 +227,11 @@ private_file "configuration file" "$config_file"
 # The token: one line of token characters, checked by grep reading the file, never by expanding it.
 # Exactly one line: awk counts an unterminated last line as a line, which `wc -l` doesn't.
 [ "$(awk 'END { print NR }' "$token_file")" = 1 ] || refuse "the token file must hold one line, the token alone, and nothing after it"
-grep -q -E '^[A-Za-z0-9_-]{30,200}$' "$token_file" || refuse "the token file doesn't hold a token: one line of letters, digits, - and _"
+# Every byte must be one of the token's: letters, digits, - and _, and one final newline at most. A NUL or a carriage
+# return after the token on the same line is refused, which a line-by-line match might not see.
+[ "$(LC_ALL=C tr -d 'A-Za-z0-9_\n-' < "$token_file" | wc -c | tr -d ' ')" = 0 ] \
+  || refuse "the token file holds a character that is no token's: only letters, digits, - and _"
+LC_ALL=C grep -q -E '^[A-Za-z0-9_-]{30,200}$' "$token_file" || refuse "the token file doesn't hold a token: one line of letters, digits, - and _"
 
 # leaked FILE...: true when any of them holds the token. grep reads the token from its file.
 leaked() {
@@ -203,7 +265,7 @@ case "$domain" in
 esac
 
 # --- the account isn't the one that holds podster.dev ---
-if [ "$(lower "${CLOUDFLARE_ACCOUNT_ID:-}")" = "$account" ]; then
+if [ "$(lower "$DC_CALLER_ACCOUNT")" = "$account" ]; then
   refuse "the configuration's account is CLOUDFLARE_ACCOUNT_ID, the account this shell deploys staging to. The content Worker goes on the other account."
 fi
 # Wrangler caches the account a login chose, as {"account": {"id", "name"}}, beside each app's packages or in the
@@ -214,8 +276,8 @@ while IFS= read -r cached; do
     refuse "the configuration's account is the one a wrangler login used in ${cached#"$root"/}. The content Worker goes on an account no login here uses."
   fi
 done < <(find "$root/apps" -mindepth 1 -maxdepth 5 -path "$root/apps/content" -prune -o \( -path '*/node_modules/.cache/wrangler/*' -o -path '*/.wrangler/cache/*' \) -name 'wrangler-account*.json' -type f -print 2> /dev/null)
-if [ -n "${WRANGLER_CACHE_DIR:-}" ]; then
-  for cached in "$WRANGLER_CACHE_DIR"/wrangler-account*.json; do
+if [ -n "$DC_CALLER_CACHE_DIR" ]; then
+  for cached in "$DC_CALLER_CACHE_DIR"/wrangler-account*.json; do
     [ -f "$cached" ] || continue
     if [ "$(cached_account "$cached")" = "$account" ]; then refuse "the configuration's account is the one cached in WRANGLER_CACHE_DIR by a wrangler login"; fi
   done
@@ -255,7 +317,7 @@ wrangler_version=$(cd apps/content && node_modules/.bin/wrangler --version 2> /d
 # --- Cloudflare's API, read with the token ---
 # curl_clean ARG...: curl with -q first, so no .curlrc is read, and an environment of PATH and an empty home alone, so
 # no proxy, no CURL_HOME and nothing else of the caller's reaches it.
-curl_clean() { env -i PATH="$PATH" HOME="$work/curl-home" curl -q "$@"; }
+curl_clean() { /usr/bin/env -i PATH="$PATH" HOME="$work/curl-home" curl -q "$@"; }
 # cf PATH: GETs Cloudflare's API, and sets $status. The Authorization header goes to curl on stdin, built from the
 # token file inside the pipe. The body is left in $work/body. Called directly, never in a subshell, so a refusal here
 # ends the script.
@@ -403,9 +465,9 @@ deploy_status=0
 # small shell reads the token on its stdin, from the file, so it is in no command's arguments, and exports it to
 # wrangler alone. It runs from $work/run, a folder of the script's own, with --env-file at an empty file, so wrangler
 # reads no .env.
-env -i PATH="$PATH" HOME="$work/home" XDG_CONFIG_HOME="$work/xdg" WRANGLER_CACHE_DIR="$work/cache" \
+/usr/bin/env -i PATH="$PATH" HOME="$work/home" XDG_CONFIG_HOME="$work/xdg" WRANGLER_CACHE_DIR="$work/cache" \
   WRANGLER_LOG_PATH="$work/logs" WRANGLER_SEND_METRICS=false CI=true \
-  bash --noprofile --norc -c 'set -eu; IFS= read -r CLOUDFLARE_API_TOKEN; export CLOUDFLARE_API_TOKEN; cd "$1"; exec "$2" deploy --config "$3" --env-file "$4" < /dev/null' \
+  /bin/bash --noprofile --norc -c 'set -eu; IFS= read -r CLOUDFLARE_API_TOKEN; export CLOUDFLARE_API_TOKEN; cd "$1"; exec "$2" deploy --config "$3" --env-file "$4" < /dev/null' \
   deploy-content "$work/run" "$root/apps/content/node_modules/.bin/wrangler" "$work/wrangler.json" "$work/empty.env" \
   < "$token_file" > "$work/deploy.out" 2>&1 || deploy_status=$?
 logs=$(find "$work/logs" -type f 2> /dev/null || true)

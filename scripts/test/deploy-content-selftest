@@ -11,6 +11,41 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 
+# Every run has a hard bound. A case that hangs is killed, with everything it started, and fails by name, so a hang
+# never stalls the whole self-test (as one did for over two hours under a mutation). The bound only detects a failure:
+# no case passes because of time, and no check measures how long anything took, so the rule against timing in tests
+# still holds. DC_SELFTEST_BOUND changes it, in seconds; a normal case takes a few.
+bound=${DC_SELFTEST_BOUND:-120}
+cat > "$tmp/bounded.pl" <<'EOF'
+# bounded.pl SECONDS TITLE COMMAND...: runs COMMAND; past SECONDS, kills it and its descendants and exits 124.
+use strict; use warnings;
+my ($secs, $title) = (shift, shift);
+my $pid = fork() // die "fork: $!";
+if ($pid == 0) { exec { $ARGV[0] } @ARGV or exit 127; }
+sub tree { my @all = ($_[0]); for my $c (split ' ', `pgrep -P $_[0]`) { push @all, tree($c); } return @all; }
+my $hung = 0;
+$SIG{ALRM} = sub { $hung = 1; kill 'KILL', reverse tree($pid); };
+alarm $secs;
+waitpid($pid, 0);
+my $status = $?;
+alarm 0;
+if ($hung) { print STDERR "HUNG: killed after ${secs}s: $title\n"; exit 124; }
+exit($status & 127 ? 128 + ($status & 127) : $status >> 8);
+EOF
+hung_cases=()
+run() { # lib.sh's run, with the bound
+  local expected=$1 code=0
+  shift
+  PATH="$bin:$PATH" perl "$tmp/bounded.pl" "$bound" "the run of: ${*:1:12}" "$@" > "$tmp/out" 2>&1 || code=$?
+  LAST=$code
+  if [ "$code" -eq 124 ] && grep -q '^HUNG: ' "$tmp/out"; then
+    hung_cases+=("$(grep '^HUNG: ' "$tmp/out" | head -n 1)")
+    echo "FAIL a run hung and was killed: $(grep '^HUNG: ' "$tmp/out" | head -n 1 | cut -c1-200)"
+    failures=$((failures + 1))
+  fi
+  [ "$code" -eq "$expected" ]
+}
+
 ACCOUNT=0123456789abcdef0123456789abcdef
 ACCOUNT_UPPER=0123456789ABCDEF0123456789ABCDEF
 OTHER=fedcba9876543210fedcba9876543210
@@ -342,21 +377,64 @@ check "with BASH_ENV set: refused" bash -c "[ $LAST -eq 1 ] && grep -q 'refused:
 
 # --- which shell ---
 fresh; run 2 "${clean_env[@]}" sh "$work/scripts/deploy-content" "${files[@]}" || true
-check "run by sh: refused, exit 2, nothing run" bash -c "[ $LAST -eq 2 ] && grep -q -E 'refused: (run it with bash|bash is in POSIX mode)' '$tmp/out' && [ ! -s '$fix/calls' ]"
+check "run by sh: refused, exit 2, nothing run" bash -c "[ $LAST -eq 2 ] && grep -q -E 'refused: (run it with bash|bash was in POSIX mode)' '$tmp/out' && [ ! -s '$fix/calls' ]"
 fresh; run 2 "${clean_env[@]}" bash --posix "$work/scripts/deploy-content" "${files[@]}" || true
-check "run by bash in POSIX mode: refused, exit 2" bash -c "[ $LAST -eq 2 ] && grep -q 'refused: bash is in POSIX mode' '$tmp/out' && [ ! -s '$fix/calls' ]"
+check "run by bash in POSIX mode: refused, exit 2" bash -c "[ $LAST -eq 2 ] && grep -q 'refused: bash was in POSIX mode' '$tmp/out' && [ ! -s '$fix/calls' ]"
 if command -v dash > /dev/null 2>&1; then
   fresh; run 2 "${clean_env[@]}" dash "$work/scripts/deploy-content" "${files[@]}" || true
   check "run by dash: refused, exit 2, nothing run" bash -c "[ $LAST -eq 2 ] && grep -q 'refused: run it with bash' '$tmp/out' && [ ! -s '$fix/calls' ]"
 fi
 check "this self-test runs under bash $BASH_VERSION" true
 
-# --- exported functions ---
-for shadow in env curl jq git mktemp; do
+# --- shadowing functions, and BASH_ENV ---
+# A function exported into the environment, as bash exports one, under the name of a command or builtin the script
+# might use. Each one records any call, with its arguments, so a call or a token passed to one would show.
+shadow_var() { # shadow_var NAME: the environment variable that exports a function of that name
+  printf "BASH_FUNC_%s%%%%=() { printf 'SHADOW-%s %%s\\n' \"\$*\" >> '%s'; }" "$1" "$1" "$fix/calls"
+}
+SHADOWS=(declare env '[' test set exit exec unset command builtin echo curl jq git mktemp)
+for name in "${SHADOWS[@]}"; do
   fresh
-  run 1 "${clean_env[@]}" bash -c "$shadow() { echo SHADOW-$shadow >> '$fix/calls'; }; export -f $shadow; exec \"\$0\" \"\$@\"" "$work/scripts/deploy-content" "${files[@]}" || true
-  check "an exported function named $shadow: refused before any command, and never called" bash -c "[ $LAST -eq 1 ] && grep -q 'refused: the environment exports a shell function ($shadow' '$tmp/out' && [ ! -s '$fix/calls' ]"
+  dc 0 "$(shadow_var "$name")" "${files[@]}" || true
+  check "an exported function named $name has no effect: the report runs, and the function is never called" bash -c "[ $LAST -eq 0 ] && ! grep -q '^SHADOW' '$fix/calls' && grep -q 'Nothing was deployed' '$tmp/out'"
+  check "  the token is in no function's arguments and no output" no_token
 done
+fresh
+all=()
+for name in "${SHADOWS[@]}"; do all+=("$(shadow_var "$name")"); done
+dc 0 "${all[@]}" "${files[@]}" || true
+check "all ${#SHADOWS[@]} exported together have no effect" bash -c "[ $LAST -eq 0 ] && ! grep -q '^SHADOW' '$fix/calls'"
+check "  the token is in no function's arguments and no output" no_token
+fresh; at_terminal 0 "$DOMAIN" "${all[@]}" -- "${files[@]}" --deploy || true
+check "  and a deploy with all of them exported calls none of them" bash -c "[ $LAST -eq 0 ] && ! grep -q '^SHADOW' '$fix/calls' && grep -q 'every probe passed' '$tmp/out'"
+check "  the token is in no function's arguments and no output" no_token
+{
+  echo 'set -x'
+  for name in curl env jq git '[' unset exec; do
+    printf "%s() { printf 'SHADOW-%s %%s\\n' \"\$*\" >> '%s'; }\n" "$name" "$name" "$fix/calls"
+  done
+  echo 'export -f curl env jq git 2> /dev/null'
+} > "$tmp/bash-env-hostile"
+fresh; dc 1 "BASH_ENV=$tmp/bash-env-hostile" "${files[@]}" || true
+check "BASH_ENV at a file that defines functions and turns tracing on: refused, and none of its functions is called" bash -c "[ $LAST -eq 1 ] && grep -q 'refused: BASH_ENV is set' '$tmp/out' && ! grep -q '^SHADOW' '$fix/calls' && ! grep -q -E '^(curl|wrangler|gh|npm) ' '$fix/calls'"
+check "  the token is in no output" no_token
+fresh; dc 1 DEPLOY_CONTENT_CLEAN=1 "${files[@]}" || true
+check "a caller who sets DEPLOY_CONTENT_CLEAN to skip the clean start is refused" bash -c "[ $LAST -eq 1 ] && grep -q 'refused: it didn.t start in the clean process' '$tmp/out' && [ ! -s '$fix/calls' ]"
+fresh; dc 1 DC_CALLER_TRACED=0 "${files[@]}" || true
+check "a process that has the exec's results but not its marker stops and never execs again" bash -c "[ $LAST -eq 1 ] && grep -q 'refused: it started again without its clean-process marker' '$tmp/out' && [ ! -s '$fix/calls' ]"
+fresh; dc 1 DC_CALLER_TRACED=0 "$(shadow_var echo)" "$(shadow_var exit)" "$(shadow_var exec)" "${files[@]}" || true
+check "  so does one with exported echo, exit and exec functions, and none of them is called" bash -c "[ $LAST -eq 1 ] && grep -q 'refused: it started again without its clean-process marker' '$tmp/out' && ! grep -q '^SHADOW' '$fix/calls' && ! grep -q -E '^(curl|wrangler|gh|npm) ' '$fix/calls'"
+# The marker lost on the way (here, left off the exec line): it must stop at once, not exec itself for ever.
+fresh
+grep -q -F ' DEPLOY_CONTENT_CLEAN=1 \' "$work/scripts/deploy-content"
+sed -i.bak 's/ DEPLOY_CONTENT_CLEAN=1 \\$/ \\/' "$work/scripts/deploy-content" && rm -f "$work/scripts/deploy-content.bak"
+check "  (the stand-in exec line has no marker)" bash -c "! grep -q -F ' DEPLOY_CONTENT_CLEAN=1 ' '$work/scripts/deploy-content'"
+dc 1 "${files[@]}" || true
+check "an exec that drops the marker: refused on the second start, with no third and no call" bash -c "[ $LAST -eq 1 ] && grep -q 'refused: it started again without its clean-process marker' '$tmp/out' && [ ! -s '$fix/calls' ]"
+# The bound itself: a run that never ends is killed with what it started, named, and exits 124.
+bound_code=0
+perl "$tmp/bounded.pl" 1 "a stand-in hang" bash -c "sleep 60 & echo \$! > '$tmp/bound-child'; wait" > /dev/null 2> "$tmp/bound-out" || bound_code=$?
+check "the self-test's bound kills a hung run and what it started, and names it" bash -c "[ $bound_code -eq 124 ] && grep -q 'HUNG: killed after 1s: a stand-in hang' '$tmp/bound-out' && ! kill -0 \$(cat '$tmp/bound-child') 2> /dev/null"
 
 # --- the caller's environment ---
 fresh; dc 1 CLOUDFLARE_API_TOKEN=x "${files[@]}" || true
@@ -393,8 +471,14 @@ fresh; : > "$secrets/content-token"; dc 1 "${files[@]}" || true
 check "an empty token file is refused" refused "the token file must hold one line"
 fresh; printf '%s' "$TOKEN" > "$secrets/content-token"; dc 0 "${files[@]}" || true
 check "a token file with no final newline passes" bash -c "[ $LAST -eq 0 ]"
+fresh; printf '%s\000x\n' "$TOKEN" > "$secrets/content-token"; dc 1 "${files[@]}" || true
+check "a token file with a NUL after the token on its line is refused" refused "the token file holds a character that is no token's"
+fresh; printf '%s\r\n' "$TOKEN" > "$secrets/content-token"; dc 1 "${files[@]}" || true
+check "a token file with a carriage return is refused" refused "the token file holds a character that is no token's"
 fresh; echo 'not a token!' > "$secrets/content-token"; dc 1 "${files[@]}" || true
-check "a token file that holds no token is refused" refused "the token file doesn't hold a token"
+check "a token file that holds no token is refused" refused "the token file holds a character that is no token's"
+fresh; echo 'short' > "$secrets/content-token"; dc 1 "${files[@]}" || true
+check "a token too short is refused" refused "the token file doesn't hold a token"
 fresh; chmod 644 "$secrets/content-deploy.json"; dc 1 "${files[@]}" || true
 check "a configuration file others can read is refused" refused "the configuration file must be yours and mode 0600"
 

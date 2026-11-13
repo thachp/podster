@@ -87,6 +87,7 @@ mod provisioning;
 mod public;
 mod public_claims;
 mod readiness_upkeep;
+mod release_commit;
 mod release_recheck;
 mod removal;
 mod repo_tokens;
@@ -4129,6 +4130,12 @@ impl Workspace {
         }
         if req.path() == release_recheck::INTERNAL_RELEASE_RECHECK {
             return self.release_recheck(req).await;
+        }
+        if req.path() == release_commit::INTERNAL_RELEASE_START_UPLOAD {
+            return self.release_start_upload(req).await;
+        }
+        if req.path() == release_commit::INTERNAL_RELEASE_COMMIT_LIVE {
+            return self.release_commit_live(req).await;
         }
         #[cfg(feature = "failpoints")]
         if req.path() == INTERNAL_MANAGED_SWITCH {

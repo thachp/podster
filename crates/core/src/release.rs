@@ -63,7 +63,9 @@ pub struct CommitRecord<'a> {
     pub sha: &'a str,
     /// The repository the merge was made in, by GitHub's ID.
     pub provider_repo_id: i64,
-    /// Podster's own merge job put it on the default branch.
+    /// Podster's own merge job called the merge of it. The room's record doesn't say whose call merged it: a person
+    /// who merges the same pull request by hand, after Podster's call was made and before its outcome was known,
+    /// leaves the same record. What is released is the reviewed commit either way.
     pub merged_by_podster: bool,
     /// And then confirmed it there.
     pub confirmed_on_default_branch: bool,
@@ -74,8 +76,8 @@ pub struct CommitRecord<'a> {
 /// Why a commit can't be released.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommitRefusal {
-    /// `commit_not_releasable`: not a commit Podster merged and confirmed on the room's own repository's default branch,
-    /// for a completed task. A task branch's head, a commit pushed any other way, and another repository's are never
+    /// `commit_not_releasable`: not a commit whose merge Podster called and then confirmed on the room's own
+    /// repository's default branch, for a completed task. A task branch's head, a commit pushed any other way, and another repository's are never
     /// releasable.
     NotReleasable,
     /// `invalid_argument`: an environment other than the one there is.
@@ -1123,6 +1125,36 @@ pub fn recheck(r: &Recheck) -> Result<(), RecheckFailure> {
         return Err(RecheckFailure::EpochMoved);
     }
     Ok(())
+}
+
+/// Why the room ends a release whose upload it had started, apart from the recheck's own reasons and a refused commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UploadFailure {
+    /// `release_upload_expired`: it was still uploading, or its upload still uncertain, an hour after it started
+    /// ([`IN_FLIGHT_EXEMPTION_MS`]). Its script no longer has the reconcile's exemption, so it never goes live.
+    Expired,
+    /// `release_script_deleted`: its script was queued for deletion, by the reconcile or anything else. A script that
+    /// may be gone is never set as what a host serves.
+    ScriptDeleted,
+    /// `release_label_retired`: the label it was asked under is no longer the room's current one.
+    LabelRetired,
+}
+
+impl UploadFailure {
+    // codes: reasons
+    pub fn code(self) -> &'static str {
+        match self {
+            UploadFailure::Expired => "release_upload_expired",
+            UploadFailure::ScriptDeleted => "release_script_deleted",
+            UploadFailure::LabelRetired => "release_label_retired",
+        }
+    }
+}
+
+/// Whether an upload that started at `since` has outlived its hour at `now`: the same bound the reconcile keeps a
+/// script for ([`reconcile_script`]), so a release is failed exactly when its script stops being kept.
+pub fn upload_expired(since: i64, now: i64) -> bool {
+    now.saturating_sub(since) >= IN_FLIGHT_EXEMPTION_MS
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

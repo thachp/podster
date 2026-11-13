@@ -87,7 +87,7 @@ pub(crate) async fn switched_on(env: &Env) -> bool {
 }
 
 /// The refusal of a route that exists in the contract and isn't built.
-fn release_not_available() -> ApiError {
+pub(crate) fn release_not_available() -> ApiError {
     ApiError::api(409, "release_not_available")
 }
 

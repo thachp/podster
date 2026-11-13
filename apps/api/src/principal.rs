@@ -1475,6 +1475,18 @@ impl Principal {
             "/internal/org-delegation" | "/internal/org-delegation-set" => {
                 let body: Value = req.json().await?;
                 let provider = body["provider"].as_str().unwrap_or_default().to_string();
+                // Test builds only: an organization whose own object doesn't answer the read, by its ID's prefix,
+                // as a person's doesn't answer the departure question.
+                #[cfg(feature = "failpoints")]
+                if path == "/internal/org-delegation"
+                    && self
+                        .state
+                        .id()
+                        .name()
+                        .is_some_and(|name| name.starts_with("org_unavailable_"))
+                {
+                    return Err(ApiError::internal("test: the organization didn't answer"));
+                }
                 exec(&sql, ORG_DELEGATION_SCHEMA, vec![])?;
                 if path == "/internal/org-delegation-set" {
                     // An organization the API has never seen a room of isn't one to delegate to. This object records

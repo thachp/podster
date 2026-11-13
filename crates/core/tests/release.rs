@@ -2019,3 +2019,40 @@ fn an_ended_record_asking_for_the_flights_own_script_is_refused_as_ended() {
         Err(RollbackRefusal::Commit(CommitLiveRefusal::ReleaseEnded))
     );
 }
+
+#[test]
+fn an_upload_expires_exactly_when_the_reconcile_stops_keeping_its_script() {
+    use podster_core::release::{upload_expired, UploadFailure, IN_FLIGHT_EXEMPTION_MS};
+    let name = format!("abc.rel_{}", "a1".repeat(16));
+    let since = 1_000_000;
+    // One bound for both: at every moment the script is kept or the release is ended, never both and never neither.
+    for now in [
+        since,
+        since + IN_FLIGHT_EXEMPTION_MS - 1,
+        since + IN_FLIGHT_EXEMPTION_MS,
+        since + IN_FLIGHT_EXEMPTION_MS + 1,
+        i64::MAX,
+    ] {
+        let kept =
+            reconcile_script(&name, RoomClaim::Uploading { since }, now) == ScriptReconcile::Keep;
+        assert_eq!(upload_expired(since, now), !kept, "at {now}");
+    }
+    assert!(!upload_expired(since, since + IN_FLIGHT_EXEMPTION_MS - 1));
+    assert!(upload_expired(since, since + IN_FLIGHT_EXEMPTION_MS));
+    // A start time ahead of the clock hasn't expired, and nothing overflows.
+    assert!(!upload_expired(i64::MAX, 0));
+    assert!(upload_expired(i64::MIN, i64::MAX));
+    let codes = [
+        UploadFailure::Expired.code(),
+        UploadFailure::ScriptDeleted.code(),
+        UploadFailure::LabelRetired.code(),
+    ];
+    assert_eq!(
+        codes,
+        [
+            "release_upload_expired",
+            "release_script_deleted",
+            "release_label_retired"
+        ]
+    );
+}

@@ -5,10 +5,14 @@
 //! reports, never a room's private state, and their only powers are suspending and lifting a room's public surface, which
 //! the room itself records and decides from, and an agent's public claims, which the agent's `Principal` keeps.
 //!
-//! Logs carry IDs and codes only, never a report's note.
+//! Since M6 step 9 it also keeps apps' reports, by host, and the deployment's release-read budget.
+//!
+//! Logs carry IDs and codes only, never a report's note or an app report's host.
 use crate::error::ApiError;
 use crate::store::{exec, int, rows, transaction_sync};
 use crate::{content_stop, forward, principal, reconcile, valid_id, Caller};
+use podster_core::hostnames::reported_host;
+use podster_core::release::{is_release_id, read_budget_wait, window_start, READ_WINDOW_MS};
 use podster_policy::moderation::{
     check_report, is_operator, parse_operators, Reason, REPORT_WINDOW_MS,
 };
@@ -32,10 +36,44 @@ CREATE INDEX IF NOT EXISTS report_by_reporter ON report (reporter, created_at);
 CREATE TABLE IF NOT EXISTS operator_action (seq INTEGER PRIMARY KEY, operator TEXT NOT NULL, subject_kind TEXT NOT NULL,
   subject TEXT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL, at INTEGER NOT NULL,
   outcome TEXT NOT NULL DEFAULT 'pending', ended_at INTEGER);
+CREATE TABLE IF NOT EXISTS app_report (seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, reporter TEXT NOT NULL,
+  request_key TEXT NOT NULL, request_hash TEXT NOT NULL, host TEXT NOT NULL CHECK (length(host) BETWEEN 1 AND 253),
+  reason TEXT NOT NULL, note TEXT, created_at INTEGER NOT NULL, UNIQUE (reporter, request_key));
+CREATE INDEX IF NOT EXISTS app_report_by_reporter ON app_report (reporter, created_at);
+CREATE TABLE IF NOT EXISTS release_reads (release_id TEXT PRIMARY KEY CHECK (length(release_id) = 36),
+  reads INTEGER NOT NULL CHECK (reads BETWEEN 1 AND 3000), reserved_at INTEGER NOT NULL);
 ";
+
+/// The deployment's release-read budget (M6 step 9, ADR 0010's budgets): where a release reserves the GitHub reads it
+/// is about to make. Internal: no route reaches it.
+pub(crate) const RELEASE_READS_PATH: &str = "/release-reads";
 
 fn now_ms() -> i64 {
     Date::now().as_millis() as i64
+}
+
+/// The time for what this object counts over a window: reports' daily limit and the read budget. Test builds only: a
+/// test sets it by holding one row in a table named `test_clock`, so a window's edge is tried to the millisecond.
+fn clock(sql: &SqlStorage) -> i64 {
+    #[cfg(feature = "failpoints")]
+    if !rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_clock'",
+        vec![],
+    )
+    .unwrap_or_default()
+    .is_empty()
+    {
+        if let Some(row) = rows(sql, "SELECT now FROM test_clock", vec![])
+            .unwrap_or_default()
+            .first()
+        {
+            return int(&row["now"]);
+        }
+    }
+    #[cfg(not(feature = "failpoints"))]
+    let _ = sql;
+    now_ms()
 }
 
 pub(crate) fn moderation(env: &Env) -> R<Stub> {
@@ -223,6 +261,66 @@ pub async fn report(env: &Env, caller: &Caller, body: Option<&str>, req: &Reques
     call(env, "/report", Method::Post, Some(request)).await
 }
 
+/// `POST /v1/app-reports { address, reason, note? }`: a signed-in person reports a deployed app by its address (M6 step
+/// 9, ADR 0010). Reached only from [`crate::releases::answer`], so only while release is switched on.
+///
+/// Only the address's host is kept, normalized, and nothing asks whether anything is served there: the answer is the
+/// same whether the host exists, is served or is suspended, so a report tells the reporter nothing. It counts against the
+/// same 10 a day as a room's report, and a retry with the same idempotency key answers with the same report. The host is
+/// a name, so it stays in this object's report store and in the operators' queue, and never reaches a log or an event.
+pub(crate) async fn app_report(
+    env: &Env,
+    caller: &Caller,
+    body: Option<&str>,
+    req: &Request,
+) -> R<Response> {
+    if caller.kind != "person" {
+        return Err(ApiError::not_allowed());
+    }
+    let key = req
+        .headers()
+        .get("idempotency-key")?
+        .filter(|k| !k.is_empty() && k.len() <= 200)
+        .ok_or_else(ApiError::idempotency_required)?;
+    let fields = object(body)?;
+    if fields
+        .keys()
+        .any(|k| !matches!(k.as_str(), "address" | "reason" | "note"))
+    {
+        return Err(ApiError::invalid_argument());
+    }
+    let host = fields
+        .get("address")
+        .and_then(Value::as_str)
+        .and_then(reported_host)
+        .ok_or_else(ApiError::invalid_argument)?;
+    let reason = fields
+        .get("reason")
+        .and_then(Value::as_str)
+        .ok_or_else(ApiError::invalid_argument)?;
+    let note = match fields.get("note") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(note)) => Some(note.clone()),
+        Some(_) => return Err(ApiError::invalid_argument()),
+    };
+    check_report(&caller.kind, reason, note.as_deref(), 0)
+        .map_err(|refusal| ApiError::api(status_of(refusal.code()), refusal.code()))?;
+    // The same request by its parsed fields and its kind, so a room's report and an app's never share a key's answer.
+    let hash = format!(
+        "{:x}",
+        Sha256::digest(
+            json!({ "kind": "app", "host": host, "reason": reason, "note": note })
+                .to_string()
+                .as_bytes()
+        )
+    );
+    let request = json!({
+        "kind": "app", "reporter": caller.id, "request_key": key, "request_hash": hash, "host": host, "reason": reason,
+        "note": note,
+    });
+    call(env, "/report", Method::Post, Some(request)).await
+}
+
 fn status_of(code: &str) -> u16 {
     match code {
         "not_allowed" => 403,
@@ -232,18 +330,31 @@ fn status_of(code: &str) -> u16 {
 }
 
 /// `GET /v1/moderation/reports?cursor=`: the operator's queue, newest first.
+///
+/// **Its shape depends on the release switch.** Switched off, which is every deployment, it is exactly M4's: rooms'
+/// reports only, each `{ id, handle, agent_id, reason, note, created_at }`. Switched on (M6 step 9), it is one queue of
+/// rooms' and apps' reports, each with `kind` (`room` or `app`) and `host` beside those fields: an app's report has the
+/// host it named and a null `handle` and `agent_id`; a room's has a null `host`.
 pub async fn list_reports(env: &Env, caller: &Caller, url: &Url) -> R<Response> {
     require_operator(env, caller)?;
     let cursor = url
         .query_pairs()
         .find(|(k, _)| k == "cursor")
         .map(|(_, v)| v.into_owned());
-    let path = match cursor {
+    let mut query = match cursor {
         Some(c) if c.chars().all(|ch| ch.is_ascii_digit()) && !c.is_empty() && c.len() < 20 => {
-            format!("/reports?before={c}")
+            vec![format!("before={c}")]
         }
         Some(_) => return Err(ApiError::invalid_argument()),
-        None => "/reports".to_string(),
+        None => vec![],
+    };
+    if crate::releases::switched_on(env).await {
+        query.push("apps=1".into());
+    }
+    let path = if query.is_empty() {
+        "/reports".to_string()
+    } else {
+        format!("/reports?{}", query.join("&"))
     };
     call(env, &path, Method::Get, None).await
 }
@@ -600,15 +711,23 @@ impl Moderation {
             }
             (Method::Post, "/report") => {
                 let body: Value = req.json().await?;
-                self.in_transaction(move || keep_report(&sql, &body, now_ms()))
+                let now = clock(&sql);
+                self.in_transaction(move || keep_report(&sql, &body, now))
             }
             (Method::Get, "/reports") => {
-                let before = req
-                    .url()?
+                let url = req.url()?;
+                let before = url
                     .query_pairs()
                     .find(|(k, _)| k == "before")
                     .and_then(|(_, v)| v.parse::<i64>().ok());
-                list(&sql, before)
+                let apps = url.query_pairs().any(|(k, v)| k == "apps" && v == "1");
+                list(&sql, before, apps)
+            }
+            // The deployment's release-read budget (M6 step 9). Nothing calls it until the release job, step 5.
+            (Method::Post, RELEASE_READS_PATH) => {
+                let body: Value = req.json().await?;
+                let now = clock(&sql);
+                self.in_transaction(move || reserve_reads(&sql, &body, now))
             }
             (Method::Post, "/report-lookup") => {
                 let body: Value = req.json().await?;
@@ -668,8 +787,12 @@ impl Moderation {
     }
 }
 
-/// Keeps a report, counting the reporter's reports in the last day, in one transaction. A retry with the same key answers
-/// with the report it made.
+/// Keeps a report, a room's or (with `kind: "app"`) an app's, counting the reporter's reports of both kinds in the last
+/// day, in one transaction. A retry with the same key answers with the report it made.
+///
+/// **One order for both kinds.** Each report takes the next number after every report of either kind, so the
+/// operators' queue pages through both by one cursor. A room's report took its number from its own table before M6;
+/// those are all lower than any app report's, so nothing kept earlier changes place.
 fn keep_report(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     let text = |name: &str| body[name].as_str().unwrap_or_default().to_string();
     let (reporter, key) = (text("reporter"), text("request_key"));
@@ -678,10 +801,17 @@ fn keep_report(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     if !earlier.is_null() {
         return Ok(earlier);
     }
+    let since = now - REPORT_WINDOW_MS;
     let made = rows(
         sql,
-        "SELECT COUNT(*) AS n FROM report WHERE reporter = ? AND created_at > ?",
-        vec![reporter.as_str().into(), (now - REPORT_WINDOW_MS).into()],
+        "SELECT (SELECT COUNT(*) FROM report WHERE reporter = ? AND created_at > ?)
+              + (SELECT COUNT(*) FROM app_report WHERE reporter = ? AND created_at > ?) AS n",
+        vec![
+            reporter.as_str().into(),
+            since.into(),
+            reporter.as_str().into(),
+            since.into(),
+        ],
     )?
     .first()
     .map_or(0, |row| int(&row["n"]));
@@ -694,11 +824,38 @@ fn keep_report(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     )
     .map_err(|refusal| ApiError::api(status_of(refusal.code()), refusal.code()))?;
     let id = format!("rpt_{}", uuid::Uuid::new_v4().simple());
+    let seq = rows(
+        sql,
+        "SELECT max(coalesce((SELECT max(seq) FROM report), 0), coalesce((SELECT max(seq) FROM app_report), 0)) + 1 AS seq",
+        vec![],
+    )?
+    .first()
+    .map_or(1, |row| int(&row["seq"]));
+    if body["kind"].as_str() == Some("app") {
+        exec(
+            sql,
+            "INSERT INTO app_report (seq, id, reporter, request_key, request_hash, host, reason, note, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            vec![
+                seq.into(),
+                id.as_str().into(),
+                reporter.as_str().into(),
+                key.as_str().into(),
+                text("request_hash").into(),
+                text("host").into(),
+                text("reason").into(),
+                note.map(str::to_owned).into(),
+                now.into(),
+            ],
+        )?;
+        return Ok(json!({ "id": id, "created_at": now }));
+    }
     exec(
         sql,
-        "INSERT INTO report (id, reporter, request_key, request_hash, handle, workspace_id, agent_id, reason, note, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO report (seq, id, reporter, request_key, request_hash, handle, workspace_id, agent_id, reason, note, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         vec![
+            seq.into(),
             id.as_str().into(),
             reporter.as_str().into(),
             key.as_str().into(),
@@ -714,16 +871,18 @@ fn keep_report(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     Ok(json!({ "id": id, "created_at": now }))
 }
 
-/// The report this reporter made with this key, as its answer, or null. The same key with a different request is
-/// refused with `idempotency_mismatch`, as every other command does.
+/// The report this reporter made with this key, of either kind, as its answer, or null. The same key with a different
+/// request, a room's report and an app's included, is refused with `idempotency_mismatch`, as every other command does.
 fn earlier_report(sql: &SqlStorage, body: &Value) -> R<Value> {
+    let (reporter, key) = (
+        body["reporter"].as_str().unwrap_or_default(),
+        body["request_key"].as_str().unwrap_or_default(),
+    );
     let found = rows(
         sql,
-        "SELECT id, created_at, request_hash FROM report WHERE reporter = ? AND request_key = ?",
-        vec![
-            body["reporter"].as_str().unwrap_or_default().into(),
-            body["request_key"].as_str().unwrap_or_default().into(),
-        ],
+        "SELECT id, created_at, request_hash FROM report WHERE reporter = ? AND request_key = ?
+         UNION ALL SELECT id, created_at, request_hash FROM app_report WHERE reporter = ? AND request_key = ?",
+        vec![reporter.into(), key.into(), reporter.into(), key.into()],
     )?;
     let Some(row) = found.first() else {
         return Ok(Value::Null);
@@ -735,13 +894,25 @@ fn earlier_report(sql: &SqlStorage, body: &Value) -> R<Value> {
 }
 
 /// A page of reports, newest first. Neither the reporter nor the room's internal ID is shown: an operator sees the handle,
-/// the agent named, the reason and the note.
-fn list(sql: &SqlStorage, before: Option<i64>) -> R<Value> {
-    let found = rows(
-        sql,
-        "SELECT seq, id, handle, agent_id, reason, note, created_at FROM report WHERE seq < ? ORDER BY seq DESC LIMIT ?",
-        vec![before.unwrap_or(i64::MAX).into(), (PAGE + 1).into()],
-    )?;
+/// the agent named, the reason and the note. With `apps`, which only release switched on asks for, apps' reports are in
+/// the same queue, and every report also says its `kind` and the `host` an app's report named.
+fn list(sql: &SqlStorage, before: Option<i64>, apps: bool) -> R<Value> {
+    let before = before.unwrap_or(i64::MAX);
+    let found = if apps {
+        rows(
+            sql,
+            "SELECT seq, id, 'room' AS kind, handle, agent_id, NULL AS host, reason, note, created_at FROM report WHERE seq < ?
+             UNION ALL SELECT seq, id, 'app' AS kind, NULL, NULL, host, reason, note, created_at FROM app_report WHERE seq < ?
+             ORDER BY seq DESC LIMIT ?",
+            vec![before.into(), before.into(), (PAGE + 1).into()],
+        )?
+    } else {
+        rows(
+            sql,
+            "SELECT seq, id, handle, agent_id, reason, note, created_at FROM report WHERE seq < ? ORDER BY seq DESC LIMIT ?",
+            vec![before.into(), (PAGE + 1).into()],
+        )?
+    };
     let more = found.len() as i64 > PAGE;
     let page: Vec<&Value> = found.iter().take(PAGE as usize).collect();
     let next = if more {
@@ -752,13 +923,77 @@ fn list(sql: &SqlStorage, before: Option<i64>) -> R<Value> {
     let reports: Vec<Value> = page
         .iter()
         .map(|row| {
-            json!({
+            let mut report = json!({
                 "id": row["id"], "handle": row["handle"], "agent_id": row["agent_id"], "reason": row["reason"],
                 "note": row["note"], "created_at": row["created_at"],
-            })
+            });
+            if apps {
+                report["kind"] = row["kind"].clone();
+                report["host"] = row["host"].clone();
+            }
+            report
         })
         .collect();
     Ok(json!({ "reports": reports, "next_cursor": next }))
+}
+
+/// A release reserves the GitHub reads it is about to make, against the deployment's budget of 3,000 in a rolling hour
+/// (M6 step 9, ADR 0010's budgets). `{ release_id, reads }` answers `{ fits: true, reads, reserved_at }`, or
+/// `{ fits: false, retry_at }`, where `retry_at` is null when `reads` alone is past the budget. Podster counts its own
+/// reads: GitHub's header is a check on this count, not the count.
+///
+/// **Keyed by the release, and idempotent:** while a release's reservation is inside the hour, asking again answers it as
+/// it was first made, whatever `reads` says, and counts nothing more. A reservation leaves the count an hour after it was
+/// made, and a release that asks after that reserves again. A release told to wait has reserved nothing.
+///
+/// **Nothing calls this until the release job, M6 step 5.** It is built at step 9 with the other caps, so the job finds
+/// the budget in place; no route reaches it.
+fn reserve_reads(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
+    let release = body["release_id"]
+        .as_str()
+        .filter(|id| is_release_id(id))
+        .ok_or_else(ApiError::invalid_argument)?;
+    let reads = body["reads"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|n| *n >= 1)
+        .ok_or_else(ApiError::invalid_argument)?;
+    exec(
+        sql,
+        "DELETE FROM release_reads WHERE reserved_at < ?",
+        vec![window_start(now, READ_WINDOW_MS).into()],
+    )?;
+    if let Some(row) = rows(
+        sql,
+        "SELECT reads, reserved_at FROM release_reads WHERE release_id = ?",
+        vec![release.into()],
+    )?
+    .first()
+    {
+        return Ok(
+            json!({ "fits": true, "reads": row["reads"], "reserved_at": row["reserved_at"] }),
+        );
+    }
+    let held: Vec<(i64, u32)> = rows(sql, "SELECT reserved_at, reads FROM release_reads", vec![])?
+        .iter()
+        .map(|row| {
+            (
+                int(&row["reserved_at"]),
+                u32::try_from(int(&row["reads"])).unwrap_or(u32::MAX),
+            )
+        })
+        .collect();
+    match read_budget_wait(&held, reads, now) {
+        Ok(()) => {
+            exec(
+                sql,
+                "INSERT INTO release_reads (release_id, reads, reserved_at) VALUES (?, ?, ?)",
+                vec![release.into(), i64::from(reads).into(), now.into()],
+            )?;
+            Ok(json!({ "fits": true, "reads": reads, "reserved_at": now }))
+        }
+        Err(retry_at) => Ok(json!({ "fits": false, "retry_at": retry_at })),
+    }
 }
 
 impl DurableObject for Moderation {

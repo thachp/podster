@@ -210,7 +210,8 @@ async fn content_stop(
 ///
 /// Built (step 4(a)): an operator's suspension of an app and its lifting, by the app's label and by its default
 /// host, which is the same act; a custom hostname's suspension and its lifting; and the stop for the whole content
-/// domain and its lifting; and the operator's read of what the reconciles found. Everything else answers `release_not_available`, and so does a host's route while no
+/// domain and its lifting; and the operator's read of what the reconciles found. Built (step 9): a person's report that
+/// names an app by its address. Everything else answers `release_not_available`, and so does a host's route while no
 /// content domain is configured, since no host can then be told from another.
 pub(crate) async fn answer(
     env: &Env,
@@ -218,6 +219,7 @@ pub(crate) async fn answer(
     audience: Audience,
     parts: &[&str],
     body: Option<&str>,
+    req: &Request,
 ) -> R<Response> {
     if caller.kind != "person" {
         return Err(ApiError::not_allowed());
@@ -226,6 +228,9 @@ pub(crate) async fn answer(
         moderation::require_operator(env, caller)?;
     }
     let done = match parts {
+        // A report that names an app by its address (step 9). It needs no content domain: any well-formed host is kept,
+        // and nothing says whether it is served.
+        ["v1", "app-reports"] => return moderation::app_report(env, caller, body, req).await,
         ["v1", "moderation", "apps", label, verb] => {
             app_suspension(env, caller, label, *verb == "suspend", body).await?
         }

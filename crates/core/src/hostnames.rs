@@ -118,6 +118,43 @@ pub fn normalize(input: &str) -> Result<String, HostnameRefusal> {
     Ok(ascii)
 }
 
+/// The longest address a report may give, as the contract caps it.
+pub const MAX_REPORTED_ADDRESS_LEN: usize = 2048;
+
+/// The host a report names (M6 step 9): the address as a reporter saw it, either a hostname or an `http` or `https` URL
+/// on one. Only the host is kept, normalized as [`normalize`] does, so two spellings of a host are one. The URL's path,
+/// query, fragment and port are dropped; one with a user name or password is refused, since it can show one host and
+/// mean another. Whether anything is served at the host isn't asked: a report answers the same either way.
+pub fn reported_host(address: &str) -> Option<String> {
+    if address.is_empty() || address.len() > MAX_REPORTED_ADDRESS_LEN {
+        return None;
+    }
+    let lower = address.to_ascii_lowercase();
+    let rest = ["https://", "http://"]
+        .iter()
+        .find_map(|scheme| lower.starts_with(scheme).then(|| &address[scheme.len()..]));
+    let host = match rest {
+        Some(rest) => {
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+            if authority.contains(['@', '[', ']', '\\']) {
+                return None;
+            }
+            match authority.rsplit_once(':') {
+                Some((name, port))
+                    if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) =>
+                {
+                    name
+                }
+                Some(_) => return None,
+                None => authority,
+            }
+        }
+        None if address.contains("://") => return None,
+        None => address,
+    };
+    normalize(host).ok()
+}
+
 /// An IP literal (IPv4 in any spelling `std` reads, IPv6 bare or in brackets), or a name whose last label looks like a
 /// number in any base: all decimal digits, or `0x` followed by hexadecimal digits, or `0` followed by octal digits.
 /// Browsers and resolvers read such names as addresses (`0x4`, `1.2.3.0x4`). Ruled on the review of PR #309.

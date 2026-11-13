@@ -119,15 +119,24 @@ describe("M6's routes, none of them built", () => {
 
   it("switched on, refuse an agent and a non-operator, and otherwise say release isn't available", async () => {
     const room: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+    // The stop is set and lifted below. Its key at the provider is this object's to write: with no provider for it
+    // here, nothing reaches the stand-in that the takedown tests share.
+    await runInDurableObject(BINDINGS.MODERATION.get(BINDINGS.MODERATION.idFromName("moderation")), (_: any, state: any) => state.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_content_provider_off (x INTEGER)"));
     await switchedOn(async () => {
       for (const route of contract()) {
         const path = fill(route.path, room);
         const as = async (who: Who) => { const answer = await api(who, route.method, path, { reason: "abuse" }); return [answer.status, answer.code]; };
         expect(await as(AGENT), `${route.operation} as an agent`).toEqual([403, "not_allowed"]);
-        // Step 4(a) built an app's suspension and its lifting: an operator asking about a label no room has is told it
-        // isn't found. Everything else still isn't built. A host that isn't an app's default host is the next PR's.
-        const built = route.operation === "suspendApp" || route.operation === "liftAppSuspension";
-        expect(await as(OPERATOR), `${route.operation} as an operator`).toEqual(built ? [404, "not_found"] : [409, "release_not_available"]);
+        // Step 4(a) built every operator route. An app's suspension, asked for a label no room has, is not found. A
+        // custom hostname's and the stop's need nothing to exist: each is done, and lifted by the route after it, so
+        // this leaves the name unsuspended and the domain unstopped. Everything else still isn't built.
+        const operatorPath = path.replace("app.example.com", "switched-on.example.net");
+        const want: Record<string, [number, string | undefined]> = {
+          suspendApp: [404, "not_found"], liftAppSuspension: [404, "not_found"], suspendAppHost: [200, undefined], liftAppHostSuspension: [200, undefined],
+          stopContentDomain: [200, undefined], resumeContentDomain: [200, undefined],
+        };
+        const operator = await api(OPERATOR, route.method, operatorPath, { reason: "abuse" });
+        expect([operator.status, operator.code], `${route.operation} as an operator`).toEqual(want[route.operation] ?? [409, "release_not_available"]);
         expect(await as(OWNER), `${route.operation} as the owner`).toEqual(M6[route.operation] === "operator" ? [403, "not_allowed"] : [409, "release_not_available"]);
       }
       // A neighbouring path the contract doesn't list is no M6 route: the room answers it as it always did.
@@ -156,7 +165,16 @@ describe("the room's release state (M6 step 2)", () => {
   const LABEL = "k3v9q2";
   const OLD = `rel_${"b2".repeat(16)}`;
   const scriptOf = (release: string, label = LABEL) => `${label}.${release}`;
-  const newRoom = async () => (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id as string;
+  /**
+   * A room for the state's own tests. They write rows no command would, and read them back. The room's applier (step
+   * 4(a)) keeps its own record beside each host it looks at, and a room's alarm runs a moment after it is made, so it
+   * has no provider here: it then looks at nothing, and the rows are only what a test wrote.
+   */
+  const newRoom = async () => {
+    const id = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id as string;
+    await inRoom(id, (sql) => sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)"));
+    return id;
+  };
   const run = (room: string, query: string, ...values: unknown[]) => inRoom(room, (sql) => refuses(() => sql.exec(query, ...values)));
   const one = (room: string, query: string, ...values: unknown[]) => inRoom(room, (sql) => sql.exec(query, ...values).one());
   const label = (room: string, name = LABEL, current: number | null = 1, retired: number | null = null) => run(room, "INSERT INTO app_label (label, current, created_at, retired_at) VALUES (?, ?, 1, ?)", name, current, retired);

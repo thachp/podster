@@ -335,6 +335,14 @@ CREATE TABLE script_delete (script_name TEXT PRIMARY KEY, label TEXT NOT NULL RE
 CREATE INDEX script_delete_due ON script_delete (next_attempt_at) WHERE gone_at IS NULL;
 "];
 
+/// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the
+/// runtime reads later than the one the moment was worked out from, so the time kept would trail the time meant.
+pub fn alarm_at(ms: i64) -> worker::ScheduledTime {
+    worker::ScheduledTime::new(js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(
+        ms as f64,
+    )))
+}
+
 pub fn int(value: &Value) -> i64 {
     value
         .as_i64()

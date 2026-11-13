@@ -113,6 +113,22 @@ async function app(opts: { plain?: boolean; epoch?: number; index?: boolean } = 
   return { room, label, host, served, kept, flight, queued };
 }
 
+const moderation = () => BINDINGS.MODERATION.get(BINDINGS.MODERATION.idFromName("moderation"));
+const inModeration = <T>(fn: (sql: any) => T) => runInDurableObject(moderation(), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
+const claimOf = (hostname: string) => BINDINGS.HOSTNAME_CLAIM.get(BINDINGS.HOSTNAME_CLAIM.idFromName(hostname));
+const inClaim = <T>(hostname: string, fn: (sql: any) => T) => runInDurableObject(claimOf(hostname), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
+/** One whole run of an object's alarm, which waits out a run the runtime started and has ended when this returns. */
+const settle = (object: DurableObjectStub) => alarmPass(object);
+const stopDomain = (who: Who = OPERATOR, reason = "illegal") => api(who, "POST", "/v1/moderation/content-domain/stop", { reason });
+const resumeDomain = (who: Who = OPERATOR, reason = "other") => api(who, "POST", "/v1/moderation/content-domain/resume", { reason });
+const stopRow = () => inModeration((sql) => sql.exec("SELECT stopped, reason, version, applied_version, attempts, attempt_version, next_attempt_at, last_code FROM content_stop").toArray()[0] ?? null);
+const stopCalls = async () => (await held()).calls.filter((call) => call.name === "_stop").map((call) => `${call.op} ${call.status}`);
+const suspendHost = (host: string, who: Who = OPERATOR, reason = "abuse") => api(who, "POST", `/v1/moderation/app-hosts/${host}/suspend`, { reason });
+const liftHost = (host: string, who: Who = OPERATOR, reason = "other") => api(who, "POST", `/v1/moderation/app-hosts/${host}/lift`, { reason });
+let hostnames = 0;
+/** A custom hostname no other test has used. */
+const newHostname = () => `h${(++hostnames).toString(36)}${crypto.randomUUID().slice(0, 8)}.example.org`;
+
 const suspend = (label: string, who: Who = OPERATOR, reason = "abuse") => api(who, "POST", `/v1/moderation/apps/${label}/suspend`, { reason });
 const lift = (label: string, who: Who = OPERATOR, reason = "other") => api(who, "POST", `/v1/moderation/apps/${label}/lift`, { reason });
 const serveRows = (room: string) => all(room, "SELECT host, kind, label, label_current, release_id, script_name, version, closed, flight_version, flight_before FROM serve_state ORDER BY host");
@@ -300,11 +316,16 @@ describe("an operator's suspension of an app", () => {
       expect((await deleteRows(a.room)).map((row: any) => row.script_name)).toEqual([a.kept, a.served].sort());
       const lifted = await api(OPERATOR, "POST", `/v1/moderation/app-hosts/${a.host}/lift`, { reason: "other" });
       expect([lifted.status, lifted.body]).toEqual([200, { host: a.host, suspended: false, reason: null, at: null }]);
-      // A custom hostname, a host two labels deep, the bare domain, another domain, and a label that isn't one:
-      // none is an app's default host. A custom hostname's suspension is the next PR's.
-      for (const host of ["app.example.org", `deep.${a.host}`, FAKE.domain, `${a.label}.other.example`, `UPPER.${FAKE.domain}`, `${a.label}.${FAKE.domain}.`]) {
-        expect((await api(OPERATOR, "POST", `/v1/moderation/app-hosts/${host}/suspend`, { reason: "abuse" })).code, host).toBe("release_not_available");
+      // A host two labels deep, the bare domain, and a host whose label no room has: none is any app's.
+      for (const host of [`deep.${a.host}`, FAKE.domain, `UPPER.${FAKE.domain}`]) {
+        const answer = await api(OPERATOR, "POST", `/v1/moderation/app-hosts/${host}/suspend`, { reason: "abuse" });
+        expect([answer.status, answer.code], host).toEqual([404, "not_found"]);
       }
+      expect((await one(a.room, "SELECT suspended_at FROM app_label")).suspended_at).toBeNull();
+      // Two spellings of the host are one host: the same app, answered by its name as Podster writes it.
+      const spelled = await api(OPERATOR, "POST", `/v1/moderation/app-hosts/${a.host.toUpperCase()}./suspend`, { reason: "abuse" });
+      expect([spelled.status, spelled.body]).toMatchObject([200, { host: a.host, suspended: true }]);
+      await api(OPERATOR, "POST", `/v1/moderation/app-hosts/${a.host}/lift`, { reason: "other" });
     });
     expect((await one(a.room, "SELECT suspended_at FROM app_label")).suspended_at).toBeNull();
     await alarmQuiet(stub(a.room));
@@ -783,5 +804,328 @@ describe("what step 4(a) adds to the room and the Worker", () => {
     // The test Worker's values are the stand-in's, and no real account, namespace or token has their form's values.
     expect([FAKE.account, FAKE.kvNamespace]).toEqual(["c0".repeat(16), "d1".repeat(16)]);
     expect([FAKE.scriptsToken, FAKE.routingToken].every((token) => token.startsWith("test-"))).toBe(true);
+  });
+});
+
+describe("the stop for the whole content domain", () => {
+  /** However a test ends, the domain is left unstopped and the object quiet, so nothing reaches the next test. */
+  async function unstopped<T>(run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } finally {
+      await inModeration((sql) => { for (const table of ["test_content_provider_off", "test_stop_unreadable"]) sql.exec(`DROP TABLE IF EXISTS ${table}`); });
+      await fake("/reset", {});
+      await switchedOn(() => resumeDomain());
+      await settle(moderation());
+      await alarmQuiet(moderation());
+    }
+  }
+
+  it("settles who is asking first, and is the Moderation object's own row", () => unstopped(async () => {
+    await switchedOn(async () => {
+      for (const body of [{ reason: "illegal" }, {}, { reason: "nonsense" }]) {
+        for (const who of [AGENT, OWNER]) for (const verb of ["stop", "resume"]) expect((await api(who, "POST", `/v1/moderation/content-domain/${verb}`, body)).code).toBe("not_allowed");
+      }
+      for (const body of [{}, { reason: "nonsense" }, { reason: "illegal", extra: 1 }]) expect((await api(OPERATOR, "POST", "/v1/moderation/content-domain/stop", body)).code).toBe("invalid_argument");
+      expect((await stopRow())?.stopped ?? 0).toBe(0);
+
+      const stopped = await stopDomain();
+      expect([stopped.status, stopped.body]).toEqual([200, { stopped: true, reason: "illegal", at: expect.any(Number) }]);
+      const version = (await stopRow()).version;
+      // Asking again changes nothing, not the reason and not the version.
+      expect((await stopDomain(OPERATOR, "spam")).body).toEqual(stopped.body);
+      expect(await stopRow()).toMatchObject({ stopped: 1, reason: "illegal", version });
+      // The object writes one key at the provider, reads it back, and records it.
+      await settle(moderation());
+      expect((await held()).entries._stop).toBe("stopped");
+      expect(await stopRow()).toMatchObject({ applied_version: version, attempts: 0, last_code: null });
+      expect((await stopCalls()).slice(0, 2)).toEqual(["entry.put 200", "entry.get 200"]);
+
+      const resumed = await resumeDomain();
+      expect([resumed.status, resumed.body]).toEqual([200, { stopped: false, reason: null, at: null }]);
+      expect((await resumeDomain()).body).toEqual(resumed.body);
+      await settle(moderation());
+      expect((await held()).entries._stop).toBeUndefined();
+      expect(await stopRow()).toMatchObject({ stopped: 0, reason: null, version: version + 1, applied_version: version + 1 });
+    });
+    const log = await runInDurableObject(moderation(), (_: any, state: any) => state.storage.sql.exec("SELECT operator, action, reason, outcome FROM operator_action WHERE subject_kind = 'content_domain' ORDER BY seq").toArray());
+    expect(log.slice(-4)).toEqual([
+      { operator: OPERATOR.id, action: "suspend", reason: "illegal", outcome: "done" }, { operator: OPERATOR.id, action: "suspend", reason: "spam", outcome: "done" },
+      { operator: OPERATOR.id, action: "lift", reason: "other", outcome: "done" }, { operator: OPERATOR.id, action: "lift", reason: "other", outcome: "done" },
+    ]);
+  }));
+
+  it("retries a key that wasn't confirmed, and never makes a new stop wait out an old failure", () => unstopped(async () => {
+    // The write fails. Scripted before the stop, so whichever run of the alarm comes first meets it.
+    await fault({ op: "entry.put", times: 1, status: 500 });
+    const started = Date.now();
+    await switchedOn(() => stopDomain());
+    await settle(moderation());
+    let row = await stopRow();
+    expect(row).toMatchObject({ stopped: 1, attempts: 1, attempt_version: row.version, last_code: "write_not_confirmed" });
+    expect(row.applied_version).not.toBe(row.version);
+    expect(row.next_attempt_at).toBeGreaterThanOrEqual(started + 5000);
+    expect((await held()).entries._stop).toBeUndefined();
+    // It waits: a run straight after asks the provider nothing.
+    const quiet = (await stopCalls()).length;
+    await settle(moderation());
+    expect((await stopCalls()).length).toBe(quiet);
+    // A write that the provider took but that doesn't read back isn't recorded either.
+    await inModeration((sql) => sql.exec("UPDATE content_stop SET next_attempt_at = 0"));
+    await fault({ op: "entry.get", times: 1, stale: true });
+    await settle(moderation());
+    expect(await stopRow()).toMatchObject({ attempts: 2, last_code: "read_back_differs" });
+    expect((await stopRow()).applied_version).not.toBe(row.version);
+    // The wait is now long. The operator resumes: that is a new version, so it is due at once, and the key comes out.
+    const far = Date.now() + 10 * 60 * 1000;
+    await inModeration((sql) => sql.exec("UPDATE content_stop SET attempts = 9, next_attempt_at = ?", far));
+    await switchedOn(() => resumeDomain());
+    await settle(moderation());
+    row = await stopRow();
+    expect(row).toMatchObject({ stopped: 0, applied_version: row.version, attempts: 0, last_code: null });
+    expect((await held()).entries._stop).toBeUndefined();
+  }));
+
+  it("does nothing at the provider with none configured, and the stop still holds", () => unstopped(async () => {
+    await inModeration((sql) => sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)"));
+    expect((await switchedOn(() => stopDomain())).body).toMatchObject({ stopped: true });
+    await settle(moderation());
+    await settle(moderation());
+    expect(await stopCalls()).toEqual([]);
+    const owed = await stopRow();
+    expect(owed).toMatchObject({ stopped: 1, attempts: 0 });
+    expect(owed.applied_version).not.toBe(owed.version);
+    expect(await nextAlarm(moderation())).toBeNull();
+    // Once one is configured, the key that was owed is written.
+    await inModeration((sql) => sql.exec("DROP TABLE test_content_provider_off"));
+    await settle(moderation());
+    expect((await held()).entries._stop).toBe("stopped");
+  }));
+
+  it("ends with the key as the operator last left it, when that changes while the key is being written", () => unstopped(async () => {
+    // The stop is set with no provider, so no alarm is owed and none runs by itself. Then there is one, and this
+    // test's own run of the alarm writes the key. That write is held at the provider.
+    await inModeration((sql) => sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)"));
+    await switchedOn(() => stopDomain());
+    await inModeration((sql) => sql.exec("DROP TABLE test_content_provider_off"));
+    const write = await gate("entry.put");
+    const running = settle(moderation());
+    await arrived(write);
+    // While it is out, the operator resumes. No other run is woken for it, so what happens next is this run's alone.
+    await inModeration((sql) => sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)"));
+    expect((await switchedOn(() => resumeDomain())).body).toMatchObject({ stopped: false });
+    expect(await nextAlarm(moderation())).toBeNull();
+    await release(write);
+    await running;
+    // The same run saw the version had moved, started over, and took the key out again.
+    const state = await held();
+    const row = await stopRow();
+    expect(state.entries._stop).toBeUndefined();
+    expect(row).toMatchObject({ stopped: 0, applied_version: row.version, attempts: 0 });
+    expect(await stopCalls()).toEqual(["entry.put 200", "entry.get 200", "entry.delete 200", "entry.get 404"]);
+    expect(state.expiredGates).toBe(0);
+  }));
+
+  it("is read by the room before it writes a default host's entry, and never stops a removal", () => unstopped(async () => {
+    const a = await app({ plain: true });
+    const b = await app({ plain: true });
+    await fake("/reset", {});
+    await fake("/seed", { scripts: [a.kept, a.served, b.kept, b.served], entries: { [b.host]: b.served } });
+    // Room a owes its default host an entry. The domain is stopped before its applier runs.
+    await inRoom(a.room, (sql) => sql.exec("DELETE FROM serve_apply"));
+    await switchedOn(() => stopDomain());
+    await pass(a.room);
+    let state = await held();
+    expect(callsFor(state, a)).toEqual([]);
+    expect(state.entries[a.host]).toBeUndefined();
+    expect(await applyRows(a.room)).toEqual([{ host: a.host, applied_version: null, applied_script: null, attempts: 1, last_code: "content_domain_stopped" }]);
+    // No room's own state changed for the stop.
+    expect((await serveRows(a.room))[0]).toMatchObject({ script_name: a.served, version: 5 });
+    // A takedown goes through while the domain is stopped: a removal never asks.
+    await switchedOn(() => suspend(b.label));
+    await pass(b.room);
+    state = await held();
+    expect(state.entries[b.host]).toBeUndefined();
+    expect((await applyRows(b.room))[0]).toMatchObject({ applied_version: 6, applied_script: null });
+    // If the stop can't be read, nothing is written either: it fails closed.
+    await alarmQuiet(stub(a.room));
+    await switchedOn(() => resumeDomain());
+    await inModeration((sql) => sql.exec("CREATE TABLE test_stop_unreadable (x INTEGER)"));
+    await due(a.room);
+    await pass(a.room);
+    expect(callsFor(await held(), a)).toEqual([]);
+    expect((await applyRows(a.room))[0]).toMatchObject({ applied_version: null, attempts: 2, last_code: "stop_unreadable" });
+    // Resumed and readable, the entry the room wanted all along is written.
+    await inModeration((sql) => sql.exec("DROP TABLE test_stop_unreadable"));
+    await due(a.room);
+    await pass(a.room);
+    state = await held();
+    expect(callsFor(state, a)).toEqual(["entry.put host 200", "entry.get host 200"]);
+    expect(state.entries[a.host]).toBe(a.served);
+    for (const room of [a.room, b.room]) await alarmQuiet(stub(room));
+  }));
+});
+
+describe("an operator's suspension of a custom hostname", () => {
+  const claimRows = (hostname: string) => inClaim(hostname, (sql) => ({
+    name: sql.exec("SELECT name, generation, last_suspended_at IS NOT NULL AS was_suspended, last_lifted_at IS NOT NULL AS was_lifted FROM hostname").toArray(),
+    suspension: sql.exec("SELECT reason, lifted_at IS NULL AS holds FROM suspension").toArray(),
+    claim: sql.exec("SELECT workspace_id, request_id, state, held, end_reason FROM claim").toArray(),
+    notice: sql.exec("SELECT workspace_id, kind, attempts, answered_at IS NOT NULL AS answered FROM notice ORDER BY seq").toArray(),
+  }));
+  const CHALLENGE = "c4".repeat(32);
+
+  /** A room whose app is also served on a custom hostname it holds a live claim to, as custom domains will leave it. */
+  async function claimed() {
+    const a = await app({ plain: true });
+    const hostname = newHostname();
+    const request = `hnr_${crypto.randomUUID().replace(/-/g, "")}`;
+    await inRoom(a.room, (sql) => {
+      sql.exec("INSERT INTO hostname_request (id, hostname, state, open, challenge, generation, requested_by, requested_at, expires_at, claimed_at, proved_at, updated_at) VALUES (?, ?, 'claimed', 1, ?, 0, 'per_td_owner', 1, 2, 1, 1, 1)", request, hostname, CHALLENGE);
+      sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES (?, 'custom', ?, 1, ?, ?, 3, 1)", hostname, a.label, rel(2), a.served);
+      sql.exec("INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, 3, ?, 1, 1)", hostname, a.served);
+    });
+    await fake("/seed", { entries: { [hostname]: a.served } });
+    await holds(hostname, a.room, request);
+    return { ...a, hostname, request };
+  }
+  /** The hostname's own object, holding a live claim for a room's request. */
+  async function holds(hostname: string, room: string, request: string) {
+    await claimOf(hostname).fetch("https://do/internal/test-migrate", { method: "POST" });
+    await inClaim(hostname, (sql) => {
+      sql.exec("INSERT INTO hostname (singleton, name, created_at) VALUES (1, ?, 1)", hostname);
+      sql.exec("INSERT INTO claim (id, workspace_id, request_id, state, held, claimed_at, proved_at, updated_at) VALUES ('clm_1', ?, ?, 'live', 1, 1, 1, 1)", room, request);
+    });
+  }
+  const customRow = (room: string, hostname: string) => one(room, "SELECT script_name, version, closed FROM serve_state WHERE host = ?", hostname);
+  const requestRow = (room: string, id: string) => one(room, "SELECT state, open, end_reason FROM hostname_request WHERE id = ?", id);
+  const hostEvents = (room: string) => all(room, "SELECT type, actor_id FROM event WHERE type LIKE 'app_hostname.%' ORDER BY seq");
+
+  it("settles who is asking first, then what the name is", async () => {
+    const hostname = newHostname();
+    const a = await app({ plain: true });
+    await switchedOn(async () => {
+      for (const body of [{ reason: "abuse" }, {}]) for (const who of [AGENT, OWNER]) expect((await api(who, "POST", `/v1/moderation/app-hosts/${hostname}/suspend`, body)).code).toBe("not_allowed");
+      for (const body of [{}, { reason: "nonsense" }]) expect((await api(OPERATOR, "POST", `/v1/moderation/app-hosts/${hostname}/suspend`, body)).code).toBe("invalid_argument");
+      // Not a hostname at all, or a single label.
+      for (const host of ["localhost", "bad_name.example.org", "-bad.example.org"]) expect((await suspendHost(host)).code, host).toBe("invalid_argument");
+      // On the content domain but nobody's host, or on Podster's own domain: no such hostname.
+      for (const host of [`deep.${a.host}`, FAKE.domain, "podster.dev", "app.podster.dev"]) expect([(await suspendHost(host)).status, (await suspendHost(host)).code], host).toEqual([404, "not_found"]);
+    });
+    // None of that left anything behind for the name.
+    expect(await claimOf(hostname).fetch("https://do/internal/state").then((r: Response) => r.json())).toEqual({ claim: null, suspended: false });
+    await alarmQuiet(stub(a.room));
+  });
+
+  it("holds with no room at all, advances the name's generation, and lifts without restoring anything", async () => {
+    const hostname = newHostname();
+    await switchedOn(async () => {
+      const done = await suspendHost(hostname);
+      expect([done.status, done.body]).toEqual([200, { host: hostname, suspended: true, reason: "abuse", at: expect.any(Number) }]);
+      expect(await claimRows(hostname)).toEqual({ name: [{ name: hostname, generation: 1, was_suspended: 1, was_lifted: 0 }], suspension: [{ reason: "abuse", holds: 1 }], claim: [], notice: [] });
+      expect(await claimOf(hostname).fetch("https://do/internal/state").then((r: Response) => r.json())).toEqual({ claim: null, suspended: true });
+      // Two spellings are one name, and asking again changes nothing: no new generation.
+      expect((await suspendHost(hostname.toUpperCase(), OPERATOR, "spam")).body).toEqual(done.body);
+      expect((await suspendHost(`${hostname}.`)).body).toEqual(done.body);
+      expect((await claimRows(hostname)).name[0].generation).toBe(1);
+
+      const lifted = await liftHost(hostname);
+      expect([lifted.status, lifted.body]).toEqual([200, { host: hostname, suspended: false, reason: null, at: null }]);
+      expect((await liftHost(hostname)).body).toEqual(lifted.body);
+      // The lift advanced it too, so a request made under either earlier generation can't claim.
+      expect(await claimRows(hostname)).toMatchObject({ name: [{ generation: 2, was_suspended: 1, was_lifted: 1 }], suspension: [{ reason: "abuse", holds: 0 }] });
+      // Suspended again, it holds again, under a new generation.
+      expect((await suspendHost(hostname, OPERATOR, "illegal")).body).toMatchObject({ suspended: true, reason: "illegal" });
+      expect(await claimRows(hostname)).toMatchObject({ name: [{ generation: 3 }], suspension: [{ reason: "illegal", holds: 1 }] });
+    });
+    const log = await runInDurableObject(moderation(), (_: any, state: any) => state.storage.sql.exec("SELECT subject_kind, action, outcome FROM operator_action WHERE subject = ? ORDER BY seq", hostname).toArray());
+    expect(log.map((row: any) => `${row.subject_kind} ${row.action} ${row.outcome}`)).toEqual(["app_host suspend done", "app_host suspend done", "app_host suspend done", "app_host lift done", "app_host lift done", "app_host suspend done"]);
+    // The object answers only for the name it is for.
+    const wrong = await claimOf(hostname).fetch("https://do/internal/suspension", { method: "POST", body: JSON.stringify({ hostname: newHostname(), suspended: false, reason: "other" }) });
+    expect(wrong.status).toBe(500);
+    expect((await claimRows(hostname)).suspension[0].holds).toBe(1);
+  });
+
+  it("ends serving on a name a room holds: the claim starts ending, the room clears and closes that host, and its default host stays", async () => {
+    const c = await claimed();
+    expect((await switchedOn(() => suspendHost(c.hostname))).status).toBe(200);
+    // In the hostname's own object, at once: suspended, the claim ending and still holding the name, the room owed a notice.
+    let rows = await claimRows(c.hostname);
+    expect(rows).toMatchObject({ name: [{ generation: 1 }], suspension: [{ holds: 1 }], claim: [{ workspace_id: c.room, request_id: c.request, state: "ending", held: 1, end_reason: "hostname_suspended" }] });
+    expect(rows.notice).toHaveLength(1);
+    // The notice reaches the room, which clears that host alone, in its own transaction.
+    await settle(claimOf(c.hostname));
+    rows = await claimRows(c.hostname);
+    expect(rows.notice).toEqual([{ workspace_id: c.room, kind: "hostname_suspended", attempts: 1, answered: 1 }]);
+    expect(await customRow(c.room, c.hostname)).toEqual({ script_name: null, version: 4, closed: 1 });
+    expect(await requestRow(c.room, c.request)).toEqual({ state: "ending", open: 1, end_reason: "hostname_suspended" });
+    expect(await hostEvents(c.room)).toEqual([{ type: "app_hostname.suspended", actor_id: "podster" }]);
+    // The app itself isn't suspended: its default host, its epoch and its scripts are as they were.
+    expect((await serveRows(c.room)).find((row: any) => row.host === c.host)).toMatchObject({ script_name: c.served, version: 5, closed: 0 });
+    expect(await configRow(c.room)).toMatchObject({ release_epoch: 4, kept_previous: c.kept });
+    expect(await all(c.room, "SELECT cause FROM unpublish")).toEqual([]);
+    // The room's applier takes that host's entry out, and nothing else.
+    await pass(c.room);
+    const state = await held();
+    expect([state.entries[c.hostname], state.entries[c.host]]).toEqual([undefined, c.served]);
+    expect(state.scripts).toEqual(expect.arrayContaining([c.kept, c.served]));
+    expect((await applyRows(c.room)).find((row: any) => row.host === c.hostname)).toMatchObject({ applied_version: 4, applied_script: null });
+    // Told a second time, the room changes nothing more.
+    await inClaim(c.hostname, (sql) => sql.exec("INSERT INTO notice (workspace_id, claim_id, kind, created_at, next_attempt_at) VALUES (?, 'clm_1', 'hostname_suspended', 1, 0)", c.room));
+    await settle(claimOf(c.hostname));
+    expect((await claimRows(c.hostname)).notice.map((row: any) => row.answered)).toEqual([1, 1]);
+    expect([await hostEvents(c.room), (await customRow(c.room, c.hostname)).version]).toEqual([[{ type: "app_hostname.suspended", actor_id: "podster" }], 4]);
+    // Lifting restores nothing: the host stays closed, the request ending, and the claim ending.
+    expect((await switchedOn(() => liftHost(c.hostname))).body).toMatchObject({ suspended: false });
+    await settle(claimOf(c.hostname));
+    await pass(c.room);
+    expect(await customRow(c.room, c.hostname)).toEqual({ script_name: null, version: 4, closed: 1 });
+    expect((await requestRow(c.room, c.request)).state).toBe("ending");
+    expect((await claimRows(c.hostname)).claim[0]).toMatchObject({ state: "ending", held: 1 });
+    expect((await held()).entries[c.hostname]).toBeUndefined();
+    await alarmQuiet(stub(c.room));
+  });
+
+  it("keeps the notice and sends it again until the room has answered", async () => {
+    const c = await claimed();
+    // The room fails to answer. Set before the suspension, so whichever run of the object's alarm comes first meets it.
+    await inRoom(c.room, (sql) => sql.exec("CREATE TABLE test_refuse_hostname_notice (x INTEGER)"));
+    const started = Date.now();
+    await switchedOn(() => suspendHost(c.hostname));
+    await settle(claimOf(c.hostname));
+    expect((await claimRows(c.hostname)).notice).toEqual([{ workspace_id: c.room, kind: "hostname_suspended", attempts: 1, answered: 0 }]);
+    const wait = (await inClaim(c.hostname, (sql) => sql.exec("SELECT next_attempt_at FROM notice").one())).next_attempt_at as number;
+    expect(wait).toBeGreaterThanOrEqual(started + 5000);
+    expect(await nextAlarm(claimOf(c.hostname))).toBe(wait);
+    // The room hasn't cleared anything yet: it is still open in the room's state.
+    expect(await customRow(c.room, c.hostname)).toEqual({ script_name: c.served, version: 3, closed: 0 });
+    // It waits before it asks again, and then asks again. The room answers this time.
+    await settle(claimOf(c.hostname));
+    expect((await claimRows(c.hostname)).notice[0].attempts).toBe(1);
+    await inRoom(c.room, (sql) => sql.exec("DROP TABLE test_refuse_hostname_notice"));
+    await inClaim(c.hostname, (sql) => sql.exec("UPDATE notice SET next_attempt_at = 0"));
+    await settle(claimOf(c.hostname));
+    expect((await claimRows(c.hostname)).notice).toEqual([{ workspace_id: c.room, kind: "hostname_suspended", attempts: 2, answered: 1 }]);
+    expect(await customRow(c.room, c.hostname)).toEqual({ script_name: null, version: 4, closed: 1 });
+    expect(await nextAlarm(claimOf(c.hostname))).toBeNull();
+    await pass(c.room);
+    expect((await held()).entries[c.hostname]).toBeUndefined();
+    await alarmQuiet(stub(c.room));
+  });
+
+  it("changes nothing in a room that doesn't hold that request, and stops asking", async () => {
+    const a = await app({ plain: true });
+    const before = [await serveRows(a.room), await all(a.room, "SELECT * FROM hostname_request"), await all(a.room, "SELECT type FROM event WHERE type LIKE 'app%'")];
+    // The object names a room that has no such request, and, for another name, a room that doesn't exist.
+    const [stray, nowhere] = [newHostname(), newHostname()];
+    await holds(stray, a.room, "hnr_unknown");
+    await holds(nowhere, `ws_${"0".repeat(32)}`, "hnr_unknown");
+    await switchedOn(async () => { await suspendHost(stray); await suspendHost(nowhere); });
+    for (const hostname of [stray, nowhere]) {
+      await settle(claimOf(hostname));
+      expect((await claimRows(hostname)).notice.map((row: any) => row.answered), hostname).toEqual([1]);
+    }
+    expect([await serveRows(a.room), await all(a.room, "SELECT * FROM hostname_request"), await all(a.room, "SELECT type FROM event WHERE type LIKE 'app%'")]).toEqual(before);
+    await alarmQuiet(stub(a.room));
   });
 });

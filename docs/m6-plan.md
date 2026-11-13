@@ -1071,6 +1071,19 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 - **For spike G: whether `no-transform` switches off Cloudflare's own compression.** The Worker asks the app for none and passes none.
 - **For step 8: `includeSubDomains` in HSTS on a custom hostname.** The Worker sends `Strict-Transport-Security` with `includeSubDomains` on every answer. On a customer's apex hostname that would pin the customer's whole domain to HTTPS for a year. Today only default hosts are served, so it can't happen yet; step 8 must decide what a custom hostname gets.
 
+#### What step 4(b)'s second PR built
+
+**The sandbox in real browsers, as a local run, and its report.** Built on 2026-11-12. Nothing deploys; no cloud resource, no secret, and no word added to the sandbox.
+
+- **[The report](m6-content-sandbox-report.md),** for the owner, as evidence about what [decision 216](spec/PRODUCT.md#decisions-needed) costs: for each thing an ordinary static app needs, whether it works under `sandbox allow-scripts`, in Chromium, Firefox and WebKit, beside a control with the policy taken off. It recommends nothing. Its raw results are beside it.
+- **The run,** `e2e/content-sandbox.mjs`: the content Worker's real handler in the real Workers runtime, under `wrangler dev`, local only, from a test-only entry with two apps' serve entries and a small static app in memory. Browsers reach it through Playwright's request interception. Both `wrangler` and the browsers get the allow-listed environment.
+- **A second wrangler configuration, for that run only,** `apps/content/test/browser/browser-run-only.wrangler.jsonc`, with the same guards as the default one. The static check now holds every wrangler configuration in the package to them, asserts nothing in `src/` imports from outside `src/`, and that no script but the browser run names the test entry.
+- **Two small items from the first PR's review:** the no-logs check matches the word `console` anywhere, and the `content` CI job installs with `npm ci --ignore-scripts`, since its tests only read the pinned wrangler's source. The tests pass from that install.
+
+**What the run couldn't show,** as the report says: no real DNS, TLS or edge; a service worker's script is fetched outside the interception; one machine, headless.
+
+**Owed, with the PR that adds it: a browser job in CI for the content Worker, covering all three engines.** Until then the report is a local run on one machine, dated, at a named commit.
+
 **Side by side.** After step 2: steps 3, 4(a) and 10(a). Step 4(b) after 4(a). After steps 2 and 4: steps 8 and 9. Steps 5, 6 and 7 follow in that order.
 
 **What doesn't wait for unfinished M5 behaviour:** step 1; and, once step 2 has merged, step 4, exercised with a test app a script uploads; step 8; step 4(a)'s suspension; and step 10(a). Step 2 waits only for M5's contract and migration PRs to merge. Steps 3, 5, 6, 7 and 10(b) each wait for the M5 step named.

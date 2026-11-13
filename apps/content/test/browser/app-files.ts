@@ -69,10 +69,12 @@ await attempt("indexedDB", () => new Promise((resolve, reject) => { const open =
 await attempt("cacheApi", async () => { await caches.open("probe"); return "opened"; });
 await attempt("serviceWorker", async () => { const registration = await navigator.serviceWorker.register("/sw.js"); return registration.scope; });
 
-document.getElementById("form").addEventListener("submit", () => { act("form submit event"); fetch("/sentinel?after=form"); });
-document.getElementById("download").addEventListener("click", () => { act("download click"); fetch("/sentinel?after=download"); });
-document.getElementById("popup").addEventListener("click", () => { let opened = "threw"; try { opened = window.open("/popup.html") === null ? "null" : "a window"; } catch (error) { opened = "threw " + error.name; } act("window.open returned " + opened); fetch("/sentinel?after=popup"); });
-document.getElementById("modal").addEventListener("click", () => { let said = "threw"; try { said = String(alert("probe")); } catch (error) { said = "threw " + error.name; } act("alert returned " + said); fetch("/sentinel?after=modal"); });
+// Each handler writes a line into the page the moment the action is taken, before anything the action may start.
+// The run waits for that line. A blocked form fires no submit event at all, so its line is written on the click.
+document.getElementById("submit").addEventListener("click", () => { act("submit click"); });
+document.getElementById("download").addEventListener("click", () => { act("download click"); });
+document.getElementById("popup").addEventListener("click", () => { let opened = "threw"; try { opened = window.open("/popup.html") === null ? "null" : "a window"; } catch (error) { opened = "threw " + error.name; } act("window.open returned " + opened); });
+document.getElementById("modal").addEventListener("click", () => { let said = "threw"; try { said = String(alert("probe")); } catch (error) { said = "threw " + error.name; } act("alert returned " + said); });
 
 results.violations = violations;
 const out = document.getElementById("results");
@@ -98,5 +100,4 @@ export const FILES: Record<string, { type: string; body: ArrayBuffer }> = {
   // Not a real font: the run shows whether the browser may ask for it, not how it renders.
   "/font.woff2": text("font/woff2", "not a font\n"),
   "/sw.js": text("text/javascript; charset=utf-8", "self.addEventListener('fetch', () => {});\n"),
-  "/sentinel": text("text/plain", "ok\n"),
 };

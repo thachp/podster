@@ -131,7 +131,6 @@ async function inBrowser(name, control = false) {
     };
     /** Every request the browser made, in order, with whether it carried a cookie. */
     const asked = [];
-    const waiting = [];
     /** Answers from the Worker that carried a `Set-Cookie`. The test app sends one on every answer of its own. */
     let answersWithSetCookie = 0;
     await context.route("**/*", async (route) => {
@@ -140,14 +139,12 @@ async function inBrowser(name, control = false) {
       const headers = { ...request.headers() };
       delete headers.host;
       asked.push({ method: request.method(), url, cookie: "cookie" in headers, kind: request.resourceType() });
-      for (const wait of waiting.filter((w) => url.includes(w.part))) wait.seen();
       if (!url.startsWith(`https://`) || !new URL(url).hostname.endsWith(`.${DOMAIN}`)) return route.abort("namenotresolved");
       const answer = await ask(url, { method: request.method(), headers });
       if (answer.setCookie.length > 0) answersWithSetCookie += 1;
       if (control) delete answer.headers["content-security-policy"];
       await route.fulfill({ status: answer.status, headers: answer.headers, body: answer.body });
     });
-    const seen = (part) => new Promise((resolve) => waiting.push({ part, seen: resolve }));
     const requested = (part) => asked.some((request) => request.url.includes(part));
     const dialogs = [];
     const downloads = [];
@@ -178,21 +175,22 @@ async function inBrowser(name, control = false) {
     /** Resolves when the browser does something an action can cause: a page, a dialog, a download, a navigation. */
     const something = () => new Promise((resolve) => { onSomething = resolve; });
 // A click doesn't wait for whatever it starts: under the sandbox it may start nothing at all.
-    // The page asks for a marker once its own handler has taken the action, whether that settled or threw. The
-    // run waits for the marker, or for the browser doing something, whichever is first; never for a fixed time.
-    const act = (selector, sentinel) => step(`act ${sentinel}`, async () => {
-      const marker = seen(`/sentinel?after=${sentinel}`);
+    // The page writes a line into itself the moment its own handler has taken the action. The run waits for that
+    // line, or for the browser doing something, whichever is first; never for a fixed time. If the page has gone,
+    // as when a form navigated it away, the line never comes and the navigation is what ends the wait.
+    const act = (selector, line) => step(`act: ${line}`, async () => {
+      const written = page.locator("#actions").filter({ hasText: line }).waitFor({ state: "attached", timeout: 20_000 }).catch(() => new Promise(() => {}));
       const happened = something();
       await page.locator(selector).click({ noWaitAfter: true });
-      await Promise.race([marker, happened]);
+      await Promise.race([written, happened]);
       await nothingMore();
     });
     const pagesBeforePopup = pagesOpened;
-    await act("#popup", "popup");
+    await act("#popup", "window.open returned");
     const popupsOpened = pagesOpened - pagesBeforePopup;
-    await act("#modal", "modal");
-    await act("#download", "download");
-    await act("#submit", "form");
+    await act("#modal", "alert returned");
+    await act("#download", "download click");
+    await act("#submit", "submit click");
     const afterActions = { url: page.url(), actions: (await step("read the actions", () => page.locator("#actions").textContent(), "") ?? "").trim().split("\n").filter(Boolean) };
     const form = { requested: requested("/submitted"), navigated: page.url().includes("/submitted") };
     const download = { requested: requested("/file.bin"), downloads: [...downloads] };

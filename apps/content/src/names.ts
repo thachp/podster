@@ -14,6 +14,25 @@ export function isScriptName(value: string): boolean {
   return SCRIPT_NAME.test(value);
 }
 
+/** A label: 1 to 26 lower-case letters and digits, as `podster_core::release::is_label` has it. */
+const LABEL = /^[a-z0-9]{1,26}$/;
+
+/**
+ * The label of the app whose default host this is on `domain`: `<label>.<domain>`, exactly one label deep. Null for
+ * any other host: the domain itself, a deeper name, a name elsewhere, or when `domain` isn't a host at all. The same
+ * rule as `default_host_label_on` in `apps/api/src/content_provider.rs`.
+ */
+export function defaultHostLabel(host: string, domain: string): string | null {
+  if (!isHost(domain) || !isHost(host) || !host.endsWith(`.${domain}`)) return null;
+  const label = host.slice(0, host.length - domain.length - 1);
+  return LABEL.test(label) ? label : null;
+}
+
+/** The label a script's name begins with, or null if it isn't a script's name. */
+export function scriptLabel(script: string): string | null {
+  return isScriptName(script) ? script.slice(0, script.indexOf(".")) : null;
+}
+
 /**
  * A host as the private API writes one as a key: lower-case letters, digits, `-` and `.`, with a `.` inside it, no
  * longer than a hostname may be, and no empty label. Anything else is never looked up.

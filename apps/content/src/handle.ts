@@ -3,16 +3,22 @@
 // this reads it. Everything it can't confirm answers not-found: it fails closed.
 //
 // For each request:
-//   1. Anything but GET and HEAD is refused, and so is a request for a service worker's script.
-//   2. The stop for the whole domain: read at most once every 30 seconds for each running copy, and kept in memory
+//   1. Anything but GET and HEAD is refused, and so is any request that carries a `Service-Worker` header.
+//   2. The host must be an app's default host, `<label>.<content domain>`. Anything else is not-found, and nothing is
+//      read for it. Custom hostnames arrive with custom domains (step 8), with their own entry form.
+//   3. A request that arrived over plain HTTP is sent to the same host and path over HTTPS, and nothing is read.
+//   4. The stop for the whole domain: read at most once every 30 seconds for each running copy, and kept in memory
 //      between. Set, or unreadable, and every host answers not-found.
-//   3. The serve entry for the request's exact host: one read. Missing, unreadable, or not a script's name: not-found.
-//   4. The script that entry names, asked of the namespace. Three of the visitor's headers go through and no others.
-//   5. The answer's headers are built from nothing: four of the app's pass, a same-host `Location` on a redirect, and
+//   5. The serve entry for the request's exact host: one read. Missing, unreadable, not a script's name, or a script
+//      under another label than the host's: not-found. The API's applier enforces the label when it writes; this is
+//      the second lock, and the public one.
+//   6. The script that entry names, asked of the namespace, with a request built from nothing: three of the
+//      visitor's headers and nothing else of the visitor's.
+//   7. The answer's headers are built from nothing: four of the app's pass, a same-host `Location` on a redirect, and
 //      then this Worker's own fixed set, the sandbox among them.
 //
-// Nothing here logs a host, a path or a header.
-import { isHost, isScriptName, STOP_KEY } from "./names";
+// Nothing is logged for a request (ADR 0010's "Logs").
+import { defaultHostLabel, scriptLabel, STOP_KEY } from "./names";
 
 /** How long a read of a serve entry or of the stop may be cached where it was read: the shortest a read may ask for. */
 export const KV_CACHE_SECONDS = 30;
@@ -37,8 +43,8 @@ export interface Deps {
   /** The time now, in milliseconds. Passed in, so no test waits. */
   now: () => number;
   stop: StopMemory;
-  /** One line for each answer of the Worker's own: a status and a code, nothing of the request. */
-  log?: (status: number, code: string) => void;
+  /** The content domain, from configuration. Not a host, and every request is not-found. */
+  domain: string;
 }
 
 /** The visitor's headers that go through to an app. Each calls only for answer headers that are let through below. */
@@ -87,8 +93,7 @@ function fixedHeaders(headers: Headers, origin: string, own: boolean): Headers {
   return headers;
 }
 
-function own(deps: Deps, request: Request, origin: string, status: number, code: string, extra: Record<string, string> = {}): Response {
-  deps.log?.(status, code);
+function own(request: Request, origin: string, status: number, code: string, extra: Record<string, string> = {}): Response {
   const headers = new Headers({ "content-type": "text/plain; charset=utf-8", ...extra });
   fixedHeaders(headers, origin, true);
   return new Response(request.method === "HEAD" ? null : `${code}\n`, { status, headers });
@@ -100,7 +105,7 @@ function own(deps: Deps, request: Request, origin: string, status: number, code:
  * an app has no cookies or storage to clear, and the cookies directive is the one under which a browser cleared a
  * sibling host's cookies in spike C.
  */
-const notFound = (deps: Deps, request: Request, origin: string, code: string) => own(deps, request, origin, 404, code, { "clear-site-data": '"cache"' });
+const notFound = (request: Request, origin: string) => own(request, origin, 404, "not_found", { "clear-site-data": '"cache"' });
 
 /** Whether the domain is stopped. Unreadable counts as stopped, and isn't remembered. */
 async function stopped(deps: Deps): Promise<boolean> {
@@ -126,48 +131,66 @@ function sameHostPath(location: string, origin: string): string | null {
   return path.startsWith("/") && !path.startsWith("//") ? path : null;
 }
 
+/**
+ * The request the app is sent, built from nothing: the URL, the method, and three of the visitor's headers. The
+ * visitor's request object is never passed on or copied, so nothing else of it can reach an app: no other header, no
+ * body, and none of its settings.
+ */
+function requestForApp(request: Request, url: URL): Request {
+  const headers = new Headers();
+  for (const name of FORWARDED_REQUEST_HEADERS) {
+    const value = request.headers.get(name);
+    if (value !== null) headers.set(name, value);
+  }
+  return new Request(url.toString(), { method: request.method, headers, redirect: "manual" });
+}
+
 export async function handle(request: Request, deps: Deps): Promise<Response> {
   const url = new URL(request.url);
   const host = url.hostname;
-  // The sandbox names the host, so a host that isn't one is named as nothing a page could be served from.
-  const origin = isHost(host) ? `https://${host}` : "'none'";
+  const label = defaultHostLabel(host, deps.domain);
+  // The sandbox names the host, so a host that is no app's is named as nothing a page could be served from.
+  const origin = label === null ? "'none'" : `https://${host}`;
   try {
-    if (request.method !== "GET" && request.method !== "HEAD") return own(deps, request, origin, 405, "method_not_allowed", { allow: "GET, HEAD" });
-    // A browser fetches a service worker's script, and what it imports, with this header. Refusing it is what keeps
-    // an app from running on in a browser after it is taken down.
-    if ((request.headers.get("service-worker") ?? "").trim().toLowerCase() === "script") return own(deps, request, origin, 403, "no_service_workers");
-    if (!isHost(host)) return notFound(deps, request, origin, "not_found");
-    if (await stopped(deps)) return notFound(deps, request, origin, "not_found");
+    if (request.method !== "GET" && request.method !== "HEAD") return own(request, origin, 405, "method_not_allowed", { allow: "GET, HEAD" });
+    // A browser fetches a service worker's script, and what it imports, with this header, and with no other request.
+    // Under the sandbox a page can't register one at all, so nothing an app needs carries it: any request that has
+    // the header is refused, whatever it holds. Refusing the script is what keeps an app from running on in a
+    // browser after it is taken down, and it holds even if the sandbox were ever loosened.
+    if (request.headers.has("service-worker")) return own(request, origin, 403, "no_service_workers");
+    if (label === null) return notFound(request, origin);
+    // An app is never served over plain HTTP, and this doesn't rest on the zone's own redirect. The scheme is read
+    // from the request's URL, which is what Cloudflare's edge received and no header of the visitor's can change.
+    // `X-Forwarded-Proto` isn't read: a header is the visitor's to send, and that Cloudflare overwrites it is its
+    // documented behaviour toward an origin, which isn't shown here for a Worker.
+    if (url.protocol !== "https:") return own(request, origin, 301, "moved_to_https", { location: `${origin}${url.pathname}${url.search}` });
+    if (await stopped(deps)) return notFound(request, origin);
 
     let script: string | null;
     try {
       script = await deps.entries.get(host, { cacheTtl: KV_CACHE_SECONDS });
     } catch {
-      return notFound(deps, request, origin, "not_found");
+      return notFound(request, origin);
     }
-    if (script === null || !isScriptName(script)) return notFound(deps, request, origin, "not_found");
+    // Only a script's name, and only one under this host's own label: a host never serves another app's script.
+    if (script === null || scriptLabel(script) !== label) return notFound(request, origin);
 
-    const forwarded = new Headers();
-    for (const name of FORWARDED_REQUEST_HEADERS) {
-      const value = request.headers.get(name);
-      if (value !== null) forwarded.set(name, value);
-    }
     let answer: Response;
     try {
       // Asking the namespace for a script that isn't there returns without error; the fetch is what rejects, with
       // exactly this message (spikes A and C). Any other rejection is an error, and nothing is served for it.
-      answer = await deps.apps.get(script).fetch(new Request(url.toString(), { method: request.method, headers: forwarded, redirect: "manual" }));
+      answer = await deps.apps.get(script).fetch(requestForApp(request, url));
     } catch (error) {
-      if (error instanceof Error && error.message === "Worker not found.") return notFound(deps, request, origin, "not_found");
-      return own(deps, request, origin, 502, "app_error");
+      if (error instanceof Error && error.message === "Worker not found.") return notFound(request, origin);
+      return own(request, origin, 502, "app_error");
     }
 
     const headers = new Headers();
-    if (answer.status < 200 || answer.status === 206 || UNSERVABLE_RESPONSE_HEADERS.some((name) => answer.headers.has(name))) return own(deps, request, origin, 502, "app_answer_unservable");
+    if (answer.status < 200 || answer.status === 206 || UNSERVABLE_RESPONSE_HEADERS.some((name) => answer.headers.has(name))) return own(request, origin, 502, "app_answer_unservable");
     if (answer.status >= 300 && answer.status < 400 && answer.status !== 304) {
       const path = REDIRECTS.includes(answer.status) ? sameHostPath(answer.headers.get("location") ?? "", origin) : null;
       // A redirect anywhere but a path on this host is never passed on.
-      if (path === null) return notFound(deps, request, origin, "not_found");
+      if (path === null) return notFound(request, origin);
       headers.set("location", path);
     }
     for (const name of PASSED_RESPONSE_HEADERS) {
@@ -180,6 +203,6 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
     return new Response(bodiless ? null : answer.body, { status: answer.status, headers });
   } catch {
     // Nothing above is expected to throw. If it does, the visitor still gets this Worker's own answer and headers.
-    return own(deps, request, origin, 502, "error");
+    return own(request, origin, 502, "error");
   }
 }

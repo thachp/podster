@@ -328,14 +328,25 @@ pub(super) fn end_stale(sql: &SqlStorage, now: i64) -> R<()> {
 /// up:** an error is logged by its code and the caller goes on. A suspension has committed by then, and the applier
 /// and the delete job run all the same. What it would have ended is ended by the next run of it, and until then
 /// can't go live: the epoch has moved, which the recheck and core's `commit_live` both refuse.
-pub(super) fn bookkeeping(state: &State) {
+///
+/// **A failure is answered with its code, and `None` means it worked.** The log line alone would leave a failure that
+/// goes on seen by nobody, so the reconcile's question carries the code to the operators' record
+/// (`takedown::takedown_check`). The room's alarm and a suspension only log it: they have nobody to tell.
+pub(super) fn bookkeeping(state: &State) -> Option<&'static str> {
     let sql = state.storage().sql();
     let now = release_now(&sql);
-    if let Err(error) = transaction_sync(state, move || end_stale(&sql, now)) {
-        console_error!(
-            "release: bookkeeping failed and was skipped: code={}",
-            error.code().unwrap_or("internal_error")
-        );
+    match transaction_sync(state, move || end_stale(&sql, now)) {
+        Ok(()) => None,
+        Err(error) => {
+            let code = error.code().unwrap_or("internal_error");
+            console_error!("release: bookkeeping failed and was skipped: code={}", code);
+            // Only a code this file can name is told: an error's own text never is.
+            Some(if code == "internal_error" {
+                "internal_error"
+            } else {
+                "refused"
+            })
+        }
     }
 }
 

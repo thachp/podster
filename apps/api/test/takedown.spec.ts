@@ -349,6 +349,110 @@ describe("an operator's suspension of an app", () => {
     expect(await nextAlarm(stub(b.room))).not.toBeNull();
   });
 
+  it("tells operators when a room's release bookkeeping keeps failing, by the app's label and a code, and stops when it works", async () => {
+    await fresh();
+    const a = await app({ plain: true });
+    // Test builds only: release bookkeeping fails in this room.
+    await inRoom(a.room, (sql) => sql.exec("CREATE TABLE test_release_bookkeeping_fails (x INTEGER)"));
+    expect((await switchedOn(() => suspend(a.label))).status).toBe(200);
+    // The suspension committed, and logged the failure. Nobody is told yet: a suspension has nobody to tell.
+    expect(await found()).toEqual([]);
+    // The reconcile asks the room, which tries again, fails again, and says so in its answer.
+    const ask = (room: string) => stub(room).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify({ kind: "wake" }) }).then((r: Response) => r.json() as Promise<any>);
+    expect((await ask(a.room)).findings).toContainEqual({ code: "release_bookkeeping_failing", subject: a.label, detail: "internal_error" });
+    // A pass of the reconcile carries it to the operators' record, by the label and the code, and counts each time.
+    await fake("/seed", { scripts: [a.kept, a.served], entries: {} });
+    await reconcile("scripts");
+    const kept = async () => (await findings()).filter((finding: any) => finding.code === "release_bookkeeping_failing");
+    expect((await kept()).map((finding: any) => [finding.subject, finding.detail])).toEqual([[a.label, "internal_error"]]);
+    const first = (await kept())[0];
+    await reconcile("scripts");
+    const second = (await kept())[0];
+    expect(second.seen).toBeGreaterThan(first.seen);
+    expect(second.first_seen_at).toBe(first.first_seen_at);
+    // No room's ID and no error's text: the subject is the label an operator suspends by, and the detail a code.
+    expect(JSON.stringify(await kept())).not.toContain(a.room);
+    expect(second.detail).toMatch(/^[a-z_]+$/);
+    // Working again, the room stops saying it, and the record's count stops rising.
+    await inRoom(a.room, (sql) => sql.exec("DROP TABLE test_release_bookkeeping_fails"));
+    expect((await ask(a.room)).findings.filter((finding: any) => finding.code === "release_bookkeeping_failing")).toEqual([]);
+    await reconcile("scripts");
+    expect((await kept())[0].seen).toBe(second.seen);
+    // A room with no app has no label to be told by, and its answer carries no such finding.
+    const bare: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+    madeApps.push(bare);
+    await alarmQuiet(stub(bare));
+    await inRoom(bare, (sql) => sql.exec("CREATE TABLE test_release_bookkeeping_fails (x INTEGER)"));
+    expect((await ask(bare)).findings).toEqual([]);
+  });
+
+  it("doesn't count an unpublish done with its files while a release's own script is still unqueued", async () => {
+    // A release that had begun its upload before the unpublish has a script of its own. It is queued only when the
+    // room's bookkeeping ends the release, after the unpublish. Here that bookkeeping fails for a while. The room's
+    // clock for release bookkeeping is the test's, so the upload is never an hour old, however long this takes.
+    const T = 1_800_000_000_000;
+    const a = await app({ plain: true });
+    const uploading = `${a.label}.${rel(5)}`;
+    await inRoom(a.room, (sql) => {
+      sql.exec("CREATE TABLE test_release_clock (now INTEGER)");
+      sql.exec("INSERT INTO test_release_clock (now) VALUES (?)", T);
+      sql.exec(
+        `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
+           VALUES (?, ?, 'uploading', ?, 1, 4, ?, ?, 'per_td_owner', 1, 'per_td_owner', 1, ?, 1)`, rel(5), SHA, a.label, uploading, rel(5), T);
+      sql.exec("CREATE TABLE test_release_bookkeeping_fails (x INTEGER)");
+    });
+    await fake("/seed", { scripts: [uploading] });
+    expect((await switchedOn(() => suspend(a.label))).status).toBe(200);
+    await pass(a.room);
+    // The unpublish's own two scripts are gone at the provider, by its own answer. The upload's script is still
+    // there, queued nowhere, and its release hasn't been ended.
+    let state = await held();
+    expect(state.scripts.filter((name) => name.startsWith(`${a.label}.`))).toEqual([uploading]);
+    expect((await deleteRows(a.room)).map((row: any) => [row.script_name, row.gone])).toEqual([a.kept, a.served].sort().map((name) => [name, 1]));
+    expect((await one(a.room, "SELECT state FROM release WHERE id = ?", rel(5))).state).toBe("uploading");
+    // So the unpublish is not done with its files.
+    expect((await one(a.room, "SELECT scripts_gone_at IS NOT NULL AS done FROM unpublish")).done).toBe(0);
+    // The bookkeeping works again: the release ends, its script is queued under that unpublish, and goes.
+    await inRoom(a.room, (sql) => sql.exec("DROP TABLE test_release_bookkeeping_fails"));
+    await pass(a.room);
+    // The script was queued at the test's clock, which is ahead of this machine's: its wait is called over, so the
+    // delete job, which runs by the machine's clock, takes it on the next pass.
+    await due(a.room);
+    await pass(a.room);
+    state = await held();
+    expect(state.scripts.filter((name) => name.startsWith(`${a.label}.`))).toEqual([]);
+    expect(await one(a.room, "SELECT state, failure_code FROM release WHERE id = ?", rel(5))).toEqual({ state: "failed", failure_code: "release_epoch_moved" });
+    expect((await deleteRows(a.room)).map((row: any) => [row.script_name, row.unpublish_epoch, row.gone])).toEqual([a.kept, a.served, uploading].sort().map((name) => [name, 5, 1]));
+    // Only now is it done.
+    expect((await one(a.room, "SELECT scripts_gone_at IS NOT NULL AS done FROM unpublish")).done).toBe(1);
+
+    // And a script queued late, under a later unpublish, also closes an earlier one that only it was holding open.
+    const b = await app({ plain: true });
+    const late = `${b.label}.${rel(5)}`;
+    await inRoom(b.room, (sql) => {
+      sql.exec("CREATE TABLE test_release_clock (now INTEGER)");
+      sql.exec("INSERT INTO test_release_clock (now) VALUES (?)", T);
+      sql.exec(
+        `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
+           VALUES (?, ?, 'uploading', ?, 1, 4, ?, ?, 'per_td_owner', 1, 'per_td_owner', 1, ?, 1)`, rel(5), SHA, b.label, late, rel(5), T);
+      sql.exec("CREATE TABLE test_release_bookkeeping_fails (x INTEGER)");
+    });
+    await fake("/seed", { scripts: [late] });
+    await switchedOn(() => suspend(b.label));
+    await pass(b.room);
+    // Lifted and suspended again while the bookkeeping still fails: a second unpublish, with no files of its own.
+    await switchedOn(() => lift(b.label));
+    await switchedOn(() => suspend(b.label));
+    expect(await all(b.room, "SELECT release_epoch, scripts_gone_at IS NOT NULL AS done FROM unpublish ORDER BY release_epoch")).toEqual([{ release_epoch: 5, done: 0 }, { release_epoch: 6, done: 0 }]);
+    await inRoom(b.room, (sql) => sql.exec("DROP TABLE test_release_bookkeeping_fails"));
+    await pass(b.room);
+    await due(b.room);
+    await pass(b.room);
+    expect((await held()).scripts).not.toContain(late);
+    expect((await one(b.room, "SELECT unpublish_epoch FROM script_delete WHERE script_name = ?", late)).unpublish_epoch).toBe(6);
+    expect(await all(b.room, "SELECT release_epoch, scripts_gone_at IS NOT NULL AS done FROM unpublish ORDER BY release_epoch")).toEqual([{ release_epoch: 5, done: 1 }, { release_epoch: 6, done: 1 }]);
+  });
+
   it("lifts without restoring anything", async () => {
     const a = await app();
     await switchedOn(() => suspend(a.label));

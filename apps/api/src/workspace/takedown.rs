@@ -57,6 +57,8 @@ pub(crate) const INTERNAL_HOSTNAME_NOTICE: &str = "/internal/hostname-notice";
 /// Worker reaches it.
 pub(crate) const INTERNAL_TAKEDOWN_CHECK: &str = "/internal/takedown-check";
 
+/// The finding for a room whose release bookkeeping fails when the reconcile asks it. See `takedown_check`.
+const BOOKKEEPING_FAILING: &str = "release_bookkeeping_failing";
 /// A script's delete is told to operators once it has failed this many times: with the waits, over half an hour.
 const DELETE_REPORT_AFTER: i64 = 12;
 /// Findings of one kind one answer carries. A room has two hosts at most and a handful of scripts.
@@ -1084,14 +1086,37 @@ async fn delete_script(sql: &SqlStorage, provider: &Provider, script: &str) -> R
         "UPDATE script_delete SET gone_at = ?, attempts = attempts + 1, last_code = NULL WHERE script_name = ? AND gone_at IS NULL",
         vec![now.into(), script.into()],
     )?;
-    // The unpublish is done with its files when the last of them is gone.
+    // An unpublish is done with its files when the last of them is gone, **and no script that it owes a deletion is
+    // still unqueued.** A release that had begun its upload before the unpublish has a script of its own, and that
+    // script is queued only when the room's release bookkeeping ends the release, in a transaction after the
+    // unpublish's. Until then it is queued nowhere, and the unpublish isn't done: it still exists at the provider.
+    //
+    // The mark is looked at for this script's own unpublish and for every earlier one that has files. A script queued
+    // late goes under the room's newest unpublish, and an earlier one that only it was holding open is done with it.
     exec(
         sql,
         "UPDATE unpublish SET scripts_gone_at = ? WHERE scripts_gone_at IS NULL
-           AND release_epoch = (SELECT unpublish_epoch FROM script_delete WHERE script_name = ?)
-           AND NOT EXISTS (SELECT 1 FROM script_delete d WHERE d.unpublish_epoch = unpublish.release_epoch AND d.gone_at IS NULL)",
+           AND release_epoch <= (SELECT unpublish_epoch FROM script_delete WHERE script_name = ?)
+           AND EXISTS (SELECT 1 FROM script_delete d WHERE d.unpublish_epoch = unpublish.release_epoch)
+           AND NOT EXISTS (SELECT 1 FROM script_delete d WHERE d.unpublish_epoch = unpublish.release_epoch AND d.gone_at IS NULL)
+           AND NOT EXISTS (SELECT 1 FROM release r WHERE r.state IN ('uploading', 'uncertain') AND r.script_name IS NOT NULL
+             AND r.script_release_id = r.id AND r.release_epoch < unpublish.release_epoch
+             AND NOT EXISTS (SELECT 1 FROM script_delete q WHERE q.script_name = r.script_name))",
         vec![now.into(), script.into()],
     )
+}
+
+/// The finding a room gives when its release bookkeeping fails as the reconcile asks: the app's label, which is how an
+/// operator names the app, and the failure's code. No room's ID and no error's text. `None` for a room with no app.
+fn bookkeeping_finding(sql: &SqlStorage, code: &str) -> R<Option<Value>> {
+    Ok(rows(
+        sql,
+        "SELECT label FROM app_label ORDER BY (current IS NOT NULL) DESC, created_at DESC LIMIT 1",
+        vec![],
+    )?
+    .first()
+    .and_then(|row| text(&row["label"]))
+    .map(|label| json!({ "code": BOOKKEEPING_FAILING, "subject": label, "detail": code })))
 }
 
 /// The applier, then the delete job, from the room's alarm. Each host and each script is its own small step, and one
@@ -1105,7 +1130,7 @@ pub(super) async fn upkeep(state: &State, env: &Env) -> R<()> {
     // A release whose upload is an hour old ends here too, so a release that was staged and then abandoned doesn't
     // keep its host waiting, and every script delete in the room behind it, for longer than its hour. In a
     // transaction of its own, and never in the way: if it fails, the applier and the delete job run all the same.
-    release_commit::bookkeeping(state);
+    let _ = release_commit::bookkeeping(state);
     let hosts: Vec<String> = rows(
         &sql,
         &format!(
@@ -1181,12 +1206,26 @@ impl Workspace {
         // Whatever was asked: a release past its upload's hour ends first, before its script is looked at, so the
         // script a pass is about to delete never belongs to a release that could still go live. In a transaction
         // of its own: if it fails, the reconcile's question is answered all the same.
-        release_commit::bookkeeping(&self.state);
+        //
+        // **And if it fails, the answer says so,** as one more finding for the operators' record. A failure here is
+        // one that has gone on: the room tries its bookkeeping after every unpublish and on every alarm, and this is
+        // a later try. The record keeps when it was first and last seen and how often, so a failure that persists is
+        // one whose count goes on rising, and one that has passed stops being seen.
+        let failing = release_commit::bookkeeping(&self.state);
         let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
         let slot = out.clone();
         let store = sql.clone();
         transaction_sync(&self.state, move || {
-            *slot.borrow_mut() = Some(check(&store, &body, now_ms())?);
+            let mut answer = check(&store, &body, now_ms())?;
+            if let Some(code) = failing {
+                if let (Some(finding), Some(findings)) = (
+                    bookkeeping_finding(&store, code)?,
+                    answer["findings"].as_array_mut(),
+                ) {
+                    findings.push(finding);
+                }
+            }
+            *slot.borrow_mut() = Some(answer);
             Ok(())
         })?;
         self.arm(false, false).await?;
@@ -1248,7 +1287,7 @@ impl Workspace {
         })?;
         // The suspension has committed. Only now are the releases that hadn't gone live ended, in a transaction of
         // their own, with nothing awaited between the two: whether or not that works, the app is unpublished.
-        release_commit::bookkeeping(&self.state);
+        let _ = release_commit::bookkeeping(&self.state);
         // The transaction moved each host's version, which voids any wait, so the applier is due now. If the alarm
         // can't be set the suspension has still committed, and the operator is told it failed: asking again changes
         // nothing in the room and arms again. Nothing else corrects a lost wake until the reconcile exists.

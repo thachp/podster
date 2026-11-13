@@ -107,7 +107,7 @@
 
 **Stated first among the consequences, because it decides what a framework app can be.**
 
-Decision 216, as the owner confirmed it, gives every app `sandbox allow-scripts` and a source list naming only its own host. **In the browser report, under that policy:** the page's origin is `null`; cookies and every kind of browser storage are refused; a form submitted to its own host sends nothing; an inline `<script>` doesn't run; `history.pushState` fails in WebKit. A framework app with a database almost always wants a session, forms, and, if it renders on the server, inline scripts.
+Decision 216, as the owner confirmed it, gives every app `sandbox allow-scripts` and a source list naming only its own host. **In the browser report, under that policy:** the page's origin is `null`; cookies and every kind of browser storage are refused; a form submitted to its own host sends nothing; an inline `<script>` doesn't run; `history.pushState` fails in WebKit. A framework app almost always wants a session, forms, and, if it renders on the server, inline scripts.
 
 **Two different controls are in that policy,** and they are worth telling apart:
 

@@ -17,6 +17,7 @@ It refuses, before changing anything, unless:
 
   - CLOUDFLARE_ACCOUNT_ID is set (docs/staging.md keeps the ID out of this repo)
   - worker-build is 0.8.7
+  - the first rustc on PATH can build for wasm32-unknown-unknown, which the API's build needs
   - the checkout is detached at origin/main's tip after a fetch, with nothing changed or untracked
   - apps/api/wrangler.jsonc's staging variables don't switch MANAGED_REPOSITORIES on without a
     well-formed REPOSITORY_REQUESTERS beside it (scripts/requesters-rule.mjs). Unset, that list
@@ -126,6 +127,14 @@ fi
 builder=$(worker-build --version 2>/dev/null || true)
 if [ "$builder" != 0.8.7 ] && [ "$builder" != "worker-build 0.8.7" ]; then
   refuse "worker-build is '${builder:-missing}', not 0.8.7. Run: cargo install worker-build --version 0.8.7 --locked"
+fi
+# The API builds for Wasm with the first rustc on PATH. rustc is asked where that target's libraries are, and the
+# folder must exist: that holds for rustup's rustc (which reads rust-toolchain.toml) and for one installed without
+# rustup, such as Homebrew's, which names the folder and exits 0 though it has none.
+rustc_path=$(command -v rustc || true)
+wasm_libs=$(rustc --print target-libdir --target wasm32-unknown-unknown 2>/dev/null || true)
+if [ -z "$wasm_libs" ] || ! [ -d "$wasm_libs" ]; then
+  refuse "the rustc on PATH, '${rustc_path:-missing}', has no wasm32-unknown-unknown target, so the API can't build. Put rustup's rustc first on PATH, or run: rustup target add wasm32-unknown-unknown"
 fi
 git fetch --quiet origin || refuse "could not fetch origin"
 if git symbolic-ref -q HEAD > /dev/null; then

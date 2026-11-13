@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Checks every refusal of scripts/deploy-staging, in a scratch repository with stand-ins for npm, npx (wrangler),
-# worker-build, gh and curl. Git is real and local. Nothing reaches the network or Cloudflare. One section gives the
+# worker-build, rustc, gh and curl. Git is real and local. Nothing reaches the network or Cloudflare. One section gives the
 # stand-in gh real JSON, captured into scripts/test/fixtures, and runs the script's own jq over it, so it needs `jq`.
 #
 #   scripts/test/deploy-staging-selftest
@@ -37,6 +37,16 @@ EOF
 stub worker-build <<'EOF'
 #!/usr/bin/env bash
 cat "$(dirname "$0")/../fix/worker-build-version"
+EOF
+
+# rustc, asked only where the Wasm target's libraries are: it names the folder in $fix/rustc-wasm-libs, there or not,
+# as Homebrew's does. A first line "rustc-fails" fails instead.
+stub rustc <<'EOF'
+#!/usr/bin/env bash
+fix="$(dirname "$0")/../fix"
+[ "$*" = "--print target-libdir --target wasm32-unknown-unknown" ] || { echo "stand-in rustc: unexpected: rustc $*" >&2; exit 97; }
+[ "$(cat "$fix/rustc-wasm-libs")" = rustc-fails ] && exit 1
+cat "$fix/rustc-wasm-libs"
 EOF
 
 stub npm <<'EOF'
@@ -154,6 +164,8 @@ fresh() {
   quiet git -C "$work" checkout --detach origin/main
 
   echo 0.8.7 > "$fix/worker-build-version"
+  mkdir -p "$tmp/wasm-libs"
+  echo "$tmp/wasm-libs" > "$fix/rustc-wasm-libs"
   echo "$none" > "$fix/pending-podster-api-staging"
   echo "$none" > "$fix/pending-podster-gateway-staging"
   echo "$none" > "$fix/pending-after-podster-api-staging"
@@ -225,6 +237,14 @@ check "  and nothing ran" test ! -s "$fix/calls"
 
 echo 0.8.6 > "$fix/worker-build-version"
 refused "another worker-build" 'worker-build is'
+# Homebrew's rustc on 2026-11-13: it names the target's folder and exits 0, and the folder isn't there.
+echo "$tmp/no-such-toolchain/lib/rustlib/wasm32-unknown-unknown/lib" > "$fix/rustc-wasm-libs"
+check "a rustc without the Wasm target is refused, exit 1" deploy 1
+check "  and says which rustc, and what to do" said "REFUSE  the rustc on PATH, '$bin/rustc', has no wasm32-unknown-unknown target.*rustup's rustc first on PATH.*rustup target add wasm32-unknown-unknown"
+check "  before anything is installed or contacted" test ! -s "$fix/calls"
+fresh
+echo rustc-fails > "$fix/rustc-wasm-libs"
+refused "a rustc that can't say where the target is" 'has no wasm32-unknown-unknown target'
 
 quiet git -C "$work" checkout main
 refused "a checkout on a branch, even at main's tip" 'is on branch main'

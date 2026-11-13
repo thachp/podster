@@ -128,7 +128,7 @@ What Cloudflare's documentation says of these:
 
 - **From the app's response it passes only these:** `Content-Type`, `Content-Length`, `ETag` and `Last-Modified`. And `Location`, on a 3xx only, when its value is a path on the same host; a 3xx with any other `Location` is answered not-found.
 - **Everything else is dropped. `Set-Cookie` never passes,** whatever its attributes, and neither does an app's `Clear-Site-Data`, `Content-Security-Policy`, `Cache-Control` or `Access-Control-*`.
-- **It then sets its own:** `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Strict-Transport-Security` with a lifetime of a year and `includeSubDomains` (added on 2026-11-12 with the move to `podster.site`, [above](#the-content-domains-name)), and `Cache-Control` with a lifetime of 60 seconds and `no-transform`. If the owner chooses the sandbox, its headers are set here too.
+- **It then sets its own:** `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Strict-Transport-Security` with a lifetime of a year and `includeSubDomains` (added on 2026-11-12 with the move to `podster.site`, [above](#the-content-domains-name)), and `Cache-Control` with a lifetime of 60 seconds and `no-transform`. The sandbox's headers are set here too, on every response: the owner chose the sandbox on 2026-11-12 ([decision 216](../spec/PRODUCT.md#decisions-needed)).
 - **Why `no-transform`. Seen in spike C:** Cloudflare injected its Web Analytics beacon, a third-party script, into every app's HTML on `opster.dev` when the request accepted `text/html`, and didn't when the response's `Cache-Control` carried `no-transform`. **Open:** whether the beacon can be switched off for the zone, which would be the owner's setting and wasn't looked at.
 
 **Without the Public Suffix List entry, the whole content domain shares one reputation.** Browsers' and mail providers' blocklists, and Safe Browsing, treat hosts under one registrable domain together unless the list says otherwise. So one room's phishing page can get every room's app flagged or blocked. M6's answers are: a release only of reviewed, merged code that a person approved, in a public room; a report route that can name an app; an operator's suspension and a domain-wide stop, [built before anything is served](#takedown-and-how-fast-it-is); and per-room hosts with random labels, so a block of one host is at least possible. None of those prevents it. It is a **consequence** the owner accepts with the content domain.
@@ -141,7 +141,7 @@ What Cloudflare's documentation says of these:
 
 ### The sandbox: an open choice for the owner
 
-**Not decided. This is the owner's, and it is in [the owner's table](../m6-plan.md#for-the-owner).** It is a product choice: what an app may do in a browser, against whether rooms' apps are kept apart before the Public Suffix List entry exists.
+**Decided by the owner on 2026-11-12: (a), every app is sandboxed in M6** ([decision 216](../spec/PRODUCT.md#decisions-needed)). The architect put it as "Sandbox every app for M6. Apps lose their own browser storage but can't read each other's cookies. I recommend yes", and the owner answered "1. confirm". The content Worker, built in step 4(b), sets the sandboxing `Content-Security-Policy` on every response. The cost is as below: a sandboxed app has no cookies, `localStorage`, IndexedDB or other browser storage of its own. *Until then this section said: not decided, the owner's.* It was a product choice: what an app may do in a browser, against whether rooms' apps are kept apart before the Public Suffix List entry exists.
 
 **What spike C saw,** in Playwright's Chromium, Firefox and WebKit, headless, with one pair of sibling hosts:
 
@@ -158,7 +158,7 @@ What Cloudflare's documentation says of these:
 | **(b) No sandbox until the domain is on the Public Suffix List** | Not until the entry is accepted and browsers ship it, and the maintainers may refuse | Nothing | Rooms' apps can interfere through cookies set for the whole domain. The content Worker drops every `Set-Cookie`, so no response sets one; **that doesn't stop a script,** which sets a domain cookie with `document.cookie`, and nothing at the server can see or stop that. One room's app can then read, overwrite or fill another's domain cookies |
 | **(c) Sandbox by default, with an opt-out the room's owner sets** | For rooms that keep the default | Nothing, for a room that opts out | A room that opts out can set domain cookies that every unsandboxed app receives, and overwrite theirs. The sandboxed rooms are still protected. It adds a setting, its policy and its tests, and the opt-out is a person's promise about code an agent wrote |
 
-**The architect recommends (a) for M6.** The reasons:
+**The architect recommended (a) for M6, and the owner chose it.** The reasons:
 
 - **It is the only option that keeps rooms apart with what Podster controls today.** The list's entry isn't Podster's to grant, and its maintainers say they generally decline small projects.
 - **It fails safe.** An app that needs storage visibly doesn't work, and the owner can see that. Under (b) the failure is silent, and it is another room's.
@@ -346,13 +346,13 @@ This ADR said "about two minutes", by arithmetic on documented numbers. That fig
   - **The scripts token** uploads, deletes and lists user Workers in the namespace. The only permission found for that is the account-level "Workers Scripts Edit" ([API token permissions](https://developers.cloudflare.com/fundamentals/api/reference/permissions/), read in part). Nothing scoped to one namespace was found, and the permission the namespace's upload endpoint needs isn't stated on the pages read.
   - **The routing token** writes the KV namespace, and creates, reads and deletes custom hostnames on the content zone. Which zone permission custom hostnames need wasn't read; a **spike**.
   - **Why two:** the paths that only route, which are the serve entries, the stop and hostnames, then can't replace code. If Cloudflare can't separate them, which is a **spike**, there is one token and this section says so then.
-- **So the working assumption is a second Cloudflare account,** holding the content domain, the namespace, the content Worker and the KV namespace, and nothing of Podster's own. On one account, a token that can write Workers scripts could replace Podster's own API Worker.
+- **So there is a second Cloudflare account,** holding the content domain, the namespace, the content Worker and the KV namespace, and nothing of Podster's own. On one account, a token that can write Workers scripts could replace Podster's own API Worker. **Decided by the owner's action on 2026-11-12** ([decision 217](../spec/PRODUCT.md#decisions-needed)): the owner created the second account and asked how to move `podster.site` to it. *Until then this was a working assumption.* `podster.site`'s registration, made with Cloudflare Registrar that day, can't move between accounts before 2026-11-22; it is added to the new account as pending.
 - **Said plainly: in the second account the scripts token can replace the content Worker itself,** since the content Worker is a script in that account. Whoever holds it can serve anything on the content domain, serve entry or not. What limits the damage:
   - **It can't reach Podster.** The second account holds none of Podster's data, the content domain shares no cookie with `podster.dev`, and the content Worker holds no secret.
   - **It is held in one place,** the private API Worker's secret, and used only by the release and unpublish jobs and the reconcile.
   - **The reconcile checks the content Worker too:** it reads the content Worker's deployed version and compares it with the one Podster's deploy recorded. A difference raises an alarm for an operator. How that version is read is a **spike**.
   - **The last resort** needs no token: the owner's own dashboard login.
-- **Who holds the second account's own credentials,** and how the content Worker is deployed to it, are the **owner's**.
+- **Who holds the second account's own credentials,** and how the content Worker is deployed to it, are the **owner's**: the move of `podster.site`, its wildcard record and HTTPS redirect there, Workers for Platforms on that account, and a deploy credential for the content Worker only.
 
 A client never names an account, a namespace, a script or a host label. All four come from trusted configuration or are generated by the server.
 
@@ -460,14 +460,14 @@ What Cloudflare's documentation adds:
 
 - **Podster becomes a host of other parties' content,** with what that brings: abuse, takedown, and a bill that follows traffic. Cloudflare's terms for its developer platform make the customer solely responsible for what its end users do, and let Cloudflare block or remove content it deems illegal or harmful ([service-specific terms](https://www.cloudflare.com/service-specific-terms-developer-platform/)). Whether those terms allow this use is the **owner's** to read.
 - **One bad app can get the whole content domain blocked,** while the Public Suffix List entry is missing.
-- **New billed resources,** more than any earlier milestone: a domain, the Workers for Platforms plan, and probably a second account with its own Workers Paid.
+- **New billed resources,** more than any earlier milestone: a domain, the Workers for Platforms plan, and a second account, decided on 2026-11-12, possibly with its own Workers Paid.
 - **A fourth GitHub App and three secrets** to keep and rotate.
 - **A new public Worker** that must never grow a binding to Podster's data. A test should fail if its configuration gains one.
 - **A release is only what was committed,** and at most 300 files. An app that needs a build step must commit its built files. That is a real limit on "a working web application", and the owner's to accept.
 - **Private rooms get no app** in M6.
 - **Apps are served under Podster's name,** on `podster.site`, by the owner's choice. A visitor will take the domain for Podster's.
 - **HTTPS isn't forced by the browser for `.site`** as it is for `.dev`, so a visitor's first request to a host can be plain HTTP unless the domain is preloaded.
-- **If the owner chooses the sandbox, an app has no storage in the browser** at all ([the sandbox](#the-sandbox-an-open-choice-for-the-owner)). If not, rooms' apps can interfere through domain cookies until the Public Suffix List entry ships.
+- **An app has no storage in the browser** at all, because the owner chose the sandbox on 2026-11-12 ([the sandbox](#the-sandbox-an-open-choice-for-the-owner)). Without it, rooms' apps could interfere through domain cookies until the Public Suffix List entry ships.
 - **Every release uploads all its files,** since one script's files don't serve another's.
 - **An app can't set a response header or a redirect of its own,** and its HTML paths are served as the platform's default handling serves them.
 - **An app's address changes** if it is unpublished and published again, because a label is never reused.

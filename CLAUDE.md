@@ -87,6 +87,7 @@ Each has `--help`, and refuses when a condition isn't met. Don't do these by han
 
 - **Merges go through `scripts/merge-gate <pr> <full-sha>`**, at the full sha that was reviewed. It only reports until you add `--merge`.
 - **Staging deploys go through `scripts/deploy-staging`.** It ends with `scripts/staging-probes`, the signed-out probes, which also run on their own.
+- **The content Worker deploys only through `scripts/deploy-content`.** Agents run it only without `--deploy`, which only reports, and only when the owner asks. A real deploy needs a person at a terminal and is the owner's.
 
 ## Pull requests
 

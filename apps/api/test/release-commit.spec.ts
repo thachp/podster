@@ -158,13 +158,23 @@ const clock = (room: string, now: number) => inRoom(room, (sql) => { sql.exec("C
 /**
  * Holds a command at the point between its outside reads and its transaction (test builds only), runs `during`
  * while it is held there, lets it go, and answers what the command answered.
+ *
+ * **The room's clock is the test's for the whole of it,** so how long `during` takes on this machine decides nothing:
+ * the reads are as old at the confirm as the test says. Here that is exactly the bound, 5,000 ms, by a statement left
+ * for the same point: a confirm that still holds shows the hold itself cost nothing, however long it really was.
+ * The release's upload is set to have begun at the clock's time, so it isn't an hour old by it.
  */
 async function heldBetween(room: string, run: () => Promise<Answer>, during: () => Promise<unknown>): Promise<Answer> {
+  await clock(room, T);
+  await inRoom(room, (sql) => void sql.exec("UPDATE release SET upload_started_at = ? WHERE id = ?", T, REL));
+  await between(room, "UPDATE test_release_clock SET now = now + 5000");
   await inRoom(room, (sql) => { sql.exec("CREATE TABLE test_release_hold (arrived INTEGER)"); sql.exec("INSERT INTO test_release_hold (arrived) VALUES (0)"); });
   const answer = run();
   try {
     for (let i = 0; i < 2000 && !(await inRoom(room, (sql) => sql.exec("SELECT arrived FROM test_release_hold").one().arrived)); i += 1) await new Promise((next) => setTimeout(next, 5));
     expect(await inRoom(room, (sql) => sql.exec("SELECT arrived FROM test_release_hold").one().arrived)).toBe(1);
+    // The reads were made at the test's time, and the room's clock now stands at the bound past it.
+    expect(await inRoom(room, (sql) => sql.exec("SELECT now FROM test_release_clock").one().now)).toBe(T + 5000);
     await during();
   } finally {
     await inRoom(room, (sql) => void sql.exec("DROP TABLE test_release_hold"));
@@ -406,6 +416,16 @@ describe("committing a release live", () => {
       await passWithProvider(h.room);
       expect(await applied(h.room)).toEqual({ applied_version: 5, applied_script: h.prev, attempts: 1, last_code: "content_domain_stopped" });
     } finally { await clear(); }
+  });
+
+  it("decides nothing when a held commit's reads are one millisecond past the bound, by the same clock", async () => {
+    // The same hold, with the clock moved one millisecond further while the command waits: the reads are too old.
+    const h = await healthy({ state: "uploading" });
+    const record = await recorded(h.room);
+    const answer = await heldBetween(h.room, () => commit(h.room), () => inRoom(h.room, (sql) => void sql.exec("UPDATE test_release_clock SET now = now + 1")));
+    expect(refused(answer)).toEqual(UNKNOWN);
+    expect(await row(h.room)).toMatchObject({ state: "uploading", failure_code: null });
+    expect(await recorded(h.room)).toBe(record);
   });
 
   it("goes live, and stays live, when the delegation is taken back or the requester leaves between its read and its confirm", async () => {

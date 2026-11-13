@@ -68,9 +68,11 @@ const M6: Record<string, "person" | "operator"> = {
   getReleaseConfig: "person", setReleaseConfig: "person", approveRelease: "person", declineRelease: "person", getAppHostname: "person", requestAppHostname: "person", removeAppHostname: "person",
   createAppReport: "person", suspendApp: "operator", liftAppSuspension: "operator", suspendAppHost: "operator", liftAppHostSuspension: "operator",
   stopContentDomain: "operator", resumeContentDomain: "operator", listTakedownFindings: "operator",
+  // Decision 218's release switch: an operator or the organization's admin reads it, and only an operator sets it.
+  getReleaseDelegation: "person", setReleaseDelegation: "operator",
 };
 const contract = () => (JSON.parse(BINDINGS.TEST_API_ROUTES) as { path: string; method: string; operation: string }[]).filter((route) => route.operation in M6);
-const fill = (path: string, room: string) => path.replace("{ws}", room).replace("{release}", REL).replace("{label}", "k3v9q2").replace("{host}", "app.example.com");
+const fill = (path: string, room: string) => path.replace("{ws}", room).replace("{release}", REL).replace("{label}", "k3v9q2").replace("{host}", "app.example.com").replace("{org}", "org_rl");
 
 describe("M6's routes, none of them built", () => {
   it("are exactly the ones the contract lists, and name no capability an agent could be given", () => {
@@ -136,6 +138,9 @@ describe("M6's routes, none of them built", () => {
           stopContentDomain: [200, undefined], resumeContentDomain: [200, undefined], listTakedownFindings: [200, undefined],
           // Step 9 built an app's report: a person's, an operator's included, and this body names no address.
           createAppReport: [400, "invalid_argument"],
+          // Decision 218's PR B built the release switch. The owner administers `org_rl`, so reads it; this body isn't
+          // `{ granted }`, so nothing is set.
+          getReleaseDelegation: [200, undefined], setReleaseDelegation: [400, "invalid_argument"],
         };
         const operator = await api(OPERATOR, route.method, operatorPath, { reason: "abuse" });
         expect([operator.status, operator.code], `${route.operation} as an operator`).toEqual(want[route.operation] ?? [409, "release_not_available"]);

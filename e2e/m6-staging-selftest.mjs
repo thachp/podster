@@ -191,7 +191,7 @@ const contract = readFileSync(join(here, "../packages/contracts/openapi.yaml"), 
 const capabilities = readFileSync(join(here, "../packages/contracts/capabilities.yaml"), "utf8");
 const adr = readFileSync(join(here, "../docs/adr/0010-release-and-the-content-domain.md"), "utf8");
 const operations = m6Operations(contract);
-const want = ["getReleaseConfig", "setReleaseConfig", "approveRelease", "declineRelease", "getAppHostname", "requestAppHostname", "removeAppHostname", "createAppReport", "suspendApp", "liftAppSuspension", "suspendAppHost", "liftAppHostSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings"];
+const want = ["getReleaseConfig", "setReleaseConfig", "approveRelease", "declineRelease", "getAppHostname", "requestAppHostname", "removeAppHostname", "createAppReport", "suspendApp", "liftAppSuspension", "suspendAppHost", "liftAppHostSuspension", "stopContentDomain", "resumeContentDomain", "listTakedownFindings", "getReleaseDelegation", "setReleaseDelegation"];
 check(JSON.stringify(operations.map((op) => op.operation).sort()) === JSON.stringify([...want].sort()), `the contract's M6 operations are read, block and inline alike: ${operations.length}`);
 check(JSON.stringify(operations.find((op) => op.operation === "removeAppHostname")) === JSON.stringify({ operation: "removeAppHostname", method: "DELETE", path: "/v1/workspaces/{ws}/app-hostname" }) && operations.find((op) => op.operation === "suspendAppHost")?.path === "/v1/moderation/app-hosts/{host}/suspend", "each with its method and path");
 check(!operations.some((op) => ["releaseTask", "releaseRole", "getTaskReleaseStatus"].includes(op.operation)), "M5's release status and the task and role releases aren't M6's");
@@ -233,13 +233,16 @@ check(m6Names(agentCapabilities(capabilities).map((c) => c.name), operations).le
   // M6 step 4(a) writes three, each only from an operator's suspension, of an app or of a custom hostname a room
   // holds, which is behind the switch. So on staging, where release is switched off, M6-S02c still must find none.
   // Any other is a new name to account for here.
-  const BUILT_M6_EVENTS = ["app.suspended", "app.suspension_lifted", "app_hostname.suspended", "release.failed", "release.live", "release.upload_started"];
-  check(named.size > 20 && JSON.stringify(clash) === JSON.stringify(BUILT_M6_EVENTS), `the only M6 event names the API or core writes today are an app's suspension, its lifting, a hostname's suspension, and a release failed, started uploading and committed live (${named.size} read): ${clash.join(", ") || "none"}`);
+  // Decision 218's PR B adds two names that aren't events: `release_switch.granted` and `release_switch.revoked` are
+  // the actions an operator's set of an organization's release switch is kept under in the operators' own record, and
+  // are written only from that route, which is behind the switch. No room's event stream carries either.
+  const BUILT_M6_EVENTS = ["app.suspended", "app.suspension_lifted", "app_hostname.suspended", "release.failed", "release.live", "release.upload_started", "release_switch.granted", "release_switch.revoked"];
+  check(named.size > 20 && JSON.stringify(clash) === JSON.stringify(BUILT_M6_EVENTS), `the only M6 event names the API or core writes today are an app's suspension, its lifting, a hostname's suspension, a release failed, started uploading and committed live, and the operators' record of a release switch set (${named.size} read): ${clash.join(", ") || "none"}`);
 }
 check(JSON.stringify(m6EventTypes([{ type: "task.created" }, { type: "role.released" }, { type: "release.requested" }, { type: "deploy.started" }, { type: "app.suspended" }, { type: "release.requested" }])) === JSON.stringify(["release.requested", "deploy.started", "app.suspended"]), "M6 event types, deploy included, are found once each, and a role's release isn't one");
 
 // ---- paths and callers ----
-check(fillPath("/v1/workspaces/{ws}/releases/{release}/approve", "ws_1") === `/v1/workspaces/ws_1/releases/rel_${"a1".repeat(16)}/approve` && fillPath("/v1/moderation/app-hosts/{host}/lift", "ws_1") === "/v1/moderation/app-hosts/app.example.com/lift", "parameters are filled with the room and fixed values");
+check(fillPath("/v1/workspaces/{ws}/releases/{release}/approve", "ws_1") === `/v1/workspaces/ws_1/releases/rel_${"a1".repeat(16)}/approve` && fillPath("/v1/moderation/app-hosts/{host}/lift", "ws_1") === "/v1/moderation/app-hosts/app.example.com/lift" && fillPath("/v1/orgs/{org}/release-delegation", "ws_1") === `/v1/orgs/org_${"0".repeat(32)}/release-delegation`, "parameters are filled with the room and fixed values");
 check(throws(() => fillPath("/v1/{nope}", "ws_1")), "a parameter the script doesn't know is refused, never guessed");
 check(neighbour("/v1/workspaces/ws_1/release-config") === "/v1/workspaces/ws_1/release-configx" && /^ws_0{32}$/.test(ABSENT_ROOM), "the neighbour is the path with one more character, and the absent room has the API's shape");
 check(snake("getReleaseConfig") === "get_release_config" && snake("ReleaseConfig") === "release_config", "an operation's tool name, and a schema's field name");

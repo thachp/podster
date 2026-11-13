@@ -42,14 +42,17 @@
 //!   the release meets the rule the room has now: if the room requires a person as reviewer, the task's reviewer was
 //!   one.
 //!
-//! **`organization_may_release` is the organization's provisioning delegation** (ruled by the architect on
-//! 2026-11-13, for the owner to review): an operator who takes that back also stops that organization's releases.
+//! **The organization's provisioning delegation is read as `organization_may_provision`,** which only refuses
+//! (decision 218, part 1): an operator who takes it back stops that organization's new releases and commits, answered
+//! `release_not_delegated`, and unpublishes nothing. **`organization_may_release` is decision 218's release switch,**
+//! the unpublish trigger. It isn't read yet, so it holds, as it does for an organization with no record of it.
 //!
 //! Logs carry the room's and the release's IDs and codes.
 use super::*;
 use crate::content_stop::{self, Stop};
 use podster_core::release::{
-    is_release_id, recheck, CommitRecord, Recheck, ReleaseState, RoomReleaseFacts,
+    is_release_id, recheck, release_switch_now, CommitRecord, Recheck, RecheckFailure,
+    ReleaseState, ReleaseSwitch, RoomReleaseFacts,
 };
 use podster_policy::release::{
     authorize_approval, delegation_holder, may_release_now, DeployGrant, ReleaseRoom,
@@ -91,7 +94,10 @@ pub(super) struct Reads {
     /// holds it. With no repository linked there is no provider to ask about, and nothing was asked.
     org: String,
     provider: Option<String>,
-    org_may_release: Option<bool>,
+    org_may_provision: Option<bool>,
+    /// The organization's release switch (decision 218), read from its own object for `org`. It isn't held for a
+    /// provider, so it is read whether or not a repository is linked.
+    org_release: Option<ReleaseSwitch>,
     approver: Asked,
     requester: Asked,
     giver: Asked,
@@ -113,7 +119,8 @@ impl Reads {
             stopped: None,
             org: String::new(),
             provider: None,
-            org_may_release: None,
+            org_may_provision: None,
+            org_release: None,
             approver: nobody(),
             requester: nobody(),
             giver: nobody(),
@@ -153,7 +160,9 @@ pub(super) fn release_now(sql: &SqlStorage) -> i64 {
 /// What one pass concludes. `Unknown` only when every fact that was read holds and at least one that matters wasn't.
 pub(super) enum Verdict {
     Holds,
-    Fails(&'static str),
+    /// Core's failure, kept whole so whoever ends the release can record which fact refused
+    /// (`RecheckFailure::not_delegated_cause`), not only the code.
+    Fails(RecheckFailure),
     Unknown,
 }
 
@@ -274,6 +283,7 @@ fn room_facts(sql: &SqlStorage, deployment_on: bool, org_may_release: bool) -> R
 /// One recheck's inputs as core takes them, with the strings it borrows.
 struct Gathered {
     room: RoomReleaseFacts,
+    organization_may_provision: bool,
     domain_stopped: bool,
     config_version_now: u64,
     config_version_asked: u64,
@@ -350,7 +360,19 @@ fn gather(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) -> R<(Gath
     // The delegation was read for an organization and a provider. Read for another, it says nothing of this one.
     let about_this_room =
         reads.org == room_owner_org(sql)? && reads.provider == linked_provider(sql)?;
-    let org_may_release = or_assume(reads.org_may_release.filter(|_| about_this_room), true);
+    let org_may_provision = or_assume(reads.org_may_provision.filter(|_| about_this_room), true);
+    // The release switch was read for an organization; read for another, it says nothing of this one. The room keeps
+    // no switch of its own yet (PR C), so what it applied is taken as unset, and the read decides: held or taken, or
+    // undecided when it couldn't be read or wasn't well formed.
+    let about_this_org = reads.org == room_owner_org(sql)?;
+    let org_may_release = or_assume(
+        release_switch_now(
+            ReleaseSwitch::UNSET,
+            reads.org_release.filter(|_| about_this_org),
+        )
+        .map(|switch| switch.granted),
+        true,
+    );
     let approver_holds = settled(sql, &reads.approver, approver.as_deref(), true)?;
     let requester_holds = settled(sql, &reads.requester, Some(&requester), false)?;
     let giver_holds = settled(sql, &reads.giver, giver.as_deref(), true)?;
@@ -361,6 +383,7 @@ fn gather(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) -> R<(Gath
     let release_room = ReleaseRoom {
         deployment_allows_release: room.deployment_allows_release,
         organization_may_release: room.organization_may_release,
+        organization_may_provision: org_may_provision,
         public: room.public,
         archived: room.archived,
         public_surface_suspended: room.public_surface_suspended,
@@ -481,6 +504,7 @@ fn gather(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) -> R<(Gath
     let config = config.first();
     let gathered = Gathered {
         room,
+        organization_may_provision: org_may_provision,
         domain_stopped: stopped,
         config_version_now: config.map_or(0, |c| as_u64(&c["version"])),
         config_version_asked: as_u64(&release["config_version"]),
@@ -539,6 +563,7 @@ pub(super) fn judge(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) 
     Ok(
         match recheck(&Recheck {
             room: facts.room,
+            organization_may_provision: facts.organization_may_provision,
             domain_stopped: facts.domain_stopped,
             config_version_now: facts.config_version_now,
             config_version_asked: facts.config_version_asked,
@@ -552,7 +577,7 @@ pub(super) fn judge(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) 
             epoch_at_start: facts.epoch_at_start,
         }) {
             // A failure stands whatever is unknown: every unknown was taken as holding.
-            Err(failure) => Verdict::Fails(failure.code()),
+            Err(failure) => Verdict::Fails(failure),
             Ok(()) if unknown => Verdict::Unknown,
             Ok(()) => Verdict::Holds,
         },
@@ -573,10 +598,10 @@ pub(super) fn pass(sql: &SqlStorage, release_id: &str, reads: &Reads, now: i64) 
     match judge(sql, &release, reads, now)? {
         Verdict::Holds => Ok(answer(&release, true, None)),
         Verdict::Unknown => Err(standing_unknown()),
-        Verdict::Fails(reason) => {
-            release_commit::fail(sql, release_id, reason, None, now)?;
+        Verdict::Fails(failure) => {
+            release_commit::fail_because(sql, release_id, failure, None, now)?;
             let after = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
-            Ok(answer(&after, true, Some(reason)))
+            Ok(answer(&after, true, Some(failure.code())))
         }
     }
 }
@@ -633,7 +658,8 @@ impl Workspace {
         let provider = linked_provider(&sql)?;
         // **The order.** The stop is asked first: the applier asks it again before every write, so its answer here may
         // be the oldest. The facts nothing asks again are asked last, so their answers are as fresh as this can
-        // make them at the transaction: each person's record, and last the organization's delegation.
+        // make them at the transaction: each person's record, then the organization's delegation, and last its release
+        // switch.
         let stopped = match content_stop::read_from(&self.env).await {
             Stop::Clear => Some(false),
             Stop::Stopped => Some(true),
@@ -643,7 +669,7 @@ impl Workspace {
         let approver = self.still_holds(people.approver.as_deref(), true).await?;
         let requester = self.still_holds(Some(&people.requester), false).await?;
         let giver = self.still_holds(people.giver.as_deref(), true).await?;
-        let org_may_release = match &provider {
+        let org_may_provision = match &provider {
             Some(provider) => {
                 let delegation = principal::org_delegation(&self.env, &org, provider)
                     .await
@@ -671,13 +697,33 @@ impl Workspace {
             }
             None => Some(true),
         };
+        // The release switch (decision 218), from the same organization's object, last of all.
+        let org_release = principal::org_release_switch(&self.env, &org).await;
+        // Test builds only: a test gives the answer the organization's object is taken to have given, to show that an
+        // answer that isn't a well-formed switch decides nothing.
+        #[cfg(feature = "failpoints")]
+        let org_release = match rows(
+            &sql,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_release_switch_answer'",
+            vec![],
+        )?
+        .is_empty()
+        {
+            true => org_release,
+            false => rows(&sql, "SELECT answer FROM test_release_switch_answer", vec![])?
+                .first()
+                .and_then(|row| row["answer"].as_str())
+                .and_then(|answer| serde_json::from_str::<Value>(answer).ok())
+                .and_then(|answer| principal::release_switch_of(&answer)),
+        };
         Ok(Reads {
             read_at,
             deployment_on,
             stopped,
             org,
             provider,
-            org_may_release,
+            org_may_provision,
+            org_release,
             approver,
             requester,
             giver,

@@ -349,6 +349,291 @@ describe("an operator's suspension of an app", () => {
     expect(await nextAlarm(stub(b.room))).not.toBeNull();
   });
 
+  it("keeps a record in the room when its release bookkeeping fails, tells operators from it at the third failure in a row, and clears it when it works", async () => {
+    await fresh();
+    const a = await app({ plain: true });
+    const T = 1_800_000_000_000;
+    const record = () => inRoom(a.room, (sql) => sql.exec("SELECT failures, first_failed_at, last_failed_at, last_code FROM release_bookkeeping").toArray());
+    const ask = (room: string) => stub(room).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify({ kind: "wake" }) }).then((r: Response) => r.json() as Promise<any>);
+    const told = async (room: string) => (await ask(room)).findings.filter((finding: any) => finding.code === "release_bookkeeping_failing");
+    /**
+     * The reconcile's question with nothing able to come between: in one turn of the room, a run of its alarm under
+     * way is waited out and its alarm cleared, `before` sets what the question starts from, and the question is asked.
+     * No alarm is set again until the question has been answered.
+     */
+    const toldFrom = (before: (sql: any) => void) => runInDurableObject(stub(a.room), async (instance: any, state: any) => {
+      await instance.alarm();
+      await state.storage.deleteAlarm();
+      before(state.storage.sql);
+      const response: Response = await instance.fetch(new Request("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify({ kind: "wake" }) }));
+      return ((await response.json()) as any).findings.filter((finding: any) => finding.code === "release_bookkeeping_failing");
+    });
+    const clockTo = (now: number) => inRoom(a.room, (sql) => { sql.exec("CREATE TABLE IF NOT EXISTS test_release_clock (now INTEGER)"); sql.exec("DELETE FROM test_release_clock"); sql.exec("INSERT INTO test_release_clock (now) VALUES (?)", now); });
+    // **The room's own alarm runs the bookkeeping too,** whenever it runs. So each counted step below is one turn of
+    // the room (`toldFrom`): the alarm is run out and cleared, the count the step starts from is set, and the
+    // question is asked, with no alarm able to come between. A count read after a step can be higher than the step
+    // left it, and is asserted only as at least that.
+    const failuresTo = (failures: number) => (sql: any) => void sql.exec("UPDATE release_bookkeeping SET failures = ?", failures);
+    // Test builds only: release bookkeeping fails in this room, and the room's clock for it is the test's.
+    await clockTo(T);
+    await inRoom(a.room, (sql) => sql.exec("CREATE TABLE test_release_bookkeeping_fails (x INTEGER)"));
+    expect(await record()).toEqual([]);
+    // The first failure, after a suspension, which commits all the same. It is kept in the room's own row.
+    expect((await switchedOn(() => suspend(a.label))).status).toBe(200);
+    expect((await record())[0]).toMatchObject({ first_failed_at: T, last_failed_at: T, last_code: "internal_error" });
+    expect((await record())[0].failures).toBeGreaterThanOrEqual(1);
+    // The second in a row, at the reconcile's question a minute on, isn't told. When it first failed stays; when
+    // it last failed moves.
+    await clockTo(T + 60_000);
+    expect(await toldFrom(failuresTo(1))).toEqual([]);
+    expect((await record())[0]).toMatchObject({ first_failed_at: T, last_failed_at: T + 60_000, last_code: "internal_error" });
+    // The third in a row is told, in the same answer, by the app's label and the code.
+    await clockTo(T + 120_000);
+    expect(await toldFrom(failuresTo(2))).toEqual([{ code: "release_bookkeeping_failing", subject: a.label, detail: "internal_error" }]);
+    expect((await record())[0]).toMatchObject({ first_failed_at: T, last_failed_at: T + 120_000 });
+    expect((await record())[0].failures).toBeGreaterThanOrEqual(3);
+    // And it is first in the answer, so it is never the one left out.
+    expect((await ask(a.room)).findings[0].code).toBe("release_bookkeeping_failing");
+    // A pass of the reconcile carries it to the operators' record, and counts each time. **It has room of its own
+    // there:** the shared part of the record is full, with a thousand findings of another kind, and it is kept.
+    await inModeration((sql) => { for (let i = 0; i < 1000; i += 1) sql.exec("INSERT INTO takedown_finding (code, subject, first_seen_at, last_seen_at) VALUES ('entry_foreign_name', ?, 1, 1)", `filler-${i}.example.org`); });
+    await fake("/seed", { scripts: [a.kept, a.served], entries: {} });
+    await reconcile("scripts");
+    expect((await inModeration((sql) => sql.exec("SELECT count(*) AS n FROM takedown_finding WHERE code = 'findings_full'").one().n))).toBe(0);
+    const kept = async () => (await findings()).filter((finding: any) => finding.code === "release_bookkeeping_failing");
+    expect((await kept()).map((finding: any) => [finding.subject, finding.detail])).toEqual([[a.label, "internal_error"]]);
+    const first = (await kept())[0];
+    await reconcile("scripts");
+    const second = (await kept())[0];
+    expect(second.seen).toBeGreaterThan(first.seen);
+    expect(second.first_seen_at).toBe(first.first_seen_at);
+    // No room's ID and no error's text: the subject is the label an operator suspends by, and the detail a code.
+    expect(JSON.stringify(await kept())).not.toContain(a.room);
+    expect(second.detail).toMatch(/^[a-z_]+$/);
+    // **It is told from the row, not from that moment's try:** the alarm runs the bookkeeping too, and its failure
+    // counts, with nothing asking.
+    const before = (await record())[0].failures;
+    await pass(a.room);
+    expect((await record())[0].failures).toBeGreaterThan(before);
+    // Working again: the record is cleared in the run that worked, the room stops telling, and the count stops rising.
+    await inRoom(a.room, (sql) => sql.exec("DROP TABLE test_release_bookkeeping_fails"));
+    expect(await told(a.room)).toEqual([]);
+    expect(await record()).toEqual([]);
+    await reconcile("scripts");
+    expect((await kept())[0].seen).toBe(second.seen);
+    // A streak starts again from one: a failure after it worked isn't told on the strength of the old ones. In one
+    // turn the alarm is run out, the bookkeeping is made to fail, and the question is the first try to fail.
+    expect(await toldFrom((sql) => void sql.exec("CREATE TABLE test_release_bookkeeping_fails (x INTEGER)"))).toEqual([]);
+    expect((await record())[0]).toMatchObject({ first_failed_at: T + 120_000, last_code: "internal_error" });
+    // A room with no app keeps the record too, and has no label to be told by.
+    const bare: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+    madeApps.push(bare);
+    await alarmQuiet(stub(bare));
+    await inRoom(bare, (sql) => sql.exec("CREATE TABLE test_release_bookkeeping_fails (x INTEGER)"));
+    for (let i = 0; i < 4; i += 1) expect(await told(bare)).toEqual([]);
+    expect(await inRoom(bare, (sql) => sql.exec("SELECT failures FROM release_bookkeeping").one().failures)).toBeGreaterThanOrEqual(4);
+  });
+
+  it("never gives the reconcile more findings in one answer than it takes, whatever the room holds", async () => {
+    // The reconcile takes a fixed number from one room's answer. The room's answer is built never to hold more: the
+    // bookkeeping's one, the hosts it refused, the deletes that keep failing and the ones a pass started. That sum is
+    // checked when the Worker is compiled, and read here from the same constants.
+    const sources = JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>;
+    const constant = (file: string, name: string) => Number(sources[file].match(new RegExp(`const ${name}: (?:i64|usize) = (\\d+);`))?.[1]);
+    const [hosts, failing, queued, taken] = [constant("workspace/takedown.rs", "HOST_FINDINGS"), constant("workspace/takedown.rs", "FINDINGS"), constant("workspace/takedown.rs", "QUEUED_FINDINGS"), constant("reconcile.rs", "ROOM_FINDINGS_TAKEN")];
+    expect([hosts, failing, queued, taken]).toEqual([7, 8, 32, 48]);
+    expect(1 + hosts + failing + queued).toBeLessThanOrEqual(taken);
+    expect(sources["workspace/takedown.rs"]).toContain("1 + HOST_FINDINGS + FINDINGS + QUEUED_FINDINGS <= crate::reconcile::ROOM_FINDINGS_TAKEN as i64");
+    expect(sources["reconcile.rs"]).toContain(".take(ROOM_FINDINGS_TAKEN)");
+    // A room has two hosts at most, so the hosts' share is never short: one default host, by the room's own index,
+    // and one custom hostname, since a room has one open request for one. Each is refused by the room's own schema.
+    const a = await app({ plain: true });
+    expect(refuses(() => { throw new Error("placeholder"); })).toBe(true);
+    await expect(inRoom(a.room, (sql) => void sql.exec("INSERT INTO serve_state (host, kind, version, updated_at) VALUES ('second-default.example.org', 'default', 1, 1)"))).rejects.toThrow();
+    const request = (id: string, hostname: string) => inRoom(a.room, (sql) => void sql.exec("INSERT INTO hostname_request (id, hostname, state, open, challenge, generation, requested_by, requested_at, expires_at, updated_at) VALUES (?, ?, 'pending', 1, ?, 0, 'per_td_owner', 1, 2, 1)", id, hostname, "ab".repeat(32)));
+    await request("hr_first", "first.example.org");
+    await expect(request("hr_second", "second.example.org")).rejects.toThrow();
+    // And a room filled with every kind at once answers with no more than is taken, the bookkeeping's finding first.
+    const T = 1_800_000_000_000;
+    await inRoom(a.room, (sql) => {
+      sql.exec("INSERT INTO release_bookkeeping (singleton, failures, first_failed_at, last_failed_at, last_code) VALUES (1, 3, 1, 2, 'internal_error')");
+      sql.exec("CREATE TABLE test_release_bookkeeping_fails (x INTEGER)");
+      for (let i = 0; i < 60; i += 1) {
+        const id = `rel_${(1000 + i).toString(16).padStart(32, "0")}`;
+        // Half keep failing, and all were queued under no unpublish just now, as a pass queues them.
+        sql.exec("INSERT INTO script_delete (script_name, label, queued_at, attempts, next_attempt_at, last_code) VALUES (?, ?, ?, ?, ?, 'delete_500')", `${a.label}.${id}`, a.label, Date.now(), i % 2 === 0 ? 12 : 0, T);
+      }
+    });
+    const answer = await stub(a.room).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify({ kind: "wake" }) }).then((r: Response) => r.json() as Promise<any>);
+    const counts: Record<string, number> = {};
+    for (const finding of answer.findings) counts[finding.code] = (counts[finding.code] ?? 0) + 1;
+    expect(counts).toEqual({ release_bookkeeping_failing: 1, script_delete_failing: 8, script_delete_queued: 32 });
+    expect(answer.findings.length).toBeLessThanOrEqual(taken);
+    expect(answer.findings[0].code).toBe("release_bookkeeping_failing");
+  });
+
+  it("doesn't count an unpublish done with its files while a release's own script is still unqueued", async () => {
+    // A release that had begun its upload before the unpublish has a script of its own. It is queued only when the
+    // room's bookkeeping ends the release, after the unpublish. Here that bookkeeping fails for a while. The room's
+    // clock for release bookkeeping is the test's, so the upload is never an hour old, however long this takes.
+    const T = 1_800_000_000_000;
+    const a = await app({ plain: true });
+    const uploading = `${a.label}.${rel(5)}`;
+    await inRoom(a.room, (sql) => {
+      sql.exec("CREATE TABLE test_release_clock (now INTEGER)");
+      sql.exec("INSERT INTO test_release_clock (now) VALUES (?)", T);
+      sql.exec(
+        `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
+           VALUES (?, ?, 'uploading', ?, 1, 4, ?, ?, 'per_td_owner', 1, 'per_td_owner', 1, ?, 1)`, rel(5), SHA, a.label, uploading, rel(5), T);
+      sql.exec("CREATE TABLE test_release_bookkeeping_fails (x INTEGER)");
+    });
+    await fake("/seed", { scripts: [uploading] });
+    expect((await switchedOn(() => suspend(a.label))).status).toBe(200);
+    await pass(a.room);
+    // The unpublish's own two scripts are gone at the provider, by its own answer. The upload's script is still
+    // there, queued nowhere, and its release hasn't been ended.
+    let state = await held();
+    expect(state.scripts.filter((name) => name.startsWith(`${a.label}.`))).toEqual([uploading]);
+    expect((await deleteRows(a.room)).map((row: any) => [row.script_name, row.gone])).toEqual([a.kept, a.served].sort().map((name) => [name, 1]));
+    expect((await one(a.room, "SELECT state FROM release WHERE id = ?", rel(5))).state).toBe("uploading");
+    // So the unpublish is not done with its files.
+    expect((await one(a.room, "SELECT scripts_gone_at IS NOT NULL AS done FROM unpublish")).done).toBe(0);
+    // The bookkeeping works again: the release ends, its script is queued under that unpublish, and goes.
+    await inRoom(a.room, (sql) => sql.exec("DROP TABLE test_release_bookkeeping_fails"));
+    await pass(a.room);
+    // The script was queued at the test's clock, which is ahead of this machine's: its wait is called over, so the
+    // delete job, which runs by the machine's clock, takes it on the next pass.
+    await due(a.room);
+    await pass(a.room);
+    state = await held();
+    expect(state.scripts.filter((name) => name.startsWith(`${a.label}.`))).toEqual([]);
+    expect(await one(a.room, "SELECT state, failure_code FROM release WHERE id = ?", rel(5))).toEqual({ state: "failed", failure_code: "release_epoch_moved" });
+    expect((await deleteRows(a.room)).map((row: any) => [row.script_name, row.unpublish_epoch, row.gone])).toEqual([a.kept, a.served, uploading].sort().map((name) => [name, 5, 1]));
+    // Only now is it done.
+    expect((await one(a.room, "SELECT scripts_gone_at IS NOT NULL AS done FROM unpublish")).done).toBe(1);
+
+    // And a script queued late, under a later unpublish, also closes an earlier one that only it was holding open.
+    const b = await app({ plain: true });
+    const late = `${b.label}.${rel(5)}`;
+    await inRoom(b.room, (sql) => {
+      sql.exec("CREATE TABLE test_release_clock (now INTEGER)");
+      sql.exec("INSERT INTO test_release_clock (now) VALUES (?)", T);
+      sql.exec(
+        `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
+           VALUES (?, ?, 'uploading', ?, 1, 4, ?, ?, 'per_td_owner', 1, 'per_td_owner', 1, ?, 1)`, rel(5), SHA, b.label, late, rel(5), T);
+      sql.exec("CREATE TABLE test_release_bookkeeping_fails (x INTEGER)");
+    });
+    await fake("/seed", { scripts: [late] });
+    await switchedOn(() => suspend(b.label));
+    await pass(b.room);
+    // Lifted and suspended again while the bookkeeping still fails: a second unpublish, with no files of its own.
+    await switchedOn(() => lift(b.label));
+    await switchedOn(() => suspend(b.label));
+    expect(await all(b.room, "SELECT release_epoch, scripts_gone_at IS NOT NULL AS done FROM unpublish ORDER BY release_epoch")).toEqual([{ release_epoch: 5, done: 0 }, { release_epoch: 6, done: 0 }]);
+    await inRoom(b.room, (sql) => sql.exec("DROP TABLE test_release_bookkeeping_fails"));
+    await pass(b.room);
+    await due(b.room);
+    await pass(b.room);
+    expect((await held()).scripts).not.toContain(late);
+    expect((await one(b.room, "SELECT unpublish_epoch FROM script_delete WHERE script_name = ?", late)).unpublish_epoch).toBe(6);
+    expect(await all(b.room, "SELECT release_epoch, scripts_gone_at IS NOT NULL AS done FROM unpublish ORDER BY release_epoch")).toEqual([{ release_epoch: 5, done: 1 }, { release_epoch: 6, done: 1 }]);
+  });
+
+  it("queues an upload's script under the unpublish that owes it, whichever path queues it, past the upload's hour", async () => {
+    const T = 1_800_000_000_000;
+    const HOUR = 60 * 60 * 1000;
+    const clockTo = (room: string, now: number) => inRoom(room, (sql) => { sql.exec("DELETE FROM test_release_clock"); sql.exec("INSERT INTO test_release_clock (now) VALUES (?)", now); });
+    const unpublish = (room: string) => one(room, "SELECT release_epoch, scripts_gone_at IS NOT NULL AS done FROM unpublish");
+    const queuedAs = (room: string, script: string) => all(room, "SELECT unpublish_epoch, gone_at IS NOT NULL AS gone FROM script_delete WHERE script_name = ?", script);
+    const checkScript = (room: string, script: string) => stub(room).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify({ kind: "script", script }) }).then((r: Response) => r.json() as Promise<any>);
+    const withUpload = async (opts: { providerOff?: boolean } = {}) => {
+      const made = await app({ plain: true });
+      const script = `${made.label}.${rel(5)}`;
+      await inRoom(made.room, (sql) => {
+        if (opts.providerOff) sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
+      sql.exec("CREATE TABLE test_release_clock (now INTEGER)");
+      sql.exec("INSERT INTO test_release_clock (now) VALUES (?)", T);
+      sql.exec(
+        `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
+           VALUES (?, ?, 'uploading', ?, 1, 4, ?, ?, 'per_td_owner', 1, 'per_td_owner', 1, ?, 1)`, rel(5), SHA, made.label, script, rel(5), T);
+      sql.exec("CREATE TABLE test_release_bookkeeping_fails (x INTEGER)");
+      });
+      await fake("/seed", { scripts: [script] });
+      expect((await switchedOn(() => suspend(made.label))).status).toBe(200);
+      return { ...made, script };
+    };
+
+    // (a) The unpublish's own scripts are already gone when the upload's hour passes, and the room's bookkeeping,
+    // working again, ends the release as expired before it looks at the unpublish.
+    const a = await withUpload();
+    await pass(a.room);
+    expect([(await held()).scripts.includes(a.script), await unpublish(a.room)]).toEqual([true, { release_epoch: 5, done: 0 }]);
+    await clockTo(a.room, T + HOUR);
+    await inRoom(a.room, (sql) => sql.exec("DROP TABLE test_release_bookkeeping_fails"));
+    await pass(a.room);
+    expect(await one(a.room, "SELECT state, failure_code FROM release WHERE id = ?", rel(5))).toEqual({ state: "failed", failure_code: "release_upload_expired" });
+    // Queued under the unpublish, though it was the expiry that queued it.
+    expect(await queuedAs(a.room, a.script)).toEqual([{ unpublish_epoch: 5, gone: 0 }]);
+    expect((await unpublish(a.room)).done).toBe(0);
+    await due(a.room);
+    await pass(a.room);
+    // Its going is what finishes the unpublish. Under no unpublish, nothing ever would have.
+    expect([(await held()).scripts.includes(a.script), await unpublish(a.room)]).toEqual([false, { release_epoch: 5, done: 1 }]);
+
+    // (a), by the other path: the bookkeeping still fails when the hour passes, and the hourly reconcile finds the
+    // script before the room has ended its release.
+    const found = await withUpload();
+    await pass(found.room);
+    await clockTo(found.room, T + HOUR);
+    expect((await checkScript(found.room, found.script)).changed).toBe(true);
+    // Queued under the unpublish, and due at once: the room's own alarm may take it before the next line, so whether
+    // it is gone yet isn't asserted here, only under which unpublish it was queued.
+    expect((await queuedAs(found.room, found.script)).map((row: any) => row.unpublish_epoch)).toEqual([5]);
+    expect((await one(found.room, "SELECT state FROM release WHERE id = ?", rel(5))).state).toBe("uploading");
+    await pass(found.room);
+    expect([(await held()).scripts.includes(found.script), await unpublish(found.room)]).toEqual([false, { release_epoch: 5, done: 1 }]);
+
+    // (b) One of the unpublish's own scripts is still pending when the upload's script is queued. The own script's
+    // going must not finish the unpublish while the upload's script is still there.
+    //
+    // **Nothing here rests on the room's alarm not having run.** The room has no provider from before the suspension
+    // until the upload's script has its wait, so whenever an alarm runs in between it can delete nothing. One is run
+    // at that point on purpose. (On CI one landed there by itself, with a provider, and deleted the upload's script
+    // before this test had set its wait: that was this test's fault, and is why it is built this way.)
+    const b = await withUpload({ providerOff: true });
+    await clockTo(b.room, T + HOUR);
+    expect((await checkScript(b.room, b.script)).changed).toBe(true);
+    await pass(b.room);
+    expect((await deleteRows(b.room)).map((row: any) => [row.script_name, row.unpublish_epoch, row.gone])).toEqual([[b.kept, 5, 0], [b.served, 5, 0], [b.script, 5, 0]].sort());
+    // The upload's script waits; the provider is back. Whichever pass comes next, this one or the room's own, takes
+    // the unpublish's own two and leaves the upload's.
+    await inRoom(b.room, (sql) => { sql.exec("UPDATE script_delete SET next_attempt_at = ? WHERE script_name = ?", FAR(), b.script); sql.exec("DROP TABLE test_content_provider_off"); });
+    await pass(b.room);
+    expect((await deleteRows(b.room)).map((row: any) => [row.script_name, row.gone])).toEqual([[b.kept, 1], [b.served, 1], [b.script, 0]].sort());
+    expect([(await held()).scripts.includes(b.script), (await unpublish(b.room)).done]).toEqual([true, 0]);
+    await due(b.room);
+    await pass(b.room);
+    expect([(await held()).scripts.includes(b.script), (await unpublish(b.room)).done]).toEqual([false, 1]);
+
+    // A release that began after the room's last unpublish is owed by none: its script is queued under none. The
+    // room was suspended and the suspension lifted, which left it at epoch 5, and the release began under that.
+    const later = await app({ plain: true });
+    await switchedOn(() => suspend(later.label));
+    await switchedOn(() => lift(later.label));
+    expect((await unpublish(later.room)).release_epoch).toBe(5);
+    const fresh5 = `${later.label}.${rel(5)}`;
+    await inRoom(later.room, (sql) => {
+      sql.exec("CREATE TABLE test_release_clock (now INTEGER)");
+      sql.exec("INSERT INTO test_release_clock (now) VALUES (?)", T + HOUR);
+      sql.exec(
+        `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
+           VALUES (?, ?, 'uploading', ?, 1, 5, ?, ?, 'per_td_owner', 1, 'per_td_owner', 1, ?, 1)`, rel(5), SHA, later.label, fresh5, rel(5), T);
+    });
+    await pass(later.room);
+    expect(await one(later.room, "SELECT state, failure_code FROM release WHERE id = ?", rel(5))).toEqual({ state: "failed", failure_code: "release_upload_expired" });
+    expect((await queuedAs(later.room, fresh5)).map((row: any) => row.unpublish_epoch)).toEqual([null]);
+  });
+
   it("lifts without restoring anything", async () => {
     const a = await app();
     await switchedOn(() => suspend(a.label));

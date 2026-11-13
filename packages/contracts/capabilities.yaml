@@ -95,6 +95,8 @@ person_only:
   - stopContentDomain
   - resumeContentDomain
   - listTakedownFindings
+  - getReleaseDelegation
+  - setReleaseDelegation
   - listRepositoryGrants
   - grantRepositoryAction
   - revokeRepositoryGrant

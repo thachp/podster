@@ -68,12 +68,17 @@ const MAX_FAILING: i64 = 1000;
 /// The kinds of finding with room of their own, 1,000 rows each: a deletion a reconcile started, a host a room
 /// refused, and the stop key not as the stop says. Whatever fills the rest of the record, three passes of an outage
 /// that writes a thousand keys that keep failing among it, can't keep one of these out.
-const OWN_ROOM: [&str; 4] = [
+const OWN_ROOM: [&str; 5] = [
     "script_delete_queued",
     "host_refused",
     "stop_key_differs",
     "stop_key_without_stop",
+    // A room whose release bookkeeping keeps failing. One row for an app at most, so a thousand apps before it fills.
+    "release_bookkeeping_failing",
 ];
+/// How many findings are taken from one room's answer. A room's answer is built never to hold more
+/// (`workspace::takedown`), and that is checked when the Worker is compiled.
+pub(crate) const ROOM_FINDINGS_TAKEN: usize = 48;
 /// What a room that gave no answer is counted as, in this object's own record. It is no answer to any caller.
 const UNANSWERED: &str = "room_unanswered";
 
@@ -170,7 +175,10 @@ fn record(sql: &SqlStorage, code: &str, subject: &str, detail: Option<&str>, now
     } else {
         rows(
             sql,
-            "SELECT count(*) AS n FROM takedown_finding WHERE code NOT IN (?, ?, ?, ?)",
+            &format!(
+                "SELECT count(*) AS n FROM takedown_finding WHERE code NOT IN ({})",
+                vec!["?"; OWN_ROOM.len()].join(", ")
+            ),
             OWN_ROOM.iter().map(|code| (*code).into()).collect(),
         )?
     }
@@ -328,7 +336,12 @@ impl Counts {
         if answer["changed"] == true {
             self.changed += 1;
         }
-        for finding in answer["findings"].as_array().into_iter().flatten().take(48) {
+        for finding in answer["findings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .take(ROOM_FINDINGS_TAKEN)
+        {
             if let (Some(code), Some(subject)) =
                 (finding["code"].as_str(), finding["subject"].as_str())
             {

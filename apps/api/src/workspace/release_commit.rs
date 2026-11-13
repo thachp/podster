@@ -66,7 +66,8 @@ use super::release_recheck::{
 use super::*;
 use podster_core::release::{
     commit_live, next_state, script_name, script_owner, set_back, upload_expired,
-    CommitLiveRefusal, ReleaseEvent, ReleaseState, ScriptOwner, ServeState, UploadFailure,
+    CommitLiveRefusal, RecheckFailure, ReleaseEvent, ReleaseState, ScriptOwner, ServeState,
+    UploadFailure,
 };
 
 /// The room's path for starting a release's upload. Nothing outside the Worker reaches it, and nothing calls it yet.
@@ -171,6 +172,11 @@ fn queue_script(sql: &SqlStorage, script: &str, under: Option<i64>, now: i64) ->
         console_error!("release: a release's script wasn't queued: code=foreign_script");
         return Ok(());
     };
+    // Whichever path ends the release, an unpublish that came after it began owes this script's deletion.
+    let under = match under {
+        Some(epoch) => Some(epoch),
+        None => owing_unpublish(sql, script)?,
+    };
     if let Some(epoch) = under {
         // That unpublish isn't done with its files until this one is gone too.
         exec(
@@ -194,6 +200,23 @@ fn queue_script(sql: &SqlStorage, script: &str, under: Option<i64>, now: i64) ->
     )
 }
 
+/// The unpublish that owes a release's own script its deletion, by its epoch: the room's newest unpublish that came
+/// after the release began. The release was there to be taken down by it, so the unpublish isn't done with its files
+/// until this script is gone, **whichever path queues the script:** the unpublish's own bookkeeping, an upload past
+/// its hour, a failed recheck, or the reconcile finding it. `None` for a release that began after the room's last
+/// unpublish, and for a script no release of this room is named after.
+pub(super) fn owing_unpublish(sql: &SqlStorage, script: &str) -> R<Option<i64>> {
+    Ok(rows(
+        sql,
+        "SELECT max(u.release_epoch) AS epoch FROM unpublish u JOIN release r ON r.release_epoch < u.release_epoch
+           WHERE r.script_name = ? AND r.script_release_id = r.id",
+        vec![script.into()],
+    )?
+    .first()
+    .filter(|row| !row["epoch"].is_null())
+    .map(|row| int(&row["epoch"])))
+}
+
 /// Ends a release as failed, with a reason's code, inside the caller's transaction. Everything a failed release
 /// leaves behind is undone here, so no caller has to remember part of it:
 ///
@@ -213,6 +236,37 @@ pub(super) fn fail(
     sql: &SqlStorage,
     release_id: &str,
     reason: &str,
+    under: Option<i64>,
+    now: i64,
+) -> R<()> {
+    end_failed(sql, release_id, reason, None, under, now)
+}
+
+/// [`fail`], for core's recheck failure: its code, and, for `release_not_delegated`, which of the organization's two
+/// facts refused, `release_switch` or `provisioning_delegation`, kept in the audit record only (decision 218). The
+/// event and the release's row carry the code alone, as for every other reason.
+pub(super) fn fail_because(
+    sql: &SqlStorage,
+    release_id: &str,
+    failure: RecheckFailure,
+    under: Option<i64>,
+    now: i64,
+) -> R<()> {
+    end_failed(
+        sql,
+        release_id,
+        failure.code(),
+        failure.not_delegated_cause().map(|cause| cause.code()),
+        under,
+        now,
+    )
+}
+
+fn end_failed(
+    sql: &SqlStorage,
+    release_id: &str,
+    reason: &str,
+    cause: Option<&str>,
     under: Option<i64>,
     now: i64,
 ) -> R<()> {
@@ -257,7 +311,13 @@ pub(super) fn fail(
         "release.failed",
         release_id,
         Some(json!({ "state": state.name() }).to_string()),
-        Some(json!({ "state": failed.name(), "reason": reason }).to_string()),
+        Some(
+            match cause {
+                Some(cause) => json!({ "state": failed.name(), "reason": reason, "cause": cause }),
+                None => json!({ "state": failed.name(), "reason": reason }),
+            }
+            .to_string(),
+        ),
         now,
     )?;
     // The event names the release it is about, by its ID, and the reason, by its code.
@@ -317,10 +377,11 @@ pub(super) fn end_stale(sql: &SqlStorage, now: i64) -> R<()> {
     let epoch = rows(sql, "SELECT release_epoch FROM release_config", vec![])?
         .first()
         .map(|config| int(&config["release_epoch"]));
-    match epoch {
-        Some(epoch) => end_at_unpublish(sql, epoch, now),
-        None => Ok(()),
+    if let Some(epoch) = epoch {
+        end_at_unpublish(sql, epoch, now)?;
     }
+    // It worked: whatever was on record of it failing is cleared, in this same transaction.
+    exec(sql, "DELETE FROM release_bookkeeping", vec![])
 }
 
 /// [`end_stale`] in a transaction of its own, from the room's takedown code: after an unpublish has committed, before
@@ -328,16 +389,45 @@ pub(super) fn end_stale(sql: &SqlStorage, now: i64) -> R<()> {
 /// up:** an error is logged by its code and the caller goes on. A suspension has committed by then, and the applier
 /// and the delete job run all the same. What it would have ended is ended by the next run of it, and until then
 /// can't go live: the epoch has moved, which the recheck and core's `commit_live` both refuse.
+///
+/// **A failure is kept in the room's own row,** `release_bookkeeping`: when it first failed, when it last failed, how
+/// many times in a row, and the last code. It is written here, where the failure is caught, in a transaction of its
+/// own, and cleared by the first run that works ([`end_stale`]). The room tells operators from that row once it has
+/// failed [`BOOKKEEPING_TOLD`] times in a row (`takedown::findings`), on every question the reconcile asks, until it
+/// is cleared. So nothing rests on the bookkeeping happening to fail at the moment the reconcile asks.
 pub(super) fn bookkeeping(state: &State) {
     let sql = state.storage().sql();
     let now = release_now(&sql);
-    if let Err(error) = transaction_sync(state, move || end_stale(&sql, now)) {
-        console_error!(
-            "release: bookkeeping failed and was skipped: code={}",
-            error.code().unwrap_or("internal_error")
-        );
+    let store = sql.clone();
+    let Err(error) = transaction_sync(state, move || end_stale(&store, now)) else {
+        return;
+    };
+    // Only a code this file can name is kept: an error's own text never is.
+    let code = if error.code().is_none_or(|code| code == "internal_error") {
+        "internal_error"
+    } else {
+        "refused"
+    };
+    console_error!("release: bookkeeping failed and was skipped: code={}", code);
+    let kept = transaction_sync(state, move || {
+        exec(
+            &sql,
+            "INSERT INTO release_bookkeeping (singleton, failures, first_failed_at, last_failed_at, last_code) VALUES (1, 1, ?, ?, ?)
+               ON CONFLICT (singleton) DO UPDATE SET failures = failures + 1, last_failed_at = max(last_failed_at, excluded.last_failed_at),
+                 last_code = excluded.last_code",
+            vec![now.into(), now.into(), code.into()],
+        )
+    });
+    if kept.is_err() {
+        console_error!("release: a bookkeeping failure couldn't be kept: code=record_failed");
     }
 }
+
+/// How many times in a row a room's release bookkeeping fails before operators are told: the third. It runs after
+/// every unpublish, at the start of every alarm and before every question of the reconcile's, so one failure, or two
+/// close together, can be a moment's trouble with the room's storage. Three in a row, with nothing working between
+/// them, is a room that isn't ending its releases. The same figure the reconcile uses for a key that keeps failing.
+pub(super) const BOOKKEEPING_TOLD: i64 = 3;
 
 /// Ends every release that hadn't gone live and started under an epoch below `epoch`, the room's own now, which an
 /// unpublish raised it to: awaiting approval, queued, uploading or uncertain. None of them can ever be committed, so none is left
@@ -401,6 +491,18 @@ fn failed(sql: &SqlStorage, release_id: &str, reason: &str, now: i64) -> R<Value
     Ok(answer(&after, true, Some(reason)))
 }
 
+/// [`failed`], for the recheck's own failure, with which fact refused kept in the audit record.
+fn rechecked_failed(
+    sql: &SqlStorage,
+    release_id: &str,
+    failure: RecheckFailure,
+    now: i64,
+) -> R<Value> {
+    fail_because(sql, release_id, failure, None, now)?;
+    let after = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
+    Ok(answer(&after, true, Some(failure.code())))
+}
+
 /// Starts a release's upload, inside the room's transaction: the recheck, and, if it holds, a queued release becomes
 /// `uploading`, with its script's name and the time. Asked again for one already uploading, or whose upload is
 /// uncertain, it is the recheck and the same script's name, and nothing changes. Any other release is answered as it
@@ -423,8 +525,11 @@ pub(super) fn start_upload(
     }
     match judge(sql, &release, reads, now)? {
         Verdict::Unknown => return Err(standing_unknown()),
-        Verdict::Fails(reason) => {
-            return Ok(with_script(failed(sql, release_id, reason, now)?, None))
+        Verdict::Fails(failure) => {
+            return Ok(with_script(
+                rechecked_failed(sql, release_id, failure, now)?,
+                None,
+            ))
         }
         Verdict::Holds => {}
     }
@@ -498,8 +603,10 @@ pub(super) fn stage(sql: &SqlStorage, release_id: &str, now: i64) -> R<Staged> {
             "a release whose script isn't its own isn't committed here",
         ));
     }
-    if let Verdict::Fails(reason) = judge(sql, &release, &Reads::nothing(), now)? {
-        return Ok(Staged::Answer(failed(sql, release_id, reason, now)?));
+    if let Verdict::Fails(failure) = judge(sql, &release, &Reads::nothing(), now)? {
+        return Ok(Staged::Answer(rechecked_failed(
+            sql, release_id, failure, now,
+        )?));
     }
     let script = text(&release["script_name"])
         .ok_or_else(|| ApiError::internal("an uploading release with no script"))?;
@@ -574,7 +681,7 @@ pub(super) fn confirm(sql: &SqlStorage, release_id: &str, reads: &Reads, now: i6
     }
     match judge(sql, &release, reads, now)? {
         Verdict::Unknown => Err(standing_unknown()),
-        Verdict::Fails(reason) => failed(sql, release_id, reason, now),
+        Verdict::Fails(failure) => rechecked_failed(sql, release_id, failure, now),
         Verdict::Holds => {
             let live = next_state(state, ReleaseEvent::CommitLive)
                 .map_err(|_| ApiError::internal("an uploading release that can't go live"))?;

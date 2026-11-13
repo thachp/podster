@@ -177,6 +177,7 @@ For local setup and checks, start with [CLAUDE.md](CLAUDE.md#commands) and the [
 | [Runner proposal](docs/spec/RUNNER.md) | Optional owner-operated executor, separate from the coordination platform |
 | [Contributors and limits](docs/spec/CONTRIBUTORS-AND-LIMITS.md) | Future contributor, model, resource and financial concepts |
 | [Concept mockups](docs/mockups/README.md) | Design references, not proof of implemented screens |
+| [Review standards](docs/review-standards.md) | Recurring review findings as rules, each with the pull request where it was learned |
 
 ## License
 

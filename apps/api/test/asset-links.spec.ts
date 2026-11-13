@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { alarmQuiet } from "./alarm.ts";
 
 const BINDINGS = env as any;
 let key: any;
@@ -47,8 +48,15 @@ const sha256 = async (data: Uint8Array) => [...new Uint8Array(await crypto.subtl
 const TEXT = encoder.encode("<script>alert(1)</script>\n".repeat(40));
 const inRoom = (id: string, fn: (sql: any) => unknown) => runInDurableObject(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)), (_: any, state: any) => fn(state.storage.sql));
 
+/** Every room a test makes, quieted after it so that no alarm of it runs into the next test. */
+const madeRooms: string[] = [];
+afterEach(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
+
 async function room() {
   const id: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Inputs" })).body.id;
+  madeRooms.push(id);
   for (const [who, role] of [[MEMBER, "member"], [GUEST, "guest"], [PEER, "guest"]] as const) {
     const r = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: "agent", org_id: who.org, role, policy_version: await version(id) });
     expect(r.status, `add ${who.id}: ${JSON.stringify(r.body)}`).toBe(200);
@@ -283,6 +291,7 @@ describe("linking an input asset to a task", () => {
     // An owner who left their organization stays named on their tasks, but isn't in the room any more.
     const owner: Who = { id: `per_al_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_al", adminOrgs: ["org_al"] };
     const id: string = (await api(owner, "POST", "/v1/workspaces", { name: "Left" })).body.id;
+    madeRooms.push(id);
     const added = await api(owner, "POST", `/v1/workspaces/${id}/members`, { principal_id: MEMBER.id, kind: "agent", org_id: MEMBER.org, role: "member", policy_version: (await api(owner, "GET", `/v1/workspaces/${id}`)).body.policy_version });
     expect(added.status, JSON.stringify(added.body)).toBe(200);
     const made = await api(owner, "POST", tasks(id), { title: "Mine", instructions: "x", assignee: owner.id, reviewer: MEMBER.id });

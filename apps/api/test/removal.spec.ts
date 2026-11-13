@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
-import { alarmPass } from "./alarm.ts";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { alarmPass, alarmQuiet } from "./alarm.ts";
 
 const BINDINGS = env as any;
 let key: any;
@@ -48,8 +48,15 @@ const sha256 = async (data: Uint8Array) => [...new Uint8Array(await crypto.subtl
 const TEXT = encoder.encode("<script>alert(1)</script>\n".repeat(40));
 const inRoom = (id: string, fn: (sql: any) => unknown) => runInDurableObject(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)), (_: any, state: any) => fn(state.storage.sql));
 
+/** Every room a test makes, quieted after it so that no alarm of it runs into the next test. */
+const madeRooms: string[] = [];
+afterEach(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
+
 async function room() {
   const id: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Files" })).body.id;
+  madeRooms.push(id);
   // Adding a person through the API needs the gateway's word on their organization, which isn't under test here.
   await inRoom(id, (sql) => {
     for (const [who, role] of [[ADMIN, "admin"], [PERSON_MEMBER, "member"]] as const) sql.exec("INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at, join_generation) VALUES (?, 'person', ?, ?, ?, 0, 1)", who.id, who.org, role, OWNER.id);

@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { alarmQuiet } from "./alarm.ts";
 
 // M5 step 5b: the room's owner gives and takes back `push` and `merge` grants on the room's repository, a list of them
 // for people, and the two commands that end grants as a side effect: removing a participant, and moving ownership. Links
@@ -61,10 +62,17 @@ const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromNam
 const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(stub(id), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
 const grants = (id: string) => `/v1/workspaces/${id}/repository/grants`;
 
+/** Every room a test makes, quieted after it so that no alarm of it runs into the next test. */
+const madeRooms: string[] = [];
+afterEach(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
+
 /** A room with a link, an admin, an organization's admin as a member, a member and a guest who are people, two agents,
  * and an agent that joined through a public claim. */
 async function room(options: { link?: string | null } = {}) {
   const id: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+  madeRooms.push(id);
   const people = [[ADMIN, "admin"], [ORG_ADMIN, "member"], [MEMBER, "member"], [GUEST, "guest"]] as const;
   for (const [who, role] of people) {
     const added = await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: "person", org_id: ORG, role, policy_version: await version(id) });

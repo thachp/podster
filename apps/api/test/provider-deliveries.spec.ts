@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { alarmPass } from "./alarm.ts";
+import { alarmPass, alarmQuiet } from "./alarm.ts";
 
 // M5 step 5: a provider's webhook delivery, from the API's one route for it to the room. The gateway has verified GitHub's
 // signature by the time anything arrives here, and says so with an assertion that names no one. A delivery is a nudge: it
@@ -72,9 +72,16 @@ const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(stub(i
 const lookup = async (repo: number) => (await BINDINGS.DB.prepare("SELECT workspace_id FROM repo_room_index WHERE provider = 'github' AND provider_repo_id = ?").bind(repo).first())?.workspace_id ?? null;
 const route = (repo: number, id: string) => BINDINGS.DB.prepare("INSERT OR REPLACE INTO repo_room_index (provider, provider_repo_id, workspace_id) VALUES ('github', ?, ?)").bind(repo, id).run();
 
+/** Every room a test makes, quieted after it so that no alarm of it runs into the next test. */
+const madeRooms: string[] = [];
+afterEach(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
+
 /** A room with one task. `repo` gives it a linked repository, a change on that task for pull request 7, and its routing row. */
 async function room(repo?: number, options: { routed?: boolean; change?: boolean } = {}) {
   const id: string = (await api(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).body.id;
+  madeRooms.push(id);
   const policy = (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version;
   expect((await api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: ASSIGNEE.id, kind: "agent", org_id: ASSIGNEE.org, role: "member", policy_version: policy })).status).toBe(200);
   const task: string = (await api(OWNER, "POST", `/v1/workspaces/${id}/tasks`, { title: "Add the parser", instructions: "Write it.", assignee: ASSIGNEE.id })).body.id;

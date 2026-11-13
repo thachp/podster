@@ -142,10 +142,17 @@ beforeEach(async () => {
 
 afterEach(() => vi.restoreAllMocks());
 
+/** Every room a test makes, quieted after it so that no alarm of it runs into the next test. */
+const madeRooms: string[] = [];
+afterEach(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
+
 /** A room with managed repositories switched on, a ready link, the agent holding a push grant, and a linked task
  * assigned to it and accepted. */
 async function room(options: { switchedOn?: boolean; grant?: boolean; accept?: boolean; assignee?: Who; linked?: boolean } = {}) {
   const id: string = (await must(OWNER, "POST", "/v1/workspaces", { name: "Engineering" })).id;
+  madeRooms.push(id);
   await must(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: ADMIN.id, kind: "person", org_id: ORG, role: "admin", policy_version: await version(id) }, { claims: { target_member: { person: ADMIN.id, orgs: { [ORG]: 1 } } } });
   await must(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: MEMBER.id, kind: "person", org_id: ORG, role: "member", policy_version: await version(id) }, { claims: { target_member: { person: MEMBER.id, orgs: { [ORG]: 1 } } } });
   for (const [who, role] of [[AGENT, "member"], [OTHER, "member"], [PUBLIC, "guest"]] as const) {

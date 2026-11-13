@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it, vi } from "vitest";
-import { alarmPass } from "./alarm.ts";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { alarmPass, alarmQuiet } from "./alarm.ts";
 
 const BINDINGS = env as any;
 let key: any;
@@ -65,10 +65,17 @@ async function admit(id: string, who: Who, invite: object = {}) {
   return api(orgAdmin(who.org), "POST", "/v1/invitations/accept", { token: created.body.token, org_id: who.org, agents: [who.id] });
 }
 
+/** Every room a test makes, quieted after it so that no alarm of it runs into the next test. */
+const madeRooms: string[] = [];
+afterEach(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
+
 async function room() {
   const created = await api(OWNER, "POST", "/v1/workspaces", { name: "Billing v2" });
   expect(created.status).toBe(200);
   const id: string = created.body.id;
+  madeRooms.push(id);
   const add = (who: Who, role: string, extra: object = {}) =>
     api(OWNER, "POST", `/v1/workspaces/${id}/members`, { principal_id: who.id, kind: who.kind ?? "agent", org_id: who.org, role, ...extra });
   for (const [who, role] of [[ADMIN, "admin"], [LEAD, "member"], [REVIEWER, "member"]] as const) {
@@ -2860,6 +2867,7 @@ describe("a person leaving the room's organization", () => {
     const rejoinedAt = leftOlder + 500;
     const token = () => assertion(founder, { claims: { org_since: { org_a: rejoinedAt } } });
     const id = (await api(founder, "POST", "/v1/workspaces", { name: "Delayed" }, { token: await token() })).body.id as string;
+    madeRooms.push(id);
     const tasks = `/v1/workspaces/${id}/tasks`;
     await listRoom(id, founder.id);
     // They made the room in a newer membership than the departure that's only reaching the room now.
@@ -3154,6 +3162,7 @@ describe("transferring and recovering a room's ownership", () => {
     it("lets an organization admin who was never in the room recover it when the owner left and no admin remains", async () => {
       const founder = human(["org_a"]);
       const id = (await api(founder, "POST", "/v1/workspaces", { name: "Stranded" }, { token: await assertion(founder, { claims: { org_since: { org_a: 1 } } }) })).body.id as string;
+      madeRooms.push(id);
       const boss = human(["org_a"]);
       const successor = human();
       const leftAt = Date.now();
@@ -3397,6 +3406,7 @@ describe("transferring and recovering a room's ownership", () => {
       const founder = human(["org_a"]);
       const since = Date.now() - 5000;
       const id = (await api(founder, "POST", "/v1/workspaces", { name: "New" }, { token: await assertion(founder, { claims: { org_since: { org_a: since } } }) })).body.id as string;
+      madeRooms.push(id);
       expect((await ownerRow(id)).owner_since).toBe(since);
     });
 
@@ -4658,6 +4668,7 @@ describe("access presets and scopes", () => {
     const founder: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a", orgs: ["org_a"], adminOrgs: ["org_a"] };
     const heir: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a", orgs: ["org_a"] };
     const id = (await api(founder, "POST", "/v1/workspaces", { name: "Handed on" })).body.id as string;
+    madeRooms.push(id);
     const version = async () => (await api(founder, "GET", `/v1/workspaces/${id}`)).body.policy_version;
     expect((await api(founder, "POST", `/v1/workspaces/${id}/members`, { principal_id: heir.id, kind: "person", org_id: "org_a", role: "admin", policy_version: await version() })).status).toBe(200);
     const t = await api(founder, "POST", `/v1/workspaces/${id}/owner/transfer`, { to: heir.id, policy_version: await version() }, { token: await assertion(founder, { claims: { target_member: { person: heir.id, orgs: { org_a: 1 } } } }) });
@@ -7129,6 +7140,7 @@ describe("directory cards", () => {
   it("gives up on a room that hangs, and keeps every other row and the next page", async () => {
     const who: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a", orgs: ["org_a"], adminOrgs: ["org_a"] };
     const mine = (await api(who, "POST", "/v1/workspaces", { name: "A working room", goal: "Ship" })).body.id as string;
+    madeRooms.push(mine);
     await alarmPass(stub(mine));
     const add = (workspace: string, name: string) => BINDINGS.DB.prepare("INSERT OR REPLACE INTO membership_index (workspace_id, principal_id, org_id, role, workspace_name, removed, updated_seq) VALUES (?, ?, 'org_a', 'member', ?, 0, 1000000)").bind(workspace, who.id, name).run();
     await add("ws_hang_one", "A hung room");
@@ -7279,6 +7291,7 @@ describe("the collaboration list and map", () => {
   it("treats an owner who left as the room read does", async () => {
     const owner: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a", orgs: ["org_a"], adminOrgs: ["org_a"] };
     const id = (await api(owner, "POST", "/v1/workspaces", { name: "Owner leaves" })).body.id as string;
+    madeRooms.push(id);
     const version = async () => (await api(owner, "GET", `/v1/workspaces/${id}`)).body.policy_version;
     const helper: Who = { id: `per_${crypto.randomUUID().replaceAll("-", "")}`, kind: "person", org: "org_a" };
     expect((await api(owner, "POST", `/v1/workspaces/${id}/members`, { principal_id: helper.id, kind: "person", org_id: "org_a", role: "admin", policy_version: await version() })).status).toBe(200);

@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
-import { alarmPass } from "./alarm.ts";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { alarmPass, alarmQuiet } from "./alarm.ts";
 
 // Decision 143's backup independent server: Podster's real send, read-back, change-request and cancel code, in workerd, against
 // pydantic's fasta2a (2.1.1) with the trivial agent in e2e/fasta2a. Only e2e/run-fasta2a-check.mjs starts it and sets
@@ -62,9 +62,16 @@ async function readOnce(room: string, attemptId: string) {
 /** Long enough for the agent's run to end. */
 const waitForRun = () => new Promise((done) => setTimeout(done, RUN_SECONDS * 1000 + 700));
 
+/** Every room a test makes, quieted after it so that no alarm of it runs into the next test. */
+const madeRooms: string[] = [];
+afterEach(async () => {
+  for (const id of madeRooms.splice(0)) await alarmQuiet(BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName(id)));
+});
+
 /** A room with the lead, and an agent whose endpoint is fasta2a's, offered a task whose send has gone out. */
 async function sentToFasta2a() {
   const room = (await must(OWNER, "POST", "/v1/workspaces", { name: `fasta2a ${++counter}` })).id as string;
+  madeRooms.push(room);
   const join = async (agent: Who, role: string) => {
     const version = (await must(OWNER, "GET", `/v1/workspaces/${room}`)).policy_version;
     await must(OWNER, "POST", `/v1/workspaces/${room}/members`, { principal_id: agent.id, kind: "agent", org_id: agent.org, role, policy_version: version });

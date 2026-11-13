@@ -10,8 +10,9 @@
 //     `globalThis.setTimeout`, `globalThis["setTimeout"]` (and `window`, `self`, `global`), or through a name bound to
 //     any of those (`const later = setTimeout`).
 //   - `promisify` of a timer; any timer from `timers/promises`, imported by name, as a namespace or dynamically.
-//   - `scheduler.wait`; a call to a function named like a sleep (`sleep`, `delay`, `pause`, `wait`), including one
-//     imported under another name.
+//   - `scheduler.wait`; a call with an argument to a function named like a sleep (`sleep`, `delay`, `pause`, `wait`);
+//     any call, with arguments or none, to a sleep imported under any name, or to a helper file's export that sleeps.
+//     A helper sleeps when its sleep is in it or in a named function inside it (a callback it passes to `vi.waitFor`).
 //   - every call to a function in the same file that sleeps, or calls one that does, found where the call is: so a new
 //     test calling an allowed helper is a new finding. (One finding per line: two calls on one line are one.)
 //   - A timer inside `vi.waitFor`'s callback is still a sleep: `vi.waitFor` already polls, and a sleep inside each try
@@ -25,7 +26,7 @@
 //   - an exact match on a reading read now plus a number;
 //   - a value minus a reading, compared with a number, written there or held by a const: `stamp - started <= 5 min +
 //     2 s` is an upper bound from an earlier reading, and `expires - Date.now() > 1 day` a lower bound read now;
-//   - the same bounds inside a comparison, or held by a name that is only ever asserted (`const soon = Date.now() +
+//   - the same bounds inside a comparison (`expect(stamp - started <= 5_000).toBe(true)`), or held by a name that is only ever asserted (`const soon = Date.now() +
 //     500`). A name that is also given to the code under test (`far`, set as a due time) holds a value the test set,
 //     and comparing with it is no margin.
 //   An upper bound read now and a lower bound read earlier only loosen with time, and pass.
@@ -320,20 +321,35 @@ export async function analyze(source, { api = false, file = "spec.ts", path = nu
   // a reading taken now. Written in the expectation or held by a const.
   const FLIP = { lower: "upper", upper: "lower", exact: "exact" };
   const usedUpReading = (reading, side) => ((side === "lower" || side === "exact") && isNow(reading)) || (side === "upper" && earlier(reading) && !isNow(reading));
+  const reads = (n) => isNow(n) || earlier(n);
+  // The difference a node is, directly or through a const: `x - started`, or `took` holding it.
+  const differenceOf = (n) => {
+    const d = n.type === "Identifier" ? (declared(n) ?? n) : n;
+    return d.type === "BinaryExpression" && d.operator === "-" && reads(d.left) !== reads(d.right) ? d : null;
+  };
+  // value - reading OP k: the value has the comparison's side; reading - value OP k: the value has the other.
+  const differenceUsedUp = (d, side) => (reads(d.right) ? usedUpReading(d.right, side) : usedUpReading(d.left, FLIP[side]));
+  const DIFFERENCE = "a value minus a clock reading, compared with a number: a bound that real time can use up";
   for (const node of every(tree)) {
     if (node.type !== "CallExpression" || node.callee.type !== "Identifier" || node.callee.name !== "expect" || node.arguments.length < 1) continue;
-    let actual = node.arguments[0];
-    if (actual.type === "Identifier") actual = declared(actual) ?? actual;
-    if (actual.type !== "BinaryExpression" || actual.operator !== "-") continue;
-    const [p, q] = [actual.left, actual.right];
-    const reads = (n) => isNow(n) || earlier(n);
-    if (reads(p) === reads(q)) continue;
-    for (let up = node; up.parent?.type === "MemberExpression" && up.parent.object === up && up.parent.parent?.type === "CallExpression" && up.parent.parent.callee === up.parent; up = up.parent.parent) {
-      const side = SIDES[propertyName(up.parent)];
-      const bound = up.parent.parent.arguments[0];
-      if (!side || !bound || !numeric(bound)) continue;
-      // value - reading OP k: the value has the matcher's side; reading - value OP k: the value has the other.
-      if (reads(q) ? usedUpReading(q, side) : usedUpReading(p, FLIP[side])) report(node.arguments[0], "margin", "a value minus a clock reading, compared with a number: a bound that real time can use up");
+    const actual = differenceOf(node.arguments[0]);
+    if (actual) {
+      for (let up = node; up.parent?.type === "MemberExpression" && up.parent.object === up && up.parent.parent?.type === "CallExpression" && up.parent.parent.callee === up.parent; up = up.parent.parent) {
+        const side = SIDES[propertyName(up.parent)];
+        const bound = up.parent.parent.arguments[0];
+        if (!side || !bound || !numeric(bound)) continue;
+        if (differenceUsedUp(actual, side)) report(node.arguments[0], "margin", DIFFERENCE);
+      }
+      continue;
+    }
+    // The same comparison written inside the expectation: `expect(x - started <= k).toBe(true)`.
+    for (const inner of compared(node.arguments[0])) {
+      if (inner.type !== "BinaryExpression" || ![">", ">=", "<", "<="].includes(inner.operator)) continue;
+      // In `d < k` d's upper bound is k; in `k < d` its lower bound is.
+      const [smaller, larger] = inner.operator[0] === "<" ? [inner.left, inner.right] : [inner.right, inner.left];
+      const below = differenceOf(smaller);
+      const above = differenceOf(larger);
+      if ((below && numeric(larger) && differenceUsedUp(below, "upper")) || (above && numeric(smaller) && differenceUsedUp(above, "lower"))) report(inner, "margin", DIFFERENCE);
     }
   }
 
@@ -361,12 +377,15 @@ export async function analyze(source, { api = false, file = "spec.ts", path = nu
     else if (node.callee.type === "MemberExpression" && node.callee.object.type === "Identifier" && promisedName(node.callee.object)) what = `${node.callee.object.name}.${propertyName(node.callee)} from timers/promises`;
     else if (calleeName(node) === "promisify" && node.arguments[0] && isTimer(node.arguments[0])) what = "promisify of a timer";
     else if (isMember(node.callee, "scheduler", "wait")) what = "scheduler.wait";
-    else if (node.callee.type === "Identifier" && node.arguments.length && (SLEEPY.test(node.callee.name) || sleepyImport(node.callee))) what = `a call to ${node.callee.name}(), named like a sleep or imported as one`;
+    // An imported sleep sleeps however it's called; a local name like a sleep is taken as one only with an argument.
+    else if (node.callee.type === "Identifier" && sleepyImport(node.callee)) what = `a call to ${node.callee.name}(), imported as a sleep`;
+    else if (node.callee.type === "Identifier" && node.arguments.length && SLEEPY.test(node.callee.name)) what = `a call to ${node.callee.name}(), named like a sleep`;
     else if (node.callee.type === "MemberExpression" && node.arguments.length && SLEEPY.test(propertyName(node.callee) ?? "")) what = `a call to ${propertyName(node.callee)}(), named like a sleep`;
     if (!what) continue;
     report(node, "sleep", what);
-    const fn = innermostName(node);
-    if (fn) sleeping.add(fn);
+    // Both the nearest named function and the outermost one sleep: an exported helper whose sleep sits in a named
+    // callback inside it is a sleeper where it's imported.
+    for (const fn of [innermostName(node), enclosingName(node)]) if (fn) sleeping.add(fn);
   }
   // A function here that sleeps, or calls one that does, sleeps; every call to it is found where it is made, so a new
   // test calling an allowed helper is a new finding. An entry for the helper's own sleep can allow its calls (a poll).
@@ -375,10 +394,11 @@ export async function analyze(source, { api = false, file = "spec.ts", path = nu
     grew = false;
     for (const node of every(tree)) {
       if (!localSleeper(node)) continue;
-      const fn = innermostName(node);
-      if (fn && !sleeping.has(fn)) {
-        sleeping.add(fn);
-        grew = true;
+      for (const fn of [innermostName(node), enclosingName(node)]) {
+        if (fn && !sleeping.has(fn)) {
+          sleeping.add(fn);
+          grew = true;
+        }
       }
     }
   }
@@ -563,6 +583,17 @@ async function selfTest() {
   await expect("sleep: sleep imported under another name", 'import { sleep as nap2 } from "./helpers";\nimport { delay as soon } from "some-package";\nawait nap2(10);\nawait soon(10);\n', ["3: sleep", "4: sleep"]);
   await expect("sleep: timers/promises as a namespace, or imported dynamically", 'import * as timers from "node:timers/promises";\nawait timers.setTimeout(10);\nconst { setTimeout: later } = await import("timers/promises");\n', ["2: sleep", "3: sleep"]);
   await expect("sleep: promisify of a timer", 'import { promisify } from "node:util";\nconst later = promisify(setTimeout);\nconst also = util.promisify(globalThis.setTimeout);\n', ["2: sleep", "3: sleep"]);
+  {
+    // An exported helper whose sleep sits in a named function passed as a callback is a sleeper at its importers, called
+    // with arguments or with none; a local name like a sleep is taken as one only with an argument.
+    const helper = await analyze("export async function waitForRun(id: string) {\n  async function tick() {\n    await new Promise((r) => setTimeout(r, 50));\n  }\n  await vi.waitFor(tick);\n}\nexport const settle = () => new Promise((r) => setTimeout(r, 10));\n", { file: "run.ts" });
+    const sleepers = [...helper.sleepers].sort();
+    const helpers = new Map([["/t/run.ts", { sleepers: helper.sleepers, rooms: new Set() }]]);
+    await expect(`sleep: an exported helper whose sleep is in a named callback sleeps where it's imported (sleepers ${JSON.stringify(sleepers)})`, 'import { waitForRun, settle as calm } from "./run.ts";\nimport { sleep as nap } from "./other.ts";\nit("a", async () => { await waitForRun("x"); });\nit("b", async () => { await waitForRun(); await calm(); });\nit("c", async () => { await nap(); });\nit("d", async () => { await sleep(); });\n', ["3: sleep", "4: sleep", "4: sleep", "5: sleep"], { api: true, path: "/t/x.spec.ts", helpers });
+    const has = sleepers.includes("waitForRun") && sleepers.includes("tick") && sleepers.includes("settle");
+    if (!has) failed++;
+    console.log(`${has ? "ok  " : "FAIL"} sleep: both the named callback and the exported helper around it are sleepers${has ? "" : `: got ${JSON.stringify(sleepers)}`}`);
+  }
   await expect("sleep: every call to a helper here that sleeps is found where it is made (once per line), through helpers that call it", 'const waitForRun = () => new Promise((done) => setTimeout(done, 700));\nconst twice = async () => { await waitForRun(); await waitForRun(); };\nit("a", async () => { await waitForRun(); });\nit("b", async () => { await twice(); });\n', ["1: sleep", "2: sleep", "3: sleep", "4: sleep"]);
   await expect("sleep: a timer inside vi.waitFor's callback is still a sleep: the poll needs none", "await vi.waitFor(async () => {\n  await new Promise((r) => setTimeout(r, 50));\n  expect(await seen()).toBe(true);\n});\n", ["2: sleep"]);
   await expect("sleep: the fixed form waits for the thing itself, and a timer that isn't a wait is fine", 'it("x", async () => {\n  const held = hold();\n  await go();\n  await held.arrived;\n  const timer = setTimeout(() => controller.abort(), 1000);\n  clearTimeout(timer);\n  await vi.waitFor(() => expect(seen()).toBe(true));\n});\n', []);
@@ -572,6 +603,8 @@ async function selfTest() {
   await expect("margin: a difference stored in a name, then asserted", "const start = Date.now();\nawait go();\nconst took = Date.now() - start;\nexpect(took).toBeLessThan(1000);\n", ["4: margin"]);
   await expect("margin: a value minus an earlier reading under an upper bound, as in email-sign-in", "const started = Date.now();\nawait ask();\nexpect(new Date(row.expiresAt).getTime() - started).toBeLessThanOrEqual(5 * 60 * 1000 + 2000);\n", ["3: margin"]);
   await expect("margin: a value minus a reading taken now over a lower bound, as in gateway, and held by a const", "expect(new Date(after).getTime() - Date.now()).toBeGreaterThan(24 * 60 * 60 * 1000);\nconst left = expiry - Date.now();\nexpect(left).toBeGreaterThan(1000);\n", ["1: margin", "3: margin"]);
+  await expect("margin: a value minus a reading compared inside the expectation, either way round, and through a const", "const started = Date.now();\nawait go();\nexpect(stamp - started <= 5_000).toBe(true);\nexpect(5_000 >= stamp - started).toBe(true);\nexpect(expiry - Date.now() > 1000).toBe(true);\nconst took = stamp - started;\nexpect(took < 5_000).toBeTruthy();\n", ["3: margin", "4: margin", "5: margin", "7: margin"]);
+  await expect("margin: the safe directions of a difference inside the expectation pass", "const started = Date.now();\nawait go();\nexpect(stamp - started >= 5_000).toBe(true);\nexpect(stamp - Date.now() <= 5_000).toBe(true);\nexpect(count - other < 5).toBe(true);\n", []);
   await expect("margin: the safe directions of a difference pass: a value minus an earlier reading over a lower bound", "const started = Date.now();\nawait go();\nexpect(stamp - started).toBeGreaterThanOrEqual(60_000);\nexpect(stamp - Date.now()).toBeLessThanOrEqual(60_000);\n", []);
   await expect("margin: a reading plus a number in a matcher", "expect(row.next_at).toBeGreaterThan(Date.now() + 60_000);\n", ["1: margin"]);
   await expect("margin: now plus a margin stored in a name that is only asserted", "it(\"x\", async () => {\n  await go();\n  const soon = Date.now() + 500;\n  expect(row.at).toBeGreaterThan(soon);\n});\n", ["4: margin"]);

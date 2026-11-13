@@ -66,7 +66,8 @@ use super::release_recheck::{
 use super::*;
 use podster_core::release::{
     commit_live, next_state, script_name, script_owner, set_back, upload_expired,
-    CommitLiveRefusal, ReleaseEvent, ReleaseState, ScriptOwner, ServeState, UploadFailure,
+    CommitLiveRefusal, RecheckFailure, ReleaseEvent, ReleaseState, ScriptOwner, ServeState,
+    UploadFailure,
 };
 
 /// The room's path for starting a release's upload. Nothing outside the Worker reaches it, and nothing calls it yet.
@@ -216,6 +217,37 @@ pub(super) fn fail(
     under: Option<i64>,
     now: i64,
 ) -> R<()> {
+    end_failed(sql, release_id, reason, None, under, now)
+}
+
+/// [`fail`], for core's recheck failure: its code, and, for `release_not_delegated`, which of the organization's two
+/// facts refused, `release_switch` or `provisioning_delegation`, kept in the audit record only (decision 218). The
+/// event and the release's row carry the code alone, as for every other reason.
+pub(super) fn fail_because(
+    sql: &SqlStorage,
+    release_id: &str,
+    failure: RecheckFailure,
+    under: Option<i64>,
+    now: i64,
+) -> R<()> {
+    end_failed(
+        sql,
+        release_id,
+        failure.code(),
+        failure.not_delegated_cause().map(|cause| cause.code()),
+        under,
+        now,
+    )
+}
+
+fn end_failed(
+    sql: &SqlStorage,
+    release_id: &str,
+    reason: &str,
+    cause: Option<&str>,
+    under: Option<i64>,
+    now: i64,
+) -> R<()> {
     let release = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
     let state = state_of(&release)?;
     let Ok(failed) = next_state(state, ReleaseEvent::Fail) else {
@@ -257,7 +289,13 @@ pub(super) fn fail(
         "release.failed",
         release_id,
         Some(json!({ "state": state.name() }).to_string()),
-        Some(json!({ "state": failed.name(), "reason": reason }).to_string()),
+        Some(
+            match cause {
+                Some(cause) => json!({ "state": failed.name(), "reason": reason, "cause": cause }),
+                None => json!({ "state": failed.name(), "reason": reason }),
+            }
+            .to_string(),
+        ),
         now,
     )?;
     // The event names the release it is about, by its ID, and the reason, by its code.
@@ -401,6 +439,18 @@ fn failed(sql: &SqlStorage, release_id: &str, reason: &str, now: i64) -> R<Value
     Ok(answer(&after, true, Some(reason)))
 }
 
+/// [`failed`], for the recheck's own failure, with which fact refused kept in the audit record.
+fn rechecked_failed(
+    sql: &SqlStorage,
+    release_id: &str,
+    failure: RecheckFailure,
+    now: i64,
+) -> R<Value> {
+    fail_because(sql, release_id, failure, None, now)?;
+    let after = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
+    Ok(answer(&after, true, Some(failure.code())))
+}
+
 /// Starts a release's upload, inside the room's transaction: the recheck, and, if it holds, a queued release becomes
 /// `uploading`, with its script's name and the time. Asked again for one already uploading, or whose upload is
 /// uncertain, it is the recheck and the same script's name, and nothing changes. Any other release is answered as it
@@ -423,8 +473,11 @@ pub(super) fn start_upload(
     }
     match judge(sql, &release, reads, now)? {
         Verdict::Unknown => return Err(standing_unknown()),
-        Verdict::Fails(reason) => {
-            return Ok(with_script(failed(sql, release_id, reason, now)?, None))
+        Verdict::Fails(failure) => {
+            return Ok(with_script(
+                rechecked_failed(sql, release_id, failure, now)?,
+                None,
+            ))
         }
         Verdict::Holds => {}
     }
@@ -498,8 +551,10 @@ pub(super) fn stage(sql: &SqlStorage, release_id: &str, now: i64) -> R<Staged> {
             "a release whose script isn't its own isn't committed here",
         ));
     }
-    if let Verdict::Fails(reason) = judge(sql, &release, &Reads::nothing(), now)? {
-        return Ok(Staged::Answer(failed(sql, release_id, reason, now)?));
+    if let Verdict::Fails(failure) = judge(sql, &release, &Reads::nothing(), now)? {
+        return Ok(Staged::Answer(rechecked_failed(
+            sql, release_id, failure, now,
+        )?));
     }
     let script = text(&release["script_name"])
         .ok_or_else(|| ApiError::internal("an uploading release with no script"))?;
@@ -574,7 +629,7 @@ pub(super) fn confirm(sql: &SqlStorage, release_id: &str, reads: &Reads, now: i6
     }
     match judge(sql, &release, reads, now)? {
         Verdict::Unknown => Err(standing_unknown()),
-        Verdict::Fails(reason) => failed(sql, release_id, reason, now),
+        Verdict::Fails(failure) => rechecked_failed(sql, release_id, failure, now),
         Verdict::Holds => {
             let live = next_state(state, ReleaseEvent::CommitLive)
                 .map_err(|_| ApiError::internal("an uploading release that can't go live"))?;

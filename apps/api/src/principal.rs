@@ -6,6 +6,7 @@ use crate::error::ApiError;
 use crate::store::{exec, int, rows, text, transaction_sync};
 use crate::{Caller, CALLER_HEADER};
 use futures_util::future::{select, Either};
+use podster_core::release::ReleaseSwitch;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{cell::RefCell, rc::Rc, time::Duration};
@@ -872,6 +873,73 @@ CREATE TABLE IF NOT EXISTS org_provider_delegation (provider TEXT PRIMARY KEY, g
 CREATE TABLE IF NOT EXISTS org_provider_delegation_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL, granted INTEGER NOT NULL, set_by TEXT NOT NULL, set_at INTEGER NOT NULL);
 ";
 
+/// An organization's release switch (decision 218), in the `Principal` named for the organization: one row, as
+/// `podster_core::release::ReleaseSwitch` shapes it, written only through its `set`. Only a Podster operator sets it.
+/// Taking it away unpublishes every room's app in the organization; giving it back restores nothing. No row is
+/// `ReleaseSwitch::UNSET`: held, generation 0, never taken. Every change is kept in the log.
+const ORG_RELEASE_SWITCH_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS org_release_switch (id INTEGER PRIMARY KEY CHECK (id = 1), granted INTEGER NOT NULL CHECK (granted IN (0, 1)),
+  generation INTEGER NOT NULL CHECK (generation >= 1), last_take INTEGER NOT NULL CHECK (last_take >= 0 AND last_take <= generation),
+  set_by TEXT NOT NULL, set_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS org_release_switch_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, granted INTEGER NOT NULL, generation INTEGER NOT NULL,
+  last_take INTEGER NOT NULL, set_by TEXT NOT NULL, set_at INTEGER NOT NULL);
+";
+
+/// The switch as this object holds it, with who set it last and when: `ReleaseSwitch::UNSET` and nobody, with no row.
+/// A row that isn't well formed is an error, never read as held.
+fn release_switch_row(sql: &SqlStorage) -> R<(ReleaseSwitch, Option<String>, Option<i64>)> {
+    let held = rows(
+        sql,
+        "SELECT granted, generation, last_take, set_by, set_at FROM org_release_switch WHERE id = 1",
+        vec![],
+    )?;
+    let Some(row) = held.first() else {
+        return Ok((ReleaseSwitch::UNSET, None, None));
+    };
+    let switch = ReleaseSwitch {
+        granted: int(&row["granted"]) != 0,
+        generation: u64::try_from(int(&row["generation"])).unwrap_or(0),
+        last_take: u64::try_from(int(&row["last_take"])).unwrap_or(u64::MAX),
+    };
+    if !switch.well_formed() {
+        return Err(ApiError::internal("the release switch isn't well formed"));
+    }
+    Ok((
+        switch,
+        row["set_by"].as_str().map(str::to_owned),
+        Some(int(&row["set_at"])),
+    ))
+}
+
+/// The switch's answer: `{ granted, generation, last_take, set_by, set_at }`.
+fn release_switch_json(switch: ReleaseSwitch, by: Option<String>, at: Option<i64>) -> Value {
+    json!({ "granted": switch.granted, "generation": switch.generation, "last_take": switch.last_take, "set_by": by, "set_at": at })
+}
+
+/// Reads an answer about a release switch, as the organization's object gives it: `None` unless it has the three
+/// facts, each of its type. Anything else is no answer, never "held" or "taken". Whether the three agree is core's to
+/// judge, in `release_switch_now`, which the recheck asks: one place decides it.
+pub fn release_switch_of(answer: &Value) -> Option<ReleaseSwitch> {
+    Some(ReleaseSwitch {
+        granted: answer["granted"].as_bool()?,
+        generation: answer["generation"].as_u64()?,
+        last_take: answer["last_take"].as_u64()?,
+    })
+}
+
+/// The organization's release switch, from its own object: `None` if the object didn't answer, or answered something
+/// that isn't a switch. Never from a read model.
+pub async fn org_release_switch(env: &Env, org: &str) -> Option<ReleaseSwitch> {
+    let mut response = internal(env, org, "/internal/org-release-switch", &json!({}))
+        .await
+        .ok()?;
+    if response.status_code() != 200 {
+        return None;
+    }
+    let answer: Value = response.json().await.ok()?;
+    release_switch_of(&answer)
+}
+
 /// The rooms this object has counted a request for a repository in: for an organization, its rooms; for a person, the
 /// rooms they asked in. One row per room, stamped with when it was last counted, and never given back: a request that
 /// fails after it was counted leaves its room counted until the stamp ages out of the window. So a count can only be too
@@ -920,6 +988,92 @@ pub async fn org_delegation(env: &Env, org: &str, provider: &str) -> R<Value> {
         return Err(ApiError::internal("couldn't read the delegation"));
     }
     Ok(response.json().await?)
+}
+
+/// `GET` or `PUT /v1/orgs/{org}/release-delegation`, the operator's release switch (decision 218). Reached only from
+/// `releases::answer`, so only while release is switched on: switched off, which is every deployment, this route is
+/// answered where an unknown path is, for everyone, operators included. An agent was refused there by its kind.
+/// Reading is for a Podster operator or a person who administers that organization; setting, `{ granted }`, is for a
+/// Podster operator alone. A take raises the generation and is the new last take; a give-back keeps the last take and
+/// restores nothing. Taking release away unpublishes the organization's rooms' apps once each room hears or reads it,
+/// which is PR C's; until then it refuses their releases at the recheck.
+pub async fn release_delegation(
+    env: &Env,
+    caller: &Caller,
+    org: &str,
+    set: Option<&str>,
+) -> R<Response> {
+    if !crate::valid_id(org) {
+        return Err(ApiError::not_found());
+    }
+    let operator = crate::moderation::require_operator(env, caller).is_ok();
+    let kind = if caller.kind == "person" {
+        podster_policy::PrincipalKind::Person
+    } else {
+        podster_policy::PrincipalKind::Agent
+    };
+    let Some(raw) = set else {
+        let admin =
+            podster_policy::repositories::administers_org(kind, &caller.admin_orgs, Some(org));
+        podster_policy::release::authorize_release_switch_read(kind, operator, admin)
+            .map_err(|_| ApiError::not_allowed())?;
+        let mut response = internal(env, org, "/internal/org-release-switch", &json!({})).await?;
+        if response.status_code() != 200 {
+            return Err(ApiError::internal("couldn't read the release switch"));
+        }
+        let answer: Value = response.json().await?;
+        return Ok(Response::from_json(&answer)?);
+    };
+    podster_policy::release::authorize_release_switch_set(kind, operator)
+        .map_err(|_| ApiError::not_allowed())?;
+    let body: Value = serde_json::from_str(raw).map_err(|_| ApiError::invalid_argument())?;
+    let granted = body
+        .as_object()
+        .filter(|fields| fields.len() == 1)
+        .and_then(|fields| fields.get("granted"))
+        .and_then(Value::as_bool)
+        .ok_or_else(ApiError::invalid_argument)?;
+    let change = json!({ "granted": granted, "by": caller.id, "org": org });
+    let mut response = internal(env, org, "/internal/org-release-switch-set", &change).await?;
+    match response.status_code() {
+        200 => {}
+        404 => return Err(ApiError::api(404, "organization_not_found")),
+        _ => return Err(ApiError::internal("couldn't set the release switch")),
+    }
+    let answer: Value = response.json().await?;
+    crate::moderation::record_operator_action(
+        env,
+        &caller.id,
+        "organization",
+        org,
+        if granted {
+            "release_switch.granted"
+        } else {
+            "release_switch.revoked"
+        },
+    )
+    .await;
+    console_log!(
+        "{}",
+        json!({ "at": "org.release_switch_set", "org": org, "granted": granted, "generation": answer["generation"], "by": caller.id })
+    );
+    Ok(Response::from_json(&answer)?)
+}
+
+/// Whether the API has seen a room of this organization: this object's own record of its rooms, and, for rooms from
+/// before it kept one, the listing, which here only says whether the organization is known and decides nothing else.
+async fn org_known(env: &Env, sql: &SqlStorage, org: &str) -> R<bool> {
+    exec(sql, ORG_ROOMS_SCHEMA, vec![])?;
+    if !rows(sql, "SELECT workspace_id FROM org_room LIMIT 1", vec![])?.is_empty() {
+        return Ok(true);
+    }
+    Ok(env
+        .d1("DB")?
+        .prepare("SELECT 1 AS known FROM membership_index WHERE org_id = ? LIMIT 1")
+        .bind(&[org.into()])?
+        .first::<Value>(None)
+        .await?
+        .is_some())
 }
 
 /// Whether managed repositories are switched on, for an organization's own routes. A deployment reads the Worker's
@@ -1472,6 +1626,55 @@ impl Principal {
                 .is_empty();
                 return Ok(json!({ "on": on }));
             }
+            "/internal/org-release-switch" | "/internal/org-release-switch-set" => {
+                // Test builds only: an organization whose own object doesn't answer, by its ID's prefix.
+                #[cfg(feature = "failpoints")]
+                if path == "/internal/org-release-switch"
+                    && self
+                        .state
+                        .id()
+                        .name()
+                        .is_some_and(|name| name.starts_with("org_unavailable_"))
+                {
+                    return Err(ApiError::internal("test: the organization didn't answer"));
+                }
+                exec(&sql, ORG_RELEASE_SWITCH_SCHEMA, vec![])?;
+                if path == "/internal/org-release-switch-set" {
+                    let body: Value = req.json().await?;
+                    let org = body["org"].as_str().unwrap_or_default().to_string();
+                    if !org_known(&self.env, &sql, &org).await? {
+                        return Err(ApiError::api(404, "organization_not_found"));
+                    }
+                    let granted = body["granted"]
+                        .as_bool()
+                        .ok_or_else(ApiError::invalid_argument)?;
+                    let by = body["by"].as_str().unwrap_or_default().to_string();
+                    let state = self.state.storage().sql();
+                    transaction_sync(&self.state, move || {
+                        let (now_held, _, _) = release_switch_row(&state)?;
+                        // Core's set alone writes it. Past the last generation it is refused, never written at one no
+                        // room would take as newer.
+                        let next = now_held.set(granted).ok_or_else(|| {
+                            ApiError::internal("the release switch can't go further")
+                        })?;
+                        let generation = i64::try_from(next.generation).map_err(|_| {
+                            ApiError::internal("the release switch can't go further")
+                        })?;
+                        let last_take = i64::try_from(next.last_take).map_err(|_| {
+                            ApiError::internal("the release switch can't go further")
+                        })?;
+                        let now = now_ms();
+                        exec(&state, "INSERT INTO org_release_switch (id, granted, generation, last_take, set_by, set_at) VALUES (1, ?, ?, ?, ?, ?)
+                            ON CONFLICT (id) DO UPDATE SET granted = excluded.granted, generation = excluded.generation, last_take = excluded.last_take,
+                            set_by = excluded.set_by, set_at = excluded.set_at",
+                            vec![i64::from(next.granted).into(), generation.into(), last_take.into(), by.as_str().into(), now.into()])?;
+                        exec(&state, "INSERT INTO org_release_switch_log (granted, generation, last_take, set_by, set_at) VALUES (?, ?, ?, ?, ?)",
+                            vec![i64::from(next.granted).into(), generation.into(), last_take.into(), by.as_str().into(), now.into()])
+                    })?;
+                }
+                let (switch, by, at) = release_switch_row(&sql)?;
+                return Ok(release_switch_json(switch, by, at));
+            }
             "/internal/org-delegation" | "/internal/org-delegation-set" => {
                 let body: Value = req.json().await?;
                 let provider = body["provider"].as_str().unwrap_or_default().to_string();
@@ -1492,23 +1695,8 @@ impl Principal {
                     // An organization the API has never seen a room of isn't one to delegate to. This object records
                     // each room as it's made. Rooms from before it kept that record are in the listing, which here
                     // only says whether the organization is known.
-                    exec(&sql, ORG_ROOMS_SCHEMA, vec![])?;
-                    let mut known =
-                        !rows(&sql, "SELECT workspace_id FROM org_room LIMIT 1", vec![])?
-                            .is_empty();
-                    if !known {
-                        known = self
-                            .env
-                            .d1("DB")?
-                            .prepare(
-                                "SELECT 1 AS known FROM membership_index WHERE org_id = ? LIMIT 1",
-                            )
-                            .bind(&[body["org"].as_str().unwrap_or_default().into()])?
-                            .first::<Value>(None)
-                            .await?
-                            .is_some();
-                    }
-                    if !known {
+                    let org = body["org"].as_str().unwrap_or_default().to_string();
+                    if !org_known(&self.env, &sql, &org).await? {
                         return Err(ApiError::api(404, "organization_not_found"));
                     }
                     let granted = body["granted"]

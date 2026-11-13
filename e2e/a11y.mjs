@@ -2185,15 +2185,34 @@ async function keyboardPaths(s) {
       await own.evaluate(() => new Promise((done) => requestAnimationFrame(done)));
       const shown = Date.now() - switched;
       ok(shown < 10_000, `${label}'s tab took ${shown}ms to show`);
-      // Reading to the end pays for each body once, a body at a time, and input can get in between them.
-      const read = await own.getByRole("dialog").evaluate(async (sheet) => {
-        const started = performance.now();
-        for (const article of sheet.querySelectorAll("article")) {
-          article.scrollIntoView();
-          await new Promise((done) => setTimeout(() => requestAnimationFrame(done), 50));
-        }
-        return Math.round(performance.now() - started);
-      });
+      // Reading to the end pays for each body once, a body at a time, and input can get in between them. One script in the
+      // page used to walk all 50, waiting 50 ms and then for an animation frame after each. It reached the bound on a
+      // script in a page with nothing saying how far it had got, and it never looked at whether a body it had passed was
+      // laid out. Now each body is a step of its own, with that bound to itself and its number in a stall, and a step
+      // ends on what it's for: the body is no longer skipped, and reading its box has laid it out. There's no clock in
+      // it and no callback to miss. The page is asked again, and the message scrolled to again, until it's so, because
+      // the app moves the view when a body above changes, and swaps a body's plain text for the formatted.
+      const messages = own.getByRole("dialog").locator("article");
+      const count = await messages.count();
+      const reading = Date.now();
+      for (let index = 0; index < count; index++) {
+        const reached = async () => {
+          while (!stopping) {
+            const laidOut = await messages.nth(index).evaluate((article) => {
+              article.scrollIntoView();
+              const body = article.querySelector(":scope > div");
+              // The body's own box is there while its contents are skipped, so what's inside it is asked.
+              const inside = body?.firstElementChild ?? body;
+              if (inside && !inside.checkVisibility({ contentVisibilityAuto: true })) return false;
+              body?.getBoundingClientRect();
+              return true;
+            });
+            if (laidOut) return;
+          }
+        };
+        await mustFinish(`message ${index + 1} of ${count} to be laid out on ${label}`, SCRIPT_IN_PAGE_MS, reached());
+      }
+      const read = Date.now() - reading;
       const blocked = await own.evaluate(() => Math.round(window.longestBlock));
       ok(blocked < longest, `${label} blocked the main thread for ${blocked}ms`);
       // What's really on the page, not what the seed's source says: every script in the messages' text, and whether this
@@ -2223,7 +2242,8 @@ async function keyboardPaths(s) {
       ok(tabBack < TAB_BACK_BLOCK_MS, `${label} blocked for ${tabBack}ms on tabbing back`);
       console.log(`     ${label}: opened in ${opened}ms (longest block ${startup}ms), tab showed in ${shown}ms, read to the end in ${read}ms, longest block ${blocked}ms`);
     } finally {
-      await own.close().catch(() => {});
+      // A stalled run asks each open page what it's doing, so the page that stalled stays open for that.
+      if (!stopping) await own.close().catch(() => {});
     }
   };
   await keyboardPath("a heavy thread on the Task Sheet (the latest 20 messages)", () => openHeavy("the Task Sheet", contextFor(s.owner), `/w/${s.room}/tasks?task=${s.heavyThread.id}`, /^Discussion/));

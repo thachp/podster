@@ -498,9 +498,14 @@ pub(super) fn hostname_suspended(sql: &SqlStorage, body: &Value, now: i64) -> R<
 /// may then run at once, ahead of the pass writing the finding down. Nothing is lost by that: the row stays, gone or
 /// not, and is what the room tells from, again and again, for 7 days.
 ///
-/// Which rows are a reconcile's: one queued under no unpublish, or one queued again after its unpublish, which is
-/// a script the room had counted gone and a pass found. An unpublish queues its scripts at its own time, in its own
-/// transaction, so a later `queued_at` can only be a pass's.
+/// Which rows are a reconcile's: one queued under no unpublish, or one queued later than its unpublish's own
+/// time, which is a script the room had counted gone and a pass found. An unpublish queues its scripts at its own
+/// time, in its own transaction, so the two times are equal for a row the unpublish queued.
+///
+/// **One exception, at the epoch's ceiling.** There the epoch can't go up, so a further unpublish adds no row of its
+/// own and its scripts are queued under the last one, later than that row's time. Those read here as a pass's and
+/// are told to operators as such. That errs toward telling, never toward silence, and a room reaches the ceiling
+/// only after about 9 * 10^15 unpublishes.
 ///
 /// **Owed:** only the 32 newest are told in one answer. And a room is told from only while something asks it: one
 /// that leaves the lookup table, or that nothing asks for 7 days, never tells again.

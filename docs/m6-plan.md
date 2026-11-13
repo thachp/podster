@@ -959,7 +959,7 @@ The architect proposes the gate call, for the owner to review.
   - `Referrer-Policy: no-referrer`
   - `X-Content-Type-Options: nosniff`
   - `Strict-Transport-Security: max-age=31536000; includeSubDomains`
-  - `Cache-Control: max-age=60, no-transform` on what an app answered, and `Cache-Control: no-store` on the Worker's own not-found and refusals, so a browser doesn't hold a not-found for a minute after an app goes up
+  - `Cache-Control: max-age=60, no-transform` on what an app answered, and `Cache-Control: no-store` on the Worker's own not-found and refusals, so a browser doesn't hold a not-found for a minute after an app goes up. **This is what holds.** The ADR had 60 seconds on every response; it is corrected there with a dated note
   - `Access-Control-Allow-Origin: *`, which a sandboxed page needs to load its own files, as spike C saw
   - `Content-Security-Policy`, the sandbox, below
 - **The sandbox: one policy, stated here once.** With `<origin>` the request's own `https://<host>`, never `'self'`, which spike C saw match nothing in a sandboxed page:
@@ -991,20 +991,32 @@ The architect proposes the gate call, for the owner to review.
 
 **What can't be shown without a deploy,** and stays owed to spike G and the first deploy: a real dispatch namespace's answers; how long a KV write takes to be read at the edge, which is the takedown time; Cloudflare's own additions to a response on the real zone, the Web Analytics beacon among them; and the wildcard route.
 
-**Keeping it from deploying. Leaving the IDs out is not enough, and the first version of this plan was wrong to say it was.** What Cloudflare's documentation says:
+**Keeping it from deploying.** *Rewritten twice on 2026-11-12. The first version said leaving the IDs out was enough. The second said a package with no configuration file makes a bare `wrangler deploy` refuse. Both were wrong, and the architect ruled the guard below.*
 
-- **`account_id` is optional.** Without it, and without `CLOUDFLARE_ACCOUNT_ID`, wrangler uses "the account selected for the profile during login" ([configuration](https://developers.cloudflare.com/workers/wrangler/configuration/), [profiles](https://developers.cloudflare.com/workers/wrangler/profiles/)). On a machine logged in to the account that holds `podster.dev`, a bare `wrangler deploy` would go there.
-- **`workers_dev` defaults to `true` when the configuration has no route** ([configuration](https://developers.cloudflare.com/workers/wrangler/configuration/)). So a configuration with no route is given a public `workers.dev` address unless it says otherwise. Preview URLs follow the same default unless set ([version URLs](https://developers.cloudflare.com/workers/versions-and-deployments/version-urls/)).
-- **With no configuration file and no entry point named, wrangler refuses:** "Missing entry-point" ([troubleshooting](https://developers.cloudflare.com/workers/ci-cd/builds/troubleshoot/)).
+What Cloudflare's documentation says, and where it is silent:
+
+- **With no configuration file, `wrangler deploy` doesn't refuse. It configures the project and deploys it.** Since wrangler 4.68, "when you run `wrangler deploy` … in a project directory without a Wrangler configuration file", wrangler detects the project, prompts, generates a `wrangler.jsonc` and deploys ([automatic configuration](https://developers.cloudflare.com/workers/framework-guides/automatic-configuration/), [the `deploy` command](https://developers.cloudflare.com/workers/wrangler/commands/workers/#deploy)). This repository pins wrangler `^4.157.0`. The same page says: "If a Wrangler configuration file already exists, automatic configuration will not run."
+- **`workers_dev` defaults to `true` when the configuration has no route** ([configuration](https://developers.cloudflare.com/workers/wrangler/configuration/)), and preview URLs follow it unless set ([version URLs](https://developers.cloudflare.com/workers/versions-and-deployments/version-urls/)).
+- **Which account.** Wrangler targets "the `account_id` in your Wrangler configuration file, or the `CLOUDFLARE_ACCOUNT_ID` environment variable", and otherwise the account chosen at login; both "are always respected" ([profiles](https://developers.cloudflare.com/workers/wrangler/profiles/)). **The documentation doesn't say which of the two wins when both are set,** and every deploy shell on the owner's machine sets the variable to the account that holds `podster.dev`.
+  - **Read in the pinned wrangler's own source, 4.157.0, since the documentation is silent:** the file's `account_id` is used first, and the environment's only when the file has none. An empty `account_id` counts as none. A value with characters outside letters, digits, `-` and `_` is refused outright.
+  - That is how this version behaves and no documented promise. **Owed with every wrangler upgrade: read it again.**
+- **An `account_id` that is no account** makes Cloudflare's API refuse the call. The documentation shows that refusal for a file whose `account_id` is another account's: "Could not route to /client/v4/accounts/…" ([troubleshooting](https://developers.cloudflare.com/workers/ci-cd/builds/troubleshoot/)). For an ID that is no account at all it isn't documented, and it isn't tried here: no real `wrangler deploy` is run to test any of this, not even one expected to fail.
 
 So the package is built like this:
 
-- **There is no `wrangler.jsonc` and no `wrangler.toml` in `apps/content`.** A bare `wrangler deploy` there finds no configuration and no entry point, and refuses. The package's one configuration is `local.wrangler.jsonc`, which the tests and `wrangler dev` name with `--config`.
-- **That file sets `workers_dev: false` and `preview_urls: false`, and has no `route`, no `routes`, no `account_id` and no `env`.** Its KV namespace's ID and its dispatch namespace's name are placeholders that exist on no account.
-- **The package has no `deploy` script,** and `scripts/deploy-staging` doesn't know it.
-- **A static check, in the package's own tests and so in CI,** fails unless all of that holds: no default-named configuration file; the two settings false; none of the four keys; the placeholders unchanged; no `deploy` script; and no mention of `apps/content` in `scripts/deploy-staging`.
-- **The gap that remains, said plainly:** someone who runs `wrangler deploy --config local.wrangler.jsonc` by hand, logged in to Podster's own account, is asking wrangler to upload there. It would have no route and no `workers.dev` address. Whether Cloudflare's API refuses the upload for the placeholder namespace and KV ID isn't shown here, since showing it would mean trying a deploy. **What closes it is the deploy script of the third PR,** the only supported way to deploy: it refuses unless the account and a token are given to it explicitly, never a login; it asks Cloudflare, with that token, whether it can see the zone `podster.dev`, and refuses if it can; and it writes the real configuration at deploy time from the owner's environment. Neither account's ID is written in this repository.
-- CI gets one job for the package: typecheck and tests, no deploy step.
+- **`apps/content` carries a default-named `wrangler.jsonc`,** so automatic configuration never runs there. That file can't deploy anything public anywhere:
+  - `workers_dev: false` and `preview_urls: false`;
+  - no `route`, no `routes`, and so no custom domain;
+  - **`account_id` is a fixed placeholder that is no account,** a plain phrase that says so, never empty. By the source read above, it is used ahead of the `CLOUDFLARE_ACCOUNT_ID` in the shell, so a deploy from that file is aimed at no account, whoever is logged in;
+  - no `env`, and placeholders for the KV namespace's ID and the dispatch namespace's name.
+- **The real account and routes come only from a separate configuration that the owner's deploy step supplies for the second account at deploy time.** It is never committed: this repository is public and holds neither account's ID.
+- **The package has no `deploy` script, and `scripts/deploy-staging` never names it.**
+- **A static check, in the package's own tests and so in CI,** asserts all of it: the default-named file is there; `workers_dev` and `preview_urls` are false; no route of any kind; the placeholder `account_id`, unchanged and not empty; the placeholder IDs; no `deploy` script; and no mention of the package in `scripts/deploy-staging`.
+- **What can be tested without a deploy:** that `wrangler deploy --dry-run` reads this file and no other. A dry run builds and makes no call to Cloudflare, so it shows nothing about the account.
+
+**The limit, said plainly.** Nothing in a configuration file stops a person who types a deploy by hand that doesn't use it: `wrangler deploy` with another `--config`, or from another folder with an entry point and a `--name`. **The guard is against accidents by scripts and agents,** and those deploy only through `scripts/deploy-staging`, which doesn't know this package. A deliberate deploy by hand is the owner's to make or not.
+
+CI gets one job for the package: typecheck and tests, no deploy step.
 
 **What the first deploy needs from the owner,** all on the second account ([decision 217](spec/PRODUCT.md#decisions-needed)):
 
@@ -1020,9 +1032,9 @@ So the package is built like this:
 
 | PR | What | Why it is its own |
 | --- | --- | --- |
-| 1 | **`apps/content`, the handler:** the method and service-worker refusals, the stop, the serve entry, the dispatch with the stand-in namespace, the three request headers, the header allow-list and the fixed headers with the one sandbox policy above; no default-named configuration, and the static check that it can't deploy; its CI job; the fixture shared with the API's applier | The whole security surface, small enough for one deep review. Nothing deploys |
+| 1 | **`apps/content`, the handler:** the method and service-worker refusals, the stop, the serve entry, the dispatch with the stand-in namespace, the three request headers, the header allow-list and the fixed headers with the one sandbox policy above; the default-named configuration that can deploy nothing public anywhere, and the static check of it; its CI job; the fixture shared with the API's applier | The whole security surface, small enough for one deep review. Nothing deploys |
 | 2 | **The sandbox in real browsers:** the Playwright run against `wrangler dev`, in three browsers, with the one policy above. It reports what an ordinary static app can't do under it and which sources it needs. It adds no `allow-` word: one that is shown to be needed goes to the owner, as a change to [decision 216](spec/PRODUCT.md#decisions-needed) | It starts browsers, takes longer, and its result is a product statement the owner may want to read |
-| 3 | **The deploy path, unused:** a script of its own for the content Worker that refuses unless the owner's account and token for the second account are given to it explicitly, and refuses if that token can see the zone `podster.dev`, with its refusals tested against stand-ins; and the notes for the first deploy. It is never run by an agent before the owner asks | It touches deploy scripts, which have their own tests and their own review |
+| 3 | **The deploy path, unused:** a script of its own for the content Worker that takes the owner's account, token and configuration for the second account explicitly, never the committed file's, and refuses if that token can see the zone `podster.dev`, with its refusals tested against stand-ins; and the notes for the first deploy. It is never run by an agent before the owner asks | It touches deploy scripts, which have their own tests and their own review |
 
 **Security-sensitive:** PR 1 should get a review deeper than the quick diff review, asked before it runs. **Not in 4(b):** uploading anything to the namespace (step 5), custom hostnames' routing (step 8), and any change to the API.
 

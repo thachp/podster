@@ -10,10 +10,13 @@
 //! | See the room's release configuration and every release | A human owner or admin |
 //! | See a task's release status | Whoever can see the task |
 //! | See an app's label, hosts and suspension | A Podster operator, as a person, and nothing private (decision 205) |
+//! | Take release from an organization, or give it back (decision 218's switch) | A Podster operator, as a person, alone ([`authorize_release_switch_set`]) |
+//! | See an organization's release switch | A Podster operator, or a person who administers that organization ([`authorize_release_switch_read`]) |
 //!
 //! What a release must satisfy beyond who is asking is `podster_core::release`. Approval of a task and a merge grant
 //! give nothing toward a release (AC-17).
 
+use podster_core::release::NotDelegatedCause;
 use podster_core::repo_grants::GrantRefusal;
 
 use crate::{Caller, PrincipalKind, Role};
@@ -37,8 +40,12 @@ pub enum ReleaseDenial {
     PublicSurfaceSuspended,
     /// `app_suspended`: an operator suspended the room's app.
     AppSuspended,
-    /// `release_not_delegated`: an operator took the ability to release from the room's organization.
+    /// `release_not_delegated`: an operator took the ability to release from the room's organization, by decision
+    /// 218's release switch.
     NotDelegated,
+    /// `release_not_delegated` too, on the wire: an operator took the organization's provisioning delegation back. It
+    /// only refuses. [`ReleaseDenial::not_delegated_cause`] tells the two apart.
+    ProvisioningNotDelegated,
     /// `release_off_for_deployment`: the deployment's own configuration doesn't allow release.
     OffForDeployment,
     /// `release_off`: release is switched off in the room. Added after the second review of PR #309.
@@ -67,12 +74,25 @@ impl ReleaseDenial {
             ReleaseDenial::PublicSurfaceSuspended => "public_surface_suspended",
             ReleaseDenial::AppSuspended => "app_suspended",
             ReleaseDenial::NotDelegated => "release_not_delegated",
+            ReleaseDenial::ProvisioningNotDelegated => "release_not_delegated",
             ReleaseDenial::OffForDeployment => "release_off_for_deployment",
             ReleaseDenial::ReleaseOff => "release_off",
             ReleaseDenial::Deleted => "workspace_deleted",
             ReleaseDenial::OrganizationDeleted => "organization_deleted",
             ReleaseDenial::RepoNotReady => "repo_not_ready",
             ReleaseDenial::Grant(refusal) => refusal.code(),
+        }
+    }
+
+    /// Which fact refused, for a denial answered `release_not_delegated`; `None` for every other. Kept in the audit
+    /// record, since the wire code is the same for both.
+    pub fn not_delegated_cause(self) -> Option<NotDelegatedCause> {
+        match self {
+            ReleaseDenial::NotDelegated => Some(NotDelegatedCause::ReleaseSwitch),
+            ReleaseDenial::ProvisioningNotDelegated => {
+                Some(NotDelegatedCause::ProvisioningDelegation)
+            }
+            _ => None,
         }
     }
 }
@@ -93,7 +113,10 @@ pub fn holds_release_authority(kind: PrincipalKind, role: Role, authority_holds:
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReleaseRoom {
     pub deployment_allows_release: bool,
+    /// The organization holds decision 218's release switch.
     pub organization_may_release: bool,
+    /// The organization holds M5's provisioning delegation, which only refuses.
+    pub organization_may_provision: bool,
     pub public: bool,
     pub archived: bool,
     pub public_surface_suspended: bool,
@@ -113,6 +136,7 @@ impl ReleaseRoom {
     pub const OPEN: ReleaseRoom = ReleaseRoom {
         deployment_allows_release: true,
         organization_may_release: true,
+        organization_may_provision: true,
         public: true,
         archived: false,
         public_surface_suspended: false,
@@ -125,8 +149,8 @@ impl ReleaseRoom {
 }
 
 /// Whether release may happen in the room at all, with the ADR's code for the first reason it can't, in the job's
-/// recheck order (`podster_core::release::recheck`): the deployment, the organization gone, the organization's ability,
-/// the room deleted, private, archived, its public surface and app suspended, its repository, and release in the room.
+/// recheck order (`podster_core::release::recheck`): the deployment, the organization gone, its release switch, its
+/// provisioning delegation, the room deleted, private, archived, its public surface and app suspended, its repository, and release in the room.
 pub fn release_room_allows(room: &ReleaseRoom) -> Result<(), ReleaseDenial> {
     let checks = [
         (
@@ -135,6 +159,10 @@ pub fn release_room_allows(room: &ReleaseRoom) -> Result<(), ReleaseDenial> {
         ),
         (room.organization_exists, ReleaseDenial::OrganizationDeleted),
         (room.organization_may_release, ReleaseDenial::NotDelegated),
+        (
+            room.organization_may_provision,
+            ReleaseDenial::ProvisioningNotDelegated,
+        ),
         (!room.deleted, ReleaseDenial::Deleted),
         (room.public, ReleaseDenial::NeedsPublicRoom),
         (!room.archived, ReleaseDenial::Archived),
@@ -149,6 +177,33 @@ pub fn release_room_allows(room: &ReleaseRoom) -> Result<(), ReleaseDenial> {
     match checks.into_iter().find(|(holds, _)| !holds) {
         Some((_, denial)) => Err(denial),
         None => Ok(()),
+    }
+}
+
+/// Who may set an organization's release switch, taking release from it or giving it back: a Podster operator, as a
+/// person, alone (decision 218). An organization's own admin can't, and an agent never can.
+pub fn authorize_release_switch_set(
+    kind: PrincipalKind,
+    is_operator: bool,
+) -> Result<(), ReleaseDenial> {
+    if kind == PrincipalKind::Person && is_operator {
+        Ok(())
+    } else {
+        Err(ReleaseDenial::NotAllowed)
+    }
+}
+
+/// Who may read an organization's release switch: a Podster operator, or a person who administers that organization,
+/// as for the provisioning delegation. An agent never.
+pub fn authorize_release_switch_read(
+    kind: PrincipalKind,
+    is_operator: bool,
+    administers_org: bool,
+) -> Result<(), ReleaseDenial> {
+    if kind == PrincipalKind::Person && (is_operator || administers_org) {
+        Ok(())
+    } else {
+        Err(ReleaseDenial::NotAllowed)
     }
 }
 

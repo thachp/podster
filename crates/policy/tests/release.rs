@@ -41,7 +41,7 @@ fn standing<'a>(grant: Option<&'a DeployGrant<'a>>) -> ReleaseStanding<'a> {
 
 /// Each of the room's facts that stops release, with the code it answers.
 type RoomChange = fn(&mut ReleaseRoom);
-const ROOM_CHANGES: [(RoomChange, ReleaseDenial); 10] = [
+const ROOM_CHANGES: [(RoomChange, ReleaseDenial); 11] = [
     (
         |r| r.deployment_allows_release = false,
         ReleaseDenial::OffForDeployment,
@@ -53,6 +53,10 @@ const ROOM_CHANGES: [(RoomChange, ReleaseDenial); 10] = [
     (
         |r| r.organization_may_release = false,
         ReleaseDenial::NotDelegated,
+    ),
+    (
+        |r| r.organization_may_provision = false,
+        ReleaseDenial::ProvisioningNotDelegated,
     ),
     (|r| r.deleted = true, ReleaseDenial::Deleted),
     (|r| r.public = false, ReleaseDenial::NeedsPublicRoom),
@@ -89,6 +93,7 @@ fn the_rooms_facts_refuse_with_the_adrs_codes_in_order() {
         [
             "release_off_for_deployment",
             "organization_deleted",
+            "release_not_delegated",
             "release_not_delegated",
             "workspace_deleted",
             "release_needs_public_room",
@@ -560,4 +565,62 @@ fn declining_is_allowed_wherever_the_room_can_still_be_acted_on() {
         ),
         Err(ReleaseDenial::NotParticipant)
     );
+}
+
+#[test]
+fn the_two_organization_denials_share_a_code_and_keep_their_cause() {
+    use podster_core::release::NotDelegatedCause;
+    assert_eq!(
+        ReleaseDenial::NotDelegated.not_delegated_cause(),
+        Some(NotDelegatedCause::ReleaseSwitch)
+    );
+    assert_eq!(
+        ReleaseDenial::ProvisioningNotDelegated.not_delegated_cause(),
+        Some(NotDelegatedCause::ProvisioningDelegation)
+    );
+    for (_, denial) in ROOM_CHANGES {
+        let expected = match denial {
+            ReleaseDenial::NotDelegated => Some(NotDelegatedCause::ReleaseSwitch),
+            ReleaseDenial::ProvisioningNotDelegated => {
+                Some(NotDelegatedCause::ProvisioningDelegation)
+            }
+            _ => None,
+        };
+        assert_eq!(denial.not_delegated_cause(), expected, "{denial:?}");
+    }
+    assert_eq!(ReleaseDenial::NotAllowed.not_delegated_cause(), None);
+}
+
+#[test]
+fn only_an_operator_as_a_person_sets_the_release_switch() {
+    assert_eq!(authorize_release_switch_set(Person, true), Ok(()));
+    assert_eq!(
+        authorize_release_switch_set(Person, false),
+        Err(ReleaseDenial::NotAllowed)
+    );
+    for operator in [true, false] {
+        assert_eq!(
+            authorize_release_switch_set(Agent, operator),
+            Err(ReleaseDenial::NotAllowed),
+            "{operator}"
+        );
+    }
+}
+
+#[test]
+fn an_operator_or_the_organizations_admin_reads_the_release_switch() {
+    assert_eq!(authorize_release_switch_read(Person, true, false), Ok(()));
+    assert_eq!(authorize_release_switch_read(Person, false, true), Ok(()));
+    assert_eq!(authorize_release_switch_read(Person, true, true), Ok(()));
+    assert_eq!(
+        authorize_release_switch_read(Person, false, false),
+        Err(ReleaseDenial::NotAllowed)
+    );
+    for (operator, admin) in [(true, true), (true, false), (false, true), (false, false)] {
+        assert_eq!(
+            authorize_release_switch_read(Agent, operator, admin),
+            Err(ReleaseDenial::NotAllowed),
+            "{operator} {admin}"
+        );
+    }
 }

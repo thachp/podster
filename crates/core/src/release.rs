@@ -720,6 +720,8 @@ pub enum UnpublishTrigger {
     OrganizationDeleted,
     PublicSurfaceSuspended,
     AppSuspended,
+    /// An operator took the ability to release from the room's organization, by the release switch of decision 218
+    /// ([`ReleaseSwitch`]). Never the provisioning delegation, which only refuses ([`Recheck::organization_may_provision`]).
     ReleaseTakenFromOrganization,
     /// The repository stopped or lost: suspended by an operator, found gone, or its link no longer ready.
     RepositoryNotReady,
@@ -1020,6 +1022,79 @@ pub fn unpublish_triggers(facts: &RoomReleaseFacts) -> Vec<UnpublishTrigger> {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The operator's release switch (decision 218)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// An organization's release switch, as its own `Principal` holds it, and as a room last applied it. An operator sets
+/// it; taking it away unpublishes every room's app in the organization ([`UnpublishTrigger::ReleaseTakenFromOrganization`])
+/// and giving it back restores nothing. Every set raises the generation, whether it takes or gives, so the newer of two
+/// answers is always the one with the higher generation, and a late or repeated one can't act on a newer state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReleaseSwitch {
+    pub granted: bool,
+    pub generation: u64,
+}
+
+impl ReleaseSwitch {
+    /// An organization nobody has set it for holds it, at generation 0. That is also where every room starts.
+    pub const UNSET: ReleaseSwitch = ReleaseSwitch {
+        granted: true,
+        generation: 0,
+    };
+
+    /// An operator's set, to `granted`. Setting it to what it already is raises the generation too, so asking again is
+    /// a new notice to every room and never silently nothing. `None` when the generation can't go up: the set is then
+    /// refused, loudly, rather than written at a generation no room would take as newer.
+    pub fn set(self, granted: bool) -> Option<ReleaseSwitch> {
+        Some(ReleaseSwitch {
+            granted,
+            generation: self.generation.checked_add(1)?,
+        })
+    }
+}
+
+/// What a room does with an answer about its organization's release switch, whether a notice the organization's object
+/// sent or the room's own read of that object, at a release command or on the reconcile's walk. Both paths take this,
+/// so a room missing from the organization's list of rooms ends exactly where a notice would have put it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwitchApplied {
+    /// Not newer than what the room last applied: a notice is acknowledged and nothing changes.
+    Stale,
+    /// Newer, and release is held: the room records the generation and restores nothing.
+    Record,
+    /// Newer, and release was taken: the room records the generation and unpublishes ([`unpublish`]) with
+    /// [`UnpublishTrigger::ReleaseTakenFromOrganization`], in one transaction. A room with nothing up still does, so its
+    /// epoch goes up and nothing in flight can go live after it.
+    Unpublish,
+}
+
+/// Decides [`SwitchApplied`] from what the room last applied and the answer it now has.
+pub fn apply_release_switch(applied: ReleaseSwitch, seen: ReleaseSwitch) -> SwitchApplied {
+    if seen.generation <= applied.generation {
+        SwitchApplied::Stale
+    } else if seen.granted {
+        SwitchApplied::Record
+    } else {
+        SwitchApplied::Unpublish
+    }
+}
+
+/// The switch as the recheck takes it: the newer of what the room last applied and what it just read. `None` when the
+/// read couldn't be made, which is undecided, never "taken" and never "held": the pass answers `standing_unknown`. A read
+/// older than what the room applied, a reply overtaken by a newer notice, gives way to what the room applied.
+pub fn release_switch_now(
+    applied: ReleaseSwitch,
+    read: Option<ReleaseSwitch>,
+) -> Option<ReleaseSwitch> {
+    let read = read?;
+    Some(if read.generation >= applied.generation {
+        read
+    } else {
+        applied
+    })
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // The job's recheck, on every pass
 // ---------------------------------------------------------------------------------------------------------------------
 
@@ -1028,6 +1103,10 @@ pub fn unpublish_triggers(facts: &RoomReleaseFacts) -> Vec<UnpublishTrigger> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Recheck<'a> {
     pub room: RoomReleaseFacts,
+    /// The organization holds M5's provisioning delegation. It only refuses a release, with
+    /// [`RecheckFailure::ProvisioningNotDelegated`]; it is never an unpublish trigger (decision 218, part 1). The release
+    /// switch that unpublishes is `room.organization_may_release`.
+    pub organization_may_provision: bool,
     /// The stop for the whole content domain is set.
     pub domain_stopped: bool,
     pub config_version_now: u64,
@@ -1049,6 +1128,10 @@ pub enum RecheckFailure {
     /// `release_stopped`: the stop for the whole content domain is set.
     DomainStopped,
     Trigger(UnpublishTrigger),
+    /// `release_not_delegated`, the same code on the wire as [`UnpublishTrigger::ReleaseTakenFromOrganization`]: the
+    /// organization's provisioning delegation was taken back. It refuses only. [`RecheckFailure::not_delegated_cause`]
+    /// tells the two apart where operators look.
+    ProvisioningNotDelegated,
     /// `release_config_changed`
     ConfigChanged,
     /// `requester_lost_authority`
@@ -1067,6 +1150,7 @@ impl RecheckFailure {
         match self {
             RecheckFailure::DomainStopped => "release_stopped",
             RecheckFailure::Trigger(trigger) => trigger.code(),
+            RecheckFailure::ProvisioningNotDelegated => "release_not_delegated",
             RecheckFailure::ConfigChanged => "release_config_changed",
             RecheckFailure::RequesterLostAuthority => "requester_lost_authority",
             RecheckFailure::ApproverLostAuthority => "approver_lost_authority",
@@ -1075,9 +1159,45 @@ impl RecheckFailure {
             RecheckFailure::EpochMoved => CommitLiveRefusal::EpochMoved.code(),
         }
     }
+
+    /// Which fact refused, for a failure answered `release_not_delegated`; `None` for every other. The wire code is the
+    /// same for both causes, so the audit record and any finding keep this one too (the architect's ruling on decision
+    /// 218's switch, 2026-11-13).
+    pub fn not_delegated_cause(self) -> Option<NotDelegatedCause> {
+        match self {
+            RecheckFailure::Trigger(UnpublishTrigger::ReleaseTakenFromOrganization) => {
+                Some(NotDelegatedCause::ReleaseSwitch)
+            }
+            RecheckFailure::ProvisioningNotDelegated => {
+                Some(NotDelegatedCause::ProvisioningDelegation)
+            }
+            _ => None,
+        }
+    }
 }
 
-/// The whole recheck, in the ADR's order: deployment and stop, the organization, the room, the repository, the room's
+/// Which of an organization's two facts refused a release that was answered `release_not_delegated`. Kept in the
+/// release's audit record and in operators' findings, never on the wire.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotDelegatedCause {
+    /// `release_switch`: an operator took release from the organization (decision 218's switch). It unpublishes.
+    ReleaseSwitch,
+    /// `provisioning_delegation`: an operator took M5's provisioning delegation back. It only refuses.
+    ProvisioningDelegation,
+}
+
+impl NotDelegatedCause {
+    // codes: reasons
+    pub fn code(self) -> &'static str {
+        match self {
+            NotDelegatedCause::ReleaseSwitch => "release_switch",
+            NotDelegatedCause::ProvisioningDelegation => "provisioning_delegation",
+        }
+    }
+}
+
+/// The whole recheck, in the ADR's order: deployment and stop, the organization (gone, its release switch, then its
+/// provisioning delegation), the room, the repository, the room's
 /// switch and configuration version, the requester, the approver, the reviewer rule, the commit, and the epoch. The
 /// first that fails is the reason. A room where no one may release is a trigger, so it fails here too.
 pub fn recheck(r: &Recheck) -> Result<(), RecheckFailure> {
@@ -1089,9 +1209,18 @@ pub fn recheck(r: &Recheck) -> Result<(), RecheckFailure> {
     if r.domain_stopped {
         return Err(RecheckFailure::DomainStopped);
     }
-    let order = [
+    let fired = unpublish_triggers(&r.room);
+    let organization = [
         UnpublishTrigger::OrganizationDeleted,
         UnpublishTrigger::ReleaseTakenFromOrganization,
+    ];
+    if let Some(trigger) = organization.iter().find(|t| fired.contains(t)) {
+        return Err(RecheckFailure::Trigger(*trigger));
+    }
+    if !r.organization_may_provision {
+        return Err(RecheckFailure::ProvisioningNotDelegated);
+    }
+    let order = [
         UnpublishTrigger::RoomDeleted,
         UnpublishTrigger::RoomMadePrivate,
         UnpublishTrigger::RoomArchived,
@@ -1100,7 +1229,6 @@ pub fn recheck(r: &Recheck) -> Result<(), RecheckFailure> {
         UnpublishTrigger::RepositoryNotReady,
         UnpublishTrigger::ReleaseOffInRoom,
     ];
-    let fired = unpublish_triggers(&r.room);
     if let Some(trigger) = order.iter().find(|t| fired.contains(t)) {
         return Err(RecheckFailure::Trigger(*trigger));
     }

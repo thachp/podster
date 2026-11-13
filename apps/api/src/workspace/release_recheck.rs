@@ -42,8 +42,10 @@
 //!   the release meets the rule the room has now: if the room requires a person as reviewer, the task's reviewer was
 //!   one.
 //!
-//! **`organization_may_release` is the organization's provisioning delegation** (ruled by the architect on
-//! 2026-11-13, for the owner to review): an operator who takes that back also stops that organization's releases.
+//! **The organization's provisioning delegation is read as `organization_may_provision`,** which only refuses
+//! (decision 218, part 1): an operator who takes it back stops that organization's new releases and commits, answered
+//! `release_not_delegated`, and unpublishes nothing. **`organization_may_release` is decision 218's release switch,**
+//! the unpublish trigger. It isn't read yet, so it holds, as it does for an organization with no record of it.
 //!
 //! Logs carry the room's and the release's IDs and codes.
 use super::*;
@@ -274,6 +276,7 @@ fn room_facts(sql: &SqlStorage, deployment_on: bool, org_may_release: bool) -> R
 /// One recheck's inputs as core takes them, with the strings it borrows.
 struct Gathered {
     room: RoomReleaseFacts,
+    organization_may_provision: bool,
     domain_stopped: bool,
     config_version_now: u64,
     config_version_asked: u64,
@@ -354,13 +357,16 @@ fn gather(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) -> R<(Gath
     let approver_holds = settled(sql, &reads.approver, approver.as_deref(), true)?;
     let requester_holds = settled(sql, &reads.requester, Some(&requester), false)?;
     let giver_holds = settled(sql, &reads.giver, giver.as_deref(), true)?;
-    let mut room = room_facts(sql, deployment_on, org_may_release)?;
+    // Decision 218's release switch isn't read yet: an organization with no record holds it, so it holds here. What is
+    // read is the provisioning delegation, which only refuses.
+    let mut room = room_facts(sql, deployment_on, true)?;
     let link_repo_id = rows(sql, "SELECT provider_repo_id FROM repo_link", vec![])?
         .first()
         .map_or(0, |link| int(&link["provider_repo_id"]));
     let release_room = ReleaseRoom {
         deployment_allows_release: room.deployment_allows_release,
         organization_may_release: room.organization_may_release,
+        organization_may_provision: org_may_release,
         public: room.public,
         archived: room.archived,
         public_surface_suspended: room.public_surface_suspended,
@@ -481,6 +487,7 @@ fn gather(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) -> R<(Gath
     let config = config.first();
     let gathered = Gathered {
         room,
+        organization_may_provision: org_may_release,
         domain_stopped: stopped,
         config_version_now: config.map_or(0, |c| as_u64(&c["version"])),
         config_version_asked: as_u64(&release["config_version"]),
@@ -539,6 +546,7 @@ pub(super) fn judge(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) 
     Ok(
         match recheck(&Recheck {
             room: facts.room,
+            organization_may_provision: facts.organization_may_provision,
             domain_stopped: facts.domain_stopped,
             config_version_now: facts.config_version_now,
             config_version_asked: facts.config_version_asked,

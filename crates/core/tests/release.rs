@@ -1137,6 +1137,7 @@ fn each_fact_fires_exactly_its_trigger() {
 fn open_recheck<'a>(commit: &'a CommitRecord<'a>) -> Recheck<'a> {
     Recheck {
         room: RoomReleaseFacts::OPEN,
+        organization_may_provision: true,
         domain_stopped: false,
         config_version_now: 3,
         config_version_asked: 3,
@@ -1155,7 +1156,7 @@ fn open_recheck<'a>(commit: &'a CommitRecord<'a>) -> Recheck<'a> {
 fn the_recheck_passes_only_when_everything_still_holds() {
     let commit = MERGED;
     assert_eq!(recheck(&open_recheck(&commit)), Ok(()));
-    let cases: [(RecheckChange, RecheckFailure); 18] = [
+    let cases: [(RecheckChange, RecheckFailure); 19] = [
         (
             |r| r.room.deployment_allows_release = false,
             RecheckFailure::Trigger(UnpublishTrigger::ReleaseOffForDeployment),
@@ -1168,6 +1169,10 @@ fn the_recheck_passes_only_when_everything_still_holds() {
         (
             |r| r.room.organization_may_release = false,
             RecheckFailure::Trigger(UnpublishTrigger::ReleaseTakenFromOrganization),
+        ),
+        (
+            |r| r.organization_may_provision = false,
+            RecheckFailure::ProvisioningNotDelegated,
         ),
         (
             |r| r.room.deleted = true,
@@ -1232,6 +1237,306 @@ fn the_recheck_passes_only_when_everything_still_holds() {
         assert_eq!(recheck(&with_later), Err(*expected), "{expected:?} first");
     }
     assert_eq!(RecheckFailure::EpochMoved.code(), "release_epoch_moved");
+}
+
+// --- the organization's two facts, and the operator's release switch (decision 218) -------------------------------
+
+#[test]
+fn both_organization_facts_answer_release_not_delegated_and_keep_their_cause() {
+    let commit = MERGED;
+    let mut switch = open_recheck(&commit);
+    switch.room.organization_may_release = false;
+    let mut provisioning = open_recheck(&commit);
+    provisioning.organization_may_provision = false;
+    let by_switch = recheck(&switch);
+    let by_provisioning = recheck(&provisioning);
+    assert_eq!(
+        by_switch,
+        Err(RecheckFailure::Trigger(
+            UnpublishTrigger::ReleaseTakenFromOrganization
+        ))
+    );
+    assert_eq!(
+        by_provisioning,
+        Err(RecheckFailure::ProvisioningNotDelegated)
+    );
+    // The same code on the wire, and a cause of each one's own for the audit record and the findings.
+    for (failure, cause) in [
+        (by_switch, NotDelegatedCause::ReleaseSwitch),
+        (by_provisioning, NotDelegatedCause::ProvisioningDelegation),
+    ] {
+        let Err(failure) = failure else {
+            unreachable!("{cause:?} must refuse")
+        };
+        assert_eq!(failure.code(), "release_not_delegated");
+        assert_eq!(failure.not_delegated_cause(), Some(cause));
+    }
+    assert_eq!(NotDelegatedCause::ReleaseSwitch.code(), "release_switch");
+    assert_eq!(
+        NotDelegatedCause::ProvisioningDelegation.code(),
+        "provisioning_delegation"
+    );
+    assert_ne!(
+        NotDelegatedCause::ReleaseSwitch.code(),
+        NotDelegatedCause::ProvisioningDelegation.code()
+    );
+    // Every other failure has no such cause, the unpublish triggers' own included.
+    for trigger in UnpublishTrigger::ALL {
+        let expected = (trigger == UnpublishTrigger::ReleaseTakenFromOrganization)
+            .then_some(NotDelegatedCause::ReleaseSwitch);
+        assert_eq!(
+            RecheckFailure::Trigger(trigger).not_delegated_cause(),
+            expected,
+            "{trigger:?}"
+        );
+    }
+    for other in [
+        RecheckFailure::DomainStopped,
+        RecheckFailure::ConfigChanged,
+        RecheckFailure::RequesterLostAuthority,
+        RecheckFailure::ApproverLostAuthority,
+        RecheckFailure::ReviewerRuleChanged,
+        RecheckFailure::Commit(CommitRefusal::NotReleasable),
+        RecheckFailure::EpochMoved,
+    ] {
+        assert_eq!(other.not_delegated_cause(), None, "{other:?}");
+    }
+}
+
+#[test]
+fn the_provisioning_delegation_refuses_and_never_unpublishes() {
+    // It isn't one of the room's facts, so no set of them can make it a trigger: a room whose organization lost only
+    // the delegation keeps its app up.
+    let facts = RoomReleaseFacts::OPEN;
+    assert!(unpublish_triggers(&facts).is_empty());
+    let commit = MERGED;
+    let mut r = open_recheck(&commit);
+    r.organization_may_provision = false;
+    assert_eq!(recheck(&r), Err(RecheckFailure::ProvisioningNotDelegated));
+    assert!(unpublish_triggers(&r.room).is_empty());
+    // The switch is checked first: both taken is the switch's, which unpublishes.
+    r.room.organization_may_release = false;
+    assert_eq!(
+        recheck(&r),
+        Err(RecheckFailure::Trigger(
+            UnpublishTrigger::ReleaseTakenFromOrganization
+        ))
+    );
+    // And the organization gone comes before both.
+    r.room.organization_exists = false;
+    assert_eq!(
+        recheck(&r),
+        Err(RecheckFailure::Trigger(
+            UnpublishTrigger::OrganizationDeleted
+        ))
+    );
+}
+
+const fn sw(granted: bool, generation: u64) -> ReleaseSwitch {
+    ReleaseSwitch {
+        granted,
+        generation,
+    }
+}
+
+#[test]
+fn every_set_of_the_switch_raises_its_generation_and_none_is_written_past_the_last() {
+    assert_eq!(ReleaseSwitch::UNSET, sw(true, 0));
+    assert_eq!(ReleaseSwitch::UNSET.set(false), Some(sw(false, 1)));
+    // Setting it to what it is still raises the generation, so asking again tells every room again.
+    assert_eq!(sw(false, 1).set(false), Some(sw(false, 2)));
+    assert_eq!(sw(false, 2).set(true), Some(sw(true, 3)));
+    assert_eq!(sw(true, 3).set(true), Some(sw(true, 4)));
+    assert_eq!(sw(true, u64::MAX - 1).set(false), Some(sw(false, u64::MAX)));
+    for granted in [true, false] {
+        assert_eq!(sw(true, u64::MAX).set(granted), None, "{granted}");
+        assert_eq!(sw(false, u64::MAX).set(granted), None, "{granted}");
+    }
+}
+
+#[test]
+fn a_room_applies_only_a_newer_answer_and_a_give_back_restores_nothing() {
+    let applied = sw(true, 4);
+    for seen in [
+        sw(true, 4),
+        sw(false, 4),
+        sw(true, 3),
+        sw(false, 3),
+        sw(false, 0),
+    ] {
+        assert_eq!(
+            apply_release_switch(applied, seen),
+            SwitchApplied::Stale,
+            "{seen:?}"
+        );
+    }
+    assert_eq!(
+        apply_release_switch(applied, sw(true, 5)),
+        SwitchApplied::Record
+    );
+    assert_eq!(
+        apply_release_switch(applied, sw(false, 5)),
+        SwitchApplied::Unpublish
+    );
+    assert_eq!(
+        apply_release_switch(applied, sw(false, u64::MAX)),
+        SwitchApplied::Unpublish
+    );
+    // After a take-back, the same notice again is acknowledged and does nothing; a give-back only records.
+    let taken = sw(false, 5);
+    assert_eq!(apply_release_switch(taken, taken), SwitchApplied::Stale);
+    assert_eq!(
+        apply_release_switch(taken, sw(true, 6)),
+        SwitchApplied::Record
+    );
+    // Nothing a room starts with is ever newer than an unset switch's answer, and a room starts unset.
+    assert_eq!(
+        apply_release_switch(ReleaseSwitch::UNSET, ReleaseSwitch::UNSET),
+        SwitchApplied::Stale
+    );
+}
+
+/// A room as the switch's answers leave it: what it applied, whether its app is still up, and its epoch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SwitchRoom {
+    applied: ReleaseSwitch,
+    up: bool,
+    epoch: u64,
+}
+
+fn hear(room: SwitchRoom, seen: ReleaseSwitch) -> SwitchRoom {
+    match apply_release_switch(room.applied, seen) {
+        SwitchApplied::Stale => room,
+        // Restores nothing: an app that was taken down stays down.
+        SwitchApplied::Record => SwitchRoom {
+            applied: seen,
+            ..room
+        },
+        SwitchApplied::Unpublish => SwitchRoom {
+            applied: seen,
+            up: false,
+            epoch: room.epoch + 1,
+        },
+    }
+}
+
+#[test]
+fn take_give_take_ends_unpublished_under_the_last_generation_in_any_order_and_with_repeats() {
+    let start = SwitchRoom {
+        applied: ReleaseSwitch::UNSET,
+        up: true,
+        epoch: 7,
+    };
+    let take = ReleaseSwitch::UNSET.set(false);
+    let give = take.and_then(|t| t.set(true));
+    let take_again = give.and_then(|g| g.set(false));
+    let (Some(take), Some(give), Some(take_again)) = (take, give, take_again) else {
+        unreachable!("three sets from unset fit")
+    };
+    assert_eq!(take_again, sw(false, 3));
+    let orders: [[ReleaseSwitch; 3]; 6] = [
+        [take, give, take_again],
+        [take, take_again, give],
+        [give, take, take_again],
+        [give, take_again, take],
+        [take_again, take, give],
+        [take_again, give, take],
+    ];
+    for order in orders {
+        // Each notice may also be resent, before or after the others.
+        for repeat in 0..order.len() {
+            let mut room = start;
+            for (i, seen) in order.iter().enumerate() {
+                room = hear(room, *seen);
+                if i == repeat {
+                    room = hear(room, *seen);
+                }
+            }
+            assert_eq!(room.applied, take_again, "{order:?} {repeat}");
+            assert!(
+                !room.up,
+                "{order:?} {repeat}: a take-back was heard, so the app is down"
+            );
+            assert!(room.epoch > start.epoch, "{order:?} {repeat}");
+        }
+    }
+    // Heard in order, the give-back between them brought nothing back.
+    let after_take = hear(start, take);
+    let after_give = hear(after_take, give);
+    assert!(!after_take.up);
+    assert_eq!(
+        after_give,
+        SwitchRoom {
+            applied: give,
+            ..after_take
+        }
+    );
+    // And a give-back alone, to a room whose app is up, changes nothing but the generation.
+    assert_eq!(
+        hear(start, give),
+        SwitchRoom {
+            applied: give,
+            ..start
+        }
+    );
+}
+
+#[test]
+fn a_room_made_after_a_take_back_has_nothing_to_unpublish_and_is_refused() {
+    // The room starts unset and reads the organization's switch, taken at generation 1, at its first release command
+    // or on the reconcile's walk: the same answer a notice would carry.
+    let read = sw(false, 1);
+    assert_eq!(
+        apply_release_switch(ReleaseSwitch::UNSET, read),
+        SwitchApplied::Unpublish
+    );
+    let empty = serving(None, 1, 0);
+    let (after, delete) = unpublish(&empty);
+    assert!(delete.is_empty(), "nothing was up, so nothing is deleted");
+    assert_eq!(scripts(&after), [None]);
+    assert_eq!(
+        after.epoch, 1,
+        "the epoch still goes up, so nothing in flight goes live after it"
+    );
+    let now = release_switch_now(ReleaseSwitch::UNSET, Some(read));
+    assert_eq!(now, Some(read));
+    let commit = MERGED;
+    let mut r = open_recheck(&commit);
+    r.room.organization_may_release = now.is_some_and(|s| s.granted);
+    assert_eq!(
+        recheck(&r),
+        Err(RecheckFailure::Trigger(
+            UnpublishTrigger::ReleaseTakenFromOrganization
+        ))
+    );
+}
+
+#[test]
+fn the_recheck_takes_the_newer_switch_and_an_unread_one_is_undecided() {
+    let applied = sw(false, 3);
+    assert_eq!(release_switch_now(applied, None), None);
+    assert_eq!(release_switch_now(ReleaseSwitch::UNSET, None), None);
+    // A reply overtaken by a newer notice gives way to the notice.
+    assert_eq!(
+        release_switch_now(applied, Some(sw(true, 2))),
+        Some(applied)
+    );
+    assert_eq!(
+        release_switch_now(applied, Some(sw(true, 0))),
+        Some(applied)
+    );
+    assert_eq!(
+        release_switch_now(applied, Some(sw(false, 3))),
+        Some(sw(false, 3))
+    );
+    assert_eq!(
+        release_switch_now(applied, Some(sw(true, 4))),
+        Some(sw(true, 4))
+    );
+    assert_eq!(
+        release_switch_now(sw(true, 4), Some(sw(false, 5))),
+        Some(sw(false, 5))
+    );
 }
 
 // --- caps and budgets -------------------------------------------------------------------------------------------------

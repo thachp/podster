@@ -40,6 +40,7 @@ export const PLAN = [
   ["M6-S02b", "the agent's MCP tool list names tools, and no M6 tool"],
   ["M6-S02d", "capabilities discovery, every page of /api/auth/capability/list, names capabilities, and no M6 capability"],
   ["M6-S02c", "no M6 event type is in the room's events after every call above"],
+  ["M6-S02e", "the operators' report list answers the run's test people, who aren't operators, 403 not_allowed as in M4, and the refusal carries none of step 9's keys (kind, host) and no reports. Test people can't show the operator's own view, which with release switched off must stay M4's: that is shown only by the API's tests"],
   ["M6-S04", "a room that existed before the deploy runs the same task: where the room schema step's migration could really harm a room", { maySkip: true }],
 ].map(([id, title, flags = {}]) => ({ id, title, offline: Boolean(flags.offline), maySkip: Boolean(flags.maySkip) }));
 
@@ -467,6 +468,25 @@ export const toolNotFound = (text) => /^(MCP error -32602: )?Tool <tool> not fou
  * capabilities.yaml and ADR 0010, so a renamed one fails there.
  */
 export const PLANNED_TOOLS = ["deploy_release"];
+
+/** The keys step 9 added to the operators' report list, which only release switched on shows (M6-S02e). */
+export const QUEUE_KEYS = ["kind", "host"];
+
+/**
+ * Why a non-operator's answer from the operators' report list isn't M4's refusal, or null: it must be 403 with
+ * `not_allowed`, and carry no report and none of step 9's keys, at any depth.
+ */
+export function queueRefusalProblem(answer) {
+  if (answer?.status !== 403 || answer?.code !== "not_allowed") return `expected 403 not_allowed, as in M4, got HTTP ${answer?.status} ${answer?.code ?? "with no code"}`;
+  const keys = [];
+  const walk = (value) => {
+    if (Array.isArray(value)) value.forEach(walk);
+    else if (value && typeof value === "object") for (const [name, inner] of Object.entries(value)) keys.push(name), walk(inner);
+  };
+  walk(answer.body);
+  const found = [...new Set(keys.filter((name) => [...QUEUE_KEYS, "reports", "next_cursor"].includes(name)))];
+  return found.length ? `the refusal carries ${found.join(", ")}` : null;
+}
 
 /** A capability or tool name that is M6's: one of the M6 operations, as a tool, or a planned one. */
 export function m6Names(names, operations) {

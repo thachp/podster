@@ -5,6 +5,7 @@
 // two phases are checked the same way: their arguments, their kept file and its refusals, and both phases run against
 // the stand-in, one process after the other, as they'd run around a deploy.
 //
+//   npm ci          (once, in this directory: the script itself imports lib.mjs's packages)
 //   node m6-staging-selftest.mjs
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -13,11 +14,28 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   ABSENT_ROOM, agentCapabilities, answerShape, CALLERS, COMPARED_HEADERS, differences, edgeRefusal, expectedAnswer, fillPath, KEPT_KIND, KEPT_MARGIN_SECONDS, keptFile, keptProblem, keptRecord, M6_EVENT, m6EventTypes, m6Fields, m6Keys, m6Names, m6Operations, mcpErrorProblem, neighbour,
-  operationsProblem, pairProblem, parseArgs, personOnly, PHASE_PLANS, PHASE_SIGN_UPS, PLAN, PLANNED_TOOLS, planFor, runOutcome, schemas, scrub, secretProblem, SESSION_SECONDS, SIGN_UPS, snake, STAGING, stagingOnly, Tally, toolAnswer, toolNotFound,
+  operationsProblem, pairProblem, parseArgs, personOnly, PHASE_PLANS, PHASE_SIGN_UPS, PLAN, PLANNED_TOOLS, planFor, QUEUE_KEYS, queueRefusalProblem, runOutcome, schemas, scrub, secretProblem, SESSION_SECONDS, SIGN_UPS, snake, STAGING, stagingOnly, Tally, toolAnswer, toolNotFound,
 } from "./m6-staging-lib.mjs";
 import { readKept, removeKept, writeKept } from "./m6-staging-kept.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+// The runs below start m6-staging.mjs, which imports lib.mjs and with it this directory's packages. Without `npm ci` here
+// every run fails on its import, and the cases read as the script's own failures. So the packages are found first, the
+// way the script finds them, and their absence is said once and stops everything: exit 2, no case run.
+const missing = ["@auth/agent", "@modelcontextprotocol/sdk/client/index.js"].filter((name) => {
+  try {
+    import.meta.resolve(name);
+    return false;
+  } catch {
+    return true;
+  }
+});
+if (missing.length) {
+  console.error(`m6-staging-selftest: e2e's packages aren't installed (${missing.join(", ")} not found). Run npm ci in e2e first. No case was run.`);
+  process.exit(2);
+}
+
 let failed = 0;
 const check = (passed, title) => {
   if (!passed) failed++;
@@ -126,6 +144,23 @@ check(SIGN_UPS.length === 2, "a run takes 2 test sign-ups, no more");
 }
 
 // ---- the plan, the tally and the exit code ----
+// ---- M6-S02e: the operators' report list, as a test person sees it ----
+{
+  const refusal = { status: 403, code: "not_allowed", body: { error: { code: "not_allowed", message: "not_allowed" } } };
+  check(queueRefusalProblem(refusal) === null, "M6-S02e: M4's refusal, 403 not_allowed with only an error, passes");
+  check(JSON.stringify(QUEUE_KEYS) === JSON.stringify(["kind", "host"]), "M6-S02e looks for step 9's two keys, kind and host");
+  for (const [label, answer] of [
+    ["an operator's answer, as if a test person were one", { status: 200, code: undefined, body: { reports: [], next_cursor: null } }],
+    ["another refusal", { status: 404, code: "not_found", body: { error: { code: "not_found" } } }],
+    ["403 with another code", { status: 403, code: "access_revoked", body: { error: { code: "access_revoked" } } }],
+    ["a refusal carrying kind", { ...refusal, body: { error: { code: "not_allowed", kind: "app" } } }],
+    ["a refusal carrying a host, deep", { ...refusal, body: { error: { code: "not_allowed", detail: [{ host: "a.example.com" }] } } }],
+    ["a refusal carrying reports", { ...refusal, body: { error: { code: "not_allowed" }, reports: [] } }],
+    ["no answer at all", undefined],
+  ]) check(typeof queueRefusalProblem(answer) === "string", `M6-S02e fails on ${label}`);
+  check(PLAN.find((entry) => entry.id === "M6-S02e")?.title.includes("can't show the operator's own view") === true, "M6-S02e's title says what test people can't show");
+}
+
 const ids = PLAN.map((entry) => entry.id);
 check(new Set(ids).size === ids.length && ids.every((id) => /^M6-S0[0-9][a-z]?$/.test(id)) && PLAN.every((entry) => entry.title.length > 0), "every check has one stable M6-S0x ID and a title");
 check(JSON.stringify(PLAN.filter((e) => e.offline).map((e) => e.id)) === JSON.stringify(["M6-S00"]) && JSON.stringify(PLAN.filter((e) => e.maySkip).map((e) => e.id)) === JSON.stringify(["M6-S04"]), "only M6-S00 reads this checkout alone, and only M6-S04 may say SKIP");

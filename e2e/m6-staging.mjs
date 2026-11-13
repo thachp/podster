@@ -46,7 +46,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  ABSENT_ROOM, agentCapabilities, answerShape, CALLERS, differences, expectedAnswer, fillPath, keptFile, KEPT_MARGIN_SECONDS, keptProblem, keptRecord, m6EventTypes, m6Fields, m6Keys, m6Names, m6Operations, mcpErrorProblem, neighbour, operationsProblem, pairProblem, parseArgs, personOnly, PHASE_SIGN_UPS, planFor, runOutcome, scrub,
+  ABSENT_ROOM, agentCapabilities, answerShape, CALLERS, differences, expectedAnswer, fillPath, keptFile, KEPT_MARGIN_SECONDS, keptProblem, keptRecord, m6EventTypes, m6Fields, m6Keys, m6Names, m6Operations, mcpErrorProblem, neighbour, operationsProblem, pairProblem, parseArgs, personOnly, PHASE_SIGN_UPS, planFor, QUEUE_KEYS, queueRefusalProblem, runOutcome, scrub,
   secretProblem, SESSION_SECONDS, SIGN_UPS, snake, STAGING, Tally, toolAnswer, toolNotFound, USAGE,
 } from "./m6-staging-lib.mjs";
 import { keptDirectoryProblem, readKept, removeKept, sweepKept, writeKept } from "./m6-staging-kept.mjs";
@@ -514,6 +514,20 @@ async function main() {
     const types = m6EventTypes(events);
     ok(types.length === 0, `M6 event types: ${types.join(", ")}`);
     return `${events.length} events, types ${[...new Set(events.map((e) => e.type))].sort().join(", ")}`;
+  });
+
+  await check("M6-S02e", async () => {
+    // Step 9 changed this list's shape for release switched on only. Test people aren't operators, so what they can show
+    // is that they're still refused as in M4, with nothing of the new shape in the refusal. The operator's own view
+    // isn't shown here: the run never uses the fixed test operator.
+    const askers = [["the owner", owner], ...(outsider ? [["the second person", outsider]] : [])];
+    const found = [];
+    for (const [label, who] of askers) {
+      const problem = queueRefusalProblem(await who.dash("GET", "/v1/moderation/reports"));
+      if (problem) found.push(`${label}: ${problem}`);
+    }
+    ok(found.length === 0, found.join("; "));
+    return `${askers.length} test ${askers.length === 1 ? "person" : "people"} refused with 403 not_allowed, none of ${QUEUE_KEYS.join(", ")} or a report in the refusal. Not shown: the operator's own view, which test people can't ask for`;
   });
 
   await check("M6-S04", async () => {

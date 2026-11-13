@@ -27,6 +27,20 @@ export CLOUDFLARE_ACCOUNT_ID=<the account that holds podster.dev>
 
 Run every `wrangler` command from the app folder named in its step, so it uses that app's pinned version.
 
+### Setting a secret: one form only
+
+Every secret in this guide is set the same way, from the folder of the app that reads it, with the environment and no Worker name:
+
+```bash
+cd apps/api && npx wrangler secret put NAME --env staging
+```
+
+Use `apps/gateway` or `apps/scanner` for theirs, as each step says. Wrangler finds the Worker from that folder's `wrangler.jsonc`: its `name` with the environment's name added, so `podster-api` with `--env staging` is `podster-api-staging`.
+
+**For these apps, never add `--name`, and never combine `--name` with `--env` for any Worker.** Wrangler adds the environment's name to whatever name it is given, so `--name podster-api-staging --env staging` means `podster-api-staging-staging`. If no such Worker exists, `secret put` creates an empty one to hold the secret. That has happened once: a stray Worker of that doubled name, made on 2026-11-10, empty, holding one secret, with no route and nothing bound to it. It was found on 2026-11-13. If `wrangler` ever asks whether to create a new Worker for a secret, the command is wrong: answer no. The A2A test server is the one exception to the first rule: it has no environment, so its README names it whole with `--name` and no `--env`.
+
+**Owed:** a read-only check that the account's Worker names are exactly the expected set, so a stray one is found by a script and not by chance. It needs a credential that can list the account's Workers, which `scripts/staging-probes` doesn't have, so it isn't built.
+
 ## Shipping a change
 
 Agents deploy with `scripts/deploy-staging`, and not by hand. It takes main's tip once its CI has passed, applies only the migrations you name, deploys the API, then the gateway, then with `--web` the dashboard, and ends with the signed-out probes in `scripts/staging-probes`. Once the owner has set the gateway's `GITHUB_WEBHOOK_SECRET`, give either script `--webhook-secret-set`: the webhook probe then wants 401 `invalid_signature` for an unsigned delivery, and without the flag it wants the 404 of an unset secret. Each case accepts its own answer only. `scripts/deploy-staging --help` lists what it refuses. It sets no secret or variable, and doesn't deploy the scanner.

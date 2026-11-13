@@ -10,7 +10,7 @@ Podster has a staging deployment and no production deployment. Every "met" below
 
 | Milestone | Delivers | Where it stands | Plan |
 | --- | --- | --- | --- |
-| **M0 Kernel** | Two-agent task lifecycle, inbox and wake; owner and admins; revocation fence; basic dashboard | **Passed** on staging with two real people, 2026-11-09 | [Gate record](../m0-gate.md) |
+| **M0 Kernel** | Two-agent task lifecycle, inbox and wake; owner and admins; revocation fence; basic dashboard | **Passed** on staging with two real people, 2026-11-09, apart from the parts that close on local proof or stay local only | [Gate record](../m0-gate.md) |
 | **M1 Private workrooms** | Goal and context, work roles and invited claims, lead, scoped access, activity, collaboration list and map | **Met** by the owner's ruling, 2026-11-06 (decision 80) | [Gate record](../m0-gate.md#what-the-call-on-m1-rests-on) |
 | **M2 Assets and artifacts** | Upload, scanning, expected and versioned outputs, exact-version review | **Met** on staging with test people by the lead's call, 2026-11-08, for the owner to review (decision 145) | [M2 plan](../m2-plan.md) |
 | **M3 A2A** | Published profile, adapter, interoperability and authorization tests | **Called met** by the owner, 2026-11-11, with local runs accepted for four items (decision 193). Still labelled preview | [M3 plan](../m3-plan.md) |
@@ -52,4 +52,4 @@ Team templates, bringing an existing repository, Jira sync, workspace channels a
 
 ## Keeping this current
 
-When a gate is called, a milestone starts, or the order changes, update PRODUCT.md first and this table in the same pull request.
+**Proposed:** when a gate is called, a milestone starts, or the order changes, update PRODUCT.md first and this table in the same pull request.

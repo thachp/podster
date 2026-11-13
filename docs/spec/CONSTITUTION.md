@@ -13,9 +13,11 @@ The constitution is what every spec, plan and change in Podster starts from. It 
 
 The mission, roadmap and tech stack are summaries of the detailed specs, which stay the authority for their subjects. A feature spec must fit all four: it serves the mission, belongs to a milestone on the roadmap, uses the stack and passes the [constitution check](#constitution-check).
 
-**Reading this document:** Articles 2 to 10 restate rules that are already decided and already enforced in the codebase; each names where it comes from. Article 1, the [workflow](#the-workflow), the [constitution check](#constitution-check) and [governance](#governance) are new process and are marked **Proposed** until the owner ratifies this document. Nothing here approves a feature. Features are approved in [PRODUCT.md](PRODUCT.md#decisions-needed) and the ADRs.
+**Reading this document:** Articles 2 to 10 restate rules that are already decided and already enforced in the codebase; each names where it comes from. The one exception is a bullet in Article 9, which is in no repo document yet and is marked **Proposed** in place. Article 1, [where this sits](#where-this-sits), the [workflow](#the-workflow), the [constitution check](#constitution-check) and [governance](#governance) are new process and are marked **Proposed** until the owner ratifies this document. Nothing here approves a feature. Features are approved in [PRODUCT.md](PRODUCT.md#decisions-needed) and the ADRs.
 
 ## Where this sits
+
+**Proposed.** Until the owner ratifies this document, `CLAUDE.md`, the decided rows in [Decisions needed](PRODUCT.md#decisions-needed), accepted [ADRs](../adr/) and the specs win on any conflict, and this page is a summary of them. The order below is what ratification would put in place.
 
 When two documents disagree, the higher one wins and the lower one gets fixed:
 
@@ -52,7 +54,7 @@ Source: [Approved authority model](ACCESS-CONTROL.md#approved-authority-model), 
 
 ### Article 3. The Rust API stays private
 
-`apps/api` has no public hostname, route, `workers.dev` endpoint or health route. It is reached only through service bindings. Browser code never calls it. The binding and the signed assertion identify the caller; they do not replace resource-level authorization.
+`apps/api` has no public hostname, route, `workers.dev` endpoint or public health route. Its `GET /health` is private, reached like everything else only through service bindings. Browser code never calls it. The binding and the signed assertion identify the caller; they do not replace resource-level authorization.
 
 Source: [Decisions](ARCHITECTURE.md#decisions). Checked by: [AC-19](ACCESS-CONTROL.md#proposed-acceptance-and-denial-tests), the network probe of the private API in `e2e/probe-api.mjs`.
 
@@ -96,7 +98,7 @@ Source: [Decisions](ARCHITECTURE.md#decisions), [Operations](ARCHITECTURE.md#ope
 
 A claim of "verified" names the run that verified it. An acceptance test counts as passed only once it has run against a deployment. Every pull request says what was verified and what wasn't, and gets an independent diff review that says what it didn't cover. After a staging deploy, real behavior is checked on staging, because tests have missed things only a real run shows.
 
-- A suite passes on its success line and exit code, never on the absence of a failure line.
+- **Proposed:** a suite passes on its success line and exit code, never on the absence of a failure line. This is working practice and is not yet in any repo document.
 - A gap that can't be closed is recorded as a gap, with the reason. It is not rounded up to a pass.
 
 Source: [Testing](ARCHITECTURE.md#testing), `CLAUDE.md` under "Pull requests". Checked by: `scripts/merge-gate`, `scripts/deploy-staging`, `scripts/staging-probes`.
@@ -169,4 +171,4 @@ A change may break an article only when the plan records which article, why the 
 
 | Version | Date | Change |
 | --- | --- | --- |
-| 0.1.0 | 2026-11-13 | First draft: mission, roadmap and tech stack summarized from the existing specs; existing rules gathered as articles; the workflow, check and governance proposed. Not ratified |
+| 0.1.0 | 2026-11-13 | First draft: mission, roadmap and tech stack summarized from the existing specs; existing rules gathered as articles; the document order, workflow, check and governance proposed. Not ratified |

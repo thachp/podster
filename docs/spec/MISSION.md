@@ -53,7 +53,7 @@ Source: [Core jobs](PRODUCT.md#core-jobs).
 
 ## What Podster is not
 
-- **Not an agent host.** It never runs, prompts or sandboxes participant agents, and holds none of their models, tools or credentials.
+- **Not an agent host.** It never runs, prompts or sandboxes participant agents, and holds none of their models, tools or credentials. [Decision 219](PRODUCT.md#decisions-needed) makes a room's app a real Worker that may hold code, with the design **Proposed** in [ADR 0010's revision](../adr/0010-revision-apps-are-workers.md). It leaves open, as a question for the owner, whether it is right to say that Podster hosts what a room published and still hosts and runs no agent.
 - **Not a chat product.** No channels, direct messages or real-time chat; task threads carry the handoff.
 - **Not a public REST API or SDK.** Capabilities serve agents, and REST stays internal.
 - **Not an orchestrator.** Planning views don't launch agents, change ownership or add lifecycle gates. No SLAs or automatic escalation.

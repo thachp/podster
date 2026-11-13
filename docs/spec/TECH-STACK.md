@@ -4,19 +4,21 @@ Status: **draft for the owner's ratification** · Owner: Patrick Thach · As of:
 
 This is what Podster is built with. The choices come from [ARCHITECTURE.md](ARCHITECTURE.md#decisions) and the [ADRs](../adr/), which stay the authority for why. The versions come from the manifests, which stay the authority for what: `rust-toolchain.toml`, `Cargo.toml`, each `package.json` and each `wrangler.jsonc`. If this file differs from them, they win and this file gets fixed.
 
-Adding, replacing or removing anything in the first two tables is an architectural decision and needs an ADR. Version bumps don't.
+**Proposed:** adding, replacing or removing anything in the first two tables is an architectural decision and needs an ADR. Version bumps don't.
 
 ## Platform
 
 | Concern | Choice | Notes |
 | --- | --- | --- |
 | Hosting | Cloudflare Workers, on the account that holds `podster.dev` | Workers Paid. Staging only; no production |
-| Per-room and per-principal state | Durable Objects with SQLite | One `Workspace` per workroom, one `Principal` per agent or person. Each is a single writer |
+| Per-room and per-principal state | Durable Objects with SQLite | One `Workspace` per workroom, one `Principal` per agent or person. Each is a single writer. `apps/api` also declares `Moderation` and `HostnameClaim`, the gateway `StrictCounter`, and the scanner `ClamAV` for its container |
 | Directory | D1 | People, organizations, agents and identity links in the gateway's database; listing indexes in the API's, never used to authorize |
+| Key-value | KV | The gateway's `OAUTH_KV` namespace; `apps/content` declares `SERVE` |
 | Files | R2 | Uploaded assets and artifacts |
-| Async | Outbox in the `Workspace` object, delivered by alarm. Queues only for outbound HTTP and provider jobs | No message bus |
+| Async | Outbox in the `Workspace` object, delivered by alarm. Queues only for outbound HTTP and provider jobs | No message bus. The queues are `podster-wake`, `podster-scan` and `podster-a2a`, with dead-letter queues for scan and A2A; staging's carry a `-staging` suffix |
+| Rate limits | Workers rate limit bindings | `RL_GENERAL`, `RL_ACCOUNT` and `RL_SENSITIVE` on the gateway; `PUBLIC_PAGE_LIMIT` and `EXPLORE_LIMIT` on the web Worker |
 | Scanning | ClamAV in a Cloudflare Container | [ADR 0006](../adr/0006-uploads-and-scanning.md) |
-| Served apps | A separate content domain on a second Cloudflare account | [ADR 0010](../adr/0010-release-and-the-content-domain.md); M6, in progress |
+| Served apps | A separate content domain on a second Cloudflare account | [ADR 0010](../adr/0010-release-and-the-content-domain.md); M6, in progress. What Podster hosts here is an open question for the owner; see the note under [Deliberately not used](#deliberately-not-used) |
 | Compatibility date | `2026-08-01` on every Worker | |
 
 ## Applications
@@ -27,7 +29,7 @@ Adding, replacing or removing anything in the first two tables is an architectur
 | `apps/gateway` | Public entry: sign-in, Agent Auth, hosted MCP, A2A, capability mapping | TypeScript Worker |
 | `apps/web` | Dashboard | Next.js on Workers through vinext 1.4.3 ([ADR 0002](../adr/0002-vinext-on-workers.md)), React 19.3.1, Vite 8 |
 | `apps/scanner` | Upload scanning | Worker with a ClamAV container |
-| `apps/content` | Serves released apps on the content domain | Worker |
+| `apps/content` | Serves released apps on the content domain, subject to the same open question | Worker |
 | `crates/core` | Command decisions, task state machine, validation, limits | Pure Rust, no I/O |
 | `crates/policy` | Permission matrix and visibility | Pure Rust, no I/O |
 | `crates/assertion` | Verifies the gateway's assertion | Rust |
@@ -73,13 +75,13 @@ Every path maps to one agent record and goes through the same Rust policy.
 | Layer | Tool |
 | --- | --- |
 | `crates/*` | `cargo test`, table-driven |
-| `apps/api`, `apps/gateway` | Vitest 4 with the Cloudflare Workers pool |
+| `apps/api`, `apps/gateway` | Vitest 4 with `@cloudflare/vitest-plugin` |
 | `apps/web` | Vitest with Testing Library, jsdom and axe-core |
 | Contracts | `packages/contracts/check.mjs` |
 | End to end and staging | Node scripts in `e2e/`, with the real `@auth/agent` SDK and an MCP client |
 | CI | GitHub Actions: `ci.yml`, plus `scanner-rebuild.yml` for the scanner image |
 | Merge | `scripts/merge-gate <pr> <full-sha>` |
-| Deploy | `scripts/deploy-staging`, ending with `scripts/staging-probes`. Order: API, then gateway, then web |
+| Deploy | `scripts/deploy-staging`, ending with `scripts/staging-probes`. Order: API, then gateway, then web. The content Worker deploys only through `scripts/deploy-content`: agents run it only without `--deploy`, which only reports, and only when the owner asks; a real deploy is the owner's |
 
 The commands are in `CLAUDE.md` and match CI.
 
@@ -93,6 +95,8 @@ The commands are in `CLAUDE.md` and match CI.
 | Agent hosting, models, prompts or sandboxes in the service | Agents own execution |
 | Code from other projects, or from `spikes/` | Everything is written fresh |
 | A payment provider | The preview is free |
+
+"Agent hosting" above is about participant agents. [Decision 219](PRODUCT.md#decisions-needed) makes a room's app a real Worker that may hold code, with the design **Proposed** in [ADR 0010's revision](../adr/0010-revision-apps-are-workers.md). It leaves open, as a question for the owner, whether it is right to say that Podster hosts what a room published and still hosts and runs no agent.
 
 ## Licence
 

@@ -342,31 +342,41 @@ pub(super) fn set(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     }))
 }
 
-/// `{ hostname, request_id }`: the hostname's own object says the name was suspended while this room's request held
-/// it. In the caller's transaction the room clears and closes that host, so its applier removes the entry and no
-/// commit, rollback or set-back writes to it again, and marks its request as ending. It acts only on a request that
-/// is its own, for that hostname; for anything else it changes nothing and still answers, so the object stops
-/// asking. Telling it twice changes nothing more. The claim itself ends as any claim does, in the step that builds
-/// claims. Audited as Podster. Answers `{ known, acted }`.
+/// `{ hostname, request_id, generation }`: the hostname's own object says the name was suspended while this room's
+/// request held it. In the caller's transaction the room clears and closes that host, so its applier removes the entry
+/// and no commit, rollback or set-back writes to it again, and marks its request as ending.
+///
+/// **It acts only for the request it holds now.** The request must be the room's own, for that hostname, made under
+/// the generation the notice carries, and still open. A notice for a request that has ended, or under another
+/// generation, is a late one: the room may since hold the name again under a new request, whose host a late notice
+/// must never close. For those, and for a request it doesn't know, it changes nothing and still answers, so the
+/// object stops asking. Telling it twice changes nothing more. The claim itself ends as any claim does, in the step
+/// that builds claims. Audited as Podster. Answers `{ known, acted }`.
 pub(super) fn hostname_suspended(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
-    let (Some(hostname), Some(request)) = (body["hostname"].as_str(), body["request_id"].as_str())
-    else {
+    let (Some(hostname), Some(request), Some(generation)) = (
+        body["hostname"].as_str(),
+        body["request_id"].as_str(),
+        body["generation"].as_i64(),
+    ) else {
         return Err(ApiError::invalid_argument());
     };
     let found = rows(
         sql,
-        "SELECT state FROM hostname_request WHERE id = ? AND hostname = ?",
+        "SELECT state, generation FROM hostname_request WHERE id = ? AND hostname = ?",
         vec![request.into(), hostname.into()],
     )?;
-    let Some(state) = found
-        .first()
-        .and_then(|row| row["state"].as_str())
-        .and_then(HostnameRequestState::parse)
-    else {
+    let Some(row) = found.first() else {
         return Ok(json!({ "known": false, "acted": false }));
     };
+    let state = row["state"].as_str().and_then(HostnameRequestState::parse);
+    let Some(state) =
+        state.filter(|state| state.is_open() && int(&row["generation"]) == generation)
+    else {
+        // Late: the request ended, or it isn't the one the notice was made for. Nothing of the room's is its to close.
+        return Ok(json!({ "known": true, "acted": false }));
+    };
     let mut acted = false;
-    if state.is_open() && state != HostnameRequestState::Ending {
+    if state != HostnameRequestState::Ending {
         exec(
             sql,
             "UPDATE hostname_request SET state = ?, end_reason = 'hostname_suspended', updated_at = ? WHERE id = ?",

@@ -18,6 +18,8 @@
 //! - `hostname`: the name this object is for, with the name's `generation`, which core's `suspend`, `lift` and `free`
 //!   each advance (`podster_core::hostnames::HostnameRecord`), and when it was last freed, suspended and lifted. A
 //!   request is honoured only under the generation it was made under, which the room keeps with the request.
+//! - `claim.generation`: the name's generation the claim was given under, which is its request's own. A notice
+//!   carries it, so the room acts only for the request it was made for. **Whatever gives a claim (step 8) must set it.**
 //! - `claim`: every claim there has been. `held` is 1 while a claim is `live` or `ending` and null once `ended`, and it
 //!   is unique, so two claims can't hold the name at once. A claim that is `ending` still holds the name: it is freed
 //!   only after the custom hostname is read as gone at Cloudflare.
@@ -46,6 +48,8 @@ CREATE TABLE claim (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, request_id 
 CREATE TABLE suspension (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), reason TEXT NOT NULL, suspended_at INTEGER NOT NULL, lifted_at INTEGER);
 CREATE TABLE notice (seq INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id TEXT NOT NULL, claim_id TEXT NOT NULL, kind TEXT NOT NULL, created_at INTEGER NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER, answered_at INTEGER);
+", "
+ALTER TABLE claim ADD COLUMN generation INTEGER NOT NULL DEFAULT 0 CHECK (typeof(generation) = 'integer' AND generation >= 0);
 "];
 
 /// Whether this object holds anything. This only reads, so asking about an unknown hostname leaves no state.
@@ -280,14 +284,19 @@ fn set_suspension(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     suspension(sql)
 }
 
-/// When a notice is next due to be sent, if any is unanswered.
+/// The notices still owed: unanswered, for a claim this object has. Both the sender and the alarm's due time read
+/// exactly this, so nothing can be due that the sender would pass over.
+const OWED_NOTICES: &str =
+    "FROM notice n JOIN claim c ON c.id = n.claim_id WHERE n.answered_at IS NULL";
+
+/// When a notice is next due to be sent, if any is owed.
 fn next_notice(sql: &SqlStorage) -> R<Option<i64>> {
     if !initialized(sql)? {
         return Ok(None);
     }
     Ok(rows(
         sql,
-        "SELECT min(coalesce(next_attempt_at, 0)) AS due, count(*) AS n FROM notice WHERE answered_at IS NULL",
+        &format!("SELECT min(coalesce(n.next_attempt_at, 0)) AS due, count(*) AS n {OWED_NOTICES}"),
         vec![],
     )?
     .first()
@@ -330,6 +339,8 @@ impl HostnameClaim {
         if !initialized(&sql)? {
             return Ok(());
         }
+        let store = sql.clone();
+        transaction_sync(&self.state, move || migrate(&store))?;
         let hostname = rows(&sql, "SELECT name FROM hostname", vec![])?
             .first()
             .and_then(|row| text(&row["name"]));
@@ -338,17 +349,18 @@ impl HostnameClaim {
         };
         let due = rows(
             &sql,
-            "SELECT n.seq, n.workspace_id, n.attempts, c.request_id FROM notice n JOIN claim c ON c.id = n.claim_id
-               WHERE n.answered_at IS NULL AND coalesce(n.next_attempt_at, 0) <= ? ORDER BY n.seq LIMIT ?",
+            &format!(
+                "SELECT n.seq, n.workspace_id, n.attempts, c.request_id, c.generation {OWED_NOTICES}
+                   AND coalesce(n.next_attempt_at, 0) <= ? ORDER BY n.seq LIMIT ?"
+            ),
             vec![now_ms().into(), BATCH.into()],
         )?;
         for notice in due {
-            let (Some(room), Some(request)) =
-                (text(&notice["workspace_id"]), text(&notice["request_id"]))
-            else {
-                continue;
-            };
-            let body = json!({ "hostname": hostname, "request_id": request });
+            // Both are columns that can't be empty. If one ever were, the notice counts as an attempt that failed,
+            // and waits like any other: it is never passed over while still being due.
+            let room = text(&notice["workspace_id"]).unwrap_or_default();
+            let request = text(&notice["request_id"]).unwrap_or_default();
+            let body = json!({ "hostname": hostname, "request_id": request, "generation": int(&notice["generation"]) });
             let sent = async {
                 let stub = self
                     .env

@@ -762,12 +762,13 @@ The architect proposes the gate call, for the owner to review.
   - **The object makes one key at the provider match the stop:** written or removed, read back, and the stop's version asked again. A failure is retried, 5 seconds doubling to 5 minutes, and a wait belongs to the version that failed. With no provider, the key waits, recorded as owed, and rooms still obey the stop.
   - **Proposed, for step 4(b):** the key is `_stop`, in the serve entries' KV namespace. No host can be that key, since a host has no `_`. The content Worker refuses every host while the key is there, and when it can't read it.
 - **A custom hostname's suspension,** in the hostname's own `HostnameClaim` object, decided by `crates/core`'s `suspend` and `lift`. It needs no room: it holds for a name nobody has asked for. It advances the name's generation, and so does a lift, so no request made before either can claim after it. Asking again changes nothing.
-  - **If a room holds the name,** the claim starts ending at once and the object owes that room a notice, kept and sent again, 5 seconds doubling to 5 minutes, until the room answers.
+  - **If a room holds the name,** the claim starts ending at once and the object owes that room a notice, kept and sent again, 5 seconds doubling to 5 minutes, until the room answers. A lift doesn't cancel it, and a second suspension of a name still held owes a second.
+  - **The notice carries the generation the claim was given under,** and the room acts only for a request that is its own, for that name, made under that generation, and still open. A late notice, for a request that has ended, is acknowledged and changes nothing, so it can never close the host of a newer request. **Whatever gives a claim (step 8) must record that generation with it.**
   - **The room clears and closes that host** through core's `clear_host`, in its own transaction, and marks its request as ending. Its default host, its epoch and its scripts are untouched. Its applier then removes that host's entry. A room that doesn't hold that request changes nothing and still answers, so the object stops asking.
   - **Lifting restores nothing:** the host stays closed, the request ending, and the claim ending.
 - **The host in an operator's route is read as Podster writes names,** so two spellings are one host. A name on the content domain that isn't an app's host, or on Podster's own domain, is nobody's.
 - **One event type,** `app_hostname.suspended`, recorded as Podster's act and told to the room's managers.
-- **No room migration.** The `Moderation` object gains one table, `content_stop`; `HostnameClaim`'s tables are step 2's.
+- **No room migration.** The `Moderation` object gains one table, `content_stop`. `HostnameClaim` gains one column, by a second migration of its own: the generation a claim was given under.
 
 **Left for custom domains (step 8),** which this plan had put in this PR: the applier's read of the hostname's claim before it writes a custom hostname's entry. Nothing makes a claim until step 8, so until then the applier writes nothing for a custom hostname, and the read arrives with the first thing that can make one. Also step 8's: deleting the custom hostname at Cloudflare, reading until it is gone, and freeing the claim that a suspension left ending.
 
@@ -780,6 +781,14 @@ The architect proposes the gate call, for the owner to review.
 - **A room whose only host is a custom hostname can't clear it,** since core never clears the first host. No command makes such a room; the notice would be kept and sent again, and nobody is told. Surfacing it is the third PR's.
 - **A notice that is never answered** is sent every 5 minutes for ever, and nobody is told (third PR).
 - **The provider's answers for the stop key are unverified,** as for a serve entry. Spike G.
+
+**Owed before any provider is configured,** from the in-depth reviews of this PR:
+
+- **The operator isn't told whether the key is confirmed.** A stop key that never confirms is retried for ever, while the command answers `stopped` either way, since the stop itself did take. The answer should say whether the key at the provider is confirmed.
+- **A stop set before a provider exists arms no alarm.** Its key is written only when someone asks again after one is configured, or something else wakes the object. Whoever configures the first provider must wake it.
+- **On resume, a failed delete with a stale "absent" read is recorded as applied.** The read-back is the confirmation, and a cache that lags can say absent while the key is still there. The content domain would then stay stopped with nothing owed. Spike G must show what a read after a delete can be trusted for.
+- **An unreadable stop also blocks replacing an entry,** such as a rollback's, since a replacement is a write. It fails closed; step 5 must decide whether that is right for a rollback.
+- **A hostname is kept as the `subject` of an operator's action.** That is a name, not an ID. No log line and no event may ever read it out.
 
 **For the provider's configuration, noted on 2026-11-12:** the owner has created the second Cloudflare account and added `podster.site` to it, where it is pending. The domain was registered with Cloudflare Registrar that day, so its registration can't move between accounts until 2026-11-22. The account's ID is written nowhere here.
 

@@ -1,0 +1,4340 @@
+{
+  "ranAt": "2026-11-13T16:13:27.688Z",
+  "commit": "f841383aeb178a551ca22757380c8f80a8086576",
+  "wrangler": "4.157.0",
+  "playwright": "1.64.1",
+  "pages": {
+    "own": "https://appa.sandbox-test.example/",
+    "sibling": "https://appb.sandbox-test.example/",
+    "boxedElsewhere": "https://boxed.elsewhere-test.example/",
+    "plainElsewhere": "https://plain.elsewhere-test.example/"
+  },
+  "modes": [
+    "none",
+    "star",
+    "null",
+    "star-nopre",
+    "null-nopre"
+  ],
+  "browsers": {
+    "chromium": {
+      "shown": true,
+      "version": "156.0.8078.4",
+      "pages": {
+        "own": {
+          "asked": "https://appa.sandbox-test.example/",
+          "page": {
+            "who": "the app's own page",
+            "origin": "null",
+            "calls": {
+              "none": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "star": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page posted json"
+                  ]
+                },
+                "putJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page put json"
+                  ]
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page put json",
+                    "the app's own page posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page put json",
+                    "the app's own page posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                }
+              },
+              "null": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page posted json"
+                  ]
+                },
+                "putJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page put json"
+                  ]
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page put json",
+                    "the app's own page posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page put json",
+                    "the app's own page posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                }
+              },
+              "star-nopre": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "null-nopre": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              }
+            },
+            "violations": []
+          },
+          "api": {
+            "byMode": {
+              "none": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "the app's own page posted text"
+                ]
+              },
+              "star": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 1,
+                "putJson": 1,
+                "deleteJson": 1,
+                "postText": 1,
+                "listAfter": []
+              },
+              "null": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 1,
+                "putJson": 1,
+                "deleteJson": 1,
+                "postText": 1,
+                "listAfter": []
+              },
+              "star-nopre": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "the app's own page posted text"
+                ]
+              },
+              "null-nopre": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "the app's own page posted text"
+                ]
+              }
+            },
+            "origins": [
+              "null"
+            ],
+            "withACookie": 0,
+            "requests": 36
+          }
+        },
+        "sibling": {
+          "asked": "https://appb.sandbox-test.example/",
+          "page": {
+            "who": "a sibling app's page",
+            "origin": "null",
+            "calls": {
+              "none": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "star": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "null": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "star-nopre": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "null-nopre": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              }
+            },
+            "violations": []
+          },
+          "api": {
+            "byMode": {
+              "none": {
+                "preflights": 0,
+                "get": 0,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 0,
+                "listAfter": []
+              },
+              "star": {
+                "preflights": 0,
+                "get": 0,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 0,
+                "listAfter": []
+              },
+              "null": {
+                "preflights": 0,
+                "get": 0,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 0,
+                "listAfter": []
+              },
+              "star-nopre": {
+                "preflights": 0,
+                "get": 0,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 0,
+                "listAfter": []
+              },
+              "null-nopre": {
+                "preflights": 0,
+                "get": 0,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 0,
+                "listAfter": []
+              }
+            },
+            "origins": [],
+            "withACookie": 0,
+            "requests": 0
+          }
+        },
+        "boxedElsewhere": {
+          "asked": "https://boxed.elsewhere-test.example/",
+          "page": {
+            "who": "a sandboxed page elsewhere",
+            "origin": "null",
+            "calls": {
+              "none": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "star": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere posted json"
+                  ]
+                },
+                "putJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere put json"
+                  ]
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere put json",
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere put json",
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                }
+              },
+              "null": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere posted json"
+                  ]
+                },
+                "putJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere put json"
+                  ]
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere put json",
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere put json",
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                }
+              },
+              "star-nopre": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "null-nopre": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              }
+            },
+            "violations": []
+          },
+          "api": {
+            "byMode": {
+              "none": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "a sandboxed page elsewhere posted text"
+                ]
+              },
+              "star": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 1,
+                "putJson": 1,
+                "deleteJson": 1,
+                "postText": 1,
+                "listAfter": []
+              },
+              "null": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 1,
+                "putJson": 1,
+                "deleteJson": 1,
+                "postText": 1,
+                "listAfter": []
+              },
+              "star-nopre": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "a sandboxed page elsewhere posted text"
+                ]
+              },
+              "null-nopre": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "a sandboxed page elsewhere posted text"
+                ]
+              }
+            },
+            "origins": [
+              "null"
+            ],
+            "withACookie": 0,
+            "requests": 36
+          }
+        },
+        "plainElsewhere": {
+          "asked": "https://plain.elsewhere-test.example/",
+          "page": {
+            "who": "an ordinary page elsewhere",
+            "origin": "https://plain.elsewhere-test.example",
+            "calls": {
+              "none": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "star": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "an ordinary page elsewhere posted json"
+                  ]
+                },
+                "putJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "an ordinary page elsewhere put json"
+                  ]
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "an ordinary page elsewhere put json",
+                    "an ordinary page elsewhere posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "an ordinary page elsewhere put json",
+                    "an ordinary page elsewhere posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                }
+              },
+              "null": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "star-nopre": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "an ordinary page elsewhere posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "an ordinary page elsewhere posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "null-nopre": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              }
+            },
+            "violations": []
+          },
+          "api": {
+            "byMode": {
+              "none": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "an ordinary page elsewhere posted text"
+                ]
+              },
+              "star": {
+                "preflights": 1,
+                "get": 2,
+                "postJson": 1,
+                "putJson": 1,
+                "deleteJson": 1,
+                "postText": 1,
+                "listAfter": []
+              },
+              "null": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "an ordinary page elsewhere posted text"
+                ]
+              },
+              "star-nopre": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "an ordinary page elsewhere posted text"
+                ]
+              },
+              "null-nopre": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "an ordinary page elsewhere posted text"
+                ]
+              }
+            },
+            "origins": [
+              "https://plain.elsewhere-test.example"
+            ],
+            "withACookie": 0,
+            "requests": 31
+          }
+        }
+      },
+      "stepsThatDidNotFinish": [],
+      "withoutThePolicy": {
+        "shown": true,
+        "version": "156.0.8078.4",
+        "pages": {
+          "own": {
+            "asked": "https://appa.sandbox-test.example/",
+            "page": {
+              "who": "the app's own page",
+              "origin": "https://appa.sandbox-test.example",
+              "calls": {
+                "none": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page posted json"
+                    ]
+                  },
+                  "putJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json"
+                    ]
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  }
+                },
+                "star": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page posted json"
+                    ]
+                  },
+                  "putJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json"
+                    ]
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  }
+                },
+                "null": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page posted json"
+                    ]
+                  },
+                  "putJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json"
+                    ]
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  }
+                },
+                "star-nopre": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page posted json"
+                    ]
+                  },
+                  "putJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json"
+                    ]
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  }
+                },
+                "null-nopre": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page posted json"
+                    ]
+                  },
+                  "putJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json"
+                    ]
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  }
+                }
+              },
+              "violations": []
+            },
+            "api": {
+              "byMode": {
+                "none": {
+                  "preflights": 0,
+                  "get": 2,
+                  "postJson": 1,
+                  "putJson": 1,
+                  "deleteJson": 1,
+                  "postText": 1,
+                  "listAfter": []
+                },
+                "star": {
+                  "preflights": 0,
+                  "get": 2,
+                  "postJson": 1,
+                  "putJson": 1,
+                  "deleteJson": 1,
+                  "postText": 1,
+                  "listAfter": []
+                },
+                "null": {
+                  "preflights": 0,
+                  "get": 2,
+                  "postJson": 1,
+                  "putJson": 1,
+                  "deleteJson": 1,
+                  "postText": 1,
+                  "listAfter": []
+                },
+                "star-nopre": {
+                  "preflights": 0,
+                  "get": 2,
+                  "postJson": 1,
+                  "putJson": 1,
+                  "deleteJson": 1,
+                  "postText": 1,
+                  "listAfter": []
+                },
+                "null-nopre": {
+                  "preflights": 0,
+                  "get": 2,
+                  "postJson": 1,
+                  "putJson": 1,
+                  "deleteJson": 1,
+                  "postText": 1,
+                  "listAfter": []
+                }
+              },
+              "origins": [
+                null,
+                "https://appa.sandbox-test.example"
+              ],
+              "withACookie": 0,
+              "requests": 30
+            }
+          },
+          "sibling": {
+            "asked": "https://appb.sandbox-test.example/",
+            "page": {
+              "who": "a sibling app's page",
+              "origin": "https://appb.sandbox-test.example",
+              "calls": {
+                "none": {
+                  "get": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "putJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postText": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "getAfter": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "deleteJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  }
+                },
+                "star": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "a sibling app's page posted json"
+                    ]
+                  },
+                  "putJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "a sibling app's page put json"
+                    ]
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "a sibling app's page put json",
+                      "a sibling app's page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "a sibling app's page put json",
+                      "a sibling app's page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  }
+                },
+                "null": {
+                  "get": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "putJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postText": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "getAfter": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "deleteJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  }
+                },
+                "star-nopre": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "putJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "a sibling app's page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "a sibling app's page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  }
+                },
+                "null-nopre": {
+                  "get": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "putJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postText": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "getAfter": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "deleteJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  }
+                }
+              },
+              "violations": []
+            },
+            "api": {
+              "byMode": {
+                "none": {
+                  "preflights": 3,
+                  "get": 2,
+                  "postJson": 0,
+                  "putJson": 0,
+                  "deleteJson": 0,
+                  "postText": 1,
+                  "listAfter": [
+                    "a sibling app's page posted text"
+                  ]
+                },
+                "star": {
+                  "preflights": 1,
+                  "get": 2,
+                  "postJson": 1,
+                  "putJson": 1,
+                  "deleteJson": 1,
+                  "postText": 1,
+                  "listAfter": []
+                },
+                "null": {
+                  "preflights": 3,
+                  "get": 2,
+                  "postJson": 0,
+                  "putJson": 0,
+                  "deleteJson": 0,
+                  "postText": 1,
+                  "listAfter": [
+                    "a sibling app's page posted text"
+                  ]
+                },
+                "star-nopre": {
+                  "preflights": 3,
+                  "get": 2,
+                  "postJson": 0,
+                  "putJson": 0,
+                  "deleteJson": 0,
+                  "postText": 1,
+                  "listAfter": [
+                    "a sibling app's page posted text"
+                  ]
+                },
+                "null-nopre": {
+                  "preflights": 3,
+                  "get": 2,
+                  "postJson": 0,
+                  "putJson": 0,
+                  "deleteJson": 0,
+                  "postText": 1,
+                  "listAfter": [
+                    "a sibling app's page posted text"
+                  ]
+                }
+              },
+              "origins": [
+                "https://appb.sandbox-test.example"
+              ],
+              "withACookie": 0,
+              "requests": 31
+            }
+          }
+        },
+        "stepsThatDidNotFinish": []
+      }
+    },
+    "firefox": {
+      "shown": true,
+      "version": "157.0",
+      "pages": {
+        "own": {
+          "asked": "https://appa.sandbox-test.example/",
+          "page": {
+            "who": "the app's own page",
+            "origin": "null",
+            "calls": {
+              "none": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "star": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page posted json"
+                  ]
+                },
+                "putJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page put json"
+                  ]
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page put json",
+                    "the app's own page posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page put json",
+                    "the app's own page posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                }
+              },
+              "null": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page posted json"
+                  ]
+                },
+                "putJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page put json"
+                  ]
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page put json",
+                    "the app's own page posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page put json",
+                    "the app's own page posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                }
+              },
+              "star-nopre": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "null-nopre": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              }
+            },
+            "violations": []
+          },
+          "api": {
+            "byMode": {
+              "none": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "the app's own page posted text"
+                ]
+              },
+              "star": {
+                "preflights": 1,
+                "get": 2,
+                "postJson": 1,
+                "putJson": 1,
+                "deleteJson": 1,
+                "postText": 1,
+                "listAfter": []
+              },
+              "null": {
+                "preflights": 1,
+                "get": 2,
+                "postJson": 1,
+                "putJson": 1,
+                "deleteJson": 1,
+                "postText": 1,
+                "listAfter": []
+              },
+              "star-nopre": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "the app's own page posted text"
+                ]
+              },
+              "null-nopre": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "the app's own page posted text"
+                ]
+              }
+            },
+            "origins": [
+              "null"
+            ],
+            "withACookie": 0,
+            "requests": 32
+          }
+        },
+        "sibling": {
+          "asked": "https://appb.sandbox-test.example/",
+          "page": {
+            "who": "a sibling app's page",
+            "origin": "null",
+            "calls": {
+              "none": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "star": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "null": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "star-nopre": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "null-nopre": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              }
+            },
+            "violations": []
+          },
+          "api": {
+            "byMode": {
+              "none": {
+                "preflights": 0,
+                "get": 0,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 0,
+                "listAfter": []
+              },
+              "star": {
+                "preflights": 0,
+                "get": 0,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 0,
+                "listAfter": []
+              },
+              "null": {
+                "preflights": 0,
+                "get": 0,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 0,
+                "listAfter": []
+              },
+              "star-nopre": {
+                "preflights": 0,
+                "get": 0,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 0,
+                "listAfter": []
+              },
+              "null-nopre": {
+                "preflights": 0,
+                "get": 0,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 0,
+                "listAfter": []
+              }
+            },
+            "origins": [],
+            "withACookie": 0,
+            "requests": 0
+          }
+        },
+        "boxedElsewhere": {
+          "asked": "https://boxed.elsewhere-test.example/",
+          "page": {
+            "who": "a sandboxed page elsewhere",
+            "origin": "null",
+            "calls": {
+              "none": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "star": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere posted json"
+                  ]
+                },
+                "putJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere put json"
+                  ]
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere put json",
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere put json",
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                }
+              },
+              "null": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere posted json"
+                  ]
+                },
+                "putJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere put json"
+                  ]
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere put json",
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere put json",
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                }
+              },
+              "star-nopre": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "null-nopre": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              }
+            },
+            "violations": []
+          },
+          "api": {
+            "byMode": {
+              "none": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "a sandboxed page elsewhere posted text"
+                ]
+              },
+              "star": {
+                "preflights": 1,
+                "get": 2,
+                "postJson": 1,
+                "putJson": 1,
+                "deleteJson": 1,
+                "postText": 1,
+                "listAfter": []
+              },
+              "null": {
+                "preflights": 1,
+                "get": 2,
+                "postJson": 1,
+                "putJson": 1,
+                "deleteJson": 1,
+                "postText": 1,
+                "listAfter": []
+              },
+              "star-nopre": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "a sandboxed page elsewhere posted text"
+                ]
+              },
+              "null-nopre": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "a sandboxed page elsewhere posted text"
+                ]
+              }
+            },
+            "origins": [
+              "null"
+            ],
+            "withACookie": 0,
+            "requests": 32
+          }
+        },
+        "plainElsewhere": {
+          "asked": "https://plain.elsewhere-test.example/",
+          "page": {
+            "who": "an ordinary page elsewhere",
+            "origin": "https://plain.elsewhere-test.example",
+            "calls": {
+              "none": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "star": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "an ordinary page elsewhere posted json"
+                  ]
+                },
+                "putJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "an ordinary page elsewhere put json"
+                  ]
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "an ordinary page elsewhere put json",
+                    "an ordinary page elsewhere posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "an ordinary page elsewhere put json",
+                    "an ordinary page elsewhere posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                }
+              },
+              "null": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "star-nopre": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "an ordinary page elsewhere posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "an ordinary page elsewhere posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "null-nopre": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              }
+            },
+            "violations": []
+          },
+          "api": {
+            "byMode": {
+              "none": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "an ordinary page elsewhere posted text"
+                ]
+              },
+              "star": {
+                "preflights": 1,
+                "get": 2,
+                "postJson": 1,
+                "putJson": 1,
+                "deleteJson": 1,
+                "postText": 1,
+                "listAfter": []
+              },
+              "null": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "an ordinary page elsewhere posted text"
+                ]
+              },
+              "star-nopre": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "an ordinary page elsewhere posted text"
+                ]
+              },
+              "null-nopre": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "an ordinary page elsewhere posted text"
+                ]
+              }
+            },
+            "origins": [
+              "https://plain.elsewhere-test.example"
+            ],
+            "withACookie": 0,
+            "requests": 31
+          }
+        }
+      },
+      "stepsThatDidNotFinish": [],
+      "withoutThePolicy": {
+        "shown": true,
+        "version": "157.0",
+        "pages": {
+          "own": {
+            "asked": "https://appa.sandbox-test.example/",
+            "page": {
+              "who": "the app's own page",
+              "origin": "https://appa.sandbox-test.example",
+              "calls": {
+                "none": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page posted json"
+                    ]
+                  },
+                  "putJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json"
+                    ]
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  }
+                },
+                "star": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page posted json"
+                    ]
+                  },
+                  "putJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json"
+                    ]
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  }
+                },
+                "null": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page posted json"
+                    ]
+                  },
+                  "putJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json"
+                    ]
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  }
+                },
+                "star-nopre": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page posted json"
+                    ]
+                  },
+                  "putJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json"
+                    ]
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  }
+                },
+                "null-nopre": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page posted json"
+                    ]
+                  },
+                  "putJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json"
+                    ]
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  }
+                }
+              },
+              "violations": []
+            },
+            "api": {
+              "byMode": {
+                "none": {
+                  "preflights": 0,
+                  "get": 2,
+                  "postJson": 1,
+                  "putJson": 1,
+                  "deleteJson": 1,
+                  "postText": 1,
+                  "listAfter": []
+                },
+                "star": {
+                  "preflights": 0,
+                  "get": 2,
+                  "postJson": 1,
+                  "putJson": 1,
+                  "deleteJson": 1,
+                  "postText": 1,
+                  "listAfter": []
+                },
+                "null": {
+                  "preflights": 0,
+                  "get": 2,
+                  "postJson": 1,
+                  "putJson": 1,
+                  "deleteJson": 1,
+                  "postText": 1,
+                  "listAfter": []
+                },
+                "star-nopre": {
+                  "preflights": 0,
+                  "get": 2,
+                  "postJson": 1,
+                  "putJson": 1,
+                  "deleteJson": 1,
+                  "postText": 1,
+                  "listAfter": []
+                },
+                "null-nopre": {
+                  "preflights": 0,
+                  "get": 2,
+                  "postJson": 1,
+                  "putJson": 1,
+                  "deleteJson": 1,
+                  "postText": 1,
+                  "listAfter": []
+                }
+              },
+              "origins": [
+                null,
+                "https://appa.sandbox-test.example"
+              ],
+              "withACookie": 0,
+              "requests": 30
+            }
+          },
+          "sibling": {
+            "asked": "https://appb.sandbox-test.example/",
+            "page": {
+              "who": "a sibling app's page",
+              "origin": "https://appb.sandbox-test.example",
+              "calls": {
+                "none": {
+                  "get": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "putJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postText": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "getAfter": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "deleteJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  }
+                },
+                "star": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "a sibling app's page posted json"
+                    ]
+                  },
+                  "putJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "a sibling app's page put json"
+                    ]
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "a sibling app's page put json",
+                      "a sibling app's page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "a sibling app's page put json",
+                      "a sibling app's page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  }
+                },
+                "null": {
+                  "get": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "putJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postText": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "getAfter": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "deleteJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  }
+                },
+                "star-nopre": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "putJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "a sibling app's page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "a sibling app's page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  }
+                },
+                "null-nopre": {
+                  "get": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "putJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postText": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "getAfter": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "deleteJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  }
+                }
+              },
+              "violations": []
+            },
+            "api": {
+              "byMode": {
+                "none": {
+                  "preflights": 3,
+                  "get": 2,
+                  "postJson": 0,
+                  "putJson": 0,
+                  "deleteJson": 0,
+                  "postText": 1,
+                  "listAfter": [
+                    "a sibling app's page posted text"
+                  ]
+                },
+                "star": {
+                  "preflights": 1,
+                  "get": 2,
+                  "postJson": 1,
+                  "putJson": 1,
+                  "deleteJson": 1,
+                  "postText": 1,
+                  "listAfter": []
+                },
+                "null": {
+                  "preflights": 3,
+                  "get": 2,
+                  "postJson": 0,
+                  "putJson": 0,
+                  "deleteJson": 0,
+                  "postText": 1,
+                  "listAfter": [
+                    "a sibling app's page posted text"
+                  ]
+                },
+                "star-nopre": {
+                  "preflights": 3,
+                  "get": 2,
+                  "postJson": 0,
+                  "putJson": 0,
+                  "deleteJson": 0,
+                  "postText": 1,
+                  "listAfter": [
+                    "a sibling app's page posted text"
+                  ]
+                },
+                "null-nopre": {
+                  "preflights": 3,
+                  "get": 2,
+                  "postJson": 0,
+                  "putJson": 0,
+                  "deleteJson": 0,
+                  "postText": 1,
+                  "listAfter": [
+                    "a sibling app's page posted text"
+                  ]
+                }
+              },
+              "origins": [
+                "https://appb.sandbox-test.example"
+              ],
+              "withACookie": 0,
+              "requests": 31
+            }
+          }
+        },
+        "stepsThatDidNotFinish": []
+      }
+    },
+    "webkit": {
+      "shown": true,
+      "version": "27.2",
+      "pages": {
+        "own": {
+          "asked": "https://appa.sandbox-test.example/",
+          "page": {
+            "who": "the app's own page",
+            "origin": "null",
+            "calls": {
+              "none": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "star": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page posted json"
+                  ]
+                },
+                "putJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page put json"
+                  ]
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page put json",
+                    "the app's own page posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page put json",
+                    "the app's own page posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                }
+              },
+              "null": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page posted json"
+                  ]
+                },
+                "putJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page put json"
+                  ]
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page put json",
+                    "the app's own page posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page put json",
+                    "the app's own page posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                }
+              },
+              "star-nopre": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "null-nopre": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "the app's own page posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              }
+            },
+            "violations": []
+          },
+          "api": {
+            "byMode": {
+              "none": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "the app's own page posted text"
+                ]
+              },
+              "star": {
+                "preflights": 1,
+                "get": 2,
+                "postJson": 1,
+                "putJson": 1,
+                "deleteJson": 1,
+                "postText": 1,
+                "listAfter": []
+              },
+              "null": {
+                "preflights": 1,
+                "get": 2,
+                "postJson": 1,
+                "putJson": 1,
+                "deleteJson": 1,
+                "postText": 1,
+                "listAfter": []
+              },
+              "star-nopre": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "the app's own page posted text"
+                ]
+              },
+              "null-nopre": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "the app's own page posted text"
+                ]
+              }
+            },
+            "origins": [
+              "null"
+            ],
+            "withACookie": 0,
+            "requests": 32
+          }
+        },
+        "sibling": {
+          "asked": "https://appb.sandbox-test.example/",
+          "page": {
+            "who": "a sibling app's page",
+            "origin": "null",
+            "calls": {
+              "none": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "star": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "null": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "star-nopre": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "null-nopre": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              }
+            },
+            "violations": [
+              "connect-src https://appa.sandbox-test.example/api/none/items",
+              "connect-src https://appa.sandbox-test.example/api/none/items",
+              "connect-src https://appa.sandbox-test.example/api/none/items",
+              "connect-src https://appa.sandbox-test.example/api/none/items",
+              "connect-src https://appa.sandbox-test.example/api/none/items",
+              "connect-src https://appa.sandbox-test.example/api/none/items",
+              "connect-src https://appa.sandbox-test.example/api/star/items",
+              "connect-src https://appa.sandbox-test.example/api/star/items",
+              "connect-src https://appa.sandbox-test.example/api/star/items",
+              "connect-src https://appa.sandbox-test.example/api/star/items",
+              "connect-src https://appa.sandbox-test.example/api/star/items",
+              "connect-src https://appa.sandbox-test.example/api/star/items",
+              "connect-src https://appa.sandbox-test.example/api/null/items",
+              "connect-src https://appa.sandbox-test.example/api/null/items",
+              "connect-src https://appa.sandbox-test.example/api/null/items",
+              "connect-src https://appa.sandbox-test.example/api/null/items",
+              "connect-src https://appa.sandbox-test.example/api/null/items",
+              "connect-src https://appa.sandbox-test.example/api/null/items",
+              "connect-src https://appa.sandbox-test.example/api/star-nopre/items",
+              "connect-src https://appa.sandbox-test.example/api/star-nopre/items",
+              "connect-src https://appa.sandbox-test.example/api/star-nopre/items",
+              "connect-src https://appa.sandbox-test.example/api/star-nopre/items",
+              "connect-src https://appa.sandbox-test.example/api/star-nopre/items",
+              "connect-src https://appa.sandbox-test.example/api/star-nopre/items",
+              "connect-src https://appa.sandbox-test.example/api/null-nopre/items",
+              "connect-src https://appa.sandbox-test.example/api/null-nopre/items",
+              "connect-src https://appa.sandbox-test.example/api/null-nopre/items",
+              "connect-src https://appa.sandbox-test.example/api/null-nopre/items",
+              "connect-src https://appa.sandbox-test.example/api/null-nopre/items",
+              "connect-src https://appa.sandbox-test.example/api/null-nopre/items"
+            ]
+          },
+          "api": {
+            "byMode": {
+              "none": {
+                "preflights": 0,
+                "get": 0,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 0,
+                "listAfter": []
+              },
+              "star": {
+                "preflights": 0,
+                "get": 0,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 0,
+                "listAfter": []
+              },
+              "null": {
+                "preflights": 0,
+                "get": 0,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 0,
+                "listAfter": []
+              },
+              "star-nopre": {
+                "preflights": 0,
+                "get": 0,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 0,
+                "listAfter": []
+              },
+              "null-nopre": {
+                "preflights": 0,
+                "get": 0,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 0,
+                "listAfter": []
+              }
+            },
+            "origins": [],
+            "withACookie": 0,
+            "requests": 0
+          }
+        },
+        "boxedElsewhere": {
+          "asked": "https://boxed.elsewhere-test.example/",
+          "page": {
+            "who": "a sandboxed page elsewhere",
+            "origin": "null",
+            "calls": {
+              "none": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "star": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere posted json"
+                  ]
+                },
+                "putJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere put json"
+                  ]
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere put json",
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere put json",
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                }
+              },
+              "null": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere posted json"
+                  ]
+                },
+                "putJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere put json"
+                  ]
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere put json",
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere put json",
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                }
+              },
+              "star-nopre": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "null-nopre": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "a sandboxed page elsewhere posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              }
+            },
+            "violations": []
+          },
+          "api": {
+            "byMode": {
+              "none": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "a sandboxed page elsewhere posted text"
+                ]
+              },
+              "star": {
+                "preflights": 1,
+                "get": 2,
+                "postJson": 1,
+                "putJson": 1,
+                "deleteJson": 1,
+                "postText": 1,
+                "listAfter": []
+              },
+              "null": {
+                "preflights": 1,
+                "get": 2,
+                "postJson": 1,
+                "putJson": 1,
+                "deleteJson": 1,
+                "postText": 1,
+                "listAfter": []
+              },
+              "star-nopre": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "a sandboxed page elsewhere posted text"
+                ]
+              },
+              "null-nopre": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "a sandboxed page elsewhere posted text"
+                ]
+              }
+            },
+            "origins": [
+              "null"
+            ],
+            "withACookie": 0,
+            "requests": 32
+          }
+        },
+        "plainElsewhere": {
+          "asked": "https://plain.elsewhere-test.example/",
+          "page": {
+            "who": "an ordinary page elsewhere",
+            "origin": "https://plain.elsewhere-test.example",
+            "calls": {
+              "none": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "star": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "an ordinary page elsewhere posted json"
+                  ]
+                },
+                "putJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "an ordinary page elsewhere put json"
+                  ]
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "an ordinary page elsewhere put json",
+                    "an ordinary page elsewhere posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "an ordinary page elsewhere put json",
+                    "an ordinary page elsewhere posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                }
+              },
+              "null": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "star-nopre": {
+                "get": {
+                  "ok": true,
+                  "status": 200,
+                  "items": []
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "an ordinary page elsewhere posted text"
+                  ]
+                },
+                "getAfter": {
+                  "ok": true,
+                  "status": 200,
+                  "items": [
+                    "an ordinary page elsewhere posted text"
+                  ]
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              },
+              "null-nopre": {
+                "get": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "putJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "postText": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "getAfter": {
+                  "ok": false,
+                  "error": "TypeError"
+                },
+                "deleteJson": {
+                  "ok": false,
+                  "error": "TypeError"
+                }
+              }
+            },
+            "violations": []
+          },
+          "api": {
+            "byMode": {
+              "none": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "an ordinary page elsewhere posted text"
+                ]
+              },
+              "star": {
+                "preflights": 1,
+                "get": 2,
+                "postJson": 1,
+                "putJson": 1,
+                "deleteJson": 1,
+                "postText": 1,
+                "listAfter": []
+              },
+              "null": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "an ordinary page elsewhere posted text"
+                ]
+              },
+              "star-nopre": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "an ordinary page elsewhere posted text"
+                ]
+              },
+              "null-nopre": {
+                "preflights": 3,
+                "get": 2,
+                "postJson": 0,
+                "putJson": 0,
+                "deleteJson": 0,
+                "postText": 1,
+                "listAfter": [
+                  "an ordinary page elsewhere posted text"
+                ]
+              }
+            },
+            "origins": [
+              "https://plain.elsewhere-test.example"
+            ],
+            "withACookie": 0,
+            "requests": 31
+          }
+        }
+      },
+      "stepsThatDidNotFinish": [],
+      "withoutThePolicy": {
+        "shown": true,
+        "version": "27.2",
+        "pages": {
+          "own": {
+            "asked": "https://appa.sandbox-test.example/",
+            "page": {
+              "who": "the app's own page",
+              "origin": "https://appa.sandbox-test.example",
+              "calls": {
+                "none": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page posted json"
+                    ]
+                  },
+                  "putJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json"
+                    ]
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  }
+                },
+                "star": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page posted json"
+                    ]
+                  },
+                  "putJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json"
+                    ]
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  }
+                },
+                "null": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page posted json"
+                    ]
+                  },
+                  "putJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json"
+                    ]
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  }
+                },
+                "star-nopre": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page posted json"
+                    ]
+                  },
+                  "putJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json"
+                    ]
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  }
+                },
+                "null-nopre": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page posted json"
+                    ]
+                  },
+                  "putJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json"
+                    ]
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "the app's own page put json",
+                      "the app's own page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  }
+                }
+              },
+              "violations": []
+            },
+            "api": {
+              "byMode": {
+                "none": {
+                  "preflights": 0,
+                  "get": 2,
+                  "postJson": 1,
+                  "putJson": 1,
+                  "deleteJson": 1,
+                  "postText": 1,
+                  "listAfter": []
+                },
+                "star": {
+                  "preflights": 0,
+                  "get": 2,
+                  "postJson": 1,
+                  "putJson": 1,
+                  "deleteJson": 1,
+                  "postText": 1,
+                  "listAfter": []
+                },
+                "null": {
+                  "preflights": 0,
+                  "get": 2,
+                  "postJson": 1,
+                  "putJson": 1,
+                  "deleteJson": 1,
+                  "postText": 1,
+                  "listAfter": []
+                },
+                "star-nopre": {
+                  "preflights": 0,
+                  "get": 2,
+                  "postJson": 1,
+                  "putJson": 1,
+                  "deleteJson": 1,
+                  "postText": 1,
+                  "listAfter": []
+                },
+                "null-nopre": {
+                  "preflights": 0,
+                  "get": 2,
+                  "postJson": 1,
+                  "putJson": 1,
+                  "deleteJson": 1,
+                  "postText": 1,
+                  "listAfter": []
+                }
+              },
+              "origins": [
+                null,
+                "https://appa.sandbox-test.example"
+              ],
+              "withACookie": 0,
+              "requests": 30
+            }
+          },
+          "sibling": {
+            "asked": "https://appb.sandbox-test.example/",
+            "page": {
+              "who": "a sibling app's page",
+              "origin": "https://appb.sandbox-test.example",
+              "calls": {
+                "none": {
+                  "get": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "putJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postText": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "getAfter": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "deleteJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  }
+                },
+                "star": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "a sibling app's page posted json"
+                    ]
+                  },
+                  "putJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "a sibling app's page put json"
+                    ]
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "a sibling app's page put json",
+                      "a sibling app's page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "a sibling app's page put json",
+                      "a sibling app's page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  }
+                },
+                "null": {
+                  "get": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "putJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postText": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "getAfter": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "deleteJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  }
+                },
+                "star-nopre": {
+                  "get": {
+                    "ok": true,
+                    "status": 200,
+                    "items": []
+                  },
+                  "postJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "putJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postText": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "a sibling app's page posted text"
+                    ]
+                  },
+                  "getAfter": {
+                    "ok": true,
+                    "status": 200,
+                    "items": [
+                      "a sibling app's page posted text"
+                    ]
+                  },
+                  "deleteJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  }
+                },
+                "null-nopre": {
+                  "get": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "putJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "postText": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "getAfter": {
+                    "ok": false,
+                    "error": "TypeError"
+                  },
+                  "deleteJson": {
+                    "ok": false,
+                    "error": "TypeError"
+                  }
+                }
+              },
+              "violations": []
+            },
+            "api": {
+              "byMode": {
+                "none": {
+                  "preflights": 3,
+                  "get": 2,
+                  "postJson": 0,
+                  "putJson": 0,
+                  "deleteJson": 0,
+                  "postText": 1,
+                  "listAfter": [
+                    "a sibling app's page posted text"
+                  ]
+                },
+                "star": {
+                  "preflights": 1,
+                  "get": 2,
+                  "postJson": 1,
+                  "putJson": 1,
+                  "deleteJson": 1,
+                  "postText": 1,
+                  "listAfter": []
+                },
+                "null": {
+                  "preflights": 3,
+                  "get": 2,
+                  "postJson": 0,
+                  "putJson": 0,
+                  "deleteJson": 0,
+                  "postText": 1,
+                  "listAfter": [
+                    "a sibling app's page posted text"
+                  ]
+                },
+                "star-nopre": {
+                  "preflights": 3,
+                  "get": 2,
+                  "postJson": 0,
+                  "putJson": 0,
+                  "deleteJson": 0,
+                  "postText": 1,
+                  "listAfter": [
+                    "a sibling app's page posted text"
+                  ]
+                },
+                "null-nopre": {
+                  "preflights": 3,
+                  "get": 2,
+                  "postJson": 0,
+                  "putJson": 0,
+                  "deleteJson": 0,
+                  "postText": 1,
+                  "listAfter": [
+                    "a sibling app's page posted text"
+                  ]
+                }
+              },
+              "origins": [
+                "https://appb.sandbox-test.example"
+              ],
+              "withACookie": 0,
+              "requests": 31
+            }
+          }
+        },
+        "stepsThatDidNotFinish": []
+      }
+    }
+  },
+  "wranglerDev": {
+    "mentionedLoginOrAccount": false,
+    "listening": "http://127.0.0.1:51445",
+    "exitedEarly": false
+  },
+  "assertions": {
+    "browsersInstalled": [
+      "chromium",
+      "firefox",
+      "webkit"
+    ],
+    "browsersRun": [
+      "chromium",
+      "firefox",
+      "webkit"
+    ],
+    "failed": [],
+    "notInstalled": []
+  }
+}

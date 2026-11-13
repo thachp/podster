@@ -142,7 +142,9 @@ async function scheduled(cron: string) {
   await waitOnExecutionContext(ctx);
 }
 const findings = async () => ((await switchedOn(() => api(OPERATOR, "GET", "/v1/moderation/takedown-findings"))).body.findings as { code: string; subject: string; detail: string | null; seen: number }[]);
-const found = async () => (await findings()).map((finding) => `${finding.code} ${finding.subject}${finding.detail ? ` ${finding.detail}` : ""}`).sort();
+// A deletion a reconcile started is told as `queued` and then `gone`, by the room's own delete job's time: which of
+// the two a test reads isn't the test's to assume, so the line leaves it out.
+const found = async () => (await findings()).map((finding) => `${finding.code} ${finding.subject}${finding.detail && finding.code !== "script_delete_queued" ? ` ${finding.detail}` : ""}`).sort();
 /**
  * A pass starts from nothing: no room in the lookup table but the ones this test makes after it, no finding kept, and
  * each pass at the start of its list. So no room of an earlier test is woken, and what a test reads is its own.
@@ -150,7 +152,7 @@ const found = async () => (await findings()).map((finding) => `${finding.code} $
 async function fresh() {
   await BINDINGS.DB.prepare("DELETE FROM app_label_index").run();
   await moderation().fetch("https://do/takedown-findings");
-  await inModeration((sql) => { sql.exec("DELETE FROM takedown_finding"); sql.exec("DELETE FROM reconcile_pass"); });
+  await inModeration((sql) => { for (const table of ["takedown_finding", "reconcile_pass", "reconcile_failure"]) sql.exec(`DELETE FROM ${table}`); sql.exec("DROP TABLE IF EXISTS test_reconcile_budget"); });
 }
 const listCalls = async (op: string) => (await held()).calls.filter((call) => call.op === op).length;
 
@@ -833,6 +835,8 @@ describe("what step 4(a) adds to the room and the Worker", () => {
     expect(mentions).toContain("moderation.rs:test_stop_unreadable");
     expect(mentions).toContain("workspace/takedown.rs:test_refuse_hostname_notice");
     expect(mentions).toContain("hostname_claim.rs:/internal/test-migrate");
+    // And the reconciles' one: the time bounds a test sets, to show each without waiting it out.
+    expect(mentions).toContain("reconcile.rs:test_reconcile_budget");
     expect(BINDINGS.TEST_API_CARGO).toMatch(/\[features\][^\[]*\nfailpoints = \[\]/);
     expect(BINDINGS.TEST_API_CARGO).not.toMatch(/^default\s*=/m);
   });
@@ -1654,7 +1658,6 @@ describe("the two reconciles", () => {
     await pass(a.room);
     state = await held();
     expect(state.scripts).not.toContain(script(9));
-    expect((await findings()).find((finding) => finding.code === "script_delete_queued" && finding.subject === script(9))?.seen).toBe(2);
     // A list that says it holds less than there is: what it holds is still asked about, and operators are told.
     await fake("/seed", { scriptsUnlisted: 3 });
     expect(await reconcile("scripts")).toMatchObject({ code: "list_incomplete", changed: 0 });
@@ -1697,7 +1700,8 @@ describe("the two reconciles", () => {
     state = await held();
     expect(state.entries[b.host]).toBe(b.served);
     expect(state.calls.filter((call) => call.op === "entry.put").length).toBe(puts + 1);
-    expect(await found()).toEqual([`entry_unreadable ${a.host}`, `entry_unreadable ${b.host}`].sort());
+    // A read that failed says nothing about that host. It is told once for the pass, with how many, never per host.
+    expect(await found()).toEqual(["entry_reads_failing serve-entries 1", `entry_unreadable ${a.host}`]);
     for (const room of [a.room, b.room]) await alarmQuiet(stub(room));
   });
 
@@ -1708,16 +1712,24 @@ describe("the two reconciles", () => {
     await fake("/reset", {});
     await fake("/seed", { scripts: [a.kept, a.served], entries: { [a.host]: a.kept, [stray]: "x" } });
     const passRow = () => inModeration((sql) => sql.exec("SELECT last_code, cursor FROM reconcile_pass WHERE pass = 'entries'").toArray()[0] ?? null);
+    const failing = () => inModeration((sql) => sql.exec("SELECT kind, subject, failures FROM reconcile_failure").toArray().map((row: any) => `${row.kind} ${row.subject} ${row.failures}`).sort());
     // The lookup table can't be read: placing the default host's key fails, and so does the walk.
     const create = (BINDINGS.TEST_D1_SCHEMA as string).split(";").map((x) => x.trim()).filter((x) => /^CREATE TABLE\s+(IF NOT EXISTS\s+)?app_label_index\b/i.test(x));
     expect(create).toHaveLength(1);
     await BINDINGS.DB.prepare("DROP TABLE app_label_index").run();
     try {
       // Each is counted and skipped. The key after it is still judged, and where the pass got to is still written.
-      expect(await reconcile("entries")).toMatchObject({ code: "ok", listed: 2, asked: 0, errors: 2, findings: 1, woken: 0 });
+      // A pass that skipped a step is never recorded as plain `ok`.
+      expect(await reconcile("entries")).toMatchObject({ code: "errors", listed: 2, asked: 0, errors: 2, findings: 1, woken: 0 });
       expect(await found()).toEqual([`entry_foreign_name ${stray}`]);
-      expect(await passRow()).toEqual({ last_code: "ok", cursor: null });
-      expect(await reconcile("scripts")).toMatchObject({ code: "ok", listed: 2, asked: 0, errors: 3 });
+      expect(await passRow()).toEqual({ last_code: "errors", cursor: null });
+      expect(await reconcile("scripts")).toMatchObject({ code: "errors", listed: 2, asked: 0, errors: 3 });
+      // The same key fails a second pass, and a third: from the third, operators are told, by the key and the code.
+      await reconcile("entries");
+      expect(await found()).toEqual([`entry_foreign_name ${stray}`]);
+      await reconcile("entries");
+      expect(await found()).toEqual([`entry_foreign_name ${stray}`, `entry_keeps_failing ${a.host} internal_error`].sort());
+      expect(await failing()).toEqual([`entry ${a.host} 3`, `script ${a.kept} 1`, `script ${a.served} 1`].sort());
     } finally {
       await BINDINGS.DB.prepare(create[0]).run();
     }
@@ -1726,10 +1738,78 @@ describe("the two reconciles", () => {
     expect(await reconcile("entries")).toMatchObject({ code: "ok", errors: 0, changed: 1 });
     await pass(a.room);
     expect((await held()).entries[a.host]).toBe(a.served);
+    // A step that works forgets the count: three in a row means three in a row.
+    expect(await failing()).toEqual([`script ${a.kept} 1`, `script ${a.served} 1`].sort());
+    expect(await reconcile("scripts")).toMatchObject({ code: "ok", errors: 0 });
+    expect(await failing()).toEqual([]);
     // A page that doesn't say whether it is the last is no page: it is never read as the end of the list.
     await fake("/seed", { keysNoInfo: true });
     expect(await reconcile("entries")).toMatchObject({ code: "list_failed", listed: 0 });
     expect(await passRow()).toEqual({ last_code: "list_failed", cursor: null });
     await alarmQuiet(stub(a.room));
+  });
+
+  it("keeps telling of a deletion it started until the record has it, and a full record of anything else can't keep one out", async () => {
+    await fresh();
+    const a = await app({ plain: true });
+    const stale = `${a.label}.${rel(9)}`;
+    await fake("/reset", {});
+    await fake("/seed", { scripts: [a.kept, a.served, stale], entries: { [a.host]: a.served } });
+    expect(await reconcile("scripts")).toMatchObject({ code: "ok", changed: 1 });
+    await pass(a.room);
+    expect((await held()).scripts).toEqual([a.kept, a.served].sort());
+    // The record of it is lost, as it would be had the room's one answer been lost. The script is gone, so no list
+    // names it again. The room itself still knows: the next question to it, here only the walk's, carries it.
+    await inModeration((sql) => sql.exec("DELETE FROM takedown_finding"));
+    expect(await found()).toEqual([]);
+    expect(await reconcile("entries")).toMatchObject({ code: "ok", changed: 0 });
+    expect((await findings()).map((finding) => [finding.code, finding.subject, finding.detail])).toEqual([["script_delete_queued", stale, "gone"]]);
+    // The record fills with something else, as an outage or a flood of strays would fill it, and the deletion's own
+    // row is lost again. It still gets in: deletions have room of their own.
+    await inModeration((sql) => {
+      sql.exec("DELETE FROM takedown_finding");
+      for (let i = 0; i < 1000; i++) sql.exec("INSERT INTO takedown_finding (code, subject, first_seen_at, last_seen_at) VALUES ('entry_foreign_name', ?, ?, ?)", `filler-${i}`, Date.now(), Date.now());
+    });
+    await fake("/seed", { entries: { [`deep.${a.host}`]: "x" } });
+    expect(await reconcile("entries")).toMatchObject({ code: "ok" });
+    const kept = await inModeration((sql) => sql.exec("SELECT code, subject, detail FROM takedown_finding WHERE subject NOT LIKE 'filler-%' ORDER BY code").toArray());
+    // The new stray didn't fit and is counted as dropped, which an operator can see. The deletion did.
+    expect(kept).toEqual([{ code: "findings_full", subject: "takedown_finding", detail: "other" }, { code: "script_delete_queued", subject: stale, detail: "gone" }]);
+    await alarmQuiet(stub(a.room));
+  });
+
+  it("gives the walk its own time, apart from the time for the list", async () => {
+    await fresh();
+    const a = await app({ plain: true });
+    const b = await app({ plain: true });
+    await fake("/reset", {});
+    await fake("/seed", { scripts: [a.kept, a.served, b.kept, b.served], entries: { [a.host]: a.served, [b.host]: b.served } });
+    const budget = (name: string | null) => inModeration((sql) => {
+      sql.exec("CREATE TABLE IF NOT EXISTS test_reconcile_budget (name TEXT, ms INTEGER)");
+      sql.exec("DELETE FROM test_reconcile_budget");
+      if (name) sql.exec("INSERT INTO test_reconcile_budget (name, ms) VALUES (?, -1)", name);
+    });
+    const at = (which: string) => inModeration((sql) => sql.exec("SELECT cursor, skip FROM reconcile_pass WHERE pass = ?", which).toArray()[0] ?? null);
+    // The list's time is already over when the pass starts, as after a provider that was slow: no key is begun, and
+    // the same page is owed again. The walk still wakes both rooms, on its own time.
+    await budget("pass");
+    expect(await reconcile("entries")).toMatchObject({ code: "out_of_time", listed: 2, asked: 2, woken: 2 });
+    expect(await at("entries")).toEqual({ cursor: null, skip: 0 });
+    expect((await held()).calls.filter((call) => call.op === "entry.get")).toEqual([]);
+    expect(await reconcile("scripts")).toMatchObject({ code: "out_of_time", listed: 4, asked: 2, woken: 2 });
+    // The walk's time is over when it starts: it wakes nobody and stays where it was, and the list is read in full.
+    await budget("wake");
+    const before = await at("wake");
+    expect(await reconcile("entries")).toMatchObject({ code: "ok", listed: 2, asked: 2, woken: 0 });
+    expect(await at("wake")).toEqual(before);
+    expect((await held()).calls.filter((call) => call.op === "entry.get").length).toBe(2);
+    // With neither set short, both run.
+    await budget(null);
+    expect(await reconcile("entries")).toMatchObject({ code: "ok", asked: 4, woken: 2 });
+    // The two bounds the build has, as the plan states them.
+    const source = (JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>)["reconcile.rs"];
+    expect([source.match(/const PASS_BUDGET_MS: i64 = ([0-9_]+);/)?.[1], source.match(/const WAKE_BUDGET_MS: i64 = ([0-9_]+);/)?.[1]]).toEqual(["20_000", "10_000"]);
+    await inModeration((sql) => sql.exec("DROP TABLE IF EXISTS test_reconcile_budget"));
+    for (const room of [a.room, b.room]) await alarmQuiet(stub(room));
   });
 });

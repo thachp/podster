@@ -1555,8 +1555,13 @@ describe("rate limits", () => {
     }
     // A registration's host name is in its token, so the header counts.
     expect((await send("/api/auth/agent/register", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${"x".repeat(17_000)}` }, body: "{}" })).status).toBe(413);
-    // The limit comes first, so an oversized request still counts.
-    expect((await send("/oauth/register", { method: "POST", headers: { "content-type": "application/json" }, body: big }, { STRICT_PER_MINUTE: "0" })).status).toBe(429);
+    // The limit comes first, so an oversized request still counts: a caller of this test's own, allowed one a minute, is
+    // refused for size once and then for the limit. It doesn't lean on what other tests left under the unnamed caller,
+    // and "0" isn't a limit of nothing: a bad setting falls back to the real 20.
+    const caller = from(`198.51.100.oversized${++counter}`);
+    const oversized = () => send("/oauth/register", { method: "POST", headers: { ...caller, "content-type": "application/json" }, body: big }, { STRICT_PER_MINUTE: "1" });
+    expect((await oversized()).status).toBe(413);
+    expect((await oversized()).status).toBe(429);
     // A body arriving in pieces is put back together intact.
     const encoder = new TextEncoder();
     const pieces = encoder.encode(JSON.stringify({ redirect_uris: ["https://client.test/cb"], client_name: "in pieces", token_endpoint_auth_method: "none" }));

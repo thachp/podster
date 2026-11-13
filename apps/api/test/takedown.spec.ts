@@ -841,6 +841,26 @@ describe("what step 4(a) adds to the room and the Worker", () => {
     expect(BINDINGS.TEST_API_CARGO).not.toMatch(/^default\s*=/m);
   });
 
+  it("writes the stop key and each serve entry as the content Worker reads them", async () => {
+    // One fixture, read by this test, by apps/content's and by crates/core's: the key and the value of the stop, and
+    // what a script's name is.
+    const fixture = JSON.parse(BINDINGS.TEST_SERVE_FIXTURE) as { stop_key: string; stop_value: string; script_name_pattern: string; valid_script_names: string[]; invalid_script_names: string[] };
+    const source: string = BINDINGS.TEST_CONTENT_PROVIDER_SOURCE;
+    expect([source.match(/const STOP_KEY: &str = "([^"]+)";/)?.[1], source.match(/const STOP_VALUE: &str = "([^"]+)";/)?.[1]]).toEqual([fixture.stop_key, fixture.stop_value]);
+    // What the applier writes for a host is the script's name alone, and a name as the server makes one is among
+    // the shapes the content Worker serves.
+    const a = await app({ plain: true });
+    await inRoom(a.room, (sql) => sql.exec("DELETE FROM serve_apply"));
+    await pass(a.room);
+    const written = (await held()).entries[a.host];
+    expect(written).toBe(a.served);
+    const pattern = new RegExp(fixture.script_name_pattern);
+    expect(pattern.test(written)).toBe(true);
+    expect([fixture.valid_script_names.every((name) => pattern.test(name)), fixture.invalid_script_names.some((name) => pattern.test(name))]).toEqual([true, false]);
+    expect(fixture.invalid_script_names).not.toContain(written);
+    await alarmQuiet(stub(a.room));
+  });
+
   it("binds no provider, no token and no schedule in any environment", () => {
     const names = [...new Set([...(BINDINGS.TEST_CONTENT_PROVIDER_SOURCE as string).matchAll(/const [A-Z_]+: &str = "(CONTENT_[A-Z_]+)";/g)].map((match) => match[1]))].sort();
     expect(names).toEqual(["CONTENT_ACCOUNT_ID", "CONTENT_DISPATCH_NAMESPACE", "CONTENT_DOMAIN", "CONTENT_KV_NAMESPACE_ID", "CONTENT_ROUTING_TOKEN", "CONTENT_SCRIPTS_TOKEN"]);

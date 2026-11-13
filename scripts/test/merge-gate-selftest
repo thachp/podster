@@ -68,7 +68,7 @@ case "$*" in
 esac
 EOF
 
-jobs="rust migrations contracts api web scanner gateway e2e"
+jobs="rust migrations contracts api web scanner content gateway e2e"
 languages="actions javascript-typescript python rust"
 set_check() { # set_check NAME STATUS CONCLUSION: changes every check of that name
   awk -F '\t' -v OFS='\t' -v name="$1" -v status="$2" -v conclusion="$3" '$1 == name { $2 = status; $3 = conclusion } { print }' "$fix/checks" > "$fix/checks.new"
@@ -238,8 +238,8 @@ done
 
 for job in $jobs; do drop_check "$job"; done
 check "a pull request with only code scanning's checks, all passing, is refused, exit 1" run 1 "$gate" 77 "$sha"
-check "  for each of ci.yml's eight jobs" test "$(grep -c "REFUSE  ci.yml's .* is not among the checks" "$tmp/out")" -eq 8
-check "  and for nothing else" said 'refused, 8 problem'
+check "  for each of ci.yml's nine jobs" test "$(grep -c "REFUSE  ci.yml's .* is not among the checks" "$tmp/out")" -eq 9
+check "  and for nothing else" said 'refused, 9 problem'
 healthy
 
 set_check contracts COMPLETED SKIPPED
@@ -412,7 +412,7 @@ refused "an alert answer that isn't a count" 'could not read code scanning alert
 
 # --- ci.yml on main ---
 sed 's/^  gateway:$/  edge:/' "$workflow" > "$fix/workflow"
-refused "a job renamed in ci.yml on main" "ci.yml on main has the jobs 'rust migrations contracts api web scanner edge e2e'"
+refused "a job renamed in ci.yml on main" "ci.yml on main has the jobs 'rust migrations contracts api web scanner content edge e2e'"
 
 sed 's/^  rust:$/  lint:\
     runs-on: ubuntu-latest\
@@ -484,6 +484,9 @@ real() { # the captured answers, as they were
   rm -f "$fix/alerts-merge" "$fix/alerts-head" "$fix/analyses" "$fix/languages"
   local name
   for name in pull checks merge-state merged main-run analyses; do cp "$captured/$name.json" "$fix/$name.json"; done
+  # The capture is older than ci.yml's `content` job. Its check is added here as a copy of the scanner's, so the
+  # captured file stays what gh really answered.
+  jq '.statusCheckRollup += [(.statusCheckRollup[] | select(.name == "scanner")) | .name = "content"]' "$fix/checks.json" > "$fix/checks.new" && mv "$fix/checks.new" "$fix/checks.json"
   cp "$captured/alerts.json" "$fix/alerts-merge.json"
   cp "$captured/alerts.json" "$fix/alerts-head.json"
   cp "$captured/default-setup.json" "$fix/languages.json"
@@ -502,7 +505,7 @@ check "  after one question to gh" test "$(wc -l < "$fix/calls" | tr -d ' ')" -e
 
 still_open
 check "the same pull request, open and CLEAN, passes: exit 0" run 0 "$gate" 252 "$real_head"
-check "  with each of its 13 checks read as passing" test "$(grep -c '^ok      check .*: SUCCESS$' "$tmp/out")" -eq 13
+check "  with each of its 14 checks read as passing" test "$(grep -c '^ok      check .*: SUCCESS$' "$tmp/out")" -eq 14
 check "  and four languages read from the setup's six names" test "$(grep -c '^ok      code scanning analysed this head for ' "$tmp/out")" -eq 4
 check "  javascript-typescript among them, as one" said '^ok      code scanning analysed this head for javascript-typescript$'
 
@@ -540,7 +543,7 @@ check "an alert answer that isn't a list is refused: exit 1" run 1 "$gate" 252 "
 
 still_open; edit checks 'del(.statusCheckRollup[] | select(.workflowName == "CI"))'
 check "the JSON with ci.yml's checks taken out is refused: exit 1" run 1 "$gate" 252 "$real_head"
-check "  for all eight jobs" said 'refused, 8 problem'
+check "  for all nine jobs" said 'refused, 9 problem'
 
 still_open; edit checks '(.statusCheckRollup[] | select(.name == "web")) |= (.status = "IN_PROGRESS" | .conclusion = "")'
 check "the JSON with web still running is refused: exit 1" run 1 "$gate" 252 "$real_head"
@@ -567,7 +570,7 @@ as_docs() { still_open; edit pull '.headRefName = "docs/m3-kit-staging"'; edit c
 as_docs
 check "a docs/ branch with #243's real files, one of them not documentation, is refused: exit 1" run 1 "$gate" 252 "$real_head"
 check "  and names the file" said "aren't documentation \(e2e/kit-report-staging-2026-11-10.json\)"
-check "  for all eight skipped jobs" said 'refused, 8 problem'
+check "  for all nine skipped jobs" said 'refused, 9 problem'
 
 as_docs; edit files 'map(select(.filename | startswith("docs/")))'; edit changed '.changed_files = 4'
 check "the same branch with only its four docs/ files passes: exit 0" run 0 "$gate" 252 "$real_head"
@@ -597,7 +600,7 @@ check "  and names it" said "aren't documentation \(CLAUDE.md\)"
 listed=$(sed -n 's/^CI_JOBS="\(.*\)"$/\1/p' "$gate")
 in_workflow=$(awk '/^jobs:/ { jobs = 1; next } jobs && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { sub(/:.*/, ""); sub(/^  /, ""); printf "%s%s", sep, $0; sep = " " }' "$workflow")
 check "the script's required jobs are exactly ci.yml's jobs" test -n "$listed" -a "$listed" = "$in_workflow"
-check "  all eight of them" test "$(echo $listed | wc -w | tr -d ' ')" -eq 8
+check "  all nine of them" test "$(echo $listed | wc -w | tr -d ' ')" -eq 9
 check "the script has no flake allowance" test "$(grep -c -E '^[A-Z_]*FLAKE[A-Z_]*=|rerun-known-flake' "$gate")" -eq 0
 check "  and the alarm helpers its note names exist" test -f "$scripts/../apps/api/test/alarm.ts" -a "$(grep -c 'apps/api/test/alarm.ts' "$gate")" -eq 1
 check "  and no API spec runs an alarm with the pool's own call" test "$(grep -l 'runDurableObjectAlarm(' "$scripts"/../apps/api/test/*.spec.ts | wc -l | tr -d ' ')" -eq 0

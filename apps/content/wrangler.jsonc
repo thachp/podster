@@ -1,0 +1,30 @@
+{
+  // The content Worker (M6 step 4(b), ADR 0010): the dispatch namespace's dynamic dispatch Worker, on the content
+  // domain only. It routes and never authorizes.
+  //
+  // **This file can deploy nothing public anywhere, and that is its job** (docs/m6-plan.md, "Keeping it from
+  // deploying"). It is named `wrangler.jsonc` on purpose: with no configuration file, `wrangler deploy` would configure
+  // the project itself and deploy it to whoever is logged in.
+  //   - `account_id` is a placeholder that is no account, and holds characters wrangler refuses before it makes any
+  //     call that is scoped to an account. Wrangler uses the file's `account_id` ahead of `CLOUDFLARE_ACCOUNT_ID` in the environment (read in the
+  //     source of the wrangler versions `test/config.test.ts` names; Cloudflare's documentation doesn't say), so a
+  //     deploy from this file is aimed at no account, whoever is logged in and whatever the shell holds.
+  //   - Both public addresses are off, and there is no route, no custom domain and no environment.
+  //   - The two IDs below are placeholders that exist on no account.
+  // `test/config.test.ts` fails if any of that changes. The real account and routes come only from a configuration the
+  // owner's deploy step supplies for the second account, which lives outside this folder and is never committed.
+  // Neither account's ID is ever written in this repository.
+  "name": "podster-content",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "account_id": "not an account: this file deploys nowhere",
+  "workers_dev": false,
+  "preview_urls": false,
+  // The content domain: an app's default host is `<label>.<this>`. A placeholder under `.invalid`, which is no
+  // domain anyone can hold. The real one comes with the deploy-time configuration.
+  "vars": { "CONTENT_DOMAIN": "content-domain.invalid" },
+  // Its only two bindings: the serve entries, to read, and the namespace that holds each release's script. Nothing
+  // to the gateway, the API, D1 or R2, and no secret.
+  "kv_namespaces": [{ "binding": "SERVE", "id": "00000000000000000000000000000000" }],
+  "dispatch_namespaces": [{ "binding": "APPS", "namespace": "placeholder-no-such-namespace" }]
+}

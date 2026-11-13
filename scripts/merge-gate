@@ -61,7 +61,7 @@ fi
 
 # ci.yml's jobs. A pull request must have every one as a check. The gate also reads ci.yml on main and refuses if this
 # list isn't its jobs, so a renamed or added job can't pass unnoticed, and the self-test pins it to the workflow file.
-CI_JOBS="rust migrations contracts api web scanner gateway e2e"
+CI_JOBS="rust migrations contracts api web scanner content gateway e2e"
 # There is no flake allowance. There were two: an alarm test of apps/api/test/kernel.spec.ts, whose cause was the test
 # runtime running a room's alarm beside the test's own run of it, and "database is locked" in the web job's
 # accessibility run, which #254 fixed. The API specs now run alarms through apps/api/test/alarm.ts. Either failing

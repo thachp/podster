@@ -33,9 +33,13 @@ function serve(script: string, request: Request): Response {
 }
 
 export default {
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env: { BROWSER_RUN_ID?: unknown }): Promise<Response> {
     const asked = request.headers.get(ASKED);
-    if (asked === null) return new Response("the content Worker's browser run: not a deployment\n", { status: 400 });
+    // Asked with no address, it says which run started it, so a run never tests a Worker another run left behind.
+    if (asked === null) {
+      const run = typeof env.BROWSER_RUN_ID === "string" ? env.BROWSER_RUN_ID : "";
+      return new Response("the content Worker's browser run: not a deployment\n", { status: 400, headers: { "x-content-browser-run-id": run } });
+    }
     const headers = new Headers(request.headers);
     headers.delete(ASKED);
     return handle(new Request(asked, { method: request.method, headers }), {
@@ -46,4 +50,4 @@ export default {
       domain: DOMAIN,
     });
   },
-} satisfies ExportedHandler;
+} satisfies ExportedHandler<{ BROWSER_RUN_ID?: unknown }>;

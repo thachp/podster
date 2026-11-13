@@ -76,10 +76,21 @@ describe("the package can't be deployed by accident", () => {
       for (const from of imports) expect(from.startsWith("./") && !from.includes(".."), `${name} imports ${from}`).toBe(true);
       expect(read(`src/${name}`), name).not.toMatch(/\btest\b\/|import\(/);
     }
-    // No script of the package, no CI job and no deploy script names the browser run's files. One script does.
+    // Nothing that runs things names the browser run's files: no workflow, no script under `scripts/`, and no
+    // `package.json` anywhere in the repository. One script does, the browser run itself.
     const named = /browser-run-only|test\/browser/;
-    expect(JSON.stringify(JSON.parse(read("package.json")).scripts)).not.toMatch(named);
-    for (const path of [".github/workflows/ci.yml", "scripts/deploy-staging", "scripts/staging-probes", "scripts/merge-gate"]) expect(repo(path), path).not.toMatch(named);
+    const repoRoot = new URL("../../", root);
+    const walk = (folder: string): string[] => readdirSync(new URL(folder, repoRoot), { withFileTypes: true }).flatMap((entry) => {
+      if (["node_modules", ".git", "target", "build", ".wrangler"].includes(entry.name)) return [];
+      return entry.isDirectory() ? walk(`${folder}${entry.name}/`) : [`${folder}${entry.name}`];
+    });
+    const runners = [...walk(".github/"), ...walk("scripts/"), ...["apps/", "packages/", "e2e/", "spikes/"].flatMap(walk).filter((path) => path.endsWith("/package.json") || path === "package.json")];
+    expect(runners.length).toBeGreaterThan(20);
+    expect(runners).toContain(".github/workflows/ci.yml");
+    expect(runners).toContain("scripts/deploy-staging");
+    expect(runners).toContain("apps/content/package.json");
+    expect(runners).toContain("e2e/package.json");
+    for (const path of runners) expect(repo(path), path).not.toMatch(named);
     expect(repo("e2e/content-sandbox.mjs")).toContain(`"--config", "${BROWSER_RUN}"`);
     // And that one script runs it on this machine only: the loopback address, local mode, no remote and no tunnel.
     const script = repo("e2e/content-sandbox.mjs");

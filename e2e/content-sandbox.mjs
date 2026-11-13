@@ -18,7 +18,9 @@
 // secret, no CLOUDFLARE_ variable, and a HOME that is an empty temporary folder, so no login is there to be used.
 // It downloads no browser: an engine Playwright can't launch is recorded as not shown.
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,18 +30,29 @@ import * as playwright from "playwright";
 const here = dirname(fileURLToPath(import.meta.url));
 const content = join(here, "../apps/content");
 const arg = (name) => { const at = process.argv.indexOf(name); return at >= 0 ? process.argv[at + 1] : undefined; };
-const port = Number(arg("--port") ?? 8799);
+/** A port nothing is listening on, chosen now, so a process left over from another run is never the one tested. */
+const freePort = () => new Promise((resolve, reject) => {
+  const probe = createServer();
+  probe.on("error", reject);
+  probe.listen(0, "127.0.0.1", () => { const { port } = probe.address(); probe.close(() => resolve(port)); });
+});
+const port = Number(arg("--port") ?? (await freePort()));
+/** This run's own mark. The Worker started below is given it, and must answer with it before anything is asked. */
+const runId = randomBytes(16).toString("hex");
+const RUN_ID = "x-content-browser-run-id";
 const out = arg("--out");
 const DOMAIN = "sandbox-test.example";
 const A = `https://appa.${DOMAIN}`;
 const B = `https://appb.${DOMAIN}`;
 const ASKED = "x-content-browser-run-url";
 const local = `http://127.0.0.1:${port}/`;
+/** How long the browser is given to do anything more after an action was taken. See `nothingMore`. */
+const NOTHING_MORE_MS = 1500;
 
 // ---- the Worker, under wrangler dev, local only ----
 const home = mkdtempSync(join(tmpdir(), "content-sandbox-home-"));
 const devLog = [];
-const dev = spawn(join(content, "node_modules/.bin/wrangler"), ["dev", "--config", "test/browser/browser-run-only.wrangler.jsonc", "--ip", "127.0.0.1", "--port", String(port), "--local"], {
+const dev = spawn(join(content, "node_modules/.bin/wrangler"), ["dev", "--config", "test/browser/browser-run-only.wrangler.jsonc", "--ip", "127.0.0.1", "--port", String(port), "--local", "--var", `BROWSER_RUN_ID:${runId}`], {
   cwd: content,
   env: childEnv({ HOME: home, WRANGLER_SEND_METRICS: "false", CI: "true", NO_COLOR: "1" }),
   stdio: ["ignore", "pipe", "pipe"],
@@ -47,6 +60,8 @@ const dev = spawn(join(content, "node_modules/.bin/wrangler"), ["dev", "--config
 for (const stream of [dev.stdout, dev.stderr]) stream.on("data", (chunk) => devLog.push(String(chunk)));
 const stopDev = () => { if (dev.exitCode === null) dev.kill("SIGTERM"); rmSync(home, { recursive: true, force: true }); rmSync(join(content, ".wrangler"), { recursive: true, force: true }); };
 process.on("exit", stopDev);
+// Stopped from outside, the Worker, the temporary home and wrangler's own folder go the same way.
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]]) process.on(signal, () => { stopDev(); process.exit(code); });
 
 /** One request to the Worker, as if it had been asked at `url`. */
 async function ask(url, init = {}) {
@@ -56,7 +71,14 @@ async function ask(url, init = {}) {
 async function ready() {
   for (let tries = 0; tries < 150; tries++) {
     if (dev.exitCode !== null) throw new Error(`wrangler dev exited with ${dev.exitCode}:\n${devLog.join("")}`);
-    try { if ((await fetch(local)).status === 400) return; } catch { /* not listening yet */ }
+    // Only the Worker this run started knows this run's mark. Anything else on the port is not it.
+    try {
+      const answer = await fetch(local);
+      if (answer.status === 400 && answer.headers.get(RUN_ID) === runId) return;
+      if (answer.status === 400 && answer.headers.get(RUN_ID) !== null) throw new Error("another run's Worker is answering on this port");
+    } catch (error) {
+      if (String(error?.message).includes("another run")) throw error;
+    }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   throw new Error(`wrangler dev never answered:\n${devLog.join("")}`);
@@ -110,6 +132,8 @@ async function inBrowser(name, control = false) {
     /** Every request the browser made, in order, with whether it carried a cookie. */
     const asked = [];
     const waiting = [];
+    /** Answers from the Worker that carried a `Set-Cookie`. The test app sends one on every answer of its own. */
+    let answersWithSetCookie = 0;
     await context.route("**/*", async (route) => {
       const request = route.request();
       const url = request.url();
@@ -119,6 +143,7 @@ async function inBrowser(name, control = false) {
       for (const wait of waiting.filter((w) => url.includes(w.part))) wait.seen();
       if (!url.startsWith(`https://`) || !new URL(url).hostname.endsWith(`.${DOMAIN}`)) return route.abort("namenotresolved");
       const answer = await ask(url, { method: request.method(), headers });
+      if (answer.setCookie.length > 0) answersWithSetCookie += 1;
       if (control) delete answer.headers["content-security-policy"];
       await route.fulfill({ status: answer.status, headers: answer.headers, body: answer.body });
     });
@@ -128,12 +153,13 @@ async function inBrowser(name, control = false) {
     const downloads = [];
     /** Pages the browser opened by itself: every page of the context but the ones this run opens. */
     let pagesOpened = 0;
-    context.on("page", () => { pagesOpened += 1; });
+    context.on("page", () => { pagesOpened += 1; onSomething(); });
 
     const page = await context.newPage();
     page.setDefaultTimeout(8000);
-    page.on("dialog", (dialog) => { dialogs.push(dialog.type()); dialog.dismiss().catch(() => {}); });
-    page.on("download", (download) => downloads.push(download.suggestedFilename()));
+    page.on("dialog", (dialog) => { dialogs.push(dialog.type()); dialog.dismiss().catch(() => {}); onSomething(); });
+    page.on("download", (download) => { downloads.push(download.suggestedFilename()); onSomething(); });
+    page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) onSomething(); });
     const first = await step("open the app", () => page.goto(`${A}/`, { waitUntil: "domcontentloaded" }), null);
     await step("the app's own probes", () => page.locator('#results[data-done="1"]').waitFor({ state: "attached", timeout: 20_000 }));
     const results = await step("read the probes", async () => JSON.parse(await page.locator("#results").textContent()), {});
@@ -143,9 +169,23 @@ async function inBrowser(name, control = false) {
     // Each of these is something a visitor does. The app's own handler asks for a sentinel file when the action
     // has been taken, so the run knows the browser has had its turn; then it gives the browser a moment, since
     // "nothing was asked for" has no event of its own to wait on.
-    const settle = () => new Promise((resolve) => setTimeout(resolve, 400));
+    // **The one place this run uses time.** When an action is stopped, nothing follows it: no request, no page, no
+    // dialog, no download. There is no event for that. So after the page has said the action was taken, the run
+    // gives the browser this long to do anything more, and what it has seen by then is the result.
+    const nothingMore = () => new Promise((resolve) => setTimeout(resolve, NOTHING_MORE_MS));
+    /** Resolves when the browser does something an action can cause: a page, a dialog, a download, a navigation. */
+    let onSomething = () => {};
+    const something = () => new Promise((resolve) => { onSomething = resolve; });
 // A click doesn't wait for whatever it starts: under the sandbox it may start nothing at all.
-    const act = (selector, sentinel) => step(`act ${sentinel}`, async () => { const done = seen(`/sentinel?after=${sentinel}`); await page.locator(selector).click({ noWaitAfter: true }); await Promise.race([done, new Promise((resolve) => setTimeout(resolve, 3000))]); await settle(); });
+    // The page asks for a marker once its own handler has taken the action, whether that settled or threw. The
+    // run waits for the marker, or for the browser doing something, whichever is first; never for a fixed time.
+    const act = (selector, sentinel) => step(`act ${sentinel}`, async () => {
+      const marker = seen(`/sentinel?after=${sentinel}`);
+      const happened = something();
+      await page.locator(selector).click({ noWaitAfter: true });
+      await Promise.race([marker, happened]);
+      await nothingMore();
+    });
     const pagesBeforePopup = pagesOpened;
     await act("#popup", "popup");
     const popupsOpened = pagesOpened - pagesBeforePopup;
@@ -187,6 +227,7 @@ async function inBrowser(name, control = false) {
       sibling: { cookieRead: siblingResults.cookieRead, cookieWriteForDomain: siblingResults.cookieWriteForDomain, localStorage: siblingResults.localStorage },
       cookiesInTheBrowsersJar: jar.map((cookie) => `${cookie.name} for ${cookie.domain}`),
       requestsThatCarriedACookie: asked.filter((request) => request.cookie).length,
+      answersWithSetCookie,
       requestsToOtherHosts: [...new Set(asked.filter((request) => !new URL(request.url).hostname.endsWith(`.${DOMAIN}`)).map((request) => request.url))],
       requestsMade: asked.length,
       stepsThatDidNotFinish: failed,
@@ -196,6 +237,29 @@ async function inBrowser(name, control = false) {
   } finally {
     await Promise.race([browser.close().catch(() => {}), new Promise((resolve) => setTimeout(resolve, 10_000))]);
   }
+}
+
+// ---- what decision 216 buys, as assertions ----
+// These fail the run. Everything else the run records is an observation of what an ordinary app can do.
+const REFUSED = ["cookieWrite", "cookieWriteForDomain", "cookieRead", "localStorage", "sessionStorage", "indexedDB", "cacheApi", "serviceWorker"];
+function judge(name, pass) {
+  const failed = [];
+  const expect = (holds, what) => { if (!holds) failed.push(`${name}: ${what}`); };
+  const refused = (result) => result !== undefined && result.ok === false;
+  expect(pass.results?.origin?.ok === true && pass.results.origin.value === "null", "under the policy the page's origin is `null`");
+  for (const probe of REFUSED) expect(refused(pass.results?.[probe]), `under the policy ${probe} is refused`);
+  expect(refused(pass.sibling?.cookieRead), "a sibling host can't read a cookie");
+  expect(refused(pass.sibling?.cookieWriteForDomain), "a sibling host can't write a cookie for the domain");
+  expect(pass.requestsMade > 0 && pass.requestsThatCarriedACookie === 0, "no request carries a cookie");
+  expect(pass.answersWithSetCookie === 0 && Array.isArray(pass.cookiesInTheBrowsersJar) && pass.cookiesInTheBrowsersJar.length === 0, "an app's `Set-Cookie` never reaches the browser");
+  // The control must show the opposite, or the rows above would hold for a harness that could see nothing.
+  const control = pass.withoutThePolicy ?? {};
+  expect(control.shown === true, "the control ran");
+  expect(control.results?.origin?.value === `https://appa.${DOMAIN}`, "in the control the page has its own origin");
+  expect(control.results?.cookieWrite?.ok === true && control.results?.localStorage?.ok === true, "in the control cookies and storage work");
+  expect(control.sibling?.cookieRead?.ok === true && String(control.sibling.cookieRead.value).includes("shared=1"), "in the control the sibling reads the first app's cookie");
+  expect(control.answersWithSetCookie === 0, "in the control too, an app's `Set-Cookie` never reaches the browser");
+  return failed;
 }
 
 let report;
@@ -214,12 +278,25 @@ try {
   }
   // What wrangler dev said, for the record of whether it tried anything to do with an account or a login.
   const said = devLog.join("");
-  report.wranglerDev = { mentionedLoginOrAccount: /log ?in|oauth|account|unauthor|api token/i.test(said), listening: (said.match(/Ready on (\S+)/) ?? [])[1] ?? null, exitedEarly: dev.exitCode !== null };
+  report.nothingMoreMs = NOTHING_MORE_MS;
+  report.wranglerDev = { mentionedLoginOrAccount: /log ?in|oauth|account|unauthor|api token/i.test(said), listening: (said.match(/Ready on (\S+)/) ?? [])[1] ?? null, portChosenAtStart: arg("--port") === undefined, answeredWithThisRunsMark: true, exitedEarly: dev.exitCode !== null };
 } finally {
   stopDev();
 }
+// Every browser that is installed must have launched and run, and each must hold what decision 216 buys.
+const wanted = ["chromium", "firefox", "webkit"].filter((name) => !arg("--browser") || name === arg("--browser"));
+const installed = wanted.filter((name) => { try { return existsSync(playwright[name].executablePath()); } catch { return false; } });
+const failed = [];
+if (installed.length === 0) failed.push("no browser is installed for Playwright to launch");
+for (const name of installed) {
+  const pass = report.browsers[name];
+  if (!pass?.shown) failed.push(`${name}: installed, and it didn't run (${pass?.why ?? "no result"})`);
+  else failed.push(...judge(name, pass));
+}
+report.assertions = { browsersInstalled: installed, browsersRun: installed.filter((name) => report.browsers[name]?.shown), notInstalled: wanted.filter((name) => !installed.includes(name)), failed };
 const text = `${JSON.stringify(report, null, 2)}\n`;
 if (out) writeFileSync(out, text); else process.stdout.write(text);
-const shown = Object.values(report.browsers).filter((browser) => browser.shown).length;
-console.error(`content sandbox: ${shown} of 3 browsers shown`);
-process.exit(shown > 0 ? 0 : 1);
+const failures = report.assertions.failed;
+for (const failure of failures) console.error(`content sandbox: FAILED ${failure}`);
+console.error(`content sandbox: ${report.assertions.browsersRun.length} browser(s) run, ${failures.length} assertion(s) failed`);
+process.exit(failures.length === 0 ? 0 : 1);

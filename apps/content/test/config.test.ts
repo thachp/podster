@@ -92,11 +92,25 @@ describe("the package can't be deployed by accident", () => {
     expect(runners).toContain("e2e/package.json");
     for (const path of runners) expect(repo(path), path).not.toMatch(named);
     expect(repo("e2e/content-sandbox.mjs")).toContain(`"--config", "${BROWSER_RUN}"`);
-    // And that one script runs it on this machine only: the loopback address, local mode, no remote and no tunnel.
-    const script = repo("e2e/content-sandbox.mjs");
-    expect(script).toContain('"--ip", "127.0.0.1"');
-    expect(script).toContain('"--local"');
-    expect(script.replace(/^\s*\/\/.*$/gm, "")).not.toMatch(/--remote|--tunnel|0\.0\.0\.0|wrangler", \["deploy/);
+    // And each script that runs it does so on this machine only: the loopback address, local mode, no remote and no
+    // tunnel. There are two: the browser run, and the API spike, which names its own test entry beside the same
+    // configuration.
+    for (const path of ["e2e/content-sandbox.mjs", "e2e/content-sandbox-api.mjs"]) {
+      const script = repo(path);
+      expect(script, path).toContain(`"--config", "${BROWSER_RUN}"`);
+      expect(script, path).toContain('"--ip", "127.0.0.1"');
+      expect(script, path).toContain('"--local"');
+      expect(script.replace(/^\s*\/\/.*$/gm, ""), path).not.toMatch(/--remote|--tunnel|0\.0\.0\.0|wrangler", \["deploy/);
+    }
+    // The spike also starts a proxy and a TLS server of its own. Each listens on the loopback address and no other:
+    // the one place the script calls `listen` names it.
+    const spike = repo("e2e/content-sandbox-api.mjs").replace(/^\s*\/\/.*$/gm, "");
+    expect(spike.match(/\.listen\(/g)).toHaveLength(1);
+    expect(spike).toContain('server.listen(0, "127.0.0.1"');
+    expect(spike).toContain('"dev", "test/browser/api-entry.ts"');
+    // No other script under `e2e` starts this package's Worker.
+    const starters = walk("e2e/").filter((path) => path.endsWith(".mjs") && repo(path).includes("apps/content") && /wrangler/.test(repo(path)));
+    expect(starters.sort()).toEqual(["e2e/content-sandbox-api.mjs", "e2e/content-sandbox.mjs"]);
   });
 
   it("aims at no account, has no route and no environment, and switches both public addresses off", () => {

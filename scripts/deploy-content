@@ -80,6 +80,20 @@ if [ "$started_clean" != true ] || [ -n "$(declare -F)" ]; then
   echo "deploy-content: refused: it didn't start in the clean process it makes for itself. Run scripts/deploy-content as it is. Nothing was read or changed." >&2
   exit 1
 fi
+# Every result the exec carries must be there, in its form: each flag 0 or 1, a bash version, and the two values (which
+# may be empty) present. A process that has the marker without them didn't come from the exec above.
+dc_malformed=
+for name in DC_CALLER_TRACED DC_CALLER_POSIX DC_CALLER_TOKEN DC_CALLER_KEY DC_CALLER_BASH_ENV DC_CALLER_WRANGLER_DEBUG; do
+  case "${!name-unset}" in 0 | 1) ;; *) dc_malformed="$dc_malformed $name" ;; esac
+done
+case "${DC_CALLER_BASH_VERSION-}" in [0-9]*.[0-9]*) ;; *) dc_malformed="$dc_malformed DC_CALLER_BASH_VERSION" ;; esac
+for name in DC_CALLER_ACCOUNT DC_CALLER_CACHE_DIR; do
+  [ -n "${!name+x}" ] || dc_malformed="$dc_malformed $name"
+done
+if [ -n "$dc_malformed" ]; then
+  echo "deploy-content: refused: it has the clean-process marker but not the results its own exec passes (missing or malformed:$dc_malformed). Run scripts/deploy-content as it is. Nothing was read or changed." >&2
+  exit 1
+fi
 if [ "$DC_CALLER_POSIX" = 1 ]; then echo "deploy-content: refused: bash was in POSIX mode, as when it runs as sh. Run it with bash. Nothing was run." >&2; exit 2; fi
 case "$DC_CALLER_BASH_VERSION" in [012].* | 3.[01].*) echo "deploy-content: refused: it needs bash 3.2 or later, and the caller's is $DC_CALLER_BASH_VERSION. Nothing was run." >&2; exit 2 ;; esac
 case "$BASH_VERSION" in [012].* | 3.[01].*) echo "deploy-content: refused: /bin/bash is $BASH_VERSION, and it needs 3.2 or later. Nothing was run." >&2; exit 2 ;; esac
@@ -112,10 +126,15 @@ The token is never an argument, never printed, never written to a file by this s
 no shell variable. curl reads it on stdin, with -q (no .curlrc) and an empty environment; wrangler
 gets it in an environment that holds nothing of the caller's, run from a folder of the script's own
 with --env-file pointing at an empty file, so no .env is read. If any child's output or log contains
-the token, the output is redacted and the script fails. It refuses to run under bash -x or -v, with
-SHELLOPTS turning either on, with BASH_ENV set, or with any shell function exported by the caller,
-which would run in place of a command such as env or curl. It needs bash 3.2 or later (macOS's
-/bin/bash is 3.2), and refuses sh, dash and bash in POSIX mode with exit 2.
+the token, the output is redacted and the script fails. Before anything else it starts itself again
+as /bin/bash under /usr/bin/env -i, keeping only HOME, TERM, PATH and SSH_AUTH_SOCK, so no function,
+alias, BASH_ENV or variable exported by the caller's shell reaches what it runs. It refuses to run
+under bash -x or -v, with SHELLOPTS turning either on, or with BASH_ENV set. It needs bash 3.2 or
+later (macOS's /bin/bash is 3.2), and refuses sh, dash and bash in POSIX mode with exit 2.
+
+It defends against accidents in the owner's shell: a stray exported function or alias, tracing left
+on, a proxy or .curlrc, a leftover token variable, the wrong account. It does not defend against
+someone who already controls the owner's account, files or PATH.
 
 It refuses, before changing anything, unless:
 
@@ -179,7 +198,19 @@ cd "$root"
 work=$(mktemp -d)
 chmod 700 "$work"
 mkdir -m 700 "$work/curl-home"
-trap 'rm -rf "$work"' EXIT
+# Every exit the script means sets dc_meant first. Any other exit is an error the script didn't handle, such as set -u's
+# unbound variable, and it must never look like success: bash 3.2 runs the EXIT trap with $? at 0 after a set -u error.
+dc_meant=0
+on_exit() {
+  local code=$?
+  rm -rf "$work"
+  if [ "$dc_meant" != 1 ]; then
+    echo "deploy-content: STOPPED on an error it didn't expect, while ${phase:-checking} (status $code). See the line above." >&2
+    [ "$code" -ne 0 ] || code=1
+  fi
+  exit "$code"
+}
+trap on_exit EXIT
 
 # Where the run is, for what a stop by a signal says.
 phase=checking
@@ -191,13 +222,14 @@ on_signal() { # on_signal NAME CODE
     deploying) echo "STOPPED by $1 during wrangler deploy. The Worker may or may not be deployed: check the account before running this again." ;;
     probing) echo "STOPPED by $1 during the probes. The Worker is deployed and NOT verified." ;;
   esac
+  dc_meant=1
   exit "$2"
 }
 trap 'on_signal SIGINT 130' INT
 trap 'on_signal SIGTERM 143' TERM
 trap 'on_signal SIGHUP 129' HUP
 
-refuse() { echo "REFUSE  $*"; echo "deploy-content: refused, nothing was deployed"; exit 1; }
+refuse() { echo "REFUSE  $*"; echo "deploy-content: refused, nothing was deployed"; dc_meant=1; exit 1; }
 step() { echo; echo "== $*"; }
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
@@ -444,6 +476,7 @@ echo "No other route, no workers.dev address and no preview address."
 if [ "$deploy" != true ]; then
   echo
   echo "deploy-content: every check passed. Nothing was deployed: this run had no --deploy."
+  dc_meant=1
   exit 0
 fi
 
@@ -478,6 +511,7 @@ if leaked "$work/deploy.out" $logs; then
   echo
   echo "STOPPED wrangler's output or its log held the token. It was redacted above and not printed."
   echo "deploy-content: the Worker may or may not be deployed. Read wrangler's output above, and make a new token."
+  dc_meant=1
   exit 3
 fi
 sed 's/^/        | /' "$work/deploy.out"
@@ -485,6 +519,7 @@ if [ "$deploy_status" -ne 0 ]; then
   echo
   echo "STOPPED wrangler deploy exited with status $deploy_status"
   echo "deploy-content: the deploy failed part-way. Read wrangler's output above for what changed."
+  dc_meant=1
   exit 3
 fi
 version=$(grep -o -E 'Current Version ID: [0-9a-f-]{36}' "$work/deploy.out" | head -n 1 | sed 's/.*: //' || true)
@@ -543,6 +578,8 @@ echo "NOT SHOWN a host two labels deep, such as a.$host: the zone's certificate 
 echo
 if [ "$probe_failures" -ne 0 ]; then
   echo "deploy-content: deployed podster-content at $here (version ${version:-unknown}), but $probe_failures probe(s) failed: the Worker is deployed and NOT verified."
+  dc_meant=1
   exit 4
 fi
 echo "deploy-content: deployed podster-content at $here (version ${version:-unknown}) to $domain, and every probe passed."
+dc_meant=1

@@ -91,6 +91,7 @@ The script builds wrangler's configuration from that file and from `apps/content
   - **Before that exec:** the script runs only what a function or alias can't replace. It sets `POSIXLY_CORRECT`, under which special builtins are found before functions. It uses `case` instead of `[`, and puts a backslash on each command word. It unsets any function named `echo`, the one ordinary command it uses there.
   - **Results carried over:** whether a token or key variable was set, whether tracing or `BASH_ENV` was on, and `CLOUDFLARE_ACCOUNT_ID`, which is an ID and not a secret.
   - **Checked after:** the new process confirms it holds exactly those variables and no function. A caller who sets the marker to skip the exec is refused.
+  - **The results must all be there.** With the marker, every carried result must be present and in its form (each flag 0 or 1, a bash version), or it refuses with exit 1 and one line naming what is missing.
   - **It execs once.** A process that has the exec's results but not its marker refuses, exit 1, and never execs again. So a lost marker stops the script instead of making it start over and over.
   - **Needs:** `/usr/bin/env` and `/bin/bash`. Missing either, the exec fails and nothing runs.
   - **Owners who use `GH_TOKEN`:** it isn't carried over, so `gh` must be logged in under `HOME`. Otherwise the CI check fails and the script refuses.
@@ -126,7 +127,7 @@ That only reports. To deploy, the owner adds `--deploy` at a terminal and types 
 scripts/deploy-content --token-file ~/.config/podster/content-token --config-file ~/.config/podster/content-deploy.json --deploy
 ```
 
-`scripts/deploy-content --help` lists every refusal. Exit codes: 0 reported, or deployed and verified; 1 refused, nothing changed; 2 wrong usage; 3 the deploy failed part-way; 4 deployed but a probe failed, so the Worker is deployed and **not verified**.
+`scripts/deploy-content --help` lists every refusal. Exit codes: 0 reported, or deployed and verified; 1 refused, nothing changed; 2 wrong usage; 3 the deploy failed part-way; 4 deployed but a probe failed, so the Worker is deployed and **not verified**. An error the script doesn't handle, such as an unbound variable, never exits 0: it says it stopped, and in which phase.
 
 **Stopped by a signal** (129 SIGHUP, 130 SIGINT, 143 SIGTERM), it says where it was:
 - while checking, nothing changed;

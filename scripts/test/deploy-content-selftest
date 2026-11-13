@@ -360,7 +360,10 @@ check "--token-file with no path: exit 2" run 2 "$work/scripts/deploy-content" -
 check "a relative --token-file: exit 2" run 2 "$work/scripts/deploy-content" --token-file content-token --config-file "$secrets/content-deploy.json"
 check "a relative --config-file: exit 2" run 2 "$work/scripts/deploy-content" --token-file "$secrets/content-token" --config-file ./content-deploy.json
 check "an unknown argument: exit 2" run 2 "$work/scripts/deploy-content" "${files[@]}" --yes
-check "--help says agents run it only without --deploy, only when the owner asks" bash -c "'$work/scripts/deploy-content' --help | grep -q 'AGENTS run it only without --deploy, and only when the owner asks'"
+run 0 "$work/scripts/deploy-content" --help || true
+check "--help exits 0" bash -c "[ $LAST -eq 0 ]"
+check "--help says agents run it only without --deploy, only when the owner asks" said 'AGENTS run it only without --deploy, and only when the owner asks'
+check "--help says it restarts in a clean process, and claims no refusal of exported functions" bash -c "grep -q 'starts itself again' '$tmp/out' && grep -q 'does not defend against' '$tmp/out' && ! grep -q -i 'function exported by the caller' '$tmp/out'"
 check "usage refusals make no call at all" bash -c "[ ! -s '$fix/calls' ]"
 
 # --- tracing ---
@@ -424,6 +427,17 @@ fresh; dc 1 DC_CALLER_TRACED=0 "${files[@]}" || true
 check "a process that has the exec's results but not its marker stops and never execs again" bash -c "[ $LAST -eq 1 ] && grep -q 'refused: it started again without its clean-process marker' '$tmp/out' && [ ! -s '$fix/calls' ]"
 fresh; dc 1 DC_CALLER_TRACED=0 "$(shadow_var echo)" "$(shadow_var exit)" "$(shadow_var exec)" "${files[@]}" || true
 check "  so does one with exported echo, exit and exec functions, and none of them is called" bash -c "[ $LAST -eq 1 ] && grep -q 'refused: it started again without its clean-process marker' '$tmp/out' && ! grep -q '^SHADOW' '$fix/calls' && ! grep -q -E '^(curl|wrangler|gh|npm) ' '$fix/calls'"
+# The marker with none of the exec's results, or with one malformed: refused with exit 1 and one line, nothing called.
+fresh; run 1 /usr/bin/env -i "PATH=$bin:/usr/bin:/bin" "HOME=$tmp/home" DEPLOY_CONTENT_CLEAN=1 /bin/bash --noprofile --norc "$work/scripts/deploy-content" "${files[@]}" || true
+check "the marker without the exec's results: exit 1, named, nothing called" bash -c "[ $LAST -eq 1 ] && grep -q 'refused: it has the clean-process marker but not the results its own exec passes' '$tmp/out' && grep -q 'DC_CALLER_TOKEN' '$tmp/out' && [ ! -s '$fix/calls' ] && [ \$(wc -l < '$tmp/out') -eq 1 ]"
+fresh; run 1 /usr/bin/env -i "PATH=$bin:/usr/bin:/bin" "HOME=$tmp/home" DEPLOY_CONTENT_CLEAN=1 DC_CALLER_TRACED=0 DC_CALLER_POSIX=0 DC_CALLER_TOKEN=yes DC_CALLER_KEY=0 DC_CALLER_BASH_ENV=0 DC_CALLER_WRANGLER_DEBUG=0 DC_CALLER_BASH_VERSION=3.2.57 DC_CALLER_ACCOUNT= DC_CALLER_CACHE_DIR= /bin/bash --noprofile --norc "$work/scripts/deploy-content" "${files[@]}" || true
+check "a malformed result (DC_CALLER_TOKEN=yes): exit 1, named, nothing called" bash -c "[ $LAST -eq 1 ] && grep -q 'malformed: DC_CALLER_TOKEN)' '$tmp/out' && [ ! -s '$fix/calls' ]"
+# An error the script doesn't handle never exits 0: here, a variable it uses is removed after the checks.
+fresh
+sed -i.bak 's/^uid=\$(id -u)$/uid=$(id -u); unset uid; : "$uid"/' "$work/scripts/deploy-content" && rm -f "$work/scripts/deploy-content.bak"
+check "  (the stand-in dies on an unbound variable)" grep -q -F 'unset uid; : "$uid"' "$work/scripts/deploy-content"
+dc 1 "${files[@]}" || true
+check "an unbound variable after the checks start: non-zero, says it stopped on an error, nothing called" bash -c "[ $LAST -ne 0 ] && grep -q 'uid: unbound variable' '$tmp/out' && grep -q 'STOPPED on an error it didn.t expect, while checking' '$tmp/out' && ! grep -q -E '^(curl|wrangler|npm) ' '$fix/calls'"
 # The marker lost on the way (here, left off the exec line): it must stop at once, not exec itself for ever.
 fresh
 grep -q -F ' DEPLOY_CONTENT_CLEAN=1 \' "$work/scripts/deploy-content"

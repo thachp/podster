@@ -85,28 +85,46 @@ The durable inbox works even when an agent has no inbound server. Wake delivery 
 The next diagram shows **a possible orchestration layer, not an implemented Podster agent**. A lead's model would read the goal and current state, choose the next useful action, delegate to specialists, handle questions and combine reviewed results. The lead would run outside Podster and use the same authorized interfaces as other participants.
 
 ```mermaid
-flowchart TB
-    Goal["Person supplies a goal"]
-    Lead["PROPOSED: model-driven lead agent<br/>reads state, plans, delegates and follows up"]
-    Room["EXISTING: Podster workroom<br/>task tools, A2A adapter, inboxes and permissions"]
-    Specialists["Independent specialist agents<br/>do work with their own models and tools"]
-    Reviewer["Authorized independent reviewer<br/>person when room policy requires it"]
-    Result["Lead combines reviewed results<br/>and reports back to the person"]
+sequenceDiagram
+    actor Person
+    participant Lead as PROPOSED external lead agent
+    participant Room as EXISTING Podster workroom
+    participant Specialist as Independent specialist agent
+    participant Reviewer as Authorized independent reviewer
 
-    Goal -.-> Lead
-    Lead -.->|"create or assign tasks via MCP/capabilities"| Room
-    Room -->|"inbox pickup or outbound A2A offer"| Specialists
-    Specialists -->|"accept, work, submit"| Room
-    Room -->|"submission ready for review"| Reviewer
-    Reviewer -->|"approve or request changes"| Room
-    Room -.->|"state and events for the next decision"| Lead
-    Lead -.-> Result
+    Note over Lead: Proposed model-driven orchestration, not implemented
+    Note over Room: Existing tools, inboxes, A2A adapter and permissions
+    Person->>Lead: Supply a goal
+    Lead->>Room: Read goal and current workroom state
+    Room-->>Lead: Authorized state and events
+    Lead->>Lead: Plan and choose the next useful action
 
-    style Lead fill:#fff3cd,stroke:#9a6700,stroke-dasharray:5 5,color:#24292f
-    style Result fill:#fff3cd,stroke:#9a6700,stroke-dasharray:5 5,color:#24292f
+    loop For each delegated task
+        Lead->>Room: Create or assign task via MCP/capabilities
+        Room->>Specialist: Deliver inbox event or outbound A2A offer
+        Specialist->>Room: Accept task
+        loop Work and review until approved
+            Specialist->>Specialist: Work using own model and tools
+            Specialist->>Room: Submit result
+            Room->>Reviewer: Submission ready for review
+            Note over Reviewer: Separate from assignee, person if room policy requires
+            alt Changes needed
+                Reviewer->>Room: Request changes
+                Room-->>Specialist: Review feedback for revision
+            else Result approved
+                Reviewer->>Room: Approve result
+            end
+        end
+        Lead->>Room: Read task state and events
+        Room-->>Lead: Reviewed outcome
+        Lead->>Lead: Follow up and decide what comes next
+    end
+
+    Lead->>Lead: Combine reviewed results
+    Lead-->>Person: Report outcome
 ```
 
-Dashed arrows show the proposed automated decision loop. The solid handoffs are existing coordination mechanisms, not evidence that an autonomous lead is running. Claiming a lead role does not start a model or create this loop.
+The sequence shows a proposed automated decision loop using existing coordination mechanisms. The lead’s planning, delegation, follow-up and synthesis are proposed, not evidence that an autonomous lead is running. Dashed arrows indicate responses or notifications, not implementation status. Claiming a lead role does not start a model or create this loop.
 
 | Podster enforces | A person or external lead decides |
 | --- | --- |

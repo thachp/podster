@@ -1084,6 +1084,8 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 
 **Owed, with the PR that adds it: a browser job in CI for the content Worker, covering all three engines.** Until then the report is a local run on one machine, dated, at a named commit.
 
+**A follow-up, 2026-11-13, from that PR's review.** The run now fails unless every installed browser ran and unless each thing the sandbox buys held in each: the `null` origin, storage refused, no cookie read or written by a sibling, no cookie on any request, no `Set-Cookie` reaching the browser, and the control showing the opposite. What an ordinary app can do stays recorded and unasserted. It cleans up when stopped by a signal, tests only the Worker it started, on a port chosen at the start, and waits on the page in place of fixed times, except for one named wait where nothing happening has no event. The report was rerun at the commit it names.
+
 **Side by side.** After step 2: steps 3, 4(a) and 10(a). Step 4(b) after 4(a). After steps 2 and 4: steps 8 and 9. Steps 5, 6 and 7 follow in that order.
 
 **What doesn't wait for unfinished M5 behaviour:** step 1; and, once step 2 has merged, step 4, exercised with a test app a script uploads; step 8; step 4(a)'s suspension; and step 10(a). Step 2 waits only for M5's contract and migration PRs to merge. Steps 3, 5, 6, 7 and 10(b) each wait for the M5 step named.

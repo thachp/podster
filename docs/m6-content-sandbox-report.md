@@ -6,7 +6,9 @@
 
 ## What was run
 
-- **A local run, on one machine, on 2026-11-12** (07:23 UTC on the 13th), at commit `4143d04103635a916f9156068be820f91df5b6da`. The raw results are in [`m6-content-sandbox-run-2026-11-12.json`](m6-content-sandbox-run-2026-11-12.json). The script is [`e2e/content-sandbox.mjs`](../e2e/content-sandbox.mjs).
+- **A local run, on one machine, on 2026-11-13** (08:10 UTC), at commit `a53062c53d8835248168c4ed043b20a57842c644`. The raw results are in [`m6-content-sandbox-run-2026-11-13.json`](m6-content-sandbox-run-2026-11-13.json). The script is [`e2e/content-sandbox.mjs`](../e2e/content-sandbox.mjs).
+  - **The commits after that one, in the pull request that carries this report, change this report, that file and the plan, and nothing that runs.**
+  - *This replaces a first run of 2026-11-12 at `4143d04`, whose report was merged at a later commit without saying what lay between. Between that run and this one the script changed: it now fails when the sandbox doesn't hold, waits on the page and not on time, and tests only the Worker it started. Every row below came out the same in both runs.*
 - **The Worker:** the content Worker's real handler, in the real Workers runtime, under `wrangler dev` 4.157.0, from a test-only entry that holds two apps' serve entries and one small static app in memory.
 - **The browsers:** the ones Playwright 1.64.1 already had installed. Chromium 156.0.8078.4, Firefox 157.0 and WebKit 27.2, all headless. None was downloaded for this.
 - **A control:** each browser was shown the same app a second time with the policy header taken off by the test harness, never by the Worker. That tells what the sandbox stops from what this harness couldn't have shown anyway.
@@ -18,7 +20,23 @@
 - **`wrangler dev` was local only:** `--local`, no `--remote`, no tunnel, listening on `127.0.0.1` alone.
 - **No account was touched.** `wrangler` ran with no `CLOUDFLARE_` variable and an empty home folder, so it had no login and no token to call with, and what it printed mentions no login and no account. Its traffic wasn't captured, so this rests on it having nothing to call with.
 - **One machine, headless browsers, one small app.** Branded and mobile browsers weren't run. A browser job in CI covering all three engines is owed.
-- **"Nothing happened" has no event to wait for.** After each action the run waits for a marker request from the page and then 400 milliseconds more.
+- **Time is used in one place.** When an action is stopped, nothing follows it, and "nothing happened" has no event to wait for. After each of the four actions, the popup, the dialog, the download and the form, the run waits for a line the page writes the moment the action is taken, or for the browser doing something, whichever is first. It then gives the browser 1.5 seconds to do anything more. A browser slower than that to start a download or a navigation would be recorded, wrongly, as not having started one. Everything else waits on an event.
+- **The run tests only the Worker it started.** The port is one that was free when the run began, and the Worker must answer with a mark made for that run before anything is asked of it.
+
+## What the run asserts, and what it only records
+
+**The run fails unless every browser that is installed launched and ran, and unless each of these held in each of them.** They are what the sandbox is for:
+
+- under the policy the page's origin is `null`;
+- cookies, `localStorage`, `sessionStorage`, IndexedDB, the Cache API and service-worker registration are each refused;
+- a sibling host can't read a cookie or write one for the domain;
+- no request carries a cookie;
+- an app's `Set-Cookie` never reaches the browser;
+- and, in the control, the opposite: storage works and the sibling reads the first app's cookie. Without that, the rows above would also hold for a harness that could see nothing.
+
+All held, in all three. The assertions have a test of their own, against the recorded results, that takes each away in turn and sees the run fail: `e2e/content-sandbox-selftest.mjs`.
+
+**Everything in the next table is recorded, never asserted.** It is what an ordinary app can do, and it is the owner's to weigh.
 
 ## Under the policy: what an ordinary static app needs
 
@@ -59,8 +77,8 @@ So an app that remembers anything in the browser, a preference, a draft, a login
 
 This is what the sandbox is for.
 
-- **Under the policy,** one app's script couldn't set a cookie for the whole content domain, and a second app on a sibling host couldn't read or write any cookie. The browser's cookie jar was empty at the end, and none of the browser's requests carried a cookie: 0 of 21, 21 and 22.
-- **With the policy taken off,** the first app set a cookie for the whole domain, and the sibling app read it, in all three browsers. In Chromium and Firefox the browser then sent cookies on its requests, 16 and 14 of them. *In WebKit no intercepted request showed one; the sibling's script still read the cookie.*
+- **Under the policy,** one app's script couldn't set a cookie for the whole content domain, and a second app on a sibling host couldn't read or write any cookie. The browser's cookie jar was empty at the end, and none of the browser's requests carried a cookie: 0 of 18 in each browser.
+- **With the policy taken off,** the first app set a cookie for the whole domain, and the sibling app read it, in all three browsers. In Chromium and Firefox the browser then sent cookies on its requests, 12 and 11 of them. *In WebKit no intercepted request showed one; the sibling's script still read the cookie.*
 - **A `Set-Cookie` an app sends never reaches the browser,** with or without the policy: the Worker drops it. The test app sends one on every answer.
 
 ## What the handler did in the real Workers runtime

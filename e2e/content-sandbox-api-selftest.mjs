@@ -34,7 +34,25 @@ const broken = (change, says) => {
 broken((pass) => { pass.pages.own.page.origin = `https://appa.${DOMAIN}`; }, "has the origin `null`");
 broken((pass) => { pass.pages.own.api.origins = ["null", `https://appa.${DOMAIN}`]; }, "with `Origin: null`");
 broken((pass) => { pass.pages.own.api.origins = []; }, "with `Origin: null`");
-for (const key of Object.keys(run.pages)) broken((pass) => { pass.pages[key].api.withACookie = 1; }, `no request from ${key} carried a cookie`);
+for (const key of ["own", "boxedElsewhere", "plainElsewhere"]) {
+  broken((pass) => { pass.pages[key].api.withACookie = 1; }, `no request from ${key} carried one`);
+  // A server that never offered a cookie proves nothing about the browser.
+  broken((pass) => { pass.pages[key].api.answersThatSetACookie = 0; }, `the API set a cookie on its answers to ${key}`);
+}
+broken((pass) => { pass.withoutThePolicy.pages.own.api.withACookie = 0; }, "in the control, on its own origin, requests carry the API's cookie");
+// A step that didn't finish, a page that never loaded, and a failure of the run's own servers each fail the run.
+broken((pass) => { pass.stepsThatDidNotFinish = ["sibling: timeout"]; }, "every step finished");
+broken((pass) => { pass.withoutThePolicy.stepsThatDidNotFinish = ["own: timeout"]; }, "every step of the control finished");
+broken((pass) => { pass.pages.sibling.page = null; }, "sibling loaded and gave its results");
+broken((pass) => { pass.pages.plainElsewhere.api.harnessErrors = 1; }, "the run's own servers answered every request from plainElsewhere");
+// "Can't read" must be the browser's refusal: the read reached the API, the answer was handed over, the page got an
+// error, and the same read works elsewhere. Each taken away fails.
+for (const key of ["own", "boxedElsewhere", "plainElsewhere"]) {
+  broken((pass) => { pass.pages[key].api.byMode.none.get = 0; }, `from ${key}, with no cross-origin header, both reads reached the API`);
+  broken((pass) => { pass.pages[key].api.handedToTheBrowser.none.readsAnswered200 = 0; }, `from ${key}, with no cross-origin header, both reads reached the API`);
+  broken((pass) => { pass.pages[key].page.calls.none.get = { ok: false, error: "AbortError" }; }, `from ${key}, with no cross-origin header, the page can't read`);
+  broken((pass) => { pass.pages[key].page.calls.star.get = { ok: false, error: "TypeError" }; }, `from ${key}, the same read works where the API allows any origin`);
+}
 for (const mode of NO_PREFLIGHT_ANSWER) {
   for (const call of PREFLIGHTED) broken((pass) => { pass.pages.boxedElsewhere.api.byMode[mode][call] = 1; }, `with no preflight answer (${mode}), no JSON write reached the API`);
 }

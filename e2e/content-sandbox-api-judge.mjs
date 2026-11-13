@@ -12,6 +12,8 @@ export const MODES = ["none", "star", "null", "star-nopre", "null-nopre"];
 export const NO_PREFLIGHT_ANSWER = ["none", "star-nopre", "null-nopre"];
 /** The calls a page makes that a browser asks leave for first: a JSON body is not a simple request. */
 export const PREFLIGHTED = ["postJson", "putJson", "deleteJson"];
+/** The four pages a pass opens. */
+export const PAGE_KEYS = ["own", "sibling", "boxedElsewhere", "plainElsewhere"];
 /** Every call a page makes, in the order it makes them. */
 export const CALLS = ["get", "postJson", "putJson", "postText", "getAfter", "deleteJson"];
 
@@ -23,8 +25,17 @@ export function judge(name, pass) {
   // The page is sandboxed, and the API saw it as such.
   expect(own.page?.origin === "null", "under the policy the app's own page has the origin `null`");
   expect(Array.isArray(own.api?.origins) && own.api.origins.length > 0 && own.api.origins.every((origin) => origin === "null"), "every request from the app's own page reached the API with `Origin: null`");
-  // No page's request carried a cookie: there is nothing for a request to ride on.
-  for (const [key, shown] of Object.entries(pass.pages ?? {})) expect(shown.api?.withACookie === 0, `no request from ${key} carried a cookie`);
+  // Every step finished and every page gave its results: a page that never loaded shows nothing, and passes nothing.
+  expect(Array.isArray(pass.stepsThatDidNotFinish) && pass.stepsThatDidNotFinish.length === 0, "every step finished");
+  for (const key of PAGE_KEYS) expect(pass.pages?.[key]?.page?.calls !== undefined, `${key} loaded and gave its results`);
+  // The run's own servers never failed: a failure of the harness is never taken for a browser's refusal.
+  for (const [key, shown] of Object.entries(pass.pages ?? {})) expect(shown.api?.harnessErrors === 0, `the run's own servers answered every request from ${key}`);
+  // The API offers a cookie on every answer, and no page's request ever carried one. The sibling's page sends the
+  // API nothing at all, so there it says nothing, and isn't asked.
+  for (const key of ["own", "boxedElsewhere", "plainElsewhere"]) {
+    const api = pass.pages?.[key]?.api ?? {};
+    expect(api.answersThatSetACookie > 0 && api.withACookie === 0, `the API set a cookie on its answers to ${key}, and no request from ${key} carried one`);
+  }
   // With no answer to its preflight, a JSON write never reaches the API, from any page.
   for (const [key, shown] of Object.entries(pass.pages ?? {})) {
     for (const mode of NO_PREFLIGHT_ANSWER) {
@@ -32,10 +43,16 @@ export function judge(name, pass) {
       expect(got.postJson === 0 && got.putJson === 0 && got.deleteJson === 0, `from ${key}, with no preflight answer (${mode}), no JSON write reached the API`);
     }
   }
-  // With no `Access-Control-Allow-Origin` at all, a page on another origin reads nothing back.
+  // With no `Access-Control-Allow-Origin` at all, a page on another origin reads nothing back, **and that is the
+  // browser's refusal:** both reads reached the API, both answers were handed to the browser with status 200, and
+  // the page was still given an error. The same page reads the same API where the header allows it, so the path works.
   for (const key of ["own", "boxedElsewhere", "plainElsewhere"]) {
-    const calls = pass.pages?.[key]?.page?.calls?.none ?? {};
-    expect(calls.get?.ok === false && calls.getAfter?.ok === false, `from ${key}, with no cross-origin header, the page can't read the API's answer`);
+    const shown = pass.pages?.[key] ?? {};
+    const calls = shown.page?.calls?.none ?? {};
+    const refused = (call) => call?.ok === false && call.error === "TypeError";
+    expect(shown.api?.byMode?.none?.get === 2 && shown.api?.handedToTheBrowser?.none?.readsAnswered200 === 2, `from ${key}, with no cross-origin header, both reads reached the API and both answers were handed to the browser`);
+    expect(refused(calls.get) && refused(calls.getAfter), `from ${key}, with no cross-origin header, the page can't read the API's answer`);
+    expect(shown.page?.calls?.star?.get?.ok === true, `from ${key}, the same read works where the API allows any origin`);
   }
   // The harness carries real preflights: where one is answered, the API received it.
   expect(own.api?.byMode?.star?.preflights > 0, "the API received the browser's own preflight from the app's page");
@@ -43,6 +60,9 @@ export function judge(name, pass) {
   const control = pass.withoutThePolicy ?? {};
   const controlOwn = control.pages?.own ?? {};
   expect(control.shown === true, "the control ran");
+  expect(Array.isArray(control.stepsThatDidNotFinish) && control.stepsThatDidNotFinish.length === 0, "every step of the control finished");
+  // On its own origin the browser keeps the API's cookie and sends it: so "no request carried one" means something.
+  expect(controlOwn.api?.withACookie > 0, "in the control, on its own origin, requests carry the API's cookie");
   expect(controlOwn.page?.origin === `https://appa.${DOMAIN}`, "in the control the app's page has its own origin");
   for (const mode of MODES) {
     for (const call of CALLS) expect(controlOwn.page?.calls?.[mode]?.[call]?.ok === true, `in the control, on its own origin, ${call} works however the API answers (${mode})`);

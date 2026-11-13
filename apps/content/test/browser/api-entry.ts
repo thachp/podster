@@ -13,7 +13,11 @@
 //   header. They are what "any other page" means.
 //
 // Every request the API receives is written to a log the run reads: the method, what the `Origin` header said, the
-// body's type, whether a cookie came with it, and whether it was a preflight.
+// body's type, whether a cookie came with it, whether it was a preflight, and whether the answer set a cookie.
+//
+// **The API sets a cookie on every answer that isn't a preflight's,** one a browser would send back from any site if
+// it kept it. So "no request carried a cookie" is a statement about the browser and not about a server that never
+// offered one: on its own origin, in the control, the browser keeps it and sends it.
 import { handle, type StopMemory } from "../../src/handle";
 
 /** A domain under `.example`, which nobody can hold. The apps' hosts are under it. */
@@ -41,7 +45,9 @@ type Mode = (typeof MODES)[number];
 const allowOrigin = (mode: Mode): string | null => (mode === "none" ? null : mode.startsWith("star") ? "*" : "null");
 const answersPreflight = (mode: Mode) => mode === "star" || mode === "null";
 
-type Seen = { mode: string; method: string; origin: string | null; contentType: string | null; cookie: boolean; preflight: boolean };
+type Seen = { mode: string; method: string; origin: string | null; contentType: string | null; cookie: boolean; preflight: boolean; setCookie: boolean };
+/** The cookie the API offers: for its own host, sent from any site, over TLS. */
+const COOKIE = "api-probe=1; Path=/; Secure; SameSite=None";
 const log: Seen[] = [];
 const lists = new Map<string, string[]>();
 
@@ -49,7 +55,7 @@ async function api(request: Request, url: URL): Promise<Response> {
   const mode = url.pathname.split("/")[2] as Mode;
   if (!MODES.includes(mode)) return new Response("no such way of answering\n", { status: 404 });
   const preflight = request.method === "OPTIONS" && request.headers.has("access-control-request-method");
-  log.push({ mode, method: request.method, origin: request.headers.get("origin"), contentType: request.headers.get("content-type"), cookie: request.headers.has("cookie"), preflight });
+  log.push({ mode, method: request.method, origin: request.headers.get("origin"), contentType: request.headers.get("content-type"), cookie: request.headers.has("cookie"), preflight, setCookie: request.method !== "OPTIONS" });
   const headers = new Headers({ "content-type": "application/json", "cache-control": "no-store" });
   const allow = allowOrigin(mode);
   if (allow !== null) headers.set("access-control-allow-origin", allow);
@@ -60,6 +66,7 @@ async function api(request: Request, url: URL): Promise<Response> {
     headers.delete("content-type");
     return new Response(null, { status: 204, headers });
   }
+  headers.set("set-cookie", COOKIE);
   const list = lists.get(mode) ?? [];
   lists.set(mode, list);
   // A body is taken as JSON `{ "text": … }` when it parses as that, and otherwise as the text itself.

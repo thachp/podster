@@ -86,7 +86,9 @@ async function seen() {
   if (answer.headers.get(RUN_ID) !== runId) throw new Error("the Worker on this port isn't this run's");
   return answer.json();
 }
-const reset = () => fetch(`${local}/__reset`);
+/** What this run's own TLS servers handed back to the browser since the last reset: each answer's address and status. */
+const delivered = [];
+const reset = async () => { delivered.length = 0; await fetch(`${local}/__reset`); };
 
 // ---- a certificate for this run alone, and the two loopback servers the browser goes through ----
 execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(scratch, "run.pem"), "-out", join(scratch, "run.crt"), "-days", "1", "-subj", `/CN=${DOMAIN}`], { env: childEnv({ HOME: scratch }), stdio: "ignore" });
@@ -115,7 +117,10 @@ function tlsServer(control) {
       const bytes = Buffer.from(await answer.arrayBuffer());
       response.writeHead(answer.status, { ...answered, "content-length": String(bytes.length) });
       response.end(request.method === "HEAD" ? undefined : bytes);
+      delivered.push({ method: request.method, host: request.headers.host, path: request.url, status: answer.status });
     } catch (error) {
+      // The run's own failure, never the browser's refusal. It is counted, and any at all fails the run.
+      delivered.push({ method: request.method, host: request.headers.host, path: request.url, status: 502, harness: true });
       response.writeHead(502, { "content-type": "text/plain" });
       response.end(`the run couldn't ask the Worker: ${String(error?.message ?? error)}\n`);
     }
@@ -161,7 +166,19 @@ function received(record) {
       listAfter: record.lists[mode] ?? [],
     };
   }
-  return { byMode, origins: [...new Set(record.log.map((entry) => entry.origin))], withACookie: record.log.filter((entry) => entry.cookie).length, requests: record.log.length };
+  // What the run's own TLS server handed the browser for the API's reads: an answer the browser was given, with its
+  // status, is not a network error, whatever the page was then allowed to see of it.
+  const handed = {};
+  for (const mode of MODES) handed[mode] = { readsAnswered200: delivered.filter((answer) => answer.method === "GET" && answer.path === `/api/${mode}/items` && answer.status === 200).length };
+  return {
+    byMode,
+    origins: [...new Set(record.log.map((entry) => entry.origin))],
+    withACookie: record.log.filter((entry) => entry.cookie).length,
+    answersThatSetACookie: record.log.filter((entry) => entry.setCookie).length,
+    requests: record.log.length,
+    handedToTheBrowser: handed,
+    harnessErrors: delivered.filter((answer) => answer.harness).length,
+  };
 }
 
 // ---- one browser, with the policy or, as the control, without it ----

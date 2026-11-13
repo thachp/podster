@@ -1,13 +1,13 @@
 {
  "about": [
   "The findings of e2e/test-timing-check.mjs that stay for now, all of them present when the check was added at 86db135. Rule 1 of docs/review-standards.md (on its branch, PR 339).",
-  "Reviewed like code. An entry matches by file, rule and the exact text of its line, and must match exactly `count` findings (1 if absent). A new copy of an allowed line, an entry whose line changed, or one with no reason, no category from below, or no `owed` fails the check.",
-  "`owed: true` is a debt with what it needs written in its reason; `owed: false` is right as it is. Every run prints the number owed.",
+  "Reviewed like code. An entry matches by file, rule, where (the enclosing test's title path, or the enclosing function's name) and the exact text of its line, and must match exactly `count` findings (1 if absent). A new copy of an allowed line, an entry re-pointed at the same text elsewhere, an entry whose line changed, or one with no reason, no where, no category from below, or no `owed` fails the check.",
+  "`owed: true` is a debt, with what it needs written in its reason; `owed: false` is right as it is. Every run prints the number owed.",
   "`lines_at_86db135` is for a reader: the check doesn't use it, and lines move.",
   "The fixes land one category per PR, removing entries as they go: R (rooms), then I and J (margins), then B's four API cases and E."
  ],
  "categories": {
-  "A": "sleep: a bounded poll for the state itself (right as it is)",
+  "A": "sleep: a bounded poll for the state itself (right as it is, unless its reason says owed)",
   "B": "sleep: a wait, then an assertion that nothing happened",
   "C": "sleep: so a streaming request is in flight before the test acts",
   "D": "sleep: a few milliseconds so the clock moves on",
@@ -17,7 +17,7 @@
   "H": "sleep: a stand-in's pacing in the safe direction (right as it is)",
   "I": "margin: a lower bound read after the action",
   "J": "margin: an upper bound read before the action",
-  "K": "margin: a false positive of the check (right as it is)",
+  "K": "margin: a fixed bound after the action, safe only by the order of a stamp and a reading",
   "L": "margin: elapsed wall-clock time asserted",
   "R": "unquieted: an API spec that makes rooms and quiets none"
  },
@@ -41,17 +41,19 @@
   {
    "file": "apps/api/test/a2a-outbound.spec.ts",
    "rule": "sleep",
+   "where": "an offer to an agent > goes on the A2A queue holding IDs only",
    "category": "A",
-   "owed": false,
+   "owed": true,
    "lines_at_86db135": [
     117
    ],
    "code": "if (!job) await new Promise((done) => setTimeout(done, 50));",
-   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure. Owed: it waits up to 5 s (100 tries, 50 ms apart) for the queue send that follows the offer asynchronously, and a loaded runner can take longer. What would remove the wait: hold the send at the stand-in's queue hook and await its arrival there."
   },
   {
    "file": "apps/api/test/a2a-readback.spec.ts",
    "rule": "sleep",
+   "where": "reading starts > from the room's alarm once due, with IDs only, and backs off from a minute to an hour",
    "category": "A",
    "owed": false,
    "lines_at_86db135": [
@@ -63,6 +65,7 @@
   {
    "file": "apps/api/test/claims.spec.ts",
    "rule": "sleep",
+   "where": "function eventually",
    "category": "A",
    "owed": false,
    "lines_at_86db135": [
@@ -74,6 +77,7 @@
   {
    "file": "apps/api/test/merge-task.spec.ts",
    "rule": "sleep",
+   "where": "function minting",
    "category": "A",
    "owed": false,
    "lines_at_86db135": [
@@ -85,6 +89,7 @@
   {
    "file": "apps/api/test/provider-deliveries.spec.ts",
    "rule": "sleep",
+   "where": "function indexed",
    "category": "A",
    "owed": false,
    "lines_at_86db135": [
@@ -96,6 +101,7 @@
   {
    "file": "apps/api/test/provisioning.spec.ts",
    "rule": "sleep",
+   "where": "function known",
    "category": "A",
    "owed": false,
    "lines_at_86db135": [
@@ -107,6 +113,7 @@
   {
    "file": "apps/api/test/provisioning.spec.ts",
    "rule": "sleep",
+   "where": "function reached",
    "category": "A",
    "owed": false,
    "lines_at_86db135": [
@@ -118,6 +125,7 @@
   {
    "file": "apps/api/test/provisioning.spec.ts",
    "rule": "sleep",
+   "where": "function settled",
    "category": "A",
    "owed": false,
    "lines_at_86db135": [
@@ -129,6 +137,7 @@
   {
    "file": "apps/api/test/provisioning.spec.ts",
    "rule": "sleep",
+   "where": "the provisioning job > creates one repository in the configured organization, sets it up, reads it back and links it by GitHub's ID (M5-01, M5-02)",
    "category": "A",
    "owed": false,
    "lines_at_86db135": [
@@ -140,6 +149,7 @@
   {
    "file": "apps/api/test/provisioning.spec.ts",
    "rule": "sleep",
+   "where": "the provisioning job > rechecks authority before it calls GitHub: the delegation, the room and the person who asked",
    "category": "A",
    "owed": false,
    "lines_at_86db135": [
@@ -151,6 +161,7 @@
   {
    "file": "apps/api/test/provisioning.spec.ts",
    "rule": "sleep",
+   "where": "the provisioning job > takes a routing row from a room that says the repository isn't its own, and leaves one whose room says it is",
    "category": "A",
    "owed": false,
    "lines_at_86db135": [
@@ -162,6 +173,7 @@
   {
    "file": "apps/api/test/provisioning.spec.ts",
    "rule": "sleep",
+   "where": "the provisioning job > takes a routing row from a room that says the repository isn't its own, and leaves one whose room says it is",
    "category": "A",
    "owed": false,
    "lines_at_86db135": [
@@ -173,6 +185,7 @@
   {
    "file": "apps/api/test/release-commit.spec.ts",
    "rule": "sleep",
+   "where": "function heldBetween",
    "category": "A",
    "owed": false,
    "lines_at_86db135": [
@@ -184,6 +197,7 @@
   {
    "file": "apps/api/test/repo-access.spec.ts",
    "rule": "sleep",
+   "where": "function minting",
    "category": "A",
    "owed": false,
    "lines_at_86db135": [
@@ -195,6 +209,7 @@
   {
    "file": "apps/api/test/repo-access.spec.ts",
    "rule": "sleep",
+   "where": "function eventually",
    "category": "A",
    "owed": false,
    "lines_at_86db135": [
@@ -206,6 +221,7 @@
   {
    "file": "apps/api/test/repo-access.spec.ts",
    "rule": "sleep",
+   "where": "the review's findings (M5 step 6) > wakes at a grant's expiry when it's sooner than its token's, and revokes the token then (M1)",
    "category": "A",
    "owed": false,
    "lines_at_86db135": [
@@ -217,6 +233,7 @@
   {
    "file": "apps/api/test/task-change.spec.ts",
    "rule": "sleep",
+   "where": "function minting",
    "category": "A",
    "owed": false,
    "lines_at_86db135": [
@@ -228,44 +245,69 @@
   {
    "file": "apps/gateway/test/gateway.spec.ts",
    "rule": "sleep",
+   "where": "kernel journey across two organizations",
    "category": "A",
-   "owed": false,
+   "owed": true,
    "lines_at_86db135": [
     2384
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 50));",
-   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure. Owed: waitForEvent waits up to 5 s (100 tries, 50 ms apart) for the inbox delivery, which is asynchronous, and a loaded runner can take longer. What would remove the wait: a signal from the delivery itself, or running the room's delivery pass from the test, which the gateway test can't reach today."
   },
   {
    "file": "apps/gateway/test/organizations.spec.ts",
    "rule": "sleep",
+   "where": "leaving an organization",
+   "category": "A",
+   "owed": true,
+   "lines_at_86db135": [
+    401
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 100));",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure. Owed: eventually waits up to 4 s (40 tries, 100 ms apart) for the API to apply a departure, which runs from the room's alarm after the removal answers, and a loaded runner can take longer. What would remove the wait: a signal that the departure was applied, or running the room's alarm from the test."
+  },
+  {
+   "file": "apps/gateway/test/organizations.spec.ts",
+   "rule": "sleep",
+   "where": "a departure reaching the person's rooms",
    "category": "A",
    "owed": false,
    "lines_at_86db135": [
-    401,
     635
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 100));",
-   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure.",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/api/test/kernel.spec.ts",
+   "rule": "sleep",
+   "where": "a person leaving the room's organization > takes a departed owner out of the room's work, refuses them even after rejoining, and records it once",
+   "category": "B",
+   "owed": true,
+   "lines_at_86db135": [
+    2831,
+    2836
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 300));",
+   "reason": "A sleep, then an assertion that nothing happened: the sleep is the pass condition, so a slow runner can pass it with the bug present. API: fix in the category-B PR by running the delivery pass (alarmPass) and then asserting nothing arrived.",
    "count": 2
   },
   {
    "file": "apps/api/test/kernel.spec.ts",
    "rule": "sleep",
+   "where": "revoking a whole organization > gives each agent one removal notice and nothing after it",
    "category": "B",
    "owed": true,
    "lines_at_86db135": [
-    2831,
-    2836,
     3505
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 300));",
-   "reason": "A sleep, then an assertion that nothing happened: the sleep is the pass condition, so a slow runner can pass it with the bug present. API: fix in the category-B PR by running the delivery pass (alarmPass) and then asserting nothing arrived.",
-   "count": 3
+   "reason": "A sleep, then an assertion that nothing happened: the sleep is the pass condition, so a slow runner can pass it with the bug present. API: fix in the category-B PR by running the delivery pass (alarmPass) and then asserting nothing arrived."
   },
   {
    "file": "apps/api/test/scanning.spec.ts",
    "rule": "sleep",
+   "where": "each room's share of the scan queue > sends a queued scan once more after 30 minutes with no verdict, with its first time, never a third time, and forgets it once settled",
    "category": "B",
    "owed": true,
    "lines_at_86db135": [
@@ -277,6 +319,7 @@
   {
    "file": "apps/gateway/test/gateway.spec.ts",
    "rule": "sleep",
+   "where": "kernel journey across two organizations > revoking an organization leaves its agent one ID-only notice, and its next read and action fail",
    "category": "B",
    "owed": true,
    "lines_at_86db135": [
@@ -288,21 +331,45 @@
   {
    "file": "apps/gateway/test/organizations.spec.ts",
    "rule": "sleep",
+   "where": "leaving an organization > recovers a room the first departure missed, by removing the rejoined owner again",
    "category": "B",
    "owed": true,
    "lines_at_86db135": [
-    508,
+    508
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 500));",
+   "reason": "A sleep, then an assertion that nothing happened: the sleep is the pass condition, so a slow runner can pass it with the bug present. Gateway: stays owed; needs a signal that the departure or delivery has run in the API, which the gateway test can't call."
+  },
+  {
+   "file": "apps/gateway/test/organizations.spec.ts",
+   "rule": "sleep",
+   "where": "a departure reaching the person's rooms > stops new events reaching their inbox",
+   "category": "B",
+   "owed": true,
+   "lines_at_86db135": [
     674,
-    678,
-    723
+    678
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 500));",
    "reason": "A sleep, then an assertion that nothing happened: the sleep is the pass condition, so a slow runner can pass it with the bug present. Gateway: stays owed; needs a signal that the departure or delivery has run in the API, which the gateway test can't call.",
-   "count": 4
+   "count": 2
+  },
+  {
+   "file": "apps/gateway/test/organizations.spec.ts",
+   "rule": "sleep",
+   "where": "a departure reaching the person's rooms > doesn't take away a role they've since been given again",
+   "category": "B",
+   "owed": true,
+   "lines_at_86db135": [
+    723
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 500));",
+   "reason": "A sleep, then an assertion that nothing happened: the sleep is the pass condition, so a slow runner can pass it with the bug present. Gateway: stays owed; needs a signal that the departure or delivery has run in the API, which the gateway test can't call."
   },
   {
    "file": "apps/gateway/test/uploads.spec.ts",
    "rule": "sleep",
+   "where": "the upload path > stops reading at the file limit, however much a sender keeps sending",
    "category": "B",
    "owed": true,
    "lines_at_86db135": [
@@ -314,6 +381,7 @@
   {
    "file": "apps/api/test/a2a-endpoint.spec.ts",
    "rule": "sleep",
+   "where": "a disconnect while a set's body is still arriving",
    "category": "C",
    "owed": true,
    "lines_at_86db135": [
@@ -325,6 +393,7 @@
   {
    "file": "apps/api/test/participation.spec.ts",
    "rule": "sleep",
+   "where": "a disconnect while a set's body is still arriving",
    "category": "C",
    "owed": true,
    "lines_at_86db135": [
@@ -336,6 +405,7 @@
   {
    "file": "apps/api/test/kernel.spec.ts",
    "rule": "sleep",
+   "where": "revoking a whole organization > keeps it out through old invitations and owner consent, until the room invites it again",
    "category": "D",
    "owed": true,
    "lines_at_86db135": [
@@ -347,6 +417,7 @@
   {
    "file": "apps/gateway/test/gateway.spec.ts",
    "rule": "sleep",
+   "where": "hosts with more than one agent > only one person can take a host, even at the same moment",
    "category": "D",
    "owed": true,
    "lines_at_86db135": [
@@ -358,19 +429,31 @@
   {
    "file": "apps/gateway/test/gateway.spec.ts",
    "rule": "sleep",
+   "where": "sign-in and claim pages > doesn't bring an Agent Auth credential back when its admin rejoins, and a new one takes over",
    "category": "D",
    "owed": true,
    "lines_at_86db135": [
-    1872,
+    1872
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 2));",
+   "reason": "A sleep of a few milliseconds so Date.now() moves on before the next step. Owed: needs a clock passed in (the test-build clock table), so the step's time is set, not waited for."
+  },
+  {
+   "file": "apps/gateway/test/gateway.spec.ts",
+   "rule": "sleep",
+   "where": "sign-in and claim pages > keeps an MCP credential off for a rejoined member, and renews it when they consent again as an admin",
+   "category": "D",
+   "owed": true,
+   "lines_at_86db135": [
     1903
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 2));",
-   "reason": "A sleep of a few milliseconds so Date.now() moves on before the next step. Owed: needs a clock passed in (the test-build clock table), so the step's time is set, not waited for.",
-   "count": 2
+   "reason": "A sleep of a few milliseconds so Date.now() moves on before the next step. Owed: needs a clock passed in (the test-build clock table), so the step's time is set, not waited for."
   },
   {
    "file": "apps/gateway/test/organizations.spec.ts",
    "rule": "sleep",
+   "where": "a departure reaching the person's rooms > doesn't take away a role they've since been given again",
    "category": "D",
    "owed": true,
    "lines_at_86db135": [
@@ -382,6 +465,7 @@
   {
    "file": "apps/api/test/provisioning.spec.ts",
    "rule": "sleep",
+   "where": "the provisioning job > leaves a request it can't even end alone for a while, keeps that wait in the room, and never sends the creation call again",
    "category": "E",
    "owed": true,
    "lines_at_86db135": [
@@ -393,6 +477,7 @@
   {
    "file": "apps/api/test/scanning.spec.ts",
    "rule": "sleep",
+   "where": "each room's share of the scan queue > starts its rest from 5 seconds again after a clean pass",
    "category": "F",
    "owed": true,
    "lines_at_86db135": [
@@ -404,6 +489,7 @@
   {
    "file": "apps/api/test/a2a-fasta2a.spec.ts",
    "rule": "sleep",
+   "where": "function waitForRun",
    "category": "G",
    "owed": true,
    "lines_at_86db135": [
@@ -415,6 +501,7 @@
   {
    "file": "apps/api/test/uploads.spec.ts",
    "rule": "sleep",
+   "where": "the bytes of an upload > deadlines > gives up on a sender that keeps trickling past the total limit",
    "category": "H",
    "owed": false,
    "lines_at_86db135": [
@@ -426,6 +513,7 @@
   {
    "file": "apps/api/test/held-access.spec.ts",
    "rule": "margin",
+   "where": "a room whose migration fails > sends nothing from the outbox while a removal is held, so the removal can still take back what was queued",
    "category": "I",
    "owed": true,
    "lines_at_86db135": [
@@ -437,6 +525,7 @@
   {
    "file": "apps/api/test/kernel.spec.ts",
    "rule": "margin",
+   "where": "inbox > a failed delivery retries in order, without holding up anyone else",
    "category": "I",
    "owed": true,
    "lines_at_86db135": [
@@ -448,6 +537,7 @@
   {
    "file": "apps/api/test/kernel.spec.ts",
    "rule": "margin",
+   "where": "inbox > if the drain itself fails, it retries after a few seconds rather than in a loop",
    "category": "I",
    "owed": true,
    "lines_at_86db135": [
@@ -459,6 +549,7 @@
   {
    "file": "apps/api/test/kernel.spec.ts",
    "rule": "margin",
+   "where": "inbox > the listing failing doesn't stop delivery, and retries more slowly",
    "category": "I",
    "owed": true,
    "lines_at_86db135": [
@@ -470,6 +561,7 @@
   {
    "file": "apps/api/test/kernel.spec.ts",
    "rule": "margin",
+   "where": "wake > shortening the window applies to a wake already waiting",
    "category": "I",
    "owed": true,
    "lines_at_86db135": [
@@ -481,6 +573,7 @@
   {
    "file": "apps/api/test/merge-task.spec.ts",
    "rule": "margin",
+   "where": "what GitHub answers to the merge > gives up after five passes with a reason, and a person asks again",
    "category": "I",
    "owed": true,
    "lines_at_86db135": [
@@ -492,6 +585,7 @@
   {
    "file": "apps/api/test/merge-task.spec.ts",
    "rule": "margin",
+   "where": "the review's findings (M5 step 7b) > reads GitHub before ending a merge whose call went out, whatever ends it, and records what the call did (M5)",
    "category": "I",
    "owed": true,
    "lines_at_86db135": [
@@ -503,6 +597,7 @@
   {
    "file": "apps/api/test/provider-deliveries.spec.ts",
    "rule": "margin",
+   "where": "a delivery as a nudge > forgets a delivery after seven days",
    "category": "I",
    "owed": true,
    "lines_at_86db135": [
@@ -514,6 +609,7 @@
   {
    "file": "apps/api/test/provisioning.spec.ts",
    "rule": "margin",
+   "where": "the organization's provisioning delegation > is given and taken back by a Podster operator, and nobody else",
    "category": "I",
    "owed": true,
    "lines_at_86db135": [
@@ -525,6 +621,7 @@
   {
    "file": "apps/api/test/provisioning.spec.ts",
    "rule": "margin",
+   "where": "the provisioning job > creates one repository in the configured organization, sets it up, reads it back and links it by GitHub's ID (M5-01, M5-02)",
    "category": "I",
    "owed": true,
    "lines_at_86db135": [
@@ -536,6 +633,7 @@
   {
    "file": "apps/api/test/repo-access.spec.ts",
    "rule": "margin",
+   "where": "the review's findings (M5 step 6) > keeps a lease a Worker never came back from as a record of a token that may be live, for its hour (L5)",
    "category": "I",
    "owed": true,
    "lines_at_86db135": [
@@ -547,6 +645,7 @@
   {
    "file": "apps/api/test/scanning.spec.ts",
    "rule": "margin",
+   "where": "a scan with no verdict > takes the file's scan turn when it arrives, then sets the alarm to send it again, and then to the end of its hour",
    "category": "I",
    "owed": true,
    "lines_at_86db135": [
@@ -558,6 +657,7 @@
   {
    "file": "apps/api/test/task-change.spec.ts",
    "rule": "margin",
+   "where": "the refresh job > stops at the read cap for the repository, and catches up once there's room",
    "category": "I",
    "owed": true,
    "lines_at_86db135": [
@@ -569,19 +669,19 @@
   {
    "file": "apps/api/test/visibility.spec.ts",
    "rule": "margin",
+   "where": "the discovery-index reconcile > writes a lost row again once the check is due, and not before",
    "category": "I",
    "owed": true,
    "lines_at_86db135": [
-    778,
-    865
+    778
    ],
    "code": "expect(await stored(id, NEXT)).toBeGreaterThan(Date.now() + SIX_HOURS - 60_000);",
-   "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before).",
-   "count": 2
+   "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before)."
   },
   {
    "file": "apps/api/test/visibility.spec.ts",
    "rule": "margin",
+   "where": "the discovery-index reconcile > checks a confirmed tombstone weekly, and within 6 hours again once the room publishes",
    "category": "I",
    "owed": true,
    "lines_at_86db135": [
@@ -591,8 +691,21 @@
    "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before)."
   },
   {
+   "file": "apps/api/test/visibility.spec.ts",
+   "rule": "margin",
+   "where": "the discovery-index reconcile > backs off from 5 s, longer after each failure, while D1 fails",
+   "category": "I",
+   "owed": true,
+   "lines_at_86db135": [
+    865
+   ],
+   "code": "expect(await stored(id, NEXT)).toBeGreaterThan(Date.now() + SIX_HOURS - 60_000);",
+   "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before)."
+  },
+  {
    "file": "apps/api/test/scanning.spec.ts",
    "rule": "margin",
+   "where": "each room's share of the scan queue > arms its own alarm for a re-send that failed, and sends it once the rest is over",
    "category": "J",
    "owed": true,
    "lines_at_86db135": [
@@ -604,6 +717,7 @@
   {
    "file": "apps/api/test/scanning.spec.ts",
    "rule": "margin",
+   "where": "each room's share of the scan queue > starts its rest from 5 seconds again after a clean pass",
    "category": "J",
    "owed": true,
    "lines_at_86db135": [
@@ -615,17 +729,19 @@
   {
    "file": "apps/api/test/scanning.spec.ts",
    "rule": "margin",
+   "where": "queueing a scan > sends exactly the agreed message once the room accepts the file, with no name",
    "category": "K",
-   "owed": false,
+   "owed": true,
    "lines_at_86db135": [
     317
    ],
    "code": "expect(jobs[0].queued_at).toBeLessThanOrEqual(after + 5_000);",
-   "reason": "Not a margin: `after` is read after the action, so `<= after + 5_000` only loosens with time. The check treats every named reading as an earlier one and can't tell."
+   "reason": "Owed: `<= after + 5_000` is a fixed bound, not one that loosens with time. It holds only because queued_at is normally stamped before `after` is read, and the 5 s is a margin a late stamp could use up. What would remove it: bracket queued_at between readings taken before and after the action, with no number added."
   },
   {
    "file": "apps/api/test/kernel.spec.ts",
    "rule": "margin",
+   "where": "inbox > a stuck recipient gives way to the timeout, and doesn't hold up the room",
    "category": "L",
    "owed": true,
    "lines_at_86db135": [
@@ -637,6 +753,7 @@
   {
    "file": "apps/api/test/kernel.spec.ts",
    "rule": "margin",
+   "where": "directory cards > gives up on a room that hangs, and keeps every other row and the next page",
    "category": "L",
    "owed": true,
    "lines_at_86db135": [
@@ -648,6 +765,7 @@
   {
    "file": "apps/api/test/task-change.spec.ts",
    "rule": "margin",
+   "where": "the refresh job > stops reading an answer at its bound instead of waiting for the rest (M5 security review F5)",
    "category": "L",
    "owed": true,
    "lines_at_86db135": [
@@ -659,6 +777,7 @@
   {
    "file": "apps/api/test/a2a-fasta2a.spec.ts",
    "rule": "unquieted",
+   "where": "function sentToFasta2a",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -670,6 +789,7 @@
   {
    "file": "apps/api/test/a2a-langgraph.spec.ts",
    "rule": "unquieted",
+   "where": "function sentToLangGraph",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -681,6 +801,7 @@
   {
    "file": "apps/api/test/a2a-outbound.spec.ts",
    "rule": "unquieted",
+   "where": "function newRoom",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -692,6 +813,7 @@
   {
    "file": "apps/api/test/a2a-readback.spec.ts",
    "rule": "unquieted",
+   "where": "function newRoom",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -703,6 +825,7 @@
   {
    "file": "apps/api/test/asset-links.spec.ts",
    "rule": "unquieted",
+   "where": "function room",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -714,6 +837,7 @@
   {
    "file": "apps/api/test/claims.spec.ts",
    "rule": "unquieted",
+   "where": "function publicRoom",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -725,6 +849,7 @@
   {
    "file": "apps/api/test/cursors.spec.ts",
    "rule": "unquieted",
+   "where": "function room",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -736,6 +861,7 @@
   {
    "file": "apps/api/test/downloads.spec.ts",
    "rule": "unquieted",
+   "where": "function room",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -747,6 +873,7 @@
   {
    "file": "apps/api/test/held-access.spec.ts",
    "rule": "unquieted",
+   "where": "function room",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -758,6 +885,7 @@
   {
    "file": "apps/api/test/kernel.spec.ts",
    "rule": "unquieted",
+   "where": "function room",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -769,6 +897,7 @@
   {
    "file": "apps/api/test/m5-events.spec.ts",
    "rule": "unquieted",
+   "where": "function room",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -780,6 +909,7 @@
   {
    "file": "apps/api/test/messages-via.spec.ts",
    "rule": "unquieted",
+   "where": "(module)",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -791,6 +921,7 @@
   {
    "file": "apps/api/test/moderation.spec.ts",
    "rule": "unquieted",
+   "where": "function publicRoom",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -802,6 +933,7 @@
   {
    "file": "apps/api/test/outputs.spec.ts",
    "rule": "unquieted",
+   "where": "function room",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -813,6 +945,7 @@
   {
    "file": "apps/api/test/provider-deliveries.spec.ts",
    "rule": "unquieted",
+   "where": "function room",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -824,6 +957,7 @@
   {
    "file": "apps/api/test/public-a2a.spec.ts",
    "rule": "unquieted",
+   "where": "function publicRoom",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -835,6 +969,7 @@
   {
    "file": "apps/api/test/public.spec.ts",
    "rule": "unquieted",
+   "where": "function room",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -846,6 +981,7 @@
   {
    "file": "apps/api/test/releases.spec.ts",
    "rule": "unquieted",
+   "where": "M6's routes, none of them built > can't be told from a path nobody defined while release is switched off, by anyone",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -857,6 +993,7 @@
   {
    "file": "apps/api/test/removal.spec.ts",
    "rule": "unquieted",
+   "where": "function room",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -868,6 +1005,7 @@
   {
    "file": "apps/api/test/repo-access.spec.ts",
    "rule": "unquieted",
+   "where": "function room",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -879,6 +1017,7 @@
   {
    "file": "apps/api/test/repo-grants.spec.ts",
    "rule": "unquieted",
+   "where": "function room",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -890,6 +1029,7 @@
   {
    "file": "apps/api/test/repositories.spec.ts",
    "rule": "unquieted",
+   "where": "function room",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -901,6 +1041,7 @@
   {
    "file": "apps/api/test/scanning.spec.ts",
    "rule": "unquieted",
+   "where": "function room",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -912,6 +1053,7 @@
   {
    "file": "apps/api/test/submission-files.spec.ts",
    "rule": "unquieted",
+   "where": "function accepted",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -923,6 +1065,7 @@
   {
    "file": "apps/api/test/uploads.spec.ts",
    "rule": "unquieted",
+   "where": "function room",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [
@@ -934,6 +1077,7 @@
   {
    "file": "apps/api/test/visibility.spec.ts",
    "rule": "unquieted",
+   "where": "function room",
    "category": "R",
    "owed": true,
    "lines_at_86db135": [

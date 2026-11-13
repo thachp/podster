@@ -435,6 +435,46 @@ try {
   rmSync(dirname(kept));
   check([openDir, linkedDir, notOurs].every((res) => !res.all.includes(home)), "no refusal names the runner's home");
 
+  // A kept file holding JSON that isn't an object is still a file there: refused before any request.
+  for (const text of ["null", "0", "false"]) {
+    mkdirSync(dirname(kept), { recursive: true, mode: 0o700 });
+    writeFileSync(kept, text, { mode: 0o600 });
+    const odd = phaseRun("before", atBefore);
+    check(odd.status === 2 && odd.requests === 0 && odd.signUps === 0 && readFileSync(kept, "utf8") === text, `a kept file holding ${text} is refused before any request, and left as it is`);
+    removeKept(kept);
+  }
+  // A directory the runner owns but can't write, which passes the mode check, fails the probe write before any request.
+  const root = typeof process.getuid === "function" && process.getuid() === 0;
+  if (!root) {
+    chmodSync(dirname(kept), 0o500);
+    const readOnly = phaseRun("before", atBefore);
+    check(readOnly.status === 2 && readOnly.requests === 0 && readOnly.signUps === 0 && /test write there failed/.test(readOnly.stderr), "a kept directory at 0500 fails the test write before any request");
+    chmodSync(dirname(kept), 0o700);
+  } else check(true, "a kept directory at 0500: not checked as root, which can write it");
+  check(readdirSync(dirname(kept)).length === 0, "the test write leaves nothing behind");
+
+  // Temporary files a killed run left are swept by either phase, after the directory checks; nothing else is.
+  const leftover = (hex) => join(dirname(kept), `.s04.json.${hex}.tmp`);
+  const unrelated = join(dirname(kept), ".s04.json.notours.tmp");
+  for (const [which, commit] of [["before", atBefore], ["after", atAfter]]) {
+    writeFileSync(leftover("0123456789abcdef"), JSON.stringify({ session: "x".repeat(20) }), { mode: 0o600 });
+    writeFileSync(unrelated, "keep", { mode: 0o600 });
+    const swept = phaseRun(which, commit);
+    check(!existsSync(leftover("0123456789abcdef")) && existsSync(unrelated) && /1 temporary file\(s\) a killed run left/.test(swept.stdout), `the ${which === "before" ? "first" : "second"} phase sweeps a leftover temporary file and nothing else`);
+    rmSync(unrelated);
+  }
+  removeKept(kept);
+
+  // The second phase says what happened to a stale file it couldn't delete.
+  if (!root) {
+    writeKept(kept, shifted);
+    chmodSync(dirname(kept), 0o500);
+    const stuck = phaseRun("after", atAfter);
+    chmodSync(dirname(kept), 0o700);
+    check(stuck.status === 2 && /couldn't be deleted: delete ~\/\.podster\/m6-staging\/s04\.json by hand/.test(stuck.stderr) && !/the file was deleted/.test(stuck.stderr) && existsSync(kept), "a stale file the second phase can't delete is reported as not deleted");
+    removeKept(kept);
+  }
+
   // The disconnect in M6-S04a fails once: the agent stays on the clean-up list and is disconnected again.
   const flaky = phaseRun("before", atBefore, { M6_STANDIN_DISCONNECT_FAIL: "1" });
   check(flaky.status === 1 && flaky.disconnects === 2 && flaky.signOuts === 1 && !existsSync(kept) && /disconnected, so its OAuth credential no longer works/.test(flaky.stdout), `a failed disconnect fails M6-S04a, keeps the agent on the clean-up list, which disconnects it, and keeps nothing: exit ${flaky.status}, ${flaky.disconnects} disconnect(s)`);

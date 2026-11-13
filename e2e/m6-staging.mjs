@@ -49,7 +49,7 @@ import {
   ABSENT_ROOM, agentCapabilities, answerShape, CALLERS, differences, expectedAnswer, fillPath, keptFile, KEPT_MARGIN_SECONDS, keptProblem, keptRecord, m6EventTypes, m6Fields, m6Keys, m6Names, m6Operations, mcpErrorProblem, neighbour, operationsProblem, pairProblem, parseArgs, personOnly, PHASE_SIGN_UPS, planFor, runOutcome, scrub,
   secretProblem, SESSION_SECONDS, SIGN_UPS, snake, STAGING, Tally, toolAnswer, toolNotFound, USAGE,
 } from "./m6-staging-lib.mjs";
-import { keptDirectoryProblem, readKept, removeKept, writeKept } from "./m6-staging-kept.mjs";
+import { keptDirectoryProblem, readKept, removeKept, sweepKept, writeKept } from "./m6-staging-kept.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const parsed = parseArgs(process.argv.slice(2), process.env);
@@ -127,19 +127,20 @@ if (phase) {
     console.error(`\nRefused: ${why}.\n${sent}`);
     process.exit(2);
   };
-  // The first phase's file must be writable where it goes, so a directory that would refuse it never costs a sign-up.
-  if (phase === "before") {
-    const problem = keptDirectoryProblem(keptAt);
-    if (problem) refuse(`the kept file couldn't be written: ${problem} (${KEPT_SHOWN})`);
-  }
+  // The first phase proves its file can be written where it goes, with a probe written the same way, so a directory that
+  // would refuse it never costs a sign-up. Either phase first sweeps temporary files a killed run left, which may hold a
+  // session.
+  const prepared = phase === "before" ? keptDirectoryProblem(keptAt) : sweepKept(keptAt);
+  if (prepared.problem) refuse(`the kept file couldn't be ${phase === "before" ? "written" : "read"} safely: ${prepared.problem} (${KEPT_SHOWN})`);
+  if (prepared.swept) console.log(`\n${prepared.swept} temporary file(s) a killed run left beside ${KEPT_SHOWN} were deleted.`);
   const found = readKept(keptAt);
   if (found.problem) refuse(`${found.problem} (${KEPT_SHOWN}). Look at it, and delete it if it isn't needed`);
   const now = Date.now();
   // Asked with a commit no record can name, so the answer is null for a usable file of this script's, the stale
   // refusal for a stale one, and anything else for a file that isn't this script's or is out of shape.
-  const standing = found.record ? keptProblem(found.record, { now, commit: null }) : null;
+  const standing = found.missing ? null : keptProblem(found.record, { now, commit: null });
   const stale = typeof standing === "string" && standing.startsWith("the kept file is stale");
-  if (phase === "before" && found.record) {
+  if (phase === "before" && !found.missing) {
     if (standing && !stale) refuse(`a file is at ${KEPT_SHOWN} that isn't a kept file of this script's (${standing}). Look at it, and delete it if it isn't needed`);
     if (!stale) refuse(`an earlier first phase's kept file is still usable (${KEPT_SHOWN}): run --after-deploy after the deploy, or wait until it's stale`);
     const ended = await endStaleSession(found.record.session);
@@ -150,8 +151,8 @@ if (phase) {
     if (found.missing) refuse(`no kept file at ${KEPT_SHOWN}: run --before-deploy before the deploy first`);
     if (stale) {
       const ended = await endStaleSession(found.record.session);
-      removeKept(keptAt);
-      refuse(`${standing}. ${ended[0].toUpperCase()}${ended.slice(1)}, and the file was deleted; its room is left behind. Run both phases again`, "Only that sign-out was sent to staging.");
+      const deleted = removeKept(keptAt);
+      refuse(`${standing}. ${ended[0].toUpperCase()}${ended.slice(1)}, and ${deleted ? "the file was deleted" : `the file couldn't be deleted: delete ${KEPT_SHOWN} by hand`}; its room is left behind. Run both phases again`, "Only that sign-out was sent to staging.");
     }
     const problem = keptProblem(found.record, { now, commit: options.deployedCommit });
     if (problem) refuse(`${problem} (${KEPT_SHOWN})`);

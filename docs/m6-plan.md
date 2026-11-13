@@ -658,6 +658,8 @@ The architect proposes the gate call, for the owner to review.
 
 ## Build order
 
+> **2026-11-13: the owner has said an app is a real Worker, code included** ([decision 219](spec/PRODUCT.md#decisions-needed)). What that changes in this order, in what is built and in what must be true before `RELEASES` is on, is proposed in [ADR 0010's proposed revision](adr/0010-revision-apps-are-workers.md), which is not accepted. The order below stands as written until it is. The room's half of step 5 doesn't depend on what an app contains.
+
 **Proposed.** Each step is one PR unless it says otherwise. Steps 2 onward wait for step 1's ADR and spikes.
 
 **After the spikes, 2026-11-12: no step moves.** Three gain something, each from [the ADR's revision](adr/0010-release-and-the-content-domain.md#what-the-spikes-changed):

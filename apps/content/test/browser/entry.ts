@@ -20,6 +20,8 @@ const ENTRIES: Record<string, string> = {
 const ASKED = "x-content-browser-run-url";
 
 const stop: StopMemory = { read: null };
+/** How many of the app's answers, as the Worker received them, carried a `Set-Cookie`. The run asks for it. */
+let appAnswersWithSetCookie = 0;
 
 /** One app's answer, as a release's static files would answer, with two headers no visitor should ever see. */
 function serve(script: string, request: Request): Response {
@@ -33,17 +35,33 @@ function serve(script: string, request: Request): Response {
 }
 
 export default {
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env: { BROWSER_RUN_ID?: unknown }): Promise<Response> {
     const asked = request.headers.get(ASKED);
-    if (asked === null) return new Response("the content Worker's browser run: not a deployment\n", { status: 400 });
+    // Asked with no address, it says which run started it, so a run never tests a Worker another run left behind.
+    if (asked === null) {
+      const run = typeof env.BROWSER_RUN_ID === "string" ? env.BROWSER_RUN_ID : "";
+      return new Response("the content Worker's browser run: not a deployment\n", {
+        status: 400,
+        headers: { "x-content-browser-run-id": run, "x-content-browser-run-app-set-cookies": String(appAnswersWithSetCookie) },
+      });
+    }
     const headers = new Headers(request.headers);
     headers.delete(ASKED);
     return handle(new Request(asked, { method: request.method, headers }), {
       entries: { get: async (key) => ENTRIES[key] ?? null },
-      apps: { get: (script) => ({ fetch: async (toApp) => serve(script, toApp) }) },
+      apps: {
+        get: (script) => ({
+          fetch: async (toApp) => {
+            const answer = serve(script, toApp);
+            // Counted here, at the Worker's input: what the app sent, before the handler has touched it.
+            if (answer.headers.has("set-cookie")) appAnswersWithSetCookie += 1;
+            return answer;
+          },
+        }),
+      },
       now: () => Date.now(),
       stop,
       domain: DOMAIN,
     });
   },
-} satisfies ExportedHandler;
+} satisfies ExportedHandler<{ BROWSER_RUN_ID?: unknown }>;

@@ -1,6 +1,6 @@
 {
-  "ranAt": "2026-11-13T07:23:39.557Z",
-  "commit": "4143d04103635a916f9156068be820f91df5b6da",
+  "ranAt": "2026-11-13T08:32:41.483Z",
+  "commit": "c2df699b57b57782c13b925c7bbb44ba73165f6c",
   "wrangler": "4.157.0",
   "playwright": "1.64.1",
   "workerd": {
@@ -195,8 +195,10 @@
       },
       "cookiesInTheBrowsersJar": [],
       "requestsThatCarriedACookie": 0,
+      "answersWithSetCookie": 0,
+      "appAnswersWithSetCookie": 16,
       "requestsToOtherHosts": [],
-      "requestsMade": 21,
+      "requestsMade": 18,
       "stepsThatDidNotFinish": [],
       "withoutThePolicy": {
         "shown": true,
@@ -338,12 +340,14 @@
           "shared for .sandbox-test.example",
           "probe for appb.sandbox-test.example"
         ],
-        "requestsThatCarriedACookie": 16,
+        "requestsThatCarriedACookie": 12,
+        "answersWithSetCookie": 0,
+        "appAnswersWithSetCookie": 16,
         "requestsToOtherHosts": [
           "https://elsewhere.example/pixel.png",
           "https://elsewhere.example/data.json"
         ],
-        "requestsMade": 28,
+        "requestsMade": 24,
         "stepsThatDidNotFinish": [
           "read the actions: locator.textContent: Timeout 8000ms exceeded."
         ]
@@ -489,8 +493,10 @@
       },
       "cookiesInTheBrowsersJar": [],
       "requestsThatCarriedACookie": 0,
+      "answersWithSetCookie": 0,
+      "appAnswersWithSetCookie": 16,
       "requestsToOtherHosts": [],
-      "requestsMade": 21,
+      "requestsMade": 18,
       "stepsThatDidNotFinish": [
         "look into the frame: no answer from the browser in 25 seconds"
       ],
@@ -634,12 +640,14 @@
           "shared for .sandbox-test.example",
           "probe for appb.sandbox-test.example"
         ],
-        "requestsThatCarriedACookie": 14,
+        "requestsThatCarriedACookie": 11,
+        "answersWithSetCookie": 0,
+        "appAnswersWithSetCookie": 17,
         "requestsToOtherHosts": [
           "https://elsewhere.example/pixel.png",
           "https://elsewhere.example/data.json"
         ],
-        "requestsMade": 28,
+        "requestsMade": 25,
         "stepsThatDidNotFinish": [
           "read the actions: locator.textContent: Timeout 8000ms exceeded."
         ]
@@ -785,8 +793,10 @@
       },
       "cookiesInTheBrowsersJar": [],
       "requestsThatCarriedACookie": 0,
+      "answersWithSetCookie": 0,
+      "appAnswersWithSetCookie": 16,
       "requestsToOtherHosts": [],
-      "requestsMade": 22,
+      "requestsMade": 18,
       "stepsThatDidNotFinish": [],
       "withoutThePolicy": {
         "shown": true,
@@ -927,20 +937,39 @@
           "probe for appa.sandbox-test.example"
         ],
         "requestsThatCarriedACookie": 0,
+        "answersWithSetCookie": 0,
+        "appAnswersWithSetCookie": 16,
         "requestsToOtherHosts": [
           "https://elsewhere.example/pixel.png",
           "https://elsewhere.example/data.json"
         ],
-        "requestsMade": 28,
+        "requestsMade": 24,
         "stepsThatDidNotFinish": [
           "read the actions: locator.textContent: Timeout 8000ms exceeded."
         ]
       }
     }
   },
+  "nothingMoreMs": 1500,
   "wranglerDev": {
     "mentionedLoginOrAccount": false,
-    "listening": "http://127.0.0.1:8799",
+    "listening": "http://127.0.0.1:50100",
+    "portChosenAtStart": true,
+    "answeredWithThisRunsMark": true,
     "exitedEarly": false
+  },
+  "assertions": {
+    "browsersInstalled": [
+      "chromium",
+      "firefox",
+      "webkit"
+    ],
+    "browsersRun": [
+      "chromium",
+      "firefox",
+      "webkit"
+    ],
+    "failed": [],
+    "notInstalled": []
   }
 }

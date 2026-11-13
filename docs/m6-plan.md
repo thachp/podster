@@ -1084,6 +1084,8 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 
 **Owed, with the PR that adds it: a browser job in CI for the content Worker, covering all three engines.** Until then the report is a local run on one machine, dated, at a named commit.
 
+**A follow-up, 2026-11-13, from that PR's review.** The run now fails unless every installed browser ran and unless each thing the sandbox buys held in each: the `null` origin, storage refused, no cookie read or written by a sibling, no cookie on any request, no `Set-Cookie` reaching the browser, and the control showing the opposite. What an ordinary app can do stays recorded and unasserted. It cleans up when stopped by a signal, tests only the Worker it started, on a port chosen at the start, and waits on the page in place of fixed times, except for one named wait where nothing happening has no event. The report was rerun at the commit it names.
+
 #### What step 9 built
 
 *2026-11-12, by the architect's rulings on the scope.* One PR, since the contract changes with its code. Behind `RELEASES`, with no provider configured.

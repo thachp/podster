@@ -707,7 +707,36 @@ The architect proposes the gate call, for the owner to review.
 - **A room made before the deploy.** M6-S04 has never run, so the room schema step's migration is shown only on a room that began with it.
 - **That the `HostnameClaim` class can be instantiated.** Nothing reaches it while the switch is off, so the run couldn't show it.
 
+*Note, 2026-11-13: M6-S04 has since run, in two phases around a deploy; see [later staging runs](#later-staging-runs-2026-11-12-and-2026-11-13). It showed that a room made before a deploy that changed the room's schema keeps working. A room that predates step 2's schema step is still unshown, and so is the `HostnameClaim` class.*
+
 **Left on staging:** the two test people, the organization, the room, the agent and the task. Every session was signed out.
+
+#### Later staging runs, 2026-11-12 and 2026-11-13
+
+**Two more usual runs, and M6-S04 shown for the first time, all with `RELEASES` unset.** This is a record of those runs, as the architect reported them. Their logs were scratch files and aren't in the repository, so the numbers below can't be checked against anything kept here.
+
+- **Run 2, 2026-11-12,** after deploying `e2ef46b`, takedown's first PR (#319). The usual run, at main `e2ef46b`.
+  - **Result:** exit 0, with 11 passed, 0 failed and 1 skipped, M6-S04. 2 sign-ups.
+- **M6-S04, shown for the first time, 2026-11-13 UTC,** around the deploy of `4b210ac`, takedown's second PR (#322). The script ran at main `52d6cac` and `4b210ac`.
+  - **First phase,** against staging at `e2ef46b`: exit 0, 1 passed, 1 sign-up. In M6-S04a, the task was offered and accepted, then open with no assignee after the agent was disconnected. The room had 6 events.
+  - **The deploy of `4b210ac`:** in-code Durable Object schema steps only, with no D1 migration and no wrangler change. 4 of 4 probes passed, after one retry on Cloudflare's code 7403.
+  - **Second phase,** against staging at `4b210ac`: exit 0, 4 passed, 0 failed, 0 sign-ups.
+    - M6-S04b: the task made before the deploy was still open. It was then offered to a new agent, accepted, submitted and completed, in the older room.
+    - M6-S04c: 6 reads, none carrying any of the 19 M6 fields.
+    - M6-S04d: 2 M6 read routes, each `404 not_found`, the same as an invented neighbouring path.
+    - M6-S04e: 11 events, the first phase's 6 still first, and no M6 event type.
+    - The kept file was deleted.
+- **Run 3,** after that deploy. The usual run.
+  - **Result:** exit 0, with 11 passed, 0 failed and 1 skipped. 2 sign-ups.
+
+**What M6-S04 shows.** A room made before a deploy that changed the room's schema keeps working. The room was made under `e2ef46b`, which already had the first takedown PR's schema step, and it crossed the deploy of the second.
+
+**What it doesn't show:**
+- a room that predates step 2's schema step, or the first takedown PR's;
+- the Moderation and `HostnameClaim` schema steps, which nothing reaches while `RELEASES` is off;
+- anything with `RELEASES` on.
+
+`--deployed-commit` is told to the script, not checked by it. So the commits above are what the runner named, from `scripts/deploy-staging`'s output.
 
 #### What step 4(a)'s first PR built
 

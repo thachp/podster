@@ -1,9 +1,10 @@
 {
  "about": [
-  "The findings of e2e/test-timing-check.mjs that stay for now, all of them present when the check was added at 86db135. Rule 1 of docs/review-standards.md (on its branch, PR 339).",
+  "The findings of e2e/test-timing-check.mjs that stay for now: those present when the check was added at 86db135, and those its later rules found at 0295880. Rule 1 of docs/review-standards.md (on its branch, PR 339).",
   "Reviewed like code. An entry matches by file, rule, where (the enclosing test's title path, or the enclosing function's name) and the exact text of its line, and must match exactly `count` findings (1 if absent). A new copy of an allowed line, an entry re-pointed at the same text elsewhere, an entry whose line changed, or one with no reason, no where, no category from below, or no `owed` fails the check.",
+  "`calls_allowed: true` allows every call to the helper the entry's sleep is in, and only an entry with `owed: false` may say it (a poll, or a stand-in's own failure bound). A call to any other helper that sleeps is its own finding and its own entry, so a new one fails.",
   "`owed: true` is a debt, with what it needs written in its reason; `owed: false` is right as it is. Every run prints the number owed.",
-  "`lines_at_86db135` is for a reader: the check doesn't use it, and lines move.",
+  "`lines_when_listed` and `listed_at` are for a reader: the check doesn't use them, and lines move.",
   "The fixes land one category per PR, removing entries as they go: R (rooms), then I and J (margins), then B's four API cases and E."
  ],
  "categories": {
@@ -19,7 +20,9 @@
   "J": "margin: an upper bound read before the action",
   "K": "margin: a fixed bound after the action, safe only by the order of a stamp and a reading",
   "L": "margin: elapsed wall-clock time asserted",
-  "R": "unquieted: an API spec that makes rooms and quiets none"
+  "R": "unquieted: an API spec that makes rooms and quiets none",
+  "S": "sleep: a stand-in's own bound that only detects a failure (right as it is)",
+  "T": "sleep: a stand-in's scripted delay"
  },
  "known_gaps": [
   {
@@ -44,7 +47,8 @@
    "where": "an offer to an agent > goes on the A2A queue holding IDs only",
    "category": "A",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     117
    ],
    "code": "if (!job) await new Promise((done) => setTimeout(done, 50));",
@@ -56,7 +60,8 @@
    "where": "reading starts > from the room's alarm once due, with IDs only, and backs off from a minute to an hour",
    "category": "A",
    "owed": false,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     156
    ],
    "code": "if (jobs.length === 0) await new Promise((done) => setTimeout(done, 50));",
@@ -68,7 +73,9 @@
    "where": "function eventually",
    "category": "A",
    "owed": false,
-   "lines_at_86db135": [
+   "calls_allowed": true,
+   "listed_at": "86db135",
+   "lines_when_listed": [
     293
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 20));",
@@ -80,7 +87,9 @@
    "where": "function minting",
    "category": "A",
    "owed": false,
-   "lines_at_86db135": [
+   "calls_allowed": true,
+   "listed_at": "86db135",
+   "lines_when_listed": [
     1012
    ],
    "code": "await new Promise((x) => setTimeout(x, 2));",
@@ -92,7 +101,9 @@
    "where": "function indexed",
    "category": "A",
    "owed": false,
-   "lines_at_86db135": [
+   "calls_allowed": true,
+   "listed_at": "86db135",
+   "lines_when_listed": [
     398
    ],
    "code": "await new Promise((r) => setTimeout(r, 50));",
@@ -104,7 +115,9 @@
    "where": "function known",
    "category": "A",
    "owed": false,
-   "lines_at_86db135": [
+   "calls_allowed": true,
+   "listed_at": "86db135",
+   "lines_when_listed": [
     83
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 25));",
@@ -116,7 +129,9 @@
    "where": "function reached",
    "category": "A",
    "owed": false,
-   "lines_at_86db135": [
+   "calls_allowed": true,
+   "listed_at": "86db135",
+   "lines_when_listed": [
     126
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 2));",
@@ -128,7 +143,9 @@
    "where": "function settled",
    "category": "A",
    "owed": false,
-   "lines_at_86db135": [
+   "calls_allowed": true,
+   "listed_at": "86db135",
+   "lines_when_listed": [
     181
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 50));",
@@ -140,7 +157,8 @@
    "where": "the provisioning job > creates one repository in the configured organization, sets it up, reads it back and links it by GitHub's ID (M5-01, M5-02)",
    "category": "A",
    "owed": false,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     840
    ],
    "code": "for (let i = 0; i < 40 && (await indexRow(id)) === null; i++) { await alarmPass(stub(r.id)); await new Promise((x) => setTimeout(x, 50)); }",
@@ -152,7 +170,8 @@
    "where": "the provisioning job > rechecks authority before it calls GitHub: the delegation, the room and the person who asked",
    "category": "A",
    "owed": false,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     896
    ],
    "code": "for (let i = 0; i < 40 && (await rowsOf(archived.id, \"repo_request\"))[0].state === \"pending\"; i++) { await alarmPass(stub(archived.id)); await new Promise((x) => setTimeout(x, 50)); }",
@@ -164,7 +183,8 @@
    "where": "the provisioning job > takes a routing row from a room that says the repository isn't its own, and leaves one whose room says it is",
    "category": "A",
    "owed": false,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     1490
    ],
    "code": "for (let i = 0; i < 40 && (await indexRow(61000)) !== r.id; i++) { await alarmPass(stub(r.id)); await new Promise((x) => setTimeout(x, 50)); }",
@@ -176,7 +196,8 @@
    "where": "the provisioning job > takes a routing row from a room that says the repository isn't its own, and leaves one whose room says it is",
    "category": "A",
    "owed": false,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     1497
    ],
    "code": "for (let i = 0; i < 40 && (await rowsOf(squatter.id, \"repo_link\"))[0].indexed_at === null; i++) { await alarmPass(stub(squatter.id)); await new Promise((x) => setTimeout(x, 50)); }",
@@ -188,7 +209,9 @@
    "where": "function heldBetween",
    "category": "A",
    "owed": false,
-   "lines_at_86db135": [
+   "calls_allowed": true,
+   "listed_at": "86db135",
+   "lines_when_listed": [
     166
    ],
    "code": "for (let i = 0; i < 2000 && !(await inRoom(room, (sql) => sql.exec(\"SELECT arrived FROM test_release_hold\").one().arrived)); i += 1) await new Promise((next) => setTimeout(next, 5));",
@@ -200,7 +223,9 @@
    "where": "function minting",
    "category": "A",
    "owed": false,
-   "lines_at_86db135": [
+   "calls_allowed": true,
+   "listed_at": "86db135",
+   "lines_when_listed": [
     70
    ],
    "code": "await new Promise((x) => setTimeout(x, 2));",
@@ -212,7 +237,9 @@
    "where": "function eventually",
    "category": "A",
    "owed": false,
-   "lines_at_86db135": [
+   "calls_allowed": true,
+   "listed_at": "86db135",
+   "lines_when_listed": [
     110
    ],
    "code": "await new Promise((x) => setTimeout(x, 100));",
@@ -224,7 +251,8 @@
    "where": "the review's findings (M5 step 6) > wakes at a grant's expiry when it's sooner than its token's, and revokes the token then (M1)",
    "category": "A",
    "owed": false,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     712
    ],
    "code": "if (alarmAt === null) await new Promise((x) => setTimeout(x, 50));",
@@ -236,7 +264,9 @@
    "where": "function minting",
    "category": "A",
    "owed": false,
-   "lines_at_86db135": [
+   "calls_allowed": true,
+   "listed_at": "86db135",
+   "lines_when_listed": [
     68
    ],
    "code": "await new Promise((x) => setTimeout(x, 2));",
@@ -248,11 +278,116 @@
    "where": "kernel journey across two organizations",
    "category": "A",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     2384
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 50));",
    "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure. Owed: waitForEvent waits up to 5 s (100 tries, 50 ms apart) for the inbox delivery, which is asynchronous, and a loaded runner can take longer. What would remove the wait: a signal from the delivery itself, or running the room's delivery pass from the test, which the gateway test can't reach today."
+  },
+  {
+   "file": "apps/gateway/test/gateway.spec.ts",
+   "rule": "sleep",
+   "where": "kernel journey across two organizations > runs offer, accept, message, submit, changes, resubmit and verify, with different credentials on each side",
+   "category": "A",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    2468
+   ],
+   "code": "const offered = await waitForEvent((q) => execute(architect, \"read_inbox\", q), \"task.offered\", task.id);",
+   "reason": "A call to waitForEvent(), a helper in this file that sleeps (its own entry is category A, owed). Each call is listed so a new one fails; it goes when waitForEvent() stops sleeping."
+  },
+  {
+   "file": "apps/gateway/test/gateway.spec.ts",
+   "rule": "sleep",
+   "where": "kernel journey across two organizations > runs offer, accept, message, submit, changes, resubmit and verify, with different credentials on each side",
+   "category": "A",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    2473
+   ],
+   "code": "await waitForEvent(async (q) => ({ data: (await lead.tool(\"read_inbox\", q)).data }), \"task.accepted\", task.id);",
+   "reason": "A call to waitForEvent(), a helper in this file that sleeps (its own entry is category A, owed). Each call is listed so a new one fails; it goes when waitForEvent() stops sleeping."
+  },
+  {
+   "file": "apps/gateway/test/gateway.spec.ts",
+   "rule": "sleep",
+   "where": "kernel journey across two organizations > runs offer, accept, message, submit, changes, resubmit and verify, with different credentials on each side",
+   "category": "A",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    2478
+   ],
+   "code": "await waitForEvent(async (q) => ({ data: (await lead.tool(\"read_inbox\", q)).data }), \"task.submitted\", task.id);",
+   "reason": "A call to waitForEvent(), a helper in this file that sleeps (its own entry is category A, owed). Each call is listed so a new one fails; it goes when waitForEvent() stops sleeping."
+  },
+  {
+   "file": "apps/gateway/test/gateway.spec.ts",
+   "rule": "sleep",
+   "where": "kernel journey across two organizations > an agent goes from connected to its first accepted task in under 5 tool calls",
+   "category": "A",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    2497
+   ],
+   "code": "const event = await waitForEvent((q) => execute(architect, \"read_inbox\", q), \"task.offered\", created.id);",
+   "reason": "A call to waitForEvent(), a helper in this file that sleeps (its own entry is category A, owed). Each call is listed so a new one fails; it goes when waitForEvent() stops sleeping."
+  },
+  {
+   "file": "apps/gateway/test/gateway.spec.ts",
+   "rule": "sleep",
+   "where": "kernel journey across two organizations > oversight shows the agent's organization IDs, type and time from another organization's room, never content (decision 31)",
+   "category": "A",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    2521
+   ],
+   "code": "await waitForEvent((q) => execute(architect, \"read_inbox\", q), \"task.offered\", task.id);",
+   "reason": "A call to waitForEvent(), a helper in this file that sleeps (its own entry is category A, owed). Each call is listed so a new one fails; it goes when waitForEvent() stops sleeping."
+  },
+  {
+   "file": "apps/gateway/test/gateway.spec.ts",
+   "rule": "sleep",
+   "where": "kernel journey across two organizations > both connection methods share one inbox and cursor",
+   "category": "A",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    2543
+   ],
+   "code": "const event = await waitForEvent((q) => execute(architect, \"read_inbox\", q), \"task.offered\", task.id);",
+   "reason": "A call to waitForEvent(), a helper in this file that sleeps (its own entry is category A, owed). Each call is listed so a new one fails; it goes when waitForEvent() stops sleeping."
+  },
+  {
+   "file": "apps/gateway/test/gateway.spec.ts",
+   "rule": "sleep",
+   "where": "kernel journey across two organizations > revoking an organization leaves its agent one ID-only notice, and its next read and action fail",
+   "category": "A",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    2553
+   ],
+   "code": "await waitForEvent((q) => execute(architect, \"read_inbox\", q), \"task.offered\", task.id);",
+   "reason": "A call to waitForEvent(), a helper in this file that sleeps (its own entry is category A, owed). Each call is listed so a new one fails; it goes when waitForEvent() stops sleeping."
+  },
+  {
+   "file": "apps/gateway/test/gateway.spec.ts",
+   "rule": "sleep",
+   "where": "kernel journey across two organizations > revoking an organization leaves its agent one ID-only notice, and its next read and action fail",
+   "category": "A",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    2557
+   ],
+   "code": "const notice = await waitForEvent((q) => execute(architect, \"read_inbox\", q), \"member.revoked\");",
+   "reason": "A call to waitForEvent(), a helper in this file that sleeps (its own entry is category A, owed). Each call is listed so a new one fails; it goes when waitForEvent() stops sleeping."
   },
   {
    "file": "apps/gateway/test/organizations.spec.ts",
@@ -260,7 +395,8 @@
    "where": "leaving an organization",
    "category": "A",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     401
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 100));",
@@ -269,10 +405,25 @@
   {
    "file": "apps/gateway/test/organizations.spec.ts",
    "rule": "sleep",
+   "where": "leaving an organization > takes the organization's rooms out of the person's list",
+   "category": "A",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    412
+   ],
+   "code": "await eventually(async () => (await listed(person)).includes(id));",
+   "reason": "A call to eventually(), a helper in this file that sleeps (its own entry is category A, owed). Each call is listed so a new one fails; it goes when eventually() stops sleeping."
+  },
+  {
+   "file": "apps/gateway/test/organizations.spec.ts",
+   "rule": "sleep",
    "where": "a departure reaching the person's rooms",
    "category": "A",
    "owed": false,
-   "lines_at_86db135": [
+   "calls_allowed": true,
+   "listed_at": "86db135",
+   "lines_when_listed": [
     635
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 100));",
@@ -284,13 +435,14 @@
    "where": "a person leaving the room's organization > takes a departed owner out of the room's work, refuses them even after rejoining, and records it once",
    "category": "B",
    "owed": true,
-   "lines_at_86db135": [
+   "count": 2,
+   "listed_at": "86db135",
+   "lines_when_listed": [
     2831,
     2836
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 300));",
-   "reason": "A sleep, then an assertion that nothing happened: the sleep is the pass condition, so a slow runner can pass it with the bug present. API: fix in the category-B PR by running the delivery pass (alarmPass) and then asserting nothing arrived.",
-   "count": 2
+   "reason": "A sleep, then an assertion that nothing happened: the sleep is the pass condition, so a slow runner can pass it with the bug present. API: fix in the category-B PR by running the delivery pass (alarmPass) and then asserting nothing arrived."
   },
   {
    "file": "apps/api/test/kernel.spec.ts",
@@ -298,7 +450,8 @@
    "where": "revoking a whole organization > gives each agent one removal notice and nothing after it",
    "category": "B",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     3505
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 300));",
@@ -310,7 +463,8 @@
    "where": "each room's share of the scan queue > sends a queued scan once more after 30 minutes with no verdict, with its first time, never a third time, and forgets it once settled",
    "category": "B",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     659
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 300));",
@@ -322,7 +476,8 @@
    "where": "kernel journey across two organizations > revoking an organization leaves its agent one ID-only notice, and its next read and action fail",
    "category": "B",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     2561
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 300));",
@@ -334,7 +489,8 @@
    "where": "leaving an organization > recovers a room the first departure missed, by removing the rejoined owner again",
    "category": "B",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     508
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 500));",
@@ -346,13 +502,14 @@
    "where": "a departure reaching the person's rooms > stops new events reaching their inbox",
    "category": "B",
    "owed": true,
-   "lines_at_86db135": [
+   "count": 2,
+   "listed_at": "86db135",
+   "lines_when_listed": [
     674,
     678
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 500));",
-   "reason": "A sleep, then an assertion that nothing happened: the sleep is the pass condition, so a slow runner can pass it with the bug present. Gateway: stays owed; needs a signal that the departure or delivery has run in the API, which the gateway test can't call.",
-   "count": 2
+   "reason": "A sleep, then an assertion that nothing happened: the sleep is the pass condition, so a slow runner can pass it with the bug present. Gateway: stays owed; needs a signal that the departure or delivery has run in the API, which the gateway test can't call."
   },
   {
    "file": "apps/gateway/test/organizations.spec.ts",
@@ -360,7 +517,8 @@
    "where": "a departure reaching the person's rooms > doesn't take away a role they've since been given again",
    "category": "B",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     723
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 500));",
@@ -372,7 +530,8 @@
    "where": "the upload path > stops reading at the file limit, however much a sender keeps sending",
    "category": "B",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     143
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 50));",
@@ -384,11 +543,38 @@
    "where": "a disconnect while a set's body is still arriving",
    "category": "C",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     274
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 50));",
    "reason": "A 50 ms sleep so a streaming request reaches the object before the test acts. Owed: needs a product-side arrival hook in test builds that the test can wait for."
+  },
+  {
+   "file": "apps/api/test/a2a-endpoint.spec.ts",
+   "rule": "sleep",
+   "where": "a disconnect while a set's body is still arriving > refuses the endpoint, so nothing survives a reconnect",
+   "category": "C",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    284
+   ],
+   "code": "const res = await setDuringDisconnect(agent, \"/v1/inbox/a2a-endpoint\", { url: URL_A, token: TOKEN });",
+   "reason": "A call to setDuringDisconnect(), a helper in this file that sleeps (its own entry is category C, owed). Each call is listed so a new one fails; it goes when setDuringDisconnect() stops sleeping."
+  },
+  {
+   "file": "apps/api/test/a2a-endpoint.spec.ts",
+   "rule": "sleep",
+   "where": "a disconnect while a set's body is still arriving > refuses wake the same way",
+   "category": "C",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    294
+   ],
+   "code": "const res = await setDuringDisconnect(agent, \"/v1/inbox/wake\", { url: \"https://hooks.acme.dev/wake\" });",
+   "reason": "A call to setDuringDisconnect(), a helper in this file that sleeps (its own entry is category C, owed). Each call is listed so a new one fails; it goes when setDuringDisconnect() stops sleeping."
   },
   {
    "file": "apps/api/test/participation.spec.ts",
@@ -396,11 +582,51 @@
    "where": "a disconnect while a set's body is still arriving",
    "category": "C",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     193
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 50));",
    "reason": "A 50 ms sleep so a streaming request reaches the object before the test acts. Owed: needs a product-side arrival hook in test builds that the test can wait for."
+  },
+  {
+   "file": "apps/api/test/participation.spec.ts",
+   "rule": "sleep",
+   "where": "a disconnect while a set's body is still arriving > refuses the set, so no consent survives the reconnect",
+   "category": "C",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    208
+   ],
+   "code": "const res = await setWhile(agent, () => disconnect(agent));",
+   "reason": "A call to setWhile(), a helper in this file that sleeps (its own entry is category C, owed). Each call is listed so a new one fails; it goes when setWhile() stops sleeping."
+  },
+  {
+   "file": "apps/api/test/participation.spec.ts",
+   "rule": "sleep",
+   "where": "a disconnect while a set's body is still arriving > refuses it when the agent was disconnected and reconnected while it arrived",
+   "category": "C",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    218
+   ],
+   "code": "const res = await setWhile(agent, async () => {",
+   "reason": "A call to setWhile(), a helper in this file that sleeps (its own entry is category C, owed). Each call is listed so a new one fails; it goes when setWhile() stops sleeping."
+  },
+  {
+   "file": "apps/api/test/participation.spec.ts",
+   "rule": "sleep",
+   "where": "a disconnect while a set's body is still arriving > still sets it when nothing changed meanwhile",
+   "category": "C",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    228
+   ],
+   "code": "const res = await setWhile(agent, async () => {});",
+   "reason": "A call to setWhile(), a helper in this file that sleeps (its own entry is category C, owed). Each call is listed so a new one fails; it goes when setWhile() stops sleeping."
   },
   {
    "file": "apps/api/test/kernel.spec.ts",
@@ -408,7 +634,8 @@
    "where": "revoking a whole organization > keeps it out through old invitations and owner consent, until the room invites it again",
    "category": "D",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     3561
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 2));",
@@ -420,7 +647,8 @@
    "where": "hosts with more than one agent > only one person can take a host, even at the same moment",
    "category": "D",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     698
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 5));",
@@ -432,7 +660,8 @@
    "where": "sign-in and claim pages > doesn't bring an Agent Auth credential back when its admin rejoins, and a new one takes over",
    "category": "D",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     1872
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 2));",
@@ -444,7 +673,8 @@
    "where": "sign-in and claim pages > keeps an MCP credential off for a rejoined member, and renews it when they consent again as an admin",
    "category": "D",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     1903
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 2));",
@@ -456,7 +686,8 @@
    "where": "a departure reaching the person's rooms > doesn't take away a role they've since been given again",
    "category": "D",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     720
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 2));",
@@ -468,11 +699,64 @@
    "where": "the provisioning job > leaves a request it can't even end alone for a while, keeps that wait in the room, and never sends the creation call again",
    "category": "E",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     1399
    ],
    "code": "const waiting = async () => { for (let i = 0; i < 12; i++) { await alarmPass(stub(r.id)); await new Promise((x) => setTimeout(x, 50)); } return (await rowsOf(r.id, \"repo_request\"))[0]; };",
    "reason": "A fixed run of alarm passes with sleeps, then exact counts (runs: 1, job_failures: 1). Fix in the category-B/E PR: poll until job_failures >= 1, then count from what the last controlled pass left."
+  },
+  {
+   "file": "apps/api/test/provisioning.spec.ts",
+   "rule": "sleep",
+   "where": "the provisioning job > leaves a request it can't even end alone for a while, keeps that wait in the room, and never sends the creation call again",
+   "category": "E",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    1400
+   ],
+   "code": "const first = await waiting();",
+   "reason": "A call to waiting(), a helper in this file that sleeps (its own entry is category E, owed). Each call is listed so a new one fails; it goes when waiting() stops sleeping."
+  },
+  {
+   "file": "apps/api/test/provisioning.spec.ts",
+   "rule": "sleep",
+   "where": "the provisioning job > leaves a request it can't even end alone for a while, keeps that wait in the room, and never sends the creation call again",
+   "category": "E",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    1408
+   ],
+   "code": "expect(await waiting()).toMatchObject({ runs: 1, job_failures: 1, job_not_before: first.job_not_before });",
+   "reason": "A call to waiting(), a helper in this file that sleeps (its own entry is category E, owed). Each call is listed so a new one fails; it goes when waiting() stops sleeping."
+  },
+  {
+   "file": "apps/api/test/provisioning.spec.ts",
+   "rule": "sleep",
+   "where": "the provisioning job > leaves a request it can't even end alone for a while, keeps that wait in the room, and never sends the creation call again",
+   "category": "E",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    1414
+   ],
+   "code": "const second = await waiting();",
+   "reason": "A call to waiting(), a helper in this file that sleeps (its own entry is category E, owed). Each call is listed so a new one fails; it goes when waiting() stops sleeping."
+  },
+  {
+   "file": "apps/api/test/provisioning.spec.ts",
+   "rule": "sleep",
+   "where": "the provisioning job > leaves a request it can't even end alone for a while, keeps that wait in the room, and never sends the creation call again",
+   "category": "E",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    1421
+   ],
+   "code": "const capped = await waiting();",
+   "reason": "A call to waiting(), a helper in this file that sleeps (its own entry is category E, owed). Each call is listed so a new one fails; it goes when waiting() stops sleeping."
   },
   {
    "file": "apps/api/test/scanning.spec.ts",
@@ -480,7 +764,8 @@
    "where": "each room's share of the scan queue > starts its rest from 5 seconds again after a clean pass",
    "category": "F",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     695
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 5_500));",
@@ -492,11 +777,27 @@
    "where": "function waitForRun",
    "category": "G",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     63
    ],
    "code": "const waitForRun = () => new Promise((done) => setTimeout(done, RUN_SECONDS * 1000 + 700));",
    "reason": "Sleeps for the third-party agent's run (RUN_SECONDS + 700 ms). Owed: poll fasta2a's own task state for the run's end instead."
+  },
+  {
+   "file": "apps/api/test/a2a-fasta2a.spec.ts",
+   "rule": "sleep",
+   "where": "outbound against fasta2a's A2A server > reads WORKING as an accept and COMPLETED as a submission with the agent's artifact, then a change request in the same context comes back as submission 2",
+   "category": "G",
+   "owed": true,
+   "count": 2,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    102,
+    121
+   ],
+   "code": "await waitForRun();",
+   "reason": "A call to waitForRun(), a helper in this file that sleeps (its own entry is category G, owed). Each call is listed so a new one fails; it goes when waitForRun() stops sleeping."
   },
   {
    "file": "apps/api/test/uploads.spec.ts",
@@ -504,7 +805,8 @@
    "where": "the bytes of an upload > deadlines > gives up on a sender that keeps trickling past the total limit",
    "category": "H",
    "owed": false,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     558
    ],
    "code": "await new Promise((resolve) => setTimeout(resolve, 500));",
@@ -516,7 +818,8 @@
    "where": "a room whose migration fails > sends nothing from the outbox while a removal is held, so the removal can still take back what was queued",
    "category": "I",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     170
    ],
    "code": "expect(next as number).toBeGreaterThan(Date.now() + 1_000);",
@@ -528,7 +831,8 @@
    "where": "inbox > a failed delivery retries in order, without holding up anyone else",
    "category": "I",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     1842
    ],
    "code": "expect(alarm).toBeGreaterThan(Date.now() + 500);",
@@ -540,7 +844,8 @@
    "where": "inbox > if the drain itself fails, it retries after a few seconds rather than in a loop",
    "category": "I",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     1974
    ],
    "code": "expect(alarm).toBeGreaterThan(Date.now() + 3000);",
@@ -552,7 +857,8 @@
    "where": "inbox > the listing failing doesn't stop delivery, and retries more slowly",
    "category": "I",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     2043
    ],
    "code": "expect(alarm).toBeGreaterThan(Date.now() + 2000);",
@@ -564,7 +870,8 @@
    "where": "wake > shortening the window applies to a wake already waiting",
    "category": "I",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     2528
    ],
    "code": "expect(waiting).toBeGreaterThan(Date.now() + 3_000_000);",
@@ -576,7 +883,8 @@
    "where": "what GitHub answers to the merge > gives up after five passes with a reason, and a person asks again",
    "category": "I",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     801
    ],
    "code": "expect((await change(r.id, r.task)).merge_next_at).toBeGreaterThan(Date.now() + 60_000);",
@@ -588,7 +896,8 @@
    "where": "the review's findings (M5 step 7b) > reads GitHub before ending a merge whose call went out, whatever ends it, and records what the call did (M5)",
    "category": "I",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     1277
    ],
    "code": "expect((await change(spent.id, spent.task)).merge_next_at).toBeGreaterThan(Date.now() + 10 * 60_000);",
@@ -600,7 +909,8 @@
    "where": "a delivery as a nudge > forgets a delivery after seven days",
    "category": "I",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     318
    ],
    "code": "expect(held[0].received_at).toBeGreaterThan(Date.now() - 60_000);",
@@ -612,7 +922,8 @@
    "where": "the organization's provisioning delegation > is given and taken back by a Podster operator, and nobody else",
    "category": "I",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     261
    ],
    "code": "expect(given.body.set_at).toBeGreaterThan(Date.now() - 60_000);",
@@ -624,7 +935,8 @@
    "where": "the provisioning job > creates one repository in the configured organization, sets it up, reads it back and links it by GitHub's ID (M5-01, M5-02)",
    "category": "I",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     800
    ],
    "code": "expect(done.repository.verified_at).toBeGreaterThan(Date.now() - 60_000);",
@@ -636,7 +948,8 @@
    "where": "the review's findings (M5 step 6) > keeps a lease a Worker never came back from as a record of a token that may be live, for its hour (L5)",
    "category": "I",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     825
    ],
    "code": "expect(row.expires_at).toBeGreaterThan(Date.now() + 59 * 60_000);",
@@ -648,7 +961,8 @@
    "where": "a scan with no verdict > takes the file's scan turn when it arrives, then sets the alarm to send it again, and then to the end of its hour",
    "category": "I",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     237
    ],
    "code": "expect(left === null || left > Date.now() + HOUR + 30 * 60 * 1000).toBe(true);",
@@ -660,7 +974,8 @@
    "where": "the refresh job > stops at the read cap for the repository, and catches up once there's room",
    "category": "I",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     558
    ],
    "code": "expect(next === null || next > Date.now() + 30 * 60_000).toBe(true);",
@@ -672,7 +987,8 @@
    "where": "the discovery-index reconcile > writes a lost row again once the check is due, and not before",
    "category": "I",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     778
    ],
    "code": "expect(await stored(id, NEXT)).toBeGreaterThan(Date.now() + SIX_HOURS - 60_000);",
@@ -684,7 +1000,8 @@
    "where": "the discovery-index reconcile > checks a confirmed tombstone weekly, and within 6 hours again once the room publishes",
    "category": "I",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     812
    ],
    "code": "expect(await stored(id, NEXT)).toBeGreaterThan(Date.now() + WEEK - 60_000);",
@@ -696,11 +1013,38 @@
    "where": "the discovery-index reconcile > backs off from 5 s, longer after each failure, while D1 fails",
    "category": "I",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     865
    ],
    "code": "expect(await stored(id, NEXT)).toBeGreaterThan(Date.now() + SIX_HOURS - 60_000);",
    "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before)."
+  },
+  {
+   "file": "apps/gateway/test/gateway.spec.ts",
+   "rule": "margin",
+   "where": "staging's test sign-up > a test session's expiry never moves > still slides everyone else's",
+   "category": "I",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    2878
+   ],
+   "code": "expect(new Date(after).getTime() - Date.now()).toBeGreaterThan(24 * 60 * 60 * 1000);",
+   "reason": "The expiry minus a reading taken now over 24 h: a lower bound read after the action, which a slow runner shrinks. Owed: read before the request and assert the expiry >= before + the session's length."
+  },
+  {
+   "file": "apps/gateway/test/organizations.spec.ts",
+   "rule": "margin",
+   "where": "inviting a person to an organization > expires after 7 days",
+   "category": "I",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    112
+   ],
+   "code": "expect(expires_at - Date.now()).toBeGreaterThan(7 * 86_400_000 - 60_000);",
+   "reason": "expires_at minus a reading taken now over 7 days - 60 s: a lower bound read after the action with a 60 s margin. Owed: read before the invitation and assert expires_at >= before + 7 days."
   },
   {
    "file": "apps/api/test/scanning.spec.ts",
@@ -708,7 +1052,8 @@
    "where": "each room's share of the scan queue > arms its own alarm for a re-send that failed, and sends it once the rest is over",
    "category": "J",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     682
    ],
    "code": "expect(alarm).toBeLessThan(before + 5 * 60 * 1000);",
@@ -720,11 +1065,25 @@
    "where": "each room's share of the scan queue > starts its rest from 5 seconds again after a clean pass",
    "category": "J",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     709
    ],
    "code": "expect(alarm).toBeLessThan(before + 9_000);",
    "reason": "An upper bound from a clock reading taken before the action, plus a margin: time on a slow runner uses it up. Fix in the margins PR: read after = Date.now() after the action and bound by after + D."
+  },
+  {
+   "file": "apps/gateway/test/email-sign-in.spec.ts",
+   "rule": "margin",
+   "where": "email sign-in > a link > runs out after five minutes, and says it's five in the email",
+   "category": "J",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    230
+   ],
+   "code": "expect(new Date(row!.expiresAt).getTime() - started).toBeLessThanOrEqual(5 * 60 * 1000 + 2000);",
+   "reason": "The stamp minus an earlier reading under 5 min + 2 s: an upper bound from an earlier reading plus a margin, which a slow runner can use up. Owed: read after the request and bound the stamp by after + 5 min, with no added margin."
   },
   {
    "file": "apps/api/test/scanning.spec.ts",
@@ -732,7 +1091,8 @@
    "where": "queueing a scan > sends exactly the agreed message once the room accepts the file, with no name",
    "category": "K",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     317
    ],
    "code": "expect(jobs[0].queued_at).toBeLessThanOrEqual(after + 5_000);",
@@ -744,7 +1104,8 @@
    "where": "inbox > a stuck recipient gives way to the timeout, and doesn't hold up the room",
    "category": "L",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     2017
    ],
    "code": "expect(Date.now() - before).toBeGreaterThanOrEqual(10_000);",
@@ -756,7 +1117,8 @@
    "where": "directory cards > gives up on a room that hangs, and keeps every other row and the next page",
    "category": "L",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     7135
    ],
    "code": "expect(Date.now() - started).toBeLessThan(5_000);",
@@ -768,7 +1130,8 @@
    "where": "the refresh job > stops reading an answer at its bound instead of waiting for the rest (M5 security review F5)",
    "category": "L",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     810
    ],
    "code": "expect(Date.now() - started).toBeLessThan(5_000);",
@@ -780,7 +1143,8 @@
    "where": "function sentToFasta2a",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     67
    ],
    "code": "const room = (await must(OWNER, \"POST\", \"/v1/workspaces\", { name: `fasta2a ${++counter}` })).id as string;",
@@ -792,7 +1156,8 @@
    "where": "function sentToLangGraph",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     65
    ],
    "code": "const room = (await must(OWNER, \"POST\", \"/v1/workspaces\", { name: `LangGraph ${++counter}` })).id as string;",
@@ -804,7 +1169,8 @@
    "where": "function newRoom",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     52
    ],
    "code": "const room = (await must(OWNER, \"POST\", \"/v1/workspaces\", { name: `Out ${++counter}` })).id as string;",
@@ -816,7 +1182,8 @@
    "where": "function newRoom",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     52
    ],
    "code": "const room = (await must(OWNER, \"POST\", \"/v1/workspaces\", { name: `Readback ${++counter}` })).id as string;",
@@ -828,7 +1195,8 @@
    "where": "function room",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     51
    ],
    "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Inputs\" })).body.id;",
@@ -840,7 +1208,8 @@
    "where": "function publicRoom",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     70
    ],
    "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Open survey\" })).body.id;",
@@ -852,7 +1221,8 @@
    "where": "function room",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     51
    ],
    "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Cursors\" })).body.id;",
@@ -864,7 +1234,8 @@
    "where": "function room",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     49
    ],
    "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Files\" })).body.id;",
@@ -876,7 +1247,8 @@
    "where": "function room",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     52
    ],
    "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Held\" })).body.id;",
@@ -888,7 +1260,8 @@
    "where": "function room",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     69
    ],
    "code": "const created = await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Billing v2\" });",
@@ -900,7 +1273,8 @@
    "where": "function room",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     62
    ],
    "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Engineering\" })).id;",
@@ -912,7 +1286,8 @@
    "where": "(module)",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     52
    ],
    "code": "room = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Via\" })).body.id;",
@@ -924,7 +1299,8 @@
    "where": "function publicRoom",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     69
    ],
    "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Open survey\" })).body.id;",
@@ -936,7 +1312,8 @@
    "where": "function room",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     61
    ],
    "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Outputs\" })).body.id;",
@@ -948,7 +1325,8 @@
    "where": "function room",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     77
    ],
    "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Engineering\" })).body.id;",
@@ -960,7 +1338,8 @@
    "where": "function publicRoom",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     62
    ],
    "code": "const room = (await must(OWNER, \"POST\", \"/v1/workspaces\", { name: `Public A2A ${++counter}` })).id as string;",
@@ -972,7 +1351,8 @@
    "where": "function room",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     71
    ],
    "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name, goal: \"Map the reef\", context: \"Shared notes on the survey\" })).body.id;",
@@ -984,7 +1364,8 @@
    "where": "M6's routes, none of them built > can't be told from a path nobody defined while release is switched off, by anyone",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     84
    ],
    "code": "const room: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Engineering\" })).body.id;",
@@ -996,7 +1377,8 @@
    "where": "function room",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     52
    ],
    "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Files\" })).body.id;",
@@ -1008,7 +1390,8 @@
    "where": "function room",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     148
    ],
    "code": "const id: string = (await must(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Engineering\" })).id;",
@@ -1020,7 +1403,8 @@
    "where": "function room",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     67
    ],
    "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Engineering\" })).body.id;",
@@ -1032,7 +1416,8 @@
    "where": "function room",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     53
    ],
    "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Engineering\" })).body.id;",
@@ -1044,7 +1429,8 @@
    "where": "function room",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     39
    ],
    "code": "return (await api(\"POST\", \"/v1/workspaces\", { name: \"Scans\" })).body.id as string;",
@@ -1056,7 +1442,8 @@
    "where": "function accepted",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     54
    ],
    "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Submissions\" })).body.id;",
@@ -1068,7 +1455,8 @@
    "where": "function room",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     56
    ],
    "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Files\" })).body.id;",
@@ -1080,11 +1468,120 @@
    "where": "function room",
    "category": "R",
    "owed": true,
-   "lines_at_86db135": [
+   "listed_at": "86db135",
+   "lines_when_listed": [
     51
    ],
    "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Billing v2\" })).body.id;",
    "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/fake-content.ts",
+   "rule": "sleep",
+   "where": "function passGate",
+   "category": "S",
+   "owed": false,
+   "calls_allowed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    71
+   ],
+   "code": "const expiry = new Promise<void>((resolve) => { timer = setTimeout(() => { gate.expired = true; resolve(); }, GATE_LIMIT_MS); });",
+   "reason": "A gate's own limit: it answers a call the test forgot to release after 2 s and marks the gate expired, so the test sees it and fails. A failure detector, never a pass condition."
+  },
+  {
+   "file": "apps/api/test/fake-github.ts",
+   "rule": "sleep",
+   "where": "function unanswered",
+   "category": "S",
+   "owed": false,
+   "calls_allowed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    162
+   ],
+   "code": "setTimeout(done, 60_000).unref?.();",
+   "reason": "Holds a call until the caller gives up, so \"no answer in time\" never rests on this side's clock; 60 s is only an end for a request nobody aborts, and nobody reads what follows."
+  },
+  {
+   "file": "apps/api/test/fake-content.ts",
+   "rule": "sleep",
+   "where": "function takeFault",
+   "category": "T",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    84
+   ],
+   "code": "if (fault.delayMs) await new Promise((resolve) => setTimeout(resolve, fault.delayMs));",
+   "reason": "A fault's scripted delay (delayMs): a test that scripts one may pass only because the delay is longer or shorter than the caller's wait. Owed: find the tests that script a delay and replace each with a hold the test releases (as the gates do)."
+  },
+  {
+   "file": "apps/api/test/fake-content.ts",
+   "rule": "sleep",
+   "where": "function fakeContent",
+   "category": "T",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    145
+   ],
+   "code": "const fault = await takeFault(\"script.list\");",
+   "reason": "A call to takeFault(), a helper in this file that sleeps (its own entry is category T, owed). Each call is listed so a new one fails; it goes when takeFault() stops sleeping."
+  },
+  {
+   "file": "apps/api/test/fake-content.ts",
+   "rule": "sleep",
+   "where": "function fakeContent",
+   "category": "T",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    153
+   ],
+   "code": "const fault = await takeFault(\"entry.list\");",
+   "reason": "A call to takeFault(), a helper in this file that sleeps (its own entry is category T, owed). Each call is listed so a new one fails; it goes when takeFault() stops sleeping."
+  },
+  {
+   "file": "apps/api/test/fake-content.ts",
+   "rule": "sleep",
+   "where": "function fakeContent",
+   "category": "T",
+   "owed": true,
+   "count": 2,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    172,
+    191
+   ],
+   "code": "const fault = await takeFault(op);",
+   "reason": "A call to takeFault(), a helper in this file that sleeps (its own entry is category T, owed). Each call is listed so a new one fails; it goes when takeFault() stops sleeping."
+  },
+  {
+   "file": "apps/api/test/fake-github.ts",
+   "rule": "sleep",
+   "where": "function fakeGithub",
+   "category": "T",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    317
+   ],
+   "code": "if (app === \"agent\" || app === \"merge\") return agentMint(body, app);",
+   "reason": "A call to agentMint(), a helper in this file that sleeps (its own entry is category T, owed). Each call is listed so a new one fails; it goes when agentMint() stops sleeping."
+  },
+  {
+   "file": "apps/api/test/fake-github.ts",
+   "rule": "sleep",
+   "where": "function agentMint",
+   "category": "T",
+   "owed": true,
+   "listed_at": "0295880",
+   "lines_when_listed": [
+    437
+   ],
+   "code": "if (mode === \"slow\") await new Promise((resolve) => setTimeout(resolve, 200));",
+   "reason": "The \"slow\" mode's 200 ms before answering a mint: a test using it may pass only because 200 ms sits on one side of the caller's wait. Owed: a hold the test releases instead of a fixed delay."
   }
  ]
 }

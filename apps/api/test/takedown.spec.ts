@@ -1774,7 +1774,55 @@ describe("the two reconciles", () => {
     expect(await reconcile("entries")).toMatchObject({ code: "ok" });
     const kept = await inModeration((sql) => sql.exec("SELECT code, subject, detail FROM takedown_finding WHERE subject NOT LIKE 'filler-%' ORDER BY code").toArray());
     // The new stray didn't fit and is counted as dropped, which an operator can see. The deletion did.
-    expect(kept).toEqual([{ code: "findings_full", subject: "takedown_finding", detail: "other" }, { code: "script_delete_queued", subject: stale, detail: "gone" }]);
+    expect(kept).toEqual([{ code: "findings_full", subject: "other", detail: null }, { code: "script_delete_queued", subject: stale, detail: "gone" }]);
+    // A refused host and the stop key not as the stop says have room of their own too, each kind its own. So three
+    // passes of an outage that fills the shared room with keys that keep failing can't keep either out.
+    const tell = (code: string, subject: string) => moderation().fetch("https://do/takedown-finding", { method: "POST", body: JSON.stringify({ code, subject }) });
+    const has = (code: string, subject: string) => inModeration((sql) => sql.exec("SELECT count(*) AS n FROM takedown_finding WHERE code = ? AND subject = ?", code, subject).one().n);
+    for (const [code, subject] of [["host_refused", "refused.example.org"], ["stop_key_differs", "_stop"], ["stop_key_without_stop", "_stop"], ["entry_keeps_failing", "failing.example.org"]]) await tell(code, subject);
+    expect([await has("host_refused", "refused.example.org"), await has("stop_key_differs", "_stop"), await has("stop_key_without_stop", "_stop"), await has("entry_keeps_failing", "failing.example.org")]).toEqual([1, 1, 1, 0]);
+    // One kind's own room filling doesn't take another's: a thousand refused hosts leave the stop key's row its place.
+    await inModeration((sql) => {
+      sql.exec("DELETE FROM takedown_finding WHERE code IN ('stop_key_differs', 'host_refused')");
+      for (let i = 0; i < 1000; i++) sql.exec("INSERT INTO takedown_finding (code, subject, first_seen_at, last_seen_at) VALUES ('host_refused', ?, ?, ?)", `refused-${i}`, Date.now(), Date.now());
+    });
+    await tell("host_refused", "one-more.example.org");
+    await tell("stop_key_differs", "_stop");
+    expect([await has("host_refused", "one-more.example.org"), await has("findings_full", "host_refused"), await has("stop_key_differs", "_stop")]).toEqual([0, 1, 1]);
+    await alarmQuiet(stub(a.room));
+  });
+
+  it("takes back an unpublish's \"scripts gone\" while one of its scripts is owed again", async () => {
+    await fresh();
+    const a = await app({ plain: true });
+    await switchedOn(() => suspend(a.label));
+    await pass(a.room);
+    const unpublish = () => one(a.room, "SELECT release_epoch, scripts_gone_at IS NOT NULL AS done FROM unpublish");
+    const queue = async () => (await deleteRows(a.room)).map((row: any) => [row.script_name, row.unpublish_epoch, row.gone]);
+    expect(await unpublish()).toEqual({ release_epoch: 5, done: 1 });
+    expect(await queue()).toEqual([[a.kept, 5, 1], [a.served, 5, 1]].sort());
+    // One of that unpublish's scripts is in the namespace after all. Its delete is held at the stand-in, so what the
+    // room holds while it is owed can be read with no clock involved.
+    await fake("/seed", { scripts: [a.kept] });
+    const removal = await gate("script.delete");
+    expect(await reconcile("scripts")).toMatchObject({ code: "ok", changed: 1 });
+    await arrived(removal);
+    // Owed again, still under the unpublish it came from, and that unpublish is no longer done with its files.
+    expect(await queue()).toEqual([[a.kept, 5, 0], [a.served, 5, 1]].sort());
+    expect(await unpublish()).toEqual({ release_epoch: 5, done: 0 });
+    await release(removal);
+    await alarmQuiet(stub(a.room));
+    // Gone again, on the provider's own word, and only then is the unpublish done.
+    const state = await held();
+    expect([state.scripts, state.expiredGates]).toEqual([[], 0]);
+    expect(await queue()).toEqual([[a.kept, 5, 1], [a.served, 5, 1]].sort());
+    expect(await unpublish()).toEqual({ release_epoch: 5, done: 1 });
+    // The one a pass found is told as a pass's deletion. The one the unpublish deleted by itself isn't.
+    expect(await found()).toEqual([`script_delete_queued ${a.kept}`]);
+    // And it is still told when the record of it is lost: the room knows it by when it was queued again.
+    await inModeration((sql) => sql.exec("DELETE FROM takedown_finding"));
+    await reconcile("entries");
+    expect(await found()).toEqual([`script_delete_queued ${a.kept}`]);
     await alarmQuiet(stub(a.room));
   });
 

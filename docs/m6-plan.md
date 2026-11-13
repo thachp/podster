@@ -928,9 +928,20 @@ The architect proposes the gate call, for the owner to review.
 
 **Still owed, as before:** nothing lets an operator clear a row, and nobody is notified. The count of failing keys holds 1,000; past it a new one isn't counted, and operators are told the count is full.
 
+**Three more, from that follow-up's review, built the same day:**
+
+- **A script the room had counted gone, and a pass found again, keeps the unpublish it was queued under.** That unpublish's "scripts gone" is taken back until the script is gone again. The follow-up had cut it loose from its unpublish, so an unpublish could read as done with its files while one was owed.
+- **A refused host and the stop key not as the stop says have room of their own in the record,** 1,000 rows for each kind, as a pass's deletions have. Three passes of an outage can write a thousand keys that keep failing into the shared room; they can no longer keep either of those out. When a kind's room is full, one row says which.
+- **The delete may run before its finding lands, and that is safe.** The row that marks a deletion as a pass's commits in the transaction that queues it, before any call to the provider. The room's delete job may then run before the pass has written the finding. Nothing is lost: the row stays, gone or not, and the room tells from it for 7 days.
+
+**Owed, and recorded here:**
+
+- **Only the 32 newest of a room's are told in one answer.** A room with more than 32 in 7 days tells of the rest never.
+- **A room tells only when asked.** One that leaves the lookup table, or that nothing asks for 7 days, never tells again, and a deletion of its that the record lost stays lost.
+
 #### Step 4(b), the content Worker: the build plan
 
-**Proposed, for the architect's ruling. Planning only: no code is written until the split below is accepted.** It follows [ADR 0010](adr/0010-release-and-the-content-domain.md#where-content-is-served), the owner's decision to sandbox every app ([216](spec/PRODUCT.md#decisions-needed)) and the second account ([217](spec/PRODUCT.md#decisions-needed)).
+**Proposed, for the architect's ruling. Planning only: no code is written until the split below is accepted.** *Corrected on 2026-11-12 after the architect's review of the first version: how the package is kept from deploying, which request headers go through, `Clear-Site-Data`, the one sandbox policy, and the KV read's cache lifetime. The first version is in this file's history.* It follows [ADR 0010](adr/0010-release-and-the-content-domain.md#where-content-is-served), the owner's decision to sandbox every app ([216](spec/PRODUCT.md#decisions-needed)) and the second account ([217](spec/PRODUCT.md#decisions-needed)).
 
 **What it is.** A new public Worker, `apps/content`, in TypeScript like the gateway. It is the dispatch namespace's dynamic dispatch Worker. It routes and never authorizes.
 
@@ -938,16 +949,29 @@ The architect proposes the gate call, for the owner to review.
 - **For each request:**
   1. Anything but `GET` and `HEAD` is refused. A request carrying `Service-Worker: script` is refused with 403.
   2. **The stop,** the key `_stop`, read at most once every 30 seconds by each running copy and kept in memory between. Set, or unreadable, and every host answers not-found.
-  3. **The serve entry** for the request's exact host: one KV read. No entry, a value that isn't a script's name of Podster's form, or an error from KV answers not-found. The name's form is checked again here, in TypeScript, against the same rule `crates/core` has; a shared test vector file keeps the two the same.
-  4. **The script** the entry names, fetched from the namespace with the request's method, path and query, and no header of the visitor's but the few a static file needs (`Accept`, `Accept-Encoding`, `If-None-Match`, `If-Modified-Since`, `Range`). No cookie and no `Authorization` goes through. A rejection whose message is `Worker not found.` answers not-found; any other rejection answers an error and serves nothing.
+  3. **The serve entry** for the request's exact host: one KV read, with the shortest cache lifetime a read may ask for, 30 seconds. No entry, a value that isn't a script's name of Podster's form, or an error from KV answers not-found. The name's form is checked again here, in TypeScript, against the same rule `crates/core` has; a shared test vector file keeps the two the same.
+  4. **The script** the entry names, fetched from the namespace with the request's method, path and query. **Of the visitor's headers only three go through: `Accept`, `If-None-Match` and `If-Modified-Since`.** No cookie and no `Authorization` goes through.
+     - **`Range` and `Accept-Encoding` are not forwarded.** A request header goes through only if the response header it calls for is on the allow-list. `Range` calls for `Content-Range` and a 206; `Accept-Encoding` calls for `Content-Encoding`. Neither is on the list, so neither request header is sent, and an app's answer that carries `Content-Encoding` or `Content-Range`, or is a 206, is answered as an error and serves nothing, since dropping the header would hand the visitor bytes it can't read. The two conditionals stay: a 304 needs only `ETag` and `Last-Modified`, which are on the list.
+     - **What that costs:** no resumed or partial downloads, and no compression asked of the app. Whether Cloudflare compresses toward the visitor anyway, with `no-transform` set, isn't known and is for the first deploy to show. If it doesn't, allowing `Content-Encoding` is a later change with its own review.
+     - A rejection whose message is `Worker not found.` answers not-found; any other rejection answers an error and serves nothing.
   5. **The response's headers, built from nothing.** From the app's response only `Content-Type`, `Content-Length`, `ETag` and `Last-Modified` pass, and `Location` on a 3xx when it is a path on the same host; any other 3xx is not-found. Everything else is dropped, `Set-Cookie` always.
-- **The fixed headers it sets on every response,** its own not-found included:
+- **The fixed headers it sets on every response,** its own answers included:
   - `Referrer-Policy: no-referrer`
   - `X-Content-Type-Options: nosniff`
   - `Strict-Transport-Security: max-age=31536000; includeSubDomains`
-  - `Cache-Control: max-age=60, no-transform`
+  - `Cache-Control: max-age=60, no-transform` on what an app answered, and `Cache-Control: no-store` on the Worker's own not-found and refusals, so a browser doesn't hold a not-found for a minute after an app goes up
   - `Access-Control-Allow-Origin: *`, which a sandboxed page needs to load its own files, as spike C saw
-  - **`Content-Security-Policy`, the sandbox:** `sandbox` with no `allow-same-origin`, and the page's sources named as the request's own host, never `'self'`, which spike C saw match nothing in a sandboxed page. **Proposed value, to be settled by the browser test below:** `sandbox allow-scripts allow-forms allow-popups allow-downloads; default-src https://<host>; img-src https://<host> data:; style-src https://<host> 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action https://<host>`. Which `allow-` words an app gets is a product question the spike didn't answer, since forms, popups and downloads weren't tried; the first PR starts from `allow-scripts` alone and the browser test adds a word only for something shown to need it.
+  - `Content-Security-Policy`, the sandbox, below
+- **The sandbox: one policy, stated here once.** With `<origin>` the request's own `https://<host>`, never `'self'`, which spike C saw match nothing in a sandboxed page:
+
+  ```text
+  sandbox allow-scripts; default-src <origin>; script-src <origin>; style-src <origin> 'unsafe-inline'; img-src <origin> data:; connect-src <origin>; frame-ancestors 'none'; form-action 'none'; base-uri 'none'
+  ```
+
+  - **`allow-scripts` is the only `allow-` word.** The ADR lists no other with a reason, and spike C's policy carried four more that it never tried one by one. The sources are the ones spike C's working policy named, without `data:` and `blob:` as general sources, which nothing was shown to need.
+  - **`allow-same-origin` is forbidden for good.** It would give a page its real origin back and undo [decision 216](spec/PRODUCT.md#decisions-needed). A test fails if the policy the Worker builds, for any host, ever contains it, and a second reads the package's source for the word.
+  - **Any other `allow-` word is a change to decision 216's stance, and is the owner's.** The browser PR may show that an ordinary app needs one. It then reports that, and nothing is added without the owner's yes. A change to the sources is the architect's.
+- **`Clear-Site-Data` on the Worker's own not-found,** as [the ADR has it](adr/0010-release-and-the-content-domain.md#unpublishing), as a best effort and never a control. **Proposed value: `"cache"` alone,** which narrows what the ADR left open. The reasons: under the sandbox an app has no cookies and no storage to clear; `"cookies"` is the directive under which Chromium cleared a sibling host's cookies in spike C; and the HTTP cache is the one thing a taken-down app can leave in a browser. It goes on not-found only, never on an app's own answer.
 - **Logs:** a status and a code. Never a host, a path or a header.
 
 **What can be built and tested with no deploy:**
@@ -958,9 +982,29 @@ The architect proposes the gate call, for the owner to review.
 - **The sandbox in real browsers,** locally: Playwright's Chromium, Firefox and WebKit against the Worker under `wrangler dev`, with the stand-in namespace serving a small static app. It shows the seven steps spike C showed, that storage is refused, that a sibling host's cookie can't be read, and it is where forms, downloads, popups, fonts and frames are tried for the first time. A browser a script starts gets the allow-listed environment from `e2e/child-env.mjs`.
 - **A contract test with the API's applier:** what the applier writes for a host, a script's name, and for the stop, `stopped`, is exactly what the content Worker reads. One fixture file, read by both packages' tests.
 
+**The KV read's cache lifetime, and what it means for a takedown.** By Cloudflare's documentation, a KV read is cached where it was read for its `cacheTtl`, 60 seconds unless the read asks for less, 30 at the least, and a missing key is cached the same way ([reading key-value pairs](https://developers.cloudflare.com/kv/api/read-key-value-pairs/#cachettl-parameter)). The content Worker asks for 30. So, by the documented figures and unmeasured:
+
+- **After the applier removes an entry,** a location that read it within the last 30 seconds can go on serving that host for up to 30 more, and a browser can reuse an answer it already has for its 60. About 90 seconds at the outside, by those figures. "Or more" is Cloudflare's own wording for the first part.
+- **After an entry is written,** a location that read the host as missing can answer not-found for up to 30 seconds. The Worker's not-found is `no-store`, so the browser adds nothing.
+- **The stop** is read the same way and then kept in memory for 30 seconds, so a running copy can take up to 60 seconds to refuse every host, and browsers their 60 after that.
+- **None of this is measured.** Spike G measures it, and M6-27's stated time is whatever that supports.
+
 **What can't be shown without a deploy,** and stays owed to spike G and the first deploy: a real dispatch namespace's answers; how long a KV write takes to be read at the edge, which is the takedown time; Cloudflare's own additions to a response on the real zone, the Web Analytics beacon among them; and the wildcard route.
 
-**Its own configuration, which deploys nowhere.** `apps/content/wrangler.jsonc` holds no account ID, no namespace ID, no KV ID and no route. With those absent a deploy fails, which is the point. The real values arrive at deploy time from the owner's environment for the second account, never from this repository; neither account's ID is written here. `scripts/deploy-staging` doesn't know the content Worker, and a test fails if it learns to before the owner says so. CI gets one job for the package: typecheck and tests, no deploy step.
+**Keeping it from deploying. Leaving the IDs out is not enough, and the first version of this plan was wrong to say it was.** What Cloudflare's documentation says:
+
+- **`account_id` is optional.** Without it, and without `CLOUDFLARE_ACCOUNT_ID`, wrangler uses "the account selected for the profile during login" ([configuration](https://developers.cloudflare.com/workers/wrangler/configuration/), [profiles](https://developers.cloudflare.com/workers/wrangler/profiles/)). On a machine logged in to the account that holds `podster.dev`, a bare `wrangler deploy` would go there.
+- **`workers_dev` defaults to `true` when the configuration has no route** ([configuration](https://developers.cloudflare.com/workers/wrangler/configuration/)). So a configuration with no route is given a public `workers.dev` address unless it says otherwise. Preview URLs follow the same default unless set ([version URLs](https://developers.cloudflare.com/workers/versions-and-deployments/version-urls/)).
+- **With no configuration file and no entry point named, wrangler refuses:** "Missing entry-point" ([troubleshooting](https://developers.cloudflare.com/workers/ci-cd/builds/troubleshoot/)).
+
+So the package is built like this:
+
+- **There is no `wrangler.jsonc` and no `wrangler.toml` in `apps/content`.** A bare `wrangler deploy` there finds no configuration and no entry point, and refuses. The package's one configuration is `local.wrangler.jsonc`, which the tests and `wrangler dev` name with `--config`.
+- **That file sets `workers_dev: false` and `preview_urls: false`, and has no `route`, no `routes`, no `account_id` and no `env`.** Its KV namespace's ID and its dispatch namespace's name are placeholders that exist on no account.
+- **The package has no `deploy` script,** and `scripts/deploy-staging` doesn't know it.
+- **A static check, in the package's own tests and so in CI,** fails unless all of that holds: no default-named configuration file; the two settings false; none of the four keys; the placeholders unchanged; no `deploy` script; and no mention of `apps/content` in `scripts/deploy-staging`.
+- **The gap that remains, said plainly:** someone who runs `wrangler deploy --config local.wrangler.jsonc` by hand, logged in to Podster's own account, is asking wrangler to upload there. It would have no route and no `workers.dev` address. Whether Cloudflare's API refuses the upload for the placeholder namespace and KV ID isn't shown here, since showing it would mean trying a deploy. **What closes it is the deploy script of the third PR,** the only supported way to deploy: it refuses unless the account and a token are given to it explicitly, never a login; it asks Cloudflare, with that token, whether it can see the zone `podster.dev`, and refuses if it can; and it writes the real configuration at deploy time from the owner's environment. Neither account's ID is written in this repository.
+- CI gets one job for the package: typecheck and tests, no deploy step.
 
 **What the first deploy needs from the owner,** all on the second account ([decision 217](spec/PRODUCT.md#decisions-needed)):
 
@@ -976,9 +1020,9 @@ The architect proposes the gate call, for the owner to review.
 
 | PR | What | Why it is its own |
 | --- | --- | --- |
-| 1 | **`apps/content`, the handler:** the method and service-worker refusals, the stop, the serve entry, the dispatch with the stand-in namespace, the header allow-list and the fixed headers with the sandbox at `allow-scripts` alone; its configuration that deploys nowhere; its CI job; the fixture shared with the API's applier | The whole security surface, small enough for one deep review. Nothing deploys |
-| 2 | **The sandbox in real browsers:** the Playwright run against `wrangler dev`, in three browsers, and whatever `allow-` words and sources it shows an ordinary static app needs. The policy's final value, and the list of what a sandboxed app can't do, written for [decision 216](spec/PRODUCT.md#decisions-needed) | It starts browsers, takes longer, and its result is a product statement the owner may want to read |
-| 3 | **The deploy path, unused:** a script of its own for the content Worker that refuses unless the owner's credential and IDs for the second account are in its environment, with its refusals tested against stand-ins; and the notes for the first deploy. It is never run by an agent before the owner asks | It touches deploy scripts, which have their own tests and their own review |
+| 1 | **`apps/content`, the handler:** the method and service-worker refusals, the stop, the serve entry, the dispatch with the stand-in namespace, the three request headers, the header allow-list and the fixed headers with the one sandbox policy above; no default-named configuration, and the static check that it can't deploy; its CI job; the fixture shared with the API's applier | The whole security surface, small enough for one deep review. Nothing deploys |
+| 2 | **The sandbox in real browsers:** the Playwright run against `wrangler dev`, in three browsers, with the one policy above. It reports what an ordinary static app can't do under it and which sources it needs. It adds no `allow-` word: one that is shown to be needed goes to the owner, as a change to [decision 216](spec/PRODUCT.md#decisions-needed) | It starts browsers, takes longer, and its result is a product statement the owner may want to read |
+| 3 | **The deploy path, unused:** a script of its own for the content Worker that refuses unless the owner's account and token for the second account are given to it explicitly, and refuses if that token can see the zone `podster.dev`, with its refusals tested against stand-ins; and the notes for the first deploy. It is never run by an agent before the owner asks | It touches deploy scripts, which have their own tests and their own review |
 
 **Security-sensitive:** PR 1 should get a review deeper than the quick diff review, asked before it runs. **Not in 4(b):** uploading anything to the namespace (step 5), custom hostnames' routing (step 8), and any change to the API.
 

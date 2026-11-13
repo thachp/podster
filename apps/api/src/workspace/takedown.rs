@@ -57,8 +57,15 @@ pub(crate) const INTERNAL_HOSTNAME_NOTICE: &str = "/internal/hostname-notice";
 /// Worker reaches it.
 pub(crate) const INTERNAL_TAKEDOWN_CHECK: &str = "/internal/takedown-check";
 
-/// The finding for a room whose release bookkeeping fails when the reconcile asks it. See `takedown_check`.
+/// The finding for a room whose release bookkeeping keeps failing, told from the room's own record of it.
 const BOOKKEEPING_FAILING: &str = "release_bookkeeping_failing";
+/// Hosts the applier refused that one answer carries. A room has two hosts at most.
+const HOST_FINDINGS: i64 = 7;
+// One answer never holds more than the reconcile takes from it, whatever the room holds: the bookkeeping's one, the
+// hosts, the failing deletes and the queued ones. So no finding is dropped for want of room in an answer.
+const _: () = assert!(
+    1 + HOST_FINDINGS + FINDINGS + QUEUED_FINDINGS <= crate::reconcile::ROOM_FINDINGS_TAKEN as i64
+);
 /// A script's delete is told to operators once it has failed this many times: with the waits, over half an hour.
 const DELETE_REPORT_AFTER: i64 = 12;
 /// Findings of one kind one answer carries. A room has two hosts at most and a handful of scripts.
@@ -519,15 +526,29 @@ pub(super) fn hostname_suspended(sql: &SqlStorage, body: &Value, now: i64) -> R<
 /// **Owed:** only the 32 newest are told in one answer. And a room is told from only while something asks it: one
 /// that leaves the lookup table, or that nothing asks for 7 days, never tells again.
 fn findings(sql: &SqlStorage, now: i64) -> R<Vec<Value>> {
+    // First, so it is never the one left out: the room's release bookkeeping, once it has failed enough times in a
+    // row, from the room's own record. By the app's label, which is how an operator names the app, and the last
+    // code. No room's ID and no error's text. A room with no app has no label, and nothing to keep.
     let mut found: Vec<Value> = rows(
         sql,
-        "SELECT s.host AS subject, a.last_code AS detail FROM serve_state s JOIN serve_apply a ON a.host = s.host
-           WHERE a.refused_version = s.version ORDER BY s.host LIMIT ?",
-        vec![FINDINGS.into()],
+        "SELECT (SELECT label FROM app_label ORDER BY (current IS NOT NULL) DESC, created_at DESC LIMIT 1) AS subject, last_code AS detail
+           FROM release_bookkeeping WHERE failures >= ?",
+        vec![release_commit::BOOKKEEPING_TOLD.into()],
     )?
     .iter()
-    .map(|row| json!({ "code": "host_refused", "subject": row["subject"], "detail": row["detail"] }))
+    .filter(|row| row["subject"].is_string())
+    .map(|row| json!({ "code": BOOKKEEPING_FAILING, "subject": row["subject"], "detail": row["detail"] }))
     .collect();
+    found.extend(
+        rows(
+            sql,
+            "SELECT s.host AS subject, a.last_code AS detail FROM serve_state s JOIN serve_apply a ON a.host = s.host
+               WHERE a.refused_version = s.version ORDER BY s.host LIMIT ?",
+            vec![HOST_FINDINGS.into()],
+        )?
+        .iter()
+        .map(|row| json!({ "code": "host_refused", "subject": row["subject"], "detail": row["detail"] })),
+    );
     found.extend(
         rows(
             sql,
@@ -634,7 +655,10 @@ fn check_script(sql: &SqlStorage, script: &str, now: i64) -> R<(bool, bool)> {
             since: int(&row["since"]),
         })
     };
-    if reconcile_script(script, claim, now) != ScriptReconcile::Delete {
+    // Whether an upload has outlived its hour is asked of the same clock that ends the release for it
+    // (`release_commit::expire_uploads`), so the script is deleted exactly when its release would be ended.
+    if reconcile_script(script, claim, release_recheck::release_now(sql)) != ScriptReconcile::Delete
+    {
         return Ok((true, false));
     }
     let queued = !rows(
@@ -650,12 +674,24 @@ fn check_script(sql: &SqlStorage, script: &str, now: i64) -> R<(bool, bool)> {
     // after all, so it is owed again. It keeps the unpublish it was queued under, and that unpublish is no longer
     // done with its files: "scripts gone" is taken back until this one is gone again, when the delete job sets it.
     // Its `queued_at` moves to now, which is how the room knows to tell of it as a pass's deletion.
+    //
+    // **A release's own script goes under the unpublish that owes it,** when one does: an unpublish that came after
+    // the release began (`release_commit::owing_unpublish`). An upload that outlived its hour while the room's
+    // bookkeeping was failing is found here before the room has ended its release, and it must still count against
+    // that unpublish's files.
+    let under = release_commit::owing_unpublish(sql, script)?;
     exec(
         sql,
-        "INSERT INTO script_delete (script_name, label, unpublish_epoch, queued_at, next_attempt_at) VALUES (?, ?, NULL, ?, ?)
+        "INSERT INTO script_delete (script_name, label, unpublish_epoch, queued_at, next_attempt_at) VALUES (?, ?, ?, ?, ?)
            ON CONFLICT (script_name) DO UPDATE SET gone_at = NULL, next_attempt_at = excluded.next_attempt_at, last_code = 'reconcile_found',
              queued_at = excluded.queued_at",
-        vec![script.into(), label.into(), now.into(), now.into()],
+        vec![
+            script.into(),
+            label.into(),
+            under.map_or(V::Null, V::from),
+            now.into(),
+            now.into(),
+        ],
     )?;
     exec(
         sql,
@@ -1106,19 +1142,6 @@ async fn delete_script(sql: &SqlStorage, provider: &Provider, script: &str) -> R
     )
 }
 
-/// The finding a room gives when its release bookkeeping fails as the reconcile asks: the app's label, which is how an
-/// operator names the app, and the failure's code. No room's ID and no error's text. `None` for a room with no app.
-fn bookkeeping_finding(sql: &SqlStorage, code: &str) -> R<Option<Value>> {
-    Ok(rows(
-        sql,
-        "SELECT label FROM app_label ORDER BY (current IS NOT NULL) DESC, created_at DESC LIMIT 1",
-        vec![],
-    )?
-    .first()
-    .and_then(|row| text(&row["label"]))
-    .map(|label| json!({ "code": BOOKKEEPING_FAILING, "subject": label, "detail": code })))
-}
-
 /// The applier, then the delete job, from the room's alarm. Each host and each script is its own small step, and one
 /// failing holds up no other.
 pub(super) async fn upkeep(state: &State, env: &Env) -> R<()> {
@@ -1130,7 +1153,7 @@ pub(super) async fn upkeep(state: &State, env: &Env) -> R<()> {
     // A release whose upload is an hour old ends here too, so a release that was staged and then abandoned doesn't
     // keep its host waiting, and every script delete in the room behind it, for longer than its hour. In a
     // transaction of its own, and never in the way: if it fails, the applier and the delete job run all the same.
-    let _ = release_commit::bookkeeping(state);
+    release_commit::bookkeeping(state);
     let hosts: Vec<String> = rows(
         &sql,
         &format!(
@@ -1205,27 +1228,14 @@ impl Workspace {
             serde_json::from_str(&req.text().await?).map_err(|_| ApiError::invalid_argument())?;
         // Whatever was asked: a release past its upload's hour ends first, before its script is looked at, so the
         // script a pass is about to delete never belongs to a release that could still go live. In a transaction
-        // of its own: if it fails, the reconcile's question is answered all the same.
-        //
-        // **And if it fails, the answer says so,** as one more finding for the operators' record. A failure here is
-        // one that has gone on: the room tries its bookkeeping after every unpublish and on every alarm, and this is
-        // a later try. The record keeps when it was first and last seen and how often, so a failure that persists is
-        // one whose count goes on rising, and one that has passed stops being seen.
-        let failing = release_commit::bookkeeping(&self.state);
+        // of its own: if it fails, the reconcile's question is answered all the same, and the failure is kept in
+        // the room's own row, which the answer's findings are read from.
+        release_commit::bookkeeping(&self.state);
         let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
         let slot = out.clone();
         let store = sql.clone();
         transaction_sync(&self.state, move || {
-            let mut answer = check(&store, &body, now_ms())?;
-            if let Some(code) = failing {
-                if let (Some(finding), Some(findings)) = (
-                    bookkeeping_finding(&store, code)?,
-                    answer["findings"].as_array_mut(),
-                ) {
-                    findings.push(finding);
-                }
-            }
-            *slot.borrow_mut() = Some(answer);
+            *slot.borrow_mut() = Some(check(&store, &body, now_ms())?);
             Ok(())
         })?;
         self.arm(false, false).await?;
@@ -1287,7 +1297,7 @@ impl Workspace {
         })?;
         // The suspension has committed. Only now are the releases that hadn't gone live ended, in a transaction of
         // their own, with nothing awaited between the two: whether or not that works, the app is unpublished.
-        let _ = release_commit::bookkeeping(&self.state);
+        release_commit::bookkeeping(&self.state);
         // The transaction moved each host's version, which voids any wait, so the applier is due now. If the alarm
         // can't be set the suspension has still committed, and the operator is told it failed: asking again changes
         // nothing in the room and arms again. Nothing else corrects a lost wake until the reconcile exists.

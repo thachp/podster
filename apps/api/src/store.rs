@@ -333,6 +333,10 @@ CREATE TABLE script_delete (script_name TEXT PRIMARY KEY, label TEXT NOT NULL RE
   CHECK (length(script_name) BETWEEN 38 AND 63 AND substr(script_name, -37, 4) = '.rel' AND substr(script_name, -33, 1) = '_' AND substr(script_name, -32) NOT GLOB '*[^0-9a-f]*' AND substr(script_name, 1, length(script_name) - 37) NOT GLOB '*[^a-z0-9]*'),
   CHECK (script_name = label || substr(script_name, -37))) WITHOUT ROWID;
 CREATE INDEX script_delete_due ON script_delete (next_attempt_at) WHERE gone_at IS NULL;
+", "
+CREATE TABLE release_bookkeeping (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), failures INTEGER NOT NULL CHECK (typeof(failures) = 'integer' AND failures >= 1),
+  first_failed_at INTEGER NOT NULL, last_failed_at INTEGER NOT NULL, last_code TEXT NOT NULL CHECK (length(last_code) BETWEEN 1 AND 64),
+  CHECK (first_failed_at <= last_failed_at));
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

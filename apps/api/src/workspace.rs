@@ -87,6 +87,7 @@ mod provisioning;
 mod public;
 mod public_claims;
 mod readiness_upkeep;
+mod release_recheck;
 mod removal;
 mod repo_tokens;
 mod repositories;
@@ -4125,6 +4126,9 @@ impl Workspace {
         }
         if req.path() == takedown::INTERNAL_TAKEDOWN_CHECK {
             return self.takedown_check(req).await;
+        }
+        if req.path() == release_recheck::INTERNAL_RELEASE_RECHECK {
+            return self.release_recheck(req).await;
         }
         #[cfg(feature = "failpoints")]
         if req.path() == INTERNAL_MANAGED_SWITCH {

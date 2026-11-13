@@ -4,8 +4,6 @@ Findings that reviews kept making in the week of 2026-11-12, written once so an 
 
 This page adds to [CLAUDE.md](../CLAUDE.md), which holds the rules that must always hold and the scripts agents must use, merges through `scripts/merge-gate` among them. Where the two disagree, CLAUDE.md wins and this page is wrong.
 
-Two of the sources, #334 and #336, were still open when this was written (2026-11-13). What they taught is in their review rounds, and it may change before they merge.
-
 ## 1. Tests never depend on wall-clock time
 
 - No sleep, and no wait on a timer to "let it happen". Wait for the thing itself: a write held at a stand-in, a line the process prints, an alarm run the test makes.
@@ -23,7 +21,9 @@ Two of the sources, #334 and #336, were still open when this was written (2026-1
 - Learned in #323 (2026-11-13): a self-test sent itself a signal and raced the event loop, failing `main`'s CI. The stand-in now holds the request until the signal has been handled, and the test has no timer at all.
 - Learned in #325 (2026-11-13): a test no longer assumes `attempts: 1`; "a pass woke something" is shown by holding the write only that thing makes.
 - Learned in #331 (2026-11-13): in test builds an object reads its clock from a table, so a day's and an hour's edge are each tested to the millisecond.
-- Learned in #336 (open): every room is quieted in an `afterEach`; two `attempts: 2` assertions stopped resting on a wait; the 5-second and one-hour bounds are shown with the clock passed in.
+- Learned in #336 (2026-11-13): every room a test makes is quieted in an `afterEach`; two `attempts: 2` assertions stopped resting on a wait; the reads' 5-second bound and the upload's one-hour expiry are each shown to the millisecond with the clock passed in.
+- Learned in #341 (2026-11-13): an accessibility run read a 50-message thread in one in-page script under a single 90-second bound, and stalled on CI without saying how far it got. It is now a bounded step per message, named, with no timer. A page starved of CPU still fails its 800 ms responsiveness budget, but as a measurement.
+- Learned in #342 (2026-11-13): a gateway test got its 429 only when other tests had put 20 requests into a shared counter's current wall-clock minute, and its `"0"` limit was an invalid setting that silently fell back to the default. It failed `main`. The test now makes its own refusal, with a caller of its own.
 
 ## 2. A check that can't fail is not a check
 
@@ -37,7 +37,8 @@ Two of the sources, #334 and #336, were still open when this was written (2026-1
 - Learned in #315 (2026-11-12): a staging run with one check passed and ten skipped exited 0; it now exits 1 and lists what wasn't shown. A pair of answers that matched but were both 429, 401 or 502 passed; only the API's own expected answer passes now.
 - Learned in #318 (2026-11-12): the PR shows its guard still fails on the old page, by putting the old prop back.
 - Learned in #332 (2026-11-13): the browser run recorded JSON and exited 0 if one browser launched. It now fails unless every browser held each sandbox property, asserts the opposite in a control, and a self-test takes each assertion away in turn.
-- Learned in #336 (open): an added call survived its own mutation, which is how the author found the call was redundant and removed it.
+- Learned in #334 (2026-11-13): on bash 3.2, a script killed by `set -u` with an EXIT trap exited 0. Every exit the script means now sets a flag first, and the trap treats any other exit as an error that is never 0. A hung self-test case is killed at a bound and fails by name; no case passes because of time.
+- Learned in #336 (2026-11-13): an added call survived its own mutation, which is how the author found the call was redundant and removed it, keeping the test.
 
 ## 3. Fail closed on what can't be read, and tell "couldn't read" from "read and false"
 
@@ -50,7 +51,7 @@ Two of the sources, #334 and #336, were still open when this was written (2026-1
 **Why:** treating an unread fact as false ends things that should have gone on, and treating it as true or absent lets through what should have been refused. Both have happened here.
 
 - Learned in #325 (2026-11-13): "couldn't read the entry" and "wants no entry" compared equal, so a foreign entry on a taken-down host would have stayed for ever, untold. A list page with no `result_info` is now a failed list, not the last page.
-- Learned in #334 (open): a deploy script's reads failed open on an unexpected body. Every read must now have the exact expected shape, and an error is a refusal, never a "no".
+- Learned in #334 (2026-11-13): a deploy script's reads failed open on an unexpected body. Every read must now be exactly one JSON document of the exact expected shape, naming the thing asked for; anything else refuses, and an error is never a "no".
 - Learned in #335 (2026-11-13): an unreadable stop, person or delegation answers `503 standing_unknown` and changes nothing; only a fact that was read and fails ends a release.
 
 ## 4. A takedown never fails or waits because of other bookkeeping
@@ -60,7 +61,7 @@ Taking an app down commits in its own transaction and runs before anything slowe
 **Why:** a takedown is the answer to abuse. It can't be held up by work that is merely owed.
 
 - Learned in #319 (2026-11-12): the alarm does takedown work "before anything slower", and the rest of the pass is bounded so a takedown still goes first.
-- Learned in #336 (open): ending expired uploads shared a path with unpublishing. It now has a transaction of its own, after the suspension has committed.
+- Learned in #336 (2026-11-13): ending expired uploads shared a path with unpublishing. It now has a transaction of its own, after the suspension has committed; two tests make it fail and show the suspension still commits and the alarm still removes the entry.
 
 ## 5. Names are not IDs
 
@@ -85,7 +86,7 @@ This repository is public. No account, zone or namespace ID and no secret goes i
 
 - Read what the pinned version does; don't assume it refuses. With no configuration file, `wrangler deploy` configures the project and deploys it.
 - Pin the tool's exact version, and re-read the behaviour you depend on when the pin moves.
-- A script that handles a token refuses to run under shell tracing, keeps the token out of every shell variable, and starts each tool with `env -i` and an allow-list, never the caller's environment.
+- A script that handles a token restarts itself in a clean process (`env -i` with an allow-list, a named shell, no profile) before anything else. It refuses to run under shell tracing, keeps the token out of every shell variable, and starts each tool with `env -i` and an allow-list, never the caller's environment.
 - Setting a secret has one form: `cd apps/<app> && npx wrangler secret put NAME --env staging`. Never combine `--name` with `--env`. See [the staging guide](staging.md#setting-a-secret-one-form-only).
 
 **Why:** a default is a decision someone else made and can change. Each of these was found as a deploy, a leak or a stray resource that nobody asked for.
@@ -94,7 +95,7 @@ This repository is public. No account, zone or namespace ID and no secret goes i
 - Learned in #328 (2026-11-13): the plan's guard assumed a bare `wrangler deploy` refuses without a configuration file. Since wrangler 4.68 it doesn't. The guard became a default-named `wrangler.jsonc` that can deploy nothing.
 - Learned in #329 (2026-11-13): wrangler is pinned exactly in `apps/content`, and the static check reads the installed copy's source for which `account_id` wins, because the documentation doesn't say.
 - Learned in #333 (2026-11-13): `--name` with `--env` made the stray Worker `podster-api-staging-staging`: wrangler appends the environment's name, and `secret put` creates an empty Worker when none exists.
-- Learned in #334 (open): review found the token echoed under `bash -x`, curl and wrangler run with the caller's environment, an exported shell function able to shadow `curl`, and `.env` files loaded from the working directory.
+- Learned in #334 (2026-11-13): review found the token echoed under `bash -x`, curl and wrangler run with the caller's environment, an exported shell function able to shadow `curl`, and `.env` files loaded from the working directory. Refusing exported functions was tried and its claim withdrawn; the script now restarts as `/bin/bash` under `/usr/bin/env -i`, refuses a second restart, and says its scope is accidents in the owner's shell, not an attacker.
 
 ## 8. An accepted ADR outranks a later ruling made in passing
 
@@ -111,7 +112,7 @@ A push after a review is reviewed again for what changed, and the PR body says w
 **Why:** a review covers one commit. What lands after it is unreviewed, however small.
 
 - Learned in #315 (2026-11-12) and #318 (2026-11-12): each body has "Changes since the review at" a named commit.
-- Learned in #319 (2026-11-12), #322 (2026-11-13) and #334 (open): each records what was closed "after the delta review".
+- Learned in #319 (2026-11-12), #322 (2026-11-13) and #334 (2026-11-13): each records what was closed "after the delta review".
 
 ## 10. Staging: run the script after the deploy, and say what it did not show
 
@@ -125,12 +126,24 @@ A push after a review is reviewed again for what changed, and the PR body says w
 - Learned in #320 (2026-11-12): schema steps had only ever been shown on rooms made after the deploy, so M6-S04 became two phases around one.
 - Learned in #324 (2026-11-13): runs are recorded after #319 and after #322. Review found the deploy M6-S04 crossed changed the room's code, not its tables, so the record now says a table change on an older room is still unshown, and the next such deploy must be wrapped.
 
+## 11. An outcome never depends on the order notices arrive
+
+A rule applied to notices gives the same result whatever order they arrive in, and whichever are missed or heard twice. The state carries what a late hearer needs, and a test tries every order.
+
+**Why:** delivery order isn't promised. A rule that is right only for the order its author pictured is wrong for some room.
+
+- Learned in #344 (2026-11-13): as specified, a room that heard a give-back before the take it had missed stayed up. The switch now carries `last_take`, and a test of over 1,000 cases hears every subset of the notices in every order, with the expected outcome computed from the operator's acts alone.
+
+## Enforced by a tool
+
+- **Rule 1:** `e2e/test-timing-check.mjs` (#346, #348 and #349, all 2026-11-13) runs in CI's `e2e` job after its own self-test. It reads every file under `apps/api/test` and `apps/gateway/test` and fails on a sleep, on a wall-clock margin in an assertion, and on an API spec that makes a room and has no `alarmQuiet` in `afterEach`, `afterAll` or `finally`.
+- **What it already found is owed.** `e2e/test-timing-allow.json` lists every existing finding with a reason: as of #349, 117 entries covering 324 findings, of which 97 entries, covering 101 findings, are owed fixes. Most of the rest are calls to helpers that only poll for the state itself. A new finding, or an edit to a listed line, fails until it is fixed or listed.
+
 ## Not yet enforced by a tool
 
-Every rule above is kept by authors and reviewers reading. These could be kept by a lint or a static check instead. They are owed work, with no date.
+Everything else above is kept by authors and reviewers reading. These could be kept by a lint or a static check instead. They are owed work, with no date.
 
-- **Rule 1:** sleeps, and timer waits used as margins, in `apps/api/test/*.spec.ts`.
-- **Rule 1:** a call to `alarmQuiet` that isn't inside `finally` or `afterEach`, and a spec that makes a room and never quiets it.
+- **Rule 1:** what the timing check's header lists as known gaps, among them a shared counter or rate-limit window (#342's kind), a margin in an `if` or `throw`, and a busy loop on `Date.now()`. The room rule is per file, so it doesn't show that every room reaches the quieting call.
 - **Rule 5:** a `console` call given a hostname or a script name. #331 has a test for its own host only.
 - **Rule 6:** a 32-character hexadecimal Cloudflare ID in any file or in a branch's commits.
 - **Rule 7:** `--name` and `--env` together on a `wrangler secret put` line, in scripts and in documentation.

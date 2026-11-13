@@ -202,6 +202,10 @@ describe("giving a grant", () => {
     const v = await version(id);
     for (const body of [
       { policy_version: v, principal_id: AGENT.id, action: "admin" },
+      // A `deploy` grant is what a release's requester must hold (M6). No route gives one: who may is step 6's to
+      // decide, and until then the only action a grant route takes is one of M5's two.
+      { policy_version: v, principal_id: AGENT.id, action: "deploy" },
+      { policy_version: v, principal_id: MEMBER.id, action: "deploy" },
       { policy_version: v, principal_id: AGENT.id, action: "Push" },
       { policy_version: v, principal_id: AGENT.id },
       { policy_version: v, action: "push" },

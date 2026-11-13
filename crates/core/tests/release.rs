@@ -1752,6 +1752,37 @@ fn a_retried_commit_is_replayed_and_never_told_to_fail() {
     assert!(confirm_served(&committed, &mark, "lab.rel_b").is_ok());
 }
 
+/// Two gaps the mutation pass on PR #313 left open, closed here: a retry of the flight's own commit under a HIGHER
+/// epoch than the flight's is refused as an epoch that moved, so the comparison is `!=` and never `>`; and the flight's
+/// own release asking for a DIFFERENT script is refused as a flight in the way, never replayed as its own.
+#[test]
+fn a_retry_under_a_higher_epoch_and_the_same_release_with_another_script_are_both_refused() {
+    let state = serving(Some("lab.rel_a"), 2, 3);
+    let Ok((committed, mark)) =
+        commit_live(&state, 3, "lab.rel_b", "lab.rel_b", ReleaseState::Uploading)
+    else {
+        unreachable!("refused");
+    };
+    for release in [ReleaseState::Uploading, ReleaseState::Live] {
+        // The same record and the same script, under an epoch above the flight's: not a replay.
+        assert_eq!(
+            commit_live(&committed, 4, "lab.rel_b", "lab.rel_b", release),
+            Err(CommitLiveRefusal::EpochMoved)
+        );
+        assert_eq!(
+            commit_live(&committed, u64::MAX, "lab.rel_b", "lab.rel_b", release),
+            Err(CommitLiveRefusal::EpochMoved)
+        );
+        // The flight's own release, under the flight's epoch, asking for another script: never its replay.
+        assert_eq!(
+            commit_live(&committed, 3, "lab.rel_c", "lab.rel_b", release),
+            Err(CommitLiveRefusal::InFlight)
+        );
+    }
+    // Neither refusal changed anything: the flight is still the first commit's, and it completes.
+    assert!(confirm_served(&committed, &mark, "lab.rel_b").is_ok());
+}
+
 #[test]
 fn a_release_that_ended_never_goes_live_again() {
     // B commits, its marker fails, and it is set back; its record is now failed.

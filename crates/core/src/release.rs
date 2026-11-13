@@ -1105,14 +1105,16 @@ pub enum SwitchApplied {
     /// in one transaction. A room with nothing up still does, so its epoch goes up and nothing in flight can go live
     /// after it.
     Unpublish,
-    /// The answer isn't well formed: nothing changes and a notice is not acknowledged, so it is kept and logged by its
-    /// IDs, never dropped as if it had been applied.
+    /// The answer, or what the room last applied, isn't well formed: nothing changes and a notice is not acknowledged,
+    /// so it is kept and logged by its IDs, never dropped as if it had been applied. A room whose own applied switch is
+    /// malformed can't tell what is newer, so it decides nothing until that is put right; its recheck is undecided too
+    /// ([`release_switch_now`]). *Added after the delta review of PR #344.*
     Refused,
 }
 
 /// Decides [`SwitchApplied`] from what the room last applied and the answer it now has.
 pub fn apply_release_switch(applied: ReleaseSwitch, seen: ReleaseSwitch) -> SwitchApplied {
-    if !seen.well_formed() {
+    if !seen.well_formed() || !applied.well_formed() {
         SwitchApplied::Refused
     } else if seen.generation <= applied.generation {
         SwitchApplied::Stale

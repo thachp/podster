@@ -1452,6 +1452,47 @@ fn a_room_applies_only_a_newer_answer_and_a_give_back_with_no_take_since_restore
         apply_release_switch(ReleaseSwitch::UNSET, ReleaseSwitch::UNSET),
         SwitchApplied::Stale
     );
+    // An answer at the generation the room applied that disagrees with it is not newer, whichever way it disagrees: it
+    // changes nothing, and a taken one doesn't unpublish.
+    assert_eq!(
+        apply_release_switch(sw(true, 4, 2), sw(false, 4, 4)),
+        SwitchApplied::Stale
+    );
+    assert_eq!(
+        apply_release_switch(sw(false, 4, 4), sw(true, 4, 2)),
+        SwitchApplied::Stale
+    );
+}
+
+#[test]
+fn a_room_whose_applied_switch_is_malformed_decides_nothing() {
+    // Whatever it hears, newer or not, taken or held, it is refused, never applied, so nothing records or unpublishes
+    // on a value the room can't compare against.
+    for applied in [
+        sw(true, 1, 2),
+        sw(false, 3, 2),
+        sw(false, 0, 0),
+        sw(true, 2, 2),
+    ] {
+        for seen in [
+            ReleaseSwitch::UNSET,
+            sw(false, 1, 1),
+            sw(true, 5, 1),
+            sw(false, 9, 9),
+            applied,
+        ] {
+            assert_eq!(
+                apply_release_switch(applied, seen),
+                SwitchApplied::Refused,
+                "{applied:?} {seen:?}"
+            );
+        }
+        assert_eq!(
+            release_switch_now(applied, Some(sw(false, 9, 9))),
+            None,
+            "{applied:?}"
+        );
+    }
 }
 
 /// A room as the switch's answers leave it: what it applied, whether its app is still up, and its epoch.

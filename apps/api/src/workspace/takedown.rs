@@ -25,22 +25,31 @@
 //! What this step leaves out, on purpose:
 //! - Only `app_suspended` unpublishes here. The other ten triggers are step 6's.
 //! - A custom hostname's entry is never written here, only removed: writing one needs the hostname's claim to agree,
-//!   and the stop for the whole content domain to be read first, which are the next PR's.
-//! - A default host's entry is written without reading the stop, which doesn't exist yet. The next PR adds that read,
-//!   and no provider may be configured before it.
+//!   and nothing makes a claim until custom domains are built (step 8), which adds that read.
+//! - **A custom hostname suspended while this room holds it** ([`hostname_suspended`]): the hostname's own object
+//!   tells the room, and the room clears and closes that host through `podster_core::release::clear_host`, in its own
+//!   transaction. The epoch doesn't move and the default host is untouched. The applier then removes the entry.
+//! - **Before it writes a default host's entry the applier asks the `Moderation` object whether the whole content
+//!   domain is stopped** (`content_stop`). Stopped, or no answer, and nothing is written. A removal never asks.
 //! - A release that was still waiting, queued or uploading is left as it is. The epoch has moved, so it can never go
 //!   live, and the job that owns it (step 5) fails it on its next pass.
 //!
 //! Logs carry the room's ID, counts and codes. Never a host, a label or a script's name.
 use super::*;
 use crate::content_provider::{Entry, Provider};
+use crate::content_stop::{self, Stop};
+use podster_core::hostname_requests::HostnameRequestState;
 use podster_core::release::{
-    next_state, script_gone, script_owner, unpublish, CommitMark, DesiredServe, InFlight,
-    ReleaseEvent, ReleaseState, ScriptAnswer, ScriptOwner, ServeState, UnpublishTrigger,
+    clear_host, next_state, script_gone, script_owner, unpublish, CommitMark, DesiredServe,
+    InFlight, ReleaseEvent, ReleaseState, ScriptAnswer, ScriptOwner, ServeState, UnpublishTrigger,
 };
 
 /// The Worker's call, for a verified operator. Nothing outside the Worker reaches it.
 pub(crate) const INTERNAL_APP_SUSPENSION: &str = "/internal/app-suspension";
+
+/// The hostname's claim object's call: the name was suspended while this room held it. Nothing outside the Worker
+/// reaches it.
+pub(crate) const INTERNAL_HOSTNAME_NOTICE: &str = "/internal/hostname-notice";
 
 /// The highest epoch or version the room stores. SQLite holds 64-bit integers, but they cross to Rust as JavaScript
 /// numbers, which are exact only to 2^53 - 1. Core's own ceiling is `u64::MAX`, the state it never moves from. So
@@ -333,6 +342,128 @@ pub(super) fn set(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     }))
 }
 
+/// `{ hostname, request_id, generation }`: the hostname's own object says the name was suspended while this room's
+/// request held it. In the caller's transaction the room clears and closes that host, so its applier removes the entry
+/// and no commit, rollback or set-back writes to it again, and marks its request as ending.
+///
+/// **Which request a notice is for is decided by its ID, which is unique.**
+/// - A request the room doesn't have for that hostname, or one that has ended: a late notice. The room may since
+///   hold the name again under a new request, whose host a late notice must never close. It changes nothing and
+///   still answers, so the object stops asking.
+/// - The room's own open request, under the generation the notice carries: it acts. Telling it twice changes nothing
+///   more.
+/// - The room's own open request, under another generation: **refused, never acknowledged.** The object keeps the
+///   notice and sends it again, and the room logs it by its IDs. A fault here must be loud: acknowledging it would
+///   leave a suspended name served with nothing owed.
+///
+/// The claim itself ends as any claim does, in the step that builds claims. Audited as Podster. Answers
+/// `{ known, acted }`.
+pub(super) fn hostname_suspended(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
+    let (Some(hostname), Some(request), Some(generation)) = (
+        body["hostname"].as_str(),
+        body["request_id"].as_str(),
+        body["generation"].as_i64(),
+    ) else {
+        return Err(ApiError::invalid_argument());
+    };
+    let found = rows(
+        sql,
+        "SELECT state, generation FROM hostname_request WHERE id = ? AND hostname = ?",
+        vec![request.into(), hostname.into()],
+    )?;
+    let Some(row) = found.first() else {
+        return Ok(json!({ "known": false, "acted": false }));
+    };
+    let state = row["state"].as_str().and_then(HostnameRequestState::parse);
+    let Some(state) = state.filter(|state| state.is_open()) else {
+        // Late: the request has ended. Nothing of the room's is its to close.
+        return Ok(json!({ "known": true, "acted": false }));
+    };
+    if int(&row["generation"]) != generation {
+        // The request is the room's own and still open, so this notice is about a host it may be serving, and the
+        // generations disagree: a fault, in whatever gave the claim or in the room's own record. It is never
+        // acknowledged and dropped. The room refuses, so the object keeps the notice and sends it again, and says so.
+        let room = rows(sql, "SELECT id FROM workspace", vec![])?
+            .first()
+            .and_then(|row| text(&row["id"]))
+            .unwrap_or_default();
+        console_error!(
+            "takedown: a hostname notice was refused: room={} request={} code=hostname_generation_mismatch",
+            room,
+            request
+        );
+        return Err(ApiError::internal(
+            "hostname notice under another generation",
+        ));
+    }
+    let mut acted = false;
+    if state != HostnameRequestState::Ending {
+        exec(
+            sql,
+            "UPDATE hostname_request SET state = ?, end_reason = 'hostname_suspended', updated_at = ? WHERE id = ?",
+            vec![
+                HostnameRequestState::Ending.name().into(),
+                now.into(),
+                request.into(),
+            ],
+        )?;
+        acted = true;
+    }
+    let open_custom = !rows(
+        sql,
+        "SELECT 1 AS open FROM serve_state WHERE host = ? AND kind = 'custom' AND closed = 0",
+        vec![hostname.into()],
+    )?
+    .is_empty();
+    if open_custom {
+        let loaded =
+            load(sql)?.ok_or_else(|| ApiError::internal("a host with no release state"))?;
+        let index = loaded
+            .hosts
+            .iter()
+            .position(|host| host == hostname)
+            .ok_or_else(|| ApiError::internal("a host that isn't in the serve state"))?;
+        // Core never clears the first host, which is the default one. A room whose only host is a custom hostname
+        // has no default host to keep, which no command makes: refused, and the object asks again.
+        let after = clear_host(&loaded.state, index)
+            .ok_or_else(|| ApiError::internal("the host can't be cleared"))?;
+        let cleared = after
+            .hosts
+            .get(index)
+            .filter(|host| host.script.is_none() && host.closed)
+            .ok_or_else(|| ApiError::internal("the host wasn't cleared"))?;
+        exec(
+            sql,
+            "UPDATE serve_state SET label = NULL, label_current = NULL, release_id = NULL, script_name = NULL, version = ?,
+               closed = 1, updated_at = ? WHERE host = ?",
+            vec![to_stored(cleared.version).into(), now.into(), hostname.into()],
+        )?;
+        acted = true;
+    }
+    if acted {
+        audit_as(
+            sql,
+            moderation::PODSTER,
+            moderation::PODSTER_KIND,
+            "app_hostname.suspended",
+            "app_hostname",
+            None,
+            Some(json!({ "suspended": true }).to_string()),
+            now,
+        )?;
+        record_event(
+            sql,
+            "app_hostname.suspended",
+            moderation::PODSTER,
+            None,
+            &Transition::NONE,
+            roles::room_managers(sql, moderation::PODSTER)?,
+            now,
+        )?;
+    }
+    Ok(json!({ "known": true, "acted": acted }))
+}
+
 /// The provider this room may use, or `None`. Test builds also read a table a test makes in one room,
 /// `test_content_provider_off`, so the unconfigured case can be shown beside the configured one.
 fn provider(env: &Env, sql: &SqlStorage) -> Option<Provider> {
@@ -518,7 +649,13 @@ fn host_label(
 
 /// One host, made to match what the room wants now. See the module's note for the four steps. `deadline` is when the
 /// pass stops starting new steps.
-async fn apply_host(sql: &SqlStorage, provider: &Provider, host: &str, deadline: i64) -> R<()> {
+async fn apply_host(
+    sql: &SqlStorage,
+    env: &Env,
+    provider: &Provider,
+    host: &str,
+    deadline: i64,
+) -> R<()> {
     let mut last = None;
     for _ in 0..APPLY_PASSES {
         let Some(want) = wanted(sql, host)? else {
@@ -557,14 +694,21 @@ async fn apply_host(sql: &SqlStorage, provider: &Provider, host: &str, deadline:
                     "script_not_this_hosts_entry_remains"
                 })
             }
-            Some(script) => {
-                let written = provider.write_entry(host, script).await;
-                match provider.read_entry(host).await {
-                    Entry::Present(found) if written && &found == script => Ok(()),
-                    _ if !written => Err("write_not_confirmed"),
-                    _ => Err("read_back_differs"),
+            // Before any write: the stop for the whole content domain, asked of its own home. While it is set, or
+            // can't be read, nothing is written. What is already there is left: the stop itself is what refuses every
+            // host, and no room's state changes for it. A removal never asks: taking an entry out is always allowed.
+            Some(script) => match content_stop::read_from(env).await {
+                Stop::Stopped => Err("content_domain_stopped"),
+                Stop::Unreadable => Err("stop_unreadable"),
+                Stop::Clear => {
+                    let written = provider.write_entry(host, script).await;
+                    match provider.read_entry(host).await {
+                        Entry::Present(found) if written && &found == script => Ok(()),
+                        _ if !written => Err("write_not_confirmed"),
+                        _ => Err("read_back_differs"),
+                    }
                 }
-            }
+            },
             None => match remove_entry(provider, host).await {
                 // Absent is the point, whether this delete or an earlier one did it.
                 (_, true) => Ok(()),
@@ -730,7 +874,7 @@ pub(super) async fn upkeep(state: &State, env: &Env) -> R<()> {
     };
     let deadline = now + PASS_BUDGET_MS;
     for host in &hosts {
-        if let Err(error) = apply_host(&sql, &provider, host, deadline).await {
+        if let Err(error) = apply_host(&sql, env, &provider, host, deadline).await {
             console_error!(
                 "takedown: a host wasn't applied: code={}",
                 error.code().unwrap_or("internal_error")
@@ -753,6 +897,40 @@ pub(super) async fn upkeep(state: &State, env: &Env) -> R<()> {
 }
 
 impl Workspace {
+    /// The hostname's claim object tells the room its custom hostname was suspended (M6 step 4(a)). The applier is
+    /// woken by the alarm this arms.
+    pub(super) async fn hostname_notice(&self, mut req: Request) -> R<Value> {
+        let sql = self.state.storage().sql();
+        if !store::is_initialized(&sql)? {
+            // No such room, so nothing of its is being served. Answered, so the object stops asking.
+            return Ok(json!({ "known": false, "acted": false }));
+        }
+        self.migrate_if_needed()?;
+        // Test builds only: a test makes the room fail to answer, to show the object keeps the notice and asks again.
+        #[cfg(feature = "failpoints")]
+        if !rows(
+            &sql,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_refuse_hostname_notice'",
+            vec![],
+        )?
+        .is_empty()
+        {
+            return Err(ApiError::internal("test: the room didn't answer"));
+        }
+        let body: Value =
+            serde_json::from_str(&req.text().await?).map_err(|_| ApiError::invalid_argument())?;
+        let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+        let slot = out.clone();
+        let store = sql.clone();
+        transaction_sync(&self.state, move || {
+            *slot.borrow_mut() = Some(hostname_suspended(&store, &body, now_ms())?);
+            Ok(())
+        })?;
+        self.arm(false, false).await?;
+        let answer = out.borrow_mut().take();
+        answer.ok_or_else(|| ApiError::internal("hostname notice answered nothing"))
+    }
+
     /// An operator suspends the room's app or lifts that (M6 step 4(a)). The Worker has checked the operator. The
     /// applier is woken by the alarm this arms, for now, so the entries go without waiting for anything else.
     pub(super) async fn app_suspension(&self, mut req: Request) -> R<Value> {

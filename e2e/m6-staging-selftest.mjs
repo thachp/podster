@@ -195,10 +195,11 @@ check(m6Names(agentCapabilities(capabilities).map((c) => c.name), operations).le
   walk(join(here, "../apps/api/src"));
   const named = new Set(files.flatMap((file) => [...readFileSync(file, "utf8").matchAll(/"([a-z_]+\.[a-z_]+)"/g)].map((m) => m[1])));
   const clash = [...named].filter((name) => M6_EVENT.test(name) && !/\.(html|js|json|xml|dex)$/.test(name)).sort();
-  // M6 step 4(a) writes two, both only from an operator's suspension of an app, which is behind the switch. So on
-  // staging, where release is switched off, M6-S02c still must find none. Any other is a new name to account for here.
-  const BUILT_M6_EVENTS = ["app.suspended", "app.suspension_lifted"];
-  check(named.size > 20 && JSON.stringify(clash) === JSON.stringify(BUILT_M6_EVENTS), `the only M6 event names the API or core writes today are an app's suspension and its lifting (${named.size} read): ${clash.join(", ") || "none"}`);
+  // M6 step 4(a) writes three, each only from an operator's suspension, of an app or of a custom hostname a room
+  // holds, which is behind the switch. So on staging, where release is switched off, M6-S02c still must find none.
+  // Any other is a new name to account for here.
+  const BUILT_M6_EVENTS = ["app.suspended", "app.suspension_lifted", "app_hostname.suspended"];
+  check(named.size > 20 && JSON.stringify(clash) === JSON.stringify(BUILT_M6_EVENTS), `the only M6 event names the API or core writes today are an app's suspension, its lifting and a hostname's suspension (${named.size} read): ${clash.join(", ") || "none"}`);
 }
 check(JSON.stringify(m6EventTypes([{ type: "task.created" }, { type: "role.released" }, { type: "release.requested" }, { type: "deploy.started" }, { type: "app.suspended" }, { type: "release.requested" }])) === JSON.stringify(["release.requested", "deploy.started", "app.suspended"]), "M6 event types, deploy included, are found once each, and a role's release isn't one");
 

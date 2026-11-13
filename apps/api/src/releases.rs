@@ -15,9 +15,10 @@
 //!
 //! Who may configure or approve a release, and everything else about authority, is decided in `podster_policy` and
 //! `podster_core` by the steps that build each route. Nothing here reads or writes state, and nothing is logged.
-use crate::content_provider::Provider;
+use crate::content_provider;
 use crate::error::ApiError;
 use crate::{moderation, Caller};
+use podster_core::hostnames::{normalize, PODSTER_DOMAIN};
 use podster_core::release::is_label;
 use serde_json::{json, Value};
 use worker::*;
@@ -132,14 +133,84 @@ async fn app_suspension(
     .await
 }
 
+/// An operator suspends a custom hostname, or lifts that (M6 step 4(a)). The operator was checked before this. The
+/// name comes normalized, so two spellings are one name. Anything on the content domain that isn't an app's
+/// default host, and anything on Podster's own domain, is nobody's hostname: `not_found`. The suspension is the
+/// hostname's own object's, with no room, so it holds whether or not any room has ever asked for the name.
+async fn hostname_suspension(
+    env: &Env,
+    caller: &Caller,
+    domain: &str,
+    name: &str,
+    suspended: bool,
+    body: Option<&str>,
+) -> R<std::result::Result<Value, Response>> {
+    let reason = moderation::reason_of(body)?;
+    if !name.contains('.') {
+        return Err(ApiError::invalid_argument());
+    }
+    if content_provider::on_domain(domain, name)
+        || content_provider::on_domain(PODSTER_DOMAIN, name)
+    {
+        return Err(ApiError::not_found());
+    }
+    let stub = env
+        .durable_object("HOSTNAME_CLAIM")?
+        .id_from_name(name)?
+        .get_stub()?;
+    let request = json!({ "hostname": name, "suspended": suspended, "reason": reason.name() });
+    let done = moderation::object_action(
+        env,
+        &caller.id,
+        stub,
+        crate::hostname_claim::INTERNAL_SUSPENSION,
+        request,
+        "app_host",
+        name,
+        suspended,
+        reason,
+    )
+    .await?;
+    Ok(done.map(|mut answer| {
+        if let Some(fields) = answer.as_object_mut() {
+            fields.insert("host".into(), json!(name));
+        }
+        answer
+    }))
+}
+
+/// An operator stops the whole content domain, or resumes it (M6 step 4(a)). The operator was checked before this.
+/// The stop's home is the `Moderation` object, which also keeps the record of who did it.
+async fn content_stop(
+    env: &Env,
+    caller: &Caller,
+    stopped: bool,
+    body: Option<&str>,
+) -> R<std::result::Result<Value, Response>> {
+    let reason = moderation::reason_of(body)?;
+    let request = json!({ "stopped": stopped, "reason": reason.name() });
+    moderation::object_action(
+        env,
+        &caller.id,
+        moderation::moderation(env)?,
+        crate::content_stop::PATH,
+        request,
+        "content_domain",
+        "content_domain",
+        stopped,
+        reason,
+    )
+    .await
+}
+
 /// The answer to an M6 route while release is switched on, which only a test build can be. An agent is refused
 /// first, by its kind, and an operator's route refuses anyone who isn't a configured operator: who is asking is
 /// settled before anything is said about what exists or is built.
 ///
-/// Built (step 4(a)): an operator's suspension of an app and its lifting, by the app's label, and by its default
-/// host, which is the same act. Everything else answers `release_not_available`: a custom hostname's suspension and
-/// the stop for the whole content domain are the next PR's, and with no content domain configured no host is anyone's
-/// default host.
+/// Built (step 4(a)): an operator's suspension of an app and its lifting, by the app's label and by its default
+/// host, which is the same act; a custom hostname's suspension and its lifting; and the stop for the whole content
+/// domain and its lifting. Everything else answers `release_not_available`, and so does a host's route while no
+/// content domain is configured, since no host can then be told from another.
 pub(crate) async fn answer(
     env: &Env,
     caller: &Caller,
@@ -158,22 +229,31 @@ pub(crate) async fn answer(
             app_suspension(env, caller, label, *verb == "suspend", body).await?
         }
         ["v1", "moderation", "app-hosts", host, verb] => {
-            let label = Provider::from_env(env)
-                .and_then(|provider| provider.default_host_label(host).map(str::to_owned));
-            let Some(label) = label else {
+            // Telling an app's default host from a custom hostname needs the content domain. With none configured,
+            // which is every deployment, no host can be placed, and nothing is done for any.
+            let Some(domain) = content_provider::content_domain(env) else {
                 return Err(release_not_available());
             };
-            app_suspension(env, caller, &label, *verb == "suspend", body)
-                .await?
-                .map(|mut answer| {
-                    // Asked by the host, answered by the host. The label is the host's first part, which the
-                    // operator already has.
-                    if let Some(fields) = answer.as_object_mut() {
-                        fields.remove("label");
-                        fields.insert("host".into(), json!(host));
-                    }
-                    answer
-                })
+            let suspended = *verb == "suspend";
+            // The name as Podster writes it, so two spellings of a host are one host.
+            let name = normalize(host).map_err(|_| ApiError::invalid_argument())?;
+            match content_provider::default_host_label_on(&domain, &name) {
+                Some(label) => app_suspension(env, caller, label, suspended, body)
+                    .await?
+                    .map(|mut answer| {
+                        // Asked by the host, answered by the host. The label is the host's first part, which the
+                        // operator already has.
+                        if let Some(fields) = answer.as_object_mut() {
+                            fields.remove("label");
+                            fields.insert("host".into(), json!(name));
+                        }
+                        answer
+                    }),
+                None => hostname_suspension(env, caller, &domain, &name, suspended, body).await?,
+            }
+        }
+        ["v1", "moderation", "content-domain", verb] => {
+            content_stop(env, caller, *verb == "stop", body).await?
         }
         _ => return Err(release_not_available()),
     };

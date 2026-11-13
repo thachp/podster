@@ -8,7 +8,7 @@
 //! Logs carry IDs and codes only, never a report's note.
 use crate::error::ApiError;
 use crate::store::{exec, int, rows, transaction_sync};
-use crate::{forward, principal, valid_id, Caller};
+use crate::{content_stop, forward, principal, valid_id, Caller};
 use podster_policy::moderation::{
     check_report, is_operator, parse_operators, Reason, REPORT_WINDOW_MS,
 };
@@ -38,7 +38,7 @@ fn now_ms() -> i64 {
     Date::now().as_millis() as i64
 }
 
-fn moderation(env: &Env) -> R<Stub> {
+pub(crate) fn moderation(env: &Env) -> R<Stub> {
     Ok(env
         .durable_object("MODERATION")?
         .id_from_name("moderation")?
@@ -336,12 +336,39 @@ pub(crate) async fn room_action(
     suspended: bool,
     reason: Reason,
 ) -> R<std::result::Result<Value, Response>> {
-    let action = if suspended { "suspend" } else { "lift" };
-    let seq = begin(env, operator, subject_kind, subject, action, reason).await?;
     let stub = env
         .durable_object("WORKSPACE")?
         .id_from_name(workspace)?
         .get_stub()?;
+    object_action(
+        env,
+        operator,
+        stub,
+        path,
+        request,
+        subject_kind,
+        subject,
+        suspended,
+        reason,
+    )
+    .await
+}
+
+/// The same, asked of any one object: a room, a hostname's claim object, or this module's own.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn object_action(
+    env: &Env,
+    operator: &str,
+    stub: Stub,
+    path: &str,
+    request: Value,
+    subject_kind: &str,
+    subject: &str,
+    suspended: bool,
+    reason: Reason,
+) -> R<std::result::Result<Value, Response>> {
+    let action = if suspended { "suspend" } else { "lift" };
+    let seq = begin(env, operator, subject_kind, subject, action, reason).await?;
     let answered = forward(
         stub,
         path,
@@ -481,6 +508,10 @@ pub async fn set_agent_suspension(
 #[durable_object]
 pub struct Moderation {
     state: State,
+    env: Env,
+    /// Test builds only: a test's direct call of the alarm waits out a run the runtime started, as the room's does.
+    #[cfg(feature = "failpoints")]
+    test_alarm_turn: futures_util::lock::Mutex<()>,
 }
 
 impl Moderation {
@@ -495,10 +526,52 @@ impl Moderation {
         value.ok_or_else(|| ApiError::internal("no transaction result"))
     }
 
+    /// Sets the alarm for when the stop's key is next due at the provider, if it is.
+    async fn arm(&self, sql: &SqlStorage) -> R<()> {
+        let now = now_ms();
+        if let Some(due) = content_stop::next_due(sql, &self.env, now)? {
+            let current = self.state.storage().get_alarm().await?;
+            if current.is_none_or(|at| at > due) {
+                self.state
+                    .storage()
+                    .set_alarm(crate::store::alarm_at(due.max(now + 1)))
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn dispatch(&self, mut req: Request) -> R<Value> {
         let sql = self.state.storage().sql();
         exec(&sql, SCHEMA, vec![])?;
+        exec(&sql, content_stop::SCHEMA, vec![])?;
         match (req.method(), req.path().as_str()) {
+            // The stop for the whole content domain (M6 step 4(a)): this object is its home. A room asks here before
+            // it writes a default host's serve entry.
+            (Method::Get, content_stop::PATH) => {
+                // Test builds only: a test makes the stop unreadable, to show a room then writes nothing.
+                #[cfg(feature = "failpoints")]
+                if !rows(
+                    &sql,
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_stop_unreadable'",
+                    vec![],
+                )?
+                .is_empty()
+                {
+                    return Err(ApiError::internal("test: the stop can't be read"));
+                }
+                content_stop::read(&sql)
+            }
+            (Method::Post, content_stop::PATH) => {
+                let body: Value = req.json().await?;
+                let store = sql.clone();
+                let answer =
+                    self.in_transaction(move || content_stop::set(&store, &body, now_ms()))?;
+                // The key at the provider is owed from now. A failed wake fails the answer, so the operator asks
+                // again, which changes nothing here and arms again.
+                self.arm(&sql).await?;
+                Ok(answer)
+            }
             (Method::Post, "/report") => {
                 let body: Value = req.json().await?;
                 self.in_transaction(move || keep_report(&sql, &body, now_ms()))
@@ -663,8 +736,37 @@ fn list(sql: &SqlStorage, before: Option<i64>) -> R<Value> {
 }
 
 impl DurableObject for Moderation {
-    fn new(state: State, _env: Env) -> Self {
-        Self { state }
+    fn new(state: State, env: Env) -> Self {
+        Self {
+            state,
+            env,
+            #[cfg(feature = "failpoints")]
+            test_alarm_turn: futures_util::lock::Mutex::new(()),
+        }
+    }
+
+    /// The object's only job on an alarm: making the provider's stop key match the stop.
+    async fn alarm(&self) -> Result<Response> {
+        #[cfg(feature = "failpoints")]
+        let _turn = self.test_alarm_turn.lock().await;
+        let sql = self.state.storage().sql();
+        let applied = match exec(&sql, content_stop::SCHEMA, vec![]) {
+            Ok(()) => content_stop::apply(&sql, &self.env).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = applied {
+            console_error!(
+                "content stop: the key wasn't applied: code={}",
+                error.code().unwrap_or("internal_error")
+            );
+        }
+        if let Err(error) = self.arm(&sql).await {
+            console_error!(
+                "content stop: couldn't set the next alarm: code={}",
+                error.code().unwrap_or("internal_error")
+            );
+        }
+        Response::ok("ok")
     }
 
     async fn fetch(&self, req: Request) -> Result<Response> {

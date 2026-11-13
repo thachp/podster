@@ -54,6 +54,47 @@ pub(crate) struct Provider {
     routing_token: String,
 }
 
+/// The key that stops the whole content domain, in the same KV namespace as the serve entries. A host is lower-case
+/// letters, digits, `-` and `.`, so no host can ever be this key. **Proposed here, for step 4(b):** the content
+/// Worker refuses every host while the key is there, and when it can't read it.
+const STOP_KEY: &str = "_stop";
+/// What the key holds while the domain is stopped. Its presence is the stop; the value says nothing more.
+const STOP_VALUE: &str = "stopped";
+
+/// What a read of the stop key found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StopKey {
+    /// The key is there: every host is refused.
+    Set,
+    /// The provider said, in so many words, that the key isn't there.
+    Absent,
+    /// Anything else. Never read as either.
+    Unknown,
+}
+
+/// The content domain this deployment is configured with, if it is: read alone, since telling an app's default host
+/// from a custom hostname needs only this and neither token.
+pub(crate) fn content_domain(env: &Env) -> Option<String> {
+    let domain = text_setting(env, DOMAIN, plain_host)?;
+    (podster_core::hostnames::normalize(&domain).ok().as_deref() == Some(domain.as_str()))
+        .then_some(domain)
+}
+
+/// The label of the app whose default host this is on `domain`: `<label>.<domain>`, exactly one label deep.
+pub(crate) fn default_host_label_on<'a>(domain: &str, host: &'a str) -> Option<&'a str> {
+    host.strip_suffix(domain)
+        .and_then(|rest| rest.strip_suffix('.'))
+        .filter(|label| is_label(label))
+}
+
+/// Whether a host is `domain` itself or anything under it, at any depth.
+pub(crate) fn on_domain(domain: &str, host: &str) -> bool {
+    host == domain
+        || host
+            .strip_suffix(domain)
+            .is_some_and(|rest| rest.ends_with('.'))
+}
+
 /// What a read of a serve entry found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Entry {
@@ -165,10 +206,7 @@ impl Provider {
     /// The provider this deployment is configured with, or `None`. All six settings must be bound as text and
     /// well-formed. One missing or malformed means no provider at all, never half of one.
     pub(crate) fn from_env(env: &Env) -> Option<Provider> {
-        let domain = text_setting(env, DOMAIN, plain_host)?;
-        if podster_core::hostnames::normalize(&domain).ok().as_deref() != Some(domain.as_str()) {
-            return None;
-        }
+        let domain = content_domain(env)?;
         Some(Provider {
             account: text_setting(env, ACCOUNT, hex32)?,
             namespace: text_setting(env, NAMESPACE, namespace_name)?,
@@ -182,18 +220,52 @@ impl Provider {
     /// The label of the app whose default host this is: `<label>.<content domain>`, exactly one label deep. `None`
     /// for any other host, a custom hostname among them.
     pub(crate) fn default_host_label<'a>(&self, host: &'a str) -> Option<&'a str> {
-        host.strip_suffix(self.domain.as_str())
-            .and_then(|rest| rest.strip_suffix('.'))
-            .filter(|label| is_label(label))
+        default_host_label_on(&self.domain, host)
     }
 
     /// Whether a host is the content domain itself or anything under it, at any depth. Only `<label>.<content domain>`
     /// is ever an app's host there ([`Provider::default_host_label`]); every other such name is nobody's.
     pub(crate) fn on_content_domain(&self, host: &str) -> bool {
-        host == self.domain
-            || host
-                .strip_suffix(self.domain.as_str())
-                .is_some_and(|rest| rest.ends_with('.'))
+        on_domain(&self.domain, host)
+    }
+
+    fn stop_url(&self) -> String {
+        format!(
+            "{API}/accounts/{}/storage/kv/namespaces/{}/values/{STOP_KEY}",
+            self.account, self.kv_namespace
+        )
+    }
+
+    /// Sets the stop key. `true` only when the provider said it was written.
+    pub(crate) async fn write_stop(&self) -> bool {
+        call(
+            Method::Put,
+            self.stop_url(),
+            &self.routing_token,
+            Some(STOP_VALUE.to_owned()),
+        )
+        .await
+        .is_some_and(|answer| answer.status == 200 && answer.json()["success"] == true)
+    }
+
+    /// Removes the stop key. `true` only when the provider said it was done.
+    pub(crate) async fn delete_stop(&self) -> bool {
+        call(Method::Delete, self.stop_url(), &self.routing_token, None)
+            .await
+            .is_some_and(|answer| answer.status == 200 && answer.json()["success"] == true)
+    }
+
+    /// Reads the stop key back.
+    pub(crate) async fn read_stop(&self) -> StopKey {
+        let Some(answer) = call(Method::Get, self.stop_url(), &self.routing_token, None).await
+        else {
+            return StopKey::Unknown;
+        };
+        match answer.status {
+            200 if answer.body == STOP_VALUE.as_bytes() => StopKey::Set,
+            404 if answer.first_code() == Some(KV_KEY_NOT_FOUND) => StopKey::Absent,
+            _ => StopKey::Unknown,
+        }
     }
 
     fn script_url(&self, name: &str) -> Option<String> {

@@ -5,6 +5,7 @@
 
 mod a2a_out;
 mod content_provider;
+mod content_stop;
 mod downloads;
 mod error;
 mod github;

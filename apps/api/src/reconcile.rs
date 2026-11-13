@@ -56,7 +56,62 @@ CREATE TABLE IF NOT EXISTS takedown_finding (code TEXT NOT NULL CHECK (length(co
 CREATE TABLE IF NOT EXISTS reconcile_pass (pass TEXT PRIMARY KEY CHECK (pass IN ('entries', 'scripts', 'wake')), cursor TEXT,
   skip INTEGER NOT NULL DEFAULT 0 CHECK (typeof(skip) = 'integer' AND skip >= 0), stop_seen INTEGER NOT NULL DEFAULT 0 CHECK (stop_seen IN (0, 1)),
   last_run_at INTEGER, last_code TEXT CHECK (last_code IS NULL OR length(last_code) BETWEEN 1 AND 64)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS reconcile_failure (kind TEXT NOT NULL CHECK (kind IN ('entry', 'script')), subject TEXT NOT NULL CHECK (length(subject) BETWEEN 1 AND 253),
+  failures INTEGER NOT NULL CHECK (typeof(failures) = 'integer' AND failures >= 1), last_code TEXT NOT NULL CHECK (length(last_code) BETWEEN 1 AND 64),
+  last_at INTEGER NOT NULL, PRIMARY KEY (kind, subject)) WITHOUT ROWID;
 ";
+
+/// A key or a script whose step has failed this many passes in a row is told to operators, by its name.
+const FAILURES_TOLD: i64 = 3;
+/// Keys and scripts whose failures are counted at once. Past it a new one isn't counted until one leaves.
+const MAX_FAILING: i64 = 1000;
+/// The one kind of finding with room of its own: a deletion a reconcile started. Whatever fills the rest of the
+/// record, an outage among it, can't keep one of these out.
+const QUEUED_CODE: &str = "script_delete_queued";
+/// What a room that gave no answer is counted as, in this object's own record. It is no answer to any caller.
+const UNANSWERED: &str = "room_unanswered";
+
+/// How one key's or one script's step ended, when it didn't end well.
+enum Stopped {
+    /// Something failed.
+    Failed(ApiError),
+    /// The room that had to answer gave no answer.
+    Unanswered,
+}
+
+impl From<ApiError> for Stopped {
+    fn from(error: ApiError) -> Self {
+        Stopped::Failed(error)
+    }
+}
+
+type Step = std::result::Result<(), Stopped>;
+
+/// How long a pass may go on starting new steps over its list, and how long the walk may. Test builds also read a
+/// table a test makes in the object, `test_reconcile_budget`, so each bound can be shown without waiting it out.
+fn budget(sql: &SqlStorage, name: &str, default: i64) -> i64 {
+    #[cfg(feature = "failpoints")]
+    if let Ok(found) = rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_reconcile_budget'",
+        vec![],
+    ) {
+        if !found.is_empty() {
+            if let Some(row) = rows(
+                sql,
+                "SELECT ms FROM test_reconcile_budget WHERE name = ?",
+                vec![name.into()],
+            )
+            .ok()
+            .and_then(|found| found.into_iter().next())
+            {
+                return int(&row["ms"]);
+            }
+        }
+    }
+    let _ = (sql, name);
+    default
+}
 
 /// Findings kept at once. Past it a new one isn't kept, and one row says the record is full.
 const MAX_FINDINGS: i64 = 1000;
@@ -98,11 +153,22 @@ fn record(sql: &SqlStorage, code: &str, subject: &str, detail: Option<&str>, now
         vec![code.into(), subject.as_str().into()],
     )?
     .is_empty();
-    let held = rows(sql, "SELECT count(*) AS n FROM takedown_finding", vec![])?
-        .first()
-        .map_or(0, |row| int(&row["n"]));
+    // Deletions a reconcile started have room of their own, and everything else shares the rest: each up to the cap.
+    let queued = i64::from(code == QUEUED_CODE);
+    let held = rows(
+        sql,
+        "SELECT count(*) AS n FROM takedown_finding WHERE (code = ?) = ?",
+        vec![QUEUED_CODE.into(), queued.into()],
+    )?
+    .first()
+    .map_or(0, |row| int(&row["n"]));
     let (code, subject, detail) = if !known && held >= MAX_FINDINGS {
-        ("findings_full", "takedown_finding".to_owned(), None)
+        let which = if queued == 1 { QUEUED_CODE } else { "other" };
+        (
+            "findings_full",
+            "takedown_finding".to_owned(),
+            Some(which.to_owned()),
+        )
     } else {
         (code, subject, detail)
     };
@@ -240,6 +306,8 @@ struct Counts {
     unanswered: u32,
     /// Steps that failed and were skipped: one key, one script or one room. The pass goes on past each.
     errors: u32,
+    /// Entries the provider gave no readable answer for. Told as one finding, however many.
+    unread: u32,
 }
 
 impl Counts {
@@ -249,7 +317,7 @@ impl Counts {
         if answer["changed"] == true {
             self.changed += 1;
         }
-        for finding in answer["findings"].as_array().into_iter().flatten().take(16) {
+        for finding in answer["findings"].as_array().into_iter().flatten().take(48) {
             if let (Some(code), Some(subject)) =
                 (finding["code"].as_str(), finding["subject"].as_str())
             {
@@ -275,6 +343,74 @@ impl Counts {
                 error.code().unwrap_or("internal_error")
             );
         }
+    }
+
+    /// One key's or one script's step is over. A failure, a room that gave no answer among them, is counted for
+    /// that name, pass after pass: at the third in a row operators are told, by the name and the code, and again on
+    /// each failure after. A step that worked forgets the count.
+    fn settled(&mut self, sql: &SqlStorage, kind: &str, subject: &str, step: Step, now: i64) {
+        let subject: String = subject.chars().take(SUBJECT_MAX).collect();
+        let code = match step {
+            Ok(()) => {
+                let forgotten = exec(
+                    sql,
+                    "DELETE FROM reconcile_failure WHERE kind = ? AND subject = ?",
+                    vec![kind.into(), subject.into()],
+                );
+                return self.skipped(forgotten);
+            }
+            Err(Stopped::Unanswered) => {
+                self.unanswered += 1;
+                UNANSWERED
+            }
+            Err(Stopped::Failed(error)) => {
+                let code = error.code().unwrap_or("internal_error");
+                self.skipped(Err(error));
+                code
+            }
+        };
+        if subject.is_empty() {
+            return;
+        }
+        let counted = (|| -> R<()> {
+            let known = rows(
+                sql,
+                "SELECT failures FROM reconcile_failure WHERE kind = ? AND subject = ?",
+                vec![kind.into(), subject.as_str().into()],
+            )?
+            .first()
+            .map(|row| int(&row["failures"]));
+            let held = rows(sql, "SELECT count(*) AS n FROM reconcile_failure", vec![])?
+                .first()
+                .map_or(0, |row| int(&row["n"]));
+            if known.is_none() && held >= MAX_FAILING {
+                return record(sql, "failures_full", "reconcile_failure", None, now);
+            }
+            let failures = known.unwrap_or(0) + 1;
+            exec(
+                sql,
+                "INSERT INTO reconcile_failure (kind, subject, failures, last_code, last_at) VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT (kind, subject) DO UPDATE SET failures = excluded.failures, last_code = excluded.last_code, last_at = excluded.last_at",
+                vec![
+                    kind.into(),
+                    subject.as_str().into(),
+                    failures.into(),
+                    code.into(),
+                    now.into(),
+                ],
+            )?;
+            if failures >= FAILURES_TOLD {
+                self.found += 1;
+                let told = if kind == "script" {
+                    "script_keeps_failing"
+                } else {
+                    "entry_keeps_failing"
+                };
+                record(sql, told, &subject, Some(code), now)?;
+            }
+            Ok(())
+        })();
+        self.skipped(counted);
     }
 }
 
@@ -311,18 +447,25 @@ async fn entry(
     host: &str,
     room: Option<String>,
     counts: &mut Counts,
-) -> R<()> {
+) -> Step {
     let Some(room) = room else {
-        return counts.finding(sql, "entry_without_room", host, now_ms());
+        return Ok(counts.finding(sql, "entry_without_room", host, now_ms())?);
     };
     let found = match provider.read_entry(host).await {
         // Gone since it was listed: nothing to ask about.
         Entry::Absent => return Ok(()),
         Entry::Present(script) => Some(script),
-        // There, and not a script's name Rust made, or unreadable. Operators are told, and the room is asked as for
-        // one that differs from anything it could want.
-        Entry::Unknown => {
+        // There, and not a script's name Rust made: something else wrote it. Operators are told, by the host, and
+        // the room is asked as for one that differs from anything it could want.
+        Entry::Foreign => {
             counts.finding(sql, "entry_unreadable", host, now_ms())?;
+            None
+        }
+        // No answer that says what is there. The room is asked the same way, which can only make it write again.
+        // It is counted, and the pass tells operators once, however many: an outage of the provider's reads would
+        // otherwise write one finding for every host.
+        Entry::Unknown => {
+            counts.unread += 1;
             None
         }
     };
@@ -333,8 +476,7 @@ async fn entry(
     )
     .await
     else {
-        counts.unanswered += 1;
-        return Ok(());
+        return Err(Stopped::Unanswered);
     };
     let now = now_ms();
     counts.take(sql, &answer, now)?;
@@ -347,7 +489,7 @@ async fn entry(
 /// Wakes a slice of the rooms the lookup table names, from where the last pass stopped, and takes what each has for
 /// operators. The table only says which rooms to ask: a room that isn't there answers that it knows nothing.
 async fn wake_rooms(sql: &SqlStorage, env: &Env, counts: &mut Counts) -> R<u32> {
-    let deadline = now_ms() + WAKE_BUDGET_MS;
+    let deadline = now_ms() + budget(sql, "wake", WAKE_BUDGET_MS);
     let mut at = pass(sql, "wake")?;
     let listed = env
         .d1("DB")?
@@ -424,35 +566,32 @@ async fn one_key(
     provider: &Provider,
     key: &str,
     counts: &mut Counts,
-) -> R<()> {
+) -> Step {
     match key_of(provider, key) {
         // The caller remembers it.
         Key::Stop => Ok(()),
-        Key::Foreign => counts.finding(sql, "entry_foreign_name", key, now_ms()),
+        Key::Foreign => Ok(counts.finding(sql, "entry_foreign_name", key, now_ms())?),
         Key::Default(label) => {
             let room = crate::releases::room_for_label(env, label).await?;
             entry(sql, env, provider, key, room, counts).await
         }
         Key::Custom => match room_for_hostname(env, key).await {
             Some(room) => entry(sql, env, provider, key, room, counts).await,
-            None => {
-                counts.unanswered += 1;
-                Ok(())
-            }
+            None => Err(Stopped::Unanswered),
         },
     }
 }
 
 /// One listed script. Core decides. With no room yet: a name Podster didn't make is told and left alone, and for any
 /// other the room is found and asked. Only the label's own room, from its current state, can make a script deletable.
-async fn one_script(sql: &SqlStorage, env: &Env, id: &str, counts: &mut Counts) -> R<()> {
+async fn one_script(sql: &SqlStorage, env: &Env, id: &str, counts: &mut Counts) -> Step {
     let now = now_ms();
     if reconcile_script(id, RoomClaim::NoRoom, now) == ScriptReconcile::ReportForeign {
-        return counts.finding(sql, "script_foreign_name", id, now);
+        return Ok(counts.finding(sql, "script_foreign_name", id, now)?);
     }
     let label = id.split('.').next().unwrap_or_default();
     let Some(room) = crate::releases::room_for_label(env, label).await? else {
-        return counts.finding(sql, "script_without_room", id, now);
+        return Ok(counts.finding(sql, "script_without_room", id, now)?);
     };
     match ask_room(env, &room, json!({ "kind": "script", "script": id })).await {
         Some(answer) => {
@@ -460,10 +599,29 @@ async fn one_script(sql: &SqlStorage, env: &Env, id: &str, counts: &mut Counts) 
             if answer["known"] != true {
                 counts.finding(sql, "script_without_room", id, now_ms())?;
             }
+            Ok(())
         }
-        None => counts.unanswered += 1,
+        None => Err(Stopped::Unanswered),
     }
-    Ok(())
+}
+
+/// What the pass is recorded as having been, once the walk is over too: a pass that skipped a step, or met a room
+/// that gave no answer, never reads as plain `ok`.
+fn finish(sql: &SqlStorage, name: &str, code: &'static str, counts: &Counts) -> &'static str {
+    if code != "ok" || (counts.errors == 0 && counts.unanswered == 0) {
+        return code;
+    }
+    if let Err(error) = exec(
+        sql,
+        "UPDATE reconcile_pass SET last_code = 'errors' WHERE pass = ?",
+        vec![name.into()],
+    ) {
+        console_error!(
+            "reconcile: a pass's outcome wasn't recorded: code={}",
+            error.code().unwrap_or("internal_error")
+        );
+    }
+    "errors"
 }
 
 /// The 5-minute pass, in the `Moderation` object: one page of serve entries against their rooms, the stop key
@@ -475,13 +633,14 @@ pub(crate) async fn entries(sql: &SqlStorage, env: &Env) -> R<Value> {
         return Ok(summary("entries", "no_provider", 0, &counts, 0));
     };
     let started = now_ms();
-    let deadline = started + PASS_BUDGET_MS;
-    let pruned = exec(
-        sql,
+    let deadline = started + budget(sql, "pass", PASS_BUDGET_MS);
+    for table in [
         "DELETE FROM takedown_finding WHERE last_seen_at < ?",
-        vec![(started - FINDING_KEPT_MS).into()],
-    );
-    counts.skipped(pruned);
+        "DELETE FROM reconcile_failure WHERE last_at < ?",
+    ] {
+        let pruned = exec(sql, table, vec![(started - FINDING_KEPT_MS).into()]);
+        counts.skipped(pruned);
+    }
     let mut at = pass(sql, "entries")?;
     let Some(page) = provider.list_entries(at.cursor.as_deref()).await else {
         // No list, or a cursor the provider no longer takes: the next pass starts the list again.
@@ -505,7 +664,7 @@ pub(crate) async fn entries(sql: &SqlStorage, env: &Env) -> R<Value> {
             at.stop_seen = true;
         }
         let step = one_key(sql, env, &provider, key, &mut counts).await;
-        counts.skipped(step);
+        counts.settled(sql, "entry", key, step, now_ms());
         done += 1;
     }
     let mut code = "ok";
@@ -534,8 +693,21 @@ pub(crate) async fn entries(sql: &SqlStorage, env: &Env) -> R<Value> {
             stop_seen: false,
         };
     }
+    if counts.unread > 0 {
+        // One finding for the pass, with how many: the provider's reads are failing.
+        let told = record(
+            sql,
+            "entry_reads_failing",
+            "serve-entries",
+            Some(&counts.unread.to_string()),
+            now_ms(),
+        );
+        counts.found += 1;
+        counts.skipped(told);
+    }
     set_pass(sql, "entries", &at, Some(code), now_ms())?;
     let woken = wake(sql, env, &mut counts).await;
+    let code = finish(sql, "entries", code, &counts);
     Ok(summary("entries", code, page.keys.len(), &counts, woken))
 }
 
@@ -548,7 +720,7 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
         return Ok(summary("scripts", "no_provider", 0, &counts, 0));
     };
     let started = now_ms();
-    let deadline = started + PASS_BUDGET_MS;
+    let deadline = started + budget(sql, "pass", PASS_BUDGET_MS);
     let mut at = pass(sql, "scripts")?;
     let Some(list) = provider.list_scripts().await else {
         set_pass(sql, "scripts", &at, Some("list_failed"), now_ms())?;
@@ -582,13 +754,14 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
         }
         at.cursor = Some(id.clone());
         let step = one_script(sql, env, id, &mut counts).await;
-        counts.skipped(step);
+        counts.settled(sql, "script", id, step, now_ms());
     }
     if reached_end {
         at.cursor = None;
     }
     set_pass(sql, "scripts", &at, Some(code), now_ms())?;
     let woken = wake(sql, env, &mut counts).await;
+    let code = finish(sql, "scripts", code, &counts);
     Ok(summary("scripts", code, ids.len(), &counts, woken))
 }
 

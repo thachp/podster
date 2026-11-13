@@ -146,7 +146,9 @@ pub(crate) enum Entry {
     Present(String),
     /// The provider said, in so many words, that the host has no entry.
     Absent,
-    /// Anything else: no answer, an error, or an answer that isn't one of the two above. Never read as absent.
+    /// The provider answered with a value, and it isn't a script's name Rust made. Something else wrote it.
+    Foreign,
+    /// Anything else: no answer, an error, or an answer that isn't one of the three above. Never read as absent.
     Unknown,
 }
 
@@ -496,7 +498,7 @@ impl Provider {
                 Ok(script) if matches!(script_owner(&script), ScriptOwner::Podster { .. }) => {
                     Entry::Present(script)
                 }
-                _ => Entry::Unknown,
+                _ => Entry::Foreign,
             },
             404 if answer.first_code() == Some(KV_KEY_NOT_FOUND) => Entry::Absent,
             _ => Entry::Unknown,

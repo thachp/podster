@@ -58,8 +58,13 @@ pub(crate) const INTERNAL_TAKEDOWN_CHECK: &str = "/internal/takedown-check";
 
 /// A script's delete is told to operators once it has failed this many times: with the waits, over half an hour.
 const DELETE_REPORT_AFTER: i64 = 12;
-/// Findings one answer carries. A room has two hosts at most and a handful of scripts.
+/// Findings of one kind one answer carries. A room has two hosts at most and a handful of scripts.
 const FINDINGS: i64 = 8;
+/// Deletions a reconcile started that one answer carries, the newest first.
+const QUEUED_FINDINGS: i64 = 32;
+/// How long the room goes on telling of a deletion a reconcile started: as long as the operators' record keeps a
+/// finding nothing has seen again.
+const QUEUED_TOLD_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// The refusals that mean a host isn't this room's to touch at all. The room can do nothing about such an entry.
 const NOT_THIS_ROOMS: [&str; 3] = [
     "host_not_a_default_host",
@@ -482,7 +487,12 @@ pub(super) fn hostname_suspended(sql: &SqlStorage, body: &Value, now: i64) -> R<
 
 /// What the room has to tell operators, read from its own rows: each host the applier refused at the version it has
 /// now, and each script whose delete keeps failing. The reconcile carries these to the operators' record.
-fn findings(sql: &SqlStorage) -> R<Vec<Value>> {
+///
+/// **A deletion a reconcile started is told from the room's own row, every time the room is asked, for 7 days.** A
+/// delete can't be taken back, so its record must not depend on one answer arriving: if an answer is lost, or the
+/// operators' record couldn't keep it then, the next question to this room carries it again, whether or not the
+/// script is still there to be listed.
+fn findings(sql: &SqlStorage, now: i64) -> R<Vec<Value>> {
     let mut found: Vec<Value> = rows(
         sql,
         "SELECT s.host AS subject, a.last_code AS detail FROM serve_state s JOIN serve_apply a ON a.host = s.host
@@ -501,6 +511,16 @@ fn findings(sql: &SqlStorage) -> R<Vec<Value>> {
         )?
         .iter()
         .map(|row| json!({ "code": "script_delete_failing", "subject": row["subject"], "detail": row["detail"] })),
+    );
+    found.extend(
+        rows(
+            sql,
+            "SELECT script_name AS subject, CASE WHEN gone_at IS NULL THEN 'queued' ELSE 'gone' END AS detail FROM script_delete
+               WHERE unpublish_epoch IS NULL AND queued_at >= ? ORDER BY queued_at DESC, script_name LIMIT ?",
+            vec![(now - QUEUED_TOLD_MS).into(), QUEUED_FINDINGS.into()],
+        )?
+        .iter()
+        .map(|row| json!({ "code": "script_delete_queued", "subject": row["subject"], "detail": row["detail"] })),
     );
     Ok(found)
 }
@@ -599,11 +619,13 @@ fn check_script(sql: &SqlStorage, script: &str, now: i64) -> R<(bool, bool)> {
         return Ok((true, false));
     }
     // Queued under no unpublish: nothing in the room's state named it. One the room had counted as gone is there
-    // after all, so it is owed again.
+    // after all, so it is owed again, and from now it is the reconcile's deletion, under no unpublish, so the room
+    // tells of it as one.
     exec(
         sql,
         "INSERT INTO script_delete (script_name, label, unpublish_epoch, queued_at, next_attempt_at) VALUES (?, ?, NULL, ?, ?)
-           ON CONFLICT (script_name) DO UPDATE SET gone_at = NULL, next_attempt_at = excluded.next_attempt_at, last_code = 'reconcile_found'",
+           ON CONFLICT (script_name) DO UPDATE SET gone_at = NULL, next_attempt_at = excluded.next_attempt_at, last_code = 'reconcile_found',
+             unpublish_epoch = NULL, queued_at = excluded.queued_at",
         vec![script.into(), label.into(), now.into(), now.into()],
     )?;
     Ok((true, true))
@@ -632,15 +654,8 @@ pub(super) fn check(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         )?,
         _ => return Err(ApiError::invalid_argument()),
     };
-    let mut findings = findings(sql)?;
-    if changed {
-        if let (Some("script"), Some(script)) = (body["kind"].as_str(), body["script"].as_str()) {
-            // A delete can't be taken back, so each one a reconcile starts is put on the operators' record, by the
-            // script's name, the moment the room queues it.
-            findings.push(json!({ "code": "script_delete_queued", "subject": script }));
-        }
-    }
-    Ok(json!({ "known": known, "changed": changed, "findings": findings }))
+    // After the change, so a deletion queued just now is in this same answer.
+    Ok(json!({ "known": known, "changed": changed, "findings": findings(sql, now)? }))
 }
 
 /// The provider this room may use, or `None`. Test builds also read a table a test makes in one room,

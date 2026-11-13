@@ -319,7 +319,7 @@ for (const { id } of [...PHASE_PLANS.before, ...PHASE_PLANS.after]) check(source
 // ---- the script as a dry run ----
 const work = mkdtempSync(join(tmpdir(), "podster-m6-selftest-"));
 try {
-  const run = (argv, env = {}) => spawnSync(process.execPath, [join(here, "m6-staging.mjs"), ...argv], { env: { PATH: process.env.PATH, HOME: process.env.HOME, ...env }, encoding: "utf8", timeout: 60_000 });
+  const run = (argv, env = {}) => spawnSync(process.execPath, [join(here, "m6-staging.mjs"), ...argv], { env: { PATH: process.env.PATH, HOME: process.env.HOME, ...env }, encoding: "utf8" });
   const secret = "s".repeat(40);
   const dry = run(["--base-url", STAGING, "--dry-run"], { PODSTER_E2E_SIGNUP_SECRET: secret });
   check(dry.status === 0 && dry.stdout.includes("Nothing was sent to staging") && PLAN.every(({ id }) => dry.stdout.includes(id)) && dry.stdout.includes(`M6 operations, read from the contract: ${want.length}.`) && dry.stdout.includes("M6 fields, derived from the contract's M6 schemas: "), "a dry run prints the plan, the contract's M6 operations and fields, and exits 0");
@@ -334,7 +334,7 @@ try {
   // The real script, not a dry run, against m6-staging-standin.mjs, which replaces fetch before the script loads, so
   // nothing leaves this machine. A stand-in that didn't load stops node before the script starts.
   const standIn = (mode) => {
-    const res = spawnSync(process.execPath, ["--import", pathToFileURL(join(here, "m6-staging-standin.mjs")).href, join(here, "m6-staging.mjs"), "--base-url", STAGING], { env: { PATH: process.env.PATH, HOME: process.env.HOME, PODSTER_E2E_SIGNUP_SECRET: secret, M6_STANDIN: mode }, encoding: "utf8", timeout: 60_000 });
+    const res = spawnSync(process.execPath, ["--import", pathToFileURL(join(here, "m6-staging-standin.mjs")).href, join(here, "m6-staging.mjs"), "--base-url", STAGING], { env: { PATH: process.env.PATH, HOME: process.env.HOME, PODSTER_E2E_SIGNUP_SECRET: secret, M6_STANDIN: mode }, encoding: "utf8" });
     const counted = /stand-in counted: (\d+) requests, (\d+) test sign-ups/.exec(res.stdout);
     const loaded = res.stdout.startsWith(`stand-in for staging: ${mode}; nothing leaves this machine`);
     return { ...res, loaded, requests: counted ? Number(counted[1]) : NaN, signUps: counted ? Number(counted[2]) : NaN };
@@ -360,19 +360,22 @@ try {
     const found = /stand-in counted: (\d+) requests, (\d+) test sign-ups, (\d+) sign-outs, (\d+) agent disconnects/.exec(res.stdout);
     return { ...res, requests: found ? Number(found[1]) : NaN, signUps: found ? Number(found[2]) : NaN, signOuts: found ? Number(found[3]) : NaN, disconnects: found ? Number(found[4]) : NaN, all: res.stdout + res.stderr };
   };
-  const phaseRun = (which, commit, extraEnv = {}, extraArgs = []) => counted(spawnSync(process.execPath, phaseArgs(which, commit, extraArgs), { env: phaseEnv(which, extraEnv), encoding: "utf8", timeout: 60_000 }));
+  const phaseRun = (which, commit, extraEnv = {}, extraArgs = []) => counted(spawnSync(process.execPath, phaseArgs(which, commit, extraArgs), { env: phaseEnv(which, extraEnv), encoding: "utf8" }));
   /**
    * A phase with Ctrl-C at a known point. The stand-in holds the first request that matches `gate` and says so; only
    * then does this send SIGINT, and the stand-in answers that request once the run's own SIGINT listener has run. So the
-   * signal always lands while that request is open: nothing here waits on time, and 60 s only bounds a run that hangs.
+   * signal always lands while that request is open. Nothing here waits on time or kills on a timer: it waits for the
+   * child to exit, however long that takes, and only the CI job's own limit bounds a run that never does. Such a child
+   * can be asked what it's waiting on: `kill -USR2` it, and node writes a diagnostic report, its JavaScript stack and
+   * open handles, into the self-test's directory, which `M6_SELFTEST_KEEP=1` keeps.
    */
   const gatedRun = (which, commit, gate) =>
     new Promise((resolve) => {
-      const child = spawn(process.execPath, phaseArgs(which, commit), { env: phaseEnv(which, { M6_STANDIN_GATE: gate }), stdio: ["ignore", "pipe", "pipe"] });
+      const reports = join(work, "reports");
+      const child = spawn(process.execPath, ["--report-on-signal", "--report-signal=SIGUSR2", `--report-dir=${reports}`, ...phaseArgs(which, commit)], { env: phaseEnv(which, { M6_STANDIN_GATE: gate }), stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "";
       let stderr = "";
       let signalled = false;
-      const bound = setTimeout(() => child.kill("SIGKILL"), 60_000);
       child.stdout.setEncoding("utf8").on("data", (chunk) => {
         stdout += chunk;
         if (!signalled && stdout.includes("stand-in: holding")) {
@@ -381,10 +384,7 @@ try {
         }
       });
       child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
-      child.on("close", (status) => {
-        clearTimeout(bound);
-        resolve({ ...counted({ status, stdout, stderr }), signalled });
-      });
+      child.on("close", (status) => resolve({ ...counted({ status, stdout, stderr }), signalled }));
     });
   const secretFree = (res, also = []) => ![secret, ...also].some((value) => res.all.includes(value));
 
@@ -521,7 +521,8 @@ try {
   const stopLate = await gatedRun("after", atAfter, "POST /api/auth/sign-out");
   check(stopLate.signalled && stopLate.status === 0 && /nothing was cut short/.test(stopLate.stdout) && stopLate.signOuts === 1 && !existsSync(kept), `Ctrl-C during the second phase's clean-up leaves its passed outcome, exit ${stopLate.status}, and the clean-up still signs out and deletes the file`);
 } finally {
-  rmSync(work, { recursive: true, force: true });
+  if (process.env.M6_SELFTEST_KEEP === "1") console.log(`kept: ${work}`);
+  else rmSync(work, { recursive: true, force: true });
 }
 
 console.log(failed ? `\n${failed} failed` : "\nM6 staging self-test: all passed");

@@ -86,7 +86,9 @@ async function inWorkerd() {
 }
 
 // ---- one browser ----
-async function inBrowser(name) {
+// `control` is the same app with the policy header taken off by this run, never by the Worker: it shows which of the
+// things below the sandbox stops, and which this harness couldn't have shown anyway.
+async function inBrowser(name, control = false) {
   let browser;
   try {
     browser = await playwright[name].launch({ env: childEnv() });
@@ -117,6 +119,7 @@ async function inBrowser(name) {
       for (const wait of waiting.filter((w) => url.includes(w.part))) wait.seen();
       if (!url.startsWith(`https://`) || !new URL(url).hostname.endsWith(`.${DOMAIN}`)) return route.abort("namenotresolved");
       const answer = await ask(url, { method: request.method(), headers });
+      if (control) delete answer.headers["content-security-policy"];
       await route.fulfill({ status: answer.status, headers: answer.headers, body: answer.body });
     });
     const seen = (part) => new Promise((resolve) => waiting.push({ part, seen: resolve }));
@@ -204,7 +207,9 @@ try {
   const only = arg("--browser");
   for (const name of ["chromium", "firefox", "webkit"].filter((name) => !only || name === only)) {
     // One browser gets four minutes in all. Past that it is recorded as not shown, and the next one runs.
-    report.browsers[name] = await Promise.race([inBrowser(name), new Promise((resolve) => setTimeout(() => resolve({ shown: false, why: "the run didn't finish in four minutes" }), 240_000))]);
+    const bounded = (run) => Promise.race([run, new Promise((resolve) => setTimeout(() => resolve({ shown: false, why: "the run didn't finish in four minutes" }), 240_000))]);
+    report.browsers[name] = await bounded(inBrowser(name));
+    report.browsers[name].withoutThePolicy = await bounded(inBrowser(name, true));
     console.error(`content sandbox: ${name} ${report.browsers[name].shown ? "shown" : `not shown (${report.browsers[name].why})`}`);
   }
   // What wrangler dev said, for the record of whether it tried anything to do with an account or a login.

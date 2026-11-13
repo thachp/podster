@@ -346,12 +346,18 @@ pub(super) fn set(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
 /// request held it. In the caller's transaction the room clears and closes that host, so its applier removes the entry
 /// and no commit, rollback or set-back writes to it again, and marks its request as ending.
 ///
-/// **It acts only for the request it holds now.** The request must be the room's own, for that hostname, made under
-/// the generation the notice carries, and still open. A notice for a request that has ended, or under another
-/// generation, is a late one: the room may since hold the name again under a new request, whose host a late notice
-/// must never close. For those, and for a request it doesn't know, it changes nothing and still answers, so the
-/// object stops asking. Telling it twice changes nothing more. The claim itself ends as any claim does, in the step
-/// that builds claims. Audited as Podster. Answers `{ known, acted }`.
+/// **Which request a notice is for is decided by its ID, which is unique.**
+/// - A request the room doesn't have for that hostname, or one that has ended: a late notice. The room may since
+///   hold the name again under a new request, whose host a late notice must never close. It changes nothing and
+///   still answers, so the object stops asking.
+/// - The room's own open request, under the generation the notice carries: it acts. Telling it twice changes nothing
+///   more.
+/// - The room's own open request, under another generation: **refused, never acknowledged.** The object keeps the
+///   notice and sends it again, and the room logs it by its IDs. A fault here must be loud: acknowledging it would
+///   leave a suspended name served with nothing owed.
+///
+/// The claim itself ends as any claim does, in the step that builds claims. Audited as Podster. Answers
+/// `{ known, acted }`.
 pub(super) fn hostname_suspended(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     let (Some(hostname), Some(request), Some(generation)) = (
         body["hostname"].as_str(),
@@ -369,12 +375,27 @@ pub(super) fn hostname_suspended(sql: &SqlStorage, body: &Value, now: i64) -> R<
         return Ok(json!({ "known": false, "acted": false }));
     };
     let state = row["state"].as_str().and_then(HostnameRequestState::parse);
-    let Some(state) =
-        state.filter(|state| state.is_open() && int(&row["generation"]) == generation)
-    else {
-        // Late: the request ended, or it isn't the one the notice was made for. Nothing of the room's is its to close.
+    let Some(state) = state.filter(|state| state.is_open()) else {
+        // Late: the request has ended. Nothing of the room's is its to close.
         return Ok(json!({ "known": true, "acted": false }));
     };
+    if int(&row["generation"]) != generation {
+        // The request is the room's own and still open, so this notice is about a host it may be serving, and the
+        // generations disagree: a fault, in whatever gave the claim or in the room's own record. It is never
+        // acknowledged and dropped. The room refuses, so the object keeps the notice and sends it again, and says so.
+        let room = rows(sql, "SELECT id FROM workspace", vec![])?
+            .first()
+            .and_then(|row| text(&row["id"]))
+            .unwrap_or_default();
+        console_error!(
+            "takedown: a hostname notice was refused: room={} request={} code=hostname_generation_mismatch",
+            room,
+            request
+        );
+        return Err(ApiError::internal(
+            "hostname notice under another generation",
+        ));
+    }
     let mut acted = false;
     if state != HostnameRequestState::Ending {
         exec(

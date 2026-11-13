@@ -145,6 +145,16 @@ const due = (room: string) => inRoom(room, (sql) => { sql.exec("UPDATE serve_app
 const FAR = () => Date.now() + 24 * 60 * 60 * 1000;
 const notDue = (room: string) => inRoom(room, (sql) => { sql.exec("UPDATE serve_apply SET next_attempt_at = ? WHERE next_attempt_at IS NOT NULL", FAR()); sql.exec("UPDATE script_delete SET next_attempt_at = ? WHERE gone_at IS NULL AND attempts > 0", FAR()); });
 const pass = (room: string) => alarmPass(stub(room));
+/**
+ * One pass, and in the same turn every wait it left is put far ahead. For a test that goes on to count attempts: no
+ * later run can try again by itself, however long the test takes, until the test says a wait is over with `due`.
+ */
+const passAndHold = (room: string) => runInDurableObject(stub(room), async (instance: any, state: any) => {
+  await state.storage.deleteAlarm();
+  await instance.alarm();
+  state.storage.sql.exec("UPDATE serve_apply SET next_attempt_at = ? WHERE next_attempt_at IS NOT NULL", FAR());
+  state.storage.sql.exec("UPDATE script_delete SET next_attempt_at = ? WHERE gone_at IS NULL AND attempts > 0", FAR());
+});
 const callsFor = (state: Held, app: App) => state.calls.filter((call) => call.name === app.host || call.name.startsWith(`${app.label}.`)).map((call) => `${call.op} ${call.name === app.host ? "host" : call.name.slice(app.label.length + 1, app.label.length + 7)} ${call.status}`);
 
 /** A room whose app is down in its own state, with the entry still at the provider and the applier yet to run.
@@ -948,7 +958,7 @@ describe("the stop for the whole content domain", () => {
     // Room a owes its default host an entry. The domain is stopped before its applier runs.
     await inRoom(a.room, (sql) => sql.exec("DELETE FROM serve_apply"));
     await switchedOn(() => stopDomain());
-    await pass(a.room);
+    await passAndHold(a.room);
     let state = await held();
     expect(callsFor(state, a)).toEqual([]);
     expect(state.entries[a.host]).toBeUndefined();
@@ -962,7 +972,6 @@ describe("the stop for the whole content domain", () => {
     expect(state.entries[b.host]).toBeUndefined();
     expect((await applyRows(b.room))[0]).toMatchObject({ applied_version: 6, applied_script: null });
     // If the stop can't be read, nothing is written either: it fails closed.
-    await notDue(a.room);
     await alarmQuiet(stub(a.room));
     await switchedOn(() => resumeDomain());
     await inModeration((sql) => sql.exec("CREATE TABLE test_stop_unreadable (x INTEGER)"));
@@ -1019,6 +1028,19 @@ describe("an operator's suspension of a custom hostname", () => {
       sql.exec("INSERT INTO claim (id, workspace_id, request_id, state, held, claimed_at, proved_at, updated_at, generation) VALUES ('clm_1', ?, ?, 'live', 1, 1, 1, 1, ?)", room, request, generation);
     });
   }
+  /**
+   * One run of the object's alarm, then, in the same turn, what it left for its one notice, with the due time put
+   * far ahead. So nothing a test reads next depends on the 5-second wait not having run out, however long the test
+   * takes between steps. `alarm` is the alarm as that run set it.
+   */
+  const settleAndHold = (hostname: string) => runInDurableObject(claimOf(hostname), async (instance: any, state: any) => {
+    await state.storage.deleteAlarm();
+    await instance.alarm();
+    const alarm = await state.storage.getAlarm();
+    const row = state.storage.sql.exec("SELECT attempts, next_attempt_at, answered_at FROM notice ORDER BY seq DESC LIMIT 1").one();
+    state.storage.sql.exec("UPDATE notice SET next_attempt_at = ? WHERE answered_at IS NULL", FAR());
+    return { attempts: row.attempts as number, wait: row.next_attempt_at as number, answered: row.answered_at !== null, alarm: alarm as number | null };
+  }) as Promise<{ attempts: number; wait: number; answered: boolean; alarm: number | null }>;
   const notice = (room: string, body: object) => stub(room).fetch("https://do/internal/hostname-notice", { method: "POST", body: JSON.stringify(body) }).then(async (r: Response) => [r.status, await r.json()]);
   const customRow = (room: string, hostname: string) => one(room, "SELECT script_name, version, closed FROM serve_state WHERE host = ?", hostname);
   const requestRow = (room: string, id: string) => one(room, "SELECT state, open, end_reason FROM hostname_request WHERE id = ?", id);
@@ -1115,21 +1137,22 @@ describe("an operator's suspension of a custom hostname", () => {
     await inRoom(c.room, (sql) => sql.exec("CREATE TABLE test_refuse_hostname_notice (x INTEGER)"));
     const started = Date.now();
     await switchedOn(() => suspendHost(c.hostname));
-    await settle(claimOf(c.hostname));
-    expect((await claimRows(c.hostname)).notice).toEqual([{ workspace_id: c.room, kind: "hostname_suspended", attempts: 1, answered: 0 }]);
-    const wait = (await inClaim(c.hostname, (sql) => sql.exec("SELECT next_attempt_at FROM notice").one())).next_attempt_at as number;
-    expect(wait).toBeGreaterThanOrEqual(started + 5000);
-    expect(await nextAlarm(claimOf(c.hostname))).toBe(wait);
+    // At least one try has failed, by this run or one the runtime started. From here the notice's due time is held
+    // far ahead, so every count below is of this test's own steps.
+    const first = await settleAndHold(c.hostname);
+    expect([first.answered, first.attempts >= 1]).toEqual([false, true]);
+    expect(first.wait).toBeGreaterThanOrEqual(started + 5000);
+    expect(first.alarm).toBe(first.wait);
     // The room hasn't cleared anything yet: it is still open in the room's state.
     expect(await customRow(c.room, c.hostname)).toEqual({ script_name: c.served, version: 3, closed: 0 });
-    // It waits before it asks again, and then asks again. The room answers this time.
-    await inClaim(c.hostname, (sql) => sql.exec("UPDATE notice SET next_attempt_at = ?", FAR()));
+    // It waits before it asks again: while the wait isn't over, a run sends nothing.
     await settle(claimOf(c.hostname));
-    expect((await claimRows(c.hostname)).notice[0].attempts).toBe(1);
+    expect((await claimRows(c.hostname)).notice[0].attempts).toBe(first.attempts);
+    // Then it asks again, and the room answers this time.
     await inRoom(c.room, (sql) => sql.exec("DROP TABLE test_refuse_hostname_notice"));
     await inClaim(c.hostname, (sql) => sql.exec("UPDATE notice SET next_attempt_at = 0"));
     await settle(claimOf(c.hostname));
-    expect((await claimRows(c.hostname)).notice).toEqual([{ workspace_id: c.room, kind: "hostname_suspended", attempts: 2, answered: 1 }]);
+    expect((await claimRows(c.hostname)).notice).toEqual([{ workspace_id: c.room, kind: "hostname_suspended", attempts: first.attempts + 1, answered: 1 }]);
     expect(await customRow(c.room, c.hostname)).toEqual({ script_name: null, version: 4, closed: 1 });
     expect(await nextAlarm(claimOf(c.hostname))).toBeNull();
     await pass(c.room);
@@ -1162,8 +1185,9 @@ describe("an operator's suspension of a custom hostname", () => {
     const before = [await customRow(c.room, c.hostname), await requestRow(c.room, c.request), await requestRow(c.room, first), await hostEvents(c.room)];
     // For the ended request: acknowledged, so the object stops asking, and nothing is cleared.
     expect(await notice(c.room, { hostname: c.hostname, request_id: first, generation: 0 })).toEqual([200, { known: true, acted: false }]);
-    // For the request the room holds, but under a generation that isn't its own: the same.
-    for (const generation of [0, 3, 5]) expect(await notice(c.room, { hostname: c.hostname, request_id: c.request, generation }), String(generation)).toEqual([200, { known: true, acted: false }]);
+    // For the request the room holds and is serving on, under a generation that isn't its own: a fault. It is never
+    // acknowledged, so the object would keep it and send it again, and nothing is cleared on its word.
+    for (const generation of [0, 3, 5]) expect((await notice(c.room, { hostname: c.hostname, request_id: c.request, generation }))[0], String(generation)).toBe(500);
     // For that request under another name, or with no generation at all: nothing either.
     expect(await notice(c.room, { hostname: newHostname(), request_id: c.request, generation: 4 })).toEqual([200, { known: false, acted: false }]);
     expect((await notice(c.room, { hostname: c.hostname, request_id: c.request }))[0]).toBe(400);
@@ -1176,19 +1200,38 @@ describe("an operator's suspension of a custom hostname", () => {
     await alarmQuiet(stub(c.room));
   });
 
+  it("keeps a notice the room refuses for its generation, and never drops it", async () => {
+    // The room's open request was made under generation 4, and it is serving on the name. The claim, as if whatever
+    // gave it had forgotten to record its generation, says 0.
+    const c = await claimed({ generation: 4 });
+    await inClaim(c.hostname, (sql) => sql.exec("UPDATE claim SET generation = 0"));
+    await switchedOn(() => suspendHost(c.hostname));
+    const first = await settleAndHold(c.hostname);
+    // Refused, so not answered: the object still owes it and will send it again. Nothing was cleared on its word.
+    expect([first.answered, first.attempts >= 1]).toEqual([false, true]);
+    expect(first.alarm).toBe(first.wait);
+    expect([await customRow(c.room, c.hostname), (await requestRow(c.room, c.request)).state, await hostEvents(c.room)]).toEqual([{ script_name: c.served, version: 3, closed: 0 }, "claimed", []]);
+    // Once the claim carries the generation it was given under, the same notice is the room's to act on.
+    await inClaim(c.hostname, (sql) => { sql.exec("UPDATE claim SET generation = 4"); sql.exec("UPDATE notice SET next_attempt_at = 0"); });
+    await settle(claimOf(c.hostname));
+    expect((await claimRows(c.hostname)).notice).toEqual([{ workspace_id: c.room, kind: "hostname_suspended", attempts: first.attempts + 1, answered: 1 }]);
+    expect(await customRow(c.room, c.hostname)).toEqual({ script_name: null, version: 4, closed: 1 });
+    await alarmQuiet(stub(c.room));
+  });
+
   it("still clears the room's host when the name is lifted before the room has answered", async () => {
     const c = await claimed();
     await inRoom(c.room, (sql) => sql.exec("CREATE TABLE test_refuse_hostname_notice (x INTEGER)"));
     await switchedOn(() => suspendHost(c.hostname));
-    await settle(claimOf(c.hostname));
-    expect((await claimRows(c.hostname)).notice).toEqual([{ workspace_id: c.room, kind: "hostname_suspended", attempts: 1, answered: 0 }]);
+    const first = await settleAndHold(c.hostname);
+    expect([first.answered, first.attempts >= 1]).toEqual([false, true]);
     // The operator lifts the suspension. The claim is ending all the same, and the notice is still owed.
     await switchedOn(() => liftHost(c.hostname));
     expect(await claimRows(c.hostname)).toMatchObject({ suspension: [{ holds: 0 }], claim: [{ state: "ending", held: 1 }], notice: [{ answered: 0 }] });
     await inRoom(c.room, (sql) => sql.exec("DROP TABLE test_refuse_hostname_notice"));
     await inClaim(c.hostname, (sql) => sql.exec("UPDATE notice SET next_attempt_at = 0"));
     await settle(claimOf(c.hostname));
-    expect((await claimRows(c.hostname)).notice).toEqual([{ workspace_id: c.room, kind: "hostname_suspended", attempts: 2, answered: 1 }]);
+    expect((await claimRows(c.hostname)).notice).toEqual([{ workspace_id: c.room, kind: "hostname_suspended", attempts: first.attempts + 1, answered: 1 }]);
     expect(await customRow(c.room, c.hostname)).toEqual({ script_name: null, version: 4, closed: 1 });
     expect((await requestRow(c.room, c.request)).state).toBe("ending");
     await alarmQuiet(stub(c.room));

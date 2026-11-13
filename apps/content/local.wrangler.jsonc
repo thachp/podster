@@ -1,0 +1,20 @@
+{
+  // The content Worker (M6 step 4(b), ADR 0010): the dispatch namespace's dynamic dispatch Worker, on the content
+  // domain only. It routes and never authorizes.
+  //
+  // **This file deploys nowhere, and is not named `wrangler.jsonc` on purpose.** A bare `wrangler deploy` in this
+  // folder finds no configuration and no entry point, and refuses. Only a command that names this file with `--config`
+  // reads it: local development. It has no account, no route and no environment, both public addresses are switched
+  // off, and the two IDs below are placeholders that exist on no account. `test/config.test.ts` fails if any of that
+  // changes. The real configuration is written at deploy time, from the owner's environment for the second account,
+  // by a script that doesn't exist yet. Neither account's ID is ever written in this repository.
+  "name": "podster-content-local",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "workers_dev": false,
+  "preview_urls": false,
+  // Its only two bindings: the serve entries, to read, and the namespace that holds each release's script. Nothing
+  // to the gateway, the API, D1 or R2, no variable and no secret.
+  "kv_namespaces": [{ "binding": "SERVE", "id": "00000000000000000000000000000000" }],
+  "dispatch_namespaces": [{ "binding": "APPS", "namespace": "placeholder-no-such-namespace" }]
+}

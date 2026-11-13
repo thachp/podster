@@ -1038,6 +1038,32 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 
 **Security-sensitive:** PR 1 should get a review deeper than the quick diff review, asked before it runs. **Not in 4(b):** uploading anything to the namespace (step 5), custom hostnames' routing (step 8), and any change to the API.
 
+#### What step 4(b)'s first PR built
+
+**The content Worker's handler, `apps/content`, built and tested locally only.** Built on 2026-11-12. Nothing deploys, no cloud resource is made, and no secret, variable or binding is set anywhere. It follows [the build plan above](#step-4b-the-content-worker-the-build-plan) as corrected after the architect's review.
+
+- **The handler,** `src/handle.ts`, written against two small interfaces, the serve entries' one read and the namespace's one `get`, so every rule is tested with stand-ins:
+  - GET and HEAD only; a service worker's script refused;
+  - the stop, read with a 30-second cache lifetime and kept 30 seconds in memory, with the clock passed in; unreadable is stopped and never remembered;
+  - the serve entry for the exact host, one read, and only a value that is a script's name is asked for;
+  - three request headers through, `Accept`, `If-None-Match` and `If-Modified-Since`, and nothing else of the visitor's;
+  - `Worker not found.` is not-found, and any other failure an error with the Worker's own headers;
+  - the answer's headers built from nothing: four of the app's, a same-host `Location`, then the fixed set and the one sandbox policy;
+  - an answer with `Content-Encoding`, `Content-Range` or a 206 serves nothing;
+  - `Clear-Site-Data: "cache"` on the Worker's own not-found, and `no-store` on every answer of its own.
+- **No configuration a bare `wrangler deploy` would find,** and a test that holds the package to that: no default-named file, both public addresses off, no account, route or environment, placeholder IDs, no deploy script, and no mention in the staging deploy.
+- **One fixture, `packages/contracts/serve-entry.fixture.json`,** read by three test suites: the content Worker's, the API's and `crates/core`'s. It holds the stop's key and value and the vectors for a script's name, so the TypeScript copy of the rule can't drift from Rust's.
+- **A CI job for the package:** typecheck and tests, no deploy step.
+
+**Where it departs from the plan:** the tests run in Node, as the scanner's do, not in the Workers test pool. The handler takes its two bindings as plain interfaces, so nothing in it needs the pool, and the suite runs in a second. What that leaves unshown is the Workers runtime's own behaviour with these calls, which the second PR's run under `wrangler dev` covers.
+
+**Not shown here, and owed:**
+
+- The real dispatch namespace's and KV's answers, and everything a deploy would show. Spike G and the first deploy.
+- The sandbox in a browser. The second PR.
+- **The script's label isn't checked against the host.** The Worker serves whatever script the entry names, if it is a script's name. That a default host's entry names only its own label's script is the API's applier's rule, and the content Worker doesn't know the content domain to check it again. A second check here would need the domain as configuration.
+- Whether Cloudflare compresses toward the visitor with `no-transform` set, since the Worker asks the app for no compression.
+
 **Side by side.** After step 2: steps 3, 4(a) and 10(a). Step 4(b) after 4(a). After steps 2 and 4: steps 8 and 9. Steps 5, 6 and 7 follow in that order.
 
 **What doesn't wait for unfinished M5 behaviour:** step 1; and, once step 2 has merged, step 4, exercised with a test app a script uploads; step 8; step 4(a)'s suspension; and step 10(a). Step 2 waits only for M5's contract and migration PRs to merge. Steps 3, 5, 6, 7 and 10(b) each wait for the M5 step named.

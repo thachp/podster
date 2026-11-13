@@ -203,6 +203,9 @@ export default defineConfig({
           TEST_API_SOURCES: JSON.stringify(Object.fromEntries((readdirSync(new URL("./src", import.meta.url), { recursive: true }) as string[]).filter((name) => name.endsWith(".rs")).sort().map((name) => [name.split("\\").join("/"), readFileSync(new URL(`./src/${name}`, import.meta.url), "utf8")]))),
           TEST_API_CARGO: readFileSync(new URL("./Cargo.toml", import.meta.url), "utf8"),
           TEST_CONTENT_PROVIDER_SOURCE: readFileSync(new URL("./src/content_provider.rs", import.meta.url), "utf8"),
+          // What the API writes into the serve entries' namespace and the content Worker reads (M6 step 4(b)): the
+          // vectors apps/content and crates/core are tested against, for the test that shows the API's side agrees.
+          TEST_SERVE_FIXTURE: readFileSync(new URL("../../packages/contracts/serve-entry.fixture.json", import.meta.url), "utf8"),
           // Set only by e2e/run-langgraph-check.mjs. Empty, a2a-langgraph.spec.ts skips.
           TEST_LANGGRAPH_ASSISTANT: process.env.PODSTER_LANGGRAPH_URL ? (process.env.PODSTER_LANGGRAPH_ASSISTANT ?? "") : "",
           // Set only by e2e/run-fasta2a-check.mjs: the agent's run time in seconds. Empty, a2a-fasta2a.spec.ts skips.

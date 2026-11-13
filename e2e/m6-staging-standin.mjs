@@ -10,9 +10,10 @@
 //   departure rule, MCP's OAuth and tool calls, and the API's 404 for every other route. Its state is kept in the file
 //   M6_STANDIN_STATE, so a second process sees what the first made, as staging would across a deploy. With
 //   M6_STANDIN_FORGET=1 it forgets every session first, as staging does once a test session ends. With
-//   M6_STANDIN_DISCONNECT_FAIL=1 an agent's first disconnect answers 503. With M6_STANDIN_SIGINT_AT set, the first
-//   request whose method and path, as "POST /api/v1/...", contain it sends this process SIGINT, as Ctrl-C would, and is
-//   then answered as usual.
+//   M6_STANDIN_DISCONNECT_FAIL=1 an agent's first disconnect answers 503. With M6_STANDIN_GATE set, the first request
+//   whose method, path and query, as "POST /api/v1/...", contain it is held: the stand-in prints "stand-in: holding" and answers
+//   it only once this process has had SIGINT, which the self-test sends as Ctrl-C would, and every SIGINT listener has
+//   run, the script's included. So the signal always lands while that request is open, never before or after it.
 //
 // Waits of the run's own pacing, half a second to five seconds, are made at once, so the self-test sleeps on nothing.
 import { readFileSync, writeFileSync } from "node:fs";
@@ -25,7 +26,11 @@ globalThis.setTimeout = (run, ms, ...rest) => realTimeout(run, ms >= 500 && ms <
 
 const counts = { requests: 0, signUps: 0, signOuts: 0, disconnects: 0 };
 let disconnectFails = process.env.M6_STANDIN_DISCONNECT_FAIL === "1";
-let interruptAt = process.env.M6_STANDIN_SIGINT_AT || null;
+let gate = process.env.M6_STANDIN_GATE || null;
+/** Opened by the first SIGINT, once every listener for it has run: the stand-in's runs first, so it waits a turn. */
+let opened = null;
+const gateOpen = gate ? new Promise((resolve) => (opened = resolve)) : null;
+if (gate) process.once("SIGINT", () => setImmediate(opened));
 const json = (status, body, headers = {}) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 const notFound = () => json(404, { error: { code: "not_found", message: "not_found" } });
 
@@ -222,9 +227,13 @@ globalThis.fetch = async (input, init = {}) => {
   const method = (init.method ?? request?.method ?? "GET").toUpperCase();
   const headers = new Headers(init.headers ?? request?.headers);
   if (path === "/api/auth/sign-up/e2e") counts.signUps++;
-  if (interruptAt && `${method} ${path}`.includes(interruptAt)) {
-    interruptAt = null;
-    process.kill(process.pid, "SIGINT");
+  if (gate && `${method} ${path}${url.search}`.includes(gate)) {
+    gate = null;
+    console.log("stand-in: holding");
+    // A held promise alone doesn't keep node running, and it would exit with 13; this handle does, until the gate opens.
+    const alive = setInterval(() => {}, 2 ** 30);
+    await gateOpen;
+    clearInterval(alive);
   }
   if (mode === "edge-down") return new Response("<html>502 Bad Gateway</html>", { status: 502, headers: { "content-type": "text/html" } });
   if (path === "/.well-known/agent-configuration") return json(200, { version: "stand-in" });

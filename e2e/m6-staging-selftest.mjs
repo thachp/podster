@@ -6,7 +6,7 @@
 // the stand-in, one process after the other, as they'd run around a deploy.
 //
 //   node m6-staging-selftest.mjs
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -354,15 +354,38 @@ try {
   const kept = keptFile(home);
   const standinState = join(work, "standin.json");
   const [atBefore, atAfter] = ["1".repeat(40), "2".repeat(40)];
-  const phaseRun = (which, commit, extraEnv = {}, extraArgs = []) => {
-    const res = spawnSync(process.execPath, ["--import", pathToFileURL(join(here, "m6-staging-standin.mjs")).href, join(here, "m6-staging.mjs"), "--base-url", STAGING, `--${which}-deploy`, "--deployed-commit", commit, ...extraArgs], {
-      env: { PATH: process.env.PATH, HOME: home, M6_STANDIN: "phases", M6_STANDIN_STATE: standinState, ...(which === "before" ? { PODSTER_E2E_SIGNUP_SECRET: secret } : {}), ...extraEnv },
-      encoding: "utf8",
-      timeout: 60_000,
-    });
-    const counted = /stand-in counted: (\d+) requests, (\d+) test sign-ups, (\d+) sign-outs, (\d+) agent disconnects/.exec(res.stdout);
-    return { ...res, requests: counted ? Number(counted[1]) : NaN, signUps: counted ? Number(counted[2]) : NaN, signOuts: counted ? Number(counted[3]) : NaN, disconnects: counted ? Number(counted[4]) : NaN, all: res.stdout + res.stderr };
+  const phaseArgs = (which, commit, extraArgs = []) => ["--import", pathToFileURL(join(here, "m6-staging-standin.mjs")).href, join(here, "m6-staging.mjs"), "--base-url", STAGING, `--${which}-deploy`, "--deployed-commit", commit, ...extraArgs];
+  const phaseEnv = (which, extraEnv = {}) => ({ PATH: process.env.PATH, HOME: home, M6_STANDIN: "phases", M6_STANDIN_STATE: standinState, ...(which === "before" ? { PODSTER_E2E_SIGNUP_SECRET: secret } : {}), ...extraEnv });
+  const counted = (res) => {
+    const found = /stand-in counted: (\d+) requests, (\d+) test sign-ups, (\d+) sign-outs, (\d+) agent disconnects/.exec(res.stdout);
+    return { ...res, requests: found ? Number(found[1]) : NaN, signUps: found ? Number(found[2]) : NaN, signOuts: found ? Number(found[3]) : NaN, disconnects: found ? Number(found[4]) : NaN, all: res.stdout + res.stderr };
   };
+  const phaseRun = (which, commit, extraEnv = {}, extraArgs = []) => counted(spawnSync(process.execPath, phaseArgs(which, commit, extraArgs), { env: phaseEnv(which, extraEnv), encoding: "utf8", timeout: 60_000 }));
+  /**
+   * A phase with Ctrl-C at a known point. The stand-in holds the first request that matches `gate` and says so; only
+   * then does this send SIGINT, and the stand-in answers that request once the run's own SIGINT listener has run. So the
+   * signal always lands while that request is open: nothing here waits on time, and 60 s only bounds a run that hangs.
+   */
+  const gatedRun = (which, commit, gate) =>
+    new Promise((resolve) => {
+      const child = spawn(process.execPath, phaseArgs(which, commit), { env: phaseEnv(which, { M6_STANDIN_GATE: gate }), stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      let signalled = false;
+      const bound = setTimeout(() => child.kill("SIGKILL"), 60_000);
+      child.stdout.setEncoding("utf8").on("data", (chunk) => {
+        stdout += chunk;
+        if (!signalled && stdout.includes("stand-in: holding")) {
+          signalled = true;
+          child.kill("SIGINT");
+        }
+      });
+      child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
+      child.on("close", (status) => {
+        clearTimeout(bound);
+        resolve({ ...counted({ status, stdout, stderr }), signalled });
+      });
+    });
   const secretFree = (res, also = []) => ![secret, ...also].some((value) => res.all.includes(value));
 
   const dryBefore = phaseRun("before", atBefore, {}, ["--dry-run"]);
@@ -480,13 +503,23 @@ try {
   check(flaky.status === 1 && flaky.disconnects === 2 && flaky.signOuts === 1 && !existsSync(kept) && /disconnected, so its OAuth credential no longer works/.test(flaky.stdout), `a failed disconnect fails M6-S04a, keeps the agent on the clean-up list, which disconnects it, and keeps nothing: exit ${flaky.status}, ${flaky.disconnects} disconnect(s)`);
 
   // Ctrl-C in each phase: the run stops at its next request, and still cleans up.
-  const stopBefore = phaseRun("before", atBefore, { M6_STANDIN_SIGINT_AT: "POST /api/v1/workspaces/" });
-  check(stopBefore.status === 1 && /stopped by a signal/.test(stopBefore.stdout) && stopBefore.signOuts === 1 && stopBefore.disconnects >= 1 && !existsSync(kept), `Ctrl-C in the first phase keeps no file, signs its session out and disconnects its agent: exit ${stopBefore.status}, ${stopBefore.signOuts} sign-out(s), ${stopBefore.disconnects} disconnect(s)`);
+  const stopBefore = await gatedRun("before", atBefore, "/tasks");
+  check(stopBefore.signalled && stopBefore.status === 1 && /stopped by a signal/.test(stopBefore.stdout) && stopBefore.signOuts === 1 && stopBefore.disconnects >= 1 && !existsSync(kept), `Ctrl-C in the first phase keeps no file, signs its session out and disconnects its agent: exit ${stopBefore.status}, ${stopBefore.signOuts} sign-out(s), ${stopBefore.disconnects} disconnect(s)`);
   check(phaseRun("before", atBefore).status === 0 && existsSync(kept), "the first phase runs again for the second's Ctrl-C");
   const keptSessionNow = readKept(kept).record.session;
-  const stopAfter = phaseRun("after", atAfter, { M6_STANDIN_SIGINT_AT: "/assign" });
-  check(stopAfter.status === 1 && /stopped by a signal/.test(stopAfter.stdout) && stopAfter.signOuts === 1 && stopAfter.disconnects === 1 && !existsSync(kept), `Ctrl-C in the second phase still signs the kept session out, disconnects its agent and deletes the file: exit ${stopAfter.status}, ${stopAfter.signOuts} sign-out(s), ${stopAfter.disconnects} disconnect(s)`);
+  const stopAfter = await gatedRun("after", atAfter, "/assign");
+  check(stopAfter.signalled && stopAfter.status === 1 && /stopped by a signal/.test(stopAfter.stdout) && stopAfter.signOuts === 1 && stopAfter.disconnects === 1 && !existsSync(kept), `Ctrl-C in the second phase still signs the kept session out, disconnects its agent and deletes the file: exit ${stopAfter.status}, ${stopAfter.signOuts} sign-out(s), ${stopAfter.disconnects} disconnect(s)`);
   check(secretFree(stopAfter, [keptSessionNow, keptSessionNow.split("=")[1]]), "and prints neither the secret nor the session");
+
+  // Ctrl-C at the first phase's last request, the events page past its 4 events, after which nothing paces before the
+  // file is written: only the run's own check of the stop keeps the file from being written.
+  const stopLast = await gatedRun("before", atBefore, "/events?after=4");
+  check(stopLast.signalled && stopLast.status === 1 && /stopped by a signal/.test(stopLast.stdout) && stopLast.signOuts === 1 && !existsSync(kept) && readdirSync(dirname(kept)).length === 0, `Ctrl-C at the first phase's last request keeps no file, whole or half-written, and signs the session out: exit ${stopLast.status}, ${stopLast.signOuts} sign-out(s)`);
+  // Ctrl-C once every check of the second phase has run, during its clean-up's sign-out: nothing is cut short, the
+  // outcome stands, and the clean-up still finishes.
+  check(phaseRun("before", atBefore).status === 0 && existsSync(kept), "the first phase runs again for a stop during the second's clean-up");
+  const stopLate = await gatedRun("after", atAfter, "POST /api/auth/sign-out");
+  check(stopLate.signalled && stopLate.status === 0 && /nothing was cut short/.test(stopLate.stdout) && stopLate.signOuts === 1 && !existsSync(kept), `Ctrl-C during the second phase's clean-up leaves its passed outcome, exit ${stopLate.status}, and the clean-up still signs out and deletes the file`);
 } finally {
   rmSync(work, { recursive: true, force: true });
 }

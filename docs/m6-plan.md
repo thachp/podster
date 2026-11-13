@@ -899,7 +899,7 @@ node e2e/m6-staging.mjs --base-url https://gateway-staging.podster.dev --after-d
 - a pass of each phase;
 - each refusal, and that the first phase's come before any request;
 - an agent whose disconnect fails, which stays on the clean-up list;
-- Ctrl-C in each phase, which still signs out, disconnects and, in the second, deletes the file;
+- Ctrl-C in each phase, which still signs out, disconnects and, in the second, deletes the file. The stand-in holds a named request until the self-test has sent the signal, so it always lands mid-phase. One case lands at the first phase's last request: a stop asked for at any point of M6-S04a keeps no file. Another lands during the second phase's clean-up, after every check: the outcome stands, and the clean-up finishes;
 - a kept session the stand-in no longer accepts;
 - a stale file;
 - that neither the secret nor the session reaches the output.

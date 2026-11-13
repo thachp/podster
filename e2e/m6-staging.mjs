@@ -562,6 +562,8 @@ async function beforeDeploy() {
     const events = await roomEvents(owner, room);
     const types = events.filter((event) => event.task_id === made.id).map((event) => event.type);
     for (const type of ["task.offered", "task.accepted", "task.assignee_departed"]) ok(types.includes(type), `the room's events have no ${type} for the task`);
+    // A stop asked for at any point of this check, even after its last request, keeps nothing: the session is signed out.
+    if (stopping) throw new Halt("stopped by a signal");
     writeKept(keptAt, keptRecord({ commit: options.deployedCommit, signedUpAt, owner: owner.id, org: owner.actingOrg, room, task: made.id, eventsSeen: events.length, lastSeq: events.at(-1).seq }, owner.cookie));
     keptSession = owner.cookie;
     task = made.id;
@@ -640,9 +642,11 @@ try {
   process.exit(2);
 }
 if (kept) sessions.push(kept.session);
+let halted = false;
 try {
   await (phase === "before" ? beforeDeploy : phase === "after" ? afterDeploy : main)();
 } catch (error) {
+  halted = error instanceof Halt;
   say(`\nThe run stopped: ${cause(error)}`);
 } finally {
   tally.skipRest(stopping ? "not run: the run was stopped by a signal" : "not run: the run stopped before it");
@@ -654,6 +658,8 @@ try {
   // The second phase is one try: its writes can't be repeated, so its file goes whatever its checks found.
   if (phase === "after") say(removeKept(keptAt) ? `The kept file ${KEPT_SHOWN} was deleted.` : `The kept file ${KEPT_SHOWN} couldn't be deleted: delete it by hand. Its session was signed out.`);
 }
+// A stop that arrived once every check had run cut nothing short: the outcome stands, and so does a kept file.
+if (stopping && !halted) say("\nThe stop arrived after every check had run, so nothing was cut short. The outcome below stands.");
 const outcome = runOutcome(tally, PLAN);
 say(`\n${tally.summary()}, in ${Math.round((Date.now() - started) / 1000)} s. Sign-ups asked for: ${signUpsAsked}, answered with a session: ${signUpsAnswered}${kept ? "; the first phase's kept session was used instead" : ""}. Checks shown on staging: ${outcome.shownOnStaging}.`);
 if (signUpUnknown) say("A sign-up's answer was lost in transport: whether staging took it is unknown, and it wasn't asked again.");

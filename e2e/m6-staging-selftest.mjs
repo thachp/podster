@@ -5,6 +5,7 @@
 // two phases are checked the same way: their arguments, their kept file and its refusals, and both phases run against
 // the stand-in, one process after the other, as they'd run around a deploy.
 //
+//   npm ci          (once, in this directory: the script itself imports lib.mjs's packages)
 //   node m6-staging-selftest.mjs
 import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -18,6 +19,23 @@ import {
 import { readKept, removeKept, writeKept } from "./m6-staging-kept.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+// The runs below start m6-staging.mjs, which imports lib.mjs and with it this directory's packages. Without `npm ci` here
+// every run fails on its import, and the cases read as the script's own failures. So the packages are found first, the
+// way the script finds them, and their absence is said once and stops everything: exit 2, no case run.
+const missing = ["@auth/agent", "@modelcontextprotocol/sdk/client/index.js"].filter((name) => {
+  try {
+    import.meta.resolve(name);
+    return false;
+  } catch {
+    return true;
+  }
+});
+if (missing.length) {
+  console.error(`m6-staging-selftest: e2e's packages aren't installed (${missing.join(", ")} not found). Run npm ci in e2e first. No case was run.`);
+  process.exit(2);
+}
+
 let failed = 0;
 const check = (passed, title) => {
   if (!passed) failed++;

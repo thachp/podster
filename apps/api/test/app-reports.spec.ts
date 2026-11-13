@@ -136,6 +136,16 @@ describe("a report that names an app (M6 step 9)", () => {
         expect((await api(who, "POST", "/v1/app-reports", body)).code, JSON.stringify(body)).toBe(code);
       }
       expect((await api(AGENT, "POST", "/v1/app-reports", { address: "a.example.com", reason: "spam" })).code).toBe("not_allowed");
+      // The address's cap counts characters, as the contract's maxLength does: 2,048 of them, most two bytes each, pass.
+      const prefix = "https://bücher.example/";
+      const longest = `${prefix}${"é".repeat(2048 - [...prefix].length)}`;
+      expect([[...longest].length, new TextEncoder().encode(longest).length > 2048]).toEqual([2048, true]);
+      expect((await api(person("long"), "POST", "/v1/app-reports", { address: longest, reason: "spam" })).status).toBe(200);
+      expect((await api(person("long"), "POST", "/v1/app-reports", { address: `${longest}é`, reason: "spam" })).code).toBe("invalid_argument");
+      // The note's counts bytes, as the contract says: 512 two-byte characters are 1,024 bytes, and one more is past it,
+      // though 513 characters are well under the schema's maxLength.
+      expect((await api(person("long"), "POST", "/v1/app-reports", { address: "a.example.com", reason: "spam", note: "é".repeat(512) })).status).toBe(200);
+      expect((await api(person("long"), "POST", "/v1/app-reports", { address: "a.example.com", reason: "spam", note: "é".repeat(513) })).code).toBe("invalid_argument");
       // The host is a name: it reaches no log.
       for (const spy of logs) {
         expect(spy.mock.calls.flat().map(String).join("\n")).not.toContain("example");
@@ -240,6 +250,15 @@ describe("the deployment's release-read budget (M6 step 9)", () => {
     // Once its hour is over, it reserves again, at its new count.
     await setClock(T + HOUR);
     expect((await reserve(rel(1), 100)).body).toEqual({ fits: true, reads: 100, reserved_at: T + HOUR });
+  });
+
+  it("keeps no reservation past the budget, by a check the table takes from the budget itself", async () => {
+    await setClock(T);
+    await reserve(rel(1), 1);
+    const sql = await inModeration((sql) => sql.exec("SELECT sql FROM sqlite_master WHERE name = 'release_reads'").one().sql as string);
+    expect(sql).toContain("CHECK (reads BETWEEN 1 AND 3000)");
+    const refused = (reads: number) => inModeration((sql) => { try { sql.exec("INSERT INTO release_reads (release_id, reads, reserved_at) VALUES (?, ?, ?)", rel(99), reads, T); sql.exec("DELETE FROM release_reads WHERE release_id = ?", rel(99)); return false; } catch { return true; } });
+    expect([await refused(3000), await refused(3001), await refused(0)]).toEqual([false, true, true]);
   });
 
   it("refuses what isn't a release or a count, and no route reaches it", async () => {

@@ -118,7 +118,8 @@ pub fn normalize(input: &str) -> Result<String, HostnameRefusal> {
     Ok(ascii)
 }
 
-/// The longest address a report may give, as the contract caps it.
+/// The longest address a report may give, in characters (Unicode scalar values), as the contract's `maxLength` counts
+/// them: an address with multi-byte characters may be longer in bytes.
 pub const MAX_REPORTED_ADDRESS_LEN: usize = 2048;
 
 /// The host a report names (M6 step 9): the address as a reporter saw it, either a hostname or an `http` or `https` URL
@@ -126,7 +127,7 @@ pub const MAX_REPORTED_ADDRESS_LEN: usize = 2048;
 /// query, fragment and port are dropped; one with a user name or password is refused, since it can show one host and
 /// mean another. Whether anything is served at the host isn't asked: a report answers the same either way.
 pub fn reported_host(address: &str) -> Option<String> {
-    if address.is_empty() || address.len() > MAX_REPORTED_ADDRESS_LEN {
+    if address.is_empty() || address.chars().count() > MAX_REPORTED_ADDRESS_LEN {
         return None;
     }
     let lower = address.to_ascii_lowercase();

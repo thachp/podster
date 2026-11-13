@@ -12,7 +12,9 @@ use crate::error::ApiError;
 use crate::store::{exec, int, rows, transaction_sync};
 use crate::{content_stop, forward, principal, reconcile, valid_id, Caller};
 use podster_core::hostnames::reported_host;
-use podster_core::release::{is_release_id, read_budget_wait, window_start, READ_WINDOW_MS};
+use podster_core::release::{
+    is_release_id, read_budget_wait, window_start, MAX_RELEASE_READS_PER_HOUR, READ_WINDOW_MS,
+};
 use podster_policy::moderation::{
     check_report, is_operator, parse_operators, Reason, REPORT_WINDOW_MS,
 };
@@ -40,9 +42,16 @@ CREATE TABLE IF NOT EXISTS app_report (seq INTEGER PRIMARY KEY, id TEXT NOT NULL
   request_key TEXT NOT NULL, request_hash TEXT NOT NULL, host TEXT NOT NULL CHECK (length(host) BETWEEN 1 AND 253),
   reason TEXT NOT NULL, note TEXT, created_at INTEGER NOT NULL, UNIQUE (reporter, request_key));
 CREATE INDEX IF NOT EXISTS app_report_by_reporter ON app_report (reporter, created_at);
-CREATE TABLE IF NOT EXISTS release_reads (release_id TEXT PRIMARY KEY CHECK (length(release_id) = 36),
-  reads INTEGER NOT NULL CHECK (reads BETWEEN 1 AND 3000), reserved_at INTEGER NOT NULL);
 ";
+
+/// The read budget's table. Its check on one reservation is the budget itself, taken from `podster_core`, so the two
+/// can't differ.
+fn release_reads_schema() -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS release_reads (release_id TEXT PRIMARY KEY CHECK (length(release_id) = 36),
+  reads INTEGER NOT NULL CHECK (reads BETWEEN 1 AND {MAX_RELEASE_READS_PER_HOUR}), reserved_at INTEGER NOT NULL);"
+    )
+}
 
 /// The deployment's release-read budget (M6 step 9, ADR 0010's budgets): where a release reserves the GitHub reads it
 /// is about to make. Internal: no route reaches it.
@@ -660,6 +669,7 @@ impl Moderation {
     async fn dispatch(&self, mut req: Request) -> R<Value> {
         let sql = self.state.storage().sql();
         exec(&sql, SCHEMA, vec![])?;
+        exec(&sql, &release_reads_schema(), vec![])?;
         exec(&sql, content_stop::SCHEMA, vec![])?;
         exec(&sql, reconcile::SCHEMA, vec![])?;
         match (req.method(), req.path().as_str()) {

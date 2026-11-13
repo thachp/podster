@@ -781,4 +781,18 @@ fn a_report_keeps_only_the_host_of_its_address() {
     );
     assert_eq!(at_limit.len(), MAX_REPORTED_ADDRESS_LEN);
     assert_eq!(reported_host(&at_limit).as_deref(), Some("app.example.com"));
+    // The cap counts characters, as the contract's maxLength does, not bytes: 2,048 characters of which most are two
+    // bytes each pass, and one more character doesn't.
+    let prefix = "https://bücher.example/";
+    let multi = format!(
+        "{prefix}{}",
+        "é".repeat(MAX_REPORTED_ADDRESS_LEN - prefix.chars().count())
+    );
+    assert_eq!(multi.chars().count(), MAX_REPORTED_ADDRESS_LEN);
+    assert!(multi.len() > MAX_REPORTED_ADDRESS_LEN);
+    assert_eq!(
+        reported_host(&multi).as_deref(),
+        Some("xn--bcher-kva.example")
+    );
+    assert_eq!(reported_host(&format!("{multi}é")), None);
 }

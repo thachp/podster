@@ -1168,40 +1168,54 @@ describe("the review's findings (M5 step 7b)", () => {
     }
   });
 
-  it("counts every request through the command itself: ten for a task in its whole life, twenty an hour for the room (M2)", async () => {
-    const r = await approved();
-    await fake({ merge: "refuse" });
-    const asked = async (task: string) => {
-      const got = await merge(MERGER, r.id, task);
-      if (got.status === 200) await pass(r.id);
+  // The two limits are a test each, since the thirty-one requests of both in one test ran to two thirds of the time a test
+  // is given on a slow runner. Each makes its requests through the command and reads what was recorded.
+  describe("counts every request through the command itself: ten for a task in its whole life, twenty an hour for the room (M2)", () => {
+    const asked = async (id: string, task: string) => {
+      const got = await merge(MERGER, id, task);
+      if (got.status === 200) await pass(id);
       return [got.status, got.code ?? "ok"];
     };
-    // Ten requests for one task, each failing. Asking again never starts the count over, and no wait lifts it.
-    for (let n = 1; n <= 10; n++) expect(await asked(r.task), String(n)).toEqual([200, "ok"]);
-    expect(await asked(r.task)).toEqual([429, "merge_request_limit"]);
-    await inRoom(r.id, (sql) => sql.exec("UPDATE merge_request SET at = at - 7200001"));
-    expect(await asked(r.task)).toEqual([429, "merge_request_limit"]);
-    expect(await merges()).toHaveLength(10);
-    // Twenty an hour for the room, whichever tasks they're for: two more tasks at ten each, and one more request.
-    const others: string[] = [];
-    for (const number of [20, 21, 22]) {
-      await pull(number);
-      const task = await submitted(r.id, number);
-      await must(OWNER, "POST", `/v1/workspaces/${r.id}/tasks/${task}/verify`, { submission_no: 1, commit_sha: HEAD });
-      others.push(task);
-    }
-    for (const task of others.slice(0, 2)) for (let n = 1; n <= 10; n++) expect(await asked(task), `${task} ${n}`).toEqual([200, "ok"]);
-    expect(await asked(others[2])).toEqual([429, "rate_limited"]);
-    // An hour on, the room takes requests again, and the first task still doesn't.
-    await inRoom(r.id, (sql) => sql.exec("UPDATE merge_request SET at = at - 3600001"));
-    expect(await asked(others[2])).toEqual([200, "ok"]);
-    expect(await asked(r.task)).toEqual([429, "merge_request_limit"]);
-    // A refused request records nothing and counts for nothing.
-    expect(await inRoom(r.id, (sql) => sql.exec("SELECT count(*) AS n FROM merge_request").one().n)).toBe(31);
-    expect((await events(r.id)).filter((e) => e.type === "merge.requested")).toHaveLength(31);
+    const recorded = async (id: string) => [await inRoom(id, (sql) => sql.exec("SELECT count(*) AS n FROM merge_request").one().n), (await events(id)).filter((e) => e.type === "merge.requested").length];
+
+    it("ten for a task in its whole life", async () => {
+      const r = await approved();
+      await fake({ merge: "refuse" });
+      // Ten requests for one task, each failing. Asking again never starts the count over, and no wait lifts it.
+      for (let n = 1; n <= 10; n++) expect(await asked(r.id, r.task), String(n)).toEqual([200, "ok"]);
+      expect(await asked(r.id, r.task)).toEqual([429, "merge_request_limit"]);
+      await inRoom(r.id, (sql) => sql.exec("UPDATE merge_request SET at = at - 7200001"));
+      expect(await asked(r.id, r.task)).toEqual([429, "merge_request_limit"]);
+      expect(await merges()).toHaveLength(10);
+      // A refused request records nothing and counts for nothing.
+      expect(await recorded(r.id)).toEqual([10, 10]);
+    });
+
+    it("twenty an hour for the room, whichever tasks they're for", async () => {
+      const r = await approved();
+      await fake({ merge: "refuse" });
+      // Two tasks at ten requests each, and one more request for a third.
+      const others: string[] = [];
+      for (const number of [20, 21, 22]) {
+        await pull(number);
+        const task = await submitted(r.id, number);
+        await must(OWNER, "POST", `/v1/workspaces/${r.id}/tasks/${task}/verify`, { submission_no: 1, commit_sha: HEAD });
+        others.push(task);
+      }
+      for (const task of others.slice(0, 2)) for (let n = 1; n <= 10; n++) expect(await asked(r.id, task), `${task} ${n}`).toEqual([200, "ok"]);
+      expect(await asked(r.id, others[2])).toEqual([429, "rate_limited"]);
+      // An hour on, the room takes requests again, and a task that has had its ten still doesn't.
+      await inRoom(r.id, (sql) => sql.exec("UPDATE merge_request SET at = at - 3600001"));
+      expect(await asked(r.id, others[2])).toEqual([200, "ok"]);
+      expect(await asked(r.id, others[0])).toEqual([429, "merge_request_limit"]);
+      // A refused request records nothing and counts for nothing.
+      expect(await recorded(r.id)).toEqual([21, 21]);
+    });
   });
 
-  it("honours authority that ends while GitHub is answering: before the mark, and between the mark and the merge (M4)", async () => {
+  // Each way authority can end, at each of the two points, is its own test: fourteen scenarios in one test ran close to
+  // the time a test is given, and a slow runner took it past that with no assertion failed.
+  describe("honours authority that ends while GitHub is answering: before the mark, and between the mark and the merge (M4)", () => {
     const ways = [
       ["grant revoked", async (r: any) => void (await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/repository/grants/${r.grant}`, { policy_version: await version(r.id) })), "grant_required"],
       ["requester removed", async (r: any) => void (await must(OWNER, "DELETE", `/v1/workspaces/${r.id}/members/${MERGER.id}`, { policy_version: await version(r.id) })), "access_revoked"],
@@ -1212,32 +1226,30 @@ describe("the review's findings (M5 step 7b)", () => {
       // The room's record of the approving review turns out not to be independent (A1, decision 195).
       ["review not independent", (r: any) => inRoom(r.id, (sql) => void sql.exec("UPDATE task_change SET reviewer_person = ?", LINKER.id)), "self_review"],
     ] as const;
-    for (const [what, lose, reason] of ways) {
-      for (const point of ["before the mark", "between the mark and the merge"] as const) {
-        await fresh();
-        const r = await requested();
-        // The merge App's token requests wait at a gate: the read's first, then the mark's, then the merge's.
-        await fake({ mode: "gate" });
-        const running = pass(r.id);
-        await minting();
-        if (point === "between the mark and the merge") {
-          // Let the read go. The mark's intent is recorded, and its token request now waits.
-          await release();
-          await minting();
-        }
-        await lose(r);
-        await fake({ mode: "ok" });
+    const cases = ways.flatMap(([what, lose, reason]) => (["before the mark", "between the mark and the merge"] as const).map((point) => [what, point, lose, reason] as const));
+    it.each(cases)("%s, %s", async (what, point, lose, reason) => {
+      const r = await requested();
+      // The merge App's token requests wait at a gate: the read's first, then the mark's, then the merge's.
+      await fake({ mode: "gate" });
+      const running = pass(r.id);
+      await minting();
+      if (point === "between the mark and the merge") {
+        // Let the read go. The mark's intent is recorded, and its token request now waits.
         await release();
-        await running;
-        const label = `${what}, ${point}`;
-        expect(await change(r.id, r.task), label).toMatchObject({ merge_state: "failed", merge_reason: reason, merge_called_at: null });
-        expect(await merges(), label).toEqual([]);
-        // Before the mark nothing was set. After it, the status is on the commit and nothing was merged with it.
-        expect((await github()).statuses.length, label).toBe(point === "before the mark" ? 0 : 1);
-        expect((await github()).pulls["7"].merged ?? false, label).toBe(false);
-        expect((await minted()).every((token) => !token.live), label).toBe(true);
+        await minting();
       }
-    }
+      await lose(r);
+      await fake({ mode: "ok" });
+      await release();
+      await running;
+      const label = `${what}, ${point}`;
+      expect(await change(r.id, r.task), label).toMatchObject({ merge_state: "failed", merge_reason: reason, merge_called_at: null });
+      expect(await merges(), label).toEqual([]);
+      // Before the mark nothing was set. After it, the status is on the commit and nothing was merged with it.
+      expect((await github()).statuses.length, label).toBe(point === "before the mark" ? 0 : 1);
+      expect((await github()).pulls["7"].merged ?? false, label).toBe(false);
+      expect((await minted()).every((token) => !token.live), label).toBe(true);
+    });
   });
 
   it("reads GitHub before ending a merge whose call went out, whatever ends it, and records what the call did (M5)", async () => {

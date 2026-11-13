@@ -435,7 +435,7 @@ async fn route(
     // answered exactly where an unknown path is: by the match below, or by the room it names.
     if let Some(audience) = releases::route(&method, &parts) {
         if releases::switched_on(&env).await {
-            return releases::answer(&env, &caller, audience, &parts, body.as_deref()).await;
+            return releases::answer(&env, &caller, audience, &parts, body.as_deref(), &req).await;
         }
     }
     let (workspace_id, forward_path) = match parts.as_slice() {

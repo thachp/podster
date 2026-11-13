@@ -735,3 +735,50 @@ fn a_byte_order_mark_is_stripped_and_any_other_unreadable_rule_fails_closed() {
     // Upper case in a rule is still a rule.
     assert!(mappable("app.example.com", CONTENT, &["COM"], false, 0).is_ok());
 }
+
+#[test]
+fn a_report_keeps_only_the_host_of_its_address() {
+    for (address, host) in [
+        ("app.example.com", "app.example.com"),
+        ("App.Example.COM.", "app.example.com"),
+        ("https://app.example.com", "app.example.com"),
+        (
+            "HTTPS://App.Example.com/some/page?q=1#top",
+            "app.example.com",
+        ),
+        ("http://app.example.com:8080/x", "app.example.com"),
+        ("https://k3v9q2.podster.site/", "k3v9q2.podster.site"),
+        ("https://bücher.example/", "xn--bcher-kva.example"),
+    ] {
+        assert_eq!(reported_host(address).as_deref(), Some(host), "{address}");
+    }
+    for refused in [
+        "",
+        "app.example.com/page",
+        "ftp://app.example.com",
+        "javascript://app.example.com",
+        "https://user@app.example.com/",
+        "https://a.example.com@b.example.com/",
+        "https://app.example.com:/",
+        "https://app.example.com:x/",
+        "https:///path",
+        "https://[::1]/",
+        "https://127.0.0.1/",
+        "*.example.com",
+        "app example.com",
+        "https://app.example.com\\@b.example.com/",
+    ] {
+        assert_eq!(reported_host(refused), None, "{refused}");
+    }
+    let long = format!(
+        "https://app.example.com/{}",
+        "a".repeat(MAX_REPORTED_ADDRESS_LEN)
+    );
+    assert_eq!(reported_host(&long), None);
+    let at_limit = format!(
+        "https://app.example.com/{}",
+        "a".repeat(MAX_REPORTED_ADDRESS_LEN - 24)
+    );
+    assert_eq!(at_limit.len(), MAX_REPORTED_ADDRESS_LEN);
+    assert_eq!(reported_host(&at_limit).as_deref(), Some("app.example.com"));
+}

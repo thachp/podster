@@ -1272,6 +1272,65 @@ fn a_release_costs_two_tree_reads_and_one_a_file_within_three_thousand_an_hour()
     assert_eq!(reads_fit(9 * 302, 302), Err(ReleaseCapRefusal::ReadBudget));
 }
 
+#[test]
+fn the_read_budget_says_when_a_release_would_fit() {
+    let hour = READ_WINDOW_MS;
+    // Nothing held: a full-size release fits, and so does the budget exactly.
+    assert_eq!(read_budget_wait(&[], 302, NOW), Ok(()));
+    assert_eq!(
+        read_budget_wait(&[], MAX_RELEASE_READS_PER_HOUR, NOW),
+        Ok(())
+    );
+    // Past the budget alone, it never fits.
+    assert_eq!(
+        read_budget_wait(&[], MAX_RELEASE_READS_PER_HOUR + 1, NOW),
+        Err(None)
+    );
+    // Nine full-size releases held: a tenth waits until the oldest leaves the hour, in any order given.
+    let nine: Vec<(i64, u32)> = (0..9).map(|n| (NOW - 9_000 + n * 1_000, 302)).collect();
+    assert_eq!(
+        read_budget_wait(&nine, 302, NOW),
+        Err(Some(NOW - 9_000 + hour))
+    );
+    let mut shuffled = nine.clone();
+    shuffled.reverse();
+    assert_eq!(
+        read_budget_wait(&shuffled, 302, NOW),
+        Err(Some(NOW - 9_000 + hour))
+    );
+    // A small one still fits beside them: 9 x 302 = 2,718, and 282 more is exactly 3,000.
+    assert_eq!(read_budget_wait(&nine, 282, NOW), Ok(()));
+    assert_eq!(
+        read_budget_wait(&nine, 283, NOW),
+        Err(Some(NOW - 9_000 + hour))
+    );
+    // The hour's edge, to the millisecond: a reservation made exactly an hour ago no longer counts, one a millisecond
+    // later still does.
+    let full = [(NOW - hour + 1, MAX_RELEASE_READS_PER_HOUR)];
+    assert_eq!(read_budget_wait(&full, 1, NOW), Err(Some(NOW + 1)));
+    assert_eq!(
+        read_budget_wait(&[(NOW - hour, MAX_RELEASE_READS_PER_HOUR)], 1, NOW),
+        Ok(())
+    );
+    // At the time it was told, it fits.
+    assert_eq!(read_budget_wait(&full, 1, NOW + 1), Ok(()));
+    // It waits for as many of the oldest as it takes: one must leave for 600 reads, two for 1,001.
+    let held = [(NOW - 100, 1_000), (NOW - 300, 1_000), (NOW - 200, 1_000)];
+    assert_eq!(
+        read_budget_wait(&held, 600, NOW),
+        Err(Some(NOW - 300 + hour))
+    );
+    assert_eq!(
+        read_budget_wait(&held, 1_001, NOW),
+        Err(Some(NOW - 200 + hour))
+    );
+    assert_eq!(read_budget_wait(&held, 1_001, NOW - 200 + hour), Ok(()));
+    assert_eq!(
+        read_budget_wait(&held, 1_001, NOW - 201 + hour),
+        Err(Some(NOW - 200 + hour))
+    );
+}
+
 // --- Cloudflare's and the host's answers ----------------------------------------------------------------------------
 
 #[test]

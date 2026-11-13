@@ -134,10 +134,12 @@ describe("M6's routes, none of them built", () => {
         const want: Record<string, [number, string | undefined]> = {
           suspendApp: [404, "not_found"], liftAppSuspension: [404, "not_found"], suspendAppHost: [200, undefined], liftAppHostSuspension: [200, undefined],
           stopContentDomain: [200, undefined], resumeContentDomain: [200, undefined], listTakedownFindings: [200, undefined],
+          // Step 9 built an app's report: a person's, an operator's included, and this body names no address.
+          createAppReport: [400, "invalid_argument"],
         };
         const operator = await api(OPERATOR, route.method, operatorPath, { reason: "abuse" });
         expect([operator.status, operator.code], `${route.operation} as an operator`).toEqual(want[route.operation] ?? [409, "release_not_available"]);
-        expect(await as(OWNER), `${route.operation} as the owner`).toEqual(M6[route.operation] === "operator" ? [403, "not_allowed"] : [409, "release_not_available"]);
+        expect(await as(OWNER), `${route.operation} as the owner`).toEqual(M6[route.operation] === "operator" ? [403, "not_allowed"] : want[route.operation] ?? [409, "release_not_available"]);
       }
       // A neighbouring path the contract doesn't list is no M6 route: the room answers it as it always did.
       expect((await api(OWNER, "GET", `/v1/workspaces/${room}/releases`)).code).toBe("not_found");

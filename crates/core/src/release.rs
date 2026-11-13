@@ -1179,6 +1179,39 @@ pub fn reads_fit(used: u32, needed: u32) -> Result<(), ReleaseCapRefusal> {
     }
 }
 
+/// The deployment's read budget, asked by one release (M6 step 9). `held` is every other release's reservation as
+/// `(reserved_at, reads)`, in any order; one reserved before the rolling hour at `now` no longer counts. `Ok` when
+/// `needed` fits now. Otherwise the earliest time it would fit if nothing else were reserved meanwhile, which is when
+/// enough of the oldest reservations leave the hour, or `None` when it never fits, since `needed` alone is past the
+/// budget.
+pub fn read_budget_wait(held: &[(i64, u32)], needed: u32, now: i64) -> Result<(), Option<i64>> {
+    if needed > MAX_RELEASE_READS_PER_HOUR {
+        return Err(None);
+    }
+    let start = window_start(now, READ_WINDOW_MS);
+    let mut counting: Vec<(i64, u32)> = held
+        .iter()
+        .copied()
+        .filter(|(at, _)| *at >= start)
+        .collect();
+    let mut used = counting
+        .iter()
+        .fold(0u32, |sum, (_, reads)| sum.saturating_add(*reads));
+    if reads_fit(used, needed).is_ok() {
+        return Ok(());
+    }
+    // Oldest first: each leaves the hour at its own time plus the window, and the release fits once enough have left.
+    counting.sort_unstable();
+    for (at, reads) in counting {
+        used = used.saturating_sub(reads);
+        if reads_fit(used, needed).is_ok() {
+            return Err(Some(at.saturating_add(READ_WINDOW_MS)));
+        }
+    }
+    // Every reservation has left by then, and `needed` alone fits, so the loop always answered.
+    Err(None)
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Confirming what Cloudflare and the host say
 // ---------------------------------------------------------------------------------------------------------------------

@@ -17,7 +17,7 @@ An OAuth client's redirect URI can't be on the gateway's own hostname, whatever 
 ## Before you start
 
 - Node, and `npm ci` in `apps/gateway` and `apps/api`.
-- Rust and `worker-build` 0.8.7, because deploying the API builds it: `cargo install worker-build --version 0.8.7 --locked`.
+- Rust and `worker-build` 0.8.7, because deploying the API builds it: `cargo install worker-build --version 0.8.7 --locked`. The first `rustc` on your `PATH` must have the `wasm32-unknown-unknown` target, so put rustup's ahead of any other, such as Homebrew's; `scripts/deploy-staging` refuses otherwise.
 - `npx wrangler login` from an app folder, or `CLOUDFLARE_API_TOKEN` in your shell.
 - The account ID in your shell. It stays out of this repo.
 

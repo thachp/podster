@@ -707,7 +707,7 @@ The architect proposes the gate call, for the owner to review.
 - **A room made before the deploy.** M6-S04 has never run, so the room schema step's migration is shown only on a room that began with it.
 - **That the `HostnameClaim` class can be instantiated.** Nothing reaches it while the switch is off, so the run couldn't show it.
 
-*Note, 2026-11-13: M6-S04 has since run, in two phases around a deploy; see [later staging runs](#later-staging-runs-2026-11-12-and-2026-11-13). It showed that a room made before a deploy that changed the room's schema keeps working. A room that predates step 2's schema step is still unshown, and so is the `HostnameClaim` class.*
+*Note, 2026-11-13: M6-S04 has since run, in two phases around a deploy; see [later staging runs](#later-staging-runs-2026-11-12-and-2026-11-13). That deploy changed the room's code and left its schema as it was, so it showed a room made before a deploy keeps working, not a room schema step applied to an older room. That, the first item above, is still unshown, and so is the `HostnameClaim` class.*
 
 **Left on staging:** the two test people, the organization, the room, the agent and the task. Every session was signed out.
 
@@ -719,7 +719,7 @@ The architect proposes the gate call, for the owner to review.
   - **Result:** exit 0, with 11 passed, 0 failed and 1 skipped, M6-S04. 2 sign-ups.
 - **M6-S04, shown for the first time, 2026-11-13 UTC,** around the deploy of `4b210ac`, takedown's second PR (#322). The script ran at main `52d6cac` and `4b210ac`.
   - **First phase,** against staging at `e2ef46b`: exit 0, 1 passed, 1 sign-up. In M6-S04a, the task was offered and accepted, then open with no assignee after the agent was disconnected. The room had 6 events.
-  - **The deploy of `4b210ac`:** in-code Durable Object schema steps only, with no D1 migration and no wrangler change. 4 of 4 probes passed, after one retry on Cloudflare's code 7403.
+  - **The deploy of `4b210ac`:** the room's schema was unchanged by this deploy. Its in-code Durable Object schema steps were Moderation's and `HostnameClaim`'s; in the room, `store.rs` gained only a helper. The room's code changed: the applier, takedown and the stop read. There was no D1 migration and no wrangler change. 4 of 4 probes passed, after one retry on Cloudflare's code 7403.
   - **Second phase,** against staging at `4b210ac`: exit 0, 4 passed, 0 failed, 0 sign-ups.
     - M6-S04b: the task made before the deploy was still open. It was then offered to a new agent, accepted, submitted and completed, in the older room.
     - M6-S04c: 6 reads, none carrying any of the 19 M6 fields.
@@ -729,10 +729,12 @@ The architect proposes the gate call, for the owner to review.
 - **Run 3,** after that deploy. The usual run.
   - **Result:** exit 0, with 11 passed, 0 failed and 1 skipped. 2 sign-ups.
 
-**What M6-S04 shows.** A room made before a deploy that changed the room's schema keeps working. The room was made under `e2ef46b`, which already had the first takedown PR's schema step, and it crossed the deploy of the second.
+**What M6-S04 shows.** A room made before a deploy, with a task part-way through its life, keeps working after a deploy that changed the room's code: the applier, takedown and the stop read. It doesn't show a change to the room's tables, because this deploy made none.
+
+*Correction, 2026-11-13: this section first said the deploy of `4b210ac` changed the room's schema. That was the architect's error, and it is corrected above.*
 
 **What it doesn't show:**
-- a room that predates step 2's schema step, or the first takedown PR's;
+- **A room schema step applied to a room that existed before it.** This has still never been shown on staging: step 2's and the first takedown PR's room schema steps both went out before M6-S04 could run. The next deploy that carries a room schema step must be wrapped in M6-S04's two phases.
 - the Moderation and `HostnameClaim` schema steps, which nothing reaches while `RELEASES` is off;
 - anything with `RELEASES` on.
 

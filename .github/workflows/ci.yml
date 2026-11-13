@@ -216,6 +216,12 @@ jobs:
         working-directory: e2e
       - run: node static-check.mjs
         working-directory: e2e
+      # The API's and the gateway's specs, read without running them: a sleep, a wall-clock margin in an expectation, or
+      # a spec that makes rooms and quiets none. What stays is in test-timing-allow.json, each with its reason.
+      - run: node test-timing-check.mjs --self-test
+        working-directory: e2e
+      - run: node test-timing-check.mjs
+        working-directory: e2e
       # The staging run's tail reader, fed wrangler's real multi-line JSON shape.
       - run: node tail-stream-selftest.mjs
         working-directory: e2e

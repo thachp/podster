@@ -1,0 +1,946 @@
+{
+ "about": [
+  "The findings of e2e/test-timing-check.mjs that stay for now, all of them present when the check was added at 86db135. Rule 1 of docs/review-standards.md (on its branch, PR 339).",
+  "Reviewed like code. An entry matches by file, rule and the exact text of its line, and must match exactly `count` findings (1 if absent). A new copy of an allowed line, an entry whose line changed, or one with no reason, no category from below, or no `owed` fails the check.",
+  "`owed: true` is a debt with what it needs written in its reason; `owed: false` is right as it is. Every run prints the number owed.",
+  "`lines_at_86db135` is for a reader: the check doesn't use it, and lines move.",
+  "The fixes land one category per PR, removing entries as they go: R (rooms), then I and J (margins), then B's four API cases and E."
+ ],
+ "categories": {
+  "A": "sleep: a bounded poll for the state itself (right as it is)",
+  "B": "sleep: a wait, then an assertion that nothing happened",
+  "C": "sleep: so a streaming request is in flight before the test acts",
+  "D": "sleep: a few milliseconds so the clock moves on",
+  "E": "sleep: a fixed run of passes, then exact counts",
+  "F": "sleep: real time for a back-off to run out",
+  "G": "sleep: for a third-party agent's run",
+  "H": "sleep: a stand-in's pacing in the safe direction (right as it is)",
+  "I": "margin: a lower bound read after the action",
+  "J": "margin: an upper bound read before the action",
+  "K": "margin: a false positive of the check (right as it is)",
+  "L": "margin: elapsed wall-clock time asserted",
+  "R": "unquieted: an API spec that makes rooms and quiets none"
+ },
+ "known_gaps": [
+  {
+   "file": "apps/gateway/test/gateway.spec.ts",
+   "near_line": 2816,
+   "what": "\"stops after a strict number across all clients\": a fixed counter (STRICT_COUNTER) other tests' sign-ups also count against.",
+   "owed": true,
+   "why_unseen": "No rule here can see a shared counter's name; found in PR 342's review."
+  },
+  {
+   "file": "apps/gateway/test/email-sign-in.spec.ts",
+   "near_line": 583,
+   "what": "\"takes five a minute per client\": counts on a fixed client name within a wall-clock minute, which can roll over mid-test, and which other tests' traffic under the same name adds to.",
+   "owed": true,
+   "why_unseen": "A rate limit's window and key name aren't a sleep or a margin; found in PR 342's review."
+  }
+ ],
+ "entries": [
+  {
+   "file": "apps/api/test/a2a-outbound.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    117
+   ],
+   "code": "if (!job) await new Promise((done) => setTimeout(done, 50));",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/api/test/a2a-readback.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    156
+   ],
+   "code": "if (jobs.length === 0) await new Promise((done) => setTimeout(done, 50));",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/api/test/claims.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    293
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 20));",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/api/test/merge-task.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    1012
+   ],
+   "code": "await new Promise((x) => setTimeout(x, 2));",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/api/test/provider-deliveries.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    398
+   ],
+   "code": "await new Promise((r) => setTimeout(r, 50));",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/api/test/provisioning.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    83
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 25));",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/api/test/provisioning.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    126
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 2));",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/api/test/provisioning.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    181
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 50));",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/api/test/provisioning.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    840
+   ],
+   "code": "for (let i = 0; i < 40 && (await indexRow(id)) === null; i++) { await alarmPass(stub(r.id)); await new Promise((x) => setTimeout(x, 50)); }",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/api/test/provisioning.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    896
+   ],
+   "code": "for (let i = 0; i < 40 && (await rowsOf(archived.id, \"repo_request\"))[0].state === \"pending\"; i++) { await alarmPass(stub(archived.id)); await new Promise((x) => setTimeout(x, 50)); }",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/api/test/provisioning.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    1490
+   ],
+   "code": "for (let i = 0; i < 40 && (await indexRow(61000)) !== r.id; i++) { await alarmPass(stub(r.id)); await new Promise((x) => setTimeout(x, 50)); }",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/api/test/provisioning.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    1497
+   ],
+   "code": "for (let i = 0; i < 40 && (await rowsOf(squatter.id, \"repo_link\"))[0].indexed_at === null; i++) { await alarmPass(stub(squatter.id)); await new Promise((x) => setTimeout(x, 50)); }",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/api/test/release-commit.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    166
+   ],
+   "code": "for (let i = 0; i < 2000 && !(await inRoom(room, (sql) => sql.exec(\"SELECT arrived FROM test_release_hold\").one().arrived)); i += 1) await new Promise((next) => setTimeout(next, 5));",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/api/test/repo-access.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    70
+   ],
+   "code": "await new Promise((x) => setTimeout(x, 2));",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/api/test/repo-access.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    110
+   ],
+   "code": "await new Promise((x) => setTimeout(x, 100));",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/api/test/repo-access.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    712
+   ],
+   "code": "if (alarmAt === null) await new Promise((x) => setTimeout(x, 50));",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/api/test/task-change.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    68
+   ],
+   "code": "await new Promise((x) => setTimeout(x, 2));",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/gateway/test/gateway.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    2384
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 50));",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure."
+  },
+  {
+   "file": "apps/gateway/test/organizations.spec.ts",
+   "rule": "sleep",
+   "category": "A",
+   "owed": false,
+   "lines_at_86db135": [
+    401,
+    635
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 100));",
+   "reason": "A poll for the state itself: the loop re-reads it, stops as soon as it is there, and throws or is followed by an expect when the bound runs out. The timer only paces the re-reads, and the bound only detects a failure.",
+   "count": 2
+  },
+  {
+   "file": "apps/api/test/kernel.spec.ts",
+   "rule": "sleep",
+   "category": "B",
+   "owed": true,
+   "lines_at_86db135": [
+    2831,
+    2836,
+    3505
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 300));",
+   "reason": "A sleep, then an assertion that nothing happened: the sleep is the pass condition, so a slow runner can pass it with the bug present. API: fix in the category-B PR by running the delivery pass (alarmPass) and then asserting nothing arrived.",
+   "count": 3
+  },
+  {
+   "file": "apps/api/test/scanning.spec.ts",
+   "rule": "sleep",
+   "category": "B",
+   "owed": true,
+   "lines_at_86db135": [
+    659
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 300));",
+   "reason": "A sleep, then an assertion that nothing happened: the sleep is the pass condition, so a slow runner can pass it with the bug present. API: fix in the category-B PR by running the room's pass (alarmPass) and then asserting no third job."
+  },
+  {
+   "file": "apps/gateway/test/gateway.spec.ts",
+   "rule": "sleep",
+   "category": "B",
+   "owed": true,
+   "lines_at_86db135": [
+    2561
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 300));",
+   "reason": "A sleep, then an assertion that nothing happened: the sleep is the pass condition, so a slow runner can pass it with the bug present. Gateway: stays owed; needs a signal that the room's delivery to the inbox has run, which the gateway test can't call."
+  },
+  {
+   "file": "apps/gateway/test/organizations.spec.ts",
+   "rule": "sleep",
+   "category": "B",
+   "owed": true,
+   "lines_at_86db135": [
+    508,
+    674,
+    678,
+    723
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 500));",
+   "reason": "A sleep, then an assertion that nothing happened: the sleep is the pass condition, so a slow runner can pass it with the bug present. Gateway: stays owed; needs a signal that the departure or delivery has run in the API, which the gateway test can't call.",
+   "count": 4
+  },
+  {
+   "file": "apps/gateway/test/uploads.spec.ts",
+   "rule": "sleep",
+   "category": "B",
+   "owed": true,
+   "lines_at_86db135": [
+    143
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 50));",
+   "reason": "A sleep, then an assertion that nothing happened: the sleep is the pass condition, so a slow runner can pass it with the bug present. Gateway: stays owed; needs a signal that the upload handler has stopped reading the body, not a 50 ms wait."
+  },
+  {
+   "file": "apps/api/test/a2a-endpoint.spec.ts",
+   "rule": "sleep",
+   "category": "C",
+   "owed": true,
+   "lines_at_86db135": [
+    274
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 50));",
+   "reason": "A 50 ms sleep so a streaming request reaches the object before the test acts. Owed: needs a product-side arrival hook in test builds that the test can wait for."
+  },
+  {
+   "file": "apps/api/test/participation.spec.ts",
+   "rule": "sleep",
+   "category": "C",
+   "owed": true,
+   "lines_at_86db135": [
+    193
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 50));",
+   "reason": "A 50 ms sleep so a streaming request reaches the object before the test acts. Owed: needs a product-side arrival hook in test builds that the test can wait for."
+  },
+  {
+   "file": "apps/api/test/kernel.spec.ts",
+   "rule": "sleep",
+   "category": "D",
+   "owed": true,
+   "lines_at_86db135": [
+    3561
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 2));",
+   "reason": "A sleep of a few milliseconds so Date.now() moves on before the next step. Owed: needs a clock passed in (the test-build clock table), so the step's time is set, not waited for."
+  },
+  {
+   "file": "apps/gateway/test/gateway.spec.ts",
+   "rule": "sleep",
+   "category": "D",
+   "owed": true,
+   "lines_at_86db135": [
+    698
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 5));",
+   "reason": "A sleep of a few milliseconds so Date.now() moves on before the next step. Owed: needs a clock passed in (the test-build clock table), so the step's time is set, not waited for."
+  },
+  {
+   "file": "apps/gateway/test/gateway.spec.ts",
+   "rule": "sleep",
+   "category": "D",
+   "owed": true,
+   "lines_at_86db135": [
+    1872,
+    1903
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 2));",
+   "reason": "A sleep of a few milliseconds so Date.now() moves on before the next step. Owed: needs a clock passed in (the test-build clock table), so the step's time is set, not waited for.",
+   "count": 2
+  },
+  {
+   "file": "apps/gateway/test/organizations.spec.ts",
+   "rule": "sleep",
+   "category": "D",
+   "owed": true,
+   "lines_at_86db135": [
+    720
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 2));",
+   "reason": "A sleep of a few milliseconds so Date.now() moves on before the next step. Owed: needs a clock passed in (the test-build clock table), so the step's time is set, not waited for."
+  },
+  {
+   "file": "apps/api/test/provisioning.spec.ts",
+   "rule": "sleep",
+   "category": "E",
+   "owed": true,
+   "lines_at_86db135": [
+    1399
+   ],
+   "code": "const waiting = async () => { for (let i = 0; i < 12; i++) { await alarmPass(stub(r.id)); await new Promise((x) => setTimeout(x, 50)); } return (await rowsOf(r.id, \"repo_request\"))[0]; };",
+   "reason": "A fixed run of alarm passes with sleeps, then exact counts (runs: 1, job_failures: 1). Fix in the category-B/E PR: poll until job_failures >= 1, then count from what the last controlled pass left."
+  },
+  {
+   "file": "apps/api/test/scanning.spec.ts",
+   "rule": "sleep",
+   "category": "F",
+   "owed": true,
+   "lines_at_86db135": [
+    695
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 5_500));",
+   "reason": "Real time spent so a 5-second back-off runs out. Owed: needs a clock passed in, so the back-off's end is set, not waited for."
+  },
+  {
+   "file": "apps/api/test/a2a-fasta2a.spec.ts",
+   "rule": "sleep",
+   "category": "G",
+   "owed": true,
+   "lines_at_86db135": [
+    63
+   ],
+   "code": "const waitForRun = () => new Promise((done) => setTimeout(done, RUN_SECONDS * 1000 + 700));",
+   "reason": "Sleeps for the third-party agent's run (RUN_SECONDS + 700 ms). Owed: poll fasta2a's own task state for the run's end instead."
+  },
+  {
+   "file": "apps/api/test/uploads.spec.ts",
+   "rule": "sleep",
+   "category": "H",
+   "owed": false,
+   "lines_at_86db135": [
+    558
+   ],
+   "code": "await new Promise((resolve) => setTimeout(resolve, 500));",
+   "reason": "A stand-in that trickles a byte every 500 ms to go past a short total limit. A slower runner only pushes it further past, so time can't make it pass wrongly."
+  },
+  {
+   "file": "apps/api/test/held-access.spec.ts",
+   "rule": "margin",
+   "category": "I",
+   "owed": true,
+   "lines_at_86db135": [
+    170
+   ],
+   "code": "expect(next as number).toBeGreaterThan(Date.now() + 1_000);",
+   "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before)."
+  },
+  {
+   "file": "apps/api/test/kernel.spec.ts",
+   "rule": "margin",
+   "category": "I",
+   "owed": true,
+   "lines_at_86db135": [
+    1842
+   ],
+   "code": "expect(alarm).toBeGreaterThan(Date.now() + 500);",
+   "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before)."
+  },
+  {
+   "file": "apps/api/test/kernel.spec.ts",
+   "rule": "margin",
+   "category": "I",
+   "owed": true,
+   "lines_at_86db135": [
+    1974
+   ],
+   "code": "expect(alarm).toBeGreaterThan(Date.now() + 3000);",
+   "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before)."
+  },
+  {
+   "file": "apps/api/test/kernel.spec.ts",
+   "rule": "margin",
+   "category": "I",
+   "owed": true,
+   "lines_at_86db135": [
+    2043
+   ],
+   "code": "expect(alarm).toBeGreaterThan(Date.now() + 2000);",
+   "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before)."
+  },
+  {
+   "file": "apps/api/test/kernel.spec.ts",
+   "rule": "margin",
+   "category": "I",
+   "owed": true,
+   "lines_at_86db135": [
+    2528
+   ],
+   "code": "expect(waiting).toBeGreaterThan(Date.now() + 3_000_000);",
+   "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before)."
+  },
+  {
+   "file": "apps/api/test/merge-task.spec.ts",
+   "rule": "margin",
+   "category": "I",
+   "owed": true,
+   "lines_at_86db135": [
+    801
+   ],
+   "code": "expect((await change(r.id, r.task)).merge_next_at).toBeGreaterThan(Date.now() + 60_000);",
+   "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before)."
+  },
+  {
+   "file": "apps/api/test/merge-task.spec.ts",
+   "rule": "margin",
+   "category": "I",
+   "owed": true,
+   "lines_at_86db135": [
+    1277
+   ],
+   "code": "expect((await change(spent.id, spent.task)).merge_next_at).toBeGreaterThan(Date.now() + 10 * 60_000);",
+   "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before)."
+  },
+  {
+   "file": "apps/api/test/provider-deliveries.spec.ts",
+   "rule": "margin",
+   "category": "I",
+   "owed": true,
+   "lines_at_86db135": [
+    318
+   ],
+   "code": "expect(held[0].received_at).toBeGreaterThan(Date.now() - 60_000);",
+   "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before)."
+  },
+  {
+   "file": "apps/api/test/provisioning.spec.ts",
+   "rule": "margin",
+   "category": "I",
+   "owed": true,
+   "lines_at_86db135": [
+    261
+   ],
+   "code": "expect(given.body.set_at).toBeGreaterThan(Date.now() - 60_000);",
+   "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before)."
+  },
+  {
+   "file": "apps/api/test/provisioning.spec.ts",
+   "rule": "margin",
+   "category": "I",
+   "owed": true,
+   "lines_at_86db135": [
+    800
+   ],
+   "code": "expect(done.repository.verified_at).toBeGreaterThan(Date.now() - 60_000);",
+   "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before)."
+  },
+  {
+   "file": "apps/api/test/repo-access.spec.ts",
+   "rule": "margin",
+   "category": "I",
+   "owed": true,
+   "lines_at_86db135": [
+    825
+   ],
+   "code": "expect(row.expires_at).toBeGreaterThan(Date.now() + 59 * 60_000);",
+   "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before)."
+  },
+  {
+   "file": "apps/api/test/scanning.spec.ts",
+   "rule": "margin",
+   "category": "I",
+   "owed": true,
+   "lines_at_86db135": [
+    237
+   ],
+   "code": "expect(left === null || left > Date.now() + HOUR + 30 * 60 * 1000).toBe(true);",
+   "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before)."
+  },
+  {
+   "file": "apps/api/test/task-change.spec.ts",
+   "rule": "margin",
+   "category": "I",
+   "owed": true,
+   "lines_at_86db135": [
+    558
+   ],
+   "code": "expect(next === null || next > Date.now() + 30 * 60_000).toBe(true);",
+   "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before)."
+  },
+  {
+   "file": "apps/api/test/visibility.spec.ts",
+   "rule": "margin",
+   "category": "I",
+   "owed": true,
+   "lines_at_86db135": [
+    778,
+    865
+   ],
+   "code": "expect(await stored(id, NEXT)).toBeGreaterThan(Date.now() + SIX_HOURS - 60_000);",
+   "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before).",
+   "count": 2
+  },
+  {
+   "file": "apps/api/test/visibility.spec.ts",
+   "rule": "margin",
+   "category": "I",
+   "owed": true,
+   "lines_at_86db135": [
+    812
+   ],
+   "code": "expect(await stored(id, NEXT)).toBeGreaterThan(Date.now() + WEEK - 60_000);",
+   "reason": "A lower bound from a clock reading taken after the action, plus or minus a margin: time on a slow runner shrinks it. Fix in the margins PR: read before = Date.now() before the action and assert >= before + D (or >= before)."
+  },
+  {
+   "file": "apps/api/test/scanning.spec.ts",
+   "rule": "margin",
+   "category": "J",
+   "owed": true,
+   "lines_at_86db135": [
+    682
+   ],
+   "code": "expect(alarm).toBeLessThan(before + 5 * 60 * 1000);",
+   "reason": "An upper bound from a clock reading taken before the action, plus a margin: time on a slow runner uses it up. Fix in the margins PR: read after = Date.now() after the action and bound by after + D."
+  },
+  {
+   "file": "apps/api/test/scanning.spec.ts",
+   "rule": "margin",
+   "category": "J",
+   "owed": true,
+   "lines_at_86db135": [
+    709
+   ],
+   "code": "expect(alarm).toBeLessThan(before + 9_000);",
+   "reason": "An upper bound from a clock reading taken before the action, plus a margin: time on a slow runner uses it up. Fix in the margins PR: read after = Date.now() after the action and bound by after + D."
+  },
+  {
+   "file": "apps/api/test/scanning.spec.ts",
+   "rule": "margin",
+   "category": "K",
+   "owed": false,
+   "lines_at_86db135": [
+    317
+   ],
+   "code": "expect(jobs[0].queued_at).toBeLessThanOrEqual(after + 5_000);",
+   "reason": "Not a margin: `after` is read after the action, so `<= after + 5_000` only loosens with time. The check treats every named reading as an earlier one and can't tell."
+  },
+  {
+   "file": "apps/api/test/kernel.spec.ts",
+   "rule": "margin",
+   "category": "L",
+   "owed": true,
+   "lines_at_86db135": [
+    2017
+   ],
+   "code": "expect(Date.now() - before).toBeGreaterThanOrEqual(10_000);",
+   "reason": "Asserts elapsed wall-clock time (a speed bound, or that 10 s really passed). Owed: needs the clock passed in, or the bound recast as a failure detector outside the assertion."
+  },
+  {
+   "file": "apps/api/test/kernel.spec.ts",
+   "rule": "margin",
+   "category": "L",
+   "owed": true,
+   "lines_at_86db135": [
+    7135
+   ],
+   "code": "expect(Date.now() - started).toBeLessThan(5_000);",
+   "reason": "Asserts elapsed wall-clock time (a speed bound, or that 10 s really passed). Owed: needs the clock passed in, or the bound recast as a failure detector outside the assertion."
+  },
+  {
+   "file": "apps/api/test/task-change.spec.ts",
+   "rule": "margin",
+   "category": "L",
+   "owed": true,
+   "lines_at_86db135": [
+    810
+   ],
+   "code": "expect(Date.now() - started).toBeLessThan(5_000);",
+   "reason": "Asserts elapsed wall-clock time (a speed bound, or that 10 s really passed). Owed: needs the clock passed in, or the bound recast as a failure detector outside the assertion."
+  },
+  {
+   "file": "apps/api/test/a2a-fasta2a.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    67
+   ],
+   "code": "const room = (await must(OWNER, \"POST\", \"/v1/workspaces\", { name: `fasta2a ${++counter}` })).id as string;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/a2a-langgraph.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    65
+   ],
+   "code": "const room = (await must(OWNER, \"POST\", \"/v1/workspaces\", { name: `LangGraph ${++counter}` })).id as string;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/a2a-outbound.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    52
+   ],
+   "code": "const room = (await must(OWNER, \"POST\", \"/v1/workspaces\", { name: `Out ${++counter}` })).id as string;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/a2a-readback.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    52
+   ],
+   "code": "const room = (await must(OWNER, \"POST\", \"/v1/workspaces\", { name: `Readback ${++counter}` })).id as string;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/asset-links.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    51
+   ],
+   "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Inputs\" })).body.id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/claims.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    70
+   ],
+   "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Open survey\" })).body.id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/cursors.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    51
+   ],
+   "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Cursors\" })).body.id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/downloads.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    49
+   ],
+   "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Files\" })).body.id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/held-access.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    52
+   ],
+   "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Held\" })).body.id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/kernel.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    69
+   ],
+   "code": "const created = await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Billing v2\" });",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/m5-events.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    62
+   ],
+   "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Engineering\" })).id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/messages-via.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    52
+   ],
+   "code": "room = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Via\" })).body.id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/moderation.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    69
+   ],
+   "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Open survey\" })).body.id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/outputs.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    61
+   ],
+   "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Outputs\" })).body.id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/provider-deliveries.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    77
+   ],
+   "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Engineering\" })).body.id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/public-a2a.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    62
+   ],
+   "code": "const room = (await must(OWNER, \"POST\", \"/v1/workspaces\", { name: `Public A2A ${++counter}` })).id as string;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/public.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    71
+   ],
+   "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name, goal: \"Map the reef\", context: \"Shared notes on the survey\" })).body.id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/releases.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    84
+   ],
+   "code": "const room: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Engineering\" })).body.id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/removal.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    52
+   ],
+   "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Files\" })).body.id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/repo-access.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    148
+   ],
+   "code": "const id: string = (await must(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Engineering\" })).id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/repo-grants.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    67
+   ],
+   "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Engineering\" })).body.id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/repositories.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    53
+   ],
+   "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Engineering\" })).body.id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/scanning.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    39
+   ],
+   "code": "return (await api(\"POST\", \"/v1/workspaces\", { name: \"Scans\" })).body.id as string;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/submission-files.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    54
+   ],
+   "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Submissions\" })).body.id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/uploads.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    56
+   ],
+   "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Files\" })).body.id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  },
+  {
+   "file": "apps/api/test/visibility.spec.ts",
+   "rule": "unquieted",
+   "category": "R",
+   "owed": true,
+   "lines_at_86db135": [
+    51
+   ],
+   "code": "const id: string = (await api(OWNER, \"POST\", \"/v1/workspaces\", { name: \"Billing v2\" })).body.id;",
+   "reason": "Makes rooms and quiets none with alarmQuiet in afterEach, afterAll or finally, so a room's alarm can reach a later test. Fix in the rooms PR: a file-level list of the rooms it makes and an afterEach that quiets each."
+  }
+ ]
+}

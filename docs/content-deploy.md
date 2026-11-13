@@ -32,7 +32,7 @@ Both live outside every repository, in a directory of mode 0700, each file of mo
 mkdir -p ~/.config/podster && chmod 700 ~/.config/podster
 ```
 
-- **`~/.config/podster/content-token`:** the token, one line. Write it with an editor or a paste into the file, never with `echo` on a command line, where it would land in the shell's history.
+- **`~/.config/podster/content-token`:** the token, exactly one line, with or without a final newline, and nothing after it. Write it with an editor or a paste into the file, never with `echo` on a command line, where it would land in the shell's history.
 
   ```bash
   touch ~/.config/podster/content-token && chmod 600 ~/.config/podster/content-token
@@ -74,6 +74,8 @@ The script builds wrangler's configuration from that file and from `apps/content
 **How the script keeps the token:**
 
 - **No shell variable ever holds it.** The token is read from its file only where it is handed to a child, so a traced command has nothing to expand. It is never a command's argument, never printed, and never written to a file by the script.
+- **Bash only, 3.2 or later.** macOS's `/bin/bash` 3.2 is supported, and the self-test runs under it on macOS and under CI's bash on Linux. Run by `sh`, by `dash`, or by bash in POSIX mode, which is what `sh` is on macOS, it refuses with exit 2 before any of its bash-only lines.
+- **No exported shell function.** A function the caller exported, named `env`, `curl`, `jq` or anything else, would run in place of the command of that name. So the script refuses to start if the environment exports any function, and keeps no alias.
 - **Tracing is refused.** The script stops before reading anything if it runs under `bash -x` or `-v`, if `SHELLOPTS` turns on `xtrace` or `verbose`, or if `BASH_ENV` is set. It then switches both off.
 - **curl** gets the `Authorization` header on stdin (`--config -`), built from the file inside the pipe. Every curl, the probes' included, runs with `-q` first, so no `.curlrc` is read, under `env -i` with only `PATH` and an empty home. So no proxy variable, no `CURL_HOME` and nothing else of the caller's reaches it.
 - **wrangler** runs under `env -i` with an allow-list: `PATH`, a temporary home, configuration, cache and log folder, `CI`, metrics off, and the token. A small shell reads the token on its stdin, from the file, and exports it to wrangler alone. So no wrangler login, no `CLOUDFLARE_ACCOUNT_ID`, no exported function and nothing else of the shell reaches it. The temporary folder is deleted when the script ends.
@@ -81,7 +83,10 @@ The script builds wrangler's configuration from that file and from `apps/content
 - If any answer from Cloudflare, or wrangler's output or log, holds the token, the script redacts it and fails.
 - It refuses to start if `CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_API_KEY` is set in the shell, so the file's is the only credential, and if `WRANGLER_LOG` is `debug`.
 
-**Every answer must have the expected shape.** Each read from Cloudflare's API must be `success: true` with a `result` of exactly the expected type, and the fields the script uses must be there. A list must be a list, and each namespace answer must name that namespace. Anything else refuses, so an unexpected answer is never taken as "no zone" or "one account".
+**Every answer must have the expected shape.** Each read from Cloudflare's API must be exactly one JSON document, `success: true`, with a `result` of exactly the expected type, and the fields the script uses must be there.
+- **Lists:** a list must be a list.
+- **Names:** the content domain's zone must carry that name, compared without regard to case, and each namespace answer must name that namespace.
+- **Whether the token can read tokens:** judged on the answer's shape as well as its status. A 200 must be a success with a result. A 401 or 403 must be Cloudflare's own refusal, with `success: false` and a list of errors. Anything else refuses, so an unexpected answer is never taken as "no zone" or "one account".
 
 **Not the account that holds `podster.dev`.** The script refuses a configured account equal to `CLOUDFLARE_ACCOUNT_ID`, compared without regard to case, or equal to an account a wrangler login cached in this checkout's other apps. Wrangler keeps the account a login chose in `node_modules/.cache/wrangler/wrangler-account*.json` or `.wrangler/cache/`, with no token in it, and in `WRANGLER_CACHE_DIR` if that is set. **What it can't see:** a login that cached nothing in this checkout. Reading the login itself would mean reading its token, which the script never does.
 

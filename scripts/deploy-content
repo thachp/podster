@@ -8,11 +8,26 @@
 # stdin, and into the stdin of the small shell that starts wrangler. Finding or redacting it in an output reads it from
 # the file too (`grep -f`, awk), so it is in no command's arguments either.
 
+# Bash only, and at least 3.2, which macOS ships: refused otherwise, in lines any POSIX shell reads, before any
+# syntax that is bash's own. `sh` on macOS is bash in POSIX mode, which is refused too.
+if [ -z "${BASH_VERSION:-}" ]; then echo "deploy-content: refused: run it with bash (scripts/deploy-content, or bash scripts/deploy-content), not sh. Nothing was run." >&2; exit 2; fi
+case ":${SHELLOPTS:-}:" in *:posix:*) echo "deploy-content: refused: bash is in POSIX mode, as when it runs as sh. Run it with bash. Nothing was run." >&2; exit 2 ;; esac
+case "$BASH_VERSION" in [012].* | 3.[01].*) echo "deploy-content: refused: it needs bash 3.2 or later, and this is $BASH_VERSION. Nothing was run." >&2; exit 2 ;; esac
+
 # Tracing would print what the script expands. Refused before anything is read, and switched off.
 case "$-" in *x* | *v*) echo "deploy-content: refused: it doesn't run under bash -x or -v, which would print what it does. Nothing was read or changed." >&2; exit 1 ;; esac
 case ":${SHELLOPTS:-}:" in *:xtrace:* | *:verbose:*) echo "deploy-content: refused: SHELLOPTS turns on xtrace or verbose. Unset it. Nothing was read or changed." >&2; exit 1 ;; esac
 if [ -n "${BASH_ENV:-}" ]; then echo "deploy-content: refused: BASH_ENV is set, so a file ran before this script did. Unset it. Nothing was read or changed." >&2; exit 1; fi
 set +xv
+# A function the caller exported would be called in place of the command of its name, `env` and `curl` included, so
+# a child could get the caller's environment or the token. Any exported function is refused before any command runs.
+# No function of the script's own is defined yet, so every one listed here came from the environment. Aliases aren't
+# expanded in a script, and none is kept.
+if [ -n "$(declare -F)" ]; then
+  echo "deploy-content: refused: the environment exports a shell function ($(declare -F | sed 's/^declare -f[x]* //' | tr '\n' ' ')), which would run in place of a command. Unset it (unset -f NAME). Nothing was read or changed." >&2
+  exit 1
+fi
+unalias -a 2> /dev/null || true
 set -euo pipefail
 
 usage() {
@@ -40,7 +55,9 @@ no shell variable. curl reads it on stdin, with -q (no .curlrc) and an empty env
 gets it in an environment that holds nothing of the caller's, run from a folder of the script's own
 with --env-file pointing at an empty file, so no .env is read. If any child's output or log contains
 the token, the output is redacted and the script fails. It refuses to run under bash -x or -v, with
-SHELLOPTS turning either on, or with BASH_ENV set.
+SHELLOPTS turning either on, with BASH_ENV set, or with any shell function exported by the caller,
+which would run in place of a command such as env or curl. It needs bash 3.2 or later (macOS's
+/bin/bash is 3.2), and refuses sh, dash and bash in POSIX mode with exit 2.
 
 It refuses, before changing anything, unless:
 
@@ -150,7 +167,8 @@ private_file "token file" "$token_file"
 private_file "configuration file" "$config_file"
 
 # The token: one line of token characters, checked by grep reading the file, never by expanding it.
-[ "$(wc -l < "$token_file" | tr -d ' ')" -le 1 ] || refuse "the token file must hold one line, the token alone"
+# Exactly one line: awk counts an unterminated last line as a line, which `wc -l` doesn't.
+[ "$(awk 'END { print NR }' "$token_file")" = 1 ] || refuse "the token file must hold one line, the token alone, and nothing after it"
 grep -q -E '^[A-Za-z0-9_-]{30,200}$' "$token_file" || refuse "the token file doesn't hold a token: one line of letters, digits, - and _"
 
 # leaked FILE...: true when any of them holds the token. grep reads the token from its file.
@@ -254,15 +272,23 @@ cf() {
   fi
 }
 # shaped FILTER [ARG...]: the body is a success in exactly the shape FILTER describes. jq's arguments follow the filter.
+# one_document FILTER [ARG...]: the body is exactly one JSON document, and FILTER holds of it. jq's -e alone judges
+# only the last document of a stream, so `{"success":false}{...}` would pass; slurped, there must be one.
+one_document() {
+  local filter=$1
+  shift
+  jq -e -s "$@" "length == 1 and (.[0] | ($filter))" "$work/body" > /dev/null 2>&1
+}
+# shaped FILTER [ARG...]: one document, a success, in exactly the shape FILTER describes.
 shaped() {
   local filter=$1
   shift
-  jq -e "$@" ".success == true and ($filter)" "$work/body" > /dev/null 2>&1
+  one_document ".success == true and ($filter)" "$@"
 }
 ARRAY='(.result | type) == "array"'
 TOKEN_SHAPE='(.result | type) == "object" and (.result.id | type) == "string" and (.result.status | type) == "string"'
 ACCOUNTS_SHAPE="$ARRAY"' and all(.result[]; type == "object" and (.id | type) == "string")'
-ZONES_SHAPE="$ARRAY"' and all(.result[]; type == "object" and (.status | type) == "string" and (.account | type) == "object" and (.account.id | type) == "string")'
+ZONES_SHAPE="$ARRAY"' and all(.result[]; type == "object" and (.name | type) == "string" and (.status | type) == "string" and (.account | type) == "object" and (.account.id | type) == "string")'
 
 step "reading Cloudflare's API with the token"
 cf /user/tokens/verify
@@ -279,9 +305,20 @@ token_id=$(jq -r .result.id "$work/body")
 echo "ok   the token is active ($token_scope token)"
 
 if [ "$token_scope" = user ]; then cf "/user/tokens/$token_id"; else cf "/accounts/$account/tokens/$token_id"; fi
+# Judged on the answer's shape as well as its status: a token Cloudflare let read itself, or a refusal in Cloudflare's
+# own form. Anything else says neither, and refuses.
 case "$status" in
-  200) refuse "the token can read API tokens, its own included. That is more than a deploy needs: make one with only the permissions docs/content-deploy.md lists." ;;
-  401 | 403) echo "ok   the token can't read API tokens (HTTP $status). Its other permissions can't be read by the token itself: docs/content-deploy.md lists what to grant" ;;
+  200)
+    if shaped '(.result | type) == "object"'; then
+      refuse "the token can read API tokens, its own included. That is more than a deploy needs: make one with only the permissions docs/content-deploy.md lists."
+    fi
+    refuse "asking whether the token can read API tokens answered HTTP 200 with an answer of another shape, which says neither"
+    ;;
+  401 | 403)
+    one_document '.success == false and (.errors | type) == "array"' \
+      || refuse "asking whether the token can read API tokens answered HTTP $status with an answer of another shape, which says neither"
+    echo "ok   the token can't read API tokens (HTTP $status). Its other permissions can't be read by the token itself: docs/content-deploy.md lists what to grant"
+    ;;
   *) refuse "asking whether the token can read API tokens answered HTTP $status, which says neither" ;;
 esac
 
@@ -303,6 +340,7 @@ cf "/zones?name=$domain&per_page=50"
 [ "$status" = 200 ] || refuse "reading the content domain's zone failed (HTTP $status)"
 shaped "$ZONES_SHAPE" || refuse "the answer about the content domain isn't a list of zones in the shape expected"
 [ "$(jq -r '.result | length' "$work/body")" = 1 ] || refuse "the token doesn't see the content domain as one zone"
+[ "$(jq -r '.result[0].name | ascii_downcase' "$work/body")" = "$domain" ] || refuse "the zone Cloudflare answered with isn't the content domain"
 [ "$(jq -r '.result[0].account.id | ascii_downcase' "$work/body")" = "$account" ] || refuse "the content domain's zone isn't on the configuration's account"
 [ "$(jq -r '.result[0].status' "$work/body")" = active ] || refuse "the content domain's zone isn't active yet ($(jq -r '.result[0].status' "$work/body"))"
 echo "ok   the content domain is an active zone on that account"

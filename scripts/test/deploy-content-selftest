@@ -156,6 +156,10 @@ case "$url" in
       else key=probe-unknown; fi
     fi
     echo "probe $method $scheme://$which/${hostpath#*/} header=${extra:-none} host_ok=$([[ "$host" =~ ^([0-9a-f]{26}\.)?content-selftest\.example$ ]] && echo yes || echo no) q_first=$first env=$leaks" >> "$fix/calls"
+    if [ -f "$fix/probe-hangs" ]; then
+      touch "$fix/probing"
+      while :; do sleep 0.1; done
+    fi
     status=$(cat "$fix/$key.status")
     if [ "$status" = unreachable ]; then printf 000; exit 6; fi
     sed "s|{HOST}|$host|g" "$fix/$key.headers" > "$headers"
@@ -181,17 +185,18 @@ probe() { # probe KEY STATUS BODY [EXTRA-HEADER-LINE]
 }
 healthy() {
   rm -f "$fix"/api-* "$fix"/probe-* "$fix/calls" "$fix/deployed-config.json" "$fix/work-dir" "$fix/npm-fails" "$fix/deploy-fails" \
-    "$fix/wrangler-leaks" "$fix/wrangler-log-leaks" "$fix/deploy-hangs" "$fix/deploying" "$fix/gh-hangs" "$fix/checking"
+    "$fix/wrangler-leaks" "$fix/wrangler-log-leaks" "$fix/deploy-hangs" "$fix/deploying" "$fix/gh-hangs" "$fix/checking" \
+    "$fix/probe-hangs" "$fix/probing"
   : > "$fix/calls"
   echo 4.157.0 > "$fix/wrangler-version"
   printf 'completed\\tsuccess' > "$fix/main-ci"
   api verify-user 200 "{\"success\":true,\"result\":{\"id\":\"$TOKEN_ID\",\"status\":\"active\"}}"
   api verify-account 401 '{"success":false}'
   api self-user 403 '{"success":false,"errors":[{"code":9109}]}'
-  api self-account 403 '{"success":false}'
+  api self-account 403 '{"success":false,"errors":[]}'
   api accounts 200 "{\"success\":true,\"result\":[{\"id\":\"$ACCOUNT\"}]}"
   api zone-podster 200 '{"success":true,"result":[]}'
-  api zone-content 200 "{\"success\":true,\"result\":[{\"status\":\"active\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
+  api zone-content 200 "{\"success\":true,\"result\":[{\"name\":\"$DOMAIN\",\"status\":\"active\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
   api namespace 200 '{"success":true,"result":{"namespace_name":"podster-apps"}}'
   api kv 200 "{\"success\":true,\"result\":{\"id\":\"$KV\"}}"
   probe probe-unknown 404 not_found
@@ -335,6 +340,24 @@ check "  the token is in no output" no_token
 fresh; echo ':' > "$tmp/bash-env"; dc 1 "BASH_ENV=$tmp/bash-env" "${files[@]}" || true
 check "with BASH_ENV set: refused" bash -c "[ $LAST -eq 1 ] && grep -q 'refused: BASH_ENV is set' '$tmp/out' && [ ! -s '$fix/calls' ]"
 
+# --- which shell ---
+fresh; run 2 "${clean_env[@]}" sh "$work/scripts/deploy-content" "${files[@]}" || true
+check "run by sh: refused, exit 2, nothing run" bash -c "[ $LAST -eq 2 ] && grep -q -E 'refused: (run it with bash|bash is in POSIX mode)' '$tmp/out' && [ ! -s '$fix/calls' ]"
+fresh; run 2 "${clean_env[@]}" bash --posix "$work/scripts/deploy-content" "${files[@]}" || true
+check "run by bash in POSIX mode: refused, exit 2" bash -c "[ $LAST -eq 2 ] && grep -q 'refused: bash is in POSIX mode' '$tmp/out' && [ ! -s '$fix/calls' ]"
+if command -v dash > /dev/null 2>&1; then
+  fresh; run 2 "${clean_env[@]}" dash "$work/scripts/deploy-content" "${files[@]}" || true
+  check "run by dash: refused, exit 2, nothing run" bash -c "[ $LAST -eq 2 ] && grep -q 'refused: run it with bash' '$tmp/out' && [ ! -s '$fix/calls' ]"
+fi
+check "this self-test runs under bash $BASH_VERSION" true
+
+# --- exported functions ---
+for shadow in env curl jq git mktemp; do
+  fresh
+  run 1 "${clean_env[@]}" bash -c "$shadow() { echo SHADOW-$shadow >> '$fix/calls'; }; export -f $shadow; exec \"\$0\" \"\$@\"" "$work/scripts/deploy-content" "${files[@]}" || true
+  check "an exported function named $shadow: refused before any command, and never called" bash -c "[ $LAST -eq 1 ] && grep -q 'refused: the environment exports a shell function ($shadow' '$tmp/out' && [ ! -s '$fix/calls' ]"
+done
+
 # --- the caller's environment ---
 fresh; dc 1 CLOUDFLARE_API_TOKEN=x "${files[@]}" || true
 check "CLOUDFLARE_API_TOKEN in the shell is refused, with no call" refused "CLOUDFLARE_API_TOKEN is set"
@@ -364,6 +387,12 @@ check "a token file inside a git checkout is refused" refused "the token file is
 rm -rf "$tmp/inrepo"
 fresh; printf '%s\nsecond\n' "$TOKEN" > "$secrets/content-token"; dc 1 "${files[@]}" || true
 check "a token file of two lines is refused" refused "the token file must hold one line"
+fresh; printf '%s\nsecond' "$TOKEN" > "$secrets/content-token"; dc 1 "${files[@]}" || true
+check "a token file with an unterminated second line is refused" refused "the token file must hold one line, the token alone, and nothing after it"
+fresh; : > "$secrets/content-token"; dc 1 "${files[@]}" || true
+check "an empty token file is refused" refused "the token file must hold one line"
+fresh; printf '%s' "$TOKEN" > "$secrets/content-token"; dc 0 "${files[@]}" || true
+check "a token file with no final newline passes" bash -c "[ $LAST -eq 0 ]"
 fresh; echo 'not a token!' > "$secrets/content-token"; dc 1 "${files[@]}" || true
 check "a token file that holds no token is refused" refused "the token file doesn't hold a token"
 fresh; chmod 644 "$secrets/content-deploy.json"; dc 1 "${files[@]}" || true
@@ -449,7 +478,10 @@ bad_api "a verification with no result is refused" "Cloudflare's verification of
 bad_api "a verification with no status is refused" "Cloudflare's verification of the token isn't in the shape expected" verify-user 200 "{\"success\":true,\"result\":{\"id\":\"$TOKEN_ID\"}}" verify-account 200 "{\"success\":true,\"result\":{\"id\":\"$TOKEN_ID\"}}"
 bad_api "a verification that isn't a success is refused" "Cloudflare's verification of the token isn't in the shape expected" verify-user 200 "{\"success\":false,\"result\":{\"id\":\"$TOKEN_ID\",\"status\":\"active\"}}" verify-account 200 "{\"result\":{\"id\":\"$TOKEN_ID\",\"status\":\"active\"}}"
 bad_api "a token that can read API tokens is refused" "the token can read API tokens" self-user 200 '{"success":true,"result":{}}'
-bad_api "  even with an empty body" "the token can read API tokens" self-user 200 ''
+bad_api "a 200 about reading tokens with an empty body says neither, and is refused" "asking whether the token can read API tokens answered HTTP 200 with an answer of another shape" self-user 200 ''
+bad_api "a 403 about reading tokens that isn't Cloudflare's refusal says neither, and is refused" "asking whether the token can read API tokens answered HTTP 403 with an answer of another shape" self-user 403 ''
+bad_api "  nor one that calls itself a success" "asking whether the token can read API tokens answered HTTP 403 with an answer of another shape" self-user 403 '{"success":true,"errors":[]}'
+bad_api "  nor two documents" "asking whether the token can read API tokens answered HTTP 403 with an answer of another shape" self-user 403 '{"success":false,"errors":[]}{"success":false,"errors":[]}'
 bad_api "an answer about reading tokens that says neither is refused" "asking whether the token can read API tokens answered HTTP 500" self-user 500 '{"success":false}'
 bad_api "a token that sees two accounts is refused" "the token must see exactly one account" accounts 200 "{\"success\":true,\"result\":[{\"id\":\"$ACCOUNT\"},{\"id\":\"$OTHER\"}]}"
 bad_api "a token that sees only another account is refused" "the token must see exactly one account" accounts 200 "{\"success\":true,\"result\":[{\"id\":\"$OTHER\"}]}"
@@ -468,11 +500,18 @@ bad_api "podster.dev's answer with an object for a result is refused" "the answe
 bad_api "podster.dev's answer that isn't a success is refused" "the answer about podster.dev isn't a list of zones" zone-podster 200 '{"success":false,"result":[]}'
 bad_api "podster.dev's answer that isn't JSON is refused" "the answer about podster.dev isn't a list of zones" zone-podster 200 '<html>'
 bad_api "a content domain the token can't see is refused" "the token doesn't see the content domain as one zone" zone-content 200 '{"success":true,"result":[]}'
-bad_api "a content domain on another account is refused" "the content domain's zone isn't on the configuration's account" zone-content 200 "{\"success\":true,\"result\":[{\"status\":\"active\",\"account\":{\"id\":\"$OTHER\"}}]}"
-bad_api "a content domain not active yet is refused" "the content domain's zone isn't active yet \\(pending\\)" zone-content 200 "{\"success\":true,\"result\":[{\"status\":\"pending\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
-bad_api "a content zone with no account is refused" "the answer about the content domain isn't a list of zones in the shape expected" zone-content 200 '{"success":true,"result":[{"status":"active"}]}'
-bad_api "a content zone with no status is refused" "the answer about the content domain isn't a list of zones in the shape expected" zone-content 200 "{\"success\":true,\"result\":[{\"account\":{\"id\":\"$ACCOUNT\"}}]}"
+bad_api "a content domain on another account is refused" "the content domain's zone isn't on the configuration's account" zone-content 200 "{\"success\":true,\"result\":[{\"name\":\"$DOMAIN\",\"status\":\"active\",\"account\":{\"id\":\"$OTHER\"}}]}"
+bad_api "a content domain not active yet is refused" "the content domain's zone isn't active yet \\(pending\\)" zone-content 200 "{\"success\":true,\"result\":[{\"name\":\"$DOMAIN\",\"status\":\"pending\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
+bad_api "a content zone with no account is refused" "the answer about the content domain isn't a list of zones in the shape expected" zone-content 200 '{"success":true,"result":[{"name":"content-selftest.example","status":"active"}]}'
+bad_api "a content zone with no status is refused" "the answer about the content domain isn't a list of zones in the shape expected" zone-content 200 "{\"success\":true,\"result\":[{\"name\":\"$DOMAIN\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
 bad_api "a content zone answer of null is refused" "the answer about the content domain isn't a list of zones in the shape expected" zone-content 200 '{"success":true,"result":null}'
+bad_api "a zone answer naming another zone is refused" "the zone Cloudflare answered with isn't the content domain" zone-content 200 "{\"success\":true,\"result\":[{\"name\":\"other.example\",\"status\":\"active\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
+bad_api "a verification of two documents is refused" "Cloudflare's verification of the token isn't in the shape expected" verify-user 200 "{\"success\":false}{\"success\":true,\"result\":{\"id\":\"$TOKEN_ID\",\"status\":\"active\"}}" verify-account 200 "{\"success\":false}{\"success\":true,\"result\":{\"id\":\"$TOKEN_ID\",\"status\":\"active\"}}"
+bad_api "an account list of two documents is refused" "the list of accounts the token sees isn't in the shape expected" accounts 200 "{\"success\":false}{\"success\":true,\"result\":[{\"id\":\"$ACCOUNT\"}]}"
+bad_api "podster.dev's answer of two documents is refused" "the answer about podster.dev isn't a list of zones" zone-podster 200 '{"success":false}{"success":true,"result":[]}'
+bad_api "a zone answer of two documents is refused" "the answer about the content domain isn't a list of zones in the shape expected" zone-content 200 "{\"success\":false}{\"success\":true,\"result\":[{\"name\":\"$DOMAIN\",\"status\":\"active\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"
+bad_api "a namespace answer of two documents is refused" "the answer about the dispatch namespace isn't that namespace" namespace 200 '{"success":false}{"success":true,"result":{"namespace_name":"podster-apps"}}'
+bad_api "a KV answer of two documents is refused" "the answer about the KV namespace isn't that namespace" kv 200 "{\"success\":false}{\"success\":true,\"result\":{\"id\":\"$KV\"}}"
 bad_api "a missing dispatch namespace is refused" "the dispatch namespace wasn't found" namespace 404 '{"success":false}'
 bad_api "a namespace answer with no result is refused" "the answer about the dispatch namespace isn't that namespace" namespace 200 '{"success":true}'
 bad_api "a namespace answer naming another namespace is refused" "the answer about the dispatch namespace isn't that namespace" namespace 200 '{"success":true,"result":{"namespace_name":"other"}}'
@@ -481,12 +520,14 @@ bad_api "a missing KV namespace is refused" "the KV namespace wasn't found" kv 4
 bad_api "a KV answer with no result is refused" "the answer about the KV namespace isn't that namespace" kv 200 '{"success":true,"result":{}}'
 bad_api "a KV answer naming another namespace is refused" "the answer about the KV namespace isn't that namespace" kv 200 "{\"success\":true,\"result\":{\"id\":\"$OTHER\"}}"
 bad_api "an answer that echoes the token is refused, and the token isn't printed" "Cloudflare's answer to GET /accounts\\?per_page=50 held the token" accounts 200 LEAK
-fresh; api verify-user 401 '{"success":false}'; api verify-account 200 "{\"success\":true,\"result\":{\"id\":\"$TOKEN_ID\",\"status\":\"active\"}}"; api self-account 200 '{"success":true}'; dc 1 "${files[@]}" || true
+fresh; api verify-user 401 '{"success":false}'; api verify-account 200 "{\"success\":true,\"result\":{\"id\":\"$TOKEN_ID\",\"status\":\"active\"}}"; api self-account 200 '{"success":true,"result":{}}'; dc 1 "${files[@]}" || true
 check "an account-owned token is verified on its account, and refused too if it can read tokens" refused "the token can read API tokens"
 fresh; api verify-user 401 '{"success":false}'; api verify-account 200 "{\"success\":true,\"result\":{\"id\":\"$TOKEN_ID\",\"status\":\"active\"}}"; dc 0 "${files[@]}" || true
 check "an account-owned token that can't read tokens passes" said "ok   the token is active \\(account token\\)"
 fresh; api accounts 200 "{\"success\":true,\"result\":[{\"id\":\"$ACCOUNT_UPPER\"}]}"; api kv 200 "{\"success\":true,\"result\":{\"id\":\"$(printf '%s' "$KV" | tr a-f A-F)\"}}"; dc 0 "${files[@]}" || true
 check "Cloudflare's IDs in capitals still match" bash -c "[ $LAST -eq 0 ]"
+fresh; api zone-content 200 "{\"success\":true,\"result\":[{\"name\":\"Content-Selftest.Example\",\"status\":\"active\",\"account\":{\"id\":\"$ACCOUNT\"}}]}"; dc 0 "${files[@]}" || true
+check "a zone name in capitals still matches the content domain" bash -c "[ $LAST -eq 0 ]"
 
 # --- a report: every check, nothing changed ---
 fresh; dc 0 "${files[@]}" || true
@@ -507,22 +548,19 @@ fresh; at_terminal 1 "" -- "${files[@]}" --deploy || true
 check "--deploy with nothing typed is refused" bash -c "[ $LAST -eq 1 ] && grep -q 'REFUSE  what was typed' '$tmp/out'"
 
 # --- a deploy ---
-selftest_function() { :; }
-export -f selftest_function
 fresh; at_terminal 0 "$DOMAIN" "CLOUDFLARE_ACCOUNT_ID=$OTHER" -- "${files[@]}" --deploy || true
 check "--deploy at a terminal, with the domain typed: exit 0, and the success line" bash -c "[ $LAST -eq 0 ] && grep -q 'deploy-content: deployed podster-content at [0-9a-f]\\{40\\} (version 11111111-2222-3333-4444-555555555555) to $DOMAIN, and every probe passed' '$tmp/out'"
-check "  wrangler ran once: the token, nothing of the caller's (CLOUDFLARE_ACCOUNT_ID, proxies, an exported function), a private home, its own empty folder, an empty .env file" \
+check "  wrangler ran once: the token, nothing of the caller's (CLOUDFLARE_ACCOUNT_ID, proxies, a canary), a private home, its own empty folder, an empty .env file" \
   called "^wrangler deploy auth=ok canary=absent account_env=absent proxy=absent function=absent home_private=yes cwd=own-empty-folder env_file=empty ci=true$"
 check "  exactly one deploy" bash -c "[ \$(grep -c '^wrangler deploy' '$fix/calls') -eq 1 ]"
 check "  its configuration: the owner's account, the route on the content domain, both public addresses off, the two namespaces" \
-  jq -e --arg a "$ACCOUNT" --arg d "$DOMAIN" --arg kv "$KV" '.name == "podster-content" and .account_id == $a and .workers_dev == false and .preview_urls == false and .routes == [{"pattern": ("*." + $d + "/*"), "zone_name": $d}] and .vars == {"CONTENT_DOMAIN": $d} and .kv_namespaces == [{"binding": "SERVE", "id": $kv}] and .dispatch_namespaces == [{"binding": "APPS", "namespace": "podster-apps"}] and (.main | endswith("/apps/content/src/index.ts"))' "$fix/deployed-config.json"
+  quiet jq -e --arg a "$ACCOUNT" --arg d "$DOMAIN" --arg kv "$KV" '.name == "podster-content" and .account_id == $a and .workers_dev == false and .preview_urls == false and .routes == [{"pattern": ("*." + $d + "/*"), "zone_name": $d}] and .vars == {"CONTENT_DOMAIN": $d} and .kv_namespaces == [{"binding": "SERVE", "id": $kv}] and .dispatch_namespaces == [{"binding": "APPS", "namespace": "podster-apps"}] and (.main | endswith("/apps/content/src/index.ts"))' "$fix/deployed-config.json"
 check "  four probes on one random host and one on the content domain itself, all signed out, -q first, nothing of the caller's" \
   bash -c "[ \$(grep -c '^probe .* host_ok=yes q_first=yes env=none$' '$fix/calls') -eq 5 ] && [ \$(grep -c '^probe ' '$fix/calls') -eq 5 ] && grep -q '^probe GET https://apex/' '$fix/calls'"
 check "  it says what it can't show: a host two labels deep" said "^NOT SHOWN a host two labels deep"
 check "  the token is in no argument and no output" no_token
 check "  the hostile .curlrc was never read" bash -c "[ ! -e '$tmp/curl-trace' ]"
 check "  the script's own temporary folder, where wrangler's home and logs were, is gone" bash -c "[ -s '$fix/work-dir' ] && [ ! -e \"\$(cat '$fix/work-dir')\" ]"
-unset -f selftest_function
 
 fresh; touch "$fix/deploy-fails"; at_terminal 3 "$DOMAIN" -- "${files[@]}" --deploy || true
 check "a failed wrangler deploy: exit 3, stopped part-way" bash -c "[ $LAST -eq 3 ] && grep -q 'STOPPED wrangler deploy exited with status 1' '$tmp/out'"
@@ -562,5 +600,13 @@ check "  the script's own temporary folder is gone" bash -c "[ -s '$fix/work-dir
 fresh; touch "$fix/deploy-hangs"; at_terminal 143 "$DOMAIN" --signal SIGTERM --when "$fix/deploying" -- "${files[@]}" --deploy || true
 check "SIGTERM during wrangler deploy: exit 143, and it says so" bash -c "[ $LAST -eq 143 ] && grep -q 'STOPPED by SIGTERM during wrangler deploy' '$tmp/out'"
 check "  the script's own temporary folder is gone" bash -c "[ -s '$fix/work-dir' ] && [ ! -e \"\$(cat '$fix/work-dir')\" ]"
+
+fresh; touch "$fix/deploy-hangs"; at_terminal 129 "$DOMAIN" --signal SIGHUP --when "$fix/deploying" -- "${files[@]}" --deploy || true
+check "SIGHUP during wrangler deploy: exit 129, and it says so" bash -c "[ $LAST -eq 129 ] && grep -q 'STOPPED by SIGHUP during wrangler deploy. The Worker may or may not be deployed' '$tmp/out'"
+check "  the script's own temporary folder is gone" bash -c "[ -s '$fix/work-dir' ] && [ ! -e \"\$(cat '$fix/work-dir')\" ]"
+fresh; touch "$fix/probe-hangs"; at_terminal 130 "$DOMAIN" --signal SIGINT --when "$fix/probing" -- "${files[@]}" --deploy || true
+check "SIGINT during the probes: exit 130, deployed and NOT verified" bash -c "[ $LAST -eq 130 ] && grep -q 'STOPPED by SIGINT during the probes. The Worker is deployed and NOT verified.' '$tmp/out'"
+check "  it had deployed once, and the token is in no output" bash -c "[ \$(grep -c '^wrangler deploy' '$fix/calls') -eq 1 ]"
+check "  the token is in no output" no_token
 
 finish deploy-content

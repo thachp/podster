@@ -3,11 +3,21 @@
 # decision 217). It never uses apps/content/wrangler.jsonc's account or a wrangler login: the account, the content
 # domain and the two namespaces come from the owner's configuration file, and the token from the owner's token file.
 # docs/content-deploy.md is the guide.
+#
+# No shell variable ever holds the token. It is read from its file only where it is handed to a child: into curl's
+# stdin, and into the stdin of the small shell that starts wrangler. Finding or redacting it in an output reads it from
+# the file too (`grep -f`, awk), so it is in no command's arguments either.
+
+# Tracing would print what the script expands. Refused before anything is read, and switched off.
+case "$-" in *x* | *v*) echo "deploy-content: refused: it doesn't run under bash -x or -v, which would print what it does. Nothing was read or changed." >&2; exit 1 ;; esac
+case ":${SHELLOPTS:-}:" in *:xtrace:* | *:verbose:*) echo "deploy-content: refused: SHELLOPTS turns on xtrace or verbose. Unset it. Nothing was read or changed." >&2; exit 1 ;; esac
+if [ -n "${BASH_ENV:-}" ]; then echo "deploy-content: refused: BASH_ENV is set, so a file ran before this script did. Unset it. Nothing was read or changed." >&2; exit 1; fi
+set +xv
 set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/deploy-content --token-file <path> --config-file <path> [--deploy]
+Usage: scripts/deploy-content --token-file <absolute path> --config-file <absolute path> [--deploy]
 
 Deploys the content Worker, apps/content, to the account that holds the content domain, and nowhere
 else. Without --deploy it only reports: it runs every check below, reads Cloudflare's API, and prints
@@ -23,10 +33,14 @@ No flag or environment variable skips that.
 --config-file  the deploy-time configuration, the same rules, as JSON with exactly these keys:
                {"account_id": "<32 hex>", "content_domain": "<the content domain>",
                 "kv_namespace_id": "<32 hex>", "dispatch_namespace": "<name>"}
+Both paths must be absolute.
 
-The token is never an argument, never printed, and never written to a file by this script. curl
-reads it on stdin; wrangler gets it in its environment, which holds nothing of the caller's. If any
-child's output contains it, the output is redacted and the script fails.
+The token is never an argument, never printed, never written to a file by this script, and held in
+no shell variable. curl reads it on stdin, with -q (no .curlrc) and an empty environment; wrangler
+gets it in an environment that holds nothing of the caller's, run from a folder of the script's own
+with --env-file pointing at an empty file, so no .env is read. If any child's output or log contains
+the token, the output is redacted and the script fails. It refuses to run under bash -x or -v, with
+SHELLOPTS turning either on, or with BASH_ENV set.
 
 It refuses, before changing anything, unless:
 
@@ -35,26 +49,30 @@ It refuses, before changing anything, unless:
   - both files pass the rules above, and the configuration is well formed. The content domain
     isn't podster.dev or under it, and isn't the committed placeholder
   - the configuration's account isn't CLOUDFLARE_ACCOUNT_ID, nor the account any wrangler login
-    has cached in this checkout's other apps (the cache holds an account's ID, not a token)
+    has cached in this checkout's other apps (the cache holds an account's ID, not a token),
+    compared without regard to case
   - the checkout is detached at origin/main's tip after a fetch, with nothing changed or untracked,
     and ci.yml's run on main for that commit finished as success
-  - apps/content has no .wrangler/deploy/config.json, and its pinned wrangler is 4.157.0
-  - Cloudflare's API says, read with the token:
+  - apps/content has no .wrangler/deploy/config.json and no .env file of any name, and its pinned
+    wrangler is 4.157.0
+  - Cloudflare's API says, read with the token, each answer in exactly the shape expected:
       the token is active
       the token can't read API tokens, its own included (a token that can is more than a deploy needs)
       the token sees exactly one account, the configuration's
       the token sees no zone named podster.dev
       the content domain is one active zone, on that account
       the dispatch namespace and the KV namespace exist on that account
-    Any error reading one of those refuses.
+    Any error, or an answer of any other shape, refuses.
 
-After a deploy it probes a random host on the content domain, signed out: an unknown host gets the
-Worker's own not-found with its fixed headers; plain HTTP gets a 301 to HTTPS; a POST gets 405; a
-request with a Service-Worker header gets 403.
+After a deploy it probes the content domain signed out: on a random host, an unknown host gets the
+Worker's own not-found with its fixed headers, plain HTTP gets a 301 to HTTPS, a POST gets 405, and
+a request with a Service-Worker header gets 403; and the content domain itself serves nothing. A
+host two labels deep is not shown: the zone's certificate covers one level.
 
 Exit codes: 0 reported (no --deploy), or deployed and every probe passed; 1 refused, nothing changed;
 2 wrong usage; 3 the deploy failed part-way (the output says what wrangler said, redacted); 4
-deployed, but a probe failed: the Worker is deployed and not verified.
+deployed, but a probe failed: the Worker is deployed and not verified; 129, 130 or 143 stopped by
+SIGHUP, SIGINT or SIGTERM, and the output says whether anything had been deployed.
 EOF
 }
 
@@ -67,6 +85,7 @@ while [ $# -gt 0 ]; do
     --deploy) deploy=true ;;
     --token-file | --config-file)
       if [ $# -lt 2 ] || [ -z "$2" ] || [[ "$2" == -* ]]; then echo "deploy-content: $1 needs a path" >&2; usage >&2; exit 2; fi
+      if [[ "$2" != /* ]]; then echo "deploy-content: $1 needs an absolute path, such as ~/.config/podster/..." >&2; exit 2; fi
       if [ "$1" = --token-file ]; then token_file=$2; else config_file=$2; fi
       shift
       ;;
@@ -84,11 +103,28 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 work=$(mktemp -d)
 chmod 700 "$work"
-token=""
-trap 'token=""; rm -rf "$work"' EXIT
+mkdir -m 700 "$work/curl-home"
+trap 'rm -rf "$work"' EXIT
+
+# Where the run is, for what a stop by a signal says.
+phase=checking
+on_signal() { # on_signal NAME CODE
+  trap - INT TERM HUP
+  echo
+  case "$phase" in
+    checking) echo "STOPPED by $1 before anything was deployed. Nothing changed." ;;
+    deploying) echo "STOPPED by $1 during wrangler deploy. The Worker may or may not be deployed: check the account before running this again." ;;
+    probing) echo "STOPPED by $1 during the probes. The Worker is deployed and NOT verified." ;;
+  esac
+  exit "$2"
+}
+trap 'on_signal SIGINT 130' INT
+trap 'on_signal SIGTERM 143' TERM
+trap 'on_signal SIGHUP 129' HUP
 
 refuse() { echo "REFUSE  $*"; echo "deploy-content: refused, nothing was deployed"; exit 1; }
 step() { echo; echo "== $*"; }
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 # --- the caller's environment ---
 if [ -n "${CLOUDFLARE_API_TOKEN+x}" ]; then refuse "CLOUDFLARE_API_TOKEN is set in this shell. Unset it: the token file's is the only token this uses."; fi
@@ -113,26 +149,23 @@ private_file() {
 private_file "token file" "$token_file"
 private_file "configuration file" "$config_file"
 
-# The token: one line of token characters. Read by the shell, never by a command whose arguments could show it.
+# The token: one line of token characters, checked by grep reading the file, never by expanding it.
 [ "$(wc -l < "$token_file" | tr -d ' ')" -le 1 ] || refuse "the token file must hold one line, the token alone"
-IFS= read -r token < "$token_file" || true
-[[ "$token" =~ ^[A-Za-z0-9_-]{30,200}$ ]] || { token=""; refuse "the token file doesn't hold a token: one line of letters, digits, - and _"; }
+grep -q -E '^[A-Za-z0-9_-]{30,200}$' "$token_file" || refuse "the token file doesn't hold a token: one line of letters, digits, - and _"
 
-# leaked FILE...: true when any of them holds the token. The comparison runs in the shell, never in a command.
+# leaked FILE...: true when any of them holds the token. grep reads the token from its file.
 leaked() {
-  local file content
+  local file
   for file in "$@"; do
     [ -f "$file" ] || continue
-    content=$(cat "$file")
-    if [[ "$content" == *"$token"* ]]; then return 0; fi
+    if grep -q -F -f "$token_file" "$file" 2> /dev/null; then return 0; fi
   done
   return 1
 }
-# redact FILE: replaces the token in it, in place.
+# redact FILE: replaces the token in it, in place. awk reads the token from its file.
 redact() {
-  local content
-  content=$(cat "$1")
-  printf '%s\n' "${content//"$token"/[redacted token]}" > "$1"
+  awk 'NR == FNR { t = $0; next } { while (t != "" && (i = index($0, t)) > 0) $0 = substr($0, 1, i - 1) "[redacted token]" substr($0, i + length(t)); print }' \
+    "$token_file" "$1" > "$1.redacted" && mv "$1.redacted" "$1"
 }
 
 config=$(cat "$config_file")
@@ -142,8 +175,8 @@ account=$(jq -r .account_id <<< "$config")
 domain=$(jq -r .content_domain <<< "$config")
 kv=$(jq -r .kv_namespace_id <<< "$config")
 namespace=$(jq -r .dispatch_namespace <<< "$config")
-[[ "$account" =~ ^[0-9a-f]{32}$ ]] || refuse "account_id isn't an account's ID, 32 hexadecimal characters"
-[[ "$kv" =~ ^[0-9a-f]{32}$ ]] || refuse "kv_namespace_id isn't a KV namespace's ID, 32 hexadecimal characters"
+[[ "$account" =~ ^[0-9a-f]{32}$ ]] || refuse "account_id isn't an account's ID, 32 hexadecimal characters in lower case"
+[[ "$kv" =~ ^[0-9a-f]{32}$ ]] || refuse "kv_namespace_id isn't a KV namespace's ID, 32 hexadecimal characters in lower case"
 [[ "$namespace" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || refuse "dispatch_namespace isn't a namespace's name"
 [[ "$domain" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] && [ "${#domain}" -le 253 ] || refuse "content_domain isn't a domain name in lower case"
 case "$domain" in
@@ -152,20 +185,21 @@ case "$domain" in
 esac
 
 # --- the account isn't the one that holds podster.dev ---
-if [ "${CLOUDFLARE_ACCOUNT_ID:-}" = "$account" ]; then
+if [ "$(lower "${CLOUDFLARE_ACCOUNT_ID:-}")" = "$account" ]; then
   refuse "the configuration's account is CLOUDFLARE_ACCOUNT_ID, the account this shell deploys staging to. The content Worker goes on the other account."
 fi
 # Wrangler caches the account a login chose, as {"account": {"id", "name"}}, beside each app's packages or in the
 # app's .wrangler/cache. That file holds no token. apps/content's own cache is skipped: it may rightly hold this account.
+cached_account() { lower "$(jq -r '.account.id // empty' "$1" 2> /dev/null || true)"; }
 while IFS= read -r cached; do
-  if [ "$(jq -r '.account.id // empty' "$cached" 2> /dev/null)" = "$account" ]; then
+  if [ "$(cached_account "$cached")" = "$account" ]; then
     refuse "the configuration's account is the one a wrangler login used in ${cached#"$root"/}. The content Worker goes on an account no login here uses."
   fi
 done < <(find "$root/apps" -mindepth 1 -maxdepth 5 -path "$root/apps/content" -prune -o \( -path '*/node_modules/.cache/wrangler/*' -o -path '*/.wrangler/cache/*' \) -name 'wrangler-account*.json' -type f -print 2> /dev/null)
 if [ -n "${WRANGLER_CACHE_DIR:-}" ]; then
   for cached in "$WRANGLER_CACHE_DIR"/wrangler-account*.json; do
     [ -f "$cached" ] || continue
-    if [ "$(jq -r '.account.id // empty' "$cached" 2> /dev/null)" = "$account" ]; then refuse "the configuration's account is the one cached in WRANGLER_CACHE_DIR by a wrangler login"; fi
+    if [ "$(cached_account "$cached")" = "$account" ]; then refuse "the configuration's account is the one cached in WRANGLER_CACHE_DIR by a wrangler login"; fi
   done
 fi
 
@@ -188,6 +222,12 @@ if [ "$ci_conclusion" != success ]; then refuse "ci.yml's run on main for $here 
 if [ -e apps/content/.wrangler/deploy/config.json ] || [ -L apps/content/.wrangler/deploy/config.json ]; then
   refuse "apps/content/.wrangler/deploy/config.json exists: it would point wrangler at another configuration. Remove it."
 fi
+# Wrangler 4.157.0 loads .env and .env.local from its working directory into its own environment, whatever git
+# ignores. It runs from a folder of this script's own with --env-file at an empty file, so none is read; a file here
+# is refused all the same, so nothing in the package can be mistaken for the deploy's configuration.
+for envfile in apps/content/.env apps/content/.env.*; do
+  if [ -e "$envfile" ] || [ -L "$envfile" ]; then refuse "${envfile} exists. Remove it: no .env file belongs in apps/content."; fi
+done
 
 step "npm ci in apps/content"
 (cd apps/content && npm ci --ignore-scripts) || refuse "npm ci failed in apps/content"
@@ -195,12 +235,16 @@ wrangler_version=$(cd apps/content && node_modules/.bin/wrangler --version 2> /d
 [ "$wrangler_version" = 4.157.0 ] || refuse "apps/content's wrangler is '${wrangler_version:-missing}', not 4.157.0"
 
 # --- Cloudflare's API, read with the token ---
-# cf PATH: GETs Cloudflare's API with the token, and sets $status. The header goes to curl on stdin, never as an
-# argument. The body is left in $work/body. Called directly, never in a subshell, so a refusal here ends the script.
+# curl_clean ARG...: curl with -q first, so no .curlrc is read, and an environment of PATH and an empty home alone, so
+# no proxy, no CURL_HOME and nothing else of the caller's reaches it.
+curl_clean() { env -i PATH="$PATH" HOME="$work/curl-home" curl -q "$@"; }
+# cf PATH: GETs Cloudflare's API, and sets $status. The Authorization header goes to curl on stdin, built from the
+# token file inside the pipe. The body is left in $work/body. Called directly, never in a subshell, so a refusal here
+# ends the script.
 cf() {
   : > "$work/body"
-  printf 'header = "Authorization: Bearer %s"\n' "$token" \
-    | curl --config - --silent --show-error --proto =https --max-time 30 -o "$work/body" -w '%{http_code}' \
+  { printf 'header = "Authorization: Bearer '; tr -d '\n' < "$token_file"; printf '"\n'; } \
+    | curl_clean --config - --silent --show-error --proto =https --max-time 30 -X GET -o "$work/body" -w '%{http_code}' \
       "https://api.cloudflare.com/client/v4$1" > "$work/status" 2> "$work/curl.err" || echo 000 > "$work/status"
   status=$(cat "$work/status")
   [[ "$status" =~ ^[0-9]{3}$ ]] || status=000
@@ -209,18 +253,28 @@ cf() {
     refuse "Cloudflare's answer to GET $1 held the token. It wasn't printed."
   fi
 }
-ok_body() { jq -e '.success == true' "$work/body" > /dev/null 2>&1; }
+# shaped FILTER [ARG...]: the body is a success in exactly the shape FILTER describes. jq's arguments follow the filter.
+shaped() {
+  local filter=$1
+  shift
+  jq -e "$@" ".success == true and ($filter)" "$work/body" > /dev/null 2>&1
+}
+ARRAY='(.result | type) == "array"'
+TOKEN_SHAPE='(.result | type) == "object" and (.result.id | type) == "string" and (.result.status | type) == "string"'
+ACCOUNTS_SHAPE="$ARRAY"' and all(.result[]; type == "object" and (.id | type) == "string")'
+ZONES_SHAPE="$ARRAY"' and all(.result[]; type == "object" and (.status | type) == "string" and (.account | type) == "object" and (.account.id | type) == "string")'
 
 step "reading Cloudflare's API with the token"
 cf /user/tokens/verify
 token_scope=user
-if [ "$status" != 200 ] || ! ok_body; then
+if [ "$status" != 200 ] || ! shaped "$TOKEN_SHAPE"; then
   cf "/accounts/$account/tokens/verify"
   token_scope=account
-  [ "$status" = 200 ] && ok_body || refuse "Cloudflare doesn't verify the token (HTTP $status)"
+  [ "$status" = 200 ] || refuse "Cloudflare doesn't verify the token (HTTP $status)"
+  shaped "$TOKEN_SHAPE" || refuse "Cloudflare's verification of the token isn't in the shape expected"
 fi
-[ "$(jq -r '.result.status // empty' "$work/body")" = active ] || refuse "the token isn't active"
-token_id=$(jq -r '.result.id // empty' "$work/body")
+[ "$(jq -r .result.status "$work/body")" = active ] || refuse "the token isn't active"
+token_id=$(jq -r .result.id "$work/body")
 [[ "$token_id" =~ ^[0-9a-f]{32}$ ]] || refuse "Cloudflare's verification didn't name the token"
 echo "ok   the token is active ($token_scope token)"
 
@@ -232,29 +286,34 @@ case "$status" in
 esac
 
 cf "/accounts?per_page=50"
-[ "$status" = 200 ] && ok_body || refuse "listing the accounts the token sees failed (HTTP $status)"
-seen=$(jq -r '[.result[].id] | join(" ")' "$work/body")
+[ "$status" = 200 ] || refuse "listing the accounts the token sees failed (HTTP $status)"
+shaped "$ACCOUNTS_SHAPE" || refuse "the list of accounts the token sees isn't in the shape expected"
+seen=$(jq -r '[.result[].id | ascii_downcase] | join(" ")' "$work/body")
 seen_count=$(jq -r '.result | length' "$work/body")
 [ "$seen" = "$account" ] || refuse "the token must see exactly one account, the configuration's. It sees $seen_count account(s), and they aren't exactly that one."
 echo "ok   the token sees exactly one account, the configuration's"
 
 cf "/zones?name=podster.dev&per_page=50"
-[ "$status" = 200 ] && ok_body || refuse "asking whether the token sees podster.dev failed (HTTP $status)"
+[ "$status" = 200 ] || refuse "asking whether the token sees podster.dev failed (HTTP $status)"
+shaped "$ARRAY" || refuse "the answer about podster.dev isn't a list of zones, so it says nothing"
 [ "$(jq -r '.result | length' "$work/body")" = 0 ] || refuse "the token can see the zone podster.dev. A content Worker's token must see nothing of Podster's own."
 echo "ok   the token sees no zone named podster.dev"
 
 cf "/zones?name=$domain&per_page=50"
-[ "$status" = 200 ] && ok_body || refuse "reading the content domain's zone failed (HTTP $status)"
+[ "$status" = 200 ] || refuse "reading the content domain's zone failed (HTTP $status)"
+shaped "$ZONES_SHAPE" || refuse "the answer about the content domain isn't a list of zones in the shape expected"
 [ "$(jq -r '.result | length' "$work/body")" = 1 ] || refuse "the token doesn't see the content domain as one zone"
-[ "$(jq -r '.result[0].account.id // empty' "$work/body")" = "$account" ] || refuse "the content domain's zone isn't on the configuration's account"
-[ "$(jq -r '.result[0].status // empty' "$work/body")" = active ] || refuse "the content domain's zone isn't active yet ($(jq -r '.result[0].status // "no status"' "$work/body"))"
+[ "$(jq -r '.result[0].account.id | ascii_downcase' "$work/body")" = "$account" ] || refuse "the content domain's zone isn't on the configuration's account"
+[ "$(jq -r '.result[0].status' "$work/body")" = active ] || refuse "the content domain's zone isn't active yet ($(jq -r '.result[0].status' "$work/body"))"
 echo "ok   the content domain is an active zone on that account"
 
 cf "/accounts/$account/workers/dispatch/namespaces/$namespace"
-[ "$status" = 200 ] && ok_body || refuse "the dispatch namespace wasn't found on that account (HTTP $status)"
+[ "$status" = 200 ] || refuse "the dispatch namespace wasn't found on that account (HTTP $status)"
+shaped '(.result | type) == "object" and .result.namespace_name == $n' --arg n "$namespace" || refuse "the answer about the dispatch namespace isn't that namespace"
 echo "ok   the dispatch namespace exists"
 cf "/accounts/$account/storage/kv/namespaces/$kv"
-[ "$status" = 200 ] && ok_body || refuse "the KV namespace wasn't found on that account (HTTP $status)"
+[ "$status" = 200 ] || refuse "the KV namespace wasn't found on that account (HTTP $status)"
+shaped '(.result | type) == "object" and (.result.id | ascii_downcase) == $k' --arg k "$kv" || refuse "the answer about the KV namespace isn't that namespace"
 echo "ok   the KV namespace exists"
 
 # --- what would be deployed ---
@@ -298,19 +357,19 @@ IFS= read -r typed || typed=""
 
 # --- the deploy ---
 step "wrangler deploy"
-mkdir -p "$work/home" "$work/logs" "$work/cache" "$work/xdg"
+mkdir -m 700 "$work/home" "$work/logs" "$work/cache" "$work/xdg" "$work/run"
+: > "$work/empty.env"
+phase=deploying
 deploy_status=0
-(
-  cd apps/content
-  # Nothing of the caller's environment reaches wrangler: every exported name is dropped, then only these are set.
-  # The token goes in by `export`, so it is in no command's arguments.
-  path=$PATH
-  while IFS= read -r name; do unset "$name" 2> /dev/null || true; done < <(compgen -e)
-  export PATH="$path" HOME="$work/home" XDG_CONFIG_HOME="$work/xdg" WRANGLER_CACHE_DIR="$work/cache" \
-    WRANGLER_LOG_PATH="$work/logs" WRANGLER_SEND_METRICS=false CI=true
-  export CLOUDFLARE_API_TOKEN="$token"
-  exec node_modules/.bin/wrangler deploy --config "$work/wrangler.json"
-) > "$work/deploy.out" 2>&1 || deploy_status=$?
+# env -i with an allow-list: nothing of the caller's environment, exported functions included, reaches wrangler. The
+# small shell reads the token on its stdin, from the file, so it is in no command's arguments, and exports it to
+# wrangler alone. It runs from $work/run, a folder of the script's own, with --env-file at an empty file, so wrangler
+# reads no .env.
+env -i PATH="$PATH" HOME="$work/home" XDG_CONFIG_HOME="$work/xdg" WRANGLER_CACHE_DIR="$work/cache" \
+  WRANGLER_LOG_PATH="$work/logs" WRANGLER_SEND_METRICS=false CI=true \
+  bash --noprofile --norc -c 'set -eu; IFS= read -r CLOUDFLARE_API_TOKEN; export CLOUDFLARE_API_TOKEN; cd "$1"; exec "$2" deploy --config "$3" --env-file "$4" < /dev/null' \
+  deploy-content "$work/run" "$root/apps/content/node_modules/.bin/wrangler" "$work/wrangler.json" "$work/empty.env" \
+  < "$token_file" > "$work/deploy.out" 2>&1 || deploy_status=$?
 logs=$(find "$work/logs" -type f 2> /dev/null || true)
 # shellcheck disable=SC2086
 if leaked "$work/deploy.out" $logs; then
@@ -332,6 +391,7 @@ version=$(grep -o -E 'Current Version ID: [0-9a-f-]{36}' "$work/deploy.out" | he
 echo "version podster-content ${version:-not printed by wrangler}"
 
 # --- signed-out probes of the content domain ---
+phase=probing
 step "probing $domain signed out"
 label=$(od -An -N13 -tx1 /dev/urandom | tr -d ' \n')
 host="$label.$domain"
@@ -341,8 +401,13 @@ fail() { echo "FAIL    $*"; probe_failures=$((probe_failures + 1)); }
 # fetch METHOD URL [HEADER]: leaves the headers in $work/h and the body in $work/b, and prints the status.
 fetch() {
   local extra=()
+  : > "$work/h"
+  : > "$work/b"
   [ -n "${3:-}" ] && extra=(-H "$3")
-  curl --silent --proto =https,http --max-time 30 -X "$1" ${extra[@]+"${extra[@]}"} -D "$work/h" -o "$work/b" -w '%{http_code}' "$2" 2> /dev/null || printf 000
+  local got
+  got=$(curl_clean --silent --proto =https,http --max-time 30 -X "$1" ${extra[@]+"${extra[@]}"} -D "$work/h" -o "$work/b" -w '%{http_code}' "$2" 2> /dev/null) || true
+  [[ "$got" =~ ^[0-9]{3}$ ]] || got=000
+  printf '%s' "$got"
 }
 header() { grep -i -E "^$1:" "$work/h" | head -n 1 | sed -E "s/^[^:]*:[[:space:]]*//" | tr -d '\r'; }
 fixed_headers() { # fixed_headers WHAT: the headers the Worker sets on every own answer
@@ -365,6 +430,15 @@ status=$(fetch POST "https://$host/")
 if [ "$status" = 405 ] && [ "$(header allow)" = "GET, HEAD" ]; then pass "a POST gets 405, allowing GET and HEAD"; else fail "a POST: HTTP $status"; fi
 status=$(fetch GET "https://$host/sw.js" "Service-Worker: script")
 if [ "$status" = 403 ] && [ "$(cat "$work/b")" = no_service_workers ]; then pass "a service worker's script gets 403"; else fail "a service worker's script: HTTP $status"; fi
+# The content domain itself is no app's host, and the route doesn't cover it: nothing may be served there. No
+# answer at all, as when it has no address, passes; so does any answer that isn't a success.
+status=$(fetch GET "https://$domain/")
+case "$status" in
+  000) pass "the content domain itself serves nothing: no answer" ;;
+  2??) fail "the content domain itself answered HTTP $status: something is served there" ;;
+  *) pass "the content domain itself serves nothing: HTTP $status" ;;
+esac
+echo "NOT SHOWN a host two labels deep, such as a.$host: the zone's certificate covers one level, so HTTPS there can't be probed"
 
 echo
 if [ "$probe_failures" -ne 0 ]; then

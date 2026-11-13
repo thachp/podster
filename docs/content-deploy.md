@@ -73,17 +73,21 @@ The script builds wrangler's configuration from that file and from `apps/content
 
 **How the script keeps the token:**
 
-- It reads the file in the shell. The token is never a command's argument, never printed, and never written to a file by the script.
-- curl gets the `Authorization` header on stdin (`--config -`).
-- wrangler gets the token in its environment. Every other variable of the caller's is removed first, and its home, configuration, cache and log folders are a temporary folder deleted when the script ends. So no wrangler login and no `CLOUDFLARE_ACCOUNT_ID` from the shell reach it.
+- **No shell variable ever holds it.** The token is read from its file only where it is handed to a child, so a traced command has nothing to expand. It is never a command's argument, never printed, and never written to a file by the script.
+- **Tracing is refused.** The script stops before reading anything if it runs under `bash -x` or `-v`, if `SHELLOPTS` turns on `xtrace` or `verbose`, or if `BASH_ENV` is set. It then switches both off.
+- **curl** gets the `Authorization` header on stdin (`--config -`), built from the file inside the pipe. Every curl, the probes' included, runs with `-q` first, so no `.curlrc` is read, under `env -i` with only `PATH` and an empty home. So no proxy variable, no `CURL_HOME` and nothing else of the caller's reaches it.
+- **wrangler** runs under `env -i` with an allow-list: `PATH`, a temporary home, configuration, cache and log folder, `CI`, metrics off, and the token. A small shell reads the token on its stdin, from the file, and exports it to wrangler alone. So no wrangler login, no `CLOUDFLARE_ACCOUNT_ID`, no exported function and nothing else of the shell reaches it. The temporary folder is deleted when the script ends.
+- **wrangler reads no `.env`.** Wrangler 4.157.0 loads `.env` and `.env.local` from its working directory into its own environment on every command, whatever git ignores. Its source has no variable that switches that off: `CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV` governs only `wrangler dev`'s variables. What does switch it off is `--env-file`: given, it replaces those defaults. So wrangler runs from an empty folder of the script's own, with `--env-file` at an empty file. And a `.env` file of any name in `apps/content` is refused all the same.
 - If any answer from Cloudflare, or wrangler's output or log, holds the token, the script redacts it and fails.
 - It refuses to start if `CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_API_KEY` is set in the shell, so the file's is the only credential, and if `WRANGLER_LOG` is `debug`.
 
-**Not the account that holds `podster.dev`.** The script refuses a configured account equal to `CLOUDFLARE_ACCOUNT_ID`, or equal to an account a wrangler login cached in this checkout's other apps. Wrangler keeps the account a login chose in `node_modules/.cache/wrangler/wrangler-account*.json` or `.wrangler/cache/`, with no token in it, and in `WRANGLER_CACHE_DIR` if that is set. **What it can't see:** a login that cached nothing in this checkout. Reading the login itself would mean reading its token, which the script never does.
+**Every answer must have the expected shape.** Each read from Cloudflare's API must be `success: true` with a `result` of exactly the expected type, and the fields the script uses must be there. A list must be a list, and each namespace answer must name that namespace. Anything else refuses, so an unexpected answer is never taken as "no zone" or "one account".
+
+**Not the account that holds `podster.dev`.** The script refuses a configured account equal to `CLOUDFLARE_ACCOUNT_ID`, compared without regard to case, or equal to an account a wrangler login cached in this checkout's other apps. Wrangler keeps the account a login chose in `node_modules/.cache/wrangler/wrangler-account*.json` or `.wrangler/cache/`, with no token in it, and in `WRANGLER_CACHE_DIR` if that is set. **What it can't see:** a login that cached nothing in this checkout. Reading the login itself would mean reading its token, which the script never does.
 
 ## Running it
 
-From a checkout detached at `origin/main`'s tip, with nothing changed, after `ci.yml` has passed on main for that commit:
+Both paths must be absolute; a relative one is refused. From a checkout detached at `origin/main`'s tip, with nothing changed, after `ci.yml` has passed on main for that commit:
 
 ```bash
 git fetch origin && git checkout --detach origin/main
@@ -101,6 +105,13 @@ scripts/deploy-content --token-file ~/.config/podster/content-token --config-fil
 
 `scripts/deploy-content --help` lists every refusal. Exit codes: 0 reported, or deployed and verified; 1 refused, nothing changed; 2 wrong usage; 3 the deploy failed part-way; 4 deployed but a probe failed, so the Worker is deployed and **not verified**.
 
+**Stopped by a signal** (129 SIGHUP, 130 SIGINT, 143 SIGTERM), it says where it was:
+- while checking, nothing changed;
+- during `wrangler deploy`, the Worker may or may not be deployed, so check the account before running it again;
+- during the probes, the Worker is deployed and not verified.
+
+The temporary folder is deleted in every case.
+
 ## After a deploy
 
 The script probes one random host on the content domain, signed out:
@@ -109,6 +120,8 @@ The script probes one random host on the content domain, signed out:
 - **Plain HTTP** gets a `301` to the same host and path over HTTPS. That can be the zone's redirect or the Worker's own: both must send the same place.
 - **A POST** gets `405`, allowing `GET, HEAD`.
 - **A request with a `Service-Worker` header** gets `403`.
+- **The content domain itself** serves nothing: no answer, or any answer that isn't a success. The route doesn't cover it.
+- **Not shown, and the script prints so:** a host two labels deep. The zone's certificate covers one level, so HTTPS there can't be probed.
 
 **What it can't check until the release job (step 5) exists:**
 
@@ -117,7 +130,7 @@ The script probes one random host on the content domain, signed out:
 - the domain-wide stop's effect;
 - how long a takedown takes.
 
-Nor can it check a host two levels deep, since the zone's certificate covers one level. These are spike G's and the first release's to show.
+These are spike G's and the first release's to show.
 
 ## An open question for the owner: deploy with the stop set?
 

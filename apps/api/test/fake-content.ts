@@ -43,6 +43,8 @@ let calls: { op: Op; name: string; status: number }[] = [];
 let faults: Fault[] = [];
 /** When set, the scripts' list says there are this many more scripts than it holds. */
 let scriptsUnlisted = 0;
+/** When set, the keys' list answers with no `result_info` at all. */
+let keysNoInfo = false;
 /**
  * A gate holds the next call of one kind until the test lets it go, and tells the test when that call has arrived. So
  * a test can change the room while a call is out, at exactly that point, with no clock involved.
@@ -93,12 +95,14 @@ export async function fakeContent(request: Request): Promise<Response | null> {
       calls = [];
       faults = [];
       scriptsUnlisted = 0;
+      keysNoInfo = false;
       for (const gate of gates) gate.release();
       gates = [];
       return json({ ok: true });
     }
     if (url.pathname === "/seed") {
-      const body = (await request.json()) as { scripts?: string[]; entries?: Record<string, string>; scriptsUnlisted?: number };
+      const body = (await request.json()) as { scripts?: string[]; entries?: Record<string, string>; scriptsUnlisted?: number; keysNoInfo?: boolean };
+      if (body.keysNoInfo !== undefined) keysNoInfo = body.keysNoInfo;
       if (body.scriptsUnlisted !== undefined) scriptsUnlisted = body.scriptsUnlisted;
       for (const name of body.scripts ?? []) scripts.add(name);
       for (const [host, value] of Object.entries(body.entries ?? {})) entries.set(host, value);
@@ -154,6 +158,7 @@ export async function fakeContent(request: Request): Promise<Response | null> {
     if (cursor !== null && !cursor.startsWith("after:")) return answer("entry.list", cursor, failure(400, 10029, "invalid cursor"));
     const rest = [...entries.keys()].sort().filter((key) => cursor === null || key > cursor.slice("after:".length));
     const page = rest.slice(0, limit);
+    if (keysNoInfo) return answer("entry.list", cursor ?? "", json(envelope(page.map((name) => ({ name })))));
     return answer("entry.list", cursor ?? "", json({ ...envelope(page.map((name) => ({ name }))), result_info: { count: page.length, cursor: rest.length > page.length ? `after:${page[page.length - 1]}` : "" } }));
   }
 

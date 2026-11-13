@@ -1373,7 +1373,8 @@ describe("an operator's suspension of a custom hostname", () => {
     await switchedOn(() => suspendHost(c.hostname, OPERATOR, "illegal"));
     let rows = await claimRows(c.hostname);
     expect(rows).toMatchObject({ name: [{ generation: 5 }], suspension: [{ reason: "illegal", holds: 1 }], claim: [{ state: "ending", held: 1 }] });
-    expect(rows.notice.map((row: any) => row.answered)).toEqual([1, 0]);
+    // A second notice is owed. Whether the object's own alarm has already sent it isn't this test's to assume.
+    expect([rows.notice.length, rows.notice[0].answered]).toEqual([2, 1]);
     await settle(claimOf(c.hostname));
     rows = await claimRows(c.hostname);
     expect(rows.notice.map((row: any) => row.answered)).toEqual([1, 1]);
@@ -1644,13 +1645,16 @@ describe("the two reconciles", () => {
     // Only those three were ever asked to be deleted, each by the room's own job.
     expect([...new Set(state.calls.filter((call) => call.op === "script.delete").map((call) => call.name))].sort()).toEqual([script(6), script(7), script(9)].sort());
     expect((await deleteRows(a.room)).map((row: any) => row.gone)).toEqual([1, 1, 1]);
-    expect(await found()).toEqual([...foreign.map((name) => `script_foreign_name ${name}`), ...noRoom.map((name) => `script_without_room ${name}`)].sort());
+    // Each delete the pass started is on the operators' record, by the script's name, beside what was left alone.
+    const queued = [script(6), script(7), script(9)].map((name) => `script_delete_queued ${name}`);
+    expect(await found()).toEqual([...queued, ...foreign.map((name) => `script_foreign_name ${name}`), ...noRoom.map((name) => `script_without_room ${name}`)].sort());
     // A script the room counted as gone is in the namespace after all: it is owed again, and goes again.
     await fake("/seed", { scripts: [script(9)] });
     expect(await reconcile("scripts")).toMatchObject({ changed: 1 });
     await pass(a.room);
     state = await held();
     expect(state.scripts).not.toContain(script(9));
+    expect((await findings()).find((finding) => finding.code === "script_delete_queued" && finding.subject === script(9))?.seen).toBe(2);
     // A list that says it holds less than there is: what it holds is still asked about, and operators are told.
     await fake("/seed", { scriptsUnlisted: 3 });
     expect(await reconcile("scripts")).toMatchObject({ code: "list_incomplete", changed: 0 });
@@ -1660,5 +1664,72 @@ describe("the two reconciles", () => {
     expect(await reconcile("scripts")).toMatchObject({ code: "list_failed", listed: 0, asked: 2, changed: 0 });
     expect((await held()).scripts).toEqual(state.scripts);
     for (const room of [a.room, unlisted.room]) await alarmQuiet(stub(room));
+  });
+
+  it("never reads an entry it couldn't read as a match: a host that wants nothing has it taken out, and operators are told", async () => {
+    await fresh();
+    const a = await app({ plain: true });
+    const b = await app({ plain: true });
+    // Room a's app is suspended, and the removal of its entry is confirmed.
+    await switchedOn(() => suspend(a.label));
+    await pass(a.room);
+    expect((await applyRows(a.room))[0]).toMatchObject({ applied_version: 6, applied_script: null });
+    expect((await held()).entries[a.host]).toBeUndefined();
+    // Something that isn't Podster writes that host an entry naming a script Podster never made.
+    await fake("/seed", { entries: { [a.host]: "someone-elses-script" } });
+    expect(await reconcile("entries")).toMatchObject({ code: "ok", listed: 2, changed: 1, errors: 0 });
+    await pass(a.room);
+    let state = await held();
+    expect([state.entries[a.host], state.entries[b.host]]).toEqual([undefined, b.served]);
+    expect(callsFor(state, a).slice(-3)).toEqual(["entry.get host 200", "entry.delete host 200", "entry.get host 404"]);
+    expect(await found()).toEqual([`entry_unreadable ${a.host}`]);
+    // The same with a script's name Podster did make, for that host: it wants nothing, so nothing there matches.
+    await fake("/seed", { entries: { [a.host]: a.served } });
+    expect(await reconcile("entries")).toMatchObject({ changed: 1 });
+    await pass(a.room);
+    expect((await held()).entries[a.host]).toBeUndefined();
+    // Room b wants its script, and its entry is right, but the pass's read of it fails. A read that failed equals
+    // nothing: the room writes its entry again, which changes nothing served.
+    const puts = (await held()).calls.filter((call) => call.op === "entry.put").length;
+    await fault({ op: "entry.get", times: 1, status: 500 });
+    expect(await reconcile("entries")).toMatchObject({ listed: 1, changed: 1 });
+    await pass(b.room);
+    state = await held();
+    expect(state.entries[b.host]).toBe(b.served);
+    expect(state.calls.filter((call) => call.op === "entry.put").length).toBe(puts + 1);
+    expect(await found()).toEqual([`entry_unreadable ${a.host}`, `entry_unreadable ${b.host}`].sort());
+    for (const room of [a.room, b.room]) await alarmQuiet(stub(room));
+  });
+
+  it("goes on past a key it can't place, and takes a list with no end marked as no list", async () => {
+    await fresh();
+    const a = await app({ plain: true });
+    const stray = `deep.${a.host}`;
+    await fake("/reset", {});
+    await fake("/seed", { scripts: [a.kept, a.served], entries: { [a.host]: a.kept, [stray]: "x" } });
+    const passRow = () => inModeration((sql) => sql.exec("SELECT last_code, cursor FROM reconcile_pass WHERE pass = 'entries'").toArray()[0] ?? null);
+    // The lookup table can't be read: placing the default host's key fails, and so does the walk.
+    const create = (BINDINGS.TEST_D1_SCHEMA as string).split(";").map((x) => x.trim()).filter((x) => /^CREATE TABLE\s+(IF NOT EXISTS\s+)?app_label_index\b/i.test(x));
+    expect(create).toHaveLength(1);
+    await BINDINGS.DB.prepare("DROP TABLE app_label_index").run();
+    try {
+      // Each is counted and skipped. The key after it is still judged, and where the pass got to is still written.
+      expect(await reconcile("entries")).toMatchObject({ code: "ok", listed: 2, asked: 0, errors: 2, findings: 1, woken: 0 });
+      expect(await found()).toEqual([`entry_foreign_name ${stray}`]);
+      expect(await passRow()).toEqual({ last_code: "ok", cursor: null });
+      expect(await reconcile("scripts")).toMatchObject({ code: "ok", listed: 2, asked: 0, errors: 3 });
+    } finally {
+      await BINDINGS.DB.prepare(create[0]).run();
+    }
+    await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, 1)").bind(a.label, a.room).run();
+    // With the table back, the key that was skipped is placed and its room asked.
+    expect(await reconcile("entries")).toMatchObject({ code: "ok", errors: 0, changed: 1 });
+    await pass(a.room);
+    expect((await held()).entries[a.host]).toBe(a.served);
+    // A page that doesn't say whether it is the last is no page: it is never read as the end of the list.
+    await fake("/seed", { keysNoInfo: true });
+    expect(await reconcile("entries")).toMatchObject({ code: "list_failed", listed: 0 });
+    expect(await passRow()).toEqual({ last_code: "list_failed", cursor: null });
+    await alarmQuiet(stub(a.room));
   });
 });

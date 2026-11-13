@@ -685,7 +685,7 @@ The architect proposes the gate call, for the owner to review.
 - **The closed sets are step 3's, and nothing restates them.** A release's states, a hostname request's states and which of them are open, an unpublish's causes, the approval policy, the environment, a release ID's form and a label's length are `crates/core`'s. The wire name of each value is exactly the string core's own `name()` or `code()` gives it. `packages/contracts/core-sets.mjs` reads them from core's source, and `check.mjs` fails unless the contract's enums and the room's column checks equal them, value for value. A value added to the rules therefore needs a contract edit and a new migration before the check passes. A hostname request's states had no home in core, so step 2 added `podster_core::hostname_requests`, names and two questions only.
 - **`HostnameClaim`,** a new Durable Object class in the private API, bound as `HOSTNAME_CLAIM`, added by the Worker's migration `v3`. One object for each hostname; at most one claim that isn't ended; a suspension apart from any claim. It keeps the name's generation, which a suspension, a lift and a freed claim each advance, so a request made before any of them can't claim after it. Nothing calls it. **Deploying the API to staging creates the class there,** which is the cloud change [the owner's table](#for-the-owner) lists.
 - **A D1 table, `app_label_index`,** migration `0008_app_label_index.sql`: which room a label belongs to, for routing a question to the room and nothing else. Nothing writes it yet. A staging deploy has to name it to `scripts/deploy-staging --apply-migrations`.
-- **Fourteen operations in `openapi.yaml`,** each a person's or an operator's: the room's release configuration, read and set; approving a release, and declining one; the room's custom hostname, read, asked for and removed; a report that names an app by its address; an operator's suspension and lift of an app by its label and of one host; and the stop for the whole content domain and its lifting. `deploy_release` and the release fields of `get_task_release_status` aren't there, as the row above says.
+- *(2026-11-12: step 4(a)'s third PR added a fifteenth, the operator's read of what the reconciles found.)* **Fourteen operations in `openapi.yaml`,** each a person's or an operator's: the room's release configuration, read and set; approving a release, and declining one; the room's custom hostname, read, asked for and removed; a report that names an app by its address; an operator's suspension and lift of an app by its label and of one host; and the stop for the whole content domain and its lifting. `deploy_release` and the release fields of `get_task_release_status` aren't there, as the row above says.
 - **One error code,** `release_not_available`. The rules' refusal codes, `release_needs_public_room` among them, join `Error.code` with the handler that answers each: that list is checked against what the API and the gateway actually answer, and core marks its own as reasons until a route does.
 - **Not decided in step 2:** who may do what. With the switch on, which only a test build can be, an agent is refused by its kind and an operator's route refuses anyone who isn't an operator; every other caller is told release isn't available. Owner-or-admin, the grant and the room's visibility are step 3's decisions and the later steps' handlers.
 
@@ -809,11 +809,15 @@ The architect proposes the gate call, for the owner to review.
   - a host a room's applier refused, with why;
   - a script whose delete has failed 12 times, which with the waits is over half an hour;
   - a suspended hostname whose room hasn't answered 12 notices, a room whose only host is that hostname among them;
+  - an entry whose value couldn't be read as a script's name;
+  - **each script a pass had a room queue for deletion,** by the script's name, since a delete can't be taken back;
   - the stop key not as the stop says; and a scripts' list that said it held less than there is.
 - **One new route,** `GET /v1/moderation/takedown-findings`, for operators, behind the switch like the rest. It names the host or the script each finding is about and never a room's ID. **Nobody is notified:** an operator reads it.
 - **The operator's answer for the stop now says whether the key is confirmed,** `key_confirmed`: false straight after a change and for as long as no provider is configured or the key can't be confirmed, true once it is read back. Asking again reads it again.
 - **The scheduled handler** answers to two schedules, `*/5 * * * *` and `0 * * * *`, does nothing while release is switched off, and does nothing for any other schedule. **No environment has a cron entry,** so nothing calls it on any deployment; a test shows the Worker's configuration holds no schedule. With no provider a pass reads nothing and says so.
-- **One pass is bounded:** one page of keys or 100 scripts, 50 rooms woken, and 20 seconds after which it starts nothing new. Where it stopped is kept in the `Moderation` object, and the next pass goes on from there.
+- **An entry that is there matches only when the room wants a script for that host and the entry was read as exactly that script.** A host that wants nothing never matches an entry that exists, and a value that couldn't be read, or isn't a script's name Podster made, equals nothing. *From the review: the first build read "couldn't read it" and "wants nothing" as a match, so a foreign entry on a taken-down host would have stayed for ever, untold.*
+- **One step that fails is counted, logged by its code and skipped:** one key, one script or one room. The pass goes on, writes where it got to, checks the stop key, walks and arms the object.
+- **One pass is bounded:** one page of keys or 100 scripts, and 20 seconds after which it starts nothing new over the list; then 50 rooms woken, with 10 seconds of their own, so a slow provider can't starve the walk. Where it stopped is kept in the `Moderation` object, and the next pass goes on from there.
 - **Two more calls on the provider's interface:** the entries' keys, a page at a time, and the namespace's scripts. **Two tables in the `Moderation` object,** made the way it makes its others. No room migration, no D1 migration, and no migration of `HostnameClaim`.
 
 **The first two PRs' owed items, each by its name:**
@@ -844,18 +848,38 @@ The architect proposes the gate call, for the owner to review.
 | An unreadable stop also blocks replacing an entry | Second PR | **Still owed,** step 5's. |
 | A hostname is kept as the `subject` of an operator's action | Second PR | **Still so, and wider:** what operators are told keeps hosts and scripts' names too. It is state in the `Moderation` object; no log line and no event reads one out. |
 
+**The real bound on a wrong entry, which is not the ADR's seven minutes.** From the review of this PR, and [noted in the ADR](adr/0010-release-and-the-content-domain.md#publishing-and-unpublishing-in-order):
+
+- **A pass reads one page of 50 keys.** With N keys in the serve entries' namespace, the stop key and any stray among them, an entry is looked at every ⌈N/50⌉ × 5 minutes, plus KV's delay. A pass that runs out of its 20 seconds reads the same page again and stretches it further.
+- **In numbers:** up to 50 keys, 5 minutes, which is the ADR's figure. At 100 keys, 10 minutes. At 600, an hour. At 1,000, an hour and 40 minutes.
+- **What N is unacceptable: anything above 50,** since the ADR's bound and M6-27's stated time rest on five minutes. A pilot of a few tens of apps fits. This must be fixed before a provider is configured for more.
+- **Proposed fix, for when a provider exists:** a pass reads page after page until its time bound, not one page, and asks rooms side by side. How many keys fit in a pass depends on what one key costs, a read, a lookup and a room's answer, which spike G must measure. If a full list can't fit in one pass at the size expected, the interval a deployment can promise is whatever that measurement gives, and the ADR's figure changes with it.
+- **The stop key shares that bound:** it is judged only when the whole list has been read.
+
+**What operators see when the record of findings is full.** It holds 1,000 rows. Past that, a finding not already there isn't kept, and one row, `findings_full`, says so and counts each one dropped. Findings already there are still counted and dated. A row leaves only when nothing has seen it again for 7 days, so **a new finding can go unrecorded for up to 7 days** while the record stays full. An operator reading the route sees the 200 most recently seen rows and `findings_full` among them. Nothing lets an operator clear a row. Both are owed before a provider is configured: a way to clear, and a cap that can't hide the newest finding.
+
 **Owed, and not built here.** None can be met while no provider is configured:
 
+- **How long a list's cursor lives is unknown.** A pass keeps the cursor for the next pass, 5 minutes later. If the provider's cursor lives less than that, every second pass fails its list and starts over, so page 1 is read again and again and later pages, and the stop key, are never judged. **Spike G must answer how long a KV list cursor lives.** If it is under 5 minutes, a pass must read the whole list itself, which is the same fix as above.
 - **The lists' answers are unverified.** The keys' list is Cloudflare's documented one and no spike has run it. How the scripts' list pages was never seen: an answer that hints at more is treated as incomplete, told to operators, and never acted past. Spike G.
 - **An entry that vanished isn't noticed.** A pass reads the entries that are there. One removed by no act of Podster's, for a host a room wants served, stays absent until that room's version moves. It fails closed.
 - **A read that lags makes a room write again.** A pass reads each entry it lists. If that read is older than the room's last write, the room is told it differs, forgets it applied the host, and its applier writes the same entry again. That costs one write and changes nothing served. What a read after a write can be trusted for is spike G's.
 - **The walk reaches only rooms the lookup table names,** and nothing writes that table yet. The step that gives a room its label must write it.
 - **An upload that outlived its hour loses its script, and its release stays `uploading`.** The room queues the script, as the ADR rules. Step 5 must fail that release and never commit it live.
+- **Step 5's obligations to the reconcile,** from the review of this PR:
+  - **Write the release's row as `uploading` before the upload starts.** A script under a room's label with no row is disowned and queued for deletion at once, with no age floor.
+  - **Settle-then-commit must never commit a script that is queued for deletion or counted gone.** The commit checks the room's delete queue in its own transaction.
+  - **Fail a release whose upload is past its hour before it can commit,** and have the delete job's own check, `may_delete`, look at the upload exemption again before it deletes.
+- **Two test gaps in `crates/core/src/release.rs`, owed with step 5,** which is the next step to touch that file. They were recorded only in a notes file until now, from the mutation pass on PR #313:
+  - **The replay's epoch comparison.** In `commit_live`'s in-flight branch, `flight.mark.epoch != release_epoch` survives being changed to `>`, because only a lower epoch is tested. Owed: a retry by the same record and script under a higher epoch than the flight's is refused `EpochMoved`. The comparison must stay `!=`.
+  - **The same release ID with a different script.** Dropping `flight.script != script` survives. Owed: the same release ID asking for a different script mid-flight is refused `InFlight`, never replayed.
+  - Both belong in `crates/core/tests/release.rs`, near `a_retried_commit_is_replayed_and_never_told_to_fail`.
 - **The reconcile's two checks of a custom hostname** are step 8's. Today any entry for one is removed.
 - **The content Worker's deployed version isn't compared,** which the ADR gives the reconcile. It needs the content Worker (step 4(b)) and spike G.
 - **Nobody is notified of a finding.** An operator has to read the route.
 - **Two passes of one kind at once** aren't prevented. Their questions change nothing twice, but each would write where it stopped, and the later write wins.
 - **The calls one pass makes weren't counted against the platform's limit:** about 200 at most, by the sizes above.
+- **The walk's 10 seconds and a pass's 20 aren't shown by a test,** as the applier's bound isn't.
 
 **Side by side.** After step 2: steps 3, 4(a) and 10(a). Step 4(b) after 4(a). After steps 2 and 4: steps 8 and 9. Steps 5, 6 and 7 follow in that order.
 

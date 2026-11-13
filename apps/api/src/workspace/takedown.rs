@@ -535,7 +535,14 @@ fn check_entry(sql: &SqlStorage, host: &str, found: Option<&str>, now: i64) -> R
         // Already owed: the applier will make it right, and this changes nothing.
         return Ok((true, false));
     }
-    if is_applied && found == row["script_name"].as_str() {
+    // The entry is there, since the pass listed it. It matches only when the room wants a script for this host and
+    // the entry was read as exactly that script. A host that wants nothing never matches an entry that exists, and a
+    // value that couldn't be read, or isn't a script's name Rust made, never equals anything.
+    let matches = match (found, row["script_name"].as_str()) {
+        (Some(found), Some(wanted)) => found == wanted,
+        _ => false,
+    };
+    if is_applied && matches {
         return Ok((true, false));
     }
     exec(
@@ -625,7 +632,15 @@ pub(super) fn check(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         )?,
         _ => return Err(ApiError::invalid_argument()),
     };
-    Ok(json!({ "known": known, "changed": changed, "findings": findings(sql)? }))
+    let mut findings = findings(sql)?;
+    if changed {
+        if let (Some("script"), Some(script)) = (body["kind"].as_str(), body["script"].as_str()) {
+            // A delete can't be taken back, so each one a reconcile starts is put on the operators' record, by the
+            // script's name, the moment the room queues it.
+            findings.push(json!({ "code": "script_delete_queued", "subject": script }));
+        }
+    }
+    Ok(json!({ "known": known, "changed": changed, "findings": findings }))
 }
 
 /// The provider this room may use, or `None`. Test builds also read a table a test makes in one room,

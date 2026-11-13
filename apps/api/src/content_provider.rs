@@ -347,8 +347,9 @@ impl Provider {
             .iter()
             .map(|key| key["name"].as_str().map(str::to_owned))
             .collect::<Option<Vec<_>>>()?;
-        let cursor = match &body["result_info"]["cursor"] {
-            Value::Null => None,
+        // The end of the list is said in so many words: `result_info` with an empty cursor. An answer with no
+        // `result_info`, or none of that shape, is no page at all, and never read as the end.
+        let cursor = match &body["result_info"].as_object()?.get("cursor")? {
             Value::String(next) if next.is_empty() => None,
             Value::String(next) if cursor_form(next) => Some(next.clone()),
             _ => return None,

@@ -68,8 +68,11 @@ const FINDING_KEPT_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const SCRIPT_BATCH: usize = 100;
 /// Rooms woken in one pass, from the lookup table.
 const WAKE_BATCH: i64 = 50;
-/// How long one pass may go on starting new steps.
+/// How long one pass may go on starting new steps over what it listed.
 const PASS_BUDGET_MS: i64 = 20_000;
+/// How long the walk that wakes rooms may go on starting new steps. Its own, counted from when the walk starts, so
+/// a provider that was slow over the list leaves the walk its whole time.
+const WAKE_BUDGET_MS: i64 = 10_000;
 const SUBJECT_MAX: usize = 253;
 
 fn now_ms() -> i64 {
@@ -235,6 +238,8 @@ struct Counts {
     changed: u32,
     found: u32,
     unanswered: u32,
+    /// Steps that failed and were skipped: one key, one script or one room. The pass goes on past each.
+    errors: u32,
 }
 
 impl Counts {
@@ -258,6 +263,18 @@ impl Counts {
     fn finding(&mut self, sql: &SqlStorage, code: &str, subject: &str, now: i64) -> R<()> {
         self.found += 1;
         record(sql, code, subject, None, now)
+    }
+
+    /// One step failed. It is counted and logged by its code, and the pass goes on: one bad key never stalls its
+    /// page, the stop key's check, the walk or the object's alarm.
+    fn skipped(&mut self, step: R<()>) {
+        if let Err(error) = step {
+            self.errors += 1;
+            console_error!(
+                "reconcile: a step was skipped: code={}",
+                error.code().unwrap_or("internal_error")
+            );
+        }
     }
 }
 
@@ -302,8 +319,12 @@ async fn entry(
         // Gone since it was listed: nothing to ask about.
         Entry::Absent => return Ok(()),
         Entry::Present(script) => Some(script),
-        // There, and not a script's name Rust made, or unreadable. The room is asked as for one that differs.
-        Entry::Unknown => None,
+        // There, and not a script's name Rust made, or unreadable. Operators are told, and the room is asked as for
+        // one that differs from anything it could want.
+        Entry::Unknown => {
+            counts.finding(sql, "entry_unreadable", host, now_ms())?;
+            None
+        }
     };
     let Some(answer) = ask_room(
         env,
@@ -325,7 +346,8 @@ async fn entry(
 
 /// Wakes a slice of the rooms the lookup table names, from where the last pass stopped, and takes what each has for
 /// operators. The table only says which rooms to ask: a room that isn't there answers that it knows nothing.
-async fn wake_rooms(sql: &SqlStorage, env: &Env, deadline: i64, counts: &mut Counts) -> R<u32> {
+async fn wake_rooms(sql: &SqlStorage, env: &Env, counts: &mut Counts) -> R<u32> {
+    let deadline = now_ms() + WAKE_BUDGET_MS;
     let mut at = pass(sql, "wake")?;
     let listed = env
         .d1("DB")?
@@ -349,7 +371,10 @@ async fn wake_rooms(sql: &SqlStorage, env: &Env, deadline: i64, counts: &mut Cou
             continue;
         };
         match ask_room(env, room, json!({ "kind": "wake" })).await {
-            Some(answer) => counts.take(sql, &answer, now_ms())?,
+            Some(answer) => {
+                let taken = counts.take(sql, &answer, now_ms());
+                counts.skipped(taken);
+            }
             None => counts.unanswered += 1,
         }
         woken += 1;
@@ -364,7 +389,7 @@ async fn wake_rooms(sql: &SqlStorage, env: &Env, deadline: i64, counts: &mut Cou
 
 fn summary(pass: &str, code: &str, listed: usize, counts: &Counts, woken: u32) -> Value {
     console_log!(
-        "reconcile: pass={} code={} listed={} asked={} changed={} findings={} unanswered={} woken={}",
+        "reconcile: pass={} code={} listed={} asked={} changed={} findings={} unanswered={} errors={} woken={}",
         pass,
         code,
         listed,
@@ -372,12 +397,73 @@ fn summary(pass: &str, code: &str, listed: usize, counts: &Counts, woken: u32) -
         counts.changed,
         counts.found,
         counts.unanswered,
+        counts.errors,
         woken
     );
     json!({
         "ran": code != "no_provider", "code": code, "listed": listed, "asked": counts.asked, "changed": counts.changed,
-        "findings": counts.found, "unanswered": counts.unanswered, "woken": woken,
+        "findings": counts.found, "unanswered": counts.unanswered, "errors": counts.errors, "woken": woken,
     })
+}
+
+/// The walk, with a failure of its own counted and never passed on: it doesn't undo the pass that came before it.
+async fn wake(sql: &SqlStorage, env: &Env, counts: &mut Counts) -> u32 {
+    match wake_rooms(sql, env, counts).await {
+        Ok(woken) => woken,
+        Err(error) => {
+            counts.skipped(Err(error));
+            0
+        }
+    }
+}
+
+/// One listed key: whose it is, and what its room says.
+async fn one_key(
+    sql: &SqlStorage,
+    env: &Env,
+    provider: &Provider,
+    key: &str,
+    counts: &mut Counts,
+) -> R<()> {
+    match key_of(provider, key) {
+        // The caller remembers it.
+        Key::Stop => Ok(()),
+        Key::Foreign => counts.finding(sql, "entry_foreign_name", key, now_ms()),
+        Key::Default(label) => {
+            let room = crate::releases::room_for_label(env, label).await?;
+            entry(sql, env, provider, key, room, counts).await
+        }
+        Key::Custom => match room_for_hostname(env, key).await {
+            Some(room) => entry(sql, env, provider, key, room, counts).await,
+            None => {
+                counts.unanswered += 1;
+                Ok(())
+            }
+        },
+    }
+}
+
+/// One listed script. Core decides. With no room yet: a name Podster didn't make is told and left alone, and for any
+/// other the room is found and asked. Only the label's own room, from its current state, can make a script deletable.
+async fn one_script(sql: &SqlStorage, env: &Env, id: &str, counts: &mut Counts) -> R<()> {
+    let now = now_ms();
+    if reconcile_script(id, RoomClaim::NoRoom, now) == ScriptReconcile::ReportForeign {
+        return counts.finding(sql, "script_foreign_name", id, now);
+    }
+    let label = id.split('.').next().unwrap_or_default();
+    let Some(room) = crate::releases::room_for_label(env, label).await? else {
+        return counts.finding(sql, "script_without_room", id, now);
+    };
+    match ask_room(env, &room, json!({ "kind": "script", "script": id })).await {
+        Some(answer) => {
+            counts.take(sql, &answer, now_ms())?;
+            if answer["known"] != true {
+                counts.finding(sql, "script_without_room", id, now_ms())?;
+            }
+        }
+        None => counts.unanswered += 1,
+    }
+    Ok(())
 }
 
 /// The 5-minute pass, in the `Moderation` object: one page of serve entries against their rooms, the stop key
@@ -390,11 +476,12 @@ pub(crate) async fn entries(sql: &SqlStorage, env: &Env) -> R<Value> {
     };
     let started = now_ms();
     let deadline = started + PASS_BUDGET_MS;
-    exec(
+    let pruned = exec(
         sql,
         "DELETE FROM takedown_finding WHERE last_seen_at < ?",
         vec![(started - FINDING_KEPT_MS).into()],
-    )?;
+    );
+    counts.skipped(pruned);
     let mut at = pass(sql, "entries")?;
     let Some(page) = provider.list_entries(at.cursor.as_deref()).await else {
         // No list, or a cursor the provider no longer takes: the next pass starts the list again.
@@ -404,7 +491,7 @@ pub(crate) async fn entries(sql: &SqlStorage, env: &Env) -> R<Value> {
             stop_seen: false,
         };
         set_pass(sql, "entries", &start, Some("list_failed"), now_ms())?;
-        let woken = wake_rooms(sql, env, deadline, &mut counts).await?;
+        let woken = wake(sql, env, &mut counts).await;
         return Ok(summary("entries", "list_failed", 0, &counts, woken));
     };
     let mut done = at.skip.min(page.keys.len());
@@ -414,18 +501,11 @@ pub(crate) async fn entries(sql: &SqlStorage, env: &Env) -> R<Value> {
             stopped_early = true;
             break;
         }
-        match key_of(&provider, key) {
-            Key::Stop => at.stop_seen = true,
-            Key::Foreign => counts.finding(sql, "entry_foreign_name", key, now_ms())?,
-            Key::Default(label) => {
-                let room = crate::releases::room_for_label(env, label).await?;
-                entry(sql, env, &provider, key, room, &mut counts).await?;
-            }
-            Key::Custom => match room_for_hostname(env, key).await {
-                Some(room) => entry(sql, env, &provider, key, room, &mut counts).await?,
-                None => counts.unanswered += 1,
-            },
+        if key == crate::content_provider::STOP_KEY {
+            at.stop_seen = true;
         }
+        let step = one_key(sql, env, &provider, key, &mut counts).await;
+        counts.skipped(step);
         done += 1;
     }
     let mut code = "ok";
@@ -438,9 +518,15 @@ pub(crate) async fn entries(sql: &SqlStorage, env: &Env) -> R<Value> {
         at.skip = 0;
     } else {
         // The whole list has been read, over one pass or several. Only now is the stop key known to be there or not.
-        if let Some(differs) = content_stop::recheck_key(sql, at.stop_seen)? {
-            counts.finding(sql, differs, crate::content_provider::STOP_KEY, now_ms())?;
-            counts.changed += 1;
+        match content_stop::recheck_key(sql, at.stop_seen) {
+            Ok(Some(differs)) => {
+                counts.changed += 1;
+                let told =
+                    counts.finding(sql, differs, crate::content_provider::STOP_KEY, now_ms());
+                counts.skipped(told);
+            }
+            Ok(None) => {}
+            Err(error) => counts.skipped(Err(error)),
         }
         at = Pass {
             cursor: None,
@@ -449,7 +535,7 @@ pub(crate) async fn entries(sql: &SqlStorage, env: &Env) -> R<Value> {
         };
     }
     set_pass(sql, "entries", &at, Some(code), now_ms())?;
-    let woken = wake_rooms(sql, env, deadline, &mut counts).await?;
+    let woken = wake(sql, env, &mut counts).await;
     Ok(summary("entries", code, page.keys.len(), &counts, woken))
 }
 
@@ -466,14 +552,15 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
     let mut at = pass(sql, "scripts")?;
     let Some(list) = provider.list_scripts().await else {
         set_pass(sql, "scripts", &at, Some("list_failed"), now_ms())?;
-        let woken = wake_rooms(sql, env, deadline, &mut counts).await?;
+        let woken = wake(sql, env, &mut counts).await;
         return Ok(summary("scripts", "list_failed", 0, &counts, woken));
     };
     let mut code = "ok";
     if !list.complete {
         // More scripts than this answer held, and how the list pages was never seen. What was listed is still asked
         // about: nothing here deletes on a list's word, so a short list can only miss a script, never lose one.
-        counts.finding(sql, "script_list_incomplete", "namespace", now_ms())?;
+        let told = counts.finding(sql, "script_list_incomplete", "namespace", now_ms());
+        counts.skipped(told);
         code = "list_incomplete";
     }
     let mut ids = list.ids;
@@ -494,33 +581,14 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
             break;
         }
         at.cursor = Some(id.clone());
-        let now = now_ms();
-        // Core decides. With no room yet: a name Podster didn't make is told and left alone, and for any other the
-        // room is found and asked. Only the label's own room, from its current state, can make a script deletable.
-        if reconcile_script(id, RoomClaim::NoRoom, now) == ScriptReconcile::ReportForeign {
-            counts.finding(sql, "script_foreign_name", id, now)?;
-            continue;
-        }
-        let label = id.split('.').next().unwrap_or_default();
-        let Some(room) = crate::releases::room_for_label(env, label).await? else {
-            counts.finding(sql, "script_without_room", id, now)?;
-            continue;
-        };
-        match ask_room(env, &room, json!({ "kind": "script", "script": id })).await {
-            Some(answer) => {
-                counts.take(sql, &answer, now_ms())?;
-                if answer["known"] != true {
-                    counts.finding(sql, "script_without_room", id, now_ms())?;
-                }
-            }
-            None => counts.unanswered += 1,
-        }
+        let step = one_script(sql, env, id, &mut counts).await;
+        counts.skipped(step);
     }
     if reached_end {
         at.cursor = None;
     }
     set_pass(sql, "scripts", &at, Some(code), now_ms())?;
-    let woken = wake_rooms(sql, env, deadline, &mut counts).await?;
+    let woken = wake(sql, env, &mut counts).await;
     Ok(summary("scripts", code, ids.len(), &counts, woken))
 }
 

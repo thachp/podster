@@ -1,0 +1,946 @@
+{
+  "ranAt": "2026-11-13T07:23:39.557Z",
+  "commit": "4143d04103635a916f9156068be820f91df5b6da",
+  "wrangler": "4.157.0",
+  "playwright": "1.64.1",
+  "workerd": {
+    "page": {
+      "status": 200,
+      "headerNames": [
+        "access-control-allow-origin",
+        "cache-control",
+        "content-encoding",
+        "content-security-policy",
+        "content-type",
+        "etag",
+        "referrer-policy",
+        "strict-transport-security",
+        "transfer-encoding",
+        "x-content-type-options"
+      ],
+      "setCookie": [],
+      "appHeader": null,
+      "policy": "sandbox allow-scripts; default-src https://appa.sandbox-test.example; script-src https://appa.sandbox-test.example; style-src https://appa.sandbox-test.example 'unsafe-inline'; img-src https://appa.sandbox-test.example data:; connect-src https://appa.sandbox-test.example; frame-ancestors 'none'; form-action 'none'; base-uri 'none'",
+      "cacheControl": "max-age=60, no-transform"
+    },
+    "appsOwnNotFound": {
+      "status": 404,
+      "cache-control": "max-age=60, no-transform",
+      "clear-site-data": null
+    },
+    "hostWithNoEntry": {
+      "status": 404,
+      "cache-control": "no-store",
+      "clear-site-data": "\"cache\""
+    },
+    "hostThatIsNoApps": {
+      "status": 404,
+      "policy": "sandbox allow-scripts; default-src 'none'; script-src 'none'; style-src 'none' 'unsafe-inline'; img-src 'none' data:; connect-src 'none'; frame-ancestors 'none'; form-action 'none'; base-uri 'none'"
+    },
+    "plainHttp": {
+      "status": 301,
+      "location": "https://appa.sandbox-test.example/docs?x=1"
+    },
+    "post": {
+      "status": 405,
+      "allow": "GET, HEAD"
+    },
+    "serviceWorkerHeader": {
+      "status": 403
+    },
+    "head": {
+      "status": 200,
+      "bodyBytes": 0,
+      "contentLength": null
+    }
+  },
+  "browsers": {
+    "chromium": {
+      "shown": true,
+      "version": "156.0.8078.4",
+      "firstPageStatus": 200,
+      "results": {
+        "origin": {
+          "ok": true,
+          "value": "null"
+        },
+        "moduleScript": {
+          "ok": true,
+          "value": true
+        },
+        "inlineScript": {
+          "ok": true,
+          "value": false
+        },
+        "fetchJson": {
+          "ok": true,
+          "value": "world"
+        },
+        "css": {
+          "ok": true,
+          "value": "rgb(10, 20, 30)"
+        },
+        "inlineStyle": {
+          "ok": true,
+          "value": "rgb(1, 2, 3)"
+        },
+        "image": {
+          "ok": true,
+          "value": true
+        },
+        "dataImage": {
+          "ok": true,
+          "value": true
+        },
+        "otherHostImage": {
+          "ok": true,
+          "value": false
+        },
+        "history": {
+          "ok": true,
+          "value": "/pushed"
+        },
+        "fetchOtherHost": {
+          "ok": false,
+          "error": "TypeError"
+        },
+        "fetchPost": {
+          "ok": true,
+          "value": 405
+        },
+        "webFont": {
+          "ok": true,
+          "value": "requested, then NetworkError"
+        },
+        "cookieWrite": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "cookieWriteForDomain": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "cookieRead": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "localStorage": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "sessionStorage": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "indexedDB": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "cacheApi": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "serviceWorker": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "violations": [
+          "connect-src https://elsewhere.example/data.json"
+        ]
+      },
+      "frame": {
+        "requested": true,
+        "rendered": false
+      },
+      "fontFileRequested": true,
+      "otherHostImageRequested": false,
+      "popup": {
+        "pagesOpened": 0,
+        "requested": false,
+        "afterActions": [
+          "window.open returned null"
+        ]
+      },
+      "modal": {
+        "dialogs": [],
+        "afterActions": [
+          "alert returned undefined"
+        ]
+      },
+      "download": {
+        "requested": true,
+        "downloads": []
+      },
+      "form": {
+        "requested": false,
+        "navigated": false
+      },
+      "link": {
+        "navigated": true,
+        "url": "https://appa.sandbox-test.example/second.html"
+      },
+      "sibling": {
+        "cookieRead": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "cookieWriteForDomain": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "localStorage": {
+          "ok": false,
+          "error": "SecurityError"
+        }
+      },
+      "cookiesInTheBrowsersJar": [],
+      "requestsThatCarriedACookie": 0,
+      "requestsToOtherHosts": [],
+      "requestsMade": 21,
+      "stepsThatDidNotFinish": [],
+      "withoutThePolicy": {
+        "shown": true,
+        "version": "156.0.8078.4",
+        "firstPageStatus": 200,
+        "results": {
+          "origin": {
+            "ok": true,
+            "value": "https://appa.sandbox-test.example"
+          },
+          "moduleScript": {
+            "ok": true,
+            "value": true
+          },
+          "inlineScript": {
+            "ok": true,
+            "value": true
+          },
+          "fetchJson": {
+            "ok": true,
+            "value": "world"
+          },
+          "css": {
+            "ok": true,
+            "value": "rgb(10, 20, 30)"
+          },
+          "inlineStyle": {
+            "ok": true,
+            "value": "rgb(1, 2, 3)"
+          },
+          "image": {
+            "ok": true,
+            "value": true
+          },
+          "dataImage": {
+            "ok": true,
+            "value": true
+          },
+          "otherHostImage": {
+            "ok": true,
+            "value": false
+          },
+          "history": {
+            "ok": true,
+            "value": "/pushed"
+          },
+          "fetchOtherHost": {
+            "ok": false,
+            "error": "TypeError"
+          },
+          "fetchPost": {
+            "ok": true,
+            "value": 405
+          },
+          "webFont": {
+            "ok": true,
+            "value": "requested, then NetworkError"
+          },
+          "cookieWrite": {
+            "ok": true,
+            "value": "probe=1"
+          },
+          "cookieWriteForDomain": {
+            "ok": true,
+            "value": "probe=1; shared=1"
+          },
+          "cookieRead": {
+            "ok": true,
+            "value": "probe=1; shared=1"
+          },
+          "localStorage": {
+            "ok": true,
+            "value": "1"
+          },
+          "sessionStorage": {
+            "ok": true,
+            "value": "1"
+          },
+          "indexedDB": {
+            "ok": true,
+            "value": "opened"
+          },
+          "cacheApi": {
+            "ok": true,
+            "value": "opened"
+          },
+          "serviceWorker": {
+            "ok": false,
+            "error": "TypeError"
+          },
+          "violations": []
+        },
+        "frame": {
+          "requested": true,
+          "rendered": true
+        },
+        "fontFileRequested": true,
+        "otherHostImageRequested": true,
+        "popup": {
+          "pagesOpened": 1,
+          "requested": true,
+          "afterActions": []
+        },
+        "modal": {
+          "dialogs": [
+            "alert"
+          ],
+          "afterActions": []
+        },
+        "download": {
+          "requested": false,
+          "downloads": [
+            "file.bin"
+          ]
+        },
+        "form": {
+          "requested": true,
+          "navigated": true
+        },
+        "link": {
+          "navigated": false
+        },
+        "sibling": {
+          "cookieRead": {
+            "ok": true,
+            "value": "shared=1; probe=1"
+          },
+          "cookieWriteForDomain": {
+            "ok": true,
+            "value": "shared=1; probe=1"
+          },
+          "localStorage": {
+            "ok": true,
+            "value": "1"
+          }
+        },
+        "cookiesInTheBrowsersJar": [
+          "probe for appa.sandbox-test.example",
+          "shared for .sandbox-test.example",
+          "probe for appb.sandbox-test.example"
+        ],
+        "requestsThatCarriedACookie": 16,
+        "requestsToOtherHosts": [
+          "https://elsewhere.example/pixel.png",
+          "https://elsewhere.example/data.json"
+        ],
+        "requestsMade": 28,
+        "stepsThatDidNotFinish": [
+          "read the actions: locator.textContent: Timeout 8000ms exceeded."
+        ]
+      }
+    },
+    "firefox": {
+      "shown": true,
+      "version": "157.0",
+      "firstPageStatus": 200,
+      "results": {
+        "origin": {
+          "ok": true,
+          "value": "null"
+        },
+        "moduleScript": {
+          "ok": true,
+          "value": true
+        },
+        "inlineScript": {
+          "ok": true,
+          "value": false
+        },
+        "fetchJson": {
+          "ok": true,
+          "value": "world"
+        },
+        "css": {
+          "ok": true,
+          "value": "rgb(10, 20, 30)"
+        },
+        "inlineStyle": {
+          "ok": true,
+          "value": "rgb(1, 2, 3)"
+        },
+        "image": {
+          "ok": true,
+          "value": true
+        },
+        "dataImage": {
+          "ok": true,
+          "value": true
+        },
+        "otherHostImage": {
+          "ok": true,
+          "value": false
+        },
+        "history": {
+          "ok": true,
+          "value": "/pushed"
+        },
+        "fetchOtherHost": {
+          "ok": false,
+          "error": "TypeError"
+        },
+        "fetchPost": {
+          "ok": true,
+          "value": 405
+        },
+        "webFont": {
+          "ok": true,
+          "value": "requested, then NetworkError"
+        },
+        "cookieWrite": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "cookieWriteForDomain": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "cookieRead": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "localStorage": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "sessionStorage": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "indexedDB": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "cacheApi": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "serviceWorker": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "violations": [
+          "connect-src https://elsewhere.example/data.json"
+        ]
+      },
+      "frame": {
+        "requested": true,
+        "rendered": false
+      },
+      "fontFileRequested": true,
+      "otherHostImageRequested": false,
+      "popup": {
+        "pagesOpened": 0,
+        "requested": false,
+        "afterActions": [
+          "window.open returned threw InvalidAccessError"
+        ]
+      },
+      "modal": {
+        "dialogs": [],
+        "afterActions": [
+          "alert returned undefined"
+        ]
+      },
+      "download": {
+        "requested": true,
+        "downloads": []
+      },
+      "form": {
+        "requested": false,
+        "navigated": false
+      },
+      "link": {
+        "navigated": true,
+        "url": "https://appa.sandbox-test.example/second.html"
+      },
+      "sibling": {
+        "cookieRead": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "cookieWriteForDomain": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "localStorage": {
+          "ok": false,
+          "error": "SecurityError"
+        }
+      },
+      "cookiesInTheBrowsersJar": [],
+      "requestsThatCarriedACookie": 0,
+      "requestsToOtherHosts": [],
+      "requestsMade": 21,
+      "stepsThatDidNotFinish": [
+        "look into the frame: no answer from the browser in 25 seconds"
+      ],
+      "withoutThePolicy": {
+        "shown": true,
+        "version": "157.0",
+        "firstPageStatus": 200,
+        "results": {
+          "origin": {
+            "ok": true,
+            "value": "https://appa.sandbox-test.example"
+          },
+          "moduleScript": {
+            "ok": true,
+            "value": true
+          },
+          "inlineScript": {
+            "ok": true,
+            "value": true
+          },
+          "fetchJson": {
+            "ok": true,
+            "value": "world"
+          },
+          "css": {
+            "ok": true,
+            "value": "rgb(10, 20, 30)"
+          },
+          "inlineStyle": {
+            "ok": true,
+            "value": "rgb(1, 2, 3)"
+          },
+          "image": {
+            "ok": true,
+            "value": true
+          },
+          "dataImage": {
+            "ok": true,
+            "value": true
+          },
+          "otherHostImage": {
+            "ok": true,
+            "value": false
+          },
+          "history": {
+            "ok": true,
+            "value": "/pushed"
+          },
+          "fetchOtherHost": {
+            "ok": false,
+            "error": "TypeError"
+          },
+          "fetchPost": {
+            "ok": true,
+            "value": 405
+          },
+          "webFont": {
+            "ok": true,
+            "value": "requested, then NetworkError"
+          },
+          "cookieWrite": {
+            "ok": true,
+            "value": "probe=1"
+          },
+          "cookieWriteForDomain": {
+            "ok": true,
+            "value": "probe=1; shared=1"
+          },
+          "cookieRead": {
+            "ok": true,
+            "value": "probe=1; shared=1"
+          },
+          "localStorage": {
+            "ok": true,
+            "value": "1"
+          },
+          "sessionStorage": {
+            "ok": true,
+            "value": "1"
+          },
+          "indexedDB": {
+            "ok": true,
+            "value": "opened"
+          },
+          "cacheApi": {
+            "ok": true,
+            "value": "opened"
+          },
+          "serviceWorker": {
+            "ok": false,
+            "error": "TypeError"
+          },
+          "violations": []
+        },
+        "frame": {
+          "requested": true,
+          "rendered": true
+        },
+        "fontFileRequested": true,
+        "otherHostImageRequested": true,
+        "popup": {
+          "pagesOpened": 1,
+          "requested": true,
+          "afterActions": []
+        },
+        "modal": {
+          "dialogs": [
+            "alert"
+          ],
+          "afterActions": []
+        },
+        "download": {
+          "requested": true,
+          "downloads": [
+            "file.bin"
+          ]
+        },
+        "form": {
+          "requested": true,
+          "navigated": true
+        },
+        "link": {
+          "navigated": false
+        },
+        "sibling": {
+          "cookieRead": {
+            "ok": true,
+            "value": "shared=1; probe=1"
+          },
+          "cookieWriteForDomain": {
+            "ok": true,
+            "value": "shared=1; probe=1"
+          },
+          "localStorage": {
+            "ok": true,
+            "value": "1"
+          }
+        },
+        "cookiesInTheBrowsersJar": [
+          "probe for appa.sandbox-test.example",
+          "shared for .sandbox-test.example",
+          "probe for appb.sandbox-test.example"
+        ],
+        "requestsThatCarriedACookie": 14,
+        "requestsToOtherHosts": [
+          "https://elsewhere.example/pixel.png",
+          "https://elsewhere.example/data.json"
+        ],
+        "requestsMade": 28,
+        "stepsThatDidNotFinish": [
+          "read the actions: locator.textContent: Timeout 8000ms exceeded."
+        ]
+      }
+    },
+    "webkit": {
+      "shown": true,
+      "version": "27.2",
+      "firstPageStatus": 200,
+      "results": {
+        "origin": {
+          "ok": true,
+          "value": "null"
+        },
+        "moduleScript": {
+          "ok": true,
+          "value": true
+        },
+        "inlineScript": {
+          "ok": true,
+          "value": false
+        },
+        "fetchJson": {
+          "ok": true,
+          "value": "world"
+        },
+        "css": {
+          "ok": true,
+          "value": "rgb(10, 20, 30)"
+        },
+        "inlineStyle": {
+          "ok": true,
+          "value": "rgb(1, 2, 3)"
+        },
+        "image": {
+          "ok": true,
+          "value": true
+        },
+        "dataImage": {
+          "ok": true,
+          "value": true
+        },
+        "otherHostImage": {
+          "ok": true,
+          "value": false
+        },
+        "history": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "fetchOtherHost": {
+          "ok": false,
+          "error": "TypeError"
+        },
+        "fetchPost": {
+          "ok": true,
+          "value": 405
+        },
+        "webFont": {
+          "ok": true,
+          "value": "requested, then NetworkError"
+        },
+        "cookieWrite": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "cookieWriteForDomain": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "cookieRead": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "localStorage": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "sessionStorage": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "indexedDB": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "cacheApi": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "serviceWorker": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "violations": [
+          "connect-src https://elsewhere.example/data.json"
+        ]
+      },
+      "frame": {
+        "requested": true,
+        "rendered": false
+      },
+      "fontFileRequested": true,
+      "otherHostImageRequested": false,
+      "popup": {
+        "pagesOpened": 0,
+        "requested": false,
+        "afterActions": [
+          "window.open returned null"
+        ]
+      },
+      "modal": {
+        "dialogs": [],
+        "afterActions": [
+          "alert returned undefined"
+        ]
+      },
+      "download": {
+        "requested": true,
+        "downloads": []
+      },
+      "form": {
+        "requested": false,
+        "navigated": false
+      },
+      "link": {
+        "navigated": true,
+        "url": "https://appa.sandbox-test.example/second.html"
+      },
+      "sibling": {
+        "cookieRead": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "cookieWriteForDomain": {
+          "ok": false,
+          "error": "SecurityError"
+        },
+        "localStorage": {
+          "ok": false,
+          "error": "SecurityError"
+        }
+      },
+      "cookiesInTheBrowsersJar": [],
+      "requestsThatCarriedACookie": 0,
+      "requestsToOtherHosts": [],
+      "requestsMade": 22,
+      "stepsThatDidNotFinish": [],
+      "withoutThePolicy": {
+        "shown": true,
+        "version": "27.2",
+        "firstPageStatus": 200,
+        "results": {
+          "origin": {
+            "ok": true,
+            "value": "https://appa.sandbox-test.example"
+          },
+          "moduleScript": {
+            "ok": true,
+            "value": true
+          },
+          "inlineScript": {
+            "ok": true,
+            "value": true
+          },
+          "fetchJson": {
+            "ok": true,
+            "value": "world"
+          },
+          "css": {
+            "ok": true,
+            "value": "rgb(10, 20, 30)"
+          },
+          "inlineStyle": {
+            "ok": true,
+            "value": "rgb(1, 2, 3)"
+          },
+          "image": {
+            "ok": true,
+            "value": true
+          },
+          "dataImage": {
+            "ok": true,
+            "value": true
+          },
+          "otherHostImage": {
+            "ok": true,
+            "value": false
+          },
+          "history": {
+            "ok": true,
+            "value": "/pushed"
+          },
+          "fetchOtherHost": {
+            "ok": false,
+            "error": "TypeError"
+          },
+          "fetchPost": {
+            "ok": true,
+            "value": 405
+          },
+          "webFont": {
+            "ok": true,
+            "value": "requested, then NetworkError"
+          },
+          "cookieWrite": {
+            "ok": true,
+            "value": "probe=1"
+          },
+          "cookieWriteForDomain": {
+            "ok": true,
+            "value": "shared=1; probe=1"
+          },
+          "cookieRead": {
+            "ok": true,
+            "value": "shared=1; probe=1"
+          },
+          "localStorage": {
+            "ok": true,
+            "value": "1"
+          },
+          "sessionStorage": {
+            "ok": true,
+            "value": "1"
+          },
+          "indexedDB": {
+            "ok": true,
+            "value": "opened"
+          },
+          "cacheApi": {
+            "ok": true,
+            "value": "opened"
+          },
+          "serviceWorker": {
+            "ok": false,
+            "error": "TypeError"
+          },
+          "violations": []
+        },
+        "frame": {
+          "requested": true,
+          "rendered": true
+        },
+        "fontFileRequested": true,
+        "otherHostImageRequested": true,
+        "popup": {
+          "pagesOpened": 1,
+          "requested": true,
+          "afterActions": []
+        },
+        "modal": {
+          "dialogs": [
+            "alert"
+          ],
+          "afterActions": []
+        },
+        "download": {
+          "requested": false,
+          "downloads": []
+        },
+        "form": {
+          "requested": true,
+          "navigated": true
+        },
+        "link": {
+          "navigated": false
+        },
+        "sibling": {
+          "cookieRead": {
+            "ok": true,
+            "value": "shared=1; probe=1"
+          },
+          "cookieWriteForDomain": {
+            "ok": true,
+            "value": "shared=1; probe=1"
+          },
+          "localStorage": {
+            "ok": true,
+            "value": "1"
+          }
+        },
+        "cookiesInTheBrowsersJar": [
+          "shared for .sandbox-test.example",
+          "probe for appb.sandbox-test.example",
+          "probe for appa.sandbox-test.example"
+        ],
+        "requestsThatCarriedACookie": 0,
+        "requestsToOtherHosts": [
+          "https://elsewhere.example/pixel.png",
+          "https://elsewhere.example/data.json"
+        ],
+        "requestsMade": 28,
+        "stepsThatDidNotFinish": [
+          "read the actions: locator.textContent: Timeout 8000ms exceeded."
+        ]
+      }
+    }
+  },
+  "wranglerDev": {
+    "mentionedLoginOrAccount": false,
+    "listening": "http://127.0.0.1:8799",
+    "exitedEarly": false
+  }
+}

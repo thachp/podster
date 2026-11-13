@@ -22,6 +22,19 @@ const read = (path: string) => readFileSync(new URL(path, root), "utf8");
 const repo = (path: string) => readFileSync(new URL(`../../${path}`, root), "utf8");
 /** The placeholder, exactly. Never empty: wrangler treats an empty `account_id` as none, and falls back to the environment's. */
 const PLACEHOLDER_ACCOUNT = "not an account: this file deploys nowhere";
+/** The browser run's configuration: test-only, named by one script, never the default. */
+const BROWSER_RUN = "test/browser/browser-run-only.wrangler.jsonc";
+/** Every wrangler configuration in the package, by its path, wherever it sits. */
+function wranglerConfigs(folder = ""): string[] {
+  const found: string[] = [];
+  for (const entry of readdirSync(new URL(folder, root), { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name === ".wrangler") continue;
+    if (entry.isDirectory()) found.push(...wranglerConfigs(`${folder}${entry.name}/`));
+    else if (/wrangler/i.test(entry.name) && /\.(jsonc?|toml)$/.test(entry.name)) found.push(`${folder}${entry.name}`);
+  }
+  return found.sort();
+}
+const parse = (path: string) => JSON.parse(read(path).replace(/^\s*\/\/.*$/gm, ""));
 
 describe("the package can't be deployed by accident", () => {
   it("has the one default-named configuration file, and nothing that would be read ahead of it", () => {
@@ -34,6 +47,45 @@ describe("the package can't be deployed by accident", () => {
     expect(existsSync(new URL(".wrangler/deploy/config.json", root))).toBe(false);
     expect(existsSync(new URL(".wrangler/deploy", root))).toBe(false);
     for (const name of [".dev.vars", ".env"]) expect(existsSync(new URL(name, root)), name).toBe(false);
+  });
+
+  it("holds every wrangler configuration in the package to the same guards, the browser run's among them", () => {
+    // Two, and no more: the default one, and the browser run's. A third would need its own line here.
+    expect(wranglerConfigs()).toEqual([BROWSER_RUN, "wrangler.jsonc"]);
+    for (const path of wranglerConfigs()) {
+      const config = parse(path);
+      expect(config.account_id, path).toBe(PLACEHOLDER_ACCOUNT);
+      expect(/^[A-Za-z0-9_-]+$/.test(config.account_id), path).toBe(false);
+      expect([config.workers_dev, config.preview_urls], path).toEqual([false, false]);
+      for (const key of ["route", "routes", "env", "triggers", "services", "d1_databases", "r2_buckets", "durable_objects", "queues", "tail_consumers", "secrets_store_secrets", "assets", "build"]) expect(config, `${path} ${key}`).not.toHaveProperty(key);
+      expect(read(path).replace(/^\s*\/\/.*$/gm, ""), path).not.toMatch(/podster\.dev|podster\.site|workers\.dev|custom_domain|zone_name|pattern/);
+    }
+    // The browser run's: its name says what it is, it has no binding and no variable at all, and its entry is the
+    // test-only one beside it.
+    const run = parse(BROWSER_RUN);
+    expect(Object.keys(run).sort()).toEqual(["account_id", "compatibility_date", "main", "name", "preview_urls", "workers_dev"]);
+    expect([run.name, run.main]).toEqual(["podster-content-browser-run-only", "entry.ts"]);
+    // The default configuration's entry is the real one, never the test-only one.
+    expect(parse("wrangler.jsonc").main).toBe("src/index.ts");
+  });
+
+  it("keeps the test-only entry out of everything but the browser run", () => {
+    // Nothing in `src/` imports from outside `src/`: the real Worker can't pull in the in-memory serve entries.
+    for (const name of readdirSync(new URL("src/", root))) {
+      const imports = [...read(`src/${name}`).matchAll(/from\s+"([^"]+)"/g)].map((match) => match[1]);
+      for (const from of imports) expect(from.startsWith("./") && !from.includes(".."), `${name} imports ${from}`).toBe(true);
+      expect(read(`src/${name}`), name).not.toMatch(/\btest\b\/|import\(/);
+    }
+    // No script of the package, no CI job and no deploy script names the browser run's files. One script does.
+    const named = /browser-run-only|test\/browser/;
+    expect(JSON.stringify(JSON.parse(read("package.json")).scripts)).not.toMatch(named);
+    for (const path of [".github/workflows/ci.yml", "scripts/deploy-staging", "scripts/staging-probes", "scripts/merge-gate"]) expect(repo(path), path).not.toMatch(named);
+    expect(repo("e2e/content-sandbox.mjs")).toContain(`"--config", "${BROWSER_RUN}"`);
+    // And that one script runs it on this machine only: the loopback address, local mode, no remote and no tunnel.
+    const script = repo("e2e/content-sandbox.mjs");
+    expect(script).toContain('"--ip", "127.0.0.1"');
+    expect(script).toContain('"--local"');
+    expect(script.replace(/^\s*\/\/.*$/gm, "")).not.toMatch(/--remote|--tunnel|0\.0\.0\.0|wrangler", \["deploy/);
   });
 
   it("aims at no account, has no route and no environment, and switches both public addresses off", () => {
@@ -95,7 +147,8 @@ describe("the package can't be deployed by accident", () => {
     const job = ci.slice(ci.indexOf("\n  content:"), ci.indexOf("\n  gateway:"));
     expect(job).toContain("working-directory: apps/content");
     expect(job.split("\n").filter((line) => !line.trim().startsWith("#")).join("\n")).not.toMatch(/deploy|wrangler|secrets\./);
-    expect([...job.matchAll(/- run: (.+)/g)].map((match) => match[1])).toEqual(["npm ci", "npm run typecheck", "npm test"]);
+    // It installs without running any package's install script: the tests only read wrangler's source.
+    expect([...job.matchAll(/- run: (.+)/g)].map((match) => match[1])).toEqual(["npm ci --ignore-scripts", "npm run typecheck", "npm test"]);
   });
 });
 
@@ -107,7 +160,7 @@ describe("the Worker reaches nothing but its two bindings", () => {
     const all = sources.map(([, text]) => text).join("\n");
     expect([...new Set([...all.matchAll(/env\.([A-Z_]+)/g)].map((match) => match[1]))].sort()).toEqual(["APPS", "CONTENT_DOMAIN", "SERVE"]);
     // Nothing is logged for a request (ADR 0010's "Logs").
-    expect(all).not.toMatch(/console\s*\./);
+    expect(all).not.toMatch(/\bconsole\b/);
     // No write to the namespace, no outbound request of its own, and no storage, cache or timer.
     for (const word of [".put(", ".delete(", ".list(", "fetch(\"", "fetch(`", "caches.", "D1Database", "R2Bucket", "DurableObject", "setTimeout", "setInterval", "process.env", "podster.dev", "Authorization"]) expect(all, word).not.toContain(word);
     // The one `fetch` call is the dispatch namespace's own.

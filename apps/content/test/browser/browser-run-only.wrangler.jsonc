@@ -1,0 +1,16 @@
+{
+  // **For the browser run only** (`e2e/content-sandbox.mjs`, M6 step 4(b)). It runs the content Worker's real handler
+  // under `wrangler dev`, on this machine, with serve entries and an app that exist only in memory, so real browsers
+  // can be shown the sandbox. It is no deployment's configuration and never the default one: only that script names
+  // it, with `--config`.
+  //
+  // It carries the same guards as `wrangler.jsonc`: an `account_id` that is no account and that wrangler refuses,
+  // both public addresses off, no route and no environment. It has no binding at all. `test/config.test.ts` holds
+  // every wrangler configuration in this package to that.
+  "name": "podster-content-browser-run-only",
+  "main": "entry.ts",
+  "compatibility_date": "2026-08-01",
+  "account_id": "not an account: this file deploys nowhere",
+  "workers_dev": false,
+  "preview_urls": false
+}

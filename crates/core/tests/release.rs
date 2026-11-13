@@ -1332,37 +1332,86 @@ fn the_provisioning_delegation_refuses_and_never_unpublishes() {
     );
 }
 
-const fn sw(granted: bool, generation: u64) -> ReleaseSwitch {
+const fn sw(granted: bool, generation: u64, last_take: u64) -> ReleaseSwitch {
     ReleaseSwitch {
         granted,
         generation,
+        last_take,
     }
 }
 
 #[test]
-fn every_set_of_the_switch_raises_its_generation_and_none_is_written_past_the_last() {
-    assert_eq!(ReleaseSwitch::UNSET, sw(true, 0));
-    assert_eq!(ReleaseSwitch::UNSET.set(false), Some(sw(false, 1)));
-    // Setting it to what it is still raises the generation, so asking again tells every room again.
-    assert_eq!(sw(false, 1).set(false), Some(sw(false, 2)));
-    assert_eq!(sw(false, 2).set(true), Some(sw(true, 3)));
-    assert_eq!(sw(true, 3).set(true), Some(sw(true, 4)));
-    assert_eq!(sw(true, u64::MAX - 1).set(false), Some(sw(false, u64::MAX)));
+fn every_set_of_the_switch_raises_its_generation_and_a_take_is_the_last_take() {
+    assert_eq!(ReleaseSwitch::UNSET, sw(true, 0, 0));
+    assert_eq!(ReleaseSwitch::UNSET.set(false), Some(sw(false, 1, 1)));
+    // Setting it to what it is still raises the generation, so asking again tells every room again; a repeated take
+    // is the new last take.
+    assert_eq!(sw(false, 1, 1).set(false), Some(sw(false, 2, 2)));
+    // A give-back keeps the last take.
+    assert_eq!(sw(false, 2, 2).set(true), Some(sw(true, 3, 2)));
+    assert_eq!(sw(true, 3, 2).set(true), Some(sw(true, 4, 2)));
+    assert_eq!(ReleaseSwitch::UNSET.set(true), Some(sw(true, 1, 0)));
+    assert_eq!(
+        sw(true, u64::MAX - 1, 3).set(false),
+        Some(sw(false, u64::MAX, u64::MAX))
+    );
     for granted in [true, false] {
-        assert_eq!(sw(true, u64::MAX).set(granted), None, "{granted}");
-        assert_eq!(sw(false, u64::MAX).set(granted), None, "{granted}");
+        assert_eq!(sw(true, u64::MAX, 3).set(granted), None, "{granted}");
+        assert_eq!(
+            sw(false, u64::MAX, u64::MAX).set(granted),
+            None,
+            "{granted}"
+        );
     }
 }
 
 #[test]
-fn a_room_applies_only_a_newer_answer_and_a_give_back_restores_nothing() {
-    let applied = sw(true, 4);
+fn a_switch_is_well_formed_only_when_its_last_take_agrees() {
+    for good in [
+        ReleaseSwitch::UNSET,
+        sw(false, 1, 1),
+        sw(true, 2, 1),
+        sw(true, 9, 0),
+        sw(false, u64::MAX, u64::MAX),
+    ] {
+        assert!(good.well_formed(), "{good:?}");
+    }
+    // A last take after the current generation; taken but not taken now; taken at generation 0, which no set makes;
+    // held with the last take now; held, unset, with a take.
+    for bad in [
+        sw(true, 1, 2),
+        sw(false, 3, 2),
+        sw(false, 3, 0),
+        sw(false, 0, 0),
+        sw(true, 2, 2),
+        sw(true, 0, 1),
+    ] {
+        assert!(!bad.well_formed(), "{bad:?}");
+        assert_eq!(
+            apply_release_switch(ReleaseSwitch::UNSET, bad),
+            SwitchApplied::Refused,
+            "{bad:?}"
+        );
+    }
+    // Every switch a sequence of sets makes is well formed.
+    let mut s = ReleaseSwitch::UNSET;
+    for step in 0..40u32 {
+        let Some(next) = s.set(step % 3 == 1) else {
+            unreachable!("forty sets fit")
+        };
+        s = next;
+        assert!(s.well_formed(), "{s:?}");
+    }
+}
+
+#[test]
+fn a_room_applies_only_a_newer_answer_and_a_give_back_with_no_take_since_restores_nothing() {
+    let applied = sw(true, 4, 2);
     for seen in [
-        sw(true, 4),
-        sw(false, 4),
-        sw(true, 3),
-        sw(false, 3),
-        sw(false, 0),
+        sw(true, 4, 2),
+        sw(true, 3, 2),
+        sw(false, 2, 2),
+        sw(true, 0, 0),
     ] {
         assert_eq!(
             apply_release_switch(applied, seen),
@@ -1370,26 +1419,35 @@ fn a_room_applies_only_a_newer_answer_and_a_give_back_restores_nothing() {
             "{seen:?}"
         );
     }
+    // Newer, with no take since generation 4: only recorded.
     assert_eq!(
-        apply_release_switch(applied, sw(true, 5)),
+        apply_release_switch(applied, sw(true, 5, 2)),
         SwitchApplied::Record
     );
     assert_eq!(
-        apply_release_switch(applied, sw(false, 5)),
+        apply_release_switch(applied, sw(true, 9, 4)),
+        SwitchApplied::Record
+    );
+    // A take since generation 4, current or already given back: unpublished.
+    assert_eq!(
+        apply_release_switch(applied, sw(false, 5, 5)),
         SwitchApplied::Unpublish
     );
     assert_eq!(
-        apply_release_switch(applied, sw(false, u64::MAX)),
+        apply_release_switch(applied, sw(true, 6, 5)),
         SwitchApplied::Unpublish
     );
-    // After a take-back, the same notice again is acknowledged and does nothing; a give-back only records.
-    let taken = sw(false, 5);
+    assert_eq!(
+        apply_release_switch(applied, sw(false, u64::MAX, u64::MAX)),
+        SwitchApplied::Unpublish
+    );
+    // After a take, the same notice again is acknowledged and does nothing; a give-back after it only records.
+    let taken = sw(false, 5, 5);
     assert_eq!(apply_release_switch(taken, taken), SwitchApplied::Stale);
     assert_eq!(
-        apply_release_switch(taken, sw(true, 6)),
+        apply_release_switch(taken, sw(true, 6, 5)),
         SwitchApplied::Record
     );
-    // Nothing a room starts with is ever newer than an unset switch's answer, and a room starts unset.
     assert_eq!(
         apply_release_switch(ReleaseSwitch::UNSET, ReleaseSwitch::UNSET),
         SwitchApplied::Stale
@@ -1404,9 +1462,11 @@ struct SwitchRoom {
     epoch: u64,
 }
 
+/// What the room does with one answer, as `apply_release_switch` says. This models the room's transaction; PR C shows
+/// it in the room itself.
 fn hear(room: SwitchRoom, seen: ReleaseSwitch) -> SwitchRoom {
     match apply_release_switch(room.applied, seen) {
-        SwitchApplied::Stale => room,
+        SwitchApplied::Stale | SwitchApplied::Refused => room,
         // Restores nothing: an app that was taken down stays down.
         SwitchApplied::Record => SwitchRoom {
             applied: seen,
@@ -1420,86 +1480,159 @@ fn hear(room: SwitchRoom, seen: ReleaseSwitch) -> SwitchRoom {
     }
 }
 
+/// The switch after each of an operator's sets, from unset: `[s1, s2, …]`.
+fn switches(takes: &[bool]) -> Vec<ReleaseSwitch> {
+    let mut s = ReleaseSwitch::UNSET;
+    takes
+        .iter()
+        .map(|take| {
+            let Some(next) = s.set(!take) else {
+                unreachable!("a few sets fit")
+            };
+            s = next;
+            s
+        })
+        .collect()
+}
+
+/// Every ordering of every subset of `0..n`, the empty one included.
+fn arrivals(n: usize) -> Vec<Vec<usize>> {
+    fn grow(prefix: &mut Vec<usize>, n: usize, out: &mut Vec<Vec<usize>>) {
+        out.push(prefix.clone());
+        for i in 0..n {
+            if !prefix.contains(&i) {
+                prefix.push(i);
+                grow(prefix, n, out);
+                prefix.pop();
+            }
+        }
+    }
+    let mut out = Vec::new();
+    grow(&mut Vec::new(), n, &mut out);
+    out
+}
+
 #[test]
-fn take_give_take_ends_unpublished_under_the_last_generation_in_any_order_and_with_repeats() {
+fn whatever_arrives_in_whatever_order_a_room_comes_down_exactly_when_a_take_happened_after_it_started(
+) {
+    // Every sequence of up to four takes and gives; a room that started from unset or from the switch after any set,
+    // as a room made then would (`start_for_room`); and that hears any subset of the sets in any order, each one
+    // possibly twice. The expected outcome is computed from the operator's acts alone, never from `last_take`.
+    let mut cases = 0u32;
+    for len in 1..=4usize {
+        for bits in 0..(1u32 << len) {
+            let takes: Vec<bool> = (0..len).map(|i| bits & (1 << i) != 0).collect();
+            let sets = switches(&takes);
+            for start_at in 0..=len {
+                let start_switch = if start_at == 0 {
+                    ReleaseSwitch::UNSET
+                } else {
+                    ReleaseSwitch::start_for_room(sets.get(start_at - 1).copied())
+                };
+                let start = SwitchRoom {
+                    applied: start_switch,
+                    up: true,
+                    epoch: 7,
+                };
+                for order in arrivals(len) {
+                    for repeat in 0..=order.len() {
+                        let mut room = start;
+                        for (k, &i) in order.iter().enumerate() {
+                            let Some(seen) = sets.get(i) else {
+                                unreachable!("an index of the sets")
+                            };
+                            room = hear(room, *seen);
+                            if k == repeat {
+                                room = hear(room, *seen);
+                            }
+                        }
+                        // The newest set heard that is newer than where the room started.
+                        let newest = order.iter().copied().filter(|&i| i + 1 > start_at).max();
+                        let label =
+                            format!("{takes:?} start {start_at} heard {order:?} twice {repeat}");
+                        match newest {
+                            None => assert_eq!(room, start, "{label}"),
+                            Some(newest) => {
+                                let took = (start_at..=newest).any(|i| takes.get(i) == Some(&true));
+                                assert_eq!(sets.get(newest), Some(&room.applied), "{label}");
+                                assert_eq!(room.up, !took, "{label}");
+                                assert_eq!(room.epoch > start.epoch, took, "{label}");
+                                // The same as hearing only the newest: no other notice changes the outcome.
+                                let only = hear(start, room.applied);
+                                assert_eq!(
+                                    (only.applied, only.up),
+                                    (room.applied, room.up),
+                                    "{label}"
+                                );
+                            }
+                        }
+                        cases += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(cases > 1_000, "{cases} cases");
+}
+
+#[test]
+fn a_room_that_hears_only_the_last_give_back_still_comes_down() {
+    // Take, then give: a room whose take notice is late, or that isn't in the organization's list and reads the
+    // switch only after the give-back.
+    let sets = switches(&[true, false]);
     let start = SwitchRoom {
         applied: ReleaseSwitch::UNSET,
         up: true,
         epoch: 7,
     };
-    let take = ReleaseSwitch::UNSET.set(false);
-    let give = take.and_then(|t| t.set(true));
-    let take_again = give.and_then(|g| g.set(false));
-    let (Some(take), Some(give), Some(take_again)) = (take, give, take_again) else {
-        unreachable!("three sets from unset fit")
+    let (Some(take), Some(give)) = (sets.first().copied(), sets.get(1).copied()) else {
+        unreachable!("two sets")
     };
-    assert_eq!(take_again, sw(false, 3));
-    let orders: [[ReleaseSwitch; 3]; 6] = [
-        [take, give, take_again],
-        [take, take_again, give],
-        [give, take, take_again],
-        [give, take_again, take],
-        [take_again, take, give],
-        [take_again, give, take],
-    ];
-    for order in orders {
-        // Each notice may also be resent, before or after the others.
-        for repeat in 0..order.len() {
-            let mut room = start;
-            for (i, seen) in order.iter().enumerate() {
-                room = hear(room, *seen);
-                if i == repeat {
-                    room = hear(room, *seen);
-                }
-            }
-            assert_eq!(room.applied, take_again, "{order:?} {repeat}");
-            assert!(
-                !room.up,
-                "{order:?} {repeat}: a take-back was heard, so the app is down"
-            );
-            assert!(room.epoch > start.epoch, "{order:?} {repeat}");
-        }
+    assert_eq!(give, sw(true, 2, 1));
+    let room = hear(start, give);
+    assert!(!room.up);
+    assert_eq!(room.applied, give);
+    // The late take is then stale and changes nothing more.
+    assert_eq!(hear(room, take), room);
+    // In order, the same end.
+    assert_eq!(
+        hear(hear(start, take), give),
+        SwitchRoom { epoch: 8, ..room }
+    );
+    // Take, give, take, give: hearing only the last give at each point brings the room down once a take was missed.
+    let sets = switches(&[true, false, true, false]);
+    for after in 0..sets.len() {
+        let Some(at) = sets.get(after).copied() else {
+            unreachable!("an index of the sets")
+        };
+        let room = SwitchRoom {
+            applied: at,
+            up: true,
+            epoch: 7,
+        };
+        let Some(last) = sets.last().copied() else {
+            unreachable!("four sets")
+        };
+        let heard = hear(room, last);
+        // A take after `after` exists unless the room already applied the last set.
+        assert_eq!(
+            heard.up,
+            after + 1 == sets.len() || after == 2,
+            "after {after}"
+        );
     }
-    // Heard in order, the give-back between them brought nothing back.
-    let after_take = hear(start, take);
-    let after_give = hear(after_take, give);
-    assert!(!after_take.up);
-    assert_eq!(
-        after_give,
-        SwitchRoom {
-            applied: give,
-            ..after_take
-        }
-    );
-    // And a give-back alone, to a room whose app is up, changes nothing but the generation.
-    assert_eq!(
-        hear(start, give),
-        SwitchRoom {
-            applied: give,
-            ..start
-        }
-    );
 }
 
 #[test]
 fn a_room_made_after_a_take_back_has_nothing_to_unpublish_and_is_refused() {
-    // The room starts unset and reads the organization's switch, taken at generation 1, at its first release command
-    // or on the reconcile's walk: the same answer a notice would carry.
-    let read = sw(false, 1);
-    assert_eq!(
-        apply_release_switch(ReleaseSwitch::UNSET, read),
-        SwitchApplied::Unpublish
-    );
-    let empty = serving(None, 1, 0);
-    let (after, delete) = unpublish(&empty);
-    assert!(delete.is_empty(), "nothing was up, so nothing is deleted");
-    assert_eq!(scripts(&after), [None]);
-    assert_eq!(
-        after.epoch, 1,
-        "the epoch still goes up, so nothing in flight goes live after it"
-    );
-    let now = release_switch_now(ReleaseSwitch::UNSET, Some(read));
-    assert_eq!(now, Some(read));
+    // The room is made while release is taken at generation 1, and starts from what it read then.
+    let taken = sw(false, 1, 1);
+    let applied = ReleaseSwitch::start_for_room(Some(taken));
+    assert_eq!(applied, taken);
+    // The take before it existed is stale for it, so it has nothing to unpublish, and the recheck refuses.
+    assert_eq!(apply_release_switch(applied, taken), SwitchApplied::Stale);
+    let now = release_switch_now(applied, Some(taken));
+    assert_eq!(now, Some(taken));
     let commit = MERGED;
     let mut r = open_recheck(&commit);
     r.room.organization_may_release = now.is_some_and(|s| s.granted);
@@ -1509,33 +1642,58 @@ fn a_room_made_after_a_take_back_has_nothing_to_unpublish_and_is_refused() {
             UnpublishTrigger::ReleaseTakenFromOrganization
         ))
     );
+    // A give-back later only records: nothing was taken after the room began.
+    assert_eq!(
+        apply_release_switch(applied, sw(true, 2, 1)),
+        SwitchApplied::Record
+    );
+    // A room that couldn't read the switch at creation, or read a malformed one, starts unset and fails closed: the
+    // take before it is then newer, so it unpublishes, which with nothing up deletes nothing and raises the epoch.
+    for unread in [None, Some(sw(false, 3, 0))] {
+        let start = ReleaseSwitch::start_for_room(unread);
+        assert_eq!(start, ReleaseSwitch::UNSET, "{unread:?}");
+        assert_eq!(apply_release_switch(start, taken), SwitchApplied::Unpublish);
+    }
+    let (after, delete) = unpublish(&serving(None, 1, 0));
+    assert!(delete.is_empty(), "nothing was up, so nothing is deleted");
+    assert_eq!(scripts(&after), [None]);
+    assert_eq!(
+        after.epoch, 1,
+        "the epoch still goes up, so nothing in flight goes live after it"
+    );
 }
 
 #[test]
-fn the_recheck_takes_the_newer_switch_and_an_unread_one_is_undecided() {
-    let applied = sw(false, 3);
+fn the_recheck_takes_the_newer_switch_and_an_unread_or_contradictory_one_is_undecided() {
+    let applied = sw(false, 3, 3);
     assert_eq!(release_switch_now(applied, None), None);
     assert_eq!(release_switch_now(ReleaseSwitch::UNSET, None), None);
     // A reply overtaken by a newer notice gives way to the notice.
     assert_eq!(
-        release_switch_now(applied, Some(sw(true, 2))),
+        release_switch_now(applied, Some(sw(true, 2, 1))),
         Some(applied)
     );
     assert_eq!(
-        release_switch_now(applied, Some(sw(true, 0))),
+        release_switch_now(applied, Some(ReleaseSwitch::UNSET)),
         Some(applied)
     );
+    assert_eq!(release_switch_now(applied, Some(applied)), Some(applied));
     assert_eq!(
-        release_switch_now(applied, Some(sw(false, 3))),
-        Some(sw(false, 3))
+        release_switch_now(applied, Some(sw(true, 4, 3))),
+        Some(sw(true, 4, 3))
     );
+    // The same generation, saying different things, can't both be the organization's: undecided, either way round.
+    assert_eq!(release_switch_now(applied, Some(sw(true, 3, 2))), None);
+    assert_eq!(release_switch_now(sw(true, 3, 2), Some(applied)), None);
     assert_eq!(
-        release_switch_now(applied, Some(sw(true, 4))),
-        Some(sw(true, 4))
+        release_switch_now(sw(true, 3, 1), Some(sw(true, 3, 2))),
+        None
     );
+    // A malformed answer, or a malformed applied switch, is undecided too.
+    assert_eq!(release_switch_now(applied, Some(sw(false, 4, 0))), None);
     assert_eq!(
-        release_switch_now(sw(true, 4), Some(sw(false, 5))),
-        Some(sw(false, 5))
+        release_switch_now(sw(false, 3, 0), Some(sw(true, 4, 3))),
+        None
     );
 }
 

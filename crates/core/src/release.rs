@@ -1029,69 +1029,117 @@ pub fn unpublish_triggers(facts: &RoomReleaseFacts) -> Vec<UnpublishTrigger> {
 /// it; taking it away unpublishes every room's app in the organization ([`UnpublishTrigger::ReleaseTakenFromOrganization`])
 /// and giving it back restores nothing. Every set raises the generation, whether it takes or gives, so the newer of two
 /// answers is always the one with the higher generation, and a late or repeated one can't act on a newer state.
+///
+/// **It carries the generation of the last take as well as the current one.** A room that missed a take, because the
+/// notice was late or never sent to it, and then hears a later give-back, must still come down: giving release back
+/// never restores what was served. So a room unpublishes whenever a take happened after the generation it last applied,
+/// whatever the current value says ([`apply_release_switch`]). *Added after the reviews of PR #344, where the first rule
+/// left such a room up, so the outcome depended on the order notices arrived in.*
+///
+/// Well formed ([`ReleaseSwitch::well_formed`]): while release is taken the last take is the current generation; while
+/// it is held the last take is earlier, or the switch is unset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReleaseSwitch {
     pub granted: bool,
     pub generation: u64,
+    /// The generation of the most recent take, or 0 if release was never taken from the organization.
+    pub last_take: u64,
 }
 
 impl ReleaseSwitch {
-    /// An organization nobody has set it for holds it, at generation 0. That is also where every room starts.
+    /// An organization nobody has set it for holds it, at generation 0, never taken.
     pub const UNSET: ReleaseSwitch = ReleaseSwitch {
         granted: true,
         generation: 0,
+        last_take: 0,
     };
 
+    /// Whether the switch's own fields agree, as only [`ReleaseSwitch::set`] from [`ReleaseSwitch::UNSET`] makes them:
+    /// taken means taken at this generation, which is above 0; held means the last take was before this generation, or
+    /// the switch is still unset.
+    pub fn well_formed(self) -> bool {
+        if self.granted {
+            self.last_take < self.generation || self == ReleaseSwitch::UNSET
+        } else {
+            self.generation > 0 && self.last_take == self.generation
+        }
+    }
+
     /// An operator's set, to `granted`. Setting it to what it already is raises the generation too, so asking again is
-    /// a new notice to every room and never silently nothing. `None` when the generation can't go up: the set is then
-    /// refused, loudly, rather than written at a generation no room would take as newer.
+    /// a new notice to every room and never silently nothing; a take, even a repeated one, is the new last take. `None`
+    /// when the generation can't go up: the set is then refused, loudly, rather than written at a generation no room
+    /// would take as newer.
     pub fn set(self, granted: bool) -> Option<ReleaseSwitch> {
+        let generation = self.generation.checked_add(1)?;
         Some(ReleaseSwitch {
             granted,
-            generation: self.generation.checked_add(1)?,
+            generation,
+            last_take: if granted { self.last_take } else { generation },
         })
+    }
+
+    /// What a new room starts from: the organization's switch as it read it while being made, so a take before the
+    /// room existed has nothing of this room's to unpublish, and a later give-back only records. A room that couldn't
+    /// read it, or read something malformed, starts from [`ReleaseSwitch::UNSET`] instead, which fails closed: any take
+    /// the organization ever made is then newer than what it applied, so its first answer unpublishes it, which for a
+    /// room with nothing up only raises its epoch. A room made before the switch existed starts there too.
+    pub fn start_for_room(read_at_creation: Option<ReleaseSwitch>) -> ReleaseSwitch {
+        read_at_creation
+            .filter(|s| s.well_formed())
+            .unwrap_or(ReleaseSwitch::UNSET)
     }
 }
 
 /// What a room does with an answer about its organization's release switch, whether a notice the organization's object
 /// sent or the room's own read of that object, at a release command or on the reconcile's walk. Both paths take this,
-/// so a room missing from the organization's list of rooms ends exactly where a notice would have put it.
+/// and the outcome depends only on the newest answer the room has had, not on which others arrived or in what order;
+/// so a room missing from the organization's list of rooms ends where the notices would have put it, once it reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SwitchApplied {
     /// Not newer than what the room last applied: a notice is acknowledged and nothing changes.
     Stale,
-    /// Newer, and release is held: the room records the generation and restores nothing.
+    /// Newer, and no take happened since what the room last applied: the room records the switch and restores nothing.
     Record,
-    /// Newer, and release was taken: the room records the generation and unpublishes ([`unpublish`]) with
-    /// [`UnpublishTrigger::ReleaseTakenFromOrganization`], in one transaction. A room with nothing up still does, so its
-    /// epoch goes up and nothing in flight can go live after it.
+    /// Newer, and a take happened since what the room last applied, whether or not release has been given back since:
+    /// the room records the switch and unpublishes ([`unpublish`]) with [`UnpublishTrigger::ReleaseTakenFromOrganization`],
+    /// in one transaction. A room with nothing up still does, so its epoch goes up and nothing in flight can go live
+    /// after it.
     Unpublish,
+    /// The answer isn't well formed: nothing changes and a notice is not acknowledged, so it is kept and logged by its
+    /// IDs, never dropped as if it had been applied.
+    Refused,
 }
 
 /// Decides [`SwitchApplied`] from what the room last applied and the answer it now has.
 pub fn apply_release_switch(applied: ReleaseSwitch, seen: ReleaseSwitch) -> SwitchApplied {
-    if seen.generation <= applied.generation {
+    if !seen.well_formed() {
+        SwitchApplied::Refused
+    } else if seen.generation <= applied.generation {
         SwitchApplied::Stale
-    } else if seen.granted {
-        SwitchApplied::Record
-    } else {
+    } else if seen.last_take > applied.generation {
         SwitchApplied::Unpublish
+    } else {
+        SwitchApplied::Record
     }
 }
 
 /// The switch as the recheck takes it: the newer of what the room last applied and what it just read. `None` when the
 /// read couldn't be made, which is undecided, never "taken" and never "held": the pass answers `standing_unknown`. A read
-/// older than what the room applied, a reply overtaken by a newer notice, gives way to what the room applied.
+/// older than what the room applied, a reply overtaken by a newer notice, gives way to what the room applied. Two
+/// answers at the same generation that disagree, or either one malformed, are undecided too: `None`.
 pub fn release_switch_now(
     applied: ReleaseSwitch,
     read: Option<ReleaseSwitch>,
 ) -> Option<ReleaseSwitch> {
-    let read = read?;
-    Some(if read.generation >= applied.generation {
-        read
-    } else {
-        applied
-    })
+    let read = read.filter(|r| r.well_formed())?;
+    if !applied.well_formed() {
+        return None;
+    }
+    match read.generation.cmp(&applied.generation) {
+        std::cmp::Ordering::Greater => Some(read),
+        std::cmp::Ordering::Less => Some(applied),
+        std::cmp::Ordering::Equal => (read == applied).then_some(read),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

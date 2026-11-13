@@ -12,6 +12,10 @@
 //   - `promisify` of a timer; any timer from `timers/promises`, imported by name, as a namespace or dynamically.
 //   - `scheduler.wait`; a call to a function named like a sleep (`sleep`, `delay`, `pause`, `wait`), including one
 //     imported under another name.
+//   - every call to a function in the same file that sleeps, or calls one that does, found where the call is: so a new
+//     test calling an allowed helper is a new finding. (One finding per line: two calls on one line are one.)
+//   - A timer inside `vi.waitFor`'s callback is still a sleep: `vi.waitFor` already polls, and a sleep inside each try
+//     only adds time. Write the try without it.
 // - margin: a wall-clock bound in an expectation that real time can use up. A clock reading is `Date.now()`,
 //   `performance.now()`, `new Date().getTime()` or `.valueOf()`, `+new Date()`, `Number(new Date())`, or a call through
 //   a name bound to `Date.now`. Inside `expect(...)` and its matcher's arguments, it reports:
@@ -19,17 +23,21 @@
 //   - a lower bound read now plus or minus a number (`toBeGreaterThan(Date.now() + 500)`);
 //   - an upper bound from an earlier reading plus a number (`toBeLessThan(before + 9_000)`);
 //   - an exact match on a reading read now plus a number;
+//   - a value minus a reading, compared with a number, written there or held by a const: `stamp - started <= 5 min +
+//     2 s` is an upper bound from an earlier reading, and `expires - Date.now() > 1 day` a lower bound read now;
 //   - the same bounds inside a comparison, or held by a name that is only ever asserted (`const soon = Date.now() +
 //     500`). A name that is also given to the code under test (`far`, set as a due time) holds a value the test set,
 //     and comparing with it is no margin.
 //   An upper bound read now and a lower bound read earlier only loosen with time, and pass.
 // - unquieted: an API spec that makes a room and has no `alarmQuiet` call inside an `afterEach`, an `afterAll` or a
 //   `finally`, so a room's alarm can reach a later test. Making a room is a call whose static strings say POST to a
-//   path ending `/v1/workspaces` (a literal, a template's fixed tail, or a constant), a `fetch` of that path with
+//   path ending `/v1/workspaces` (a literal, a template's fixed tail, a concatenation's last part, or a constant), a `fetch` of that path with
 //   `method: "POST"`, or a call to a function, in the file or in a helper file it imports, that does one of those.
 //   This is per file: it doesn't follow which rooms reach the quieting call.
 //
-// Besides the specs, it reads the helper files they import from their own folders (rules 1 and 2 only).
+// It reads every file under apps/api/test and apps/gateway/test, specs and the helpers and stand-ins beside them, whether a
+// spec imports them or not; rule 3 applies to the API's specs only. An imported helper file's sleeping and room-making
+// exports are followed into the specs that call them.
 //
 // How it reads TypeScript: esbuild (pinned in e2e/package.json, so a bump elsewhere can't change it) strips the types
 // with a source map. acorn parses what is left, as static-check.mjs does, and each finding is mapped back to its line.
@@ -37,10 +45,17 @@
 // name in another test is another name. Bindings are followed when simple: `const a = b`, never through an object, an
 // array, a parameter, a reassignment or another module's export.
 //
-// KNOWN GAPS, which it doesn't follow and doesn't pretend to:
-// - a timer passed as a value (`retry(fn, setTimeout)`), taken by destructuring (`const { setTimeout: t } =
-//   globalThis`), reached by a computed name that isn't a literal, or wrapped with `.bind`/`.call`;
-// - a sleep inside a package's code, or in a helper file outside the specs' folders;
+// KNOWN GAPS. It is a net, not a proof, and these pass it:
+// - a timer passed as an argument (`retry(fn, setTimeout)`), taken by destructuring (`const { setTimeout: t } =
+//   globalThis`), called with `.call`, `.apply` or `.bind`, reached by a computed name that isn't a literal, called as
+//   `(0, setTimeout)(...)`, or held in a `let` that is reassigned;
+// - a timer whose resolver is held outside it (`let done; const p = new Promise((r) => (done = r)); setTimeout(done,
+//   50); await p`): the timer isn't inside the Promise, and isn't awaited;
+// - a busy loop on the clock (`while (Date.now() < until) {}`), which waits without a timer;
+// - a margin checked with `if` and `throw`, or with `assert`, rather than `expect`;
+// - a sleep inside a package's code, or in a file outside the two test folders;
+// - a call to a helper that sleeps, made from another file, unless the helper is exported by name and imported by
+//   name;
 // - a clock read inside a helper function and returned to the test;
 // - a room made through a Durable Object's own routes (`stub.fetch("https://workspace/internal/...")`), through a
 //   `Request` object, or with the method or path computed at run time;
@@ -48,14 +63,16 @@
 //   test-timing-allow.json lists them under `known_gaps`.
 //
 // test-timing-allow.json lists the findings that stay. Each entry has its category (the file's header defines them),
-// its reason, `owed: true` where it is a debt rather than right, and `count`, how many findings it covers. It is
+// its reason, `owed: true` where it is a debt rather than right, and `count`, how many findings it covers. An entry
+// that isn't owed (a poll, or a stand-in's own failure bound) may say `calls_allowed: true`, which allows the calls to
+// the helper its sleep is in, and to helpers that call only such helpers. It is
 // reviewed like code, and the check keeps it honest: an entry matches by file, rule, `where` (the enclosing test's
 // title path, or the enclosing function's name) and the text of its line, and must match exactly `count` findings. So
 // a new copy of an allowed line fails, an entry can't be re-pointed at the same text in another test or function, and
 // an entry whose line changed or went away fails. An entry with no reason, no category or no `owed` fails. Every run
 // prints how many entries are owed.
 //
-// With no file named it checks apps/api/test/**/*.spec.ts and apps/gateway/test/**/*.spec.ts, and what they import.
+// With no file named it checks every file under apps/api/test and apps/gateway/test.
 // Exit 1 if anything is found that isn't allowed, or an entry doesn't match; 2 if esbuild isn't installed.
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -189,7 +206,7 @@ export async function analyze(source, { api = false, file = "spec.ts", path = nu
     }
     return titles.length ? titles.join(" > ") : named ? `function ${named}` : "(module)";
   };
-  const report = (node, rule, text) => found.push({ line: at(node.loc.start.line, node.loc.start.column), rule, text, where: where(node) });
+  const report = (node, rule, text) => found.push({ line: at(node.loc.start.line, node.loc.start.column), rule, text, where: where(node), fn: innermostName(node) });
 
   // What a name is given where it's declared: the nearest enclosing block, function or module that declares it.
   // `undefined` for a name declared nowhere in the file (a global), null for one that is but can't be followed.
@@ -298,6 +315,28 @@ export async function analyze(source, { api = false, file = "spec.ts", path = nu
     yield node;
     if (["BinaryExpression", "LogicalExpression", "UnaryExpression", "ConditionalExpression"].includes(node.type)) for (const child of children(node)) yield* compared(child);
   };
+  // A difference of a value and a reading, compared with a number: `stamp - started <= 5 min + 2 s` bounds the stamp by
+  // `started + 5 min + 2 s`, an upper bound from an earlier reading; `expires - Date.now() > 1 day` bounds it below by
+  // a reading taken now. Written in the expectation or held by a const.
+  const FLIP = { lower: "upper", upper: "lower", exact: "exact" };
+  const usedUpReading = (reading, side) => ((side === "lower" || side === "exact") && isNow(reading)) || (side === "upper" && earlier(reading) && !isNow(reading));
+  for (const node of every(tree)) {
+    if (node.type !== "CallExpression" || node.callee.type !== "Identifier" || node.callee.name !== "expect" || node.arguments.length < 1) continue;
+    let actual = node.arguments[0];
+    if (actual.type === "Identifier") actual = declared(actual) ?? actual;
+    if (actual.type !== "BinaryExpression" || actual.operator !== "-") continue;
+    const [p, q] = [actual.left, actual.right];
+    const reads = (n) => isNow(n) || earlier(n);
+    if (reads(p) === reads(q)) continue;
+    for (let up = node; up.parent?.type === "MemberExpression" && up.parent.object === up && up.parent.parent?.type === "CallExpression" && up.parent.parent.callee === up.parent; up = up.parent.parent) {
+      const side = SIDES[propertyName(up.parent)];
+      const bound = up.parent.parent.arguments[0];
+      if (!side || !bound || !numeric(bound)) continue;
+      // value - reading OP k: the value has the matcher's side; reading - value OP k: the value has the other.
+      if (reads(q) ? usedUpReading(q, side) : usedUpReading(p, FLIP[side])) report(node.arguments[0], "margin", "a value minus a clock reading, compared with a number: a bound that real time can use up");
+    }
+  }
+
   for (const [arg, side] of expectations) {
     for (const inner of compared(arg)) {
       if (difference(inner)) report(inner, "margin", "the difference of two clock readings in an expectation");
@@ -326,15 +365,32 @@ export async function analyze(source, { api = false, file = "spec.ts", path = nu
     else if (node.callee.type === "MemberExpression" && node.arguments.length && SLEEPY.test(propertyName(node.callee) ?? "")) what = `a call to ${propertyName(node.callee)}(), named like a sleep`;
     if (!what) continue;
     report(node, "sleep", what);
-    const fn = enclosingName(node);
+    const fn = innermostName(node);
     if (fn) sleeping.add(fn);
   }
+  // A function here that sleeps, or calls one that does, sleeps; every call to it is found where it is made, so a new
+  // test calling an allowed helper is a new finding. An entry for the helper's own sleep can allow its calls (a poll).
+  const localSleeper = (call) => call.type === "CallExpression" && call.callee.type === "Identifier" && sleeping.has(call.callee.name) && ["const", "function"].includes(declaration(call.callee)?.kind);
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const node of every(tree)) {
+      if (!localSleeper(node)) continue;
+      const fn = innermostName(node);
+      if (fn && !sleeping.has(fn)) {
+        sleeping.add(fn);
+        grew = true;
+      }
+    }
+  }
+  for (const node of every(tree)) if (localSleeper(node)) found.push({ line: at(node.loc.start.line, node.loc.start.column), rule: "sleep", text: `a call to ${node.callee.name}(), a helper here that sleeps`, where: where(node), fn: innermostName(node), via: node.callee.name });
 
   // Rule 3's room-making calls, and the functions here that make one.
   const staticString = (n) => {
     if (!n) return undefined;
     if (n.type === "Literal" && typeof n.value === "string") return n.value;
-    if (n.type === "TemplateLiteral") return n.quasis.at(-1).value.cooked;
+    if (n.type === "TemplateLiteral") return n.quasis.at(-1).value.cooked === "" && n.expressions.length ? staticString(n.expressions.at(-1)) : n.quasis.at(-1).value.cooked;
+    // A concatenation's fixed tail is what names the path: `BASE + "/v1/workspaces"`.
+    if (n.type === "BinaryExpression" && n.operator === "+") return staticString(n.right);
     if (n.type === "Identifier") return staticString(declared(n));
     return undefined;
   };
@@ -386,6 +442,15 @@ export async function analyze(source, { api = false, file = "spec.ts", path = nu
   };
 }
 
+/** The name of the nearest named function a node is in; null at the top. */
+function innermostName(node) {
+  for (let up = node.parent; up; up = up.parent) {
+    if (up.type === "FunctionDeclaration" && up.id) return up.id.name;
+    if (FUNCTIONS.has(up.type) && up.parent?.type === "VariableDeclarator" && up.parent.id.type === "Identifier") return up.parent.id.name;
+  }
+  return null;
+}
+
 /** The name of the outermost-named function a node is in, as another file would import it; null at the top. */
 function enclosingName(node) {
   let name = null;
@@ -414,7 +479,7 @@ function specs(dir) {
     const path = join(dir, name);
     if (name === "node_modules") continue;
     if (statSync(path).isDirectory()) out.push(...specs(path));
-    else if (name.endsWith(".spec.ts")) out.push(path);
+    else if (/\.(m?ts|m?js)$/.test(name)) out.push(path);
   }
   return out;
 }
@@ -462,10 +527,19 @@ export async function check(files) {
  */
 export function judge(all, allow, categories = null) {
   const matches = (entry, f) => entry.file === f.file && entry.rule === f.rule && entry.where === f.where && entry.code === f.code;
-  const allowed = all.filter((f) => allow.some((entry) => matches(entry, f)));
+  // A call to a helper here that sleeps is allowed by its own entry, or by the helper's entry when that says its calls
+  // are allowed, which only an entry that isn't owed (a poll) may say.
+  // Every sleep inside the helper must be allowed that way: by such an entry, or as a call to a helper that is.
+  const callsAllowed = (g) => allow.some((entry) => entry.calls_allowed === true && entry.owed === false && matches(entry, g));
+  const helperOk = (file, name, seen) => {
+    const inside = all.filter((g) => g.file === file && g.rule === "sleep" && g.fn === name);
+    return inside.length > 0 && inside.every((g) => callsAllowed(g) || (g.via && !seen.has(g.via) && helperOk(file, g.via, new Set([...seen, g.via]))));
+  };
+  const viaHelper = (f) => Boolean(f.via) && helperOk(f.file, f.via, new Set([f.via]));
+  const allowed = all.filter((f) => allow.some((entry) => matches(entry, f)) || viaHelper(f));
   const failing = all.filter((f) => !allowed.includes(f));
   const stale = allow.filter((entry) => all.filter((f) => matches(entry, f)).length !== (entry.count ?? 1));
-  const unreasoned = allow.filter((entry) => typeof entry.reason !== "string" || entry.reason.trim().length < 20 || typeof entry.owed !== "boolean" || typeof entry.where !== "string" || typeof entry.category !== "string" || (categories && !(entry.category in categories)));
+  const unreasoned = allow.filter((entry) => typeof entry.reason !== "string" || entry.reason.trim().length < 20 || typeof entry.owed !== "boolean" || typeof entry.where !== "string" || (entry.calls_allowed !== undefined && (entry.calls_allowed !== true || entry.owed !== false)) || typeof entry.category !== "string" || (categories && !(entry.category in categories)));
   return { allowed, failing, stale, unreasoned };
 }
 
@@ -480,7 +554,7 @@ async function selfTest() {
   const quiet = 'import { afterEach } from "vitest";\nimport { alarmQuiet } from "./alarm.ts";\nconst made: string[] = [];\nafterEach(async () => { for (const id of made.splice(0)) await alarmQuiet(stub(id)); });\n';
   // Rule 1, each form found, then the fixed form: wait for the thing itself.
   await expect("sleep: a timer wrapped in a Promise and awaited", 'it("x", async () => {\n  await go();\n  await new Promise((r) => setTimeout(r, 50));\n  expect(await seen()).toBe(true);\n});\n', ["3: sleep"]);
-  await expect("sleep: a helper whose body is a timer Promise is found where the timer is", "const waitForRun = (): Promise<void> => new Promise((done) => setTimeout(done, 700));\nawait waitForRun();\n", ["1: sleep"]);
+  await expect("sleep: a helper whose body is a timer Promise is found where the timer is", "const waitForRun = (): Promise<void> => new Promise((done) => setTimeout(done, 700));\nawait waitForRun();\n", ["1: sleep", "2: sleep"]);
   await expect("sleep: a poll with a timer between tries", "for (let i = 0; i < 100 && !(await ready()); i++) await new Promise<void>((next) => setTimeout(next, 2));\n", ["1: sleep"]);
   await expect("sleep: timers/promises, scheduler.wait and a helper named like a sleep", 'import { setTimeout as later } from "node:timers/promises";\nawait later(10);\nawait scheduler.wait(10);\nawait sleep(10);\nawait delay(5);\n', ["2: sleep", "3: sleep", "4: sleep", "5: sleep"]);
   await expect("sleep: globalThis.setTimeout and globalThis[\"setTimeout\"]", 'await new Promise((r) => globalThis.setTimeout(r, 50));\nawait new Promise((r) => globalThis["setTimeout"](r, 50));\nawait new Promise((r) => window.setInterval(r, 50));\n', ["1: sleep", "2: sleep", "3: sleep"]);
@@ -489,11 +563,16 @@ async function selfTest() {
   await expect("sleep: sleep imported under another name", 'import { sleep as nap2 } from "./helpers";\nimport { delay as soon } from "some-package";\nawait nap2(10);\nawait soon(10);\n', ["3: sleep", "4: sleep"]);
   await expect("sleep: timers/promises as a namespace, or imported dynamically", 'import * as timers from "node:timers/promises";\nawait timers.setTimeout(10);\nconst { setTimeout: later } = await import("timers/promises");\n', ["2: sleep", "3: sleep"]);
   await expect("sleep: promisify of a timer", 'import { promisify } from "node:util";\nconst later = promisify(setTimeout);\nconst also = util.promisify(globalThis.setTimeout);\n', ["2: sleep", "3: sleep"]);
+  await expect("sleep: every call to a helper here that sleeps is found where it is made (once per line), through helpers that call it", 'const waitForRun = () => new Promise((done) => setTimeout(done, 700));\nconst twice = async () => { await waitForRun(); await waitForRun(); };\nit("a", async () => { await waitForRun(); });\nit("b", async () => { await twice(); });\n', ["1: sleep", "2: sleep", "3: sleep", "4: sleep"]);
+  await expect("sleep: a timer inside vi.waitFor's callback is still a sleep: the poll needs none", "await vi.waitFor(async () => {\n  await new Promise((r) => setTimeout(r, 50));\n  expect(await seen()).toBe(true);\n});\n", ["2: sleep"]);
   await expect("sleep: the fixed form waits for the thing itself, and a timer that isn't a wait is fine", 'it("x", async () => {\n  const held = hold();\n  await go();\n  await held.arrived;\n  const timer = setTimeout(() => controller.abort(), 1000);\n  clearTimeout(timer);\n  await vi.waitFor(() => expect(seen()).toBe(true));\n});\n', []);
   await expect("sleep: a comment or a string that names a timer isn't one", '// await new Promise((r) => setTimeout(r, 50));\nconst text = "await sleep(100)";\nexpect(text).toContain("sleep");\n', []);
   // Rule 2.
   await expect("margin: the difference of two readings in an expectation", "const started = Date.now();\nawait go();\nexpect(Date.now() - started).toBeLessThan(1000);\n", ["3: margin"]);
   await expect("margin: a difference stored in a name, then asserted", "const start = Date.now();\nawait go();\nconst took = Date.now() - start;\nexpect(took).toBeLessThan(1000);\n", ["4: margin"]);
+  await expect("margin: a value minus an earlier reading under an upper bound, as in email-sign-in", "const started = Date.now();\nawait ask();\nexpect(new Date(row.expiresAt).getTime() - started).toBeLessThanOrEqual(5 * 60 * 1000 + 2000);\n", ["3: margin"]);
+  await expect("margin: a value minus a reading taken now over a lower bound, as in gateway, and held by a const", "expect(new Date(after).getTime() - Date.now()).toBeGreaterThan(24 * 60 * 60 * 1000);\nconst left = expiry - Date.now();\nexpect(left).toBeGreaterThan(1000);\n", ["1: margin", "3: margin"]);
+  await expect("margin: the safe directions of a difference pass: a value minus an earlier reading over a lower bound", "const started = Date.now();\nawait go();\nexpect(stamp - started).toBeGreaterThanOrEqual(60_000);\nexpect(stamp - Date.now()).toBeLessThanOrEqual(60_000);\n", []);
   await expect("margin: a reading plus a number in a matcher", "expect(row.next_at).toBeGreaterThan(Date.now() + 60_000);\n", ["1: margin"]);
   await expect("margin: now plus a margin stored in a name that is only asserted", "it(\"x\", async () => {\n  await go();\n  const soon = Date.now() + 500;\n  expect(row.at).toBeGreaterThan(soon);\n});\n", ["4: margin"]);
   await expect("margin: a value the test gives to the code under test is no margin", "it(\"x\", async () => {\n  const far = Date.now() + 3_600_000;\n  await setDue(far);\n  expect(await due()).toBe(far);\n  expect(await next()).toBeGreaterThan(far);\n});\n", []);
@@ -508,6 +587,7 @@ async function selfTest() {
   // Rule 3.
   await expect("unquieted: an API spec that makes rooms and never quiets one", 'it("a", async () => {\n  const id = (await api(OWNER, "POST", "/v1/workspaces", { name: "A" })).body.id;\n  await alarmQuiet(stub(id));\n});\n', ["2: unquieted"]);
   await expect("unquieted: through a local helper, a constant path, a template's tail, or fetch", 'const ROOMS = "/v1/workspaces";\nconst newRoom = async () => (await api(OWNER, "POST", ROOMS, {})).body.id;\nit("a", async () => { await newRoom(); });\n', ["2: unquieted"]);
+  await expect("unquieted: a path by concatenation with a constant", 'const BASE = "https://api.test";\nit("a", async () => {\n  await fetch(BASE + "/v1/workspaces", { method: "POST" });\n});\n', ["3: unquieted"]);
   await expect("unquieted: fetch with method POST", 'it("a", async () => {\n  await fetch(`${BASE}/v1/workspaces`, { method: "POST", body: "{}" });\n});\n', ["2: unquieted"]);
   await expect("unquieted: a helper imported from a helper file that makes rooms", 'import { room } from "./rooms.ts";\nit("a", async () => { await room(); });\n', ["2: unquieted"], { api: true, path: "/t/x.spec.ts", helpers: new Map([["/t/rooms.ts", { rooms: new Set(["room"]), sleepers: new Set() }]]) });
   await expect("unquieted: quieted in afterEach", `${quiet}it("a", async () => {\n  const id = (await api(OWNER, "POST", "/v1/workspaces", { name: "A" })).body.id;\n  made.push(id);\n});\n`, []);
@@ -536,6 +616,15 @@ async function selfTest() {
   allowCase("an entry with no owed, no where, no category, or one the header doesn't define, fails", [entry({ owed: undefined }), entry({ where: undefined }), entry({ category: undefined }), entry({ category: "Z" })], { allowed: 1, failing: 1, stale: 1, unreasoned: 4 });
   allowCase("a new copy of an allowed line fails: the entry covers exactly its count", [entry()], { allowed: 2, failing: 1, stale: 1, unreasoned: 0 }, [...all, { ...all[0], line: 5 }]);
   allowCase("an entry with count 2 covers two copies of a line", [entry({ count: 2 })], { allowed: 2, failing: 1, stale: 0, unreasoned: 0 }, [...all, { ...all[0], line: 5 }]);
+  all[0].fn = "poll";
+  const call = { file: "a.spec.ts", line: 12, rule: "sleep", where: "t2", fn: null, code: "await poll();", via: "poll" };
+  const outer = { file: "a.spec.ts", line: 20, rule: "sleep", where: "function room", fn: "room", code: "await poll();", via: "poll" };
+  const callOuter = { file: "a.spec.ts", line: 30, rule: "sleep", where: "t3", fn: null, code: "await room();", via: "room" };
+  allowCase("calls are allowed through a helper that calls an allowed poll, and through it alone", [entry({ calls_allowed: true })], { allowed: 4, failing: 1, stale: 0, unreasoned: 0 }, [...all, call, outer, callOuter]);
+  allowCase("a helper with another sleep besides the allowed poll doesn't pass its calls", [entry({ calls_allowed: true })], { allowed: 3, failing: 3, stale: 0, unreasoned: 0 }, [...all, call, outer, callOuter, { file: "a.spec.ts", line: 21, rule: "sleep", where: "function room", fn: "room", code: "await nap(5);" }]);
+  allowCase("a call to a helper that sleeps is allowed by the helper's entry only when it says calls_allowed and isn't owed", [entry({ calls_allowed: true })], { allowed: 2, failing: 1, stale: 0, unreasoned: 0 }, [...all, call]);
+  allowCase("an owed helper's entry can't allow its calls: each call is listed or fails", [entry({ owed: true, calls_allowed: true })], { allowed: 1, failing: 2, stale: 0, unreasoned: 1 }, [...all, call]);
+  allowCase("without calls_allowed, a new call to an allowed helper fails", [entry()], { allowed: 1, failing: 2, stale: 0, unreasoned: 0 }, [...all, call]);
   allowCase("an entry can't be re-pointed: the allowed poll gone, the same text in a test fails", [entry()], { allowed: 0, failing: 2, stale: 1, unreasoned: 0 }, [{ ...all[0], where: "rooms > waits" }, all[1]]);
   console.log(failed ? `\n${failed} failed` : "\ntest-timing-check self-test: all passed");
   return failed ? 1 : 0;
@@ -565,7 +654,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const owed = allow.filter((entry) => entry.owed);
   const owedFindings = owed.reduce((n, entry) => n + (entry.count ?? 1), 0);
   const scanned = new Set(all.map((f) => f.file)).size;
-  console.log(`\n${files.length} specs and the helpers they import (${scanned} files with findings); ${all.length} found, ${allowed.length} allowed by test-timing-allow.json: OWED ${owed.length} of its ${allow.length} entries, covering ${owedFindings} findings`);
+  console.log(`\n${files.length} files under the test folders (${scanned} with findings); ${all.length} found, ${allowed.length} allowed by test-timing-allow.json: OWED ${owed.length} of its ${allow.length} entries, covering ${owedFindings} findings`);
   if (failing.length || stale.length || unreasoned.length) process.exit(1);
   console.log("test-timing-check: passed");
 }

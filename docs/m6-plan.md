@@ -660,6 +660,14 @@ The architect proposes the gate call, for the owner to review.
 
 > **2026-11-13: the owner has said an app is a real Worker, code included** ([decision 219](spec/PRODUCT.md#decisions-needed)). What that changes in this order, in what is built and in what must be true before `RELEASES` is on, is proposed in [ADR 0010's proposed revision](adr/0010-revision-apps-are-workers.md), which is not accepted. The order below stands as written until it is. The room's half of step 5 doesn't depend on what an app contains.
 
+> **2026-11-13: step 5's remaining pieces, the tree read and the upload, are held** until that proposal is accepted, since what a release contains is what is changing.
+>
+> **Owed by the next PR that touches the room's release commands or takedown, from the review of step 5's second PR:**
+>
+> - **The three held-window tests use the real clock.** Each holds a commit between its outside reads and its confirm while a fact is changed in another object, so each rests on that change finishing inside the 5-second bound on the reads' age. Under load they fail; they don't pass falsely. Give them the passed-in clock.
+> - **A release bookkeeping failure after a suspension is seen only as a log line by its code.** It is retried on every alarm, release command and reconcile question, and that room's release commands answer an error meanwhile. **Write a takedown finding for a bookkeeping failure that persists,** as a failing script delete has one.
+> - **An unpublish can be marked done with its files while one remains.** An `uploading` release's script isn't queued until the bookkeeping runs after the unpublish. If the delete job finishes the unpublish's own scripts first, `scripts_gone_at` is set while that unserved script still exists, until the later pass queues it and resets the mark. **Don't mark an unpublish's scripts gone while a release that started under an earlier epoch still has a script that isn't queued.**
+
 **Proposed.** Each step is one PR unless it says otherwise. Steps 2 onward wait for step 1's ADR and spikes.
 
 **After the spikes, 2026-11-12: no step moves.** Three gain something, each from [the ADR's revision](adr/0010-release-and-the-content-domain.md#what-the-spikes-changed):

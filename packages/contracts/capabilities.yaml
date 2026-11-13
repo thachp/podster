@@ -94,6 +94,7 @@ person_only:
   - liftAppHostSuspension
   - stopContentDomain
   - resumeContentDomain
+  - listTakedownFindings
   - listRepositoryGrants
   - grantRepositoryAction
   - revokeRepositoryGrant

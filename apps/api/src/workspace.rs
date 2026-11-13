@@ -99,7 +99,9 @@ pub(crate) use merges::INTERNAL_REPOSITORY_RECHECK;
 pub(crate) use moderation::INTERNAL_SUSPENSION;
 pub(crate) use public::{INTERNAL_EXPLORE_ENTRY, INTERNAL_PUBLIC_PAGE};
 pub(crate) use public_claims::{INTERNAL_PUBLIC_CLAIM, INTERNAL_PUBLIC_CLAIM_STATUS};
-pub(crate) use takedown::{INTERNAL_APP_SUSPENSION, INTERNAL_HOSTNAME_NOTICE};
+pub(crate) use takedown::{
+    INTERNAL_APP_SUSPENSION, INTERNAL_HOSTNAME_NOTICE, INTERNAL_TAKEDOWN_CHECK,
+};
 pub(crate) use visibility::public_rooms_enabled;
 
 /// The room's own answer to whether managed repositories are switched on for it, for routes the Worker answers outside
@@ -4120,6 +4122,9 @@ impl Workspace {
         }
         if req.path() == takedown::INTERNAL_HOSTNAME_NOTICE {
             return self.hostname_notice(req).await;
+        }
+        if req.path() == takedown::INTERNAL_TAKEDOWN_CHECK {
+            return self.takedown_check(req).await;
         }
         #[cfg(feature = "failpoints")]
         if req.path() == INTERNAL_MANAGED_SWITCH {

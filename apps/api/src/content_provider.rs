@@ -18,6 +18,12 @@
 //!   only on `200` with `"success": true`, and as absent only on `404` with code `10009`, so a wrong assumption leaves
 //!   the applier retrying, which shows, and never lets it record a removal that didn't happen.
 //!
+//! - **The two lists, for the reconciles** (third PR). The namespace's scripts, with the scripts token: one `GET`, as
+//!   spike A saw it, an array of objects of which only `id` is trusted. **How it pages wasn't seen,** so anything in
+//!   the answer that hints at more makes the list incomplete, and the caller is told. The serve entries' keys, with
+//!   the routing token: Cloudflare's documented KV list, a page at a time with a cursor. **No spike has run it,** and
+//!   spike G must confirm it. Both are strict: an answer that isn't exactly the expected shape is no list at all.
+//!
 //! A client never names an account, a namespace, a script or a host here: all come from configuration or from the
 //! room's own state, and each name is checked against its form before it goes into a path. Logs carry nothing from
 //! this module: no host, no script, no ID of the account or the namespaces, and no token.
@@ -44,6 +50,44 @@ const KV_NAMESPACE: &str = "CONTENT_KV_NAMESPACE_ID";
 const DOMAIN: &str = "CONTENT_DOMAIN";
 const SCRIPTS_TOKEN: &str = "CONTENT_SCRIPTS_TOKEN";
 const ROUTING_TOKEN: &str = "CONTENT_ROUTING_TOKEN";
+
+/// No list this module reads is longer. A longer one is no list: the reconcile says so and tries again later.
+const MAX_LIST_BYTES: usize = 1024 * 1024;
+/// Serve-entry keys asked for in one page.
+pub(crate) const KEY_PAGE: usize = 50;
+
+/// One page of the serve entries' keys, as the provider named them: hosts, the stop key, and anything else that is
+/// there. Nothing about a key is trusted but its name.
+pub(crate) struct KeyPage {
+    pub(crate) keys: Vec<String>,
+    /// Where the next page starts, or `None` at the end of the list.
+    pub(crate) cursor: Option<String>,
+}
+
+/// The dispatch namespace's scripts, by name. Nothing else in the provider's list is trusted.
+pub(crate) struct ScriptList {
+    pub(crate) ids: Vec<String>,
+    /// `false` when anything in the answer hinted at more than it held. How the list pages was never seen.
+    pub(crate) complete: bool,
+}
+
+/// A cursor as it goes back into a query: printable ASCII, and not long. Anything else is no cursor.
+fn cursor_form(cursor: &str) -> bool {
+    (1..=2048).contains(&cursor.len()) && cursor.bytes().all(|b| b.is_ascii_graphic())
+}
+
+/// Percent-encodes everything but letters, digits, `-`, `_`, `.` and `~`.
+fn escaped(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
 /// A configured provider. Its fields never leave this module, except the content domain's name.
 pub(crate) struct Provider {
     account: String,
@@ -57,7 +101,7 @@ pub(crate) struct Provider {
 /// The key that stops the whole content domain, in the same KV namespace as the serve entries. A host is lower-case
 /// letters, digits, `-` and `.`, so no host can ever be this key. **Proposed here, for step 4(b):** the content
 /// Worker refuses every host while the key is there, and when it can't read it.
-const STOP_KEY: &str = "_stop";
+pub(crate) const STOP_KEY: &str = "_stop";
 /// What the key holds while the domain is stopped. Its presence is the stop; the value says nothing more.
 const STOP_VALUE: &str = "stopped";
 
@@ -169,6 +213,17 @@ impl Answer {
 /// One call. `None` when there was no answer to read: unreachable, timed out, or longer than any answer this module
 /// expects. A redirect is never followed.
 async fn call(method: Method, url: String, bearer: &str, body: Option<String>) -> Option<Answer> {
+    call_bounded(method, url, bearer, body, MAX_ANSWER_BYTES).await
+}
+
+/// The same call, for an answer that may be as long as `max`: a list.
+async fn call_bounded(
+    method: Method,
+    url: String,
+    bearer: &str,
+    body: Option<String>,
+    max: usize,
+) -> Option<Answer> {
     let controller = AbortController::default();
     let signal = controller.signal();
     let bearer = bearer.to_owned();
@@ -190,7 +245,7 @@ async fn call(method: Method, url: String, bearer: &str, body: Option<String>) -
             .send_with_signal(&signal)
             .await?;
         let status = response.status_code();
-        let body = crate::github::bounded_body(&mut response, MAX_ANSWER_BYTES).await?;
+        let body = crate::github::bounded_body(&mut response, max).await?;
         Ok::<_, Error>(body.map(|body| Answer { status, body }))
     };
     let timeout = Delay::from(Duration::from_millis(CALL_TIMEOUT_MS));
@@ -266,6 +321,70 @@ impl Provider {
             404 if answer.first_code() == Some(KV_KEY_NOT_FOUND) => StopKey::Absent,
             _ => StopKey::Unknown,
         }
+    }
+
+    /// One page of the serve entries' keys. `None` when there was no answer, or one that isn't exactly a page.
+    pub(crate) async fn list_entries(&self, cursor: Option<&str>) -> Option<KeyPage> {
+        let mut url = format!(
+            "{API}/accounts/{}/storage/kv/namespaces/{}/keys?limit={KEY_PAGE}",
+            self.account, self.kv_namespace
+        );
+        if let Some(cursor) = cursor {
+            if !cursor_form(cursor) {
+                return None;
+            }
+            url.push_str("&cursor=");
+            url.push_str(&escaped(cursor));
+        }
+        let answer =
+            call_bounded(Method::Get, url, &self.routing_token, None, MAX_LIST_BYTES).await?;
+        let body = answer.json();
+        if answer.status != 200 || body["success"] != true {
+            return None;
+        }
+        let keys = body["result"]
+            .as_array()?
+            .iter()
+            .map(|key| key["name"].as_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>()?;
+        let cursor = match &body["result_info"]["cursor"] {
+            Value::Null => None,
+            Value::String(next) if next.is_empty() => None,
+            Value::String(next) if cursor_form(next) => Some(next.clone()),
+            _ => return None,
+        };
+        Some(KeyPage { keys, cursor })
+    }
+
+    /// The namespace's scripts. `None` when there was no answer, or one that isn't exactly a list.
+    pub(crate) async fn list_scripts(&self) -> Option<ScriptList> {
+        let url = format!(
+            "{API}/accounts/{}/workers/dispatch/namespaces/{}/scripts",
+            self.account, self.namespace
+        );
+        let answer =
+            call_bounded(Method::Get, url, &self.scripts_token, None, MAX_LIST_BYTES).await?;
+        let body = answer.json();
+        if answer.status != 200 || body["success"] != true {
+            return None;
+        }
+        let ids = body["result"]
+            .as_array()?
+            .iter()
+            .map(|script| script["id"].as_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>()?;
+        // Spike A saw the whole list in one answer and never more than five scripts. Anything here that says there
+        // is more than this answer holds makes the list incomplete, which the caller reports and never acts past.
+        let info = &body["result_info"];
+        let more = info["cursor"].as_str().is_some_and(|next| !next.is_empty())
+            || info["total_count"]
+                .as_u64()
+                .is_some_and(|total| total > ids.len() as u64)
+            || info["total_pages"].as_u64().is_some_and(|pages| pages > 1);
+        Some(ScriptList {
+            ids,
+            complete: !more,
+        })
     }
 
     fn script_url(&self, name: &str) -> Option<String> {

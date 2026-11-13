@@ -40,8 +40,9 @@ use crate::content_provider::{Entry, Provider};
 use crate::content_stop::{self, Stop};
 use podster_core::hostname_requests::HostnameRequestState;
 use podster_core::release::{
-    clear_host, next_state, script_gone, script_owner, unpublish, CommitMark, DesiredServe,
-    InFlight, ReleaseEvent, ReleaseState, ScriptAnswer, ScriptOwner, ServeState, UnpublishTrigger,
+    clear_host, next_state, reconcile_script, script_gone, script_owner, unpublish, CommitMark,
+    DesiredServe, InFlight, ReleaseEvent, ReleaseState, RoomClaim, ScriptAnswer, ScriptOwner,
+    ScriptReconcile, ServeState, UnpublishTrigger,
 };
 
 /// The Worker's call, for a verified operator. Nothing outside the Worker reaches it.
@@ -50,6 +51,21 @@ pub(crate) const INTERNAL_APP_SUSPENSION: &str = "/internal/app-suspension";
 /// The hostname's claim object's call: the name was suspended while this room held it. Nothing outside the Worker
 /// reaches it.
 pub(crate) const INTERNAL_HOSTNAME_NOTICE: &str = "/internal/hostname-notice";
+
+/// The reconcile's call (third PR): one question about one entry or one script, or only a wake. Nothing outside the
+/// Worker reaches it.
+pub(crate) const INTERNAL_TAKEDOWN_CHECK: &str = "/internal/takedown-check";
+
+/// A script's delete is told to operators once it has failed this many times: with the waits, over half an hour.
+const DELETE_REPORT_AFTER: i64 = 12;
+/// Findings one answer carries. A room has two hosts at most and a handful of scripts.
+const FINDINGS: i64 = 8;
+/// The refusals that mean a host isn't this room's to touch at all. The room can do nothing about such an entry.
+const NOT_THIS_ROOMS: [&str; 3] = [
+    "host_not_a_default_host",
+    "host_not_this_rooms",
+    "custom_host_on_content_domain",
+];
 
 /// The highest epoch or version the room stores. SQLite holds 64-bit integers, but they cross to Rust as JavaScript
 /// numbers, which are exact only to 2^53 - 1. Core's own ceiling is `u64::MAX`, the state it never moves from. So
@@ -462,6 +478,154 @@ pub(super) fn hostname_suspended(sql: &SqlStorage, body: &Value, now: i64) -> R<
         )?;
     }
     Ok(json!({ "known": true, "acted": acted }))
+}
+
+/// What the room has to tell operators, read from its own rows: each host the applier refused at the version it has
+/// now, and each script whose delete keeps failing. The reconcile carries these to the operators' record.
+fn findings(sql: &SqlStorage) -> R<Vec<Value>> {
+    let mut found: Vec<Value> = rows(
+        sql,
+        "SELECT s.host AS subject, a.last_code AS detail FROM serve_state s JOIN serve_apply a ON a.host = s.host
+           WHERE a.refused_version = s.version ORDER BY s.host LIMIT ?",
+        vec![FINDINGS.into()],
+    )?
+    .iter()
+    .map(|row| json!({ "code": "host_refused", "subject": row["subject"], "detail": row["detail"] }))
+    .collect();
+    found.extend(
+        rows(
+            sql,
+            "SELECT script_name AS subject, last_code AS detail FROM script_delete WHERE gone_at IS NULL AND attempts >= ?
+               ORDER BY script_name LIMIT ?",
+            vec![DELETE_REPORT_AFTER.into(), FINDINGS.into()],
+        )?
+        .iter()
+        .map(|row| json!({ "code": "script_delete_failing", "subject": row["subject"], "detail": row["detail"] })),
+    );
+    Ok(found)
+}
+
+/// The 5-minute reconcile found an entry for `host` naming `found`, or one it couldn't read (`None`). `(known,
+/// changed)`: whether the host is this room's to answer for, and whether the room now owes it a new pass.
+///
+/// **The reconcile never writes or removes an entry.** Where what is there differs from what the room wants, the room
+/// forgets that it applied the host, so its own applier, still the only writer, does it again.
+fn check_entry(sql: &SqlStorage, host: &str, found: Option<&str>, now: i64) -> R<(bool, bool)> {
+    let row = rows(
+        sql,
+        "SELECT s.script_name, s.version, a.applied_version, a.refused_version, a.last_code FROM serve_state s
+           LEFT JOIN serve_apply a ON a.host = s.host WHERE s.host = ?",
+        vec![host.into()],
+    )?;
+    let Some(row) = row.first() else {
+        return Ok((false, false));
+    };
+    let version = int(&row["version"]);
+    let at = |value: &Value| !value.is_null() && int(value) == version;
+    let (is_applied, is_refused) = (at(&row["applied_version"]), at(&row["refused_version"]));
+    if is_refused
+        && row["last_code"]
+            .as_str()
+            .is_some_and(|code| NOT_THIS_ROOMS.contains(&code))
+    {
+        // The room has a row for it and may not touch it. To the reconcile that is an entry with no room.
+        return Ok((false, false));
+    }
+    if !is_applied && !is_refused {
+        // Already owed: the applier will make it right, and this changes nothing.
+        return Ok((true, false));
+    }
+    if is_applied && found == row["script_name"].as_str() {
+        return Ok((true, false));
+    }
+    exec(
+        sql,
+        "UPDATE serve_apply SET applied_version = NULL, applied_script = NULL, applied_at = NULL, refused_version = NULL, attempts = 0,
+           attempt_version = NULL, next_attempt_at = NULL, last_code = 'reconcile_differs', updated_at = ? WHERE host = ?",
+        vec![now.into(), host.into()],
+    )?;
+    Ok((true, true))
+}
+
+/// The hourly reconcile found `script` in the namespace. `(known, changed)`: whether its label is this room's, and
+/// whether the room queued it for deletion just now. `podster_core::release::reconcile_script` decides, from what the
+/// room's own state says of it: named by a host, the kept script or a commit in flight, it is kept; uploading within
+/// its hour, it is kept; anything else no row claims, an `uncertain` release's among them, is deleted, by the room's
+/// own delete job.
+fn check_script(sql: &SqlStorage, script: &str, now: i64) -> R<(bool, bool)> {
+    let ScriptOwner::Podster { label, release_id } = script_owner(script) else {
+        return Ok((false, false));
+    };
+    if !own_label(sql, label)? {
+        return Ok((false, false));
+    }
+    let named = !rows(
+        sql,
+        "SELECT 1 AS named FROM serve_state WHERE script_name = ?1 OR flight_before = ?1
+           UNION ALL SELECT 1 FROM release_config WHERE kept_previous = ?1 OR in_flight_script = ?1",
+        vec![script.into()],
+    )?
+    .is_empty();
+    let claim = if named {
+        RoomClaim::Claims
+    } else {
+        rows(
+            sql,
+            "SELECT coalesce(upload_started_at, updated_at) AS since FROM release WHERE id = ? AND state = ?",
+            vec![release_id.into(), ReleaseState::Uploading.name().into()],
+        )?
+        .first()
+        .map_or(RoomClaim::Disowns, |row| RoomClaim::Uploading {
+            since: int(&row["since"]),
+        })
+    };
+    if reconcile_script(script, claim, now) != ScriptReconcile::Delete {
+        return Ok((true, false));
+    }
+    let queued = !rows(
+        sql,
+        "SELECT 1 AS queued FROM script_delete WHERE script_name = ? AND gone_at IS NULL",
+        vec![script.into()],
+    )?
+    .is_empty();
+    if queued {
+        return Ok((true, false));
+    }
+    // Queued under no unpublish: nothing in the room's state named it. One the room had counted as gone is there
+    // after all, so it is owed again.
+    exec(
+        sql,
+        "INSERT INTO script_delete (script_name, label, unpublish_epoch, queued_at, next_attempt_at) VALUES (?, ?, NULL, ?, ?)
+           ON CONFLICT (script_name) DO UPDATE SET gone_at = NULL, next_attempt_at = excluded.next_attempt_at, last_code = 'reconcile_found'",
+        vec![script.into(), label.into(), now.into(), now.into()],
+    )?;
+    Ok((true, true))
+}
+
+/// `{ kind: "wake" }`, `{ kind: "entry", host, found }` or `{ kind: "script", script }`: the reconcile's one question,
+/// inside the caller's transaction. Answers `{ known, changed, findings }`. The caller arms the room's alarm after it,
+/// whatever was asked, which is also what corrects a wake that was lost.
+pub(super) fn check(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
+    let (known, changed) = match body["kind"].as_str() {
+        Some("wake") => (true, false),
+        Some("entry") => check_entry(
+            sql,
+            body["host"]
+                .as_str()
+                .ok_or_else(ApiError::invalid_argument)?,
+            body["found"].as_str(),
+            now,
+        )?,
+        Some("script") => check_script(
+            sql,
+            body["script"]
+                .as_str()
+                .ok_or_else(ApiError::invalid_argument)?,
+            now,
+        )?,
+        _ => return Err(ApiError::invalid_argument()),
+    };
+    Ok(json!({ "known": known, "changed": changed, "findings": findings(sql)? }))
 }
 
 /// The provider this room may use, or `None`. Test builds also read a table a test makes in one room,
@@ -897,6 +1061,28 @@ pub(super) async fn upkeep(state: &State, env: &Env) -> R<()> {
 }
 
 impl Workspace {
+    /// The reconcile asks the room about one entry or one script, or only wakes it (M6 step 4(a), third PR). The
+    /// alarm is armed whatever the answer: a room that owes work and lost its wake gets it back here.
+    pub(super) async fn takedown_check(&self, mut req: Request) -> R<Value> {
+        let sql = self.state.storage().sql();
+        if !store::is_initialized(&sql)? {
+            return Ok(json!({ "known": false, "changed": false, "findings": [] }));
+        }
+        self.migrate_if_needed()?;
+        let body: Value =
+            serde_json::from_str(&req.text().await?).map_err(|_| ApiError::invalid_argument())?;
+        let out: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+        let slot = out.clone();
+        let store = sql.clone();
+        transaction_sync(&self.state, move || {
+            *slot.borrow_mut() = Some(check(&store, &body, now_ms())?);
+            Ok(())
+        })?;
+        self.arm(false, false).await?;
+        let answer = out.borrow_mut().take();
+        answer.ok_or_else(|| ApiError::internal("takedown check answered nothing"))
+    }
+
     /// The hostname's claim object tells the room its custom hostname was suspended (M6 step 4(a)). The applier is
     /// woken by the alarm this arms.
     pub(super) async fn hostname_notice(&self, mut req: Request) -> R<Value> {

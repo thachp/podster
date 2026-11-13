@@ -118,6 +118,11 @@ const FIRST_WAIT_MS: i64 = 5_000;
 const LONGEST_WAIT_MS: i64 = 5 * 60 * 1000;
 /// Notices sent in one alarm. A name has one room at most, so one notice at a time in practice.
 const BATCH: i64 = 8;
+/// A notice is told to operators once it has gone unanswered this many times: with the waits, over half an hour. It
+/// is told again on each try after that, so the telling itself needs no retry of its own.
+const NOTICE_REPORT_AFTER: i64 = 12;
+/// The reconcile's call: wakes the object, and answers what it holds. Nothing outside the Worker reaches it.
+pub(crate) const INTERNAL_WAKE: &str = "/internal/wake";
 
 fn wait_ms(attempts: i64) -> i64 {
     FIRST_WAIT_MS
@@ -396,6 +401,26 @@ impl HostnameClaim {
                         int(&notice["seq"]).into(),
                     ],
                 )?;
+                if int(&notice["attempts"]) + 1 >= NOTICE_REPORT_AFTER {
+                    // The room hasn't answered for over half an hour: it can't be reached, or it refuses, as a room
+                    // whose only host is this one must. The name may still be served. An operator is told, in the
+                    // operators' own record, which is state and no log. If the telling fails, the next try tells again.
+                    let finding =
+                        json!({ "code": "hostname_notice_unanswered", "subject": hostname });
+                    let told = crate::moderation::call(
+                        &self.env,
+                        crate::reconcile::FINDING_PATH,
+                        Method::Post,
+                        Some(finding),
+                    )
+                    .await
+                    .is_ok_and(|response| response.status_code() == 200);
+                    if !told {
+                        console_error!(
+                            "hostname claim: operators weren't told of an unanswered notice: code=finding_not_kept"
+                        );
+                    }
+                }
             }
         }
         Ok(())
@@ -406,6 +431,13 @@ impl HostnameClaim {
         let url = req.url()?;
         match (req.method(), url.path()) {
             (Method::Get, "/internal/state") => read(&sql),
+            // The reconcile found an entry for this name. It is told what the object holds, and the object's alarm is
+            // set if a notice is owed, which corrects a wake that was lost. For a name nobody asked about, nothing
+            // is owed and nothing is written.
+            (Method::Post, INTERNAL_WAKE) => {
+                self.arm().await?;
+                read(&sql)
+            }
             (Method::Post, INTERNAL_SUSPENSION) => {
                 let body: Value = serde_json::from_str(&req.text().await?)
                     .map_err(|_| ApiError::invalid_argument())?;

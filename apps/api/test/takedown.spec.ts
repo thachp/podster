@@ -1,4 +1,6 @@
-import { env, runInDurableObject, SELF } from "cloudflare:test";
+import { createExecutionContext, createScheduledController, env, runInDurableObject, SELF, waitOnExecutionContext } from "cloudflare:test";
+// The Worker's own entry, as it is built: the scheduled handler is called on it directly, since no schedule calls it.
+import ApiWorker from "../build/index.js";
 import { importJWK, SignJWT } from "jose";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { alarmPass, alarmQuiet, nextAlarm } from "./alarm";
@@ -128,6 +130,29 @@ const liftHost = (host: string, who: Who = OPERATOR, reason = "other") => api(wh
 let hostnames = 0;
 /** A custom hostname no other test has used. */
 const newHostname = () => `h${(++hostnames).toString(36)}${crypto.randomUUID().slice(0, 8)}.example.org`;
+
+// The two reconciles (third PR). A pass runs in the Moderation object: a test calls the object's own path and reads
+// the pass's summary, or calls the Worker's scheduled handler, which no environment's schedule ever does.
+const ENTRIES_CRON = "*/5 * * * *";
+const SCRIPTS_CRON = "0 * * * *";
+const reconcile = async (which: "entries" | "scripts") => (await (await moderation().fetch(`https://do/reconcile/${which}`, { method: "POST" })).json()) as any;
+async function scheduled(cron: string) {
+  const ctx = createExecutionContext();
+  await new (ApiWorker as any)(ctx, env).scheduled(createScheduledController({ cron, scheduledTime: new Date() }));
+  await waitOnExecutionContext(ctx);
+}
+const findings = async () => ((await switchedOn(() => api(OPERATOR, "GET", "/v1/moderation/takedown-findings"))).body.findings as { code: string; subject: string; detail: string | null; seen: number }[]);
+const found = async () => (await findings()).map((finding) => `${finding.code} ${finding.subject}${finding.detail ? ` ${finding.detail}` : ""}`).sort();
+/**
+ * A pass starts from nothing: no room in the lookup table but the ones this test makes after it, no finding kept, and
+ * each pass at the start of its list. So no room of an earlier test is woken, and what a test reads is its own.
+ */
+async function fresh() {
+  await BINDINGS.DB.prepare("DELETE FROM app_label_index").run();
+  await moderation().fetch("https://do/takedown-findings");
+  await inModeration((sql) => { sql.exec("DELETE FROM takedown_finding"); sql.exec("DELETE FROM reconcile_pass"); });
+}
+const listCalls = async (op: string) => (await held()).calls.filter((call) => call.op === op).length;
 
 const suspend = (label: string, who: Who = OPERATOR, reason = "abuse") => api(who, "POST", `/v1/moderation/apps/${label}/suspend`, { reason });
 const lift = (label: string, who: Who = OPERATOR, reason = "other") => api(who, "POST", `/v1/moderation/apps/${label}/lift`, { reason });
@@ -853,10 +878,12 @@ describe("the stop for the whole content domain", () => {
       expect((await stopRow())?.stopped ?? 0).toBe(0);
 
       const stopped = await stopDomain();
-      expect([stopped.status, stopped.body]).toEqual([200, { stopped: true, reason: "illegal", at: expect.any(Number) }]);
+      // The key at the provider isn't confirmed yet: that is the object's alarm's to do, after this answer.
+      expect([stopped.status, stopped.body]).toEqual([200, { stopped: true, reason: "illegal", at: expect.any(Number), key_confirmed: false }]);
       const version = (await stopRow()).version;
-      // Asking again changes nothing, not the reason and not the version.
-      expect((await stopDomain(OPERATOR, "spam")).body).toEqual(stopped.body);
+      // Asking again changes nothing, not the reason and not the version. Whether the key is confirmed by then is the
+      // alarm's own time, which the reconcile's tests show.
+      expect((await stopDomain(OPERATOR, "spam")).body).toMatchObject({ stopped: true, reason: "illegal", at: stopped.body.at });
       expect(await stopRow()).toMatchObject({ stopped: 1, reason: "illegal", version });
       // The object writes one key at the provider, reads it back, and records it.
       await settle(moderation());
@@ -865,8 +892,8 @@ describe("the stop for the whole content domain", () => {
       expect((await stopCalls()).slice(0, 2)).toEqual(["entry.put 200", "entry.get 200"]);
 
       const resumed = await resumeDomain();
-      expect([resumed.status, resumed.body]).toEqual([200, { stopped: false, reason: null, at: null }]);
-      expect((await resumeDomain()).body).toEqual(resumed.body);
+      expect([resumed.status, resumed.body]).toEqual([200, { stopped: false, reason: null, at: null, key_confirmed: false }]);
+      expect((await resumeDomain()).body).toMatchObject({ stopped: false, reason: null, at: null });
       await settle(moderation());
       expect((await held()).entries._stop).toBeUndefined();
       expect(await stopRow()).toMatchObject({ stopped: 0, reason: null, version: version + 1, applied_version: version + 1 });
@@ -962,7 +989,11 @@ describe("the stop for the whole content domain", () => {
     let state = await held();
     expect(callsFor(state, a)).toEqual([]);
     expect(state.entries[a.host]).toBeUndefined();
-    expect(await applyRows(a.room)).toEqual([{ host: a.host, applied_version: null, applied_script: null, attempts: 1, last_code: "content_domain_stopped" }]);
+    // At least one try met the stop: this test's own pass, or a run the runtime started before it. From here the wait
+    // is held far ahead, so every count below is of this test's own steps.
+    const first = (await applyRows(a.room))[0] as any;
+    expect(first).toEqual({ host: a.host, applied_version: null, applied_script: null, attempts: expect.any(Number), last_code: "content_domain_stopped" });
+    expect(first.attempts).toBeGreaterThanOrEqual(1);
     // No room's own state changed for the stop.
     expect((await serveRows(a.room))[0]).toMatchObject({ script_name: a.served, version: 5 });
     // A takedown goes through while the domain is stopped: a removal never asks.
@@ -978,7 +1009,7 @@ describe("the stop for the whole content domain", () => {
     await due(a.room);
     await pass(a.room);
     expect(callsFor(await held(), a)).toEqual([]);
-    expect((await applyRows(a.room))[0]).toMatchObject({ applied_version: null, attempts: 2, last_code: "stop_unreadable" });
+    expect((await applyRows(a.room))[0]).toMatchObject({ applied_version: null, attempts: first.attempts + 1, last_code: "stop_unreadable" });
     // Resumed and readable, the entry the room wanted all along is written.
     await inModeration((sql) => sql.exec("DROP TABLE test_stop_unreadable"));
     await due(a.room);
@@ -987,6 +1018,101 @@ describe("the stop for the whole content domain", () => {
     expect(callsFor(state, a)).toEqual(["entry.put host 200", "entry.get host 200"]);
     expect(state.entries[a.host]).toBe(a.served);
     for (const room of [a.room, b.room]) await alarmQuiet(stub(room));
+  }));
+
+  it("says in the operator's answer whether the key is confirmed, and writes a key owed from before a provider existed", () => unstopped(async () => {
+    await fresh();
+    // Stopped with no provider: the stop holds, its key is owed, and no alarm is set for it.
+    await inModeration((sql) => sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)"));
+    expect((await switchedOn(() => stopDomain())).body).toMatchObject({ stopped: true, key_confirmed: false });
+    await settle(moderation());
+    expect((await switchedOn(() => stopDomain())).body).toMatchObject({ stopped: true, key_confirmed: false });
+    expect(await nextAlarm(moderation())).toBeNull();
+    // With none, a pass reads nothing, and says so.
+    expect(await reconcile("entries")).toMatchObject({ ran: false, code: "no_provider" });
+    expect(await reconcile("scripts")).toMatchObject({ ran: false, code: "no_provider" });
+    expect((await held()).calls).toEqual([]);
+    expect(await nextAlarm(moderation())).toBeNull();
+    // A provider appears. Nobody asks the operator's route again: the next pass sets the object's alarm, and that
+    // run writes the key. The write is held at the stand-in, so it is known to be that run's, with no clock involved.
+    await inModeration((sql) => sql.exec("DROP TABLE test_content_provider_off"));
+    const write = await gate("entry.put");
+    expect(await reconcile("entries")).toMatchObject({ ran: true, code: "ok" });
+    await arrived(write);
+    await release(write);
+    await settle(moderation());
+    const state = await held();
+    expect([state.entries._stop, state.expiredGates]).toEqual(["stopped", 0]);
+    expect((await switchedOn(() => stopDomain())).body).toMatchObject({ stopped: true, key_confirmed: true });
+    // Resumed: unconfirmed until the key is read as gone, then confirmed.
+    expect((await switchedOn(() => resumeDomain())).body).toMatchObject({ stopped: false, key_confirmed: false });
+    await settle(moderation());
+    expect((await held()).entries._stop).toBeUndefined();
+    expect((await switchedOn(() => resumeDomain())).body).toMatchObject({ stopped: false, key_confirmed: true });
+  }));
+
+  it("is put right by the object itself when the key at the provider isn't what the stop says", () => unstopped(async () => {
+    await fresh();
+    await switchedOn(() => stopDomain());
+    await settle(moderation());
+    await alarmQuiet(moderation());
+    expect((await held()).entries._stop).toBe("stopped");
+    // A pass that finds the key where it should be changes nothing.
+    expect(await reconcile("entries")).toMatchObject({ code: "ok", listed: 1, changed: 0 });
+    expect((await stopRow()).applied_version).toBe((await stopRow()).version);
+    // The key goes missing, by no act of Podster's. The pass writes nothing itself: the object forgets that it
+    // confirmed the key, and its own alarm writes it again.
+    await fake("/reset", {});
+    const write = await gate("entry.put");
+    expect(await reconcile("entries")).toMatchObject({ code: "ok", listed: 0, changed: 1 });
+    await arrived(write);
+    await release(write);
+    await settle(moderation());
+    expect((await held()).entries._stop).toBe("stopped");
+    expect(await found()).toEqual(["stop_key_differs _stop"]);
+    // Resumed and confirmed absent, then the key appears again: the object takes it out.
+    await switchedOn(() => resumeDomain());
+    await settle(moderation());
+    await alarmQuiet(moderation());
+    await fake("/seed", { entries: { _stop: "stopped" } });
+    const removal = await gate("entry.delete");
+    expect(await reconcile("entries")).toMatchObject({ changed: 1 });
+    await arrived(removal);
+    await release(removal);
+    await settle(moderation());
+    const state = await held();
+    expect([state.entries._stop, state.expiredGates]).toEqual([undefined, 0]);
+    expect((await stopRow()).applied_version).toBe((await stopRow()).version);
+  }));
+
+  it("judges the stop key only once the whole list is read, a page at a time, and starts over on a cursor the provider refuses", () => unstopped(async () => {
+    await fresh();
+    await switchedOn(() => stopDomain());
+    await settle(moderation());
+    await alarmQuiet(moderation());
+    // Sixty names nobody's, on the content domain, around the stop key: more than one page.
+    // Fifty-five sort before the key and five after it, so the first page of fifty holds strays alone.
+    const strays = Array.from({ length: 60 }, (_, i) => `${i < 55 ? "0" : "z"}${i}.deep.${FAKE.domain}`);
+    await fake("/seed", { entries: Object.fromEntries(strays.map((name) => [name, "x"])) });
+    const passState = () => inModeration((sql) => sql.exec("SELECT cursor IS NOT NULL AS mid, stop_seen, last_code FROM reconcile_pass WHERE pass = 'entries'").one());
+    // Nothing is said of the stop after the first page: the key hasn't been reached.
+    expect(await reconcile("entries")).toMatchObject({ code: "ok", listed: 50, findings: 50, changed: 0 });
+    expect(await passState()).toMatchObject({ mid: 1 });
+    // The second page ends the list, with the key in it: it is where it should be, and nothing changes.
+    expect(await reconcile("entries")).toMatchObject({ code: "ok", listed: 11, findings: 10, changed: 0 });
+    expect(await passState()).toEqual({ mid: 0, stop_seen: 0, last_code: "ok" });
+    expect((await stopRow()).applied_version).toBe((await stopRow()).version);
+    expect((await found()).filter((line) => line.startsWith("entry_foreign_name ")).length).toBe(60);
+    // Nothing was written or removed by either pass: every stray is still there.
+    const state = await held();
+    expect(Object.keys(state.entries).length).toBe(61);
+    expect(state.calls.filter((call) => call.op === "entry.put" || call.op === "entry.delete").length).toBe(1);
+    // A cursor the provider no longer takes: no list, and the next pass starts from the top.
+    await reconcile("entries");
+    await inModeration((sql) => sql.exec("UPDATE reconcile_pass SET cursor = 'no such cursor' WHERE pass = 'entries'"));
+    expect(await reconcile("entries")).toMatchObject({ code: "list_failed", listed: 0 });
+    expect(await passState()).toEqual({ mid: 0, stop_seen: 0, last_code: "list_failed" });
+    expect(await reconcile("entries")).toMatchObject({ code: "ok", listed: 50 });
   }));
 });
 
@@ -1284,5 +1410,255 @@ describe("an operator's suspension of a custom hostname", () => {
     await settle(claimOf(hostname));
     expect(await nextAlarm(claimOf(hostname))).toBeNull();
     expect(await inClaim(hostname, (sql) => sql.exec("SELECT attempts, answered_at FROM notice").one())).toEqual({ attempts: 0, answered_at: null });
+  });
+
+  it("is found for the reconcile by the hostname's own object, which is woken, and a host the room refuses is told to operators", async () => {
+    await fresh();
+    const c = await claimed();
+    // The entry for the custom hostname names another of the room's scripts than the room wants.
+    await fake("/seed", { entries: { [c.hostname]: c.kept } });
+    const summary = await reconcile("entries");
+    expect(summary).toMatchObject({ code: "ok", listed: 2, changed: 1, unanswered: 0 });
+    // The room's own applier did the rest. Nothing confirms a custom hostname's claim until custom domains are built,
+    // so it takes the entry out and refuses the host; the default host's entry, which matched, is untouched.
+    await pass(c.room);
+    const state = await held();
+    expect([state.entries[c.hostname], state.entries[c.host]]).toEqual([undefined, c.served]);
+    expect(state.calls.filter((call) => call.name === c.host).map((call) => call.op)).toEqual(["entry.get"]);
+    // The next pass carries the refusal to the operators' record, by the host it is about.
+    await reconcile("entries");
+    expect(await found()).toEqual([`host_refused ${c.hostname} claim_check_not_built`]);
+    await alarmQuiet(stub(c.room));
+  });
+
+  it("tells operators of a notice no room answers, and gets a lost wake back from the reconcile", async () => {
+    await fresh();
+    const c = await claimed();
+    await inRoom(c.room, (sql) => sql.exec("CREATE TABLE test_refuse_hostname_notice (x INTEGER)"));
+    await switchedOn(() => suspendHost(c.hostname));
+    const first = await settleAndHold(c.hostname);
+    expect(first.answered).toBe(false);
+    expect(await found()).toEqual([]);
+    // Its eleventh try has failed. The twelfth fails too, and operators are told, by the hostname.
+    await inClaim(c.hostname, (sql) => sql.exec("UPDATE notice SET attempts = 11, next_attempt_at = 0"));
+    const twelfth = await settleAndHold(c.hostname);
+    expect([twelfth.answered, twelfth.attempts]).toEqual([false, 12]);
+    expect(await found()).toEqual([`hostname_notice_unanswered ${c.hostname}`]);
+    // No room's ID is in what operators read.
+    expect(JSON.stringify(await findings())).not.toContain(c.room);
+
+    // The room can answer again, the notice is due, and the wake for it is lost: no alarm is set.
+    await inRoom(c.room, (sql) => sql.exec("DROP TABLE test_refuse_hostname_notice"));
+    await inClaim(c.hostname, (sql) => sql.exec("UPDATE notice SET next_attempt_at = 0"));
+    await runInDurableObject(claimOf(c.hostname), (_: any, state: any) => state.storage.deleteAlarm());
+    // The removal of the name's entry is held at the stand-in. Only the room's applier removes it, and only after
+    // the notice has reached the room. This test runs no alarm of its own from here, so a removal that arrives means
+    // the pass asked the name's own object, which set its alarm again, sent the notice, and the room acted on it.
+    const removal = await gate("entry.delete");
+    await reconcile("entries");
+    await arrived(removal);
+    await release(removal);
+    await alarmQuiet(stub(c.room));
+    const state = await held();
+    expect([state.entries[c.hostname], state.entries[c.host], state.expiredGates]).toEqual([undefined, c.served, 0]);
+    expect((await claimRows(c.hostname)).notice[0]).toMatchObject({ answered: 1 });
+    await alarmQuiet(claimOf(c.hostname));
+    await alarmQuiet(stub(c.room));
+  });
+});
+
+describe("the two reconciles", () => {
+  it("run only from the scheduled handler, only while release is switched on, and only for the two schedules", async () => {
+    await fresh();
+    // Switched off, which is everywhere: the handler does nothing at all.
+    await scheduled(ENTRIES_CRON);
+    await scheduled(SCRIPTS_CRON);
+    expect((await held()).calls).toEqual([]);
+    await switchedOn(async () => {
+      // A schedule nothing answers to.
+      await scheduled("* * * * *");
+      expect((await held()).calls).toEqual([]);
+      await scheduled(ENTRIES_CRON);
+      expect([await listCalls("entry.list"), await listCalls("script.list")]).toEqual([1, 0]);
+      await scheduled(SCRIPTS_CRON);
+      expect([await listCalls("entry.list"), await listCalls("script.list")]).toEqual([1, 1]);
+    });
+    // Each list is asked with its own token: the stand-in refuses the other.
+    expect((await held()).calls.map((call) => call.status)).toEqual([200, 200]);
+    // The schedules the handler knows are the two the plan names, and no environment has either (the wrangler file
+    // holds no schedule at all, as the test above this group shows).
+    const source = (JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>)["reconcile.rs"];
+    expect([...source.matchAll(/_CRON: &str = "([^"]+)";/g)].map((match) => match[1])).toEqual([ENTRIES_CRON, SCRIPTS_CRON]);
+    expect(BINDINGS.TEST_WRANGLER).not.toContain("* * *");
+  });
+
+  it("is an operator's read and nobody else's, and nothing anyone can find while release is switched off", async () => {
+    await fresh();
+    for (const who of [OPERATOR, OWNER, AGENT]) {
+      const [real, unknown] = [await api(who, "GET", "/v1/moderation/takedown-findings"), await api(who, "GET", "/v1/moderation/takedown-findingsx")];
+      expect([real.status, real.code], who.id).toEqual([404, "not_found"]);
+      expect([real.status, real.body], who.id).toEqual([unknown.status, unknown.body]);
+    }
+    await switchedOn(async () => {
+      for (const who of [AGENT, OWNER]) expect((await api(who, "GET", "/v1/moderation/takedown-findings")).code).toBe("not_allowed");
+      const read = await api(OPERATOR, "GET", "/v1/moderation/takedown-findings");
+      expect([read.status, read.body]).toEqual([200, { findings: [] }]);
+    });
+  });
+
+  it("asks the room about an entry that differs, and writes nothing itself: the room's applier puts it right", async () => {
+    await fresh();
+    const a = await app({ plain: true });
+    const b = await app({ plain: true });
+    // Room a's entry names a script the room doesn't want there. Room b's is as it should be.
+    await fake("/reset", {});
+    await fake("/seed", { scripts: [a.kept, a.served, b.kept, b.served], entries: { [a.host]: a.kept, [b.host]: b.served } });
+    const summary = await reconcile("entries");
+    expect(summary).toMatchObject({ ran: true, code: "ok", listed: 2, asked: 4, changed: 1, findings: 0, unanswered: 0, woken: 2 });
+    await pass(a.room);
+    await pass(b.room);
+    const state = await held();
+    expect([state.entries[a.host], state.entries[b.host]]).toEqual([a.served, b.served]);
+    // The reconcile listed and read. The one write, and its read-back, were room a's applier's. Room b's entry was
+    // only read.
+    expect(callsFor(state, a)).toEqual(["entry.get host 200", "entry.put host 200", "entry.get host 200"]);
+    expect(callsFor(state, b)).toEqual(["entry.get host 200"]);
+    expect((await applyRows(a.room))[0]).toMatchObject({ applied_version: 5, applied_script: a.served, attempts: 0 });
+    // A second pass finds both as they should be, and changes nothing.
+    expect(await reconcile("entries")).toMatchObject({ changed: 0 });
+    await pass(a.room);
+    expect((await held()).calls.filter((call) => call.op === "entry.put").length).toBe(1);
+    // An entry that shouldn't be there at all, for a room whose app is down and applied: the room takes it out.
+    await switchedOn(() => suspend(b.label));
+    await pass(b.room);
+    await fake("/seed", { entries: { [b.host]: b.served } });
+    expect(await reconcile("entries")).toMatchObject({ changed: 1 });
+    await pass(b.room);
+    expect((await held()).entries[b.host]).toBeUndefined();
+    for (const room of [a.room, b.room]) await alarmQuiet(stub(room));
+  });
+
+  it("tells operators of an entry with no room or a name Podster didn't write, and never removes one on the table's word", async () => {
+    await fresh();
+    const a = await app({ plain: true });
+    const unlisted = await app({ plain: true, index: false });
+    const [stray, nowhere, hostname] = [newLabel(), newLabel(), newHostname()];
+    // A row that names a room which never had the label, and one that names a room that doesn't exist.
+    await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, 1)").bind(stray, a.room).run();
+    await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, 1)").bind(nowhere, `ws_${"0".repeat(32)}`).run();
+    const entries: Record<string, string> = {
+      [a.host]: a.served, [unlisted.host]: unlisted.served, [`${stray}.${FAKE.domain}`]: a.served, [`${nowhere}.${FAKE.domain}`]: a.served,
+      [`deep.${a.host}`]: a.served, [FAKE.domain]: a.served, "Not_A-Host": "x", [hostname]: a.served,
+    };
+    await fake("/reset", {});
+    await fake("/seed", { scripts: [a.kept, a.served], entries });
+    const summary = await reconcile("entries");
+    expect(summary).toMatchObject({ code: "ok", listed: 8, changed: 0, unanswered: 0 });
+    expect(await found()).toEqual([
+      `entry_foreign_name ${FAKE.domain}`, "entry_foreign_name Not_A-Host", `entry_foreign_name deep.${a.host}`,
+      `entry_without_room ${hostname}`, `entry_without_room ${nowhere}.${FAKE.domain}`, `entry_without_room ${stray}.${FAKE.domain}`, `entry_without_room ${unlisted.host}`,
+    ].sort());
+    // Every one is left exactly as it was: no entry was written or removed, by the pass or by any room.
+    await pass(a.room);
+    const state = await held();
+    expect(state.entries).toEqual(Object.fromEntries(Object.entries(entries).sort()));
+    expect(state.calls.filter((call) => call.op === "entry.put" || call.op === "entry.delete")).toEqual([]);
+    // Seen again, each is counted again and kept once.
+    await reconcile("entries");
+    expect((await findings()).map((finding) => finding.seen)).toEqual([2, 2, 2, 2, 2, 2, 2]);
+    // Nothing operators read names a room by its ID.
+    expect(JSON.stringify(await findings())).not.toMatch(/ws_[0-9a-f]/);
+    for (const room of [a.room, unlisted.room]) await alarmQuiet(stub(room));
+  });
+
+  it("wakes a room whose wake was lost, and a room whose work was owed from before a provider existed", async () => {
+    await fresh();
+    // Its app is down in its own state, its entry is still at the provider, and no alarm is set: the wake was lost.
+    const a = await downButNotApplied();
+    await BINDINGS.DB.prepare("DELETE FROM app_label_index WHERE label != ?").bind(a.label).run();
+    expect(await nextAlarm(stub(a.room))).toBeNull();
+    // The removal is held at the stand-in. Only the room's applier removes an entry, and this test runs no pass of
+    // its own, so a removal that arrives is the room's own alarm at work: the reconcile woke it.
+    let removal = await gate("entry.delete");
+    expect(await reconcile("entries")).toMatchObject({ code: "ok", listed: 1, changed: 0 });
+    await arrived(removal);
+    await release(removal);
+    await alarmQuiet(stub(a.room));
+    let state = await held();
+    expect([state.entries[a.host], state.scripts, state.expiredGates]).toEqual([undefined, [], 0]);
+    expect((await applyRows(a.room))[0]).toMatchObject({ applied_version: 6, applied_script: null });
+
+    // A second room owes the same from a time with no provider, when it set no alarm. Nothing of its is at the
+    // provider, so no list names it: the walk of the lookup table reaches it, from either pass.
+    const b = await downButNotApplied();
+    await fake("/reset", {});
+    await inRoom(b.room, (sql) => sql.exec("UPDATE script_delete SET attempts = 12, last_code = 'delete_500' WHERE script_name = ?", b.kept));
+    expect(await nextAlarm(stub(b.room))).toBeNull();
+    removal = await gate("entry.delete");
+    const summary = await reconcile("scripts");
+    expect(summary).toMatchObject({ code: "ok", listed: 0, woken: 2 });
+    await arrived(removal);
+    await release(removal);
+    await alarmQuiet(stub(b.room));
+    state = await held();
+    expect(state.expiredGates).toBe(0);
+    expect((await applyRows(b.room))[0]).toMatchObject({ applied_version: 6, applied_script: null });
+    // The room also said one of its deletes had failed twelve times, and operators were told, by the script's name.
+    expect(await found()).toEqual([`script_delete_failing ${b.kept} delete_500`]);
+    for (const room of [a.room, b.room]) await alarmQuiet(stub(room));
+  });
+
+  it("has the label's own room delete a script nothing of its claims, an uncertain release's among them, and leaves the rest", async () => {
+    await fresh();
+    const a = await app({ plain: true });
+    const unlisted = await app({ plain: true, index: false });
+    const stray = newLabel();
+    await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, 1)").bind(stray, a.room).run();
+    const script = (n: number) => `${a.label}.${rel(n)}`;
+    const now = Date.now();
+    await inRoom(a.room, (sql) => {
+      const release = (n: number, state: string, started: number | null) => sql.exec(
+        `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
+           VALUES (?, ?, ?, ?, 1, 4, ?, ?, 'per_td_owner', 1, 'per_td_owner', 1, ?, 1)`, rel(n), SHA, state, a.label, script(n), rel(n), started);
+      // Uploaded, with an outcome nobody knows, and no commit in flight: no row of the room's state names its script.
+      release(7, "uncertain", 1);
+      // Uploading now, and uploading for two hours.
+      release(8, "uploading", now);
+      release(6, "uploading", now - 2 * 60 * 60 * 1000);
+    });
+    const foreign = ["not-podsters", `${a.label}.rel_short`];
+    const noRoom = [`${unlisted.label}.${rel(1)}`, `${stray}.${rel(1)}`];
+    // In the namespace: what the room serves and keeps, the three releases' scripts, one under its label that no
+    // release of its ever had, two names Podster didn't make, and two whose label finds no room that owns it.
+    const seeded = [a.kept, a.served, script(7), script(8), script(6), script(9), ...foreign, ...noRoom];
+    await fake("/reset", {});
+    await fake("/seed", { scripts: seeded, entries: { [a.host]: a.served } });
+    const summary = await reconcile("scripts");
+    expect(summary).toMatchObject({ ran: true, code: "ok", listed: 10, changed: 3, unanswered: 0 });
+    // The room queued exactly three, under no unpublish: the uncertain one, the upload that outlived its hour, and
+    // the one no release names.
+    expect((await deleteRows(a.room)).map((row: any) => [row.script_name, row.unpublish_epoch])).toEqual([script(6), script(7), script(9)].sort().map((name) => [name, null]));
+    await pass(a.room);
+    let state = await held();
+    expect(state.scripts).toEqual([a.kept, a.served, script(8), ...foreign, ...noRoom].sort());
+    // Only those three were ever asked to be deleted, each by the room's own job.
+    expect([...new Set(state.calls.filter((call) => call.op === "script.delete").map((call) => call.name))].sort()).toEqual([script(6), script(7), script(9)].sort());
+    expect((await deleteRows(a.room)).map((row: any) => row.gone)).toEqual([1, 1, 1]);
+    expect(await found()).toEqual([...foreign.map((name) => `script_foreign_name ${name}`), ...noRoom.map((name) => `script_without_room ${name}`)].sort());
+    // A script the room counted as gone is in the namespace after all: it is owed again, and goes again.
+    await fake("/seed", { scripts: [script(9)] });
+    expect(await reconcile("scripts")).toMatchObject({ changed: 1 });
+    await pass(a.room);
+    state = await held();
+    expect(state.scripts).not.toContain(script(9));
+    // A list that says it holds less than there is: what it holds is still asked about, and operators are told.
+    await fake("/seed", { scriptsUnlisted: 3 });
+    expect(await reconcile("scripts")).toMatchObject({ code: "list_incomplete", changed: 0 });
+    expect(await found()).toContain("script_list_incomplete namespace");
+    // No list at all: nothing is asked and nothing queued.
+    await fault({ op: "script.list", times: 1, status: 500 });
+    expect(await reconcile("scripts")).toMatchObject({ code: "list_failed", listed: 0, asked: 2, changed: 0 });
+    expect((await held()).scripts).toEqual(state.scripts);
+    for (const room of [a.room, unlisted.room]) await alarmQuiet(stub(room));
   });
 });

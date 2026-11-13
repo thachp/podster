@@ -11,6 +11,11 @@
 // with the value, and a read of a missing key answers 404 with code 10009. Spike G must confirm those before a
 // provider is configured.
 //
+// **The two lists are for the reconciles** (third PR). The scripts' list answers as spike A saw it: one array, each
+// script an object with `id`, and a `has_assets` that is wrong on purpose, as it was. **The keys' list is an
+// assumption,** from Cloudflare's documented KV list: `result` an array of `{ name }`, and `result_info.cursor` for
+// the next page, empty at the end. A test can make the scripts' list claim there is more than it holds.
+//
 // A test scripts how it misbehaves through `content-fake.example.com`, and reads back what it holds and every call it
 // saw. Calls are recorded by kind and name, never with a token.
 
@@ -24,7 +29,7 @@ export const FAKE_CONTENT = {
   routingToken: "test-routing-token-0000000000",
 };
 
-type Op = "script.get" | "script.delete" | "entry.put" | "entry.get" | "entry.delete";
+type Op = "script.get" | "script.delete" | "script.list" | "entry.put" | "entry.get" | "entry.delete" | "entry.list";
 /**
  * How one kind of call misbehaves, for its next `times` calls. `lost` does the work and then answers nothing useful;
  * `stale` answers a read with the opposite of what is held; `delayMs` alone answers properly, late, so a test can
@@ -36,6 +41,8 @@ let scripts = new Set<string>();
 let entries = new Map<string, string>();
 let calls: { op: Op; name: string; status: number }[] = [];
 let faults: Fault[] = [];
+/** When set, the scripts' list says there are this many more scripts than it holds. */
+let scriptsUnlisted = 0;
 /**
  * A gate holds the next call of one kind until the test lets it go, and tells the test when that call has arrived. So
  * a test can change the room while a call is out, at exactly that point, with no clock involved.
@@ -85,12 +92,14 @@ export async function fakeContent(request: Request): Promise<Response | null> {
       entries = new Map();
       calls = [];
       faults = [];
+      scriptsUnlisted = 0;
       for (const gate of gates) gate.release();
       gates = [];
       return json({ ok: true });
     }
     if (url.pathname === "/seed") {
-      const body = (await request.json()) as { scripts?: string[]; entries?: Record<string, string> };
+      const body = (await request.json()) as { scripts?: string[]; entries?: Record<string, string>; scriptsUnlisted?: number };
+      if (body.scriptsUnlisted !== undefined) scriptsUnlisted = body.scriptsUnlisted;
       for (const name of body.scripts ?? []) scripts.add(name);
       for (const [host, value] of Object.entries(body.entries ?? {})) entries.set(host, value);
       return json({ ok: true });
@@ -124,6 +133,29 @@ export async function fakeContent(request: Request): Promise<Response | null> {
     calls.push({ op, name, status: response.status });
     return response;
   };
+
+  // The two lists. Each takes its own token only, as the calls on one script and one entry do.
+  if (url.pathname === `/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${FAKE_CONTENT.namespace}/scripts` && request.method === "GET") {
+    if (bearer !== `Bearer ${FAKE_CONTENT.scriptsToken}`) return answer("script.list", "", failure(403, 10000, "Authentication error"));
+    await passGate("script.list");
+    const fault = await takeFault("script.list");
+    if (fault) return answer("script.list", "", failure(fault.status ?? 500, 10001, "fault"));
+    const listed = [...scripts].sort().map((id) => ({ id, tag: "tag-test", has_assets: false, deployment_id: "" }));
+    return answer("script.list", "", json(scriptsUnlisted ? { ...envelope(listed), result_info: { count: listed.length, total_count: listed.length + scriptsUnlisted } } : envelope(listed)));
+  }
+  if (url.pathname === `/client/v4/accounts/${FAKE_CONTENT.account}/storage/kv/namespaces/${FAKE_CONTENT.kvNamespace}/keys` && request.method === "GET") {
+    if (bearer !== `Bearer ${FAKE_CONTENT.routingToken}`) return answer("entry.list", "", failure(403, 10000, "Authentication error"));
+    await passGate("entry.list");
+    const fault = await takeFault("entry.list");
+    if (fault) return answer("entry.list", "", failure(fault.status ?? 500, 10001, "fault"));
+    const limit = Number(url.searchParams.get("limit") ?? 1000);
+    const cursor = url.searchParams.get("cursor");
+    // The cursor is the last key of the page before, behind a prefix, so it is opaque enough to need escaping.
+    if (cursor !== null && !cursor.startsWith("after:")) return answer("entry.list", cursor, failure(400, 10029, "invalid cursor"));
+    const rest = [...entries.keys()].sort().filter((key) => cursor === null || key > cursor.slice("after:".length));
+    const page = rest.slice(0, limit);
+    return answer("entry.list", cursor ?? "", json({ ...envelope(page.map((name) => ({ name }))), result_info: { count: page.length, cursor: rest.length > page.length ? `after:${page[page.length - 1]}` : "" } }));
+  }
 
   if (script) {
     const name = decodeURIComponent(script[1]);

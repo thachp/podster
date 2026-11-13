@@ -67,7 +67,7 @@ const REL = `rel_${"a1".repeat(16)}`;
 const M6: Record<string, "person" | "operator"> = {
   getReleaseConfig: "person", setReleaseConfig: "person", approveRelease: "person", declineRelease: "person", getAppHostname: "person", requestAppHostname: "person", removeAppHostname: "person",
   createAppReport: "person", suspendApp: "operator", liftAppSuspension: "operator", suspendAppHost: "operator", liftAppHostSuspension: "operator",
-  stopContentDomain: "operator", resumeContentDomain: "operator",
+  stopContentDomain: "operator", resumeContentDomain: "operator", listTakedownFindings: "operator",
 };
 const contract = () => (JSON.parse(BINDINGS.TEST_API_ROUTES) as { path: string; method: string; operation: string }[]).filter((route) => route.operation in M6);
 const fill = (path: string, room: string) => path.replace("{ws}", room).replace("{release}", REL).replace("{label}", "k3v9q2").replace("{host}", "app.example.com");
@@ -133,7 +133,7 @@ describe("M6's routes, none of them built", () => {
         const operatorPath = path.replace("app.example.com", "switched-on.example.net");
         const want: Record<string, [number, string | undefined]> = {
           suspendApp: [404, "not_found"], liftAppSuspension: [404, "not_found"], suspendAppHost: [200, undefined], liftAppHostSuspension: [200, undefined],
-          stopContentDomain: [200, undefined], resumeContentDomain: [200, undefined],
+          stopContentDomain: [200, undefined], resumeContentDomain: [200, undefined], listTakedownFindings: [200, undefined],
         };
         const operator = await api(OPERATOR, route.method, operatorPath, { reason: "abuse" });
         expect([operator.status, operator.code], `${route.operation} as an operator`).toEqual(want[route.operation] ?? [409, "release_not_available"]);

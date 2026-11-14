@@ -1274,6 +1274,42 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 - **With nothing up,** a room with a release configuration records the unpublish and raises its epoch, as every room trigger does. A room with none records nothing.
 - **A grant's revocation** in the ruling is read as an organization's revocation from the room. A `deploy` grant decides nothing in this rule, so taking one back can't fire it.
 
+#### The release job for static files: its PRs, and what the first built
+
+**The hold on step 5's tree read and upload was lifted for static files on 2026-11-13.** The job is built in three PRs, each behind `RELEASES`, with `RELEASE_PATH_COMPLETE` false throughout. None uploads a Worker's script, a binding or a store: those wait for [the spike](#stage-1-of-apps-as-workers-the-build-order).
+
+| PR | What | State |
+| --- | --- | --- |
+| 1 | **The read:** the release directory, `site`, at the approved commit, with the read-only App | **Built, 2026-11-13.** Below |
+| 2 | **The upload of static files** to the provider, as the release's own script: the upload session, the files in its batches, the script with the marker; and the room command that ties starting an upload, the read and the upload together | Not built. *Proposed as its own PR: the architect asked for the read and the upload together, and the read alone was already a new App's client, a stand-in for it and the checks' wiring* |
+| 3 | **The job's driver:** what runs a queued release through the commands, one release at a time in a room; an upload whose answer was lost; the marker's wait, a release recorded served, and the set-back when it never comes | Not built |
+
+**What the first PR built: the read, alone.** `apps/api/src/github/release_read.rs`. **Nothing calls it yet** but a test-only path; the second PR's upload is its caller. **No room schema step, no D1 migration, no contract change, and nothing on a room's alarm.**
+
+- **Its own App, which doesn't exist yet.** A fourth GitHub App, read-only, with Contents read and Metadata read, as ADR 0010 calls for. The Worker reads three settings for it: `GITHUB_RELEASE_APP_ID`, `GITHUB_RELEASE_INSTALLATION_ID` and `GITHUB_RELEASE_APP_KEY`. **None is set in any deployment. The App, its installation on the organization and its key are each the owner's.** Unconfigured, a read is refused as `release_read_not_configured` before anything is asked of anyone. Its ID, installation and key must differ from the other three Apps', or it is treated as unconfigured.
+- **One token for one read,** for the one repository and the two permissions, revoked when the read is over. An answer that names another repository, or more than was asked, is revoked and never used.
+- **Two tree reads, then one read for each file.** The commit's top tree, by the commit's sha and never recursively, where `site` must be a directory. Then that entry's own tree, recursively. Never `{commit}:{path}`. Each answer is capped at 1 MB before it is parsed, and one too long fails the release, as a truncated one does. `crates/core` judges the entries, as built in step 3.
+- **The reads are reserved from the deployment's budget from the tree,** before any file is fetched: the two made and one for each file. That closes one of the two things step 9 left this step. A release with no room waits; it isn't failed. **The other, a share for each room, is still owed.**
+- **Each file is fetched by itself, as its own bytes,** capped at one file's size, ten at a time, and checked against its tree entry: its length, and its git blob sha. GitHub's type for a file is never read.
+- **A file's type is Podster's own, from its last extension,** by one list in core. A kind not listed is served as bytes to download.
+- **A file's manifest hash is known from the tree, before the file is fetched:** the first 32 hexadecimal characters of a SHA-256 over its git blob sha, a zero byte and its type. **This is a change from ADR 0010's wording, for the architect's ruling.** The ADR says the hash is derived from the file's bytes and its type together. The blob sha is derived from the bytes, and every file is checked against it, so the hash still changes whenever the bytes or the type do. What it buys: the upload's manifest needs every hash before any file is sent, and with hashes from the bytes the job would have to hold a whole release in memory, or fetch every file twice.
+- **What a failed read means,** each with a code from core:
+
+| | Code | The release |
+| --- | --- | --- |
+| No read-only App configured | `release_read_not_configured` | Waits |
+| No answer to go on: a failure, a rate limit, a token that wasn't the one asked for, a file that didn't come | `release_read_unavailable` | Waits, and the read is tried again |
+| The budget has no room | `release_reads_budget` | Waits, with when it would fit |
+| The repository doesn't have the commit | `release_commit_unreadable` | **Fails** |
+| What the trees hold | Core's own, `release_directory_missing` and the rest | **Fails,** before any file is fetched |
+| A file that isn't what the tree said | `release_file_mismatch` | **Fails** |
+
+- **How it is tested with no App:** a stand-in for the part of GitHub the read uses, of its own, apart from the one for the other three Apps; and a test-only path in the room that runs one whole read and says what came of it, compiled only into test builds.
+
+**Owed by the second PR:** to call the read and drop the allowance that lets it go uncalled in a deployment's build; the root `_headers` and `_redirects` test ADR 0010 names, which bypasses the refusal on purpose; and a ruling on whether the token is revoked before or after the upload, since the upload fetches as it sends.
+
+**Not shown:** the unconfigured case and the App's distinctness from the other three, since the test Worker's settings are fixed for a run; the real GitHub, which spike E read with another App's token cut down; a private repository.
+
 #### Stage 1 of apps as Workers: the build order
 
 **Proposed, on 2026-11-13, after the owner's answer ([decision 220](spec/PRODUCT.md#decisions-needed)).** What stage 1 is, and why, is [the revision](adr/0010-revision-apps-are-workers.md#3-stage-1-in-full-one-todo-app). This is only the order. **No code is started.**

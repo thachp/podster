@@ -452,3 +452,94 @@ fn a_path_is_folded_before_html_is_stripped() {
         "{found:?}"
     );
 }
+
+#[test]
+fn a_file_is_served_with_a_type_from_podsters_own_list_by_its_last_extension() {
+    for (path, wanted) in [
+        ("index.html", "text/html; charset=utf-8"),
+        ("a/b/PAGE.HTM", "text/html; charset=utf-8"),
+        ("app.min.js", "text/javascript; charset=utf-8"),
+        ("mod.mjs", "text/javascript; charset=utf-8"),
+        ("style.css", "text/css; charset=utf-8"),
+        ("data.json", "application/json"),
+        ("app.js.map", "application/json"),
+        ("site.webmanifest", "application/manifest+json"),
+        ("logo.svg", "image/svg+xml"),
+        ("p.png", "image/png"),
+        ("p.JPEG", "image/jpeg"),
+        ("f.woff2", "font/woff2"),
+        ("m.wasm", "application/wasm"),
+        // Not listed, no extension, a dot file, a directory with a dot in its name: bytes to download.
+        ("archive.zip", "application/octet-stream"),
+        ("LICENSE", "application/octet-stream"),
+        (".gitkeep", "application/octet-stream"),
+        ("v1.2/readme", "application/octet-stream"),
+        ("page.html.bak", "application/octet-stream"),
+        ("", "application/octet-stream"),
+    ] {
+        assert_eq!(served_type(path), wanted, "{path}");
+    }
+    // A script is never served as HTML whatever precedes its last extension, and HTML never as a script.
+    assert_ne!(served_type("x.html.js"), served_type("x.js.html"));
+}
+
+#[test]
+fn a_manifest_hash_changes_with_the_bytes_and_with_the_type_and_is_known_before_a_file_is_fetched()
+{
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let html = manifest_hash_input(sha, served_type("a.html"));
+    let text = manifest_hash_input(sha, served_type("a.txt"));
+    let other = manifest_hash_input(
+        "1123456789abcdef0123456789abcdef01234567",
+        served_type("a.html"),
+    );
+    assert_ne!(
+        html, text,
+        "the same bytes served as another type hash differently"
+    );
+    assert_ne!(html, other, "other bytes hash differently");
+    // The sha is taken in lower case, so the same file read twice hashes the same.
+    assert_eq!(
+        manifest_hash_input(&sha.to_ascii_uppercase(), "t"),
+        manifest_hash_input(sha, "t")
+    );
+    // One zero byte between the two parts, so no sha and type run together into another pair's.
+    assert_eq!(html.len(), 40 + 1 + "text/html; charset=utf-8".len());
+    assert_eq!(html.get(40), Some(&0));
+    let digest = "AB".repeat(32);
+    assert_eq!(
+        manifest_hash(&digest).as_deref(),
+        Some("ab".repeat(16).as_str())
+    );
+    for bad in [
+        "",
+        "ab",
+        &"ab".repeat(31),
+        &"zz".repeat(32),
+        &"ab".repeat(33),
+    ] {
+        assert_eq!(manifest_hash(bad), None, "{bad}");
+    }
+    assert_eq!(git_blob_header(0), b"blob 0\0");
+    assert_eq!(git_blob_header(5_000_000), b"blob 5000000\0");
+}
+
+#[test]
+fn only_a_commit_the_repository_doesnt_have_ends_a_release_at_the_read() {
+    let codes = [
+        (
+            ReadProblem::NotConfigured,
+            "release_read_not_configured",
+            false,
+        ),
+        (ReadProblem::Unavailable, "release_read_unavailable", false),
+        (
+            ReadProblem::CommitUnreadable,
+            "release_commit_unreadable",
+            true,
+        ),
+    ];
+    for (problem, code, fails) in codes {
+        assert_eq!((problem.code(), problem.fails_release()), (code, fails));
+    }
+}

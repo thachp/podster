@@ -5,6 +5,7 @@ import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 import { FAKE_CONTENT, fakeContent, GATE_LIMIT_MS } from "./test/fake-content.ts";
 import { FAKE_AGENT_KEY_PEM, FAKE_APP_KEY_PEM, FAKE_GITHUB, FAKE_MERGE_KEY_PEM, fakeGithub } from "./test/fake-github.ts";
+import { FAKE_RELEASE, FAKE_RELEASE_KEY_PEM, fakeGithubRelease } from "./test/fake-github-release.ts";
 import { stagingRequestersProblem, validRequesters } from "../../scripts/requesters-rule.mjs";
 
 // A throwaway key per run. Tests sign as the gateway, and the Worker verifies with the public half.
@@ -76,6 +77,9 @@ async function uploadGate(url: URL) {
 async function fakeHook(request: Request) {
   // GitHub, for provisioning (M5 step 4): a fake, so nothing ever reaches the real one. Its calls carry tokens, so they
   // stay out of the hook log.
+  // The release job's read-only App is a stand-in of its own, asked first: what isn't that App's is left to the other.
+  const releaseRead = await fakeGithubRelease(request);
+  if (releaseRead) return releaseRead;
   const github = await fakeGithub(request);
   if (github) return github;
   // The provider that serves rooms' apps (M6 step 4(a)): a stand-in, so nothing ever reaches Cloudflare's API.
@@ -187,6 +191,11 @@ export default defineConfig({
           GITHUB_MERGE_INSTALLATION_ID: String(FAKE_GITHUB.mergeInstallationId),
           GITHUB_MERGE_APP_KEY: FAKE_MERGE_KEY_PEM,
           TEST_FAKE_GITHUB: JSON.stringify(FAKE_GITHUB),
+          // The release job's read-only App (M6 step 5), pointing at its stand-in, with its own installation and key.
+          // Test values: the App doesn't exist, no environment binds these names, and each is the owner's to set.
+          GITHUB_RELEASE_APP_ID: String(FAKE_RELEASE.appId),
+          GITHUB_RELEASE_INSTALLATION_ID: String(FAKE_RELEASE.installationId),
+          GITHUB_RELEASE_APP_KEY: FAKE_RELEASE_KEY_PEM,
           // The content provider's configuration (M6 step 4(a)), pointing at the stand-in. Test values: no environment
           // binds any of these names, and the real ones are the owner's to set.
           CONTENT_ACCOUNT_ID: FAKE_CONTENT.account,
@@ -202,6 +211,8 @@ export default defineConfig({
           // test-only switch is in a deployment's build.
           TEST_API_SOURCES: JSON.stringify(Object.fromEntries((readdirSync(new URL("./src", import.meta.url), { recursive: true }) as string[]).filter((name) => name.endsWith(".rs")).sort().map((name) => [name.split("\\").join("/"), readFileSync(new URL(`./src/${name}`, import.meta.url), "utf8")]))),
           TEST_API_CARGO: readFileSync(new URL("./Cargo.toml", import.meta.url), "utf8"),
+          // The Worker's own configuration file, as text, for a test that it names no setting it shouldn't.
+          TEST_API_WRANGLER: readFileSync(new URL("./wrangler.jsonc", import.meta.url), "utf8"),
           TEST_CONTENT_PROVIDER_SOURCE: readFileSync(new URL("./src/content_provider.rs", import.meta.url), "utf8"),
           // What the API writes into the serve entries' namespace and the content Worker reads (M6 step 4(b)): the
           // vectors apps/content and crates/core are tested against, for the test that shows the API's side agrees.

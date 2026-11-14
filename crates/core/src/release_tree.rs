@@ -367,3 +367,100 @@ pub fn check_fetched(
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Reading a release: what a failed read means, the type a file is served with, and the names the upload uses
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// Why reading a release from the repository gave nothing to publish, apart from its contents failing it
+/// ([`ContentProblem`]) and a fetched file not matching its entry ([`FetchMismatch`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadProblem {
+    /// `release_read_not_configured`: the deployment has no read-only App to read with. The release waits.
+    NotConfigured,
+    /// `release_read_unavailable`: the provider gave no answer to go on, a rate limit among them, or a token that
+    /// wasn't exactly the one asked for. The release waits, and the read is tried again.
+    Unavailable,
+    /// `release_commit_unreadable`: the provider answered, and the commit or the directory's tree isn't there to
+    /// read. The release fails: the room's own record said this commit was merged, and the repository disagrees.
+    CommitUnreadable,
+}
+
+impl ReadProblem {
+    // codes: reasons
+    pub fn code(self) -> &'static str {
+        match self {
+            ReadProblem::NotConfigured => "release_read_not_configured",
+            ReadProblem::Unavailable => "release_read_unavailable",
+            ReadProblem::CommitUnreadable => "release_commit_unreadable",
+        }
+    }
+
+    /// Whether it ends the release. The other two leave it to be tried again.
+    pub fn fails_release(self) -> bool {
+        self == ReadProblem::CommitUnreadable
+    }
+}
+
+/// The type a file is served with, from its path's last extension, by Podster's own list. Nothing the repository or
+/// the provider says of a file's type is used. A file of a kind not listed is served as bytes to download.
+pub fn served_type(path: &str) -> &'static str {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let extension = match name.rsplit_once('.') {
+        // A name that is only a leading dot and letters, as `.gitkeep`, has no extension.
+        Some((stem, extension)) if !stem.is_empty() => extension.to_ascii_lowercase(),
+        _ => String::new(),
+    };
+    match extension.as_str() {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "json" | "map" => "application/json",
+        "webmanifest" => "application/manifest+json",
+        "txt" => "text/plain; charset=utf-8",
+        "xml" => "application/xml",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "wasm" => "application/wasm",
+        "pdf" => "application/pdf",
+        "mp3" => "audio/mpeg",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        _ => "application/octet-stream",
+    }
+}
+
+/// What a file's manifest hash is computed over: its git blob sha, in lower case, one zero byte, and the type it is
+/// served with. The caller takes a SHA-256 of these bytes and gives the digest's hexadecimal to
+/// [`manifest_hash`].
+///
+/// The hash comes back to visitors as the file's `ETag`, so it must change whenever what is served changes. The blob
+/// sha changes with the bytes, and every fetched file is checked against it ([`check_fetched`]); the type is the
+/// other half of what is served. So the hash is known from the tree alone, before any file is fetched.
+pub fn manifest_hash_input(blob_sha: &str, served_type: &str) -> Vec<u8> {
+    let mut input = blob_sha.to_ascii_lowercase().into_bytes();
+    input.push(0);
+    input.extend_from_slice(served_type.as_bytes());
+    input
+}
+
+/// The manifest's hash for a file: the first 32 hexadecimal characters of the SHA-256 over [`manifest_hash_input`],
+/// in lower case. `None` if what it is given isn't a SHA-256's 64 hexadecimal characters.
+pub fn manifest_hash(sha256_hex: &str) -> Option<String> {
+    (sha256_hex.len() == 64 && sha256_hex.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| sha256_hex[..32].to_ascii_lowercase())
+}
+
+/// The header git puts before a file's bytes when it names them: a blob's sha is the SHA-1 of this and then the bytes.
+pub fn git_blob_header(length: u64) -> Vec<u8> {
+    format!("blob {length}\0").into_bytes()
+}

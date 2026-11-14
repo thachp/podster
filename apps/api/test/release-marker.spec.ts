@@ -99,7 +99,7 @@ const WAIT = 30_000;
 const SWITCH_WAIT = 10 * 60 * 1000;
 let rooms = 0;
 const made: string[] = [];
-type Room = { room: string; label: string; host: string; script: string; previous: string };
+type Room = { room: string; label: string; host: string; script: string; previous: string; admin: string };
 
 /**
  * A room where everything the recheck asks for holds, whose default host serves `PREV` at version 5, and whose release
@@ -138,7 +138,7 @@ async function room(extra: string[] = []): Promise<Room> {
     for (const statement of extra) sql.exec(statement);
   });
   await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, 1)").bind(label, id).run();
-  return { room: id, label, host, script: `${label}.${REL}`, previous: `${label}.${PREV}` };
+  return { room: id, label, host, script: `${label}.${REL}`, previous: `${label}.${PREV}`, admin };
 }
 type Pass = { release_id?: string | null; outcome: string; code?: string | null; next_attempt_at?: number | null; state?: string; step?: string; due: number | null };
 const pass = (id: string): Promise<Pass> => switchedOn(() => stub(id).fetch("https://do/internal/test-release-drive", { method: "POST", body: "{}" }).then(async (r: Response) => {
@@ -417,13 +417,12 @@ describe("a stop during the marker's wait (the architect's ruling on question 9,
   }
 
   const stops: [string, string, (r: Room) => Promise<unknown>][] = [
-    // Written as the room's own hold writes it (`releasers::hold`): the hold, its generation moved, and the applier's
-    // record reset so every host is due again. A real departure isn't used here: its hold is timed by the Worker's clock,
-    // and this room's alarm judges the hold's end by the release commands' clock, `T`, which would end it at once.
-    ["a hold because nobody may release", "no_releaser", (r) => inRoom(r.room, (sql) => {
-      sql.exec("UPDATE release_hold SET cause = 'no_releaser', held_at = ?, until = ?, generation = generation + 1", T, T + HOLD);
-      sql.exec("UPDATE serve_apply SET applied_version = NULL, applied_at = NULL, applied_script = NULL, refused_version = NULL, attempts = 0, attempt_version = NULL, next_attempt_at = NULL");
-    })],
+    // A real departure, the admin's and then the owner's, leaves nobody who may release: the room holds the app by the
+    // release commands' clock, so the hold runs a week from `T + POLL`, and resets the applier's record itself.
+    ["a hold because nobody may release", "no_releaser", async (r) => {
+      for (const who of [r.admin, OWNER.id]) expect(await internal(r.room, "org-departure", { person: who, org: ORG, actor: "per_rm_orgadmin", left_at: T })).toBe(200);
+      expect(await inRoom(r.room, (sql) => sql.exec("SELECT held_at, until FROM release_hold").one())).toEqual({ held_at: T + POLL, until: T + POLL + HOLD });
+    }],
     ["the stop for the whole content domain", "release_stopped", async () => {}],
   ];
   for (const [what, code, fire] of stops) {

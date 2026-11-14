@@ -3105,7 +3105,7 @@ impl Workspace {
             }
             let key = key.ok_or_else(ApiError::idempotency_required)?;
             // Recovery naming an owner lifts a hold on the room's app (M6 step 6, `releasers`).
-            let value = releasers::watching(&sql, "owner_recovered", now, || {
+            let value = releasers::watching(&sql, "owner_recovered", || {
                 apply_recovery(
                     &sql,
                     &identity.id,
@@ -4085,7 +4085,10 @@ impl Workspace {
             );
         }
         let body = body.clone();
-        transaction_sync(&self.state, move || departure_effect(&sql, &body, now_ms()))?;
+        // At the clock the room's hold is judged by, so a hold this departure starts ends when it should, under test too.
+        transaction_sync(&self.state, move || {
+            departure_effect(&sql, &body, release_recheck::release_now(&sql))
+        })?;
         Ok(json!({ "applied": true }))
     }
 
@@ -4665,7 +4668,7 @@ impl Workspace {
                     stops_when_archived,
                     test_fail,
                     move |sql, who, now| {
-                        releasers::watching(sql, "member_added", now, || {
+                        releasers::watching(sql, "member_added", || {
                             handle_add_member(
                                 sql,
                                 &who.caller,
@@ -4720,7 +4723,7 @@ impl Workspace {
                     // Each command that can change who may release is watched for the last releaser going (M6 step
                     // 6, `releasers`).
                     move |sql, who, now| {
-                        releasers::watching(sql, "role_changed", now, || {
+                        releasers::watching(sql, "role_changed", || {
                             handle_change_role(sql, &who.caller, &target, &body, target_member, now)
                         })
                     },
@@ -5128,7 +5131,7 @@ impl Workspace {
                 stops_when_archived,
                 test_fail,
                 move |sql, who, now| {
-                    releasers::watching(sql, "organization_removed", now, || {
+                    releasers::watching(sql, "organization_removed", || {
                         handle_revoke_organization(sql, &who.caller, &target, &body, now)
                     })
                 },
@@ -5142,7 +5145,7 @@ impl Workspace {
                     stops_when_archived,
                     test_fail,
                     move |sql, who, now| {
-                        releasers::watching(sql, "owner_transferred", now, || {
+                        releasers::watching(sql, "owner_transferred", || {
                             handle_transfer_owner(sql, &who.caller, &body, target_member, now)
                         })
                     },
@@ -5155,7 +5158,7 @@ impl Workspace {
                 stops_when_archived,
                 test_fail,
                 move |sql, who, now| {
-                    releasers::watching(sql, "member_removed", now, || {
+                    releasers::watching(sql, "member_removed", || {
                         handle_revoke_member(sql, &who.caller, &target, &body, now)
                     })
                 },
@@ -5471,7 +5474,7 @@ fn departure_fields(body: &Value) -> R<(String, String, String, i64)> {
 /// same code.
 fn departure_effect(sql: &SqlStorage, body: &Value, now: i64) -> R<()> {
     // A departure can take the room's last releaser away (M6 step 6, `releasers`).
-    releasers::watching(sql, "org_departure", now, || {
+    releasers::watching(sql, "org_departure", || {
         departure_effect_in_room(sql, body, now)
     })
 }

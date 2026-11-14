@@ -179,16 +179,13 @@ fn lift(sql: &SqlStorage, cause: &str, now: i64) -> R<()> {
 }
 
 /// Runs one command's change, and holds or lifts the app in the same transaction by what it did to who may release.
-/// `cause` is the command's own name, kept beside the trigger's reason so causes stay apart.
-pub(super) fn watching<T>(
-    sql: &SqlStorage,
-    cause: &str,
-    now: i64,
-    run: impl FnOnce() -> R<T>,
-) -> R<T> {
+/// `cause` is the command's own name, kept beside the trigger's reason so causes stay apart. The hold is timed by the
+/// clock its end is judged by (`release_now`, which a test sets), whatever clock the command itself reads.
+pub(super) fn watching<T>(sql: &SqlStorage, cause: &str, run: impl FnOnce() -> R<T>) -> R<T> {
     let before = someone_may_release(sql)?;
     let out = run()?;
     let after = someone_may_release(sql)?;
+    let now = release_recheck::release_now(sql);
     match releaser_change(before, after, held_until(sql)?.is_some()) {
         ReleaserChange::Hold => hold(sql, cause, now)?,
         ReleaserChange::Lift => lift(sql, cause, now)?,

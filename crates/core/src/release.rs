@@ -851,6 +851,49 @@ pub fn deployment_release(setting: Option<&str>) -> DeploymentRelease {
     }
 }
 
+/// How long a room's app is held, served nothing but kept, once nobody who may release remains, before it is unpublished
+/// for good (`UnpublishTrigger::NoReleaserLeft`).
+///
+/// **Decided by the architect on 2026-11-13, for the owner to review, with the window *Proposed* and the owner's to
+/// change: 7 days.** The owner's departure from a room with no admin is routine offboarding, and the organization's
+/// admin can name a new owner only once the room records it. Unpublishing at once would retire the app before anyone
+/// could answer for it. Within the window, recovery naming an owner, or an admin added, lifts the hold.
+pub const NO_RELEASER_GRACE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// What a command that may change who may release does to the room's hold, given whether someone may release before
+/// and after it, and whether the app is held now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaserChange {
+    /// The command left nobody: the app is held, served nothing, until `NO_RELEASER_GRACE_MS` from now.
+    Hold,
+    /// Someone may release again while the app is held: the hold lifts, and what the room serves is served again.
+    Lift,
+    /// Nothing about the hold changes.
+    Nothing,
+}
+
+pub fn releaser_change(before: bool, after: bool, held: bool) -> ReleaserChange {
+    match (before, after, held) {
+        (_, true, true) => ReleaserChange::Lift,
+        (true, false, false) => ReleaserChange::Hold,
+        _ => ReleaserChange::Nothing,
+    }
+}
+
+/// How long the room's alarm waits before it tries again to end a hold that has run out, after `failures` failed
+/// tries in a row: 5 seconds, doubling, to at most 5 minutes, as the room's other alarm duties back off.
+pub fn hold_settle_retry_ms(failures: u32) -> i64 {
+    const FIRST_MS: i64 = 5_000;
+    const MOST_MS: i64 = 5 * 60 * 1000;
+    let doublings = failures.saturating_sub(1).min(16);
+    FIRST_MS.saturating_mul(1 << doublings).min(MOST_MS)
+}
+
+/// Whether a hold that lasts until `until` has run out at `now`, so the app is unpublished for good.
+pub fn hold_ended(until: i64, now: i64) -> bool {
+    now >= until
+}
+
 /// Whether a repository's link in `status` unpublishes the room's app, as `UnpublishTrigger::RepositoryNotReady`
 /// (ADR 0010: "its link is no longer ready"). A link that isn't ready refuses every new release at the recheck,
 /// whatever this says; this decides only whether what is up comes down too.

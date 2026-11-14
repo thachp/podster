@@ -2670,3 +2670,39 @@ fn a_stale_version_is_refused_before_anything_else_an_unchanged_request_included
         "version_conflict"
     );
 }
+
+// --- nobody who may release remains: the hold ------------------------------------------------------------------------
+
+#[test]
+fn a_command_that_leaves_nobody_holds_the_app_and_one_that_names_someone_lifts_it() {
+    use ReleaserChange::*;
+    assert_eq!(releaser_change(true, false, false), Hold);
+    assert_eq!(releaser_change(false, true, true), Lift);
+    assert_eq!(releaser_change(true, true, true), Lift);
+    // Nobody before and after, held or not: nothing changes, so a room with nobody at deploy isn't held.
+    assert_eq!(releaser_change(false, false, false), Nothing);
+    assert_eq!(releaser_change(false, false, true), Nothing);
+    assert_eq!(releaser_change(true, true, false), Nothing);
+    assert_eq!(releaser_change(false, true, false), Nothing);
+}
+
+#[test]
+fn the_hold_runs_out_at_exactly_seven_days() {
+    assert_eq!(NO_RELEASER_GRACE_MS, 604_800_000);
+    assert!(!hold_ended(
+        NOW + NO_RELEASER_GRACE_MS,
+        NOW + NO_RELEASER_GRACE_MS - 1
+    ));
+    assert!(hold_ended(
+        NOW + NO_RELEASER_GRACE_MS,
+        NOW + NO_RELEASER_GRACE_MS
+    ));
+}
+
+#[test]
+fn a_failed_settle_of_the_hold_waits_five_seconds_doubling_to_five_minutes() {
+    assert_eq!(
+        [1, 2, 3, 4, 6, 7, 20, u32::MAX].map(hold_settle_retry_ms),
+        [5_000, 10_000, 20_000, 40_000, 160_000, 300_000, 300_000, 300_000]
+    );
+}

@@ -322,6 +322,8 @@ pub(super) fn unpublish_app(
     let Some(loaded) = load(sql)? else {
         return Ok(false);
     };
+    // A hold on the app ends with it (step 6): nothing is left to serve again, and its window can't unpublish twice.
+    super::releasers::end_after_unpublish(sql)?;
     let (after, delete) = unpublish(&loaded.state);
     let epoch = to_stored(after.epoch);
     exec(
@@ -919,9 +921,14 @@ struct Wanted {
     script: Option<String>,
     version: i64,
     custom: bool,
+    /// Whether the room's app is held, and the hold's generation (step 6). A pass is stale if either the version or
+    /// the generation moved while the provider was asked, since a hold and a lift leave the host's version alone.
+    held: bool,
+    hold_generation: i64,
 }
 
 fn wanted(sql: &SqlStorage, host: &str) -> R<Option<Wanted>> {
+    let (held, hold_generation) = super::releasers::hold_state(sql)?;
     Ok(rows(
         sql,
         "SELECT script_name, version, kind FROM serve_state WHERE host = ?",
@@ -932,6 +939,8 @@ fn wanted(sql: &SqlStorage, host: &str) -> R<Option<Wanted>> {
         script: text(&row["script_name"]),
         version: int(&row["version"]),
         custom: row["kind"].as_str() != Some("default"),
+        held,
+        hold_generation,
     }))
 }
 
@@ -1064,16 +1073,21 @@ async fn apply_host(
         };
         let outcome = match &want.script {
             // A custom hostname's entry needs its claim to agree, which this step can't ask yet. And the room's state
-            // never names a script while its app is suspended. In both cases nothing is written, and an entry that
-            // is there is removed: what can't be confirmed isn't left serving.
-            Some(_) if want.custom || app_suspended(sql)? => {
+            // never names a script while its app is suspended. While the app is held because nobody who may release
+            // remains (step 6), the room keeps the script it serves, and the host serves nothing. In each case nothing
+            // is written, and an entry that is there is removed: what can't be confirmed isn't left serving.
+            Some(_) if want.custom || app_suspended(sql)? || want.held => {
                 let (_, absent) = remove_entry(provider, host).await;
-                Err(match (want.custom, absent) {
-                    (true, true) => "claim_check_not_built",
-                    (true, false) => "claim_check_not_built_entry_remains",
-                    (false, true) => "app_suspended",
-                    (false, false) => "app_suspended_entry_remains",
-                })
+                Err(
+                    match (want.custom, app_suspended(sql)? || !want.held, absent) {
+                        (true, _, true) => "claim_check_not_built",
+                        (true, _, false) => "claim_check_not_built_entry_remains",
+                        (false, true, true) => "app_suspended",
+                        (false, true, false) => "app_suspended_entry_remains",
+                        (false, false, true) => "app_held",
+                        (false, false, false) => "app_held_entry_remains",
+                    },
+                )
             }
             // A default host serves only a script under its own label. Anything else is a fault in the room's rows:
             // it is never written, and whatever the host has is removed.
@@ -1116,14 +1130,19 @@ async fn apply_host(
         // already stale: start over from what the room wants now.
         let now = now_ms();
         match wanted(sql, host)? {
-            Some(again) if again.version == want.version => {
+            Some(again)
+                if again.version == want.version
+                    && again.hold_generation == want.hold_generation =>
+            {
                 return match outcome {
                     Ok(()) => applied(sql, host, &want, now),
                     // What the room asks can't be confirmed, and the host's entry is known to be absent: there is
                     // nothing left to do or to retry for this version.
                     Err(
-                        code
-                        @ ("claim_check_not_built" | "app_suspended" | "script_not_this_hosts"),
+                        code @ ("claim_check_not_built"
+                        | "app_suspended"
+                        | "app_held"
+                        | "script_not_this_hosts"),
                     ) => refused(sql, host, want.version, code, now),
                     Err(code) => not_applied(sql, host, want.version, code, now),
                 };

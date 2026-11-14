@@ -4,9 +4,10 @@
 //! release has had enough attempts.
 //!
 //! - **Which step** ([`drive_step`]): a queued release is started; an uploading release whose upload the room hasn't
-//!   recorded is uploaded; one whose upload is recorded is committed (staged, then confirmed). Anything else is not the
-//!   driver's: an ended release, one that is live (its marker's wait is [`DriveStep::Marker`], leased for the release in
-//!   flight by `crate::release_marker`'s rules), and one whose upload is uncertain (nothing makes one yet).
+//!   recorded is uploaded; one whose upload is recorded is committed (staged, then confirmed); one whose upload is
+//!   uncertain is settled, as its upload step, by the provider's own read (`crate::release_uncertain`). Anything else is
+//!   not the driver's: an ended release, and one that is live (its marker's wait is [`DriveStep::Marker`], leased for
+//!   the release in flight by `crate::release_marker`'s rules).
 //! - **Another release's flight** ([`waits_in_flight`]): a commit waits for it under [`IN_FLIGHT_WAITING`], counting no
 //!   attempt (`m6-plan.md`, the driver's ruling 7).
 //! - **What came of a step** ([`drive_outcome`]): the release moved on to another step, or out of the driver's hands,
@@ -32,6 +33,7 @@ use crate::release::{
     FETCH_PASSES, MAX_RELEASE_READS_PER_HOUR, READ_WINDOW_MS, TREE_READS,
 };
 use crate::release_tree::MAX_FILES;
+use crate::release_uncertain::COMMIT_WAITS_UNCERTAIN;
 
 /// The code a release ends with when the driver has used up its attempts.
 pub const ATTEMPTS_EXHAUSTED: &str = "release_attempts_exhausted";
@@ -91,10 +93,14 @@ pub const READ_SHARE_WAITING: &str = "release_reads_share";
 /// cap: the other flight ends by its own marker's bounds.
 pub const IN_FLIGHT_WAITING: &str = "release_in_flight";
 
-/// The waits that count no driver attempt, take no upload slot and so never end a release by the cap: the read share's
-/// and the marker's ([`READ_SHARE_WAITING`] and [`IN_FLIGHT_WAITING`]). Nothing else.
+/// The waits that count no driver attempt, take no upload slot and so never end a release by the cap: the read share's,
+/// the marker's and another release's settling ([`READ_SHARE_WAITING`], [`IN_FLIGHT_WAITING`] and
+/// [`COMMIT_WAITS_UNCERTAIN`]). Nothing else.
 pub fn waits_uncounted(code: &str) -> bool {
-    matches!(code, READ_SHARE_WAITING | IN_FLIGHT_WAITING)
+    matches!(
+        code,
+        READ_SHARE_WAITING | IN_FLIGHT_WAITING | COMMIT_WAITS_UNCERTAIN
+    )
 }
 
 /// Whether a release at `step` waits for another release's flight: only its commit, and only while the room's flight
@@ -191,7 +197,9 @@ pub fn read_share_due(retry_at: i64, now: i64) -> i64 {
 pub enum DriveStep {
     /// A queued release: the recheck, and the upload started (`/internal/release-start-upload`).
     Start,
-    /// An uploading release with no upload on record: the read and the upload (`/internal/release-upload`).
+    /// An uploading release with no upload on record: the read and the upload (`/internal/release-upload`). For a
+    /// release whose upload is uncertain, the same command settles it by the provider's read of its script, taking no
+    /// upload slot (`crate::release_uncertain`).
     Upload,
     /// An uploading release whose upload is recorded: the stage and the confirm (`/internal/release-commit-live`).
     Commit,
@@ -213,11 +221,11 @@ impl DriveStep {
 }
 
 /// The step for a release in `state`, with `uploaded` whether the room has recorded its upload; `None` for a release
-/// that isn't the driver's.
+/// that isn't the driver's. An `uncertain` release is at its upload, which settles it.
 pub fn drive_step(state: ReleaseState, uploaded: bool) -> Option<DriveStep> {
     match (state, uploaded) {
         (ReleaseState::Queued, _) => Some(DriveStep::Start),
-        (ReleaseState::Uploading, false) => Some(DriveStep::Upload),
+        (ReleaseState::Uploading, false) | (ReleaseState::Uncertain, _) => Some(DriveStep::Upload),
         (ReleaseState::Uploading, true) => Some(DriveStep::Commit),
         _ => None,
     }

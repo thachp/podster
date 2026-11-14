@@ -3,8 +3,10 @@
 //! or an eviction. **Behind `RELEASES`, exactly `true`, and the gate on the release path.** What it decides is pure,
 //! in `podster_core::release_driver`; here is only what it reads, writes and calls.
 //!
-//! **One release at a time,** the room's oldest that is queued or uploading, as ADR 0010 has the room run its release
-//! jobs in the order it committed them. The rest wait behind it. **Beside it, the release in flight's marker**
+//! **One release at a time,** the room's oldest that is queued, uploading or `uncertain`, as ADR 0010 has the room run
+//! its release jobs in the order it committed them. An `uncertain` one is at its upload step, which settles it by the
+//! provider's read of its script (`release_settle`), by its own bounds, taking no upload slot, its reads not counted
+//! by the cap. The rest wait behind it. **Beside it, the release in flight's marker**
 //! (`release_marker`): once a release is committed live, the alarm waits for its switch and fetches its marker until
 //! it is served or set back, before the head's next step. A head that reaches its commit while another release's
 //! flight is open waits `release_in_flight`, counting no attempt and taking no upload slot, and that flight's end
@@ -62,6 +64,9 @@ use podster_core::release_driver::{
     upload_slot, waits_in_flight, waits_uncounted, DriveOutcome, DriveStep, ATTEMPTS_EXHAUSTED,
     DRIVE_FIRST_WAIT_MS, DRIVE_IDLE_MS, DRIVE_LEASE_MS, IN_FLIGHT_WAITING, MAX_ATTEMPT_READS,
     READ_SHARE_WAITING,
+};
+use podster_core::release_uncertain::{
+    counted_attempts, may_settle, settle_outcome, SettleDrive, SETTLE_UNKNOWN, UNSETTLED,
 };
 
 /// The room's path for one step of the driver. Nothing outside the Worker reaches it: the room's alarm sends it to the
@@ -143,7 +148,8 @@ pub(super) fn test_at(sql: &SqlStorage, point: &str) {
     }
 }
 
-/// The release at the head of the room's line: its oldest that is queued or uploading.
+/// The release at the head of the room's line: its oldest that is queued, uploading or `uncertain`. An `uncertain` one
+/// holds the line until it is settled or ends: nothing behind it is started or committed meanwhile.
 struct Head {
     id: String,
     state: ReleaseState,
@@ -156,7 +162,7 @@ fn head(sql: &SqlStorage) -> R<Option<Head>> {
     let Some(release) = rows(
         sql,
         "SELECT r.id, r.state, r.script_name, j.attempts, j.next_attempt_at FROM release r LEFT JOIN release_job j ON j.release_id = r.id
-           WHERE r.state IN ('queued', 'uploading') ORDER BY r.seq LIMIT 1",
+           WHERE r.state IN ('queued', 'uploading', 'uncertain') ORDER BY r.seq LIMIT 1",
         vec![],
     )?
     .into_iter()
@@ -432,12 +438,28 @@ fn lease(
         );
         return Ok(answer("waiting", Some(code), Some(at)));
     }
-    if !may_lease(head.attempts) {
+    // An `uncertain` release is settled by its own bounds: past them it ends here, and nothing is read.
+    let kept = release_settle::uncertain_of(sql, &head.id)?;
+    let settling = head.state == ReleaseState::Uncertain;
+    if settling {
+        let kept = kept
+            .as_ref()
+            .ok_or_else(|| ApiError::internal("an uncertain release with nothing kept of it"))?;
+        if !may_settle(kept.settles, kept.since, now) {
+            release_settle::unsettled(sql, &head.id, now)?;
+            set_job(sql, &head.id, None, Some(UNSETTLED), now)?;
+            return Ok(answer("gave_up", Some(UNSETTLED), None));
+        }
+    }
+    // The cap counts every attempt but the reads that settled, or tried to settle, the release.
+    let settles = kept.map_or(0, |kept| kept.settles);
+    if !may_lease(counted_attempts(head.attempts, settles)) {
         fail(sql, &head.id, ATTEMPTS_EXHAUSTED, None, now)?;
         set_job(sql, &head.id, None, Some(ATTEMPTS_EXHAUSTED), now)?;
         return Ok(answer("gave_up", Some(ATTEMPTS_EXHAUSTED), None));
     }
-    if step == DriveStep::Upload {
+    // A settling read reads nothing from GitHub, so it takes no upload slot.
+    if step == DriveStep::Upload && !settling {
         exec(
             sql,
             "DELETE FROM release_upload_attempt WHERE at < ?",
@@ -485,11 +507,13 @@ fn lease(
 
 /// The record of a step, in the room's transaction: see the module's note. `code` is why the step's command said the
 /// release waits, or the code it refused with; `retry_at` a time it named, the read budget's.
+#[allow(clippy::too_many_arguments)]
 fn record(
     sql: &SqlStorage,
     release_id: &str,
     attempt: u32,
     before: DriveStep,
+    was_uncertain: bool,
     code: Option<&str>,
     retry_at: Option<i64>,
     now: i64,
@@ -528,25 +552,57 @@ fn record(
     };
     let after = drive_step(state, recorded);
     let stalled = u32::try_from(int(&job["stalls"]).max(0)).unwrap_or(u32::MAX);
+    let kept = release_settle::uncertain_of(sql, release_id)?;
+    let settles = kept.as_ref().map_or(0, |kept| kept.settles);
+    // A release that was, or now is, `uncertain` is settled by its own bounds, and its reads aren't stalls.
+    let now_uncertain = state == ReleaseState::Uncertain;
+    let settling = match &kept {
+        Some(kept) => settle_outcome(
+            was_uncertain,
+            now_uncertain,
+            after,
+            kept.settles,
+            kept.since,
+            now,
+        ),
+        None if now_uncertain => {
+            return Err(ApiError::internal(
+                "an uncertain release with nothing kept of it",
+            ))
+        }
+        None => None,
+    };
     // A wait that counts no attempt, answered by the step itself (another release's flight opened after the lease), is
     // never ended by the cap; anything else is the cap's and the backoff's.
     let uncounted = uncounted_outcome(before, after, code, retry_at, now);
-    let outcome =
-        uncounted.unwrap_or_else(|| drive_outcome(before, after, attempts, stalled, retry_at, now));
-    let (name, code, next) = match outcome {
-        DriveOutcome::Next => ("next", None, Some(now)),
-        DriveOutcome::Done => ("done", None, None),
-        DriveOutcome::Retry { at } => ("retry", Some(code.unwrap_or(NO_PROGRESS)), Some(at)),
-        DriveOutcome::GiveUp => {
-            fail(sql, release_id, ATTEMPTS_EXHAUSTED, None, now)?;
-            ("gave_up", Some(ATTEMPTS_EXHAUSTED), None)
+    let counted = counted_attempts(attempts, settles);
+    let (name, code, next) = match settling {
+        Some(SettleDrive::Next) => ("next", None, Some(now)),
+        Some(SettleDrive::Retry { at }) => {
+            ("retry", Some(code.unwrap_or(SETTLE_UNKNOWN)), Some(at))
         }
+        Some(SettleDrive::Unsettled) => {
+            release_settle::unsettled(sql, release_id, now)?;
+            ("gave_up", Some(UNSETTLED), None)
+        }
+        None => match uncounted
+            .unwrap_or_else(|| drive_outcome(before, after, counted, stalled, retry_at, now))
+        {
+            DriveOutcome::Next => ("next", None, Some(now)),
+            DriveOutcome::Done => ("done", None, None),
+            DriveOutcome::Retry { at } => ("retry", Some(code.unwrap_or(NO_PROGRESS)), Some(at)),
+            DriveOutcome::GiveUp => {
+                fail(sql, release_id, ATTEMPTS_EXHAUSTED, None, now)?;
+                ("gave_up", Some(ATTEMPTS_EXHAUSTED), None)
+            }
+        },
     };
     set_job(sql, release_id, next, code, now)?;
-    let stalls = if uncounted.is_some() {
-        stalled
-    } else {
-        stalls_after(before, after, stalled)
+    let stalls = match settling {
+        Some(SettleDrive::Next) => 0,
+        Some(_) => stalled,
+        None if uncounted.is_some() => stalled,
+        None => stalls_after(before, after, stalled),
     };
     exec(
         sql,
@@ -802,6 +858,7 @@ impl Workspace {
         }
         let release = release_row(&sql, release_id)?.ok_or_else(ApiError::not_found)?;
         let state = state_of(&release)?;
+        let was_uncertain = state == ReleaseState::Uncertain;
         let recorded = match release["script_name"].as_str() {
             Some(script) => uploaded(&sql, release_id, script)?,
             None => false,
@@ -844,6 +901,7 @@ impl Workspace {
                 &id,
                 attempt,
                 before,
+                was_uncertain,
                 code.as_deref(),
                 retry_at,
                 release_now(sql),

@@ -115,7 +115,11 @@ impl Workspace {
                             body["floor"].as_i64().unwrap_or_default(),
                             now,
                         )?,
-                        Some(HELD_DEPARTURE) => departure_effect(&replaying, &body, now)?,
+                        Some(HELD_DEPARTURE) => departure_effect(
+                            &replaying,
+                            &body,
+                            release_recheck::release_now(&replaying),
+                        )?,
                         _ => return Err(ApiError::internal("unknown held access change")),
                     }
                     exec(

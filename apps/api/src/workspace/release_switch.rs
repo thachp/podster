@@ -130,6 +130,22 @@ pub(super) fn apply(sql: &SqlStorage, seen: ReleaseSwitch, now: i64) -> R<Switch
     Ok(decision)
 }
 
+/// A room creation under way, counted in the room's `creating` for as long as this lives.
+pub(super) struct Creating<'a>(&'a std::cell::Cell<u32>);
+
+impl<'a> Creating<'a> {
+    pub(super) fn mark(count: &'a std::cell::Cell<u32>) -> Self {
+        count.set(count.get().saturating_add(1));
+        Creating(count)
+    }
+}
+
+impl Drop for Creating<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get().saturating_sub(1));
+    }
+}
+
 fn room_id(sql: &SqlStorage) -> String {
     rows(sql, "SELECT id FROM workspace", vec![])
         .ok()
@@ -158,6 +174,18 @@ impl Workspace {
             Ok(())
         })?;
         let decision = *out.borrow();
+        // Test builds only: the room stops right after each answer it applied, an unpublish before its bookkeeping and
+        // its own arm, as an object that died there would. The organization sends the notice again.
+        #[cfg(feature = "failpoints")]
+        if !rows(
+                &self.state.storage().sql(),
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_release_switch_stops_after_commit'",
+                vec![],
+            )?
+            .is_empty()
+        {
+            return Err(ApiError::internal("test: the room stopped after applying"));
+        }
         if decision == SwitchApplied::Unpublish {
             release_commit::bookkeeping(&self.state);
             self.arm(false, false).await?;
@@ -195,14 +223,26 @@ impl Workspace {
     /// `{ org, granted, generation, last_take }` from the organization's own object, after a set. Answers
     /// `{ known, applied, generation }` with 200, which the object takes as acknowledged.
     ///
-    /// - A room that doesn't exist answers `known: false`, so the object stops asking. A room still being made reads the
-    ///   switch itself as it is made, and every release command reads it again.
-    /// - **Refused, never acknowledged:** a notice naming an organization that isn't the room's own, a body that isn't a
-    ///   switch, or a switch core refuses as malformed. The object keeps it and sends it again, and tells operators
-    ///   once it has gone unanswered long enough. Each refusal is logged by IDs.
+    /// - A room that doesn't exist answers `known: false`, so the object stops asking.
+    /// - **A room being made doesn't answer.** Its switch read may have been made before the set this notice is about,
+    ///   so the notice is left for the object to send again, by when the room exists and applies it.
+    /// - **Refused, never acknowledged:** a body that isn't a switch, or a switch core refuses as malformed. The object
+    ///   keeps it and sends it again, and tells operators once it has gone unanswered long enough.
+    /// - **A notice naming an organization that isn't the room's own** is refused with 403, which only this answers:
+    ///   the object then tells operators once and stops sending it.
+    ///
+    /// Each refusal is logged by IDs.
+    ///
+    /// **A notice the room answers stale still arms the room,** like every request that isn't a read: the room's
+    /// `fetch` arms after each one, whatever it answered. So when an unpublish has committed and its own arm in
+    /// `apply_switch` failed or never ran, the notice sent again restores the applier's wake.
     pub(super) async fn release_switch_notice(&self, mut req: Request) -> R<Value> {
         let sql = self.state.storage().sql();
         if !store::is_initialized(&sql)? {
+            if self.creating.get() > 0 {
+                console_error!("release switch: a notice reached a room still being made: code=room_being_made");
+                return Err(ApiError::internal("the room is being made"));
+            }
             return Ok(json!({ "known": false, "applied": null, "generation": null }));
         }
         self.migrate_if_needed()?;

@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { alarmQuiet } from "./alarm";
+import { alarmQuiet, nextAlarm } from "./alarm";
 
 // Decision 218's release switch, PR C: what a room does when an operator takes release from its organization or gives
 // it back. The organization's own object sends each room it lists a notice, again until the room acknowledges it; a
@@ -409,6 +409,169 @@ describe("a notice the room doesn't acknowledge", () => {
       }
     });
     expect(await unpublishes(r)).toEqual([]);
+  });
+});
+
+describe("the follow-up to decision 218's PR C", () => {
+  const refuse = (r: Room) => inRoom(r.room, (sql) => void sql.exec("CREATE TABLE IF NOT EXISTS test_refuse_release_switch_notice (x INTEGER)"));
+  const answer = (r: Room) => inRoom(r.room, (sql) => void sql.exec("DROP TABLE IF EXISTS test_refuse_release_switch_notice"));
+  const finding = (code: string, org: string) => inModeration((sql) => hasTable(sql, "takedown_finding")
+    ? sql.exec("SELECT code, subject, detail, seen FROM takedown_finding WHERE code = ? AND subject = ?", code, org).toArray() : []);
+
+  it("arms the applier again when a notice comes back stale after the room stopped right after its unpublish", async () => {
+    const org = "org_limit_rs_wake";
+    const r = await room(org);
+    // The room commits the unpublish and stops there, before its bookkeeping and its own arm, and at every notice after
+    // it while the test keeps it so: the notice isn't acknowledged.
+    await inRoom(r.room, (sql) => void sql.exec("CREATE TABLE test_release_switch_stops_after_commit (x INTEGER)"));
+    await setSwitch(org, false);
+    await notify(org);
+    // A run of the organization's own alarm still under way is waited out, so nothing more is sent until the test sends it.
+    await alarmQuiet(principal(org));
+    expect(await unpublishes(r)).toEqual([{ cause: "release_not_delegated", label: null, release_epoch: 3 }]);
+    expect((await notices(org)).map((n: any) => n.generation)).toEqual([1]);
+    // As an object that died there: no wake. The room is quieted first while its provider is still off, so whatever its
+    // own runs set can't be the applier's. Then, in one step, a provider is configured, so the applier owes the host's
+    // removal, at a time an hour ahead: sooner than anything else the room owes, so its wake is the room's next alarm,
+    // and too far for the runtime to run it while the test reads it. The room stops no more, and has no wake.
+    await alarmQuiet(stub(r.room));
+    const owedAt = Date.now() + 60 * 60 * 1000;
+    await runInDurableObject(stub(r.room), async (_: any, state: any) => {
+      const sql = state.storage.sql;
+      sql.exec("DROP TABLE test_content_provider_off");
+      sql.exec("UPDATE serve_apply SET attempts = 1, attempt_version = (SELECT version FROM serve_state WHERE host = ?), next_attempt_at = ? WHERE host = ?", r.host, owedAt, r.host);
+      sql.exec("UPDATE script_delete SET next_attempt_at = ?", owedAt);
+      sql.exec("DROP TABLE test_release_switch_stops_after_commit");
+      await state.storage.deleteAlarm();
+    });
+    // The notice again: the room has applied it, so it is stale, and the room arms for what the applier owes all the
+    // same, at exactly the time it owes it, the room's soonest.
+    await notify(org);
+    expect(await notices(org)).toEqual([]);
+    expect(await nextAlarm(stub(r.room))).toBe(owedAt);
+    await expectDown(r, 1, "stopped after its unpublish");
+  });
+
+  it("keeps counting a room's unanswered tries when the switch is set again, so operators are told on time", async () => {
+    const org = "org_limit_rs_deaf_again";
+    const r = await room(org);
+    await refuse(r);
+    await setSwitch(org, false);
+    const tries = async () => (await notices(org))[0]?.tries;
+    for (let i = 0; i < 20 && (await tries()) < 11; i += 1) await notify(org);
+    expect(await tries()).toBeGreaterThanOrEqual(11);
+    // Given back: the notice is replaced by the newer switch, and keeps its count. The organization's own alarm may send
+    // it again at any point, which only adds a try, so the count is read as at least what it was.
+    await setSwitch(org, true);
+    const [replaced] = await notices(org);
+    expect([replaced.workspace_id, replaced.generation]).toEqual([r.room, 2]);
+    expect(replaced.tries).toBeGreaterThanOrEqual(11);
+    for (let i = 0; i < 5 && (await tries()) < 12; i += 1) await notify(org);
+    expect(await tries()).toBeGreaterThanOrEqual(12);
+    expect((await finding("release_switch_notice_unanswered", org)).map((f: any) => [f.code, f.subject, f.detail])).toEqual([["release_switch_notice_unanswered", org, null]]);
+    await answer(r);
+    await notify(org);
+    expect(await notices(org)).toEqual([]);
+    // It hears the give-back, which still shows the take it missed.
+    await expectDown(r, 2, "answered at last");
+  });
+
+  it("stops sending a notice to a listed room that is another organization's, and tells operators once", async () => {
+    const mine = await room("org_rs_misdirected_owner");
+    const org = "org_rs_misdirected";
+    await room(org);
+    await unlisted(org);
+    await inOrg(org, (sql) => void sql.exec("INSERT INTO org_room (workspace_id) VALUES (?)", mine.room));
+    await setSwitch(org, false);
+    await notify(org);
+    expect(await notices(org)).toEqual([]);
+    expect(await finding("release_switch_notice_misdirected", org)).toEqual([{ code: "release_switch_notice_misdirected", subject: org, detail: null, seen: 1 }]);
+    // Nothing more is sent, and nothing is told again.
+    await notify(org);
+    expect(await finding("release_switch_notice_misdirected", org)).toEqual([{ code: "release_switch_notice_misdirected", subject: org, detail: null, seen: 1 }]);
+    expect(await finding("release_switch_notice_unanswered", org)).toEqual([]);
+    // The room, whose organization's switch was never taken, is untouched.
+    expect(await serving(mine)).toEqual(UP(mine));
+    expect(await appliedSwitch(mine.room)).toEqual({ granted: 1, generation: 0, last_take: 0 });
+  });
+
+  it("sends a notice again to a room still being made when it came, which applies it once it exists", async () => {
+    const org = "org_limit_rs_making";
+    await room(org);
+    const owner: Who = { id: `per_rs_owner_${org}`, org, adminOrgs: [org] };
+    await inOrg(org, (sql) => { sql.exec("CREATE TABLE test_release_switch_read_hold (arrived INTEGER)"); sql.exec("INSERT INTO test_release_switch_read_hold (arrived) VALUES (0)"); });
+    let making: Promise<{ status: number; body: any }> | undefined;
+    try {
+      making = api(owner, "POST", "/v1/workspaces", { name: "Being made" });
+      // The new room has read the switch, unset, and waits for the answer: the room doesn't exist yet. Polled on the
+      // organization's own mark, which is the state itself: no timer.
+      await vi.waitFor(async () => expect(await inOrg(org, (sql) => sql.exec("SELECT arrived FROM test_release_switch_read_hold").one().arrived)).toBe(1), { timeout: 10_000, interval: 5 });
+      await setSwitch(org, false);
+      await notify(org);
+      // The room being made didn't answer, so its notice is still owed; the other room's is done.
+      expect((await notices(org)).map((n: any) => n.generation)).toEqual([1]);
+    } finally {
+      await inOrg(org, (sql) => void sql.exec("DROP TABLE IF EXISTS test_release_switch_read_hold"));
+    }
+    const created = await making!;
+    expect(created.status).toBe(200);
+    const id: string = created.body.id;
+    made.push(id);
+    expect((await notices(org)).map((n: any) => n.workspace_id)).toEqual([id]);
+    // It started from the switch it read, before the take, and the notice sent again brings it to the take.
+    expect(await appliedSwitch(id)).toEqual({ granted: 1, generation: 0, last_take: 0 });
+    await notify(org);
+    expect(await notices(org)).toEqual([]);
+    expect(await appliedSwitch(id)).toEqual({ granted: 0, generation: 1, last_take: 1 });
+  });
+
+  it("records a take in a room with no release configuration, which has nothing to unpublish and says so to nobody", async () => {
+    const org = "org_limit_rs_bare";
+    const owner: Who = { id: `per_rs_owner_${org}`, org, adminOrgs: [org] };
+    const created = await api(owner, "POST", "/v1/workspaces", { name: "Bare" });
+    expect(created.status).toBe(200);
+    const id: string = created.body.id;
+    made.push(id);
+    await alarmQuiet(stub(id));
+    await setSwitch(org, false);
+    await notify(org);
+    expect(await notices(org)).toEqual([]);
+    expect(await appliedSwitch(id)).toEqual({ granted: 0, generation: 1, last_take: 1 });
+    expect(await all(id, "SELECT * FROM release_config")).toEqual([]);
+    expect(await all(id, "SELECT * FROM unpublish")).toEqual([]);
+    expect(await all(id, "SELECT type FROM event WHERE type = 'app.unpublished'")).toEqual([]);
+    expect(await all(id, "SELECT action FROM audit_event WHERE action = 'app.unpublished'")).toEqual([]);
+  });
+
+  // Each arrival order through the Worker: an operator's sets, the organization's notices, and the room's own reads.
+  // The room refuses notices except where a step lets it hear, so the order is the test's and not the alarm's.
+  const orders: [string, string[], number[]][] = [
+    ["each set heard in turn", ["take", "hear", "give", "hear", "take", "hear"], [3, 4]],
+    ["the give-back and the last take heard as one", ["take", "hear", "give", "take", "hear"], [3, 4]],
+    ["nothing heard until the last take", ["take", "give", "take", "hear"], [3]],
+    ["the give-back read first, by the room itself", ["take", "give", "read", "take", "hear"], [3, 4]],
+    ["notices and reads in turn", ["take", "hear", "give", "read", "take", "read", "hear"], [3, 4]],
+  ];
+  orders.forEach(([name, steps, epochs], n) => {
+    it(`ends at the last take, down, whatever the order: ${name}`, async () => {
+      const org = `org_limit_rs_order_${n}`;
+      const r = await room(org);
+      await refuse(r);
+      try {
+        for (const step of steps) {
+          if (step === "take") await setSwitch(org, false);
+          if (step === "give") await setSwitch(org, true);
+          if (step === "read") await check(r);
+          if (step === "hear") { await answer(r); await notify(org); await refuse(r); }
+        }
+      } finally {
+        await answer(r);
+      }
+      expect(await notices(org)).toEqual([]);
+      expect(await appliedSwitch(r.room)).toEqual({ granted: 0, generation: 3, last_take: 3 });
+      expect(await serving(r)).toEqual({ script_name: null, release_id: null });
+      expect(await unpublishes(r)).toEqual(epochs.map((epoch) => ({ cause: "release_not_delegated", label: null, release_epoch: epoch })));
+    });
   });
 });
 

@@ -2826,6 +2826,10 @@ pub struct Workspace {
     provision_not_before: std::cell::Cell<i64>,
     /// Whether nothing is held from a failed migration, so a request needn't look. A restart looks again.
     held_clear: std::cell::Cell<bool>,
+    /// How many creations of this room are under way, between the request arriving and the room existing: a release
+    /// switch notice that comes meanwhile isn't acknowledged, so it is sent again once the room exists
+    /// (`release_switch`).
+    creating: std::cell::Cell<u32>,
     /// Test builds only: one alarm at a time, as the platform runs them. See `alarm`.
     #[cfg(feature = "failpoints")]
     test_alarm_turn: futures_util::lock::Mutex<()>,
@@ -4210,15 +4214,23 @@ impl Workspace {
             return self.preview_invitation(&identity, &body);
         }
         if path == INTERNAL_INIT_PATH {
-            let body: Value = serde_json::from_str(&req.text().await?)
-                .map_err(|_| ApiError::invalid_argument())?;
-            // The organization's release switch as it is now, read before the room exists (decision 218): what the
-            // room starts from, so a take before it existed has nothing of its to unpublish. A read that fails starts
-            // it unset, which fails closed.
-            let switch = podster_core::release::ReleaseSwitch::start_for_room(
-                crate::principal::org_release_switch(&self.env, &identity.org).await,
-            );
-            return self.init(&identity, &body, switch);
+            // Marked before the first await: a notice of a set made after the switch read below would otherwise find
+            // no room, be acknowledged and dropped, and the room would start from the switch before that set. The
+            // mark goes when this ends, however it ends, a request dropped partway included.
+            let _creating = release_switch::Creating::mark(&self.creating);
+            let made = async {
+                let body: Value = serde_json::from_str(&req.text().await?)
+                    .map_err(|_| ApiError::invalid_argument())?;
+                // The organization's release switch as it is now, read before the room exists (decision 218): what
+                // the room starts from, so a take before it existed has nothing of its to unpublish. A read that
+                // fails starts it unset, which fails closed.
+                let switch = podster_core::release::ReleaseSwitch::start_for_room(
+                    crate::principal::org_release_switch(&self.env, &identity.org).await,
+                );
+                self.init(&identity, &body, switch)
+            }
+            .await;
+            return made;
         }
 
         // An unknown room answers from a read, so it stays empty.
@@ -5100,6 +5112,7 @@ impl DurableObject for Workspace {
             scan_send_retry_at: std::cell::Cell::new(0),
             provision_not_before: std::cell::Cell::new(0),
             held_clear: std::cell::Cell::new(false),
+            creating: std::cell::Cell::new(0),
             #[cfg(feature = "failpoints")]
             test_alarm_turn: futures_util::lock::Mutex::new(()),
         }

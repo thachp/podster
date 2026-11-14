@@ -49,11 +49,11 @@ let keysNoInfo = false;
  * A gate holds the next call of one kind until the test lets it go, and tells the test when that call has arrived. So
  * a test can change the room while a call is out, at exactly that point, with no clock involved.
  */
-type Gate = { op: Op | UploadOp; taken: boolean; expired: boolean; arrived: Promise<void>; markArrived: () => void; released: Promise<void>; release: () => void };
+type Gate = { op: Op | UploadOp | "marker"; taken: boolean; expired: boolean; arrived: Promise<void>; markArrived: () => void; released: Promise<void>; release: () => void };
 let gates: Gate[] = [];
 /** Well under the provider module's call limit, `CALL_TIMEOUT_MS`, which a test pins against this. */
 export const GATE_LIMIT_MS = 2000;
-function newGate(op: Op | UploadOp): Gate {
+function newGate(op: Op | UploadOp | "marker"): Gate {
   let markArrived = () => {};
   let release = () => {};
   const arrived = new Promise<void>((resolve) => { markArrived = resolve; });
@@ -61,7 +61,7 @@ function newGate(op: Op | UploadOp): Gate {
   return { op, taken: false, expired: false, arrived, markArrived, released, release };
 }
 /** `held` is where the gate is kept: the global list `/reset` clears, or one upload's own. */
-async function passGate(op: Op | UploadOp, held: Gate[] = gates) {
+async function passGate(op: Op | UploadOp | "marker", held: Gate[] = gates) {
   const gate = held.find((g) => g.op === op && !g.taken);
   if (!gate) return;
   gate.taken = true;
@@ -231,8 +231,52 @@ async function fakeUpload(request: Request, url: URL): Promise<Response | null> 
   return null;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// An app's own host, as a visitor reaches it, for the release job's marker (M6 step 5, ADR 0010's step 6): only
+// `/.well-known/podster-release.json` on `<label>.<domain>`. **Kept by host, apart from `/reset`,** as the upload part
+// is by script: each spec file's labels carry its own tag. A host serves what a test said: the marker file of a script
+// the upload part holds, as the content Worker would once a serve entry names that script; a body of its own; a status;
+// or, said nothing, not-found. Every fetch is counted, and a gate can hold the next one.
+// ---------------------------------------------------------------------------------------------------------------------
+type MarkerHost = { script?: string; body?: string; status?: number; fetches: number; credentialed: number; gates: Gate[] };
+const markerHosts = new Map<string, MarkerHost>();
+const markerHost = (host: string) => {
+  let found = markerHosts.get(host);
+  if (!found) { found = { fetches: 0, credentialed: 0, gates: [] }; markerHosts.set(host, found); }
+  return found;
+};
+const MARKER_FILE = "/.well-known/podster-release.json";
+
+async function fakeAppHost(request: Request, url: URL): Promise<Response> {
+  const held = markerHost(url.hostname);
+  if (url.pathname !== MARKER_FILE || request.method !== "GET") return new Response("not found", { status: 404 });
+  held.fetches += 1;
+  if (request.headers.get("authorization") !== null || request.headers.get("cookie") !== null) held.credentialed += 1;
+  await passGate("marker", held.gates);
+  if (held.status !== undefined) return new Response(held.body ?? "", { status: held.status });
+  if (held.body !== undefined) return new Response(held.body, { status: 200, headers: { "content-type": "application/json" } });
+  const file = held.script ? uploads.get(held.script)?.written?.files[MARKER_FILE] : undefined;
+  if (file) return new Response(Buffer.from(file.base64, "base64"), { status: 200, headers: { "content-type": file.type } });
+  return new Response("not found", { status: 404 });
+}
+
 export async function fakeContent(request: Request): Promise<Response | null> {
   const url = new URL(request.url);
+  if (url.hostname.endsWith(`.${FAKE_CONTENT.domain}`)) return fakeAppHost(request, url);
+  if (url.hostname === "content-fake.example.com" && url.pathname.startsWith("/marker-")) {
+    const held = markerHost(url.searchParams.get("host") ?? "");
+    if (url.pathname === "/marker-serve") {
+      const body = (await request.json()) as { script?: string; body?: string; status?: number };
+      held.script = body.script; held.body = body.body; held.status = body.status;
+      return json({ ok: true });
+    }
+    if (url.pathname === "/marker-state") return json({ fetches: held.fetches, credentialed: held.credentialed, expiredGates: held.gates.filter((gate) => gate.expired).length });
+    if (url.pathname === "/marker-gate") { held.gates.push(newGate("marker")); return json({ id: held.gates.length - 1 }); }
+    const gate = held.gates[Number(url.searchParams.get("id") ?? -1)];
+    if (url.pathname === "/marker-arrived" && gate) { await gate.arrived; return json({ ok: true }); }
+    if (url.pathname === "/marker-release" && gate) { gate.release(); return json({ ok: true }); }
+    return json({ error: "unknown" }, 404);
+  }
   if (url.hostname === "content-fake.example.com" && url.pathname.startsWith("/upload-")) {
     const name = url.searchParams.get("script") ?? "";
     if (url.pathname === "/upload-fault") { upload(name).faults.push((await request.json()) as UploadFault); return json({ ok: true }); }

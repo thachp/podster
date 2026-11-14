@@ -54,10 +54,9 @@
 //!   raised from. The release's row, its hosts set back if it had been staged, the flight closed, and its script
 //!   queued for deletion, in the caller's transaction, audited and told to the room's managers as Podster's act.
 //!
-//! **What this leaves for the job's own PR:** reading the tree, fetching and uploading; an upload whose answer was
-//! lost and its settling (`uncertain`); waiting for the marker, recording a release served, and the set-back when the
-//! marker never comes; and running a room's release jobs one at a time. A release that is `live` and never confirmed
-//! served stays as it is until that is built or the room is unpublished. A stage nobody comes back to is ended when
+//! **What this leaves for the job's own PR:** an upload whose answer was lost and its settling (`uncertain`). The
+//! marker's wait, a release recorded served and the set-back are `release_marker`'s, driven by the room's alarm; a
+//! confirm records when the release went live, which that wait runs from. A stage nobody comes back to is ended when
 //! its upload's hour is over, by the next release command, the reconcile's next question or the room's own alarm.
 //!
 //! Logs carry the room's and the release's IDs and codes.
@@ -109,7 +108,12 @@ fn label_current(sql: &SqlStorage, label: &str) -> R<bool> {
 ///
 /// A script under a label that isn't the room's current one is never set on a host: that host is written as serving
 /// nothing, at the version core gave it, and it is logged by its code. Nothing makes such a state today.
-fn write_state(sql: &SqlStorage, names: &[String], state: &ServeState, now: i64) -> R<()> {
+pub(super) fn write_state(
+    sql: &SqlStorage,
+    names: &[String],
+    state: &ServeState,
+    now: i64,
+) -> R<()> {
     let flight = state.in_flight.as_ref();
     for (i, (name, host)) in names.iter().zip(&state.hosts).enumerate() {
         let script = match host.script.as_deref().map(script_owner) {
@@ -172,7 +176,7 @@ fn write_state(sql: &SqlStorage, names: &[String], state: &ServeState, now: i64)
 
 /// Queues a release's own script for deletion at `now`, under the unpublish that ended it if one did. A script
 /// already queued stays as it was queued. Only a name Rust made is ever queued.
-fn queue_script(sql: &SqlStorage, script: &str, under: Option<i64>, now: i64) -> R<()> {
+pub(super) fn queue_script(sql: &SqlStorage, script: &str, under: Option<i64>, now: i64) -> R<()> {
     let ScriptOwner::Podster { label, .. } = script_owner(script) else {
         console_error!("release: a release's script wasn't queued: code=foreign_script");
         return Ok(());
@@ -466,7 +470,15 @@ fn end_at_unpublish(sql: &SqlStorage, epoch: i64, now: i64) -> R<()> {
     Ok(())
 }
 
-fn record(sql: &SqlStorage, kind: &str, release_id: &str, from: &str, to: &str, now: i64) -> R<()> {
+/// A release's change of state on its trail: an audit record and an event, as Podster's act, naming the release.
+pub(super) fn record(
+    sql: &SqlStorage,
+    kind: &str,
+    release_id: &str,
+    from: &str,
+    to: &str,
+    now: i64,
+) -> R<()> {
     audit_as(
         sql,
         moderation::PODSTER,
@@ -933,6 +945,14 @@ pub(super) fn confirm(sql: &SqlStorage, release_id: &str, reads: &Reads, now: i6
                 "UPDATE release SET state = ?, updated_at = ? WHERE id = ?",
                 vec![live.name().into(), now.into(), release_id.into()],
             )?;
+            // When it went live, by this clock: the marker's job waits for the switch from here
+            // (`podster_core::release_marker`). Nothing else of the job's row is touched: a driver's step may hold it.
+            exec(
+                sql,
+                "INSERT INTO release_job (release_id, live_at, updated_at) VALUES (?, ?, ?)
+                   ON CONFLICT (release_id) DO UPDATE SET live_at = excluded.live_at, switched_at = NULL",
+                vec![release_id.into(), now.into(), now.into()],
+            )?;
             // The hosts that waited for this: their wait is void, so the applier takes them on its next pass.
             exec(
                 sql,
@@ -1033,6 +1053,12 @@ impl Workspace {
         .await?;
         if let Some(answer) = staged.borrow_mut().take() {
             return Ok(answer);
+        }
+        #[cfg(feature = "failpoints")]
+        super::release_driver::test_at(&self.state.storage().sql(), "staged");
+        // The stage's transaction took time: no outside read starts once the step's lease has run out.
+        if !may_go_on(&self.state.storage().sql(), lease) {
+            return lease_lost(&self.state.storage().sql(), &release_id);
         }
         // Asked only now, with the release already staged in the room's own state.
         let reads = self.release_reads(&release_id).await?;

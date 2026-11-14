@@ -187,10 +187,12 @@ describe("driving a release", () => {
     expect((await provider(r.script)).written!.times).toBe(1);
     const third = await drivenPass(r.room);
     expect([third.outcome, third.state, third.next_attempt_at]).toEqual(["done", "live", null]);
-    // Nothing left for the driver: no pass, and no wake but none.
-    const after = await drivenPass(r.room);
-    expect([after.outcome, after.due]).toEqual(["not_due", null]);
     expect(await job(r.room)).toEqual({ attempts: 3, next_attempt_at: null, leased_step: null, last_code: null });
+    // Nothing left of the steps: what is left is the marker's wait, which waits for the room's applier to switch the
+    // host, counting no attempt (`release-marker.spec.ts`).
+    const after = await drivenPass(r.room);
+    expect([after.outcome, after.code, after.next_attempt_at, after.due]).toEqual(["waiting", "release_awaiting_switch", T + 5_000, T + 5_000]);
+    expect(await job(r.room)).toEqual({ attempts: 3, next_attempt_at: T + 5_000, leased_step: null, last_code: "release_awaiting_switch" });
     // **The upload is on the release's trail,** between its start and its going live, as Podster's act.
     const seen = await trail(r.room);
     expect(seen.events).toEqual([["release.upload_started", REL, null], ["release.uploaded", REL, null], ["release.live", REL, null]]);

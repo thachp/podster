@@ -90,6 +90,7 @@ mod readiness_upkeep;
 mod release_commit;
 mod release_config;
 mod release_driver;
+mod release_marker;
 mod release_recheck;
 mod release_switch;
 mod release_upload;

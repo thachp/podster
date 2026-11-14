@@ -35,8 +35,8 @@
 //! answer to go on, the attempt's deadline. A release that waits past its upload's hour is ended by the room's own
 //! bookkeeping, and its script deleted.
 //!
-//! **Still owed:** an upload whose answer was lost, as the state `uncertain` and
-//! its settling by the provider's own answer; the marker's wait.
+//! **Still owed:** an upload whose answer was lost, as the state `uncertain` and its settling by the provider's own
+//! answer. The marker's wait is `release_marker`'s.
 //!
 //! Logs carry the room's and the release's IDs and codes. No token, path or file name is logged.
 use super::release_commit::{
@@ -126,6 +126,8 @@ async fn send_files(
     let check = || if go_on() { Ok(()) } else { Err(Stop::Lease) };
     let marker = marker_body(release_id, commit_sha).ok_or(Stop::Provider)?;
     let marker_hash = hash_of(MARKER_TYPE, marker.as_bytes()).ok_or(Stop::Provider)?;
+    // The token's mint took time: no tree is read once the step's lease has run out.
+    check()?;
     let plan = reader.plan(commit_sha).await?;
     check()?;
     reserve(
@@ -331,6 +333,15 @@ impl Workspace {
         ready.ok_or_else(|| ApiError::internal("an upload check that answered nothing"))
     }
 
+    /// Whether the step may go on after the reservation: its lease still holds. Test builds only: a test changes the
+    /// room here first (`release_driver::test_at`, at `reserved`).
+    fn may_open(&self, sql: &SqlStorage, go_on: &dyn Fn() -> bool) -> bool {
+        #[cfg(feature = "failpoints")]
+        release_driver::test_at(sql, "reserved");
+        let _ = sql;
+        go_on()
+    }
+
     /// The release as it is, with why its upload waits.
     fn upload_waiting(&self, release_id: &str, code: &str, retry_at: Option<i64>) -> R<Value> {
         let sql = self.state.storage().sql();
@@ -410,9 +421,13 @@ impl Workspace {
         // The two tree reads are reserved before the token is asked for, so a read that ends at them is counted.
         let sent = match reserve(&self.env, &release_id, &owner, TREE_READS, &attempt).await {
             Err(failure) => Err(Stop::Read(failure)),
+            // The reservation took time: no token is asked of GitHub once the step's lease has run out.
+            Ok(()) if !self.may_open(&sql, &go_on) => Err(Stop::Lease),
             Ok(()) => match ReleaseReader::open(&app, repo_id, &attempt).await {
                 Err(failure) => Err(Stop::Read(failure)),
                 Ok(reader) => {
+                    #[cfg(feature = "failpoints")]
+                    release_driver::test_at(&sql, "opened");
                     let sent = send_files(
                         &self.env,
                         &provider,

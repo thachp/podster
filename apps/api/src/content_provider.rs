@@ -262,6 +262,45 @@ async fn call_bounded(
     answer
 }
 
+/// Fetches a release's marker through an app's own host, as a visitor would (M6 step 5; ADR 0010's "The release job",
+/// step 6). `(status, body)`, or `None` when there was no answer to read: unreachable, timed out, or longer than any
+/// marker. **No credential of any kind is sent,** no redirect is followed, and nothing is read but the status and at
+/// most `MARKER_MAX_BYTES` of body. The host is the room's own, checked against its form here; it is never logged.
+pub(crate) async fn fetch_marker(host: &str) -> Option<(u16, Vec<u8>)> {
+    use podster_core::release_marker::{MARKER_FETCH_TIMEOUT_MS, MARKER_MAX_BYTES};
+    use podster_core::release_tree::MARKER_PATH;
+    if !plain_host(host) {
+        return None;
+    }
+    let url = format!("https://{host}/{MARKER_PATH}");
+    let controller = AbortController::default();
+    let signal = controller.signal();
+    let attempt = async move {
+        let headers = Headers::new();
+        headers.set("accept", "application/json")?;
+        headers.set("cache-control", "no-cache")?;
+        let mut init = RequestInit::new();
+        init.with_method(Method::Get)
+            .with_headers(headers)
+            .with_redirect(RequestRedirect::Manual);
+        let mut response = Fetch::Request(Request::new_with_init(&url, &init)?)
+            .send_with_signal(&signal)
+            .await?;
+        let status = response.status_code();
+        let body = crate::github::bounded_body(&mut response, MARKER_MAX_BYTES).await?;
+        Ok::<_, Error>(body.map(|body| (status, body)))
+    };
+    let timeout = Delay::from(Duration::from_millis(
+        u64::try_from(MARKER_FETCH_TIMEOUT_MS).unwrap_or(0),
+    ));
+    let answer = match select(Box::pin(attempt), timeout).await {
+        Either::Left((Ok(answer), _)) => answer,
+        Either::Left((Err(_), _)) | Either::Right(_) => None,
+    };
+    controller.abort();
+    answer
+}
+
 impl Provider {
     /// The provider this deployment is configured with, or `None`. All six settings must be bound as text and
     /// well-formed. One missing or malformed means no provider at all, never half of one.

@@ -3101,13 +3101,16 @@ impl Workspace {
                 return Err(ApiError::not_allowed());
             }
             let key = key.ok_or_else(ApiError::idempotency_required)?;
-            let value = apply_recovery(
-                &sql,
-                &identity.id,
-                &body,
-                identity.target_member.as_ref(),
-                now,
-            )?;
+            // Recovery naming an owner lifts a hold on the room's app (M6 step 6, `releasers`).
+            let value = releasers::watching(&sql, "owner_recovered", now, || {
+                apply_recovery(
+                    &sql,
+                    &identity.id,
+                    &body,
+                    identity.target_member.as_ref(),
+                    now,
+                )
+            })?;
             store_answer(&sql, &identity.id, &key, &hash, &value, now)?;
             #[cfg(feature = "failpoints")]
             if test_fail {
@@ -3842,6 +3845,15 @@ impl Workspace {
         // A ready link's scheduled read-back.
         if let Some(next) = migrated
             .then(|| readiness_upkeep::next_due(&sql, &self.env, now))
+            .transpose()?
+            .flatten()
+        {
+            let next = next.max(now + 10);
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
+        // A hold on the room's app, when it runs out (M6 step 6).
+        if let Some(next) = migrated
+            .then(|| releasers::next_due(&sql))
             .transpose()?
             .flatten()
         {
@@ -4611,7 +4623,16 @@ impl Workspace {
                     stops_when_archived,
                     test_fail,
                     move |sql, who, now| {
-                        handle_add_member(sql, &who.caller, &body, registered, target_member, now)
+                        releasers::watching(sql, "member_added", now, || {
+                            handle_add_member(
+                                sql,
+                                &who.caller,
+                                &body,
+                                registered,
+                                target_member,
+                                now,
+                            )
+                        })
                     },
                 )
             }
@@ -5246,6 +5267,9 @@ impl DurableObject for Workspace {
         // A job below may fire an unpublish trigger, a repository's link degraded: then the release bookkeeping runs
         // before the alarm sets its next wake.
         let epoch_before = takedown::release_epoch(&self.state.storage().sql());
+        // A hold on the room's app that has run out unpublishes it for good (M6 step 6), before the applier runs, so
+        // the hosts' entries come out in this same alarm. The clock is the release commands' own, which a test sets.
+        self.settle_hold();
         // A takedown's serve entries first, before anything slower: the applier never waits behind a job (ADR 0010).
         if let Err(error) = takedown::upkeep(&self.state, &self.env).await {
             console_error!("takedown upkeep failed: {:?}", error.code());

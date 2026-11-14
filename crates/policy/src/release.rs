@@ -103,6 +103,26 @@ pub fn holds_release_authority(kind: PrincipalKind, role: Role, authority_holds:
     kind == PrincipalKind::Person && matches!(role, Role::Owner | Role::Admin) && authority_holds
 }
 
+/// One admin row of the room, as the room reads it: what kind of principal it is, and whether its place in the room
+/// still stands, which its removal, its organization revoked from the room, or its organization's departure ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdminPlace {
+    pub kind: PrincipalKind,
+    pub place_stands: bool,
+}
+
+/// ADR 0010's "somebody who may release now remains", as the architect's interim rule (ruling 3 of 2026-11-13, for the
+/// owner to review): some person who is the room's owner or one of its admins is in the room and still in their
+/// organization (decision 215). `owner_holds` is whether the room records no departure of its owner from the room's
+/// organization; `admins` is every row the room holds with the admin role. An agent never counts, whatever role is
+/// stored for it. The room reads its rows and passes them here; this decides.
+pub fn someone_may_release(owner_holds: bool, admins: &[AdminPlace]) -> bool {
+    holds_release_authority(PrincipalKind::Person, Role::Owner, owner_holds)
+        || admins
+            .iter()
+            .any(|admin| holds_release_authority(admin.kind, Role::Admin, admin.place_stands))
+}
+
 /// What the room and its deployment say, now, about whether release may happen there at all. Read from the room's
 /// current state and its organization's, never from a caller. Every `podster_core::release::UnpublishTrigger` but
 /// `NoReleaserLeft` has its field here, so each is refused at the command; "nobody may release" is the caller's own

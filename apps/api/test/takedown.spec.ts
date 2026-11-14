@@ -1136,6 +1136,48 @@ describe("the room's applier and its delete job", () => {
     await alarmQuiet(stub(a.room));
   });
 
+  /** A hold that can't run out during the test, whatever the clock. */
+  const FAR_HOLD = 4_000_000_000_000;
+  it("take a default host's entry out while the app is held, keep its script, and write the same script back once the hold lifts", async () => {
+    const a = await app({ plain: true });
+    await fake("/reset", {});
+    await fake("/seed", { scripts: [a.kept, a.served] });
+    await inRoom(a.room, (sql) => sql.exec("DELETE FROM serve_apply"));
+    await pass(a.room);
+    expect((await held()).entries[a.host]).toBe(a.served);
+    await alarmQuiet(stub(a.room));
+    // Held, as a command that leaves nobody who may release holds it (step 6): the room keeps what it serves, and
+    // resets the applier's record of each host that names a script, so the applier takes the entry out.
+    const owe = (sql: any) => sql.exec("UPDATE serve_apply SET applied_version = NULL, applied_at = NULL, applied_script = NULL, refused_version = NULL, attempts = 0, attempt_version = NULL, next_attempt_at = NULL WHERE host IN (SELECT host FROM serve_state WHERE script_name IS NOT NULL)");
+    await inRoom(a.room, (sql) => {
+      sql.exec("INSERT INTO release_hold (singleton, cause, held_at, until) VALUES (1, 'no_releaser', 1, ?)", FAR_HOLD);
+      owe(sql);
+    });
+    let before = (await held()).calls.length;
+    await pass(a.room);
+    let state = await held();
+    expect(state.calls.slice(before).filter((call) => call.name === a.host).map((call) => `${call.op} ${call.status}`)).toEqual(["entry.delete 200", "entry.get 404"]);
+    expect(state.entries[a.host]).toBeUndefined();
+    expect((await applyRows(a.room)).find((row: any) => row.host === a.host)).toMatchObject({ applied_version: null, last_code: "app_held" });
+    // Nothing is deleted: the scripts stay, and the room still names its served release.
+    expect(await all(a.room, "SELECT script_name FROM script_delete")).toEqual([]);
+    expect(state.scripts).toEqual(expect.arrayContaining([a.kept, a.served]));
+    expect(await all(a.room, "SELECT script_name FROM serve_state WHERE host = ?", a.host)).toEqual([{ script_name: a.served }]);
+    await alarmQuiet(stub(a.room));
+    // Lifted: the applier owes the host a pass again, and writes the same script back at the same version.
+    await inRoom(a.room, (sql) => {
+      sql.exec("DELETE FROM release_hold");
+      owe(sql);
+    });
+    before = (await held()).calls.length;
+    await pass(a.room);
+    state = await held();
+    expect(state.calls.slice(before).filter((call) => call.name === a.host).map((call) => `${call.op} ${call.status}`)).toEqual(["entry.put 200", "entry.get 200"]);
+    expect(state.entries[a.host]).toBe(a.served);
+    expect((await applyRows(a.room)).find((row: any) => row.host === a.host)).toMatchObject({ applied_version: 5, applied_script: a.served, last_code: null });
+    await alarmQuiet(stub(a.room));
+  });
+
   it("use each token for its own kind of call, and nothing else on the provider's API", async () => {
     const a = await app();
     await switchedOn(() => suspend(a.label));

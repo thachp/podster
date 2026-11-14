@@ -1064,15 +1064,23 @@ async fn apply_host(
         };
         let outcome = match &want.script {
             // A custom hostname's entry needs its claim to agree, which this step can't ask yet. And the room's state
-            // never names a script while its app is suspended. In both cases nothing is written, and an entry that
-            // is there is removed: what can't be confirmed isn't left serving.
-            Some(_) if want.custom || app_suspended(sql)? => {
+            // never names a script while its app is suspended. While the app is held because nobody who may release
+            // remains (step 6), the room keeps the script it serves, and the host serves nothing. In each case nothing
+            // is written, and an entry that is there is removed: what can't be confirmed isn't left serving.
+            Some(_)
+                if want.custom
+                    || app_suspended(sql)?
+                    || super::releasers::held_until(sql)?.is_some() =>
+            {
                 let (_, absent) = remove_entry(provider, host).await;
-                Err(match (want.custom, absent) {
-                    (true, true) => "claim_check_not_built",
-                    (true, false) => "claim_check_not_built_entry_remains",
-                    (false, true) => "app_suspended",
-                    (false, false) => "app_suspended_entry_remains",
+                let held = super::releasers::held_until(sql)?.is_some();
+                Err(match (want.custom, app_suspended(sql)? || !held, absent) {
+                    (true, _, true) => "claim_check_not_built",
+                    (true, _, false) => "claim_check_not_built_entry_remains",
+                    (false, true, true) => "app_suspended",
+                    (false, true, false) => "app_suspended_entry_remains",
+                    (false, false, true) => "app_held",
+                    (false, false, false) => "app_held_entry_remains",
                 })
             }
             // A default host serves only a script under its own label. Anything else is a fault in the room's rows:
@@ -1122,8 +1130,10 @@ async fn apply_host(
                     // What the room asks can't be confirmed, and the host's entry is known to be absent: there is
                     // nothing left to do or to retry for this version.
                     Err(
-                        code
-                        @ ("claim_check_not_built" | "app_suspended" | "script_not_this_hosts"),
+                        code @ ("claim_check_not_built"
+                        | "app_suspended"
+                        | "app_held"
+                        | "script_not_this_hosts"),
                     ) => refused(sql, host, want.version, code, now),
                     Err(code) => not_applied(sql, host, want.version, code, now),
                 };

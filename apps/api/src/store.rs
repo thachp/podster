@@ -342,6 +342,9 @@ CREATE TABLE release_switch_applied (singleton INTEGER PRIMARY KEY CHECK (single
   generation INTEGER NOT NULL DEFAULT 0 CHECK (typeof(generation) = 'integer' AND generation >= 0),
   last_take INTEGER NOT NULL DEFAULT 0 CHECK (typeof(last_take) = 'integer' AND last_take >= 0 AND last_take <= generation), applied_at INTEGER);
 INSERT INTO release_switch_applied (singleton) VALUES (1);
+", "
+CREATE TABLE release_hold (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), cause TEXT NOT NULL CHECK (cause = 'no_releaser'),
+  held_at INTEGER NOT NULL, until INTEGER NOT NULL, CHECK (typeof(until) = 'integer' AND held_at < until));
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

@@ -880,6 +880,15 @@ pub fn releaser_change(before: bool, after: bool, held: bool) -> ReleaserChange 
     }
 }
 
+/// How long the room's alarm waits before it tries again to end a hold that has run out, after `failures` failed
+/// tries in a row: 5 seconds, doubling, to at most 5 minutes, as the room's other alarm duties back off.
+pub fn hold_settle_retry_ms(failures: u32) -> i64 {
+    const FIRST_MS: i64 = 5_000;
+    const MOST_MS: i64 = 5 * 60 * 1000;
+    let doublings = failures.saturating_sub(1).min(16);
+    FIRST_MS.saturating_mul(1 << doublings).min(MOST_MS)
+}
+
 /// Whether a hold that lasts until `until` has run out at `now`, so the app is unpublished for good.
 pub fn hold_ended(until: i64, now: i64) -> bool {
     now >= until

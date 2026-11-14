@@ -113,7 +113,7 @@ const unpublishAudit = (r: Room) => all(r.room, "SELECT actor_id, new_json FROM 
 const unpublishEvents = (r: Room) => all(r.room, "SELECT actor_id, reason FROM event WHERE type = 'app.unpublished' ORDER BY seq");
 
 const WEEK = 7 * 24 * 60 * 60 * 1000;
-const hold = (r: Room) => all(r.room, "SELECT cause, held_at, until FROM release_hold");
+const hold = (r: Room) => all(r.room, "SELECT cause, held_at, until FROM release_hold WHERE until IS NOT NULL");
 const holdTrail = (r: Room) => inRoom(r.room, (sql) => ({
   audit: sql.exec("SELECT actor_id, action, new_json FROM audit_event WHERE action IN ('app.held', 'app.hold_lifted') ORDER BY seq").toArray()
     .map((a: any) => [a.actor_id, a.action, JSON.parse(a.new_json)]),
@@ -189,6 +189,15 @@ async function heldBetween(r: Room, during: () => Promise<unknown>) {
   }
   return answer;
 }
+
+/** The recheck of one of the room's releases, as the release job would ask it. */
+const recheck = (r: Room) => switchedOn(() => stub(r.room).fetch("https://do/internal/release-recheck", { method: "POST", body: JSON.stringify({ release_id: REL }) })
+  .then(async (x: Response) => ({ status: x.status, body: (await x.json()) as any })));
+/** An operator suspends the room's app by its label, or lifts that, as the Moderation object asks the room. */
+const operatorSuspends = (r: Room, suspended: boolean) => stub(r.room).fetch("https://do/internal/app-suspension", {
+  method: "POST", body: JSON.stringify({ label: r.host.split(".")[0], suspended, reason: "abuse" }),
+}).then((x: Response) => x.status);
+const suspendedAt = (r: Room) => inRoom(r.room, (sql) => sql.exec("SELECT suspended_at FROM app_label").one().suspended_at);
 
 /** An admin of the room's organization, outside the room, names a new owner by recovery. */
 const recover = (r: Room, to: Who, key = `nr-recover-${++counter}`) => send(
@@ -393,6 +402,116 @@ describe("ADR 0010's trigger, nobody who may release remains (M6 step 6, the int
     expect(await serving(r)).toEqual(UP(r));
     expect(await all(r.room, "SELECT state FROM release WHERE id = ?", REL)).toEqual([{ state: "failed" }]);
     expect(await all(r.room, "SELECT in_flight_release FROM release_config")).toEqual([{ in_flight_release: null }]);
+  });
+
+  it("has the release recheck refuse while the app is held, whatever the requester's own standing", async () => {
+    const r = await room("org_nr_recheck");
+    await clock(r, T);
+    // Not held: the requester may release, and the queued release passes its recheck.
+    expect((await recheck(r)).body).toEqual({ release_id: REL, state: "queued", rechecked: true, reason: null });
+    // Held, as no command would leave a room with its owner still in it: the gate is the hold's own.
+    await inRoom(r.room, (sql) => void sql.exec("UPDATE release_hold SET cause = 'no_releaser', held_at = 1, until = ?, generation = generation + 1", T + WEEK));
+    expect((await recheck(r)).body).toEqual({ release_id: REL, state: "failed", rechecked: true, reason: "no_releaser" });
+  });
+
+  it("comes back for a hold whose settle failed, after a wait that doubles, and nothing is half done", async () => {
+    const r = await room("org_nr_settle_fails");
+    expect(await depart(r, r.admin)).toBe(200);
+    expect(await depart(r, r.owner)).toBe(200);
+    const [row] = await hold(r);
+    await runInDurableObject(stub(r.room), (_: any, state: any) => state.storage.put("public_index_verify_next", row.until + WEEK));
+    // The failpoint goes in before the clock reaches the window's end, so no run of the alarm can settle in between.
+    await inRoom(r.room, (sql) => void sql.exec("CREATE TABLE test_settle_hold_fails (x INTEGER)"));
+    const retry = () => inRoom(r.room, (sql) => sql.exec("SELECT settle_failures, settle_retry_at FROM release_hold").one());
+    // Nothing set or running from here, before the clock moves: the pass below is the only one at the window's end.
+    await alarmQuiet(stub(r.room));
+    await clock(r, row.until);
+    await alarmPass(stub(r.room));
+    // Rolled back whole: still held and nothing unpublished. The alarm comes back 5 seconds on, not at once.
+    expect(await hold(r)).toEqual([row]);
+    expect(await unpublishes(r)).toEqual([]);
+    expect(await serving(r)).toEqual(UP(r));
+    expect(await retry()).toEqual({ settle_failures: 1, settle_retry_at: row.until + 5_000 });
+    expect(await nextAlarm(stub(r.room))).toBe(row.until + 5_000);
+    // Failing again at that time: the wait doubles.
+    await clock(r, row.until + 5_000);
+    await alarmPass(stub(r.room));
+    expect(await retry()).toEqual({ settle_failures: 2, settle_retry_at: row.until + 15_000 });
+    expect(await nextAlarm(stub(r.room))).toBe(row.until + 15_000);
+    // Once it works, the hold ends and the app is unpublished once.
+    await inRoom(r.room, (sql) => void sql.exec("DROP TABLE test_settle_hold_fails"));
+    await clock(r, row.until + 15_000);
+    await alarmPass(stub(r.room));
+    expect(await hold(r)).toEqual([]);
+    expect(await retry()).toEqual({ settle_failures: 0, settle_retry_at: null });
+    expect(await unpublishes(r)).toEqual([{ cause: "no_releaser", label: null, release_epoch: 3 }]);
+  });
+
+  it("lifts the hold instead of unpublishing when somebody who may release is there at the window's end", async () => {
+    const r = await room("org_nr_present_at_end");
+    // Held while the owner is still in the room, as no command would leave it: a lift a command missed.
+    await inRoom(r.room, (sql) => void sql.exec("UPDATE release_hold SET cause = 'no_releaser', held_at = 1, until = ?, generation = generation + 1", T + WEEK));
+    await clock(r, T + WEEK);
+    await alarmPass(stub(r.room));
+    expect(await hold(r)).toEqual([]);
+    expect(await unpublishes(r)).toEqual([]);
+    expect(await serving(r)).toEqual(UP(r));
+    expect((await holdTrail(r)).audit).toEqual([["podster", "app.hold_lifted", { cause: "releaser_present_at_end", reason: "no_releaser" }]]);
+  });
+
+  it("ends the hold when another cause unpublishes: the window's end unpublishes nothing more, and recovery lifts nothing", async () => {
+    const r = await room("org_nr_other_cause");
+    expect(await depart(r, r.admin)).toBe(200);
+    expect(await depart(r, r.owner)).toBe(200);
+    const [row] = await hold(r);
+    // The deployment's setting read as exactly `false` by the walk's question: its own unpublish, in its own
+    // transaction, ends the hold with it.
+    await BINDINGS.DB.prepare("CREATE TABLE test_releases_setting (value TEXT)").run();
+    await BINDINGS.DB.prepare("INSERT INTO test_releases_setting (value) VALUES ('false')").run();
+    try {
+      await stub(r.room).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify({ kind: "wake" }) });
+    } finally {
+      await BINDINGS.DB.prepare("DROP TABLE test_releases_setting").run();
+    }
+    expect(await unpublishes(r)).toEqual([{ cause: "release_off_for_deployment", label: null, release_epoch: 3 }]);
+    expect(await hold(r)).toEqual([]);
+    await clock(r, row.until);
+    await alarmPass(stub(r.room));
+    expect(await unpublishes(r)).toHaveLength(1);
+    expect((await recover(r, r.member)).status).toBe(200);
+    expect((await holdTrail(r)).audit.map((a: any) => a[1])).toEqual(["app.held"]);
+  });
+
+  describe("with an operator's suspension of the app, which a hold never undoes", () => {
+    it("suspended, then held, then lifted: the suspension stands", async () => {
+      const r = await room("org_nr_suspended_first");
+      expect(await operatorSuspends(r, true)).toBe(200);
+      expect(await serving(r)).toEqual(DOWN);
+      expect(await depart(r, r.admin)).toBe(200);
+      expect(await depart(r, r.owner)).toBe(200);
+      expect(await hold(r)).toHaveLength(1);
+      expect((await recover(r, r.member)).status).toBe(200);
+      expect(await hold(r)).toEqual([]);
+      expect(await suspendedAt(r)).not.toBeNull();
+      expect(await serving(r)).toEqual(DOWN);
+      expect(await unpublishes(r)).toEqual([{ cause: "app_suspended", label: r.host.split(".")[0], release_epoch: 3 }]);
+    });
+
+    it("held, then suspended: the suspension's unpublish ends the hold, and neither recovery nor the operator's lift brings anything back", async () => {
+      const r = await room("org_nr_held_first");
+      expect(await depart(r, r.admin)).toBe(200);
+      expect(await depart(r, r.owner)).toBe(200);
+      expect(await hold(r)).toHaveLength(1);
+      expect(await operatorSuspends(r, true)).toBe(200);
+      expect(await hold(r)).toEqual([]);
+      expect((await recover(r, r.member)).status).toBe(200);
+      expect(await suspendedAt(r)).not.toBeNull();
+      expect(await serving(r)).toEqual(DOWN);
+      expect((await holdTrail(r)).audit.map((a: any) => a[1])).toEqual(["app.held"]);
+      expect(await operatorSuspends(r, false)).toBe(200);
+      expect(await hold(r)).toEqual([]);
+      expect(await serving(r)).toEqual(DOWN);
+    });
   });
 
   describe("the commands that change who may release, none of which can leave nobody", () => {

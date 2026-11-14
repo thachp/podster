@@ -2698,3 +2698,11 @@ fn the_hold_runs_out_at_exactly_seven_days() {
         NOW + NO_RELEASER_GRACE_MS
     ));
 }
+
+#[test]
+fn a_failed_settle_of_the_hold_waits_five_seconds_doubling_to_five_minutes() {
+    assert_eq!(
+        [1, 2, 3, 4, 6, 7, 20, u32::MAX].map(hold_settle_retry_ms),
+        [5_000, 10_000, 20_000, 40_000, 160_000, 300_000, 300_000, 300_000]
+    );
+}

@@ -38,6 +38,9 @@ use wasm_bindgen::{JsCast, JsValue};
 use worker::wasm_bindgen_futures::JsFuture;
 use worker::*;
 
+/// Reading a release from a room's repository, with the read-only App (M6 step 5).
+pub(crate) mod release_read;
+
 #[cfg(not(feature = "rehearsal"))]
 const API: &str = "https://api.github.com";
 /// The local rehearsal's fake GitHub (`e2e/run-local.mjs`). The address is fixed when that build is made, and the build

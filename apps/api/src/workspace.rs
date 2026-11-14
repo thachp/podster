@@ -4171,6 +4171,15 @@ impl Workspace {
         if req.path() == release_commit::INTERNAL_RELEASE_COMMIT_LIVE {
             return self.release_commit_live(req).await;
         }
+        // Test builds only: one whole read of a release from a repository, which publishes nothing and writes
+        // nothing here. The release job's upload, which will drive the read, isn't built.
+        #[cfg(feature = "failpoints")]
+        if req.path() == "/internal/test-release-read" {
+            let mut req = req;
+            let body: Value = serde_json::from_str(&req.text().await?)
+                .map_err(|_| ApiError::invalid_argument())?;
+            return Ok(crate::github::release_read::probe(&self.env, &body).await);
+        }
         #[cfg(feature = "failpoints")]
         if req.path() == INTERNAL_MANAGED_SWITCH {
             let sql = self.state.storage().sql();

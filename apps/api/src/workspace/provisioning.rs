@@ -807,6 +807,18 @@ impl Workspace {
     /// even ending the request fails, the alarm stays away for longer each time, so a room that can't write doesn't spin.
     pub(super) async fn provision(&self) -> R<()> {
         let sql = self.state.storage().sql();
+        // Test builds only: while the room holds this table the job doesn't run, so a test can change the room between a
+        // request's commit and the job's first look, however late its next step lands. The alarm still comes back for it.
+        #[cfg(feature = "failpoints")]
+        if !rows(
+            &sql,
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_hold_provisioning'",
+            vec![],
+        )?
+        .is_empty()
+        {
+            return Ok(());
+        }
         if !store::is_initialized(&sql)? || store::needs_migration(&sql)? {
             return Ok(());
         }

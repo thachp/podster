@@ -68,6 +68,12 @@ afterEach(async () => {
 });
 
 const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(stub(id), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
+/**
+ * Holds the room's provisioning job back until `release`: a request's commit arms the alarm for 50 ms later and the
+ * runtime runs it on its own, so a test that changes the room after asking must hold the job for the change to come first.
+ */
+const holdJob = (id: string) => inRoom(id, (sql) => void sql.exec("CREATE TABLE test_hold_provisioning (x INTEGER)"));
+const releaseJob = (id: string) => inRoom(id, (sql) => void sql.exec("DROP TABLE test_hold_provisioning"));
 const delegate = (org: string, granted = true, by: Who = OPERATOR) => api(by, "PUT", `/v1/orgs/${org}/provisioning-delegation`, { granted });
 /** Switches managed repositories on for one organization's own routes, as `test_managed_repositories_on` does for a room. */
 const orgOn = (org: string) => runInDurableObject(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(org)), (_: any, state: any) => void state.storage.sql.exec("CREATE TABLE IF NOT EXISTS test_managed_repositories_on (x INTEGER)"));
@@ -1613,8 +1619,9 @@ describe("a deployment's list of repository requesters", () => {
     expect((await github()).calls).toEqual([]);
     for (const holder of [r.org, r.owner.id]) expect(await counted(holder)).not.toContain(r.id);
     expect((await read(r)).may_request).toBe(false);
-    // Listed, the retry is taken.
+    // Listed, the retry is taken. The job is held, so the request is still pending when it's read.
     await listed(r.id, r.owner.id);
+    await holdJob(r.id);
     expect((await retry(r)).status).toBe(200);
     expect((await rowsOf(r.id, "repo_request"))[0].state).toBe("pending");
   });
@@ -1719,8 +1726,10 @@ describe("a deployment's list of repository requesters", () => {
     const r = await roomOf(operator);
     await listed(r.id, "operators");
     await alarmQuiet(stub(r.id));
+    await holdJob(r.id);
     expect((await ask(r)).status).toBe(200);
     await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_no_operators (x INTEGER)"));
+    await releaseJob(r.id);
     for (let i = 0; i < 40 && (await rowsOf(r.id, "repo_request"))[0].state === "pending"; i++) await alarmPass(stub(r.id));
     expect((await rowsOf(r.id, "repo_request"))[0]).toMatchObject({ state: "failed", reason: "repository_requests_closed" });
     expect((await github()).calls).toEqual([]);
@@ -1834,12 +1843,15 @@ describe("a deployment's list of repository requesters", () => {
   it("stops a request recorded under a wider setting before anything goes to GitHub, and replays no stored answer to someone who isn't listed", async () => {
     const r = await room();
     await alarmQuiet(stub(r.id));
+    // The job is held until the setting is narrowed, so it has run on neither side of that by when the test gets there.
+    await holdJob(r.id);
     const first = await ask(r, undefined, { key: "pv-narrowed-key" });
     expect(first.status).toBe(200);
     // The setting is narrowed before the job has run.
     await listed(r.id, "per_pv_someone_else");
     const replay = await ask(r, undefined, { key: "pv-narrowed-key" });
     expect([replay.status, replay.code]).toEqual(CLOSED);
+    await releaseJob(r.id);
     for (let i = 0; i < 40 && (await rowsOf(r.id, "repo_request"))[0].state === "pending"; i++) await alarmPass(stub(r.id));
     expect((await rowsOf(r.id, "repo_request"))[0]).toMatchObject({ state: "failed", reason: "repository_requests_closed" });
     expect((await github()).calls).toEqual([]);

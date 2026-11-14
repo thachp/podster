@@ -960,6 +960,11 @@ fn list(sql: &SqlStorage, before: Option<i64>, apps: bool) -> R<Value> {
 /// it was first made, whatever `reads` says, and counts nothing more. A reservation leaves the count an hour after it was
 /// made, and a release that asks after that reserves again. A release told to wait has reserved nothing.
 ///
+/// **With `more: true`, the reads are added,** which is how the release job asks (M6 step 5): it reserves each
+/// attempt's reads before making them, the two tree reads and then the file reads, so nothing it reads goes
+/// uncounted, a read that ended at the trees and a second attempt among them. They join the release's one row, which
+/// then counts from now. If they don't fit, nothing is added and what the release already holds stays.
+///
 /// **Nothing calls this until the release job, M6 step 5.** It is built at step 9 with the other caps, so the job finds
 /// the budget in place; no route reaches it.
 fn reserve_reads(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
@@ -977,13 +982,13 @@ fn reserve_reads(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         "DELETE FROM release_reads WHERE reserved_at < ?",
         vec![window_start(now, READ_WINDOW_MS).into()],
     )?;
-    if let Some(row) = rows(
+    let more = body["more"] == true;
+    let existing = rows(
         sql,
         "SELECT reads, reserved_at FROM release_reads WHERE release_id = ?",
         vec![release.into()],
-    )?
-    .first()
-    {
+    )?;
+    if let Some(row) = existing.first().filter(|_| !more) {
         return Ok(
             json!({ "fits": true, "reads": row["reads"], "reserved_at": row["reserved_at"] }),
         );
@@ -999,12 +1004,18 @@ fn reserve_reads(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         .collect();
     match read_budget_wait(&held, reads, now) {
         Ok(()) => {
+            // With `more`, the release's own earlier reads are in `held`, and these join them in its one row, which
+            // then counts from now: every read stays counted for at least its hour.
             exec(
                 sql,
-                "INSERT INTO release_reads (release_id, reads, reserved_at) VALUES (?, ?, ?)",
+                "INSERT INTO release_reads (release_id, reads, reserved_at) VALUES (?, ?, ?)
+                   ON CONFLICT (release_id) DO UPDATE SET reads = min(reads + excluded.reads, 4294967295), reserved_at = excluded.reserved_at",
                 vec![release.into(), i64::from(reads).into(), now.into()],
             )?;
-            Ok(json!({ "fits": true, "reads": reads, "reserved_at": now }))
+            let held = existing.first().map_or(0, |row| int(&row["reads"]));
+            Ok(
+                json!({ "fits": true, "reads": held.saturating_add(i64::from(reads)), "reserved_at": now }),
+            )
         }
         Err(retry_at) => Ok(json!({ "fits": false, "retry_at": retry_at })),
     }

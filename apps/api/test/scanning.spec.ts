@@ -399,7 +399,10 @@ describe("a room from before this", () => {
       // M6 step 2's release tables, the newest migration, come off first.
       // M6 step 4(a)'s applier and script-delete tables, the newest migration, come off first.
       // The record of release bookkeeping that keeps failing, the newest migration, comes off first.
-      // The hold on a room's app (step 6), the newest migration, comes off first.
+      // The record of a release's upload, the newest migration, comes off first.
+      sql.exec("DROP TABLE release_upload");
+      sql.exec("UPDATE schema_version SET version = version - 1");
+      // Then the hold on a room's app (step 6).
       sql.exec("DROP TABLE release_hold");
       sql.exec("UPDATE schema_version SET version = version - 1");
       // Then decision 218's applied release switch.

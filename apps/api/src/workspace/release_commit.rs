@@ -2,7 +2,8 @@
 //! "The release job", steps 1 and 5, and "Publishing and unpublishing, in order").
 //!
 //! Three room commands' worth, all behind the recheck in [`release_recheck`]. Nothing calls them yet: the release job
-//! will. Nothing here reads a repository, uploads a file or asks the provider anything.
+//! will. Nothing here reads a repository, uploads a file or asks the provider anything: the upload command that does
+//! is `release_upload`, and what the room decides for it is here ([`upload_ready`], [`record_uploaded`]).
 //!
 //! - **Start an upload** ([`start_upload`]). A queued release whose recheck holds becomes `uploading`: the room names
 //!   its script, from its label and its own ID, and records when the upload began, which is what the hourly reconcile
@@ -74,6 +75,9 @@ use podster_core::release::{
 pub(crate) const INTERNAL_RELEASE_START_UPLOAD: &str = "/internal/release-start-upload";
 /// The room's path for committing a release live. Nothing outside the Worker reaches it, and nothing calls it yet.
 pub(crate) const INTERNAL_RELEASE_COMMIT_LIVE: &str = "/internal/release-commit-live";
+/// What a commit is answered with, as `waiting`, for a release whose upload the room hasn't recorded: nothing is
+/// staged on a script that may hold nothing, or part of a release.
+pub(super) const NOT_UPLOADED: &str = "release_not_uploaded";
 
 /// **Whether the release path is complete.** False until the PR that completes it flips this, and that is the only
 /// place it is set. While false, a deployment with release switched on and a provider configured refuses every
@@ -572,6 +576,216 @@ pub(super) fn start_upload(
     Ok(with_script(answer(&after, true, None), Some(script)))
 }
 
+/// Whether the room has recorded this release's script as written whole (`record_uploaded`).
+pub(super) fn uploaded(sql: &SqlStorage, release_id: &str, script: &str) -> R<bool> {
+    Ok(!rows(
+        sql,
+        "SELECT 1 AS uploaded FROM release_upload WHERE release_id = ? AND script_name = ?",
+        vec![release_id.into(), script.into()],
+    )?
+    .is_empty())
+}
+
+/// What the room says of a release before anything is read for it or written under its name.
+pub(super) enum UploadReady {
+    /// It is uploading, under the epoch it started under, and everything the room knows of it holds: its script's
+    /// name, and the repository and the commit to read.
+    Go {
+        script: String,
+        repo_id: i64,
+        commit_sha: String,
+    },
+    /// The command ends here, with this answer: the release isn't uploading, it failed, or it is uploaded already.
+    Answer(Value),
+}
+
+/// The upload's answer for a release as it is: the recheck's answer, and whether its upload is recorded.
+pub(super) fn upload_answer(sql: &SqlStorage, release: &Value, rechecked: bool) -> R<Value> {
+    let mut out = answer(release, rechecked, None);
+    let recorded = match (release["id"].as_str(), release["script_name"].as_str()) {
+        (Some(id), Some(script)) => uploaded(sql, id, script)?,
+        _ => false,
+    };
+    out["uploaded"] = recorded.into();
+    Ok(out)
+}
+
+/// The room's check before an upload reads a file, and again before it writes the script, inside the room's
+/// transaction: the recheck, the epoch included, on `reads` and the room's rows now.
+///
+/// - A release that isn't `uploading` is answered as it is.
+/// - A fact that fails ends the release here, before anything more is asked of anyone. With `whole`, a fact that
+///   couldn't be read leaves it undecided, `standing_unknown`; without it, `reads` hold nothing from outside, and
+///   only the room's own facts are judged, as a commit's stage does.
+/// - A script queued for deletion is never written, and neither is one under a label that isn't the room's current.
+/// - One already recorded as uploaded is answered as such: a retry writes nothing again.
+pub(super) fn upload_ready(
+    sql: &SqlStorage,
+    release_id: &str,
+    reads: &Reads,
+    whole: bool,
+    now: i64,
+) -> R<UploadReady> {
+    end_stale(sql, now)?;
+    let release = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
+    let state = state_of(&release)?;
+    if state != ReleaseState::Uploading {
+        return Ok(UploadReady::Answer(upload_answer(sql, &release, false)?));
+    }
+    if release["script_release_id"].as_str() != Some(release_id) {
+        return Err(ApiError::internal(
+            "a release whose script isn't its own isn't uploaded",
+        ));
+    }
+    let ended = |answer: Value| {
+        let mut answer = answer;
+        answer["uploaded"] = false.into();
+        Ok(UploadReady::Answer(answer))
+    };
+    match judge(sql, &release, reads, now)? {
+        Verdict::Fails(failure) => return ended(rechecked_failed(sql, release_id, failure, now)?),
+        Verdict::Unknown if whole => return Err(standing_unknown()),
+        Verdict::Unknown | Verdict::Holds => {}
+    }
+    let script = text(&release["script_name"])
+        .ok_or_else(|| ApiError::internal("an uploading release with no script"))?;
+    let queued = !rows(
+        sql,
+        "SELECT 1 AS queued FROM script_delete WHERE script_name = ?",
+        vec![script.as_str().into()],
+    )?
+    .is_empty();
+    if queued {
+        let reason = UploadFailure::ScriptDeleted.code();
+        return ended(failed(sql, release_id, reason, now)?);
+    }
+    if !label_current(sql, &text(&release["label"]).unwrap_or_default())? {
+        let reason = UploadFailure::LabelRetired.code();
+        return ended(failed(sql, release_id, reason, now)?);
+    }
+    if uploaded(sql, release_id, &script)? {
+        return Ok(UploadReady::Answer(upload_answer(sql, &release, whole)?));
+    }
+    let repo_id = rows(
+        sql,
+        "SELECT provider_repo_id FROM repo_link WHERE provider = 'github'",
+        vec![],
+    )?
+    .first()
+    .map(|row| int(&row["provider_repo_id"]))
+    .ok_or_else(|| ApiError::internal("an uploading release with no repository"))?;
+    let commit_sha = text(&release["commit_sha"])
+        .ok_or_else(|| ApiError::internal("a release with no commit"))?;
+    Ok(UploadReady::Go {
+        script,
+        repo_id,
+        commit_sha,
+    })
+}
+
+/// Ends a release whose read failed it, with the read's code, and answers it as it now is.
+///
+/// **Only a release still uploading, with no upload on record.** An attempt's failure is an answer about when it
+/// read, and two attempts can overlap: one records the upload and the release goes live while the other is still
+/// reading. The late one's failure then ends nothing: a release that is live, or whose upload another attempt
+/// recorded whole, is answered as it is.
+pub(super) fn upload_failed(
+    sql: &SqlStorage,
+    release_id: &str,
+    reason: &str,
+    now: i64,
+) -> R<Value> {
+    end_stale(sql, now)?;
+    let release = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
+    let recorded = match release["script_name"].as_str() {
+        Some(script) => uploaded(sql, release_id, script)?,
+        None => false,
+    };
+    if state_of(&release)? != ReleaseState::Uploading || recorded {
+        return upload_answer(sql, &release, false);
+    }
+    let mut out = failed(sql, release_id, reason, now)?;
+    out["uploaded"] = false.into();
+    Ok(out)
+}
+
+/// The room's transaction after the script's write was asked for. `written` is whether the provider said, in so many
+/// words, that the script is written.
+///
+/// - **Still uploading, and written:** the upload is recorded, with how many files and bytes it holds. From here a
+///   commit may stage it. Asked again, nothing changes.
+/// - **Still uploading, and not known to be written:** nothing is recorded. The script may exist; the release's own
+///   state keeps it for the upload's hour, a retry writes it again, and the hour's end deletes it.
+/// - **No longer uploading:** it ended while its script was being written, by an unpublish, an expiry or a failed
+///   recheck. Whatever ended it queued its script for deletion, and that deletion may already have been counted
+///   done, before the write landed. **So the script is owed its deletion again, now:** queued, or queued again if it
+///   had been counted gone, under the unpublish that owes it, which isn't done with its files until this is gone.
+pub(super) fn record_uploaded(
+    sql: &SqlStorage,
+    release_id: &str,
+    script: &str,
+    written: bool,
+    files: i64,
+    bytes: i64,
+    now: i64,
+) -> R<Value> {
+    end_stale(sql, now)?;
+    let release = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
+    let own = release["script_name"].as_str() == Some(script)
+        && release["script_release_id"].as_str() == Some(release_id);
+    if !own {
+        return Err(ApiError::internal("an upload for another release's script"));
+    }
+    if state_of(&release)? == ReleaseState::Uploading {
+        let queued = !rows(
+            sql,
+            "SELECT 1 AS queued FROM script_delete WHERE script_name = ?",
+            vec![script.into()],
+        )?
+        .is_empty();
+        if written && !queued {
+            exec(
+                sql,
+                "INSERT INTO release_upload (release_id, script_name, files, bytes, uploaded_at) VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT (release_id) DO NOTHING",
+                vec![
+                    release_id.into(),
+                    script.into(),
+                    files.into(),
+                    bytes.into(),
+                    now.into(),
+                ],
+            )?;
+        }
+        return upload_answer(sql, &release, false);
+    }
+    let ScriptOwner::Podster { label, .. } = script_owner(script) else {
+        return Err(ApiError::internal(
+            "an upload under a name Podster didn't make",
+        ));
+    };
+    let under = owing_unpublish(sql, script)?;
+    exec(
+        sql,
+        "INSERT INTO script_delete (script_name, label, unpublish_epoch, queued_at, next_attempt_at) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (script_name) DO UPDATE SET next_attempt_at = excluded.next_attempt_at, attempts = 0, last_code = 'written_after_end',
+             queued_at = CASE WHEN gone_at IS NULL THEN queued_at ELSE excluded.queued_at END, gone_at = NULL",
+        vec![
+            script.into(),
+            label.into(),
+            under.map_or(V::Null, V::from),
+            now.into(),
+            now.into(),
+        ],
+    )?;
+    exec(
+        sql,
+        "UPDATE unpublish SET scripts_gone_at = NULL WHERE release_epoch = (SELECT unpublish_epoch FROM script_delete WHERE script_name = ?)",
+        vec![script.into()],
+    )?;
+    upload_answer(sql, &release, false)
+}
+
 /// What the first of a commit's two transactions did.
 pub(super) enum Staged {
     /// The release's hosts name its script and the flight is its own. The outside reads and the confirm come next.
@@ -623,6 +837,12 @@ pub(super) fn stage(sql: &SqlStorage, release_id: &str, now: i64) -> R<Staged> {
     if !label_current(sql, &text(&release["label"]).unwrap_or_default())? {
         let reason = UploadFailure::LabelRetired.code();
         return Ok(Staged::Answer(failed(sql, release_id, reason, now)?));
+    }
+    // Only a script the room has recorded as written whole is ever set on a host.
+    if !uploaded(sql, release_id, &script)? {
+        let mut waiting = answer(&release, false, None);
+        waiting["waiting"] = NOT_UPLOADED.into();
+        return Ok(Staged::Answer(waiting));
     }
     let loaded =
         takedown::load(sql)?.ok_or_else(|| ApiError::internal("a release with no serve state"))?;

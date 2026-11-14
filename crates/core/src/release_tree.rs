@@ -439,25 +439,54 @@ pub fn served_type(path: &str) -> &'static str {
     }
 }
 
-/// What a file's manifest hash is computed over: its git blob sha, in lower case, one zero byte, and the type it is
-/// served with. The caller takes a SHA-256 of these bytes and gives the digest's hexadecimal to
-/// [`manifest_hash`].
+/// What goes before a file's bytes in its manifest hash: the type it is served with, then one zero byte. The hash is
+/// the first 32 hexadecimal characters of a SHA-256 over this and then **the file's own bytes** ([`manifest_hash`]).
 ///
-/// The hash comes back to visitors as the file's `ETag`, so it must change whenever what is served changes. The blob
-/// sha changes with the bytes, and every fetched file is checked against it ([`check_fetched`]); the type is the
-/// other half of what is served. So the hash is known from the tree alone, before any file is fetched.
-pub fn manifest_hash_input(blob_sha: &str, served_type: &str) -> Vec<u8> {
-    let mut input = blob_sha.to_ascii_lowercase().into_bytes();
-    input.push(0);
-    input.extend_from_slice(served_type.as_bytes());
-    input
+/// The hash comes back to visitors as the file's `ETag`, so it must change whenever what is served changes: the
+/// bytes, or the type. **It is never taken over git's blob sha:** whatever the provider keeps by this hash then rests
+/// on SHA-256 over the bytes alone, and never on SHA-1. No type holds a zero byte, so no type and bytes run together
+/// into another pair's.
+pub fn manifest_hash_prefix(served_type: &str) -> Vec<u8> {
+    let mut prefix = served_type.as_bytes().to_vec();
+    prefix.push(0);
+    prefix
 }
 
-/// The manifest's hash for a file: the first 32 hexadecimal characters of the SHA-256 over [`manifest_hash_input`],
-/// in lower case. `None` if what it is given isn't a SHA-256's 64 hexadecimal characters.
+/// The manifest's hash for a file: the first 32 hexadecimal characters, in lower case, of the SHA-256 the caller took
+/// over [`manifest_hash_prefix`] and then the file's bytes. `None` if what it is given isn't a SHA-256's 64
+/// hexadecimal characters.
 pub fn manifest_hash(sha256_hex: &str) -> Option<String> {
     (sha256_hex.len() == 64 && sha256_hex.bytes().all(|b| b.is_ascii_hexdigit()))
         .then(|| sha256_hex[..32].to_ascii_lowercase())
+}
+
+/// Whether bytes begin as an HTML document: a doctype or an `html` tag, after any byte-order mark and white space, in
+/// any case. A fetched file that fails its check and begins so is taken for a page put in the file's place, a
+/// sign-in page for one, and never for the file: the read is tried again, and the release isn't failed on it.
+pub fn looks_like_html_page(bytes: &[u8]) -> bool {
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    let start = bytes
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let head: Vec<u8> = bytes
+        .iter()
+        .skip(start)
+        .take(14)
+        .map(u8::to_ascii_lowercase)
+        .collect();
+    head.starts_with(b"<!doctype html") || head.starts_with(b"<html")
+}
+
+/// The type the job's own marker file is served with.
+pub const MARKER_TYPE: &str = "application/json";
+
+/// What the job's own marker file holds, at [`MARKER_PATH`]: the release's ID and its commit, and nothing else.
+/// Fetching it through a host says which release that host is serving. `None` unless both are exactly the form
+/// Podster made them in, so nothing else is ever written into the file.
+pub fn marker_body(release_id: &str, commit_sha: &str) -> Option<String> {
+    (crate::release::is_release_id(release_id) && crate::repositories::valid_commit_sha(commit_sha))
+        .then(|| format!("{{\"release_id\":\"{release_id}\",\"commit\":\"{commit_sha}\"}}\n"))
 }
 
 /// The header git puts before a file's bytes when it names them: a blob's sha is the SHA-1 of this and then the bytes.

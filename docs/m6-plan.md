@@ -1308,7 +1308,7 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 | PR | What | State |
 | --- | --- | --- |
 | 1 | **The read:** the release directory, `site`, at the approved commit, with the read-only App | **Built, 2026-11-13.** Below |
-| 2 | **The upload of static files** to the provider, as the release's own script: the upload session, the files in its batches, the script with the marker; and the room command that ties starting an upload, the read and the upload together | Not built. *Proposed as its own PR: the architect asked for the read and the upload together, and the read alone was already a new App's client, a stand-in for it and the checks' wiring* |
+| 2 | **The upload of static files** to the provider, as the release's own script: the upload session, the files in its batches, the script with the marker; and the room command that ties the recheck, the read and the upload together | **Built, 2026-11-14.** [Below](#what-the-second-pr-built-the-upload). *The split from the read was accepted by the architect on 2026-11-13 (ruling 1 below)* |
 | 3 | **The job's driver:** what runs a queued release through the commands, one release at a time in a room; an upload whose answer was lost; the marker's wait, a release recorded served, and the set-back when it never comes | Not built |
 
 **What the first PR built: the read, alone.** `apps/api/src/github/release_read.rs`. **Nothing calls it yet** but a test-only path; the second PR's upload is its caller. **No room schema step, no D1 migration, no contract change, and nothing on a room's alarm.**
@@ -1319,7 +1319,7 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 - **The reads are reserved from the deployment's budget from the tree,** before any file is fetched: the two made and one for each file. That closes one of the two things step 9 left this step. A release with no room waits; it isn't failed. **The other, a share for each room, is still owed.**
 - **Each file is fetched by itself, as its own bytes,** capped at one file's size, ten at a time, and checked against its tree entry: its length, and its git blob sha. GitHub's type for a file is never read.
 - **A file's type is Podster's own, from its last extension,** by one list in core. A kind not listed is served as bytes to download.
-- **A file's manifest hash is known from the tree, before the file is fetched:** the first 32 hexadecimal characters of a SHA-256 over its git blob sha, a zero byte and its type. **This is a change from ADR 0010's wording, for the architect's ruling.** The ADR says the hash is derived from the file's bytes and its type together. The blob sha is derived from the bytes, and every file is checked against it, so the hash still changes whenever the bytes or the type do. What it buys: the upload's manifest needs every hash before any file is sent, and with hashes from the bytes the job would have to hold a whole release in memory, or fetch every file twice.
+- ***Replaced by ruling 2 below, 2026-11-13: the hash is over the file's own bytes. What the first PR built is kept here as it was written.*** **A file's manifest hash is known from the tree, before the file is fetched:** the first 32 hexadecimal characters of a SHA-256 over its git blob sha, a zero byte and its type. **This is a change from ADR 0010's wording, for the architect's ruling.** The ADR says the hash is derived from the file's bytes and its type together. The blob sha is derived from the bytes, and every file is checked against it, so the hash still changes whenever the bytes or the type do. What it buys: the upload's manifest needs every hash before any file is sent, and with hashes from the bytes the job would have to hold a whole release in memory, or fetch every file twice.
 - **What a failed read means,** each with a code from core:
 
 | | Code | The release |
@@ -1336,6 +1336,81 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 **Owed by the second PR:** to call the read and drop the allowance that lets it go uncalled in a deployment's build; the root `_headers` and `_redirects` test ADR 0010 names, which bypasses the refusal on purpose; and a ruling on whether the token is revoked before or after the upload, since the upload fetches as it sends.
 
 **Not shown:** the unconfigured case and the App's distinctness from the other three, since the test Worker's settings are fixed for a run; the real GitHub, which spike E read with another App's token cut down; a private repository.
+
+#### The architect's rulings on the release job, 2026-11-13
+
+**For the owner to review.** Made on PR 366, the read, after its security review.
+
+1. **Splitting the read from the upload: accepted.** Smaller PRs review better.
+2. **The manifest hash is over the file's bytes,** a SHA-256 computed as each blob is fetched, **and never over GitHub's blob sha.** Whatever the provider keeps by that hash then rests on SHA-256 alone. The key is to be tied to the room's namespace or the release if the provider allows, and the plan is to say so if it doesn't.
+
+**How ruling 2 was built, and what it cost.**
+
+- **The hash:** the first 32 hexadecimal characters of a SHA-256 over the file's type, one zero byte, and the file's own bytes. It is ADR 0010's wording again. The git blob sha is still checked, as the tree's own name for the bytes, and is no part of the hash.
+- **Every file is fetched twice.** The upload's manifest must name every file's hash before any file is sent, and a hash over the bytes isn't known until the bytes are fetched. So the job fetches each file once to hash it, drops it, and fetches it again to send it, checking it against the tree both times and against its first hash the second. **A release is never held in memory whole,** which was the reason not to do this in one pass: 25 MB of files, again as base64.
+- **A release of *n* files now costs 2 + 2*n* reads, where ADR 0010 budgeted 2 + *n*.** At the cap of 300 files that is 602. The deployment's 3,000 an hour is then four full-size releases an hour, where the ADR says nine. The figure 3,000 is unchanged. **This is the cost of the ruling, for the owner to know.** A file the provider already holds under the script's name is not fetched the second time.
+- **Tying the key to the room or the release: the provider already does, and nothing was added.** Seen in spike A: the files the provider remembers are remembered for one script's name, and the same files under a second name were all asked for again. A script's name is the room's label and the release's ID, so what is kept by a hash is kept for one release of one room. **This is the provider's behaviour as spike A observed it, and not a documented promise. It is checked again in the store spike.** **Not seen:** whether it holds for every account and for all time; and whether the provider checks a hash against the bytes at all. The hash itself is not salted with the room or the release: it comes back to visitors as the file's `ETag`, and a file that didn't change between two releases should keep it.
+
+#### What the second PR built: the upload
+
+**Built on 2026-11-14,** behind `RELEASES`, with `RELEASE_PATH_COMPLETE` still false. **Static files only: no Worker code, no binding and no store.** It adds one room schema step, the table `release_upload`, and no contract change. **Nothing calls the command yet;** the job's driver is the third PR.
+
+**The read's five fixes, from PR 366's review.**
+
+- **A `200` that isn't JSON is "no answer, try again",** for either tree, and never `release_tree_too_large`, which would have ended the release. Tested with an HTML page in the tree's place.
+- **One attempt has one deadline,** five minutes (**proposed**), by a clock passed in. Each call to GitHub and to the provider takes the shorter of its own limit and what the attempt has left, and past the deadline none is made. The revoke has its own time, so a read that ran out still gives its token back. The test builds' shorter call timeout applies to a file's fetch as to every other call.
+- **Every read is reserved before it is made, the two tree reads first,** before the token is asked for. A read that ends at the trees is counted. Each attempt reserves its own reads, so a second attempt is counted too. The budget takes added reads for a release in its one row, which then counts from the latest. With no room for the trees nothing is asked of GitHub at all.
+- **Revoke on every way out.** The room's command closes the reader whatever came of the read, before it does anything else. **A mint whose answer never arrived can't be revoked, and that can happen:** GitHub revokes a token only for a call that carries that token, the answer holds no ID that would do instead, and a token Podster never received is one it can't present. Such a token went to nobody, reads two things in one repository, and ends within the hour. *The review asked to keep the token's ID and revoke later, or show it can't happen. Neither is possible; this is what is true instead.*
+- **The unconfigured case and the App's distinctness are tested,** through the test-only read, which takes stand-in settings: each of the three unset or malformed, and its ID, installation and key each shared with each of the other three Apps, the key also written with other line breaks.
+
+**The room's command, `/internal/release-upload`,** for a release that is `uploading` (`workspace/release_upload.rs`; what the room decides is in `release_commit.rs`). In order:
+
+1. **The whole recheck,** on fresh outside reads and the room's rows, the release epoch included, in the room's transaction. A fact that fails ends the release before anything is asked of GitHub or the provider.
+2. **The read,** as above, each file fetched to hash it.
+3. **The upload session,** with the manifest: every file at its path, its hash and size, and the job's marker file, `/.well-known/podster-release.json`, holding the release's ID and its commit. Then each bucket the provider asks for, its files fetched again and sent as base64 with Podster's own type.
+4. **The token is revoked.**
+5. **The room again,** in its transaction: still uploading, under the same epoch, its script not queued for deletion, its label still current. If not, nothing is written.
+6. **The script is written** from the provider's completion token, which it gives only once it holds every file the manifest names. **So a script is never part of a release.** Its metadata is three fixed fields: the token with an empty `config`, a compatibility date and no flags.
+7. **The room records the upload** in `release_upload`. If the release ended while the script was being written, the script is owed its deletion again, even if that deletion had already been counted done.
+
+- **Nothing is served by it.** No serve entry names the script. **A commit now stages only a release whose upload is recorded,** and answers `waiting: release_not_uploaded` for any other; the applier still writes a host's entry only for a release recorded live.
+- **Asked again, it is safe at every point.** A release already recorded asks nobody anything. The provider remembers the files it holds under the script's name, so a second attempt sends only what is missing, and writes the same script.
+- **What fails a release and what waits.** It fails on what its repository holds. It waits, answered with a code, on no provider, no read-only App, the read budget, the deadline, and GitHub or the provider giving no answer to go on. One that waits past its upload's hour is ended by the room's bookkeeping, as before.
+- **Files are fetched ten at a time and at most 10 MB at a time** (**proposed**). A fetched file is held twice while it is checked, so ten files of 5 MB at once would have been 100 MB.
+
+**From the state-and-tests review of PR 368, 2026-11-14.**
+
+- **A late attempt's failure ends nothing it shouldn't.** Two attempts at one upload can overlap. A failure found by the read ends a release only while it is still uploading with no upload on record: one that another attempt recorded, or that has gone live, is answered as it is. Before this, the late attempt's failure took a live release down.
+- **A release that is recorded, or has ended, is never answered as waiting,** whatever the attempt that gives up had found.
+- **The budget is asked under the attempt's deadline,** as every other call is.
+- **Two overlapping attempts are tested:** both writing the script, with one record; and a late failure after the release went live.
+
+**Owed to the driver's PR, the third:**
+
+- **A wait between attempts that grows,** and **a cap on attempts.** Today a release that waits is asked again whenever its caller asks, and each attempt reserves its reads, so retries alone can use the deployment's hour.
+- **A bound on how often one release is tried, set against the read budget:** each attempt reserves up to 602 reads of the hour's 3,000, so five attempts at one full-size release would leave nothing for any other room. One waiting release must never be able to starve the rest.
+- **The room's alarm taking an upload up again** after the object was evicted or an attempt was cut short. Nothing resumes one today; the upload's hour ends it.
+- **An event or an audit record for a recorded upload.** Today it is a row in `release_upload` and nothing else, as a commit's stage is: the release's trail says `release.upload_started`, then `release.live` or `release.failed`.
+
+**From the security review of PR 368, and the architect's ruling of 2026-11-14.**
+
+- **The assets configuration is explicit and fixed** ([the ruling, in the ADR's revision](adr/0010-revision-apps-are-workers.md#32-how-its-code-is-uploaded)): `{"html_handling":"auto-trailing-slash","not_found_handling":"none"}`, in every script, and the metadata sent is tested byte for byte. *What was first built sent the empty object, as spike A saw wrangler send it.* **No single-page-app fallback.** **`html_handling` is the documented default written out, and not `none`:** with `none` every app's `/` answers not-found, against what spike A saw and what core's two-paths-at-one-address rule is written for. The ruling first said "no HTML path rewriting", and the architect amended it on 2026-11-14 for that reason.
+- **One request carries at most 8 MiB of files** (**proposed**), so about 11 MB as base64, however large the provider makes a bucket. A bucket over that is sent in several requests. A file is at most 5 MB, so one always fits. A release of 25 MB is then never in memory as one body. **An assumption no spike saw:** that the provider takes part of a bucket in one request and answers `202` until it holds every file. If it doesn't, the release waits, and that shows.
+- **The room is asked again on fresh outside reads before the script is written,** the stop for the whole content domain, the organization's switch and the deployment's setting among them, as the first check is. A stop set while the files were sent ends the release there, with no script written.
+- **A file's fetch answering `200` with a page is "no answer, try again",** as a tree's is, and never `release_file_mismatch`. A fetched file that fails its check is taken for a page when its bytes begin as an HTML document. *What that costs:* an HTML file whose bytes really aren't the tree's also waits, and ends at its upload's hour instead of at once. Nothing wrong is ever published either way.
+
+**For the architect's ruling.**
+
+- **A provider's refusal waits; it doesn't fail the release.** No spike saw any of the three calls answer an error, so none is read as a verdict on the release. A release the provider will never take ends at its upload's hour.
+- **The revoke comes after the last file is fetched and before the script is written.** The upload fetches as it sends, so it can't come sooner.
+
+**Not shown.**
+
+- **The real provider and the real GitHub.** Both are stand-ins. The provider's answers to an error, whether the script's call needs wrangler's two query parameters, and how it sizes a bucket are assumptions, strict ones: a wrong one leaves the room retrying.
+- **Memory in a Worker.** One bucket is held whole as base64 while it is sent, and the provider decides its size. Spike G's.
+- **A lost answer as the state `uncertain`.** Here it only waits, and the retry settles it. The third PR's.
+- **The root `_headers` and `_redirects` test ADR 0010 names,** which the first PR's note left to this one: it needs the real provider, to see whether a root file of either name sent plain is an ordinary file. The refusal by name stays. Spike G's, with the rest.
+- **The upload and the takedown code together at the provider.** The stand-in keeps an uploaded script apart from the scripts the delete job and the reconciles see, because spec files share it.
 
 #### Stage 1 of apps as Workers: the build order
 

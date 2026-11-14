@@ -484,28 +484,16 @@ fn a_file_is_served_with_a_type_from_podsters_own_list_by_its_last_extension() {
 }
 
 #[test]
-fn a_manifest_hash_changes_with_the_bytes_and_with_the_type_and_is_known_before_a_file_is_fetched()
-{
-    let sha = "0123456789abcdef0123456789abcdef01234567";
-    let html = manifest_hash_input(sha, served_type("a.html"));
-    let text = manifest_hash_input(sha, served_type("a.txt"));
-    let other = manifest_hash_input(
-        "1123456789abcdef0123456789abcdef01234567",
-        served_type("a.html"),
-    );
+fn a_manifest_hash_is_over_the_type_and_the_bytes_and_never_over_the_blob_sha() {
+    let html = manifest_hash_prefix(served_type("a.html"));
+    let text = manifest_hash_prefix(served_type("a.txt"));
     assert_ne!(
         html, text,
         "the same bytes served as another type hash differently"
     );
-    assert_ne!(html, other, "other bytes hash differently");
-    // The sha is taken in lower case, so the same file read twice hashes the same.
-    assert_eq!(
-        manifest_hash_input(&sha.to_ascii_uppercase(), "t"),
-        manifest_hash_input(sha, "t")
-    );
-    // One zero byte between the two parts, so no sha and type run together into another pair's.
-    assert_eq!(html.len(), 40 + 1 + "text/html; charset=utf-8".len());
-    assert_eq!(html.get(40), Some(&0));
+    // The type, then one zero byte, and nothing else: the file's bytes follow it.
+    assert_eq!(html, b"text/html; charset=utf-8\0");
+    assert_eq!(manifest_hash_prefix(""), b"\0");
     let digest = "AB".repeat(32);
     assert_eq!(
         manifest_hash(&digest).as_deref(),
@@ -522,6 +510,59 @@ fn a_manifest_hash_changes_with_the_bytes_and_with_the_type_and_is_known_before_
     }
     assert_eq!(git_blob_header(0), b"blob 0\0");
     assert_eq!(git_blob_header(5_000_000), b"blob 5000000\0");
+}
+
+#[test]
+fn bytes_that_begin_as_an_html_document_are_taken_for_a_page() {
+    for page in [
+        &b"<!doctype html><title>Sign in</title>"[..],
+        b"<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01//EN\">",
+        b"\n\r\t  <html lang=\"en\">",
+        b"\xEF\xBB\xBF<!DocType Html>",
+        b"<HTML>",
+        b"<html",
+    ] {
+        assert!(looks_like_html_page(page), "{page:?}");
+    }
+    for other in [
+        &b""[..],
+        b"   ",
+        b"not the file",
+        b"<p>one</p>\n",
+        b"<!doctype",
+        b"<!-- <html> -->",
+        b"{\"html\":\"<html>\"}",
+        b"x<html>",
+        b"<htm",
+        b"\xEF\xBB",
+        b"export const one = 1;\n",
+    ] {
+        assert!(!looks_like_html_page(other), "{other:?}");
+    }
+}
+
+#[test]
+fn the_marker_holds_the_release_and_its_commit_and_nothing_anyone_else_wrote() {
+    let release = format!("rel_{}", "0a".repeat(16));
+    let commit = "c0".repeat(20);
+    assert_eq!(
+        marker_body(&release, &commit).as_deref(),
+        Some(format!("{{\"release_id\":\"{release}\",\"commit\":\"{commit}\"}}\n").as_str())
+    );
+    for (bad_release, bad_commit) in [
+        ("rel_\"x", commit.as_str()),
+        ("", commit.as_str()),
+        (release.as_str(), "not-a-sha"),
+        (release.as_str(), ""),
+        (release.as_str(), "C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0"),
+    ] {
+        assert_eq!(
+            marker_body(bad_release, bad_commit),
+            None,
+            "{bad_release} {bad_commit}"
+        );
+    }
+    assert_eq!(MARKER_TYPE, served_type(MARKER_PATH));
 }
 
 #[test]

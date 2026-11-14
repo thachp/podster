@@ -157,6 +157,17 @@ Decision 216, as the owner confirmed it, gives every app `sandbox allow-scripts`
 
 **Proposed:** Podster writes the metadata itself, all of it. The entry module from the manifest, once it is a file in the tree of an allowed kind. A compatibility date Podster fixes. **Bindings: the app's one store and nothing else.** No `assets.config`, no migrations, no schedule, no route. The marker stays a static file Podster adds, served before the app's script can answer for it; that order is from the documentation and **must be seen in a spike.**
 
+**Ruled on 2026-11-14, by the architect, for the owner to review: the assets configuration is explicit and fixed.** "No `assets.config`" above, and ADR 0010's "the job sends no `assets.config` at all", are replaced by this. Podster writes one fixed configuration into every script it uploads, never an empty object and never anything from the repository, so that a change in the provider's defaults can't change how an app is served:
+
+```json
+{"html_handling":"auto-trailing-slash","not_found_handling":"none"}
+```
+
+- **`not_found_handling` is `none`: no single-page-app fallback.** A path with no file answers not-found. Stage 1's todo app doesn't need one: it is one page at `/`, and what it shows changes by script and by the address's fragment, which never reaches the server ([3.5](#35-under-the-sandbox-as-it-stands)). An app with client-side routes under real paths would need the fallback, and it stays off until the owner asks for it.
+- **`html_handling` is `auto-trailing-slash`, the provider's documented default today, written out. It is not `none`. The ruling first said "no HTML path rewriting"; the architect amended it the same day, for this reason.** With `none` a file is served only at its exact path: `/index.html` is served and `/` is not-found ([HTML handling](https://developers.cloudflare.com/workers/static-assets/routing/advanced/html-handling/)). **Every app's front door would then answer not-found,** the todo app's with it. `auto-trailing-slash` is also what spike A saw (`/index.html` redirects to `/`, `page.html` is served at `/page`), what ADR 0010 says a release is uploaded with, and what `crates/core` judges a tree against when it refuses two paths at one address. Written out, it no longer moves if the default does, which is the ruling's purpose.
+- **Nothing else is in it:** no base path, no rules for headers or redirects, no setting that runs code first.
+- **Built and tested** in the release job's upload: the metadata sent is checked byte for byte ([the plan](../m6-plan.md#what-the-second-pr-built-the-upload)).
+
 ### 3.3 Its store
 
 **Cloudflare's documentation:** a KV namespace is made through the API and attached in the upload's metadata as a binding of type `kv_namespace`, with a name and the namespace's ID; a user Worker reaches only the bindings attached to it ([bindings](https://developers.cloudflare.com/cloudflare-for-platforms/workers-for-platforms/configuration/bindings/)). A value is at most 25 MiB, a key 512 bytes, and one key takes one write a second ([KV limits](https://developers.cloudflare.com/kv/platform/limits/)). Prices are in the summary's table ([KV pricing](https://developers.cloudflare.com/kv/platform/pricing/)).

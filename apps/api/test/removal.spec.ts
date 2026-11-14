@@ -241,7 +241,10 @@ describe("the room's sweep", () => {
       // M6 step 2's release tables, the newest migration, come off first.
       // M6 step 4(a)'s applier and script-delete tables, the newest migration, come off first.
       // The record of release bookkeeping that keeps failing, the newest migration, comes off first.
-      // The hold on a room's app (step 6), the newest migration, comes off first.
+      // The record of a release's upload, the newest migration, comes off first.
+      state.storage.sql.exec("DROP TABLE release_upload");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+      // Then the hold on a room's app (step 6).
       state.storage.sql.exec("DROP TABLE release_hold");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       // Then decision 218's applied release switch.
@@ -454,7 +457,10 @@ describe("the room's sweep", () => {
       // M6 step 2's release tables, the newest migration, come off first.
       // M6 step 4(a)'s applier and script-delete tables, the newest migration, come off first.
       // The record of release bookkeeping that keeps failing, the newest migration, comes off first.
-      // The hold on a room's app (step 6), the newest migration, comes off first.
+      // The record of a release's upload, the newest migration, comes off first.
+      state.storage.sql.exec("DROP TABLE release_upload");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+      // Then the hold on a room's app (step 6).
       state.storage.sql.exec("DROP TABLE release_hold");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       // Then decision 218's applied release switch.
@@ -813,7 +819,10 @@ describe("removal by the rules, review fixes", () => {
       // M6 step 2's release tables, the newest migration, come off first.
       // M6 step 4(a)'s applier and script-delete tables, the newest migration, come off first.
       // The record of release bookkeeping that keeps failing, the newest migration, comes off first.
-      // The hold on a room's app (step 6), the newest migration, comes off first.
+      // The record of a release's upload, the newest migration, comes off first.
+      state.storage.sql.exec("DROP TABLE release_upload");
+      state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
+      // Then the hold on a room's app (step 6).
       state.storage.sql.exec("DROP TABLE release_hold");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       // Then decision 218's applied release switch.

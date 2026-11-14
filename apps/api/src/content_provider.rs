@@ -34,6 +34,9 @@ use serde_json::Value;
 use std::time::Duration;
 use worker::*;
 
+/// Uploading a release's static files, as its own script (M6 step 5).
+pub(crate) mod upload;
+
 const API: &str = "https://api.cloudflare.com/client/v4";
 /// How long one call may take. The room's alarm waits on it.
 const CALL_TIMEOUT_MS: u64 = 5_000;

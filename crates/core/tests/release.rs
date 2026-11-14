@@ -1767,6 +1767,40 @@ fn a_release_costs_two_tree_reads_and_one_a_file_within_three_thousand_an_hour()
     assert_eq!(reads_for_release(300), 302);
     assert_eq!(reads_for_release(0), 2);
     assert_eq!(reads_for_release(u32::MAX), u32::MAX);
+    // The job fetches each file twice, and the two trees are counted apart.
+    assert_eq!(TREE_READS + file_reads(300, FETCH_PASSES), 602);
+    assert_eq!(file_reads(u32::MAX, 2), u32::MAX);
+    assert_eq!(file_reads(0, 2), 0);
+    // Files are fetched ten at a time and at most 10 MB at a time, every file once and in order.
+    assert_eq!(fetch_batches(&[]), Vec::<usize>::new());
+    assert_eq!(fetch_batches(&[1; 25]), vec![10, 10, 5]);
+    let mb = 1024 * 1024;
+    assert_eq!(
+        fetch_batches(&[5 * mb, 5 * mb, 1, 5 * mb, 5 * mb + 1, 1]),
+        vec![2, 2, 2]
+    );
+    assert_eq!(fetch_batches(&[11 * mb, 1, 11 * mb]), vec![1, 1, 1]);
+    assert_eq!(fetch_batches(&[u64::MAX, u64::MAX]), vec![1, 1]);
+    assert_eq!(fetch_batches(&[0; 10]), vec![10]);
+    for sizes in [vec![3 * mb; 31], vec![0; 300], vec![FETCH_BATCH_BYTES; 4]] {
+        assert_eq!(fetch_batches(&sizes).iter().sum::<usize>(), sizes.len());
+    }
+    // One request to the provider carries at most 8 MiB of files, however many files that is.
+    assert_eq!(upload_requests(&[3 * mb, 3 * mb, 3 * mb, 1]), vec![2, 2]);
+    assert_eq!(upload_requests(&[1; 500]), vec![500]);
+    assert_eq!(upload_requests(&[5 * mb; 5]), vec![1; 5]);
+    assert_eq!(upload_requests(&[8 * mb, 1]), vec![1, 1]);
+    assert_eq!(upload_requests(&[4 * mb, 4 * mb, 1]), vec![2, 1]);
+    assert_eq!(upload_requests(&[9 * mb]), vec![1]);
+    assert_eq!(upload_requests(&[]), Vec::<usize>::new());
+    assert_eq!(UPLOAD_REQUEST_BYTES, 8 * mb);
+    // An attempt's time: whole at its start, nothing at the deadline or after, and nothing on a clock gone backwards.
+    assert_eq!(attempt_left_ms(1_000, 1_000), ATTEMPT_DEADLINE_MS);
+    assert_eq!(attempt_left_ms(1_000, 1_000 + ATTEMPT_DEADLINE_MS - 1), 1);
+    assert_eq!(attempt_left_ms(1_000, 1_000 + ATTEMPT_DEADLINE_MS), 0);
+    assert_eq!(attempt_left_ms(1_000, i64::MAX), 0);
+    assert_eq!(attempt_left_ms(1_000, 999), 0);
+    assert_eq!(attempt_left_ms(i64::MIN, i64::MAX), 0);
     assert_eq!(reads_fit(0, 302), Ok(()));
     assert_eq!(reads_fit(2_698, 302), Ok(()));
     assert_eq!(reads_fit(2_699, 302), Err(ReleaseCapRefusal::ReadBudget));

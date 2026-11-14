@@ -100,6 +100,10 @@ async function healthy(opts: { org?: string; state?: string } = {}): Promise<Hea
     sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES (?, 'default', ?, 1, ?, ?, 5, 1)", host, label, PREV, prev);
     sql.exec("INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, 5, ?, 1, 1)", host, prev);
     sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
+    // The upload itself is `release-upload.spec.ts`'s. Here a release's upload is on record from the moment it is
+    // uploading, as that command leaves it, so a commit has something it may stage.
+    sql.exec("INSERT INTO release_upload (release_id, script_name, files, bytes, uploaded_at) SELECT id, script_name, 1, 0, 1 FROM release WHERE state = 'uploading'");
+    for (const on of ["INSERT", "UPDATE OF state"]) sql.exec(`CREATE TRIGGER test_release_uploaded_${on.slice(0, 6).toLowerCase()} AFTER ${on} ON release WHEN NEW.state = 'uploading' BEGIN INSERT OR IGNORE INTO release_upload (release_id, script_name, files, bytes, uploaded_at) VALUES (NEW.id, NEW.script_name, 1, 0, 1); END`);
   });
   await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, 1)").bind(label, room).run();
   return { room, requester, admin, org, label, host, script, prev };

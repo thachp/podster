@@ -351,6 +351,10 @@ CREATE TABLE release_hold (singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   CHECK (until IS NOT NULL OR (settle_failures = 0 AND settle_retry_at IS NULL)),
   CHECK (until IS NULL OR (typeof(until) = 'integer' AND held_at < until)));
 INSERT INTO release_hold (singleton) VALUES (1);
+", "
+CREATE TABLE release_upload (release_id TEXT PRIMARY KEY REFERENCES release (id), script_name TEXT NOT NULL,
+  files INTEGER NOT NULL CHECK (typeof(files) = 'integer' AND files >= 1), bytes INTEGER NOT NULL CHECK (typeof(bytes) = 'integer' AND bytes >= 0), uploaded_at INTEGER NOT NULL,
+  CHECK (length(script_name) BETWEEN 38 AND 63 AND substr(script_name, -36) = release_id)) WITHOUT ROWID;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

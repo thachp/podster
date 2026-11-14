@@ -106,6 +106,10 @@ async function room(org: string, opts: { state?: string } = {}): Promise<Room> {
     sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES (?, 'default', ?, 1, ?, ?, 5, 1)", host, label, PREV, prev);
     sql.exec("INSERT INTO serve_apply (host, applied_version, applied_script, applied_at, updated_at) VALUES (?, 5, ?, 1, 1)", host, prev);
     sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
+    // The upload itself is `release-upload.spec.ts`'s. Here a release's upload is on record from the moment it is
+    // uploading, as that command leaves it, so a commit has something it may stage.
+    sql.exec("INSERT INTO release_upload (release_id, script_name, files, bytes, uploaded_at) SELECT id, script_name, 1, 0, 1 FROM release WHERE state = 'uploading'");
+    for (const on of ["INSERT", "UPDATE OF state"]) sql.exec(`CREATE TRIGGER test_release_uploaded_${on.slice(0, 6).toLowerCase()} AFTER ${on} ON release WHEN NEW.state = 'uploading' BEGIN INSERT OR IGNORE INTO release_upload (release_id, script_name, files, bytes, uploaded_at) VALUES (NEW.id, NEW.script_name, 1, 0, 1); END`);
   });
   await BINDINGS.DB.prepare("INSERT INTO app_label_index (label, workspace_id, created_at) VALUES (?, ?, 1)").bind(label, id).run();
   return { room: id, org, owner, label, host, script, prev };
@@ -250,7 +254,7 @@ describe("a take of an organization's release switch, carried to its rooms (deci
     await unlisted(org);
     const [unset, older] = [await room(org), await room(org)];
     // As each was before room schema step 40: no applied switch at all.
-    for (const r of [unset, older]) await inRoom(r.room, (sql) => { sql.exec("DROP TABLE release_hold"); sql.exec("DROP TABLE release_switch_applied"); sql.exec("UPDATE schema_version SET version = 39"); });
+    for (const r of [unset, older]) await inRoom(r.room, (sql) => { sql.exec("DROP TABLE release_upload"); sql.exec("DROP TABLE release_hold"); sql.exec("DROP TABLE release_switch_applied"); sql.exec("UPDATE schema_version SET version = 39"); });
     // Migrated while nothing was ever taken: unset, as the step's defaults make it, and nothing changes.
     await check(unset);
     expect(await inRoom(unset.room, (sql) => sql.exec("SELECT singleton, granted, generation, last_take, applied_at FROM release_switch_applied").toArray()))

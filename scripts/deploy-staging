@@ -15,7 +15,9 @@ owner has set the gateway's GITHUB_WEBHOOK_SECRET, so the webhook probe wants th
 
 It refuses, before changing anything, unless:
 
-  - CLOUDFLARE_ACCOUNT_ID is set (docs/staging.md keeps the ID out of this repo)
+  - CLOUDFLARE_ACCOUNT_ID is set, or ~/.podster/cloudflare-account-id.staging holds the ID: yours,
+    mode 0600, a regular file, 32 lowercase hex characters and at most one newline. The variable
+    wins when set. docs/staging.md keeps the ID out of this repo
   - worker-build is 0.8.7
   - the first rustc on PATH can build for wasm32-unknown-unknown, which the API's build needs
   - the checkout is detached at origin/main's tip after a fetch, with nothing changed or untracked
@@ -118,6 +120,23 @@ note_retry() { # note_retry WHAT CODE TRY: says the try was refused, and waits b
 }
 
 # --- what must hold before anything runs ---
+# The account: CLOUDFLARE_ACCOUNT_ID when set, or else the owner's file. Neither the file's content nor the ID is printed.
+account_file="$HOME/.podster/cloudflare-account-id.staging"
+if [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+  [ -e "$account_file" ] || [ -L "$account_file" ] \
+    || refuse "CLOUDFLARE_ACCOUNT_ID isn't set, and $account_file doesn't exist. Set either to the account that holds podster.dev (docs/staging.md)."
+  [ ! -L "$account_file" ] && [ -f "$account_file" ] || refuse "$account_file must be a regular file, not a link"
+  [ -n "$(find "$account_file" -maxdepth 0 -user "$(id -u)" -perm 0600 2> /dev/null)" ] \
+    || refuse "$account_file must be yours and mode 0600, readable by you alone"
+  # 32 lowercase hex characters, and one newline at most after them. Checked by size and bytes, never echoed.
+  account_size=$(LC_ALL=C wc -c < "$account_file" | tr -d ' ')
+  CLOUDFLARE_ACCOUNT_ID=$(LC_ALL=C head -c 32 "$account_file" 2> /dev/null)
+  if ! { [ "$account_size" = 32 ] || { [ "$account_size" = 33 ] && [ "$(tail -c 1 "$account_file" | od -An -tx1 | tr -d ' \n')" = 0a ]; }; } \
+    || ! [[ "$CLOUDFLARE_ACCOUNT_ID" =~ ^[0-9a-f]{32}$ ]]; then
+    CLOUDFLARE_ACCOUNT_ID=""
+    refuse "$account_file must hold the account ID alone: 32 lowercase hex characters and at most one newline"
+  fi
+fi
 if ! [[ "${CLOUDFLARE_ACCOUNT_ID:-}" =~ ^[0-9a-f]{32}$ ]]; then
   refuse "CLOUDFLARE_ACCOUNT_ID isn't set to an account ID. Export the account that holds podster.dev."
 fi

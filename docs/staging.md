@@ -25,6 +25,14 @@ An OAuth client's redirect URI can't be on the gateway's own hostname, whatever 
 export CLOUDFLARE_ACCOUNT_ID=<the account that holds podster.dev>
 ```
 
+`scripts/deploy-staging` reads the variable when it is set, and otherwise `~/.podster/cloudflare-account-id.staging`, beside the staging sign-up secret's `~/.podster/e2e-signup-secret.staging`. The owner writes that file once, with this one form:
+
+```bash
+umask 077; printf '%s\n' "<id>" > ~/.podster/cloudflare-account-id.staging
+```
+
+It must be yours, mode 0600, a regular file, and hold exactly 32 lowercase hex characters with at most one newline after them; the script refuses anything else, never prints the ID, and refuses before fetching or installing anything when neither is there. Don't copy the ID out of session scratch scripts.
+
 Run every `wrangler` command from the app folder named in its step, so it uses that app's pinned version.
 
 ### Setting a secret: one form only

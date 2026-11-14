@@ -53,6 +53,59 @@ impl ApprovalPolicy {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Switching release on or off in a room
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// What a request to set the room's release configuration does (`setReleaseConfig`, M6 step 6). Who may ask, and
+/// where, is `podster_policy::release::authorize_release_config`, which is asked first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaseConfigChange {
+    /// Release goes on: the configuration is made if it was never set, and its version goes up.
+    TurnOn,
+    /// Release goes off, and its version goes up. ADR 0010's `release_off` trigger: what is up comes down, in the same
+    /// transaction.
+    TurnOff,
+    /// Already as asked. Nothing is written, and the version stays.
+    Unchanged,
+}
+
+/// Why a request to set the room's release configuration was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReleaseConfigRefusal {
+    /// `version_conflict`: the caller read another version than the one there is now, so they decided on something
+    /// that has changed since. A configuration never set is version 0.
+    VersionConflict,
+}
+
+impl ReleaseConfigRefusal {
+    // codes: errors
+    pub fn code(self) -> &'static str {
+        match self {
+            ReleaseConfigRefusal::VersionConflict => "version_conflict",
+        }
+    }
+}
+
+/// What setting release to `enabled` does, given what the room has now: `None` when it was never set, else whether it
+/// is on and its version. A stale `expected_version` is refused before anything else, an unchanged request included,
+/// so a caller always learns that they read an old configuration.
+pub fn release_config_change(
+    now: Option<(bool, u64)>,
+    enabled: bool,
+    expected_version: u64,
+) -> Result<ReleaseConfigChange, ReleaseConfigRefusal> {
+    let (on_now, version_now) = now.unwrap_or((false, 0));
+    if expected_version != version_now {
+        return Err(ReleaseConfigRefusal::VersionConflict);
+    }
+    Ok(match (on_now, enabled) {
+        (false, true) => ReleaseConfigChange::TurnOn,
+        (true, false) => ReleaseConfigChange::TurnOff,
+        _ => ReleaseConfigChange::Unchanged,
+    })
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Which commit may be released
 // ---------------------------------------------------------------------------------------------------------------------
 

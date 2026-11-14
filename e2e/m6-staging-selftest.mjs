@@ -238,8 +238,11 @@ check(m6Names(agentCapabilities(capabilities).map((c) => c.name), operations).le
   // are written only from that route, which is behind the switch. No room's event stream carries either.
   // Decision 218's PR C adds `app.unpublished`, written only when a room hears of a take of its organization's release
   // switch. Only an operator's set takes it, through that same route, so with release switched off nothing writes it.
-  const BUILT_M6_EVENTS = ["app.suspended", "app.suspension_lifted", "app.unpublished", "app_hostname.suspended", "release.failed", "release.live", "release.upload_started", "release_switch.granted", "release_switch.revoked"];
-  check(named.size > 20 && JSON.stringify(clash) === JSON.stringify(BUILT_M6_EVENTS), `the only M6 event names the API or core writes today are an app's suspension, its lifting, its unpublish by the release switch, a hostname's suspension, a release failed, started uploading and committed live, and the operators' record of a release switch set (${named.size} read): ${clash.join(", ") || "none"}`);
+  // Step 6 writes `app.unpublished` from more commands (archive, make private, an operator's room suspension), but only
+  // for a room with a release configuration, which nothing gives a room while release is switched off. Its contract PR
+  // adds `release.config_set`, written only by the room's release configuration route, which is behind the switch.
+  const BUILT_M6_EVENTS = ["app.suspended", "app.suspension_lifted", "app.unpublished", "app_hostname.suspended", "release.config_set", "release.failed", "release.live", "release.upload_started", "release_switch.granted", "release_switch.revoked"];
+  check(named.size > 20 && JSON.stringify(clash) === JSON.stringify(BUILT_M6_EVENTS), `the only M6 event names the API or core writes today are an app's suspension, its lifting, its unpublish, a hostname's suspension, a room's release configuration set, a release failed, started uploading and committed live, and the operators' record of a release switch set (${named.size} read): ${clash.join(", ") || "none"}`);
 }
 check(JSON.stringify(m6EventTypes([{ type: "task.created" }, { type: "role.released" }, { type: "release.requested" }, { type: "deploy.started" }, { type: "app.suspended" }, { type: "release.requested" }])) === JSON.stringify(["release.requested", "deploy.started", "app.suspended"]), "M6 event types, deploy included, are found once each, and a role's release isn't one");
 

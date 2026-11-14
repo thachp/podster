@@ -65,6 +65,12 @@ pub(crate) fn route(method: &Method, parts: &[&str]) -> Option<Audience> {
     }
 }
 
+/// Whether an M6 route is built in the room that it names, and so goes to that room like any other room route: the room's
+/// release configuration, read and set (step 6). The room answers it only while release is switched on.
+pub(crate) fn room_route(parts: &[&str]) -> bool {
+    matches!(parts, ["v1", "workspaces", _, "release-config"])
+}
+
 /// The deployment's release setting, `RELEASES`, read by core's one rule (`podster_core::release::deployment_release`):
 /// on only for exactly `true`, off only for exactly `false`, and undecided for anything else, unset included. A
 /// deployment reads its Worker variable alone. Test builds can also be switched on while D1 holds a table named
@@ -237,7 +243,8 @@ async fn content_stop(
 /// Built (step 4(a)): an operator's suspension of an app and its lifting, by the app's label and by its default
 /// host, which is the same act; a custom hostname's suspension and its lifting; and the stop for the whole content
 /// domain and its lifting; and the operator's read of what the reconciles found. Built (step 9): a person's report that
-/// names an app by its address. Built (decision 218, PR B): an organization's release switch, read and set. Everything else answers `release_not_available`, and so does a host's route while no
+/// names an app by its address. Built (decision 218, PR B): an organization's release switch, read and set. Built (step 6), and answered by the room
+/// itself, not here ([`room_route`]): the room's release configuration, read and set. Everything else answers `release_not_available`, and so does a host's route while no
 /// content domain is configured, since no host can then be told from another.
 pub(crate) async fn answer(
     env: &Env,

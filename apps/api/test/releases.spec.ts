@@ -141,10 +141,14 @@ describe("M6's routes, none of them built", () => {
           // Decision 218's PR B built the release switch. The owner administers `org_rl`, so reads it; this body isn't
           // `{ granted }`, so nothing is set.
           getReleaseDelegation: [200, undefined], setReleaseDelegation: [400, "invalid_argument"],
+          // Step 6 built the room's release configuration, which the room itself answers: an operator isn't in the
+          // room, and the owner reads it, and sends a body that isn't `{ enabled, expected_version }`.
+          getReleaseConfig: [404, "workspace_not_found"], setReleaseConfig: [404, "workspace_not_found"],
         };
+        const ownerWant: Record<string, [number, string | undefined]> = { ...want, getReleaseConfig: [200, undefined], setReleaseConfig: [400, "invalid_argument"] };
         const operator = await api(OPERATOR, route.method, operatorPath, { reason: "abuse" });
         expect([operator.status, operator.code], `${route.operation} as an operator`).toEqual(want[route.operation] ?? [409, "release_not_available"]);
-        expect(await as(OWNER), `${route.operation} as the owner`).toEqual(M6[route.operation] === "operator" ? [403, "not_allowed"] : want[route.operation] ?? [409, "release_not_available"]);
+        expect(await as(OWNER), `${route.operation} as the owner`).toEqual(M6[route.operation] === "operator" ? [403, "not_allowed"] : ownerWant[route.operation] ?? [409, "release_not_available"]);
       }
       // A neighbouring path the contract doesn't list is no M6 route: the room answers it as it always did.
       expect((await api(OWNER, "GET", `/v1/workspaces/${room}/releases`)).code).toBe("not_found");

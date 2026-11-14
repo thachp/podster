@@ -88,6 +88,7 @@ mod public;
 mod public_claims;
 mod readiness_upkeep;
 mod release_commit;
+mod release_config;
 mod release_recheck;
 mod release_switch;
 mod removal;
@@ -4368,6 +4369,10 @@ impl Workspace {
             .collect();
         let parts: Vec<&str> = segments.iter().map(String::as_str).collect();
         let tail = parts.get(3..).unwrap_or(&[]);
+        // The room's release configuration (M6 step 6) is there only while the deployment's setting is on, as every M6
+        // route. Otherwise it answers as a route that doesn't exist.
+        let release_route_on =
+            matches!(tail, ["release-config"]) && crate::releases::switched_on(&self.env).await;
 
         // An archived room can still lose participants and links, and can come back. Nothing new happens in it, and only
         // recovery, which doesn't come through here, can change its owner. `command`
@@ -4382,6 +4387,9 @@ impl Workspace {
                 | (Method::Put, ["visibility"])
                 // Taking a repository grant back only lessens authority, as a removal does.
                 | (Method::Delete, ["repository", "grants", _])
+                // Switching release off only takes down. Switching it on in an archived room is refused by
+                // `podster_policy::release::authorize_release_config`, by its own code.
+                | (Method::Put, ["release-config"])
                 | (
                     Method::Delete,
                     ["members" | "organizations" | "invitations", _]
@@ -4454,6 +4462,11 @@ impl Workspace {
                     provisioning::enabled(&self.env, &sql)?,
                 ),
                 ["audit"] => queries::list_audit(&sql, &who.caller, &url),
+                ["release-config"] if release_route_on => release_config::read(
+                    &sql,
+                    &who,
+                    crate::content_provider::content_domain(&self.env).as_deref(),
+                ),
                 _ => Err(ApiError::not_found()),
             };
         }
@@ -5109,6 +5122,25 @@ impl Workspace {
                             &body,
                             now,
                         )
+                    },
+                )
+            }
+            // The room's release configuration (M6 step 6). Who may configure it is checked first, by the room's rows,
+            // so nobody else makes the room ask, or apply, anything outside it. Then what it needs from outside is
+            // read, and the transaction checks again. A stored answer goes only to someone who may still configure it.
+            (Method::Put, ["release-config"]) if release_route_on => {
+                release_config::may_configure(&who)?;
+                let reads = self.release_config_reads(&identity.id, &raw).await?;
+                let domain = crate::content_provider::content_domain(&self.env);
+                self.command_checked(
+                    &identity,
+                    key,
+                    hash,
+                    stops_when_archived,
+                    test_fail,
+                    |_: &SqlStorage, who: &Participant| release_config::may_configure(who),
+                    move |sql, who, now| {
+                        release_config::handle_set(sql, who, &body, &reads, domain.as_deref(), now)
                     },
                 )
             }

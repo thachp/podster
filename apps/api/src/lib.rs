@@ -437,7 +437,15 @@ async fn route(
     // answered exactly where an unknown path is: by the match below, or by the room it names.
     if let Some(audience) = releases::route(&method, &parts) {
         if releases::switched_on(&env).await {
-            return releases::answer(&env, &caller, audience, &parts, body.as_deref(), &req).await;
+            // A room's own built route goes to the room like any other, once an agent is refused by its kind. The room
+            // reads the setting itself, so it answers the route only while release is on.
+            if !releases::room_route(&parts) {
+                return releases::answer(&env, &caller, audience, &parts, body.as_deref(), &req)
+                    .await;
+            }
+            if caller.kind != "person" {
+                return Err(ApiError::not_allowed());
+            }
         }
     }
     let (workspace_id, forward_path) = match parts.as_slice() {

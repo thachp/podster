@@ -244,9 +244,10 @@ check(m6Names(agentCapabilities(capabilities).map((c) => c.name), operations).le
   // Step 6's follow-up to 6d adds `app.held` and `app.hold_lifted`, written only for a room with a release
   // configuration, which nothing gives a room while release is switched off.
   // Step 5's driver adds `release.uploaded`, written only when the room records a release's upload, which needs a
-  // release that is uploading: nothing makes one while release is switched off.
-  const BUILT_M6_EVENTS = ["app.held", "app.hold_lifted", "app.suspended", "app.suspension_lifted", "app.unpublished", "app_hostname.suspended", "release.config_set", "release.failed", "release.live", "release.upload_started", "release.uploaded", "release_switch.granted", "release_switch.revoked"];
-  check(named.size > 20 && JSON.stringify(clash) === JSON.stringify(BUILT_M6_EVENTS), `the only M6 event names the API or core writes today are an app's hold and its lifting, its suspension and its lifting, its unpublish, a hostname's suspension, a room's release configuration set, a release failed, started uploading, recorded uploaded and committed live, and the operators' record of a release switch set (${named.size} read): ${clash.join(", ") || "none"}`);
+  // release that is uploading: nothing makes one while release is switched off. The marker job adds `release.served`
+  // and `release.replaced`, written only for a release committed live, which nothing makes while release is off.
+  const BUILT_M6_EVENTS = ["app.held", "app.hold_lifted", "app.suspended", "app.suspension_lifted", "app.unpublished", "app_hostname.suspended", "release.config_set", "release.failed", "release.live", "release.replaced", "release.served", "release.upload_started", "release.uploaded", "release_switch.granted", "release_switch.revoked"];
+  check(named.size > 20 && JSON.stringify(clash) === JSON.stringify(BUILT_M6_EVENTS), `the only M6 event names the API or core writes today are an app's hold and its lifting, its suspension and its lifting, its unpublish, a hostname's suspension, a room's release configuration set, a release failed, started uploading, recorded uploaded, committed live, served and replaced, and the operators' record of a release switch set (${named.size} read): ${clash.join(", ") || "none"}`);
 }
 check(JSON.stringify(m6EventTypes([{ type: "task.created" }, { type: "role.released" }, { type: "release.requested" }, { type: "deploy.started" }, { type: "app.suspended" }, { type: "release.requested" }])) === JSON.stringify(["release.requested", "deploy.started", "app.suspended"]), "M6 event types, deploy included, are found once each, and a role's release isn't one");
 

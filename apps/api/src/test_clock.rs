@@ -14,6 +14,7 @@ thread_local! {
 /// While the guard lives, a call's timeout is the room's `test_call_timeout (ms, only)`, if it has a row for every call
 /// (`only` null) or for this one (`only` = `call`), and never longer than the release timeout. Only the wait for the
 /// timeout is shorter: a hung call still hangs until it fires.
+#[cfg(feature = "failpoints")]
 pub(crate) fn shorten_calls(sql: &SqlStorage, call: &str) -> Shortened {
     let ms = rows(
         sql,
@@ -43,6 +44,7 @@ pub(crate) fn call_timeout_ms(release_ms: u64) -> u64 {
 }
 
 /// The room's clock for its scan passes, `test_scan_now (at)`, if a test passed one in.
+#[cfg(feature = "failpoints")]
 pub(crate) fn scan_now(sql: &SqlStorage) -> Result<Option<i64>, ApiError> {
     let table = rows(
         sql,

@@ -4,8 +4,8 @@ import { notFound } from "next/navigation";
 import { gatewayQuery } from "@/lib/gateway/server";
 import { visibleText } from "@/lib/public/visible-text";
 import { Time } from "../w/[id]/activity/time";
-import { HANDLE, reasonLabel, type QueuedReport } from "./model";
-import { OperatorActions } from "./operator-actions";
+import { HANDLE, reasonLabel, viewOf, type QueuedReport } from "./model";
+import { AppActions, OperatorActions } from "./operator-actions";
 
 /**
  * The operators' queue (M4 step 11(c), decision 158). Only Podster's operators, named in the API's configuration and checked
@@ -27,7 +27,9 @@ export default async function Moderation({ searchParams }: { searchParams?: Prom
       {read.data.reports.length === 0 ? <p className="text-muted-foreground">{cursor ? "No more reports." : "No reports."}</p> : null}
       {read.data.reports.length > 0 ? (
         <ul className="space-y-3">
-          {read.data.reports.map((report) => (
+          {read.data.reports.map((report) => {
+            const view = viewOf(report);
+            return (
             <li key={report.id} className="space-y-2 rounded-lg border p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h2 className="font-medium">{reasonLabel(report.reason)}</h2>
@@ -38,12 +40,41 @@ export default async function Moderation({ searchParams }: { searchParams?: Prom
               <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-sm">
                 <dt className="text-muted-foreground">Report</dt>
                 <dd className="break-all font-mono">{report.id}</dd>
-                <dt className="text-muted-foreground">Workroom</dt>
-                <dd className="break-all font-mono">
-                  {/* The handle it had when reported. It may have gone private or changed since; actions find the room from the report. */}
-                  {HANDLE.test(report.handle) ? <a href={`/p/${report.handle}`} className="text-primary underline">{report.handle}</a> : report.handle}
-                </dd>
-                {report.agent_id ? (
+                {view.kind === "room" ? (
+                  <>
+                    <dt className="text-muted-foreground">Workroom</dt>
+                    <dd className="break-all font-mono">
+                      {/* The handle it had when reported. It may have gone private or changed since; actions find the room from the report. */}
+                      {HANDLE.test(view.handle) ? <a href={`/p/${view.handle}`} className="text-primary underline">{view.handle}</a> : visibleText(view.handle)}
+                    </dd>
+                  </>
+                ) : null}
+                {view.kind === "app" ? (
+                  <>
+                    <dt className="text-muted-foreground">App host</dt>
+                    {/* Plain text, never a link: it names a site an agent wrote, and opening it from here would visit it. */}
+                    <dd className="break-all font-mono">{view.host}</dd>
+                  </>
+                ) : null}
+                {view.kind === "unknown" ? (
+                  <>
+                    <dt className="text-muted-foreground">Kind</dt>
+                    <dd>Not one this page knows, so it offers no action. Nothing in it is shown as a link.</dd>
+                    {typeof report.handle === "string" && report.handle !== "" ? (
+                      <>
+                        <dt className="text-muted-foreground">Handle, as sent</dt>
+                        <dd className="break-all font-mono">{visibleText(report.handle)}</dd>
+                      </>
+                    ) : null}
+                    {typeof report.host === "string" && report.host !== "" ? (
+                      <>
+                        <dt className="text-muted-foreground">Host, as sent</dt>
+                        <dd className="break-all font-mono">{visibleText(report.host)}</dd>
+                      </>
+                    ) : null}
+                  </>
+                ) : null}
+                {view.kind === "room" && report.agent_id ? (
                   <>
                     <dt className="text-muted-foreground">Agent named by the reporter (not checked)</dt>
                     <dd className="break-all font-mono">{report.agent_id}</dd>
@@ -60,9 +91,11 @@ export default async function Moderation({ searchParams }: { searchParams?: Prom
                 </div>
               ) : null}
               {/* Only these fields reach the browser's component, whatever else the read carried. */}
-              <OperatorActions report={{ id: report.id, handle: report.handle, agent_id: report.agent_id, reason: report.reason, note: report.note, created_at: report.created_at }} />
+              {view.kind === "room" ? <OperatorActions report={{ id: report.id, handle: view.handle, agent_id: report.agent_id, reason: report.reason }} /> : null}
+              {view.kind === "app" ? <AppActions report={{ id: report.id, host: view.host, reason: report.reason }} /> : null}
             </li>
-          ))}
+            );
+          })}
         </ul>
       ) : null}
       <div className="flex flex-wrap gap-4">

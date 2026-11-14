@@ -49,19 +49,20 @@ let keysNoInfo = false;
  * A gate holds the next call of one kind until the test lets it go, and tells the test when that call has arrived. So
  * a test can change the room while a call is out, at exactly that point, with no clock involved.
  */
-type Gate = { op: Op; taken: boolean; expired: boolean; arrived: Promise<void>; markArrived: () => void; released: Promise<void>; release: () => void };
+type Gate = { op: Op | UploadOp; taken: boolean; expired: boolean; arrived: Promise<void>; markArrived: () => void; released: Promise<void>; release: () => void };
 let gates: Gate[] = [];
 /** Well under the provider module's call limit, `CALL_TIMEOUT_MS`, which a test pins against this. */
 export const GATE_LIMIT_MS = 2000;
-function newGate(op: Op): Gate {
+function newGate(op: Op | UploadOp): Gate {
   let markArrived = () => {};
   let release = () => {};
   const arrived = new Promise<void>((resolve) => { markArrived = resolve; });
   const released = new Promise<void>((resolve) => { release = resolve; });
   return { op, taken: false, expired: false, arrived, markArrived, released, release };
 }
-async function passGate(op: Op) {
-  const gate = gates.find((g) => g.op === op && !g.taken);
+/** `held` is where the gate is kept: the global list `/reset` clears, or one upload's own. */
+async function passGate(op: Op | UploadOp, held: Gate[] = gates) {
+  const gate = held.find((g) => g.op === op && !g.taken);
   if (!gate) return;
   gate.taken = true;
   gate.markArrived();
@@ -104,8 +105,6 @@ type UploadFault = {
   op: UploadOp; times: number;
   /** A status with the provider's error envelope. */
   status?: number;
-  /** The call is answered properly, this much later: a session after it has decided what it wants, the script's write before it is done. So a test can run a second attempt while the first is out. */
-  delayMs?: number;
   /** The work is done and the answer is lost: a `502`. */
   lost?: boolean;
   /** One way the answer isn't what it must be, the status staying a success. */
@@ -117,6 +116,12 @@ type Upload = {
   held: Map<string, { type: string; base64: string }>;
   calls: { op: UploadOp; status: number; hashes?: string[]; manifest?: Manifest; query?: string; parts?: string[]; bytes?: number }[];
   faults: UploadFault[];
+  /**
+   * Gates on this script's calls, kept here rather than with the gates above so `/reset` never lets one go: a held
+   * session is answered once it has decided what it wants, a held script's write before it is done. So a test can run
+   * a second attempt, or change the room, while the first is out, at exactly that point.
+   */
+  gates: Gate[];
   /** The script as last written: every path with what is served there, and the metadata it was written with. */
   written?: { files: Record<string, { hash: string; size: number; type: string; base64: string }>; metadata: unknown; metadataText: string; times: number };
   /** Hashes asked for in one bucket. */
@@ -126,7 +131,7 @@ type Upload = {
 const uploads = new Map<string, Upload>();
 const upload = (script: string) => {
   let found = uploads.get(script);
-  if (!found) { found = { held: new Map(), calls: [], faults: [], bucketSize: 2 }; uploads.set(script, found); }
+  if (!found) { found = { held: new Map(), calls: [], faults: [], gates: [], bucketSize: 2 }; uploads.set(script, found); }
   return found;
 };
 const sessions = new Map<string, { script: string; manifest: Manifest; needed: string[]; got: Set<string>; bucketsSent: number; buckets: number }>();
@@ -165,7 +170,7 @@ async function fakeUpload(request: Request, url: URL): Promise<Response | null> 
     if (fault?.shape === "unknown_hash") buckets = [["f".repeat(32)], ...buckets];
     if (fault?.shape === "hash_twice" && buckets[0]) buckets = [...buckets, [buckets[0][0]]];
     if (fault?.shape === "empty_bucket") buckets = [...buckets, []];
-    if (fault?.delayMs) await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
+    await passGate("session", held.gates);
     return done(200, json({ success: true, errors: null, messages: null, result: fault?.shape === "no_token" ? { buckets } : { jwt: token, buckets } }), manifest);
   }
   if (url.pathname === `/client/v4/accounts/${FAKE_CONTENT.account}/workers/assets/upload` && request.method === "POST") {
@@ -205,7 +210,7 @@ async function fakeUpload(request: Request, url: URL): Promise<Response | null> 
     const done = (status: number, response: Response) => { held.calls.push({ op: "script", status, query: url.search, parts }); return response; };
     if (bearer !== `Bearer ${FAKE_CONTENT.scriptsToken}`) return done(403, failure(403, 10000, "Authentication error"));
     const fault = takeUploadFault(name, "script");
-    if (fault?.delayMs) await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
+    await passGate("script", held.gates);
     if (fault?.status) return done(fault.status, failure(fault.status, 10001, "SECRET-PROVIDER-TEXT"));
     const part = form.get("metadata");
     const metadataText = typeof part === "string" ? part : await part!.text();
@@ -234,7 +239,21 @@ export async function fakeContent(request: Request): Promise<Response | null> {
     if (url.pathname === "/upload-bucket-size") { upload(name).bucketSize = Number(url.searchParams.get("size")); return json({ ok: true }); }
     if (url.pathname === "/upload-state") {
       const held = upload(name);
-      return json({ calls: held.calls, held: [...held.held.keys()].sort(), written: held.written ?? null });
+      return json({ calls: held.calls, held: [...held.held.keys()].sort(), written: held.written ?? null, expiredGates: held.gates.filter((gate) => gate.expired).length });
+    }
+    if (url.pathname === "/upload-gate") {
+      const held = upload(name);
+      held.gates.push(newGate(((await request.json()) as { op: UploadOp }).op));
+      return json({ id: held.gates.length - 1 });
+    }
+    const gate = upload(name).gates[Number(url.searchParams.get("id") ?? -1)];
+    if (url.pathname === "/upload-arrived" && gate) {
+      await gate.arrived;
+      return json({ ok: true });
+    }
+    if (url.pathname === "/upload-release" && gate) {
+      gate.release();
+      return json({ ok: true });
     }
     return json({ error: "unknown" }, 404);
   }

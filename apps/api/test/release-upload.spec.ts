@@ -85,9 +85,21 @@ const blobReads = (seen: GithubState) => seen.calls.filter((call) => call.path.i
 
 // --- the provider's stand-in, by script ---------------------------------------------------------------------------------
 type Written = { files: Record<string, { hash: string; size: number; type: string; base64: string }>; metadata: any; metadataText: string; times: number };
-type Provider = { calls: { op: string; status: number; hashes?: string[]; manifest?: Record<string, { hash: string; size: number }>; query?: string; parts?: string[]; bytes?: number }[]; held: string[]; written: Written | null };
+type Provider = { calls: { op: string; status: number; hashes?: string[]; manifest?: Record<string, { hash: string; size: number }>; query?: string; parts?: string[]; bytes?: number }[]; held: string[]; written: Written | null; expiredGates: number };
 const provider = async (script: string) => (await (await fetch(`https://content-fake.example.com/upload-state?script=${script}`)).json()) as Provider;
 const providerFault = (script: string, fault: object) => fetch(`https://content-fake.example.com/upload-fault?script=${script}`, { method: "POST", body: JSON.stringify({ times: 1, ...fault }) });
+/**
+ * Holds the next call of one kind to the provider for this script until the test lets it go: `arrived` resolves once
+ * that call is held, `release` answers it. No clock: the test does what it means to do while the call is out.
+ */
+async function providerGate(script: string, op: "session" | "script") {
+  const at = (path: string, id?: number) => `https://content-fake.example.com/${path}?script=${script}${id === undefined ? "" : `&id=${id}`}`;
+  const { id } = (await (await fetch(at("upload-gate"), { method: "POST", body: JSON.stringify({ op }) })).json()) as { id: number };
+  return {
+    arrived: async () => { await (await fetch(at("upload-arrived", id))).json(); },
+    release: async () => { await (await fetch(at("upload-release", id))).json(); },
+  };
+}
 const bucketSize = (script: string, size: number) => fetch(`https://content-fake.example.com/upload-bucket-size?script=${script}&size=${size}`);
 const ops = (seen: Provider) => seen.calls.map((call) => `${call.op} ${call.status}`);
 
@@ -321,17 +333,21 @@ describe("two attempts at one upload, overlapping", () => {
     await github("/seed", repository(SITE));
     const h = await uploading();
     // The first attempt's write of the script is held at the provider while a second attempt runs whole.
-    await providerFault(h.script, { op: "script", delayMs: 1500 });
+    const gate = await providerGate(h.script, "script");
     const first = upload(h.room);
-    for (let i = 0; i < 400 && !(await provider(h.script)).calls.some((call) => call.op === "bucket" && call.status === 201); i += 1) await new Promise((next) => setTimeout(next, 5));
+    // Its write is reached only once its buckets are done.
+    await gate.arrived();
+    expect((await provider(h.script)).calls.some((call) => call.op === "bucket" && call.status === 201)).toBe(true);
     const second = await upload(h.room);
     expect(brief(second)).toEqual([200, "uploading", true, null, null]);
     expect(await record(h.room)).toHaveLength(1);
     const before = await record(h.room);
+    await gate.release();
     // The first comes back to a release already recorded: the same answer, and the record as it was.
     expect(brief(await first)).toEqual([200, "uploading", true, null, null]);
     expect(await record(h.room)).toEqual(before);
     expect((await provider(h.script)).written!.times).toBe(2);
+    expect((await provider(h.script)).expiredGates).toBe(0);
     expect((await githubState()).tokens.map((token) => token.revoked)).toEqual([true, true]);
   });
 
@@ -342,64 +358,73 @@ describe("two attempts at one upload, overlapping", () => {
     await github("/fault", { blob: { [blobSha(bytes(SITE["index.html"]))]: ["ok", "ok", "ok", "other_bytes"] } });
     const h = await uploading();
     // The first attempt's session is held at the provider, after it has said which files it wants.
-    await providerFault(h.script, { op: "session", delayMs: 1500 });
+    const gate = await providerGate(h.script, "session");
     const first = upload(h.room);
-    for (let i = 0; i < 400 && (await provider(h.script)).calls.length === 0 && blobReads(await githubState()) < 5; i += 1) await new Promise((next) => setTimeout(next, 5));
+    await gate.arrived();
     expect(blobReads(await githubState())).toBe(5);
     // The second attempt uploads, and the room commits the release live.
     expect(brief(await upload(h.room))).toEqual([200, "uploading", true, null, null]);
     expect((await commit(h.room)).body.state).toBe("live");
     // The first attempt now finds a file that isn't what the tree said. The release is live, and stays so.
+    await gate.release();
     const late = await first;
     expect([late.status, late.body.state, late.body.uploaded, late.body.waiting ?? null]).toEqual([200, "live", true, null]);
     expect(await row(h.room)).toEqual({ state: "live", failure_code: null });
     expect((await host(h.room)).script_name).toBe(h.script);
     expect(await queued(h.room)).toEqual([]);
+    expect((await provider(h.script)).expiredGates).toBe(0);
   });
 
   it("never lets a late attempt's failure end a release another attempt has recorded, before any commit", async () => {
     await github("/seed", repository(SITE));
     await github("/fault", { blob: { [blobSha(bytes(SITE["index.html"]))]: ["ok", "ok", "ok", "other_bytes"] } });
     const h = await uploading();
-    await providerFault(h.script, { op: "session", delayMs: 1500 });
+    const gate = await providerGate(h.script, "session");
     const first = upload(h.room);
-    for (let i = 0; i < 400 && blobReads(await githubState()) < 5; i += 1) await new Promise((next) => setTimeout(next, 5));
+    // Held at its session, its five reads done.
+    await gate.arrived();
     expect(brief(await upload(h.room))).toEqual([200, "uploading", true, null, null]);
+    await gate.release();
     const late = await first;
     expect([late.status, late.body.state, late.body.uploaded, late.body.waiting ?? null]).toEqual([200, "uploading", true, null]);
     expect(await row(h.room)).toEqual({ state: "uploading", failure_code: null });
     expect([await record(h.room), await queued(h.room)]).toEqual([[{ release_id: REL, script_name: h.script, files: 6, bytes: 168 }], []]);
     // And the room still commits it.
     expect((await commit(h.room)).body.state).toBe("live");
+    expect((await provider(h.script)).expiredGates).toBe(0);
   });
 
   it("never answers that a release waits when it is recorded, or has ended, by the time an attempt gives up", async () => {
     await github("/seed", repository(SITE));
     // Recorded by a second attempt while the first, held at its session, then gets a bucket refused.
     const h = await uploading();
-    await providerFault(h.script, { op: "session", delayMs: 1500 });
+    const gate = await providerGate(h.script, "session");
     await providerFault(h.script, { op: "bucket", status: 500, times: 1 });
     const first = upload(h.room);
-    for (let i = 0; i < 400 && blobReads(await githubState()) < 5; i += 1) await new Promise((next) => setTimeout(next, 5));
+    await gate.arrived();
     // The second attempt takes the refused bucket, and waits; a third uploads.
     expect(brief(await upload(h.room))).toEqual([200, "uploading", false, "release_upload_unavailable", null]);
     expect(brief(await upload(h.room))).toEqual([200, "uploading", true, null, null]);
     // The first's own buckets are refused now: the provider's session for them has nothing left to want. It gives
     // up, and answers the release as it is: uploaded, and not waiting.
     await providerFault(h.script, { op: "bucket", status: 500, times: 5 });
+    await gate.release();
     const late = await first;
     expect([late.body.state, late.body.uploaded, late.body.waiting ?? null]).toEqual(["uploading", true, null]);
+    expect((await provider(h.script)).expiredGates).toBe(0);
     // Ended while an attempt was out: answered as failed, with its reason, and not as waiting.
     await github("/reset", {});
     await github("/seed", repository(SITE));
     const ended = await uploading();
-    await providerFault(ended.script, { op: "session", delayMs: 1000 });
+    const held = await providerGate(ended.script, "session");
     await providerFault(ended.script, { op: "bucket", status: 500, times: 5 });
     const out = upload(ended.room);
-    for (let i = 0; i < 400 && blobReads(await githubState()) < 5; i += 1) await new Promise((next) => setTimeout(next, 5));
+    await held.arrived();
     await inRoom(ended.room, (sql) => sql.exec("UPDATE release SET state = 'failed', failure_code = 'release_upload_expired', finished_at = 1 WHERE id = ?", REL));
+    await held.release();
     const answer = await out;
     expect([answer.body.state, answer.body.uploaded, answer.body.waiting ?? null, answer.body.reason]).toEqual(["failed", false, null, "release_upload_expired"]);
+    expect((await provider(ended.script)).expiredGates).toBe(0);
   });
 });
 
@@ -464,21 +489,23 @@ describe("a room that changes while its release uploads", () => {
     await github("/seed", repository(SITE));
     const h = await uploading();
     // The session is held at the provider. The first check has passed by then, on reads made before the stop.
-    await providerFault(h.script, { op: "session", delayMs: 1000 });
+    const gate = await providerGate(h.script, "session");
     await moderation().fetch("https://do/content-stop");
     const clear = () => inModeration((sql) => sql.exec("UPDATE content_stop SET stopped = 0, reason = NULL, at = NULL, version = version + 1"));
     const out = upload(h.room);
     try {
-      for (let i = 0; i < 400 && blobReads(await githubState()) < 5; i += 1) await new Promise((next) => setTimeout(next, 5));
+      await gate.arrived();
       expect(blobReads(await githubState())).toBe(5);
       // The stop for the whole content domain, set now, in its own object.
       await inModeration((sql) => sql.exec("INSERT INTO content_stop (singleton, stopped, reason, at, version, updated_at) VALUES (1, 1, 'illegal', 1, 1, 1) ON CONFLICT (singleton) DO UPDATE SET stopped = 1, reason = 'illegal', at = 1, version = version + 1"));
+      await gate.release();
       const answer = await out;
       expect([answer.status, answer.body.state, answer.body.uploaded]).toEqual([200, "failed", false]);
       expect(answer.body.reason).toBe("release_stopped");
-    } finally { await clear(); }
+    } finally { await gate.release(); await clear(); }
     // The files went up, and the script was never asked for.
     const seen = await provider(h.script);
+    expect(seen.expiredGates).toBe(0);
     expect([ops(seen).filter((op) => op.startsWith("script")), seen.written]).toEqual([[], null]);
     expect(ops(seen).filter((op) => op.startsWith("bucket"))).toHaveLength(3);
   });

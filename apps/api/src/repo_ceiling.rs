@@ -8,12 +8,16 @@
 //! - **A room asks before it unpublishes for this cause,** `{ room, wanted: true, operator }`, and this object answers
 //!   `{ permit }` in one transaction of its own: two rooms asking at once can't both take the last place. A grant is
 //!   kept for the window, so a room whose unpublish failed after it is granted again.
-//! - **Past the ceiling the room is held,** and so is every room that asks after it: the ceiling is tripped. Operators
-//!   are told by one finding, `repo_unpublish_held`, with how many are held, and no room's ID.
+//! - **Past the ceiling the room is held,** and so is every room that asks after it: the ceiling is tripped. Each held
+//!   room is a finding of its own, `repo_unpublish_held`, by the room's ID, so an operator knows what to recheck.
 //! - **It clears room by room.** An operator's recheck of a held room confirms it (`operator: true`), and it is granted.
-//!   A room whose cause cleared, its link ready again or nothing up, says so (`wanted: false`), from an operator's recheck
-//!   or in its answer to the reconcile's walk. Once no room is held the ceiling is cleared: the count starts again, and
-//!   the finding is taken away, so the record says only what is so now. Nothing that came down comes back.
+//!   A room whose cause cleared, its link ready again or nothing up, says so (`wanted: false`): from an operator's
+//!   recheck, from its own alarm, or in its answer to the reconcile's walk. Its finding goes with it. Once no room is
+//!   held the trip clears. **The count is a true rolling hour** (the architect's ruling of 2026-11-14): clearing a trip
+//!   never forgets the hour's grants, so held rooms that ask again proceed only within what the hour still has, and a
+//!   grant the room didn't use, because its link healed meanwhile, still counts. Nothing that came down comes back.
+//! - **An ask that stalled is told by the room's ID,** `repo_unpublish_stalled`: undecided, recorded here; no answer or
+//!   a granted unpublish that failed, sent by the room. Any later answer here to that room takes it away.
 //!
 //! What it reads that it doesn't own: how many rooms have apps, from the app-label lookup table in D1. It only sizes
 //! the ceiling, and only ever smaller than the fixed number: it never lets anything down that the number wouldn't. Read
@@ -41,9 +45,10 @@ CREATE TABLE IF NOT EXISTS repo_unpublish_held (room TEXT PRIMARY KEY CHECK (len
 CREATE TABLE IF NOT EXISTS repo_unpublish_trip (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), at INTEGER NOT NULL);
 ";
 
-/// The operators' finding while the ceiling holds rooms: one row, with how many in `detail`.
+/// The operators' finding for each room the ceiling holds, by the room's ID.
 pub(crate) const FINDING: &str = "repo_unpublish_held";
-const FINDING_SUBJECT: &str = "repository_not_ready";
+/// The operators' finding for a room whose ask stalled, by the room's ID, with why in `detail`.
+pub(crate) const STALLED: &str = "repo_unpublish_stalled";
 
 /// How many rooms have apps, by the app-label lookup table, or `None` when it can't be read.
 pub(crate) async fn rooms_with_apps(env: &Env) -> Option<u64> {
@@ -69,18 +74,12 @@ fn held_count(sql: &SqlStorage) -> R<i64> {
     )
 }
 
-/// Once no room is held, a tripped ceiling clears: the count starts again and the finding goes, the trip's own row last,
-/// so a stop between steps leaves it tripped and the next room that leaves finishes the clearing.
+/// Once no room is held, a tripped ceiling clears. The hour's grants stay: the count is a rolling hour, whatever cleared
+/// the trip.
 fn clear_if_done(sql: &SqlStorage) -> R<()> {
     if !tripped(sql)? || held_count(sql)? > 0 {
         return Ok(());
     }
-    exec(sql, "DELETE FROM repo_unpublish_grant", vec![])?;
-    exec(
-        sql,
-        "DELETE FROM takedown_finding WHERE code = ? AND subject = ?",
-        vec![FINDING.into(), FINDING_SUBJECT.into()],
-    )?;
     exec(sql, "DELETE FROM repo_unpublish_trip", vec![])?;
     console_log!("repo ceiling: cleared: code=repo_unpublish_cleared");
     Ok(())
@@ -94,7 +93,17 @@ pub(crate) fn noted(sql: &SqlStorage, room: &str) -> R<()> {
         "DELETE FROM repo_unpublish_held WHERE room = ?",
         vec![room.into()],
     )?;
+    forget_findings(sql, room)?;
     clear_if_done(sql)
+}
+
+/// The room's two findings, held and stalled, taken away: it was answered, or no longer waits.
+fn forget_findings(sql: &SqlStorage, room: &str) -> R<()> {
+    exec(
+        sql,
+        "DELETE FROM takedown_finding WHERE code IN (?, ?) AND subject = ?",
+        vec![FINDING.into(), STALLED.into(), room.into()],
+    )
 }
 
 /// One room's ask, `{ room, wanted, operator }`, answered `{ permit }` with core's decision, or `noted` for a room that
@@ -166,12 +175,13 @@ pub(crate) fn ask(
                 "INSERT INTO repo_unpublish_trip (singleton, at) VALUES (1, ?) ON CONFLICT (singleton) DO NOTHING",
                 vec![now.into()],
             )?;
-            let held = held_count(sql)?;
-            crate::reconcile::keep(
+            exec(
                 sql,
-                &json!({ "code": FINDING, "subject": FINDING_SUBJECT, "detail": held.to_string() }),
-                now,
+                "DELETE FROM takedown_finding WHERE code = ? AND subject = ?",
+                vec![STALLED.into(), room.into()],
             )?;
+            crate::reconcile::keep(sql, &json!({ "code": FINDING, "subject": room }), now)?;
+            let held = held_count(sql)?;
             console_error!(
                 "repo ceiling: an unpublish was held: code={} held={}",
                 FINDING,
@@ -179,6 +189,11 @@ pub(crate) fn ask(
             );
         }
         RepoUnpublishPermit::Undecided => {
+            crate::reconcile::keep(
+                sql,
+                &json!({ "code": STALLED, "subject": room, "detail": "undecided" }),
+                now,
+            )?;
             console_error!(
                 "repo ceiling: the rooms with apps couldn't be counted: code=rooms_uncounted"
             );

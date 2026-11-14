@@ -9,30 +9,37 @@
 //!   App's own installation reads healthy. Otherwise the read is undecided: nothing is degraded, the room logs its ID and
 //!   a code, and operators are told by one finding, `installation_unconfirmed`, however many rooms meet it.
 //! - **The ceiling** (`crate::repo_ceiling`, in the `Moderation` object, which every room asks): each room reads its own
-//!   link, so there is no shared pass, and the one object that sees every room counts by time. **A room asks it before
-//!   it unpublishes for this cause, and the object decides in one transaction of its own,** so two rooms asking at once
-//!   can't both take the last place. Past the ceiling the rest are held, with one finding, until an operator's recheck
-//!   of a held room confirms it, or the cause clears there.
+//!   link, so there is no shared pass, and the one object that sees every room counts a rolling hour. **A room asks it
+//!   before it unpublishes for this cause, and the object decides in one transaction of its own,** so two rooms asking
+//!   at once can't both take the last place. Past the ceiling the rest are held, each named by its room's ID in a
+//!   finding, until an operator's recheck of a held room confirms it, or the cause clears there.
 //!
 //! **Degrading never waits for this.** The link is degraded, and agents' tokens marked for revocation, in the
 //! transaction that finds the difference, as before. Only the unpublish waits for the ceiling's answer, asked outside any
 //! transaction; then the room checks again, in one transaction, that its link is still not ready and something is
 //! still up, and unpublishes there. Every other unpublish trigger is untouched and still acts at once.
 //!
-//! When the room asks:
-//! - in its alarm, after a job of that pass took the link off ready (the merge job, the daily read-back, a pull
-//!   request's read);
-//! - at an operator's recheck, which is that operator's confirmation for this room;
-//! - after the reconcile's walk woke it with an unpublish still owed, and, after a hold or no answer, again an hour on.
+//! **Nothing here lives in memory.** Whether an unpublish is owed is worked out from the room's own rows each time
+//! ([`owed`]): a link off ready with something up. When the room's ask didn't end it (held, undecided, no answer, or a
+//! grant whose unpublish failed), the time it asks again is kept in the object's durable storage, under
+//! [`RETRY_KEY`], which needs no schema step. While anything is owed, or that key is there, the room's alarm is armed
+//! for it, so a restart between any two steps loses nothing. A room whose cause cleared while the key was there tells
+//! the ceiling so, which releases it from a hold.
+//!
+//! An ask that got no answer, or a granted unpublish that failed, is told to operators as `repo_unpublish_stalled`, by
+//! the room's ID; the ceiling records an undecided one itself, and takes the finding away at its next answer.
 //!
 //! Logs carry the room's ID and codes, nothing else.
 use super::*;
 use podster_core::release::{repo_unpublish_owed, RepoUnpublishPermit, UnpublishTrigger};
 use podster_core::repositories::LinkStatus;
 
-/// How long a room that was held, or got no answer, waits before it asks again by itself. An operator's recheck asks at
-/// once. Proposed.
+/// How long a room whose ask didn't end it waits before it asks again by itself. An operator's recheck asks at once.
+/// Proposed.
 const ASK_AGAIN_MS: i64 = 60 * 60 * 1000;
+
+/// The key in the room's durable storage that holds when it next asks the ceiling, while an ask hasn't ended it.
+pub(super) const RETRY_KEY: &str = "repo_unpublish_retry_at";
 
 /// The finding a room's undecided "gone" raises, one for the deployment, with the installation's reading in `detail`.
 const INSTALLATION_FINDING: &str = "installation_unconfirmed";
@@ -55,7 +62,7 @@ pub(super) fn link_status(sql: &SqlStorage) -> R<Option<(LinkStatus, Option<Stri
 }
 
 /// The reason the room's app is owed an unpublish for its link, or `None` when it isn't: core's
-/// `repo_unpublish_owed`, on the link's status and whether anything is up.
+/// `repo_unpublish_owed`, on the link's status and whether anything is up. Durable state alone decides it.
 pub(super) fn owed(sql: &SqlStorage) -> R<Option<String>> {
     let Some((status, reason)) = link_status(sql)? else {
         return Ok(None);
@@ -69,13 +76,14 @@ pub(super) fn owed(sql: &SqlStorage) -> R<Option<String>> {
     )
 }
 
-/// When the room's alarm should next ask, if it owes an unpublish it has been told to ask about again: after the walk
-/// woke it, or once the wait after a hold or no answer is over. `None` otherwise.
-pub(super) fn next_due(sql: &SqlStorage, ask_after: i64, now: i64) -> R<Option<i64>> {
-    if ask_after == 0 || owed(sql)?.is_none() {
-        return Ok(None);
-    }
-    Ok(Some(ask_after.max(now + 10)))
+/// When the room's alarm should next come for this: while an unpublish is owed, at once or when the kept retry time
+/// comes; with nothing owed and a retry kept, at once, to tell the ceiling the room no longer waits. `None` otherwise.
+pub(super) fn next_due(sql: &SqlStorage, retry_at: Option<i64>, now: i64) -> R<Option<i64>> {
+    Ok(match (owed(sql)?.is_some(), retry_at) {
+        (true, retry_at) => Some(retry_at.unwrap_or(0).max(now + 10)),
+        (false, Some(_)) => Some(now + 10),
+        (false, None) => None,
+    })
 }
 
 fn room_id(sql: &SqlStorage) -> String {
@@ -85,8 +93,29 @@ fn room_id(sql: &SqlStorage) -> String {
         .unwrap_or_default()
 }
 
-/// The ceiling's answer to one room, or `None` when it gave none that reads as one of its three.
-async fn ask(env: &Env, room: &str, operator: bool) -> Option<RepoUnpublishPermit> {
+#[cfg(feature = "failpoints")]
+fn test_table(sql: &SqlStorage, name: &str) -> bool {
+    rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        vec![name.into()],
+    )
+    .is_ok_and(|found| !found.is_empty())
+}
+
+/// The ceiling's answer to one room, or `None` when it gave none that reads as one of its three. Test builds give no
+/// answer while the room holds `test_ceiling_unanswered`.
+async fn ask(
+    env: &Env,
+    sql: &SqlStorage,
+    room: &str,
+    operator: bool,
+) -> Option<RepoUnpublishPermit> {
+    #[cfg(feature = "failpoints")]
+    if test_table(sql, "test_ceiling_unanswered") {
+        return None;
+    }
+    let _ = sql;
     let body = json!({ "room": room, "wanted": true, "operator": operator });
     let mut response =
         crate::moderation::call(env, crate::repo_ceiling::PATH, Method::Post, Some(body))
@@ -104,40 +133,76 @@ async fn ask(env: &Env, room: &str, operator: bool) -> Option<RepoUnpublishPermi
     }
 }
 
+/// Tells operators, by the room's ID, that its ask stalled: `no_answer` or `unpublish_failed`. Best effort.
+async fn tell_stalled(env: &Env, room: &str, detail: &str) {
+    let finding =
+        json!({ "code": crate::repo_ceiling::STALLED, "subject": room, "detail": detail });
+    let kept = crate::moderation::call(
+        env,
+        crate::reconcile::FINDING_PATH,
+        Method::Post,
+        Some(finding),
+    )
+    .await
+    .is_ok_and(|response| response.status_code() == 200);
+    if !kept {
+        console_error!(
+            "{}",
+            json!({ "event": "repository.unpublish_stalled", "ws": room, "code": "finding_not_kept" })
+        );
+    }
+}
+
 impl Workspace {
-    /// The room's alarm, after its jobs: asks if a job of this pass took the link off ready (`before` is the status the
-    /// pass began with), or if the room was told to ask again and the wait is over.
-    pub(super) async fn repo_unpublish_after_alarm(&self, before: Option<LinkStatus>) {
-        let sql = self.state.storage().sql();
-        let now = now_ms();
-        let went_off = before == Some(LinkStatus::Ready)
-            && link_status(&sql)
-                .ok()
-                .flatten()
-                .is_some_and(|(status, _)| status != LinkStatus::Ready);
-        let ask_after = self.repo_ask_after.get();
-        if went_off || (ask_after != 0 && ask_after <= now) {
-            self.repo_unpublish(false).await;
+    async fn retry_at(&self) -> Option<i64> {
+        self.state
+            .storage()
+            .get::<i64>(RETRY_KEY)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn retry_later(&self) {
+        if self
+            .state
+            .storage()
+            .put(RETRY_KEY, now_ms() + ASK_AGAIN_MS)
+            .await
+            .is_err()
+        {
+            console_error!("repository unpublish: the retry time wasn't kept: code=storage_failed");
         }
     }
 
-    /// The reconcile's walk woke the room: if an unpublish is owed for its link, its alarm asks the ceiling. Asked from
-    /// the alarm, never from inside the walk's own call, so the deployment's object is never asked while it is waiting
-    /// on this room.
-    pub(super) fn repo_unpublish_woken(&self, owed: bool) {
-        if owed && self.repo_ask_after.get() == 0 {
-            self.repo_ask_after.set(now_ms());
+    /// When the room's alarm should next come for an unpublish owed for its link, or to release it from a hold.
+    pub(super) async fn repo_unpublish_due(&self, sql: &SqlStorage, now: i64) -> R<Option<i64>> {
+        next_due(sql, self.retry_at().await, now)
+    }
+
+    /// The room's alarm: asks the ceiling while an unpublish is owed and no kept retry time is still ahead, or, with
+    /// nothing owed and a retry kept, tells the ceiling the room no longer waits.
+    pub(super) async fn repo_unpublish_from_alarm(&self) {
+        let sql = self.state.storage().sql();
+        let Ok(owed) = owed(&sql) else {
+            return;
+        };
+        let retry_at = self.retry_at().await;
+        match (owed.is_some(), retry_at) {
+            (true, Some(at)) if at > now_ms() => {}
+            (true, _) => self.repo_unpublish(false).await,
+            (false, Some(_)) => self.repo_unpublish(false).await,
+            (false, None) => {}
         }
     }
 
     /// Asks the ceiling, then unpublishes as `RepositoryNotReady` if it granted and an unpublish is still owed, checked
     /// again in the transaction that unpublishes. `operator` is an operator's recheck of this room, which confirms it.
-    /// With nothing owed, an operator's recheck tells the ceiling so, which releases the room from a hold. A failure is
-    /// logged by the room's ID and a code and changes nothing; the room asks again an hour on.
+    /// With nothing owed, the ceiling is told so if an operator asked or the room had an ask outstanding, which releases
+    /// it from a hold. Whatever didn't end it keeps a retry time; a failure is logged by the room's ID and a code.
     pub(super) async fn repo_unpublish(&self, operator: bool) {
         if let Err(error) = self.try_repo_unpublish(operator).await {
-            // Asked again once the wait is over, as after a hold: the unpublish was its own transaction, and left nothing.
-            self.repo_ask_after.set(now_ms() + ASK_AGAIN_MS);
+            self.retry_later().await;
             let sql = self.state.storage().sql();
             console_error!(
                 "{}",
@@ -153,41 +218,53 @@ impl Workspace {
         }
         let room = room_id(&sql);
         if owed(&sql)?.is_none() {
-            self.repo_ask_after.set(0);
-            if operator {
-                // The cause cleared here, or nothing is up: the room is no longer waiting on the ceiling.
-                let body = json!({ "room": room, "wanted": false, "operator": true });
-                let told = crate::moderation::call(
-                    &self.env,
-                    crate::repo_ceiling::PATH,
-                    Method::Post,
-                    Some(body),
-                )
-                .await
-                .is_ok_and(|response| response.status_code() == 200);
-                if !told {
-                    console_error!(
-                        "{}",
-                        json!({ "event": "repository.unpublish_noted", "ws": room, "code": "ceiling_unanswered" })
-                    );
-                }
+            if !operator && self.retry_at().await.is_none() {
+                return Ok(());
+            }
+            // The cause cleared here, or nothing is up: the room is no longer waiting on the ceiling.
+            let body = json!({ "room": room, "wanted": false, "operator": operator });
+            let told = crate::moderation::call(
+                &self.env,
+                crate::repo_ceiling::PATH,
+                Method::Post,
+                Some(body),
+            )
+            .await
+            .is_ok_and(|response| response.status_code() == 200);
+            if told {
+                self.state.storage().delete(RETRY_KEY).await?;
+            } else {
+                self.retry_later().await;
+                console_error!(
+                    "{}",
+                    json!({ "event": "repository.unpublish_noted", "ws": room, "code": "ceiling_unanswered" })
+                );
             }
             return Ok(());
         }
-        let permit = ask(&self.env, &room, operator)
-            .await
-            .unwrap_or(RepoUnpublishPermit::Undecided);
+        let Some(permit) = ask(&self.env, &sql, &room, operator).await else {
+            self.retry_later().await;
+            console_error!(
+                "{}",
+                json!({ "event": "repository.unpublish_held", "ws": room, "code": "no_answer" })
+            );
+            tell_stalled(&self.env, &room, "no_answer").await;
+            return Ok(());
+        };
         if permit != RepoUnpublishPermit::Grant {
-            self.repo_ask_after.set(now_ms() + ASK_AGAIN_MS);
+            self.retry_later().await;
             console_log!(
                 "{}",
                 json!({ "event": "repository.unpublish_held", "ws": room, "code": permit.code() })
             );
             return Ok(());
         }
+        // Test builds only: a test changes the room here, between the grant and the unpublish's own check.
+        #[cfg(feature = "failpoints")]
+        self.test_hold(&sql, "test_hold_before_unpublish").await;
         // Granted: checked again, in the transaction that unpublishes, since the room may have changed while it asked.
         let store = sql.clone();
-        transaction_sync(&self.state, move || {
+        let unpublished = transaction_sync(&self.state, move || {
             if let Some(reason) = owed(&store)? {
                 takedown::unpublish_for(
                     &store,
@@ -197,8 +274,12 @@ impl Workspace {
                 )?;
             }
             Ok(())
-        })?;
-        self.repo_ask_after.set(0);
+        });
+        if let Err(error) = unpublished {
+            tell_stalled(&self.env, &room, "unpublish_failed").await;
+            return Err(error);
+        }
+        self.state.storage().delete(RETRY_KEY).await?;
         Ok(())
     }
 

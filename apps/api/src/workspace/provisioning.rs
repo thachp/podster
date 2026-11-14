@@ -766,7 +766,7 @@ impl Workspace {
     /// For a test: waits, if the room has a table of that name, until the test lets go, at the fake's gate for the
     /// number in that table. So a test can change the room between this call's look and its transaction.
     #[cfg(feature = "failpoints")]
-    async fn test_hold(&self, sql: &SqlStorage, table: &str) {
+    pub(super) async fn test_hold(&self, sql: &SqlStorage, table: &str) {
         let gate = rows(
             sql,
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",

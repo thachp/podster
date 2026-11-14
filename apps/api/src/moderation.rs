@@ -692,6 +692,19 @@ impl Moderation {
                 } else {
                     None
                 };
+                // Test builds only: a test makes the count of rooms with apps unreadable.
+                #[cfg(feature = "failpoints")]
+                let rooms = if rows(
+                    &sql,
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_rooms_uncounted'",
+                    vec![],
+                )?
+                .is_empty()
+                {
+                    rooms
+                } else {
+                    None
+                };
                 let store = sql.clone();
                 self.in_transaction(move || {
                     let now = clock(&store);

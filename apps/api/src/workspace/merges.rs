@@ -1181,6 +1181,9 @@ impl Workspace {
         };
         let hash = format!("{:x}", Sha256::digest(b"POST repository recheck"));
         if let Some(answer) = stored_answer(&sql, &operator, &key, &hash, now_ms())? {
+            // A replay still confirms: the first answer may have been kept while its confirmation's ask failed. Asked
+            // from current rows, so a room with nothing owed only tells the ceiling it no longer waits.
+            self.repo_unpublish(true).await;
             return Ok(answer);
         }
         let found = rows(

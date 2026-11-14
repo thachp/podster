@@ -124,6 +124,8 @@ const readyRulesets = (): Ruleset[] => [
 ];
 /** Mints held by `mode: "gate"`, by repository, until a test releases them. */
 const gates = new Map<number, (() => void)[]>();
+/** Tests waiting for a call to reach a gate, by the gate's number: each is answered once one is held there. */
+const gateWatchers = new Map<number, (() => void)[]>();
 /**
  * A pull request of a test's repository, for the server's own read (M5 step 7a). `head_repo` and `base_repo` default to
  * the repository itself; `head_repo: null` is a fork that's gone. `as_number` answers with another number than asked.
@@ -267,7 +269,15 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
     // A caller that waits here until a test releases the gate of that number, as a gated mint does.
     if (url.pathname === "/hold") {
       const id = Number(url.searchParams.get("repo"));
-      await new Promise<void>((open) => gates.set(id, [...(gates.get(id) ?? []), open]));
+      const held = new Promise<void>((open) => gates.set(id, [...(gates.get(id) ?? []), open]));
+      for (const told of gateWatchers.get(id)?.splice(0) ?? []) told();
+      await held;
+      return json({ held: true });
+    }
+    // Answers once a call is held at that gate: at once if one already is. A test waits on this, never on a timer.
+    if (url.pathname === "/gate-reached") {
+      const id = Number(url.searchParams.get("repo"));
+      if (!gates.get(id)?.length) await new Promise<void>((told) => gateWatchers.set(id, [...(gateWatchers.get(id) ?? []), told]));
       return json({ held: true });
     }
     if (url.pathname === "/agent-release") {

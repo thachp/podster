@@ -1389,13 +1389,10 @@ impl Workspace {
             *slot.borrow_mut() = Some(check(&store, &body, now_ms())?);
             Ok(())
         })?;
-        // Whether an unpublish is owed for the repository's link: the room's alarm asks the deployment's ceiling about
-        // it, and the walk takes `false` from a room it holds as the cause cleared there (`crate::repo_ceiling`). One
-        // that couldn't be read is left out of the answer, so it can never release a room from a hold.
+        // Whether an unpublish is owed for the repository's link: the room's alarm, which `arm` sets while one is, asks
+        // the deployment's ceiling, and the walk takes `false` from a room it holds as the cause cleared there
+        // (`crate::repo_ceiling`). One that couldn't be read is left out of the answer, so it can never release a hold.
         let owed = super::repo_unpublish::owed(&sql).map(|owed| owed.is_some());
-        if let Ok(owed) = owed {
-            self.repo_unpublish_woken(owed);
-        }
         self.arm(false, false).await?;
         let mut answer = out
             .borrow_mut()

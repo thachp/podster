@@ -68,13 +68,16 @@ const MAX_FAILING: i64 = 1000;
 /// The kinds of finding with room of their own, 1,000 rows each: a deletion a reconcile started, a host a room
 /// refused, and the stop key not as the stop says. Whatever fills the rest of the record, three passes of an outage
 /// that writes a thousand keys that keep failing among it, can't keep one of these out.
-const OWN_ROOM: [&str; 5] = [
+const OWN_ROOM: [&str; 7] = [
     "script_delete_queued",
     "host_refused",
     "stop_key_differs",
     "stop_key_without_stop",
     // A room whose release bookkeeping keeps failing. One row for an app at most, so a thousand apps before it fills.
     "release_bookkeeping_failing",
+    // A room the repository ceiling holds, and one whose ask stalled: one row for each room, by its ID.
+    "repo_unpublish_held",
+    "repo_unpublish_stalled",
 ];
 /// How many findings are taken from one room's answer. A room's answer is built never to hold more
 /// (`workspace::takedown`), and that is checked when the Worker is compiled.

@@ -2852,9 +2852,6 @@ pub struct Workspace {
     /// switch notice that comes meanwhile isn't acknowledged, so it is sent again once the room exists
     /// (`release_switch`).
     creating: std::cell::Cell<u32>,
-    /// When the room next asks the deployment's ceiling about an unpublish owed for its repository's link, or 0 when it
-    /// wasn't told to (`repo_unpublish`). A restart forgets it, and the walk's wake sets it again.
-    repo_ask_after: std::cell::Cell<i64>,
     /// Test builds only: one alarm at a time, as the platform runs them. See `alarm`.
     #[cfg(feature = "failpoints")]
     test_alarm_turn: futures_util::lock::Mutex<()>,
@@ -3858,13 +3855,12 @@ impl Workspace {
             let next = next.max(now + 10);
             due = Some(due.map_or(next, |d| d.min(next)));
         }
-        // An unpublish owed for the repository's link, asked of the deployment's ceiling again (M6 step 6).
-        if let Some(next) = migrated
-            .then(|| repo_unpublish::next_due(&sql, self.repo_ask_after.get(), now))
-            .transpose()?
-            .flatten()
-        {
-            due = Some(due.map_or(next, |d| d.min(next)));
+        // An unpublish owed for the repository's link, worked out from the room's rows, or a hold to be released: asked
+        // of the deployment's ceiling (M6 step 6).
+        if migrated {
+            if let Some(next) = self.repo_unpublish_due(&sql, now).await? {
+                due = Some(due.map_or(next, |d| d.min(next)));
+            }
         }
         // A hold on the room's app, when it runs out (M6 step 6).
         if let Some(next) = migrated
@@ -5254,7 +5250,6 @@ impl DurableObject for Workspace {
             provision_not_before: std::cell::Cell::new(0),
             held_clear: std::cell::Cell::new(false),
             creating: std::cell::Cell::new(0),
-            repo_ask_after: std::cell::Cell::new(0),
             #[cfg(feature = "failpoints")]
             test_alarm_turn: futures_util::lock::Mutex::new(()),
         }
@@ -5325,10 +5320,6 @@ impl DurableObject for Workspace {
         // A job below may fire an unpublish trigger, a repository's link degraded: then the release bookkeeping runs
         // before the alarm sets its next wake.
         let epoch_before = takedown::release_epoch(&self.state.storage().sql());
-        let link_before = repo_unpublish::link_status(&self.state.storage().sql())
-            .ok()
-            .flatten()
-            .map(|(status, _)| status);
         // A hold on the room's app that has run out unpublishes it for good (M6 step 6), before the applier runs, so
         // the hosts' entries come out in this same alarm. The clock is the release commands' own, which a test sets.
         self.settle_hold();
@@ -5383,8 +5374,9 @@ impl DurableObject for Workspace {
         if let Err(error) = self.refresh_changes().await {
             console_error!("change refresh failed: {:?}", error.code());
         }
-        // A link one of these jobs took off ready unpublishes the room's app, once the deployment's ceiling allows it.
-        self.repo_unpublish_after_alarm(link_before).await;
+        // A link off ready unpublishes the room's app, once the deployment's ceiling allows it: worked out from the
+        // room's rows on every alarm, so a restart between the degrade and the unpublish loses nothing.
+        self.repo_unpublish_from_alarm().await;
         // A stuck scan fails closed here, and this failing holds up nothing else.
         if let Err(error) = self.expire_scans() {
             console_error!("couldn't end overdue scans: {:?}", error.code());

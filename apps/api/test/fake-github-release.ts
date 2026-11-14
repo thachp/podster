@@ -19,7 +19,7 @@ type Faults = {
   /** A tree read, by the sha asked for: a status, an answer too long to parse, one that isn't a tree, or a `200` that isn't JSON at all. */
   tree?: Record<string, number | "too_long" | "not_a_tree" | "html">;
   /** A blob read, by its sha: a status, bytes that aren't the file's, or more bytes than a file may have. A list is taken one read at a time, so a file can be right the first time it is read and wrong the second. */
-  blob?: Record<string, number | "other_bytes" | "too_long" | (number | "other_bytes" | "too_long" | "ok")[]>;
+  blob?: Record<string, number | "other_bytes" | "too_long" | "html" | (number | "other_bytes" | "too_long" | "html" | "ok")[]>;
   /** What revoking the token answers. 204 unless set. */
   revoke?: number;
 };
@@ -146,6 +146,8 @@ export async function fakeGithubRelease(request: Request): Promise<Response | nu
   if (file === undefined) return json({ message: "Not Found" }, 404);
   // The file's own bytes only for the raw type, as the job asks. A type no file should be given, to show it is never read.
   if (request.headers.get("accept") !== "application/vnd.github.raw+json") return json({ message: "this stand-in answers raw reads only" }, 415);
-  const bytes = fault === "too_long" ? new Uint8Array(5_000_001) : fault === "other_bytes" ? new TextEncoder().encode("not the file") : Buffer.from(file, "base64");
+  // A page in the file's place: something between GitHub and here answering `200` for it.
+  const page = "\n<!DOCTYPE html><title>Sign in</title><p>SECRET-PROVIDER-TEXT</p>";
+  const bytes = fault === "too_long" ? new Uint8Array(5_000_001) : fault === "other_bytes" ? new TextEncoder().encode("not the file") : fault === "html" ? new TextEncoder().encode(page) : Buffer.from(file, "base64");
   return new Response(bytes, { headers: { "content-type": "text/html; charset=utf-16be" } });
 }

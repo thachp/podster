@@ -39,9 +39,13 @@ const stub = (id: string) => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromNam
 const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(stub(id), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
 const moderation = () => BINDINGS.MODERATION.get(BINDINGS.MODERATION.idFromName("moderation"));
 const inModeration = <T>(fn: (sql: any) => T) => runInDurableObject(moderation(), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
+/** Release switched on for the test Worker, as no deployment is, while any command of this file's is out: two may overlap. */
+let on = 0;
+let switching: Promise<unknown> = Promise.resolve();
+const inTurn = (step: () => Promise<unknown>) => (switching = switching.then(step, step));
 async function switchedOn<T>(run: () => Promise<T>): Promise<T> {
-  await BINDINGS.DB.prepare("CREATE TABLE test_releases_on (x INTEGER)").run();
-  try { return await run(); } finally { await BINDINGS.DB.prepare("DROP TABLE test_releases_on").run(); }
+  await inTurn(async () => { if (on++ === 0) await BINDINGS.DB.prepare("CREATE TABLE IF NOT EXISTS test_releases_on (x INTEGER)").run(); });
+  try { return await run(); } finally { await inTurn(async () => { if (--on === 0) await BINDINGS.DB.prepare("DROP TABLE IF EXISTS test_releases_on").run(); }); }
 }
 
 // --- GitHub's stand-in, for this file's own repository ---------------------------------------------------------------
@@ -80,8 +84,8 @@ const asked = (seen: GithubState) => seen.calls.map((call) => `${call.method} ${
 const blobReads = (seen: GithubState) => seen.calls.filter((call) => call.path.includes("/git/blobs/")).length;
 
 // --- the provider's stand-in, by script ---------------------------------------------------------------------------------
-type Written = { files: Record<string, { hash: string; size: number; type: string; base64: string }>; metadata: any; times: number };
-type Provider = { calls: { op: string; status: number; hashes?: string[]; manifest?: Record<string, { hash: string; size: number }>; query?: string; parts?: string[] }[]; held: string[]; written: Written | null };
+type Written = { files: Record<string, { hash: string; size: number; type: string; base64: string }>; metadata: any; metadataText: string; times: number };
+type Provider = { calls: { op: string; status: number; hashes?: string[]; manifest?: Record<string, { hash: string; size: number }>; query?: string; parts?: string[]; bytes?: number }[]; held: string[]; written: Written | null };
 const provider = async (script: string) => (await (await fetch(`https://content-fake.example.com/upload-state?script=${script}`)).json()) as Provider;
 const providerFault = (script: string, fault: object) => fetch(`https://content-fake.example.com/upload-fault?script=${script}`, { method: "POST", body: JSON.stringify({ times: 1, ...fault }) });
 const bucketSize = (script: string, size: number) => fetch(`https://content-fake.example.com/upload-bucket-size?script=${script}&size=${size}`);
@@ -184,8 +188,11 @@ describe("uploading a release's static files", () => {
     const written = seen.calls.find((call) => call.op === "script")!;
     expect(written.parts).toEqual(["metadata"]);
     expect(written.query).toBe("?excludeScript=true&bindings_inherit=strict");
-    expect(Object.keys(seen.written!.metadata).sort()).toEqual(["assets", "compatibility_date", "compatibility_flags"]);
-    expect([seen.written!.metadata.assets.config, seen.written!.metadata.compatibility_flags, Object.keys(seen.written!.metadata.assets).sort()]).toEqual([{}, [], ["config", "jwt"]]);
+    // **The metadata is exactly these bytes:** Podster's own fixed assets configuration, written out, the
+    // completion token, a date and no flags. Nothing is left to the provider's defaults, and nothing is the room's.
+    const token = seen.written!.metadata.assets.jwt;
+    expect(token).toMatch(/^cfwau_test-completion-/);
+    expect(seen.written!.metadataText).toBe(`{"assets":{"config":{"html_handling":"auto-trailing-slash","not_found_handling":"none"},"jwt":"${token}"},"compatibility_date":"2026-11-01","compatibility_flags":[]}`);
     // Each bucket went with `base64=true`.
     expect(seen.calls.filter((call) => call.op === "bucket").every((call) => call.query === "?base64=true")).toBe(true);
     // The room records the upload: six files, their bytes and the marker's.
@@ -244,6 +251,29 @@ describe("uploading a release's static files", () => {
   });
 });
 
+describe("how much goes in one request", () => {
+  it("sends at most 8 MiB of files in one request, however large the provider's bucket", async () => {
+    const MIB = 1024 * 1024;
+    // Three files of 3 MiB and a small one: 9 MiB and a little, which the provider asks for in one bucket.
+    const big = (letter: string) => letter + "x".repeat(3 * MIB - 1);
+    await github("/seed", repository({ "a.bin": big("a"), "b.bin": big("b"), "c.bin": big("c"), "index.html": "<p>one</p>\n" }));
+    const h = await uploading();
+    await bucketSize(h.script, 50);
+    expect(brief(await upload(h.room))).toEqual([200, "uploading", true, null, null]);
+    const seen = await provider(h.script);
+    const sent = seen.calls.filter((call) => call.op === "bucket");
+    // One bucket of five hashes went as two requests, each within the cap, every hash once.
+    expect(seen.calls[0].op).toBe("session");
+    expect(sent.map((call) => call.status)).toEqual([202, 201]);
+    for (const call of sent) expect(call.bytes).toBeLessThanOrEqual(8 * MIB);
+    expect(Math.max(...sent.map((call) => call.bytes!))).toBeGreaterThan(5 * MIB);
+    expect(sent.flatMap((call) => call.hashes!).sort()).toEqual(Object.values(seen.calls[0].manifest!).map((file) => file.hash).sort());
+    // And the script holds each file whole.
+    for (const letter of ["a", "b", "c"]) expect(Buffer.from(seen.written!.files[`/${letter}.bin`].base64, "base64").toString() === big(letter), letter).toBe(true);
+    expect(await record(h.room)).toEqual([{ release_id: REL, script_name: h.script, files: 5, bytes: 9 * MIB + 11 + `{"release_id":"${REL}","commit":"${COMMIT}"}\n`.length }]);
+  });
+});
+
 describe("an upload asked again", () => {
   it("asks nobody anything for a release already recorded", async () => {
     await github("/seed", repository(SITE));
@@ -283,6 +313,93 @@ describe("an upload asked again", () => {
     expect(brief(await upload(h.room))).toEqual([200, "uploading", true, null, null]);
     // The first bucket's two files were kept: the second session asks for four hashes, in two buckets.
     expect(ops(await provider(h.script))).toEqual(["session 200", "bucket 502", "session 200", "bucket 202", "bucket 201", "script 200"]);
+  });
+});
+
+describe("two attempts at one upload, overlapping", () => {
+  it("records one upload when both write the script, and the second to finish changes nothing", async () => {
+    await github("/seed", repository(SITE));
+    const h = await uploading();
+    // The first attempt's write of the script is held at the provider while a second attempt runs whole.
+    await providerFault(h.script, { op: "script", delayMs: 1500 });
+    const first = upload(h.room);
+    for (let i = 0; i < 400 && !(await provider(h.script)).calls.some((call) => call.op === "bucket" && call.status === 201); i += 1) await new Promise((next) => setTimeout(next, 5));
+    const second = await upload(h.room);
+    expect(brief(second)).toEqual([200, "uploading", true, null, null]);
+    expect(await record(h.room)).toHaveLength(1);
+    const before = await record(h.room);
+    // The first comes back to a release already recorded: the same answer, and the record as it was.
+    expect(brief(await first)).toEqual([200, "uploading", true, null, null]);
+    expect(await record(h.room)).toEqual(before);
+    expect((await provider(h.script)).written!.times).toBe(2);
+    expect((await githubState()).tokens.map((token) => token.revoked)).toEqual([true, true]);
+  });
+
+  it("never lets a late attempt's failure end a release another attempt uploaded and the room took live", async () => {
+    await github("/seed", repository(SITE));
+    // `index.html` is right for the first attempt's hash, right twice for the second attempt, and wrong when the
+    // first attempt comes back for it: a failure that would end the release, found by an attempt that is stale.
+    await github("/fault", { blob: { [blobSha(bytes(SITE["index.html"]))]: ["ok", "ok", "ok", "other_bytes"] } });
+    const h = await uploading();
+    // The first attempt's session is held at the provider, after it has said which files it wants.
+    await providerFault(h.script, { op: "session", delayMs: 1500 });
+    const first = upload(h.room);
+    for (let i = 0; i < 400 && (await provider(h.script)).calls.length === 0 && blobReads(await githubState()) < 5; i += 1) await new Promise((next) => setTimeout(next, 5));
+    expect(blobReads(await githubState())).toBe(5);
+    // The second attempt uploads, and the room commits the release live.
+    expect(brief(await upload(h.room))).toEqual([200, "uploading", true, null, null]);
+    expect((await commit(h.room)).body.state).toBe("live");
+    // The first attempt now finds a file that isn't what the tree said. The release is live, and stays so.
+    const late = await first;
+    expect([late.status, late.body.state, late.body.uploaded, late.body.waiting ?? null]).toEqual([200, "live", true, null]);
+    expect(await row(h.room)).toEqual({ state: "live", failure_code: null });
+    expect((await host(h.room)).script_name).toBe(h.script);
+    expect(await queued(h.room)).toEqual([]);
+  });
+
+  it("never lets a late attempt's failure end a release another attempt has recorded, before any commit", async () => {
+    await github("/seed", repository(SITE));
+    await github("/fault", { blob: { [blobSha(bytes(SITE["index.html"]))]: ["ok", "ok", "ok", "other_bytes"] } });
+    const h = await uploading();
+    await providerFault(h.script, { op: "session", delayMs: 1500 });
+    const first = upload(h.room);
+    for (let i = 0; i < 400 && blobReads(await githubState()) < 5; i += 1) await new Promise((next) => setTimeout(next, 5));
+    expect(brief(await upload(h.room))).toEqual([200, "uploading", true, null, null]);
+    const late = await first;
+    expect([late.status, late.body.state, late.body.uploaded, late.body.waiting ?? null]).toEqual([200, "uploading", true, null]);
+    expect(await row(h.room)).toEqual({ state: "uploading", failure_code: null });
+    expect([await record(h.room), await queued(h.room)]).toEqual([[{ release_id: REL, script_name: h.script, files: 6, bytes: 168 }], []]);
+    // And the room still commits it.
+    expect((await commit(h.room)).body.state).toBe("live");
+  });
+
+  it("never answers that a release waits when it is recorded, or has ended, by the time an attempt gives up", async () => {
+    await github("/seed", repository(SITE));
+    // Recorded by a second attempt while the first, held at its session, then gets a bucket refused.
+    const h = await uploading();
+    await providerFault(h.script, { op: "session", delayMs: 1500 });
+    await providerFault(h.script, { op: "bucket", status: 500, times: 1 });
+    const first = upload(h.room);
+    for (let i = 0; i < 400 && blobReads(await githubState()) < 5; i += 1) await new Promise((next) => setTimeout(next, 5));
+    // The second attempt takes the refused bucket, and waits; a third uploads.
+    expect(brief(await upload(h.room))).toEqual([200, "uploading", false, "release_upload_unavailable", null]);
+    expect(brief(await upload(h.room))).toEqual([200, "uploading", true, null, null]);
+    // The first's own buckets are refused now: the provider's session for them has nothing left to want. It gives
+    // up, and answers the release as it is: uploaded, and not waiting.
+    await providerFault(h.script, { op: "bucket", status: 500, times: 5 });
+    const late = await first;
+    expect([late.body.state, late.body.uploaded, late.body.waiting ?? null]).toEqual(["uploading", true, null]);
+    // Ended while an attempt was out: answered as failed, with its reason, and not as waiting.
+    await github("/reset", {});
+    await github("/seed", repository(SITE));
+    const ended = await uploading();
+    await providerFault(ended.script, { op: "session", delayMs: 1000 });
+    await providerFault(ended.script, { op: "bucket", status: 500, times: 5 });
+    const out = upload(ended.room);
+    for (let i = 0; i < 400 && blobReads(await githubState()) < 5; i += 1) await new Promise((next) => setTimeout(next, 5));
+    await inRoom(ended.room, (sql) => sql.exec("UPDATE release SET state = 'failed', failure_code = 'release_upload_expired', finished_at = 1 WHERE id = ?", REL));
+    const answer = await out;
+    expect([answer.body.state, answer.body.uploaded, answer.body.waiting ?? null, answer.body.reason]).toEqual(["failed", false, null, "release_upload_expired"]);
   });
 });
 
@@ -341,6 +458,29 @@ describe("a room that changes while its release uploads", () => {
     // A commit then ends it: a script that may be gone is never set on a host.
     expect((await commit(h.room)).body.reason).toBe("release_script_deleted");
     expect((await host(h.room)).script_name).toBe(h.prev);
+  });
+
+  it("asks everyone again before the script is written: a stop set while the files were sent ends it, with no script", async () => {
+    await github("/seed", repository(SITE));
+    const h = await uploading();
+    // The session is held at the provider. The first check has passed by then, on reads made before the stop.
+    await providerFault(h.script, { op: "session", delayMs: 1000 });
+    await moderation().fetch("https://do/content-stop");
+    const clear = () => inModeration((sql) => sql.exec("UPDATE content_stop SET stopped = 0, reason = NULL, at = NULL, version = version + 1"));
+    const out = upload(h.room);
+    try {
+      for (let i = 0; i < 400 && blobReads(await githubState()) < 5; i += 1) await new Promise((next) => setTimeout(next, 5));
+      expect(blobReads(await githubState())).toBe(5);
+      // The stop for the whole content domain, set now, in its own object.
+      await inModeration((sql) => sql.exec("INSERT INTO content_stop (singleton, stopped, reason, at, version, updated_at) VALUES (1, 1, 'illegal', 1, 1, 1) ON CONFLICT (singleton) DO UPDATE SET stopped = 1, reason = 'illegal', at = 1, version = version + 1"));
+      const answer = await out;
+      expect([answer.status, answer.body.state, answer.body.uploaded]).toEqual([200, "failed", false]);
+      expect(answer.body.reason).toBe("release_stopped");
+    } finally { await clear(); }
+    // The files went up, and the script was never asked for.
+    const seen = await provider(h.script);
+    expect([ops(seen).filter((op) => op.startsWith("script")), seen.written]).toEqual([[], null]);
+    expect(ops(seen).filter((op) => op.startsWith("bucket"))).toHaveLength(3);
   });
 
   it("writes nothing under a script already queued for deletion, or under a label that isn't the room's any more", async () => {
@@ -406,6 +546,8 @@ describe("a read that gives nothing to upload", () => {
       ["a page in place of the tree", { tree: { [COMMIT]: "html" } }, "release_read_unavailable"],
       ["a rate limit on the directory's tree", { tree: { [DIRECTORY]: 429 } }, "release_read_unavailable"],
       ["a file that didn't come", { blob: { [index]: 502 } }, "release_read_unavailable"],
+      ["a page in a file's place", { blob: { [index]: "html" } }, "release_read_unavailable"],
+      ["a page in a file's place the second time", { blob: { [index]: ["ok", "html"] } }, "release_read_unavailable"],
       ["a file that didn't come the second time", { blob: { [index]: ["ok", 502] } }, "release_read_unavailable"],
     ];
     for (const [what, fault, code] of cases) {
@@ -444,7 +586,7 @@ describe("a read that gives nothing to upload", () => {
     await github("/reset", {});
     await github("/seed", repository(SITE));
     const other = await uploading();
-    await inRoom(other.room, (sql) => { sql.exec("CREATE TABLE test_release_upload_clock (step_ms INTEGER)"); sql.exec("INSERT INTO test_release_upload_clock VALUES (35000)"); });
+    await inRoom(other.room, (sql) => { sql.exec("CREATE TABLE test_release_upload_clock (step_ms INTEGER)"); sql.exec("INSERT INTO test_release_upload_clock VALUES (28000)"); });
     expect(brief(await upload(other.room))).toEqual([200, "uploading", false, "release_upload_unavailable", null]);
     expect([blobReads(await githubState()), (await provider(other.script)).calls]).toEqual([5, []]);
     expect((await githubState()).tokens.map((token) => token.revoked)).toEqual([true]);
@@ -524,8 +666,11 @@ describe("the upload's own boundaries", () => {
     expect(sources["workspace/release_commit.rs"]).toContain("pub(crate) const RELEASE_PATH_COMPLETE: bool = false;");
     // The script's metadata is three fixed fields: no module, no binding, no store, and nothing from a repository.
     const source = sources["content_provider/upload.rs"];
-    const metadata = source.slice(source.indexOf("let metadata = json!({"), source.indexOf("});", source.indexOf("let metadata = json!({")));
-    expect(metadata.match(/"[a-z_]+":/g)).toEqual(['"assets":', '"jwt":', '"config":', '"compatibility_date":', '"compatibility_flags":']);
+    const metadata = source.slice(source.indexOf("let metadata = format!("), source.indexOf(");", source.indexOf("let metadata = format!(")));
+    expect(metadata.match(/"[a-z_]+\\":/g)).toEqual(['"assets\\":', '"config\\":', '"jwt\\":', '"compatibility_date\\":', '"compatibility_flags\\":']);
+    // The assets configuration is one constant, with two fields and nothing a repository could reach.
+    expect(source.match(/const ASSETS_CONFIG: &str =\s*r#"([^#]+)"#;/)?.[1]).toBe('{"html_handling":"auto-trailing-slash","not_found_handling":"none"}');
+    expect(source.match(/ASSETS_CONFIG/g)).toHaveLength(3);
     for (const word of ["main_module", "bindings\"", "durable_objects", "kv_namespaces", "d1_databases", "migrations"]) expect(source, word).not.toContain(word);
     // The test-only switches are compiled only into test builds.
     for (const name of ["test_release_upload_provider", "test_release_upload_before_check", "test_release_upload_clock"]) {

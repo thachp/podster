@@ -1785,6 +1785,15 @@ fn a_release_costs_two_tree_reads_and_one_a_file_within_three_thousand_an_hour()
     for sizes in [vec![3 * mb; 31], vec![0; 300], vec![FETCH_BATCH_BYTES; 4]] {
         assert_eq!(fetch_batches(&sizes).iter().sum::<usize>(), sizes.len());
     }
+    // One request to the provider carries at most 8 MiB of files, however many files that is.
+    assert_eq!(upload_requests(&[3 * mb, 3 * mb, 3 * mb, 1]), vec![2, 2]);
+    assert_eq!(upload_requests(&[1; 500]), vec![500]);
+    assert_eq!(upload_requests(&[5 * mb; 5]), vec![1; 5]);
+    assert_eq!(upload_requests(&[8 * mb, 1]), vec![1, 1]);
+    assert_eq!(upload_requests(&[4 * mb, 4 * mb, 1]), vec![2, 1]);
+    assert_eq!(upload_requests(&[9 * mb]), vec![1]);
+    assert_eq!(upload_requests(&[]), Vec::<usize>::new());
+    assert_eq!(UPLOAD_REQUEST_BYTES, 8 * mb);
     // An attempt's time: whole at its start, nothing at the deadline or after, and nothing on a clock gone backwards.
     assert_eq!(attempt_left_ms(1_000, 1_000), ATTEMPT_DEADLINE_MS);
     assert_eq!(attempt_left_ms(1_000, 1_000 + ATTEMPT_DEADLINE_MS - 1), 1);

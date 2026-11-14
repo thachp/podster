@@ -13,8 +13,8 @@
 //!    the job's own marker file. Then each bucket the provider asks for: its files fetched again, checked again, and
 //!    sent. **No file is held between the two fetches,** so a release is never in memory whole.
 //! 4. **The read's token is revoked,** whatever came of it, before the script is written.
-//! 5. **The room again,** in its transaction: still uploading, under the same epoch, by the room's own facts. If not,
-//!    nothing is written.
+//! 5. **The room again,** in its transaction: the whole recheck once more, on outside facts read afresh and the
+//!    room's rows and epoch now. If it doesn't hold, nothing is written.
 //! 6. **The script is written,** from the provider's completion token, which it gives only once it holds every file
 //!    the manifest names. So a script is never part of a release.
 //! 7. **The room records the upload,** or, if the release ended while the script was being written, owes the script
@@ -49,7 +49,9 @@ use crate::content_provider::Provider;
 use crate::github::release_read::{
     hash_of, reserve, Attempt, ReadFailure, ReadFile, ReleaseApp, ReleaseReader,
 };
-use podster_core::release::{fetch_batches, file_reads, ReleaseState, FETCH_PASSES, TREE_READS};
+use podster_core::release::{
+    fetch_batches, file_reads, upload_requests, ReleaseState, FETCH_PASSES, TREE_READS,
+};
 use podster_core::release_tree::{
     marker_body, FetchMismatch, ReadProblem, MARKER_PATH, MARKER_TYPE,
 };
@@ -117,7 +119,13 @@ async fn send_files(
     let marker = marker_body(release_id, commit_sha).ok_or(Stop::Provider)?;
     let marker_hash = hash_of(MARKER_TYPE, marker.as_bytes()).ok_or(Stop::Provider)?;
     let plan = reader.plan(commit_sha).await?;
-    reserve(env, release_id, file_reads(plan.count(), FETCH_PASSES)).await?;
+    reserve(
+        env,
+        release_id,
+        file_reads(plan.count(), FETCH_PASSES),
+        attempt,
+    )
+    .await?;
     // The first pass: every file's hash, from its own bytes. The bytes are dropped as each is hashed.
     let all: Vec<&ReadFile> = plan.files.iter().collect();
     let mut hashes: Vec<String> = Vec::with_capacity(all.len());
@@ -147,8 +155,32 @@ async fn send_files(
         .ok_or(Stop::Provider)?;
     // No bucket: the provider holds every file under this script's name already, and the token completes it.
     let mut completion = session.buckets.is_empty().then(|| session.token.clone());
-    let last = session.buckets.len().saturating_sub(1);
-    for (index, bucket) in session.buckets.iter().enumerate() {
+    // **One request carries at most `UPLOAD_REQUEST_BYTES` of files,** however large the provider made a bucket: a
+    // bucket over that goes in several requests, in its own order.
+    let size_of = |hash: &String| -> std::result::Result<u64, Stop> {
+        if *hash == marker_hash {
+            return Ok(marker.len() as u64);
+        }
+        let place = hashes
+            .iter()
+            .position(|known| known == hash)
+            .ok_or(Stop::Provider)?;
+        Ok(plan.files.get(place).ok_or(Stop::Provider)?.size)
+    };
+    let mut requests: Vec<&[String]> = Vec::new();
+    for bucket in &session.buckets {
+        let sizes = bucket
+            .iter()
+            .map(size_of)
+            .collect::<std::result::Result<Vec<u64>, Stop>>()?;
+        let mut at = 0_usize;
+        for length in upload_requests(&sizes) {
+            requests.push(bucket.get(at..at + length).unwrap_or_default());
+            at += length;
+        }
+    }
+    let last = requests.len().saturating_sub(1);
+    for (index, bucket) in requests.iter().copied().enumerate() {
         let mut body = BucketBody::new();
         // The second pass, for this bucket's files: fetched again, checked against the tree again, and each must
         // hash as it did in the manifest.
@@ -185,7 +217,7 @@ async fn send_files(
         match provider.upload_bucket(&session.token, body, attempt).await {
             Some(Sent::More) if index < last => {}
             Some(Sent::Done(token)) if index == last => completion = Some(token),
-            // Done before the last bucket, more after it, or no answer: nothing to go on.
+            // Done before the last request, more after it, or no answer: nothing to go on.
             _ => return Err(Stop::Provider),
         }
     }
@@ -291,6 +323,16 @@ impl Workspace {
         let sql = self.state.storage().sql();
         let release =
             release_recheck::release_row(&sql, release_id)?.ok_or_else(ApiError::not_found)?;
+        // Only a release still uploading, with nothing on record, waits. One that ended meanwhile, or that another
+        // attempt recorded, is answered as it is.
+        let recorded = release_commit::uploaded(
+            &sql,
+            release_id,
+            release["script_name"].as_str().unwrap_or_default(),
+        )?;
+        if state_of(&release)? != ReleaseState::Uploading || recorded {
+            return upload_answer(&sql, &release, false);
+        }
         let mut out = upload_answer(&sql, &release, true)?;
         out["waiting"] = code.into();
         if let Some(at) = retry_at {
@@ -331,7 +373,7 @@ impl Workspace {
         };
         let attempt = self.upload_attempt();
         // The two tree reads are reserved before the token is asked for, so a read that ends at them is counted.
-        let sent = match reserve(&self.env, &release_id, TREE_READS).await {
+        let sent = match reserve(&self.env, &release_id, TREE_READS, &attempt).await {
             Err(failure) => Err(Stop::Read(failure)),
             Ok(()) => match ReleaseReader::open(&app, repo_id, &attempt).await {
                 Err(failure) => Err(Stop::Read(failure)),
@@ -375,11 +417,12 @@ impl Workspace {
         };
         #[cfg(feature = "failpoints")]
         self.test_before_check()?;
-        // The room again, on its own facts and the epoch, before anything exists under the script's name.
-        if let UploadReady::Answer(answer) = self
-            .upload_check(&release_id, Reads::nothing(), false)
-            .await?
-        {
+        // The room again, before anything exists under the script's name: **the whole recheck, on outside facts read
+        // afresh,** the stop for the whole content domain, the organization's switch and the deployment's setting
+        // among them, and the room's rows and epoch now. A stop set while the files were sent ends the release
+        // here, with no script written; a fact that can't be read leaves it undecided, and nothing is written.
+        let reads = self.release_reads(&release_id).await?;
+        if let UploadReady::Answer(answer) = self.upload_check(&release_id, reads, true).await? {
             return Ok(answer);
         }
         #[cfg(feature = "failpoints")]

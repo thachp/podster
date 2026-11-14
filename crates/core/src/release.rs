@@ -1531,12 +1531,26 @@ pub const FETCH_BATCH_BYTES: u64 = 10 * 1024 * 1024;
 /// files and at most [`FETCH_BATCH_BYTES`] by the sizes given. A file larger than that by itself is a batch alone.
 /// Every file is in exactly one batch, in order.
 pub fn fetch_batches(sizes: &[u64]) -> Vec<usize> {
+    batches(sizes, FETCH_CONCURRENCY, FETCH_BATCH_BYTES)
+}
+
+/// The most bytes of files Podster sends the provider in one request, whatever the provider asked for in one bucket.
+/// As base64 that is about 11 MB, held twice while it is sent. One file is at most 5 MB, so one always fits; a
+/// release of 25 MB never goes as one body. **Proposed.**
+pub const UPLOAD_REQUEST_BYTES: u64 = 8 * 1024 * 1024;
+
+/// How the files of one bucket are sent, as the lengths of consecutive requests: each at most
+/// [`UPLOAD_REQUEST_BYTES`] by the sizes given, however many files that is. A file larger than that by itself is a
+/// request alone. Every file is in exactly one request, in order.
+pub fn upload_requests(sizes: &[u64]) -> Vec<usize> {
+    batches(sizes, usize::MAX, UPLOAD_REQUEST_BYTES)
+}
+
+fn batches(sizes: &[u64], max_count: usize, max_bytes: u64) -> Vec<usize> {
     let mut batches = Vec::new();
     let (mut count, mut bytes) = (0_usize, 0_u64);
     for size in sizes {
-        if count > 0
-            && (count == FETCH_CONCURRENCY || bytes.saturating_add(*size) > FETCH_BATCH_BYTES)
-        {
+        if count > 0 && (count == max_count || bytes.saturating_add(*size) > max_bytes) {
             batches.push(count);
             (count, bytes) = (0, 0);
         }

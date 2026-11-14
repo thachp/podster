@@ -37,9 +37,9 @@
 use super::*;
 use podster_core::release::{attempt_left_ms, ReleaseCapRefusal};
 use podster_core::release_tree::{
-    check_fetched, check_release_tree, git_blob_header, manifest_hash, manifest_hash_prefix,
-    release_directory, served_type, ContentProblem, EntryKind, FetchMismatch, PlannedFile,
-    ReadProblem, TreeEntry, MAX_FILE_BYTES, MAX_TREE_ANSWER_BYTES,
+    check_fetched, check_release_tree, git_blob_header, looks_like_html_page, manifest_hash,
+    manifest_hash_prefix, release_directory, served_type, ContentProblem, EntryKind, FetchMismatch,
+    PlannedFile, ReadProblem, TreeEntry, MAX_FILE_BYTES, MAX_TREE_ANSWER_BYTES,
 };
 use sha2::{Digest, Sha256};
 
@@ -442,7 +442,15 @@ impl<'a> ReleaseReader<'a> {
                 named.extend_from_slice(&bytes);
                 let sha = sha1_hex(&named).await.ok_or(UNAVAILABLE)?;
                 drop(named);
-                check_fetched(&planned, length, &sha).map_err(ReadFailure::Mismatch)?;
+                // Bytes that aren't the file's fail the release. **A page in the file's place doesn't:** something
+                // between GitHub and here answered `200` for it, and the read is tried again, as for a tree.
+                check_fetched(&planned, length, &sha).map_err(|mismatch| {
+                    if looks_like_html_page(&bytes) {
+                        UNAVAILABLE
+                    } else {
+                        ReadFailure::Mismatch(mismatch)
+                    }
+                })?;
                 let hash = hash_of(file.served_type, &bytes).ok_or(UNAVAILABLE)?;
                 Ok(Fetched { bytes, hash })
             }
@@ -465,15 +473,18 @@ impl<'a> ReleaseReader<'a> {
 
 /// Reserves `reads` more of a release's reads from the deployment's budget, in the `Moderation` object, which is its
 /// home, **before they are made.** Each attempt reserves its own: the two tree reads, then the file reads. `Budget`
-/// when there isn't room now, and nothing is reserved.
+/// when there isn't room now, and nothing is reserved. **It is asked under the attempt's deadline, as every other
+/// call is:** past it nothing is asked, and an answer that doesn't come in a call's time is no answer.
 pub(crate) async fn reserve(
     env: &Env,
     release_id: &str,
     reads: u32,
+    attempt: &Attempt,
 ) -> std::result::Result<(), ReadFailure> {
     if reads == 0 {
         return Ok(());
     }
+    let wait_ms = attempt.call_ms(CALL_TIMEOUT_MS).ok_or(UNAVAILABLE)?;
     let asked = async {
         let stub = env
             .durable_object("MODERATION")?
@@ -496,7 +507,11 @@ pub(crate) async fn reserve(
         }
         response.json::<Value>().await
     };
-    let answer = asked.await.map_err(|_| UNAVAILABLE)?;
+    let timeout = Delay::from(Duration::from_millis(wait_ms));
+    let answer = match select(Box::pin(asked), timeout).await {
+        Either::Left((Ok(answer), _)) => answer,
+        _ => return Err(UNAVAILABLE),
+    };
     match answer["fits"].as_bool() {
         Some(true) => Ok(()),
         Some(false) => Err(ReadFailure::Budget {
@@ -554,7 +569,7 @@ pub(crate) async fn probe(env: &Env, body: &Value) -> Value {
         }
         None => Attempt::by_the_clock(),
     };
-    if let Err(failure) = reserve(env, release_id, TREE_READS).await {
+    if let Err(failure) = reserve(env, release_id, TREE_READS, &attempt).await {
         return failed(&failure);
     }
     let reader = match ReleaseReader::open(&app, repo_id, &attempt).await {
@@ -563,7 +578,7 @@ pub(crate) async fn probe(env: &Env, body: &Value) -> Value {
     };
     let outcome = async {
         let plan = reader.plan(commit).await?;
-        reserve(env, release_id, file_reads(plan.count(), 1)).await?;
+        reserve(env, release_id, file_reads(plan.count(), 1), &attempt).await?;
         let mut fetched = 0_u64;
         let mut hashes = Vec::new();
         for batch in plan.files.chunks(FETCH_CONCURRENCY) {

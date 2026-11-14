@@ -26,9 +26,10 @@
 //! three answers on an error; whether the script's call needs wrangler's two query parameters, which are sent as
 //! wrangler sent them; how the provider sizes a bucket; and whether it checks a hash against the bytes.
 //!
-//! **No rule file is sent.** The metadata's `assets.config` is the empty object, as wrangler sent it for a directory
-//! with no `_headers` and no `_redirects`: the platform's rules arrive only there, and nothing from the repository
-//! is ever put in it.
+//! **The assets configuration is Podster's own, fixed, and written out** ([`ASSETS_CONFIG`]): how HTML paths are
+//! served and what a missing path answers, and nothing else. The platform's rules for headers and redirects arrive
+//! only in that object, and nothing from a repository is ever put in it. *Spike A saw wrangler send the empty
+//! object; whether the provider takes these two fields as its documentation says wasn't run.*
 //!
 //! The session and completion tokens stay in this module and the caller's hands for one attempt, and are never
 //! stored or logged. Logs carry nothing from here.
@@ -46,6 +47,16 @@ const MAX_TOKEN_BYTES: usize = 256 * 1024;
 /// The compatibility date every release's script is written with. Nothing of a release runs, so it decides nothing
 /// but how the platform serves files, and it is the one spike A's uploads carried.
 const COMPATIBILITY_DATE: &str = "2026-11-01";
+/// How every release's files are served, written out in every script: **explicit and fixed** (the architect's
+/// ruling of 2026-11-14, as amended that day), so that a change in the provider's defaults can't change how an app is
+/// served. Never an empty object, and never anything from a repository.
+///
+/// - `html_handling` is the provider's documented default today, by name: `/index.html` is served at `/`, and
+///   `page.html` at `/page`. It is what spike A saw and what `podster_core::release_tree` judges two paths at one
+///   address by. `none` would leave every app's `/` answering not-found.
+/// - `not_found_handling` is `none`: a path with no file is not-found. No single-page-app fallback.
+const ASSETS_CONFIG: &str =
+    r#"{"html_handling":"auto-trailing-slash","not_found_handling":"none"}"#;
 /// What separates the parts of a body. Base64 holds no `-`, and no part's name or type holds a line break, so no
 /// part can hold it.
 const BOUNDARY: &str = "podster-release-upload";
@@ -298,11 +309,12 @@ impl Provider {
         if !token_form(completion_token) {
             return Written::Unknown;
         }
-        let metadata = json!({
-            "assets": { "jwt": completion_token, "config": {} },
-            "compatibility_date": COMPATIBILITY_DATE,
-            "compatibility_flags": [],
-        });
+        // Written out field by field, so what is sent is exactly these bytes whatever a library orders or adds. The
+        // token is the only part that isn't a constant, and it goes in as a JSON string.
+        let token = Value::from(completion_token).to_string();
+        let metadata = format!(
+            "{{\"assets\":{{\"config\":{ASSETS_CONFIG},\"jwt\":{token}}},\"compatibility_date\":\"{COMPATIBILITY_DATE}\",\"compatibility_flags\":[]}}"
+        );
         let body = format!(
             "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n{metadata}\r\n--{BOUNDARY}--\r\n"
         )

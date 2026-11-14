@@ -513,6 +513,35 @@ fn a_manifest_hash_is_over_the_type_and_the_bytes_and_never_over_the_blob_sha() 
 }
 
 #[test]
+fn bytes_that_begin_as_an_html_document_are_taken_for_a_page() {
+    for page in [
+        &b"<!doctype html><title>Sign in</title>"[..],
+        b"<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01//EN\">",
+        b"\n\r\t  <html lang=\"en\">",
+        b"\xEF\xBB\xBF<!DocType Html>",
+        b"<HTML>",
+        b"<html",
+    ] {
+        assert!(looks_like_html_page(page), "{page:?}");
+    }
+    for other in [
+        &b""[..],
+        b"   ",
+        b"not the file",
+        b"<p>one</p>\n",
+        b"<!doctype",
+        b"<!-- <html> -->",
+        b"{\"html\":\"<html>\"}",
+        b"x<html>",
+        b"<htm",
+        b"\xEF\xBB",
+        b"export const one = 1;\n",
+    ] {
+        assert!(!looks_like_html_page(other), "{other:?}");
+    }
+}
+
+#[test]
 fn the_marker_holds_the_release_and_its_commit_and_nothing_anyone_else_wrote() {
     let release = format!("rel_{}", "0a".repeat(16));
     let commit = "c0".repeat(20);

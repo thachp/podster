@@ -460,6 +460,24 @@ pub fn manifest_hash(sha256_hex: &str) -> Option<String> {
         .then(|| sha256_hex[..32].to_ascii_lowercase())
 }
 
+/// Whether bytes begin as an HTML document: a doctype or an `html` tag, after any byte-order mark and white space, in
+/// any case. A fetched file that fails its check and begins so is taken for a page put in the file's place, a
+/// sign-in page for one, and never for the file: the read is tried again, and the release isn't failed on it.
+pub fn looks_like_html_page(bytes: &[u8]) -> bool {
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    let start = bytes
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let head: Vec<u8> = bytes
+        .iter()
+        .skip(start)
+        .take(14)
+        .map(u8::to_ascii_lowercase)
+        .collect();
+    head.starts_with(b"<!doctype html") || head.starts_with(b"<html")
+}
+
 /// The type the job's own marker file is served with.
 pub const MARKER_TYPE: &str = "application/json";
 

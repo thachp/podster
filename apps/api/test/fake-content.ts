@@ -104,6 +104,8 @@ type UploadFault = {
   op: UploadOp; times: number;
   /** A status with the provider's error envelope. */
   status?: number;
+  /** The call is answered properly, this much later: a session after it has decided what it wants, the script's write before it is done. So a test can run a second attempt while the first is out. */
+  delayMs?: number;
   /** The work is done and the answer is lost: a `502`. */
   lost?: boolean;
   /** One way the answer isn't what it must be, the status staying a success. */
@@ -113,10 +115,10 @@ type Manifest = Record<string, { hash: string; size: number }>;
 type Upload = {
   /** The files held under this script's name, by hash: the provider remembers them for the script. */
   held: Map<string, { type: string; base64: string }>;
-  calls: { op: UploadOp; status: number; hashes?: string[]; manifest?: Manifest; query?: string; parts?: string[] }[];
+  calls: { op: UploadOp; status: number; hashes?: string[]; manifest?: Manifest; query?: string; parts?: string[]; bytes?: number }[];
   faults: UploadFault[];
   /** The script as last written: every path with what is served there, and the metadata it was written with. */
-  written?: { files: Record<string, { hash: string; size: number; type: string; base64: string }>; metadata: unknown; times: number };
+  written?: { files: Record<string, { hash: string; size: number; type: string; base64: string }>; metadata: unknown; metadataText: string; times: number };
   /** Hashes asked for in one bucket. */
   bucketSize: number;
   /** Statements a test wants run when the first bucket arrives: `{ room, statement }` is read by the test, not run here. */
@@ -163,6 +165,7 @@ async function fakeUpload(request: Request, url: URL): Promise<Response | null> 
     if (fault?.shape === "unknown_hash") buckets = [["f".repeat(32)], ...buckets];
     if (fault?.shape === "hash_twice" && buckets[0]) buckets = [...buckets, [buckets[0][0]]];
     if (fault?.shape === "empty_bucket") buckets = [...buckets, []];
+    if (fault?.delayMs) await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
     return done(200, json({ success: true, errors: null, messages: null, result: fault?.shape === "no_token" ? { buckets } : { jwt: token, buckets } }), manifest);
   }
   if (url.pathname === `/client/v4/accounts/${FAKE_CONTENT.account}/workers/assets/upload` && request.method === "POST") {
@@ -172,7 +175,10 @@ async function fakeUpload(request: Request, url: URL): Promise<Response | null> 
     const held = upload(open.script);
     const parts = [...(await request.formData()).entries()];
     const hashes = parts.map(([name]) => name);
-    const done = (status: number, response: Response) => { held.calls.push({ op: "bucket", status, hashes, query: url.search }); return response; };
+    // The files' own bytes in this one request, as the base64 decodes: what the sender held to send it.
+    let bytes = 0;
+    for (const [, value] of parts) if (typeof value !== "string") bytes += Buffer.from(await value.text(), "base64").length;
+    const done = (status: number, response: Response) => { held.calls.push({ op: "bucket", status, hashes, query: url.search, bytes }); return response; };
     if (url.searchParams.get("base64") !== "true") return done(400, failure(400, 10400, "base64 is required"));
     const fault = takeUploadFault(open.script, "bucket");
     if (fault?.status) return done(fault.status, failure(fault.status, 10001, "SECRET-PROVIDER-TEXT"));
@@ -199,15 +205,17 @@ async function fakeUpload(request: Request, url: URL): Promise<Response | null> 
     const done = (status: number, response: Response) => { held.calls.push({ op: "script", status, query: url.search, parts }); return response; };
     if (bearer !== `Bearer ${FAKE_CONTENT.scriptsToken}`) return done(403, failure(403, 10000, "Authentication error"));
     const fault = takeUploadFault(name, "script");
+    if (fault?.delayMs) await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
     if (fault?.status) return done(fault.status, failure(fault.status, 10001, "SECRET-PROVIDER-TEXT"));
     const part = form.get("metadata");
-    const metadata = JSON.parse(typeof part === "string" ? part : await part!.text());
+    const metadataText = typeof part === "string" ? part : await part!.text();
+    const metadata = JSON.parse(metadataText);
     const complete = completions.get(metadata?.assets?.jwt);
     // Only a completion token for this very script, with every file its manifest names held.
     if (!complete || complete.script !== name || !Object.values(complete.manifest).every((file) => held.held.has(file.hash))) return done(400, failure(400, 10400, "the token doesn't complete this script"));
     const files: Record<string, { hash: string; size: number; type: string; base64: string }> = {};
     for (const [path, file] of Object.entries(complete.manifest)) files[path] = { ...file, ...held.held.get(file.hash)! };
-    held.written = { files, metadata, times: (held.written?.times ?? 0) + 1 };
+    held.written = { files, metadata, metadataText, times: (held.written?.times ?? 0) + 1 };
     if (fault?.lost) return done(502, failure(502, 10001, "the answer was lost"));
     if (fault?.shape === "html") return done(200, html());
     if (fault?.shape === "not_success") return done(200, json({ success: false, errors: [], messages: [], result: { id: name } }));

@@ -684,6 +684,11 @@ pub(super) fn upload_ready(
 }
 
 /// Ends a release whose read failed it, with the read's code, and answers it as it now is.
+///
+/// **Only a release still uploading, with no upload on record.** An attempt's failure is an answer about when it
+/// read, and two attempts can overlap: one records the upload and the release goes live while the other is still
+/// reading. The late one's failure then ends nothing: a release that is live, or whose upload another attempt
+/// recorded whole, is answered as it is.
 pub(super) fn upload_failed(
     sql: &SqlStorage,
     release_id: &str,
@@ -691,6 +696,14 @@ pub(super) fn upload_failed(
     now: i64,
 ) -> R<Value> {
     end_stale(sql, now)?;
+    let release = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
+    let recorded = match release["script_name"].as_str() {
+        Some(script) => uploaded(sql, release_id, script)?,
+        None => false,
+    };
+    if state_of(&release)? != ReleaseState::Uploading || recorded {
+        return upload_answer(sql, &release, false);
+    }
     let mut out = failed(sql, release_id, reason, now)?;
     out["uploaded"] = false.into();
     Ok(out)

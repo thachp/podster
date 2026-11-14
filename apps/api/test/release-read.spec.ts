@@ -234,7 +234,8 @@ describe("a read that gives nothing to publish", () => {
   it("fails the release on a file that isn't what the tree said, and waits on a file that didn't come", async () => {
     const repo = repository(SITE);
     const index = blobSha(bytes(SITE["index.html"]));
-    for (const [fault, code, fails] of [["other_bytes", "release_file_mismatch", true], ["too_long", "release_file_mismatch", true], [500, "release_read_unavailable", false], [404, "release_read_unavailable", false], [429, "release_read_unavailable", false]] as const) {
+    // **A page in the file's place is no answer, and the read is tried again:** it never fails the release.
+    for (const [fault, code, fails] of [["other_bytes", "release_file_mismatch", true], ["too_long", "release_file_mismatch", true], ["html", "release_read_unavailable", false], [500, "release_read_unavailable", false], [404, "release_read_unavailable", false], [429, "release_read_unavailable", false]] as const) {
       await control("/reset", {});
       await seed(repo);
       await control("/fault", { blob: { [index]: fault } });
@@ -286,18 +287,21 @@ describe("a read that gives nothing to publish", () => {
 
   it("gives one attempt one deadline, by the clock it is given, and revokes its token all the same", async () => {
     await seed(repository(SITE));
-    // A clock that moves on by a third of the deadline each time it is read: the attempt's start, the token, the
-    // first tree. The second tree's call finds no time left, and isn't made.
-    const third = 100_000;
-    const late = await outcome({ clock_step_ms: third });
+    // A clock that moves on by a quarter of the deadline each time it is read: the attempt's start, the trees'
+    // reservation, the token, the first tree. The second tree's call finds no time left, and isn't made.
+    const quarter = 75_000;
+    const late = await outcome({ clock_step_ms: quarter });
     expect([late.failed, late.fails, late.asked]).toEqual(["release_read_unavailable", false, ["trees"]]);
     // The revoke has its own time: a read that ran out of time still gives its token back.
     expect(late.seen.tokens.map((token) => token.revoked)).toEqual([true]);
     // A clock already past the deadline at the first call: no token is asked for at all.
     await control("/reset", {});
     await seed(repository(SITE));
+    await inModeration((sql) => sql.exec("DELETE FROM release_reads"));
     const over = await outcome({ clock_step_ms: 300_000 });
     expect([over.failed, over.fails, over.seen.calls]).toEqual(["release_read_unavailable", false, []]);
+    // **The budget is asked under the same deadline:** past it, not even a reservation is made.
+    expect(await inModeration((sql) => sql.exec("SELECT count(*) AS n FROM release_reads").one().n)).toBe(0);
     // A clock that goes backwards past the attempt's start has no time left either.
     await control("/reset", {});
     await seed(repository(SITE));

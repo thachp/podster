@@ -1322,7 +1322,7 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 - **The hash:** the first 32 hexadecimal characters of a SHA-256 over the file's type, one zero byte, and the file's own bytes. It is ADR 0010's wording again. The git blob sha is still checked, as the tree's own name for the bytes, and is no part of the hash.
 - **Every file is fetched twice.** The upload's manifest must name every file's hash before any file is sent, and a hash over the bytes isn't known until the bytes are fetched. So the job fetches each file once to hash it, drops it, and fetches it again to send it, checking it against the tree both times and against its first hash the second. **A release is never held in memory whole,** which was the reason not to do this in one pass: 25 MB of files, again as base64.
 - **A release of *n* files now costs 2 + 2*n* reads, where ADR 0010 budgeted 2 + *n*.** At the cap of 300 files that is 602. The deployment's 3,000 an hour is then four full-size releases an hour, where the ADR says nine. The figure 3,000 is unchanged. **This is the cost of the ruling, for the owner to know.** A file the provider already holds under the script's name is not fetched the second time.
-- **Tying the key to the room or the release: the provider already does, and nothing was added.** Seen in spike A: the files the provider remembers are remembered for one script's name, and the same files under a second name were all asked for again. A script's name is the room's label and the release's ID, so what is kept by a hash is kept for one release of one room. **Not seen:** whether that holds for every account and for all time, since it is the provider's behaviour and not a documented promise; and whether the provider checks a hash against the bytes at all. The hash itself is not salted with the room or the release: it comes back to visitors as the file's `ETag`, and a file that didn't change between two releases should keep it.
+- **Tying the key to the room or the release: the provider already does, and nothing was added.** Seen in spike A: the files the provider remembers are remembered for one script's name, and the same files under a second name were all asked for again. A script's name is the room's label and the release's ID, so what is kept by a hash is kept for one release of one room. **This is the provider's behaviour as spike A observed it, and not a documented promise. It is checked again in the store spike.** **Not seen:** whether it holds for every account and for all time; and whether the provider checks a hash against the bytes at all. The hash itself is not salted with the room or the release: it comes back to visitors as the file's `ETag`, and a file that didn't change between two releases should keep it.
 
 #### What the second PR built: the upload
 
@@ -1351,9 +1351,29 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 - **What fails a release and what waits.** It fails on what its repository holds. It waits, answered with a code, on no provider, no read-only App, the read budget, the deadline, and GitHub or the provider giving no answer to go on. One that waits past its upload's hour is ended by the room's bookkeeping, as before.
 - **Files are fetched ten at a time and at most 10 MB at a time** (**proposed**). A fetched file is held twice while it is checked, so ten files of 5 MB at once would have been 100 MB.
 
+**From the state-and-tests review of PR 368, 2026-11-14.**
+
+- **A late attempt's failure ends nothing it shouldn't.** Two attempts at one upload can overlap. A failure found by the read ends a release only while it is still uploading with no upload on record: one that another attempt recorded, or that has gone live, is answered as it is. Before this, the late attempt's failure took a live release down.
+- **A release that is recorded, or has ended, is never answered as waiting,** whatever the attempt that gives up had found.
+- **The budget is asked under the attempt's deadline,** as every other call is.
+- **Two overlapping attempts are tested:** both writing the script, with one record; and a late failure after the release went live.
+
+**Owed to the driver's PR, the third:**
+
+- **A wait between attempts that grows,** and **a cap on attempts.** Today a release that waits is asked again whenever its caller asks, and each attempt reserves its reads, so retries alone can use the deployment's hour.
+- **A bound on how often one release is tried, set against the read budget:** each attempt reserves up to 602 reads of the hour's 3,000, so five attempts at one full-size release would leave nothing for any other room. One waiting release must never be able to starve the rest.
+- **The room's alarm taking an upload up again** after the object was evicted or an attempt was cut short. Nothing resumes one today; the upload's hour ends it.
+- **An event or an audit record for a recorded upload.** Today it is a row in `release_upload` and nothing else, as a commit's stage is: the release's trail says `release.upload_started`, then `release.live` or `release.failed`.
+
+**From the security review of PR 368, and the architect's ruling of 2026-11-14.**
+
+- **The assets configuration is explicit and fixed** ([the ruling, in the ADR's revision](adr/0010-revision-apps-are-workers.md#32-how-its-code-is-uploaded)): `{"html_handling":"auto-trailing-slash","not_found_handling":"none"}`, in every script, and the metadata sent is tested byte for byte. *What was first built sent the empty object, as spike A saw wrangler send it.* **No single-page-app fallback.** **`html_handling` is the documented default written out, and not `none`:** with `none` every app's `/` answers not-found, against what spike A saw and what core's two-paths-at-one-address rule is written for. The ruling first said "no HTML path rewriting", and the architect amended it on 2026-11-14 for that reason.
+- **One request carries at most 8 MiB of files** (**proposed**), so about 11 MB as base64, however large the provider makes a bucket. A bucket over that is sent in several requests. A file is at most 5 MB, so one always fits. A release of 25 MB is then never in memory as one body. **An assumption no spike saw:** that the provider takes part of a bucket in one request and answers `202` until it holds every file. If it doesn't, the release waits, and that shows.
+- **The room is asked again on fresh outside reads before the script is written,** the stop for the whole content domain, the organization's switch and the deployment's setting among them, as the first check is. A stop set while the files were sent ends the release there, with no script written.
+- **A file's fetch answering `200` with a page is "no answer, try again",** as a tree's is, and never `release_file_mismatch`. A fetched file that fails its check is taken for a page when its bytes begin as an HTML document. *What that costs:* an HTML file whose bytes really aren't the tree's also waits, and ends at its upload's hour instead of at once. Nothing wrong is ever published either way.
+
 **For the architect's ruling.**
 
-- **`assets.config` is sent as the empty object,** as spike A saw wrangler send it for a directory with no rule files. ADR 0010 says the job "sends no `assets.config` at all". Nothing from a repository is ever put in it either way. Leaving the key out wasn't seen to work.
 - **A provider's refusal waits; it doesn't fail the release.** No spike saw any of the three calls answer an error, so none is read as a verdict on the release. A release the provider will never take ends at its upload's hour.
 - **The revoke comes after the last file is fetched and before the script is written.** The upload fetches as it sends, so it can't come sooner.
 

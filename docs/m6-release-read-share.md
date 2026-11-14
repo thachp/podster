@@ -1,24 +1,26 @@
 # M6: a cross-room share of the release read budget
 
-**Status: design only, for the architect.** Everything marked **Proposed** is not approved. It answers one item on
+**Status: design only, its four questions ruled on 2026-11-14.** The design stays **Proposed** until it is built. It answers one item on
 [the gate on the release path](m6-plan.md#the-gate-on-the-release-path): "a cross-room share of the read budget"
 ([ruling 3 on the driver](m6-plan.md#what-the-third-pr-built-the-driver)). No code changes with this document.
 Line numbers are on `main` at `6c2d12b2`.
 
-## Questions for the architect
+## The architect's rulings, 2026-11-14
 
-1. **Whose share is it?** The recommendation keys the share by the room's owner: its organization when it has one
-   (`workspace.owner_org_id`), otherwise its owner person, otherwise the room itself. Is that the right unit, and
-   does a room whose owner organization changes or leaves carry its hour's reads with it (proposed: no, reads stay
-   counted under the key they were reserved under)?
-2. **The share's size.** 1,204 reads an hour per owner, equal to one room's own bound, so an organization with many
-   rooms gets what one room gets. Two owners at their share leave 592, which fits any attempt of up to 295 files but
-   not a full 300-file one. Accept, or set it to 1,198 so two full owners always leave a full attempt?
-3. **Waiting before the upload's hour.** The recommendation checks the share while the release is still `queued`, so
-   a release waiting on its share neither starts its upload's hour nor spends a driver attempt or a room upload slot.
-   Accept that the share is checked there and enforced again at the reservation?
-4. **Fair queueing deferred.** The recommendation does not build a waiting line in the `Moderation` object. Accept
-   per-owner shares alone for stage 1, with the line as the named next step if staging shows starvation?
+1. **The owner is the unit.** It is the room's organization, else its owner person, else the room itself. Reads are
+   charged to whoever owned the room when they were reserved. They stay charged there if ownership changes later. A
+   change of owner needs a person, so this can't be gamed cheaply. *Decided by the architect, for the owner to
+   review.*
+2. **The share is 1,204 reads an hour per owner,** so each owner keeps exactly two full attempts, the same as the
+   driver's per-room bound. **The consequence is accepted:** once two owners have used their whole share, they leave
+   592 reads, and a third owner's full-size release waits up to the rest of the hour. **Owed before production:**
+   measure contention, then revisit the share or add a held-back reserve. *Decided by the architect, for the owner to
+   review.*
+3. **Both checks.** The share is checked while the release is `queued`, to save the attempt and the slot. That check
+   is only an optimisation. It is enforced again at the reservation, inside `Moderation`'s transaction, which is the
+   only place that decides. *Decided by the architect, for the owner to review.*
+4. **Fair queueing is deferred.** It is owed only if the measurement in ruling 2 shows starvation. *Decided by the
+   architect, for the owner to review.*
 
 ## 1. The budget today
 

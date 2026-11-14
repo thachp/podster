@@ -91,6 +91,7 @@ mod release_commit;
 mod release_config;
 mod release_recheck;
 mod release_switch;
+mod releasers;
 mod removal;
 mod repo_tokens;
 mod repositories;
@@ -4653,8 +4654,12 @@ impl Workspace {
                     hash,
                     stops_when_archived,
                     test_fail,
+                    // Each command that can change who may release is watched for the last releaser going (M6 step
+                    // 6, `releasers`).
                     move |sql, who, now| {
-                        handle_change_role(sql, &who.caller, &target, &body, target_member, now)
+                        releasers::watching(sql, "role_changed", now, || {
+                            handle_change_role(sql, &who.caller, &target, &body, target_member, now)
+                        })
                     },
                 )
             }
@@ -5060,7 +5065,9 @@ impl Workspace {
                 stops_when_archived,
                 test_fail,
                 move |sql, who, now| {
-                    handle_revoke_organization(sql, &who.caller, &target, &body, now)
+                    releasers::watching(sql, "organization_removed", now, || {
+                        handle_revoke_organization(sql, &who.caller, &target, &body, now)
+                    })
                 },
             ),
             (Method::Post, ["owner", "transfer"]) => {
@@ -5072,7 +5079,9 @@ impl Workspace {
                     stops_when_archived,
                     test_fail,
                     move |sql, who, now| {
-                        handle_transfer_owner(sql, &who.caller, &body, target_member, now)
+                        releasers::watching(sql, "owner_transferred", now, || {
+                            handle_transfer_owner(sql, &who.caller, &body, target_member, now)
+                        })
                     },
                 )
             }
@@ -5082,7 +5091,11 @@ impl Workspace {
                 hash,
                 stops_when_archived,
                 test_fail,
-                move |sql, who, now| handle_revoke_member(sql, &who.caller, &target, &body, now),
+                move |sql, who, now| {
+                    releasers::watching(sql, "member_removed", now, || {
+                        handle_revoke_member(sql, &who.caller, &target, &body, now)
+                    })
+                },
             ),
             // A stored grant is replayed only to someone who may still give one.
             (Method::Post, ["repository", "grants"]) => self.command_checked(
@@ -5366,6 +5379,13 @@ fn departure_fields(body: &Value) -> R<(String, String, String, i64)> {
 /// An organization departure's effect in one room. The caller holds the transaction, so a held departure replays through the
 /// same code.
 fn departure_effect(sql: &SqlStorage, body: &Value, now: i64) -> R<()> {
+    // A departure can take the room's last releaser away (M6 step 6, `releasers`).
+    releasers::watching(sql, "org_departure", now, || {
+        departure_effect_in_room(sql, body, now)
+    })
+}
+
+fn departure_effect_in_room(sql: &SqlStorage, body: &Value, now: i64) -> R<()> {
     let (person, org, actor_id, left_at) = departure_fields(body)?;
     let actor = Caller {
         id: actor_id.clone(),

@@ -762,6 +762,42 @@ impl UnpublishTrigger {
     }
 }
 
+/// The deployment's own release setting, the Worker variable `RELEASES`, as read (ADR 0010; M6 step 6).
+///
+/// **Decided by the architect on 2026-11-13, for the owner to review: three readings.** Exactly `true` is on. Exactly
+/// `false` is off, and only that is ADR 0010's deployment trigger, which unpublishes every app that is up for good.
+/// Anything else, unset, empty or malformed (`True`, `1`, `"true "`), is undecided: new releases and commits are
+/// refused as when off, and nothing is unpublished. So a typo, an environment that omits it, a rollback to a version
+/// from before it was set, or a value a later deploy removed takes nothing down and releases nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeploymentRelease {
+    On,
+    Off,
+    Undecided,
+}
+
+impl DeploymentRelease {
+    /// Whether new releases and commits may go on: only when on.
+    pub fn allows_release(self) -> bool {
+        self == DeploymentRelease::On
+    }
+
+    /// Whether it is the deployment trigger, which unpublishes: only when off, exactly.
+    pub fn unpublishes(self) -> bool {
+        self == DeploymentRelease::Off
+    }
+}
+
+/// The deployment's release setting from the variable as written, `None` when it is unset. Every reader takes it from
+/// here.
+pub fn deployment_release(setting: Option<&str>) -> DeploymentRelease {
+    match setting {
+        Some("true") => DeploymentRelease::On,
+        Some("false") => DeploymentRelease::Off,
+        _ => DeploymentRelease::Undecided,
+    }
+}
+
 /// Whether a repository's link in `status` unpublishes the room's app, as `UnpublishTrigger::RepositoryNotReady`
 /// (ADR 0010: "its link is no longer ready"). A link that isn't ready refuses every new release at the recheck,
 /// whatever this says; this decides only whether what is up comes down too.

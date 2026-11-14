@@ -138,10 +138,21 @@ const newHostname = () => `h${(++hostnames).toString(36)}${crypto.randomUUID().s
 // the pass's summary, or calls the Worker's scheduled handler, which no environment's schedule ever does.
 const ENTRIES_CRON = "*/5 * * * *";
 const SCRIPTS_CRON = "0 * * * *";
-const reconcile = async (which: "entries" | "scripts") => (await (await moderation().fetch(`https://do/reconcile/${which}`, { method: "POST" })).json()) as any;
-async function scheduled(cron: string) {
+// A pass runs as in a deployment that has a provider, which sets `RELEASES` explicitly (M6 step 6): written `true` here
+// (test builds only). Unset, the setting is undecided, and each pass tells operators so, which
+// `release-triggers.spec.ts` shows on its own.
+const reconcile = async (which: "entries" | "scripts") => {
+  await BINDINGS.DB.prepare("CREATE TABLE test_releases_setting (value TEXT)").run();
+  await BINDINGS.DB.prepare("INSERT INTO test_releases_setting (value) VALUES ('true')").run();
+  try {
+    return (await (await moderation().fetch(`https://do/reconcile/${which}`, { method: "POST" })).json()) as any;
+  } finally {
+    await BINDINGS.DB.prepare("DROP TABLE test_releases_setting").run();
+  }
+};
+async function scheduled(cron: string, bindings: object = env) {
   const ctx = createExecutionContext();
-  await new (ApiWorker as any)(ctx, env).scheduled(createScheduledController({ cron, scheduledTime: new Date() }));
+  await new (ApiWorker as any)(ctx, bindings).scheduled(createScheduledController({ cron, scheduledTime: new Date() }));
   await waitOnExecutionContext(ctx);
 }
 const findings = async () => ((await switchedOn(() => api(OPERATOR, "GET", "/v1/moderation/takedown-findings"))).body.findings as { code: string; subject: string; detail: string | null; seen: number }[]);
@@ -1243,14 +1254,19 @@ describe("what step 4(a) adds to the room and the Worker", () => {
     await alarmQuiet(stub(a.room));
   });
 
-  it("binds no provider, no token and no schedule in any environment", () => {
+  it("binds no provider and no token in any environment, and gives each the reconciles' two schedules", () => {
     const names = [...new Set([...(BINDINGS.TEST_CONTENT_PROVIDER_SOURCE as string).matchAll(/const [A-Z_]+: &str = "(CONTENT_[A-Z_]+)";/g)].map((match) => match[1]))].sort();
     expect(names).toEqual(["CONTENT_ACCOUNT_ID", "CONTENT_DISPATCH_NAMESPACE", "CONTENT_DOMAIN", "CONTENT_KV_NAMESPACE_ID", "CONTENT_ROUTING_TOKEN", "CONTENT_SCRIPTS_TOKEN"]);
     const wrangler: string = BINDINGS.TEST_WRANGLER;
     // Not as a variable, not in a comment, not under another spelling: the file doesn't hold the word.
     expect(wrangler).not.toMatch(/CONTENT_/);
-    for (const name of ["triggers", "crons", "dispatch_namespaces", "kv_namespaces"]) expect(wrangler, name).not.toContain(`"${name}"`);
-    expect(JSON.parse(wrangler.replace(/^\s*\/\/.*$/gm, "")).build.command).toBe("worker-build --release");
+    for (const name of ["dispatch_namespaces", "kv_namespaces"]) expect(wrangler, name).not.toContain(`"${name}"`);
+    const config = JSON.parse(wrangler.replace(/^\s*\/\/.*$/gm, ""));
+    expect(config.build.command).toBe("worker-build --release");
+    // The two schedules, and nothing else, at the top and in every environment, since wrangler doesn't carry them in
+    // (M6 step 6). The handler calls nothing while no provider is configured, which the reconciles' tests show.
+    expect(config.triggers).toEqual({ crons: [ENTRIES_CRON, SCRIPTS_CRON] });
+    for (const [name, environment] of Object.entries(config.env)) expect((environment as any).triggers, name).toEqual({ crons: [ENTRIES_CRON, SCRIPTS_CRON] });
     // The stand-in never holds a call as long as the provider module waits for one.
     const limit = Number((BINDINGS.TEST_CONTENT_PROVIDER_SOURCE as string).match(/const CALL_TIMEOUT_MS: u64 = ([0-9_]+);/)?.[1].replace(/_/g, ""));
     expect(limit).toBe(5000);
@@ -1875,28 +1891,67 @@ describe("an operator's suspension of a custom hostname", () => {
 });
 
 describe("the two reconciles", () => {
-  it("run only from the scheduled handler, only while release is switched on, and only for the two schedules", async () => {
+  it("run from the scheduled handler whenever a provider is configured, whatever `RELEASES` says, and with none call no object", async () => {
     await fresh();
-    // Switched off, which is everywhere: the handler does nothing at all.
-    await scheduled(ENTRIES_CRON);
-    await scheduled(SCRIPTS_CRON);
+    // Each call of a pass in the Moderation object is counted (test builds only), so a run that calls nothing is seen.
+    await inModeration((sql) => void sql.exec("CREATE TABLE IF NOT EXISTS test_reconcile_calls (x INTEGER)"));
+    const calls = () => inModeration((sql) => sql.exec("SELECT count(*) AS n FROM test_reconcile_calls").one().n as number);
+    const before = await calls();
+    // With no provider configured, which is every deployment today, the handler returns before it calls any Durable
+    // Object: the cron's own invocation is all it costs.
+    const noProvider = { ...env, CONTENT_DOMAIN: undefined };
+    await scheduled(ENTRIES_CRON, noProvider);
+    await scheduled(SCRIPTS_CRON, noProvider);
+    expect(await calls()).toBe(before);
     expect((await held()).calls).toEqual([]);
-    await switchedOn(async () => {
-      // A schedule nothing answers to.
-      await scheduled("* * * * *");
-      expect((await held()).calls).toEqual([]);
-      await scheduled(ENTRIES_CRON);
-      expect([await listCalls("entry.list"), await listCalls("script.list")]).toEqual([1, 0]);
-      await scheduled(SCRIPTS_CRON);
-      expect([await listCalls("entry.list"), await listCalls("script.list")]).toEqual([1, 1]);
-    });
+    // A schedule nothing answers to calls nothing either.
+    await scheduled("* * * * *");
+    expect(await calls()).toBe(before);
+    // With a provider and `RELEASES` not switched on, unset here as in every deployment: both passes run, so a
+    // deployment's rooms are still asked whatever the setting says (M6 step 6). Unset is undecided, which takes
+    // nothing down; `release-triggers.spec.ts` shows each reading.
+    await scheduled(ENTRIES_CRON);
+    expect([await listCalls("entry.list"), await listCalls("script.list")]).toEqual([1, 0]);
+    await scheduled(SCRIPTS_CRON);
+    expect([await listCalls("entry.list"), await listCalls("script.list")]).toEqual([1, 1]);
+    expect(await calls()).toBe(before + 2);
+    // And the same with release switched on.
+    await switchedOn(() => scheduled(ENTRIES_CRON));
+    expect(await calls()).toBe(before + 3);
     // Each list is asked with its own token: the stand-in refuses the other.
-    expect((await held()).calls.map((call) => call.status)).toEqual([200, 200]);
-    // The schedules the handler knows are the two the plan names, and no environment has either (the wrangler file
-    // holds no schedule at all, as the test above this group shows).
+    expect((await held()).calls.filter((call) => call.op.endsWith(".list")).map((call) => call.status)).toEqual([200, 200, 200]);
+    await inModeration((sql) => void sql.exec("DROP TABLE test_reconcile_calls"));
+    // The schedules the handler knows are the two the plan names, and the two `wrangler.jsonc` gives every
+    // environment, as the test of what step 4(a) binds shows.
     const source = (JSON.parse(BINDINGS.TEST_API_SOURCES) as Record<string, string>)["reconcile.rs"];
     expect([...source.matchAll(/_CRON: &str = "([^"]+)";/g)].map((match) => match[1])).toEqual([ENTRIES_CRON, SCRIPTS_CRON]);
-    expect(BINDINGS.TEST_WRANGLER).not.toContain("* * *");
+  });
+
+  it("tell operators of an undecided `RELEASES` once by each pass, and take it away once a pass reads it decided (M6 step 6)", async () => {
+    await fresh();
+    // The setting as written (test builds only), `null` for unset: exactly `true` or `false` is decided.
+    const passWith = async (value: string | null) => {
+      await BINDINGS.DB.prepare("CREATE TABLE test_releases_setting (value TEXT)").run();
+      await BINDINGS.DB.prepare("INSERT INTO test_releases_setting (value) VALUES (?)").bind(value).run();
+      try { await moderation().fetch("https://do/reconcile/entries", { method: "POST" }); } finally { await BINDINGS.DB.prepare("DROP TABLE test_releases_setting").run(); }
+    };
+    const seen = () => inModeration((sql) => sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'takedown_finding'").toArray().length === 0 ? 0
+      : (sql.exec("SELECT seen FROM takedown_finding WHERE code = 'release_setting_undecided' AND subject = 'RELEASES'").toArray()[0]?.seen ?? 0)) as Promise<number>;
+    // Decided, whatever an earlier test left: no finding.
+    await passWith("true");
+    expect(await seen()).toBe(0);
+    // Undecided: told once by each pass.
+    await passWith("True");
+    expect(await seen()).toBe(1);
+    await passWith(null);
+    expect(await seen()).toBe(2);
+    // Read decided, either way: the finding is gone.
+    await passWith("true");
+    expect(await seen()).toBe(0);
+    await passWith("1");
+    expect(await seen()).toBe(1);
+    await passWith("false");
+    expect(await seen()).toBe(0);
   });
 
   it("is an operator's read and nobody else's, and nothing anyone can find while release is switched off", async () => {
@@ -2013,6 +2068,26 @@ describe("the two reconciles", () => {
     // The room also said one of its deletes had failed twelve times, and operators were told, by the script's name.
     expect(await found()).toEqual([`script_delete_failing ${b.kept} delete_500`]);
     for (const room of [a.room, b.room]) await alarmQuiet(stub(room));
+  });
+
+  it("doesn't find again a script the room counted gone after the pass read its list", async () => {
+    // The pass reads the namespace once and then asks each script's room in turn, so the room's own delete job can
+    // count a script gone between the list and the question: the question before ended a release and woke the room.
+    // The question says when the list was read, and the room decides from its own record. Set here by construction.
+    await fresh();
+    const a = await app({ plain: true });
+    const script = `${a.label}.${rel(9)}`;
+    const goneAt = 1_900_000_000_000;
+    await inRoom(a.room, (sql) => sql.exec("INSERT INTO script_delete (script_name, label, unpublish_epoch, queued_at, next_attempt_at, gone_at) VALUES (?, ?, NULL, 1, 1, ?)", script, a.label, goneAt));
+    const ask = (listedAt?: number) => stub(a.room).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify({ kind: "script", script, ...(listedAt === undefined ? {} : { listed_at: listedAt }) }) }).then((r: Response) => r.json() as Promise<any>);
+    // Listed before the room counted it gone: the list is older than the deletion. Nothing owed, nothing told.
+    expect((await ask(goneAt - 1)).changed).toBe(false);
+    expect((await ask(goneAt)).changed).toBe(false);
+    expect((await one(a.room, "SELECT gone_at FROM script_delete WHERE script_name = ?", script)).gone_at).toBe(goneAt);
+    // Listed after it was counted gone: it is there after all, and owed again.
+    expect((await ask(goneAt + 1)).changed).toBe(true);
+    expect((await one(a.room, "SELECT gone_at, last_code FROM script_delete WHERE script_name = ?", script))).toEqual({ gone_at: null, last_code: "reconcile_found" });
+    await alarmQuiet(stub(a.room));
   });
 
   it("has the label's own room delete a script nothing of its claims, an uncertain release's among them, and leaves the rest", async () => {

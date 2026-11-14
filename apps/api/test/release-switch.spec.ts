@@ -442,6 +442,9 @@ describe("the follow-up to decision 218's PR C", () => {
       sql.exec("UPDATE serve_apply SET attempts = 1, attempt_version = (SELECT version FROM serve_state WHERE host = ?), next_attempt_at = ? WHERE host = ?", r.host, owedAt, r.host);
       sql.exec("UPDATE script_delete SET next_attempt_at = ?", owedAt);
       sql.exec("DROP TABLE test_release_switch_stops_after_commit");
+      // A public room's first discovery-index check is set at random within six hours: put past the applier's time, so
+      // the room's next alarm is the applier's alone.
+      await state.storage.put("public_index_verify_next", FAR());
       await state.storage.deleteAlarm();
     });
     // The notice again: the room has applied it, so it is stale, and the room arms for what the applier owes all the

@@ -124,6 +124,47 @@ impl Drop for Creating<'_> {
     }
 }
 
+/// Whether the room has anything the deployment's own switch must take down (M6 step 6): a host whose desired script
+/// is set, a kept script, a commit in flight, or a release that hasn't ended. A room with nothing of these has nothing
+/// to unpublish, so the switch read again and again changes nothing, with no marker kept: while `RELEASES` is off no
+/// release can start, and switching it back on brings nothing back.
+fn has_anything_up(sql: &SqlStorage) -> R<bool> {
+    if rows(sql, "SELECT 1 AS configured FROM release_config", vec![])?.is_empty() {
+        return Ok(false);
+    }
+    let open: Vec<String> = podster_core::release::ReleaseState::ALL
+        .into_iter()
+        .filter(|state| !state.is_final())
+        .map(|state| format!("'{}'", state.name()))
+        .collect();
+    let up = rows(
+        sql,
+        &format!(
+            "SELECT 1 AS up WHERE EXISTS (SELECT 1 FROM serve_state WHERE script_name IS NOT NULL)
+               OR EXISTS (SELECT 1 FROM release_config WHERE kept_previous IS NOT NULL OR in_flight_release IS NOT NULL)
+               OR EXISTS (SELECT 1 FROM release WHERE state IN ({}))",
+            open.join(", ")
+        ),
+        vec![],
+    )?;
+    Ok(!up.is_empty())
+}
+
+/// The deployment's own setting read as exactly `false`, applied in the caller's transaction: if the room has anything up, it is
+/// unpublished as `UnpublishTrigger::ReleaseOffForDeployment` (ADR 0010), and permanently, as every unpublish is.
+/// Answers whether it unpublished.
+pub(super) fn apply_deployment_off(sql: &SqlStorage, now: i64) -> R<bool> {
+    if !has_anything_up(sql)? {
+        return Ok(false);
+    }
+    takedown::unpublish_for(
+        sql,
+        UnpublishTrigger::ReleaseOffForDeployment,
+        json!({}),
+        now,
+    )
+}
+
 fn room_id(sql: &SqlStorage) -> String {
     rows(sql, "SELECT id FROM workspace", vec![])
         .ok()
@@ -188,8 +229,37 @@ impl Workspace {
         }
     }
 
-    /// Reads the organization's switch from its own object, for the room's organization, and applies it.
+    /// The deployment's own setting as read, `RELEASES`, applied (M6 step 6): exactly `false`, and the room's app comes
+    /// down if anything is up. On or undecided, nothing happens here: an undecided setting refuses new releases and
+    /// commits, as off does, and takes nothing down, so a typo or a missing variable can't retire every app. It is
+    /// read where the organization's switch is read, at the reconcile's question and at every release command, which
+    /// is how a room learns of it: there is no notice for a deploy. An undecided setting is told to operators by the
+    /// reconcile's pass, once a pass, not by each room. A failure applying it is logged by IDs and changes nothing; the
+    /// next question or command applies it again.
+    pub(super) async fn apply_deployment_switch(
+        &self,
+        setting: podster_core::release::DeploymentRelease,
+    ) {
+        if !setting.unpublishes() {
+            return;
+        }
+        let store = self.state.storage().sql();
+        if let Err(error) = transaction_sync(&self.state, move || {
+            apply_deployment_off(&store, now_ms()).map(|_| ())
+        }) {
+            let sql = self.state.storage().sql();
+            console_error!(
+                "release switch: the deployment's switch wasn't applied: room={} code={}",
+                room_id(&sql),
+                error.code().unwrap_or("internal_error")
+            );
+        }
+    }
+
+    /// Reads the deployment's switch and the organization's, for the room's organization, and applies both.
     pub(super) async fn read_and_apply_switch(&self) {
+        self.apply_deployment_switch(crate::releases::setting(&self.env).await)
+            .await;
         let sql = self.state.storage().sql();
         let Ok(org) = room_owner_org(&sql) else {
             return;

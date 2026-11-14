@@ -83,6 +83,58 @@ const checkedAgo = (id: string, ms: number, also?: (sql: any) => void) => inRoom
 const recheck = (who: Who, id: string) => api(who, "POST", `/v1/moderation/repositories/${id}/recheck`, {});
 const made: string[] = [];
 
+/**
+ * M6 step 6: room `id` given an app, through the test pool, as nothing takes a release's request yet: a release
+ * configuration at epoch 2 and, unless `up` is false, a served release on its default host and a queued one. The
+ * provider is switched off, so the room's own state is what is read.
+ */
+async function withApp(id: string, opts: { up?: boolean } = {}) {
+  const label = `rr${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+  const served = `rel_${"3c".repeat(16)}`;
+  const queued = `rel_${"4e".repeat(16)}`;
+  const script = `${label}.${served}`;
+  await inRoom(id, (sql) => {
+    sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
+    sql.exec("INSERT INTO app_label (label, current, created_at) VALUES (?, 1, 1)", label);
+    sql.exec("INSERT INTO release_config (singleton, enabled, version, release_epoch, set_by, set_at, updated_at) VALUES (1, 1, 1, 2, ?, 1, 1)", OWNER.id);
+    sql.exec("INSERT INTO task (id, title, instructions, requester_id, reviewer_id, status, version, created_at, updated_at) VALUES ('tsk_rr_release', 'Ship it', 'x', ?, ?, 'completed', 1, 1, 1)", OWNER.id, OWNER.id);
+    if (opts.up === false) return;
+    const release = (rel: string, state: string, withScript: boolean) => sql.exec(
+      `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, task_id, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
+         VALUES (?, ?, ?, ?, 1, 2, 'tsk_rr_release', ?, ?, ?, 1, ?, 1, ?, 1)`, rel, "ab".repeat(20), state, label, withScript ? `${label}.${rel}` : null, withScript ? rel : null, OWNER.id, OWNER.id, withScript ? 1 : null);
+    release(served, "served", true);
+    release(queued, "queued", false);
+    sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES (?, 'default', ?, 1, ?, ?, 5, 1)", `${label}.apps.example`, label, served, script);
+  });
+  return { label, served, queued, script };
+}
+type App = Awaited<ReturnType<typeof withApp>>;
+const appState = (id: string) => inRoom(id, (sql) => ({
+  serving: sql.exec("SELECT script_name FROM serve_state").one().script_name,
+  releases: sql.exec("SELECT id, state, failure_code FROM release WHERE id IN (?, ?) ORDER BY id", `rel_${"3c".repeat(16)}`, `rel_${"4e".repeat(16)}`).toArray(),
+  unpublish: sql.exec("SELECT cause, release_epoch FROM unpublish").toArray(),
+  queued: sql.exec("SELECT script_name FROM script_delete").toArray().map((q: any) => q.script_name),
+  event: sql.exec("SELECT actor_id, reason FROM event WHERE type = 'app.unpublished'").toArray(),
+  audit: sql.exec("SELECT actor_id, new_json FROM audit_event WHERE action = 'app.unpublished'").toArray().map((a: any) => [a.actor_id, JSON.parse(a.new_json)]),
+}));
+/** Room state after a degrade with code `cause` took the app down, the queued release ended in the same request or pass. */
+const appDown = (app: App, cause: string) => ({
+  serving: null,
+  releases: [{ id: app.served, state: "unpublished", failure_code: null }, { id: app.queued, state: "failed", failure_code: "release_epoch_moved" }],
+  unpublish: [{ cause: "repo_not_ready", release_epoch: 3 }],
+  queued: [app.script],
+  event: [{ actor_id: "podster", reason: "repo_not_ready" }],
+  audit: [["podster", { reason: "repo_not_ready", cause }]],
+});
+const appUp = (app: App) => ({
+  serving: app.script,
+  releases: [{ id: app.served, state: "served", failure_code: null }, { id: app.queued, state: "queued", failure_code: null }],
+  unpublish: [],
+  queued: [],
+  event: [],
+  audit: [],
+});
+
 beforeAll(async () => {
   key = await importJWK(JSON.parse(BINDINGS.TEST_SIGNING_JWK), "EdDSA");
   for (const statement of BINDINGS.TEST_D1_SCHEMA.split(";").map((x: string) => x.trim()).filter(Boolean)) await BINDINGS.DB.prepare(statement).run();
@@ -390,37 +442,77 @@ describe("an operator's recheck of a ready link (item 12)", () => {
 
   it("unpublishes the room's app when its link is degraded, as ADR 0010 is written (M6 step 6)", async () => {
     // A link no longer ready takes the room's app down, as core's `link_status_unpublishes` decides for `degraded` by the
-    // architect's ruling of 2026-11-13. The room serves an app, with the provider switched off so nothing is asked of it.
+    // architect's ruling of 2026-11-13. The operator's recheck is a request: its bookkeeping ends the queued release.
     const r = await room();
-    const label = `rr${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
-    const release = `rel_${"3c".repeat(16)}`;
-    const script = `${label}.${release}`;
-    await inRoom(r.id, (sql) => {
-      sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
-      sql.exec("INSERT INTO app_label (label, current, created_at) VALUES (?, 1, 1)", label);
-      sql.exec("INSERT INTO release_config (singleton, enabled, version, release_epoch, set_by, set_at, updated_at) VALUES (1, 1, 1, 2, ?, 1, 1)", OWNER.id);
-      sql.exec("INSERT INTO task (id, title, instructions, requester_id, reviewer_id, status, version, created_at, updated_at) VALUES ('tsk_rr_release', 'Ship it', 'x', ?, ?, 'completed', 1, 1, 1)", OWNER.id, OWNER.id);
-      sql.exec(`INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, task_id, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
-        VALUES (?, ?, 'served', ?, 1, 2, 'tsk_rr_release', ?, ?, ?, 1, ?, 1, 1, 1)`, release, "ab".repeat(20), label, script, release, OWNER.id, OWNER.id);
-      sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES (?, 'default', ?, 1, ?, ?, 5, 1)", `${label}.apps.example`, label, release, script);
-    });
+    const app = await withApp(r.id);
     await ready({ deleted: true });
     await recheck(OPERATOR, r.id);
     await aMinuteLater(r.id);
     expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "degraded", reason: "repository_gone" });
+    expect(await appState(r.id)).toEqual(appDown(app, "repository_gone"));
+  });
+
+  it("unpublishes from the room's own alarm when the daily read-back degrades the link, and that alarm ends the queued release", async () => {
+    const r = await room();
+    const app = await withApp(r.id);
+    await ready({ deleted: true });
+    await checkedAgo(r.id, DAY + 1);
+    await alarmPass(stub(r.id));
+    expect(await link(r.id)).toMatchObject({ status: "ready" });
+    await aMinuteLater(r.id);
+    await alarmPass(stub(r.id));
+    expect(await link(r.id)).toMatchObject({ status: "degraded", status_reason: "repository_gone" });
+    // The same alarm pass that fired the trigger ran the release bookkeeping before it set its next wake.
+    expect(await appState(r.id)).toEqual(appDown(app, "repository_gone"));
+  });
+
+  it("restores nothing when the link is ready again, and a new release then gets the whole recheck", async () => {
+    const r = await room();
+    const app = await withApp(r.id);
+    await ready({ rulesets: "no_update" });
+    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "degraded", reason: "ruleset_missing" });
+    await ready({ rulesets: "ready" });
+    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "ready", reason: null });
+    expect(await appState(r.id)).toEqual(appDown(app, "ruleset_missing"));
+    // A release asked for under the epoch the trigger moved to is decided by the whole recheck, not refused for its
+    // epoch. This room has no merged change of the task's, so the recheck fails on that, having been made.
+    await inRoom(r.id, (sql) => void sql.exec(
+      `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, task_id, requested_by, requested_at, approved_by, approved_at, updated_at)
+         VALUES ('rel_${"5d".repeat(16)}', ?, 'queued', ?, 1, 3, 'tsk_rr_release', ?, 2, ?, 2, 2)`, "ab".repeat(20), app.label, OWNER.id, OWNER.id));
+    await BINDINGS.DB.prepare("CREATE TABLE test_releases_on (x INTEGER)").run();
+    try {
+      const answer = await (await stub(r.id).fetch("https://do/internal/release-recheck", { method: "POST", body: JSON.stringify({ release_id: `rel_${"5d".repeat(16)}` }) })).json() as any;
+      expect(answer).toMatchObject({ rechecked: true });
+      expect(answer.reason).not.toBe("release_epoch_moved");
+    } finally {
+      await BINDINGS.DB.prepare("DROP TABLE test_releases_on").run();
+    }
+    expect(await appState(r.id)).toEqual(appDown(app, "ruleset_missing"));
+  });
+
+  it("is never left behind by a recheck that fails after it: the link stays ready and the app stays up", async () => {
+    const r = await room();
+    const app = await withApp(r.id);
+    await ready({ rulesets: "no_update" });
+    await inRoom(r.id, (sql) => void sql.exec("CREATE TABLE test_fail_after_unpublish (x INTEGER)"));
+    expect((await recheck(OPERATOR, r.id)).status).not.toBe(200);
+    expect(await link(r.id)).toMatchObject({ status: "ready" });
+    expect(await appState(r.id)).toEqual(appUp(app));
+    await inRoom(r.id, (sql) => void sql.exec("DROP TABLE test_fail_after_unpublish"));
+    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "degraded", reason: "ruleset_missing" });
+    expect(await appState(r.id)).toEqual(appDown(app, "ruleset_missing"));
+  });
+
+  it("still records the unpublish for a room with a configuration and nothing up, which only raises the epoch", async () => {
+    const r = await room();
+    await withApp(r.id, { up: false });
+    await ready({ rulesets: "no_update" });
+    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "degraded", reason: "ruleset_missing" });
     expect(await inRoom(r.id, (sql) => ({
-      serving: sql.exec("SELECT script_name FROM serve_state").one().script_name,
       unpublish: sql.exec("SELECT cause, release_epoch FROM unpublish").toArray(),
-      queued: sql.exec("SELECT script_name FROM script_delete").toArray().map((q: any) => q.script_name),
-      event: sql.exec("SELECT actor_id, reason FROM event WHERE type = 'app.unpublished'").toArray(),
-      audit: sql.exec("SELECT actor_id, new_json FROM audit_event WHERE action = 'app.unpublished'").toArray().map((a: any) => [a.actor_id, JSON.parse(a.new_json)]),
-    }))).toEqual({
-      serving: null,
-      unpublish: [{ cause: "repo_not_ready", release_epoch: 3 }],
-      queued: [script],
-      event: [{ actor_id: "podster", reason: "repo_not_ready" }],
-      audit: [["podster", { reason: "repo_not_ready", cause: "repository_gone" }]],
-    });
+      queued: sql.exec("SELECT count(*) AS n FROM script_delete").one().n,
+      event: sql.exec("SELECT reason FROM event WHERE type = 'app.unpublished'").toArray(),
+    }))).toEqual({ unpublish: [{ cause: "repo_not_ready", release_epoch: 3 }], queued: 0, event: [{ reason: "repo_not_ready" }] });
   });
 
   it("restores a repository made before these settings were set, once they're switched off by hand on GitHub", async () => {

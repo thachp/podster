@@ -16,9 +16,9 @@
 //!   from before any provider was configured.
 //!
 //! They run in the `Moderation` object, the one object for the deployment, which keeps where each pass got to and
-//! what it found for operators. The Worker's scheduled handler only calls it, and only while release is switched on.
-//! **No environment has a cron entry,** so on every deployment nothing calls the handler: the entry is owed with the
-//! provider's configuration. **With no provider, a pass reads nothing, and says so.**
+//! what it found for operators. The Worker's scheduled handler only calls it, on the two schedules `wrangler.jsonc`
+//! gives every environment, and only while a content provider is configured, whatever `RELEASES` says (M6 step 6).
+//! **With no provider, the handler calls nothing, and a pass asked directly reads nothing, and says so.**
 //!
 //! One pass is bounded: a page of keys or a slice of scripts, a slice of rooms, and a time after which it starts
 //! nothing new. Where it stopped is kept, and the next pass goes on from there.
@@ -36,7 +36,7 @@ use worker::*;
 
 type R<T> = std::result::Result<T, ApiError>;
 
-/// The schedules the handler answers to. No environment has either: see the module's note.
+/// The schedules the handler answers to, the two in `wrangler.jsonc`: see the module's note.
 pub(crate) const ENTRIES_CRON: &str = "*/5 * * * *";
 pub(crate) const SCRIPTS_CRON: &str = "0 * * * *";
 
@@ -608,7 +608,13 @@ async fn one_key(
 
 /// One listed script. Core decides. With no room yet: a name Podster didn't make is told and left alone, and for any
 /// other the room is found and asked. Only the label's own room, from its current state, can make a script deletable.
-async fn one_script(sql: &SqlStorage, env: &Env, id: &str, counts: &mut Counts) -> Step {
+async fn one_script(
+    sql: &SqlStorage,
+    env: &Env,
+    id: &str,
+    listed_at: i64,
+    counts: &mut Counts,
+) -> Step {
     let now = now_ms();
     if reconcile_script(id, RoomClaim::NoRoom, now) == ScriptReconcile::ReportForeign {
         return Ok(counts.finding(sql, "script_foreign_name", id, now)?);
@@ -617,7 +623,15 @@ async fn one_script(sql: &SqlStorage, env: &Env, id: &str, counts: &mut Counts) 
     let Some(room) = crate::releases::room_for_label(env, label).await? else {
         return Ok(counts.finding(sql, "script_without_room", id, now)?);
     };
-    match ask_room(env, &room, json!({ "kind": "script", "script": id })).await {
+    // With when the list was read: a script the room counted gone since then is in the list only because the list is
+    // older than the deletion, and isn't found again.
+    match ask_room(
+        env,
+        &room,
+        json!({ "kind": "script", "script": id, "listed_at": listed_at }),
+    )
+    .await
+    {
         Some(answer) => {
             counts.take(sql, &answer, now_ms())?;
             if answer["known"] != true {
@@ -648,6 +662,33 @@ fn finish(sql: &SqlStorage, name: &str, code: &'static str, counts: &Counts) -> 
     "errors"
 }
 
+/// A deployment whose release setting, `RELEASES`, is neither exactly `true` nor exactly `false` (M6 step 6): nothing
+/// is released and nothing taken down, and operators are told once by each pass, by one finding, until it is set
+/// one way or the other. The code is logged, with no ID. **The first pass that reads it decided takes the finding
+/// away,** so operators' record says only what is so now.
+async fn tell_undecided_setting(sql: &SqlStorage, env: &Env) {
+    if crate::releases::setting(env).await != podster_core::release::DeploymentRelease::Undecided {
+        if let Err(error) = exec(
+            sql,
+            "DELETE FROM takedown_finding WHERE code = 'release_setting_undecided' AND subject = 'RELEASES'",
+            vec![],
+        ) {
+            console_error!(
+                "reconcile: a decided release setting's finding wasn't cleared: code={}",
+                error.code().unwrap_or("internal_error")
+            );
+        }
+        return;
+    }
+    console_error!("reconcile: the deployment's release setting is neither true nor false: code=release_setting_undecided");
+    if let Err(error) = record(sql, "release_setting_undecided", "RELEASES", None, now_ms()) {
+        console_error!(
+            "reconcile: an undecided release setting wasn't kept for operators: code={}",
+            error.code().unwrap_or("internal_error")
+        );
+    }
+}
+
 /// The 5-minute pass, in the `Moderation` object: one page of serve entries against their rooms, the stop key
 /// against the stop, and a slice of rooms woken.
 pub(crate) async fn entries(sql: &SqlStorage, env: &Env) -> R<Value> {
@@ -656,6 +697,7 @@ pub(crate) async fn entries(sql: &SqlStorage, env: &Env) -> R<Value> {
         console_log!("reconcile: no provider is configured, so no serve entry was read");
         return Ok(summary("entries", "no_provider", 0, &counts, 0));
     };
+    tell_undecided_setting(sql, env).await;
     let started = now_ms();
     let deadline = started + budget(sql, "pass", PASS_BUDGET_MS);
     for table in [
@@ -743,9 +785,12 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
         console_log!("reconcile: no provider is configured, so no script was listed");
         return Ok(summary("scripts", "no_provider", 0, &counts, 0));
     };
+    tell_undecided_setting(sql, env).await;
     let started = now_ms();
     let deadline = started + budget(sql, "pass", PASS_BUDGET_MS);
     let mut at = pass(sql, "scripts")?;
+    // Taken before the list is asked for: whatever the list holds, the provider read it after this.
+    let listed_at = now_ms();
     let Some(list) = provider.list_scripts().await else {
         set_pass(sql, "scripts", &at, Some("list_failed"), now_ms())?;
         let woken = wake(sql, env, &mut counts).await;
@@ -777,7 +822,7 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
             break;
         }
         at.cursor = Some(id.clone());
-        let step = one_script(sql, env, id, &mut counts).await;
+        let step = one_script(sql, env, id, listed_at, &mut counts).await;
         counts.settled(sql, "script", id, step, now_ms());
     }
     if reached_end {
@@ -789,11 +834,14 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
     Ok(summary("scripts", code, ids.len(), &counts, woken))
 }
 
-/// The Worker's scheduled handler. **No environment has a cron entry,** so nothing calls it on any deployment, and
-/// tests call it directly. It does nothing while release is switched off, and nothing for a schedule it doesn't know.
+/// The Worker's scheduled handler, on the two schedules in `wrangler.jsonc` (M6 step 6). **It runs whenever a
+/// content provider is configured, whatever `RELEASES` says,** so a deployment that switches release off still has
+/// its rooms woken, and each takes its app down at the walk's question (ADR 0010's deployment trigger). **With no
+/// provider configured, which is every deployment today, it returns before it calls any Durable Object:** the cron's
+/// own invocation is all it costs. It does nothing for a schedule it doesn't know.
 #[event(scheduled)]
 pub async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
-    if !crate::releases::switched_on(&env).await {
+    if Provider::from_env(&env).is_none() {
         return;
     }
     let path = match event.cron().as_str() {

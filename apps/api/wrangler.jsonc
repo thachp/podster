@@ -45,8 +45,14 @@
       { "queue": "podster-a2a-dlq", "max_batch_size": 6, "max_batch_timeout": 5 }
     ]
   },
+  // The two reconciles' schedules (M6 step 6, ADR 0010): serve entries every 5 minutes, scripts every hour. The
+  // handler calls nothing unless a content provider is configured, which no environment has, so each costs only its
+  // own invocation. Ruled in by the architect on 2026-11-13, for the owner to review: a schedule on this Worker, not
+  // a new or billed resource. Wrangler doesn't carry schedules into an environment, so each environment repeats them.
+  "triggers": { "crons": ["*/5 * * * *", "0 * * * *"] },
   "env": {
     "staging": {
+      "triggers": { "crons": ["*/5 * * * *", "0 * * * *"] },
       "workers_dev": false,
       "preview_urls": false,
       "r2_buckets": [{ "binding": "ASSETS", "bucket_name": "podster-assets-staging" }],

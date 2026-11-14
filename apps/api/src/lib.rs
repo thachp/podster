@@ -18,6 +18,8 @@ mod public;
 mod reconcile;
 mod releases;
 mod store;
+#[cfg(feature = "failpoints")]
+mod test_clock;
 mod wake;
 mod workspace;
 

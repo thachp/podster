@@ -506,17 +506,19 @@ describe("what GitHub answers", () => {
     expect(await tokens(r.id)).toEqual([]);
   });
 
-  it("answers provider_unavailable when GitHub doesn't answer in time, and holds nothing", { timeout: 60_000 }, async () => {
+  it("answers provider_unavailable when GitHub doesn't answer in time, and holds nothing", async () => {
     // GitHub holds the mint until the test lets it go, which is after the room has stopped waiting: the room's own
-    // wait for a call, ten seconds, is the only clock here.
+    // wait for a call is the only clock here. The test build lets that wait be a second rather than ten.
     await script({ mode: "gate" });
     const r = await room();
+    await inRoom(r.id, (sql) => sql.exec("CREATE TABLE test_call_timeout (ms INTEGER, only TEXT); INSERT INTO test_call_timeout VALUES (1000, NULL)"));
     const res = await access(AGENT, r.id, r.task);
     expect([res.status, res.code]).toEqual([502, "provider_unavailable"]);
     // The lease stays as a record of a token that may be live, with no token in it, until any such token has expired.
     expect((await tokens(r.id)).map((t) => [t.state, t.sealed])).toEqual([["mint_unknown", null]]);
     expect(await events(r.id, "repo_token.mint_unknown")).toHaveLength(1);
-    // It holds nothing up: the agent can ask again.
+    // It holds nothing up: the agent can ask again, with the room's wait back to ten seconds.
+    await inRoom(r.id, (sql) => sql.exec("DROP TABLE test_call_timeout"));
     await script({ mode: "ok" });
     const next = await access(AGENT, r.id, r.task);
     expect(next.status).toBe(200);

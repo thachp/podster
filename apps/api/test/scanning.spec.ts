@@ -701,26 +701,35 @@ describe("each room's share of the scan queue", () => {
 
   it("starts its rest from 5 seconds again after a clean pass", async () => {
     const id = await room();
-    await inRoom(id, (sql) => sql.exec("CREATE TABLE test_scan_send_fails (x)"));
+    // The room's scan passes read the clock the test passes in, ten minutes ahead, so the runtime never runs the alarm
+    // by itself during the test, and well inside the files' hour.
+    let now = Date.now() + 10 * 60 * 1000;
+    const at = (when: number) => inRoom(id, (sql) => sql.exec("DELETE FROM test_scan_now; INSERT INTO test_scan_now VALUES (?)", when));
+    await inRoom(id, (sql) => sql.exec("CREATE TABLE test_scan_now (at INTEGER); CREATE TABLE test_scan_send_fails (x)"));
+    await at(now);
+    const alarm = () => inRoom(id, (_sql, state) => state.storage.getAlarm()) as Promise<number>;
     // The first failure, in the alarm the upload arms, rests 5 seconds.
     await stored(id, "r0.txt");
     await settle(id);
+    expect(await alarm()).toBe(now + 5_000);
     // After that rest, a second pass fails too, and the rest doubles: the count really climbs.
-    await new Promise((resolve) => setTimeout(resolve, 5_500));
-    const second = Date.now();
+    now += 5_000;
+    await at(now);
     await settle(id);
-    const doubled = await inRoom(id, (_sql, state) => state.storage.getAlarm());
-    expect(doubled).toBeGreaterThanOrEqual(second + 9_000);
+    expect(await alarm()).toBe(now + 10_000);
+    // A clean pass after that rest sends the file and resets the count.
     await inRoom(id, (sql) => sql.exec("DROP TABLE test_scan_send_fails"));
-    await vi.waitFor(async () => expect(await counts(id)).toEqual({ queued: 1, waiting: 0 }), { timeout: 20_000, interval: 250 });
-    // A clean pass reset the count: the next failure rests 5 seconds, not the 20 a third failure in a row would.
+    now += 10_000;
+    await at(now);
+    await settle(id);
+    expect(await counts(id)).toEqual({ queued: 1, waiting: 0 });
+    // So the next failure rests 5 seconds, not the 20 a third failure in a row would.
     await inRoom(id, (sql) => sql.exec("CREATE TABLE test_scan_send_fails (x)"));
-    const before = Date.now();
+    now += 1;
+    await at(now);
     await stored(id, "r1.txt");
     await settle(id);
-    const alarm = await inRoom(id, (_sql, state) => state.storage.getAlarm());
-    expect(alarm).toBeGreaterThanOrEqual(before + 5_000);
-    expect(alarm).toBeLessThan(before + 9_000);
+    expect(await alarm()).toBe(now + 5_000);
   });
 
   it("starts a file's hour when it's queued, not when it arrived", async () => {

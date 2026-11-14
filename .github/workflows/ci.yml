@@ -76,8 +76,15 @@ jobs:
           node-version: 22
       - run: npm ci
         working-directory: apps/api
-      - run: npm test
+      # vitest's JSON report is read by the step after this one. The two other reporters are what CI printed before.
+      - run: npm test -- --reporter=default --reporter=github-actions --reporter=json --outputFile.json="$RUNNER_TEMP/api-durations.json"
         working-directory: apps/api
+      # Each test's time against its own bound: over a third is a warning, naming its entry in e2e/test-durations-allow.json
+      # (the owed list) or saying it has none; over two thirds fails, listed or not. The ten slowest are printed either
+      # way, and after a failed run too, so a slow runner shows before a test times out.
+      - run: node test-durations.mjs --suite api --package apps/api --report "$RUNNER_TEMP/api-durations.json"
+        if: ${{ !cancelled() }}
+        working-directory: e2e
 
   web:
     if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'docs/') }}
@@ -183,8 +190,15 @@ jobs:
         working-directory: apps/gateway
       - run: npm run typecheck
         working-directory: apps/gateway
-      - run: npm test
+      # vitest's JSON report is read by the step after this one. The two other reporters are what CI printed before.
+      - run: npm test -- --reporter=default --reporter=github-actions --reporter=json --outputFile.json="$RUNNER_TEMP/gateway-durations.json"
         working-directory: apps/gateway
+      # Each test's time against its own bound: over a third is a warning, naming its entry in e2e/test-durations-allow.json
+      # (the owed list) or saying it has none; over two thirds fails, listed or not. The ten slowest are printed either
+      # way, and after a failed run too, so a slow runner shows before a test times out.
+      - run: node test-durations.mjs --suite gateway --package apps/gateway --report "$RUNNER_TEMP/gateway-durations.json"
+        if: ${{ !cancelled() }}
+        working-directory: e2e
 
   # The real gateway and the API's release build under wrangler dev, driven by the real signer and MCP SDK.
   e2e:
@@ -219,6 +233,8 @@ jobs:
       # The API's and the gateway's specs, read without running them: a sleep, a wall-clock margin in an expectation, or
       # a spec that makes rooms and quiets none. What stays is in test-timing-allow.json, each with its reason.
       - run: node test-timing-check.mjs --self-test
+        working-directory: e2e
+      - run: node test-durations.mjs --self-test
         working-directory: e2e
       - run: node test-timing-check.mjs
         working-directory: e2e

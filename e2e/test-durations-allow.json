@@ -1,0 +1,41 @@
+{
+ "about": [
+  "The owed list for e2e/test-durations.mjs: API and gateway tests that use more than a third of their own time bound on CI, each with why it's slow and what would bring it down. Listed when the step was added, from CI at a4ab299 (run 43580489828) and at 9fd5833 (run 43587073064), where each was over a third or within three points of it.",
+  "A test over a third is a warning whether it's listed or not, and the warning names the entry's fix or says the test isn't listed. A test over two thirds fails the step whether it's listed or not: the list never passes anything.",
+  "An entry matches by suite, file (relative to the package) and the test's full name, and needs a reason and a fix. An entry for a test that didn't run fails the step, so the list can't rot. Take an entry out when its fix lands. `ci_ms_when_listed` is for a reader: the step doesn't use it."
+ ],
+ "entries": [
+  {
+   "suite": "api",
+   "file": "test/merge-task.spec.ts",
+   "test": "the job checks everything again ends the merge, marking nothing, when the pull request isn't what was reviewed any more",
+   "ci_ms_when_listed": [10212, 8696],
+   "reason": "Eight cases in one test, each a whole room, repository, task and merge pass, so it spends eight setups against one 30 s bound.",
+   "fix": "One test per case (it.each over the seven patches, and the moved base on its own), so each gets the whole bound."
+  },
+  {
+   "suite": "api",
+   "file": "test/merge-task.spec.ts",
+   "test": "the review's findings (M5 step 7b) reads GitHub before ending a merge whose call went out, whatever ends it, and records what the call did (M5)",
+   "ci_ms_when_listed": [7962, 9999],
+   "reason": "A loop over every way a merge whose call went out can end, each with its own room and merge pass, in one test.",
+   "fix": "One test per way it can end (it.each), so each gets the whole bound."
+  },
+  {
+   "suite": "api",
+   "file": "test/merge-task.spec.ts",
+   "test": "the review's findings (M5 step 7b) counts every request through the command itself: ten for a task in its whole life, twenty an hour for the room (M2) twenty an hour for the room, whichever tasks they're for",
+   "ci_ms_when_listed": [7906, 9295],
+   "reason": "It sends twenty-one merge requests through the real command, each for its own task, to reach the room's hourly limit.",
+   "fix": "Make the twenty tasks with one helper that skips what the limit doesn't read, keeping all twenty-one requests through the command."
+  },
+  {
+   "suite": "gateway",
+   "file": "test/uploads.spec.ts",
+   "test": "the upload path answers after a few seconds if a sender stalls once refused",
+   "ci_ms_when_listed": [5002, 5002],
+   "reason": "It waits out the gateway's own DISCARD_LIMIT_MS, a real 5 s, against a 15 s bound. The wait is fixed, so it doesn't grow on a slow runner.",
+   "fix": "Let a test pass the discard limit in (product code in apps/gateway/src/uploads.ts), then wait a short one."
+  }
+ ]
+}

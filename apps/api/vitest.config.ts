@@ -241,5 +241,6 @@ export default defineConfig({
       },
     }),
   ],
-  test: { testTimeout: 30000 },
+  // bound-meta.ts records each test's time bound for the duration report (e2e/test-durations.mjs).
+  test: { testTimeout: 30000, setupFiles: ["./test/bound-meta.ts"] },
 });

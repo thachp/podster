@@ -54,9 +54,9 @@
 //!   raised from. The release's row, its hosts set back if it had been staged, the flight closed, and its script
 //!   queued for deletion, in the caller's transaction, audited and told to the room's managers as Podster's act.
 //!
-//! **What this leaves for the job's own PR:** an upload whose answer was lost and its settling (`uncertain`). The
-//! marker's wait, a release recorded served and the set-back are `release_marker`'s, driven by the room's alarm; a
-//! confirm records when the release went live, which that wait runs from. A stage nobody comes back to is ended when
+//! **An upload whose answer was lost** is `uncertain` until the provider's own read settles it (`release_settle`);
+//! while one is, no other release of the room is staged (`release_uncertain`). The marker's wait, a release recorded
+//! served and the set-back are `release_marker`'s, driven by the room's alarm; a confirm records when the release went live, which that wait runs from. A stage nobody comes back to is ended when
 //! its upload's hour is over, by the next release command, the reconcile's next question or the room's own alarm.
 //!
 //! Logs carry the room's and the release's IDs and codes.
@@ -69,6 +69,9 @@ use podster_core::release::{
     commit_live, next_state, script_name, script_owner, set_back, upload_expired,
     CommitLiveRefusal, RecheckFailure, ReleaseEvent, ReleaseState, ScriptOwner, ServeState,
     UploadFailure,
+};
+use podster_core::release_uncertain::{
+    commit_waits_on_uncertain, WriteOutcome, COMMIT_WAITS_UNCERTAIN,
 };
 
 /// The room's path for starting a release's upload. Nothing outside the Worker reaches it.
@@ -722,13 +725,19 @@ pub(super) fn upload_failed(
     Ok(out)
 }
 
-/// The room's transaction after the script's write was asked for. `written` is whether the provider said, in so many
-/// words, that the script is written.
+/// The room's transaction after the script's write was asked for. `written` is core's judgement of what the provider
+/// answered (`podster_core::release_uncertain::script_write_outcome`).
 ///
 /// - **Still uploading, and written:** the upload is recorded, with how many files and bytes it holds, audited and
-///   told to the room's managers as `release.uploaded`. From here a commit may stage it. Asked again, nothing changes.
-/// - **Still uploading, and not known to be written:** nothing is recorded. The script may exist; the release's own
-///   state keeps it for the upload's hour, a retry writes it again, and the hour's end deletes it.
+///   told to the room's managers as `release.uploaded` ([`record_upload`]). From here a commit may stage it. Asked
+///   again, nothing changes.
+/// - **Still uploading, and not written:** nothing is recorded. The provider refused, or nothing was sent: a retry
+///   writes it again.
+/// - **Still uploading, and unknown:** the script may exist. The release becomes `uncertain`, with what this attempt
+///   sent kept beside it, until the provider's own read settles it (`release_settle`). One whose upload another
+///   attempt recorded, or whose script is queued for deletion, is left as it is.
+/// - **Already `uncertain`,** from an attempt that overlapped this one: written settles it as written, as the
+///   provider's read would; anything else leaves it to its read.
 /// - **No longer uploading:** it ended while its script was being written, by an unpublish, an expiry or a failed
 ///   recheck. Whatever ended it queued its script for deletion, and that deletion may already have been counted
 ///   done, before the write landed. **So the script is owed its deletion again, now:** queued, or queued again if it
@@ -737,7 +746,7 @@ pub(super) fn record_uploaded(
     sql: &SqlStorage,
     release_id: &str,
     script: &str,
-    written: bool,
+    written: WriteOutcome,
     files: i64,
     bytes: i64,
     now: i64,
@@ -749,7 +758,14 @@ pub(super) fn record_uploaded(
     if !own {
         return Err(ApiError::internal("an upload for another release's script"));
     }
-    if state_of(&release)? == ReleaseState::Uploading {
+    let state = state_of(&release)?;
+    if state == ReleaseState::Uncertain {
+        if written == WriteOutcome::Written {
+            return release_settle::settle_written(sql, release_id, script, files, bytes, now);
+        }
+        return upload_answer(sql, &release, false);
+    }
+    if state == ReleaseState::Uploading {
         let queued = !rows(
             sql,
             "SELECT 1 AS queued FROM script_delete WHERE script_name = ?",
@@ -757,40 +773,15 @@ pub(super) fn record_uploaded(
         )?
         .is_empty();
         // Recorded once: a second attempt that writes the script again finds it on record, and records nothing more.
-        if written && !queued && !uploaded(sql, release_id, script)? {
-            exec(
-                sql,
-                "INSERT INTO release_upload (release_id, script_name, files, bytes, uploaded_at) VALUES (?, ?, ?, ?, ?)",
-                vec![
-                    release_id.into(),
-                    script.into(),
-                    files.into(),
-                    bytes.into(),
-                    now.into(),
-                ],
-            )?;
-            // The release's trail: `release.upload_started`, this, then `release.live` or `release.failed`. Its state
-            // doesn't change, so the audit record says what was recorded: how many files and bytes, never their names.
-            audit_as(
-                sql,
-                moderation::PODSTER,
-                moderation::PODSTER_KIND,
-                "release.uploaded",
-                release_id,
-                None,
-                Some(json!({ "state": ReleaseState::Uploading.name(), "files": files, "bytes": bytes }).to_string()),
-                now,
-            )?;
-            store::record_event_about(
-                sql,
-                "release.uploaded",
-                moderation::PODSTER,
-                Some(release_id),
-                None,
-                &Transition::NONE,
-                roles::room_managers(sql, moderation::PODSTER)?,
-                now,
-            )?;
+        let recorded = uploaded(sql, release_id, script)?;
+        match written {
+            WriteOutcome::Written if !queued && !recorded => {
+                record_upload(sql, release_id, script, files, bytes, now)?;
+            }
+            WriteOutcome::Unknown if !queued && !recorded => {
+                return release_settle::enter_uncertain(sql, release_id, script, files, bytes, now);
+            }
+            _ => {}
         }
         return upload_answer(sql, &release, false);
     }
@@ -819,6 +810,55 @@ pub(super) fn record_uploaded(
         vec![script.into()],
     )?;
     upload_answer(sql, &release, false)
+}
+
+/// Records a release's upload as written whole: a row in `release_upload`, with how many files and bytes it holds, an
+/// audit record and an event, `release.uploaded`, as Podster's act. The caller has checked that it isn't on record
+/// yet. The release's state doesn't change here, so the audit record says what was recorded: how many files and
+/// bytes, never their names. The release's trail: `release.upload_started`, this, then `release.live` or
+/// `release.failed`.
+pub(super) fn record_upload(
+    sql: &SqlStorage,
+    release_id: &str,
+    script: &str,
+    files: i64,
+    bytes: i64,
+    now: i64,
+) -> R<()> {
+    exec(
+        sql,
+        "INSERT INTO release_upload (release_id, script_name, files, bytes, uploaded_at) VALUES (?, ?, ?, ?, ?)",
+        vec![
+            release_id.into(),
+            script.into(),
+            files.into(),
+            bytes.into(),
+            now.into(),
+        ],
+    )?;
+    audit_as(
+        sql,
+        moderation::PODSTER,
+        moderation::PODSTER_KIND,
+        "release.uploaded",
+        release_id,
+        None,
+        Some(
+            json!({ "state": ReleaseState::Uploading.name(), "files": files, "bytes": bytes })
+                .to_string(),
+        ),
+        now,
+    )?;
+    store::record_event_about(
+        sql,
+        "release.uploaded",
+        moderation::PODSTER,
+        Some(release_id),
+        None,
+        &Transition::NONE,
+        roles::room_managers(sql, moderation::PODSTER)?,
+        now,
+    )
 }
 
 /// What the first of a commit's two transactions did.
@@ -881,6 +921,27 @@ pub(super) fn stage(sql: &SqlStorage, release_id: &str, now: i64) -> R<Staged> {
     }
     let loaded =
         takedown::load(sql)?.ok_or_else(|| ApiError::internal("a release with no serve state"))?;
+    // **While another release of the room is `uncertain`, nothing new goes live:** whether its script stands is
+    // unsettled. A retry of this release's own open flight is left to core, as it was staged before.
+    let own_flight = loaded
+        .state
+        .in_flight
+        .as_ref()
+        .is_some_and(|flight| flight.release_id == release_id);
+    let uncertain: Vec<String> = rows(
+        sql,
+        "SELECT id FROM release WHERE state = ?",
+        vec![ReleaseState::Uncertain.name().into()],
+    )?
+    .iter()
+    .filter_map(|row| text(&row["id"]))
+    .collect();
+    let uncertain: Vec<&str> = uncertain.iter().map(String::as_str).collect();
+    if !own_flight && commit_waits_on_uncertain(release_id, &uncertain) {
+        let mut waiting = answer(&release, false, None);
+        waiting["waiting"] = COMMIT_WAITS_UNCERTAIN.into();
+        return Ok(Staged::Answer(waiting));
+    }
     let started_under = takedown::from_stored(int(&release["release_epoch"]));
     match commit_live(&loaded.state, started_under, &script, release_id, state) {
         Ok((after, _)) => {

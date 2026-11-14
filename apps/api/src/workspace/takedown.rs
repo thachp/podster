@@ -734,9 +734,10 @@ fn check_entry(sql: &SqlStorage, host: &str, found: Option<&str>, now: i64) -> R
 
 /// The hourly reconcile found `script` in the namespace. `(known, changed)`: whether its label is this room's, and
 /// whether the room queued it for deletion just now. `podster_core::release::reconcile_script` decides, from what the
-/// room's own state says of it: named by a host, the kept script or a commit in flight, it is kept; uploading within
-/// its hour, it is kept; anything else no row claims, an `uncertain` release's among them, is deleted, by the room's
-/// own delete job.
+/// room's own state says of it: named by a host, the kept script or a commit in flight, it is kept; uploading, or
+/// `uncertain` and being settled, within its upload's hour, it is kept; anything else no row claims is deleted, by the
+/// room's own delete job. An `uncertain` release's script is kept while settling may still find it written
+/// (`release_settle`); once the release ends, its own failure queues the script.
 fn check_script(
     sql: &SqlStorage,
     script: &str,
@@ -761,8 +762,12 @@ fn check_script(
     } else {
         rows(
             sql,
-            "SELECT coalesce(upload_started_at, updated_at) AS since FROM release WHERE id = ? AND state = ?",
-            vec![release_id.into(), ReleaseState::Uploading.name().into()],
+            "SELECT coalesce(upload_started_at, updated_at) AS since FROM release WHERE id = ? AND state IN (?, ?)",
+            vec![
+                release_id.into(),
+                ReleaseState::Uploading.name().into(),
+                ReleaseState::Uncertain.name().into(),
+            ],
         )?
         .first()
         .map_or(RoomClaim::Disowns, |row| RoomClaim::Uploading {
@@ -1170,15 +1175,19 @@ fn release_confirmed(sql: &SqlStorage, script: &str) -> R<bool> {
     .is_empty())
 }
 
-/// Until when a script is kept from the delete job because its release is still uploading within its hour, if it
-/// is. **Asked at the moment of the delete,** and not only when the script was queued: a script queued while its
+/// Until when a script is kept from the delete job because its release is still uploading, or `uncertain`, within its
+/// hour, if it is. **Asked at the moment of the delete,** and not only when the script was queued: a script queued while its
 /// release's upload was uncertain may belong to a release that is uploading again by now. Such a release can't be
 /// committed either, since its script is queued, but the delete waits for its hour, or for the room to end it.
 fn upload_keeps_until(sql: &SqlStorage, script: &str, now: i64) -> R<Option<i64>> {
     Ok(rows(
         sql,
-        "SELECT coalesce(upload_started_at, updated_at) AS since FROM release WHERE script_name = ? AND state = ?",
-        vec![script.into(), ReleaseState::Uploading.name().into()],
+        "SELECT coalesce(upload_started_at, updated_at) AS since FROM release WHERE script_name = ? AND state IN (?, ?)",
+        vec![
+            script.into(),
+            ReleaseState::Uploading.name().into(),
+            ReleaseState::Uncertain.name().into(),
+        ],
     )?
     .iter()
     .map(|row| int(&row["since"]))

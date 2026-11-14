@@ -99,8 +99,12 @@ async function takeFault(op: Op) {
 //
 // **What it answers on an error is an assumption:** no spike saw one. A fault is one thing the provider, or something
 // in its place, could answer.
+//
+// **A read of a script this part knows** (`read`, a `GET` of the script by name, as the release job's settling makes
+// it) answers from this part, as spike A recorded a read: the script as an object once it is written, `"script": null`
+// before. It has faults and gates of its own, by script. Every other script's read is the scripts' part's below.
 // ---------------------------------------------------------------------------------------------------------------------
-type UploadOp = "session" | "bucket" | "script";
+type UploadOp = "session" | "bucket" | "script" | "read";
 type UploadFault = {
   op: UploadOp; times: number;
   /** A status with the provider's error envelope. */
@@ -202,6 +206,17 @@ async function fakeUpload(request: Request, url: URL): Promise<Response | null> 
     return done(202, json({ success: true, errors: null, messages: null, result: {} }, 202));
   }
   const script = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${FAKE_CONTENT.namespace}/scripts/([^/]+)$`));
+  if (script && request.method === "GET" && uploads.has(decodeURIComponent(script[1])) && !scripts.has(decodeURIComponent(script[1]))) {
+    const name = decodeURIComponent(script[1]);
+    const held = upload(name);
+    const done = (status: number, response: Response) => { held.calls.push({ op: "read", status }); return response; };
+    if (bearer !== `Bearer ${FAKE_CONTENT.scriptsToken}`) return done(403, failure(403, 10000, "Authentication error"));
+    const fault = takeUploadFault(name, "read");
+    await passGate("read", held.gates);
+    if (fault?.status) return done(fault.status, failure(fault.status, 10001, "SECRET-PROVIDER-TEXT"));
+    if (fault?.shape === "html") return done(200, html());
+    return done(200, json(envelope({ namespace_id: "ns-test", namespace_name: FAKE_CONTENT.namespace, script: held.written ? { id: name, tag: "tag-test" } : null })));
+  }
   if (script && request.method === "PUT") {
     const name = decodeURIComponent(script[1]);
     const held = upload(name);

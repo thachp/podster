@@ -28,12 +28,22 @@ fn a_queued_release_is_started_an_uploading_one_uploaded_then_committed() {
         drive_step(ReleaseState::Uploading, true),
         Some(DriveStep::Commit)
     );
+    // An uncertain release is at its upload, whose command settles it by the provider's read.
+    for uploaded in [false, true] {
+        assert_eq!(
+            drive_step(ReleaseState::Uncertain, uploaded),
+            Some(DriveStep::Upload)
+        );
+    }
 }
 
 #[test]
 fn every_other_state_is_not_the_drivers() {
     for state in ReleaseState::ALL {
-        if matches!(state, ReleaseState::Queued | ReleaseState::Uploading) {
+        if matches!(
+            state,
+            ReleaseState::Queued | ReleaseState::Uploading | ReleaseState::Uncertain
+        ) {
             continue;
         }
         for uploaded in [false, true] {
@@ -379,6 +389,10 @@ fn the_share_and_the_total_alone_agree_with_the_budget_for_the_deployment() {
 fn only_the_share_and_the_markers_waits_count_no_attempt() {
     assert_eq!(READ_SHARE_WAITING, "release_reads_share");
     assert!(waits_uncounted(READ_SHARE_WAITING));
+    // And another release's settling, which ends by its own bounds.
+    assert!(waits_uncounted("release_uncertain"));
+    assert!(!waits_uncounted("release_upload_outcome_unknown"));
+    assert!(!waits_uncounted("release_settle_unknown"));
     assert!(waits_uncounted(
         podster_core::release::CommitLiveRefusal::InFlight.code()
     ));

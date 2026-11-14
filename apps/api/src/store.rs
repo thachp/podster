@@ -387,6 +387,12 @@ INSERT INTO release_job_next (release_id, attempts, next_attempt_at, leased_step
   SELECT release_id, attempts, next_attempt_at, leased_step, leased_epoch, leased_hold, last_code, updated_at, stalls FROM release_job;
 DROP TABLE release_job;
 ALTER TABLE release_job_next RENAME TO release_job;
+", "
+CREATE TABLE release_uncertain (release_id TEXT PRIMARY KEY REFERENCES release (id), script_name TEXT NOT NULL,
+  files INTEGER NOT NULL CHECK (typeof(files) = 'integer' AND files >= 1), bytes INTEGER NOT NULL CHECK (typeof(bytes) = 'integer' AND bytes >= 0),
+  since INTEGER NOT NULL CHECK (typeof(since) = 'integer'), settles INTEGER NOT NULL DEFAULT 0 CHECK (typeof(settles) = 'integer' AND settles >= 0),
+  settled_at INTEGER CHECK (settled_at IS NULL OR typeof(settled_at) = 'integer'), last_code TEXT NOT NULL CHECK (length(last_code) BETWEEN 1 AND 64),
+  CHECK (length(script_name) BETWEEN 38 AND 63 AND substr(script_name, -36) = release_id)) WITHOUT ROWID;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

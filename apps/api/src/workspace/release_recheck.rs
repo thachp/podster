@@ -438,8 +438,11 @@ fn gather(sql: &SqlStorage, release: &Value, reads: &Reads, now: i64) -> R<(Gath
         unknown = true;
     }
     // The recheck asks whether anyone at all may release only after it has asked whether the requester may, so the
-    // requester's own answer is the one that can matter here. Who else may is the unpublish trigger's question.
-    room.someone_may_release = requester_may_release_now;
+    // requester's own answer is the one that can matter here. Who else may is the unpublish trigger's question. While
+    // the room's app is held because nobody who may release remained (step 6), nobody may: the release fails as
+    // `no_releaser`, whatever the requester's own standing, so the gate doesn't rest on nobody being able to approve.
+    room.someone_may_release =
+        requester_may_release_now && super::releasers::held_until(sql)?.is_none();
 
     // Whoever approved: a person who is the room's owner or a room admin now, with that authority holding, where
     // release may happen now.

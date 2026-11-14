@@ -21,10 +21,10 @@ const OWNER: Who = { id: "per_td_owner", kind: "person", org: "org_td", adminOrg
 const AGENT: Who = { id: "agt_td_agent", org: "org_td" };
 const OPERATOR: Who = { id: "per_operator_one", kind: "person", org: "org_td_ops" };
 
-async function assertion(who: Who) {
+async function assertion(who: Who, extra: Record<string, unknown> = {}) {
   const now = Math.floor(Date.now() / 1000);
   const isAgent = (who.kind ?? "agent") === "agent";
-  return new SignJWT({ kind: who.kind ?? "agent", org: who.org, ...(isAgent ? { gen: who.gen ?? 1 } : { orgs: [who.org], admin_orgs: who.adminOrgs ?? [] }) })
+  return new SignJWT({ kind: who.kind ?? "agent", org: who.org, ...(isAgent ? { gen: who.gen ?? 1 } : { orgs: [who.org], admin_orgs: who.adminOrgs ?? [] }), ...extra })
     .setProtectedHeader({ alg: "EdDSA", kid: "test" }).setIssuer("podster-gateway").setSubject(who.id).setAudience("podster-api")
     .setIssuedAt(now).setExpirationTime(now + 60).setJti(crypto.randomUUID()).sign(key);
 }
@@ -1133,6 +1133,107 @@ describe("the room's applier and its delete job", () => {
     await fault({ op: "entry.delete", times: 2, status: 500 });
     await pass(a.room);
     expect((await applyRows(a.room)).find((row: any) => row.host === a.host)).toMatchObject({ attempts: 1, last_code: "app_suspended_entry_remains" });
+    await alarmQuiet(stub(a.room));
+  });
+
+  /** A hold that can't run out during the test, whatever the clock. */
+  const FAR_HOLD = 4_000_000_000_000;
+  /** The room's owner leaves their organization, as the organization's sweep tells every room: nobody who may release
+   *  remains, so the app is held (step 6). At a fixed time past the owner's place, which the room is given. */
+  const ownerLeaves = async (room: string) => {
+    await inRoom(room, (sql) => sql.exec("UPDATE workspace SET owner_since = 1"));
+    const res = await stub(room).fetch("https://workspace/internal/org-departure", { method: "POST", body: JSON.stringify({ person: OWNER.id, org: OWNER.org, actor: "per_td_orgadmin", left_at: 4_000_000_000_000 }) });
+    expect(res.status).toBe(200);
+  };
+  /** An admin of the room's organization names a new owner by recovery, which lifts the hold. */
+  const recoverTo = async (room: string, to: string) => {
+    const admin: Who = { id: "per_td_orgadmin", kind: "person", org: OWNER.org, adminOrgs: [OWNER.org] };
+    const res = await SELF.fetch(`https://api.internal/v1/workspaces/${room}/owner/recover`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": `td-recover-${++counter}`, "x-podster-assertion": await assertion(admin, { target_member: { person: to, orgs: { [OWNER.org]: 1 } } }) },
+      body: JSON.stringify({ to, expected_owner: OWNER.id }),
+    });
+    expect(res.status, await res.clone().text()).toBe(200);
+  };
+  const heldNow = (room: string) => inRoom(room, (sql) => sql.exec("SELECT until IS NOT NULL AS held FROM release_hold").one().held === 1);
+
+  it("never records a write as applied when a hold commits while the provider is being asked: the same pass takes the entry out", async () => {
+    const a = await app({ plain: true });
+    await fake("/reset", {});
+    await fake("/seed", { scripts: [a.kept, a.served] });
+    await inRoom(a.room, (sql) => sql.exec("DELETE FROM serve_apply"));
+    // The applier's write is held at the provider; the departure that leaves nobody commits meanwhile.
+    const id = await gate("entry.put");
+    const running = pass(a.room);
+    await arrived(id);
+    await ownerLeaves(a.room);
+    expect(await heldNow(a.room)).toBe(true);
+    await release(id);
+    await running;
+    const state = await held();
+    expect(state.entries[a.host]).toBeUndefined();
+    expect(callsFor(state, a)).toEqual(["entry.put host 200", "entry.get host 200", "entry.delete host 200", "entry.get host 404"]);
+    expect((await applyRows(a.room)).find((row: any) => row.host === a.host)).toMatchObject({ applied_version: null, applied_script: null, last_code: "app_held" });
+    await alarmQuiet(stub(a.room));
+  });
+
+  it("never records a removal as refused when a lift commits while the provider is being asked: the same pass writes the entry back", async () => {
+    const a = await app({ plain: true });
+    await fake("/reset", {});
+    await fake("/seed", { scripts: [a.kept, a.served], entries: { [a.host]: a.served } });
+    await ownerLeaves(a.room);
+    // The applier's removal of the held host is held at the provider; recovery lifts the hold meanwhile.
+    const id = await gate("entry.delete");
+    const running = pass(a.room);
+    await arrived(id);
+    await recoverTo(a.room, "per_td_successor");
+    expect(await heldNow(a.room)).toBe(false);
+    await release(id);
+    await running;
+    const state = await held();
+    expect(state.entries[a.host]).toBe(a.served);
+    expect(callsFor(state, a)).toEqual(["entry.delete host 200", "entry.get host 404", "entry.put host 200", "entry.get host 200"]);
+    expect((await applyRows(a.room)).find((row: any) => row.host === a.host)).toMatchObject({ applied_version: 5, applied_script: a.served, last_code: null });
+    await alarmQuiet(stub(a.room));
+  });
+
+  it("take a default host's entry out while the app is held, keep its script, and write the same script back once the hold lifts", async () => {
+    const a = await app({ plain: true });
+    await fake("/reset", {});
+    await fake("/seed", { scripts: [a.kept, a.served] });
+    await inRoom(a.room, (sql) => sql.exec("DELETE FROM serve_apply"));
+    await pass(a.room);
+    expect((await held()).entries[a.host]).toBe(a.served);
+    await alarmQuiet(stub(a.room));
+    // Held, as a command that leaves nobody who may release holds it (step 6): the room keeps what it serves, and
+    // resets the applier's record of each host that names a script, so the applier takes the entry out.
+    const owe = (sql: any) => sql.exec("UPDATE serve_apply SET applied_version = NULL, applied_at = NULL, applied_script = NULL, refused_version = NULL, attempts = 0, attempt_version = NULL, next_attempt_at = NULL WHERE host IN (SELECT host FROM serve_state WHERE script_name IS NOT NULL)");
+    await inRoom(a.room, (sql) => {
+      sql.exec("UPDATE release_hold SET cause = 'no_releaser', held_at = 1, until = ?, generation = generation + 1", FAR_HOLD);
+      owe(sql);
+    });
+    let before = (await held()).calls.length;
+    await pass(a.room);
+    let state = await held();
+    expect(state.calls.slice(before).filter((call) => call.name === a.host).map((call) => `${call.op} ${call.status}`)).toEqual(["entry.delete 200", "entry.get 404"]);
+    expect(state.entries[a.host]).toBeUndefined();
+    expect((await applyRows(a.room)).find((row: any) => row.host === a.host)).toMatchObject({ applied_version: null, last_code: "app_held" });
+    // Nothing is deleted: the scripts stay, and the room still names its served release.
+    expect(await all(a.room, "SELECT script_name FROM script_delete")).toEqual([]);
+    expect(state.scripts).toEqual(expect.arrayContaining([a.kept, a.served]));
+    expect(await all(a.room, "SELECT script_name FROM serve_state WHERE host = ?", a.host)).toEqual([{ script_name: a.served }]);
+    await alarmQuiet(stub(a.room));
+    // Lifted: the applier owes the host a pass again, and writes the same script back at the same version.
+    await inRoom(a.room, (sql) => {
+      sql.exec("UPDATE release_hold SET cause = NULL, held_at = NULL, until = NULL, generation = generation + 1");
+      owe(sql);
+    });
+    before = (await held()).calls.length;
+    await pass(a.room);
+    state = await held();
+    expect(state.calls.slice(before).filter((call) => call.name === a.host).map((call) => `${call.op} ${call.status}`)).toEqual(["entry.put 200", "entry.get 200"]);
+    expect(state.entries[a.host]).toBe(a.served);
+    expect((await applyRows(a.room)).find((row: any) => row.host === a.host)).toMatchObject({ applied_version: 5, applied_script: a.served, last_code: null });
     await alarmQuiet(stub(a.room));
   });
 

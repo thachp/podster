@@ -642,3 +642,29 @@ fn a_switch_notice_acts_only_on_a_room_of_the_organization_it_names() {
         );
     }
 }
+
+// --- somebody who may release remains (the interim rule) -------------------------------------------------------------
+
+#[test]
+fn someone_may_release_while_the_owner_holds_or_a_person_admin_keeps_their_place() {
+    let person = |stands| AdminPlace {
+        kind: PrincipalKind::Person,
+        place_stands: stands,
+    };
+    let agent = |stands| AdminPlace {
+        kind: PrincipalKind::Agent,
+        place_stands: stands,
+    };
+    // Someone may.
+    assert!(someone_may_release(true, &[]));
+    assert!(someone_may_release(false, &[person(true)]));
+    assert!(someone_may_release(
+        false,
+        &[agent(true), person(false), person(true)]
+    ));
+    // Nobody may: the owner left, and no person admin's place stands. An agent never counts.
+    assert!(!someone_may_release(false, &[]));
+    assert!(!someone_may_release(false, &[person(false)]));
+    assert!(!someone_may_release(false, &[agent(true)]));
+    assert!(!someone_may_release(false, &[agent(true), person(false)]));
+}

@@ -147,10 +147,11 @@ pub(super) fn handle_set(
     now: i64,
 ) -> R<Value> {
     let caller = &who.caller;
-    let (enabled, expected_version) = parse(body)?;
-    // Who first, by the room's rows: someone who can't configure release learns nothing of its version. Then whether
-    // their authority still holds, which only their own `Principal` says.
+    // Who first, by the room's rows: someone who can't configure release learns nothing of its version or of what
+    // their body should be. Then the body, then whether their authority still holds, which only their own
+    // `Principal` says.
     may_configure(who)?;
+    let (enabled, expected_version) = parse(body)?;
     let holds =
         settled(sql, &reads.caller, Some(&caller.id), true)?.ok_or_else(standing_unknown)?;
     let config = rows(sql, "SELECT enabled, version FROM release_config", vec![])?;

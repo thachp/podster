@@ -1,6 +1,6 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { alarmQuiet } from "./alarm";
 
 // M6 step 6: the room's release configuration, read and set (`getReleaseConfig`, `setReleaseConfig`). Only the room's
@@ -281,6 +281,62 @@ describe("the room's release configuration (M6 step 6)", () => {
       expect([on.status, on.body?.enabled]).toEqual([200, true]);
     });
     await alarmQuiet(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(r.owner.org)));
+  });
+
+  it("asks and applies nothing outside the room for someone who may not configure it, whatever their body", async () => {
+    const r = await room("org_rc_member_load");
+    await inRoom(r.room, (sql) => void sql.exec("UPDATE release_config SET enabled = 0"));
+    const inOrg = <T>(fn: (sql: any) => T) => runInDurableObject(BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(r.owner.org)), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
+    const arrived = () => inOrg((sql) => sql.exec("SELECT arrived FROM test_release_switch_read_hold").one().arrived);
+    const state = () => inRoom(r.room, (sql) => ({
+      config: sql.exec("SELECT enabled, version FROM release_config").toArray(),
+      applied: sql.exec("SELECT * FROM release_switch_applied").toArray(),
+      audit: sql.exec("SELECT COUNT(*) AS n FROM audit_event").one().n,
+    }));
+    const before = await state();
+    // The organization's object marks any read of its release switch, and holds it until the table is gone.
+    await inOrg((sql) => { sql.exec("CREATE TABLE test_release_switch_read_hold (arrived INTEGER)"); sql.exec("INSERT INTO test_release_switch_read_hold (arrived) VALUES (0)"); });
+    try {
+      await switchedOn(async () => {
+        for (const body of [{ enabled: true, expected_version: 3 }, { enabled: true }, { nonsense: 1 }]) {
+          expect((await put(r, body, { who: r.member })).code, JSON.stringify(body)).toBe("not_allowed");
+        }
+        // Nothing was asked of the organization, and nothing in the room changed.
+        expect(await arrived()).toBe(0);
+        expect(await state()).toEqual(before);
+        // The probe sees a read: the owner's switching on asks the organization, and waits at the hold.
+        const owner = put(r, { enabled: true, expected_version: 3 });
+        await vi.waitFor(async () => expect(await arrived()).toBe(1), { timeout: 10_000, interval: 5 });
+        await inOrg((sql) => void sql.exec("DROP TABLE test_release_switch_read_hold"));
+        expect((await owner).status).toBe(200);
+      });
+    } finally {
+      await inOrg((sql) => void sql.exec("DROP TABLE IF EXISTS test_release_switch_read_hold"));
+    }
+    expect(await configAudit(r)).toHaveLength(1);
+  });
+
+  it("switches off only for a body that says exactly so, and refuses any other shape, changing nothing", async () => {
+    const r = await room("org_rc_shape");
+    await switchedOn(async () => {
+      for (const body of [
+        { expected_version: 3 },
+        { enabled: null, expected_version: 3 },
+        { enabled: "false", expected_version: 3 },
+        { enabled: 0, expected_version: 3 },
+        { enabled: false },
+        { enabled: false, expected_version: "3" },
+        { enabled: false, expected_version: -1 },
+        { enabled: false, expected_version: 3, extra: true },
+      ]) {
+        const answer = await put(r, body);
+        expect([answer.status, answer.code], JSON.stringify(body)).toEqual([400, "invalid_argument"]);
+      }
+    });
+    expect(await all(r.room, "SELECT enabled, version, release_epoch FROM release_config")).toEqual([{ enabled: 1, version: 3, release_epoch: 2 }]);
+    expect(await serving(r)).toEqual(UP(r));
+    expect(await unpublishes(r)).toEqual([]);
+    expect(await configAudit(r)).toEqual([]);
   });
 
   it("isn't there while release is switched off for the deployment", async () => {

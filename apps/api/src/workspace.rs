@@ -5125,9 +5125,11 @@ impl Workspace {
                     },
                 )
             }
-            // The room's release configuration (M6 step 6). What it needs from outside is read first, and a stored
-            // answer goes only to someone who may still configure release.
+            // The room's release configuration (M6 step 6). Who may configure it is checked first, by the room's rows,
+            // so nobody else makes the room ask, or apply, anything outside it. Then what it needs from outside is
+            // read, and the transaction checks again. A stored answer goes only to someone who may still configure it.
             (Method::Put, ["release-config"]) if release_route_on => {
+                release_config::may_configure(&who)?;
                 let reads = self.release_config_reads(&identity.id, &raw).await?;
                 let domain = crate::content_provider::content_domain(&self.env);
                 self.command_checked(

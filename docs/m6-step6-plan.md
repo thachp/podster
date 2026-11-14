@@ -58,6 +58,8 @@ Nothing below depends on those decisions.
 | `NoReleaserLeft`, `no_releaser` | None; it is a consequence | Room rows, plus each person's organization | Room commands and the departure sweep | The interim rule (ruling 3): fire when no person who is the room's owner or an admin is in the room and still in their organization |
 | `RoomDeleted`, `OrganizationDeleted` | Nothing deletes either | No source | None | Owed by whatever first deletes either (ruling 4) |
 
+**`release_off`, as built in 6c: switching off needs the caller's own `Principal` to answer.** Before switching release off, the room asks the caller's own `Principal` whether they are still in the organization their place here is held in. If it gives no answer, the switch is refused with `standing_unknown` (503), and nothing comes down: a room's owner can't take their app down this way while that object is unreachable, which is the object that knows whether they have left their organization. Archiving the room or making it private still works then, and each unpublishes, and so does an operator's release switch for the organization.
+
 **The `unpublish` table's CHECK already admits every cause above** (room schema step 37). None of this needs a room schema step.
 
 ## What is shared with the switch's machinery

@@ -1429,7 +1429,7 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 
 **The architect's rulings on the driver's nine questions, 2026-11-14, each by the architect, for the owner to review.**
 
-1. **The cap: accepted, at most 8 attempts.** *The ruling's words were "counting only steps that make progress". As built, every step counts, those that make progress included (`MAX_DRIVE_ATTEMPTS`, `drive_outcome`); a cap counting only steps that make progress would never end a release that never moves. Nothing was changed: which was meant is for the architect to confirm.*
+1. **The cap: accepted,** at most 8 attempts, counting every attempt, so a release that never moves still ends (corrected by the architect the same day).
 2. **The wait: accepted,** 30 seconds doubling to 10 minutes.
 3. **Two upload attempts a room an hour: not enough to open the gate.** It bounds one room, and nothing bounds rooms in total. **A cross-room share of the read budget is owed** before `RELEASE_PATH_COMPLETE` is flipped, and is on [the gate's list](#the-gate-on-the-release-path).
 4. **The lease: accepted, 6 minutes.** **A requirement: the lease is longer than an upload attempt's deadline** (`DRIVE_LEASE_MS > ATTEMPT_DEADLINE_MS`), so a step still within its deadline is never taken for a dead one. A cargo test fails the build if the constants break it: `the_waits_of_a_release_that_never_moves_fit_inside_its_uploads_hour` in `crates/core/tests/release_driver.rs`, a compile-time assertion.

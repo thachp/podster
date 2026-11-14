@@ -1,5 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import axe from "axe-core";
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NotFoundSignal, setUrl } from "@/test/next-navigation";
@@ -117,3 +118,107 @@ describe("the operators' queue", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("That agent was never registered. Nothing changed.");
   });
 });
+
+// While release is switched on (M6 step 9) every report has `kind` and `host`, and an app's report names a host and no room.
+const appReport = { id: "rpt_2", kind: "app", host: "k3j9x2.podster.site", handle: null, agent_id: null, reason: "abuse", note: "<img src=x onerror=alert(1)> see https://evil.example", created_at: Date.UTC(2026, 10, 13) };
+const roomReport = { ...report, kind: "room", host: null };
+const strange = { id: "rpt_3", kind: "<b>bundle</b>", host: "javascript:alert(1)", handle: null, agent_id: "agt_y", reason: "spam", note: null, created_at: Date.UTC(2026, 10, 12) };
+
+const accessible = async (container: Element) => {
+  const results = await axe.run(container, { rules: { "color-contrast": { enabled: false } } });
+  expect(results.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`)).toEqual([]);
+};
+
+describe("apps' reports in the operators' queue", () => {
+  beforeEach(() => {
+    state.reply = { ok: true, data: { reports: [appReport, roomReport, strange], next_cursor: null } };
+    answer = { status: 200, body: { host: "k3j9x2.podster.site", suspended: true, reason: "abuse", at: 1 } };
+  });
+
+  const item = (id: string) => screen.getByText(id).closest("li") as HTMLElement;
+
+  it("shows an app's report by its host, as plain text, with only the app's actions", async () => {
+    await show();
+    const app = within(item("rpt_2"));
+    expect(app.getByText("App host")).toBeInTheDocument();
+    expect(app.getByText("k3j9x2.podster.site").closest("a")).toBeNull();
+    expect(app.queryByRole("link")).toBeNull();
+    expect(app.queryByText("Workroom")).toBeNull();
+    expect(app.getByText("<img src=x onerror=alert(1)> see https://evil.example")).toBeInTheDocument();
+    expect(document.querySelector("img")).toBeNull();
+    expect(app.queryByRole("button", { name: "Suspend workroom" })).toBeNull();
+    expect(app.queryByRole("button", { name: "Suspend agent's public claims" })).toBeNull();
+    expect(app.getByRole("button", { name: "Suspend app host" }).className).toMatch(/destructive/);
+    expect(app.getByLabelText("Reason recorded for the app")).toHaveValue("abuse");
+  });
+
+  it("suspends the reported host by the app routes, and lifts it", async () => {
+    await show();
+    const app = within(item("rpt_2"));
+    await userEvent.click(app.getByRole("button", { name: "Suspend app host" }));
+    expect(await screen.findByRole("alertdialog", { name: "Suspend the app host reported in rpt_2 (k3j9x2.podster.site)?" })).toBeInTheDocument();
+    await userEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Suspend" }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toEqual({ url: "/api/v1/moderation/app-hosts/k3j9x2.podster.site/suspend", body: { reason: "abuse" } });
+    expect(await app.findByText("App host suspended, for abuse.")).toBeInTheDocument();
+    answer = { status: 200, body: { host: "k3j9x2.podster.site", suspended: false, reason: null, at: null } };
+    await userEvent.click(app.getByRole("button", { name: "Lift app host suspension" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Lift" }));
+    await waitFor(() => expect(sent).toHaveLength(2));
+    expect(sent[1]).toEqual({ url: "/api/v1/moderation/app-hosts/k3j9x2.podster.site/lift", body: { reason: "abuse" } });
+    expect(await app.findByText("App host no longer suspended.")).toBeInTheDocument();
+  });
+
+  it("explains the app routes' own refusals", async () => {
+    answer = { status: 409, body: { error: { code: "release_not_available" } } };
+    await show();
+    const app = within(item("rpt_2"));
+    await userEvent.click(app.getByRole("button", { name: "Suspend app host" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Suspend" }));
+    expect(await app.findByRole("alert")).toHaveTextContent("Apps aren't served on this deployment, so there's no host to suspend. Nothing changed.");
+  });
+
+  it("keeps a room's report, kind and all, as it was", async () => {
+    answer = { status: 200, body: { report_id: "rpt_1", suspended: true, reason: "impersonation", at: 1 } };
+    await show();
+    const room = within(item("rpt_1"));
+    expect(room.getByRole("link", { name: HANDLE })).toHaveAttribute("href", `/p/${HANDLE}`);
+    expect(room.getByText("agt_x")).toBeInTheDocument();
+    expect(room.queryByText("App host")).toBeNull();
+    expect(room.queryByRole("button", { name: "Suspend app host" })).toBeNull();
+    await userEvent.click(room.getByRole("button", { name: "Suspend workroom" }));
+    await userEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Suspend" }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toEqual({ url: "/api/v1/moderation/reports/rpt_1/suspend-room", body: { reason: "impersonation" } });
+  });
+
+  it("shows a kind it doesn't know as inert text, with no action and no link", async () => {
+    await show();
+    const other = within(item("rpt_3"));
+    expect(other.getByText("Not one this page knows, so it offers no action. Nothing in it is shown as a link.")).toBeInTheDocument();
+    expect(other.getByText("javascript:alert(1)").closest("a")).toBeNull();
+    expect(other.queryByRole("link")).toBeNull();
+    expect(other.queryByRole("button")).toBeNull();
+    expect(other.queryByRole("combobox")).toBeNull();
+    expect(other.queryByText("agt_y")).toBeNull();
+    expect(document.querySelector("b")).toBeNull();
+  });
+
+  it.each([
+    ["an app's report with no host", { ...appReport, host: null }],
+    ["an app's report whose host isn't one", { ...appReport, host: "evil.example/../x" }],
+    ["a room's report with no handle", { ...roomReport, handle: null }],
+    ["a null kind", { ...roomReport, kind: null }],
+  ])("offers no action for %s", async (_name, odd) => {
+    state.reply = { ok: true, data: { reports: [odd], next_cursor: null } };
+    await show();
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.getByText("Not one this page knows, so it offers no action. Nothing in it is shown as a link.")).toBeInTheDocument();
+  });
+
+  it("passes axe with each kind on the page", async () => {
+    const { container } = await show();
+    await accessible(container);
+  });
+});
+

@@ -41,10 +41,11 @@ const inRoom = <T>(id: string, fn: (sql: any) => T) => runInDurableObject(stub(i
 const moderation = () => BINDINGS.MODERATION.get(BINDINGS.MODERATION.idFromName("moderation"));
 const inModeration = <T>(fn: (sql: any) => T) => runInDurableObject(moderation(), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
 
-/** Release switched on for the test Worker, as no deployment is, while `run` runs. */
+/** Release switched on for the test Worker while `run` runs. A call inside another leaves it on. */
+let releasesOn = 0;
 async function switchedOn<T>(run: () => Promise<T>): Promise<T> {
-  await BINDINGS.DB.prepare("CREATE TABLE test_releases_on (x INTEGER)").run();
-  try { return await run(); } finally { await BINDINGS.DB.prepare("DROP TABLE test_releases_on").run(); }
+  if (releasesOn++ === 0) await BINDINGS.DB.prepare("CREATE TABLE test_releases_on (x INTEGER)").run();
+  try { return await run(); } finally { if (--releasesOn === 0) await BINDINGS.DB.prepare("DROP TABLE test_releases_on").run(); }
 }
 
 const REL = `rel_${"5a".repeat(16)}`;
@@ -218,10 +219,13 @@ describe("the room's recheck of a release", () => {
     expect(await switchedOn(() => recheck(h.room))).toEqual(HOLDS);
   });
 
-  it("fails while release is switched off for the deployment, which is everywhere", async () => {
+  it("fails while release is switched off for the deployment, which is everywhere, and takes the room's app down first", async () => {
     const h = await healthy();
-    // No switch: the deployment's own configuration doesn't allow release.
-    expect((await recheck(h.room)).body).toEqual({ release_id: REL, state: "failed", rechecked: true, reason: "release_off_for_deployment" });
+    // No switch: the deployment's own configuration doesn't allow release. The room reads it before deciding anything
+    // and, with this release open, has something up: it unpublishes as ADR 0010's deployment trigger (M6 step 6), so
+    // the release ends under the epoch that moved, before any recheck is made.
+    expect((await recheck(h.room)).body).toEqual({ release_id: REL, state: "failed", rechecked: false, reason: "release_epoch_moved" });
+    expect(await inRoom(h.room, (sql) => sql.exec("SELECT cause FROM unpublish").toArray())).toEqual([{ cause: "release_off_for_deployment" }]);
   });
 
   /** Nothing was decided: the pass was refused as retryable, and the release, its events and its audit are as they were. */

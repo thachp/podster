@@ -93,6 +93,14 @@ const trail = (r: Room) => inRoom(r.room, (sql) => ({
   audit: sql.exec("SELECT actor_id, action, target_id, prior_json, new_json FROM audit_event WHERE action = 'app.unpublished' ORDER BY seq").toArray()
     .map((a: any) => [a.actor_id, a.action, a.target_id, a.prior_json, JSON.parse(a.new_json)]),
 }));
+/** Release switched on for the test Worker while `run` runs. A call inside another leaves it on. */
+let releasesOn = 0;
+async function switchedOn<T>(run: () => Promise<T>): Promise<T> {
+  if (releasesOn++ === 0) await BINDINGS.DB.prepare("CREATE TABLE test_releases_on (x INTEGER)").run();
+  try { return await run(); } finally { if (--releasesOn === 0) await BINDINGS.DB.prepare("DROP TABLE test_releases_on").run(); }
+}
+/** The reconcile's question, the walk's wake, as `RELEASES` is: off unless the caller switched it on. */
+const ask = (r: Room) => stub(r.room).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify({ kind: "wake" }) }).then((x: Response) => x.json() as Promise<any>);
 const suspendSurface = (r: Room, suspended: boolean) => stub(r.room).fetch("https://do/internal/operator-suspension", { method: "POST", body: JSON.stringify({ suspended, reason: "abuse" }) })
   .then(async (x: Response) => ({ status: x.status, body: (await x.json()) as any }));
 
@@ -173,5 +181,31 @@ describe("ADR 0010's unpublish triggers that are the room's own state (M6 step 6
       { cause: "workspace_archived", label: null, release_epoch: 4 },
     ]);
     expect((await trail(r)).events.map((e: any) => e.reason)).toEqual(["public_surface_suspended", "workspace_archived"]);
+  });
+});
+
+describe("the deployment's own switch, `RELEASES`, read by the room (M6 step 6)", () => {
+  it("takes the room's app down at the walk's question once release is off for the deployment, and only once", async () => {
+    const r = await room("org_rt_deployment");
+    // On, as a deployment that serves apps has it: the question changes nothing.
+    expect((await switchedOn(() => ask(r))).known).toBe(true);
+    expect(await serving(r)).toEqual(UP(r));
+    expect(await unpublishes(r)).toEqual([]);
+    // Off: the room reads it at the question and unpublishes, ending its queued release in the same request.
+    expect((await ask(r)).known).toBe(true);
+    await expectDown(r, "release_off_for_deployment", "switched off");
+    // Asked again while off: nothing is up, so nothing more is recorded.
+    await ask(r);
+    await expectDown(r, "release_off_for_deployment", "asked again");
+    // Switched back on: nothing comes back.
+    await switchedOn(() => ask(r));
+    await expectDown(r, "release_off_for_deployment", "switched back on");
+  });
+
+  it("records nothing for a room with no release configuration while release is off", async () => {
+    const r = await room("org_rt_deployment_bare", { configured: false });
+    await ask(r);
+    expect(await unpublishes(r)).toEqual([]);
+    expect(await trail(r)).toEqual({ events: [], audit: [] });
   });
 });

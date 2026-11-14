@@ -16,9 +16,9 @@
 //!   from before any provider was configured.
 //!
 //! They run in the `Moderation` object, the one object for the deployment, which keeps where each pass got to and
-//! what it found for operators. The Worker's scheduled handler only calls it, and only while release is switched on.
-//! **No environment has a cron entry,** so on every deployment nothing calls the handler: the entry is owed with the
-//! provider's configuration. **With no provider, a pass reads nothing, and says so.**
+//! what it found for operators. The Worker's scheduled handler only calls it, on the two schedules `wrangler.jsonc`
+//! gives every environment, and only while a content provider is configured, whatever `RELEASES` says (M6 step 6).
+//! **With no provider, the handler calls nothing, and a pass asked directly reads nothing, and says so.**
 //!
 //! One pass is bounded: a page of keys or a slice of scripts, a slice of rooms, and a time after which it starts
 //! nothing new. Where it stopped is kept, and the next pass goes on from there.
@@ -36,7 +36,7 @@ use worker::*;
 
 type R<T> = std::result::Result<T, ApiError>;
 
-/// The schedules the handler answers to. No environment has either: see the module's note.
+/// The schedules the handler answers to, the two in `wrangler.jsonc`: see the module's note.
 pub(crate) const ENTRIES_CRON: &str = "*/5 * * * *";
 pub(crate) const SCRIPTS_CRON: &str = "0 * * * *";
 
@@ -789,11 +789,14 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
     Ok(summary("scripts", code, ids.len(), &counts, woken))
 }
 
-/// The Worker's scheduled handler. **No environment has a cron entry,** so nothing calls it on any deployment, and
-/// tests call it directly. It does nothing while release is switched off, and nothing for a schedule it doesn't know.
+/// The Worker's scheduled handler, on the two schedules in `wrangler.jsonc` (M6 step 6). **It runs whenever a
+/// content provider is configured, whatever `RELEASES` says,** so a deployment that switches release off still has
+/// its rooms woken, and each takes its app down at the walk's question (ADR 0010's deployment trigger). **With no
+/// provider configured, which is every deployment today, it returns before it calls any Durable Object:** the cron's
+/// own invocation is all it costs. It does nothing for a schedule it doesn't know.
 #[event(scheduled)]
 pub async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
-    if !crate::releases::switched_on(&env).await {
+    if Provider::from_env(&env).is_none() {
         return;
     }
     let path = match event.cron().as_str() {

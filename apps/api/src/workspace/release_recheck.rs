@@ -667,6 +667,9 @@ impl Workspace {
             Stop::Unreadable => None,
         };
         let deployment_on = Some(crate::releases::switched_on(&self.env).await);
+        // Off, and anything the room has up comes down here, before anything is decided (M6 step 6).
+        self.apply_deployment_switch(deployment_on == Some(true))
+            .await;
         let approver = self.still_holds(people.approver.as_deref(), true).await?;
         let requester = self.still_holds(Some(&people.requester), false).await?;
         let giver = self.still_holds(people.giver.as_deref(), true).await?;

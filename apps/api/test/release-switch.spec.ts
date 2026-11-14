@@ -146,7 +146,8 @@ const trail = (r: Room) => inRoom(r.room, (sql) => ({
   events: sql.exec("SELECT type, actor_id, reason FROM event WHERE type = 'app.unpublished' ORDER BY seq").toArray(),
   audit: sql.exec("SELECT actor_id, action, target_id, prior_json, new_json FROM audit_event WHERE action = 'app.unpublished' ORDER BY seq").toArray(),
 }));
-const check = (r: Room, body: object = { kind: "wake" }) => stub(r.room).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify(body) }).then((x: Response) => x.json() as Promise<any>);
+/** The reconcile's question, asked with release switched on, as a deployment that serves apps has it (M6 step 6). */
+const check = (r: Room, body: object = { kind: "wake" }) => switchedOn(() => stub(r.room).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify(body) }).then((x: Response) => x.json() as Promise<any>));
 const command = (path: string) => (r: Room) =>
   switchedOn(() => stub(r.room).fetch(`https://do/internal/${path}`, { method: "POST", body: JSON.stringify({ release_id: REL }) }).then(async (x: Response) => ({ status: x.status, body: (await x.json()) as any })));
 const recheck = command("release-recheck");

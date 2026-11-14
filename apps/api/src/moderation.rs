@@ -677,11 +677,15 @@ impl Moderation {
             // setting this object's own alarm if the stop's key is owed, which is what corrects a wake that was lost
             // and writes a key that was owed from before any provider was configured.
             (Method::Post, reconcile::ENTRIES_PATH) => {
+                #[cfg(feature = "failpoints")]
+                test_count_reconcile_call(&sql)?;
                 let done = reconcile::entries(&sql, &self.env).await?;
                 self.arm(&sql).await?;
                 Ok(done)
             }
             (Method::Post, reconcile::SCRIPTS_PATH) => {
+                #[cfg(feature = "failpoints")]
+                test_count_reconcile_call(&sql)?;
                 let done = reconcile::scripts(&sql, &self.env).await?;
                 self.arm(&sql).await?;
                 Ok(done)
@@ -1128,4 +1132,24 @@ pub async fn recheck_repository(
         .await;
     }
     Ok(response)
+}
+
+/// Test builds only: each call of a reconcile pass counted in `test_reconcile_calls`, if a test made it, so a test can
+/// show the scheduled handler calls this object only when a content provider is configured.
+#[cfg(feature = "failpoints")]
+fn test_count_reconcile_call(sql: &SqlStorage) -> R<()> {
+    if !rows(
+        sql,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_reconcile_calls'",
+        vec![],
+    )?
+    .is_empty()
+    {
+        exec(
+            sql,
+            "INSERT INTO test_reconcile_calls (x) VALUES (1)",
+            vec![],
+        )?;
+    }
+    Ok(())
 }

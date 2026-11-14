@@ -14,7 +14,8 @@
 //!   `release_not_switched`. When the room first sees the switch, it keeps the time: the marker's wait runs from it.
 //! - **The fetch** ([`Workspace::marker_step`]), as a step of the driver with a lease of its own, handed off from the
 //!   alarm so the alarm never waits on it: the lease is asked first, then one `GET` of
-//!   `/.well-known/podster-release.json` on the default host, with no credential. Nothing more is asked of anyone.
+//!   `/.well-known/podster-release.json` on the default host, with no credential. Besides the host, only the stop for
+//!   the content domain is asked, at its home, before the fetch.
 //! - **The record** ([`record`]), in the room's transaction: the lease, the release epoch and the hold's generation are
 //!   each compared with the lease's, and the flight must still be this release's; if any moved, nothing is kept.
 //!   Otherwise: **served** when this release's own marker came back (core's `confirm_served`: hosts opened meanwhile
@@ -23,6 +24,15 @@
 //!   fails, `release_marker_missing`, and core's `set_back` puts each host back only where the epoch and the host's
 //!   own version are still exactly what the commit wrote, so a failed check never brings back what an unpublish took
 //!   down. Either way this release's script is queued for deletion by the room's `fail`.
+//! - **A stop during the wait** ([`stop_cause`]): a hold because nobody may release, or the stop for the whole content
+//!   domain, ends the release at once with that stop's own cause, `no_releaser` or `release_stopped`, never
+//!   `release_marker_missing` or `release_not_switched` (the architect's ruling on the PR's question 9, 2026-11-14). A
+//!   hold is read in the lease's transaction, so **no fetch is leased while the app is held**: a marker read then could
+//!   be a stale entry's, and would record a held app's release served. The stop is read from its home before the lease
+//!   and again before the fetch. An unpublish, a suspension among them, closes the flight itself, and the release ends
+//!   `unpublished` under that unpublish's cause.
+//! - **A marker that comes back after its release was set back** (its step's lease ran out, and a later pass set the
+//!   release back) records nothing served. Its answer and log show the set-back it found, with its code.
 //! - **A flight's end wakes** every release waiting `release_in_flight`.
 //!
 //! **Not shown, and not decided here:** whether 30 seconds is long enough at the real host. ADR 0010 calls it
@@ -33,7 +43,9 @@ use super::release_commit::{end_stale, fail, queue_script, record as record_chan
 use super::release_driver::{epoch_and_hold, room_id, set_job, StepLease, MOVED};
 use super::release_recheck::{release_now, release_row, state_of};
 use super::*;
-use podster_core::release::{confirm_served, next_state, ReleaseEvent, ReleaseState};
+use podster_core::release::{
+    confirm_served, next_state, RecheckFailure, ReleaseEvent, ReleaseState, UnpublishTrigger,
+};
 use podster_core::release_driver::{step_still_current, DRIVE_IDLE_MS, IN_FLIGHT_WAITING};
 use podster_core::release_marker::{
     marker_outcome, marker_plan, marker_seen, marker_switched, MarkerOutcome, MarkerPlan,
@@ -114,6 +126,16 @@ fn set_back(sql: &SqlStorage, release_id: &str, code: &str, now: i64) -> R<()> {
     Ok(())
 }
 
+/// Why the flight must end now rather than wait or fetch, if a stop holds: a hold on the app because nobody may
+/// release (`no_releaser`), read here, or the stop for the whole content domain (`release_stopped`, as the recheck
+/// names it), which the caller read from its home before the transaction (`stopped`). `None` if neither holds.
+fn stop_cause(sql: &SqlStorage, stopped: bool) -> R<Option<&'static str>> {
+    if releasers::hold_state(sql)?.0 {
+        return Ok(Some(UnpublishTrigger::NoReleaserLeft.code()));
+    }
+    Ok(stopped.then(|| RecheckFailure::DomainStopped.code()))
+}
+
 /// The release is recorded served, in the caller's transaction, if core's `confirm_served` takes it: the flight is
 /// still exactly this release's, under its epoch, with the default host still at what its commit wrote. `false` and
 /// nothing written otherwise.
@@ -183,9 +205,15 @@ fn serve(sql: &SqlStorage, release_id: &str, now: i64) -> R<bool> {
 pub(super) type Leased = std::result::Result<(String, u32), Value>;
 
 /// The marker's lease, in the room's transaction: see the module's note. `idle` is why the driver may do nothing now,
-/// read before the transaction. `Ok` names the release and the attempt leased for a fetch; `Err` is the answer when
-/// nothing is to be fetched now.
-pub(super) fn lease(sql: &SqlStorage, idle: Option<&'static str>, now: i64) -> R<Leased> {
+/// and `stopped` whether the content domain's stop is set, both read before the transaction. `Ok` names the release
+/// and the attempt leased for a fetch; `Err` is the answer when nothing is to be fetched now. **Nothing is leased while
+/// the app is held or the domain stopped:** the release ends with that stop's cause instead.
+pub(super) fn lease(
+    sql: &SqlStorage,
+    idle: Option<&'static str>,
+    stopped: bool,
+    now: i64,
+) -> R<Leased> {
     end_stale(sql, now)?;
     let Some(flight) = flight(sql)? else {
         return Ok(Err(json!({ "release_id": null, "outcome": "none" })));
@@ -202,6 +230,10 @@ pub(super) fn lease(sql: &SqlStorage, idle: Option<&'static str>, now: i64) -> R
         let next = now.saturating_add(DRIVE_IDLE_MS);
         set_job(sql, &flight.id, Some(next), Some(code), now)?;
         return Ok(answer("idle", Some(code), Some(next)));
+    }
+    if let Some(code) = stop_cause(sql, stopped)? {
+        set_back(sql, &flight.id, code, now)?;
+        return Ok(answer("set_back", Some(code), None));
     }
     // A release that went live before its confirm kept the time is taken as live from now: its wait only starts later.
     let live_at = match flight.live_at {
@@ -291,9 +323,40 @@ fn target(sql: &SqlStorage, env: &Env, release_id: &str) -> R<Option<(String, St
         .map(|host| (host, commit)))
 }
 
+/// The answer for a step whose lease is no longer the job's: nothing is kept of it. If the release was set back
+/// meanwhile, the answer and the log say so, with the set-back's code, and whether this late fetch saw the marker: a
+/// marker that comes back after its release was set back is never recorded served.
+fn stale(sql: &SqlStorage, release_id: &str, seen: bool) -> R<Value> {
+    let release = release_row(sql, release_id)?;
+    let failed = release
+        .as_ref()
+        .is_some_and(|row| row["state"].as_str() == Some(ReleaseState::Failed.name()));
+    if !failed {
+        return Ok(json!({ "release_id": release_id, "outcome": "stale" }));
+    }
+    let code = release.as_ref().and_then(|row| text(&row["failure_code"]));
+    console_log!(
+        "release: a marker step ended after its release was set back: room={} release={} code={} seen={}",
+        room_id(sql),
+        release_id,
+        code.as_deref().unwrap_or("none"),
+        seen
+    );
+    Ok(
+        json!({ "release_id": release_id, "outcome": "stale", "set_back": true, "code": code, "seen": seen, "state": ReleaseState::Failed.name(), "step": "marker" }),
+    )
+}
+
 /// The record of a marker step, in the room's transaction: see the module's note. `seen` is whether this release's
-/// own marker came back.
-fn record(sql: &SqlStorage, release_id: &str, attempt: u32, seen: bool, now: i64) -> R<Value> {
+/// own marker came back; `stop` is the stop's cause when the step found the content domain stopped and fetched nothing.
+fn record(
+    sql: &SqlStorage,
+    release_id: &str,
+    attempt: u32,
+    seen: bool,
+    stop: Option<&'static str>,
+    now: i64,
+) -> R<Value> {
     end_stale(sql, now)?;
     let job = rows(
         sql,
@@ -301,7 +364,7 @@ fn record(sql: &SqlStorage, release_id: &str, attempt: u32, seen: bool, now: i64
         vec![release_id.into()],
     )?;
     let Some(job) = job.first() else {
-        return Ok(json!({ "release_id": release_id, "outcome": "stale" }));
+        return stale(sql, release_id, seen);
     };
     let attempts = u32::try_from(int(&job["attempts"]).max(0)).unwrap_or(u32::MAX);
     let (epoch, hold) = epoch_and_hold(sql)?;
@@ -314,7 +377,7 @@ fn record(sql: &SqlStorage, release_id: &str, attempt: u32, seen: bool, now: i64
         hold,
     ) {
         if attempt != attempts {
-            return Ok(json!({ "release_id": release_id, "outcome": "stale" }));
+            return stale(sql, release_id, seen);
         }
         // The room moved under the fetch: what came back is about a room that no longer is. Looked at afresh.
         set_job(sql, release_id, Some(now), Some(MOVED), now)?;
@@ -325,6 +388,9 @@ fn record(sql: &SqlStorage, release_id: &str, attempt: u32, seen: bool, now: i64
         // It is no longer the live release in flight: unpublished, or ended some other way. Nothing is the job's.
         set_job(sql, release_id, None, None, now)?;
         ("done", None, None)
+    } else if let Some(code) = stop_cause(sql, stop.is_some())? {
+        set_back(sql, release_id, code, now)?;
+        ("set_back", Some(code), None)
     } else {
         let switched_at = job["switched_at"].as_i64().unwrap_or(now);
         let served = seen && serve(sql, release_id, now)?;
@@ -368,8 +434,14 @@ impl Workspace {
         lease: &StepLease,
     ) -> R<Value> {
         let sql = self.state.storage().sql();
+        // The stop for the whole content domain, read from its home before anything is fetched: while it is set,
+        // nothing is fetched, and the record ends the release with its cause.
+        let stopped = matches!(
+            crate::content_stop::read_from(&self.env).await,
+            crate::content_stop::Stop::Stopped
+        );
         let seen = match target(&sql, &self.env, release_id)? {
-            Some((host, commit)) if lease.holds(&sql) => {
+            Some((host, commit)) if !stopped && lease.holds(&sql) => {
                 let fetched = crate::content_provider::fetch_marker(&host).await;
                 marker_seen(
                     fetched
@@ -382,7 +454,8 @@ impl Workspace {
             _ => false,
         };
         let id = release_id.to_owned();
-        self.release_transaction(move |sql| record(sql, &id, attempt, seen, release_now(sql)))
+        let stop = stopped.then(|| RecheckFailure::DomainStopped.code());
+        self.release_transaction(move |sql| record(sql, &id, attempt, seen, stop, release_now(sql)))
             .await
     }
 }

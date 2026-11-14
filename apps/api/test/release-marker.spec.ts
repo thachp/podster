@@ -2,7 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { createHash } from "node:crypto";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { alarmQuiet } from "./alarm";
+import { alarmPass, alarmQuiet, nextAlarm } from "./alarm";
 import { fakeIds } from "./fake-ids";
 
 // M6 step 5, the release job's marker (ADR 0010's "The release job", step 6): once the room commits a release live, its
@@ -32,7 +32,7 @@ async function assertion(who: Who) {
 let counter = 0;
 async function api(who: Who, method: string, path: string, body?: unknown) {
   const headers: Record<string, string> = { "content-type": "application/json", "x-podster-assertion": await assertion(who), "idempotency-key": `rm-key-${++counter}` };
-  const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: JSON.stringify(body ?? {}) });
+  const res = await SELF.fetch(`https://api.internal${path}`, { method, headers, body: method === "GET" ? undefined : JSON.stringify(body ?? {}) });
   const text = await res.text();
   return { status: res.status, body: text ? JSON.parse(text) : null };
 }
@@ -154,6 +154,18 @@ const events = (id: string) => inRoom(id, (sql) => sql.exec("SELECT type, subjec
 const queued = (id: string) => inRoom(id, (sql) => sql.exec("SELECT script_name FROM script_delete ORDER BY script_name").toArray().map((row: any) => row.script_name));
 /** What the room's applier records once it has written the default host's entry as the room now wants it. */
 const switchHost = (id: string) => inRoom(id, (sql) => void sql.exec("UPDATE serve_apply SET applied_version = (SELECT version FROM serve_state WHERE kind = 'default'), applied_script = (SELECT script_name FROM serve_state WHERE kind = 'default'), applied_at = 1"));
+
+const version = async (id: string) => (await api(OWNER, "GET", `/v1/workspaces/${id}`)).body.policy_version as number;
+const internal = (id: string, path: string, body: object) => stub(id).fetch(`https://do/internal/${path}`, { method: "POST", body: JSON.stringify(body) }).then((x: Response) => x.status);
+const HOLD = 7 * 24 * 3_600_000;
+const servedEvents = async (id: string) => (await events(id)).filter(([type]) => type === "release.served");
+const unpublished = (id: string) => inRoom(id, (sql) => sql.exec("SELECT cause FROM unpublish ORDER BY seq").toArray().map((row: any) => row.cause));
+/** The stop for the whole content domain set while `run` runs, at its home, the Moderation object, and cleared after. */
+async function withStop<T>(run: () => Promise<T>): Promise<T> {
+  await moderation().fetch("https://do/content-stop");
+  await inModeration((s) => void s.exec("INSERT INTO content_stop (singleton, stopped, reason, at, version, updated_at) VALUES (1, 1, 'illegal', 1, 1, 1) ON CONFLICT (singleton) DO UPDATE SET stopped = 1, reason = 'illegal', at = 1, version = version + 1"));
+  try { return await run(); } finally { await inModeration((s) => void s.exec("UPDATE content_stop SET stopped = 0, reason = NULL, at = NULL, version = version + 1")); }
+}
 
 /** A room whose `REL` the driver has taken through its upload and its commit, at `T`: live, its flight open. */
 async function live(extra: string[] = []): Promise<Room> {
@@ -386,5 +398,198 @@ describe("a step's lease, at the points #373's review named", () => {
     const out = await pass(r.room);
     expect([out.outcome, out.state]).toEqual(["done", "live"]);
     expect(await inRoom(r.room, (sql) => sql.exec("SELECT COUNT(*) AS n FROM test_release_reads_seen").one().n)).toBe(1);
+  });
+});
+
+describe("a stop during the marker's wait (the architect's ruling on question 9, 2026-11-14)", () => {
+  /**
+   * A live release, switched, whose first fetch found the release before's marker: it waits to fetch again at
+   * `T + POLL`. From here the host serves the release's own marker, so only the stop keeps it from being served.
+   */
+  async function waiting() {
+    const r = await live();
+    await serve(r.host, { body: marker(PREV) });
+    await switchHost(r.room);
+    expect((await pass(r.room)).outcome).toBe("retry");
+    await serve(r.host, { script: r.script });
+    await at(r.room, T + POLL);
+    return r;
+  }
+
+  const stops: [string, string, (r: Room) => Promise<unknown>][] = [
+    // Written as the room's own hold writes it (`releasers::hold`): the hold, its generation moved, and the applier's
+    // record reset so every host is due again. A real departure isn't used here: its hold is timed by the Worker's clock,
+    // and this room's alarm judges the hold's end by the release commands' clock, `T`, which would end it at once.
+    ["a hold because nobody may release", "no_releaser", (r) => inRoom(r.room, (sql) => {
+      sql.exec("UPDATE release_hold SET cause = 'no_releaser', held_at = ?, until = ?, generation = generation + 1", T, T + HOLD);
+      sql.exec("UPDATE serve_apply SET applied_version = NULL, applied_at = NULL, applied_script = NULL, refused_version = NULL, attempts = 0, attempt_version = NULL, next_attempt_at = NULL");
+    })],
+    ["the stop for the whole content domain", "release_stopped", async () => {}],
+  ];
+  for (const [what, code, fire] of stops) {
+    it(`ends the release with ${what}'s own cause, ${code}, fetching nothing more and serving nothing`, async () => {
+      const r = await waiting();
+      await fire(r);
+      const back = code === "release_stopped" ? await withStop(() => pass(r.room)) : await pass(r.room);
+      expect([back.release_id, back.outcome, back.code]).toEqual([REL, "set_back", code]);
+      expect((await fetches(r.host)).fetches).toBe(1);
+      expect(await release(r.room)).toEqual({ state: "failed", failure_code: code, served_at: null });
+      expect(await servedEvents(r.room)).toEqual([]);
+      expect((await events(r.room)).at(-1)).toEqual(["release.failed", REL, code]);
+      expect(await config(r.room)).toMatchObject({ in_flight_release: null, kept_previous: null });
+      expect(await defaultHost(r.room)).toMatchObject({ script_name: r.previous, flight_version: null });
+      expect(await queued(r.room)).toEqual([r.script]);
+      expect((await pass(r.room)).due).toBeNull();
+    });
+  }
+
+  it("leases no fetch once a hold has started, even on applier rows the hold would have reset", async () => {
+    // The default host's entry is recorded as switched, and the hold is written alone, leaving that record standing:
+    // a fetch now could read an entry the hold is about to take down, and would record a held app's release served.
+    const r = await live();
+    await serve(r.host, { script: r.script });
+    await switchHost(r.room);
+    await inRoom(r.room, (sql) => void sql.exec("UPDATE release_hold SET cause = 'no_releaser', held_at = ?, until = ?, generation = generation + 1", T, T + HOLD));
+    const back = await pass(r.room);
+    expect([back.outcome, back.code]).toEqual(["set_back", "no_releaser"]);
+    expect((await fetches(r.host)).fetches).toBe(0);
+    expect(await release(r.room)).toEqual({ state: "failed", failure_code: "no_releaser", served_at: null });
+    expect(await servedEvents(r.room)).toEqual([]);
+  });
+
+  const unpublishes: [string, string, (r: Room) => Promise<unknown>][] = [
+    ["the room archived", "workspace_archived", async (r) => expect((await api(OWNER, "POST", `/v1/workspaces/${r.room}/archive`, { policy_version: await version(r.room) })).status).toBe(200)],
+    ["the room made private", "release_needs_public_room", async (r) => expect((await api(OWNER, "PUT", `/v1/workspaces/${r.room}/visibility`, { visibility: "private" })).status).toBe(200)],
+    ["an operator's suspension of the app", "app_suspended", async (r) => expect(await internal(r.room, "app-suspension", { label: r.label, suspended: true, reason: "abuse" })).toBe(200)],
+  ];
+  for (const [what, cause, fire] of unpublishes) {
+    it(`ends the flight unpublished under its own cause when ${what}, fetching nothing more and serving nothing`, async () => {
+      const r = await waiting();
+      await fire(r);
+      const after = await pass(r.room);
+      expect([after.outcome, after.due]).toEqual(["not_due", null]);
+      expect((await fetches(r.host)).fetches).toBe(1);
+      expect(await release(r.room)).toEqual({ state: "unpublished", failure_code: null, served_at: null });
+      expect(await unpublished(r.room)).toEqual([cause]);
+      expect(await servedEvents(r.room)).toEqual([]);
+      expect(await config(r.room)).toMatchObject({ in_flight_release: null, kept_previous: null });
+      expect(await defaultHost(r.room)).toMatchObject({ script_name: null, flight_version: null });
+    });
+  }
+
+  it("records nothing served for a marker that comes back after its release was set back, and its answer shows the set-back", async () => {
+    // The fetch is held at the host past its own lease and the marker's wait: a later pass sets the release back.
+    const r = await live();
+    await serve(r.host, { script: r.script });
+    await switchHost(r.room);
+    const gate = await hostGate(r.host);
+    const running = pass(r.room);
+    try {
+      await gate.arrived();
+      await at(r.room, T + WAIT);
+      const back = await pass(r.room);
+      expect([back.outcome, back.code]).toEqual(["set_back", "release_marker_missing"]);
+    } finally {
+      await gate.release();
+    }
+    // The late fetch saw the release's own marker, and keeps nothing of it: the set-back stands, and its answer says so.
+    const late = await running;
+    expect(late).toMatchObject({ release_id: REL, outcome: "stale", set_back: true, code: "release_marker_missing", seen: true, state: "failed" });
+    expect(await release(r.room)).toEqual({ state: "failed", failure_code: "release_marker_missing", served_at: null });
+    expect(await servedEvents(r.room)).toEqual([]);
+    expect((await events(r.room)).at(-1)).toEqual(["release.failed", REL, "release_marker_missing"]);
+    expect(await defaultHost(r.room)).toMatchObject({ script_name: r.previous, flight_version: null });
+    expect((await fetches(r.host)).expiredGates).toBe(0);
+  });
+});
+
+describe("the room's stored alarm for the marker", () => {
+  /** One run of the room's own alarm, the driver on from it, release allowed; then the alarm it set. */
+  async function armedBy(id: string) {
+    await inRoom(id, (sql) => void sql.exec("UPDATE test_release_driver SET from_alarm = 1"));
+    try {
+      const before = Date.now();
+      await switchedOn(() => alarmPass(stub(id)));
+      const armed = await nextAlarm(stub(id));
+      return { before, after: Date.now(), armed };
+    } finally {
+      await inRoom(id, (sql) => void sql.exec("UPDATE test_release_driver SET from_alarm = 0"));
+      await runInDurableObject(stub(id), (_: any, state: any) => state.storage.deleteAlarm());
+    }
+  }
+
+  it("is set for the switch's next look while the flight waits for its switch", async () => {
+    const r = await live();
+    const { before, after, armed } = await armedBy(r.room);
+    expect(await job(r.room)).toMatchObject({ next_attempt_at: T + POLL, last_code: "release_awaiting_switch" });
+    expect(armed).not.toBeNull();
+    expect(armed!).toBeGreaterThanOrEqual(before + POLL);
+    expect(armed!).toBeLessThanOrEqual(after + POLL);
+  });
+
+  it("is set for the in-flight recheck while a later release's commit waits for the flight", async () => {
+    const r = await live();
+    await inRoom(r.room, (sql) => {
+      sql.exec(`INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, task_id, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
+        SELECT ?, commit_sha, 'uploading', label, 3, 2, task_id, ?, ?, requested_by, 2, approved_by, 2, ?, ? FROM release WHERE id = ?`, REL2, `${r.label}.${REL2}`, REL2, T, T, REL);
+      sql.exec("INSERT INTO release_upload (release_id, script_name, files, bytes, uploaded_at) VALUES (?, ?, 2, 100, ?)", REL2, `${r.label}.${REL2}`, T);
+      // The flight's own next look is far off, so only the waiting commit's recheck can set this alarm.
+      sql.exec("UPDATE release_job SET next_attempt_at = ? WHERE release_id = ?", T + SWITCH_WAIT - 1, REL);
+    });
+    const { before, after, armed } = await armedBy(r.room);
+    expect(await job(r.room, REL2)).toMatchObject({ next_attempt_at: T + 30_000, last_code: "release_in_flight" });
+    expect(armed).not.toBeNull();
+    expect(armed!).toBeGreaterThanOrEqual(before + 30_000);
+    expect(armed!).toBeLessThanOrEqual(after + 30_000);
+  });
+});
+
+describe("room schema step 45, on a room with jobs on record", () => {
+  it("keeps every job's row whole as it rebuilds release_job, and then admits the marker's step", async () => {
+    const r = await room();
+    const COLUMNS = "release_id, attempts, next_attempt_at, leased_step, leased_epoch, leased_hold, last_code, updated_at, stalls";
+    const newest = await inRoom(r.room, (sql) => {
+      // The room as step 44 left it: step 43's release_job, with step 44's stalls.
+      sql.exec("DROP TABLE release_job");
+      sql.exec(`CREATE TABLE release_job (release_id TEXT PRIMARY KEY REFERENCES release (id),
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (typeof(attempts) = 'integer' AND attempts >= 0),
+        next_attempt_at INTEGER CHECK (next_attempt_at IS NULL OR typeof(next_attempt_at) = 'integer'),
+        leased_step TEXT CHECK (leased_step IS NULL OR leased_step IN ('start', 'upload', 'commit')),
+        leased_epoch INTEGER CHECK (leased_epoch IS NULL OR typeof(leased_epoch) = 'integer'),
+        leased_hold INTEGER CHECK (leased_hold IS NULL OR typeof(leased_hold) = 'integer'),
+        last_code TEXT CHECK (last_code IS NULL OR length(last_code) BETWEEN 1 AND 64), updated_at INTEGER NOT NULL,
+        CHECK ((leased_step IS NULL) = (leased_epoch IS NULL)), CHECK ((leased_step IS NULL) = (leased_hold IS NULL))) WITHOUT ROWID`);
+      sql.exec("ALTER TABLE release_job ADD COLUMN stalls INTEGER NOT NULL DEFAULT 0 CHECK (typeof(stalls) = 'integer' AND stalls >= 0)");
+      // One job with every field set, leased for its commit; one with every optional field empty.
+      sql.exec(`INSERT INTO release_job (${COLUMNS}) VALUES (?, 7, ?, 'commit', 4, 9, 'release_driver_moved', ?, 2)`, REL, T + 1, T);
+      sql.exec("INSERT INTO release_job (release_id, updated_at) VALUES (?, ?)", PREV, T - 1);
+      const newest = sql.exec("SELECT version FROM schema_version").one().version as number;
+      sql.exec("UPDATE schema_version SET version = version - 1");
+      return newest;
+    });
+    const before = await inRoom(r.room, (sql) => sql.exec(`SELECT ${COLUMNS} FROM release_job ORDER BY release_id`).toArray());
+    expect(before).toEqual([
+      { release_id: PREV, attempts: 0, next_attempt_at: null, leased_step: null, leased_epoch: null, leased_hold: null, last_code: null, updated_at: T - 1, stalls: 0 },
+      { release_id: REL, attempts: 7, next_attempt_at: T + 1, leased_step: "commit", leased_epoch: 4, leased_hold: 9, last_code: "release_driver_moved", updated_at: T, stalls: 2 },
+    ].sort((a, b) => a.release_id.localeCompare(b.release_id)));
+    // A request migrates the room.
+    expect((await api(OWNER, "GET", `/v1/workspaces/${r.room}`)).status).toBe(200);
+    const after = await inRoom(r.room, (sql) => ({
+      version: sql.exec("SELECT version FROM schema_version").one().version,
+      rows: sql.exec(`SELECT ${COLUMNS} FROM release_job ORDER BY release_id`).toArray(),
+      times: sql.exec("SELECT live_at, switched_at FROM release_job ORDER BY release_id").toArray(),
+      leftover: sql.exec("SELECT name FROM sqlite_master WHERE name = 'release_job_next'").toArray(),
+      foreignKeys: sql.exec("PRAGMA foreign_key_check").toArray(),
+    }));
+    expect(after).toEqual({
+      version: newest,
+      rows: before,
+      times: [{ live_at: null, switched_at: null }, { live_at: null, switched_at: null }],
+      leftover: [],
+      foreignKeys: [],
+    });
+    // The marker's step is admitted now, as step 43's check never did.
+    await inRoom(r.room, (sql) => void sql.exec("UPDATE release_job SET leased_step = 'marker' WHERE release_id = ?", REL));
+    expect((await job(r.room)).leased_step).toBe("marker");
   });
 });

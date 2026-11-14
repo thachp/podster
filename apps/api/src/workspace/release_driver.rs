@@ -614,12 +614,23 @@ impl Workspace {
             None
         };
         if flight_due {
+            // The stop for the whole content domain, read from its home before the transaction: set, it ends the
+            // flight with its own cause (`release_marker::lease`). An answer that can't be read decides nothing.
+            let stopped = idle.is_none()
+                && matches!(
+                    crate::content_stop::read_from(&self.env).await,
+                    crate::content_stop::Stop::Stopped
+                );
             let leased: Rc<RefCell<Option<release_marker::Leased>>> = Rc::new(RefCell::new(None));
             let slot = leased.clone();
             let store = sql.clone();
             transaction_sync(&self.state, move || {
-                *slot.borrow_mut() =
-                    Some(release_marker::lease(&store, idle, release_now(&store))?);
+                *slot.borrow_mut() = Some(release_marker::lease(
+                    &store,
+                    idle,
+                    stopped,
+                    release_now(&store),
+                )?);
                 Ok(())
             })?;
             let leased = leased.borrow_mut().take();

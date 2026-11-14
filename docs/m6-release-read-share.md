@@ -1,9 +1,14 @@
 # M6: a cross-room share of the release read budget
 
-**Status: design only, its four questions ruled on 2026-11-14.** The design stays **Proposed** until it is built. It answers one item on
+**Status: built on 2026-11-14, its four questions ruled on the same day,** behind `RELEASES` with
+`RELEASE_PATH_COMPLETE` still false. Its figures stay **Proposed.** It answers one item on
 [the gate on the release path](m6-plan.md#the-gate-on-the-release-path): "a cross-room share of the read budget"
-([ruling 3 on the driver](m6-plan.md#what-the-third-pr-built-the-driver)). No code changes with this document.
-Line numbers are on `main` at `6c2d12b2`.
+([ruling 3 on the driver](m6-plan.md#what-the-third-pr-built-the-driver)). Built: the share in core
+(`MAX_OWNER_READS_PER_HOUR`, `read_share_wait`, `waits_uncounted`), the `release_read_owner` table and the owner-aware
+reservation in `Moderation`, the read-only question at `/release-reads/share`, and the driver's wait as `queued` under
+`release_reads_share`. **Not built:** applying `waits_uncounted` to `release_in_flight`, which is the marker job's; fair
+queueing (ruling 4); and the contention measurement owed before production (ruling 2). Nothing is shown on staging.
+The design below is as it was written; line numbers are on `main` at `6c2d12b2`.
 
 ## The architect's rulings, 2026-11-14
 

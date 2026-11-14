@@ -13,8 +13,9 @@ use crate::store::{exec, int, rows, transaction_sync};
 use crate::{content_stop, forward, principal, reconcile, valid_id, Caller};
 use podster_core::hostnames::reported_host;
 use podster_core::release::{
-    is_release_id, read_budget_wait, window_start, MAX_RELEASE_READS_PER_HOUR, READ_WINDOW_MS,
+    is_release_id, window_start, MAX_RELEASE_READS_PER_HOUR, READ_WINDOW_MS,
 };
+use podster_core::release_driver::{is_read_owner_key, read_share_wait};
 use podster_policy::moderation::{
     check_report, is_operator, parse_operators, Reason, REPORT_WINDOW_MS,
 };
@@ -49,13 +50,21 @@ CREATE INDEX IF NOT EXISTS app_report_by_reporter ON app_report (reporter, creat
 fn release_reads_schema() -> String {
     format!(
         "CREATE TABLE IF NOT EXISTS release_reads (release_id TEXT PRIMARY KEY CHECK (length(release_id) = 36),
-  reads INTEGER NOT NULL CHECK (reads BETWEEN 1 AND {MAX_RELEASE_READS_PER_HOUR}), reserved_at INTEGER NOT NULL);"
+  reads INTEGER NOT NULL CHECK (reads BETWEEN 1 AND {MAX_RELEASE_READS_PER_HOUR}), reserved_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS release_read_owner (release_id TEXT PRIMARY KEY CHECK (length(release_id) = 36),
+  owner_key TEXT NOT NULL CHECK (length(owner_key) BETWEEN 5 AND 140));
+CREATE INDEX IF NOT EXISTS release_read_owner_by_owner ON release_read_owner (owner_key);"
     )
 }
 
 /// The deployment's release-read budget (M6 step 9, ADR 0010's budgets): where a release reserves the GitHub reads it
 /// is about to make. Internal: no route reaches it.
 pub(crate) const RELEASE_READS_PATH: &str = "/release-reads";
+
+/// The read share's question, asked by a room's driver while its release is queued: whether a full attempt would fit
+/// its owner's share and the deployment's hour now. It writes nothing and authorizes nothing: the reservation at
+/// [`RELEASE_READS_PATH`] decides. Internal: no route reaches it.
+pub(crate) const RELEASE_READS_SHARE_PATH: &str = "/release-reads/share";
 
 fn now_ms() -> i64 {
     Date::now().as_millis() as i64
@@ -743,6 +752,11 @@ impl Moderation {
                 let now = clock(&sql);
                 self.in_transaction(move || reserve_reads(&sql, &body, now))
             }
+            // The read share's question (M6, `docs/m6-release-read-share.md`): read-only, and only an optimisation.
+            (Method::Post, RELEASE_READS_SHARE_PATH) => {
+                let body: Value = req.json().await?;
+                share_question(&sql, &body, clock(&sql))
+            }
             (Method::Post, "/report-lookup") => {
                 let body: Value = req.json().await?;
                 Ok(json!({ "report": earlier_report(&sql, &body)? }))
@@ -952,9 +966,9 @@ fn list(sql: &SqlStorage, before: Option<i64>, apps: bool) -> R<Value> {
 }
 
 /// A release reserves the GitHub reads it is about to make, against the deployment's budget of 3,000 in a rolling hour
-/// (M6 step 9, ADR 0010's budgets). `{ release_id, reads }` answers `{ fits: true, reads, reserved_at }`, or
-/// `{ fits: false, retry_at }`, where `retry_at` is null when `reads` alone is past the budget. Podster counts its own
-/// reads: GitHub's header is a check on this count, not the count.
+/// (M6 step 9, ADR 0010's budgets). `{ release_id, reads, owner_key }` answers `{ fits: true, reads, reserved_at }`,
+/// or `{ fits: false, retry_at }`, where `retry_at` is null when `reads` alone is past the budget or the share. Podster
+/// counts its own reads: GitHub's header is a check on this count, not the count.
 ///
 /// **Keyed by the release, and idempotent:** while a release's reservation is inside the hour, asking again answers it as
 /// it was first made, whatever `reads` says, and counts nothing more. A reservation leaves the count an hour after it was
@@ -965,22 +979,30 @@ fn list(sql: &SqlStorage, before: Option<i64>, apps: bool) -> R<Value> {
 /// uncounted, a read that ended at the trees and a second attempt among them. They join the release's one row, which
 /// then counts from now. If they don't fit, nothing is added and what the release already holds stays.
 ///
-/// **Nothing calls this until the release job, M6 step 5.** It is built at step 9 with the other caps, so the job finds
-/// the budget in place; no route reaches it.
+/// **The owner's share is decided here too, in the same transaction as the total** (`docs/m6-release-read-share.md`):
+/// `owner_key` is the room's owner as its Rust names it, and no owner holds more than `MAX_OWNER_READS_PER_HOUR` of the
+/// hour. This is the only place the share is enforced; the driver's question while a release is queued only spares an
+/// attempt. Reads stay charged to the owner first recorded for the release (`release_read_owner`), whatever a later
+/// `more: true` names.
+///
+/// The release job calls this (M6 step 5); no route reaches it.
 fn reserve_reads(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
     let release = body["release_id"]
         .as_str()
         .filter(|id| is_release_id(id))
         .ok_or_else(ApiError::invalid_argument)?;
-    let reads = body["reads"]
-        .as_u64()
-        .and_then(|n| u32::try_from(n).ok())
-        .filter(|n| *n >= 1)
-        .ok_or_else(ApiError::invalid_argument)?;
+    let reads = asked_reads(body)?;
+    let owner = asked_owner(body)?;
     exec(
         sql,
         "DELETE FROM release_reads WHERE reserved_at < ?",
         vec![window_start(now, READ_WINDOW_MS).into()],
+    )?;
+    // A release's owner leaves with its last reads: one that reserves again after its hour is charged afresh.
+    exec(
+        sql,
+        "DELETE FROM release_read_owner WHERE release_id NOT IN (SELECT release_id FROM release_reads)",
+        vec![],
     )?;
     let more = body["more"] == true;
     let existing = rows(
@@ -993,16 +1015,18 @@ fn reserve_reads(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
             json!({ "fits": true, "reads": row["reads"], "reserved_at": row["reserved_at"] }),
         );
     }
-    let held: Vec<(i64, u32)> = rows(sql, "SELECT reserved_at, reads FROM release_reads", vec![])?
-        .iter()
-        .map(|row| {
-            (
-                int(&row["reserved_at"]),
-                u32::try_from(int(&row["reads"])).unwrap_or(u32::MAX),
-            )
-        })
-        .collect();
-    match read_budget_wait(&held, reads, now) {
+    // **The owner charged is the one first recorded for the release,** while it holds reads in the hour: a room whose
+    // owner changed since keeps its release's earlier reads, and these, with the owner they were first charged to.
+    let charged = rows(
+        sql,
+        "SELECT owner_key FROM release_read_owner WHERE release_id = ?",
+        vec![release.into()],
+    )?
+    .first()
+    .and_then(|row| row["owner_key"].as_str().map(str::to_owned))
+    .unwrap_or_else(|| owner.to_owned());
+    let (by_owner, all) = held_reads(sql, &charged)?;
+    match read_share_wait(&by_owner, &all, reads, now) {
         Ok(()) => {
             // With `more`, the release's own earlier reads are in `held`, and these join them in its one row, which
             // then counts from now: every read stays counted for at least its hour.
@@ -1012,6 +1036,11 @@ fn reserve_reads(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
                    ON CONFLICT (release_id) DO UPDATE SET reads = min(reads + excluded.reads, 4294967295), reserved_at = excluded.reserved_at",
                 vec![release.into(), i64::from(reads).into(), now.into()],
             )?;
+            exec(
+                sql,
+                "INSERT INTO release_read_owner (release_id, owner_key) VALUES (?, ?) ON CONFLICT (release_id) DO NOTHING",
+                vec![release.into(), charged.as_str().into()],
+            )?;
             let held = existing.first().map_or(0, |row| int(&row["reads"]));
             Ok(
                 json!({ "fits": true, "reads": held.saturating_add(i64::from(reads)), "reserved_at": now }),
@@ -1019,6 +1048,65 @@ fn reserve_reads(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
         }
         Err(retry_at) => Ok(json!({ "fits": false, "retry_at": retry_at })),
     }
+}
+
+/// `reads` asked of the budget: a whole number from 1.
+fn asked_reads(body: &Value) -> R<u32> {
+    body["reads"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|n| *n >= 1)
+        .ok_or_else(ApiError::invalid_argument)
+}
+
+/// `owner_key`, as a room's Rust makes it from its own row (`release_driver::read_owner_key`). One missing or of
+/// another shape is refused: nothing is reserved for an owner that can't be named.
+fn asked_owner(body: &Value) -> R<&str> {
+    body["owner_key"]
+        .as_str()
+        .filter(|key| is_read_owner_key(key))
+        .ok_or_else(ApiError::invalid_argument)
+}
+
+/// Reservations as `(reserved_at, reads)`.
+type Held = Vec<(i64, u32)>;
+
+/// Every reservation as `(reserved_at, reads)`: those charged to `owner`, and all of them. A reservation with no owner
+/// on record, made before the share, counts in the total only, and is gone within its hour.
+fn held_reads(sql: &SqlStorage, owner: &str) -> R<(Held, Held)> {
+    let pairs = |found: Vec<Value>| -> Held {
+        found
+            .iter()
+            .map(|row| {
+                (
+                    int(&row["reserved_at"]),
+                    u32::try_from(int(&row["reads"])).unwrap_or(u32::MAX),
+                )
+            })
+            .collect()
+    };
+    let by_owner = rows(
+        sql,
+        "SELECT r.reserved_at, r.reads FROM release_reads r JOIN release_read_owner o ON o.release_id = r.release_id
+           WHERE o.owner_key = ?",
+        vec![owner.into()],
+    )?;
+    let all = rows(sql, "SELECT reserved_at, reads FROM release_reads", vec![])?;
+    Ok((pairs(by_owner), pairs(all)))
+}
+
+/// The read share's question: `{ owner_key, reads }` answers `{ fits: true }` when `reads` would fit the owner's share
+/// and the deployment's hour now, or `{ fits: false, retry_at }`, as [`reserve_reads`] would. **It writes nothing,
+/// and its answer authorizes nothing:** a room asks it only to wait as `queued`, sparing an attempt; the reservation
+/// decides again in its own transaction.
+fn share_question(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
+    let reads = asked_reads(body)?;
+    let owner = asked_owner(body)?;
+    let (by_owner, all) = held_reads(sql, owner)?;
+    Ok(match read_share_wait(&by_owner, &all, reads, now) {
+        Ok(()) => json!({ "fits": true }),
+        Err(retry_at) => json!({ "fits": false, "retry_at": retry_at }),
+    })
 }
 
 impl DurableObject for Moderation {

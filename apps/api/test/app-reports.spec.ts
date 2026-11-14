@@ -215,11 +215,14 @@ describe("a report that names an app (M6 step 9)", () => {
 
 describe("the deployment's release-read budget (M6 step 9)", () => {
   const rel = (n: number) => `rel_${n.toString(16).padStart(32, "0")}`;
-  const reserve = (release: string, reads: unknown) => internal("/release-reads", { release_id: release, reads });
+  // Each release here is its own owner's unless a test says otherwise, so only the deployment's total binds.
+  const reserve = (release: string, reads: unknown, owner = `room:ws_${release}`, more?: boolean) => internal("/release-reads", { release_id: release, reads, owner_key: owner, ...(more === undefined ? {} : { more }) });
+  const share = (owner: unknown, reads: unknown) => internal("/release-reads/share", { owner_key: owner, reads });
+  const empty = () => inModeration((sql) => { sql.exec("DELETE FROM release_reads"); sql.exec("DELETE FROM release_read_owner"); });
 
   it("reserves up to 3,000 reads in a rolling hour, says when a release would fit, and is reached by no route", async () => {
     await setClock(T);
-    await inModeration((sql) => sql.exec("DELETE FROM release_reads"));
+    await empty();
     // Nine full-size releases, a second apart.
     for (let n = 0; n < 9; n++) {
       await setClock(T + n * 1000);
@@ -241,7 +244,7 @@ describe("the deployment's release-read budget (M6 step 9)", () => {
 
   it("is keyed by the release: asking again inside the hour answers as first made and counts nothing more", async () => {
     await setClock(T);
-    await inModeration((sql) => sql.exec("DELETE FROM release_reads"));
+    await empty();
     expect((await reserve(rel(1), 302)).body).toEqual({ fits: true, reads: 302, reserved_at: T });
     await setClock(T + 5000);
     expect((await reserve(rel(1), 302)).body).toEqual({ fits: true, reads: 302, reserved_at: T });
@@ -261,15 +264,126 @@ describe("the deployment's release-read budget (M6 step 9)", () => {
     expect([await refused(3000), await refused(3001), await refused(0)]).toEqual([false, true, true]);
   });
 
-  it("refuses what isn't a release or a count, and no route reaches it", async () => {
+  it("refuses what isn't a release, a count or an owner, and no route reaches it", async () => {
+    await empty();
     for (const [release, reads] of [["rel_x", 302], [`rel_${"A".repeat(32)}`, 302], [rel(1), 0], [rel(1), -1], [rel(1), 1.5], [rel(1), "302"], [rel(1), 2 ** 32]] as [string, unknown][]) {
       const answer = await reserve(release, reads);
       expect([answer.status, answer.body.error?.code], `${release} ${reads}`).toEqual([400, "invalid_argument"]);
     }
+    // **An owner that isn't named as a room's Rust names one is refused, and nothing is reserved:** missing, of another
+    // kind, or not an ID. The share's question refuses the same.
+    for (const owner of [undefined, null, "", "org:", "team:org_x", "org:org x", 7, `org:${"a".repeat(129)}`]) {
+      const answer = await internal("/release-reads", { release_id: rel(1), reads: 1, ...(owner === undefined ? {} : { owner_key: owner }) });
+      expect([answer.status, answer.body.error?.code], String(owner)).toEqual([400, "invalid_argument"]);
+      expect((await share(owner, 1)).status, String(owner)).toBe(400);
+    }
+    expect((await share("org:org_x", 0)).status).toBe(400);
+    expect(await inModeration((sql) => sql.exec("SELECT COUNT(*) AS n FROM release_reads").one().n)).toBe(0);
     await switchedOn(async () => {
-      for (const path of ["/v1/release-reads", "/v1/moderation/release-reads", "/release-reads"]) {
-        expect((await api(OPERATOR, "POST", path, { release_id: rel(1), reads: 1 })).code, path).toBe("not_found");
+      for (const path of ["/v1/release-reads", "/v1/moderation/release-reads", "/release-reads", "/release-reads/share", "/v1/release-reads/share"]) {
+        expect((await api(OPERATOR, "POST", path, { release_id: rel(1), reads: 1, owner_key: "org:org_x" })).code, path).toBe("not_found");
       }
     });
+  });
+});
+
+describe("each owner's share of the release-read budget (docs/m6-release-read-share.md)", () => {
+  const rel = (n: number) => `rel_${n.toString(16).padStart(32, "0")}`;
+  const reserve = (release: string, reads: number, owner: string, more?: boolean) => internal("/release-reads", { release_id: release, reads, owner_key: owner, ...(more === undefined ? {} : { more }) });
+  const share = (owner: string, reads: number) => internal("/release-reads/share", { owner_key: owner, reads });
+  const tables = () => inModeration((sql) => ({
+    reads: sql.exec("SELECT release_id, reads, reserved_at FROM release_reads ORDER BY release_id").toArray(),
+    owners: sql.exec("SELECT release_id, owner_key FROM release_read_owner ORDER BY release_id").toArray(),
+  }));
+  const ORG_A = "org:org_share_a";
+  const ORG_B = "org:org_share_b";
+  const PERSON = "person:per_share_c";
+
+  it("holds one owner to 1,204 reads in the hour, to the read and to the millisecond, while another owner still fits", async () => {
+    await setClock(T);
+    await inModeration((sql) => { sql.exec("DELETE FROM release_reads"); sql.exec("DELETE FROM release_read_owner"); });
+    // Two full attempts of one organization, from two of its rooms' releases: exactly its share.
+    expect((await reserve(rel(1), 602, ORG_A, true)).body).toEqual({ fits: true, reads: 602, reserved_at: T });
+    await setClock(T + 1000);
+    expect((await reserve(rel(2), 602, ORG_A, true)).body).toEqual({ fits: true, reads: 602, reserved_at: T + 1000 });
+    // A read more is refused, though the hour's total has 1,796 left, and waits for its owner's oldest to leave.
+    expect((await reserve(rel(3), 1, ORG_A, true)).body).toEqual({ fits: false, retry_at: T + HOUR });
+    expect((await reserve(rel(1), 1, ORG_A, true)).body).toEqual({ fits: false, retry_at: T + HOUR });
+    // Another owner's release fits at once.
+    expect((await reserve(rel(4), 10, ORG_B, true)).body).toEqual({ fits: true, reads: 10, reserved_at: T + 1000 });
+    // More than a share alone never fits.
+    expect((await reserve(rel(5), 1205, PERSON, true)).body).toEqual({ fits: false, retry_at: null });
+    expect((await reserve(rel(5), 1204, PERSON, true)).body).toEqual({ fits: true, reads: 1204, reserved_at: T + 1000 });
+    // A millisecond before the hour rolls, the full owner still waits; at it, it fits again.
+    await setClock(T + HOUR - 1);
+    expect((await reserve(rel(3), 1, ORG_A, true)).body).toEqual({ fits: false, retry_at: T + HOUR });
+    await setClock(T + HOUR);
+    expect((await reserve(rel(3), 602, ORG_A, true)).body).toEqual({ fits: true, reads: 602, reserved_at: T + HOUR });
+    expect((await reserve(rel(6), 1, ORG_A, true)).body).toEqual({ fits: false, retry_at: T + 1000 + HOUR });
+  });
+
+  it("still binds the hour's total across owners: two full owners leave 592, and a third owner's full attempt waits", async () => {
+    await setClock(T);
+    await inModeration((sql) => { sql.exec("DELETE FROM release_reads"); sql.exec("DELETE FROM release_read_owner"); });
+    expect((await reserve(rel(1), 1204, ORG_A, true)).body.fits).toBe(true);
+    await setClock(T + 500);
+    expect((await reserve(rel(2), 1204, ORG_B, true)).body.fits).toBe(true);
+    // The third owner has nothing of its own, and 592 are left of the 3,000.
+    expect((await share(PERSON, 602)).body).toEqual({ fits: false, retry_at: T + HOUR });
+    expect((await reserve(rel(3), 602, PERSON, true)).body).toEqual({ fits: false, retry_at: T + HOUR });
+    expect((await share(PERSON, 592)).body).toEqual({ fits: true });
+    expect((await reserve(rel(3), 592, PERSON, true)).body).toEqual({ fits: true, reads: 592, reserved_at: T + 500 });
+    expect((await reserve(rel(4), 1, "room:ws_share_d", true)).body).toEqual({ fits: false, retry_at: T + HOUR });
+  });
+
+  it("keeps a release's reads with the owner first recorded, whatever a later reservation names, until they leave the hour", async () => {
+    await setClock(T);
+    await inModeration((sql) => { sql.exec("DELETE FROM release_reads"); sql.exec("DELETE FROM release_read_owner"); });
+    // A release reserves its trees under its room's organization; the room then changes hands to a person, and the
+    // same release's file reads are asked for under the new owner.
+    expect((await reserve(rel(1), 2, ORG_A, true)).body.fits).toBe(true);
+    await setClock(T + 1000);
+    expect((await reserve(rel(1), 600, PERSON, true)).body).toEqual({ fits: true, reads: 602, reserved_at: T + 1000 });
+    expect((await tables()).owners).toEqual([{ release_id: rel(1), owner_key: ORG_A }]);
+    // **The past reads stay with the old owner:** the new owner's share is whole, the old one's holds them.
+    expect((await share(PERSON, 1204)).body).toEqual({ fits: true });
+    expect((await share(ORG_A, 603)).body).toEqual({ fits: false, retry_at: T + 1000 + HOUR });
+    expect((await share(ORG_A, 602)).body).toEqual({ fits: true });
+    // A later attempt of the same release is charged to the old owner too, and refused by the old owner's share.
+    expect((await reserve(rel(2), 602, ORG_A, true)).body.fits).toBe(true);
+    expect((await reserve(rel(1), 2, PERSON, true)).body).toEqual({ fits: false, retry_at: T + 1000 + HOUR });
+    // Once its reads leave the hour, the release's owner goes with them, and a new reservation is charged afresh.
+    await setClock(T + 1000 + HOUR);
+    expect((await reserve(rel(1), 2, PERSON, true)).body.fits).toBe(true);
+    expect((await tables()).owners).toEqual([{ release_id: rel(1), owner_key: PERSON }]);
+  });
+
+  it("answers the share's question without writing anything, by the object's clock", async () => {
+    await setClock(T);
+    await inModeration((sql) => { sql.exec("DELETE FROM release_reads"); sql.exec("DELETE FROM release_read_owner"); });
+    expect((await reserve(rel(1), 1204, ORG_A, true)).body.fits).toBe(true);
+    // An hour on, the old row is still in the table: the question reads past it, and leaves it there.
+    await setClock(T + HOUR);
+    const before = await tables();
+    expect((await share(ORG_A, 1204)).body).toEqual({ fits: true });
+    await setClock(T + HOUR - 1);
+    expect((await share(ORG_A, 1)).body).toEqual({ fits: false, retry_at: T + HOUR });
+    expect((await share(ORG_B, 1204)).body).toEqual({ fits: true });
+    expect((await share(ORG_B, 1205)).body).toEqual({ fits: false, retry_at: null });
+    expect(await tables()).toEqual(before);
+  });
+
+  it("counts a reservation made before the share in the total only, and keeps the owners' table safe to make on an old object", async () => {
+    await setClock(T);
+    await inModeration((sql) => { sql.exec("DELETE FROM release_reads"); sql.exec("DELETE FROM release_read_owner"); });
+    // A row as the object held it before the share: no owner on record.
+    await inModeration((sql) => sql.exec("INSERT INTO release_reads (release_id, reads, reserved_at) VALUES (?, 1800, ?)", rel(9), T));
+    expect((await share(ORG_A, 1200)).body).toEqual({ fits: true });
+    expect((await share(ORG_A, 1201)).body).toEqual({ fits: false, retry_at: T + HOUR });
+    // Every request makes the table if it isn't there, and leaves it alone if it is.
+    const made = await inModeration((sql) => sql.exec("SELECT sql FROM sqlite_master WHERE name = 'release_read_owner'").one().sql as string);
+    expect(made).toContain("release_read_owner (release_id TEXT PRIMARY KEY");
+    expect((await share(ORG_A, 1)).status).toBe(200);
+    expect(await inModeration((sql) => sql.exec("SELECT reads FROM release_reads WHERE release_id = ?", rel(9)).one().reads)).toBe(1800);
   });
 });

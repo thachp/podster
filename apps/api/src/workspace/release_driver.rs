@@ -13,13 +13,19 @@
 //! 2. Only if the release at the head is due: whether the deployment allows release, exactly `true`, the gate on the
 //!    release path is open, and a content provider is configured to upload to. Any not, and the driver does nothing,
 //!    counts no attempt and looks again after `DRIVE_IDLE_MS`, with the reason as the job's code.
-//! 3. **The lease,** one room transaction ([`lease`]): everything is read again, the head included, since the pass
+//! 3. **The read share, while the head is queued** ([`Workspace::read_share`]): the deployment's budget is asked, read
+//!    only, whether a full attempt would fit the room's owner's share and the hour now. If not, the release waits as
+//!    `queued` under `release_reads_share` until the time it named, and the lease below counts no attempt and takes no
+//!    upload slot for it (`waits_uncounted`), so a starved release is never ended by the cap, and its upload's hour
+//!    hasn't begun. **The answer authorizes nothing:** the reservation decides again, in the budget's own transaction,
+//!    and a race lost there waits `release_reads_budget` as before. Only the room's own row names the owner.
+//! 4. **The lease,** one room transaction ([`lease`]): everything is read again, the head included, since the pass
 //!    awaited. The step comes from the release's state now. For an upload, the room's hourly upload attempts
 //!    (`upload_slot`) must leave room for it, or the release waits for one. The attempt is counted, and the release is
 //!    not due again until the lease runs out, `DRIVE_LEASE_MS` on: so a pass that finds the step still out does nothing,
 //!    and a step that died with the object is taken up again then. A release with every attempt made ends here,
 //!    `release_attempts_exhausted`.
-//! 4. **The step is handed to a request of the room's own** (`/internal/release-drive`), kept alive by the alarm's
+//! 5. **The step is handed to a request of the room's own** (`/internal/release-drive`), kept alive by the alarm's
 //!    `wait_until`, and the alarm returns. **So the alarm never waits on an upload,** and a takedown's applier, which the
 //!    alarm runs, never waits behind a release job (ADR 0010).
 //!
@@ -47,9 +53,10 @@ use podster_core::release::{
     is_release_id, window_start, ReleaseState, IN_FLIGHT_EXEMPTION_MS, READ_WINDOW_MS,
 };
 use podster_core::release_driver::{
-    drive_outcome, drive_step, drive_wait_ms, lease_holds, may_lease, stalls_after,
-    step_still_current, upload_slot, DriveOutcome, DriveStep, ATTEMPTS_EXHAUSTED,
-    DRIVE_FIRST_WAIT_MS, DRIVE_IDLE_MS, DRIVE_LEASE_MS,
+    drive_outcome, drive_step, drive_wait_ms, lease_holds, may_lease, read_owner_key,
+    read_share_due, stalls_after, step_still_current, upload_slot, waits_uncounted, DriveOutcome,
+    DriveStep, ATTEMPTS_EXHAUSTED, DRIVE_FIRST_WAIT_MS, DRIVE_IDLE_MS, DRIVE_LEASE_MS,
+    MAX_ATTEMPT_READS, READ_SHARE_WAITING,
 };
 
 /// The room's path for one step of the driver. Nothing outside the Worker reaches it: the room's alarm sends it to the
@@ -233,6 +240,23 @@ fn set_job(
     )
 }
 
+/// The owner a room's release reads are charged to, from the room's own row: its organization, else its owner person,
+/// else the room (`read_owner_key`). **Never from a request.** One that can't be read refuses, and nothing is reserved.
+pub(super) fn read_owner(sql: &SqlStorage) -> R<String> {
+    let room = rows(
+        sql,
+        "SELECT id, owner_org_id, owner_person_id FROM workspace",
+        vec![],
+    )?;
+    let room = room.first().ok_or_else(ApiError::workspace_not_found)?;
+    read_owner_key(
+        room["owner_org_id"].as_str(),
+        room["owner_person_id"].as_str(),
+        room["id"].as_str().unwrap_or_default(),
+    )
+    .ok_or_else(|| ApiError::internal("a room with no owner to charge its reads to"))
+}
+
 fn room_id(sql: &SqlStorage) -> String {
     rows(sql, "SELECT id FROM workspace", vec![])
         .ok()
@@ -301,10 +325,16 @@ enum Leased {
     Nothing(Value),
 }
 
-/// The lease, in the room's transaction: see the module's note, step 3. `idle` is why the driver may do nothing now,
+/// The lease, in the room's transaction: see the module's note, step 4. `idle` is why the driver may do nothing now,
 /// read before the transaction: the deployment doesn't allow release or the release path is closed ([`IDLE`]), or no
-/// content provider is configured ([`NO_PROVIDER`]).
-fn lease(sql: &SqlStorage, idle: Option<&'static str>, now: i64) -> R<Leased> {
+/// content provider is configured ([`NO_PROVIDER`]). `uncounted` is a wait read before the transaction that counts no
+/// attempt, with when the release is next due: the read share's, for a queued release.
+fn lease(
+    sql: &SqlStorage,
+    idle: Option<&'static str>,
+    uncounted: Option<(&'static str, i64)>,
+    now: i64,
+) -> R<Leased> {
     end_stale(sql, now)?;
     let Some(head) = head(sql)? else {
         return Ok(Leased::Nothing(
@@ -327,6 +357,19 @@ fn lease(sql: &SqlStorage, idle: Option<&'static str>, now: i64) -> R<Leased> {
     let Some(step) = drive_step(head.state, head.uploaded) else {
         return Ok(answer("none", None, None));
     };
+    // Before the cap: a wait that counts no attempt never ends a release, and takes no upload slot.
+    if let Some((code, at)) =
+        uncounted.filter(|(code, _)| step == DriveStep::Start && waits_uncounted(code))
+    {
+        set_job(sql, &head.id, Some(at), Some(code), now)?;
+        console_log!(
+            "release: a queued release waits: room={} release={} code={}",
+            room_id(sql),
+            head.id,
+            code
+        );
+        return Ok(answer("waiting", Some(code), Some(at)));
+    }
     if !may_lease(head.attempts) {
         fail(sql, &head.id, ATTEMPTS_EXHAUSTED, None, now)?;
         set_job(sql, &head.id, None, Some(ATTEMPTS_EXHAUSTED), now)?;
@@ -484,9 +527,10 @@ impl Workspace {
         if !expired.is_empty() {
             bookkeeping(&self.state);
         }
-        if !head(&sql)?.is_some_and(|head| head.next_attempt_at.is_none_or(|at| at <= now)) {
+        let Some(due) = head(&sql)?.filter(|head| head.next_attempt_at.is_none_or(|at| at <= now))
+        else {
             return Ok(json!({ "outcome": "not_due" }));
-        }
+        };
         // Behind `RELEASES`, exactly `true`, and the gate on the release path. With release allowed, a deployment with no
         // content provider idles too: every upload would wait for one, and none would be worth an attempt.
         let idle = if !(crate::releases::setting(&self.env).await.allows_release()
@@ -498,11 +542,20 @@ impl Workspace {
         } else {
             None
         };
+        // The read share, only for a queued release the driver would otherwise start. A question that can't be answered
+        // fails the pass, which writes nothing and is asked again after its backoff.
+        let uncounted = if idle.is_none() && due.state == ReleaseState::Queued {
+            self.read_share(&sql)
+                .await?
+                .map(|retry_at| (READ_SHARE_WAITING, read_share_due(retry_at, now)))
+        } else {
+            None
+        };
         let leased: Rc<RefCell<Option<Leased>>> = Rc::new(RefCell::new(None));
         let slot = leased.clone();
         let store = sql.clone();
         transaction_sync(&self.state, move || {
-            *slot.borrow_mut() = Some(lease(&store, idle, release_now(&store))?);
+            *slot.borrow_mut() = Some(lease(&store, idle, uncounted, release_now(&store))?);
             Ok(())
         })?;
         let leased = leased.borrow_mut().take();
@@ -526,6 +579,31 @@ impl Workspace {
             }
             #[cfg(feature = "failpoints")]
             Pass::Inline => self.drive(&release_id, attempt).await,
+        }
+    }
+
+    /// The read share's question for this room's owner and one full attempt (`MAX_ATTEMPT_READS`): `None` when it would
+    /// fit now, or the time the budget named. **Read only, and it authorizes nothing.** An answer that isn't exactly
+    /// one of the two is no answer: an error, so nothing is written.
+    async fn read_share(&self, sql: &SqlStorage) -> R<Option<i64>> {
+        let owner = read_owner(sql)?;
+        let mut response = crate::moderation::call(
+            &self.env,
+            crate::moderation::RELEASE_READS_SHARE_PATH,
+            Method::Post,
+            Some(json!({ "owner_key": owner, "reads": MAX_ATTEMPT_READS })),
+        )
+        .await?;
+        if response.status_code() != 200 {
+            return Err(ApiError::internal("the read share wasn't answered"));
+        }
+        let answer: Value = response.json().await?;
+        match (answer["fits"].as_bool(), answer["retry_at"].as_i64()) {
+            (Some(true), None) => Ok(None),
+            (Some(false), Some(at)) => Ok(Some(at)),
+            _ => Err(ApiError::internal(
+                "the read share answered in another shape",
+            )),
         }
     }
 

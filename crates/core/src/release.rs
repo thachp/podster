@@ -1645,7 +1645,19 @@ pub fn reads_fit(used: u32, needed: u32) -> Result<(), ReleaseCapRefusal> {
 /// enough of the oldest reservations leave the hour, or `None` when it never fits, since `needed` alone is past the
 /// budget.
 pub fn read_budget_wait(held: &[(i64, u32)], needed: u32, now: i64) -> Result<(), Option<i64>> {
-    if needed > MAX_RELEASE_READS_PER_HOUR {
+    reads_wait_under(MAX_RELEASE_READS_PER_HOUR, held, needed, now)
+}
+
+/// [`read_budget_wait`] against any `limit` of reads in the rolling hour: the deployment's, or one owner's share of it
+/// (`release_driver::read_share_wait`).
+pub fn reads_wait_under(
+    limit: u32,
+    held: &[(i64, u32)],
+    needed: u32,
+    now: i64,
+) -> Result<(), Option<i64>> {
+    let fits = |used: u32| used.saturating_add(needed) <= limit;
+    if needed > limit {
         return Err(None);
     }
     let start = window_start(now, READ_WINDOW_MS);
@@ -1657,14 +1669,14 @@ pub fn read_budget_wait(held: &[(i64, u32)], needed: u32, now: i64) -> Result<()
     let mut used = counting
         .iter()
         .fold(0u32, |sum, (_, reads)| sum.saturating_add(*reads));
-    if reads_fit(used, needed).is_ok() {
+    if fits(used) {
         return Ok(());
     }
     // Oldest first: each leaves the hour at its own time plus the window, and the release fits once enough have left.
     counting.sort_unstable();
     for (at, reads) in counting {
         used = used.saturating_sub(reads);
-        if reads_fit(used, needed).is_ok() {
+        if fits(used) {
             return Err(Some(at.saturating_add(READ_WINDOW_MS)));
         }
     }

@@ -118,6 +118,7 @@ async fn send_files(
     reader: &ReleaseReader<'_>,
     attempt: &Attempt,
     release_id: &str,
+    owner: &str,
     script: &str,
     commit_sha: &str,
     go_on: &dyn Fn() -> bool,
@@ -130,6 +131,7 @@ async fn send_files(
     reserve(
         env,
         release_id,
+        owner,
         file_reads(plan.count(), FETCH_PASSES),
         attempt,
     )
@@ -399,12 +401,14 @@ impl Workspace {
         let Some(app) = ReleaseApp::from_env(&self.env) else {
             return self.upload_waiting(&release_id, ReadProblem::NotConfigured.code(), None);
         };
+        // The owner the reads are charged to, from the room's own row: never from a request.
+        let owner = release_driver::read_owner(&sql)?;
         let attempt = self.upload_attempt();
         if !go_on() {
             return self.upload_waiting(&release_id, release_driver::LEASE_LOST, None);
         }
         // The two tree reads are reserved before the token is asked for, so a read that ends at them is counted.
-        let sent = match reserve(&self.env, &release_id, TREE_READS, &attempt).await {
+        let sent = match reserve(&self.env, &release_id, &owner, TREE_READS, &attempt).await {
             Err(failure) => Err(Stop::Read(failure)),
             Ok(()) => match ReleaseReader::open(&app, repo_id, &attempt).await {
                 Err(failure) => Err(Stop::Read(failure)),
@@ -415,6 +419,7 @@ impl Workspace {
                         &reader,
                         &attempt,
                         &release_id,
+                        &owner,
                         &script,
                         &commit_sha,
                         &go_on,

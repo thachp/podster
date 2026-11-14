@@ -172,7 +172,7 @@ beforeAll(async () => {
 });
 beforeEach(async () => {
   await github("/reset", {});
-  await moderation().fetch("https://do/release-reads", { method: "POST", body: JSON.stringify({ release_id: `rel_${"0".repeat(32)}`, reads: 1 }) });
+  await moderation().fetch("https://do/release-reads", { method: "POST", body: JSON.stringify({ release_id: `rel_${"0".repeat(32)}`, reads: 1, owner_key: "room:ws_schema" }) });
   await inModeration((sql) => sql.exec("DELETE FROM release_reads"));
 });
 afterEach(async () => { for (const room of made.splice(0)) await alarmQuiet(stub(room)); });
@@ -591,7 +591,9 @@ describe("a read that gives nothing to upload", () => {
     await github("/reset", {});
     await github("/seed", repository(SITE));
     await inModeration((sql) => sql.exec("DELETE FROM release_reads"));
-    await moderation().fetch("https://do/release-reads", { method: "POST", body: JSON.stringify({ release_id: `rel_${"9".repeat(32)}`, reads: 2995 }) });
+    // Of another owner, and made larger after it is reserved: no owner can reserve 2,995 under its share.
+    await moderation().fetch("https://do/release-reads", { method: "POST", body: JSON.stringify({ release_id: `rel_${"9".repeat(32)}`, reads: 1, owner_key: "org:org_ru_elsewhere" }) });
+    await inModeration((sql) => sql.exec("UPDATE release_reads SET reads = 2995 WHERE release_id = ?", `rel_${"9".repeat(32)}`));
     const h = await uploading();
     const answer = await upload(h.room);
     expect(brief(answer)).toEqual([200, "uploading", false, "release_reads_budget", null]);

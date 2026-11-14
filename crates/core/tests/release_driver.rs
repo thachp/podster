@@ -2,7 +2,7 @@
 //! on attempts, and the bound on how often a room reads.
 
 use podster_core::release::{
-    ReleaseState, ATTEMPT_DEADLINE_MS, MAX_RELEASE_READS_PER_HOUR, READ_WINDOW_MS,
+    reads_wait_under, ReleaseState, ATTEMPT_DEADLINE_MS, MAX_RELEASE_READS_PER_HOUR, READ_WINDOW_MS,
 };
 use podster_core::release_driver::*;
 
@@ -268,4 +268,172 @@ fn a_step_is_recorded_only_while_its_lease_the_epoch_and_the_hold_are_as_they_we
     assert!(!step_still_current(3, 4, 2, 2, 7, 7), "another lease");
     assert!(!step_still_current(3, 3, 2, 3, 7, 7), "the epoch moved");
     assert!(!step_still_current(3, 3, 2, 2, 7, 8), "the hold moved");
+}
+
+// --- the read share (docs/m6-release-read-share.md) -----------------------------------------------------------------
+
+#[test]
+fn an_owner_keeps_exactly_two_full_attempts_and_two_owners_leave_592() {
+    assert_eq!(MAX_OWNER_READS_PER_HOUR, 1_204);
+    assert_eq!(MAX_OWNER_READS_PER_HOUR, 2 * MAX_ATTEMPT_READS);
+    assert_eq!(MAX_RELEASE_READS_PER_HOUR, 3_000);
+    assert_eq!(
+        MAX_RELEASE_READS_PER_HOUR - 2 * MAX_OWNER_READS_PER_HOUR,
+        592
+    );
+    const { assert!(MAX_OWNER_READS_PER_HOUR >= MAX_ATTEMPT_READS) };
+    const { assert!(MAX_RELEASE_READS_PER_HOUR - MAX_OWNER_READS_PER_HOUR >= MAX_ATTEMPT_READS) };
+}
+
+#[test]
+fn an_owner_fits_to_exactly_1204_and_waits_at_1205_until_its_oldest_leaves_the_hour() {
+    let first = NOW - 1_000;
+    let mine = [(first, 602), (NOW - 10, 600)];
+    // 1,202 held: two more fit, exactly the share; three don't.
+    assert_eq!(read_share_wait(&mine, &mine, 2, NOW), Ok(()));
+    assert_eq!(
+        read_share_wait(&mine, &mine, 3, NOW),
+        Err(Some(first + READ_WINDOW_MS))
+    );
+    // Nothing held: the whole share fits at once, a read more never does.
+    assert_eq!(read_share_wait(&[], &[], 1_204, NOW), Ok(()));
+    assert_eq!(read_share_wait(&[], &[], 1_205, NOW), Err(None));
+    // A millisecond before the oldest leaves, it still waits; at that millisecond it fits.
+    let at = first + READ_WINDOW_MS;
+    assert_eq!(read_share_wait(&mine, &mine, 3, at - 1), Err(Some(at)));
+    assert_eq!(read_share_wait(&mine, &mine, 3, at), Ok(()));
+}
+
+#[test]
+fn the_total_binds_across_owners_and_the_later_of_the_two_times_wins() {
+    // Two owners, each at its whole share; a third owner has nothing of its own.
+    let one = [(NOW - 3_000, 602), (NOW - 2_000, 602)];
+    let two = [(NOW - 1_500, 602), (NOW - 500, 602)];
+    let all: Vec<(i64, u32)> = one.iter().chain(&two).copied().collect();
+    // 592 are left: exactly 592 fit, a full attempt waits for the first of them to leave the hour.
+    assert_eq!(read_share_wait(&[], &all, 592, NOW), Ok(()));
+    assert_eq!(
+        read_share_wait(&[], &all, 593, NOW),
+        Err(Some(NOW - 3_000 + READ_WINDOW_MS))
+    );
+    assert_eq!(
+        read_share_wait(&[], &all, MAX_ATTEMPT_READS, NOW),
+        Err(Some(NOW - 3_000 + READ_WINDOW_MS))
+    );
+    // The total alone can't decide for an owner past its share: the first owner waits for its own oldest, though the
+    // total would let a small read through.
+    assert_eq!(
+        read_share_wait(&one, &one, 1, NOW),
+        Err(Some(NOW - 3_000 + READ_WINDOW_MS))
+    );
+    // Both bind: the owner's oldest row leaves first and makes room in its share, but not yet in the total, which waits
+    // for another owner's row. The later wins.
+    let mine = [(NOW - 1_000, 100), (NOW - 20, 900)];
+    let full: Vec<(i64, u32)> = mine.iter().copied().chain([(NOW - 500, 2_000)]).collect();
+    assert_eq!(
+        reads_wait_under(MAX_OWNER_READS_PER_HOUR, &mine, 300, NOW),
+        Err(Some(NOW - 1_000 + READ_WINDOW_MS))
+    );
+    assert_eq!(
+        read_share_wait(&mine, &full, 300, NOW),
+        Err(Some(NOW - 500 + READ_WINDOW_MS))
+    );
+    // And the other way round: the total frees first, the owner's own row later.
+    let late = [(NOW - 10, 1_204)];
+    let spread: Vec<(i64, u32)> = late
+        .iter()
+        .copied()
+        .chain([(NOW - 4_000, 1_204), (NOW - 3_000, 592)])
+        .collect();
+    assert_eq!(
+        read_share_wait(&late, &spread, 10, NOW),
+        Err(Some(NOW - 10 + READ_WINDOW_MS))
+    );
+    // Reservations from before the hour count for nobody.
+    let old = [(NOW - READ_WINDOW_MS - 1, 1_204)];
+    assert_eq!(read_share_wait(&old, &old, 1_204, NOW), Ok(()));
+}
+
+#[test]
+fn the_share_and_the_total_alone_agree_with_the_budget_for_the_deployment() {
+    // With one owner holding nothing, the share is the deployment's budget, as before it.
+    let held = [(NOW - 10, 2_995)];
+    assert_eq!(
+        read_share_wait(&[], &held, 6, NOW),
+        podster_core::release::read_budget_wait(&held, 6, NOW)
+    );
+    assert_eq!(
+        read_share_wait(&[], &held, 6, NOW),
+        Err(Some(NOW - 10 + READ_WINDOW_MS))
+    );
+    assert_eq!(read_share_wait(&[], &held, 5, NOW), Ok(()));
+}
+
+#[test]
+fn only_the_share_and_the_markers_waits_count_no_attempt() {
+    assert_eq!(READ_SHARE_WAITING, "release_reads_share");
+    assert!(waits_uncounted(READ_SHARE_WAITING));
+    assert!(waits_uncounted(
+        podster_core::release::CommitLiveRefusal::InFlight.code()
+    ));
+    for code in [
+        "release_reads_budget",
+        "release_upload_attempts",
+        "release_driver_idle",
+        "release_step_no_progress",
+        "release_attempts_exhausted",
+        "standing_unknown",
+        "",
+        "release_reads_share ",
+    ] {
+        assert!(!waits_uncounted(code), "{code}");
+    }
+}
+
+#[test]
+fn a_share_wait_is_due_when_the_share_said_and_never_sooner_than_the_first_wait() {
+    assert_eq!(
+        read_share_due(NOW + READ_WINDOW_MS, NOW),
+        NOW + READ_WINDOW_MS
+    );
+    assert_eq!(read_share_due(NOW + 1, NOW), NOW + DRIVE_FIRST_WAIT_MS);
+    assert_eq!(read_share_due(NOW - 5, NOW), NOW + DRIVE_FIRST_WAIT_MS);
+}
+
+#[test]
+fn the_owner_is_the_organization_else_the_person_else_the_room() {
+    assert_eq!(
+        read_owner_key(Some("org_a"), Some("per_b"), "ws_c").as_deref(),
+        Some("org:org_a")
+    );
+    assert_eq!(
+        read_owner_key(Some(""), Some("per_b"), "ws_c").as_deref(),
+        Some("person:per_b")
+    );
+    assert_eq!(
+        read_owner_key(None, None, "ws_c").as_deref(),
+        Some("room:ws_c")
+    );
+    assert_eq!(
+        read_owner_key(None, Some(""), "ws_c").as_deref(),
+        Some("room:ws_c")
+    );
+    // An owner that isn't an ID is no owner: nothing falls back past it.
+    assert_eq!(read_owner_key(Some("org a"), Some("per_b"), "ws_c"), None);
+    assert_eq!(read_owner_key(None, None, ""), None);
+    for key in ["org:a", "person:per_1", "room:ws-1_x"] {
+        assert!(is_read_owner_key(key), "{key}");
+    }
+    for key in [
+        "org:",
+        "a",
+        "team:a",
+        "org:a:b",
+        "org:a b",
+        "Org:a",
+        &format!("org:{}", "a".repeat(129)),
+    ] {
+        assert!(!is_read_owner_key(key), "{key}");
+    }
+    assert!(is_read_owner_key(&format!("org:{}", "a".repeat(128))));
 }

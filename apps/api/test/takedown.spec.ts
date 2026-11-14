@@ -2043,6 +2043,26 @@ describe("the two reconciles", () => {
     for (const room of [a.room, b.room]) await alarmQuiet(stub(room));
   });
 
+  it("doesn't find again a script the room counted gone after the pass read its list", async () => {
+    // The pass reads the namespace once and then asks each script's room in turn, so the room's own delete job can
+    // count a script gone between the list and the question: the question before ended a release and woke the room.
+    // The question says when the list was read, and the room decides from its own record. Set here by construction.
+    await fresh();
+    const a = await app({ plain: true });
+    const script = `${a.label}.${rel(9)}`;
+    const goneAt = 1_900_000_000_000;
+    await inRoom(a.room, (sql) => sql.exec("INSERT INTO script_delete (script_name, label, unpublish_epoch, queued_at, next_attempt_at, gone_at) VALUES (?, ?, NULL, 1, 1, ?)", script, a.label, goneAt));
+    const ask = (listedAt?: number) => stub(a.room).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify({ kind: "script", script, ...(listedAt === undefined ? {} : { listed_at: listedAt }) }) }).then((r: Response) => r.json() as Promise<any>);
+    // Listed before the room counted it gone: the list is older than the deletion. Nothing owed, nothing told.
+    expect((await ask(goneAt - 1)).changed).toBe(false);
+    expect((await ask(goneAt)).changed).toBe(false);
+    expect((await one(a.room, "SELECT gone_at FROM script_delete WHERE script_name = ?", script)).gone_at).toBe(goneAt);
+    // Listed after it was counted gone: it is there after all, and owed again.
+    expect((await ask(goneAt + 1)).changed).toBe(true);
+    expect((await one(a.room, "SELECT gone_at, last_code FROM script_delete WHERE script_name = ?", script))).toEqual({ gone_at: null, last_code: "reconcile_found" });
+    await alarmQuiet(stub(a.room));
+  });
+
   it("has the label's own room delete a script nothing of its claims, an uncertain release's among them, and leaves the rest", async () => {
     await fresh();
     const a = await app({ plain: true });

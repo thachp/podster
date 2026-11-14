@@ -735,7 +735,12 @@ fn check_entry(sql: &SqlStorage, host: &str, found: Option<&str>, now: i64) -> R
 /// room's own state says of it: named by a host, the kept script or a commit in flight, it is kept; uploading within
 /// its hour, it is kept; anything else no row claims, an `uncertain` release's among them, is deleted, by the room's
 /// own delete job.
-fn check_script(sql: &SqlStorage, script: &str, now: i64) -> R<(bool, bool)> {
+fn check_script(
+    sql: &SqlStorage,
+    script: &str,
+    listed_at: Option<i64>,
+    now: i64,
+) -> R<(bool, bool)> {
     let ScriptOwner::Podster { label, release_id } = script_owner(script) else {
         return Ok((false, false));
     };
@@ -776,6 +781,21 @@ fn check_script(sql: &SqlStorage, script: &str, now: i64) -> R<(bool, bool)> {
     .is_empty();
     if queued {
         return Ok((true, false));
+    }
+    // Counted gone since the pass read its list: the list is older than the deletion, and nothing is owed. The room's
+    // own delete job can run between the pass's list and its question, as when the question before this one ended a
+    // release and woke the room (M6 step 6's review). Only one counted gone before the list was read is there after
+    // all.
+    if let Some(listed_at) = listed_at {
+        let gone_since = !rows(
+            sql,
+            "SELECT 1 AS gone FROM script_delete WHERE script_name = ? AND gone_at IS NOT NULL AND gone_at >= ?",
+            vec![script.into(), listed_at.into()],
+        )?
+        .is_empty();
+        if gone_since {
+            return Ok((true, false));
+        }
     }
     // Queued under no unpublish: nothing in the room's state named it. One the room had counted as gone is there
     // after all, so it is owed again. It keeps the unpublish it was queued under, and that unpublish is no longer
@@ -827,6 +847,7 @@ pub(super) fn check(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
             body["script"]
                 .as_str()
                 .ok_or_else(ApiError::invalid_argument)?,
+            body["listed_at"].as_i64(),
             now,
         )?,
         _ => return Err(ApiError::invalid_argument()),

@@ -608,7 +608,13 @@ async fn one_key(
 
 /// One listed script. Core decides. With no room yet: a name Podster didn't make is told and left alone, and for any
 /// other the room is found and asked. Only the label's own room, from its current state, can make a script deletable.
-async fn one_script(sql: &SqlStorage, env: &Env, id: &str, counts: &mut Counts) -> Step {
+async fn one_script(
+    sql: &SqlStorage,
+    env: &Env,
+    id: &str,
+    listed_at: i64,
+    counts: &mut Counts,
+) -> Step {
     let now = now_ms();
     if reconcile_script(id, RoomClaim::NoRoom, now) == ScriptReconcile::ReportForeign {
         return Ok(counts.finding(sql, "script_foreign_name", id, now)?);
@@ -617,7 +623,15 @@ async fn one_script(sql: &SqlStorage, env: &Env, id: &str, counts: &mut Counts) 
     let Some(room) = crate::releases::room_for_label(env, label).await? else {
         return Ok(counts.finding(sql, "script_without_room", id, now)?);
     };
-    match ask_room(env, &room, json!({ "kind": "script", "script": id })).await {
+    // With when the list was read: a script the room counted gone since then is in the list only because the list is
+    // older than the deletion, and isn't found again.
+    match ask_room(
+        env,
+        &room,
+        json!({ "kind": "script", "script": id, "listed_at": listed_at }),
+    )
+    .await
+    {
         Some(answer) => {
             counts.take(sql, &answer, now_ms())?;
             if answer["known"] != true {
@@ -764,6 +778,8 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
     let started = now_ms();
     let deadline = started + budget(sql, "pass", PASS_BUDGET_MS);
     let mut at = pass(sql, "scripts")?;
+    // Taken before the list is asked for: whatever the list holds, the provider read it after this.
+    let listed_at = now_ms();
     let Some(list) = provider.list_scripts().await else {
         set_pass(sql, "scripts", &at, Some("list_failed"), now_ms())?;
         let woken = wake(sql, env, &mut counts).await;
@@ -795,7 +811,7 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
             break;
         }
         at.cursor = Some(id.clone());
-        let step = one_script(sql, env, id, &mut counts).await;
+        let step = one_script(sql, env, id, listed_at, &mut counts).await;
         counts.settled(sql, "script", id, step, now_ms());
     }
     if reached_end {

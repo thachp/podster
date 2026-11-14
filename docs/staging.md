@@ -395,6 +395,12 @@ A sealed token that opens with neither key is recorded as `repo_token.unrevocabl
 
 **Switching managed repositories off** doesn't wake the rooms. Each room revokes its tokens at its next alarm, within the hour. Keep `REPO_TOKEN_KEY` and the agent-token App's ID, installation ID and key set for at least 65 minutes after setting `MANAGED_REPOSITORIES` to anything but `true`, or the tokens still out can't be revoked.
 
+## Switching release off for the deployment
+
+**Read this before turning `RELEASES` off on any deployment that has served an app.** Once M6 step 6 is built, turning the deployment's switch off unpublishes every app that was up, and it is permanent: each app's address is retired, and turning `RELEASES` back on brings nothing back. The rooms learn of it from the reconcile's walk, which runs whenever a content provider is configured, whatever `RELEASES` says.
+
+**To stop serving and be able to undo it, use the stop for the whole content domain** (M6 step 4(a)), an operator's command. Lifting the stop serves again what was up. *Decided by the architect on 2026-11-13, for the owner to review ([the step 6 plan](m6-step6-plan.md)).*
+
 ## Operators
 
 `OPERATORS` names Podster's operators (M4 step 10, decision 158): their person IDs, separated by commas. An operator can suspend and lift a room's public surface and an agent's public claims, and reads reports. **The owner names them and runs this**, and nobody else does. It's unset until then, and while it's unset nobody is an operator, so every moderation route answers `not_allowed`. **Since 2026-11-11 it also says who may ask for a repository on staging:** the API's `REPOSITORY_REQUESTERS` there holds the entry `operators`, so each person named here may ask for a room's repository in a room they own or administer, and removing someone here takes that away ([above](#who-may-ask-for-a-repository-on-staging)).

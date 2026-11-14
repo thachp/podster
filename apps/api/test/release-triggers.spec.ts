@@ -342,9 +342,9 @@ describe("the record of an unpublish", () => {
 });
 
 describe("the deployment's own setting, `RELEASES`, read by the room (M6 step 6)", () => {
-  /** Whether M6's routes are open: switched on, an unbuilt room route answers `release_not_available`; otherwise it is
-   *  answered where an unknown path is. */
-  const routesOpen = async (r: Room) => (await api(r.owner, "GET", `/v1/workspaces/${r.room}/release-config`)).code === "release_not_available";
+  /** Whether M6's routes are open: switched on, a room route that isn't built yet, the custom hostname's read, answers
+   *  `release_not_available`; otherwise it is answered where an unknown path is. */
+  const routesOpen = async (r: Room) => (await api(r.owner, "GET", `/v1/workspaces/${r.room}/app-hostname`)).code === "release_not_available";
   const UNDECIDED = [null, "", "True", "TRUE", "1", "true ", " true", "False", "0", "off"];
 
   it("takes the room's app down at the walk's question only when the setting is exactly `false`, and only once", async () => {

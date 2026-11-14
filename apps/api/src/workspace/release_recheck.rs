@@ -209,7 +209,7 @@ fn worth_asking(
 }
 
 /// The provider the room's repository is with, if it has one linked.
-fn linked_provider(sql: &SqlStorage) -> R<Option<String>> {
+pub(super) fn linked_provider(sql: &SqlStorage) -> R<Option<String>> {
     Ok(rows(sql, "SELECT provider FROM repo_link", vec![])?
         .first()
         .and_then(|link| text(&link["provider"])))
@@ -242,7 +242,11 @@ fn people(sql: &SqlStorage, release: &str, now: i64) -> R<Option<People>> {
 }
 
 /// What the room and the others say of whether release may happen here at all, for policy and for core alike.
-fn room_facts(sql: &SqlStorage, deployment_on: bool, org_may_release: bool) -> R<RoomReleaseFacts> {
+pub(super) fn room_facts(
+    sql: &SqlStorage,
+    deployment_on: bool,
+    org_may_release: bool,
+) -> R<RoomReleaseFacts> {
     let room = rows(
         sql,
         "SELECT status, visibility, suspended_at FROM workspace",
@@ -306,7 +310,7 @@ fn as_u64(value: &Value) -> u64 {
 /// `Principal` gave no answer, when they weren't asked though the rows make them worth asking about now, as someone
 /// made an admin, or added to the room, since the questions were asked, and when the question was about another
 /// place than the one the rows give them now: another organization, or a place that began at another time.
-fn settled(
+pub(super) fn settled(
     sql: &SqlStorage,
     answer: &Asked,
     now_who: Option<&str>,
@@ -619,7 +623,7 @@ impl Workspace {
     /// since that place began. Nobody is asked about someone the room's rows don't record, about an agent, or, with
     /// `authority_only`, about a person who isn't the room's owner or an admin: none of them holds, whatever a
     /// `Principal` would say. An answer that isn't a clear yes or no is no answer: `holds` is `None`.
-    async fn still_holds(&self, who: Option<&str>, authority_only: bool) -> R<Asked> {
+    pub(super) async fn still_holds(&self, who: Option<&str>, authority_only: bool) -> R<Asked> {
         let Some(who) = who else {
             return Ok(Asked {
                 who: None,
@@ -763,7 +767,7 @@ impl Workspace {
     /// deployment that has release switched on and a provider configured refuses every release command, exactly as a
     /// route that isn't built, and says so in one log line by its code. With either missing nothing can be served,
     /// which is every deployment today, and the commands answer.
-    async fn release_path_open(&self) -> R<()> {
+    pub(super) async fn release_path_open(&self) -> R<()> {
         if release_commit::RELEASE_PATH_COMPLETE {
             return Ok(());
         }

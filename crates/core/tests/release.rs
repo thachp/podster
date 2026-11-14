@@ -2633,3 +2633,40 @@ fn the_deployments_release_setting_has_three_readings_and_only_an_exact_false_un
         [false, true, false]
     );
 }
+
+// --- switching release on or off in a room ---------------------------------------------------------------------------
+
+#[test]
+fn setting_release_in_a_room_turns_it_on_or_off_only_from_the_version_read() {
+    use ReleaseConfigChange::*;
+    // Never set: version 0, off.
+    assert_eq!(release_config_change(None, true, 0), Ok(TurnOn));
+    assert_eq!(release_config_change(None, false, 0), Ok(Unchanged));
+    // Set: from its own version only.
+    assert_eq!(
+        release_config_change(Some((true, 3)), false, 3),
+        Ok(TurnOff)
+    );
+    assert_eq!(release_config_change(Some((false, 4)), true, 4), Ok(TurnOn));
+    assert_eq!(
+        release_config_change(Some((true, 3)), true, 3),
+        Ok(Unchanged)
+    );
+    assert_eq!(
+        release_config_change(Some((false, 4)), false, 4),
+        Ok(Unchanged)
+    );
+}
+
+#[test]
+fn a_stale_version_is_refused_before_anything_else_an_unchanged_request_included() {
+    let stale = Err(ReleaseConfigRefusal::VersionConflict);
+    assert_eq!(release_config_change(None, true, 1), stale);
+    assert_eq!(release_config_change(Some((true, 3)), false, 2), stale);
+    assert_eq!(release_config_change(Some((true, 3)), true, 4), stale);
+    assert_eq!(release_config_change(Some((false, 1)), false, 0), stale);
+    assert_eq!(
+        ReleaseConfigRefusal::VersionConflict.code(),
+        "version_conflict"
+    );
+}

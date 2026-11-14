@@ -1,6 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
+import { fakeIds } from "./fake-ids.ts";
 
 // M6 step 5, the release job's read (ADR 0010, "The release job", steps 2 to 4): reading the release directory, `site`,
 // at one exact commit, with the read-only App's token for that one repository. The room's upload command drives the
@@ -13,15 +14,18 @@ const BINDINGS = env as any;
 const stub = () => BINDINGS.WORKSPACE.get(BINDINGS.WORKSPACE.idFromName("ws_release_read_probe"));
 const moderation = () => BINDINGS.MODERATION.get(BINDINGS.MODERATION.idFromName("moderation"));
 const inModeration = <T>(fn: (sql: any) => T) => runInDurableObject(moderation(), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
-/** The stand-in's controls, for this file's own repository: other spec files use it at the same time, with theirs. */
+/** The stand-in's controls, for this file's own repository (`fake-ids.ts`): other spec files use it at the same time, with theirs. */
 const control = (path: string, body?: unknown) => fetch(`https://github-release-fake.example.com${path}?repo=${REPO}`, body === undefined ? undefined : { method: "POST", body: JSON.stringify(body) });
 type Call = { method: string; path: string; accept: string | null; auth: string };
 type State = { calls: Call[]; minted: any[]; mostBlobsAtOnce: number; tokens: { repo: number; permissions: Record<string, string>; revoked: boolean }[] };
 const state = async () => (await (await control("/state")).json()) as State;
-/** Another repository's ID, which the stand-in holds nothing for. Its world is this file's too. */
-const elsewhere = (path: string) => fetch(`https://github-release-fake.example.com${path}?repo=${REPO + 1}`, { method: "POST", body: "{}" });
+/** The stand-in's controls for `OTHER_REPO`. */
+const elsewhere = (path: string) => fetch(`https://github-release-fake.example.com${path}?repo=${OTHER_REPO}`, { method: "POST", body: "{}" });
 
-const REPO = 987650777;
+const IDS = fakeIds("release-read");
+const REPO = IDS.id(0);
+/** Another repository, which the stand-in holds nothing for. It is this file's too. */
+const OTHER_REPO = IDS.id(1);
 const COMMIT = "c0".repeat(20);
 const DIRECTORY = "d1".repeat(20);
 const sha = (n: number) => n.toString(16).padStart(40, "0");
@@ -64,7 +68,7 @@ const SITE = { "index.html": "<p>one</p>\n", "app.js": "export const one = 1;\n"
 beforeEach(async () => {
   await control("/reset", {});
   await moderation().fetch("https://do/release-reads", { method: "POST", body: JSON.stringify({ release_id: `rel_${"0".repeat(32)}`, reads: 1, owner_key: "room:ws_schema" }) });
-  await inModeration((sql) => sql.exec("DELETE FROM release_reads"));
+  await inModeration((sql) => { sql.exec("DELETE FROM release_reads"); sql.exec("DELETE FROM release_read_owner"); });
 });
 
 describe("reading a release from the room's repository", () => {
@@ -374,9 +378,9 @@ describe("a read that gives nothing to publish", () => {
     await control("/reset", {});
     await elsewhere("/reset");
     await seed(repository(SITE));
-    const other = await read({ repo_id: REPO + 1 });
+    const other = await read({ repo_id: OTHER_REPO });
     expect(other.failed).toBe("release_commit_unreadable");
-    expect(((await (await elsewhere("/state")).json()) as State).minted).toEqual([{ repository_ids: [REPO + 1], permissions: { contents: "read", metadata: "read" } }]);
+    expect(((await (await elsewhere("/state")).json()) as State).minted).toEqual([{ repository_ids: [OTHER_REPO], permissions: { contents: "read", metadata: "read" } }]);
     expect((await state()).calls).toEqual([]);
   });
 });

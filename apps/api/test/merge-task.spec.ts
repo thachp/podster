@@ -2,6 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { fakeIds } from "./fake-ids.ts";
 
 // M5 step 7b: `merge_task`. Asking for a task's reviewed commit to be merged, and the room's job that marks it and
 // merges it through the merge App, against the fake GitHub. A room's link is written straight into the room, and the
@@ -28,7 +29,8 @@ const PUBLIC: Who = { id: "agt_mt_public", org: ORG, linker: "per_mt_public_link
 const OUTSIDER: Who = { id: "agt_mt_outsider", org: ORG, linker: "per_mt_x" };
 const orgAdmin: Who = { id: "per_mt_orgadmin", kind: "person", org: ORG, adminOrgs: [ORG] };
 let REPO_ID = 0;
-let nextRepo = 11_000_000 + Math.floor(Math.random() * 1_000_000) * 10;
+/** This file's own repository IDs at the shared GitHub stand-in: see `fake-ids.ts`. */
+const IDS = fakeIds("merge-task");
 const HEAD = "a1".repeat(20);
 const HEAD2 = "c3".repeat(20);
 const BASE = "b2".repeat(20);
@@ -129,7 +131,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  REPO_ID = ++nextRepo;
+  REPO_ID = IDS.next();
   await fake({});
   await ready();
 });
@@ -400,7 +402,7 @@ describe("an independent review (the owner's decision of 2026-11-11 on review A1
 
   it("refuses to merge a commit its submitter's own person approved, or another of their agents did, though the task's review completes as before", async () => {
     for (const reviewer of [LINKER, SIBLING]) {
-      REPO_ID = ++nextRepo;
+      REPO_ID = IDS.next();
       await fake({});
       await ready();
       const r = await approvedBy(reviewer);
@@ -420,7 +422,7 @@ describe("an independent review (the owner's decision of 2026-11-11 on review A1
 
   it("merges a commit another person's agent approved, and one a person who controls no party approved", async () => {
     for (const reviewer of [ROBOT, ADMIN]) {
-      REPO_ID = ++nextRepo;
+      REPO_ID = IDS.next();
       await fake({});
       await ready();
       await pull(7);
@@ -502,7 +504,7 @@ describe("the job checks everything again", () => {
         await inRoom(r.id, (sql) => void sql.exec("UPDATE workspace SET owner_left_at = NULL"));
       }, "grant_stale"],
     ] as const) {
-      REPO_ID = ++nextRepo;
+      REPO_ID = IDS.next();
       await fake({});
       await ready();
       const r = await requested();
@@ -534,7 +536,7 @@ describe("the job checks everything again", () => {
 
   it("reads the repository's protections back first, and degrades the link instead of merging when they aren't what was set", async () => {
     for (const [patch, reason] of [[{ actionsEnabled: true }, "actions_enabled"], [{ rulesets: "no_update" }, "ruleset_missing"], [{ rulesets: "extra_bypass" }, "bypass_differs"], [{ rulesets: "inactive" }, "ruleset_inactive"], [{ rulesets: "extra" }, "unexpected_ruleset"], [{ archived: true }, "archived"]] as const) {
-      REPO_ID = ++nextRepo;
+      REPO_ID = IDS.next();
       await fake({});
       await ready();
       const r = await requested();
@@ -577,7 +579,7 @@ describe("the job checks everything again", () => {
       [{ draft: true }, "pull_request_draft", false],
       [{ merged: true, merge_commit_sha: "8d".repeat(20), merged_by: 31337 }, "merged_elsewhere", false],
     ] as const) {
-      REPO_ID = ++nextRepo;
+      REPO_ID = IDS.next();
       await fake({});
       await ready();
       const r = await requested();
@@ -596,7 +598,7 @@ describe("the job checks everything again", () => {
       expect(again.code ?? "ok", reason).toBe(sticky ? "commit_changed" : "ok");
     }
     // A base that moved under the same branch still merges, and the base seen at the merge is kept.
-    REPO_ID = ++nextRepo;
+    REPO_ID = IDS.next();
     await fake({});
     await ready();
     const r = await requested();
@@ -676,7 +678,7 @@ describe("dying and coming back", () => {
     expect(await marks()).toHaveLength(1);
     // And with the requester's authority gone in between: the call was authorized when it was made, so the next pass
     // reads GitHub before it ends the merge, and records what the call did.
-    REPO_ID = ++nextRepo;
+    REPO_ID = IDS.next();
     await fake({});
     await ready();
     const lost = await requested();
@@ -710,7 +712,7 @@ describe("what GitHub answers to the merge", () => {
 
     // GitHub answers 200, because someone else merged another head a moment before. The read shows a head that isn't the
     // reviewed commit, so this isn't a success, whatever the call said.
-    REPO_ID = ++nextRepo;
+    REPO_ID = IDS.next();
     await fake({});
     await ready();
     const other = await requested();
@@ -721,7 +723,7 @@ describe("what GitHub answers to the merge", () => {
     expect((await change(other.id, other.task)).commit_changed_at).toBeGreaterThan(0);
 
     // The head moves just before the call lands: 409, and the read agrees.
-    REPO_ID = ++nextRepo;
+    REPO_ID = IDS.next();
     await fake({});
     await ready();
     const moved = await requested();
@@ -732,7 +734,7 @@ describe("what GitHub answers to the merge", () => {
     expect((await taskRow(moved.id, moved.task)).status).toBe("completed");
 
     // The rules refuse it: 405, failed with its reason, and it can be asked for again once that's put right.
-    REPO_ID = ++nextRepo;
+    REPO_ID = IDS.next();
     await fake({});
     await ready();
     const refused = await requested();
@@ -1042,7 +1044,7 @@ const release = () => fetch("https://github-fake.example.com/agent-release", { m
 const OPERATOR: Who = { id: "per_operator_one", kind: "person", org: "org_operators" };
 const recheck = (who: Who, id: string) => api(who, "POST", `/v1/moderation/repositories/${id}/recheck`, {});
 const fresh = async () => {
-  REPO_ID = ++nextRepo;
+  REPO_ID = IDS.next();
   await fake({});
   await ready();
 };
@@ -1656,7 +1658,7 @@ describe("a room admin's grant (the owner's decision of 2026-11-11: owner and ad
     const givenThenLeft = async (requestFirst: boolean) => {
       await fresh();
       const r = await approved();
-      const admin: Who = { id: `per_mt_leaver_${nextRepo}`, kind: "person", org: ORG };
+      const admin: Who = { id: `per_mt_leaver_${REPO_ID}`, kind: "person", org: ORG };
       await must(OWNER, "POST", `/v1/workspaces/${r.id}/members`, { principal_id: admin.id, kind: "person", org_id: ORG, role: "admin", policy_version: await version(r.id) }, { claims: { target_member: { person: admin.id, orgs: { [ORG]: 1 } } } });
       const given = await must(admin, "POST", `/v1/workspaces/${r.id}/repository/grants`, { policy_version: await version(r.id), principal_id: MERGER.id, action: "merge" });
       expect(given.delegated_by).toBe(admin.id);
@@ -1684,7 +1686,7 @@ describe("a room admin's grant (the owner's decision of 2026-11-11: owner and ad
   it("waits, counted, when the admin's record can't be read, and merges nothing on an unknown", async () => {
     await fresh();
     const r = await approved();
-    const admin: Who = { id: `per_unavailable_mt_admin_${nextRepo}`, kind: "person", org: ORG };
+    const admin: Who = { id: `per_unavailable_mt_admin_${REPO_ID}`, kind: "person", org: ORG };
     await must(OWNER, "POST", `/v1/workspaces/${r.id}/members`, { principal_id: admin.id, kind: "person", org_id: ORG, role: "admin", policy_version: await version(r.id) }, { claims: { target_member: { person: admin.id, orgs: { [ORG]: 1 } } } });
     await must(admin, "POST", `/v1/workspaces/${r.id}/repository/grants`, { policy_version: await version(r.id), principal_id: MERGER.id, action: "merge" });
     const got = await merge(MERGER, r.id, r.task);

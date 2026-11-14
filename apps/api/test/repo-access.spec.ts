@@ -2,6 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { fakeIds } from "./fake-ids.ts";
 
 // M5 step 6: `get_repo_access`, an agent's short-lived token for the room's repository, against the fake GitHub. Links
 // and a task's link to the repository are written straight into the room, as step 5b's tests do: no command marks a
@@ -23,7 +24,8 @@ const OUTSIDER: Who = { id: "agt_ra_outsider", org: ORG };
 const orgAdmin: Who = { id: "per_ra_orgadmin", kind: "person", org: ORG, adminOrgs: [ORG] };
 /** Each test's own repository, so the fake's state for it is the test's alone while other specs run beside it. */
 let REPO_ID = 0;
-let nextRepo = 7_000_000 + Math.floor(Math.random() * 1_000_000) * 10;
+/** This file's own repository IDs at the shared GitHub stand-in: see `fake-ids.ts`. */
+const IDS = fakeIds("repo-access");
 const PERMISSIONS = { contents: "write", metadata: "read", pull_requests: "write" };
 
 async function assertion(who: Who, claims: object = {}) {
@@ -75,7 +77,7 @@ const minting = async () => {
 const release = () => fetch("https://github-fake.example.com/agent-release", { method: "POST", body: JSON.stringify({ id: REPO_ID }) });
 /** A fresh repository for this test, known to the fake's agent-token App. */
 const freshRepo = async () => {
-  REPO_ID = ++nextRepo;
+  REPO_ID = IDS.next();
   await script({});
 };
 
@@ -818,7 +820,7 @@ describe("the review's findings (M5 step 6)", () => {
   it("uses the live grant when an expired one sits beside it (L4)", async () => {
     const r = await room();
     // Newer than the live grant, on an earlier repository, and expired.
-    await inRoom(r.id, (sql) => sql.exec("INSERT INTO provider_grant (id, principal_id, provider, provider_repo_id, action, delegated_by, created_at, expires_at) VALUES ('pgr_old', ?, 'github', ?, 'push', ?, ?, ?)", AGENT.id, REPO_ID + 1, OWNER.id, Date.now() + 1000, Date.now() - 1));
+    await inRoom(r.id, (sql) => sql.exec("INSERT INTO provider_grant (id, principal_id, provider, provider_repo_id, action, delegated_by, created_at, expires_at) VALUES ('pgr_old', ?, 'github', ?, 'push', ?, ?, ?)", AGENT.id, IDS.next(), OWNER.id, Date.now() + 1000, Date.now() - 1));
     const got = await access(AGENT, r.id, r.task);
     expect(got.status, got.text).toBe(200);
     expect((await tokens(r.id))[0].grant_id).toBe(r.grant);

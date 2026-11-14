@@ -63,7 +63,7 @@ const SITE = { "index.html": "<p>one</p>\n", "app.js": "export const one = 1;\n"
 
 beforeEach(async () => {
   await control("/reset", {});
-  await moderation().fetch("https://do/release-reads", { method: "POST", body: JSON.stringify({ release_id: `rel_${"0".repeat(32)}`, reads: 1 }) });
+  await moderation().fetch("https://do/release-reads", { method: "POST", body: JSON.stringify({ release_id: `rel_${"0".repeat(32)}`, reads: 1, owner_key: "room:ws_schema" }) });
   await inModeration((sql) => sql.exec("DELETE FROM release_reads"));
 });
 
@@ -255,8 +255,10 @@ describe("a read that gives nothing to publish", () => {
   it("reserves every read before it is made, waits when the budget has no room, and counts each attempt", async () => {
     await seed(repository(SITE));
     const others = `rel_${"9".repeat(32)}`;
-    // 2,995 of the hour's 3,000 reads are held by another release. This one needs 2 for its trees, then 5.
-    await moderation().fetch("https://do/release-reads", { method: "POST", body: JSON.stringify({ release_id: others, reads: 2995 }) });
+    // 2,995 of the hour's 3,000 reads are held by another release, of another owner. This one needs 2 for its trees,
+    // then 5. No owner can reserve 2,995 under its share, so the row is made larger after it is reserved.
+    await moderation().fetch("https://do/release-reads", { method: "POST", body: JSON.stringify({ release_id: others, reads: 1, owner_key: "org:org_rr_elsewhere" }) });
+    await inModeration((sql) => sql.exec("UPDATE release_reads SET reads = 2995 WHERE release_id = ?", others));
     const first = newRelease();
     const got = await outcome({ release_id: first });
     expect([got.failed, got.fails, got.asked]).toEqual(["release_reads_budget", false, ["trees", "trees?recursive=1"]]);
@@ -280,7 +282,7 @@ describe("a read that gives nothing to publish", () => {
     await read({ release_id: release });
     expect(await inModeration((sql) => sql.exec("SELECT release_id, reads FROM release_reads").toArray())).toEqual([{ release_id: release, reads: 14 }]);
     // An earlier way of asking, with no `more`, still answers a release's reservation as it stands and adds nothing.
-    const again = await moderation().fetch("https://do/release-reads", { method: "POST", body: JSON.stringify({ release_id: release, reads: 500 }) });
+    const again = await moderation().fetch("https://do/release-reads", { method: "POST", body: JSON.stringify({ release_id: release, reads: 500, owner_key: "room:ws_test_release_read" }) });
     expect(((await again.json()) as any).reads).toBe(14);
     expect(await inModeration((sql) => sql.exec("SELECT reads FROM release_reads").toArray())).toEqual([{ reads: 14 }]);
   });

@@ -165,10 +165,13 @@ beforeAll(async () => {
 });
 beforeEach(async () => {
   await github("/reset", {});
-  await moderation().fetch("https://do/release-reads", { method: "POST", body: JSON.stringify({ release_id: `rel_${"0".repeat(32)}`, reads: 1 }) });
-  await inModeration((sql) => sql.exec("DELETE FROM release_reads"));
+  await moderation().fetch("https://do/release-reads", { method: "POST", body: JSON.stringify({ release_id: `rel_${"0".repeat(32)}`, reads: 1, owner_key: "room:ws_schema" }) });
+  await inModeration((sql) => { sql.exec("DELETE FROM release_reads"); sql.exec("DELETE FROM release_read_owner"); });
 });
-afterEach(async () => { for (const id of made.splice(0)) await alarmQuiet(stub(id)); });
+afterEach(async () => {
+  for (const id of made.splice(0)) await alarmQuiet(stub(id));
+  await inModeration((sql) => void sql.exec("DROP TABLE IF EXISTS test_clock"));
+});
 
 describe("driving a release", () => {
   it("takes a queued release through start, upload and commit, a step a pass, and records the upload with an event", async () => {
@@ -371,6 +374,95 @@ describe("how often a room reads", () => {
   });
 });
 
+describe("each owner's share of the read budget (docs/m6-release-read-share.md)", () => {
+  /** The `Moderation` object's clock, where the budget is kept, set to match the rooms'. */
+  const moderationAt = (now: number) => inModeration((sql) => {
+    sql.exec("CREATE TABLE IF NOT EXISTS test_clock (now INTEGER NOT NULL)");
+    sql.exec("DELETE FROM test_clock");
+    sql.exec("INSERT INTO test_clock (now) VALUES (?)", now);
+  });
+  /** Reads reserved by another release of `owner`, as one of its rooms would. */
+  const fill = async (n: number, reads: number, owner: string) => {
+    const answer = await moderation().fetch("https://do/release-reads", { method: "POST", body: JSON.stringify({ release_id: `rel_${n.toString(16).padStart(32, "a")}`, reads, owner_key: owner, more: true }) });
+    expect(((await answer.json()) as any).fits, `${owner} ${reads}`).toBe(true);
+  };
+  const slots = (id: string) => inRoom(id, (sql) => sql.exec("SELECT COUNT(*) AS n FROM release_upload_attempt").one().n);
+  const owners = () => inModeration((sql) => sql.exec("SELECT release_id, owner_key FROM release_read_owner ORDER BY release_id").toArray());
+
+  it("keeps a queued release waiting while two other owners hold their whole share, counting nothing, and starts it when the hour rolls", async () => {
+    await github("/seed", repository(SITE));
+    await moderationAt(T);
+    await fill(1, 1204, "org:org_rd_one");
+    await moderationAt(T + 1000);
+    await fill(2, 1204, "org:org_rd_two");
+    const held = await reserved();
+    // 592 of the 3,000 are left, less than a full attempt: the room's release waits as it is, queued.
+    const r = await room("queued");
+    const waiting = await drivenPass(r.room);
+    expect([waiting.outcome, waiting.code, waiting.next_attempt_at, waiting.due]).toEqual(["waiting", "release_reads_share", T + HOUR, T + HOUR]);
+    // **No attempt is counted, no upload slot taken, nothing asked of GitHub, nothing reserved, and the upload's hour
+    // hasn't begun.**
+    expect(await job(r.room)).toEqual({ attempts: 0, next_attempt_at: T + HOUR, leased_step: null, last_code: "release_reads_share" });
+    expect([await release(r.room), await slots(r.room), (await githubState()).minted, await reserved()]).toEqual([{ state: "queued", failure_code: null }, 0, [], held]);
+    // Asked again a millisecond early, it isn't due; asked many times, it is never ended by the cap.
+    await at(r.room, T + HOUR - 1);
+    expect((await drivenPass(r.room)).outcome).toBe("not_due");
+    for (let n = 0; n < 9; n += 1) {
+      await inRoom(r.room, (sql) => void sql.exec("UPDATE release_job SET next_attempt_at = NULL"));
+      expect((await drivenPass(r.room)).code, `pass ${n}`).toBe("release_reads_share");
+    }
+    expect([(await job(r.room)).attempts, (await release(r.room)).state]).toEqual([0, "queued"]);
+    // The hour rolls past the first owner's reads: the release is started, as its first attempt.
+    await moderationAt(T + HOUR);
+    await at(r.room, T + HOUR);
+    await inRoom(r.room, (sql) => void sql.exec("UPDATE release_job SET next_attempt_at = ?", T + HOUR));
+    const started = await drivenPass(r.room);
+    expect([started.outcome, started.state]).toEqual(["next", "uploading"]);
+    expect((await job(r.room)).attempts).toBe(1);
+    // Its upload reserves under its own room's organization, from the room's row.
+    const uploaded = await drivenPass(r.room);
+    expect([uploaded.outcome, uploaded.state]).toEqual(["next", "uploading"]);
+    expect((await owners()).find((row: any) => row.release_id === REL)).toEqual({ release_id: REL, owner_key: `org:${ORG}` });
+  });
+
+  it("keeps a queued release waiting while its own organization's other releases hold the share, though the hour has room", async () => {
+    await github("/seed", repository(SITE));
+    await moderationAt(T);
+    await fill(3, 602, `org:${ORG}`);
+    await moderationAt(T + 2000);
+    await fill(4, 602, `org:${ORG}`);
+    const r = await room("queued");
+    const waiting = await drivenPass(r.room);
+    expect([waiting.outcome, waiting.code, waiting.next_attempt_at]).toEqual(["waiting", "release_reads_share", T + HOUR]);
+    expect([(await job(r.room)).attempts, (await release(r.room)).state, await slots(r.room)]).toEqual([0, "queued", 0]);
+    // The control: another organization's reads in its place leave this one's share whole, and the release starts.
+    await inModeration((sql) => void sql.exec("UPDATE release_read_owner SET owner_key = 'org:org_rd_other'"));
+    await inRoom(r.room, (sql) => void sql.exec("UPDATE release_job SET next_attempt_at = NULL"));
+    const started = await drivenPass(r.room);
+    expect([started.outcome, started.state, (await job(r.room)).attempts]).toEqual(["next", "uploading", 1]);
+  });
+
+  it("is enforced at the reservation all the same: a release past the queued check is refused by its owner's share", async () => {
+    await github("/seed", repository(SITE));
+    await moderationAt(T);
+    await fill(5, 1204, `org:${ORG}`);
+    const held = await reserved();
+    // Already uploading, so the queued check is never asked: only the reservation stands between it and the reads.
+    const r = await room("uploading");
+    const refused = await drivenPass(r.room);
+    expect([refused.outcome, refused.code, refused.state, refused.next_attempt_at]).toEqual(["retry", "release_reads_budget", "uploading", T + HOUR]);
+    // The hour's total had room for it: the share alone refused, and nothing was reserved or asked of GitHub.
+    expect([await reserved(), (await githubState()).minted]).toEqual([held, []]);
+    // The control: the same reads charged to another owner, and the same release's next attempt reads and uploads.
+    await inModeration((sql) => void sql.exec("UPDATE release_read_owner SET owner_key = 'org:org_rd_other'"));
+    // Asked again before its upload's hour is out, which began at T.
+    await inRoom(r.room, (sql) => void sql.exec("UPDATE release_job SET next_attempt_at = NULL"));
+    const uploaded = await drivenPass(r.room);
+    expect([uploaded.outcome, uploaded.state]).toEqual(["next", "uploading"]);
+    expect((await provider(r.script)).written!.times).toBe(1);
+  });
+});
+
 describe("the upload's hour", () => {
   it("wakes the room at its end, to the millisecond, whatever the release's next attempt says", async () => {
     const r = await room("uploading", [`INSERT INTO release_job (release_id, attempts, next_attempt_at, updated_at) VALUES ('${REL}', 1, ${T + 2 * HOUR}, ${T})`]);
@@ -441,6 +533,15 @@ describe("what the driver is behind", () => {
     };
     check("workspace/release_driver.rs", "name = 'test_release_driver'");
     check("workspace.rs", '"/internal/test-release-drive"');
+    // **The owner a room's reads are charged to comes from the room's own row,** never from a request: the driver's
+    // question and the upload's reservations both take it from `read_owner`, which reads only `workspace`.
+    const driver = sources["workspace/release_driver.rs"];
+    const owner = driver.slice(driver.indexOf("pub(super) fn read_owner("), driver.indexOf("fn room_id("));
+    expect(owner).toContain('"SELECT id, owner_org_id, owner_person_id FROM workspace"');
+    expect(owner).not.toMatch(/req|body|Request/);
+    expect(driver).toContain('Some(json!({ "owner_key": owner, "reads": MAX_ATTEMPT_READS }))');
+    expect(sources["workspace/release_upload.rs"]).toContain("let owner = release_driver::read_owner(&sql)?;");
+    expect(sources["workspace/release_upload.rs"].match(/owner_key/g)).toBeNull();
     expect(sources["workspace/release_commit.rs"]).toContain("pub(crate) const RELEASE_PATH_COMPLETE: bool = false;");
   });
 });

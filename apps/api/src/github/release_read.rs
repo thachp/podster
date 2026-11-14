@@ -475,9 +475,13 @@ impl<'a> ReleaseReader<'a> {
 /// home, **before they are made.** Each attempt reserves its own: the two tree reads, then the file reads. `Budget`
 /// when there isn't room now, and nothing is reserved. **It is asked under the attempt's deadline, as every other
 /// call is:** past it nothing is asked, and an answer that doesn't come in a call's time is no answer.
+///
+/// `owner` is the room's owner key, which the room's Rust makes from its own row (`release_driver::read_owner_key`):
+/// the budget charges the reads to that owner's share as well as the hour's total.
 pub(crate) async fn reserve(
     env: &Env,
     release_id: &str,
+    owner: &str,
     reads: u32,
     attempt: &Attempt,
 ) -> std::result::Result<(), ReadFailure> {
@@ -492,7 +496,7 @@ pub(crate) async fn reserve(
             .get_stub()?;
         let mut init = RequestInit::new();
         init.with_method(Method::Post).with_body(Some(
-            json!({ "release_id": release_id, "reads": reads, "more": true })
+            json!({ "release_id": release_id, "reads": reads, "owner_key": owner, "more": true })
                 .to_string()
                 .into(),
         ));
@@ -569,7 +573,11 @@ pub(crate) async fn probe(env: &Env, body: &Value) -> Value {
         }
         None => Attempt::by_the_clock(),
     };
-    if let Err(failure) = reserve(env, release_id, TREE_READS, &attempt).await {
+    // A test names the owner its reads are charged to, as a room's Rust does from its row.
+    let owner = body["owner_key"]
+        .as_str()
+        .unwrap_or("room:ws_test_release_read");
+    if let Err(failure) = reserve(env, release_id, owner, TREE_READS, &attempt).await {
         return failed(&failure);
     }
     let reader = match ReleaseReader::open(&app, repo_id, &attempt).await {
@@ -578,7 +586,14 @@ pub(crate) async fn probe(env: &Env, body: &Value) -> Value {
     };
     let outcome = async {
         let plan = reader.plan(commit).await?;
-        reserve(env, release_id, file_reads(plan.count(), 1), &attempt).await?;
+        reserve(
+            env,
+            release_id,
+            owner,
+            file_reads(plan.count(), 1),
+            &attempt,
+        )
+        .await?;
         let mut fetched = 0_u64;
         let mut hashes = Vec::new();
         for batch in plan.files.chunks(FETCH_CONCURRENCY) {

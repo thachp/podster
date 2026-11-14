@@ -26,8 +26,8 @@
 //! Every figure marked **Proposed** is the architect's to rule on.
 
 use crate::release::{
-    window_start, ReleaseState, ATTEMPT_DEADLINE_MS, FETCH_PASSES, MAX_RELEASE_READS_PER_HOUR,
-    READ_WINDOW_MS, TREE_READS,
+    read_budget_wait, reads_wait_under, window_start, ReleaseState, ATTEMPT_DEADLINE_MS,
+    FETCH_PASSES, MAX_RELEASE_READS_PER_HOUR, READ_WINDOW_MS, TREE_READS,
 };
 use crate::release_tree::MAX_FILES;
 
@@ -67,6 +67,90 @@ pub const MAX_ROOM_READS_PER_HOUR: u32 = MAX_UPLOAD_ATTEMPTS_PER_ROOM_PER_HOUR *
 // full-size attempt.
 const _: () = assert!(MAX_ROOM_READS_PER_HOUR * 2 <= MAX_RELEASE_READS_PER_HOUR);
 const _: () = assert!(MAX_RELEASE_READS_PER_HOUR - MAX_ROOM_READS_PER_HOUR >= MAX_ATTEMPT_READS);
+
+/// The most of the deployment's hourly reads one owner may hold, over all its rooms and releases: what one room can
+/// hold, 1,204 of 3,000, so an owner keeps exactly two full attempts (`docs/m6-release-read-share.md`, ruling 2). An
+/// owner is the room's organization, else its owner person, else the room itself ([`read_owner_key`]). Two owners at
+/// their whole share leave 592, less than a full attempt: a third owner's full-size release waits, which the ruling
+/// accepts until contention is measured. **Proposed.**
+pub const MAX_OWNER_READS_PER_HOUR: u32 = MAX_ROOM_READS_PER_HOUR;
+
+// An owner can always make one full attempt, and never holds the deployment's budget alone: a full attempt of another
+// owner always fits beside a whole share.
+const _: () = assert!(MAX_OWNER_READS_PER_HOUR >= MAX_ATTEMPT_READS);
+const _: () = assert!(MAX_RELEASE_READS_PER_HOUR - MAX_OWNER_READS_PER_HOUR >= MAX_ATTEMPT_READS);
+
+/// The code a queued release waits under while its owner's share, or the deployment's hour, has no room for a full
+/// attempt. It counts no attempt ([`waits_uncounted`]). **Proposed.**
+pub const READ_SHARE_WAITING: &str = "release_reads_share";
+
+/// The code a release waits under while another release's commit or rollback waits for its marker (`m6-plan.md`
+/// ruling 7). Its wait is not built yet; it is named here so the two uncounted waits share one rule.
+const IN_FLIGHT_WAITING: &str = "release_in_flight";
+
+/// The waits that count no driver attempt, take no upload slot and so never end a release by the cap: the read share's
+/// and the marker's ([`READ_SHARE_WAITING`] and `release_in_flight`). Nothing else.
+pub fn waits_uncounted(code: &str) -> bool {
+    matches!(code, READ_SHARE_WAITING | IN_FLIGHT_WAITING)
+}
+
+/// The owner a room's reads are charged to, as the key the deployment's budget keeps: `org:` the room's organization,
+/// else `person:` its owner person, else `room:` the room itself. An empty value counts as none. `None` when the one
+/// chosen isn't an ID, so a room whose owner can't be read reserves nothing.
+pub fn read_owner_key(org: Option<&str>, person: Option<&str>, room: &str) -> Option<String> {
+    let key = match (
+        org.filter(|org| !org.is_empty()),
+        person.filter(|person| !person.is_empty()),
+    ) {
+        (Some(org), _) => format!("org:{org}"),
+        (None, Some(person)) => format!("person:{person}"),
+        (None, None) => format!("room:{room}"),
+    };
+    is_read_owner_key(&key).then_some(key)
+}
+
+/// The longest ID an owner key carries.
+const MAX_OWNER_ID_BYTES: usize = 128;
+
+/// Whether `key` is an owner key as [`read_owner_key`] makes them: a kind, a colon, and an ID of letters, digits, `_`
+/// and `-`.
+pub fn is_read_owner_key(key: &str) -> bool {
+    let Some((kind, id)) = key.split_once(':') else {
+        return false;
+    };
+    matches!(kind, "org" | "person" | "room")
+        && !id.is_empty()
+        && id.len() <= MAX_OWNER_ID_BYTES
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// The read share, asked for `needed` reads by one owner: `held_by_owner` is that owner's reservations and `held_all`
+/// every reservation, the owner's among them, each as `(reserved_at, reads)` in any order. `Ok` when the reads fit both
+/// the owner's share ([`MAX_OWNER_READS_PER_HOUR`]) and the deployment's hour now. Otherwise the later of the two times
+/// each would fit, if nothing else were reserved meanwhile, or `None` when `needed` alone is past either.
+pub fn read_share_wait(
+    held_by_owner: &[(i64, u32)],
+    held_all: &[(i64, u32)],
+    needed: u32,
+    now: i64,
+) -> Result<(), Option<i64>> {
+    let owner = reads_wait_under(MAX_OWNER_READS_PER_HOUR, held_by_owner, needed, now);
+    let total = read_budget_wait(held_all, needed, now);
+    match (owner, total) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(None), _) | (_, Err(None)) => Err(None),
+        (Err(Some(at)), Ok(())) | (Ok(()), Err(Some(at))) => Err(Some(at)),
+        (Err(Some(owner)), Err(Some(total))) => Err(Some(owner.max(total))),
+    }
+}
+
+/// When a queued release told to wait by the read share is next due: the time the share named, and never sooner than
+/// the first wait from `now`, so a clock that differs between two objects can't bring the release straight back.
+pub fn read_share_due(retry_at: i64, now: i64) -> i64 {
+    retry_at.max(now.saturating_add(DRIVE_FIRST_WAIT_MS))
+}
 
 /// One step the driver asks of the room for a release, each one of the room's existing commands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

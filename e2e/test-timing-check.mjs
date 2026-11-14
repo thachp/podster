@@ -564,11 +564,27 @@ export function judge(all, allow, categories = null) {
 }
 
 async function selfTest() {
-  let failed = 0;
+  // Every case reads only its own text, and the checker keeps nothing between cases, so a case can fail differently from
+  // run to run only through esbuild. Its absence is said once, as the check itself says it, not as a failure per case.
+  const tool = await esbuild();
+  if (!tool) {
+    console.error("test-timing-check self-test needs esbuild: run `npm ci` in e2e first. No case was run.");
+    return 2;
+  }
+  /** The titles of the cases that failed, named again at the end so a cut-off log still places them. */
+  const failures = [];
   const expect = async (title, text, wanted, options = { api: true }) => {
-    const got = ((await findings(text, options)) ?? [{ line: 0, rule: "esbuild isn't installed" }]).map((f) => `${f.line}: ${f.rule}`);
+    let got;
+    try {
+      got = (await findings(text, options)).map((f) => `${f.line}: ${f.rule}`);
+    } catch (error) {
+      // A throw (esbuild's service, a parse) fails this case alone, with what was thrown, and the rest still run.
+      failures.push(title);
+      console.log(`FAIL ${title}\n     threw ${error?.stack ?? error}`);
+      return;
+    }
     const passed = JSON.stringify(got) === JSON.stringify(wanted);
-    if (!passed) failed++;
+    if (!passed) failures.push(title);
     console.log(`${passed ? "ok  " : "FAIL"} ${title}${passed ? "" : `\n     wanted ${JSON.stringify(wanted)}\n     got    ${JSON.stringify(got)}`}`);
   };
   const quiet = 'import { afterEach } from "vitest";\nimport { alarmQuiet } from "./alarm.ts";\nconst made: string[] = [];\nafterEach(async () => { for (const id of made.splice(0)) await alarmQuiet(stub(id)); });\n';
@@ -591,7 +607,7 @@ async function selfTest() {
     const helpers = new Map([["/t/run.ts", { sleepers: helper.sleepers, rooms: new Set() }]]);
     await expect(`sleep: an exported helper whose sleep is in a named callback sleeps where it's imported (sleepers ${JSON.stringify(sleepers)})`, 'import { waitForRun, settle as calm } from "./run.ts";\nimport { sleep as nap } from "./other.ts";\nit("a", async () => { await waitForRun("x"); });\nit("b", async () => { await waitForRun(); await calm(); });\nit("c", async () => { await nap(); });\nit("d", async () => { await sleep(); });\n', ["3: sleep", "4: sleep", "4: sleep", "5: sleep"], { api: true, path: "/t/x.spec.ts", helpers });
     const has = sleepers.includes("waitForRun") && sleepers.includes("tick") && sleepers.includes("settle");
-    if (!has) failed++;
+    if (!has) failures.push("sleep: both the named callback and the exported helper around it are sleepers");
     console.log(`${has ? "ok  " : "FAIL"} sleep: both the named callback and the exported helper around it are sleepers${has ? "" : `: got ${JSON.stringify(sleepers)}`}`);
   }
   await expect("sleep: every call to a helper here that sleeps is found where it is made (once per line), through helpers that call it", 'const waitForRun = () => new Promise((done) => setTimeout(done, 700));\nconst twice = async () => { await waitForRun(); await waitForRun(); };\nit("a", async () => { await waitForRun(); });\nit("b", async () => { await twice(); });\n', ["1: sleep", "2: sleep", "3: sleep", "4: sleep"]);
@@ -630,7 +646,7 @@ async function selfTest() {
   // Where a finding is, for the allow-list's key.
   const wheres = ((await findings('describe("rooms", () => {\n  it("waits", async () => {\n    await new Promise((r) => setTimeout(r, 5));\n  });\n});\nconst poll = async () => {\n  await new Promise((r) => setTimeout(r, 5));\n};\n')) ?? []).map((f) => f.where);
   const whereOk = JSON.stringify(wheres) === JSON.stringify(["rooms > waits", "function poll"]);
-  if (!whereOk) failed++;
+  if (!whereOk) failures.push("a finding's where is its test's title path, or its function's name");
   console.log(`${whereOk ? "ok  " : "FAIL"} a finding's where is its test's title path, or its function's name${whereOk ? "" : `: got ${JSON.stringify(wheres)}`}`);
   // The allow-list.
   const categories = { A: "a poll", B: "a sleep before asserting nothing happened" };
@@ -640,7 +656,7 @@ async function selfTest() {
     const v = judge(findingsHere, allow, categories);
     const got = { allowed: v.allowed.length, failing: v.failing.length, stale: v.stale.length, unreasoned: v.unreasoned.length };
     const passed = JSON.stringify(got) === JSON.stringify(wanted);
-    if (!passed) failed++;
+    if (!passed) failures.push(`allow-list: ${title}`);
     console.log(`${passed ? "ok  " : "FAIL"} allow-list: ${title}${passed ? "" : `\n     wanted ${JSON.stringify(wanted)}\n     got    ${JSON.stringify(got)}`}`);
   };
   allowCase("an entry allows the finding it names and nothing else", [entry()], { allowed: 1, failing: 1, stale: 0, unreasoned: 0 });
@@ -659,13 +675,24 @@ async function selfTest() {
   allowCase("an owed helper's entry can't allow its calls: each call is listed or fails", [entry({ owed: true, calls_allowed: true })], { allowed: 1, failing: 2, stale: 0, unreasoned: 1 }, [...all, call]);
   allowCase("without calls_allowed, a new call to an allowed helper fails", [entry()], { allowed: 1, failing: 2, stale: 0, unreasoned: 0 }, [...all, call]);
   allowCase("an entry can't be re-pointed: the allowed poll gone, the same text in a test fails", [entry()], { allowed: 0, failing: 2, stale: 1, unreasoned: 0 }, [{ ...all[0], where: "rooms > waits" }, all[1]]);
-  console.log(failed ? `\n${failed} failed` : "\ntest-timing-check self-test: all passed");
-  return failed ? 1 : 0;
+  if (!failures.length) {
+    console.log("\ntest-timing-check self-test: all passed");
+    return 0;
+  }
+  console.log(`\n${failures.length} failed, on node ${process.version} and esbuild ${tool.version}:\n${failures.map((title) => `  - ${title}`).join("\n")}`);
+  return 1;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const argv = process.argv.slice(2);
-  if (argv.includes("--self-test")) process.exit(await selfTest());
+  if (argv.includes("--self-test")) {
+    // A throw outside any case still ends with what was thrown and exit 1, never an unhandled rejection with no summary.
+    const code = await selfTest().catch((error) => {
+      console.error(`\ntest-timing-check self-test stopped outside a case: ${error?.stack ?? error}`);
+      return 1;
+    });
+    process.exit(code);
+  }
   const json = argv.includes("--json");
   const named = argv.filter((a) => !a.startsWith("--"));
   const files = named.length ? named.map((name) => resolve(process.cwd(), name)) : ROOTS.flatMap((dir) => specs(join(root, dir)));

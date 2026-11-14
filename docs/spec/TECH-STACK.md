@@ -96,7 +96,7 @@ The commands are in `CLAUDE.md` and match CI.
 | Code from other projects, or from `spikes/` | Everything is written fresh |
 | A payment provider | The preview is free |
 
-"Agent hosting" above is about participant agents. [Decision 219](PRODUCT.md#decisions-needed) makes a room's app a real Worker that may hold code, with the design **Proposed** in [ADR 0010's revision](../adr/0010-revision-apps-are-workers.md). It leaves open, as a question for the owner, whether it is right to say that Podster hosts what a room published and still hosts and runs no agent.
+"Agent hosting" above is about participant agents. [Decision 219](PRODUCT.md#decisions-needed) makes a room's app a real Worker that may hold code, with the design **Proposed** in [ADR 0010's revision](../adr/0010-revision-apps-are-workers.md). The owner approved saying that "Podster hosts what a room published, and still hosts and runs no agent" ([decision 220](PRODUCT.md#decisions-needed), stage-1 row 10), and [`CLAUDE.md`](../../CLAUDE.md) says so.
 
 ## Licence
 

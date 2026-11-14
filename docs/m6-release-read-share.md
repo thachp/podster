@@ -1,6 +1,7 @@
 # M6: a cross-room share of the release read budget
 
-**Status: built on 2026-11-14, its four questions ruled on the same day,** behind `RELEASES` with
+**Status: built on 2026-11-14, its four questions ruled on the same day and confirmed by the owner on 2026-11-14
+([the owner's words](m6-plan.md#confirmed-by-the-owner-2026-11-14)),** behind `RELEASES` with
 `RELEASE_PATH_COMPLETE` still false. Its figures stay **Proposed.** It answers one item on
 [the gate on the release path](m6-plan.md#the-gate-on-the-release-path): "a cross-room share of the read budget"
 ([ruling 3 on the driver](m6-plan.md#what-the-third-pr-built-the-driver)). Built: the share in core
@@ -14,18 +15,18 @@ The design below is as it was written; line numbers are on `main` at `6c2d12b2`.
 
 1. **The owner is the unit.** It is the room's organization, else its owner person, else the room itself. Reads are
    charged to whoever owned the room when they were reserved. They stay charged there if ownership changes later. A
-   change of owner needs a person, so this can't be gamed cheaply. *Decided by the architect, for the owner to
-   review.*
+   change of owner needs a person, so this can't be gamed cheaply. *Decided by the architect, confirmed by the owner
+   on 2026-11-14 ([the owner's words](m6-plan.md#confirmed-by-the-owner-2026-11-14)).*
 2. **The share is 1,204 reads an hour per owner,** so each owner keeps exactly two full attempts, the same as the
    driver's per-room bound. **The consequence is accepted:** once two owners have used their whole share, they leave
    592 reads, and a third owner's full-size release waits up to the rest of the hour. **Owed before production:**
-   measure contention, then revisit the share or add a held-back reserve. *Decided by the architect, for the owner to
-   review.*
+   measure contention, then revisit the share or add a held-back reserve. *Decided by the architect, confirmed by the
+   owner on 2026-11-14 ([the owner's words](m6-plan.md#confirmed-by-the-owner-2026-11-14)); the figure stays **Proposed**.*
 3. **Both checks.** The share is checked while the release is `queued`, to save the attempt and the slot. That check
    is only an optimisation. It is enforced again at the reservation, inside `Moderation`'s transaction, which is the
-   only place that decides. *Decided by the architect, for the owner to review.*
+   only place that decides. *Decided by the architect, confirmed by the owner on 2026-11-14 ([the owner's words](m6-plan.md#confirmed-by-the-owner-2026-11-14)).*
 4. **Fair queueing is deferred.** It is owed only if the measurement in ruling 2 shows starvation. *Decided by the
-   architect, for the owner to review.*
+   architect, confirmed by the owner on 2026-11-14 ([the owner's words](m6-plan.md#confirmed-by-the-owner-2026-11-14)).*
 
 ## 1. The budget today
 

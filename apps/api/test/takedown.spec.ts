@@ -355,9 +355,13 @@ describe("an operator's suspension of an app", () => {
     await inRoom(b.room, (sql) => sql.exec("UPDATE serve_apply SET applied_version = 5"));
     await runInDurableObject(stub(b.room), (_: any, s: any) => s.storage.deleteAlarm());
     expect(await nextAlarm(stub(b.room))).toBeNull();
+    expect(await applyRows(b.room)).toEqual([{ host: b.host, applied_version: 5, applied_script: b.flight, attempts: 0, last_code: null }]);
     const again = await stub(b.room).fetch("https://do/internal/release-commit-live", { method: "POST", body: JSON.stringify({ release_id: rel(3) }) });
     expect([again.status, ((await again.json()) as any).state]).toEqual([200, "live"]);
-    expect(await nextAlarm(stub(b.room))).not.toBeNull();
+    // The alarm it sets is due at once, and the test runtime runs a due alarm by itself, so whether it is still set when
+    // read is a race. What it is for isn't: once whatever is due has run, the owed entry is applied.
+    await alarmQuiet(stub(b.room));
+    expect(await applyRows(b.room)).toEqual([{ host: b.host, applied_version: 6, applied_script: b.flight, attempts: 0, last_code: null }]);
   });
 
   it("keeps a record in the room when its release bookkeeping fails, tells operators from it at the third failure in a row, and clears it when it works", async () => {

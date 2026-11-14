@@ -1,6 +1,6 @@
 # ADR 0010, proposed revision: a room's app is a Worker
 
-**Status: Proposed, by the architect's session on 2026-11-13, for the architect's review and then independent reviews. Nothing here is accepted, and no code is written for it.** It proposes how [ADR 0010](0010-release-and-the-content-domain.md) changes now that the owner has said an app is a real Worker and not only static files ([decision 219](../spec/PRODUCT.md#decisions-needed)). ADR 0010 itself is unchanged apart from a dated note pointing here; if this is accepted, its sections are revised then, each with what it said before.
+**Status: Proposed, by the architect's session on 2026-11-13. Its stage-1 questions were answered by the owner on 2026-11-13, each as recommended ([decision 220](../spec/PRODUCT.md#decisions-needed)); those answers are decided. The design that follows from them, and everything about stages 2 to 4, is still proposed: it was reviewed twice before the owner answered and awaits an independent review before it is marked Accepted. No code is written for it.** It proposes how [ADR 0010](0010-release-and-the-content-domain.md) changes now that the owner has said an app is a real Worker and not only static files ([decision 219](../spec/PRODUCT.md#decisions-needed)). ADR 0010 itself is unchanged apart from a dated note pointing here; if this is accepted, its sections are revised then, each with what it said before.
 
 ## The owner's words
 
@@ -17,12 +17,13 @@
 9. "the firs demot app will most likely be a demo app"
 10. "i mean a todo app"
 11. "okay". *This answered the architect's summary of what a todo app needs. It approves no decision.*
+12. "stage1: all as recommend". *This answered [the stage-1 table](#stage-1-one-todo-app) below. The architect had put its rows 1 to 10, with 4a and 4b, to the owner, each with this document's recommendation, and had said that this reply would mean all as recommended.*
 
 **What those words settle:** an app is a Worker, code included, in any language Workers for Platforms runs, and not only HTML (1, 2). **The target is a full framework app** (8), and **the first app published is one todo app** (9, 10). **What they don't settle, and stays the owner's to decide:** whether an app gets storage, of any kind; whether Podster builds; what an app may reach; the sandbox. Each is a row in [the summary](#1-summary-the-decisions-by-stage).
 
 **What this overrides:** [decision 214](../spec/PRODUCT.md#decisions-needed)'s "an app is static files: nothing an agent wrote runs on a server". **What it leaves, proposed:** one environment, `production`; no preview of unmerged code; only a public room releases ([decision 213](../spec/PRODUCT.md#decisions-needed)). **What it puts in question:** the strict sandbox ([decision 216](../spec/PRODUCT.md#decisions-needed)), which the owner confirmed again on 2026-11-13, before message 8: the architect asked "Keep the sandbox as strict as it is? Forms, downloads and popups don't work under it. I'd keep it until real apps show what they need.", and the owner answered "2. per your recommendation". That conflict is [section 2](#2-the-sandbox-conflict).
 
-**What is built, and what is only in a pull request.** On `main`: steps 1 to 4 and 9, and the room's recheck of a release (step 5's first PR). **In PR #336, not yet merged:** starting an upload and committing live in the room, the file `apps/api/src/workspace/release_commit.rs`, the constant `RELEASE_PATH_COMPLETE` and the gate's list. Wherever this document relies on one of those, it says so.
+**What is built, as of `main` at `f43fdcc` on 2026-11-13.** Steps 1 to 4 and 9. The room's half of step 5: its recheck of a release, starting an upload and committing live, with the constant `RELEASE_PATH_COMPLETE`, false, and the gate's list ([the plan](../m6-plan.md#the-gate-on-the-release-path)). The first parts of step 6, as [the plan](../m6-plan.md#what-step-6s-first-pr-built) records them: the unpublish triggers that are the room's own state, the deployment's trigger with the reconciles' schedules, and the rules of the organization's release switch. **Not built:** the release job that reads a tree and uploads, which is held for this revision; and everything this revision proposes. *Until 2026-11-13 this paragraph, and five lines below, said the room's commit was "in PR #336, not yet merged". It merged that day, as `86db135`.*
 
 ## How to read this
 
@@ -35,25 +36,29 @@
 
 ## 1. Summary: the decisions, by stage
 
-**This section is meant to be decided from alone.** Each row is one question, what is recommended, what it costs, and what happens if the answer is no. Everything in it is **proposed.**
+**This section is meant to be decided from alone.** Each row is one question, what is recommended, what it costs, and what happens if the answer is no.
+
+**Stage 1 is decided. The owner, on 2026-11-13: "stage1: all as recommend".** Each of its rows is marked below. Two are a yes in principle with a spike still owed, and two leave a figure or a setting with the owner. **Stages 2 to 4 are not decided,** and everything about them is **proposed.**
 
 ### Stage 1: one todo app
 
 **What it is:** a todo app built with a front-end framework as a single page, published from a reviewed, approved, merged commit. A small Worker that answers a JSON API, static files for the page, and one store of its own. No login, no outbound access, the sandbox exactly as it stands.
 
-| # | The question | Recommended | Cost | If the answer is no |
-| --- | --- | --- | --- | --- |
-| 1 | **May an app have a store,** one for each app, made and owned by Podster in the second account? | **Needs a spike first.** Yes in principle; whether it is KV or D1 waits for the answer on tokens ([section 3.3](#33-its-store)) | KV: see [the cost table](#what-stage-1-can-cost). D1's prices weren't read | A todo app can't keep its items. Stage 1 is then a page that forgets everything on reload |
-| 2 | **May anyone who has the address read and change a demo's list,** since there is no login? | **Yes for a demo,** said plainly beside the link | None in money | The demo needs a session, which needs the sandbox decision first (stage 2). The demo waits for it |
-| 3 | **May a demo's built files be committed to the repository,** with Podster building nothing? | **Yes for the demo.** With a committed bundle nobody checks it matches the source, so approval rests on trusting its author | None | A build path comes first: a spike, a container image, a new billed resource and a change of stance ([section 5](#5-building)) |
-| 4a | **Is there a cap on the write requests one app may take?** Any website can make its visitors' browsers send writes to an app, since the content Worker must allow any origin ([section 3.5](#35-under-the-sandbox-as-it-stands)); a limit for each address won't hold, because the requests come from many visitors | **Needs a spike first.** Yes: a budget of write requests for each app, held by the content Worker. How the content Worker counts isn't designed | **Podster pays for every request, capped or not.** Without a cap there is no ceiling: each million write requests is about $0.30 in requests and, **if each request makes one KV write,** $5 in writes, plus CPU. An app that writes more than once a request costs more | Nothing with a store is released: the cap is on [the gate's list](#10-what-must-be-true-before-releases-is-on-anywhere) |
-| 4b | **What happens to an app past its cap?** | The content Worker answers its own refusal to further writes until the budget's period ends; reads go on. And an alert on the account's bill, which is the owner's to set | **Podster pays up to the cap,** which is a figure the owner names, and nothing past it for writes | An app past its cap goes on costing Podster, as with no cap |
-| 5 | **May the content Worker take `POST`, `PUT`, `PATCH` and `DELETE` with a body, and answer the browser's preflight for any origin,** for an app whose release has code? | **Yes, for those hosts only.** It is a loosened stance: today it takes `GET` and `HEAD` and no body | None in money | No sandboxed page can change anything on a server. No todo app |
-| 6 | **May the publishing credential gain the permission to make and delete stores?** | **Yes, only if it can't then write serve entries.** That is the spike in row 1 | None in money. A wider credential | Each app's store is made by hand, by whoever holds the account |
-| 7 | **An app's data outlives an unpublish.** Who may delete it: only an operator, or also the room's owner or an admin, as a person? | **Both.** Otherwise a room's owner who unpublishes can't wipe what strangers wrote into their app | None in money. Two new commands, one a contract change | Only an operator can, and a room's owner must ask one |
-| 8 | **May Podster deploy one more Worker, the outbound Worker,** in the second account, which refuses every request an app's code makes? | **Yes.** It is what turns sockets off and makes "no outbound" true | Whether its invocations are billed apart from the app's request: **not read** | An app's code can reach the public internet and open sockets, as spike A saw. Nothing with code is released |
-| 9 | **Does the owner accept that an app with a store can keep what a visitor types,** a password among them, and give it back to its author through the app's own address ([section 3.7](#37-what-stage-1-makes-possible-that-static-files-didnt))? | **Yes, with what stands against it:** review, a person's approval, a public room, a report, a takedown that reaches the data | None in money. It is Podster's name on the page | No app has a store: row 1 is no |
-| 10 | **Is this the right way to say what changed:** "Podster hosts what a room published, and still hosts and runs no agent"? *The sentence is the architect's, not the owner's* | **Yes** | None | The product's own wording about agents and execution needs the owner's words in its place |
+| # | The question | Recommended | Cost | If the answer is no | The owner, 2026-11-13 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | **May an app have a store,** one for each app, made and owned by Podster in the second account? | **Needs a spike first.** Yes in principle; whether it is KV or D1 waits for the answer on tokens ([section 3.3](#33-its-store)) | KV: see [the cost table](#what-stage-1-can-cost). D1's prices weren't read | A todo app can't keep its items. Stage 1 is then a page that forgets everything on reload | **Decided in principle: yes.** The spike is still owed, and whether the store is KV or D1 waits for it |
+| 2 | **May anyone who has the address read and change a demo's list,** since there is no login? | **Yes for a demo,** said plainly beside the link | None in money | The demo needs a session, which needs the sandbox decision first (stage 2). The demo waits for it | **Decided: as recommended** |
+| 3 | **May a demo's built files be committed to the repository,** with Podster building nothing? | **Yes for the demo.** With a committed bundle nobody checks it matches the source, so approval rests on trusting its author | None | A build path comes first: a spike, a container image, a new billed resource and a change of stance ([section 5](#5-building)) | **Decided: as recommended** |
+| 4a | **Is there a cap on the write requests one app may take?** Any website can make its visitors' browsers send writes to an app, since the content Worker must allow any origin ([section 3.5](#35-under-the-sandbox-as-it-stands)); a limit for each address won't hold, because the requests come from many visitors | **Needs a spike first.** Yes: a budget of write requests for each app, held by the content Worker. How the content Worker counts isn't designed | **Podster pays for every request, capped or not.** Without a cap there is no ceiling: each million write requests is about $0.30 in requests and, **if each request makes one KV write,** $5 in writes, plus CPU. An app that writes more than once a request costs more | Nothing with a store is released: the cap is on [the gate's list](#10-what-must-be-true-before-releases-is-on-anywhere) | **Decided: yes, a cap,** with its spike still owed. **Still the owner's: the cap's figure.** None is proposed here |
+| 4b | **What happens to an app past its cap?** | The content Worker answers its own refusal to further writes until the budget's period ends; reads go on. And an alert on the account's bill, which is the owner's to set | **Podster pays up to the cap,** which is a figure the owner names, and nothing past it for writes | An app past its cap goes on costing Podster, as with no cap | **Decided: as recommended**. **Still the owner's: the alert on the account's bill,** which is theirs to set |
+| 5 | **May the content Worker take `POST`, `PUT`, `PATCH` and `DELETE` with a body, and answer the browser's preflight for any origin,** for an app whose release has code? | **Yes, for those hosts only.** It is a loosened stance: today it takes `GET` and `HEAD` and no body | None in money | No sandboxed page can change anything on a server. No todo app | **Decided: as recommended** |
+| 6 | **May the publishing credential gain the permission to make and delete stores?** | **Yes, only if it can't then write serve entries.** That is the spike in row 1 | None in money. A wider credential | Each app's store is made by hand, by whoever holds the account | **Decided in principle: yes, only if it can't then write serve entries.** The spike is still owed |
+| 7 | **An app's data outlives an unpublish.** Who may delete it: only an operator, or also the room's owner or an admin, as a person? | **Both.** Otherwise a room's owner who unpublishes can't wipe what strangers wrote into their app | None in money. Two new commands, one a contract change | Only an operator can, and a room's owner must ask one | **Decided: as recommended** |
+| 8 | **May Podster deploy one more Worker, the outbound Worker,** in the second account, which refuses every request an app's code makes? | **Yes.** It is what turns sockets off and makes "no outbound" true | Whether its invocations are billed apart from the app's request: **not read** | An app's code can reach the public internet and open sockets, as spike A saw. Nothing with code is released | **Decided: as recommended** |
+| 9 | **Does the owner accept that an app with a store can keep what a visitor types,** a password among them, and give it back to its author through the app's own address ([section 3.7](#37-what-stage-1-makes-possible-that-static-files-didnt))? | **Yes, with what stands against it:** review, a person's approval, a public room, a report, a takedown that reaches the data | None in money. It is Podster's name on the page | No app has a store: row 1 is no | **Decided: as recommended** |
+| 10 | **Is this the right way to say what changed:** "Podster hosts what a room published, and still hosts and runs no agent"? *The sentence is the architect's, not the owner's* | **Yes** | None | The product's own wording about agents and execution needs the owner's words in its place | **Decided: as recommended** |
+
+**What is still the owner's in stage 1, after that answer:** the cap's figure (4a); the alert on the account's bill (4b); the short-lived credentials the spike needs, and its yes to what the spike makes ([the plan](../m6-plan.md#stage-1-of-apps-as-workers-the-build-order)); and each deploy and switch as it comes.
 
 **What needs no decision in stage 1:** the sandbox stays as it is; outbound stays refused; no new domain.
 
@@ -375,16 +380,17 @@ Sources: [Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds
 
 - **The room is the only writer of serve state,** and its applier the only writer of a serve entry.
 - **The recheck, on every pass,** and everything it reads. *On `main`.*
-- **Starting an upload and committing live.** None of it looks at what a release contains. *In PR #336, not yet merged.*
+- **Starting an upload and committing live.** None of it looks at what a release contains. *On `main` since 2026-11-13.*
 - **Takedown:** suspension, the stop, unpublishing, the epoch.
 - **One script for each release, named by Rust.**
 - **The second Cloudflare account,** and the deploy guard.
 - **Only a public room releases; one environment; no preview.**
-- **The gate on the release path,** the constant `RELEASE_PATH_COMPLETE`, which stays false until its list is true. *In PR #336, not yet merged.*
+- **The gate on the release path,** the constant `RELEASE_PATH_COMPLETE`, which stays false until its list is true. *On `main` since 2026-11-13.*
+- **The unpublish triggers and the release switches** step 6 has built since.
 
 ## 9. The build order, revised
 
-**Proposed.** Steps 1 to 4 and 9 are built and stand, and so does the room's recheck. The rest of the room's half of step 5 is in PR #336, not yet merged. **Step 5's tree read and upload are held** until this proposal is accepted or refused.
+**Proposed.** Steps 1 to 4 and 9 are built and stand, and so are the room's half of step 5 and the first parts of step 6. **Step 5's tree read and upload are held** until this proposal is accepted or refused. *2026-11-13: with stage 1 decided, the order for stage 1 itself is [in the plan](../m6-plan.md#stage-1-of-apps-as-workers-the-build-order), spike first. The table below is the fuller order this document first proposed, and stands beside it.*
 
 | Order | What | Why here |
 | --- | --- | --- |
@@ -393,7 +399,7 @@ Sources: [Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds
 | 3 | **Core, again (step 3):** the manifest, modules, the limits, the store's caps and the write budget | Pure; reviewable before any spike returns |
 | 4 | **The contract and schema steps:** the serve entry's marker; the room's and the `Moderation` object's schema steps; the two routes that delete an app's data; the `Release` description | Each alone in its turn |
 | 5 | **The content Worker, again (step 4(b)), and the outbound Worker** | Before anything with code is served |
-| 6 | **Step 5's job,** with the module upload and the store | The room's half is in PR #336, not yet merged |
+| 6 | **Step 5's job,** with the module upload and the store | The room's half is built |
 | 7 | **Step 6,** triggers and approvals, with the operator's deletion of an app's data | As before, plus one command |
 | 8 | **Steps 7, 8 and 10** | 7 and 8 unchanged; step 8 is also what stage 2's safest session rests on. Step 10's screens gain what an approver must be told |
 | 9 | **Step 11,** the staging run and the security review | The run gains a todo app: it answers, keeps its list across a release, reaches nothing, is stopped at its limits, and its data is gone after an operator deletes it |
@@ -401,7 +407,7 @@ Sources: [Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds
 
 ## 10. What must be true before `RELEASES` is on anywhere
 
-Everything the gate on the release path lists, which is in PR #336 and not yet merged, and for an app with code:
+Everything [the gate on the release path](../m6-plan.md#the-gate-on-the-release-path) lists, and for an app with code:
 
 - **The spikes above have run,** and what they saw is in the plan.
 - **A write budget for each app is built and set,** and a test shows an app past it is refused by the content Worker and costs no more.
@@ -410,12 +416,12 @@ Everything the gate on the release path lists, which is in PR #336 and not yet m
 - **No script has a binding but its own app's store, and none has a Durable Object,** by the reconcile's check.
 - **An app's data can be deleted,** by an operator and by the room's owner, and a test shows it gone by Cloudflare's own answer.
 - **A person who approves a release is told what it holds.**
-- **The owner has answered** stage 1's questions.
+- **The owner has answered** stage 1's questions: done on 2026-11-13. **And has named the cap's figure and set the bill's alert,** which are still owed.
 - **The security review has covered** the manifest, the limits, the store, the write budget, the outbound Worker and the wider methods.
 
 ## The owner's decisions
 
-**They are [the summary](#1-summary-the-decisions-by-stage), and only there:** eleven questions for stage 1, and one each for stages 2 to 4, each with what is recommended, what it costs and what a no means.
+**They are [the summary](#1-summary-the-decisions-by-stage), and only there:** eleven questions for stage 1, each now answered by the owner as recommended, and one each for stages 2 to 4, not yet put to them.
 
 ## Not verified
 

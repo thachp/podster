@@ -32,6 +32,7 @@
 | **Three secrets on Podster's private API:** the read-only App's private key, and two Cloudflare credentials, one that publishes apps' files and one that only routes requests to them | Secrets, which the owner sets | None | **Yes,** once a test has named the narrowest credentials that work. Two Cloudflare credentials so the routing one can't replace code; one, if Cloudflare can't separate them |
 | **Whether anything is served on staging before the content domain is on the Public Suffix List.** The architecture says the domain "must be on" that list, which tells browsers to keep each room's app apart from the others. Getting on it means a public request to its maintainers, who say they generally decline small projects ([publicsuffix.org](https://publicsuffix.org/submit/)) | It is a rule in the spec, and the request is made under Podster's name | None | **Make the request. Meanwhile yes for test rooms on staging only, and never for a real person's app.** Without the entry one room's app can set a cookie another's reads, and one bad app can get the whole domain blocked |
 | **Whether every app is sandboxed in the browser.** **Decided by the owner on 2026-11-12: (a), every app is sandboxed in M6,** in the owner's words "1. confirm" ([decision 216](spec/PRODUCT.md#decisions-needed)); the content Worker sets the header on every response. Added on 2026-11-12, from spike C. Without the Public Suffix List entry, one room's app was seen reading and overwriting a cookie another's set for the whole domain. A sandboxing header closed that, and cost the app every kind of browser storage: cookies, `localStorage`, `sessionStorage`, IndexedDB, caches and service workers. The options: **(a)** sandbox every app; **(b)** no sandbox until the domain is on the list, with rooms able to interfere through cookies a script sets, which the server can't stop; **(c)** sandbox by default, with an opt-out the room's owner sets. [The ADR sets out each](adr/0010-release-and-the-content-domain.md#the-sandbox-an-open-choice-for-the-owner) | It is a product choice: what "a working web application" may do, against whether rooms are kept apart now | None | **(a), for this milestone.** It is the only one that keeps rooms apart with what Podster controls today, it fails where the owner can see it, and it can be loosened later where the others can't easily be tightened. An app that must remember something in the browser won't work under it |
+| **Stage 1 of apps as Workers: one todo app.** **Decided by the owner on 2026-11-13: "stage1: all as recommend",** to the eleven questions of [ADR 0010's proposed revision](adr/0010-revision-apps-are-workers.md#stage-1-one-todo-app) ([decision 220](spec/PRODUCT.md#decisions-needed)). **Still the owner's, each asked when it is needed:** the figure for the cap on one app's write requests; an alert on the second account's bill; three short-lived credentials for the spike and a yes to what it makes and deletes ([below](#stage-1-of-apps-as-workers-the-build-order)); and the deploy of the outbound Worker when it is built | Each is money, a cloud resource or a credential | The cap's figure sets it. KV's and Workers for Platforms' list prices are in [the revision's cost table](adr/0010-revision-apps-are-workers.md#what-stage-1-can-cost). The spike makes a few stores and scripts and deletes them: nothing past the included amounts | A figure for the cap isn't recommended yet: it wants the spike's measure of what one write costs |
 | **What happens to a room's app when its owner leaves** | It decides whether content stays up with nobody answerable for it | None | **The app comes down when no person who may release remains in the room.** That is also what holds until the owner answers |
 | **Whether a repository's link that is `degraded` unpublishes the room's app.** Added on 2026-11-13 with M6 step 6. ADR 0010 says an app comes down when its repository's link is no longer ready, and the architect ruled to build it as written, since narrowing an accepted trigger isn't the architect's. `degraded` is set by the daily read-back, a merge's read or an operator's recheck when a protection or setting differs or the repository is gone, and goes back to `ready` when an operator's recheck finds it fixed | It narrows or keeps a trigger in an accepted ADR, and it decides whether a transient settings change can take a public app down | **A transient settings change costs the room its app's address for good:** an unpublish retires the label, and nothing comes back when the link is ready again | **As ruled, and as step 6 builds it: unpublish on `degraded` and `suspended`.** The alternative is to unpublish on `suspended` only, and on `degraded` only refuse new releases, which the recheck already does. Either is a one-line change: one predicate in core, tested both ways ([the step 6 plan](m6-step6-plan.md)). **A risk either way, from the review of step 6's first PR:** a GitHub incident, or the provisioning App suspended or removed, could make every repository read as gone, two 404s a minute apart, which degrades every link as `repository_gone` and retires every app's address for good. *Proposed, for the owner to choose from:* (a) never take "gone" as final while the App's installation itself is unreadable or suspended, so an installation-wide failure reads as "couldn't read", not as every repository gone; (b) a ceiling on how many rooms may be unpublished for `repo_not_ready` in one pass or one hour, past which further rooms wait for an operator to confirm; (c) both. The architect recommends (c). Neither is built |
 | **Who may retire an app's address.** Added on 2026-11-13 with M6 step 6. Archiving a room and making it private each unpublish its app for good, and both are the room's owner's or a human admin's to do (decisions 149 and 215), so an admin, not only the owner, can retire the address | It decides who can end a public app permanently | None | **As built: the owner or an admin.** The alternative is to ask the owner's confirmation before an admin archives or makes private a room whose app is up |
@@ -660,11 +661,11 @@ The architect proposes the gate call, for the owner to review.
 
 ## Build order
 
-> **2026-11-13: the owner has said an app is a real Worker, code included** ([decision 219](spec/PRODUCT.md#decisions-needed)). What that changes in this order, in what is built and in what must be true before `RELEASES` is on, is proposed in [ADR 0010's proposed revision](adr/0010-revision-apps-are-workers.md), which is not accepted. The order below stands as written until it is. The room's half of step 5 doesn't depend on what an app contains: its recheck is on `main`, and starting an upload and committing live are in PR #336, not yet merged.
+> **2026-11-13: the owner has said an app is a real Worker, code included** ([decision 219](spec/PRODUCT.md#decisions-needed)). What that changes in this order, in what is built and in what must be true before `RELEASES` is on, is proposed in [ADR 0010's proposed revision](adr/0010-revision-apps-are-workers.md), which is not accepted. The order below stands as written until it is. *Later on 2026-11-13: the owner answered that revision's stage-1 questions, each as recommended ([decision 220](spec/PRODUCT.md#decisions-needed)). What is built first for stage 1 is [below](#stage-1-of-apps-as-workers-the-build-order).* The room's half of step 5 doesn't depend on what an app contains: its recheck is on `main`, and starting an upload and committing live are in PR #336, not yet merged.
 
 > **2026-11-13: step 5's remaining pieces, the tree read and the upload, are held** until that proposal is accepted, since what a release contains is what is changing.
 >
-> **Owed by the next PR that touches the room's release commands or takedown, from the review of step 5's second PR, which is PR #336 and not yet merged. Each is about code in that PR:**
+> **Owed by the next PR that touches the room's release commands or takedown, from the review of step 5's second PR, PR #336.** *Later on 2026-11-13: PR #336 merged, and all three below were closed by PR #347, which merged too. They are left here as written.*
 >
 > - **The three held-window tests use the real clock.** Each holds a commit between its outside reads and its confirm while a fact is changed in another object, so each rests on that change finishing inside the 5-second bound on the reads' age. Under load they fail; they don't pass falsely. Give them the passed-in clock.
 > - **A release bookkeeping failure after a suspension is seen only as a log line by its code.** It is retried on every alarm, release command and reconcile question, and that room's release commands answer an error meanwhile. **Write a takedown finding for a bookkeeping failure that persists,** as a failing script delete has one.
@@ -1248,6 +1249,64 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 - **Tests run with `RELEASES` unset, which is undecided,** so the existing tests that ask a room the reconcile's question are unchanged. `takedown.spec.ts` runs its passes with the setting written `true`, as a deployment with a provider has it. Each reading, and four ways the setting can slip, are in `release-triggers.spec.ts`.
 
 **A race found while building step 6's second PR, and closed.** The hourly scripts pass reads the namespace once and asks each script's room in turn. A question that ends a release wakes its room, whose delete job could count a script gone before the pass asked about it; the room then took the stale list's word that the script was there after all, queued it again and told operators of a deletion the pass started. Each question now says when the list was read, and a script the room counted gone at or after then isn't found again. Possible since step 4(a)'s third PR; seen as a flaky test, and in this PR's CI.
+
+#### Stage 1 of apps as Workers: the build order
+
+**Proposed, on 2026-11-13, after the owner's answer ([decision 220](spec/PRODUCT.md#decisions-needed)).** What stage 1 is, and why, is [the revision](adr/0010-revision-apps-are-workers.md#3-stage-1-in-full-one-todo-app). This is only the order. **No code is started.**
+
+**Questions for the architect, before anything here is built:**
+
+1. **How does the content Worker count one app's write requests?** It keeps no state today, and the cap is decided. The candidates are a rate-limiting binding of Cloudflare's, a Durable Object in the second account, or a counter in KV, which is slow to agree and costs a write for each write. None was read or tried. It needs a ruling, or a place in the spike.
+2. **On which account does the spike run?** The second account, if it has Workers for Platforms and a namespace by then, or the account that holds `podster.dev`, where spike B ran against `podster-staging-apps`. Its tokens are for that account.
+3. **Is the hold on step 5's tree read and upload lifted for static apps,** which this revision doesn't change, or does the whole job wait for the module upload?
+4. **Does the release directory keep the name `site`,** now that it holds code as well?
+5. **Decision 220's tenth answer makes "Podster hosts what a room published, and still hosts and runs no agent" the owner's.** CLAUDE.md says "Agents own execution, and Podster never hosts or runs them". Whether that line wants a note is the architect's to say and to make.
+
+**First: the spike for a store and its credential.** It answers the two things the owner's yes waits on, and nothing is built on a store before it reports.
+
+| What it must show | Why |
+| --- | --- |
+| Can a credential make and delete a KV namespace **without being able to write a key in another namespace** of the account? | The serve entries are keys in a KV namespace there. ADR 0010 keeps the credential that uploads scripts from writing them. If KV's permission is for the whole account, a KV store for apps breaks that |
+| The same for D1: can a credential make and delete a database without reaching KV at all? | If so, D1 is the store that keeps the two apart |
+| Does an upload that binds a store need the store's permission, or only the script's? | It decides whether the uploading credential is the widened one |
+| What an app's code sees of its store, and that it sees no other | Isolation between rooms' apps |
+| That a store's deletion can be told from Cloudflare's own answer, and that stores can be listed | The takedown's confirmation, and the reconcile |
+| Whether a write to the store counts against the limit on subrequests the dispatch sets, and what one write costs | The cap's figure, which is the owner's |
+
+**The credentials it needs, each short-lived, on the one account, made by the owner.** Cloudflare's names for the permissions, as its dashboard gives them; the D1 one is written from memory and should be read off the dashboard when the token is made.
+
+| Token | Account permissions | What it is for |
+| --- | --- | --- |
+| `kv` | Workers Scripts: Edit, and Workers KV Storage: Edit | The KV candidate: make a namespace, bind it at an upload, delete it; and try to write a key in a namespace it didn't make |
+| `d1` | Workers Scripts: Edit, and D1: Edit | The D1 candidate: the same, and try to write a KV key |
+| `scripts` | Workers Scripts: Edit alone | The control: what today's publishing credential can already do to a store, and whether it can bind one it can't make |
+| `read` | Workers Scripts: Read, Workers KV Storage: Read, and D1: Read | To read back what the others did, past them |
+
+- **What the owner is also asked while making them:** whether the dashboard offers to hold a KV or D1 permission to named namespaces or databases, and not the whole account. No token can read its own permissions, as spike B found.
+- **What it makes, and deletes:** a few KV namespaces, a D1 database, and a few scripts in a namespace, each under a name only the spike uses, with one function sending every request and refusing any write outside those names, as spike B's did. **Each is a cloud resource, so the run needs the owner's yes.**
+- **It stays in `spikes/`,** and nothing builds on it.
+
+**What can be built before the spike reports,** since none of it depends on which store:
+
+| What | Where | Notes |
+| --- | --- | --- |
+| The manifest's rules, which files are modules, the limits on each request and the write budget's constants | `crates/core` | Pure. Modules and the manifest are never served as files |
+| The serve entry's marker that a script has code | The contract's fixture and its three readers | A contract change, alone in its turn |
+| The content Worker for a host with code: `POST`, `PUT`, `PATCH`, `DELETE` and a body; a write refused unless its type is `application/json`; its own answer to a preflight, allowing the origin `null`, for those hosts only; `no-store`; its own error when an app throws; limits on each dispatch | `apps/content` | From [the browser spike](m6-sandbox-api-report.md) and the revision's section 3.5. Shown again in the local browser run, through the real handler this time |
+| The outbound Worker, which refuses every request | A new Worker's code and its configuration's tests | Its deploy is a cloud change, asked for when it is ready |
+| The write cap, **once question 1 is ruled** | `apps/content`, and whatever counts | Its figure is the owner's and can be a setting |
+| What a person who approves a release is told | The screens, step 10 | That it runs code on a server and has a store anyone can write to |
+
+**What must wait for the spike:**
+
+- **Making, binding and deleting a store,** and the credential that does it.
+- **The room's schema step for a store,** unless it is written to hold either kind, which is proposed: a kind and an ID.
+- **The two commands that delete an app's data,** an operator's and a room owner's, whose last step is the store's own deletion. Their routes are a contract change, alone in its turn.
+- **The reconcile of stores,** which lists them by kind.
+- **The release job's upload,** which binds the store.
+- **The cap's figure,** which wants the spike's measure.
+
+**Not in stage 1, and not decided:** sessions and forms, a build path, more kinds of storage, and outbound access. Each is a later stage of the revision.
 
 #### The gate on the release path
 

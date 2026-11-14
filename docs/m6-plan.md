@@ -1309,7 +1309,7 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 | --- | --- | --- |
 | 1 | **The read:** the release directory, `site`, at the approved commit, with the read-only App | **Built, 2026-11-13.** Below |
 | 2 | **The upload of static files** to the provider, as the release's own script: the upload session, the files in its batches, the script with the marker; and the room command that ties the recheck, the read and the upload together | **Built, 2026-11-14.** [Below](#what-the-second-pr-built-the-upload). *The split from the read was accepted by the architect on 2026-11-13 (ruling 1 below)* |
-| 3 | **The job's driver:** what runs a queued release through the commands, one release at a time in a room; an upload whose answer was lost; the marker's wait, a release recorded served, and the set-back when it never comes | Not built |
+| 3 | **The job's driver:** what runs a queued release through the commands, one release at a time in a room; an upload whose answer was lost; the marker's wait, a release recorded served, and the set-back when it never comes | **The driver through the commit built, 2026-11-14.** [Below](#what-the-third-pr-built-the-driver). The lost answer, the marker's wait and the set-back are still owed |
 
 **What the first PR built: the read, alone.** `apps/api/src/github/release_read.rs`. **Nothing calls it yet** but a test-only path; the second PR's upload is its caller. **No room schema step, no D1 migration, no contract change, and nothing on a room's alarm.**
 
@@ -1412,6 +1412,21 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 - **The root `_headers` and `_redirects` test ADR 0010 names,** which the first PR's note left to this one: it needs the real provider, to see whether a root file of either name sent plain is an ordinary file. The refusal by name stays. Spike G's, with the rest.
 - **The upload and the takedown code together at the provider.** The stand-in keeps an uploaded script apart from the scripts the delete job and the reconciles see, because spec files share it.
 
+#### What the third PR built: the driver
+
+**Built on 2026-11-14,** behind `RELEASES` (exactly `true`) and the gate, with `RELEASE_PATH_COMPLETE` still false. No contract change. **One room schema step, 43:** `release_job` and `release_upload_attempt`, because the attempt count, the lease and the room's hourly upload attempts must survive an eviction.
+
+- **The room's alarm drives the oldest queued or uploading release,** one step a pass: start, upload, commit (stage and confirm), each the room's existing command, which reads the outside facts afresh and rechecks everything itself. What it decides is pure, in `podster_core::release_driver`.
+- **A lease, then a hand-off.** One transaction counts the attempt and makes the release due again only once the lease, 6 minutes (**proposed**), runs out; the step then goes to a request of the room's own under `wait_until`, and the alarm returns. So the alarm, and a takedown's applier with it, never waits on an upload. A step that died is taken up again when its lease runs out; one that comes back after that runs nothing.
+- **The record** compares the lease, the release epoch and the hold's generation with the lease's; if any moved, nothing of the step is kept and the release is looked at afresh. Otherwise core says: the next step at once, done, a wait of 30 seconds doubling to 10 minutes (**proposed**) and never before the budget's own time, or, at the eighth attempt (**proposed**), the end, `release_attempts_exhausted`.
+- **How often a room reads:** at most two upload attempts begun in a rolling hour in one room (**proposed**), so at most 1,204 of the hour's 3,000 reads. **The share across rooms that step 9's review owed is still owed:** three rooms can still fill the hour.
+- **The upload's hour is an alarm,** and the room's bookkeeping ends the upload then.
+- **Inert** while the deployment's setting isn't exactly `true` or the gate is closed: nothing is done or counted, and the release is looked at again in 10 minutes (**proposed**).
+- **`release.uploaded`:** an audit record, with files and bytes, and an event, when the upload is recorded.
+- **In test builds** the driver runs only in a room that opts in (`test_release_driver`), and a test asks for one pass at a time.
+
+**Still owed to the job:** the marker's wait, a release recorded served, the set-back, and settling `uncertain`. **Until the marker's wait closes a live release's flight, a later release's commit waits `release_in_flight` and ends `release_attempts_exhausted`.** Not shown: the real provider and GitHub, and whether the platform keeps the handed-off request alive across an eviction (the lease covers it if not).
+
 #### Stage 1 of apps as Workers: the build order
 
 **Proposed, on 2026-11-13, after the owner's answer ([decision 220](spec/PRODUCT.md#decisions-needed)).** What stage 1 is, and why, is [the revision](adr/0010-revision-apps-are-workers.md#3-stage-1-in-full-one-todo-app). This is only the order. **No code is started.**
@@ -1484,7 +1499,7 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 
 **The PR that completes the release path flips it,** and no other does. That is the last of these to merge, and all of them must be true first:
 
-- **the caller:** the release job that calls these commands, reads the tree and uploads (step 5's own PR);
+- **the caller:** the release job that calls these commands, reads the tree and uploads (step 5's own PR). *2026-11-14: the driver through the commit is built ([the third PR](#what-the-third-pr-built-the-driver)); a share of the read budget across rooms is still owed;*
 - **the marker job:** a release recorded served, and the set-back when the marker never comes (the same);
 - **`uncertain` settling:** an upload whose answer was lost, settled by the provider's own answer (the same);
 - **every unpublish trigger in ADR 0010's list whose fact has a source** (step 6, [the step 6 plan](m6-step6-plan.md)), which is what closes the windows named above. *Built so far: the room's own state (step 6's first PR), the deployment's setting (its second), release switched off in the room (its contract PR), and nobody left who may release, as the interim rule (its fourth), held for a window before it unpublishes (its follow-up). Owed: room and organization deletion, by whatever first deletes either.* **Room deletion and organization deletion have no source:** nothing deletes either, and each trigger is owed by whatever first does (the architect's ruling of 2026-11-13, for the owner to review). **A repository found gone has one:** the daily read-back and an operator's recheck each degrade the link as `repository_gone` after two looks a minute apart, and step 6's first PR unpublishes on that. **Before `RELEASES` and a provider are both on, the owner chooses a guard against an outage reading as every repository gone** ([the owner's row](#for-the-owner): an installation-wide failure must not read as gone, a ceiling on unpublishes for this cause before an operator confirms, or both; *Proposed*), since without one a GitHub incident or the provisioning App suspended or removed would retire every app's address for good;

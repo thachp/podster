@@ -355,6 +355,17 @@ INSERT INTO release_hold (singleton) VALUES (1);
 CREATE TABLE release_upload (release_id TEXT PRIMARY KEY REFERENCES release (id), script_name TEXT NOT NULL,
   files INTEGER NOT NULL CHECK (typeof(files) = 'integer' AND files >= 1), bytes INTEGER NOT NULL CHECK (typeof(bytes) = 'integer' AND bytes >= 0), uploaded_at INTEGER NOT NULL,
   CHECK (length(script_name) BETWEEN 38 AND 63 AND substr(script_name, -36) = release_id)) WITHOUT ROWID;
+", "
+CREATE TABLE release_job (release_id TEXT PRIMARY KEY REFERENCES release (id),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (typeof(attempts) = 'integer' AND attempts >= 0),
+  next_attempt_at INTEGER CHECK (next_attempt_at IS NULL OR typeof(next_attempt_at) = 'integer'),
+  leased_step TEXT CHECK (leased_step IS NULL OR leased_step IN ('start', 'upload', 'commit')),
+  leased_epoch INTEGER CHECK (leased_epoch IS NULL OR typeof(leased_epoch) = 'integer'),
+  leased_hold INTEGER CHECK (leased_hold IS NULL OR typeof(leased_hold) = 'integer'),
+  last_code TEXT CHECK (last_code IS NULL OR length(last_code) BETWEEN 1 AND 64), updated_at INTEGER NOT NULL,
+  CHECK ((leased_step IS NULL) = (leased_epoch IS NULL)), CHECK ((leased_step IS NULL) = (leased_hold IS NULL))) WITHOUT ROWID;
+CREATE TABLE release_upload_attempt (release_id TEXT NOT NULL REFERENCES release (id), at INTEGER NOT NULL CHECK (typeof(at) = 'integer'));
+CREATE INDEX release_upload_attempt_at ON release_upload_attempt (at);
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

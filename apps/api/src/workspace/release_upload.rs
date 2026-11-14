@@ -1,8 +1,8 @@
 //! Reading a release's files and uploading them as its own script (M6 step 5; ADR 0010's "The release job", steps 1
 //! to 4). **Static files only:** no Worker code, no binding and no store is ever uploaded here.
 //!
-//! One room command, `{ release_id }`, for a release that is `uploading`. Nothing calls it yet: the job's driver
-//! will, after it has started the upload and before it commits the release live. In order:
+//! One room command, `{ release_id }`, for a release that is `uploading`. The job's driver (`release_driver`) calls
+//! it, after it has started the upload and before it commits the release live. In order:
 //!
 //! 1. **The recheck, whole,** in the room's transaction, on fresh outside reads and the room's rows, the release
 //!    epoch included (`release_commit::upload_ready`). A fact that fails ends the release before anything is asked
@@ -35,7 +35,7 @@
 //! answer to go on, the attempt's deadline. A release that waits past its upload's hour is ended by the room's own
 //! bookkeeping, and its script deleted.
 //!
-//! **Left for the job's driver:** calling this at all; an upload whose answer was lost, as the state `uncertain` and
+//! **Still owed:** an upload whose answer was lost, as the state `uncertain` and
 //! its settling by the provider's own answer; the marker's wait.
 //!
 //! Logs carry the room's and the release's IDs and codes. No token, path or file name is logged.
@@ -56,7 +56,8 @@ use podster_core::release_tree::{
     marker_body, FetchMismatch, ReadProblem, MARKER_PATH, MARKER_TYPE,
 };
 
-/// The room's path for uploading a release's files. Nothing outside the Worker reaches it, and nothing calls it yet.
+/// The room's path for uploading a release's files. Nothing outside the Worker reaches it; the job's driver asks the
+/// same command directly.
 pub(crate) const INTERNAL_RELEASE_UPLOAD: &str = "/internal/release-upload";
 /// `waiting`, when the deployment has no provider to upload to.
 const NO_PROVIDER: &str = "content_provider_not_configured";
@@ -346,11 +347,16 @@ impl Workspace {
         Ok(out)
     }
 
-    /// `{ release_id }`: reads one release's files and uploads them as its script (M6 step 5). Nothing calls it yet.
+    /// `{ release_id }`: reads one release's files and uploads them as its script (M6 step 5).
     /// Answers `{ release_id, state, rechecked, reason, uploaded }`, with `waiting` and a code when nothing was
     /// decided and the command is to be asked again. See the module's note for the order.
     pub(super) async fn release_upload(&self, mut req: Request) -> R<Value> {
         let (release_id, release) = self.named_release(&mut req).await?;
+        self.upload_of(release_id, release).await
+    }
+
+    /// [`Workspace::release_upload`] for a release already read, as the release job's driver asks it.
+    pub(super) async fn upload_of(&self, release_id: String, release: Value) -> R<Value> {
         let sql = self.state.storage().sql();
         if state_of(&release)? != ReleaseState::Uploading {
             return upload_answer(&sql, &release, false);

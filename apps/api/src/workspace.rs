@@ -89,6 +89,7 @@ mod public_claims;
 mod readiness_upkeep;
 mod release_commit;
 mod release_config;
+mod release_driver;
 mod release_recheck;
 mod release_switch;
 mod release_upload;
@@ -2849,6 +2850,9 @@ pub struct Workspace {
     /// switch notice that comes meanwhile isn't acknowledged, so it is sent again once the room exists
     /// (`release_switch`).
     creating: std::cell::Cell<u32>,
+    /// Passes of the release job's driver that failed in a row, which backs off how soon the alarm comes back for it.
+    /// A restart forgets it.
+    drive_failures: std::cell::Cell<u32>,
     /// Test builds only: one alarm at a time, as the platform runs them. See `alarm`.
     #[cfg(feature = "failpoints")]
     test_alarm_turn: futures_util::lock::Mutex<()>,
@@ -3861,6 +3865,14 @@ impl Workspace {
             let next = next.max(now + 10);
             due = Some(due.map_or(next, |d| d.min(next)));
         }
+        // The release job's driver: the release at the head of the room's line, and every upload's hour (M6 step 5).
+        if let Some(next) = migrated
+            .then(|| release_driver::next_due(&sql, now, self.drive_failures.get()))
+            .transpose()?
+            .flatten()
+        {
+            due = Some(due.map_or(next, |d| d.min(next)));
+        }
         // A serve entry to write or remove, or a script to delete (M6 step 4(a)). Nothing while no provider is configured.
         if let Some(next) = migrated
             .then(|| takedown::next_due(&sql, &self.env, now))
@@ -4187,6 +4199,25 @@ impl Workspace {
         }
         if req.path() == release_upload::INTERNAL_RELEASE_UPLOAD {
             return self.release_upload(req).await;
+        }
+        if req.path() == release_driver::INTERNAL_RELEASE_DRIVE {
+            return self.release_drive_step(req).await;
+        }
+        // Test builds only: one pass of the release job's driver, its step run in the pass, in a room that opted in.
+        #[cfg(feature = "failpoints")]
+        if req.path() == "/internal/test-release-drive" {
+            let sql = self.state.storage().sql();
+            if !store::is_initialized(&sql)? || !release_driver::enabled(&sql, false) {
+                return Err(ApiError::not_found());
+            }
+            self.migrate_if_needed()?;
+            let mut out = self
+                .release_drive_pass(release_driver::Pass::Inline)
+                .await?;
+            // When the driver would next wake the room, by the release commands' clock.
+            let now = release_recheck::release_now(&sql);
+            out["due"] = release_driver::due(&sql, now, 0)?.map_or(Value::Null, Value::from);
+            return Ok(out);
         }
         // Test builds only: one whole read of a release from a repository, alone, which publishes nothing and
         // writes nothing here.
@@ -5210,6 +5241,7 @@ impl DurableObject for Workspace {
             provision_not_before: std::cell::Cell::new(0),
             held_clear: std::cell::Cell::new(false),
             creating: std::cell::Cell::new(0),
+            drive_failures: std::cell::Cell::new(0),
             #[cfg(feature = "failpoints")]
             test_alarm_turn: futures_util::lock::Mutex::new(()),
         }
@@ -5349,6 +5381,21 @@ impl DurableObject for Workspace {
         }
         if let Err(error) = &outbox {
             console_error!("outbox drain failed: {:?}", error);
+        }
+        // The release job's driver, after the takedown's work: one step, handed to a request of the room's own, so the
+        // alarm never waits on an upload (M6 step 5).
+        if release_driver::enabled(&sql, true) {
+            match self.release_drive_pass(release_driver::Pass::HandOff).await {
+                Ok(_) => self.drive_failures.set(0),
+                Err(error) => {
+                    self.drive_failures
+                        .set(self.drive_failures.get().saturating_add(1));
+                    console_error!(
+                        "release: a drive pass failed: code={}",
+                        error.code().unwrap_or("internal_error")
+                    );
+                }
+            }
         }
         if takedown::release_epoch(&sql) != epoch_before {
             release_commit::bookkeeping(&self.state);

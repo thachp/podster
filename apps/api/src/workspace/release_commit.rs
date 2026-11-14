@@ -1,8 +1,8 @@
 //! Starting a release's upload, committing it live, and ending one that can't go on (M6 step 5, second PR; ADR 0010's
 //! "The release job", steps 1 and 5, and "Publishing and unpublishing, in order").
 //!
-//! Three room commands' worth, all behind the recheck in [`release_recheck`]. Nothing calls them yet: the release job
-//! will. Nothing here reads a repository, uploads a file or asks the provider anything: the upload command that does
+//! Three room commands' worth, all behind the recheck in [`release_recheck`]. The release job's driver
+//! (`release_driver`) calls them. Nothing here reads a repository, uploads a file or asks the provider anything: the upload command that does
 //! is `release_upload`, and what the room decides for it is here ([`upload_ready`], [`record_uploaded`]).
 //!
 //! - **Start an upload** ([`start_upload`]). A queued release whose recheck holds becomes `uploading`: the room names
@@ -71,9 +71,9 @@ use podster_core::release::{
     UploadFailure,
 };
 
-/// The room's path for starting a release's upload. Nothing outside the Worker reaches it, and nothing calls it yet.
+/// The room's path for starting a release's upload. Nothing outside the Worker reaches it.
 pub(crate) const INTERNAL_RELEASE_START_UPLOAD: &str = "/internal/release-start-upload";
-/// The room's path for committing a release live. Nothing outside the Worker reaches it, and nothing calls it yet.
+/// The room's path for committing a release live. Nothing outside the Worker reaches it.
 pub(crate) const INTERNAL_RELEASE_COMMIT_LIVE: &str = "/internal/release-commit-live";
 /// What a commit is answered with, as `waiting`, for a release whose upload the room hasn't recorded: nothing is
 /// staged on a script that may hold nothing, or part of a release.
@@ -712,8 +712,8 @@ pub(super) fn upload_failed(
 /// The room's transaction after the script's write was asked for. `written` is whether the provider said, in so many
 /// words, that the script is written.
 ///
-/// - **Still uploading, and written:** the upload is recorded, with how many files and bytes it holds. From here a
-///   commit may stage it. Asked again, nothing changes.
+/// - **Still uploading, and written:** the upload is recorded, with how many files and bytes it holds, audited and
+///   told to the room's managers as `release.uploaded`. From here a commit may stage it. Asked again, nothing changes.
 /// - **Still uploading, and not known to be written:** nothing is recorded. The script may exist; the release's own
 ///   state keeps it for the upload's hour, a retry writes it again, and the hour's end deletes it.
 /// - **No longer uploading:** it ended while its script was being written, by an unpublish, an expiry or a failed
@@ -743,11 +743,11 @@ pub(super) fn record_uploaded(
             vec![script.into()],
         )?
         .is_empty();
-        if written && !queued {
+        // Recorded once: a second attempt that writes the script again finds it on record, and records nothing more.
+        if written && !queued && !uploaded(sql, release_id, script)? {
             exec(
                 sql,
-                "INSERT INTO release_upload (release_id, script_name, files, bytes, uploaded_at) VALUES (?, ?, ?, ?, ?)
-                   ON CONFLICT (release_id) DO NOTHING",
+                "INSERT INTO release_upload (release_id, script_name, files, bytes, uploaded_at) VALUES (?, ?, ?, ?, ?)",
                 vec![
                     release_id.into(),
                     script.into(),
@@ -755,6 +755,28 @@ pub(super) fn record_uploaded(
                     bytes.into(),
                     now.into(),
                 ],
+            )?;
+            // The release's trail: `release.upload_started`, this, then `release.live` or `release.failed`. Its state
+            // doesn't change, so the audit record says what was recorded: how many files and bytes, never their names.
+            audit_as(
+                sql,
+                moderation::PODSTER,
+                moderation::PODSTER_KIND,
+                "release.uploaded",
+                release_id,
+                None,
+                Some(json!({ "state": ReleaseState::Uploading.name(), "files": files, "bytes": bytes }).to_string()),
+                now,
+            )?;
+            store::record_event_about(
+                sql,
+                "release.uploaded",
+                moderation::PODSTER,
+                Some(release_id),
+                None,
+                &Transition::NONE,
+                roles::room_managers(sql, moderation::PODSTER)?,
+                now,
             )?;
         }
         return upload_answer(sql, &release, false);
@@ -932,11 +954,16 @@ pub(super) fn confirm(sql: &SqlStorage, release_id: &str, reads: &Reads, now: i6
 }
 
 impl Workspace {
-    /// `{ release_id }`: starts one release's upload (M6 step 5). Nothing calls it yet. The release's own state is
+    /// `{ release_id }`: starts one release's upload (M6 step 5). The release's own state is
     /// read first, with no outside read for one that isn't the job's; then every outside fact; then the room's
     /// transaction. Nothing goes live on this, so one round of reads before the transaction is all it makes.
     pub(super) async fn release_start_upload(&self, mut req: Request) -> R<Value> {
         let (release_id, release) = self.named_release(&mut req).await?;
+        self.start_upload_of(release_id, release).await
+    }
+
+    /// [`Workspace::release_start_upload`] for a release already read, as the release job's driver asks it.
+    pub(super) async fn start_upload_of(&self, release_id: String, release: Value) -> R<Value> {
         if !job_owns(state_of(&release)?) {
             let mut as_is = answer(&release, false, None);
             as_is["script"] = Value::Null;
@@ -951,10 +978,15 @@ impl Workspace {
         .await
     }
 
-    /// `{ release_id }`: commits one release live (M6 step 5). Nothing calls it yet. See the module's note for the
+    /// `{ release_id }`: commits one release live (M6 step 5). See the module's note for the
     /// order: the release's own state, the stage, the outside reads, the confirm.
     pub(super) async fn release_commit_live(&self, mut req: Request) -> R<Value> {
         let (release_id, release) = self.named_release(&mut req).await?;
+        self.commit_live_of(release_id, release).await
+    }
+
+    /// [`Workspace::release_commit_live`] for a release already read, as the release job's driver asks it.
+    pub(super) async fn commit_live_of(&self, release_id: String, release: Value) -> R<Value> {
         if state_of(&release)? != ReleaseState::Uploading {
             // A retry may find the release already `live` with its hosts still owed, as when the alarm couldn't be
             // set after the confirm committed. It needs nothing here: the room sets its alarm for whatever it owes

@@ -443,6 +443,13 @@ async fn call_within(
         Ok::<_, Error>((status, parsed, limited))
     };
     let timeout = Delay::from(Duration::from_millis(CALL_TIMEOUT_MS));
+    #[cfg(feature = "failpoints")]
+    let timeout = {
+        drop(timeout);
+        Delay::from(Duration::from_millis(crate::test_clock::call_timeout_ms(
+            CALL_TIMEOUT_MS,
+        )))
+    };
     let answer = match select(Box::pin(attempt), timeout).await {
         Either::Left((Ok((status, _, Some((wait_ms, primary_403)))), _)) => {
             Err(Failure::RateLimited {

@@ -1673,6 +1673,13 @@ async fn send_to_inbox(env: &Env, recipient: &str, body: &Value) -> bool {
         stub.fetch_with_request(request).await
     };
     let timeout = Delay::from(std::time::Duration::from_millis(DELIVERY_TIMEOUT_MS));
+    #[cfg(feature = "failpoints")]
+    let timeout = {
+        drop(timeout);
+        Delay::from(std::time::Duration::from_millis(
+            crate::test_clock::call_timeout_ms(DELIVERY_TIMEOUT_MS),
+        ))
+    };
     match futures_util::future::select(Box::pin(attempt), timeout).await {
         futures_util::future::Either::Left((result, _)) => {
             let result: Result<Response> = result;
@@ -3556,6 +3563,8 @@ impl Workspace {
                 }
             }
             let body = json!({ "event_id": event_id, "event_seq": row["seq"], "workspace_id": workspace_id, "type": row["type"], "actor_id": row["actor_id"], "task_id": row["task_id"], "created_at": row["created_at"] });
+            #[cfg(feature = "failpoints")]
+            let _shortened = crate::test_clock::shorten_calls(&sql, &recipient);
             if send_to_inbox(&self.env, &recipient, &body).await {
                 exec(
                     &sql,

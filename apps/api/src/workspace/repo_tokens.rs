@@ -607,6 +607,8 @@ impl Workspace {
             return Err(unavailable());
         };
         let issuer = AgentTokens::new(config);
+        #[cfg(feature = "failpoints")]
+        let _shortened = crate::test_clock::shorten_calls(&sql, &lease.id);
         let minted = match issuer
             .mint_agent_token(lease.repo_id, &TokenPermissions::AGENT.pairs())
             .await

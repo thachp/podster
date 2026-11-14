@@ -669,6 +669,11 @@ impl Workspace {
         }
         self.clear_settled_resend_markers(&sql).await;
         let now = now_ms();
+        #[cfg(feature = "failpoints")]
+        let now = crate::test_clock::scan_now(&sql)
+            .ok()
+            .flatten()
+            .unwrap_or(now);
         // After a send failed, the queue gets a rest before the room asks again.
         if now < self.scan_send_retry_at.get() {
             return;

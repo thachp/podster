@@ -2025,15 +2025,17 @@ describe("inbox", () => {
     await holdOutbox(id);
     await offerTo(tasks, bob);
     const other = await offerTo(tasks, carol, "carol");
+    // Bob's inbox holds the call for 30 seconds, and the room gives up on it when its timeout fires, as a deployment does.
+    // The test build lets the room's timeout for Bob's call be a second rather than ten: the call still hangs until it
+    // fires, and Carol's call has the full ten seconds.
+    await runInDurableObject(stub(id), (_: any, state: any) => void state.storage.sql.exec("CREATE TABLE test_call_timeout (ms INTEGER, only TEXT); INSERT INTO test_call_timeout VALUES (1000, ?)", bob.id));
     await releaseOutbox(id);
-    // Bob's inbox holds the call for 30 seconds, and the room gives up on it after its own 10, as a deployment does.
-    const before = Date.now();
     await alarmPass(stub(id));
-    expect(Date.now() - before).toBeGreaterThanOrEqual(10_000);
     expect((await inbox(carol, "?limit=50")).events.some((e: any) => e.task_id === other.id)).toBe(true);
-    const attempts = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT attempts FROM outbox WHERE recipient_principal_id = ?", bob.id).one().attempts);
-    expect(attempts).toBe(1);
-  }, 60_000);
+    const outbox = await runInDurableObject(stub(id), (_: any, state: any) => state.storage.sql.exec("SELECT attempts FROM outbox WHERE recipient_principal_id = ?", bob.id).toArray());
+    // Still waiting for Bob, tried once: the call timed out rather than arriving.
+    expect(outbox.map((row: any) => row.attempts)).toEqual([1]);
+  });
 
   it("a command schedules delivery on its own, even with an alarm set far off", async () => {
     const { id, tasks, bob } = await setup();

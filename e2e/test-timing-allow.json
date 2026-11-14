@@ -759,19 +759,6 @@
    "reason": "A call to waiting(), a helper in this file that sleeps (its own entry is category E, owed). Each call is listed so a new one fails; it goes when waiting() stops sleeping."
   },
   {
-   "file": "apps/api/test/scanning.spec.ts",
-   "rule": "sleep",
-   "where": "each room's share of the scan queue > starts its rest from 5 seconds again after a clean pass",
-   "category": "F",
-   "owed": true,
-   "listed_at": "86db135",
-   "lines_when_listed": [
-    695
-   ],
-   "code": "await new Promise((resolve) => setTimeout(resolve, 5_500));",
-   "reason": "Real time spent so a 5-second back-off runs out. Owed: needs a clock passed in, so the back-off's end is set, not waited for."
-  },
-  {
    "file": "apps/api/test/a2a-fasta2a.spec.ts",
    "rule": "sleep",
    "where": "function waitForRun",
@@ -1060,19 +1047,6 @@
    "reason": "An upper bound from a clock reading taken before the action, plus a margin: time on a slow runner uses it up. Fix in the margins PR: read after = Date.now() after the action and bound by after + D."
   },
   {
-   "file": "apps/api/test/scanning.spec.ts",
-   "rule": "margin",
-   "where": "each room's share of the scan queue > starts its rest from 5 seconds again after a clean pass",
-   "category": "J",
-   "owed": true,
-   "listed_at": "86db135",
-   "lines_when_listed": [
-    709
-   ],
-   "code": "expect(alarm).toBeLessThan(before + 9_000);",
-   "reason": "An upper bound from a clock reading taken before the action, plus a margin: time on a slow runner uses it up. Fix in the margins PR: read after = Date.now() after the action and bound by after + D."
-  },
-  {
    "file": "apps/gateway/test/email-sign-in.spec.ts",
    "rule": "margin",
    "where": "email sign-in > a link > runs out after five minutes, and says it's five in the email",
@@ -1097,19 +1071,6 @@
    ],
    "code": "expect(jobs[0].queued_at).toBeLessThanOrEqual(after + 5_000);",
    "reason": "Owed: `<= after + 5_000` is a fixed bound, not one that loosens with time. It holds only because queued_at is normally stamped before `after` is read, and the 5 s is a margin a late stamp could use up. What would remove it: bracket queued_at between readings taken before and after the action, with no number added."
-  },
-  {
-   "file": "apps/api/test/kernel.spec.ts",
-   "rule": "margin",
-   "where": "inbox > a stuck recipient gives way to the timeout, and doesn't hold up the room",
-   "category": "L",
-   "owed": true,
-   "listed_at": "86db135",
-   "lines_when_listed": [
-    2017
-   ],
-   "code": "expect(Date.now() - before).toBeGreaterThanOrEqual(10_000);",
-   "reason": "Asserts elapsed wall-clock time (a speed bound, or that 10 s really passed). Owed: needs the clock passed in, or the bound recast as a failure detector outside the assertion."
   },
   {
    "file": "apps/api/test/kernel.spec.ts",

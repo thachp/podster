@@ -25,7 +25,7 @@ paths:
     delete:
       operationId: removeOrgMember
       tags: [commands]
-      summary: Admin, or the person themselves. Takes effect on their next request, and ends the organization invitations they made and the credentials they connected. Each room then removes them with the departure rules and withdraws their room invitations, unless they own it, which it only records. Rejoining restores none of those, including a room they own. Answers 409 `last_admin` if the organization would have no admin
+      summary: Admin, or the person themselves. Takes effect on their next request, and ends the organization invitations they made and the credentials they connected. Each room then removes them with the departure rules and withdraws their room invitations, unless they own it, which it only records. Rejoining restores none of those, including a room they own. Answers 409 `last_admin` if the organization would have no admin. A room with a release configuration (M6, behind the release switch) left with nobody who may release holds its app, as `recordOrgDeparture` says
       responses: { "200": { description: OK } }
   /api/orgs/{org}/invitations:
     parameters: [{ $ref: "#/components/parameters/org" }]

@@ -820,7 +820,7 @@ describe("the review's findings (M5 step 6)", () => {
   it("uses the live grant when an expired one sits beside it (L4)", async () => {
     const r = await room();
     // Newer than the live grant, on an earlier repository, and expired.
-    await inRoom(r.id, (sql) => sql.exec("INSERT INTO provider_grant (id, principal_id, provider, provider_repo_id, action, delegated_by, created_at, expires_at) VALUES ('pgr_old', ?, 'github', ?, 'push', ?, ?, ?)", AGENT.id, REPO_ID + 1, OWNER.id, Date.now() + 1000, Date.now() - 1));
+    await inRoom(r.id, (sql) => sql.exec("INSERT INTO provider_grant (id, principal_id, provider, provider_repo_id, action, delegated_by, created_at, expires_at) VALUES ('pgr_old', ?, 'github', ?, 'push', ?, ?, ?)", AGENT.id, IDS.next(), OWNER.id, Date.now() + 1000, Date.now() - 1));
     const got = await access(AGENT, r.id, r.task);
     expect(got.status, got.text).toBe(200);
     expect((await tokens(r.id))[0].grant_id).toBe(r.grant);

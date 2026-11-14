@@ -204,10 +204,10 @@ describe("linking a pull request at submission", () => {
     // No such pull request in the room's repository.
     await tried(404, null, [404, "pull_request_not_found"]);
     // One the provider says is in another repository, or answers about under another number.
-    await tried(8, { base_repo: REPO_ID + 1 }, [404, "pull_request_not_found"]);
+    await tried(8, { base_repo: IDS.next() }, [404, "pull_request_not_found"]);
     await tried(9, { as_number: 10 }, [404, "pull_request_not_found"]);
     // A fork's pull request is never a task change, whether the fork is still there or gone.
-    await tried(11, { head_repo: REPO_ID + 1 }, [409, "pull_request_from_fork"]);
+    await tried(11, { head_repo: IDS.next() }, [409, "pull_request_from_fork"]);
     await tried(12, { head_repo: null }, [409, "pull_request_from_fork"]);
     // Not into the default branch.
     await tried(13, { base_ref: "release" }, [409, "pull_request_wrong_base"]);
@@ -461,7 +461,7 @@ describe("review pins the commit", () => {
 
   it("refuses to approve a pull request that's no longer one the task may have", async () => {
     const r = await submitted();
-    for (const [patch, code] of [[{ state: "closed" }, "pull_request_not_open"], [{ base_ref: "other" }, "pull_request_wrong_base"], [{ head_repo: REPO_ID + 1 }, "pull_request_from_fork"], [{ draft: true }, "pull_request_draft"]] as const) {
+    for (const [patch, code] of [[{ state: "closed" }, "pull_request_not_open"], [{ base_ref: "other" }, "pull_request_wrong_base"], [{ head_repo: IDS.next() }, "pull_request_from_fork"], [{ draft: true }, "pull_request_draft"]] as const) {
       await pull(7, { head_sha: HEAD, base_sha: BASE, state: "open", base_ref: "main", head_repo: REPO_ID, draft: false, ...patch });
       const got = await verify(OWNER, r.id, r.task, { submission_no: 1, commit_sha: HEAD });
       expect([got.status, got.code], code).toEqual([409, code]);
@@ -476,7 +476,7 @@ describe("review pins the commit", () => {
     // A change on record for some other repository isn't this room's, and isn't read or approved.
     await fake({ pullRead: 200 });
     await pull(7);
-    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET provider_repo_id = provider_repo_id + 1"));
+    await inRoom(r.id, (sql) => sql.exec("UPDATE task_change SET provider_repo_id = ?", IDS.next()));
     const elsewhere = await verify(OWNER, r.id, r.task, { submission_no: 1, commit_sha: HEAD });
     expect([elsewhere.status, elsewhere.code]).toEqual([409, "change_not_found"]);
     expect((await reads()).length).toBe(before);

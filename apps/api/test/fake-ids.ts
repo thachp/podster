@@ -7,7 +7,7 @@
 // So each spec file that keys a stand-in gets a block of its own here, by its file name, and takes every such ID from
 // `fakeIds("<its name>")`. Blocks don't overlap, and `e2e/fake-ids-check.mjs` (CI's `e2e` job) fails when a block or a
 // tag is used twice, when a file that keys a stand-in doesn't take its IDs here under its own name, or when it writes
-// such an ID as a number of its own.
+// such an ID as a number of its own or computes one from another (`REPO + 1`): it takes another from its block instead.
 
 const FIRST = 600_000_000;
 /** How many IDs a block holds. The last is below 2^31, as GitHub's repository IDs have been. */

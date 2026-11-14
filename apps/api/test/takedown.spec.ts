@@ -356,10 +356,19 @@ describe("an operator's suspension of an app", () => {
     await runInDurableObject(stub(b.room), (_: any, s: any) => s.storage.deleteAlarm());
     expect(await nextAlarm(stub(b.room))).toBeNull();
     expect(await applyRows(b.room)).toEqual([{ host: b.host, applied_version: 5, applied_script: b.flight, attempts: 0, last_code: null }]);
-    const again = await stub(b.room).fetch("https://do/internal/release-commit-live", { method: "POST", body: JSON.stringify({ release_id: rel(3) }) });
-    expect([again.status, ((await again.json()) as any).state]).toEqual([200, "live"]);
-    // The alarm it sets is due at once, and the test runtime runs a due alarm by itself, so whether it is still set when
-    // read is a race. What it is for isn't: once whatever is due has run, the owed entry is applied.
+    // The alarm it sets is due at once, and the test runtime runs a due alarm by itself, so a read of it in a later call
+    // races that run. So the commit and the read are one turn of the room, with no alarm call: the read follows the
+    // commit before anything else of the room's can start. Either way, the alarm or what it did can only be the commit's,
+    // since the alarm was cleared and the entry unapplied just before.
+    const after = await runInDurableObject(stub(b.room), async (instance: any, state: any) => {
+      const response: Response = await instance.fetch(new Request("https://do/internal/release-commit-live", { method: "POST", body: JSON.stringify({ release_id: rel(3) }) }));
+      const alarm = await state.storage.getAlarm();
+      const applied = state.storage.sql.exec("SELECT applied_version FROM serve_apply").one().applied_version;
+      return { status: response.status, state: ((await response.json()) as any).state, alarm, applied };
+    });
+    expect([after.status, after.state]).toEqual([200, "live"]);
+    expect(after.alarm !== null || after.applied === 6, JSON.stringify(after)).toBe(true);
+    // And what it is for: once whatever is due has run, the owed entry is applied.
     await alarmQuiet(stub(b.room));
     expect(await applyRows(b.room)).toEqual([{ host: b.host, applied_version: 6, applied_script: b.flight, attempts: 0, last_code: null }]);
   });

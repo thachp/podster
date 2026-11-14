@@ -16,13 +16,15 @@
 //   `github-release-fake.example.com`, or `content-fake.example.com` with a `script=`) calls `fakeIds("<its name>")`.
 // - literal: such a file gives a name like a repository or a gate (`REPO`, `REPO_ID`, `nextRepo`, `gate`) a number of
 //   six digits or more, or asks the stand-in about `?repo=` and a number, rather than an ID from its block.
+// - derived: such a file adds to or takes from a repository's or a gate's ID (`REPO_ID + 1`, `IDS.id(0) - 1`, or
+//   `provider_repo_id + 1` in SQL), which can step outside its block, rather than taking another ID from it.
 //
 // Why a static check rather than the stand-in refusing a second file's claim: the stand-in only sees control calls, and
 // only when both files run in one process, so a clash between files run apart, or reached by a call that doesn't carry
 // the claim, would still pass. This fails the PR that writes the clash, every time, without running anything.
 //
-// KNOWN GAPS: an ID computed from another (`REPO_ID + 1`) is trusted to stay in its file's block, as one written into a
-// test's body (a `pulls` entry, `{ id: 42 }`) is; a stand-in reached under another host name isn't seen.
+// KNOWN GAPS: an ID written as a short number into a test's body (a `pulls` entry, `{ id: 42 }`), arithmetic through a
+// name that doesn't say repository or gate, and a stand-in reached under another host name aren't seen.
 //
 // Exit 1 if anything is found.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -56,6 +58,7 @@ export function registryProblems(source, specNames) {
 }
 
 const KEYS_A_FAKE = /github-fake\.example\.com|github-release-fake\.example\.com|content-fake\.example\.com[^\n]*script=/;
+const DERIVED_ID = /\b(?:\w*(?:repo|REPO|Repo|gate|Gate|GATE)\w*|IDS\.\w+\([^)]*\))\s*[-+]\s*\d/;
 const LITERAL_ID = /\b(\w*(?:repo|REPO|Repo|gate|Gate|GATE)\w*)\s*=\s*\d[\d_]{5,}\b|\?repo=\d/;
 
 /** Problems in one spec file, by its name (without `.spec.ts`), given the registry's names. */
@@ -69,6 +72,8 @@ export function specProblems(name, source, registered) {
   source.split("\n").forEach((line, i) => {
     const found = line.match(LITERAL_ID);
     if (found) problems.push(`literal: ${name}.spec.ts:${i + 1} gives a stand-in's ID as a number of its own (${found[0].trim()}); take it from fakeIds("${name}")`);
+    const derived = line.match(DERIVED_ID);
+    if (derived) problems.push(`derived: ${name}.spec.ts:${i + 1} computes a stand-in's ID from another (${derived[0].trim()}); take another from fakeIds("${name}")`);
   });
   return problems;
 }
@@ -101,6 +106,8 @@ function selfTest() {
   is("a file that takes another file's block fails", kinds(check(good, { a: user("a"), b: user("a") })), ["not-own", "unregistered"]);
   is("a file that keys the stand-in under its own name but adds a number of its own fails", kinds(check(good, { a: user("a", "const OTHER_REPO = 987_650_778;\n"), b: user("b") })), ["literal"]);
   is("a random start of its own is still a number of its own", kinds(check(good, { a: user("a", "let nextRepo = 11_000_000 + Math.floor(Math.random() * 1_000_000) * 10;\n"), b: user("b") })), ["literal"]);
+  is("an ID derived from another fails, as the release-read file once did with REPO + 1", kinds(check(good, { a: user("a", "const elsewhere = fetch(`https://github-release-fake.example.com/reset?repo=${REPO + 1}`);\n"), b: user("b") })), ["derived"]);
+  is("so does arithmetic on the block's own ID, and in SQL", kinds(check(good, { a: user("a", "const X = IDS.id(0) + 1;\nsql.exec(\"UPDATE task_change SET provider_repo_id = provider_repo_id + 1\");\n"), b: user("b") })), ["derived", "derived"]);
   is("a gate number of its own fails", kinds(check(good, { a: user("a", "  const gate = 900_000 + Math.floor(Math.random() * 90_000);\n"), b: user("b") })), ["literal"]);
   is("asking the stand-in about a written repository number fails", kinds(check(good, { a: user("a", "fetch('https://github-fake.example.com/agent-tokens?repo=4242');\n"), b: user("b") })), ["literal"]);
   is("the general stand-in and the provider's upload part count too", kinds(check(good, {

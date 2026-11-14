@@ -168,7 +168,7 @@ async function expectNothingBack(r: Room, reason: string, what: string) {
 /** The room's clock for release commands, set by the test (test builds only). */
 const T = 1_800_000_000_000;
 /** Holds a commit between its outside reads and its confirm (test builds only), runs `during`, then lets it go. */
-async function heldBetween(r: Room, during: () => Promise<unknown>) {
+async function heldBetween(r: Room, during: () => Promise<unknown>, start: (r: Room) => Promise<{ status: number; body: any }> = commit) {
   await inRoom(r.room, (sql) => {
     sql.exec("CREATE TABLE IF NOT EXISTS test_release_clock (now INTEGER)");
     sql.exec("DELETE FROM test_release_clock");
@@ -177,7 +177,7 @@ async function heldBetween(r: Room, during: () => Promise<unknown>) {
     sql.exec("CREATE TABLE test_release_hold (arrived INTEGER)");
     sql.exec("INSERT INTO test_release_hold (arrived) VALUES (0)");
   });
-  const answer = commit(r);
+  const answer = start(r);
   try {
     // Polled on the room's own mark that the commit has reached the hold, which is the state itself: no timer.
     await vi.waitFor(async () => expect(await inRoom(r.room, (sql) => sql.exec("SELECT arrived FROM test_release_hold").one().arrived)).toBe(1), { timeout: 10_000, interval: 5 });
@@ -401,6 +401,54 @@ describe("the deployment's own setting, `RELEASES`, read by the room (M6 step 6)
       await withSetting("false", () => ask(r));
       await expectDown(r, "release_off_for_deployment", name);
     });
+  });
+
+  it("unpublishes once for one cause even when the bookkeeping after it fails, so `false` read again records nothing more", async () => {
+    const r = await room("org_rt_deployment_once");
+    // Test builds only: the release bookkeeping fails, so the queued release from under the old epoch stays open.
+    await inRoom(r.room, (sql) => void sql.exec("CREATE TABLE test_release_bookkeeping_fails (x INTEGER)"));
+    await withSetting("false", () => ask(r));
+    expect(await unpublishes(r)).toEqual([{ cause: "release_off_for_deployment", label: null, release_epoch: 3 }]);
+    expect((await all(r.room, "SELECT state FROM release WHERE id = ?", REL))[0].state).toBe("queued");
+    // Read again, twice: the open release started under an epoch that has moved, so it can't go live, and isn't up.
+    await withSetting("false", () => ask(r));
+    await withSetting("false", () => ask(r));
+    expect(await unpublishes(r)).toEqual([{ cause: "release_off_for_deployment", label: null, release_epoch: 3 }]);
+    expect((await trail(r)).events).toEqual([{ type: "app.unpublished", actor_id: "podster", reason: "release_off_for_deployment" }]);
+    // The bookkeeping working again ends it, at the next question, and still nothing more is recorded.
+    await inRoom(r.room, (sql) => void sql.exec("DROP TABLE test_release_bookkeeping_fails"));
+    await withSetting("false", () => ask(r));
+    await expectDown(r, "release_off_for_deployment", "bookkeeping working again");
+  });
+
+  it("takes down a room whose only thing up is a release still open under its epoch, with nothing served", async () => {
+    const r = await room("org_rt_deployment_open", { up: false });
+    await inRoom(r.room, (sql) => void sql.exec(
+      `INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, task_id, requested_by, requested_at, approved_by, approved_at, updated_at)
+         VALUES (?, ?, 'queued', ?, 3, 2, ?, ?, 1, ?, 1, 1)`, REL, SHA, r.label, TASK, r.owner.id, r.owner.id));
+    await withSetting("false", () => ask(r));
+    expect(await unpublishes(r)).toEqual([{ cause: "release_off_for_deployment", label: null, release_epoch: 3 }]);
+    expect(await all(r.room, "SELECT state, failure_code FROM release WHERE id = ?", REL)).toEqual([{ state: "failed", failure_code: "release_epoch_moved" }]);
+  });
+
+  it("ends a commit caught between its reads and its confirm when the setting turns `false`: it never goes live", async () => {
+    const r = await room("org_rt_deployment_flight", { state: "uploading" });
+    // The commit runs with the setting written `true`; while it is held, the setting is written `false` and the room
+    // asked the reconcile's question.
+    await BINDINGS.DB.prepare("CREATE TABLE test_releases_setting (value TEXT)").run();
+    await BINDINGS.DB.prepare("INSERT INTO test_releases_setting (value) VALUES ('true')").run();
+    try {
+      const answer = await heldBetween(r, async () => {
+        await BINDINGS.DB.prepare("UPDATE test_releases_setting SET value = 'false'").run();
+        await ask(r);
+        expect(await unpublishes(r)).toEqual([{ cause: "release_off_for_deployment", label: null, release_epoch: 3 }]);
+      }, (held) => internal(held, "release-commit-live", { release_id: REL }));
+      expect(answer.body).toEqual({ release_id: REL, state: "failed", rechecked: false, reason: "release_epoch_moved" });
+    } finally {
+      await BINDINGS.DB.prepare("DROP TABLE test_releases_setting").run();
+    }
+    expect(await serving(r)).toEqual(DOWN);
+    expect((await all(r.room, "SELECT script_name FROM script_delete ORDER BY script_name")).map((q: any) => q.script_name)).toEqual([r.prev, r.script].sort());
   });
 
   it("records nothing for a room with no release configuration, or nothing up, when the setting is `false`", async () => {

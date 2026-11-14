@@ -490,6 +490,22 @@ describe("an operator's recheck of a ready link (item 12)", () => {
     expect(await appState(r.id)).toEqual(appDown(app, "ruleset_missing"));
   });
 
+  it("unpublishes once for a retry of the operator's recheck with the same idempotency key, and once when asked anew", async () => {
+    const r = await room();
+    const app = await withApp(r.id);
+    await ready({ rulesets: "no_update" });
+    const key = `rr-retry-${crypto.randomUUID()}`;
+    const first = await api(OPERATOR, "POST", `/v1/moderation/repositories/${r.id}/recheck`, {}, { key });
+    const again = await api(OPERATOR, "POST", `/v1/moderation/repositories/${r.id}/recheck`, {}, { key });
+    expect(first.body).toEqual({ status: "degraded", reason: "ruleset_missing" });
+    expect(again.body).toEqual(first.body);
+    expect(await appState(r.id)).toEqual(appDown(app, "ruleset_missing"));
+    // Asked anew, with another key: the link is already degraded, which a recheck reads only to restore, so the trigger
+    // doesn't fire a second time.
+    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "degraded", reason: "ruleset_missing" });
+    expect(await appState(r.id)).toEqual(appDown(app, "ruleset_missing"));
+  });
+
   it("is never left behind by a recheck that fails after it: the link stays ready and the app stays up", async () => {
     const r = await room();
     const app = await withApp(r.id);

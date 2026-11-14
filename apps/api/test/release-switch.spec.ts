@@ -254,7 +254,7 @@ describe("a take of an organization's release switch, carried to its rooms (deci
     await unlisted(org);
     const [unset, older] = [await room(org), await room(org)];
     // As each was before room schema step 40: no applied switch at all.
-    for (const r of [unset, older]) await inRoom(r.room, (sql) => { sql.exec("DROP TABLE release_upload_attempt"); sql.exec("DROP TABLE release_job"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload"); sql.exec("DROP TABLE release_hold"); sql.exec("DROP TABLE release_switch_applied"); sql.exec("UPDATE schema_version SET version = 39"); });
+    for (const r of [unset, older]) await inRoom(r.room, (sql) => { sql.exec("DROP TABLE release_drive_failure"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload_attempt"); sql.exec("DROP TABLE release_job"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload"); sql.exec("DROP TABLE release_hold"); sql.exec("DROP TABLE release_switch_applied"); sql.exec("UPDATE schema_version SET version = 39"); });
     // Migrated while nothing was ever taken: unset, as the step's defaults make it, and nothing changes.
     await check(unset);
     expect(await inRoom(unset.room, (sql) => sql.exec("SELECT singleton, granted, generation, last_take, applied_at FROM release_switch_applied").toArray()))

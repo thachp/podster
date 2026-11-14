@@ -2850,9 +2850,6 @@ pub struct Workspace {
     /// switch notice that comes meanwhile isn't acknowledged, so it is sent again once the room exists
     /// (`release_switch`).
     creating: std::cell::Cell<u32>,
-    /// Passes of the release job's driver that failed in a row, which backs off how soon the alarm comes back for it.
-    /// A restart forgets it.
-    drive_failures: std::cell::Cell<u32>,
     /// Test builds only: one alarm at a time, as the platform runs them. See `alarm`.
     #[cfg(feature = "failpoints")]
     test_alarm_turn: futures_util::lock::Mutex<()>,
@@ -3867,7 +3864,7 @@ impl Workspace {
         }
         // The release job's driver: the release at the head of the room's line, and every upload's hour (M6 step 5).
         if let Some(next) = migrated
-            .then(|| release_driver::next_due(&sql, now, self.drive_failures.get()))
+            .then(|| release_driver::next_due(&sql, now))
             .transpose()?
             .flatten()
         {
@@ -4216,7 +4213,7 @@ impl Workspace {
                 .await?;
             // When the driver would next wake the room, by the release commands' clock.
             let now = release_recheck::release_now(&sql);
-            out["due"] = release_driver::due(&sql, now, 0)?.map_or(Value::Null, Value::from);
+            out["due"] = release_driver::due(&sql, now)?.map_or(Value::Null, Value::from);
             return Ok(out);
         }
         // Test builds only: one whole read of a release from a repository, alone, which publishes nothing and
@@ -5241,7 +5238,6 @@ impl DurableObject for Workspace {
             provision_not_before: std::cell::Cell::new(0),
             held_clear: std::cell::Cell::new(false),
             creating: std::cell::Cell::new(0),
-            drive_failures: std::cell::Cell::new(0),
             #[cfg(feature = "failpoints")]
             test_alarm_turn: futures_util::lock::Mutex::new(()),
         }
@@ -5385,16 +5381,26 @@ impl DurableObject for Workspace {
         // The release job's driver, after the takedown's work: one step, handed to a request of the room's own, so the
         // alarm never waits on an upload (M6 step 5).
         if release_driver::enabled(&sql, true) {
-            match self.release_drive_pass(release_driver::Pass::HandOff).await {
-                Ok(_) => self.drive_failures.set(0),
-                Err(error) => {
-                    self.drive_failures
-                        .set(self.drive_failures.get().saturating_add(1));
-                    console_error!(
-                        "release: a drive pass failed: code={}",
-                        error.code().unwrap_or("internal_error")
-                    );
-                }
+            // What came of the pass is kept in the room, so its backoff outlives the object (`release_drive_failure`).
+            let pass = self.release_drive_pass(release_driver::Pass::HandOff).await;
+            if let Err(error) = &pass {
+                console_error!(
+                    "release: a drive pass failed: code={}",
+                    error.code().unwrap_or("internal_error")
+                );
+            }
+            // Only in a room on the current schema: the alarm doesn't migrate one, and the table may not be there yet.
+            let now = release_recheck::release_now(&sql);
+            let current = store::is_initialized(&sql).unwrap_or(false)
+                && !store::needs_migration(&sql).unwrap_or(true);
+            if let Err(error) = current
+                .then(|| release_driver::record_pass(&sql, pass.is_err(), now))
+                .transpose()
+            {
+                console_error!(
+                    "release: a drive pass's outcome wasn't recorded: code={}",
+                    error.code().unwrap_or("internal_error")
+                );
             }
         }
         if takedown::release_epoch(&sql) != epoch_before {

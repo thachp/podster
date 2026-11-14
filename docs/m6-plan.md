@@ -1425,12 +1425,20 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 - **`release.uploaded`:** an audit record, with files and bytes, and an event, when the upload is recorded.
 - **In test builds** the driver runs only in a room that opts in (`test_release_driver`), and a test asks for one pass at a time.
 
+**Follow-ups from the driver's two reviews, 2026-11-14.** One room schema step, 44: `release_job.stalls` and `release_drive_failure`, each a count that must outlive an eviction.
+
+- **A step stops at its lease's end.** Start, upload and commit carry the step's lease and check it, by the release commands' clock, before each thing they ask outside the room and in each transaction that would write. Once it has run out the step asks nothing more, writes nothing, and waits `release_drive_lease_lost`; a later pass may have leased the release again. The upload's own deadline is unchanged inside it.
+- **No content provider configured idles,** like release switched off: code `content_provider_not_configured`, no attempt counted, looked at again after 10 minutes.
+- **The wait starts again from 30 seconds once a step moves the release on.** It doubles with the attempts in a row that left the release where it was (`stalls`); the cap of 8 still counts every attempt. So a commit that stalls after a good start and upload waits 30 seconds, not 2 minutes. A release that never moves still waits 35.5 minutes in all (30 s, 1, 2, 4, 8, 10 and 10 minutes), inside its upload's hour with a lease to spare.
+- **Failed passes are counted in the room** (`release_drive_failure`), not in the object, so the alarm's backoff from them survives a restart; the first pass that doesn't fail ends the count.
+- **The room's stored alarm is tested,** not only the test path's reading of it: it is set for an upload's hour, and it is the earliest of the room's duties whichever is sooner.
+
 **Still owed to the job:** the marker's wait, a release recorded served, the set-back, and settling `uncertain`. **Until the marker's wait closes a live release's flight, a later release's commit waits `release_in_flight` and ends `release_attempts_exhausted`.** Not shown: the real provider and GitHub, and whether the platform keeps the handed-off request alive across an eviction (the lease covers it if not).
 
 **The architect's rulings on the driver's nine questions, 2026-11-14, each by the architect, for the owner to review.**
 
 1. **The cap: accepted,** at most 8 attempts, counting every attempt, so a release that never moves still ends (corrected by the architect the same day).
-2. **The wait: accepted,** 30 seconds doubling to 10 minutes.
+2. **The wait: accepted,** 30 seconds doubling to 10 minutes. *2026-11-14, after review: it doubles with the attempts in a row that left the release where it was, and starts again after a step that moved it on (the follow-ups above).*
 3. **Two upload attempts a room an hour: not enough to open the gate.** It bounds one room, and nothing bounds rooms in total. **A cross-room share of the read budget is owed** before `RELEASE_PATH_COMPLETE` is flipped, and is on [the gate's list](#the-gate-on-the-release-path).
 4. **The lease: accepted, 6 minutes.** **A requirement: the lease is longer than an upload attempt's deadline** (`DRIVE_LEASE_MS > ATTEMPT_DEADLINE_MS`), so a step still within its deadline is never taken for a dead one. A cargo test fails the build if the constants break it: `the_waits_of_a_release_that_never_moves_fit_inside_its_uploads_hour` in `crates/core/tests/release_driver.rs`, a compile-time assertion.
 5. **Idle: accepted,** looked at again after 10 minutes while release is off or the path closed.

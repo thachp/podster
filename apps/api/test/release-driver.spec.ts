@@ -2,7 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { createHash } from "node:crypto";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { alarmPass, alarmQuiet } from "./alarm";
+import { alarmPass, alarmQuiet, nextAlarm } from "./alarm";
 
 // M6 step 5, the release job's driver (ADR 0010's "The release job"): the room's alarm takes a release through the
 // room's own commands, start, upload and commit, one step at a time, with a wait that grows, a cap on attempts, a bound
@@ -99,6 +99,7 @@ const TASK = "tsk_rd_1";
 const T = 1_900_000_000_000;
 const HOUR = 60 * 60 * 1000;
 const LEASE = 6 * 60 * 1000;
+const IDLE = 10 * 60 * 1000;
 let rooms = 0;
 const made: string[] = [];
 type Room = { room: string; label: string; script: string };
@@ -270,6 +271,77 @@ describe("a release that stays where it was", () => {
     const next = await drivenPass(r.room);
     expect([next.outcome, next.state]).toEqual(["done", "live"]);
   });
+
+  it("records nothing of a step the room's release epoch moved under, and looks at the release afresh", async () => {
+    await github("/seed", repository(SITE));
+    // The epoch moves while the files are sent; the hold stays as it was.
+    const r = await room("uploading", ["CREATE TABLE test_release_upload_before_check (statement TEXT)", "INSERT INTO test_release_upload_before_check (statement) VALUES ('UPDATE release_config SET release_epoch = release_epoch + 1')"]);
+    const hold = () => inRoom(r.room, (sql) => sql.exec("SELECT generation FROM release_hold").one().generation);
+    const holdBefore = await hold();
+    const moved = await drivenPass(r.room);
+    expect([moved.outcome, moved.code]).toEqual(["moved", "release_driver_moved"]);
+    expect(await job(r.room)).toEqual({ attempts: 1, next_attempt_at: T, leased_step: null, last_code: "release_driver_moved" });
+    expect(await hold()).toBe(holdBefore);
+  });
+});
+
+describe("the backoff", () => {
+  it("waits the first wait again once a step has moved the release on, and doubles only for attempts in a row", async () => {
+    await github("/seed", repository(SITE));
+    const r = await room("queued");
+    // A start and an upload that each move it on.
+    expect((await drivenPass(r.room)).outcome).toBe("next");
+    expect((await drivenPass(r.room)).outcome).toBe("next");
+    // Then the organization's object gives no answer to go on, and the commit leaves the release where it was.
+    await inRoom(r.room, (sql) => { sql.exec("CREATE TABLE test_release_delegation_answer (answer TEXT)"); sql.exec(`INSERT INTO test_release_delegation_answer (answer) VALUES ('"maybe"')`); });
+    const first = await drivenPass(r.room);
+    // The third attempt, but the first in a row to stall: thirty seconds, not the third wait's two minutes.
+    expect([first.outcome, first.code, first.state, first.next_attempt_at]).toEqual(["retry", "standing_unknown", "uploading", T + 30_000]);
+    expect((await job(r.room)).attempts).toBe(3);
+    await at(r.room, T + 30_000);
+    const second = await drivenPass(r.room);
+    expect([second.outcome, second.next_attempt_at]).toEqual(["retry", T + 30_000 + 60_000]);
+    expect(await inRoom(r.room, (sql) => sql.exec("SELECT attempts, stalls FROM release_job").one())).toEqual({ attempts: 4, stalls: 2 });
+  });
+});
+
+describe("a step's lease", () => {
+  it("asks nothing more of the provider once it has run out, and the step waits", async () => {
+    await github("/seed", repository(SITE));
+    const r = await room("uploading");
+    // The upload session is held at the provider while the release commands' clock reaches the lease's end.
+    const gate = await providerGate(r.script, "session");
+    const running = drivenPass(r.room);
+    try {
+      await gate.arrived();
+      await at(r.room, T + LEASE);
+    } finally {
+      await gate.release();
+    }
+    const out = await running;
+    expect([out.outcome, out.code, out.state, out.next_attempt_at]).toEqual(["retry", "release_drive_lease_lost", "uploading", T + LEASE + 30_000]);
+    // The session was the provider's only call: no bucket, and no script written.
+    const seen = await provider(r.script);
+    expect([seen.calls.map((call) => call.op), seen.written]).toEqual([["session"], null]);
+    // GitHub's token was revoked all the same.
+    expect((await githubState()).tokens.every((token) => token.revoked)).toBe(true);
+  });
+
+  it("is still one the step may finish within: the same step, its clock a millisecond short of the end, uploads", async () => {
+    await github("/seed", repository(SITE));
+    const r = await room("uploading");
+    const gate = await providerGate(r.script, "session");
+    const running = drivenPass(r.room);
+    try {
+      await gate.arrived();
+      await at(r.room, T + LEASE - 1);
+    } finally {
+      await gate.release();
+    }
+    const out = await running;
+    expect([out.outcome, out.state]).toEqual(["next", "uploading"]);
+    expect((await provider(r.script)).written!.times).toBe(1);
+  });
 });
 
 describe("how often a room reads", () => {
@@ -342,6 +414,19 @@ describe("what the driver is behind", () => {
     expect((await drivenPass(r.room)).outcome).toBe("next");
   });
 
+  it("does nothing, and counts nothing, while no content provider is configured to upload to", async () => {
+    await github("/seed", repository(SITE));
+    const r = await room("uploading");
+    await inRoom(r.room, (sql) => void sql.exec("DROP TABLE test_release_upload_provider"));
+    const idle = await drivenPass(r.room);
+    expect([idle.outcome, idle.code, idle.next_attempt_at, idle.due]).toEqual(["idle", "content_provider_not_configured", T + IDLE, T + IDLE]);
+    expect(await job(r.room)).toEqual({ attempts: 0, next_attempt_at: T + IDLE, leased_step: null, last_code: "content_provider_not_configured" });
+    expect([(await githubState()).minted, await reserved(), (await release(r.room)).state]).toEqual([[], [], "uploading"]);
+    // The control: with a provider, the same room is driven.
+    await inRoom(r.room, (sql) => { sql.exec("CREATE TABLE test_release_upload_provider (x INTEGER)"); sql.exec("DELETE FROM release_job"); });
+    expect((await drivenPass(r.room)).outcome).toBe("next");
+  });
+
   it("is reached by no client, and its test switches are compiled only into test builds", async () => {
     for (const path of ["/internal/release-drive", "/v1/internal/release-drive", "/internal/test-release-drive"]) {
       const answer = await SELF.fetch(`https://api.internal${path}`, { method: "POST", body: JSON.stringify({ release_id: REL, attempt: 1 }) });
@@ -384,5 +469,66 @@ describe("the alarm's own pass", () => {
       await gate.release();
     }
     expect((await provider(r.script)).expiredGates).toBe(0);
+  });
+});
+
+describe("the room's stored alarm", () => {
+  const job = (next: number) => `INSERT INTO release_job (release_id, attempts, next_attempt_at, updated_at) VALUES ('${REL}', 1, ${next}, ${T})`;
+  const fromAlarm = "UPDATE test_release_driver SET from_alarm = 1";
+
+  it("is set for the upload's hour by the driver, and by nothing else in the room", async () => {
+    // The release's next attempt is two hours off, so only its upload's hour, one hour off, can set this alarm.
+    const r = await room("uploading", [job(T + 2 * HOUR)]);
+    // The control: with the driver off from the alarm, the room sets none.
+    await alarmPass(stub(r.room));
+    expect(await nextAlarm(stub(r.room))).toBeNull();
+    await inRoom(r.room, (sql) => void sql.exec(fromAlarm));
+    const before = Date.now();
+    await alarmPass(stub(r.room));
+    const armed = (await nextAlarm(stub(r.room)))!;
+    expect(armed).toBeGreaterThanOrEqual(before + HOUR);
+    expect(armed).toBeLessThanOrEqual(Date.now() + HOUR);
+  });
+
+  it("is the earliest of the room's duties: the driver never puts an earlier one later, and brings a later one sooner", async () => {
+    // A hold on the room's app runs out at a fixed moment, set as the alarm's own time.
+    const HELD_UNTIL = 4_000_000_000_000;
+    // The driver's own wake is a century off by the release commands' clock, so later than the hold's.
+    const r = await room("queued", [job(T + 100 * 365 * 24 * HOUR), `UPDATE release_hold SET cause = 'no_releaser', held_at = 1, until = ${HELD_UNTIL}`, fromAlarm]);
+    await alarmPass(stub(r.room));
+    expect(await nextAlarm(stub(r.room))).toBe(HELD_UNTIL);
+    // Now the driver's wake is an hour off: sooner than the hold's, so it is the alarm.
+    await inRoom(r.room, (sql) => void sql.exec("UPDATE release_job SET next_attempt_at = ?", T + HOUR));
+    const before = Date.now();
+    await alarmPass(stub(r.room));
+    const armed = (await nextAlarm(stub(r.room)))!;
+    expect(armed).toBeGreaterThanOrEqual(before + HOUR);
+    expect(armed).toBeLessThanOrEqual(Date.now() + HOUR);
+    expect(armed).toBeLessThan(HELD_UNTIL);
+  });
+
+  it("backs off from passes that failed by the count kept in the room, so a restart doesn't bring it back sooner", async () => {
+    // Every write to the job fails, so every pass does; four had failed before, as a restarted object finds them.
+    const r = await room("uploading", [
+      fromAlarm,
+      "CREATE TRIGGER test_release_job_fails BEFORE INSERT ON release_job BEGIN SELECT RAISE(ABORT, 'test'); END",
+      `INSERT INTO release_drive_failure (singleton, failures, last_failed_at) VALUES (1, 4, ${T})`,
+    ]);
+    const failures = () => inRoom(r.room, (sql) => sql.exec("SELECT failures FROM release_drive_failure").toArray().map((row: any) => row.failures));
+    const before = Date.now();
+    await alarmPass(stub(r.room));
+    const armed = (await nextAlarm(stub(r.room)))!;
+    // The fifth in a row: 30 seconds doubled four times, though the release is due at once.
+    expect(await failures()).toEqual([5]);
+    expect(armed).toBeGreaterThanOrEqual(before + 480_000);
+    expect(armed).toBeLessThanOrEqual(Date.now() + 480_000);
+    // A pass that doesn't fail ends the count. Release is off here, so it idles, and the alarm is the idle's.
+    await inRoom(r.room, (sql) => void sql.exec("DROP TRIGGER test_release_job_fails"));
+    const after = Date.now();
+    await alarmPass(stub(r.room));
+    const idle = (await nextAlarm(stub(r.room)))!;
+    expect(await failures()).toEqual([]);
+    expect(idle).toBeGreaterThanOrEqual(after + IDLE);
+    expect(idle).toBeLessThanOrEqual(Date.now() + IDLE);
   });
 });

@@ -10,9 +10,9 @@
 //!
 //! 1. Uploads past their hour are ended, in a transaction of their own (`release_commit::bookkeeping`). The room's
 //!    alarm is set for the hour's end of every upload under way ([`next_due`]), so nothing waits for someone to ask.
-//! 2. Only if the release at the head is due: whether the deployment allows release, exactly `true`, and the gate on
-//!    the release path is open. Neither, and the driver does nothing, counts no attempt and looks again after
-//!    `DRIVE_IDLE_MS`.
+//! 2. Only if the release at the head is due: whether the deployment allows release, exactly `true`, the gate on the
+//!    release path is open, and a content provider is configured to upload to. Any not, and the driver does nothing,
+//!    counts no attempt and looks again after `DRIVE_IDLE_MS`, with the reason as the job's code.
 //! 3. **The lease,** one room transaction ([`lease`]): everything is read again, the head included, since the pass
 //!    awaited. The step comes from the release's state now. For an upload, the room's hourly upload attempts
 //!    (`upload_slot`) must leave room for it, or the release waits for one. The attempt is counted, and the release is
@@ -26,22 +26,30 @@
 //! **A step** ([`Workspace::release_drive_step`]): the lease must still be its own. The step is the room's own command,
 //! [`Workspace::start_upload_of`], [`Workspace::upload_of`] or [`Workspace::commit_live_of`], each of which reads the
 //! outside facts afresh and rechecks everything, epoch included, in its own transactions, as when it is asked alone.
+//! **The step carries its lease** ([`StepLease`]): before each thing it asks outside the room, and in each transaction
+//! that would write, the command checks the lease is still its own and hasn't run out by the release commands' clock.
+//! Once it has, the step asks nothing more and writes nothing, and answers `release_drive_lease_lost`; a later pass
+//! may have leased the release again by then.
 //! Then **the record,** one room transaction ([`record`]): the lease, the release epoch and the app's hold are each
 //! compared with what they were at the lease; if any moved, nothing of the step is recorded and the release is looked
 //! at afresh. Otherwise what came of it is core's, from the release's state now: the next step at once, done, a wait
-//! that grows, or the end.
+//! that grows with the attempts in a row that left the release where it was (`stalls`), or the end.
+//!
+//! **Passes that fail** are counted in `release_drive_failure`, so the alarm backs off from them across a restart of
+//! the object, and the count ends with the first pass that doesn't fail.
 //!
 //! Logs carry the room's and the release's IDs, the step and codes.
 use super::release_commit::{bookkeeping, end_stale, fail, uploaded};
 use super::release_recheck::{release_now, release_row, state_of};
+use super::release_upload::NO_PROVIDER;
 use super::*;
 use podster_core::release::{
     is_release_id, window_start, ReleaseState, IN_FLIGHT_EXEMPTION_MS, READ_WINDOW_MS,
 };
 use podster_core::release_driver::{
-    drive_outcome, drive_step, drive_wait_ms, may_lease, step_still_current, upload_slot,
-    DriveOutcome, DriveStep, ATTEMPTS_EXHAUSTED, DRIVE_FIRST_WAIT_MS, DRIVE_IDLE_MS,
-    DRIVE_LEASE_MS,
+    drive_outcome, drive_step, drive_wait_ms, lease_holds, may_lease, stalls_after,
+    step_still_current, upload_slot, DriveOutcome, DriveStep, ATTEMPTS_EXHAUSTED,
+    DRIVE_FIRST_WAIT_MS, DRIVE_IDLE_MS, DRIVE_LEASE_MS,
 };
 
 /// The room's path for one step of the driver. Nothing outside the Worker reaches it: the room's alarm sends it to the
@@ -52,6 +60,9 @@ pub(crate) const INTERNAL_RELEASE_DRIVE: &str = "/internal/release-drive";
 const IDLE: &str = "release_driver_idle";
 /// `last_code` while an upload waits for the room's hourly upload attempts to leave room for it.
 const UPLOAD_ATTEMPTS: &str = "release_upload_attempts";
+/// What a step answers, as `waiting`, when its lease ran out before it was done: it asked nothing more and wrote
+/// nothing from there.
+pub(super) const LEASE_LOST: &str = "release_drive_lease_lost";
 /// `last_code` when the room moved under a step, and the release is looked at afresh.
 const MOVED: &str = "release_driver_moved";
 /// `last_code` for a step that left the release where it was and gave no code of its own.
@@ -128,6 +139,77 @@ fn epoch_and_hold(sql: &SqlStorage) -> R<(i64, i64)> {
     Ok((epoch, releasers::hold_state(sql)?.1))
 }
 
+/// The lease a step was given, which the step's command checks before each thing it asks outside the room and in each
+/// transaction that would write. A command asked alone, not by the driver, has none.
+#[derive(Clone)]
+pub(super) struct StepLease {
+    pub(super) release_id: String,
+    pub(super) attempt: u32,
+}
+
+impl StepLease {
+    /// Whether the lease is still this step's: the job's current lease, not run out by the release commands' clock. A
+    /// lease that can't be read doesn't hold.
+    pub(super) fn holds(&self, sql: &SqlStorage) -> bool {
+        rows(
+            sql,
+            "SELECT attempts, next_attempt_at FROM release_job WHERE release_id = ? AND leased_step IS NOT NULL",
+            vec![self.release_id.as_str().into()],
+        )
+        .ok()
+        .and_then(|found| found.into_iter().next())
+        .is_some_and(|job| {
+            int(&job["attempts"]) == i64::from(self.attempt)
+                && job["next_attempt_at"]
+                    .as_i64()
+                    .is_some_and(|until| lease_holds(until, release_now(sql)))
+        })
+    }
+}
+
+/// Whether a command may go on: it was asked alone, or its step's lease still holds.
+pub(super) fn may_go_on(sql: &SqlStorage, lease: Option<&StepLease>) -> bool {
+    lease.is_none_or(|lease| lease.holds(sql))
+}
+
+/// What a command answers when its step's lease ran out: the release as it is, `waiting` [`LEASE_LOST`].
+pub(super) fn lease_lost(sql: &SqlStorage, release_id: &str) -> R<Value> {
+    let release = release_row(sql, release_id)?.ok_or_else(ApiError::not_found)?;
+    let mut out = super::release_recheck::answer(&release, false, None);
+    out["waiting"] = LEASE_LOST.into();
+    console_log!(
+        "release: a step's lease ran out: release={} code={}",
+        release_id,
+        LEASE_LOST
+    );
+    Ok(out)
+}
+
+/// How many passes of the driver have failed in a row, as recorded.
+fn drive_failures(sql: &SqlStorage) -> R<u32> {
+    Ok(
+        rows(sql, "SELECT failures FROM release_drive_failure", vec![])?
+            .first()
+            .map_or(0, |row| {
+                u32::try_from(int(&row["failures"]).max(0)).unwrap_or(u32::MAX)
+            }),
+    )
+}
+
+/// Records what came of a pass of the driver: a failure counts one more, and a pass that didn't fail ends the count.
+pub(super) fn record_pass(sql: &SqlStorage, failed: bool, now: i64) -> R<()> {
+    if failed {
+        exec(
+            sql,
+            "INSERT INTO release_drive_failure (singleton, failures, last_failed_at) VALUES (1, 1, ?)
+               ON CONFLICT (singleton) DO UPDATE SET failures = failures + 1, last_failed_at = excluded.last_failed_at",
+            vec![now.into()],
+        )
+    } else {
+        exec(sql, "DELETE FROM release_drive_failure", vec![])
+    }
+}
+
 /// Writes the job's row for a release, made if it isn't there: when it is next due and why it waits. Any lease is
 /// cleared.
 fn set_job(
@@ -164,19 +246,21 @@ fn room_id(sql: &SqlStorage) -> String {
 /// - **The hour's end of every upload under way,** so an upload that outlives it is ended then, whoever asks. After a
 ///   failed bookkeeping run, not before its next try is due (`DRIVE_FIRST_WAIT_MS`), so a run that keeps failing doesn't
 ///   bring the alarm straight back.
-/// - After `failures` passes in a row that failed, not before `drive_wait_ms(failures)`.
+/// - After passes in a row that failed, as `release_drive_failure` records them, not before `drive_wait_ms` of how many.
+///   The count is the room's, not the object's, so a restart doesn't bring the alarm back sooner.
 ///
 /// The times are kept by the release commands' clock (`release_now`), which a test sets; the alarm is set the same
 /// distance from the Worker's own clock, so it is never in the past by one and the future by the other.
-pub(super) fn next_due(sql: &SqlStorage, real_now: i64, failures: u32) -> R<Option<i64>> {
+pub(super) fn next_due(sql: &SqlStorage, real_now: i64) -> R<Option<i64>> {
     if !enabled(sql, true) {
         return Ok(None);
     }
-    due(sql, real_now, failures)
+    due(sql, real_now)
 }
 
 /// [`next_due`], whether or not the driver runs from this room's alarm.
-pub(super) fn due(sql: &SqlStorage, real_now: i64, failures: u32) -> R<Option<i64>> {
+pub(super) fn due(sql: &SqlStorage, real_now: i64) -> R<Option<i64>> {
+    let failures = drive_failures(sql)?;
     let now = release_now(sql);
     let mut due: Option<i64> = head(sql)?.map(|head| head.next_attempt_at.unwrap_or(now));
     let started = rows(
@@ -217,9 +301,10 @@ enum Leased {
     Nothing(Value),
 }
 
-/// The lease, in the room's transaction: see the module's note, step 3. `allowed` is whether the deployment allows
-/// release and the release path is open, read before the transaction.
-fn lease(sql: &SqlStorage, allowed: bool, now: i64) -> R<Leased> {
+/// The lease, in the room's transaction: see the module's note, step 3. `idle` is why the driver may do nothing now,
+/// read before the transaction: the deployment doesn't allow release or the release path is closed ([`IDLE`]), or no
+/// content provider is configured ([`NO_PROVIDER`]).
+fn lease(sql: &SqlStorage, idle: Option<&'static str>, now: i64) -> R<Leased> {
     end_stale(sql, now)?;
     let Some(head) = head(sql)? else {
         return Ok(Leased::Nothing(
@@ -234,10 +319,10 @@ fn lease(sql: &SqlStorage, allowed: bool, now: i64) -> R<Leased> {
     if head.next_attempt_at.is_some_and(|at| at > now) {
         return Ok(answer("not_due", None, head.next_attempt_at));
     }
-    if !allowed {
+    if let Some(code) = idle {
         let next = now.saturating_add(DRIVE_IDLE_MS);
-        set_job(sql, &head.id, Some(next), Some(IDLE), now)?;
-        return Ok(answer("idle", Some(IDLE), Some(next)));
+        set_job(sql, &head.id, Some(next), Some(code), now)?;
+        return Ok(answer("idle", Some(code), Some(next)));
     }
     let Some(step) = drive_step(head.state, head.uploaded) else {
         return Ok(answer("none", None, None));
@@ -307,7 +392,7 @@ fn record(
     end_stale(sql, now)?;
     let job = rows(
         sql,
-        "SELECT attempts, leased_epoch, leased_hold FROM release_job WHERE release_id = ? AND leased_step IS NOT NULL",
+        "SELECT attempts, stalls, leased_epoch, leased_hold FROM release_job WHERE release_id = ? AND leased_step IS NOT NULL",
         vec![release_id.into()],
     )?;
     let Some(job) = job.first() else {
@@ -336,7 +421,9 @@ fn record(
         Some(script) => uploaded(sql, release_id, script)?,
         None => false,
     };
-    let outcome = drive_outcome(before, drive_step(state, recorded), attempts, retry_at, now);
+    let after = drive_step(state, recorded);
+    let stalled = u32::try_from(int(&job["stalls"]).max(0)).unwrap_or(u32::MAX);
+    let outcome = drive_outcome(before, after, attempts, stalled, retry_at, now);
     let (name, code, next) = match outcome {
         DriveOutcome::Next => ("next", None, Some(now)),
         DriveOutcome::Done => ("done", None, None),
@@ -347,6 +434,14 @@ fn record(
         }
     };
     set_job(sql, release_id, next, code, now)?;
+    exec(
+        sql,
+        "UPDATE release_job SET stalls = ? WHERE release_id = ?",
+        vec![
+            i64::from(stalls_after(before, after, stalled)).into(),
+            release_id.into(),
+        ],
+    )?;
     console_log!(
         "release: a drive step: room={} release={} step={} outcome={} code={}",
         room_id(sql),
@@ -392,14 +487,22 @@ impl Workspace {
         if !head(&sql)?.is_some_and(|head| head.next_attempt_at.is_none_or(|at| at <= now)) {
             return Ok(json!({ "outcome": "not_due" }));
         }
-        // Behind `RELEASES`, exactly `true`, and the gate on the release path.
-        let allowed = crate::releases::setting(&self.env).await.allows_release()
-            && self.release_path_open().await.is_ok();
+        // Behind `RELEASES`, exactly `true`, and the gate on the release path. With release allowed, a deployment with no
+        // content provider idles too: every upload would wait for one, and none would be worth an attempt.
+        let idle = if !(crate::releases::setting(&self.env).await.allows_release()
+            && self.release_path_open().await.is_ok())
+        {
+            Some(IDLE)
+        } else if self.upload_provider().is_none() {
+            Some(NO_PROVIDER)
+        } else {
+            None
+        };
         let leased: Rc<RefCell<Option<Leased>>> = Rc::new(RefCell::new(None));
         let slot = leased.clone();
         let store = sql.clone();
         transaction_sync(&self.state, move || {
-            *slot.borrow_mut() = Some(lease(&store, allowed, release_now(&store))?);
+            *slot.borrow_mut() = Some(lease(&store, idle, release_now(&store))?);
             Ok(())
         })?;
         let leased = leased.borrow_mut().take();
@@ -477,13 +580,18 @@ impl Workspace {
     /// The step leased as `attempt`, run and recorded.
     async fn drive(&self, release_id: &str, attempt: u32) -> R<Value> {
         let sql = self.state.storage().sql();
+        let lease = StepLease {
+            release_id: release_id.to_owned(),
+            attempt,
+        };
         let leased = rows(
             &sql,
             "SELECT attempts, leased_step FROM release_job WHERE release_id = ? AND leased_step IS NOT NULL",
             vec![release_id.into()],
         )?;
         let before = match leased.first() {
-            Some(job) if int(&job["attempts"]) == i64::from(attempt) => {
+            // Its own lease, not run out: one that ran out is a later pass's to lease again.
+            Some(job) if int(&job["attempts"]) == i64::from(attempt) && lease.holds(&sql) => {
                 match job["leased_step"].as_str() {
                     Some("start") => DriveStep::Start,
                     Some("upload") => DriveStep::Upload,
@@ -491,7 +599,7 @@ impl Workspace {
                     _ => return Err(ApiError::internal("a lease with no step")),
                 }
             }
-            // Another lease, or none: this step is someone else's now, or done.
+            // Another lease, none, or its own run out: this step is someone else's now, or done.
             _ => return Ok(json!({ "release_id": release_id, "outcome": "stale" })),
         };
         let release = release_row(&sql, release_id)?.ok_or_else(ApiError::not_found)?;
@@ -507,10 +615,12 @@ impl Workspace {
                 // Each command asks the gate on the release path again, after the pass's awaits.
                 match self.release_path_open().await {
                     Err(error) => Err(error),
+                    // The gate's read took time: the lease is asked again before the command asks anything.
+                    Ok(()) if !lease.holds(&sql) => lease_lost(&sql, &id),
                     Ok(()) => match step {
-                        DriveStep::Start => self.start_upload_of(id, release).await,
-                        DriveStep::Upload => self.upload_of(id, release).await,
-                        DriveStep::Commit => self.commit_live_of(id, release).await,
+                        DriveStep::Start => self.start_upload_of(id, release, Some(&lease)).await,
+                        DriveStep::Upload => self.upload_of(id, release, Some(&lease)).await,
+                        DriveStep::Commit => self.commit_live_of(id, release, Some(&lease)).await,
                     },
                 }
             }

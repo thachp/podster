@@ -242,7 +242,7 @@ describe("the room's sweep", () => {
       // M6 step 4(a)'s applier and script-delete tables, the newest migration, come off first.
       // The record of release bookkeeping that keeps failing, the newest migration, comes off first.
       // The record of a release's upload, the newest migration, comes off first.
-      state.storage.sql.exec("DROP TABLE release_upload_attempt"); state.storage.sql.exec("DROP TABLE release_job"); state.storage.sql.exec("UPDATE schema_version SET version = version - 1"); state.storage.sql.exec("DROP TABLE release_upload");
+      state.storage.sql.exec("DROP TABLE release_drive_failure"); state.storage.sql.exec("UPDATE schema_version SET version = version - 1"); state.storage.sql.exec("DROP TABLE release_upload_attempt"); state.storage.sql.exec("DROP TABLE release_job"); state.storage.sql.exec("UPDATE schema_version SET version = version - 1"); state.storage.sql.exec("DROP TABLE release_upload");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       // Then the hold on a room's app (step 6).
       state.storage.sql.exec("DROP TABLE release_hold");
@@ -458,7 +458,7 @@ describe("the room's sweep", () => {
       // M6 step 4(a)'s applier and script-delete tables, the newest migration, come off first.
       // The record of release bookkeeping that keeps failing, the newest migration, comes off first.
       // The record of a release's upload, the newest migration, comes off first.
-      state.storage.sql.exec("DROP TABLE release_upload_attempt"); state.storage.sql.exec("DROP TABLE release_job"); state.storage.sql.exec("UPDATE schema_version SET version = version - 1"); state.storage.sql.exec("DROP TABLE release_upload");
+      state.storage.sql.exec("DROP TABLE release_drive_failure"); state.storage.sql.exec("UPDATE schema_version SET version = version - 1"); state.storage.sql.exec("DROP TABLE release_upload_attempt"); state.storage.sql.exec("DROP TABLE release_job"); state.storage.sql.exec("UPDATE schema_version SET version = version - 1"); state.storage.sql.exec("DROP TABLE release_upload");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       // Then the hold on a room's app (step 6).
       state.storage.sql.exec("DROP TABLE release_hold");
@@ -820,7 +820,7 @@ describe("removal by the rules, review fixes", () => {
       // M6 step 4(a)'s applier and script-delete tables, the newest migration, come off first.
       // The record of release bookkeeping that keeps failing, the newest migration, comes off first.
       // The record of a release's upload, the newest migration, comes off first.
-      state.storage.sql.exec("DROP TABLE release_upload_attempt"); state.storage.sql.exec("DROP TABLE release_job"); state.storage.sql.exec("UPDATE schema_version SET version = version - 1"); state.storage.sql.exec("DROP TABLE release_upload");
+      state.storage.sql.exec("DROP TABLE release_drive_failure"); state.storage.sql.exec("UPDATE schema_version SET version = version - 1"); state.storage.sql.exec("DROP TABLE release_upload_attempt"); state.storage.sql.exec("DROP TABLE release_job"); state.storage.sql.exec("UPDATE schema_version SET version = version - 1"); state.storage.sql.exec("DROP TABLE release_upload");
       state.storage.sql.exec("UPDATE schema_version SET version = version - 1");
       // Then the hold on a room's app (step 6).
       state.storage.sql.exec("DROP TABLE release_hold");

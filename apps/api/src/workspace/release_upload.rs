@@ -59,8 +59,8 @@ use podster_core::release_tree::{
 /// The room's path for uploading a release's files. Nothing outside the Worker reaches it; the job's driver asks the
 /// same command directly.
 pub(crate) const INTERNAL_RELEASE_UPLOAD: &str = "/internal/release-upload";
-/// `waiting`, when the deployment has no provider to upload to.
-const NO_PROVIDER: &str = "content_provider_not_configured";
+/// `waiting`, when the deployment has no provider to upload to; and the driver's code while it idles for that.
+pub(super) const NO_PROVIDER: &str = "content_provider_not_configured";
 /// `waiting`, when the provider gave no answer to go on, at the session, a bucket or the script.
 const UPLOAD_UNAVAILABLE: &str = "release_upload_unavailable";
 
@@ -70,6 +70,8 @@ enum Stop {
     Read(ReadFailure),
     /// The provider gave no answer to go on.
     Provider,
+    /// The driver's lease on the step ran out: nothing more is asked of anyone.
+    Lease,
 }
 
 impl From<ReadFailure> for Stop {
@@ -107,7 +109,9 @@ async fn fetch_each(
     Ok(())
 }
 
-/// Steps 2 and 3: the read, the session and the buckets. The reader is the caller's to close.
+/// Steps 2 and 3: the read, the session and the buckets. The reader is the caller's to close. `go_on` is asked before
+/// each thing asked of the read budget or the provider; once it says no, nothing more is (the driver's lease).
+#[allow(clippy::too_many_arguments)]
 async fn send_files(
     env: &Env,
     provider: &Provider,
@@ -116,10 +120,13 @@ async fn send_files(
     release_id: &str,
     script: &str,
     commit_sha: &str,
+    go_on: &dyn Fn() -> bool,
 ) -> std::result::Result<Complete, Stop> {
+    let check = || if go_on() { Ok(()) } else { Err(Stop::Lease) };
     let marker = marker_body(release_id, commit_sha).ok_or(Stop::Provider)?;
     let marker_hash = hash_of(MARKER_TYPE, marker.as_bytes()).ok_or(Stop::Provider)?;
     let plan = reader.plan(commit_sha).await?;
+    check()?;
     reserve(
         env,
         release_id,
@@ -150,6 +157,7 @@ async fn send_files(
         hash: marker_hash.clone(),
         size: marker.len() as u64,
     });
+    check()?;
     let session = provider
         .upload_session(script, &manifest, attempt)
         .await
@@ -182,6 +190,7 @@ async fn send_files(
     }
     let last = requests.len().saturating_sub(1);
     for (index, bucket) in requests.iter().copied().enumerate() {
+        check()?;
         let mut body = BucketBody::new();
         // The second pass, for this bucket's files: fetched again, checked against the tree again, and each must
         // hash as it did in the manifest.
@@ -215,6 +224,7 @@ async fn send_files(
             Ok(())
         })
         .await?;
+        check()?;
         match provider.upload_bucket(&session.token, body, attempt).await {
             Some(Sent::More) if index < last => {}
             Some(Sent::Done(token)) if index == last => completion = Some(token),
@@ -266,7 +276,7 @@ impl Workspace {
     /// The provider to upload to. Test builds only: a room a test gave `test_release_upload_provider` uploads to the
     /// test Worker's provider though the room's applier and delete job have none (`test_content_provider_off`), so an
     /// upload's test asks the stand-in for nothing but the upload.
-    fn upload_provider(&self) -> Option<Provider> {
+    pub(super) fn upload_provider(&self) -> Option<Provider> {
         let sql = self.state.storage().sql();
         #[cfg(feature = "failpoints")]
         if rows(
@@ -352,14 +362,26 @@ impl Workspace {
     /// decided and the command is to be asked again. See the module's note for the order.
     pub(super) async fn release_upload(&self, mut req: Request) -> R<Value> {
         let (release_id, release) = self.named_release(&mut req).await?;
-        self.upload_of(release_id, release).await
+        self.upload_of(release_id, release, None).await
     }
 
-    /// [`Workspace::release_upload`] for a release already read, as the release job's driver asks it.
-    pub(super) async fn upload_of(&self, release_id: String, release: Value) -> R<Value> {
+    /// [`Workspace::release_upload`] for a release already read, as the release job's driver asks it, with the step's
+    /// lease: asked before each thing asked outside the room, the reads, the read budget, GitHub's token, the session,
+    /// each bucket and the script's write. Once it has run out, nothing more is asked and the release waits,
+    /// `release_driver::LEASE_LOST`. A script already written is still recorded: that is the provider's fact.
+    pub(super) async fn upload_of(
+        &self,
+        release_id: String,
+        release: Value,
+        lease: Option<&release_driver::StepLease>,
+    ) -> R<Value> {
         let sql = self.state.storage().sql();
         if state_of(&release)? != ReleaseState::Uploading {
             return upload_answer(&sql, &release, false);
+        }
+        let go_on = || release_driver::may_go_on(&sql, lease);
+        if !go_on() {
+            return self.upload_waiting(&release_id, release_driver::LEASE_LOST, None);
         }
         let reads = self.release_reads(&release_id).await?;
         let (script, repo_id, commit_sha) =
@@ -378,6 +400,9 @@ impl Workspace {
             return self.upload_waiting(&release_id, ReadProblem::NotConfigured.code(), None);
         };
         let attempt = self.upload_attempt();
+        if !go_on() {
+            return self.upload_waiting(&release_id, release_driver::LEASE_LOST, None);
+        }
         // The two tree reads are reserved before the token is asked for, so a read that ends at them is counted.
         let sent = match reserve(&self.env, &release_id, TREE_READS, &attempt).await {
             Err(failure) => Err(Stop::Read(failure)),
@@ -392,6 +417,7 @@ impl Workspace {
                         &release_id,
                         &script,
                         &commit_sha,
+                        &go_on,
                     )
                     .await;
                     // Every way out of the read ends here: the token is revoked before anything else is done.
@@ -420,6 +446,9 @@ impl Workspace {
             Err(Stop::Provider) => {
                 return self.upload_waiting(&release_id, UPLOAD_UNAVAILABLE, None)
             }
+            Err(Stop::Lease) => {
+                return self.upload_waiting(&release_id, release_driver::LEASE_LOST, None)
+            }
         };
         #[cfg(feature = "failpoints")]
         self.test_before_check()?;
@@ -427,12 +456,18 @@ impl Workspace {
         // afresh,** the stop for the whole content domain, the organization's switch and the deployment's setting
         // among them, and the room's rows and epoch now. A stop set while the files were sent ends the release
         // here, with no script written; a fact that can't be read leaves it undecided, and nothing is written.
+        if !go_on() {
+            return self.upload_waiting(&release_id, release_driver::LEASE_LOST, None);
+        }
         let reads = self.release_reads(&release_id).await?;
         if let UploadReady::Answer(answer) = self.upload_check(&release_id, reads, true).await? {
             return Ok(answer);
         }
         #[cfg(feature = "failpoints")]
         self.test_between_reads().await?;
+        if !go_on() {
+            return self.upload_waiting(&release_id, release_driver::LEASE_LOST, None);
+        }
         let written = provider
             .write_script(&script, &complete.token, &attempt)
             .await

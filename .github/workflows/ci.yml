@@ -238,6 +238,12 @@ jobs:
         working-directory: e2e
       - run: node test-timing-check.mjs
         working-directory: e2e
+      # The API's specs share one GitHub stand-in, and one provider, keyed by ID: each file takes its IDs from its own
+      # block in apps/api/test/fake-ids.ts, so no two can reset, seed or fault the same one.
+      - run: node fake-ids-check.mjs --self-test
+        working-directory: e2e
+      - run: node fake-ids-check.mjs
+        working-directory: e2e
       # The staging run's tail reader, fed wrangler's real multi-line JSON shape.
       - run: node tail-stream-selftest.mjs
         working-directory: e2e

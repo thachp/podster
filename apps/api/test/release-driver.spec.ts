@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { alarmPass, alarmQuiet, nextAlarm } from "./alarm";
+import { fakeIds } from "./fake-ids";
 
 // M6 step 5, the release job's driver (ADR 0010's "The release job"): the room's alarm takes a release through the
 // room's own commands, start, upload and commit, one step at a time, with a wait that grows, a cap on attempts, a bound
@@ -56,7 +57,9 @@ async function switchedOn<T>(run: () => Promise<T>): Promise<T> {
 }
 
 // --- GitHub's stand-in, for this file's own repository ---------------------------------------------------------------
-const REPO = 987650777;
+/** This file's own repository at the shared stand-in: see `fake-ids.ts`. */
+const IDS = fakeIds("release-driver");
+const REPO = IDS.id(0);
 const COMMIT = "c3".repeat(20);
 const DIRECTORY = "d4".repeat(20);
 const github = (path: string, body?: unknown) => fetch(`https://github-release-fake.example.com${path}?repo=${REPO}`, body === undefined ? undefined : { method: "POST", body: JSON.stringify(body) });
@@ -114,7 +117,7 @@ async function room(state: "queued" | "uploading", extra: string[] = []): Promis
   const n = ++rooms;
   const requester = `per_rd_req_${n}`;
   const admin = `per_rd_adm_${n}`;
-  const label = `rd${n.toString(36)}x${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+  const label = `${IDS.tag}${n.toString(36)}x${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
   const host = `${label}.${FAKE.domain}`;
   await inRoom(id, (sql) => {
     for (const [who, role] of [[requester, "member"], [admin, "admin"]] as const) sql.exec("INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at) VALUES (?, 'person', ?, ?, ?, 1)", who, ORG, role, OWNER.id);

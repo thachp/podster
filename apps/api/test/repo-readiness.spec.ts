@@ -2,6 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { alarmPass, alarmQuiet, expectNoAlarmSooner } from "./alarm.ts";
+import { fakeIds } from "./fake-ids.ts";
 
 // The M5 security review's F2 and F8: a ready link is read back once a day from the room's alarm, and a link that's
 // degraded, by that read or a merge's, has its agents' tokens revoked in the same alarm pass. Against the fake GitHub:
@@ -19,7 +20,8 @@ const DAY = 24 * 60 * 60 * 1000;
 /** The soonest anything in these rooms is due again after a pass that read nothing: the held token's renewal is an hour off. */
 const QUIET_MS = 30 * 60 * 1000;
 let REPO_ID = 0;
-let nextRepo = 6_000_000 + Math.floor(Math.random() * 1_000_000) * 10;
+/** This file's own repository IDs at the shared GitHub stand-in: see `fake-ids.ts`. */
+const IDS = fakeIds("repo-readiness");
 
 async function assertion(who: Who) {
   const now = Math.floor(Date.now() / 1000);
@@ -143,7 +145,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  REPO_ID = ++nextRepo;
+  REPO_ID = IDS.next();
   await fake("/agent-repo", { id: REPO_ID });
   await ready({ rulesets: "ready" });
 });
@@ -207,7 +209,7 @@ describe("the scheduled read-back of a ready link", () => {
       [{ workflow: { default_workflow_permissions: "write", can_approve_pull_request_reviews: false } }, "workflow_permissions_differ"],
     ];
     for (const [patch, reason] of cases) {
-      REPO_ID = ++nextRepo;
+      REPO_ID = IDS.next();
       await fake("/agent-repo", { id: REPO_ID });
       await ready({ rulesets: "ready" });
       const r = await room();
@@ -240,7 +242,7 @@ describe("the scheduled read-back of a ready link", () => {
     // [why the read can't be made]
     const cases: object[] = [{ readRepo: 503 }, { workflowRead: 500 }, { limited: { kind: "primary", seconds: 600 } }, { limited: { kind: "secondary", seconds: 120 } }];
     for (const script of cases) {
-      REPO_ID = ++nextRepo;
+      REPO_ID = IDS.next();
       await fake("/agent-repo", { id: REPO_ID });
       await ready({ rulesets: "ready" });
       const r = await room();

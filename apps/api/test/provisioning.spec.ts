@@ -2,6 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { fakeIds } from "./fake-ids.ts";
 
 // M5 step 4: provisioning a room's managed repository. Every GitHub call lands on test/fake-github.ts, which the test
 // runtime puts in place of the network, so nothing here or in CI reaches GitHub. The fake checks the App's JWT and the
@@ -116,7 +117,7 @@ const stampOf = (holder: string, room: string) => runInDurableObject(BINDINGS.PR
 }) as Promise<number | null>;
 /** Holds calls in room `id` at the fake's gate: `counted` once both caps counted them, `uncounted` once they decided not to count. */
 const holdAt = async (id: string, where: "counted" | "uncounted") => {
-  const gate = 900_000 + Math.floor(Math.random() * 90_000);
+  const gate = IDS.next();
   await inRoom(id, (sql) => { sql.exec(`CREATE TABLE test_hold_${where} (gate INTEGER)`); sql.exec(`INSERT INTO test_hold_${where} VALUES (?)`, gate); });
   return {
     /** Waits until `n` calls are held, then stops holding new ones. */
@@ -151,6 +152,8 @@ const age = (holder: string, room: string, ms: number) => runInDurableObject(BIN
 /** Asks an organization's object, or a person's, directly, as a room does. */
 const principalCall = async (holder: string, path: string, body: object) =>
   (await BINDINGS.PRINCIPAL.get(BINDINGS.PRINCIPAL.idFromName(holder)).fetch(`https://principal/internal/${path}`, { method: "POST", body: JSON.stringify(body) })).json() as Promise<any>;
+/** This file's own gate numbers at the shared GitHub stand-in, which keeps its gates by repository ID: see `fake-ids.ts`. */
+const IDS = fakeIds("provisioning");
 /** How many calls wait at the fake's gate of that number, and letting them go. */
 const heldAt = async (gate: number) => ((await (await fetch(`https://github-fake.example.com/agent-gate?repo=${gate}`)).json()) as { waiting: number }).waiting;
 const letGo = (gate: number) => fetch("https://github-fake.example.com/agent-release", { method: "POST", body: JSON.stringify({ id: gate }) });

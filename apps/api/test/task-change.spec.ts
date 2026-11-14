@@ -2,6 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { alarmPass, alarmQuiet } from "./alarm.ts";
+import { fakeIds } from "./fake-ids.ts";
 
 // M5 step 7a: a task's pull request. Linking it at submission, pinning the commit at review, and recording what Podster's
 // own reads of GitHub show, against the fake GitHub. A room's link is written straight into the room, as step 6's tests
@@ -22,7 +23,8 @@ const GUEST: Who = { id: "per_tc_guest", kind: "person", org: ORG };
 const orgAdmin: Who = { id: "per_tc_orgadmin", kind: "person", org: ORG, adminOrgs: [ORG] };
 /** Each test's own repository, so the fake's state for it is the test's alone while other specs run beside it. */
 let REPO_ID = 0;
-let nextRepo = 9_000_000 + Math.floor(Math.random() * 1_000_000) * 10;
+/** This file's own repository IDs at the shared GitHub stand-in: see `fake-ids.ts`. */
+const IDS = fakeIds("task-change");
 const READ_ONLY = { metadata: "read", pull_requests: "read" };
 const HEAD = "a1".repeat(20);
 const HEAD2 = "c3".repeat(20);
@@ -107,7 +109,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  REPO_ID = ++nextRepo;
+  REPO_ID = IDS.next();
   await fake({});
 });
 
@@ -645,7 +647,7 @@ describe("the refresh job", () => {
     expect((await events(r.id)).filter((e) => e.type === "task_change.merge_observed")).toHaveLength(1);
 
     // Never approved, and merged anyway.
-    REPO_ID = ++nextRepo;
+    REPO_ID = IDS.next();
     await fake({});
     const u = await submitted();
     await settle(u.id);

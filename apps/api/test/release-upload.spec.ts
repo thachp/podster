@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { importJWK, SignJWT } from "jose";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { alarmQuiet } from "./alarm";
+import { fakeIds } from "./fake-ids";
 
 // M6 step 5, the upload of a release's static files (ADR 0010's "The release job", steps 1 to 4): the room's command
 // that rechecks, reads the release directory with the read-only App, uploads the files as the release's own script,
@@ -49,7 +50,9 @@ async function switchedOn<T>(run: () => Promise<T>): Promise<T> {
 }
 
 // --- GitHub's stand-in, for this file's own repository ---------------------------------------------------------------
-const REPO = 987650888;
+/** This file's own repository at the shared stand-in: see `fake-ids.ts`. */
+const IDS = fakeIds("release-upload");
+const REPO = IDS.id(0);
 const COMMIT = "c1".repeat(20);
 const DIRECTORY = "d2".repeat(20);
 const github = (path: string, body?: unknown) => fetch(`https://github-release-fake.example.com${path}?repo=${REPO}`, body === undefined ? undefined : { method: "POST", body: JSON.stringify(body) });
@@ -121,7 +124,7 @@ async function uploading(opts: { provider?: boolean } = {}): Promise<Healthy> {
   const n = ++rooms;
   const requester = `per_ru_req_${n}`;
   const admin = `per_ru_adm_${n}`;
-  const label = `ru${n.toString(36)}x${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+  const label = `${IDS.tag}${n.toString(36)}x${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
   const host = `${label}.${FAKE.domain}`;
   const [script, prev] = [`${label}.${REL}`, `${label}.${PREV}`];
   await inRoom(room, (sql) => {
@@ -173,7 +176,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   await github("/reset", {});
   await moderation().fetch("https://do/release-reads", { method: "POST", body: JSON.stringify({ release_id: `rel_${"0".repeat(32)}`, reads: 1, owner_key: "room:ws_schema" }) });
-  await inModeration((sql) => sql.exec("DELETE FROM release_reads"));
+  await inModeration((sql) => { sql.exec("DELETE FROM release_reads"); sql.exec("DELETE FROM release_read_owner"); });
 });
 afterEach(async () => { for (const room of made.splice(0)) await alarmQuiet(stub(room)); });
 

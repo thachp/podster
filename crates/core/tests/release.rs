@@ -2592,3 +2592,13 @@ fn an_unanswered_switch_notice_waits_longer_each_time_and_is_told_from_the_twelf
         .sum();
     assert_eq!(before_told, 1_815_000);
 }
+
+#[test]
+fn a_repository_link_that_is_not_ready_unpublishes_as_adr_0010_is_written() {
+    use podster_core::repositories::LinkStatus;
+    // As built, by the architect's ruling of 2026-11-13: every status but ready. The owner's alternative is
+    // `Suspended` only; answering it changes the `Degraded` row here and the one line in `link_status_unpublishes`.
+    assert!(!link_status_unpublishes(LinkStatus::Ready));
+    assert!(link_status_unpublishes(LinkStatus::Degraded));
+    assert!(link_status_unpublishes(LinkStatus::Suspended));
+}

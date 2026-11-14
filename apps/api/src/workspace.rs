@@ -2070,6 +2070,15 @@ fn handle_set_room_status(
     exec(sql, "UPDATE workspace SET status = ?", vec![status.into()])?;
     store::mark_stale_repo_tokens(sql, now)?;
     requeue_listing(sql, now)?;
+    // Archiving unpublishes the room's app (ADR 0010, M6 step 6). Bringing the room back restores nothing.
+    if status == ARCHIVED {
+        takedown::unpublish_for(
+            sql,
+            podster_core::release::UnpublishTrigger::RoomArchived,
+            json!({}),
+            now,
+        )?;
+    }
     let kind = if status == ARCHIVED {
         "workspace.archived"
     } else {
@@ -5141,6 +5150,13 @@ impl DurableObject for Workspace {
         } else {
             None
         };
+        // The release epoch before the request: if the request moved it, an unpublish trigger fired, and the release
+        // bookkeeping runs once it has committed (ADR 0010, M6 step 6).
+        let epoch_before = if is_write {
+            takedown::release_epoch(&self.state.storage().sql())
+        } else {
+            None
+        };
         let response = match self.dispatch(req).await {
             Ok(value) => Response::from_json(&value),
             Err(error) => {
@@ -5152,6 +5168,9 @@ impl DurableObject for Workspace {
                 error.into_response()
             }
         };
+        if is_write && takedown::release_epoch(&self.state.storage().sql()) != epoch_before {
+            release_commit::bookkeeping(&self.state);
+        }
         if is_write || migrates {
             // The command has already committed, so a scheduling problem can't change its answer. The next write retries.
             if let Err(error) = self.arm(false, false).await {
@@ -5179,6 +5198,9 @@ impl DurableObject for Workspace {
                 console_error!("couldn't schedule the denial record: {:?}", error);
             }
         }
+        // A job below may fire an unpublish trigger, a repository's link degraded: then the release bookkeeping runs
+        // before the alarm sets its next wake.
+        let epoch_before = takedown::release_epoch(&self.state.storage().sql());
         // A takedown's serve entries first, before anything slower: the applier never waits behind a job (ADR 0010).
         if let Err(error) = takedown::upkeep(&self.state, &self.env).await {
             console_error!("takedown upkeep failed: {:?}", error.code());
@@ -5245,6 +5267,9 @@ impl DurableObject for Workspace {
         }
         if let Err(error) = &outbox {
             console_error!("outbox drain failed: {:?}", error);
+        }
+        if takedown::release_epoch(&sql) != epoch_before {
+            release_commit::bookkeeping(&self.state);
         }
         if let Err(error) = self
             .arm(

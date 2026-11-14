@@ -1224,6 +1224,17 @@ CI gets one job for the package: typecheck and tests, no deploy step.
 - **"Merged by Podster", said as it is.** The room's merge record says Podster's job called the merge and later read the pull request back as merged with the reviewed commit on the default branch. It doesn't say whose call merged it: if Podster's call is on record with its outcome unknown and a person merges the same pull request by hand, the record reads the same. **A commit doesn't care, and that is the architect's to overrule:** what is released is still the commit a reviewer accepted, on the room's own repository's default branch, for a completed task, through a merge Podster decided to make and called. A merge with no call of Podster's on record is refused.
 - **The organization-exists fact still has no source,** and a commit now rests on it. Nothing deletes an organization: no command does it and no object records it, so there is nothing to read. It stays true, and **whatever first deletes an organization owes the fact its source and the trigger.**
 
+#### What step 6's first PR built
+
+**The unpublish triggers that are the room's own state,** built on 2026-11-13 as the first PR of [the step 6 plan](m6-step6-plan.md), with no room schema step and no contract change. Each fires in the transaction of the command that changes its state, and nothing is undone by undoing its cause:
+
+- **the room archived** (`workspace_archived`), in the archive command;
+- **the room made private** (`release_needs_public_room`), in the visibility command;
+- **the room's public surface suspended by an operator** (`public_surface_suspended`), in the room's side of the operator's suspension;
+- **the repository's link degraded** (`repo_not_ready`), where the link is degraded, by the read-back, a merge's read or an operator's recheck. Whether a link status unpublishes is one predicate in core, `link_status_unpublishes`: as ADR 0010 is written, `degraded` and `suspended` both do, by the architect's ruling for the owner to review. The owner's alternative is that predicate's `Degraded` arm, and nothing else. Nothing writes `suspended` yet.
+
+**One function fires every trigger about the whole room,** `takedown::unpublish_for`, decision 218's release switch included: the unpublish, an `app.unpublished` audit row as Podster with the trigger's code as `reason`, and the event `app.unpublished` to the room's managers. A room with no release configuration records nothing. **The release bookkeeping runs after any request, or alarm, that moved the release epoch,** so a release that hadn't gone live is ended in the same request that took the app down, whatever trigger fired. Tests: `release-triggers.spec.ts`, and the degraded link in `repo-readiness.spec.ts`. The contract's summaries of those commands say what they now unpublish in step 6's contract PR.
+
 #### The gate on the release path
 
 **One constant, `RELEASE_PATH_COMPLETE`, in `apps/api/src/workspace/release_commit.rs`, false.** While it is false, a room in a deployment that has `RELEASES` on **and** a content provider configured refuses every release command, the recheck, the start and the commit, exactly as a route that isn't built (`release_not_available`), and says so in one log line by its code, `release_path_incomplete`. With either missing nothing can be served, and the commands answer, which is how every test of them runs. A test shows the refusal, and that the constant is set in one place.

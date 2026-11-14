@@ -97,34 +97,12 @@ pub(super) fn apply(sql: &SqlStorage, seen: ReleaseSwitch, now: i64) -> R<Switch
         SwitchApplied::Record => record(sql, seen, now)?,
         SwitchApplied::Unpublish => {
             record(sql, seen, now)?;
-            let trigger = UnpublishTrigger::ReleaseTakenFromOrganization;
-            if takedown::unpublish_app(sql, trigger, None, now)? {
-                audit_as(
-                    sql,
-                    moderation::PODSTER,
-                    moderation::PODSTER_KIND,
-                    "app.unpublished",
-                    "app",
-                    None,
-                    Some(
-                        json!({ "reason": trigger.code(), "cause": "release_switch", "generation": seen.generation })
-                            .to_string(),
-                    ),
-                    now,
-                )?;
-                record_event(
-                    sql,
-                    "app.unpublished",
-                    moderation::PODSTER,
-                    None,
-                    &Transition {
-                        reason: Some(trigger.code()),
-                        ..Transition::NONE
-                    },
-                    roles::room_managers(sql, moderation::PODSTER)?,
-                    now,
-                )?;
-            }
+            takedown::unpublish_for(
+                sql,
+                UnpublishTrigger::ReleaseTakenFromOrganization,
+                json!({ "cause": "release_switch", "generation": seen.generation }),
+                now,
+            )?;
         }
     }
     Ok(decision)

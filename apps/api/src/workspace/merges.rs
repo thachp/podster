@@ -1045,6 +1045,16 @@ pub(super) fn degrade(sql: &SqlStorage, repo_id: i64, code: &'static str, now: i
     )?;
     // Every token agents hold on it is marked for revocation in this same transaction (the M5 security review's F2).
     store::mark_stale_repo_tokens(sql, now)?;
+    // A link no longer ready unpublishes the room's app, as core decides for the status (ADR 0010, M6 step 6). Ready
+    // again restores nothing.
+    if podster_core::release::link_status_unpublishes(LinkStatus::Degraded) {
+        super::takedown::unpublish_for(
+            sql,
+            podster_core::release::UnpublishTrigger::RepositoryNotReady,
+            json!({ "cause": code }),
+            now,
+        )?;
+    }
     record_event(
         sql,
         "repository.degraded",

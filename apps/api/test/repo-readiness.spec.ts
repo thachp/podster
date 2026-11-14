@@ -388,6 +388,41 @@ describe("an operator's recheck of a ready link (item 12)", () => {
     expect(await link(r.id)).toMatchObject({ status: "degraded", status_reason: "repository_gone" });
   });
 
+  it("unpublishes the room's app when its link is degraded, as ADR 0010 is written (M6 step 6)", async () => {
+    // A link no longer ready takes the room's app down, as core's `link_status_unpublishes` decides for `degraded` by the
+    // architect's ruling of 2026-11-13. The room serves an app, with the provider switched off so nothing is asked of it.
+    const r = await room();
+    const label = `rr${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    const release = `rel_${"3c".repeat(16)}`;
+    const script = `${label}.${release}`;
+    await inRoom(r.id, (sql) => {
+      sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
+      sql.exec("INSERT INTO app_label (label, current, created_at) VALUES (?, 1, 1)", label);
+      sql.exec("INSERT INTO release_config (singleton, enabled, version, release_epoch, set_by, set_at, updated_at) VALUES (1, 1, 1, 2, ?, 1, 1)", OWNER.id);
+      sql.exec("INSERT INTO task (id, title, instructions, requester_id, reviewer_id, status, version, created_at, updated_at) VALUES ('tsk_rr_release', 'Ship it', 'x', ?, ?, 'completed', 1, 1, 1)", OWNER.id, OWNER.id);
+      sql.exec(`INSERT INTO release (id, commit_sha, state, label, config_version, release_epoch, task_id, script_name, script_release_id, requested_by, requested_at, approved_by, approved_at, upload_started_at, updated_at)
+        VALUES (?, ?, 'served', ?, 1, 2, 'tsk_rr_release', ?, ?, ?, 1, ?, 1, 1, 1)`, release, "ab".repeat(20), label, script, release, OWNER.id, OWNER.id);
+      sql.exec("INSERT INTO serve_state (host, kind, label, label_current, release_id, script_name, version, updated_at) VALUES (?, 'default', ?, 1, ?, ?, 5, 1)", `${label}.apps.example`, label, release, script);
+    });
+    await ready({ deleted: true });
+    await recheck(OPERATOR, r.id);
+    await aMinuteLater(r.id);
+    expect((await recheck(OPERATOR, r.id)).body).toEqual({ status: "degraded", reason: "repository_gone" });
+    expect(await inRoom(r.id, (sql) => ({
+      serving: sql.exec("SELECT script_name FROM serve_state").one().script_name,
+      unpublish: sql.exec("SELECT cause, release_epoch FROM unpublish").toArray(),
+      queued: sql.exec("SELECT script_name FROM script_delete").toArray().map((q: any) => q.script_name),
+      event: sql.exec("SELECT actor_id, reason FROM event WHERE type = 'app.unpublished'").toArray(),
+      audit: sql.exec("SELECT actor_id, new_json FROM audit_event WHERE action = 'app.unpublished'").toArray().map((a: any) => [a.actor_id, JSON.parse(a.new_json)]),
+    }))).toEqual({
+      serving: null,
+      unpublish: [{ cause: "repo_not_ready", release_epoch: 3 }],
+      queued: [script],
+      event: [{ actor_id: "podster", reason: "repo_not_ready" }],
+      audit: [["podster", { reason: "repo_not_ready", cause: "repository_gone" }]],
+    });
+  });
+
   it("restores a repository made before these settings were set, once they're switched off by hand on GitHub", async () => {
     const r = await room();
     // A repository from before: issues, wiki and projects on, as GitHub's defaults left them. Nothing repairs them.

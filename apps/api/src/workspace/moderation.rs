@@ -56,6 +56,14 @@ pub(super) fn set(sql: &SqlStorage, body: &Value, now: i64) -> R<Value> {
                 "UPDATE workspace SET suspended_at = ?, suspension_reason = ?",
                 vec![now.into(), reason.name().into()],
             )?;
+            // An operator's suspension of the room's public surface unpublishes its app (ADR 0010, M6 step 6).
+            // Lifting it restores nothing.
+            super::takedown::unpublish_for(
+                sql,
+                podster_core::release::UnpublishTrigger::PublicSurfaceSuspended,
+                json!({}),
+                now,
+            )?;
         } else {
             exec(
                 sql,

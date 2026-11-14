@@ -92,6 +92,10 @@ async function room(org: string, opts: { state?: string; up?: boolean; configure
     // A public room has person review on (decision 159), which publishing it again also asks for.
     sql.exec("UPDATE workspace SET visibility = 'public', public_handle = ?, published_at = 1, require_person_review = 1", handle);
     sql.exec("CREATE TABLE test_content_provider_off (x INTEGER)");
+    // The upload itself is `release-upload.spec.ts`'s. Here a release's upload is on record from the moment it is
+    // uploading, as that command leaves it, so a commit has something it may stage.
+    sql.exec("INSERT INTO release_upload (release_id, script_name, files, bytes, uploaded_at) SELECT id, script_name, 1, 0, 1 FROM release WHERE state = 'uploading'");
+    for (const on of ["INSERT", "UPDATE OF state"]) sql.exec(`CREATE TRIGGER test_release_uploaded_${on.slice(0, 6).toLowerCase()} AFTER ${on} ON release WHEN NEW.state = 'uploading' BEGIN INSERT OR IGNORE INTO release_upload (release_id, script_name, files, bytes, uploaded_at) VALUES (NEW.id, NEW.script_name, 1, 0, 1); END`);
     if (opts.configured === false) return;
     for (const [who, role] of [[requester, "member"], [admin, "admin"]] as const) sql.exec("INSERT INTO member (principal_id, kind, org_id, role, added_by, added_at) VALUES (?, 'person', ?, ?, ?, 1)", who.id, org, role, owner.id);
     sql.exec("INSERT INTO repo_link (id, request_id, provider, provider_repo_id, provider_org_id, full_name, visibility, default_branch, status, created_by, created_at, verified_at, updated_at) VALUES ('rl_1', 'rr_1', 'github', ?, 4242, 'podsterx/release', 'public', 'main', 'ready', ?, 1, 1, 1)", REPO_ID, owner.id);

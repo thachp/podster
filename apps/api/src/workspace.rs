@@ -91,6 +91,7 @@ mod release_commit;
 mod release_config;
 mod release_recheck;
 mod release_switch;
+mod release_upload;
 mod releasers;
 mod removal;
 mod repo_tokens;
@@ -4172,8 +4173,11 @@ impl Workspace {
         if req.path() == release_commit::INTERNAL_RELEASE_COMMIT_LIVE {
             return self.release_commit_live(req).await;
         }
-        // Test builds only: one whole read of a release from a repository, which publishes nothing and writes
-        // nothing here. The release job's upload, which will drive the read, isn't built.
+        if req.path() == release_upload::INTERNAL_RELEASE_UPLOAD {
+            return self.release_upload(req).await;
+        }
+        // Test builds only: one whole read of a release from a repository, alone, which publishes nothing and
+        // writes nothing here.
         #[cfg(feature = "failpoints")]
         if req.path() == "/internal/test-release-read" {
             let mut req = req;

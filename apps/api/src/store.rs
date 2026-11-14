@@ -342,6 +342,10 @@ CREATE TABLE release_switch_applied (singleton INTEGER PRIMARY KEY CHECK (single
   generation INTEGER NOT NULL DEFAULT 0 CHECK (typeof(generation) = 'integer' AND generation >= 0),
   last_take INTEGER NOT NULL DEFAULT 0 CHECK (typeof(last_take) = 'integer' AND last_take >= 0 AND last_take <= generation), applied_at INTEGER);
 INSERT INTO release_switch_applied (singleton) VALUES (1);
+", "
+CREATE TABLE release_upload (release_id TEXT PRIMARY KEY REFERENCES release (id), script_name TEXT NOT NULL,
+  files INTEGER NOT NULL CHECK (typeof(files) = 'integer' AND files >= 1), bytes INTEGER NOT NULL CHECK (typeof(bytes) = 'integer' AND bytes >= 0), uploaded_at INTEGER NOT NULL,
+  CHECK (length(script_name) BETWEEN 38 AND 63 AND substr(script_name, -36) = release_id)) WITHOUT ROWID;
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

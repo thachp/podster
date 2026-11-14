@@ -86,8 +86,154 @@ async function takeFault(op: Op) {
   return fault.lost || fault.stale || fault.status ? fault : undefined;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// The upload of a release's files (M6 step 5), exactly as spike A recorded wrangler's three calls
+// (spikes/m6-namespace-app/README.md, "The upload's calls"): the session with its manifest, the files a bucket at a
+// time as base64 parts named by hash, and the script written from the completion token.
+//
+// **Everything here is kept by script name, apart from the scripts and entries above, and `/reset` doesn't touch
+// it.** Spec files run at the same time against this one stand-in: `takedown.spec.ts` resets it and reads its whole
+// state, and an upload's test must neither lose its session to that reset nor show up in that state. So a script
+// written here is not in the set a read, a delete or the list above sees. Each test uploads under a name of its own.
+//
+// **What it answers on an error is an assumption:** no spike saw one. A fault is one thing the provider, or something
+// in its place, could answer.
+// ---------------------------------------------------------------------------------------------------------------------
+type UploadOp = "session" | "bucket" | "script";
+type UploadFault = {
+  op: UploadOp; times: number;
+  /** A status with the provider's error envelope. */
+  status?: number;
+  /** The work is done and the answer is lost: a `502`. */
+  lost?: boolean;
+  /** One way the answer isn't what it must be, the status staying a success. */
+  shape?: "not_success" | "no_token" | "unknown_hash" | "hash_twice" | "empty_bucket" | "html" | "done_early" | "never_done" | "other_id" | "refused_but_success";
+};
+type Manifest = Record<string, { hash: string; size: number }>;
+type Upload = {
+  /** The files held under this script's name, by hash: the provider remembers them for the script. */
+  held: Map<string, { type: string; base64: string }>;
+  calls: { op: UploadOp; status: number; hashes?: string[]; manifest?: Manifest; query?: string; parts?: string[] }[];
+  faults: UploadFault[];
+  /** The script as last written: every path with what is served there, and the metadata it was written with. */
+  written?: { files: Record<string, { hash: string; size: number; type: string; base64: string }>; metadata: unknown; times: number };
+  /** Hashes asked for in one bucket. */
+  bucketSize: number;
+  /** Statements a test wants run when the first bucket arrives: `{ room, statement }` is read by the test, not run here. */
+};
+const uploads = new Map<string, Upload>();
+const upload = (script: string) => {
+  let found = uploads.get(script);
+  if (!found) { found = { held: new Map(), calls: [], faults: [], bucketSize: 2 }; uploads.set(script, found); }
+  return found;
+};
+const sessions = new Map<string, { script: string; manifest: Manifest; needed: string[]; got: Set<string>; bucketsSent: number; buckets: number }>();
+const completions = new Map<string, { script: string; manifest: Manifest }>();
+let uploadTokens = 0;
+function takeUploadFault(script: string, op: UploadOp) {
+  const fault = upload(script).faults.find((f) => f.op === op && f.times > 0);
+  if (fault) fault.times -= 1;
+  return fault;
+}
+const html = () => new Response("<!doctype html><title>Sign in</title>", { status: 200, headers: { "content-type": "text/html" } });
+
+async function fakeUpload(request: Request, url: URL): Promise<Response | null> {
+  const bearer = request.headers.get("authorization");
+  const session = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${FAKE_CONTENT.namespace}/scripts/([^/]+)/assets-upload-session$`));
+  if (session && request.method === "POST") {
+    const script = decodeURIComponent(session[1]);
+    const held = upload(script);
+    const done = (status: number, response: Response, manifest?: Manifest) => { held.calls.push({ op: "session", status, manifest }); return response; };
+    if (bearer !== `Bearer ${FAKE_CONTENT.scriptsToken}`) return done(403, failure(403, 10000, "Authentication error"));
+    if (request.headers.get("content-type") !== "application/json") return done(415, failure(415, 10415, "the session takes JSON"));
+    const manifest = ((await request.json()) as { manifest: Manifest }).manifest;
+    const fault = takeUploadFault(script, "session");
+    if (fault?.status) return done(fault.status, failure(fault.status, 10001, "SECRET-PROVIDER-TEXT"), manifest);
+    if (fault?.shape === "html") return done(200, html(), manifest);
+    if (fault?.shape === "not_success") return done(200, json({ success: false, errors: [], messages: [], result: { jwt: "cfwau_x", buckets: [] } }), manifest);
+    const needed = [...new Set(Object.values(manifest).map((file) => file.hash))].filter((hash) => !held.held.has(hash));
+    let buckets: string[][] = [];
+    for (let i = 0; i < needed.length; i += held.bucketSize) buckets.push(needed.slice(i, i + held.bucketSize));
+    const n = ++uploadTokens;
+    const completion = `cfwau_test-completion-${n}.${"c".repeat(40)}`;
+    completions.set(completion, { script, manifest });
+    // With nothing to send, the session's token is already the completion token, as spike A saw.
+    const token = needed.length === 0 ? completion : `cfwau_test-session-${n}.${"s".repeat(40)}`;
+    if (needed.length > 0) sessions.set(token, { script, manifest, needed, got: new Set(), bucketsSent: 0, buckets: buckets.length });
+    if (fault?.shape === "unknown_hash") buckets = [["f".repeat(32)], ...buckets];
+    if (fault?.shape === "hash_twice" && buckets[0]) buckets = [...buckets, [buckets[0][0]]];
+    if (fault?.shape === "empty_bucket") buckets = [...buckets, []];
+    return done(200, json({ success: true, errors: null, messages: null, result: fault?.shape === "no_token" ? { buckets } : { jwt: token, buckets } }), manifest);
+  }
+  if (url.pathname === `/client/v4/accounts/${FAKE_CONTENT.account}/workers/assets/upload` && request.method === "POST") {
+    // The session's own token, and no other: neither of the provider's two tokens sends a file.
+    const open = sessions.get(bearer?.replace(/^Bearer /, "") ?? "");
+    if (!open) return failure(403, 10000, "Authentication error");
+    const held = upload(open.script);
+    const parts = [...(await request.formData()).entries()];
+    const hashes = parts.map(([name]) => name);
+    const done = (status: number, response: Response) => { held.calls.push({ op: "bucket", status, hashes, query: url.search }); return response; };
+    if (url.searchParams.get("base64") !== "true") return done(400, failure(400, 10400, "base64 is required"));
+    const fault = takeUploadFault(open.script, "bucket");
+    if (fault?.status) return done(fault.status, failure(fault.status, 10001, "SECRET-PROVIDER-TEXT"));
+    for (const [name, value] of parts) {
+      if (!open.needed.includes(name) || typeof value === "string") return done(400, failure(400, 10400, "a part the session didn't ask for"));
+      held.held.set(name, { type: value.type, base64: await value.text() });
+      open.got.add(name);
+    }
+    open.bucketsSent += 1;
+    if (fault?.lost) return done(502, failure(502, 10001, "the answer was lost"));
+    if (fault?.shape === "html") return done(200, html());
+    const all = open.needed.every((hash) => open.got.has(hash));
+    const completion = [...completions.entries()].find(([, to]) => to.script === open.script && to.manifest === open.manifest)?.[0];
+    const finished = (fault?.shape === "done_early" || all) && fault?.shape !== "never_done";
+    if (finished) return done(201, json({ success: true, errors: null, messages: null, result: { jwt: completion } }, 201));
+    return done(202, json({ success: true, errors: null, messages: null, result: {} }, 202));
+  }
+  const script = url.pathname.match(new RegExp(`^/client/v4/accounts/${FAKE_CONTENT.account}/workers/dispatch/namespaces/${FAKE_CONTENT.namespace}/scripts/([^/]+)$`));
+  if (script && request.method === "PUT") {
+    const name = decodeURIComponent(script[1]);
+    const held = upload(name);
+    const form = await request.formData();
+    const parts = [...form.keys()];
+    const done = (status: number, response: Response) => { held.calls.push({ op: "script", status, query: url.search, parts }); return response; };
+    if (bearer !== `Bearer ${FAKE_CONTENT.scriptsToken}`) return done(403, failure(403, 10000, "Authentication error"));
+    const fault = takeUploadFault(name, "script");
+    if (fault?.status) return done(fault.status, failure(fault.status, 10001, "SECRET-PROVIDER-TEXT"));
+    const part = form.get("metadata");
+    const metadata = JSON.parse(typeof part === "string" ? part : await part!.text());
+    const complete = completions.get(metadata?.assets?.jwt);
+    // Only a completion token for this very script, with every file its manifest names held.
+    if (!complete || complete.script !== name || !Object.values(complete.manifest).every((file) => held.held.has(file.hash))) return done(400, failure(400, 10400, "the token doesn't complete this script"));
+    const files: Record<string, { hash: string; size: number; type: string; base64: string }> = {};
+    for (const [path, file] of Object.entries(complete.manifest)) files[path] = { ...file, ...held.held.get(file.hash)! };
+    held.written = { files, metadata, times: (held.written?.times ?? 0) + 1 };
+    if (fault?.lost) return done(502, failure(502, 10001, "the answer was lost"));
+    if (fault?.shape === "html") return done(200, html());
+    if (fault?.shape === "not_success") return done(200, json({ success: false, errors: [], messages: [], result: { id: name } }));
+    // A refusal by its status, in a body that reads as a success: only the status says it wasn't taken.
+    if (fault?.shape === "refused_but_success") return done(500, json(envelope({ id: name }), 500));
+    return done(200, json(envelope({ id: fault?.shape === "other_id" ? `${name}x` : name, tag: "tag-test", has_assets: true, has_modules: false, handlers: ["fetch"] })));
+  }
+  return null;
+}
+
 export async function fakeContent(request: Request): Promise<Response | null> {
   const url = new URL(request.url);
+  if (url.hostname === "content-fake.example.com" && url.pathname.startsWith("/upload-")) {
+    const name = url.searchParams.get("script") ?? "";
+    if (url.pathname === "/upload-fault") { upload(name).faults.push((await request.json()) as UploadFault); return json({ ok: true }); }
+    if (url.pathname === "/upload-bucket-size") { upload(name).bucketSize = Number(url.searchParams.get("size")); return json({ ok: true }); }
+    if (url.pathname === "/upload-state") {
+      const held = upload(name);
+      return json({ calls: held.calls, held: [...held.held.keys()].sort(), written: held.written ?? null });
+    }
+    return json({ error: "unknown" }, 404);
+  }
+  if (url.hostname === "api.cloudflare.com") {
+    const uploaded = await fakeUpload(request, url);
+    if (uploaded) return uploaded;
+  }
   if (url.hostname === "content-fake.example.com") {
     if (url.pathname === "/reset") {
       scripts = new Set();

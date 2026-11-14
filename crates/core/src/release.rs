@@ -1514,9 +1514,62 @@ pub fn release_allowed_today(asked_at: &[i64], now: i64) -> Result<(), ReleaseCa
     }
 }
 
-/// The reads a release of `files` files costs: the commit's top tree, the directory's tree, and one per file.
+/// The two tree reads every read of a release begins with: the commit's top tree and the directory's own.
+pub const TREE_READS: u32 = 2;
+/// How many times the job fetches each file of a release: once to hash its bytes for the upload's manifest, which
+/// must name every file before any is sent, and once to send it. Nothing is held between the two.
+pub const FETCH_PASSES: u32 = 2;
+/// How long one attempt at a release's read and upload may take in all, by the clock it is given. Past it the
+/// attempt asks nothing more of anyone, and the release waits to be tried again. **Proposed.**
+pub const ATTEMPT_DEADLINE_MS: i64 = 5 * 60 * 1000;
+
+/// The most bytes of files fetched at once, whatever their number. A fetched file is held twice while it is checked,
+/// so ten files of 5 MB at once would be 100 MB in a Worker; this keeps it to two such files. **Proposed.**
+pub const FETCH_BATCH_BYTES: u64 = 10 * 1024 * 1024;
+
+/// How a list of files is fetched, as the lengths of consecutive batches: each batch at most [`FETCH_CONCURRENCY`]
+/// files and at most [`FETCH_BATCH_BYTES`] by the sizes given. A file larger than that by itself is a batch alone.
+/// Every file is in exactly one batch, in order.
+pub fn fetch_batches(sizes: &[u64]) -> Vec<usize> {
+    let mut batches = Vec::new();
+    let (mut count, mut bytes) = (0_usize, 0_u64);
+    for size in sizes {
+        if count > 0
+            && (count == FETCH_CONCURRENCY || bytes.saturating_add(*size) > FETCH_BATCH_BYTES)
+        {
+            batches.push(count);
+            (count, bytes) = (0, 0);
+        }
+        count += 1;
+        bytes = bytes.saturating_add(*size);
+    }
+    if count > 0 {
+        batches.push(count);
+    }
+    batches
+}
+
+/// The reads a release of `files` files costs when each is read once: the commit's top tree, the directory's tree,
+/// and one per file.
 pub fn reads_for_release(files: u32) -> u32 {
-    files.saturating_add(2)
+    files.saturating_add(TREE_READS)
+}
+
+/// The file reads of one attempt at a release of `files` files, fetched in `passes` passes. The two tree reads are
+/// counted apart, before them ([`TREE_READS`]).
+pub fn file_reads(files: u32, passes: u32) -> u32 {
+    files.saturating_mul(passes)
+}
+
+/// What is left of an attempt's time at `now`, having started at `started`: never negative, and nothing once the
+/// deadline has passed or the clock has gone backwards past the start.
+pub fn attempt_left_ms(started: i64, now: i64) -> i64 {
+    if now < started {
+        return 0;
+    }
+    ATTEMPT_DEADLINE_MS
+        .saturating_sub(now.saturating_sub(started))
+        .max(0)
 }
 
 /// Whether a release's reads fit the deployment's hour, counted by Podster itself: `used` reads already made in the

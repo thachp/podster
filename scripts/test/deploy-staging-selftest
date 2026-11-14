@@ -7,6 +7,10 @@
 set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 stub_curl
+# A stand-in HOME, so the owner's ~/.podster/cloudflare-account-id.staging is never read.
+export HOME="$tmp/home"
+mkdir -p "$HOME/.podster"
+account_file="$HOME/.podster/cloudflare-account-id.staging"
 
 # $fix/main-ci holds what `gh run list ... --jq` would print. $fix/main-ci.json holds gh's JSON instead, and the
 # --jq expression the script passed is run over it.
@@ -230,8 +234,45 @@ fresh
 # --- the checkout ---
 check "with no account ID it is refused, exit 1" run 1 env -u CLOUDFLARE_ACCOUNT_ID "$work/scripts/deploy-staging"
 check "  and nothing ran" test ! -s "$fix/calls"
+check "  and the refusal names the account file" said "REFUSE  CLOUDFLARE_ACCOUNT_ID isn't set, and $account_file doesn't exist"
 check "with an account ID that isn't one it is refused, exit 1" run 1 env CLOUDFLARE_ACCOUNT_ID=podster "$work/scripts/deploy-staging"
 check "  and nothing ran" test ! -s "$fix/calls"
+
+# --- the account file, read when CLOUDFLARE_ACCOUNT_ID isn't set ---
+never_said() { ! said "$1"; }
+other=ffffffffffffffffffffffffffffffff
+printf '%s\n' "$other" > "$account_file" && chmod 600 "$account_file"
+check "CLOUDFLARE_ACCOUNT_ID wins over the account file: exit 0" deploy 0
+check "  every wrangler call has the variable's account" test "$(grep -c '^npx ' "$fix/calls")" -eq "$(grep -c "^npx .* account=$account " "$fix/calls")"
+fresh
+printf '%s\n' "$account" > "$account_file" && chmod 600 "$account_file"
+check "with the variable unset, the account file is used: exit 0" run 0 env -u CLOUDFLARE_ACCOUNT_ID "$work/scripts/deploy-staging"
+check "  every wrangler call has the file's account" test "$(grep -c '^npx ' "$fix/calls")" -eq "$(grep -c "^npx .* account=$account " "$fix/calls")"
+check "  and the ID is never printed" never_said "$account"
+fresh
+printf '%s' "$account" > "$account_file" && chmod 600 "$account_file"
+check "an account file with no newline is used: exit 0" run 0 env -u CLOUDFLARE_ACCOUNT_ID "$work/scripts/deploy-staging"
+fresh
+account_refused() { # account_refused TITLE WHAT-IT-SAYS: the caller wrote the account file
+  check "$1 is refused, exit 1" run 1 env -u CLOUDFLARE_ACCOUNT_ID "$work/scripts/deploy-staging"
+  check "  and says why" said "REFUSE  $account_file must $2"
+  check "  before anything is installed or contacted" test ! -s "$fix/calls"
+  check "  and its content isn't printed" never_said "$account|0123456789ABCDEF"
+  fresh
+}
+chmod 644 "$account_file"
+account_refused "an account file others can read" "be yours and mode 0600"
+chmod 400 "$account_file"
+account_refused "an account file of mode 0400" "be yours and mode 0600"
+chmod 600 "$account_file"
+for bad in "${account}\n\n" "${account} \n" "0123456789ABCDEF0123456789ABCDEF\n" "${account%?}\n" "${account}0\n" "\n${account}" ""; do
+  printf "$bad" > "$account_file"
+  account_refused "an account file holding '$bad'" "hold the account ID alone"
+done
+rm -f "$account_file" && ln -s "$tmp/target" "$account_file" && printf '%s\n' "$account" > "$tmp/target" && chmod 600 "$tmp/target"
+account_refused "an account file that is a link" "be a regular file, not a link"
+rm -f "$account_file" "$tmp/target"
+
 check "with CLOUDFLARE_ENV naming another environment it is refused, exit 1" run 1 env CLOUDFLARE_ACCOUNT_ID=$account CLOUDFLARE_ENV=live "$work/scripts/deploy-staging"
 check "  and nothing ran" test ! -s "$fix/calls"
 

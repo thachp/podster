@@ -22,6 +22,7 @@ pub mod release_driver;
 pub mod release_marker;
 pub mod release_status;
 pub mod release_tree;
+pub mod release_uncertain;
 pub mod removal;
 pub mod repo_access;
 pub mod repo_grants;

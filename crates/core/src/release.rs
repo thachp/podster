@@ -261,6 +261,8 @@ pub enum ReleaseEvent {
     UploadUnknown,
     /// Cloudflare's own answer for this release's script says it exists: the upload went through.
     UploadConfirmed,
+    /// Cloudflare's own answer for this release's script says it isn't there: the upload is tried again.
+    UploadAbsent,
     /// The room's transaction reran the recheck, epoch included, and committed it live.
     CommitLive,
     /// Its marker came back through the host within the wait.
@@ -297,7 +299,7 @@ pub fn next_state(
         }
         (S::Queued, E::StartUpload) => S::Uploading,
         (S::Uploading, E::UploadUnknown) => S::Uncertain,
-        (S::Uncertain, E::UploadConfirmed) => S::Uploading,
+        (S::Uncertain, E::UploadConfirmed | E::UploadAbsent) => S::Uploading,
         (S::Uploading, E::CommitLive) => S::Live,
         (S::Live, E::MarkerSeen) => S::Served,
         (S::Live | S::Served, E::Replace) => S::Replaced,

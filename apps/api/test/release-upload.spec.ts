@@ -232,8 +232,8 @@ describe("uploading a release's static files", () => {
     const early = await commit(h.room);
     expect([early.status, early.body.state, early.body.waiting]).toEqual([200, "uploading", "release_not_uploaded"]);
     expect(await host(h.room)).toEqual({ script_name: h.prev, release_id: PREV, version: 5 });
-    // An upload whose script wasn't written leaves it waiting still.
-    await providerFault(h.script, { op: "script", status: 500 });
+    // An upload whose script's write the provider refused leaves it waiting still.
+    await providerFault(h.script, { op: "script", status: 400 });
     expect(brief(await upload(h.room))).toEqual([200, "uploading", false, "release_upload_unavailable", null]);
     expect((await commit(h.room)).body.waiting).toBe("release_not_uploaded");
     // After it: the same commit goes live.
@@ -300,23 +300,31 @@ describe("an upload asked again", () => {
     expect(await record(h.room)).toHaveLength(1);
   });
 
-  it("writes the same script again when the answer to its write was lost, sending no file a second time", async () => {
+  it("leaves the release uncertain when the answer to its write was lost, and settles it by the provider's read, sending nothing again", async () => {
     await github("/seed", repository(SITE));
     const h = await uploading();
     // The script is written, and the answer never arrives.
     await providerFault(h.script, { op: "script", lost: true });
-    expect(brief(await upload(h.room))).toEqual([200, "uploading", false, "release_upload_unavailable", null]);
+    expect(brief(await upload(h.room))).toEqual([200, "uncertain", false, "release_upload_outcome_unknown", null]);
     expect((await provider(h.script)).written!.times).toBe(1);
     expect(await record(h.room)).toEqual([]);
-    // Again: the provider holds every file under this script's name, so its session asks for none.
-    expect(brief(await upload(h.room))).toEqual([200, "uploading", true, null, null]);
+    // Nothing is committed on it meanwhile, and nothing is queued for deletion.
+    expect((await commit(h.room)).body.state).toBe("uncertain");
+    expect([await queued(h.room), (await host(h.room)).script_name]).toEqual([[], h.prev]);
+    // Asked again, the command reads the script back and records the upload on the provider's word: no session, no
+    // file and no write a second time, and nothing more asked of GitHub.
+    const reads = await githubState();
+    const settled = await upload(h.room);
+    expect(brief(settled)).toEqual([200, "uploading", true, null, null]);
+    expect(settled.body.settled).toBe("release_settled_written");
     const seen = await provider(h.script);
-    expect(ops(seen)).toEqual(["session 200", "bucket 202", "bucket 202", "bucket 201", "script 502", "session 200", "script 200"]);
-    expect(seen.written!.times).toBe(2);
-    expect(await record(h.room)).toHaveLength(1);
-    // Both attempts' reads are counted: twelve, then two trees and one pass, since nothing was fetched to send.
-    expect(await reserved()).toEqual([{ release_id: REL, reads: 24 }]);
-    expect((await githubState()).tokens.map((token) => token.revoked)).toEqual([true, true]);
+    expect(ops(seen)).toEqual(["session 200", "bucket 202", "bucket 202", "bucket 201", "script 502", "read 200"]);
+    expect(seen.written!.times).toBe(1);
+    // What the attempt sent is what is recorded: six files, their bytes and the marker's.
+    expect(await record(h.room)).toEqual([{ release_id: REL, script_name: h.script, files: 6, bytes: 62 + `{"release_id":"${REL}","commit":"${COMMIT}"}\n`.length }]);
+    expect([await githubState(), await reserved()]).toEqual([reads, [{ release_id: REL, reads: 12 }]]);
+    // And the commit goes live on it.
+    expect((await commit(h.room)).body.state).toBe("live");
   });
 
   it("starts over after a bucket was lost, and sends only what the provider doesn't hold", async () => {
@@ -632,6 +640,8 @@ describe("a read that gives nothing to upload", () => {
 
 describe("a provider that doesn't answer as it must", () => {
   it("records no upload on anything but the three answers the upload was seen to get", async () => {
+    // The last of each: whether the script is written at the provider. A refusal by its `4xx` waits; anything else at
+    // the script's write may follow a write that went through, and leaves the release uncertain.
     const faults: [string, object, boolean][] = [
       ["the session refused", { op: "session", status: 500 }, false],
       ["the session forbidden", { op: "session", status: 403 }, false],
@@ -655,17 +665,19 @@ describe("a provider that doesn't answer as it must", () => {
     for (const [what, fault, written] of faults) {
       const h = await uploading();
       await providerFault(h.script, fault);
-      expect(brief(await upload(h.room)), what).toEqual([200, "uploading", false, "release_upload_unavailable", null]);
+      const op = (fault as { op: string; status?: number }).op;
+      const refused = op !== "script" || (fault as { status?: number }).status === 400;
+      expect(brief(await upload(h.room)), what).toEqual(refused ? [200, "uploading", false, "release_upload_unavailable", null] : [200, "uncertain", false, "release_upload_outcome_unknown", null]);
       expect([await record(h.room), await queued(h.room)], what).toEqual([[], []]);
       const seen = await provider(h.script);
       expect(seen.written !== null, what).toBe(written);
       // **Nothing goes on past an answer that can't be gone on:** a session that isn't one sends no file, and a
       // bucket not taken as it must be writes no script.
-      const op = (fault as { op: string }).op;
       if (op === "session") expect(ops(seen), what).toEqual([ops(seen)[0]]);
       if (op === "bucket") expect(ops(seen).filter((call) => call.startsWith("script")), what).toEqual([]);
       // Whatever the provider did, a commit stages nothing.
-      expect((await commit(h.room)).body.waiting, what).toBe("release_not_uploaded");
+      const committed = (await commit(h.room)).body;
+      expect([committed.state, committed.waiting ?? null], what).toEqual(refused ? ["uploading", "release_not_uploaded"] : ["uncertain", null]);
       expect((await host(h.room)).script_name, what).toBe(h.prev);
     }
     expect((await githubState()).tokens.every((token) => token.revoked)).toBe(true);

@@ -563,7 +563,9 @@ describe("room schema step 45, on a room with jobs on record", () => {
       sql.exec(`INSERT INTO release_job (${COLUMNS}) VALUES (?, 7, ?, 'commit', 4, 9, 'release_driver_moved', ?, 2)`, REL, T + 1, T);
       sql.exec("INSERT INTO release_job (release_id, updated_at) VALUES (?, ?)", PREV, T - 1);
       const newest = sql.exec("SELECT version FROM schema_version").one().version as number;
-      sql.exec("UPDATE schema_version SET version = version - 1");
+      // Before step 46 too, which only adds `release_uncertain`, so both run.
+      sql.exec("DROP TABLE release_uncertain");
+      sql.exec("UPDATE schema_version SET version = version - 2");
       return newest;
     });
     const before = await inRoom(r.room, (sql) => sql.exec(`SELECT ${COLUMNS} FROM release_job ORDER BY release_id`).toArray());
@@ -578,6 +580,7 @@ describe("room schema step 45, on a room with jobs on record", () => {
       rows: sql.exec(`SELECT ${COLUMNS} FROM release_job ORDER BY release_id`).toArray(),
       times: sql.exec("SELECT live_at, switched_at FROM release_job ORDER BY release_id").toArray(),
       leftover: sql.exec("SELECT name FROM sqlite_master WHERE name = 'release_job_next'").toArray(),
+      uncertain: sql.exec("SELECT count(*) AS n FROM release_uncertain").one().n,
       foreignKeys: sql.exec("PRAGMA foreign_key_check").toArray(),
     }));
     expect(after).toEqual({
@@ -585,6 +588,7 @@ describe("room schema step 45, on a room with jobs on record", () => {
       rows: before,
       times: [{ live_at: null, switched_at: null }, { live_at: null, switched_at: null }],
       leftover: [],
+      uncertain: 0,
       foreignKeys: [],
     });
     // The marker's step is admitted now, as step 43's check never did.

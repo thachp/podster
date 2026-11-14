@@ -18,7 +18,8 @@
 //! 6. **The script is written,** from the provider's completion token, which it gives only once it holds every file
 //!    the manifest names. So a script is never part of a release.
 //! 7. **The room records the upload,** or, if the release ended while the script was being written, owes the script
-//!    its deletion again (`release_commit::record_uploaded`).
+//!    its deletion again (`release_commit::record_uploaded`). An answer that may follow a write that went through, and
+//!    isn't the one that says written, makes the release `uncertain` (`release_settle`).
 //!
 //! **Nothing is served by any of this.** The script exists and no serve entry names it. A commit stages a release
 //! only once step 7 has recorded it (`release_commit::stage`), and the applier writes a host's entry only for a
@@ -35,8 +36,9 @@
 //! answer to go on, the attempt's deadline. A release that waits past its upload's hour is ended by the room's own
 //! bookkeeping, and its script deleted.
 //!
-//! **Still owed:** an upload whose answer was lost, as the state `uncertain` and its settling by the provider's own
-//! answer. The marker's wait is `release_marker`'s.
+//! **An upload whose answer was lost** at the script's write leaves the release `uncertain` (step 7), and the same
+//! command, asked again, settles it by the provider's own read of the script instead of uploading (`release_settle`).
+//! The marker's wait is `release_marker`'s.
 //!
 //! Logs carry the room's and the release's IDs and codes. No token, path or file name is logged.
 use super::release_commit::{
@@ -44,7 +46,7 @@ use super::release_commit::{
 };
 use super::release_recheck::{release_now, state_of, Reads};
 use super::*;
-use crate::content_provider::upload::{BucketBody, ManifestFile, Sent, Written};
+use crate::content_provider::upload::{BucketBody, ManifestFile, Sent};
 use crate::content_provider::Provider;
 use crate::github::release_read::{
     hash_of, reserve, Attempt, ReadFailure, ReadFile, ReleaseApp, ReleaseReader,
@@ -55,6 +57,7 @@ use podster_core::release::{
 use podster_core::release_tree::{
     marker_body, FetchMismatch, ReadProblem, MARKER_PATH, MARKER_TYPE,
 };
+use podster_core::release_uncertain::{script_write_outcome, WriteOutcome};
 
 /// The room's path for uploading a release's files. Nothing outside the Worker reaches it; the job's driver asks the
 /// same command directly.
@@ -389,8 +392,11 @@ impl Workspace {
         lease: Option<&release_driver::StepLease>,
     ) -> R<Value> {
         let sql = self.state.storage().sql();
-        if state_of(&release)? != ReleaseState::Uploading {
-            return upload_answer(&sql, &release, false);
+        match state_of(&release)? {
+            ReleaseState::Uploading => {}
+            // An upload whose answer was lost is settled by the provider's read, and nothing is uploaded.
+            ReleaseState::Uncertain => return self.settle_of(release_id, release, lease).await,
+            _ => return upload_answer(&sql, &release, false),
         }
         let go_on = || release_driver::may_go_on(&sql, lease);
         if !go_on() {
@@ -488,10 +494,11 @@ impl Workspace {
         if !go_on() {
             return self.upload_waiting(&release_id, release_driver::LEASE_LOST, None);
         }
-        let written = provider
-            .write_script(&script, &complete.token, &attempt)
-            .await
-            == Written::Yes;
+        let written = script_write_outcome(
+            provider
+                .write_script(&script, &complete.token, &attempt)
+                .await,
+        );
         let id = release_id.clone();
         let recorded = self
             .release_transaction(move |sql| {
@@ -506,7 +513,9 @@ impl Workspace {
                 )
             })
             .await?;
-        if !written && recorded["state"] == ReleaseState::Uploading.name() {
+        if written == WriteOutcome::NotWritten
+            && recorded["state"] == ReleaseState::Uploading.name()
+        {
             return self.upload_waiting(&release_id, UPLOAD_UNAVAILABLE, None);
         }
         Ok(recorded)

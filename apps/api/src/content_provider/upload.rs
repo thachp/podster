@@ -20,7 +20,9 @@
 //! **Strict on every answer.** A session counts only on `200`, `"success": true`, a token of a token's form, and
 //! buckets that name only hashes the manifest holds, each once. A bucket counts only on the two answers above. The
 //! script counts as written only on `200`, `"success": true` and the script's own name in the answer. Anything else
-//! is no answer, and the room tries again: an upload is never recorded on a guess.
+//! at the session or a bucket is no answer, and the room tries again. At the script, a `4xx` is a refusal and the room
+//! tries again; anything else, no answer among it, leaves the release `uncertain` until the provider's own read of
+//! the script settles it (`podster_core::release_uncertain`). An upload is never recorded on a guess.
 //!
 //! **What no spike has shown,** and a wrong assumption here leaves the room retrying, which shows: what any of the
 //! three answers on an error; whether the script's call needs wrangler's two query parameters, which are sent as
@@ -36,6 +38,7 @@
 use super::*;
 use crate::github::release_read::Attempt;
 use js_sys::Uint8Array;
+use podster_core::release_uncertain::ScriptWriteAnswer;
 use serde_json::json;
 
 /// How long one of the three calls may take. A bucket carries files.
@@ -82,15 +85,6 @@ pub(crate) enum Sent {
     More,
     /// Taken, and it was the last: the completion token.
     Done(String),
-}
-
-/// What the provider said of the script's write.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Written {
-    /// It said, in so many words, that this script is written.
-    Yes,
-    /// Anything else: no answer, an error, or an answer that doesn't name the script. It may or may not exist.
-    Unknown,
 }
 
 fn token_form(token: &str) -> bool {
@@ -164,7 +158,26 @@ async fn send(
     body: Vec<u8>,
     attempt: &Attempt,
 ) -> Option<Answer> {
-    let wait_ms = attempt.call_ms(UPLOAD_TIMEOUT_MS)?;
+    send_told(method, url, bearer, content_type, body, attempt)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// The call was never made: the attempt's deadline had passed.
+struct NotSent;
+
+/// [`send`], telling a call that was never made from one whose answer was lost: `Err(NotSent)` only when the deadline
+/// had passed before anything was sent. The script's write needs the difference; nothing else does.
+async fn send_told(
+    method: Method,
+    url: String,
+    bearer: &str,
+    content_type: &str,
+    body: Vec<u8>,
+    attempt: &Attempt,
+) -> std::result::Result<Option<Answer>, NotSent> {
+    let wait_ms = attempt.call_ms(UPLOAD_TIMEOUT_MS).ok_or(NotSent)?;
     let controller = AbortController::default();
     let signal = controller.signal();
     let bearer = bearer.to_owned();
@@ -193,7 +206,7 @@ async fn send(
         Either::Left((Err(_), _)) | Either::Right(_) => None,
     };
     controller.abort();
-    answer
+    Ok(answer)
 }
 
 impl Provider {
@@ -295,19 +308,21 @@ impl Provider {
         }
     }
 
-    /// Writes the script from a completion token: static files, and nothing else. The script may exist after this
-    /// whatever it answers; only `Yes` says it does.
+    /// Writes the script from a completion token: static files, and nothing else. Answers what came back, for core's
+    /// `script_write_outcome` to judge: the script may exist after this whatever it answers, unless nothing was sent.
+    /// **Nothing was sent** only when the name or the token isn't of its form, or the attempt's deadline had passed
+    /// before the call: anything that goes wrong after that is no answer, and the release becomes `uncertain`.
     pub(crate) async fn write_script(
         &self,
         script: &str,
         completion_token: &str,
         attempt: &Attempt,
-    ) -> Written {
+    ) -> ScriptWriteAnswer {
         let Some(url) = self.script_url(script) else {
-            return Written::Unknown;
+            return ScriptWriteAnswer::NotSent;
         };
         if !token_form(completion_token) {
-            return Written::Unknown;
+            return ScriptWriteAnswer::NotSent;
         }
         // Written out field by field, so what is sent is exactly these bytes whatever a library orders or adds. The
         // token is the only part that isn't a constant, and it goes in as a JSON string.
@@ -319,7 +334,7 @@ impl Provider {
             "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n{metadata}\r\n--{BOUNDARY}--\r\n"
         )
         .into_bytes();
-        let answer = send(
+        let answer = send_told(
             Method::Put,
             format!("{url}?excludeScript=true&bindings_inherit=strict"),
             &self.scripts_token,
@@ -329,14 +344,16 @@ impl Provider {
         )
         .await;
         match answer {
-            Some(answer)
-                if answer.status == 200
-                    && answer.json()["success"] == true
-                    && answer.json()["result"]["id"].as_str() == Some(script) =>
-            {
-                Written::Yes
+            Err(NotSent) => ScriptWriteAnswer::NotSent,
+            Ok(Some(answer)) => {
+                let body = answer.json();
+                ScriptWriteAnswer::Answered {
+                    status: answer.status,
+                    success: body["success"] == true,
+                    names_script: body["result"]["id"].as_str() == Some(script),
+                }
             }
-            _ => Written::Unknown,
+            Ok(None) => ScriptWriteAnswer::NoAnswer,
         }
     }
 }

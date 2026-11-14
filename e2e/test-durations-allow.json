@@ -1,0 +1,45 @@
+{
+ "about": [
+  "The API and gateway tests that may use more than a third of their own time bound, for e2e/test-durations.mjs. Each was over, or within a few points of, a third on CI at a4ab299 (run 43580489828), where CI ran about twice as slow as a laptop.",
+  "An entry matches by suite, file (relative to the package) and the test's full name, and must give a reason, owed true or false, and a ceiling over a third and at most three quarters. The test still fails above its ceiling. An entry for a test that didn't run fails the step.",
+  "`owed: true` is a debt, with what it needs written in its reason; `owed: false` is right as it is. `ci_ms_when_listed` is for a reader: the step doesn't use it."
+ ],
+ "entries": [
+  {
+   "suite": "api",
+   "file": "test/merge-task.spec.ts",
+   "test": "the job checks everything again ends the merge, marking nothing, when the pull request isn't what was reviewed any more",
+   "ceiling": 0.5,
+   "owed": true,
+   "ci_ms_when_listed": 10212,
+   "reason": "Eight cases in one test, each a whole room, repository, task and merge pass. Owed: one test per case (it.each), so each gets the whole bound."
+  },
+  {
+   "suite": "api",
+   "file": "test/merge-task.spec.ts",
+   "test": "the review's findings (M5 step 7b) reads GitHub before ending a merge whose call went out, whatever ends it, and records what the call did (M5)",
+   "ceiling": 0.5,
+   "owed": true,
+   "ci_ms_when_listed": 7962,
+   "reason": "A loop over every way a merge whose call went out can end, each with its own room and merge pass. Owed: one test per way, as above."
+  },
+  {
+   "suite": "api",
+   "file": "test/merge-task.spec.ts",
+   "test": "the review's findings (M5 step 7b) counts every request through the command itself: ten for a task in its whole life, twenty an hour for the room (M2) twenty an hour for the room, whichever tasks they're for",
+   "ceiling": 0.5,
+   "owed": false,
+   "ci_ms_when_listed": 7906,
+   "reason": "It has to send twenty-one merge requests through the real command to show the room's hourly limit, each its own task. The count is the point of the test."
+  },
+  {
+   "suite": "gateway",
+   "file": "test/uploads.spec.ts",
+   "test": "the upload path answers after a few seconds if a sender stalls once refused",
+   "ceiling": 0.5,
+   "owed": true,
+   "ci_ms_when_listed": 5002,
+   "reason": "It waits out the gateway's own DISCARD_LIMIT_MS, 5 s, against a 15 s bound, so it sits at a third on any runner. Owed: a way to pass the limit in, which is product code."
+  }
+ ]
+}

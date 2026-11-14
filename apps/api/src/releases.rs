@@ -19,7 +19,7 @@ use crate::content_provider;
 use crate::error::ApiError;
 use crate::{moderation, Caller};
 use podster_core::hostnames::{normalize, PODSTER_DOMAIN};
-use podster_core::release::is_label;
+use podster_core::release::{deployment_release, is_label, DeploymentRelease};
 use serde_json::{json, Value};
 use worker::*;
 
@@ -65,28 +65,51 @@ pub(crate) fn route(method: &Method, parts: &[&str]) -> Option<Audience> {
     }
 }
 
-/// Whether release is switched on. A deployment reads its Worker variable alone. Test builds are also on while D1 holds
-/// a table named `test_releases_on`, which a test makes and drops.
-pub(crate) async fn switched_on(env: &Env) -> bool {
-    if env
-        .var(SWITCH_VAR)
-        .is_ok_and(|value| value.to_string() == "true")
-    {
-        return true;
-    }
+/// The deployment's release setting, `RELEASES`, read by core's one rule (`podster_core::release::deployment_release`):
+/// on only for exactly `true`, off only for exactly `false`, and undecided for anything else, unset included. A
+/// deployment reads its Worker variable alone. Test builds can also be switched on while D1 holds a table named
+/// `test_releases_on`, or given any setting as written, while D1 holds `test_releases_setting` (`value`, null for
+/// unset), which a test makes and drops.
+pub(crate) async fn setting(env: &Env) -> DeploymentRelease {
+    let written = env.var(SWITCH_VAR).ok().map(|value| value.to_string());
     #[cfg(feature = "failpoints")]
     if let Ok(db) = env.d1("DB") {
-        let found = db
-            .prepare(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'test_releases_on'",
-            )
-            .first::<serde_json::Value>(None)
-            .await;
-        if matches!(found, Ok(Some(_))) {
-            return true;
+        if test_table(&db, "test_releases_on").await {
+            return DeploymentRelease::On;
+        }
+        if test_table(&db, "test_releases_setting").await {
+            let value = db
+                .prepare("SELECT value FROM test_releases_setting LIMIT 1")
+                .first::<serde_json::Value>(None)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|row| row["value"].as_str().map(str::to_owned));
+            return deployment_release(value.as_deref());
         }
     }
-    false
+    deployment_release(written.as_deref())
+}
+
+/// Test builds only: whether D1 holds a table of this name.
+#[cfg(feature = "failpoints")]
+async fn test_table(db: &D1Database, name: &str) -> bool {
+    let Ok(statement) = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .bind(&[name.into()])
+    else {
+        return false;
+    };
+    matches!(
+        statement.first::<serde_json::Value>(None).await,
+        Ok(Some(_))
+    )
+}
+
+/// Whether release is switched on: the setting is exactly `true`. Off and undecided both answer no, so every M6 route
+/// is answered as an unknown path and no new release or commit goes on.
+pub(crate) async fn switched_on(env: &Env) -> bool {
+    setting(env).await.allows_release()
 }
 
 /// The refusal of a route that exists in the contract and isn't built.

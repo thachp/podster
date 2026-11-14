@@ -49,11 +49,10 @@ const actions = (subject: string) => runInDurableObject(BINDINGS.MODERATION.get(
   state.storage.sql.exec("SELECT name FROM sqlite_master WHERE name = 'operator_action'").toArray().length === 0 ? []
     : state.storage.sql.exec("SELECT operator, subject_kind, action, reason, outcome FROM operator_action WHERE subject = ? ORDER BY seq", subject).toArray());
 
-/** Release switched on for the test Worker while `run` runs. A call inside another leaves it on. */
-let releasesOn = 0;
+/** Release switched on for the test Worker, as no deployment is, while `run` runs. */
 async function switchedOn<T>(run: () => Promise<T>): Promise<T> {
-  if (releasesOn++ === 0) await BINDINGS.DB.prepare("CREATE TABLE test_releases_on (x INTEGER)").run();
-  try { return await run(); } finally { if (--releasesOn === 0) await BINDINGS.DB.prepare("DROP TABLE test_releases_on").run(); }
+  await BINDINGS.DB.prepare("CREATE TABLE test_releases_on (x INTEGER)").run();
+  try { return await run(); } finally { await BINDINGS.DB.prepare("DROP TABLE test_releases_on").run(); }
 }
 
 const fake = (path: string, body?: unknown) => fetch(`https://content-fake.example.com${path}`, body === undefined ? undefined : { method: "POST", body: JSON.stringify(body) });
@@ -139,9 +138,18 @@ const newHostname = () => `h${(++hostnames).toString(36)}${crypto.randomUUID().s
 // the pass's summary, or calls the Worker's scheduled handler, which no environment's schedule ever does.
 const ENTRIES_CRON = "*/5 * * * *";
 const SCRIPTS_CRON = "0 * * * *";
-// A pass is run with release switched on, as a deployment that serves apps has it: with it off, every room a pass asks
-// takes its app down (ADR 0010's deployment trigger, M6 step 6), which a test of that shows on its own.
-const reconcile = (which: "entries" | "scripts") => switchedOn(async () => (await (await moderation().fetch(`https://do/reconcile/${which}`, { method: "POST" })).json()) as any);
+// A pass runs as in a deployment that has a provider, which sets `RELEASES` explicitly (M6 step 6): written `true` here
+// (test builds only). Unset, the setting is undecided, and each pass tells operators so, which
+// `release-triggers.spec.ts` shows on its own.
+const reconcile = async (which: "entries" | "scripts") => {
+  await BINDINGS.DB.prepare("CREATE TABLE test_releases_setting (value TEXT)").run();
+  await BINDINGS.DB.prepare("INSERT INTO test_releases_setting (value) VALUES ('true')").run();
+  try {
+    return (await (await moderation().fetch(`https://do/reconcile/${which}`, { method: "POST" })).json()) as any;
+  } finally {
+    await BINDINGS.DB.prepare("DROP TABLE test_releases_setting").run();
+  }
+};
 async function scheduled(cron: string, bindings: object = env) {
   const ctx = createExecutionContext();
   await new (ApiWorker as any)(ctx, bindings).scheduled(createScheduledController({ cron, scheduledTime: new Date() }));
@@ -548,7 +556,7 @@ describe("an operator's suspension of an app", () => {
     const clockTo = (room: string, now: number) => inRoom(room, (sql) => { sql.exec("DELETE FROM test_release_clock"); sql.exec("INSERT INTO test_release_clock (now) VALUES (?)", now); });
     const unpublish = (room: string) => one(room, "SELECT release_epoch, scripts_gone_at IS NOT NULL AS done FROM unpublish");
     const queuedAs = (room: string, script: string) => all(room, "SELECT unpublish_epoch, gone_at IS NOT NULL AS gone FROM script_delete WHERE script_name = ?", script);
-    const checkScript = (room: string, script: string) => switchedOn(() => stub(room).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify({ kind: "script", script }) }).then((r: Response) => r.json() as Promise<any>));
+    const checkScript = (room: string, script: string) => stub(room).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify({ kind: "script", script }) }).then((r: Response) => r.json() as Promise<any>);
     const withUpload = async (opts: { providerOff?: boolean } = {}) => {
       const made = await app({ plain: true });
       const script = `${made.label}.${rel(5)}`;
@@ -1899,8 +1907,9 @@ describe("the two reconciles", () => {
     // A schedule nothing answers to calls nothing either.
     await scheduled("* * * * *");
     expect(await calls()).toBe(before);
-    // With a provider and release switched off, which a deployment that has turned `RELEASES` off is: both passes run,
-    // so its rooms are still asked, and each takes its app down (ADR 0010's deployment trigger, M6 step 6).
+    // With a provider and `RELEASES` not switched on, unset here as in every deployment: both passes run, so a
+    // deployment's rooms are still asked whatever the setting says (M6 step 6). Unset is undecided, which takes
+    // nothing down; `release-triggers.spec.ts` shows each reading.
     await scheduled(ENTRIES_CRON);
     expect([await listCalls("entry.list"), await listCalls("script.list")]).toEqual([1, 0]);
     await scheduled(SCRIPTS_CRON);

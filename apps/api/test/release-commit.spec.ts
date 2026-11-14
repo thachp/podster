@@ -45,11 +45,10 @@ const all = (room: string, query: string, ...values: unknown[]) => inRoom(room, 
 const moderation = () => BINDINGS.MODERATION.get(BINDINGS.MODERATION.idFromName("moderation"));
 const inModeration = <T>(fn: (sql: any) => T) => runInDurableObject(moderation(), (_: any, state: any) => fn(state.storage.sql)) as Promise<T>;
 
-/** Release switched on for the test Worker while `run` runs. A call inside another leaves it on. */
-let releasesOn = 0;
+/** Release switched on for the test Worker, as no deployment is, while `run` runs. */
 async function switchedOn<T>(run: () => Promise<T>): Promise<T> {
-  if (releasesOn++ === 0) await BINDINGS.DB.prepare("CREATE TABLE test_releases_on (x INTEGER)").run();
-  try { return await run(); } finally { if (--releasesOn === 0) await BINDINGS.DB.prepare("DROP TABLE test_releases_on").run(); }
+  await BINDINGS.DB.prepare("CREATE TABLE test_releases_on (x INTEGER)").run();
+  try { return await run(); } finally { await BINDINGS.DB.prepare("DROP TABLE test_releases_on").run(); }
 }
 
 const REL = `rel_${"5c".repeat(16)}`;
@@ -112,8 +111,7 @@ const command = (path: string) => (room: string, release: string = REL): Promise
 const recheck = command("release-recheck");
 const start = command("release-start-upload");
 const commit = command("release-commit-live");
-/** The reconcile's question, asked with release switched on, as a deployment that serves apps has it (M6 step 6). */
-const check = (room: string, body: object) => switchedOn(() => stub(room).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify(body) }).then((r: Response) => r.json() as Promise<any>));
+const check = (room: string, body: object) => stub(room).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify(body) }).then((r: Response) => r.json() as Promise<any>);
 
 const row = (room: string, release: string = REL) => inRoom(room, (sql) => sql.exec("SELECT state, failure_code, script_name, upload_started_at IS NOT NULL AS started FROM release WHERE id = ?", release).one());
 const hostRow = (room: string) => inRoom(room, (sql) => sql.exec("SELECT script_name, release_id, version, flight_version, flight_before FROM serve_state").one());

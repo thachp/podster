@@ -47,6 +47,16 @@ async function switchedOn<T>(run: () => Promise<T>): Promise<T> {
   try { return await run(); } finally { if (--releasesOn === 0) await BINDINGS.DB.prepare("DROP TABLE test_releases_on").run(); }
 }
 
+/**
+ * The deployment's release setting as written, while `run` runs (test builds only): `null` is unset. Read by core's one
+ * rule: exactly `true` is on, exactly `false` is off, and anything else is undecided.
+ */
+async function withSetting<T>(value: string | null, run: () => Promise<T>): Promise<T> {
+  await BINDINGS.DB.prepare("CREATE TABLE test_releases_setting (value TEXT)").run();
+  await BINDINGS.DB.prepare("INSERT INTO test_releases_setting (value) VALUES (?)").bind(value).run();
+  try { return await run(); } finally { await BINDINGS.DB.prepare("DROP TABLE test_releases_setting").run(); }
+}
+
 const REL = `rel_${"7a".repeat(16)}`;
 const PREV = `rel_${"6b".repeat(16)}`;
 const NEXT = `rel_${"8c".repeat(16)}`;
@@ -331,28 +341,87 @@ describe("the record of an unpublish", () => {
   });
 });
 
-describe("the deployment's own switch, `RELEASES`, read by the room (M6 step 6)", () => {
-  it("takes the room's app down at the walk's question once release is off for the deployment, and only once", async () => {
+describe("the deployment's own setting, `RELEASES`, read by the room (M6 step 6)", () => {
+  /** Whether M6's routes are open: switched on, an unbuilt room route answers `release_not_available`; otherwise it is
+   *  answered where an unknown path is. */
+  const routesOpen = async (r: Room) => (await api(r.owner, "GET", `/v1/workspaces/${r.room}/release-config`)).code === "release_not_available";
+  const UNDECIDED = [null, "", "True", "TRUE", "1", "true ", " true", "False", "0", "off"];
+
+  it("takes the room's app down at the walk's question only when the setting is exactly `false`, and only once", async () => {
     const r = await room("org_rt_deployment");
-    // On, as a deployment that serves apps has it: the question changes nothing.
-    expect((await switchedOn(() => ask(r))).known).toBe(true);
+    // On, as a deployment that serves apps has it: the question changes nothing, and the routes are open.
+    expect(await withSetting("true", async () => [(await ask(r)).known, await routesOpen(r)])).toEqual([true, true]);
     expect(await serving(r)).toEqual(UP(r));
     expect(await unpublishes(r)).toEqual([]);
-    // Off: the room reads it at the question and unpublishes, ending its queued release in the same request.
-    expect((await ask(r)).known).toBe(true);
-    await expectDown(r, "release_off_for_deployment", "switched off");
+    // Exactly `false`: the room reads it at the question and unpublishes, ending its queued release in that request.
+    expect(await withSetting("false", async () => [(await ask(r)).known, await routesOpen(r)])).toEqual([true, false]);
+    await expectDown(r, "release_off_for_deployment", "set to false");
     // Asked again while off: nothing is up, so nothing more is recorded.
-    await ask(r);
+    await withSetting("false", () => ask(r));
     await expectDown(r, "release_off_for_deployment", "asked again");
     // Switched back on: nothing comes back, and a new release gets the whole recheck.
-    await switchedOn(() => ask(r));
-    await expectNothingBack(r, "release_off_for_deployment", "switched back on");
+    await withSetting("true", () => ask(r));
+    await expectNothingBack(r, "release_off_for_deployment", "set to true again");
   });
 
-  it("records nothing for a room with no release configuration, or nothing up, while release is off", async () => {
+  it("takes nothing down and releases nothing for any other setting: unset, empty or malformed", async () => {
+    const r = await room("org_rt_deployment_undecided");
+    for (const value of UNDECIDED) {
+      const what = JSON.stringify(value);
+      await withSetting(value, async () => {
+        expect((await ask(r)).known, what).toBe(true);
+        // M6's routes stay shut, exactly as when off.
+        expect(await routesOpen(r), what).toBe(false);
+      });
+      expect(await serving(r), what).toEqual(UP(r));
+      expect(await unpublishes(r), what).toEqual([]);
+      expect(await trail(r), what).toEqual({ events: [], audit: [] });
+    }
+    // A release command under an undecided setting is refused, as when off, and takes nothing down either.
+    expect((await withSetting("True", () => internal(r, "release-recheck", { release_id: REL }))).body)
+      .toEqual({ release_id: REL, state: "failed", rechecked: true, reason: "release_off_for_deployment" });
+    expect(await serving(r)).toEqual(UP(r));
+    expect(await unpublishes(r)).toEqual([]);
+  });
+
+  // The four ways a deployment's setting can slip without anyone meaning to take every app down, each from a deployment
+  // that was serving: none takes anything down, and only a deliberate `false` afterwards does.
+  const SLIPS: [string, (string | null)[]][] = [
+    ["a typo in the value", ["true", "True"]],
+    ["a new environment that omits it", [null]],
+    ["a rollback to a version from before it was set", ["true", null]],
+    ["a dashboard value removed by the next deploy", ["true", "", null]],
+  ];
+  SLIPS.forEach(([name, settings], n) => {
+    it(`takes nothing down after ${name}; only a deliberate \`false\` does`, async () => {
+      const r = await room(`org_rt_slip_${n}`);
+      for (const value of settings) await withSetting(value, () => ask(r));
+      expect(await serving(r)).toEqual(UP(r));
+      expect(await unpublishes(r)).toEqual([]);
+      await withSetting("false", () => ask(r));
+      await expectDown(r, "release_off_for_deployment", name);
+    });
+  });
+
+  it("tells operators of an undecided setting once by each reconcile pass, and not for `true` or `false`", async () => {
+    const pass = () => BINDINGS.MODERATION.get(BINDINGS.MODERATION.idFromName("moderation")).fetch("https://do/reconcile/entries", { method: "POST" }).then((x: Response) => x.json());
+    const seen = () => runInDurableObject(BINDINGS.MODERATION.get(BINDINGS.MODERATION.idFromName("moderation")), (_: any, state: any) =>
+      state.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'takedown_finding'").toArray().length === 0 ? 0
+        : (state.storage.sql.exec("SELECT seen FROM takedown_finding WHERE code = 'release_setting_undecided' AND subject = 'RELEASES'").toArray()[0]?.seen ?? 0)) as Promise<number>;
+    const before = await seen();
+    await withSetting("True", pass);
+    expect(await seen()).toBe(before + 1);
+    await withSetting(null, pass);
+    expect(await seen()).toBe(before + 2);
+    await withSetting("true", pass);
+    await withSetting("false", pass);
+    expect(await seen()).toBe(before + 2);
+  });
+
+  it("records nothing for a room with no release configuration, or nothing up, when the setting is `false`", async () => {
     for (const opts of [{ configured: false }, { up: false }]) {
       const r = await room(`org_rt_deployment_${opts.configured === false ? "bare" : "nothing"}`, opts);
-      await ask(r);
+      await withSetting("false", () => ask(r));
       expect(await unpublishes(r), JSON.stringify(opts)).toEqual([]);
       expect(await trail(r), JSON.stringify(opts)).toEqual({ events: [], audit: [] });
     }

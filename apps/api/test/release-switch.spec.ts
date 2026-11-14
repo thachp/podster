@@ -146,8 +146,7 @@ const trail = (r: Room) => inRoom(r.room, (sql) => ({
   events: sql.exec("SELECT type, actor_id, reason FROM event WHERE type = 'app.unpublished' ORDER BY seq").toArray(),
   audit: sql.exec("SELECT actor_id, action, target_id, prior_json, new_json FROM audit_event WHERE action = 'app.unpublished' ORDER BY seq").toArray(),
 }));
-/** The reconcile's question, asked with release switched on, as a deployment that serves apps has it (M6 step 6). */
-const check = (r: Room, body: object = { kind: "wake" }) => switchedOn(() => stub(r.room).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify(body) }).then((x: Response) => x.json() as Promise<any>));
+const check = (r: Room, body: object = { kind: "wake" }) => stub(r.room).fetch("https://do/internal/takedown-check", { method: "POST", body: JSON.stringify(body) }).then((x: Response) => x.json() as Promise<any>);
 const command = (path: string) => (r: Room) =>
   switchedOn(() => stub(r.room).fetch(`https://do/internal/${path}`, { method: "POST", body: JSON.stringify({ release_id: REL }) }).then(async (x: Response) => ({ status: x.status, body: (await x.json()) as any })));
 const recheck = command("release-recheck");
@@ -443,6 +442,9 @@ describe("the follow-up to decision 218's PR C", () => {
       sql.exec("UPDATE serve_apply SET attempts = 1, attempt_version = (SELECT version FROM serve_state WHERE host = ?), next_attempt_at = ? WHERE host = ?", r.host, owedAt, r.host);
       sql.exec("UPDATE script_delete SET next_attempt_at = ?", owedAt);
       sql.exec("DROP TABLE test_release_switch_stops_after_commit");
+      // A public room's first discovery-index check is set at random within six hours: put past the applier's time, so
+      // the room's next alarm is the applier's alone.
+      await state.storage.put("public_index_verify_next", FAR());
       await state.storage.deleteAlarm();
     });
     // The notice again: the room has applied it, so it is stale, and the room arms for what the applier owes all the

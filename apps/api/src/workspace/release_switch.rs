@@ -150,7 +150,7 @@ fn has_anything_up(sql: &SqlStorage) -> R<bool> {
     Ok(!up.is_empty())
 }
 
-/// The deployment's own switch read off, applied in the caller's transaction: if the room has anything up, it is
+/// The deployment's own setting read as exactly `false`, applied in the caller's transaction: if the room has anything up, it is
 /// unpublished as `UnpublishTrigger::ReleaseOffForDeployment` (ADR 0010), and permanently, as every unpublish is.
 /// Answers whether it unpublished.
 pub(super) fn apply_deployment_off(sql: &SqlStorage, now: i64) -> R<bool> {
@@ -229,12 +229,18 @@ impl Workspace {
         }
     }
 
-    /// The deployment's own switch as read, `RELEASES`, applied: off, and the room's app comes down if anything is up
-    /// (M6 step 6). Read where the organization's switch is read, at the reconcile's question and at every release
-    /// command, which is how a room learns of it: there is no notice for a deploy. A failure applying it is logged by
-    /// IDs and changes nothing; the next question or command applies it again.
-    pub(super) async fn apply_deployment_switch(&self, on: bool) {
-        if on {
+    /// The deployment's own setting as read, `RELEASES`, applied (M6 step 6): exactly `false`, and the room's app comes
+    /// down if anything is up. On or undecided, nothing happens here: an undecided setting refuses new releases and
+    /// commits, as off does, and takes nothing down, so a typo or a missing variable can't retire every app. It is
+    /// read where the organization's switch is read, at the reconcile's question and at every release command, which
+    /// is how a room learns of it: there is no notice for a deploy. An undecided setting is told to operators by the
+    /// reconcile's pass, once a pass, not by each room. A failure applying it is logged by IDs and changes nothing; the
+    /// next question or command applies it again.
+    pub(super) async fn apply_deployment_switch(
+        &self,
+        setting: podster_core::release::DeploymentRelease,
+    ) {
+        if !setting.unpublishes() {
             return;
         }
         let store = self.state.storage().sql();
@@ -252,7 +258,7 @@ impl Workspace {
 
     /// Reads the deployment's switch and the organization's, for the room's organization, and applies both.
     pub(super) async fn read_and_apply_switch(&self) {
-        self.apply_deployment_switch(crate::releases::switched_on(&self.env).await)
+        self.apply_deployment_switch(crate::releases::setting(&self.env).await)
             .await;
         let sql = self.state.storage().sql();
         let Ok(org) = room_owner_org(&sql) else {

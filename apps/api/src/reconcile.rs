@@ -648,6 +648,22 @@ fn finish(sql: &SqlStorage, name: &str, code: &'static str, counts: &Counts) -> 
     "errors"
 }
 
+/// A deployment whose release setting, `RELEASES`, is neither exactly `true` nor exactly `false` (M6 step 6): nothing
+/// is released and nothing taken down, and operators are told once by each pass, by one finding, until it is set
+/// one way or the other. The code is logged, with no ID.
+async fn tell_undecided_setting(sql: &SqlStorage, env: &Env) {
+    if crate::releases::setting(env).await != podster_core::release::DeploymentRelease::Undecided {
+        return;
+    }
+    console_error!("reconcile: the deployment's release setting is neither true nor false: code=release_setting_undecided");
+    if let Err(error) = record(sql, "release_setting_undecided", "RELEASES", None, now_ms()) {
+        console_error!(
+            "reconcile: an undecided release setting wasn't kept for operators: code={}",
+            error.code().unwrap_or("internal_error")
+        );
+    }
+}
+
 /// The 5-minute pass, in the `Moderation` object: one page of serve entries against their rooms, the stop key
 /// against the stop, and a slice of rooms woken.
 pub(crate) async fn entries(sql: &SqlStorage, env: &Env) -> R<Value> {
@@ -656,6 +672,7 @@ pub(crate) async fn entries(sql: &SqlStorage, env: &Env) -> R<Value> {
         console_log!("reconcile: no provider is configured, so no serve entry was read");
         return Ok(summary("entries", "no_provider", 0, &counts, 0));
     };
+    tell_undecided_setting(sql, env).await;
     let started = now_ms();
     let deadline = started + budget(sql, "pass", PASS_BUDGET_MS);
     for table in [
@@ -743,6 +760,7 @@ pub(crate) async fn scripts(sql: &SqlStorage, env: &Env) -> R<Value> {
         console_log!("reconcile: no provider is configured, so no script was listed");
         return Ok(summary("scripts", "no_provider", 0, &counts, 0));
     };
+    tell_undecided_setting(sql, env).await;
     let started = now_ms();
     let deadline = started + budget(sql, "pass", PASS_BUDGET_MS);
     let mut at = pass(sql, "scripts")?;

@@ -2602,3 +2602,34 @@ fn a_repository_link_that_is_not_ready_unpublishes_as_adr_0010_is_written() {
     assert!(link_status_unpublishes(LinkStatus::Degraded));
     assert!(link_status_unpublishes(LinkStatus::Suspended));
 }
+
+#[test]
+fn the_deployments_release_setting_has_three_readings_and_only_an_exact_false_unpublishes() {
+    use DeploymentRelease::*;
+    assert_eq!(deployment_release(Some("true")), On);
+    assert_eq!(deployment_release(Some("false")), Off);
+    // Unset, empty and every near miss are undecided: nothing released, nothing taken down.
+    for setting in [
+        None,
+        Some(""),
+        Some("True"),
+        Some("TRUE"),
+        Some("1"),
+        Some("true "),
+        Some(" true"),
+        Some("False"),
+        Some("0"),
+        Some("no"),
+        Some("off"),
+    ] {
+        assert_eq!(deployment_release(setting), Undecided, "{setting:?}");
+    }
+    assert_eq!(
+        [On, Off, Undecided].map(|r| r.allows_release()),
+        [true, false, false]
+    );
+    assert_eq!(
+        [On, Off, Undecided].map(|r| r.unpublishes()),
+        [false, true, false]
+    );
+}

@@ -397,7 +397,11 @@ A sealed token that opens with neither key is recorded as `repo_token.unrevocabl
 
 ## Switching release off for the deployment
 
-**Read this before turning `RELEASES` off on any deployment that has served an app.** Once M6 step 6 is built, turning the deployment's switch off unpublishes every app that was up, and it is permanent: each app's address is retired, and turning `RELEASES` back on brings nothing back. The rooms learn of it from the reconcile's walk, which runs whenever a content provider is configured, whatever `RELEASES` says.
+**Read this before changing `RELEASES` on any deployment that has a content provider and has served an app.** The setting has three readings (M6 step 6):
+
+- **Exactly `true`:** release is on.
+- **Exactly `false`:** release is off, and **every app that was up is unpublished for good:** each app's address is retired, and setting `true` again brings nothing back. The rooms learn of it from the reconcile's walk, which runs whenever a provider is configured. **To take everything down, an operator sets `RELEASES` to `false`, deliberately.**
+- **Anything else, unset, empty or malformed** (`True`, `1`, `"true "`): undecided. Nothing is released and nothing is taken down, and each reconcile pass tells operators once, by the finding `release_setting_undecided`. So a typo, an environment that omits the variable, a `wrangler rollback` to a version from before it was set, or a dashboard value removed by the next deploy takes nothing down and releases nothing.
 
 **To stop serving and be able to undo it, use the stop for the whole content domain** (M6 step 4(a)), an operator's command. Lifting the stop serves again what was up. *Decided by the architect on 2026-11-13, for the owner to review ([the step 6 plan](m6-step6-plan.md)).*
 

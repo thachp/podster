@@ -295,6 +295,16 @@ export async function fakeGithub(request: Request): Promise<Response | null> {
   const body = text ? JSON.parse(text) : null;
   const bearer = request.headers.get("authorization")?.replace(/^Bearer /, "") ?? "";
   const path = url.pathname;
+  // The provisioning App reading its own installation, by its JWT, before a repository's "gone" counts. Always healthy
+  // here: this stand-in is shared by every spec file at once, so a test that wants the installation otherwise scripts it
+  // in its own room (`test_installation_answer`), never here. Kept out of the provisioning spec's call log.
+  const installationRoute = request.method === "GET" ? path.match(/^\/app\/installations\/(\d+)$/) : null;
+  if (installationRoute) {
+    const versionedRead = request.headers.get("x-github-api-version") === "2022-11-28" && request.headers.get("accept") === "application/vnd.github+json" && !!request.headers.get("user-agent");
+    if (!versionedRead) return json({ message: "missing headers" }, 400);
+    if (appJwtValid(bearer, installationRoute[1]) !== "provision") return json({ message: "Bad credentials" }, 401);
+    return json({ id: Number(installationRoute[1]), app_id: FAKE_GITHUB.provisionAppId, suspended_at: null, account: { login: FAKE_GITHUB.orgLogin } });
+  }
   const tokenRoute = path.match(/^\/app\/installations\/(\d+)\/access_tokens$/);
   const app = tokenRoute && bearer ? appJwtValid(bearer, tokenRoute[1]) : null;
   const auth: Call["auth"] = !bearer ? "none" : tokenRoute ? (app ? "app" : "bad") : tokens.has(bearer) ? "token" : "bad";

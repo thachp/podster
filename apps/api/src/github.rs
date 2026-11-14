@@ -17,9 +17,9 @@ use futures_util::future::{select, Either};
 use futures_util::StreamExt;
 use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
 use podster_core::provisioning::{
-    classify_creation, gone, repository_gone, token_answer_matches, Bypass, Creation, Observed,
-    RepoSettings, Ruleset, SetupStep, WorkflowPermissions, DEFAULT_BRANCH_REF,
-    PRESENCE_PERMISSIONS, PROVISIONING_PERMISSIONS, STATUS_CONTEXT,
+    classify_creation, gone, installation_read, repository_gone, token_answer_matches, Bypass,
+    Creation, InstallationRead, Observed, RepoSettings, Ruleset, SetupStep, WorkflowPermissions,
+    DEFAULT_BRANCH_REF, PRESENCE_PERMISSIONS, PROVISIONING_PERMISSIONS, STATUS_CONTEXT,
 };
 use podster_core::rate_limit::{
     has_secondary_marker, primary_403, rate_limit_wait_ms, LimitSignals,
@@ -303,6 +303,9 @@ pub(crate) trait Provider {
     /// Revokes every token still held. Answers how many couldn't be revoked in this job, whenever their work ended:
     /// those live out their hour.
     async fn release(&self) -> u32;
+    /// Reads the App's own installation, by the App's JWT and no token, before a repository's "gone" is acted on
+    /// (decided by the architect on 2026-11-14): `core::installation_read` judges it.
+    async fn installation(&self) -> InstallationRead;
 }
 
 pub struct GitHubApp {
@@ -935,6 +938,27 @@ impl Provider for GitHubApp {
             }
         }
         self.unrevoked.get()
+    }
+
+    async fn installation(&self) -> InstallationRead {
+        // GitHub's "Get an installation for the authenticated app". Nothing it wrote is kept or logged: only whether it
+        // named this installation and whether `suspended_at` was null.
+        let Ok(jwt) = app_jwt(self.config.app_id, &self.config.key_pem).await else {
+            return InstallationRead::Unreadable;
+        };
+        let path = format!("/app/installations/{}", self.config.installation_id);
+        match self.send(Method::Get, &path, &jwt, None).await {
+            Ok((status, answer)) => {
+                let id_matches = answer["id"].as_i64() == Some(self.config.installation_id);
+                let suspended = match answer.get("suspended_at") {
+                    Some(Value::Null) => Some(false),
+                    Some(Value::String(at)) if !at.is_empty() => Some(true),
+                    _ => None,
+                };
+                installation_read(Some(status), id_matches, suspended)
+            }
+            Err(_) => installation_read(None, false, None),
+        }
     }
 }
 

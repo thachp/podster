@@ -17,6 +17,7 @@ mod provider;
 mod public;
 mod reconcile;
 mod releases;
+mod repo_ceiling;
 mod store;
 #[cfg(feature = "failpoints")]
 mod test_clock;

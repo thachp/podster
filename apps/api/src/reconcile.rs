@@ -540,6 +540,10 @@ async fn wake_rooms(sql: &SqlStorage, env: &Env, counts: &mut Counts) -> R<u32> 
             Some(answer) => {
                 let taken = counts.take(sql, &answer, now_ms());
                 counts.skipped(taken);
+                // A room the repository ceiling holds whose cause cleared there no longer waits on it.
+                if answer["repo_unpublish_wanted"] == false {
+                    counts.skipped(crate::repo_ceiling::noted(sql, room));
+                }
             }
             None => counts.unanswered += 1,
         }

@@ -56,7 +56,7 @@ fn a_release_that_moved_on_is_due_at_once_and_one_out_of_hand_is_done() {
     for (before, after) in [(Start, Upload), (Upload, Commit), (Start, Commit)] {
         for attempts in [1, MAX_DRIVE_ATTEMPTS, MAX_DRIVE_ATTEMPTS + 3] {
             assert_eq!(
-                drive_outcome(before, Some(after), attempts, None, NOW),
+                drive_outcome(before, Some(after), attempts, attempts - 1, None, NOW),
                 DriveOutcome::Next,
                 "{before:?} {after:?} {attempts}"
             );
@@ -65,7 +65,7 @@ fn a_release_that_moved_on_is_due_at_once_and_one_out_of_hand_is_done() {
     for before in [Start, Upload, Commit] {
         for attempts in [1, MAX_DRIVE_ATTEMPTS] {
             assert_eq!(
-                drive_outcome(before, None, attempts, Some(NOW + 1), NOW),
+                drive_outcome(before, None, attempts, 0, Some(NOW + 1), NOW),
                 DriveOutcome::Done
             );
         }
@@ -80,6 +80,7 @@ fn a_release_where_it_was_waits_longer_each_time_up_to_the_most() {
                 DriveStep::Upload,
                 Some(DriveStep::Upload),
                 attempts,
+                attempts - 1,
                 None,
                 NOW,
             ) {
@@ -97,7 +98,7 @@ fn a_release_where_it_was_waits_longer_each_time_up_to_the_most() {
     assert_eq!(drive_wait_ms(u32::MAX), DRIVE_MAX_WAIT_MS);
     // A step back to an earlier one is still not the same step: the room moved it, and the driver asks the next.
     assert_eq!(
-        drive_outcome(DriveStep::Commit, Some(DriveStep::Upload), 3, None, NOW),
+        drive_outcome(DriveStep::Commit, Some(DriveStep::Upload), 3, 2, None, NOW),
         DriveOutcome::Next
     );
 }
@@ -110,6 +111,7 @@ fn a_wait_is_never_before_the_time_the_step_named_nor_before_its_own_backoff() {
             DriveStep::Upload,
             Some(DriveStep::Upload),
             1,
+            0,
             Some(named),
             NOW
         ),
@@ -122,6 +124,7 @@ fn a_wait_is_never_before_the_time_the_step_named_nor_before_its_own_backoff() {
                 DriveStep::Upload,
                 Some(DriveStep::Upload),
                 1,
+                0,
                 Some(early),
                 NOW
             ),
@@ -136,17 +139,69 @@ fn a_wait_is_never_before_the_time_the_step_named_nor_before_its_own_backoff() {
 fn the_last_attempt_that_leaves_a_release_where_it_was_ends_it() {
     for step in [DriveStep::Start, DriveStep::Upload, DriveStep::Commit] {
         assert!(matches!(
-            drive_outcome(step, Some(step), MAX_DRIVE_ATTEMPTS - 1, None, NOW),
+            drive_outcome(step, Some(step), MAX_DRIVE_ATTEMPTS - 1, 0, None, NOW),
             DriveOutcome::Retry { .. }
         ));
         for attempts in [MAX_DRIVE_ATTEMPTS, MAX_DRIVE_ATTEMPTS + 1] {
             assert_eq!(
-                drive_outcome(step, Some(step), attempts, Some(NOW + 1), NOW),
+                drive_outcome(step, Some(step), attempts, 0, Some(NOW + 1), NOW),
                 DriveOutcome::GiveUp
             );
         }
     }
     assert_eq!(ATTEMPTS_EXHAUSTED, "release_attempts_exhausted");
+}
+
+#[test]
+fn the_wait_starts_again_from_the_first_once_a_step_moves_the_release_on() {
+    use DriveStep::*;
+    // A start and an upload that each moved it on, then a commit that left it where it was: the third attempt, the
+    // first in a row to stall, waits the first wait, not the third.
+    let mut stalled = 0;
+    for (attempt, (before, after)) in [(Start, Upload), (Upload, Commit)].into_iter().enumerate() {
+        let attempts = attempt as u32 + 1;
+        assert_eq!(
+            drive_outcome(before, Some(after), attempts, stalled, None, NOW),
+            DriveOutcome::Next
+        );
+        stalled = stalls_after(before, Some(after), stalled);
+        assert_eq!(stalled, 0);
+    }
+    assert_eq!(
+        drive_outcome(Commit, Some(Commit), 3, stalled, None, NOW),
+        DriveOutcome::Retry {
+            at: NOW + DRIVE_FIRST_WAIT_MS
+        }
+    );
+    // In a row, the waits double as before.
+    let mut waits = Vec::new();
+    for attempts in 3..MAX_DRIVE_ATTEMPTS {
+        if let DriveOutcome::Retry { at } =
+            drive_outcome(Commit, Some(Commit), attempts, stalled, None, NOW)
+        {
+            waits.push(at - NOW);
+        }
+        stalled = stalls_after(Commit, Some(Commit), stalled);
+    }
+    assert_eq!(waits, [30_000, 60_000, 120_000, 240_000, 480_000]);
+    // The cap still counts every attempt, those that moved it on included.
+    assert_eq!(
+        drive_outcome(Commit, Some(Commit), MAX_DRIVE_ATTEMPTS, 0, None, NOW),
+        DriveOutcome::GiveUp
+    );
+    // A step that moved it on, or out of the driver's hands, starts the count again.
+    assert_eq!(stalls_after(Upload, Some(Commit), 5), 0);
+    assert_eq!(stalls_after(Commit, None, 5), 0);
+    assert_eq!(stalls_after(Commit, Some(Commit), u32::MAX), u32::MAX);
+}
+
+#[test]
+fn a_lease_holds_until_the_millisecond_it_runs_out() {
+    let until = NOW + DRIVE_LEASE_MS;
+    assert!(lease_holds(until, NOW));
+    assert!(lease_holds(until, until - 1));
+    assert!(!lease_holds(until, until));
+    assert!(!lease_holds(until, until + 1));
 }
 
 #[test]
@@ -161,6 +216,8 @@ fn a_lease_is_given_until_every_attempt_is_made() {
 fn the_waits_of_a_release_that_never_moves_fit_inside_its_uploads_hour() {
     // Three attempts move it on, and the rest wait, each up to its own backoff, with a lease each.
     let waits: i64 = (1..MAX_DRIVE_ATTEMPTS).map(drive_wait_ms).sum();
+    // 35.5 minutes, as `DRIVE_MAX_WAIT_MS` says.
+    assert_eq!(waits, 2_130_000);
     assert!(waits + DRIVE_LEASE_MS < READ_WINDOW_MS, "{waits}");
     const { assert!(DRIVE_LEASE_MS > ATTEMPT_DEADLINE_MS) };
 }

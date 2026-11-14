@@ -366,6 +366,10 @@ CREATE TABLE release_job (release_id TEXT PRIMARY KEY REFERENCES release (id),
   CHECK ((leased_step IS NULL) = (leased_epoch IS NULL)), CHECK ((leased_step IS NULL) = (leased_hold IS NULL))) WITHOUT ROWID;
 CREATE TABLE release_upload_attempt (release_id TEXT NOT NULL REFERENCES release (id), at INTEGER NOT NULL CHECK (typeof(at) = 'integer'));
 CREATE INDEX release_upload_attempt_at ON release_upload_attempt (at);
+", "
+ALTER TABLE release_job ADD COLUMN stalls INTEGER NOT NULL DEFAULT 0 CHECK (typeof(stalls) = 'integer' AND stalls >= 0);
+CREATE TABLE release_drive_failure (singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  failures INTEGER NOT NULL CHECK (typeof(failures) = 'integer' AND failures >= 1), last_failed_at INTEGER NOT NULL);
 "];
 
 /// An alarm time as the moment itself, for the objects outside the room. A wait would be counted from a clock the

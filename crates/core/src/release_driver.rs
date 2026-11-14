@@ -11,14 +11,17 @@
 //!   or it is where it was and waits. Only the release's state after the step decides that, never what the step's
 //!   answer said of itself.
 //! - **When to ask again** ([`drive_wait_ms`]): a wait that grows, from [`DRIVE_FIRST_WAIT_MS`] doubling to
-//!   [`DRIVE_MAX_WAIT_MS`], and never before a time the step itself named, the read budget's.
+//!   [`DRIVE_MAX_WAIT_MS`], and never before a time the step itself named, the read budget's. It grows with the
+//!   attempts in a row that left the release where it was ([`stalls_after`]), and starts again from the first wait
+//!   once a step moves the release on.
 //! - **How many attempts** ([`MAX_DRIVE_ATTEMPTS`]): past it the release ends, [`ATTEMPTS_EXHAUSTED`].
 //! - **How often a room may read** ([`upload_slot`]): at most [`MAX_UPLOAD_ATTEMPTS_PER_ROOM_PER_HOUR`] upload attempts
 //!   begun in a rolling hour in one room, whichever of its releases they are for. Each attempt reserves up to
 //!   [`MAX_ATTEMPT_READS`] of the deployment's [`MAX_RELEASE_READS_PER_HOUR`], so one room, and so one waiting release,
 //!   can hold at most [`MAX_ROOM_READS_PER_HOUR`] of them.
 //! - **How long a step may be out** ([`DRIVE_LEASE_MS`]): a step that hasn't come back by then is taken for one that
-//!   died with its object, and the release is taken up again.
+//!   died with its object, and the release is taken up again. A step still running asks nothing more outside the room
+//!   and writes nothing once its lease has run out ([`lease_holds`]).
 //!
 //! Every figure marked **Proposed** is the architect's to rule on.
 
@@ -38,8 +41,9 @@ pub const MAX_DRIVE_ATTEMPTS: u32 = 8;
 /// The first wait after a step that left a release where it was. **Proposed.**
 pub const DRIVE_FIRST_WAIT_MS: i64 = 30_000;
 
-/// The longest wait between two steps for one release. With [`MAX_DRIVE_ATTEMPTS`] the waits of a release that never
-/// moves add up to about 16 minutes, inside its upload's hour. **Proposed.**
+/// The longest wait between two steps for one release. With [`MAX_DRIVE_ATTEMPTS`] the seven waits of a release that
+/// never moves add up to 35.5 minutes (30 s, 1, 2, 4 and 8 minutes, then 10 and 10), inside its upload's hour with a
+/// lease to spare. A release that moves on waits less: its waits start again from the first. **Proposed.**
 pub const DRIVE_MAX_WAIT_MS: i64 = 10 * 60 * 1000;
 
 /// How long a release waits, counting no attempt, when the deployment doesn't allow release or the release path is
@@ -110,7 +114,7 @@ pub enum DriveOutcome {
     GiveUp,
 }
 
-/// The wait after the `attempts`-th attempt left a release where it was: [`DRIVE_FIRST_WAIT_MS`] after the first,
+/// The wait after the `attempts`-th attempt in a row left a release where it was: [`DRIVE_FIRST_WAIT_MS`] after the first,
 /// doubling, at most [`DRIVE_MAX_WAIT_MS`]. Never less than the first wait.
 pub fn drive_wait_ms(attempts: u32) -> i64 {
     let doublings = attempts.saturating_sub(1).min(20);
@@ -121,16 +125,20 @@ pub fn drive_wait_ms(attempts: u32) -> i64 {
 
 /// What came of a step. `before` is the step that was asked; `after` the step the release is at now, from its state
 /// and its upload's record after the step (`None` when it isn't the driver's any more); `attempts` how many the driver
-/// has made for it, this one included; `retry_at` a time the step named, the read budget's, before which nothing fits.
+/// has made for it, this one included; `stalled` how many attempts in a row before this one left it where it was
+/// since it last moved on; `retry_at` a time the step named, the read budget's, before which nothing fits.
 ///
 /// - Another step: [`DriveOutcome::Next`].
 /// - No step: [`DriveOutcome::Done`].
-/// - The same step: it waits, by [`drive_wait_ms`] and never before `retry_at`; or, with every attempt made,
-///   [`DriveOutcome::GiveUp`].
+/// - The same step: it waits, by [`drive_wait_ms`] of the attempts in a row that left it where it was, this one
+///   included, and never before `retry_at`; or, with every attempt made, [`DriveOutcome::GiveUp`]. **The cap counts
+///   every attempt; the wait counts only those since the release last moved on,** so a commit that stalls after a
+///   good start and upload waits the first wait, not the third.
 pub fn drive_outcome(
     before: DriveStep,
     after: Option<DriveStep>,
     attempts: u32,
+    stalled: u32,
     retry_at: Option<i64>,
     now: i64,
 ) -> DriveOutcome {
@@ -139,12 +147,28 @@ pub fn drive_outcome(
         Some(step) if step != before => DriveOutcome::Next,
         Some(_) if attempts >= MAX_DRIVE_ATTEMPTS => DriveOutcome::GiveUp,
         Some(_) => {
-            let backoff = now.saturating_add(drive_wait_ms(attempts));
+            let backoff = now.saturating_add(drive_wait_ms(stalled.saturating_add(1)));
             DriveOutcome::Retry {
                 at: retry_at.map_or(backoff, |at| at.max(backoff)),
             }
         }
     }
+}
+
+/// How many attempts in a row have left a release where it was, after a step: one more than `stalled` when it is at
+/// the same step, and none once it moved on or out of the driver's hands.
+pub fn stalls_after(before: DriveStep, after: Option<DriveStep>, stalled: u32) -> u32 {
+    if after == Some(before) {
+        stalled.saturating_add(1)
+    } else {
+        0
+    }
+}
+
+/// Whether a step's lease, given until `until`, still holds at `now`. At `until` it has run out: from then a pass may
+/// lease the release again, so the step it was given asks nothing more and writes nothing.
+pub fn lease_holds(until: i64, now: i64) -> bool {
+    now < until
 }
 
 /// Whether one more attempt may be leased for a release that has had `attempts`: not once they are all made. A

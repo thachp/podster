@@ -61,6 +61,7 @@
 //! its upload's hour is over, by the next release command, the reconcile's next question or the room's own alarm.
 //!
 //! Logs carry the room's and the release's IDs and codes.
+use super::release_driver::{lease_lost, may_go_on, StepLease};
 use super::release_recheck::{
     answer, job_owns, judge, release_now, release_row, standing_unknown, state_of, Reads, Verdict,
 };
@@ -959,20 +960,35 @@ impl Workspace {
     /// transaction. Nothing goes live on this, so one round of reads before the transaction is all it makes.
     pub(super) async fn release_start_upload(&self, mut req: Request) -> R<Value> {
         let (release_id, release) = self.named_release(&mut req).await?;
-        self.start_upload_of(release_id, release).await
+        self.start_upload_of(release_id, release, None).await
     }
 
-    /// [`Workspace::release_start_upload`] for a release already read, as the release job's driver asks it.
-    pub(super) async fn start_upload_of(&self, release_id: String, release: Value) -> R<Value> {
+    /// [`Workspace::release_start_upload`] for a release already read, as the release job's driver asks it, with the
+    /// step's lease: checked before the reads, and again in the transaction, so a step whose lease ran out while it
+    /// read starts nothing (`release_driver::LEASE_LOST`).
+    pub(super) async fn start_upload_of(
+        &self,
+        release_id: String,
+        release: Value,
+        lease: Option<&StepLease>,
+    ) -> R<Value> {
         if !job_owns(state_of(&release)?) {
             let mut as_is = answer(&release, false, None);
             as_is["script"] = Value::Null;
             return Ok(as_is);
         }
+        let sql = self.state.storage().sql();
+        if !may_go_on(&sql, lease) {
+            return lease_lost(&sql, &release_id);
+        }
         let reads = self.release_reads(&release_id).await?;
         #[cfg(feature = "failpoints")]
         self.test_between_reads().await?;
+        let lease = lease.cloned();
         self.release_transaction(move |sql| {
+            if !may_go_on(sql, lease.as_ref()) {
+                return lease_lost(sql, &release_id);
+            }
             start_upload(sql, &release_id, &reads, release_now(sql))
         })
         .await
@@ -982,11 +998,18 @@ impl Workspace {
     /// order: the release's own state, the stage, the outside reads, the confirm.
     pub(super) async fn release_commit_live(&self, mut req: Request) -> R<Value> {
         let (release_id, release) = self.named_release(&mut req).await?;
-        self.commit_live_of(release_id, release).await
+        self.commit_live_of(release_id, release, None).await
     }
 
-    /// [`Workspace::release_commit_live`] for a release already read, as the release job's driver asks it.
-    pub(super) async fn commit_live_of(&self, release_id: String, release: Value) -> R<Value> {
+    /// [`Workspace::release_commit_live`] for a release already read, as the release job's driver asks it, with the
+    /// step's lease: checked in the stage's transaction and in the confirm's, so a step whose lease ran out while it
+    /// read stages or confirms nothing (`release_driver::LEASE_LOST`).
+    pub(super) async fn commit_live_of(
+        &self,
+        release_id: String,
+        release: Value,
+        lease: Option<&StepLease>,
+    ) -> R<Value> {
         if state_of(&release)? != ReleaseState::Uploading {
             // A retry may find the release already `live` with its hosts still owed, as when the alarm couldn't be
             // set after the confirm committed. It needs nothing here: the room sets its alarm for whatever it owes
@@ -996,7 +1019,12 @@ impl Workspace {
         let staged: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
         let slot = staged.clone();
         let id = release_id.clone();
+        let staging = lease.cloned();
         self.release_transaction(move |sql| {
+            if !may_go_on(sql, staging.as_ref()) {
+                *slot.borrow_mut() = Some(lease_lost(sql, &id)?);
+                return Ok(Value::Null);
+            }
             if let Staged::Answer(answer) = stage(sql, &id, release_now(sql))? {
                 *slot.borrow_mut() = Some(answer);
             }
@@ -1010,7 +1038,13 @@ impl Workspace {
         let reads = self.release_reads(&release_id).await?;
         #[cfg(feature = "failpoints")]
         self.test_between_reads().await?;
-        self.release_transaction(move |sql| confirm(sql, &release_id, &reads, release_now(sql)))
-            .await
+        let confirming = lease.cloned();
+        self.release_transaction(move |sql| {
+            if !may_go_on(sql, confirming.as_ref()) {
+                return lease_lost(sql, &release_id);
+            }
+            confirm(sql, &release_id, &reads, release_now(sql))
+        })
+        .await
     }
 }

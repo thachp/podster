@@ -960,7 +960,7 @@ describe("the room migration", () => {
       // M6 step 4(a)'s applier and script-delete tables, the newest migration, come off first.
       // The record of release bookkeeping that keeps failing, the newest migration, comes off first.
       // The record of a release's upload, the newest migration, comes off first.
-      sql.exec("DROP TABLE release_upload_attempt"); sql.exec("DROP TABLE release_job"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload");
+      sql.exec("DROP TABLE release_drive_failure"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload_attempt"); sql.exec("DROP TABLE release_job"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload");
       sql.exec("UPDATE schema_version SET version = version - 1");
       // Then the hold on a room's app (step 6).
       sql.exec("DROP TABLE release_hold");
@@ -998,7 +998,7 @@ describe("the room migration", () => {
       // M6 step 4(a)'s applier and script-delete tables, the newest migration, come off first.
       // The record of release bookkeeping that keeps failing, the newest migration, comes off first.
       // The record of a release's upload, the newest migration, comes off first.
-      sql.exec("DROP TABLE release_upload_attempt"); sql.exec("DROP TABLE release_job"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload");
+      sql.exec("DROP TABLE release_drive_failure"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload_attempt"); sql.exec("DROP TABLE release_job"); sql.exec("UPDATE schema_version SET version = version - 1"); sql.exec("DROP TABLE release_upload");
       sql.exec("UPDATE schema_version SET version = version - 1");
       // Then the hold on a room's app (step 6).
       sql.exec("DROP TABLE release_hold");

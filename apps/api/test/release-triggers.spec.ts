@@ -403,21 +403,6 @@ describe("the deployment's own setting, `RELEASES`, read by the room (M6 step 6)
     });
   });
 
-  it("tells operators of an undecided setting once by each reconcile pass, and not for `true` or `false`", async () => {
-    const pass = () => BINDINGS.MODERATION.get(BINDINGS.MODERATION.idFromName("moderation")).fetch("https://do/reconcile/entries", { method: "POST" }).then((x: Response) => x.json());
-    const seen = () => runInDurableObject(BINDINGS.MODERATION.get(BINDINGS.MODERATION.idFromName("moderation")), (_: any, state: any) =>
-      state.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'takedown_finding'").toArray().length === 0 ? 0
-        : (state.storage.sql.exec("SELECT seen FROM takedown_finding WHERE code = 'release_setting_undecided' AND subject = 'RELEASES'").toArray()[0]?.seen ?? 0)) as Promise<number>;
-    const before = await seen();
-    await withSetting("True", pass);
-    expect(await seen()).toBe(before + 1);
-    await withSetting(null, pass);
-    expect(await seen()).toBe(before + 2);
-    await withSetting("true", pass);
-    await withSetting("false", pass);
-    expect(await seen()).toBe(before + 2);
-  });
-
   it("records nothing for a room with no release configuration, or nothing up, when the setting is `false`", async () => {
     for (const opts of [{ configured: false }, { up: false }]) {
       const r = await room(`org_rt_deployment_${opts.configured === false ? "bare" : "nothing"}`, opts);

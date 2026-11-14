@@ -1927,6 +1927,33 @@ describe("the two reconciles", () => {
     expect([...source.matchAll(/_CRON: &str = "([^"]+)";/g)].map((match) => match[1])).toEqual([ENTRIES_CRON, SCRIPTS_CRON]);
   });
 
+  it("tell operators of an undecided `RELEASES` once by each pass, and take it away once a pass reads it decided (M6 step 6)", async () => {
+    await fresh();
+    // The setting as written (test builds only), `null` for unset: exactly `true` or `false` is decided.
+    const passWith = async (value: string | null) => {
+      await BINDINGS.DB.prepare("CREATE TABLE test_releases_setting (value TEXT)").run();
+      await BINDINGS.DB.prepare("INSERT INTO test_releases_setting (value) VALUES (?)").bind(value).run();
+      try { await moderation().fetch("https://do/reconcile/entries", { method: "POST" }); } finally { await BINDINGS.DB.prepare("DROP TABLE test_releases_setting").run(); }
+    };
+    const seen = () => inModeration((sql) => sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'takedown_finding'").toArray().length === 0 ? 0
+      : (sql.exec("SELECT seen FROM takedown_finding WHERE code = 'release_setting_undecided' AND subject = 'RELEASES'").toArray()[0]?.seen ?? 0)) as Promise<number>;
+    // Decided, whatever an earlier test left: no finding.
+    await passWith("true");
+    expect(await seen()).toBe(0);
+    // Undecided: told once by each pass.
+    await passWith("True");
+    expect(await seen()).toBe(1);
+    await passWith(null);
+    expect(await seen()).toBe(2);
+    // Read decided, either way: the finding is gone.
+    await passWith("true");
+    expect(await seen()).toBe(0);
+    await passWith("1");
+    expect(await seen()).toBe(1);
+    await passWith("false");
+    expect(await seen()).toBe(0);
+  });
+
   it("is an operator's read and nobody else's, and nothing anyone can find while release is switched off", async () => {
     await fresh();
     for (const who of [OPERATOR, OWNER, AGENT]) {

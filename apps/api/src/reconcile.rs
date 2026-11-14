@@ -664,9 +664,20 @@ fn finish(sql: &SqlStorage, name: &str, code: &'static str, counts: &Counts) -> 
 
 /// A deployment whose release setting, `RELEASES`, is neither exactly `true` nor exactly `false` (M6 step 6): nothing
 /// is released and nothing taken down, and operators are told once by each pass, by one finding, until it is set
-/// one way or the other. The code is logged, with no ID.
+/// one way or the other. The code is logged, with no ID. **The first pass that reads it decided takes the finding
+/// away,** so operators' record says only what is so now.
 async fn tell_undecided_setting(sql: &SqlStorage, env: &Env) {
     if crate::releases::setting(env).await != podster_core::release::DeploymentRelease::Undecided {
+        if let Err(error) = exec(
+            sql,
+            "DELETE FROM takedown_finding WHERE code = 'release_setting_undecided' AND subject = 'RELEASES'",
+            vec![],
+        ) {
+            console_error!(
+                "reconcile: a decided release setting's finding wasn't cleared: code={}",
+                error.code().unwrap_or("internal_error")
+            );
+        }
         return;
     }
     console_error!("reconcile: the deployment's release setting is neither true nor false: code=release_setting_undecided");
